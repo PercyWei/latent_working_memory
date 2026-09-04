@@ -1,38 +1,35 @@
-# ICAE v1 reproduction
+# ICAE v1 复现（20260904 10:13:57 CST）
 
-This directory contains the ICAE v1 code required as the compressor base for
-the later C-DIC reproduction. It targets the paper's Llama-2-7B-Chat path, not
-the later Mistral-based ICAE v2 release.
+创建时间：20260904 10:13:57 CST（UTC+08:00）
 
-No benchmark, dataset, model weight, or checkpoint is stored or downloaded by
-the repository setup.
+最后修订时间：20260904 19:55:44 CST（UTC+08:00）
 
-## Source layout
+本目录保存后续复现 C-DIC 所需的 ICAE v1 压缩器代码，目标是论文使用的 Llama-2-7B-Chat 路径，而不是后续基于 Mistral 的 ICAE v2。
 
-- `src/icae/`: migrated ICAE v1 model and training code.
-- `vendor/peft/`: the customized PEFT 0.4.0.dev0 source shipped by ICAE.
-- `src/icae_repro/`: local environment checks that do not download models.
-- `examples/ft_inference_upstream.py`: the original path-based inference example,
-  retained for reference and not used as a production entry point.
-- `UPSTREAM.md`: source revision, migration mapping, and local patch record.
+仓库初始化过程不会保存或下载 benchmark、数据集、模型权重与 checkpoint。
 
-## Server environment
+## 源码结构
 
-Target hardware:
+- `src/icae/`：迁移后的 ICAE v1 模型与训练代码；
+- `vendor/peft/`：ICAE 随附的定制 PEFT `0.4.0.dev0` 源码；
+- `src/icae_repro/`：无需下载模型的本地环境检查，以及受测试的 checkpoint 加载和推理入口；
+- `examples/ft_inference_upstream.py`：上游基于固定路径的原始推理示例，仅用于参考，不作为正式入口；
+- `UPSTREAM.md`：上游版本、迁移路径与本地改动记录。
 
-- NVIDIA A800-SXM4-80GB;
-- Linux x86-64;
-- CUDA 13.0-capable server driver/toolkit environment;
-- Python 3.10;
-- PyTorch 2.0.1 CUDA 11.8 wheel;
-- Transformers 4.31.0 and the ICAE-customized PEFT package.
+## 服务器环境
 
-The CUDA 11.8 wheel is intentional. NVIDIA drivers are backward compatible
-with applications built against older CUDA toolkits, and PyTorch 2.0.1 is much
-closer to ICAE's original 2023 stack than current CUDA 13.0 PyTorch releases.
-No local CUDA extension is compiled by the migrated code.
+目标环境：
 
-Create the environment on the server:
+- NVIDIA A800-SXM4-80GB；
+- Linux x86-64；
+- 支持 CUDA 13.0 的服务器驱动与工具链；
+- Python 3.10；
+- PyTorch 2.0.1 CUDA 11.8 wheel；
+- Transformers 4.31.0 与 ICAE 定制 PEFT。
+
+使用 CUDA 11.8 wheel 是有意选择。NVIDIA 驱动能够向后兼容使用旧版 CUDA toolkit 构建的应用，而 PyTorch 2.0.1 比当前 CUDA 13.0 对应版本更接近 ICAE 最初使用的 2023 年依赖栈。迁移代码不编译本地 CUDA extension。
+
+在服务器上创建环境：
 
 ```bash
 export UV_CACHE_DIR=/data/bywei/cache/uv
@@ -40,14 +37,11 @@ uv sync --project reproductions/icae --frozen
 uv run --project reproductions/icae icae-check-environment
 ```
 
-The uv project uses the Aliyun PyPI mirror for regular dependencies and the
-Aliyun CUDA 11.8 wheel mirror for PyTorch. `UV_CACHE_DIR` keeps downloaded
-packages under `/data/bywei` so later environment rebuilds can reuse them.
+该 uv 项目使用阿里云 PyPI 镜像安装常规依赖，并使用阿里云 CUDA 11.8 wheel 镜像安装 PyTorch。`UV_CACHE_DIR` 将下载缓存保存在 `/data/bywei` 下，便于后续重建环境时复用。
 
-The environment check reports PyTorch, CUDA, GPU capability, and bfloat16
-support without accessing Hugging Face or downloading weights.
+环境检查不会访问 Hugging Face 或下载权重，只报告 PyTorch、CUDA、GPU 计算能力和 bfloat16 支持情况。
 
-Run the tested single-record inference path after the environment check:
+环境检查通过后，可运行受测试的单样本推理入口：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/icae --no-sync \
@@ -58,41 +52,29 @@ CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/icae --no-sync \
   --prompt "What is the access code for Project Quartz?"
 ```
 
-The public v1 checkpoint stores frozen Llama parameters as scalar `0.0`
-placeholders. The runner restores those entries from the local base model and
-then performs a strict state-dict load; it does not weaken loading to
-`strict=False`.
+公开的 v1 checkpoint 使用标量 `0.0` 作为冻结 Llama 参数的占位符。推理入口会从本地基础模型恢复这些参数，再使用 `strict=True` 严格加载完整 state dict，不会通过 `strict=False` 跳过不匹配项。
 
-The upstream ICAE instructions require bfloat16 rather than fp16 training and
-only support training batch size 1 in the released path. Preserve those limits
-until a controlled compatibility test justifies changing them.
+ICAE 上游说明要求训练使用 bfloat16 而不是 fp16，且公开训练路径只支持 batch size 1。在受控兼容性测试证明可以修改之前，应保留这些限制。
 
-## Current migration boundary
+## 当前迁移边界
 
-The migrated model and trainer sources are packaged and syntax-checked. The
-upstream v1 inference example contains placeholder paths, references a
-tokenization helper absent from the released v1 training file, and contains an
-upstream variable-name typo. It is kept unchanged for provenance; the tested
-`icae-smoke-inference` entry point implements the supported local path.
+迁移后的模型和 trainer 源码已完成打包与语法检查。上游 v1 推理示例包含占位路径、引用了公开 v1 训练文件中不存在的 tokenization helper，并保留了一个上游变量名拼写错误。为保留来源信息，该示例不作修改；本项目使用受测试的 `icae-smoke-inference` 作为推理入口。
 
-For a first inference demonstration, prepare a JSONL file with one record per
-example:
+首次批量推理时可准备 JSONL 文件，每行一个样本：
 
 ```json
 {"input": "long context", "prompt": "question about the context", "answer": "reference answer"}
 ```
 
-`answer` is used for comparison and is not supplied to the model during
-generation.
+`answer` 仅用于结果比较，不会在生成时提供给模型。
 
-## Deferred resources
+## 暂不纳入仓库的资源
 
-The following remain server-side setup tasks and are intentionally absent:
+以下内容保留为服务器侧准备事项，不存放在本目录中：
 
-- `meta-llama/Llama-2-7b-chat-hf` access and local model path;
-- the ICAE Llama-2 checkpoint;
-- PwC, MSC, REALTALK, LongMemEval, or other datasets;
-- generated predictions, checkpoints, and benchmark outputs.
+- `meta-llama/Llama-2-7b-chat-hf` 的访问权限与本地模型目录；
+- ICAE Llama-2 checkpoint；
+- PwC、MSC、REALTALK、LongMemEval 或其他数据集；
+- 生成结果、训练 checkpoint 与 benchmark 输出。
 
-Do not add these files to Git. The root `.gitignore` excludes common model and
-artifact paths and extensions.
+不得将这些文件提交到 Git。根目录 `.gitignore` 已排除常见模型与实验产物路径和扩展名。
