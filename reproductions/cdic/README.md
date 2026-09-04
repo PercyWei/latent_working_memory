@@ -1,8 +1,8 @@
-# C-DIC 论文复现（20260904 22:09:00 CST）
+# C-DIC 论文复现（20260904 22:47:18 CST）
 
 创建时间：20260904 16:19:08 CST（UTC+08:00）
 
-最后修订时间：20260904 22:09:00 CST（UTC+08:00）
+最后修订时间：20260904 22:47:18 CST（UTC+08:00）
 
 本目录用于分阶段复现 Context-Driven Incremental Compression（C-DIC）。由于当前没有公开的官方实现，所有论文未明确的行为均记录在 `ASSUMPTIONS.md`。
 
@@ -30,7 +30,7 @@ R2 训练代码已实现：
 - checkpoint/resume、resolved config、metrics 与 memory trace；
 - pilot 和论文规模 JSON 配置。
 
-ICAE adapter 已在 A800 上通过真实 Llama-2-7B-Chat、公开 checkpoint 和五轮对话的工程 smoke test。MSC 训练代码已通过本地单元测试、官方数据 schema 检查和两轮真实 7B autograd smoke test；全部 128 个 LoRA tensors 与 compression-token embedding 均获得 gradient。官方 MSC pilot 尚未运行，因此不能视为已经复现论文训练结果。
+ICAE adapter 已在 A800 上通过真实 Llama-2-7B-Chat、公开 checkpoint 和五轮对话的工程 smoke test。MSC 训练代码已通过本地单元测试、官方数据 schema 检查、单卡 autograd/checkpoint smoke test 和双卡官方 MSC pilot。完整训练尚未完成，因此不能视为已经复现论文训练结果。
 
 ## 目录结构
 
@@ -134,34 +134,33 @@ uv run --project reproductions/cdic --no-sync cdic-train-msc \
 运行最小 GPU pilot：
 
 ```bash
-uv run --project reproductions/cdic --no-sync cdic-train-msc \
+uv run --project reproductions/cdic --no-sync \
+  torchrun --standalone --nproc-per-node=2 \
+  -m cdic_repro.train_msc \
   --config reproductions/cdic/configs/msc_pilot_a800.json
 ```
 
 pilot 通过后运行 seed 42 的论文规模训练：
 
 ```bash
-uv run --project reproductions/cdic --no-sync cdic-train-msc \
+uv run --project reproductions/cdic --no-sync \
+  torchrun --standalone --nproc-per-node=2 \
+  -m cdic_repro.train_msc \
   --config reproductions/cdic/configs/msc_paper_a800.json
-```
-
-其他 seeds 不需要复制配置文件：
-
-```bash
-uv run --project reproductions/cdic --no-sync cdic-train-msc \
-  --config reproductions/cdic/configs/msc_paper_a800.json \
-  --seed 43 \
-  --output-dir /data/bywei/checkpoints/cdic/msc_paper_seed43
 ```
 
 从 checkpoint 恢复：
 
 ```bash
-uv run --project reproductions/cdic --no-sync cdic-train-msc \
+uv run --project reproductions/cdic --no-sync \
+  torchrun --standalone --nproc-per-node=2 \
+  -m cdic_repro.train_msc \
   --config reproductions/cdic/configs/msc_paper_a800.json \
   --resume-from /data/bywei/checkpoints/cdic/msc_paper_seed42/checkpoints/step-000050.pt
 ```
 
-训练目录包含 `config.resolved.json`、`data_summary.json`、`trainable_parameters.json`、`metrics.jsonl`、`memory_trace.jsonl` 和 `checkpoints/`。`metrics.jsonl` 记录 loss、gradient norm、LoRA/compression-token gradient coverage、运行时间、peak GPU memory 和 memory slot 数。checkpoint 保存 trainable model state、AdamW state、RNG state 与训练位置，默认只保留最近两个 step checkpoints。不使用 `--resume-from` 时，程序拒绝写入非空 output directory。
+训练使用一个 seed 42 模型的同步双卡 data parallel：每张卡处理一个 episode，NCCL 同步并平均 trainable gradients 后共同执行 optimizer step。每卡 batch size 为 1，global batch size 为 2；这与论文单卡 global batch size 1 存在明确差异。
+
+训练目录包含 `config.resolved.json`、`data_summary.json`、`trainable_parameters.json`、按 rank 分开的 `metrics.rankXX.jsonl`、`memory_trace.rankXX.jsonl` 和 `checkpoints/`。checkpoint 保存 trainable model state、AdamW state、各 rank RNG state 与训练位置，默认只保留最近两个 step checkpoints。不使用 `--resume-from` 时，程序拒绝写入非空 output directory。
 
 模型权重、数据集、predictions 和 checkpoints 均保存在 Git 仓库之外。

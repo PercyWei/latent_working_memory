@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from cdic_repro.distributed import DistributedContext, initialize_distributed
 from cdic_repro.icae_adapter import IcaeV1TrainingAdapter, torch_cosine_similarity
 from cdic_repro.msc import MscEpisode, load_msc_episodes, summarize_msc_episodes
 from cdic_repro.training import CdicTrainingEngine, EpisodeTrainingResult
@@ -61,15 +63,44 @@ def run_training(
 ) -> None:
     import torch
 
+    distributed = initialize_distributed(
+        torch,
+        primary_device=config.model.device,
+        devices=config.model.devices,
+    )
+    try:
+        _run_training_worker(
+            config,
+            episodes=episodes,
+            data_summary=data_summary,
+            distributed=distributed,
+            torch_module=torch,
+        )
+    finally:
+        distributed.close()
+
+
+def _run_training_worker(
+    config: CdicMscTrainingConfig,
+    *,
+    episodes: tuple[MscEpisode, ...],
+    data_summary: dict[str, float | int],
+    distributed: DistributedContext,
+    torch_module: Any,
+) -> None:
     output_dir = config.training.output_dir
     _prepare_output_directory(output_dir, resume_from=config.training.resume_from)
+    distributed.barrier()
 
-    adapter = IcaeV1TrainingAdapter.load(config.model)
+    local_model_config = replace(config.model, device=distributed.device, devices=())
+    adapter = IcaeV1TrainingAdapter.load(local_model_config)
     trainable_parameters = tuple(adapter.trainable_parameters())
-    optimizer = torch.optim.AdamW(
+    distributed.broadcast_parameters(trainable_parameters)
+    optimizer = torch_module.optim.AdamW(
         trainable_parameters,
         lr=config.training.learning_rate,
         weight_decay=config.training.weight_decay,
+        foreach=False,
     )
     engine = CdicTrainingEngine(
         model=adapter,
@@ -83,14 +114,22 @@ def run_training(
             model=adapter,
             optimizer=optimizer,
             expected_config_fingerprint=config.fingerprint(),
-            torch_module=torch,
+            torch_module=torch_module,
+            rank=distributed.rank,
         )
 
-    _write_json(output_dir / "config.resolved.json", config.to_dict())
-    _write_json(output_dir / "data_summary.json", data_summary)
-    _write_json(output_dir / "trainable_parameters.json", adapter.trainable_parameter_report())
-    metrics_path = output_dir / "metrics.jsonl"
-    traces_path = output_dir / "memory_trace.jsonl"
+    if distributed.is_main:
+        _write_json(output_dir / "config.resolved.json", config.to_dict())
+        _write_json(output_dir / "data_summary.json", data_summary)
+        _write_json(
+            output_dir / "trainable_parameters.json",
+            adapter.trainable_parameter_report(),
+        )
+    distributed.barrier()
+
+    suffix = "" if distributed.world_size == 1 else f".rank{distributed.rank:02d}"
+    metrics_path = output_dir / f"metrics{suffix}.jsonl"
+    traces_path = output_dir / f"memory_trace{suffix}.jsonl"
     if config.training.resume_from is not None:
         _truncate_jsonl_after_step(metrics_path, max_step=progress.global_step)
         _truncate_jsonl_after_step(traces_path, max_step=progress.global_step)
@@ -108,58 +147,74 @@ def run_training(
                 shuffle=config.training.shuffle,
             )
             start_position = progress.next_episode_position if epoch == progress.epoch else 0
-            for position in range(start_position, len(order)):
-                episode = episodes[order[position]]
+            for batch_start in range(start_position, len(order), distributed.world_size):
+                position = batch_start + distributed.rank
+                active_workers = min(distributed.world_size, len(order) - batch_start)
                 optimizer.zero_grad(set_to_none=True)
-                _synchronize_if_cuda(torch, config.model.device)
-                _reset_peak_memory_if_cuda(torch, config.model.device)
+                _synchronize_cuda_devices(torch_module, (distributed.device,))
+                _reset_peak_memory(torch_module, (distributed.device,))
                 started_at = time.perf_counter()
-                result = engine.train_episode(episode)
-                grad_norm = None
-                gradient_coverage = adapter.gradient_coverage_report()
-                if result.backward_turns:
-                    maximum_norm = (
-                        config.training.max_grad_norm
-                        if config.training.max_grad_norm is not None
-                        else float("inf")
-                    )
-                    norm = torch.nn.utils.clip_grad_norm_(trainable_parameters, maximum_norm)
-                    grad_norm = float(norm.detach().float().item())
-                    optimizer.step()
-                _synchronize_if_cuda(torch, config.model.device)
+                result = (
+                    engine.train_episode(episodes[order[position]])
+                    if position < len(order)
+                    else None
+                )
+                local_gradient_coverage = adapter.gradient_coverage_report()
+                distributed.average_gradients(
+                    trainable_parameters,
+                    active_workers=active_workers,
+                )
+                grad_norm = _gradient_norm_and_clip(
+                    trainable_parameters,
+                    max_norm=config.training.max_grad_norm,
+                )
+                optimizer.step()
+                _synchronize_cuda_devices(torch_module, (distributed.device,))
                 duration_seconds = time.perf_counter() - started_at
-                peak_memory_bytes = _peak_memory_if_cuda(torch, config.model.device)
+                peak_memory_by_device = _peak_memory_by_device(
+                    torch_module,
+                    (distributed.device,),
+                )
+                peak_memory_bytes = sum(peak_memory_by_device.values())
                 global_step += 1
-                metric_record = {
-                    "epoch": epoch,
-                    "episode_position": position,
-                    "global_step": global_step,
-                    "gradient_norm": grad_norm,
-                    "gradient_coverage": gradient_coverage,
-                    "duration_seconds": duration_seconds,
-                    "peak_memory_bytes": peak_memory_bytes,
-                    **result.to_summary_dict(),
-                }
-                metrics_file.write(json.dumps(metric_record, ensure_ascii=False) + "\n")
-                for record in result.records:
-                    traces_file.write(
-                        json.dumps(
-                            {
-                                "epoch": epoch,
-                                "episode_position": position,
-                                "global_step": global_step,
-                                "episode_id": result.episode_id,
-                                **record.to_dict(),
-                            },
-                            ensure_ascii=False,
+                if result is not None:
+                    metric_record = {
+                        "rank": distributed.rank,
+                        "world_size": distributed.world_size,
+                        "global_batch_size": active_workers,
+                        "epoch": epoch,
+                        "episode_position": position,
+                        "global_step": global_step,
+                        "gradient_norm": grad_norm,
+                        "local_gradient_coverage": local_gradient_coverage,
+                        "duration_seconds": duration_seconds,
+                        "peak_memory_bytes": peak_memory_bytes,
+                        "peak_memory_bytes_by_device": peak_memory_by_device,
+                        **result.to_summary_dict(),
+                    }
+                    metrics_file.write(json.dumps(metric_record, ensure_ascii=False) + "\n")
+                    for record in result.records:
+                        traces_file.write(
+                            json.dumps(
+                                {
+                                    "rank": distributed.rank,
+                                    "world_size": distributed.world_size,
+                                    "epoch": epoch,
+                                    "episode_position": position,
+                                    "global_step": global_step,
+                                    "episode_id": result.episode_id,
+                                    **record.to_dict(),
+                                },
+                                ensure_ascii=False,
+                            )
+                            + "\n"
                         )
-                        + "\n"
-                    )
                 metrics_file.flush()
                 traces_file.flush()
 
-                if global_step % config.training.log_every_episodes == 0:
+                if result is not None and global_step % config.training.log_every_steps == 0:
                     _print_progress(
+                        distributed.rank,
                         epoch,
                         position,
                         len(order),
@@ -171,42 +226,51 @@ def run_training(
                     )
                 next_progress = _next_progress(
                     epoch=epoch,
-                    position=position,
+                    position=batch_start,
                     epoch_size=len(order),
+                    world_size=distributed.world_size,
                     global_step=global_step,
                 )
-                if global_step % config.training.save_every_episodes == 0:
+                if global_step % config.training.save_every_steps == 0:
+                    rng_states = distributed.gather_rng_states()
                     checkpoint_dir = output_dir / "checkpoints"
-                    save_training_checkpoint(
-                        checkpoint_dir / f"step-{global_step:06d}.pt",
-                        model=adapter,
-                        optimizer=optimizer,
-                        progress=next_progress,
-                        config_fingerprint=config.fingerprint(),
-                        torch_module=torch,
-                    )
-                    _prune_step_checkpoints(
-                        checkpoint_dir,
-                        keep_last=config.training.keep_last_checkpoints,
-                    )
+                    if distributed.is_main:
+                        save_training_checkpoint(
+                            checkpoint_dir / f"step-{global_step:06d}.pt",
+                            model=adapter,
+                            optimizer=optimizer,
+                            progress=next_progress,
+                            config_fingerprint=config.fingerprint(),
+                            torch_module=torch_module,
+                            rng_states=rng_states,
+                        )
+                        _prune_step_checkpoints(
+                            checkpoint_dir,
+                            keep_last=config.training.keep_last_checkpoints,
+                        )
+                    distributed.barrier()
             progress = TrainingProgress(
                 epoch=epoch + 1, next_episode_position=0, global_step=global_step
             )
 
-    last_step_was_saved = global_step % config.training.save_every_episodes == 0
+    last_step_was_saved = global_step % config.training.save_every_steps == 0
     if config.training.save_final_checkpoint and not last_step_was_saved:
-        save_training_checkpoint(
-            output_dir / "checkpoints" / "final.pt",
-            model=adapter,
-            optimizer=optimizer,
-            progress=TrainingProgress(
-                epoch=config.training.epochs,
-                next_episode_position=0,
-                global_step=global_step,
-            ),
-            config_fingerprint=config.fingerprint(),
-            torch_module=torch,
-        )
+        rng_states = distributed.gather_rng_states()
+        if distributed.is_main:
+            save_training_checkpoint(
+                output_dir / "checkpoints" / "final.pt",
+                model=adapter,
+                optimizer=optimizer,
+                progress=TrainingProgress(
+                    epoch=config.training.epochs,
+                    next_episode_position=0,
+                    global_step=global_step,
+                ),
+                config_fingerprint=config.fingerprint(),
+                torch_module=torch_module,
+                rng_states=rng_states,
+            )
+        distributed.barrier()
 
 
 def _prepare_output_directory(output_dir: Path, *, resume_from: Path | None) -> None:
@@ -254,31 +318,57 @@ def _next_progress(
     epoch: int,
     position: int,
     epoch_size: int,
+    world_size: int = 1,
     global_step: int,
 ) -> TrainingProgress:
-    if position + 1 == epoch_size:
+    next_position = min(position + world_size, epoch_size)
+    if next_position == epoch_size:
         return TrainingProgress(epoch=epoch + 1, next_episode_position=0, global_step=global_step)
     return TrainingProgress(
         epoch=epoch,
-        next_episode_position=position + 1,
+        next_episode_position=next_position,
         global_step=global_step,
     )
 
 
-def _synchronize_if_cuda(torch_module: Any, device: str) -> None:
-    if device.startswith("cuda") and torch_module.cuda.is_available():
+def _synchronize_cuda_devices(torch_module: Any, devices: tuple[str, ...]) -> None:
+    if not torch_module.cuda.is_available():
+        return
+    for device in devices:
         torch_module.cuda.synchronize(torch_module.device(device))
 
 
-def _reset_peak_memory_if_cuda(torch_module: Any, device: str) -> None:
-    if device.startswith("cuda") and torch_module.cuda.is_available():
+def _reset_peak_memory(torch_module: Any, devices: tuple[str, ...]) -> None:
+    if not torch_module.cuda.is_available():
+        return
+    for device in devices:
         torch_module.cuda.reset_peak_memory_stats(torch_module.device(device))
 
 
-def _peak_memory_if_cuda(torch_module: Any, device: str) -> int | None:
-    if not device.startswith("cuda") or not torch_module.cuda.is_available():
-        return None
-    return int(torch_module.cuda.max_memory_allocated(torch_module.device(device)))
+def _peak_memory_by_device(torch_module: Any, devices: tuple[str, ...]) -> dict[str, int]:
+    if not torch_module.cuda.is_available():
+        return {}
+    return {
+        device: int(torch_module.cuda.max_memory_allocated(torch_module.device(device)))
+        for device in devices
+    }
+
+
+def _gradient_norm_and_clip(
+    parameters: tuple[object, ...],
+    *,
+    max_norm: float | None,
+) -> float:
+    gradients = [parameter.grad for parameter in parameters if parameter.grad is not None]
+    total_squared_norm = sum(
+        float(gradient.detach().float().pow(2).sum().item()) for gradient in gradients
+    )
+    total_norm = math.sqrt(total_squared_norm)
+    if max_norm is not None and total_norm > max_norm:
+        scale = max_norm / (total_norm + 1e-12)
+        for gradient in gradients:
+            gradient.mul_(scale)
+    return total_norm
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -308,6 +398,7 @@ def _truncate_jsonl_after_step(path: Path, *, max_step: int) -> None:
 
 
 def _print_progress(
+    rank: int,
     epoch: int,
     position: int,
     epoch_size: int,
@@ -320,6 +411,7 @@ def _print_progress(
     print(
         json.dumps(
             {
+                "rank": rank,
                 "epoch": epoch,
                 "episode": position + 1,
                 "episodes_in_epoch": epoch_size,
@@ -335,3 +427,7 @@ def _print_progress(
         ),
         flush=True,
     )
+
+
+if __name__ == "__main__":
+    main()

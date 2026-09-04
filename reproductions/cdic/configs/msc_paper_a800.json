@@ -3,6 +3,7 @@
     "model_path": "/data/bywei/models/meta-llama/Llama-2-7b-chat-hf",
     "checkpoint_path": "/data/bywei/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt",
     "device": "cuda:0",
+    "devices": ["cuda:0", "cuda:1"],
     "dtype": "bfloat16",
     "memory_size": 128,
     "max_turn_tokens": 512,
@@ -33,10 +34,10 @@
     "seed": 42,
     "shuffle": true,
     "max_grad_norm": null,
-    "save_every_episodes": 50,
+    "save_every_steps": 50,
     "keep_last_checkpoints": 2,
     "save_final_checkpoint": true,
-    "log_every_episodes": 1,
+    "log_every_steps": 1,
     "resume_from": null
   }
 }

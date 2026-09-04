@@ -15,6 +15,8 @@ def test_training_config_loads_paper_defaults(tmp_path: Path) -> None:
                 "model": {
                     "model_path": "/models/llama",
                     "checkpoint_path": "/checkpoints/icae.pt",
+                    "device": "cuda:0",
+                    "devices": ["cuda:0", "cuda:1"],
                 },
                 "data": {"root": "/datasets/msc"},
                 "retrieval": {},
@@ -27,6 +29,7 @@ def test_training_config_loads_paper_defaults(tmp_path: Path) -> None:
     config = load_training_config(path)
 
     assert config.model.memory_size == 128
+    assert config.model.devices == ("cuda:0", "cuda:1")
     assert config.model.gradient_checkpointing is True
     assert config.data.session_id == 4
     assert config.data.strict_pairs is False

@@ -30,6 +30,16 @@ def test_next_progress_advances_epoch_after_last_episode() -> None:
     assert completed.epoch == 1
     assert completed.next_episode_position == 0
 
+    distributed = _next_progress(
+        epoch=0,
+        position=2,
+        epoch_size=7,
+        world_size=2,
+        global_step=2,
+    )
+    assert distributed.epoch == 0
+    assert distributed.next_episode_position == 4
+
 
 def test_checkpoint_retention_keeps_latest_steps(tmp_path: Path) -> None:
     for step in (1, 2, 10):

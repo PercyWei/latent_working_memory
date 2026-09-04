@@ -8,7 +8,7 @@ from typing import Any
 from cdic_repro.model_protocol import CdicTrainingAdapter
 
 
-CHECKPOINT_VERSION = 1
+CHECKPOINT_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +26,7 @@ def save_training_checkpoint(
     progress: TrainingProgress,
     config_fingerprint: str,
     torch_module: Any,
+    rng_states: list[dict[str, object]] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -35,10 +36,7 @@ def save_training_checkpoint(
         "progress": asdict(progress),
         "model_state": dict(model.trainable_state_dict()),
         "optimizer_state": optimizer.state_dict(),
-        "torch_rng_state": torch_module.get_rng_state(),
-        "cuda_rng_state_all": (
-            torch_module.cuda.get_rng_state_all() if torch_module.cuda.is_available() else None
-        ),
+        "rng_states": rng_states or [_capture_rng_state(torch_module)],
     }
     torch_module.save(payload, temporary)
     temporary.replace(path)
@@ -56,6 +54,7 @@ def load_training_checkpoint(
     optimizer: Any,
     expected_config_fingerprint: str,
     torch_module: Any,
+    rank: int = 0,
 ) -> TrainingProgress:
     if not path.is_file():
         raise FileNotFoundError(f"training checkpoint does not exist: {path}")
@@ -78,12 +77,28 @@ def load_training_checkpoint(
         raise TypeError("training checkpoint is missing progress")
     model.load_trainable_state_dict(model_state, strict=True)
     optimizer.load_state_dict(optimizer_state)
-    torch_module.set_rng_state(payload["torch_rng_state"])
-    cuda_rng_state = payload.get("cuda_rng_state_all")
-    if cuda_rng_state is not None and torch_module.cuda.is_available():
-        torch_module.cuda.set_rng_state_all(cuda_rng_state)
+    rng_states = payload.get("rng_states")
+    if not isinstance(rng_states, list) or rank >= len(rng_states):
+        raise ValueError("training checkpoint has no RNG state for this rank")
+    _restore_rng_state(torch_module, rng_states[rank])
     return TrainingProgress(
         epoch=int(progress["epoch"]),
         next_episode_position=int(progress["next_episode_position"]),
         global_step=int(progress["global_step"]),
     )
+
+
+def _capture_rng_state(torch_module: Any) -> dict[str, object]:
+    return {
+        "torch": torch_module.get_rng_state(),
+        "cuda": torch_module.cuda.get_rng_state() if torch_module.cuda.is_available() else None,
+    }
+
+
+def _restore_rng_state(torch_module: Any, state: object) -> None:
+    if not isinstance(state, dict) or "torch" not in state:
+        raise TypeError("invalid RNG state in training checkpoint")
+    torch_module.set_rng_state(state["torch"])
+    cuda_state = state.get("cuda")
+    if cuda_state is not None and torch_module.cuda.is_available():
+        torch_module.cuda.set_rng_state(cuda_state)

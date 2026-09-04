@@ -1,10 +1,10 @@
-# 20260903 C-DIC 复现与项目仓库结构规划（20260904 22:09:00 CST 修订）
+# 20260903 C-DIC 复现与项目仓库结构规划（20260904 22:47:18 CST 修订）
 
 创建时间：20260903 19:58:48 CST（UTC+08:00）
 
-最后修订时间：20260904 22:09:00 CST（UTC+08:00）
+最后修订时间：20260904 22:47:18 CST（UTC+08:00）
 
-状态：C-DIC R1 核心状态机与五轮 7B GPU smoke test 已通过；R2 训练代码和合成 autograd smoke test 已通过，官方 MSC GPU pilot 待运行
+状态：C-DIC R1 核心状态机与五轮 7B GPU smoke test 已通过；R2 训练代码、合成 autograd smoke test 和双卡官方 MSC pilot 已通过，完整训练待启动
 
 ## 术语
 

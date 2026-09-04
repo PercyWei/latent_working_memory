@@ -1,10 +1,10 @@
-# C-DIC 假设清单（20260904 22:09:00 CST）
+# C-DIC 假设清单（20260904 22:47:18 CST）
 
 创建时间：20260904 16:19:08 CST（UTC+08:00）
 
-最后修订时间：20260904 22:09:00 CST（UTC+08:00）
+最后修订时间：20260904 22:47:18 CST（UTC+08:00）
 
-状态：R1 已通过 GPU smoke test；R2 训练代码和合成两轮 autograd smoke test 已通过，官方 MSC pilot 待运行
+状态：R1 已通过 GPU smoke test；R2 训练代码、合成 autograd smoke test 和双卡官方 MSC pilot 已通过
 
 论文明确了 C-DIC 的总体算法，但部分实现细节未公开。首次 MSC pilot 前需固定主实验选择；后续修改必须记录时间，并使用独立结果标签。
 
@@ -33,5 +33,6 @@
 | Gradient checkpointing | ICAE 上游 checkpoint branch 未转发 `enable_lora` | 补充转发；query routing 临时使用 eval mode | 合成 GPU test 确认 128/128 LoRA tensors 有 gradient |
 | Optimizer 未公开项 | 仅给出 AdamW 和 learning rate | `weight_decay=0`、默认不做 gradient clipping，均显式配置 | 待敏感性检查 |
 | 论文 utterance 均值 | 论文报告 53.3；当前官方 v0.1 原始字段统计约 50.32 | 保存数据 revision 和 `data_summary.json`，不修改数据以追齐均值 | 待核对论文预处理 |
+| 双卡训练 | 论文使用单张 A100、batch size 1 | 一个 seed 42 模型使用两份同步 replica；每卡一个 episode，NCCL 平均梯度，global batch size 2 | 用户指定双卡；属于显式复现偏差 |
 
 不得通过 checkpoint `strict=False`、未记录的数据截断或隐式 fallback 掩盖配置不一致。

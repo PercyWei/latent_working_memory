@@ -16,6 +16,7 @@ class IcaeV1AdapterConfig:
     model_path: Path
     checkpoint_path: Path
     device: str = "cuda"
+    devices: tuple[str, ...] = ()
     dtype: str = "bfloat16"
     memory_size: int = 128
     max_turn_tokens: int = 512
@@ -37,6 +38,11 @@ class IcaeV1AdapterConfig:
             raise ValueError("max_new_tokens must be positive")
         if self.lora_rank is not None and self.lora_rank < 1:
             raise ValueError("lora_rank must be positive")
+        if self.devices:
+            if len(set(self.devices)) != len(self.devices):
+                raise ValueError("devices must not contain duplicates")
+            if self.device != self.devices[0]:
+                raise ValueError("device must match the first entry in devices")
         if "{query}" not in self.turn_template or "{response}" not in self.turn_template:
             raise ValueError("turn_template must contain {query} and {response}")
 
@@ -479,6 +485,7 @@ def _load_icae_model(config: IcaeV1AdapterConfig, *, do_train: bool) -> tuple[An
         is_tensor=torch.is_tensor,
     )
     model.load_state_dict(restored_state, strict=True)
+    _validate_execution_devices(torch, (config.device,))
     model.to(config.device)
     if do_train and config.gradient_checkpointing:
         model.icae.gradient_checkpointing_enable()
@@ -499,3 +506,12 @@ def _configure_trainable_parameters(model: Any) -> None:
 
 def _is_trainable_icae_parameter(name: str) -> bool:
     return name.startswith("memory_token_embed.") or ".lora_A." in name or ".lora_B." in name
+
+
+def _validate_execution_devices(torch_module: Any, devices: tuple[str, ...]) -> None:
+    for device in devices:
+        parsed = torch_module.device(device)
+        if parsed.type != "cuda":
+            raise ValueError("ICAE execution devices must be CUDA devices")
+        if parsed.index is not None and parsed.index >= torch_module.cuda.device_count():
+            raise ValueError(f"configured CUDA device is unavailable: {device}")

@@ -19,10 +19,10 @@ class FakeCuda:
     def is_available(self) -> bool:
         return True
 
-    def get_rng_state_all(self) -> list[str]:
+    def get_rng_state(self) -> list[str]:
         return list(self.state)
 
-    def set_rng_state_all(self, value: list[str]) -> None:
+    def set_rng_state(self, value: list[str]) -> None:
         self.state = list(value)
 
 

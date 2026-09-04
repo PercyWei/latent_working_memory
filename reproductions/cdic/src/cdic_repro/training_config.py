@@ -41,10 +41,10 @@ class OptimizationConfig:
     seed: int = 42
     shuffle: bool = True
     max_grad_norm: float | None = None
-    save_every_episodes: int = 50
+    save_every_steps: int = 50
     keep_last_checkpoints: int | None = 2
     save_final_checkpoint: bool = True
-    log_every_episodes: int = 1
+    log_every_steps: int = 1
     resume_from: Path | None = None
 
     def __post_init__(self) -> None:
@@ -56,12 +56,12 @@ class OptimizationConfig:
             raise ValueError("training.weight_decay must be non-negative")
         if self.max_grad_norm is not None and self.max_grad_norm <= 0.0:
             raise ValueError("training.max_grad_norm must be positive")
-        if self.save_every_episodes < 1:
-            raise ValueError("training.save_every_episodes must be positive")
+        if self.save_every_steps < 1:
+            raise ValueError("training.save_every_steps must be positive")
         if self.keep_last_checkpoints is not None and self.keep_last_checkpoints < 1:
             raise ValueError("training.keep_last_checkpoints must be positive")
-        if self.log_every_episodes < 1:
-            raise ValueError("training.log_every_episodes must be positive")
+        if self.log_every_steps < 1:
+            raise ValueError("training.log_every_steps must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +99,7 @@ def load_training_config(path: Path) -> CdicMscTrainingConfig:
             model_path=Path(_required_string(model, "model_path")),
             checkpoint_path=Path(_required_string(model, "checkpoint_path")),
             device=str(model.get("device", "cuda:0")),
+            devices=_device_tuple(model.get("devices")),
             dtype=str(model.get("dtype", "bfloat16")),
             memory_size=int(model.get("memory_size", 128)),
             max_turn_tokens=int(model.get("max_turn_tokens", 512)),
@@ -135,10 +136,10 @@ def load_training_config(path: Path) -> CdicMscTrainingConfig:
             seed=int(training.get("seed", 42)),
             shuffle=bool(training.get("shuffle", True)),
             max_grad_norm=_optional_float(training.get("max_grad_norm")),
-            save_every_episodes=int(training.get("save_every_episodes", 50)),
+            save_every_steps=int(training.get("save_every_steps", 50)),
             keep_last_checkpoints=_optional_int(training.get("keep_last_checkpoints", 2)),
             save_final_checkpoint=bool(training.get("save_final_checkpoint", True)),
-            log_every_episodes=int(training.get("log_every_episodes", 1)),
+            log_every_steps=int(training.get("log_every_steps", 1)),
             resume_from=_optional_path(training.get("resume_from")),
         ),
     )
@@ -172,6 +173,14 @@ def _optional_path(value: object) -> Path | None:
     if not isinstance(value, str) or not value:
         raise ValueError("resume_from must be null or a non-empty path")
     return Path(value)
+
+
+def _device_tuple(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) for item in value):
+        raise ValueError("model.devices must be a non-empty list of device strings")
+    return tuple(value)
 
 
 def _serialize_paths(value: object) -> object:
