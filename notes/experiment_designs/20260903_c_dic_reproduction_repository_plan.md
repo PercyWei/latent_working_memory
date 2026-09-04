@@ -1,10 +1,10 @@
-# 20260903_C-DIC 复现与项目仓库结构规划
+# 20260903 C-DIC 复现与项目仓库结构规划（20260904 22:09:00 CST 修订）
 
 创建时间：20260903 19:58:48 CST（UTC+08:00）
 
-最后修订时间：20260904 21:26:56 CST（UTC+08:00）
+最后修订时间：20260904 22:09:00 CST（UTC+08:00）
 
-状态：C-DIC R1 核心状态机与五轮 7B GPU smoke test 已通过；MSC 训练闭环待完成
+状态：C-DIC R1 核心状态机与五轮 7B GPU smoke test 已通过；R2 训练代码和合成 autograd smoke test 已通过，官方 MSC GPU pilot 待运行
 
 ## 术语
 
@@ -285,9 +285,12 @@ EMA 和 2-layer gate 作为论文消融实现，不与主 C-DIC 路径混用。
 
 ### R2：MSC 最小训练闭环
 
-- 只运行 MSC 的小训练子集和固定 validation subset；
-- 验证 loss、slot growth、retrieved slot count 和生成结果；
-- 冻结所有 generator 参数，只更新论文允许的 compressor/LoRA/token 参数。
+- [x] 实现 MSC `session_4/train.txt` episode loader；
+- [x] 实现 gold-response teacher forcing、one-hop ra-TBPTT 和 episode-level optimizer step；
+- [x] 冻结 generator，仅暴露 compressor LoRA 与 compression-token embeddings；
+- [x] 实现 config、checkpoint/resume、metrics 和 memory trace；
+- [ ] 运行小训练子集和固定 validation subset；
+- [ ] 验证真实 GPU loss、slot growth、retrieved slot count、gradient path 和生成结果。
 
 完成标准：训练稳定、checkpoint 可恢复、固定样本输出可复查。
 
@@ -345,4 +348,4 @@ C-DIC 原论文的 memory bank 会随 topic shift 增长，因此论文复现结
 
 ## 下一步
 
-R1 已完成 model-independent 的 thread state、相似度与时间衰减检索、top-1 fallback、insert/replace 写回、one-hop credit plan、turn trace 和完整状态机测试。截至 20260904 21:01:28 CST，已在 A800 上通过真实 Llama-2-7B-Chat 与 ICAE checkpoint 的五轮 GPU smoke test，覆盖 `initialize`、`insert`、`replace`、fallback、thread revision、latent shape/有限值和峰值显存。下一步进入 R2：实现实际 ra-TBPTT autograd graph、MSC 数据流水线和最小训练闭环。
+R1 已完成 model-independent 的 thread state、相似度与时间衰减检索、top-1 fallback、insert/replace 写回、one-hop credit plan、turn trace 和完整状态机测试。截至 20260904 21:01:28 CST，已在 A800 上通过真实 Llama-2-7B-Chat 与 ICAE checkpoint 的五轮 GPU smoke test。20260904 21:41:08 CST 已完成 MSC loader、training adapter、one-hop autograd、checkpoint/resume 和训练 CLI；下一步是在 A800 上运行 `msc_pilot_a800.json`，先验证真实 loss、梯度、显存和 checkpoint 恢复，再进入完整两 epoch 训练。

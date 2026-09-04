@@ -1,0 +1,42 @@
+{
+  "model": {
+    "model_path": "/data/bywei/models/meta-llama/Llama-2-7b-chat-hf",
+    "checkpoint_path": "/data/bywei/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt",
+    "device": "cuda:0",
+    "dtype": "bfloat16",
+    "memory_size": 128,
+    "max_turn_tokens": 512,
+    "lora_alpha": 32,
+    "lora_dropout": 0.05,
+    "use_ft_markers": true,
+    "gradient_checkpointing": true
+  },
+  "data": {
+    "root": "/data/bywei/datasets/msc/raw",
+    "split": "train",
+    "session_id": 4,
+    "max_episodes": null,
+    "max_turns_per_episode": null,
+    "strict_pairs": false
+  },
+  "retrieval": {
+    "threshold": 0.8,
+    "decay": 0.05,
+    "support_order": "score_desc",
+    "max_retrieved": null
+  },
+  "training": {
+    "output_dir": "/data/bywei/checkpoints/cdic/msc_paper_seed42",
+    "epochs": 2,
+    "learning_rate": 0.0002,
+    "weight_decay": 0.0,
+    "seed": 42,
+    "shuffle": true,
+    "max_grad_norm": null,
+    "save_every_episodes": 50,
+    "keep_last_checkpoints": 2,
+    "save_final_checkpoint": true,
+    "log_every_episodes": 1,
+    "resume_from": null
+  }
+}

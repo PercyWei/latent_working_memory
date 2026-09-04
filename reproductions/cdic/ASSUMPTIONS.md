@@ -1,10 +1,10 @@
-# C-DIC 假设清单（20260904 17:08:27 CST）
+# C-DIC 假设清单（20260904 22:09:00 CST）
 
 创建时间：20260904 16:19:08 CST（UTC+08:00）
 
-最后修订时间：20260904 21:01:28 CST（UTC+08:00）
+最后修订时间：20260904 22:09:00 CST（UTC+08:00）
 
-状态：R1 核心机制与 inference adapter 已通过 GPU smoke test
+状态：R1 已通过 GPU smoke test；R2 训练代码和合成两轮 autograd smoke test 已通过，官方 MSC pilot 待运行
 
 论文明确了 C-DIC 的总体算法，但部分实现细节未公开。首次 MSC pilot 前需固定主实验选择；后续修改必须记录时间，并使用独立结果标签。
 
@@ -24,5 +24,14 @@
 | Retrieval budget | 默认方法不限制 memory bank；附录测试 `B_ret=6` | 默认 `None`，可选 bounded retrieval | 论文默认设置 |
 | 训练 response | 训练公式使用 gold `r_t`；inference 使用生成的 `r_hat_t` | 训练使用 gold response，closed-loop inference 使用 generated response | 论文约束 |
 | LoRA 细节 | 仅说明训练 compressor 与 compression tokens | 加载前从 ICAE checkpoint 推断 rank 和参数形状 | 已确认 rank 为 128，strict load 通过 |
+| MSC episode | 论文使用 official train split，共 1001 episodes | 使用 `session_4/train.txt`，按 `previous_dialogs → dialog` 顺序展开 | episode 数与论文一致 |
+| Speaker 方向 | 论文未说明双向样本构造 | 每个 session 从首个 utterance 开始按相邻两条组成 `query → response` | 实现假设 |
+| 无配对尾项 | 官方 train 数据存在 122 个 odd-length session | 丢弃最后一个无 gold response 的 utterance，并记录计数 | 数据约束 |
+| 空 utterance | 官方 train 数据存在 1 个空文本 | 替换为 ParlAI 使用的 `__SILENCE__` | 数据兼容选择 |
+| Loss 归一化 | Eq. 7 对 episode 的 $T$ 个 turn 取平均；token reduction 未说明 | 每轮 response token CE 取均值，再乘以 `1 / T` backward；episode 结束后统一 optimizer step | 实现假设 |
+| ra-TBPTT 执行顺序 | 论文描述 reverse-time one-hop backward，但未给代码 | memory-safe online one-hop backward；episode 内不更新参数，因此梯度和与逐轮 loss 求和一致 | 实现假设，需 GPU gradient audit |
+| Gradient checkpointing | ICAE 上游 checkpoint branch 未转发 `enable_lora` | 补充转发；query routing 临时使用 eval mode | 合成 GPU test 确认 128/128 LoRA tensors 有 gradient |
+| Optimizer 未公开项 | 仅给出 AdamW 和 learning rate | `weight_decay=0`、默认不做 gradient clipping，均显式配置 | 待敏感性检查 |
+| 论文 utterance 均值 | 论文报告 53.3；当前官方 v0.1 原始字段统计约 50.32 | 保存数据 revision 和 `data_summary.json`，不修改数据以追齐均值 | 待核对论文预处理 |
 
-不得通过 `strict=False`、静默截断或隐式 fallback 掩盖配置不一致。
+不得通过 checkpoint `strict=False`、未记录的数据截断或隐式 fallback 掩盖配置不一致。

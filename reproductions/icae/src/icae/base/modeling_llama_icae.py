@@ -682,7 +682,12 @@ class LlamaModel(LlamaPreTrainedModel):
                 def create_custom_forward(module):
                     def custom_forward(*inputs):
                         # None for past_key_value
-                        return module(*inputs, output_attentions, None)
+                        return module(
+                            *inputs,
+                            output_attentions,
+                            None,
+                            enable_lora=enable_lora,
+                        )
 
                     return custom_forward
 

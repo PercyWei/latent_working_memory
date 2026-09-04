@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from cdic_repro.icae_adapter import IcaeV1AdapterConfig, format_turn, resolve_stop_token_id
+from cdic_repro.icae_adapter import (
+    IcaeV1AdapterConfig,
+    _is_trainable_icae_parameter,
+    format_turn,
+    resolve_stop_token_id,
+)
 
 
 def make_config(**overrides: object) -> IcaeV1AdapterConfig:
@@ -44,3 +49,10 @@ def test_icae_stop_token_takes_precedence_over_tokenizer_eos() -> None:
     model = type("Model", (), {"eos_id": 1, "tokenizer": tokenizer})()
 
     assert resolve_stop_token_id(model) == 1
+
+
+def test_training_parameter_filter_keeps_only_lora_and_compression_tokens() -> None:
+    assert _is_trainable_icae_parameter("icae.base_model.model.q_proj.lora_A.default.weight")
+    assert _is_trainable_icae_parameter("icae.base_model.model.q_proj.lora_B.default.weight")
+    assert _is_trainable_icae_parameter("memory_token_embed.weight")
+    assert not _is_trainable_icae_parameter("icae.base_model.model.q_proj.base_layer.weight")

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from cdic_repro.checkpoint import infer_lora_rank, load_checkpoint_state_dict
+from cdic_repro.credit import CreditPlan
 from cdic_repro.memory_state import ThreadState
-from cdic_repro.model_protocol import CompressedTurn
+from cdic_repro.model_protocol import CompressedTurn, TrainingLoss
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +26,7 @@ class IcaeV1AdapterConfig:
     seed: int = 42
     use_ft_markers: bool = True
     turn_template: str = "<s>[INST] {query} [/INST] {response} </s>"
+    gradient_checkpointing: bool = False
 
     def __post_init__(self) -> None:
         if self.memory_size < 1:
@@ -50,59 +53,7 @@ class IcaeV1InferenceAdapter:
 
     @classmethod
     def load(cls, config: IcaeV1AdapterConfig) -> IcaeV1InferenceAdapter:
-        import torch
-        from peft import LoraConfig
-
-        from icae.llama_icae_modeling import LlamaICAE, ModelArguments, TrainingArguments
-        from icae_repro.checkpoint import restore_zero_weight_state_dict
-
-        state_dict = load_checkpoint_state_dict(config.checkpoint_path)
-        if config.device.startswith("cuda") and not torch.cuda.is_available():
-            raise RuntimeError("CUDA is unavailable for the configured ICAE device")
-        torch.manual_seed(config.seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(config.seed)
-        inferred_rank = infer_lora_rank(state_dict)
-        if config.lora_rank is not None and config.lora_rank != inferred_rank:
-            raise ValueError(
-                f"configured LoRA rank {config.lora_rank} does not match checkpoint rank "
-                f"{inferred_rank}"
-            )
-
-        dtype = _resolve_dtype(torch, config.dtype)
-        model_arguments = ModelArguments(
-            model_name_or_path=str(config.model_path),
-            memory_head=False,
-            better_transformer=False,
-            mem_size=config.memory_size,
-            lora_r=inferred_rank,
-            lora_dropout=config.lora_dropout,
-        )
-        training_arguments = TrainingArguments(
-            output_dir="/tmp/cdic_icae_runtime",
-            do_train=False,
-            bf16=dtype is torch.bfloat16,
-            fp16=dtype is torch.float16,
-            per_device_train_batch_size=1,
-            model_max_length=config.max_turn_tokens,
-            report_to=[],
-            disable_tqdm=True,
-        )
-        lora_config = LoraConfig(
-            r=inferred_rank,
-            lora_alpha=config.lora_alpha,
-            lora_dropout=config.lora_dropout,
-            bias="none",
-            task_type="CAUSAL_LM",
-        )
-        model = LlamaICAE(model_arguments, training_arguments, lora_config)
-        restored_state, _ = restore_zero_weight_state_dict(
-            state_dict,
-            model.state_dict(),
-            is_tensor=torch.is_tensor,
-        )
-        model.load_state_dict(restored_state, strict=True)
-        model.to(config.device)
+        model, torch = _load_icae_model(config, do_train=False)
         return cls(config=config, model=model, torch_module=torch)
 
     def encode_query(self, query: str) -> object:
@@ -161,8 +112,13 @@ class IcaeV1InferenceAdapter:
         self,
         supports: tuple[ThreadState, ...],
         token_ids: list[int],
+        *,
+        detach_supports: bool = False,
     ) -> Any:
-        pieces = [self._support_embeddings(supports), self._embed_base_ids(token_ids)]
+        pieces = [
+            self._support_embeddings(supports, detach_all=detach_supports),
+            self._embed_base_ids(token_ids),
+        ]
         pieces.append(self._memory_token_embeddings())
         inputs_embeds = self.torch.cat([piece for piece in pieces if piece.shape[1] > 0], dim=1)
         self._validate_position_budget(inputs_embeds.shape[1])
@@ -181,17 +137,26 @@ class IcaeV1InferenceAdapter:
 
     def _build_decoder_input(self, supports: tuple[ThreadState, ...], query: str) -> Any:
         support_embeddings = self._support_embeddings(supports)
-        query_ids = self._tokenize(query, add_special_tokens=False)
-        if self.config.use_ft_markers:
-            prompt_ids = [self.model.ft_token_id, *query_ids, self.model.ft_token_id]
-            prompt_embeddings = self._embed_mixed_ids(prompt_ids)
-        else:
-            prompt_embeddings = self._embed_base_ids(query_ids)
+        prompt_embeddings = self._query_prompt_embeddings(query)
         result = self.torch.cat((support_embeddings, prompt_embeddings), dim=1)
         self._validate_position_budget(result.shape[1])
         return result
 
-    def _support_embeddings(self, supports: tuple[ThreadState, ...]) -> Any:
+    def _query_prompt_embeddings(self, query: str) -> Any:
+        query_ids = self._tokenize(query, add_special_tokens=False)
+        if self.config.use_ft_markers:
+            prompt_ids = [self.model.ft_token_id, *query_ids, self.model.ft_token_id]
+            return self._embed_mixed_ids(prompt_ids)
+        return self._embed_base_ids(query_ids)
+
+    def _support_embeddings(
+        self,
+        supports: tuple[ThreadState, ...],
+        *,
+        connected_state_id: str | None = None,
+        detach_unconnected: bool = False,
+        detach_all: bool = False,
+    ) -> Any:
         if not supports:
             return self.torch.empty(
                 (1, 0, self.model.dim),
@@ -206,6 +171,8 @@ class IcaeV1InferenceAdapter:
                 self.model.dim,
             ):
                 raise ValueError(f"invalid latent shape for {state.state_id}")
+            if detach_all or (detach_unconnected and state.state_id != connected_state_id):
+                latent = latent.detach()
             tensors.append(latent.to(device=self.device, dtype=self._model_dtype()).unsqueeze(0))
         return self.torch.cat(tensors, dim=1)
 
@@ -263,6 +230,160 @@ class IcaeV1InferenceAdapter:
             )
 
 
+class IcaeV1TrainingAdapter(IcaeV1InferenceAdapter):
+    """Differentiable ICAE adapter for teacher-forced C-DIC training."""
+
+    def __init__(self, *, config: IcaeV1AdapterConfig, model: Any, torch_module: Any) -> None:
+        super().__init__(config=config, model=model, torch_module=torch_module)
+        _configure_trainable_parameters(self.model)
+        self.model.train()
+
+    @classmethod
+    def load(cls, config: IcaeV1AdapterConfig) -> IcaeV1TrainingAdapter:
+        model, torch = _load_icae_model(config, do_train=True)
+        return cls(config=config, model=model, torch_module=torch)
+
+    def encode_query(self, query: str) -> object:
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            return super().encode_query(query)
+        finally:
+            if was_training:
+                self.model.train()
+
+    def response_loss(
+        self,
+        supports: tuple[ThreadState, ...],
+        query: str,
+        response: str,
+        credit: CreditPlan,
+    ) -> TrainingLoss:
+        support_embeddings = self._support_embeddings(
+            supports,
+            connected_state_id=credit.connected_state_id,
+            detach_unconnected=True,
+        )
+        prompt_embeddings = self._query_prompt_embeddings(query)
+        response_ids = self._tokenize(response, add_special_tokens=False)
+        response_ids.append(resolve_stop_token_id(self.model))
+        response_embeddings = self._embed_base_ids(response_ids)
+        inputs_embeds = self.torch.cat(
+            (support_embeddings, prompt_embeddings, response_embeddings),
+            dim=1,
+        )
+        self._validate_position_budget(inputs_embeds.shape[1])
+        labels = self.torch.full(
+            (1, inputs_embeds.shape[1]),
+            -100,
+            dtype=self.torch.long,
+            device=self.device,
+        )
+        response_start = support_embeddings.shape[1] + prompt_embeddings.shape[1]
+        labels[:, response_start:] = self.torch.tensor(
+            [response_ids],
+            dtype=self.torch.long,
+            device=self.device,
+        )
+        output = self.model.icae(
+            inputs_embeds=inputs_embeds,
+            labels=labels,
+            use_cache=False,
+            enable_lora=False,
+        )
+        if output.loss is None:
+            raise RuntimeError("frozen generator returned no teacher-forced loss")
+        return TrainingLoss(value=output.loss, token_count=len(response_ids))
+
+    def compress_gold(
+        self,
+        supports: tuple[ThreadState, ...],
+        query: str,
+        response: str,
+    ) -> CompressedTurn:
+        turn_text = format_turn(self.config.turn_template, query=query, response=response)
+        token_ids = self._tokenize(turn_text, add_special_tokens=False)
+        latent = self._compress_token_ids(supports, token_ids, detach_supports=True)
+        return CompressedTurn(
+            latent=latent,
+            retrieval_key=self._pool(latent).detach(),
+            provenance=("gold-response",),
+        )
+
+    def backward(self, loss: object, *, scale: float) -> None:
+        if scale <= 0.0:
+            raise ValueError("loss scale must be positive")
+        (loss * scale).backward()  # type: ignore[operator, union-attr]
+
+    def loss_requires_grad(self, loss: object) -> bool:
+        return bool(getattr(loss, "requires_grad", False))
+
+    def loss_to_float(self, loss: object) -> float:
+        return float(loss.detach().float().item())  # type: ignore[union-attr]
+
+    def trainable_parameters(self) -> Iterable[object]:
+        return tuple(parameter for parameter in self.model.parameters() if parameter.requires_grad)
+
+    def trainable_state_dict(self) -> Mapping[str, object]:
+        return {
+            name: parameter.detach().cpu().clone()
+            for name, parameter in self.model.named_parameters()
+            if parameter.requires_grad
+        }
+
+    def load_trainable_state_dict(
+        self,
+        state_dict: Mapping[str, object],
+        *,
+        strict: bool = True,
+    ) -> None:
+        parameters = {
+            name: parameter
+            for name, parameter in self.model.named_parameters()
+            if parameter.requires_grad
+        }
+        missing = sorted(set(parameters).difference(state_dict))
+        unexpected = sorted(set(state_dict).difference(parameters))
+        if strict and (missing or unexpected):
+            raise ValueError(
+                f"trainable state mismatch: missing={missing}, unexpected={unexpected}"
+            )
+        with self.torch.no_grad():
+            for name, parameter in parameters.items():
+                if name not in state_dict:
+                    continue
+                value = state_dict[name]
+                if not hasattr(value, "shape") or tuple(value.shape) != tuple(parameter.shape):
+                    raise ValueError(f"trainable parameter shape mismatch for {name}")
+                parameter.copy_(value.to(device=parameter.device, dtype=parameter.dtype))
+
+    def trainable_parameter_report(self) -> dict[str, object]:
+        records = [
+            (name, parameter.numel())
+            for name, parameter in self.model.named_parameters()
+            if parameter.requires_grad
+        ]
+        return {
+            "parameter_count": sum(count for _, count in records),
+            "tensor_count": len(records),
+            "names": [name for name, _ in records],
+        }
+
+    def gradient_coverage_report(self) -> dict[str, object]:
+        groups = {
+            "lora": {"trainable_tensors": 0, "gradient_tensors": 0},
+            "compression_tokens": {"trainable_tensors": 0, "gradient_tensors": 0},
+        }
+        for name, parameter in self.model.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            group = "compression_tokens" if name.startswith("memory_token_embed.") else "lora"
+            groups[group]["trainable_tensors"] += 1
+            if parameter.grad is not None:
+                groups[group]["gradient_tensors"] += 1
+        return groups
+
+
 def torch_cosine_similarity(left: object, right: object) -> float:
     import torch
 
@@ -302,3 +423,79 @@ def _resolve_dtype(torch_module: Any, dtype: str) -> Any:
         return supported[dtype]
     except KeyError as error:
         raise ValueError(f"unsupported dtype: {dtype}") from error
+
+
+def _load_icae_model(config: IcaeV1AdapterConfig, *, do_train: bool) -> tuple[Any, Any]:
+    import torch
+    from peft import LoraConfig
+
+    from icae.llama_icae_modeling import LlamaICAE, ModelArguments, TrainingArguments
+    from icae_repro.checkpoint import restore_zero_weight_state_dict
+
+    state_dict = load_checkpoint_state_dict(config.checkpoint_path)
+    if config.device.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError("CUDA is unavailable for the configured ICAE device")
+    torch.manual_seed(config.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(config.seed)
+    inferred_rank = infer_lora_rank(state_dict)
+    if config.lora_rank is not None and config.lora_rank != inferred_rank:
+        raise ValueError(
+            f"configured LoRA rank {config.lora_rank} does not match checkpoint rank "
+            f"{inferred_rank}"
+        )
+
+    dtype = _resolve_dtype(torch, config.dtype)
+    model_arguments = ModelArguments(
+        model_name_or_path=str(config.model_path),
+        memory_head=False,
+        better_transformer=False,
+        mem_size=config.memory_size,
+        lora_r=inferred_rank,
+        lora_dropout=config.lora_dropout,
+    )
+    training_arguments = TrainingArguments(
+        output_dir="/tmp/cdic_icae_runtime",
+        do_train=do_train,
+        bf16=dtype is torch.bfloat16,
+        fp16=dtype is torch.float16,
+        per_device_train_batch_size=1,
+        model_max_length=config.max_turn_tokens,
+        report_to=[],
+        disable_tqdm=True,
+        gradient_checkpointing=do_train and config.gradient_checkpointing,
+    )
+    lora_config = LoraConfig(
+        r=inferred_rank,
+        lora_alpha=config.lora_alpha,
+        lora_dropout=config.lora_dropout,
+        bias="none",
+        task_type="CAUSAL_LM",
+    )
+    model = LlamaICAE(model_arguments, training_arguments, lora_config)
+    restored_state, _ = restore_zero_weight_state_dict(
+        state_dict,
+        model.state_dict(),
+        is_tensor=torch.is_tensor,
+    )
+    model.load_state_dict(restored_state, strict=True)
+    model.to(config.device)
+    if do_train and config.gradient_checkpointing:
+        model.icae.gradient_checkpointing_enable()
+        model.icae.config.use_cache = False
+    return model, torch
+
+
+def _configure_trainable_parameters(model: Any) -> None:
+    trainable_names: list[str] = []
+    for name, parameter in model.named_parameters():
+        trainable = _is_trainable_icae_parameter(name)
+        parameter.requires_grad_(trainable)
+        if trainable:
+            trainable_names.append(name)
+    if not trainable_names:
+        raise RuntimeError("ICAE training adapter exposed no trainable parameters")
+
+
+def _is_trainable_icae_parameter(name: str) -> bool:
+    return name.startswith("memory_token_embed.") or ".lora_A." in name or ".lora_B." in name

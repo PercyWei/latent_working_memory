@@ -1,8 +1,8 @@
-# C-DIC 上游来源与复现边界（20260904 17:08:27 CST）
+# C-DIC 上游来源与复现边界（20260904 22:09:00 CST）
 
 创建时间：20260904 16:19:08 CST（UTC+08:00）
 
-最后修订时间：20260904 19:52:38 CST（UTC+08:00）
+最后修订时间：20260904 22:09:00 CST（UTC+08:00）
 
 ## 论文信息
 
@@ -16,6 +16,19 @@
 
 - https://arxiv.org/abs/2606.12411v1
 - https://arxiv.org/pdf/2606.12411v1
+
+## MSC 数据来源
+
+- 数据版本：ParlAI `msc_v0.1`；
+- 官方归档：`https://parl.ai/downloads/msc/msc_v0.1.tar.gz`；
+- SHA256：`e640e37cf4317cd09fc02a4cd57ef130a185f23635f4003b0cee341ffcb45e60`；
+- 主训练输入：`msc/msc_dialogue/session_4/train.txt`，共 1001 records。
+
+当前 loader 直接读取官方 JSONL，不依赖 ParlAI runtime。原始数据中的空 utterance、无配对尾项和解析统计会写入 training artifact。
+
+## ICAE 兼容修复
+
+ICAE v1 的 gradient-checkpoint branch 原先未把 `enable_lora` 传入 decoder layer。启用 gradient checkpointing 时会导致 compressor LoRA 不参与 forward，表现为训练可运行但全部 LoRA gradients 缺失。本项目在 `reproductions/icae/src/icae/base/modeling_llama_icae.py` 中补充参数转发；两轮 A800 autograd smoke test 已确认 128/128 LoRA tensors 获得 gradient。
 
 ## 代码开放状态
 

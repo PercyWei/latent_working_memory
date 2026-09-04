@@ -1,8 +1,8 @@
-# C-DIC 论文复现（20260904 17:08:27 CST）
+# C-DIC 论文复现（20260904 22:09:00 CST）
 
 创建时间：20260904 16:19:08 CST（UTC+08:00）
 
-最后修订时间：20260904 21:26:56 CST（UTC+08:00）
+最后修订时间：20260904 22:09:00 CST（UTC+08:00）
 
 本目录用于分阶段复现 Context-Driven Incremental Compression（C-DIC）。由于当前没有公开的官方实现，所有论文未明确的行为均记录在 `ASSUMPTIONS.md`。
 
@@ -20,12 +20,24 @@
 - inference-only ICAE v1 adapter；
 - 多轮 JSONL smoke CLI。
 
-ICAE adapter 已在 A800 上通过真实 Llama-2-7B-Chat、公开 checkpoint 和五轮对话的工程 smoke test。MSC 数据流水线、实际 ra-TBPTT autograd graph 和训练闭环尚未实现。ICAE v1 上游 inference 示例不完整，因此本项目不直接调用该脚本。
+R2 训练代码已实现：
+
+- 官方 MSC `session_4/train.txt` episode loader；
+- teacher-forced response loss 与 gold-response compression；
+- one-hop ra-TBPTT autograd path；
+- frozen generator，仅训练 compressor LoRA 与 compression-token embeddings；
+- episode-level AdamW step、gradient clipping 配置和确定性 shuffle；
+- checkpoint/resume、resolved config、metrics 与 memory trace；
+- pilot 和论文规模 JSON 配置。
+
+ICAE adapter 已在 A800 上通过真实 Llama-2-7B-Chat、公开 checkpoint 和五轮对话的工程 smoke test。MSC 训练代码已通过本地单元测试、官方数据 schema 检查和两轮真实 7B autograd smoke test；全部 128 个 LoRA tensors 与 compression-token embedding 均获得 gradient。官方 MSC pilot 尚未运行，因此不能视为已经复现论文训练结果。
 
 ## 目录结构
 
 - `src/cdic_repro/`：论文核心机制、ICAE adapter 与运行接口；
 - `configs/paper.yaml`：论文默认参数和显式复现选择；
+- `configs/msc_pilot_a800.json`：两条 episode、每条八轮的 GPU pilot；
+- `configs/msc_paper_a800.json`：论文规模两 epoch 配置；
 - `tests/`：retrieval、memory transition、credit assignment 和端到端状态机的 CPU tests；
 - `UPSTREAM.md`：论文版本、代码开放状态和复现边界；
 - `ASSUMPTIONS.md`：论文未说明的细节及当前选择。
@@ -93,5 +105,63 @@ uv run --project reproductions/cdic --no-sync pytest -q -s \
 ```
 
 报告 SHA256：`a732f168897c80d9dcc8c570139161834b10c061506b2898e51ea2c8ed8b93c7`。
+
+## MSC 训练
+
+训练 loader 使用官方 `session_4/train.txt` 的 1001 条完整多 session records，按原始 session 顺序展开，并将相邻 utterances 组成 `(query, gold response)`。官方数据包含 122 个无配对尾 utterance 和 1 个空 utterance；默认丢弃无法形成 response 的尾项，并将空文本替换为 `__SILENCE__`，统计写入 `data_summary.json`。
+
+准备官方 `msc_v0.1`：
+
+```bash
+mkdir -p /data/bywei/datasets/msc/raw
+curl -L --fail --retry 5 \
+  https://parl.ai/downloads/msc/msc_v0.1.tar.gz \
+  -o /data/bywei/datasets/msc/raw/msc_v0.1.tar.gz
+echo "e640e37cf4317cd09fc02a4cd57ef130a185f23635f4003b0cee341ffcb45e60  /data/bywei/datasets/msc/raw/msc_v0.1.tar.gz" \
+  | sha256sum -c -
+tar -xzf /data/bywei/datasets/msc/raw/msc_v0.1.tar.gz \
+  -C /data/bywei/datasets/msc/raw
+```
+
+先只验证数据，不加载模型：
+
+```bash
+uv run --project reproductions/cdic --no-sync cdic-train-msc \
+  --config reproductions/cdic/configs/msc_pilot_a800.json \
+  --validate-data-only
+```
+
+运行最小 GPU pilot：
+
+```bash
+uv run --project reproductions/cdic --no-sync cdic-train-msc \
+  --config reproductions/cdic/configs/msc_pilot_a800.json
+```
+
+pilot 通过后运行 seed 42 的论文规模训练：
+
+```bash
+uv run --project reproductions/cdic --no-sync cdic-train-msc \
+  --config reproductions/cdic/configs/msc_paper_a800.json
+```
+
+其他 seeds 不需要复制配置文件：
+
+```bash
+uv run --project reproductions/cdic --no-sync cdic-train-msc \
+  --config reproductions/cdic/configs/msc_paper_a800.json \
+  --seed 43 \
+  --output-dir /data/bywei/checkpoints/cdic/msc_paper_seed43
+```
+
+从 checkpoint 恢复：
+
+```bash
+uv run --project reproductions/cdic --no-sync cdic-train-msc \
+  --config reproductions/cdic/configs/msc_paper_a800.json \
+  --resume-from /data/bywei/checkpoints/cdic/msc_paper_seed42/checkpoints/step-000050.pt
+```
+
+训练目录包含 `config.resolved.json`、`data_summary.json`、`trainable_parameters.json`、`metrics.jsonl`、`memory_trace.jsonl` 和 `checkpoints/`。`metrics.jsonl` 记录 loss、gradient norm、LoRA/compression-token gradient coverage、运行时间、peak GPU memory 和 memory slot 数。checkpoint 保存 trainable model state、AdamW state、RNG state 与训练位置，默认只保留最近两个 step checkpoints。不使用 `--resume-from` 时，程序拒绝写入非空 output directory。
 
 模型权重、数据集、predictions 和 checkpoints 均保存在 Git 仓库之外。
