@@ -2,9 +2,9 @@
 
 创建时间：20260903 19:58:48 CST（UTC+08:00）
 
-最后修订时间：20260903 21:22:33 CST（UTC+08:00）
+最后修订时间：20260904 19:52:38 CST（UTC+08:00）
 
-状态：根项目与 ICAE v1 迁移已完成；C-DIC 尚未实现
+状态：C-DIC R1 核心状态机与 ICAE inference adapter 代码已实现；7B GPU 验证与训练闭环待完成
 
 ## 术语
 
@@ -174,7 +174,7 @@ artifacts/runs/<run_id>/
 
 关键字段：
 
-- `manifest.json`：Git commit、dirty status、uv lock hash、Python、CUDA、GPU、模型 revision、数据 hash 和 seed；
+- `manifest.json`：Git commit、dirty status、Python、CUDA、GPU、模型 revision、数据 revision、split 和 seed；
 - `predictions.jsonl`：sample、turn、prompt、reference、prediction 和 token counts；
 - `memory_trace.jsonl`：每轮 retrieval scores、retrieved IDs、write target、insert/replace、slot count、state bytes 和 detach edges；
 - `resource_usage.json`：write/read wall time、peak allocated/reserved GPU memory 和 OOM；
@@ -198,16 +198,17 @@ artifacts/runs/<run_id>/
 
 ### ICAE 与 C-DIC 兼容环境
 
-ICAE v1 官方说明要求 Transformers 4.31.0 和其定制 PEFT；这与未来较新的 Transformer/PEFT 方法可能冲突。因此 ICAE 已在 `reproductions/icae/` 单独维护：
+ICAE v1 官方说明要求 Transformers 4.31.0 和其定制 PEFT；这与未来较新的 Transformer/PEFT 方法可能冲突。因此 ICAE 和 C-DIC 分别在 `reproductions/icae/` 与 `reproductions/cdic/` 中维护独立环境：
 
 - 独立 `pyproject.toml` 与 `uv.lock`；
 - Python 3.10；
 - ICAE 上游固定 commit，定制 PEFT 以本地 path dependency 或明确 patch 形式安装；
-- PyTorch 2.0.1 使用官方 cu118 wheel；CUDA 13.0-capable driver 向后兼容该 runtime，且该版本更接近 ICAE 的 2023 依赖栈；
-- GPU 机器使用 `uv sync --project reproductions/icae --frozen`；
+- PyTorch 2.0.1 使用阿里云镜像中的 cu118 wheel；CUDA 13.0-capable driver 向后兼容该 runtime，且该版本更接近 ICAE 的 2023 依赖栈；
+- ICAE 独立检查使用 `uv sync --project reproductions/icae --frozen`，C-DIC 使用 `uv sync --project reproductions/cdic --frozen`；
+- 后续实验默认只使用物理 GPU 0 和 1；单进程 smoke test 优先使用 GPU 0；
 - macOS 仅同步主项目和 CPU 测试依赖，不尝试运行 7B 训练环境。
 
-C-DIC 实现阶段可建立独立 `reproductions/cdic/pyproject.toml`，通过本地 path dependency 引用 ICAE package，并生成自己的 `uv.lock`，避免在 C-DIC 中重新 vendor ICAE。
+C-DIC 已通过本地 path dependency 引用 ICAE package，并维护自己的 `uv.lock`，避免在 C-DIC 中重新 vendor ICAE。
 
 不建议直接把 ICAE 整仓复制进本项目。优先记录 upstream commit，并只保存必要补丁；若上游代码必须修改，补丁应能够从干净 commit 重放。
 
@@ -268,7 +269,6 @@ EMA 和 2-layer gate 作为论文消融实现，不与主 C-DIC 路径混用。
 ### R0：环境与上游冻结
 
 - 固定论文版本、ICAE commit、checkpoint URL/revision 和数据 revision；
-- 生成 checksum；
 - 完成单 GPU import、checkpoint load 和单样本前向；
 - 记录所有未公开细节。
 
@@ -344,4 +344,4 @@ C-DIC 原论文的 memory bank 会随 topic shift 增长，因此论文复现结
 
 ## 下一步
 
-下一步是在 A800 服务器上执行 ICAE 环境检查和无下载 import smoke test；确认 PyTorch、Transformers 与定制 PEFT 兼容后，再配置 Llama-2/ICAE checkpoint 路径并开始单样本前向。C-DIC 仍应从 R0/R1 机制实现开始，不直接进入完整训练或全部 baseline。
+R1 已完成 model-independent 的 thread state、相似度与时间衰减检索、top-1 fallback、insert/replace 写回、one-hop credit plan、turn trace 和完整状态机测试；同时已实现 checkpoint schema 检查、LoRA rank 推断、ICAE v1 inference adapter 与多轮 JSONL smoke CLI。下一步是在 A800 服务器上执行 strict checkpoint load 和单轮 `retrieve → generate → compress → write-back` GPU smoke test；在该路径稳定前，不进入 MSC 完整训练或全部 baseline。

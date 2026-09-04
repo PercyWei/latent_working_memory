@@ -1,0 +1,46 @@
+[project]
+name = "cdic-reproduction"
+version = "0.1.0"
+description = "Paper-based reproduction of Context-Driven Incremental Compression"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "icae-reproduction",
+]
+
+[project.scripts]
+cdic-inspect-checkpoint = "cdic_repro.checkpoint:main"
+cdic-run-dialogue = "cdic_repro.run_dialogue:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4,<9",
+    "ruff>=0.12,<0.14",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cdic_repro"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.uv]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+find-links = ["https://mirrors.aliyun.com/pytorch-wheels/cu118"]
+
+[tool.uv.sources]
+icae-reproduction = { path = "../icae", editable = true }
+peft = { path = "../icae/vendor/peft", editable = true }
+
+[[tool.uv.index]]
+name = "aliyun-pypi"
+url = "https://mirrors.aliyun.com/pypi/simple"
+default = true

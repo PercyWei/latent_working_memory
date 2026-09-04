@@ -27,3 +27,16 @@ uv run --project reproductions/icae icae-check-environment
 ```
 
 See `reproductions/icae/README.md` before running on the GPU server.
+
+## C-DIC reproduction
+
+The paper-based C-DIC implementation is staged under `reproductions/cdic/`.
+Its first phase implements the model-independent retrieval, recency, write-back,
+state-lineage, trace, and one-hop credit-assignment contracts. It also includes
+checkpoint inspection and an inference-only ICAE adapter awaiting A800 smoke
+validation. The server-only runtime depends on the sibling ICAE reproduction.
+
+```bash
+PYTHONPATH=reproductions/cdic/src uv run pytest -q reproductions/cdic/tests
+uv sync --project reproductions/cdic --frozen
+```

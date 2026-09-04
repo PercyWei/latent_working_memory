@@ -1,0 +1,28 @@
+paper:
+  arxiv: "2606.12411v1"
+  method: "C-DIC"
+
+model:
+  backbone: "Llama-2-Chat-7B"
+  compression_tokens: 128
+  generator_frozen: true
+
+retrieval:
+  threshold: 0.8
+  threshold_inclusive: true
+  decay: 0.05
+  pooling: "mean"
+  support_order: "score_desc"
+  max_retrieved: null
+
+training:
+  batch_size: 1
+  epochs: 2
+  optimizer: "AdamW"
+  learning_rate: 0.0002
+  seeds: [42, 43, 44]
+  credit_hops: 1
+
+inference:
+  msc_batch_size: 8
+  realtalk_batch_size: 1
