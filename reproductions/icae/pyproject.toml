@@ -1,0 +1,59 @@
+[project]
+name = "icae-reproduction"
+version = "0.1.0"
+description = "Faithful ICAE v1 migration for the C-DIC reproduction"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "accelerate==0.21.0",
+    "datasets==2.14.5",
+    "huggingface-hub==0.16.4",
+    "numpy==1.24.4",
+    "packaging==23.1",
+    "peft==0.4.0.dev0",
+    "protobuf==4.24.4",
+    "psutil==5.9.5",
+    "pyarrow==13.0.0",
+    "pyyaml==6.0.1",
+    "safetensors==0.3.3",
+    "sentencepiece==0.1.99",
+    "tokenizers==0.13.3",
+    "torch==2.0.1",
+    "tqdm==4.66.1",
+    "transformers==4.31.0",
+]
+
+[project.scripts]
+icae-check-environment = "icae_repro.check_environment:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4,<9",
+    "ruff>=0.12,<0.14",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/icae", "src/icae_repro"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.uv]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[tool.uv.sources]
+peft = { path = "vendor/peft", editable = true }
+torch = { index = "pytorch-cu118" }
+
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true

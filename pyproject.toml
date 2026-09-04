@@ -1,0 +1,27 @@
+[project]
+name = "latent-working-memory"
+version = "0.1.0"
+description = "Research infrastructure for streaming mutable latent memory"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4,<9",
+    "ruff>=0.12,<0.14",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latent_working_memory"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
