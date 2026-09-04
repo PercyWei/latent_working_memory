@@ -25,6 +25,7 @@ dependencies = [
 
 [project.scripts]
 icae-check-environment = "icae_repro.check_environment:main"
+icae-smoke-inference = "icae_repro.inference:main"
 
 [build-system]
 requires = ["hatchling"]

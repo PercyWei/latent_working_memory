@@ -47,18 +47,33 @@ packages under `/data/bywei` so later environment rebuilds can reuse them.
 The environment check reports PyTorch, CUDA, GPU capability, and bfloat16
 support without accessing Hugging Face or downloading weights.
 
+Run the tested single-record inference path after the environment check:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/icae --no-sync \
+  icae-smoke-inference \
+  --model-path /data/bywei/models/meta-llama/Llama-2-7b-chat-hf \
+  --checkpoint /data/bywei/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt \
+  --context "The access code for Project Quartz is ZETA-4827." \
+  --prompt "What is the access code for Project Quartz?"
+```
+
+The public v1 checkpoint stores frozen Llama parameters as scalar `0.0`
+placeholders. The runner restores those entries from the local base model and
+then performs a strict state-dict load; it does not weaken loading to
+`strict=False`.
+
 The upstream ICAE instructions require bfloat16 rather than fp16 training and
 only support training batch size 1 in the released path. Preserve those limits
 until a controlled compatibility test justifies changing them.
 
 ## Current migration boundary
 
-The migrated model and trainer sources are packaged and syntax-checked, but the
-upstream v1 inference example is not an end-to-end CLI. It contains placeholder
-paths, references a tokenization helper absent from the released v1 training
-file, and contains an upstream variable-name typo. The example is kept unchanged
-for provenance. A tested project inference runner will be added only after the
-base model and ICAE checkpoint are available on the server.
+The migrated model and trainer sources are packaged and syntax-checked. The
+upstream v1 inference example contains placeholder paths, references a
+tokenization helper absent from the released v1 training file, and contains an
+upstream variable-name typo. It is kept unchanged for provenance; the tested
+`icae-smoke-inference` entry point implements the supported local path.
 
 For a first inference demonstration, prepare a JSONL file with one record per
 example:

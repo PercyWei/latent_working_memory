@@ -2,9 +2,9 @@
 
 创建时间：20260904 16:09:49 CST（UTC+08:00）
 
-最后修订时间：20260904 19:21:37 CST（UTC+08:00）
+最后修订时间：20260904 19:42:24 CST（UTC+08:00）
 
-状态：服务器环境检查已通过；checkpoint 加载与推理入口待验证
+状态：环境、checkpoint strict load 和单样本推理入口已通过；待进行最小功能测试
 
 ## 术语
 
@@ -73,6 +73,7 @@ export HF_HOME="/data/bywei/cache/huggingface"
 export UV_CACHE_DIR="/data/bywei/cache/uv"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
+export CUDA_VISIBLE_DEVICES=0
 
 uv sync --project reproductions/icae --frozen
 uv run --project reproductions/icae --no-sync icae-check-environment
@@ -92,6 +93,8 @@ uv run --project reproductions/icae --no-sync pytest -q reproductions/icae/tests
 
 服务器 CUDA 13.0-capable driver 与 wheel 内 CUDA 11.8 runtime 不相等是预期情况。这里不编译自定义 CUDA extension。
 
+本项目后续实验默认只使用物理 GPU 0 和 1；单进程检查优先使用 GPU 0。
+
 ### 2. Checkpoint 结构与参数确认
 
 加载 checkpoint 到 CPU，记录：
@@ -102,7 +105,7 @@ uv run --project reproductions/icae --no-sync pytest -q reproductions/icae/tests
 - checkpoint 中是否包含基础模型权重、零尺寸占位参数或仅 trainable 参数；
 - 由 LoRA A/B 张量形状推断的实际 rank。
 
-论文默认 LoRA rank 为 128，但公开 v1 代码默认值为 64。必须以公开 checkpoint 的实际张量形状确定实例化参数，并在 manifest 中记录；不能为了消除报错而使用 `strict=False`。
+论文默认 LoRA rank 为 128，但公开 v1 代码默认值为 64。实际 checkpoint 的 LoRA rank 已确认为 128。该文件使用 323 个标量 `0.0` 代替冻结的 Llama 参数；加载时先从基础模型 state dict 补回这些占位键，再对合并后的完整 state dict 使用 `strict=True`。
 
 模型实例化后要求：
 
@@ -114,6 +117,8 @@ uv run --project reproductions/icae --no-sync pytest -q reproductions/icae/tests
 - decoder 路径不启用 encoder LoRA，encoder 压缩路径显式启用 LoRA。
 
 若 strict load 失败，先判断是 rank、special-token 数量、key 命名还是 checkpoint 保存方式不一致；不得直接跳过错误。
+
+20260904 19:42 CST 检查结果：452 个 checkpoint 键，其中 129 个 tensor；LoRA A/B 各 64 组，rank 128；memory embedding 为 `[131, 4096]`；无 memory head；合并后 strict load 的 missing/unexpected keys 均为空。
 
 ### 3. 受测试的推理入口
 
@@ -136,6 +141,8 @@ uv run --project reproductions/icae --no-sync pytest -q reproductions/icae/tests
 - 推理处于 `eval()` 和 inference/no-grad mode；
 - 固定输入重复运行得到相同 token IDs；
 - 保存输入 token 数、memory slot 数、输出 token 数、压缩耗时、生成耗时和峰值显存。
+
+20260904 19:42 CST 单样本结果：在物理 GPU 0 上将 28-token 上下文压缩为 `[1, 128, 4096]` 的 bfloat16 memory，全部数值有限；针对随机代码 `ZETA-4827` 的提问生成正确答案，两次 greedy generation 的 token IDs 完全一致。ICAE v1 使用 `model.eos_id=1` 作为停止 token；使用 tokenizer 的标准 EOS 2 会在正确答案后继续生成。结果保存于服务器 `artifacts/icae/20260904_validation/smoke_single/result.json`。
 
 ### 4. 最小功能测试
 

@@ -2,6 +2,8 @@
 
 Migration date: 20260903
 
+Last revised: 20260904 19:52:23 CST
+
 ## Upstream
 
 - Repository: https://github.com/getao/icae
@@ -44,6 +46,15 @@ without modifying their meaning.
    the CUDA 13.0-capable NVIDIA driver can run the older bundled CUDA runtime.
 5. Trailing whitespace was normalized in copied text and Python files; this has
    no runtime effect.
+6. The released ICAE v1 checkpoint stores frozen Llama parameters as scalar
+   `0.0` placeholders. The local loader restores those entries from the
+   initialized base model before strict loading, following the procedure
+   confirmed by the upstream author in
+   [issue #1](https://github.com/getao/icae/issues/1).
+7. The local inference runner stops on ICAE's `model.eos_id` (`1`). This differs
+   from the Llama tokenizer EOS ID (`2`); using the tokenizer value allowed
+   generation to continue after an otherwise correct answer in the server
+   smoke test.
 
 ## Known upstream v1 gaps
 
@@ -53,8 +64,8 @@ without modifying their meaning.
 - File paths and output locations are placeholders rather than CLI arguments.
 
 These issues are documented rather than silently fixed in the retained example.
-The project inference runner should implement the required behavior separately
-and be validated with the released checkpoint.
+The project inference runner implements the required behavior separately and
+has been validated with the released checkpoint.
 
 No model architecture, compression-token logic, loss, trainer, or customized
 PEFT implementation was otherwise changed during migration.
