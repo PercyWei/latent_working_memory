@@ -21,4 +21,6 @@ def test_default_memory_size_is_128() -> None:
 def test_transformers_version_is_pinned() -> None:
     pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert '"transformers==4.31.0"' in pyproject
-    assert '"torch==2.0.1"' in pyproject
+    assert '"torch==2.0.1+cu118"' in pyproject
+    assert "https://mirrors.aliyun.com/pypi/simple" in pyproject
+    assert "https://mirrors.aliyun.com/pytorch-wheels/cu118" in pyproject

@@ -35,9 +35,14 @@ No local CUDA extension is compiled by the migrated code.
 Create the environment on the server:
 
 ```bash
+export UV_CACHE_DIR=/data/bywei/cache/uv
 uv sync --project reproductions/icae --frozen
 uv run --project reproductions/icae icae-check-environment
 ```
+
+The uv project uses the Aliyun PyPI mirror for regular dependencies and the
+Aliyun CUDA 11.8 wheel mirror for PyTorch. `UV_CACHE_DIR` keeps downloaded
+packages under `/data/bywei` so later environment rebuilds can reuse them.
 
 The environment check reports PyTorch, CUDA, GPU capability, and bfloat16
 support without accessing Hugging Face or downloading weights.
