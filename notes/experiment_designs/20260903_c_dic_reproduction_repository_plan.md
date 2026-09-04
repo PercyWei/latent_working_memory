@@ -2,9 +2,9 @@
 
 创建时间：20260903 19:58:48 CST（UTC+08:00）
 
-最后修订时间：20260904 19:52:38 CST（UTC+08:00）
+最后修订时间：20260904 21:26:56 CST（UTC+08:00）
 
-状态：C-DIC R1 核心状态机与 ICAE inference adapter 代码已实现；7B GPU 验证与训练闭环待完成
+状态：C-DIC R1 核心状态机与五轮 7B GPU smoke test 已通过；MSC 训练闭环待完成
 
 ## 术语
 
@@ -204,7 +204,7 @@ ICAE v1 官方说明要求 Transformers 4.31.0 和其定制 PEFT；这与未来�
 - Python 3.10；
 - ICAE 上游固定 commit，定制 PEFT 以本地 path dependency 或明确 patch 形式安装；
 - PyTorch 2.0.1 使用阿里云镜像中的 cu118 wheel；CUDA 13.0-capable driver 向后兼容该 runtime，且该版本更接近 ICAE 的 2023 依赖栈；
-- ICAE 独立检查使用 `uv sync --project reproductions/icae --frozen`，C-DIC 使用 `uv sync --project reproductions/cdic --frozen`；
+- ICAE 独立检查使用 `uv sync --project reproductions/icae --frozen`，C-DIC 使用 `uv sync --project reproductions/cdic --frozen`；二者各自创建 `.venv`；
 - 后续实验默认只使用物理 GPU 0 和 1；单进程 smoke test 优先使用 GPU 0；
 - macOS 仅同步主项目和 CPU 测试依赖，不尝试运行 7B 训练环境。
 
@@ -338,10 +338,11 @@ C-DIC 原论文的 memory bank 会随 topic shift 增长，因此论文复现结
 - integration tests 覆盖一个完整 turn 的 `retrieve → generate → compress → write-back`；
 - regression tests 固定论文公式、默认参数和关键 trace；
 - GPU tests 使用显式 marker，普通 `pytest` 不触发模型下载；
+- 多轮 GPU smoke test 通过 `--cdic-gpu-config` 显式传入独立 JSON 配置，并检查 latent shape/有限值、状态转移、thread revision、trace 与峰值显存；
 - 数据下载、模型下载与运行分离，测试不得隐式访问网络；
 - 所有生成路径记录 tokenizer、chat template 和 special-token IDs；
 - 对官方代码未来发布预留 `upstream comparison` 报告：API、权重加载、数据、训练图和指标逐项比较。
 
 ## 下一步
 
-R1 已完成 model-independent 的 thread state、相似度与时间衰减检索、top-1 fallback、insert/replace 写回、one-hop credit plan、turn trace 和完整状态机测试；同时已实现 checkpoint schema 检查、LoRA rank 推断、ICAE v1 inference adapter 与多轮 JSONL smoke CLI。下一步是在 A800 服务器上执行 strict checkpoint load 和单轮 `retrieve → generate → compress → write-back` GPU smoke test；在该路径稳定前，不进入 MSC 完整训练或全部 baseline。
+R1 已完成 model-independent 的 thread state、相似度与时间衰减检索、top-1 fallback、insert/replace 写回、one-hop credit plan、turn trace 和完整状态机测试。截至 20260904 21:01:28 CST，已在 A800 上通过真实 Llama-2-7B-Chat 与 ICAE checkpoint 的五轮 GPU smoke test，覆盖 `initialize`、`insert`、`replace`、fallback、thread revision、latent shape/有限值和峰值显存。下一步进入 R2：实现实际 ra-TBPTT autograd graph、MSC 数据流水线和最小训练闭环。

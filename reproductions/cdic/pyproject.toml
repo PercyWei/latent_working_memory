@@ -27,6 +27,10 @@ packages = ["src/cdic_repro"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "gpu: requires a CUDA GPU and local model resources",
+    "slow: runs the real 7B model and may take several minutes",
+]
 
 [tool.ruff]
 line-length = 100
