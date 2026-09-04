@@ -1,50 +1,52 @@
-# 20260904 ICAE v1 复现检查计划（20260904 16:09:49 CST）
+# 20260904 ICAE v1 论文结果复现计划（20260904 20:07:10 CST）
 
 创建时间：20260904 16:09:49 CST（UTC+08:00）
 
-最后修订时间：20260904 19:42:24 CST（UTC+08:00）
+最后修订时间：20260904 20:07:10 CST（UTC+08:00）
 
-状态：环境、checkpoint strict load 和单样本推理入口已通过；待进行最小功能测试
+状态：环境、checkpoint strict load 和单样本推理已通过；下一步直接复现 PwC 论文结果
 
 ## 术语
 
 - **ICAE v1**：以 Llama-2-7B-Chat 为基础模型、使用 128 个连续 memory slots 的公开版本。
-- **Memory slot**：ICAE encoder 输出、可直接作为 LLM 输入 embedding 的连续向量；本文也简称 slot。
+- **Memory slot**：ICAE encoder 输出、可直接作为 LLM 输入 embedding 的连续向量；下文简称 slot。
 - **PwC**：Prompt-with-Context 数据集，每条记录包含 `input`、`prompt` 和 `answer`。
 - **Strict load**：使用 `load_state_dict(..., strict=True)` 加载 checkpoint，不忽略缺失键或多余键。
-- **Smoke test（冒烟测试）**：只验证最短端到端路径和明显错误，不等同于论文结果复现。
-- **Functional validation（功能验证）**：通过对照和反事实输入确认输出确实依赖压缩后的上下文，而不只是语言模型先验。
+- **Full-context baseline（完整上下文基线）**：不压缩 `input`，直接将原始上下文提供给同一基础模型。
+- **Pairwise judge（成对评估器）**：比较 ICAE 与完整上下文基线回答，并输出 win、lose 或 tie 的外部模型。
+- **Evaluator drift（评估器漂移）**：评估模型版本、服务实现或 prompt 不同导致的评分变化，不等同于被评估模型能力变化。
 
 ## 目标与边界
 
-本轮目标是确认迁移后的 ICAE v1 能在服务器上正确加载公开 checkpoint，将不超过 512 tokens 的上下文压缩为 128 个 slots，并根据 PwC prompt 生成受上下文约束的回答。
+本轮直接复现论文在 PwC test 上对 instruction-fine-tuned ICAE v1 的结果。核心任务是使用公开 checkpoint 生成 ICAE 与完整上下文基线的成对回答，再复现论文的评估流程并解释差异来源。
 
-复现分为三级：
+复现分为两层：
 
-1. **工程复现**：环境、代码和 checkpoint 能无歧义加载并完成前向计算；
-2. **功能复现**：ICAE 输出稳定优于无上下文或无有效 memory 的对照；
-3. **结果复现**：在 PwC test 上使用可审计的评估流程，与论文报告的趋势和指标比较。
+1. **工程复现**：环境、代码和 checkpoint 能无歧义加载，压缩与生成链路正确运行；该层已通过。
+2. **结果复现**：完成 PwC test 全量生成，使用可审计的成对评估流程，与论文 Table 4 的结果比较。
 
-当前不包含：
+不再执行 source-only facts、反事实样本、Prompt only、Zero memory、20 样本人工门槛或 200 样本 pilot。批量入口完成后直接运行 PwC test；少量样本仅可用于检查输出格式和断点续跑，不设置功能性验收阈值。
+
+本轮不包含：
 
 - 从头预训练或 instruction fine-tuning；
 - ICAE v2；
 - C-DIC 训练；
-- 仅凭若干流畅输出宣称复现成功。
+- 使用当前 fine-tuned checkpoint 验收 pretrained ICAE 的重建 BLEU、Exact Match、cross-entropy loss 或 text-continuation PPL。
 
-公开文件 `llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt` 是 instruction-fine-tuned checkpoint。论文中 pretrained ICAE 的重建 BLEU、Exact Match、cross-entropy loss 和 text-continuation PPL 不能直接用该 checkpoint 验收；若要复现这些结果，需要另行取得对应的 pretrained checkpoint 和数据处理流程。
+公开文件 `llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt` 是 instruction-fine-tuned checkpoint。论文中的 pretrained ICAE `512→128` 重建结果属于另一 checkpoint 和任务设置。
 
 ## 固定输入
 
 ### 代码
 
 - 项目：`/data/bywei/projects/latent_working_memory`
-- 当前计划基线：`bfdf06a9ab3f271297e09c968122c43ac576833e`
+- 本次计划修订前基线：`6e2acda67ecf9da65e3c9a26159a4f45b1454b8f`
 - ICAE 上游 commit：`469a46886a92dd5e76b2d12a8bac0fb7ed7d4cdd`
 - 迁移说明：[UPSTREAM.md](../../reproductions/icae/UPSTREAM.md)
 - 环境说明：[README.md](../../reproductions/icae/README.md)
 
-实际运行可以使用基线的后继 commit，但必须在 run manifest 中记录精确 commit 和 dirty status。服务器仓库的 `origin` 应为：
+实际运行必须在 manifest 中记录精确 Git commit 和 dirty status。服务器仓库的 `origin` 应为：
 
 ```text
 https://github.com/PercyWei/latent_working_memory.git
@@ -54,208 +56,154 @@ https://github.com/PercyWei/latent_working_memory.git
 
 - 基础模型：`/data/bywei/models/meta-llama/Llama-2-7b-chat-hf`
 - ICAE checkpoint：`/data/bywei/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt`
-- PwC train：`/data/bywei/datasets/sggetao/PwC/PwC_train.jsonl`
 - PwC test：`/data/bywei/datasets/sggetao/PwC/PwC_test.jsonl`
 - uv cache：`/data/bywei/cache/uv`
 
-## 检查流程
+## 已完成的工程检查
 
-### 1. 代码与环境
+### 1. 环境
 
-```bash
-cd /data/bywei/projects/latent_working_memory
-
-git remote -v
-git status --short
-git rev-parse HEAD
-
-export HF_HOME="/data/bywei/cache/huggingface"
-export UV_CACHE_DIR="/data/bywei/cache/uv"
-export HF_HUB_OFFLINE=1
-export TRANSFORMERS_OFFLINE=1
-export CUDA_VISIBLE_DEVICES=0
-
-uv sync --project reproductions/icae --frozen
-uv run --project reproductions/icae --no-sync icae-check-environment
-uv run --project reproductions/icae --no-sync pytest -q reproductions/icae/tests
-```
-
-环境验收值：
+服务器环境已确认：
 
 - Python `3.10.x`；
-- PyTorch `2.0.1+cu118`；
-- `torch.version.cuda == "11.8"`；
+- PyTorch `2.0.1+cu118`，`torch.version.cuda == "11.8"`；
 - Transformers `4.31.0`；
-- PEFT `0.4.0.dev0`，来源为项目中的 `vendor/peft`；
-- `torch.cuda.is_available()` 为真；
-- GPU 为 NVIDIA A800-SXM4-80GB；
-- bfloat16 可用。
+- 项目内定制 PEFT `0.4.0.dev0`；
+- NVIDIA A800-SXM4-80GB，bfloat16 可用。
 
-服务器 CUDA 13.0-capable driver 与 wheel 内 CUDA 11.8 runtime 不相等是预期情况。这里不编译自定义 CUDA extension。
+服务器驱动支持 CUDA 13.0，而 PyTorch wheel 内含 CUDA 11.8 runtime；两者不同是预期情况。迁移代码不编译自定义 CUDA extension。
 
-本项目后续实验默认只使用物理 GPU 0 和 1；单进程检查优先使用 GPU 0。
+本项目实验默认只使用物理 GPU 0 和 1；单进程任务优先使用 GPU 0。环境或依赖未变化时，无需重复执行环境检查。
 
-### 2. Checkpoint 结构与参数确认
+### 2. Checkpoint
 
-加载 checkpoint 到 CPU，记录：
+公开 checkpoint 已确认包含 452 个键，其中 129 个 tensor 和 323 个标量 `0.0` 占位符；LoRA A/B 各 64 组，实际 rank 为 128；memory embedding 形状为 `[131, 4096]`，无 memory head。
 
-- 顶层对象类型；
-- state-dict key 数量；
-- 每组 LoRA A/B、memory-token embedding 和可选 memory head 的形状与 dtype；
-- checkpoint 中是否包含基础模型权重、零尺寸占位参数或仅 trainable 参数；
-- 由 LoRA A/B 张量形状推断的实际 rank。
+加载流程为：先从本地 Llama-2 基础模型补回 `0.0` 占位键，再使用 `strict=True` 加载完整 state dict。检查结果中 missing keys 与 unexpected keys 均为空。
 
-论文默认 LoRA rank 为 128，但公开 v1 代码默认值为 64。实际 checkpoint 的 LoRA rank 已确认为 128。该文件使用 323 个标量 `0.0` 代替冻结的 Llama 参数；加载时先从基础模型 state dict 补回这些占位键，再对合并后的完整 state dict 使用 `strict=True`。
+固定模型参数：
 
-模型实例化后要求：
-
-- 基础模型从本地目录加载，不访问网络；
 - `mem_size=128`；
 - `model_max_length=512`；
-- checkpoint strict load 无 missing keys 和 unexpected keys；
-- 记录总参数量、trainable 参数量和 checkpoint 加载后的 dtype；
-- decoder 路径不启用 encoder LoRA，encoder 压缩路径显式启用 LoRA。
+- encoder 压缩路径启用 LoRA；
+- decoder 生成路径不启用 encoder LoRA；
+- bfloat16 推理。
 
-若 strict load 失败，先判断是 rank、special-token 数量、key 命名还是 checkpoint 保存方式不一致；不得直接跳过错误。
+### 3. 单样本推理
 
-20260904 19:42 CST 检查结果：452 个 checkpoint 键，其中 129 个 tensor；LoRA A/B 各 64 组，rank 128；memory embedding 为 `[131, 4096]`；无 memory head；合并后 strict load 的 missing/unexpected keys 均为空。
+受测试的推理链路已经通过：
 
-### 3. 受测试的推理入口
+1. 将 `input` 截断到最多 512 tokens；
+2. 附加 128 个 memory token IDs；
+3. encoder 输出 `[batch, 128, 4096]` memory tensor；
+4. decoder 接收 memory tensor 与 `[FT] prompt [FT]` embeddings；
+5. 使用 KV cache 和 greedy decoding；
+6. 遇到 `model.eos_id=1`、扩展 token 或生成长度上限时停止。
 
-上游 `ft_inference.py` 不能直接作为复现入口：它引用未发布的 `instruct_ft_tokenize_function`，并含有 `memopry_mask` 拼写错误。应在 `src/icae_repro/` 中实现独立且受测试的推理入口，保留上游示例不变。
+20260904 19:42 CST，物理 GPU 0 上的样本将 28-token 上下文压缩为 `[1, 128, 4096]` 的 bfloat16 memory；数值全部有限，对随机代码 `ZETA-4827` 生成了正确答案，两次生成的 token IDs 完全一致。结果保存在服务器：
 
-推理链路应固定为：
+```text
+artifacts/icae/20260904_validation/smoke_single/result.json
+```
 
-1. tokenizer 将 `input` 截断到最多 512 tokens；
-2. 在上下文后附加 128 个 memory token IDs；
-3. encoder 使用 LoRA 前向，读取 memory positions 对应的最后层 hidden states；
-4. 得到形状 `[batch, 128, 4096]` 的 memory tensor；
-5. decoder 输入为 memory tensor 与 `[FT] prompt [FT]` embeddings；
-6. 使用 KV cache 做 greedy decoding；
-7. 遇到 EOS、非法扩展 token 或 `max_new_tokens` 时停止。
+## PwC 论文结果复现
 
-每次运行检查：
+### 1. 成对生成条件
 
-- memory、logits 和 KV cache 中无 NaN/Inf；
-- 输入的 `answer` 字段不进入 tokenizer 或模型；
-- 推理处于 `eval()` 和 inference/no-grad mode；
-- 固定输入重复运行得到相同 token IDs；
-- 保存输入 token 数、memory slot 数、输出 token 数、压缩耗时、生成耗时和峰值显存。
+对 PwC test 的每条有效记录生成两份回答：
 
-20260904 19:42 CST 单样本结果：在物理 GPU 0 上将 28-token 上下文压缩为 `[1, 128, 4096]` 的 bfloat16 memory，全部数值有限；针对随机代码 `ZETA-4827` 的提问生成正确答案，两次 greedy generation 的 token IDs 完全一致。ICAE v1 使用 `model.eos_id=1` 作为停止 token；使用 tokenizer 的标准 EOS 2 会在正确答案后继续生成。结果保存于服务器 `artifacts/icae/20260904_validation/smoke_single/result.json`。
-
-### 4. 最小功能测试
-
-先构造 20 组 source-only facts，每组包含模型无法依赖常识猜出的随机实体和值。例如上下文给出唯一编号，prompt 只询问该编号。每组另构造只修改目标值的反事实版本。
-
-比较四个条件：
-
-| 条件 | 目的 |
+| 条件 | 模型输入 |
 |---|---|
-| Prompt only | 测量无上下文先验 |
-| Zero memory | 排除 prompt 模板或 special token 自身的作用 |
-| ICAE 128 slots | 待验证对象 |
-| Full context | 确认基础模型和 prompt 模板能够完成任务 |
+| ICAE-128 | 将 `input` 压缩为 128 个 slots，再与 `[FT] prompt [FT]` 拼接 |
+| Full context | 将未压缩的 `input` 与 `prompt` 直接提供给 Llama-2-7B-Chat |
 
-冒烟验收目标：
+两个条件必须使用同一基础模型、同一数据顺序和相同的解码策略。ICAE 路径按上游示例使用 greedy decoding，最大生成 512 tokens，并在 token `1` 停止。完整上下文基线的 prompt 模板、截断规则和停止条件应优先按论文或公开材料实现；无法确认的细节必须写入运行配置，不得默认为与 ICAE 的 `[FT]` 模板相同。
 
-- 20 组全部完成，无 OOM、异常退出或空输出；
-- ICAE 和 Full context 的目标事实准确率至少为 90%；
-- Prompt only 与 Zero memory 不应系统恢复随机目标值；
-- 修改上下文中的目标值后，ICAE 回答随之正确改变；
-- 同一输入重复运行 3 次，生成 token IDs 完全一致。
+`answer` 只作为评估参考，不得进入生成输入。每条 prediction 至少保存：
 
-若 Full context 也失败，优先检查 prompt 序列化和 tokenizer；若 Full context 成功而 ICAE 与 Zero memory 接近，优先检查 checkpoint、memory positions、LoRA 开关和 decoder 输入。
+- sample ID、`input`、`prompt` 和 reference answer；
+- 条件名称、生成文本和 token IDs；
+- 输入、压缩状态和输出 token 数；
+- 压缩、prefill、generation 时间与峰值显存；
+- 异常类型和是否成功完成。
 
-### 5. PwC 分阶段检查
+全量生成应支持断点续跑，以 sample ID 去重。若使用 GPU 0 和 1 并行，每个进程处理互斥的样本集合，并分别记录设备和运行配置。
 
-#### 20 样本人工审计
+### 2. 评估协议
 
-按 tokenizer 后的 `input` 长度固定抽取短、中、长样本，覆盖不同 prompt 类型。逐条保存：
+论文 Table 4 使用 GPT-4 对 ICAE 与完整上下文回答进行成对判断。评估过程与回答生成解耦：先冻结两套 predictions，再运行 judge。这样可以在不重新执行 7B 推理的情况下更换或复核评估模型。
 
-- 原始 input、prompt、reference answer；
-- 四个条件的输出；
-- 是否引用上下文中的具体事实；
-- 是否存在与输入冲突的内容；
-- ICAE 相对 Prompt only、Zero memory 和 Full context 的人工成对判断。
+若能够获得论文使用的 judge prompt 和等价 GPT-4 版本，则按原协议复现；否则将本次评估标记为 **protocol approximation（协议近似）**，并记录：
 
-#### 200 样本 pilot
+- 服务提供方、完整模型 ID、调用日期和接口版本；
+- 完整 judge prompt、回答排列顺序和输出解析规则；
+- temperature、最大输出长度、重试策略和失败样本；
+- win、lose、tie 的原始计数、有效 denominator、比例和置信区间。
 
-冻结样本 ID、模板、生成参数和随机种子后，报告：
+为识别位置偏差，可在协议近似结果之外增加 A/B 与 B/A 顺序互换检查，但不得将其与论文原始协议结果混为同一指标。
 
-- 非空输出率和失败率；
-- normalized exact match、token F1、ROUGE-1/2/L，仅作为诊断指标；
-- ICAE 对 Prompt only、Zero memory、Full context 的成对 win/tie/lose；
-- 按输入长度和答案长度分层的结果；
-- 压缩、prefill、generation 延迟与峰值显存。
+Normalized exact match、token F1 和 ROUGE-1/2/L 可作为补充诊断，不作为论文主结果的替代。PwC 回答具有开放性，文本重叠分数不能单独决定复现是否成功。
 
-PwC 答案具有开放性，自动文本重叠不能单独作为复现结论。任何 LLM judge 必须记录模型版本、完整 prompt、采样参数、失败重试和原始判定。
+### 3. 论文参照
 
-#### 全量 test
-
-仅在 20 样本和 200 样本检查通过后运行 18,146 条 PwC test。先估算总 GPU 时间和输出空间，支持断点续跑，并保证每个 sample ID 只计一次。
-
-## 论文结果参照
-
-论文 Table 4 中，Llama-2-7B-Chat ICAE、`k=128` 相对使用原始上下文的 Llama-2-7B-Chat，GPT-4 成对判断为：
+论文 Table 4 中，Llama-2-7B-Chat ICAE、`k=128` 相对完整上下文 Llama-2-7B-Chat 的 GPT-4 成对结果为：
 
 - win：19.6%；
 - lose：45.4%；
 - tie：35.0%；
 - win + tie：54.6%。
 
-这些数字是结果复现的参照，不是工程冒烟阈值。只有测试集、输入模板、生成配置、judge prompt 和 judge 模型版本均可比时，才能讨论数值复现；否则只报告方向和差异来源。
+上述数值用于比较，不作为必须逐项达到的硬阈值。外部 judge 的模型版本、prompt、服务实现和随机性均可能造成系统偏移；当这些条件无法与论文完全一致时，只比较总体趋势、差异幅度和主要失败类型，并明确标注评估协议差异。
 
-论文中的 Llama-2-7B pretrained ICAE `512→128` 重建 BLEU 99.5、loss 0.009 属于另一 checkpoint/任务设置，不用于验收当前 fine-tuned checkpoint。
-
-## 通过标准与停止条件
+## 通过标准与排查条件
 
 ### 工程复现通过
 
-- 环境版本符合记录；
-- checkpoint 参数由实际张量确定并 strict load；
-- memory tensor 形状和 dtype 正确，无非有限值；
-- 单样本端到端推理确定性通过；
-- 运行产物包含完整 manifest 和资源统计。
+- checkpoint 参数由实际结构确定并完成 strict load；
+- memory tensor 形状与 dtype 正确，无 NaN/Inf；
+- 单样本端到端推理和确定性检查通过；
+- 批量运行不把 `answer` 泄漏给生成模型。
 
-### 功能复现通过
+### 结果复现完成
 
-- source-only fact 与反事实测试表明输出受 memory 内容控制；
-- ICAE 明显优于 Prompt only 和 Zero memory；
-- PwC 小样本中能够稳定利用上下文，而非只生成通用回答；
-- 结论在固定样本和配置下可重复。
+- PwC test 的 ICAE 与完整上下文回答均已生成，失败样本和最终 denominator 明确；
+- predictions、运行配置、资源统计和错误记录可追溯；
+- judge 决策能够追溯到具体模型、prompt 和原始输出；
+- 报告论文参照值、本次结果及其协议差异，不要求最终比例完全一致。
 
-### 立即停止并排查
+若结果与论文显著不同，不直接判定复现失败。先区分生成差异与评估器差异，再检查 prompt 序列化、截断长度、解码上限、EOS、基础模型版本和 judge 协议。
 
-- 只能通过 `strict=False` 加载；
-- LoRA rank 或 special tokens 无法从 checkpoint 对齐；
-- Full context 与 Prompt only 同样失败；
-- ICAE 与 Zero memory 行为接近；
-- 输出不随反事实上下文改变；
-- 出现 NaN、非法 token、持续 OOM 或相同输入非确定性。
+以下情况应立即停止当前运行并排查：
 
-在工程复现和功能复现通过前，不开始 C-DIC GPU 训练，也不将流畅示例输出写成论文复现结论。
+- 只能通过 `strict=False` 加载 checkpoint；
+- LoRA rank 或 special tokens 无法与 checkpoint 对齐；
+- 输出大面积为空、重复或包含非法扩展 token；
+- 出现 NaN、持续 OOM 或同一输入的 greedy token IDs 不一致；
+- judge 输出无法稳定解析，或失败样本未单独报告。
 
 ## 运行产物
 
 统一保存到：
 
 ```text
-/data/bywei/projects/latent_working_memory/artifacts/icae/20260904_validation/<run_id>/
+/data/bywei/projects/latent_working_memory/artifacts/icae/20260904_pwc_reproduction/<run_id>/
 ├── manifest.json
 ├── environment.json
 ├── checkpoint_schema.json
 ├── config.resolved.json
-├── sample_ids.json
-├── predictions.jsonl
-├── metrics.json
+├── predictions_icae.jsonl
+├── predictions_full_context.jsonl
+├── generation_metrics.json
+├── judge_config.json
+├── judge_decisions.jsonl
+├── evaluation_metrics.json
 ├── resource_usage.json
 └── logs/
 ```
 
-`manifest.json` 至少记录 Git commit、dirty status、`uv.lock` hash、Python、PyTorch、CUDA runtime、driver、GPU、模型与数据路径、LoRA rank、memory size、dtype、生成参数和运行时间。
+`manifest.json` 至少记录 Git commit、dirty status、Python、PyTorch、CUDA runtime、driver、GPU、模型与数据 revision、LoRA rank、memory size、dtype、生成参数和运行时间。
 
-建议执行顺序：环境 → checkpoint schema → strict load → 单样本推理 → source-only fact 对照 → 20 条 PwC → 200 条 pilot → 决定是否全量运行。
+执行顺序：确认已通过的工程检查仍适用于当前 commit → 实现并测试 PwC 批量生成入口 → 直接完成 ICAE 与完整上下文的全量生成 → 冻结 predictions → 运行外部 judge → 对照论文结果并记录协议差异。
 
 ## 参考
 
