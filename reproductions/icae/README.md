@@ -2,7 +2,7 @@
 
 创建时间：20260904 10:13:57 CST（UTC+08:00）
 
-最后修订时间：20260904 19:55:44 CST（UTC+08:00）
+最后修订时间：20260904 20:16:17 CST（UTC+08:00）
 
 本目录保存后续复现 C-DIC 所需的 ICAE v1 压缩器代码，目标是论文使用的 Llama-2-7B-Chat 路径，而不是后续基于 Mistral 的 ICAE v2。
 
@@ -55,6 +55,34 @@ CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/icae --no-sync \
 公开的 v1 checkpoint 使用标量 `0.0` 作为冻结 Llama 参数的占位符。推理入口会从本地基础模型恢复这些参数，再使用 `strict=True` 严格加载完整 state dict，不会通过 `strict=False` 跳过不匹配项。
 
 ICAE 上游说明要求训练使用 bfloat16 而不是 fp16，且公开训练路径只支持 batch size 1。在受控兼容性测试证明可以修改之前，应保留这些限制。
+
+## PwC 结果生成
+
+`icae-reproduce-pwc` 分别生成 ICAE-128 与完整上下文基线的结果，支持按 sample ID 断点续跑。两个条件应写入不同文件；如需并行，可分别使用物理 GPU 0 和 1：
+
+```bash
+export HF_HOME=/data/bywei/cache/huggingface
+export UV_CACHE_DIR=/data/bywei/cache/uv
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
+CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/icae --no-sync \
+  icae-reproduce-pwc \
+  --condition icae-128 \
+  --model-path /data/bywei/models/meta-llama/Llama-2-7b-chat-hf \
+  --checkpoint /data/bywei/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt \
+  --input /data/bywei/datasets/sggetao/PwC/PwC_test.jsonl \
+  --output artifacts/icae/20260904_pwc_reproduction/run/predictions_icae.jsonl
+
+CUDA_VISIBLE_DEVICES=1 uv run --project reproductions/icae --no-sync \
+  icae-reproduce-pwc \
+  --condition full-context \
+  --model-path /data/bywei/models/meta-llama/Llama-2-7b-chat-hf \
+  --input /data/bywei/datasets/sggetao/PwC/PwC_test.jsonl \
+  --output artifacts/icae/20260904_pwc_reproduction/run/predictions_full_context.jsonl
+```
+
+ICAE 条件遵循上游的 `[FT] prompt [FT]`、greedy decoding 和 token `1` 停止规则。上游未发布完整上下文 baseline 代码；当前 baseline 将最多 512 个原始上下文 tokens 与 prompt tokens 直接拼接，并使用 Llama tokenizer 的 EOS。该选择必须在结果中标记为实现假设。
 
 ## 当前迁移边界
 

@@ -1,8 +1,8 @@
-# 20260904 ICAE v1 论文结果复现计划（20260904 20:07:10 CST）
+# 20260904 ICAE v1 论文结果复现计划（20260904 20:16:17 CST）
 
 创建时间：20260904 16:09:49 CST（UTC+08:00）
 
-最后修订时间：20260904 20:07:10 CST（UTC+08:00）
+最后修订时间：20260904 20:16:17 CST（UTC+08:00）
 
 状态：环境、checkpoint strict load 和单样本推理已通过；下一步直接复现 PwC 论文结果
 
@@ -117,7 +117,7 @@ artifacts/icae/20260904_validation/smoke_single/result.json
 | ICAE-128 | 将 `input` 压缩为 128 个 slots，再与 `[FT] prompt [FT]` 拼接 |
 | Full context | 将未压缩的 `input` 与 `prompt` 直接提供给 Llama-2-7B-Chat |
 
-两个条件必须使用同一基础模型、同一数据顺序和相同的解码策略。ICAE 路径按上游示例使用 greedy decoding，最大生成 512 tokens，并在 token `1` 停止。完整上下文基线的 prompt 模板、截断规则和停止条件应优先按论文或公开材料实现；无法确认的细节必须写入运行配置，不得默认为与 ICAE 的 `[FT]` 模板相同。
+两个条件必须使用同一基础模型、同一数据顺序和 greedy decoding。ICAE 路径按上游示例最大生成 512 tokens，并在 token `1` 停止。官方仓库没有提供完整上下文 baseline 代码；当前实现将最多 512 个上下文 tokens 与 prompt tokens 直接拼接，并使用 Llama tokenizer EOS。该选择属于实现假设，不能表述为作者公开协议。
 
 `answer` 只作为评估参考，不得进入生成输入。每条 prediction 至少保存：
 
@@ -133,14 +133,14 @@ artifacts/icae/20260904_validation/smoke_single/result.json
 
 论文 Table 4 使用 GPT-4 对 ICAE 与完整上下文回答进行成对判断。评估过程与回答生成解耦：先冻结两套 predictions，再运行 judge。这样可以在不重新执行 7B 推理的情况下更换或复核评估模型。
 
-若能够获得论文使用的 judge prompt 和等价 GPT-4 版本，则按原协议复现；否则将本次评估标记为 **protocol approximation（协议近似）**，并记录：
+论文 Appendix D Listing 2 已提供完整 judge prompt，并明确要求随机交换两个回答的 Assistant A/B 顺序以减轻位置偏差。本项目应固定使用该 prompt；若无法使用论文当时的等价 GPT-4 版本，则将本次评估标记为 **protocol approximation（协议近似）**，并记录：
 
 - 服务提供方、完整模型 ID、调用日期和接口版本；
 - 完整 judge prompt、回答排列顺序和输出解析规则；
 - temperature、最大输出长度、重试策略和失败样本；
 - win、lose、tie 的原始计数、有效 denominator、比例和置信区间。
 
-为识别位置偏差，可在协议近似结果之外增加 A/B 与 B/A 顺序互换检查，但不得将其与论文原始协议结果混为同一指标。
+每个样本只随机选择一次回答顺序，并保存随机种子、A/B 到系统条件的映射和 judge 原始输出。额外的双向 A/B 与 B/A 检查只能作为补充稳健性分析，不得与论文原始单次随机顺序结果混为同一指标。
 
 Normalized exact match、token F1 和 ROUGE-1/2/L 可作为补充诊断，不作为论文主结果的替代。PwC 回答具有开放性，文本重叠分数不能单独决定复现是否成功。
 

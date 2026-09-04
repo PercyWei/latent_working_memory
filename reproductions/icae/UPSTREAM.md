@@ -2,7 +2,7 @@
 
 创建时间：20260904 10:13:57 CST（UTC+08:00）
 
-最后修订时间：20260904 19:55:44 CST（UTC+08:00）
+最后修订时间：20260904 20:16:17 CST（UTC+08:00）
 
 迁移日期：20260903
 
@@ -38,6 +38,7 @@
 5. 清理了复制文本和 Python 文件中的行尾空格，不影响运行行为。
 6. 公开的 ICAE v1 checkpoint 使用标量 `0.0` 作为冻结 Llama 参数的占位符。本地 loader 会先从初始化后的基础模型恢复这些条目，再严格加载完整 state dict。该流程由上游作者在 [issue #1](https://github.com/getao/icae/issues/1) 中确认。
 7. 本地推理入口使用 ICAE 的 `model.eos_id`（`1`）作为停止 token。它不同于 Llama tokenizer 的 EOS ID（`2`）；服务器 smoke test 表明，使用 tokenizer EOS 会使模型在生成正确答案后继续生成。
+8. 上游未发布 PwC 完整上下文 baseline 或批量评估代码。本地批量入口将上下文与 prompt tokens 直接拼接，并将这一选择记录为实现假设；judge 阶段使用论文 Appendix D Listing 2 的 prompt，并按论文要求随机交换 Assistant A/B 顺序。
 
 ## 已知的上游 v1 缺口
 
