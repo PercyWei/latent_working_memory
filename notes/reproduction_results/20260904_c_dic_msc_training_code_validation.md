@@ -1,10 +1,10 @@
-# 20260904 C-DIC MSC 训练代码验证（20260904 22:47:18 CST）
+# 20260904 C-DIC MSC 训练代码验证（20260905 10:38:27 CST）
 
 创建时间：20260904 22:00:30 CST（UTC+08:00）
 
-最后修订时间：20260904 22:47:18 CST（UTC+08:00）
+最后修订时间：20260905 10:38:27 CST（UTC+08:00）
 
-状态：训练代码、单卡 autograd/checkpoint smoke test 和双卡官方 MSC pilot 已通过；完整训练待启动
+状态：训练代码、单卡 autograd/checkpoint smoke test、双卡官方 MSC pilot 和 seed 42 两 epoch 完整训练均已完成
 
 ## 验证范围
 
@@ -84,10 +84,35 @@ nohup uv run --project reproductions/cdic --no-sync \
   torchrun --standalone --nproc-per-node=2 \
   -m cdic_repro.train_msc \
   --config reproductions/cdic/configs/msc_paper_a800.json \
-  > /data/bywei/logs/cdic/20260904_msc_paper_seed42.log 2>&1 < /dev/null &
+  > /data/bywei/projects/latent_working_memory/artifacts/cdic/logs/20260904_msc_paper_seed42.log 2>&1 < /dev/null &
 ```
 
-训练对象只有一个 seed 42 模型，不并行运行多个 seeds。输出目录为 `/data/bywei/checkpoints/cdic/msc_paper_seed42`。
+训练对象只有一个 seed 42 模型，不并行运行多个 seeds。输出目录为 `/data/bywei/projects/latent_working_memory/checkpoints/cdic/msc_paper_seed42`。
+
+## 训练结果保存位置
+
+- 完整训练目录：`/data/bywei/projects/latent_working_memory/checkpoints/cdic/msc_paper_seed42/`；
+- 最终 checkpoint：`checkpoints/final.pt`；
+- 最新 checkpoint 指针：`checkpoints/latest.json`；
+- 中间 checkpoint：`checkpoints/step-000950.pt`、`checkpoints/step-001000.pt`；
+- 训练配置与数据摘要：`config.resolved.json`、`data_summary.json`、`trainable_parameters.json`；
+- 分 rank 指标：`metrics.rank00.jsonl`、`metrics.rank01.jsonl`；
+- 分 rank memory trace：`memory_trace.rank00.jsonl`、`memory_trace.rank01.jsonl`；
+- 训练日志：`/data/bywei/projects/latent_working_memory/artifacts/cdic/logs/20260904_msc_paper_seed42.log`。
+
+## 完整训练结果
+
+- epoch：2；
+- optimizer steps：1002；
+- 最终进度：`epoch=2`、`next_episode_position=0`；
+- 最终 checkpoint：`checkpoints/cdic/msc_paper_seed42/checkpoints/final.pt`；
+- 保留的中间 checkpoint：`step-000950.pt`、`step-001000.pt`；
+- 最终 checkpoint 大小：811,913,595 bytes；
+- 最后一批 mean loss：3.607225；
+- 最后一批 gradient norm：0.043376；
+- 最后一批 GPU 0 peak allocated memory：19,357,192,192 bytes，约 18.03 GiB。
+
+`latest.json` 已指向迁移后的项目内 `final.pt`。历史 `config.resolved.json` 保留训练时的旧绝对路径；旧路径现为 symlink，不影响 checkpoint 恢复。
 
 ## 修复记录
 
@@ -97,4 +122,4 @@ query routing 使用临时 eval mode 和 `inference_mode()`，避免无梯度 qu
 
 ## 下一步
 
-启动完整两 epoch 训练，并检查前两个 optimizer steps 的双 rank loss、gradient norm、GPU memory 和 checkpoint 状态。
+使用 `final.pt` 运行训练后多轮 GPU 评估，并与 ICAE initialization、论文设置及必要 baseline 对照。训练完成本身不等于论文效果复现。

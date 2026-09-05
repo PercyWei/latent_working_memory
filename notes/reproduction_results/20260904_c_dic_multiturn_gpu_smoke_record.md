@@ -1,8 +1,8 @@
-# 20260904 C-DIC 多轮 GPU Smoke Test 记录（20260904 21:08:40 CST）
+# 20260904 C-DIC 多轮 GPU Smoke Test 记录（20260905 10:35:18 CST）
 
 创建时间：20260904 21:08:40 CST（UTC+08:00）
-最后修订时间：20260904 21:26:56 CST（UTC+08:00）
-状态：工程 smoke test 通过；尚未进行 MSC 训练与论文结果复现
+最后修订时间：20260905 10:35:18 CST（UTC+08:00）
+状态：工程 smoke test 通过；后续 MSC 完整训练已完成，但本文不验证训练效果或论文指标
 
 ## 测试范围
 
@@ -27,7 +27,7 @@
 | CUDA runtime | `11.8` |
 | GPU | NVIDIA A800-SXM4-80GB，物理 GPU 0 |
 | 基础模型 | `/data/bywei/models/meta-llama/Llama-2-7b-chat-hf` |
-| ICAE checkpoint | `/data/bywei/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt` |
+| ICAE checkpoint | `/data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt` |
 | C-DIC 环境 | `reproductions/cdic/.venv` |
 
 ## 测试方法

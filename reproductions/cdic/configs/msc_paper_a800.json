@@ -1,7 +1,7 @@
 {
   "model": {
     "model_path": "/data/bywei/models/meta-llama/Llama-2-7b-chat-hf",
-    "checkpoint_path": "/data/bywei/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt",
+    "checkpoint_path": "/data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt",
     "device": "cuda:0",
     "devices": ["cuda:0", "cuda:1"],
     "dtype": "bfloat16",
@@ -13,7 +13,7 @@
     "gradient_checkpointing": true
   },
   "data": {
-    "root": "/data/bywei/datasets/msc/raw",
+    "root": "/data/bywei/projects/latent_working_memory/data/raw/msc",
     "split": "train",
     "session_id": 4,
     "max_episodes": null,
@@ -27,7 +27,7 @@
     "max_retrieved": null
   },
   "training": {
-    "output_dir": "/data/bywei/checkpoints/cdic/msc_paper_seed42",
+    "output_dir": "/data/bywei/projects/latent_working_memory/checkpoints/cdic/msc_paper_seed42",
     "epochs": 2,
     "learning_rate": 0.0002,
     "weight_decay": 0.0,

@@ -1,8 +1,8 @@
-# 20260904 ICAE v1 论文结果复现计划（20260904 20:16:17 CST）
+# 20260904 ICAE v1 论文结果复现计划（20260905 10:35:18 CST）
 
 创建时间：20260904 16:09:49 CST（UTC+08:00）
 
-最后修订时间：20260904 20:16:17 CST（UTC+08:00）
+最后修订时间：20260905 10:35:18 CST（UTC+08:00）
 
 状态：环境、checkpoint strict load 和单样本推理已通过；下一步直接复现 PwC 论文结果
 
@@ -55,8 +55,8 @@ https://github.com/PercyWei/latent_working_memory.git
 ### 运行路径
 
 - 基础模型：`/data/bywei/models/meta-llama/Llama-2-7b-chat-hf`
-- ICAE checkpoint：`/data/bywei/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt`
-- PwC test：`/data/bywei/datasets/sggetao/PwC/PwC_test.jsonl`
+- ICAE checkpoint：`/data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt`
+- PwC test：`/data/bywei/projects/latent_working_memory/data/raw/pwc/PwC_test.jsonl`
 - uv cache：`/data/bywei/cache/uv`
 
 ## 已完成的工程检查

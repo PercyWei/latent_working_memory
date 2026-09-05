@@ -1,8 +1,8 @@
-# ICAE v1 复现（20260904 10:13:57 CST）
+# ICAE v1 复现（20260905 10:35:18 CST）
 
 创建时间：20260904 10:13:57 CST（UTC+08:00）
 
-最后修订时间：20260904 20:16:17 CST（UTC+08:00）
+最后修订时间：20260905 10:35:18 CST（UTC+08:00）
 
 本目录保存后续复现 C-DIC 所需的 ICAE v1 压缩器代码，目标是论文使用的 Llama-2-7B-Chat 路径，而不是后续基于 Mistral 的 ICAE v2。
 
@@ -47,7 +47,7 @@ uv run --project reproductions/icae icae-check-environment
 CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/icae --no-sync \
   icae-smoke-inference \
   --model-path /data/bywei/models/meta-llama/Llama-2-7b-chat-hf \
-  --checkpoint /data/bywei/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt \
+  --checkpoint /data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt \
   --context "The access code for Project Quartz is ZETA-4827." \
   --prompt "What is the access code for Project Quartz?"
 ```
@@ -70,15 +70,15 @@ CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/icae --no-sync \
   icae-reproduce-pwc \
   --condition icae-128 \
   --model-path /data/bywei/models/meta-llama/Llama-2-7b-chat-hf \
-  --checkpoint /data/bywei/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt \
-  --input /data/bywei/datasets/sggetao/PwC/PwC_test.jsonl \
+  --checkpoint /data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt \
+  --input /data/bywei/projects/latent_working_memory/data/raw/pwc/PwC_test.jsonl \
   --output artifacts/icae/20260904_pwc_reproduction/run/predictions_icae.jsonl
 
 CUDA_VISIBLE_DEVICES=1 uv run --project reproductions/icae --no-sync \
   icae-reproduce-pwc \
   --condition full-context \
   --model-path /data/bywei/models/meta-llama/Llama-2-7b-chat-hf \
-  --input /data/bywei/datasets/sggetao/PwC/PwC_test.jsonl \
+  --input /data/bywei/projects/latent_working_memory/data/raw/pwc/PwC_test.jsonl \
   --output artifacts/icae/20260904_pwc_reproduction/run/predictions_full_context.jsonl
 ```
 
@@ -98,11 +98,12 @@ ICAE 条件遵循上游的 `[FT] prompt [FT]`、greedy decoding 和 token `1` �
 
 ## 暂不纳入仓库的资源
 
-以下内容保留为服务器侧准备事项，不存放在本目录中：
+以下内容保留为服务器侧准备事项，不提交到 Git：
 
 - `meta-llama/Llama-2-7b-chat-hf` 的访问权限与本地模型目录；
-- ICAE Llama-2 checkpoint；
-- PwC、MSC、REALTALK、LongMemEval 或其他数据集；
-- 生成结果、训练 checkpoint 与 benchmark 输出。
+- ICAE Llama-2 checkpoint，保存在项目根目录 `checkpoints/icae/`；
+- PwC、MSC、REALTALK、LongMemEval 等数据集，保存在项目根目录 `data/`；
+- 生成结果和 benchmark 输出，保存在项目根目录 `artifacts/`；
+- 训练 checkpoint，保存在项目根目录 `checkpoints/`。
 
 不得将这些文件提交到 Git。根目录 `.gitignore` 已排除常见模型与实验产物路径和扩展名。

@@ -1,40 +1,46 @@
-# latent_working_memory
+# latent_working_memory（20260905 10:34:28 CST）
 
-Research code for streaming mutable latent working memory and matched-budget
-context-compression experiments.
+最后修订时间：20260905 10:34:28 CST（UTC+08:00）
 
-The repository keeps paper reproductions separate from new methods. ICAE v1,
-the compressor initialization used by C-DIC, is migrated under
-`reproductions/icae/` with its own `uv` environment.
+本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理；ICAE v1 和 C-DIC 分别位于 `reproductions/icae/` 与 `reproductions/cdic/`，各自使用独立的 `uv` 环境。
 
-## Local development
+## 本地开发
 
 ```bash
 uv sync --frozen
 uv run pytest
 ```
 
-## ICAE environment
+## 服务器目录
 
-The ICAE lock targets Linux x86-64. It uses the older PyTorch CUDA 11.8 wheel
-that matches ICAE's 2023 dependency stack; the server's CUDA 13.0-capable
-driver is backward compatible with that runtime. Project setup does not
-download model weights or datasets.
+项目相关的数据、checkpoint 和实验产物均放在服务器项目根目录 `/data/bywei/projects/latent_working_memory` 下：
+
+```text
+data/raw/pwc/          PwC 原始数据
+data/raw/msc/          MSC 原始数据与归档
+checkpoints/icae/v1/  ICAE v1 公开 checkpoint
+checkpoints/cdic/      C-DIC pilot 与完整训练 checkpoint
+artifacts/             生成结果、测试报告和日志
+```
+
+上述目录均已由 `.gitignore` 排除。Llama-2-7B-Chat 基础模型仍保存在共享目录 `/data/bywei/models/`，Hugging Face 与 `uv` cache 仍保存在 `/data/bywei/cache/`。
+
+迁移前位于 `/data/bywei/datasets/`、`/data/bywei/checkpoints/` 和 `/data/bywei/logs/cdic/` 下的相关旧路径暂时保留为 symlink，以兼容已有 checkpoint 中记录的绝对路径；新配置统一使用项目内路径。
+
+## ICAE 环境
+
+ICAE lock 面向 Linux x86-64，使用与原始代码依赖栈兼容的 PyTorch CUDA 11.8 wheel。服务器驱动支持 CUDA 13.0，并可向后兼容该 runtime。环境安装不会自动下载模型或数据。
 
 ```bash
 uv sync --project reproductions/icae --frozen
 uv run --project reproductions/icae icae-check-environment
 ```
 
-See `reproductions/icae/README.md` before running on the GPU server.
+在 GPU 服务器运行前，参见 `reproductions/icae/README.md`。
 
-## C-DIC reproduction
+## C-DIC 复现
 
-The paper-based C-DIC implementation is staged under `reproductions/cdic/`.
-Its first phase implements the model-independent retrieval, recency, write-back,
-state-lineage, trace, and one-hop credit-assignment contracts. It also includes
-checkpoint inspection and an inference-only ICAE adapter awaiting A800 smoke
-validation. The server-only runtime depends on the sibling ICAE reproduction.
+C-DIC 的论文实现位于 `reproductions/cdic/`。当前已完成 retrieval、recency、write-back、state lineage、trace、one-hop credit assignment、ICAE adapter、MSC loader、双卡训练与 checkpoint/resume。A800 多轮 GPU smoke test、双卡 MSC pilot 和 seed 42 的两 epoch 完整训练均已完成；后续需要验证训练后模型的多轮行为与论文指标。
 
 ```bash
 PYTHONPATH=reproductions/cdic/src uv run pytest -q reproductions/cdic/tests

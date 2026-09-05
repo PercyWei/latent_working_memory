@@ -1,8 +1,8 @@
-# C-DIC 论文复现（20260904 22:47:18 CST）
+# C-DIC 论文复现（20260905 10:34:28 CST）
 
 创建时间：20260904 16:19:08 CST（UTC+08:00）
 
-最后修订时间：20260904 22:47:18 CST（UTC+08:00）
+最后修订时间：20260905 10:34:28 CST（UTC+08:00）
 
 本目录用于分阶段复现 Context-Driven Incremental Compression（C-DIC）。由于当前没有公开的官方实现，所有论文未明确的行为均记录在 `ASSUMPTIONS.md`。
 
@@ -30,7 +30,7 @@ R2 训练代码已实现：
 - checkpoint/resume、resolved config、metrics 与 memory trace；
 - pilot 和论文规模 JSON 配置。
 
-ICAE adapter 已在 A800 上通过真实 Llama-2-7B-Chat、公开 checkpoint 和五轮对话的工程 smoke test。MSC 训练代码已通过本地单元测试、官方数据 schema 检查、单卡 autograd/checkpoint smoke test 和双卡官方 MSC pilot。完整训练尚未完成，因此不能视为已经复现论文训练结果。
+ICAE adapter 已在 A800 上通过真实 Llama-2-7B-Chat、公开 checkpoint 和五轮对话的工程 smoke test。MSC 训练代码已通过本地单元测试、官方数据 schema 检查、单卡 autograd/checkpoint smoke test 和双卡官方 MSC pilot。seed 42 的两 epoch 完整训练已完成，共执行 1002 个 optimizer steps；最终 checkpoint 位于 `checkpoints/cdic/msc_paper_seed42/checkpoints/final.pt`。训练完成仅证明训练链路可运行，论文效果仍需单独评估。
 
 ## 目录结构
 
@@ -72,7 +72,7 @@ uv run --project reproductions/cdic --no-sync \
 
 ```bash
 uv run --project reproductions/cdic --no-sync cdic-inspect-checkpoint \
-  /data/bywei/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt
+  /data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt
 ```
 
 `cdic-run-dialogue` 接收 JSONL 输入，每行至少包含 `query`，可选 `id`。输出包含 generated response 和该 turn 的完整 memory trace。
@@ -113,14 +113,14 @@ uv run --project reproductions/cdic --no-sync pytest -q -s \
 准备官方 `msc_v0.1`：
 
 ```bash
-mkdir -p /data/bywei/datasets/msc/raw
+mkdir -p /data/bywei/projects/latent_working_memory/data/raw/msc
 curl -L --fail --retry 5 \
   https://parl.ai/downloads/msc/msc_v0.1.tar.gz \
-  -o /data/bywei/datasets/msc/raw/msc_v0.1.tar.gz
-echo "e640e37cf4317cd09fc02a4cd57ef130a185f23635f4003b0cee341ffcb45e60  /data/bywei/datasets/msc/raw/msc_v0.1.tar.gz" \
+  -o /data/bywei/projects/latent_working_memory/data/raw/msc/msc_v0.1.tar.gz
+echo "e640e37cf4317cd09fc02a4cd57ef130a185f23635f4003b0cee341ffcb45e60  /data/bywei/projects/latent_working_memory/data/raw/msc/msc_v0.1.tar.gz" \
   | sha256sum -c -
-tar -xzf /data/bywei/datasets/msc/raw/msc_v0.1.tar.gz \
-  -C /data/bywei/datasets/msc/raw
+tar -xzf /data/bywei/projects/latent_working_memory/data/raw/msc/msc_v0.1.tar.gz \
+  -C /data/bywei/projects/latent_working_memory/data/raw/msc
 ```
 
 先只验证数据，不加载模型：
@@ -156,11 +156,20 @@ uv run --project reproductions/cdic --no-sync \
   torchrun --standalone --nproc-per-node=2 \
   -m cdic_repro.train_msc \
   --config reproductions/cdic/configs/msc_paper_a800.json \
-  --resume-from /data/bywei/checkpoints/cdic/msc_paper_seed42/checkpoints/step-000050.pt
+  --resume-from /data/bywei/projects/latent_working_memory/checkpoints/cdic/msc_paper_seed42/checkpoints/step-000050.pt
 ```
 
 训练使用一个 seed 42 模型的同步双卡 data parallel：每张卡处理一个 episode，NCCL 同步并平均 trainable gradients 后共同执行 optimizer step。每卡 batch size 为 1，global batch size 为 2；这与论文单卡 global batch size 1 存在明确差异。
 
 训练目录包含 `config.resolved.json`、`data_summary.json`、`trainable_parameters.json`、按 rank 分开的 `metrics.rankXX.jsonl`、`memory_trace.rankXX.jsonl` 和 `checkpoints/`。checkpoint 保存 trainable model state、AdamW state、各 rank RNG state 与训练位置，默认只保留最近两个 step checkpoints。不使用 `--resume-from` 时，程序拒绝写入非空 output directory。
 
-模型权重、数据集、predictions 和 checkpoints 均保存在 Git 仓库之外。
+基础模型保存在共享模型目录；数据、predictions、checkpoints 和日志保存在项目根目录下的 Git-ignored `data/`、`artifacts/` 与 `checkpoints/`。
+
+迁移后的实际资源路径为：
+
+- MSC：`data/raw/msc/`；
+- ICAE v1 checkpoint：`checkpoints/icae/v1/`；
+- C-DIC checkpoint：`checkpoints/cdic/`；
+- C-DIC 日志：`artifacts/cdic/logs/`。
+
+历史 `config.resolved.json` 保留训练时记录的旧绝对路径，避免改写实验 provenance。服务器上的旧路径已改为指向新目录的 symlink，因此现有 checkpoint 仍可恢复；新运行统一使用当前配置中的项目内路径。

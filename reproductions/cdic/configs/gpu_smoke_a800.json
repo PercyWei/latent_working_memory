@@ -1,6 +1,6 @@
 {
   "model_path": "/data/bywei/models/meta-llama/Llama-2-7b-chat-hf",
-  "checkpoint_path": "/data/bywei/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt",
+  "checkpoint_path": "/data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt",
   "artifact_dir": "/data/bywei/projects/latent_working_memory/artifacts/cdic/20260904_multiturn_gpu_smoke",
   "device": "cuda:0",
   "max_new_tokens": 16,
