@@ -13,6 +13,7 @@ from cdic_repro.icae_adapter import (
     IcaeV1InferenceAdapter,
     torch_cosine_similarity,
 )
+from cdic_repro.training_checkpoint import load_model_from_training_checkpoint
 from cdic_repro.writeback import WriteAction
 
 
@@ -78,6 +79,12 @@ def test_real_icae_multiturn_state_machine(pytestconfig: pytest.Config) -> None:
 
     model_path = _required_resource(config.get("model_path"), "model_path")
     checkpoint_path = _required_resource(config.get("checkpoint_path"), "checkpoint_path")
+    training_checkpoint_value = config.get("training_checkpoint_path")
+    training_checkpoint_path = (
+        _required_resource(training_checkpoint_value, "training_checkpoint_path")
+        if training_checkpoint_value is not None
+        else None
+    )
     artifact_dir = Path(str(config["artifact_dir"]))
     device = str(config.get("device", "cuda:0"))
     max_new_tokens = int(config.get("max_new_tokens", 32))
@@ -98,6 +105,14 @@ def test_real_icae_multiturn_state_machine(pytestconfig: pytest.Config) -> None:
             max_new_tokens=max_new_tokens,
         )
     )
+    training_progress = None
+    if training_checkpoint_path is not None:
+        training_progress = load_model_from_training_checkpoint(
+            training_checkpoint_path,
+            model=adapter,
+            torch_module=torch,
+        )
+        adapter.model.eval()
     engine = CdicInferenceEngine(
         model=adapter,
         similarity=torch_cosine_similarity,
@@ -110,6 +125,9 @@ def test_real_icae_multiturn_state_machine(pytestconfig: pytest.Config) -> None:
             pytest.fail(f"invalid query record at index {turn - 1}")
         query = query_record["query"]
         query_id = str(query_record.get("id", f"gpu-smoke-{turn:02d}"))
+        expected_substring = query_record.get("expected_response_substring")
+        if expected_substring is not None and not isinstance(expected_substring, str):
+            pytest.fail(f"expected_response_substring must be a string at index {turn - 1}")
         memory_before = {state.state_id: state for state in engine.memory.states}
         output = engine.step(query, query_id=query_id)
 
@@ -138,6 +156,12 @@ def test_real_icae_multiturn_state_machine(pytestconfig: pytest.Config) -> None:
                 "turn": turn,
                 "query": query,
                 "response": output.response,
+                "expected_response_substring": expected_substring,
+                "expected_response_match": (
+                    expected_substring.casefold() in output.response.casefold()
+                    if isinstance(expected_substring, str)
+                    else None
+                ),
                 "state_shape": list(output.state.latent.shape),
                 "state_dtype": str(output.state.latent.dtype),
                 "trace": output.trace.to_dict(),
@@ -147,6 +171,19 @@ def test_real_icae_multiturn_state_machine(pytestconfig: pytest.Config) -> None:
     torch.cuda.synchronize()
     report = {
         "config_path": str(config_path),
+        "initial_checkpoint_path": str(checkpoint_path),
+        "training_checkpoint_path": (
+            str(training_checkpoint_path) if training_checkpoint_path is not None else None
+        ),
+        "training_progress": (
+            {
+                "epoch": training_progress.epoch,
+                "next_episode_position": training_progress.next_episode_position,
+                "global_step": training_progress.global_step,
+            }
+            if training_progress is not None
+            else None
+        ),
         "torch_version": torch.__version__,
         "torch_cuda_version": torch.version.cuda,
         "device": device,

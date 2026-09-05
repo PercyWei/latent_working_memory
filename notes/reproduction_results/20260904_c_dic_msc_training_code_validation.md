@@ -1,8 +1,8 @@
-# 20260904 C-DIC MSC 训练代码验证（20260905 10:38:27 CST）
+# 20260904 C-DIC MSC 训练代码验证（20260905 10:50:23 CST）
 
 创建时间：20260904 22:00:30 CST（UTC+08:00）
 
-最后修订时间：20260905 10:38:27 CST（UTC+08:00）
+最后修订时间：20260905 10:50:23 CST（UTC+08:00）
 
 状态：训练代码、单卡 autograd/checkpoint smoke test、双卡官方 MSC pilot 和 seed 42 两 epoch 完整训练均已完成
 
@@ -122,4 +122,4 @@ query routing 使用临时 eval mode 和 `inference_mode()`，避免无梯度 qu
 
 ## 下一步
 
-使用 `final.pt` 运行训练后多轮 GPU 评估，并与 ICAE initialization、论文设置及必要 baseline 对照。训练完成本身不等于论文效果复现。
+训练后多轮 GPU 工程测试已完成，结果见 [20260905_c_dic_trained_multiturn_gpu_validation.md](20260905_c_dic_trained_multiturn_gpu_validation.md)。下一步是在 MSC held-out episodes 上比较 ICAE initialization 与 C-DIC final 的 response loss 和 routing 指标。训练完成本身不等于论文效果复现。

@@ -42,7 +42,18 @@ class CdicModelAdapter(Protocol):
     ) -> CompressedTurn: ...
 
 
-class CdicTrainingAdapter(Protocol):
+class TrainableStateAdapter(Protocol):
+    """Boundary for restoring the trainable subset of a model checkpoint."""
+
+    def load_trainable_state_dict(
+        self,
+        state_dict: Mapping[str, object],
+        *,
+        strict: bool = True,
+    ) -> None: ...
+
+
+class CdicTrainingAdapter(TrainableStateAdapter, Protocol):
     """Differentiable boundary used by retrieval-aware C-DIC training."""
 
     def encode_query(self, query: str) -> object: ...
@@ -71,10 +82,3 @@ class CdicTrainingAdapter(Protocol):
     def trainable_parameters(self) -> Iterable[object]: ...
 
     def trainable_state_dict(self) -> Mapping[str, object]: ...
-
-    def load_trainable_state_dict(
-        self,
-        state_dict: Mapping[str, object],
-        *,
-        strict: bool = True,
-    ) -> None: ...

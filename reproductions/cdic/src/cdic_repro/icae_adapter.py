@@ -114,6 +114,32 @@ class IcaeV1InferenceAdapter:
                 provenance=("generated-response",),
             )
 
+    def load_trainable_state_dict(
+        self,
+        state_dict: Mapping[str, object],
+        *,
+        strict: bool = True,
+    ) -> None:
+        parameters = {
+            name: parameter
+            for name, parameter in self.model.named_parameters()
+            if _is_trainable_icae_parameter(name)
+        }
+        missing = sorted(set(parameters).difference(state_dict))
+        unexpected = sorted(set(state_dict).difference(parameters))
+        if strict and (missing or unexpected):
+            raise ValueError(
+                f"trainable state mismatch: missing={missing}, unexpected={unexpected}"
+            )
+        with self.torch.no_grad():
+            for name, parameter in parameters.items():
+                if name not in state_dict:
+                    continue
+                value = state_dict[name]
+                if not hasattr(value, "shape") or tuple(value.shape) != tuple(parameter.shape):
+                    raise ValueError(f"trainable parameter shape mismatch for {name}")
+                parameter.copy_(value.to(device=parameter.device, dtype=parameter.dtype))
+
     def _compress_token_ids(
         self,
         supports: tuple[ThreadState, ...],
@@ -336,32 +362,6 @@ class IcaeV1TrainingAdapter(IcaeV1InferenceAdapter):
             for name, parameter in self.model.named_parameters()
             if parameter.requires_grad
         }
-
-    def load_trainable_state_dict(
-        self,
-        state_dict: Mapping[str, object],
-        *,
-        strict: bool = True,
-    ) -> None:
-        parameters = {
-            name: parameter
-            for name, parameter in self.model.named_parameters()
-            if parameter.requires_grad
-        }
-        missing = sorted(set(parameters).difference(state_dict))
-        unexpected = sorted(set(state_dict).difference(parameters))
-        if strict and (missing or unexpected):
-            raise ValueError(
-                f"trainable state mismatch: missing={missing}, unexpected={unexpected}"
-            )
-        with self.torch.no_grad():
-            for name, parameter in parameters.items():
-                if name not in state_dict:
-                    continue
-                value = state_dict[name]
-                if not hasattr(value, "shape") or tuple(value.shape) != tuple(parameter.shape):
-                    raise ValueError(f"trainable parameter shape mismatch for {name}")
-                parameter.copy_(value.to(device=parameter.device, dtype=parameter.dtype))
 
     def trainable_parameter_report(self) -> dict[str, object]:
         records = [

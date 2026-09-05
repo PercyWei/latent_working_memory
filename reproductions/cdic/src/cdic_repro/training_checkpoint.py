@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from cdic_repro.model_protocol import CdicTrainingAdapter
+from cdic_repro.model_protocol import CdicTrainingAdapter, TrainableStateAdapter
 
 
 CHECKPOINT_VERSION = 2
@@ -81,6 +81,37 @@ def load_training_checkpoint(
     if not isinstance(rng_states, list) or rank >= len(rng_states):
         raise ValueError("training checkpoint has no RNG state for this rank")
     _restore_rng_state(torch_module, rng_states[rank])
+    return TrainingProgress(
+        epoch=int(progress["epoch"]),
+        next_episode_position=int(progress["next_episode_position"]),
+        global_step=int(progress["global_step"]),
+    )
+
+
+def load_model_from_training_checkpoint(
+    path: Path,
+    *,
+    model: TrainableStateAdapter,
+    torch_module: Any,
+) -> TrainingProgress:
+    """Restore only trainable model tensors for evaluation or inference."""
+    if not path.is_file():
+        raise FileNotFoundError(f"training checkpoint does not exist: {path}")
+    try:
+        payload = torch_module.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        payload = torch_module.load(path, map_location="cpu")
+    if not isinstance(payload, dict):
+        raise TypeError("training checkpoint must contain a mapping")
+    if payload.get("version") != CHECKPOINT_VERSION:
+        raise ValueError(f"unsupported training checkpoint version: {payload.get('version')}")
+    model_state = payload.get("model_state")
+    progress = payload.get("progress")
+    if not isinstance(model_state, dict):
+        raise TypeError("training checkpoint is missing model state")
+    if not isinstance(progress, dict):
+        raise TypeError("training checkpoint is missing progress")
+    model.load_trainable_state_dict(model_state, strict=True)
     return TrainingProgress(
         epoch=int(progress["epoch"]),
         next_episode_position=int(progress["next_episode_position"]),

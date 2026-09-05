@@ -7,6 +7,7 @@ import pytest
 
 from cdic_repro.training_checkpoint import (
     TrainingProgress,
+    load_model_from_training_checkpoint,
     load_training_checkpoint,
     save_training_checkpoint,
 )
@@ -128,3 +129,35 @@ def test_training_checkpoint_rejects_different_config(tmp_path: Path) -> None:
             expected_config_fingerprint="different",
             torch_module=torch,
         )
+
+
+def test_evaluation_restore_loads_only_model_state(tmp_path: Path) -> None:
+    path = tmp_path / "checkpoint.pt"
+    model = FakeModel()
+    optimizer = FakeOptimizer()
+    torch = FakeTorch()
+    progress = TrainingProgress(epoch=2, next_episode_position=0, global_step=1002)
+    save_training_checkpoint(
+        path,
+        model=model,  # type: ignore[arg-type]
+        optimizer=optimizer,
+        progress=progress,
+        config_fingerprint="training-fingerprint",
+        torch_module=torch,
+    )
+    model.state = {"weight": 9}
+    optimizer.state = {"step": 99}
+    torch.state = "changed"
+    torch.cuda.state = ["changed"]
+
+    restored = load_model_from_training_checkpoint(
+        path,
+        model=model,
+        torch_module=torch,
+    )
+
+    assert restored == progress
+    assert model.state == {"weight": 1}
+    assert optimizer.state == {"step": 99}
+    assert torch.state == "changed"
+    assert torch.cuda.state == ["changed"]

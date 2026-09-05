@@ -1,0 +1,34 @@
+{
+  "model_path": "/data/bywei/models/meta-llama/Llama-2-7b-chat-hf",
+  "checkpoint_path": "/data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt",
+  "training_checkpoint_path": "/data/bywei/projects/latent_working_memory/checkpoints/cdic/msc_paper_seed42/checkpoints/final.pt",
+  "artifact_dir": "/data/bywei/projects/latent_working_memory/artifacts/cdic/20260905_trained_multiturn_gpu_smoke_threshold085",
+  "device": "cuda:0",
+  "max_new_tokens": 16,
+  "threshold": 0.85,
+  "decay": 0.05,
+  "queries": [
+    {
+      "id": "gpu-smoke-01",
+      "query": "Remember that the access code for Project Quartz is ZETA-4827."
+    },
+    {
+      "id": "gpu-smoke-02",
+      "query": "Briefly explain how dolphins breathe."
+    },
+    {
+      "id": "gpu-smoke-03",
+      "query": "What is the access code for Project Quartz?",
+      "expected_response_substring": "ZETA-4827"
+    },
+    {
+      "id": "gpu-smoke-04",
+      "query": "The access code for Project Quartz is now OMEGA-7319. Remember the update."
+    },
+    {
+      "id": "gpu-smoke-05",
+      "query": "What is the current access code for Project Quartz?",
+      "expected_response_substring": "OMEGA-7319"
+    }
+  ]
+}
