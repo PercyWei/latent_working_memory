@@ -1,8 +1,8 @@
-# C-DIC 论文复现（20260905 10:34:28 CST）
+# C-DIC 论文复现（20260905 11:38:24 CST）
 
 创建时间：20260904 16:19:08 CST（UTC+08:00）
 
-最后修订时间：20260905 10:34:28 CST（UTC+08:00）
+最后修订时间：20260905 11:38:24 CST（UTC+08:00）
 
 本目录用于分阶段复现 Context-Driven Incremental Compression（C-DIC）。由于当前没有公开的官方实现，所有论文未明确的行为均记录在 `ASSUMPTIONS.md`。
 
@@ -173,3 +173,27 @@ uv run --project reproductions/cdic --no-sync \
 - C-DIC 日志：`artifacts/cdic/logs/`。
 
 历史 `config.resolved.json` 保留训练时记录的旧绝对路径，避免改写实验 provenance。服务器上的旧路径已改为指向新目录的 symlink，因此现有 checkpoint 仍可恢复；新运行统一使用当前配置中的项目内路径。
+
+## MSC held-out pilot
+
+使用同一模型进程在 MSC session 4 validation 的相同样本上依次评估 ICAE initialization 和 C-DIC final：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/cdic --no-sync \
+  pytest -q -s reproductions/cdic/tests/test_gpu_msc_heldout.py \
+  --cdic-msc-eval-config reproductions/cdic/configs/msc_heldout_pilot_a800.json
+```
+
+首轮 8 episodes × 8 turns pilot 已完成。训练后 token-weighted loss 略升，且 threshold `0.8` 下 cross-episode false accept rate 从 12.5% 升至 100%；该结果只构成诊断信号，需扩大样本并补充 threshold-independent 指标。详细记录见 `notes/reproduction_results/20260905_c_dic_evaluation_reproduction_record.md`。
+
+## Table 1 MSC 评估
+
+当前入口使用 session 5 test，session 1 只构建 gold memory，sessions 2–5 执行 teacher-forced PPL 与 greedy generation：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/cdic --no-sync \
+  python -m cdic_repro.eval_table1_msc \
+  --config reproductions/cdic/configs/table1_msc_pilot_a800.json
+```
+
+两 episode pilot 已完成，但 PPL 与 BLEU 明显低于论文。由于作者未公开 prompt serialization、instruction initialization 和 metric 实现，暂不启动全量运行。协议与结果记录见 `notes/experiment_designs/20260905_c_dic_table1_reproduction_plan.md` 和 `notes/reproduction_results/20260905_c_dic_evaluation_reproduction_record.md`。

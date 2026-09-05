@@ -82,3 +82,26 @@ class CdicTrainingAdapter(TrainableStateAdapter, Protocol):
     def trainable_parameters(self) -> Iterable[object]: ...
 
     def trainable_state_dict(self) -> Mapping[str, object]: ...
+
+
+class CdicEvaluationAdapter(TrainableStateAdapter, Protocol):
+    """Teacher-forced inference boundary used by held-out evaluation."""
+
+    def encode_query(self, query: str) -> object: ...
+
+    def response_loss(
+        self,
+        supports: tuple[ThreadState, ...],
+        query: str,
+        response: str,
+        credit: CreditPlan,
+    ) -> TrainingLoss: ...
+
+    def compress_gold(
+        self,
+        supports: tuple[ThreadState, ...],
+        query: str,
+        response: str,
+    ) -> CompressedTurn: ...
+
+    def loss_to_float(self, loss: object) -> float: ...

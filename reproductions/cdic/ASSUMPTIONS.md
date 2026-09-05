@@ -1,10 +1,10 @@
-# C-DIC 假设清单（20260904 22:47:18 CST）
+# C-DIC 假设清单（20260905 11:00:37 CST）
 
 创建时间：20260904 16:19:08 CST（UTC+08:00）
 
-最后修订时间：20260904 22:47:18 CST（UTC+08:00）
+最后修订时间：20260905 11:00:37 CST（UTC+08:00）
 
-状态：R1 已通过 GPU smoke test；R2 训练代码、合成 autograd smoke test 和双卡官方 MSC pilot 已通过
+状态：R1、R2 与两 epoch训练已完成；训练后多轮测试和 MSC held-out pilot 暴露 fixed threshold 校准问题
 
 论文明确了 C-DIC 的总体算法，但部分实现细节未公开。首次 MSC pilot 前需固定主实验选择；后续修改必须记录时间，并使用独立结果标签。
 

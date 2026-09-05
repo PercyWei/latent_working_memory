@@ -1,0 +1,17 @@
+{
+  "model_path": "/data/bywei/models/meta-llama/Llama-2-7b-chat-hf",
+  "checkpoint_path": "/data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt",
+  "training_checkpoint_path": "/data/bywei/projects/latent_working_memory/checkpoints/cdic/msc_paper_seed42/checkpoints/final.pt",
+  "data_root": "/data/bywei/projects/latent_working_memory/data/raw/msc",
+  "artifact_dir": "/data/bywei/projects/latent_working_memory/artifacts/cdic/20260905_msc_heldout_pilot",
+  "device": "cuda:0",
+  "session_id": 4,
+  "split": "valid",
+  "max_episodes": 8,
+  "max_turns_per_episode": 8,
+  "max_turn_tokens": 512,
+  "threshold": 0.8,
+  "decay": 0.05,
+  "support_order": "score_desc",
+  "max_retrieved": null
+}

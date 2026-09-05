@@ -18,3 +18,9 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=None,
         help="Path to the JSON configuration for the real C-DIC GPU smoke test.",
     )
+    group.addoption(
+        "--cdic-msc-eval-config",
+        action="store",
+        default=None,
+        help="Path to the JSON configuration for held-out MSC GPU evaluation.",
+    )
