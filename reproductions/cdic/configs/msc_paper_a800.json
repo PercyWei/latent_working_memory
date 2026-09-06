@@ -10,7 +10,8 @@
     "lora_alpha": 32,
     "lora_dropout": 0.05,
     "use_ft_markers": true,
-    "gradient_checkpointing": true
+    "gradient_checkpointing": true,
+    "gradient_window_size": 1
   },
   "data": {
     "root": "/data/bywei/projects/latent_working_memory/data/raw/msc",

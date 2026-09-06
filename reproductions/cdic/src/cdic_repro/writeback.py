@@ -19,6 +19,7 @@ class NewStatePayload:
     retrieval_key: object
     provenance: tuple[str, ...] = ()
     graph_connected: bool = False
+    gradient_depth: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +57,7 @@ def apply_write_back(
             turn=turn,
             provenance=payload.provenance,
             graph_connected=payload.graph_connected,
+            gradient_depth=payload.gradient_depth,
         )
     elif not retrieval.on_topic:
         action = WriteAction.INSERT
@@ -66,6 +68,7 @@ def apply_write_back(
             turn=turn,
             provenance=payload.provenance,
             graph_connected=payload.graph_connected,
+            gradient_depth=payload.gradient_depth,
         )
     else:
         action = WriteAction.REPLACE
@@ -77,6 +80,7 @@ def apply_write_back(
             turn=turn,
             provenance=payload.provenance,
             graph_connected=payload.graph_connected,
+            gradient_depth=payload.gradient_depth,
         )
 
     return WriteBackResult(

@@ -19,6 +19,11 @@ class ThreadState:
     parent_state_id: str | None = None
     provenance: tuple[str, ...] = ()
     graph_connected: bool = False
+    gradient_depth: int = 1
+
+    def __post_init__(self) -> None:
+        if self.gradient_depth < 1:
+            raise ValueError("gradient_depth must be positive")
 
     def recency_at(self, turn: int) -> int:
         if turn < self.last_retrieved_turn:
@@ -61,6 +66,7 @@ class MemoryBank:
         turn: int,
         provenance: tuple[str, ...] = (),
         graph_connected: bool = False,
+        gradient_depth: int = 1,
     ) -> ThreadState:
         self._validate_turn(turn)
         state = ThreadState(
@@ -74,6 +80,7 @@ class MemoryBank:
             last_retrieved_turn=turn,
             provenance=provenance,
             graph_connected=graph_connected,
+            gradient_depth=gradient_depth,
         )
         self._states.append(state)
         return state
@@ -86,6 +93,7 @@ class MemoryBank:
         turn: int,
         provenance: tuple[str, ...] = (),
         graph_connected: bool = False,
+        gradient_depth: int = 1,
     ) -> ThreadState:
         self._validate_turn(turn)
         index = self._index_of(state_id)
@@ -104,6 +112,7 @@ class MemoryBank:
             parent_state_id=previous.state_id,
             provenance=provenance,
             graph_connected=graph_connected,
+            gradient_depth=gradient_depth,
         )
         self._states[index] = state
         return state

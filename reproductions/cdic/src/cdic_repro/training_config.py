@@ -77,6 +77,10 @@ class CdicMscTrainingConfig:
 
     def fingerprint(self) -> str:
         serialized = self.to_dict()
+        model = dict(serialized["model"])  # type: ignore[arg-type]
+        if model.get("gradient_window_size") == 1:
+            model.pop("gradient_window_size")
+        serialized["model"] = model
         training = dict(serialized["training"])  # type: ignore[arg-type]
         training["resume_from"] = None
         serialized["training"] = training
@@ -113,6 +117,7 @@ def load_training_config(path: Path) -> CdicMscTrainingConfig:
                 model.get("turn_template", "<s>[INST] {query} [/INST] {response} </s>")
             ),
             gradient_checkpointing=bool(model.get("gradient_checkpointing", True)),
+            gradient_window_size=int(model.get("gradient_window_size", 1)),
         ),
         data=MscDataConfig(
             root=Path(_required_string(data, "root")),

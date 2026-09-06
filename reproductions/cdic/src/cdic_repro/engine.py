@@ -56,6 +56,7 @@ class CdicInferenceEngine:
                 retrieval_key=compressed.retrieval_key,
                 provenance=compressed.provenance,
                 graph_connected=False,
+                gradient_depth=compressed.gradient_depth,
             ),
             turn=turn,
         )

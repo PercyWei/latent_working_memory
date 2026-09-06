@@ -1,8 +1,8 @@
-# C-DIC 论文复现（20260905 11:38:24 CST）
+# C-DIC 论文复现（20260906 21:52:47 CST）
 
 创建时间：20260904 16:19:08 CST（UTC+08:00）
 
-最后修订时间：20260905 11:38:24 CST（UTC+08:00）
+最后修订时间：20260906 21:52:47 CST（UTC+08:00）
 
 本目录用于分阶段复现 Context-Driven Incremental Compression（C-DIC）。由于当前没有公开的官方实现，所有论文未明确的行为均记录在 `ASSUMPTIONS.md`。
 
@@ -24,13 +24,15 @@ R2 训练代码已实现：
 
 - 官方 MSC `session_4/train.txt` episode loader；
 - teacher-forced response loss 与 gold-response compression；
-- one-hop ra-TBPTT autograd path；
+- 可配置的 revision-chain gradient window，默认 `gradient_window_size=1`，对应 one-hop ra-TBPTT；
 - frozen generator，仅训练 compressor LoRA 与 compression-token embeddings；
 - episode-level AdamW step、gradient clipping 配置和确定性 shuffle；
 - checkpoint/resume、resolved config、metrics 与 memory trace；
 - pilot 和论文规模 JSON 配置。
 
 ICAE adapter 已在 A800 上通过真实 Llama-2-7B-Chat、公开 checkpoint 和五轮对话的工程 smoke test。MSC 训练代码已通过本地单元测试、官方数据 schema 检查、单卡 autograd/checkpoint smoke test 和双卡官方 MSC pilot。seed 42 的两 epoch 完整训练已完成，共执行 1002 个 optimizer steps；最终 checkpoint 位于 `checkpoints/cdic/msc_paper_seed42/checkpoints/final.pt`。训练完成仅证明训练链路可运行，论文效果仍需单独评估。
+
+`gradient_window_size` 表示一个 latent state 的计算图最多包含多少次连续 compression。默认值 `1` 保持原复现的 one-hop 行为；大于 `1` 时，仅 argmax write path 可跨 revision 继续反传，到达上限后 detach 并开始新的图分段。因此它是 bounded/chunked TBPTT，而不是逐轮平移的严格 sliding window。
 
 ## 目录结构
 
@@ -196,4 +198,25 @@ CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/cdic --no-sync \
   --config reproductions/cdic/configs/table1_msc_pilot_a800.json
 ```
 
-两 episode pilot 已完成，但 PPL 与 BLEU 明显低于论文。由于作者未公开 prompt serialization、instruction initialization 和 metric 实现，暂不启动全量运行。协议与结果记录见 `notes/experiment_designs/20260905_c_dic_table1_reproduction_plan.md` 和 `notes/reproduction_results/20260905_c_dic_evaluation_reproduction_record.md`。
+两 episode pilot 已完成，PPL 高于论文、BLEU 低于论文。由于作者未公开 prompt serialization、instruction initialization 和 metric 实现，暂不启动全量运行。协议与结果记录见 `notes/experiment_designs/20260905_c_dic_table1_reproduction_plan.md` 和 `notes/reproduction_results/20260905_c_dic_evaluation_reproduction_record.md`。
+
+## 评估口径对齐
+
+`eval_aligned_msc.py` 在固定抽样的 32 个 session 5 validation episodes 上，使用完整 gold history 比较 initialization 与 final。每轮只运行一次生成，再分别汇总 sessions 2–5 全部轮次、每 session 最后一轮、session 5 最后一轮；PPL 区分含／不含 EOS，ROUGE 区分 recall／F1。逐 token NLL、目标 ID 和协议均保存，允许不重跑模型即可重新汇总。
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/cdic --no-sync \
+  python -m cdic_repro.eval_aligned_msc \
+  --config reproductions/cdic/configs/msc_alignment_initialization_a800.json
+
+CUDA_VISIBLE_DEVICES=1 uv run --project reproductions/cdic --no-sync \
+  python -m cdic_repro.eval_aligned_msc \
+  --config reproductions/cdic/configs/msc_alignment_final_a800.json
+
+PYTHONPATH=reproductions/cdic/src uv run python -m cdic_repro.eval_aligned_msc \
+  --compare <initialization_dir> <final_dir> --output <comparison.json>
+```
+
+initialization 指相同 C-DIC 状态机加载公开 ICAE 权重，不等同于论文的 ICAE incremental baseline。Appendix K 明确使用 session 5 最后一轮；Table 1 的具体轮次、split 和指标库仍未完全确认。操作、分母和结果见 [20260906 评估口径对齐记录](../../notes/reproduction_results/20260906_c_dic_evaluation_alignment_record.md)。
+
+本次两条件均完成 753 个计分轮次。全部轮次 PPL 从 initialization 的 16.9929 升至 final 的 23.0159；session 5 最后一轮从 22.5589 升至 28.2935。三种计分范围的 paired episode bootstrap 区间均支持 NLL 恶化；final 在 sessions 2–5 的 753 次检索全部走 fallback/insert，后续应优先审计跨 session 的检索与压缩状态。

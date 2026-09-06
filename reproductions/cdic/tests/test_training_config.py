@@ -31,6 +31,7 @@ def test_training_config_loads_paper_defaults(tmp_path: Path) -> None:
     assert config.model.memory_size == 128
     assert config.model.devices == ("cuda:0", "cuda:1")
     assert config.model.gradient_checkpointing is True
+    assert config.model.gradient_window_size == 1
     assert config.data.session_id == 4
     assert config.data.strict_pairs is False
     assert config.retrieval.threshold == 0.8

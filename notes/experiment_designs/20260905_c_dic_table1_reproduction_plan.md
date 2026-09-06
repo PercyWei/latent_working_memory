@@ -1,10 +1,12 @@
-# 20260905 C-DIC Table 1 复现计划（20260905 11:16:59 CST）
+# 20260905 C-DIC Table 1 复现计划（20260906 17:05:27 CST）
 
 创建时间：20260905 11:16:59 CST（UTC+08:00）
 
-最后修订时间：20260905 11:16:59 CST（UTC+08:00）
+最后修订时间：20260906 17:05:27 CST（UTC+08:00）
 
 状态：MSC C-DIC seed 42 评估入口和两 episode pilot 已完成；全量运行前需收敛协议差异
+
+后续执行：[20260906 评估口径对齐记录](../reproduction_results/20260906_c_dic_evaluation_alignment_record.md) 固定相同 validation 样本，对照 initialization/final，并分列全部轮次与最后轮次、含／不含 EOS、ROUGE recall／F1。本文件保留 20260905 的原始计划。
 
 ## 目标
 

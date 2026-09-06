@@ -228,9 +228,9 @@ def evaluate_episode(
             config=retrieval_config,
         )
         supports = memory.select(retrieval.selected_state_ids)
+        credit = build_credit_plan(retrieval)
         record_id = turn.turn_id
         if turn.session_index >= target_min_session and record_id not in completed_ids:
-            credit = build_credit_plan(retrieval)
             response_loss = adapter.response_loss(supports, turn.query, turn.response, credit)
             prediction = adapter.generate(supports, turn.query)
             results.append(
@@ -243,7 +243,7 @@ def evaluate_episode(
                     "query": turn.query,
                     "reference": turn.response,
                     "prediction": prediction,
-                    "loss": adapter.loss_to_float(response_loss.value),
+                    "loss": float(response_loss.value),
                     "loss_tokens": response_loss.token_count,
                     "retrieval": {
                         "peak_score": retrieval.peak_score,
@@ -253,7 +253,7 @@ def evaluate_episode(
                     },
                 }
             )
-        compressed = adapter.compress_gold(supports, turn.query, turn.response)
+        compressed = adapter.compress_gold(supports, turn.query, turn.response, credit)
         apply_write_back(
             memory,
             retrieval=retrieval,
@@ -262,6 +262,7 @@ def evaluate_episode(
                 retrieval_key=compressed.retrieval_key,
                 provenance=compressed.provenance,
                 graph_connected=False,
+                gradient_depth=compressed.gradient_depth,
             ),
             turn=turn_number,
         )

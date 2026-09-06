@@ -36,6 +36,7 @@ def test_turn_template_is_explicit_and_reproducible() -> None:
         {"max_turn_tokens": 0},
         {"max_new_tokens": 0},
         {"lora_rank": 0},
+        {"gradient_window_size": 0},
         {"turn_template": "{query}"},
     ],
 )

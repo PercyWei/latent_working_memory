@@ -65,10 +65,10 @@ def evaluate_msc_episodes(
                 turn.response,
                 credit,
             )
-            loss = model.loss_to_float(response_loss.value)
+            loss = float(response_loss.value)  # type: ignore[arg-type]
             if not math.isfinite(loss):
                 raise ValueError(f"non-finite loss for {turn.turn_id}")
-            compressed = model.compress_gold(supports, turn.query, turn.response)
+            compressed = model.compress_gold(supports, turn.query, turn.response, credit)
             write_back = apply_write_back(
                 memory,
                 retrieval=retrieval,
@@ -77,6 +77,7 @@ def evaluate_msc_episodes(
                     retrieval_key=compressed.retrieval_key,
                     provenance=compressed.provenance,
                     graph_connected=False,
+                    gradient_depth=compressed.gradient_depth,
                 ),
                 turn=turn_number,
             )

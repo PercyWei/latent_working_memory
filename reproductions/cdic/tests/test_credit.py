@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
 from cdic_repro.config import RetrievalConfig
-from cdic_repro.credit import build_credit_plan
+from cdic_repro.credit import CreditPlan, build_compression_gradient_plan, build_credit_plan
 from cdic_repro.memory_state import MemoryBank
 from cdic_repro.retrieval import retrieve
 
@@ -42,3 +44,29 @@ def test_off_topic_fallback_is_detached() -> None:
 
     assert plan.connected_state_id is None
     assert plan.detached_state_ids == (state.state_id,)
+
+
+def test_compression_gradient_window_resets_at_configured_depth() -> None:
+    memory = MemoryBank()
+    first = memory.insert(
+        latent="a",
+        retrieval_key="a",
+        turn=0,
+        gradient_depth=1,
+    )
+    credit = CreditPlan(connected_state_id=first.state_id, detached_state_ids=())
+
+    continued = build_compression_gradient_plan((first,), credit, gradient_window_size=3)
+    reset = build_compression_gradient_plan((first,), credit, gradient_window_size=1)
+
+    assert continued.retained_state_id == first.state_id
+    assert continued.new_state_gradient_depth == 2
+    assert reset.retained_state_id is None
+    assert reset.new_state_gradient_depth == 1
+
+
+def test_compression_gradient_window_rejects_missing_connected_support() -> None:
+    credit = CreditPlan(connected_state_id="missing", detached_state_ids=())
+
+    with pytest.raises(ValueError, match="present in compression supports"):
+        build_compression_gradient_plan((), credit, gradient_window_size=2)

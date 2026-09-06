@@ -88,7 +88,9 @@ def _run_training_worker(
 
     local_model_config = replace(config.model, device=distributed.device, devices=())
     adapter = IcaeV1TrainingAdapter.load(local_model_config)
-    trainable_parameters = tuple(adapter.trainable_parameters())
+    trainable_parameters = tuple(
+        parameter for parameter in adapter.model.parameters() if parameter.requires_grad
+    )
     distributed.broadcast_parameters(trainable_parameters)
     optimizer = torch.optim.AdamW(
         trainable_parameters,

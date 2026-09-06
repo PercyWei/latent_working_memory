@@ -1,8 +1,8 @@
-# C-DIC 假设清单（20260905 11:00:37 CST）
+# C-DIC 假设清单（20260906 21:52:47 CST）
 
 创建时间：20260904 16:19:08 CST（UTC+08:00）
 
-最后修订时间：20260905 11:00:37 CST（UTC+08:00）
+最后修订时间：20260906 21:52:47 CST（UTC+08:00）
 
 状态：R1、R2 与两 epoch训练已完成；训练后多轮测试和 MSC held-out pilot 暴露 fixed threshold 校准问题
 
@@ -29,7 +29,7 @@
 | 无配对尾项 | 官方 train 数据存在 122 个 odd-length session | 丢弃最后一个无 gold response 的 utterance，并记录计数 | 数据约束 |
 | 空 utterance | 官方 train 数据存在 1 个空文本 | 替换为 ParlAI 使用的 `__SILENCE__` | 数据兼容选择 |
 | Loss 归一化 | Eq. 7 对 episode 的 $T$ 个 turn 取平均；token reduction 未说明 | 每轮 response token CE 取均值，再乘以 `1 / T` backward；episode 结束后统一 optimizer step | 实现假设 |
-| ra-TBPTT 执行顺序 | 论文描述 reverse-time one-hop backward，但未给代码 | memory-safe online one-hop backward；episode 内不更新参数，因此梯度和与逐轮 loss 求和一致 | 实现假设，需 GPU gradient audit |
+| ra-TBPTT 执行顺序 | 论文给出 reverse-time ra-TBPTT 描述，但公开材料未提供可核对的 window 实现 | 当前复现默认 `gradient_window_size=1`；更大值允许 argmax revision chain 在限定深度内继续反传，到达边界后 detach 并开始新分段 | 默认值已通过 GPU gradient audit；大窗口属于扩展机制，尚未验证 |
 | Gradient checkpointing | ICAE 上游 checkpoint branch 未转发 `enable_lora` | 补充转发；query routing 临时使用 eval mode | 合成 GPU test 确认 128/128 LoRA tensors 有 gradient |
 | Optimizer 未公开项 | 仅给出 AdamW 和 learning rate | `weight_decay=0`、默认不做 gradient clipping，均显式配置 | 待敏感性检查 |
 | 论文 utterance 均值 | 论文报告 53.3；当前官方 v0.1 原始字段统计约 50.32 | 保存数据 revision 和 `data_summary.json`，不修改数据以追齐均值 | 待核对论文预处理 |

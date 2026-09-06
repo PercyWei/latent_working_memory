@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from cdic_repro.config import RetrievalConfig
-from cdic_repro.credit import build_credit_plan
+from cdic_repro.credit import build_compression_gradient_plan, build_credit_plan
 from cdic_repro.memory_state import MemoryBank
 from cdic_repro.model_protocol import CdicTrainingAdapter
 from cdic_repro.msc import MscEpisode
@@ -56,7 +56,7 @@ class EpisodeTrainingResult:
 
 
 class CdicTrainingEngine:
-    """Teacher-forced C-DIC episode loop with one-hop retrieval-aware credit."""
+    """Teacher-forced C-DIC episode loop with bounded retrieval-aware credit."""
 
     def __init__(
         self,
@@ -93,16 +93,25 @@ class CdicTrainingEngine:
                 turn.response,
                 credit,
             )
-            loss_value = self.model.loss_to_float(training_loss.value)
-            backward_applied = self.model.loss_requires_grad(training_loss.value)
+            loss_value = float(training_loss.value)
+            backward_applied = training_loss.value.requires_grad
+            compression_gradient_plan = build_compression_gradient_plan(
+                supports,
+                credit,
+                gradient_window_size=self.model.gradient_window_size,
+            )
             if backward_applied:
-                self.model.backward(training_loss.value, scale=loss_scale)
+                scaled_loss = training_loss.value * loss_scale
+                scaled_loss.backward(
+                    retain_graph=compression_gradient_plan.retained_state_id is not None,
+                )
                 backward_turns += 1
 
             compressed = self.model.compress_gold(
                 supports,
                 turn.query,
                 turn.response,
+                credit,
             )
             write_back = apply_write_back(
                 memory,
@@ -112,6 +121,7 @@ class CdicTrainingEngine:
                     retrieval_key=compressed.retrieval_key,
                     provenance=compressed.provenance,
                     graph_connected=True,
+                    gradient_depth=compressed.gradient_depth,
                 ),
                 turn=turn_number,
             )

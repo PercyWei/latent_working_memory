@@ -25,17 +25,11 @@ class FakeEvaluationAdapter:
         supports: tuple[object, ...],
         query: str,
         response: str,
+        credit: object,
     ) -> CompressedTurn:
-        del supports, query
+        del supports, query, credit
         value = float(response)
         return CompressedTurn(latent=value, retrieval_key=value)
-
-    def loss_to_float(self, loss: object) -> float:
-        return float(loss)
-
-    def load_trainable_state_dict(self, state_dict: object, strict: bool = True) -> None:
-        del state_dict, strict
-
 
 def _episode(episode_id: str, values: tuple[tuple[str, str], ...]) -> MscEpisode:
     return MscEpisode(

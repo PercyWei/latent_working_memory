@@ -7,7 +7,7 @@ from typing import Any
 
 import torch
 
-from cdic_repro.model_protocol import CdicTrainingAdapter, TrainableStateAdapter
+from cdic_repro.model_protocol import TrainableStateAdapter
 
 
 CHECKPOINT_VERSION = 2
@@ -22,7 +22,7 @@ class TrainingProgress:
 
 def save_training_checkpoint(
     path: Path,
-    model: CdicTrainingAdapter,
+    model: TrainableStateAdapter,
     optimizer: Any,
     progress: TrainingProgress,
     config_fingerprint: str,
@@ -49,7 +49,7 @@ def save_training_checkpoint(
 
 def load_training_checkpoint(
     path: Path,
-    model: CdicTrainingAdapter,
+    model: TrainableStateAdapter,
     optimizer: Any,
     expected_config_fingerprint: str,
     rank: int = 0,

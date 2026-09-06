@@ -48,6 +48,7 @@ class TurnTrace:
                 "new_state_id": self.write_back.new_state.state_id,
                 "new_thread_id": self.write_back.new_state.thread_id,
                 "new_revision": self.write_back.new_state.revision,
+                "new_gradient_depth": self.write_back.new_state.gradient_depth,
                 "replaced_state_id": self.write_back.replaced_state_id,
                 "memory_before": list(self.write_back.memory_before),
                 "memory_after": list(self.write_back.memory_after),

@@ -2,16 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 import torch
+from torch import Tensor
 from icae.llama_icae_modeling import LlamaICAE, ModelArguments, TrainingArguments
 from icae_repro.checkpoint import restore_zero_weight_state_dict
 from peft import LoraConfig
 
 from cdic_repro.checkpoint import infer_lora_rank, load_checkpoint_state_dict
-from cdic_repro.credit import CreditPlan
+from cdic_repro.credit import CreditPlan, build_compression_gradient_plan
 from cdic_repro.memory_state import ThreadState
 from cdic_repro.model_protocol import CompressedTurn, TrainingLoss
 
@@ -33,6 +34,7 @@ class IcaeV1AdapterConfig:
     use_ft_markers: bool = True
     turn_template: str = "<s>[INST] {query} [/INST] {response} </s>"
     gradient_checkpointing: bool = False
+    gradient_window_size: int = 1
 
     def __post_init__(self) -> None:
         if self.memory_size < 1:
@@ -43,6 +45,8 @@ class IcaeV1AdapterConfig:
             raise ValueError("max_new_tokens must be positive")
         if self.lora_rank is not None and self.lora_rank < 1:
             raise ValueError("lora_rank must be positive")
+        if self.gradient_window_size < 1:
+            raise ValueError("gradient_window_size must be positive")
         if self.devices:
             if len(set(self.devices)) != len(self.devices):
                 raise ValueError("devices must not contain duplicates")
@@ -146,10 +150,25 @@ class IcaeV1InferenceAdapter:
         self,
         supports: tuple[ThreadState, ...],
         token_ids: list[int],
-        detach_supports: bool = False,
-    ) -> Any:
+        gradient_state_id: str | None = None,
+    ) -> Tensor:
+        """将检索到的旧 latent states 和当前 turn 的文本压缩为新的 latent state.
+
+        Args:
+            supports: 检索到的旧 latent states.
+            token_ids: 当前 turn 的文本的 token IDs.
+            gradient_state_id: 允许保留计算图连接的旧 latent state ID, 为 None 时所有旧 latent states 均从计算图中分离.
+
+        Returns:
+            Tensor: 新的 latent state, 形状为 (memory_size, hidden_dim).
+        """
         pieces = [
-            self._support_embeddings(supports, detach_all=detach_supports),
+            self._support_embeddings(
+                supports,
+                gradient_state_ids=frozenset()
+                if gradient_state_id is None
+                else frozenset((gradient_state_id,)),
+            ),
             self._embed_base_ids(token_ids),
         ]
         pieces.append(self._memory_token_embeddings())
@@ -185,10 +204,13 @@ class IcaeV1InferenceAdapter:
     def _support_embeddings(
         self,
         supports: tuple[ThreadState, ...],
-        connected_state_id: str | None = None,
-        detach_unconnected: bool = False,
-        detach_all: bool = False,
-    ) -> Any:
+        gradient_state_ids: frozenset[str] | None = None,
+    ) -> Tensor:
+        """将检索到的旧 latent states 整理并拼接成输入嵌入."""
+        if gradient_state_ids is not None:
+            unknown_state_ids = gradient_state_ids.difference(state.state_id for state in supports)
+            if unknown_state_ids:
+                raise ValueError(f"gradient states are not present in supports: {sorted(unknown_state_ids)}")
         if not supports:
             return torch.empty(
                 (1, 0, self.model.dim),
@@ -198,12 +220,11 @@ class IcaeV1InferenceAdapter:
         tensors = []
         for state in supports:
             latent = state.latent
-            if not hasattr(latent, "shape") or tuple(latent.shape) != (
-                self.config.memory_size,
-                self.model.dim,
-            ):
+            if not hasattr(latent, "shape") or tuple(latent.shape) != (self.config.memory_size, self.model.dim):
                 raise ValueError(f"invalid latent shape for {state.state_id}")
-            if detach_all or (detach_unconnected and state.state_id != connected_state_id):
+            if gradient_state_ids is not None and state.state_id not in gradient_state_ids:
+                # 仅保留明确纳入当前 gradient window 的 latent state, 其余 state
+                # 从计算图中分离，避免梯度沿无关检索分支或窗口外 revision 继续传播。
                 latent = latent.detach()
             tensors.append(latent.to(device=self.device, dtype=self._model_dtype()).unsqueeze(0))
         return torch.cat(tensors, dim=1)
@@ -283,17 +304,23 @@ class IcaeV1TrainingAdapter(IcaeV1InferenceAdapter):
             if was_training:
                 self.model.train()
 
+    @property
+    def gradient_window_size(self) -> int:
+        return self.config.gradient_window_size
+
     def response_loss(
         self,
         supports: tuple[ThreadState, ...],
         query: str,
         response: str,
         credit: CreditPlan,
+        collect_token_nll: bool = False,
     ) -> TrainingLoss:
         support_embeddings = self._support_embeddings(
             supports,
-            connected_state_id=credit.connected_state_id,
-            detach_unconnected=True,
+            gradient_state_ids=frozenset()
+            if credit.connected_state_id is None
+            else frozenset((credit.connected_state_id,)),
         )
         prompt_embeddings = self._query_prompt_embeddings(query)
         response_ids = self._tokenize(response, add_special_tokens=False)
@@ -324,36 +351,43 @@ class IcaeV1TrainingAdapter(IcaeV1InferenceAdapter):
         )
         if output.loss is None:
             raise RuntimeError("frozen generator returned no teacher-forced loss")
-        return TrainingLoss(value=output.loss, token_count=len(response_ids))
+        token_nll = None
+        if collect_token_nll:
+            # The last target is the ICAE stop token. Keep its NLL separately
+            # identifiable without changing the existing training objective.
+            token_losses = torch.nn.functional.cross_entropy(
+                output.logits[0, response_start - 1 : -1].detach().float(),
+                labels[0, response_start:],
+                reduction="none",
+            )
+            token_nll = tuple(float(value) for value in token_losses.cpu().tolist())
+        return TrainingLoss(value=output.loss, token_count=len(response_ids), token_nll=token_nll)
 
     def compress_gold(
         self,
         supports: tuple[ThreadState, ...],
         query: str,
         response: str,
+        credit: CreditPlan,
     ) -> CompressedTurn:
         turn_text = format_turn(self.config.turn_template, query=query, response=response)
         token_ids = self._tokenize(turn_text, add_special_tokens=False)
-        latent = self._compress_token_ids(supports, token_ids, detach_supports=True)
+        gradient_plan = build_compression_gradient_plan(
+            supports,
+            credit,
+            gradient_window_size=self.config.gradient_window_size,
+        )
+        latent = self._compress_token_ids(
+            supports,
+            token_ids,
+            gradient_state_id=gradient_plan.retained_state_id,
+        )
         return CompressedTurn(
             latent=latent,
             retrieval_key=self._pool(latent).detach(),
             provenance=("gold-response",),
+            gradient_depth=gradient_plan.new_state_gradient_depth,
         )
-
-    def backward(self, loss: object, scale: float) -> None:
-        if scale <= 0.0:
-            raise ValueError("loss scale must be positive")
-        (loss * scale).backward()  # type: ignore[operator, union-attr]
-
-    def loss_requires_grad(self, loss: object) -> bool:
-        return bool(getattr(loss, "requires_grad", False))
-
-    def loss_to_float(self, loss: object) -> float:
-        return float(loss.detach().float().item())  # type: ignore[union-attr]
-
-    def trainable_parameters(self) -> Iterable[object]:
-        return tuple(parameter for parameter in self.model.parameters() if parameter.requires_grad)
 
     def trainable_state_dict(self) -> Mapping[str, object]:
         return {

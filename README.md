@@ -1,6 +1,6 @@
-# latent_working_memory（20260905 10:34:28 CST）
+# latent_working_memory（20260906 17:05:27 CST）
 
-最后修订时间：20260905 10:34:28 CST（UTC+08:00）
+最后修订时间：20260906 17:05:27 CST（UTC+08:00）
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理；ICAE v1 和 C-DIC 分别位于 `reproductions/icae/` 与 `reproductions/cdic/`，各自使用独立的 `uv` 环境。
 
@@ -40,7 +40,9 @@ uv run --project reproductions/icae icae-check-environment
 
 ## C-DIC 复现
 
-C-DIC 的论文实现位于 `reproductions/cdic/`。当前已完成 retrieval、recency、write-back、state lineage、trace、one-hop credit assignment、ICAE adapter、MSC loader、双卡训练与 checkpoint/resume。A800 多轮 GPU smoke test、双卡 MSC pilot 和 seed 42 的两 epoch 完整训练均已完成；后续需要验证训练后模型的多轮行为与论文指标。
+C-DIC 的论文实现位于 `reproductions/cdic/`。当前已完成 retrieval、recency、write-back、state lineage、trace、one-hop credit assignment、ICAE adapter、MSC loader、双卡训练与 checkpoint/resume。A800 多轮 GPU smoke test、双卡 MSC pilot 和 seed 42 的两 epoch 完整训练均已完成。
+
+[20260906 评估口径对齐](notes/reproduction_results/20260906_c_dic_evaluation_alignment_record.md) 已在相同 32 个 validation episodes 上比较初始化与训练后模型，并分列轮次范围、EOS 分母和 ROUGE recall/F1。全部轮次 PPL 从 16.9929 升至 23.0159，session 5 最后一轮从 22.5589 升至 28.2935；当前结果不支持论文效果已复现。
 
 ```bash
 PYTHONPATH=reproductions/cdic/src uv run pytest -q reproductions/cdic/tests

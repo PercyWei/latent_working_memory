@@ -49,7 +49,11 @@ def test_on_topic_write_replaces_only_argmax_and_preserves_thread_identity() -> 
     result = apply_write_back(
         memory,
         retrieval=retrieval,
-        payload=NewStatePayload(latent="new", retrieval_key="topic-a"),
+        payload=NewStatePayload(
+            latent="new",
+            retrieval_key="topic-a",
+            gradient_depth=2,
+        ),
         turn=2,
     )
 
@@ -59,6 +63,7 @@ def test_on_topic_write_replaces_only_argmax_and_preserves_thread_identity() -> 
     assert result.new_state.thread_id == original.thread_id
     assert result.new_state.revision == 1
     assert result.new_state.parent_state_id == original.state_id
+    assert result.new_state.gradient_depth == 2
     assert memory.state_ids == (result.new_state.state_id, other.state_id)
     assert memory.get(other.state_id).last_retrieved_turn == 2
 

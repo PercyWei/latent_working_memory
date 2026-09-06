@@ -1,0 +1,18 @@
+{
+  "model_path": "/data/bywei/models/meta-llama/Llama-2-7b-chat-hf",
+  "checkpoint_path": "/data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt",
+  "training_checkpoint_path": null,
+  "data_root": "/data/bywei/projects/latent_working_memory/data/raw/msc",
+  "artifact_dir": "/data/bywei/projects/latent_working_memory/artifacts/cdic/20260906_evaluation_alignment/initialization",
+  "condition": "initialization",
+  "split": "valid",
+  "sample_size": 32,
+  "sample_seed": 20260906,
+  "device": "cuda:0",
+  "max_turn_tokens": 512,
+  "max_new_tokens": 128,
+  "threshold": 0.8,
+  "decay": 0.05,
+  "use_ft_markers": true,
+  "turn_template": "<s>[INST] {query} [/INST] {response} </s>"
+}

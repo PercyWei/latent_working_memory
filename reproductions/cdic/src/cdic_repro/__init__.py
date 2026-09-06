@@ -1,7 +1,12 @@
 """Core contracts for the paper-based C-DIC reproduction."""
 
 from cdic_repro.config import RetrievalConfig, SupportOrder
-from cdic_repro.credit import CreditPlan, build_credit_plan
+from cdic_repro.credit import (
+    CompressionGradientPlan,
+    CreditPlan,
+    build_compression_gradient_plan,
+    build_credit_plan,
+)
 from cdic_repro.engine import CdicInferenceEngine, TurnOutput
 from cdic_repro.icae_adapter import (
     IcaeV1AdapterConfig,
@@ -26,6 +31,7 @@ __all__ = [
     "CdicTrainingAdapter",
     "CdicTrainingEngine",
     "CompressedTurn",
+    "CompressionGradientPlan",
     "CreditPlan",
     "IcaeV1AdapterConfig",
     "IcaeV1InferenceAdapter",
@@ -44,6 +50,7 @@ __all__ = [
     "WriteAction",
     "WriteBackResult",
     "apply_write_back",
+    "build_compression_gradient_plan",
     "build_credit_plan",
     "load_msc_episodes",
     "retrieve",
