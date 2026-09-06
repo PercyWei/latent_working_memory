@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
+from torch import Tensor
+
 
 LORA_A_WEIGHT_SUFFIX = ".lora_A.default.weight"
 ICAE_V1_LORA_RANK = 128
@@ -21,21 +23,28 @@ class CheckpointLoadReport:
     unexpected_keys: tuple[str, ...]
 
 
-def restore_zero_weight_state_dict(
+def restore_zero_placeholder_checkpoint(
     checkpoint_state: Mapping[str, object],
     base_state: Mapping[str, object],
 ) -> tuple[OrderedDict[str, object], int]:
+    """
+    恢复 checkpoint 中以 0.0 表示的占位参数.
+
+    注意:
+    - 要求 checkpoint_state 与 base_state 的参数键完全一致.
+    - checkpoint_state 中的 Tensor 参数直接保留.
+    - checkpoint_state 中值为 0.0 的参数, 使用 base_state 中对应的原始参数进行替换.
+    """
     missing = sorted(set(base_state) - set(checkpoint_state))
     unexpected = sorted(set(checkpoint_state) - set(base_state))
     if missing or unexpected:
         raise ValueError(
             f"checkpoint key mismatch: missing={missing[:5]}, unexpected={unexpected[:5]}"
         )
-
     restored: OrderedDict[str, object] = OrderedDict()
     placeholder_count = 0
     for key, value in checkpoint_state.items():
-        if isinstance(value, torch.Tensor):
+        if isinstance(value, Tensor):
             restored[key] = value
         elif isinstance(value, float) and value == 0.0:
             restored[key] = base_state[key]
@@ -45,11 +54,11 @@ def restore_zero_weight_state_dict(
     return restored, placeholder_count
 
 
-def apply_zero_weight_checkpoint(
+def load_zero_placeholder_checkpoint(
     model: object,
     checkpoint_state: Mapping[str, object],
 ) -> CheckpointLoadReport:
-    restored_state, placeholder_count = restore_zero_weight_state_dict(
+    restored_state, placeholder_count = restore_zero_placeholder_checkpoint(
         checkpoint_state,
         model.state_dict(),
     )
@@ -65,8 +74,6 @@ def apply_zero_weight_checkpoint(
 
 
 def load_checkpoint_state_dict(checkpoint_path: Path) -> Mapping[str, object]:
-    """Load the direct state-dict format published for ICAE v1."""
-
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     if not isinstance(checkpoint, Mapping):
         raise TypeError("ICAE checkpoint must be a direct state-dict mapping")

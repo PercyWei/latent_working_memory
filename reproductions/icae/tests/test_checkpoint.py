@@ -9,7 +9,7 @@ import torch
 from icae_repro.checkpoint import (
     ICAE_V1_LORA_RANK,
     load_checkpoint_state_dict,
-    restore_zero_weight_state_dict,
+    restore_zero_placeholder_checkpoint,
 )
 
 
@@ -25,7 +25,7 @@ def test_checkpoint_loader_accepts_canonical_lora_rank(tmp_path: Path) -> None:
     assert load_checkpoint_state_dict(path).keys() == state.keys()
 
 
-def test_restore_zero_weight_checkpoint_uses_base_parameters() -> None:
+def test_restore_zero_placeholder_checkpoint_uses_base_parameters() -> None:
     trained = torch.zeros(ICAE_V1_LORA_RANK, 4)
     base = torch.zeros(4, 4)
     checkpoint = OrderedDict(
@@ -39,7 +39,7 @@ def test_restore_zero_weight_checkpoint_uses_base_parameters() -> None:
         "q_proj.lora_A.default.weight": torch.zeros(ICAE_V1_LORA_RANK, 4),
     }
 
-    restored, count = restore_zero_weight_state_dict(checkpoint, base_state)
+    restored, count = restore_zero_placeholder_checkpoint(checkpoint, base_state)
 
     assert count == 1
     assert restored["base.weight"] is base
@@ -48,7 +48,7 @@ def test_restore_zero_weight_checkpoint_uses_base_parameters() -> None:
 
 def test_restore_rejects_key_mismatch() -> None:
     with pytest.raises(ValueError, match="key mismatch"):
-        restore_zero_weight_state_dict(
+        restore_zero_placeholder_checkpoint(
             {"checkpoint-only": 0.0},
             {"base-only": torch.zeros(1)},
         )

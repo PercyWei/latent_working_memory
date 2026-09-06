@@ -11,7 +11,7 @@ from icae.llama_icae_modeling import LlamaICAE, ModelArguments, TrainingArgument
 from icae_repro.checkpoint import (
     ICAE_V1_LORA_RANK,
     load_checkpoint_state_dict,
-    restore_zero_weight_state_dict,
+    restore_zero_placeholder_checkpoint,
 )
 from peft import LoraConfig
 
@@ -488,7 +488,7 @@ def _load_icae_model(config: IcaeV1AdapterConfig, do_train: bool) -> LlamaICAE:
         task_type="CAUSAL_LM",
     )
     model = LlamaICAE(model_arguments, training_arguments, lora_config)
-    restored_state, _ = restore_zero_weight_state_dict(
+    restored_state, _ = restore_zero_placeholder_checkpoint(
         state_dict,
         model.state_dict(),
     )

@@ -15,8 +15,8 @@ from peft import LoraConfig
 
 from icae_repro.checkpoint import (
     ICAE_V1_LORA_RANK,
-    apply_zero_weight_checkpoint,
     load_checkpoint_state_dict,
+    load_zero_placeholder_checkpoint,
 )
 
 
@@ -75,7 +75,7 @@ def load_model(config: InferenceConfig) -> tuple[LlamaICAE, object]:
     )
     with contextlib.redirect_stdout(io.StringIO()):
         model = LlamaICAE(model_arguments, training_arguments, lora_config)
-    report = apply_zero_weight_checkpoint(model, raw_checkpoint)
+    report = load_zero_placeholder_checkpoint(model, raw_checkpoint)
     if report.missing_keys or report.unexpected_keys:
         raise RuntimeError(
             f"strict checkpoint load failed: missing={report.missing_keys}, "
