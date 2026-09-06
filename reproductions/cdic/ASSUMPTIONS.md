@@ -1,8 +1,8 @@
-# C-DIC 假设清单（20260906 21:52:47 CST）
+# C-DIC 假设清单（20260906 22:24:15 CST）
 
 创建时间：20260904 16:19:08 CST（UTC+08:00）
 
-最后修订时间：20260906 21:52:47 CST（UTC+08:00）
+最后修订时间：20260906 22:24:15 CST（UTC+08:00）
 
 状态：R1、R2 与两 epoch训练已完成；训练后多轮测试和 MSC held-out pilot 暴露 fixed threshold 校准问题
 
@@ -23,7 +23,7 @@
 | EOS 处理 | C-DIC 未说明；ICAE v1 定义 `model.eos_id=1` | 使用 `model.eos_id`，并拒绝扩展 ICAE token IDs | 已由 ICAE 单样本 smoke test 验证 |
 | Retrieval budget | 默认方法不限制 memory bank；附录测试 `B_ret=6` | 默认 `None`，可选 bounded retrieval | 论文默认设置 |
 | 训练 response | 训练公式使用 gold `r_t`；inference 使用生成的 `r_hat_t` | 训练使用 gold response，closed-loop inference 使用 generated response | 论文约束 |
-| LoRA 细节 | 仅说明训练 compressor 与 compression tokens | 加载前从 ICAE checkpoint 推断 rank 和参数形状 | 已确认 rank 为 128，strict load 通过 |
+| LoRA 细节 | 仅说明训练 compressor 与 compression tokens | 按公开 ICAE v1 checkpoint 固定 LoRA rank 128，并校验 direct state-dict 中所有 LoRA A 形状 | strict load 已通过 |
 | MSC episode | 论文使用 official train split，共 1001 episodes | 使用 `session_4/train.txt`，按 `previous_dialogs → dialog` 顺序展开 | episode 数与论文一致 |
 | Speaker 方向 | 论文未说明双向样本构造 | 每个 session 从首个 utterance 开始按相邻两条组成 `query → response` | 实现假设 |
 | 无配对尾项 | 官方 train 数据存在 122 个 odd-length session | 丢弃最后一个无 gold response 的 utterance，并记录计数 | 数据约束 |

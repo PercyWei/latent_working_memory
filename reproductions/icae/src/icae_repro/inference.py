@@ -13,7 +13,11 @@ import torch
 from icae.llama_icae_modeling import LlamaICAE, ModelArguments, TrainingArguments
 from peft import LoraConfig
 
-from icae_repro.checkpoint import apply_zero_weight_checkpoint, infer_lora_rank
+from icae_repro.checkpoint import (
+    ICAE_V1_LORA_RANK,
+    apply_zero_weight_checkpoint,
+    load_checkpoint_state_dict,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,14 +48,13 @@ class InferenceConfig:
 def load_model(config: InferenceConfig) -> tuple[LlamaICAE, object]:
     if config.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable")
-    raw_checkpoint = torch.load(config.checkpoint_path, map_location="cpu")
-    lora_rank = infer_lora_rank(raw_checkpoint)
+    raw_checkpoint = load_checkpoint_state_dict(config.checkpoint_path)
     model_arguments = ModelArguments(
         model_name_or_path=str(config.model_path),
         memory_head=False,
         better_transformer=False,
         mem_size=config.memory_size,
-        lora_r=lora_rank,
+        lora_r=ICAE_V1_LORA_RANK,
         lora_dropout=config.lora_dropout,
     )
     training_arguments = TrainingArguments(
@@ -64,7 +67,7 @@ def load_model(config: InferenceConfig) -> tuple[LlamaICAE, object]:
         disable_tqdm=True,
     )
     lora_config = LoraConfig(
-        r=lora_rank,
+        r=ICAE_V1_LORA_RANK,
         lora_alpha=config.lora_alpha,
         lora_dropout=config.lora_dropout,
         bias="none",
@@ -140,7 +143,7 @@ def generate_answer(
     current_input = torch.cat((memory, prompt_embeddings), dim=1)
     past_key_values = None
     generated_ids: list[int] = []
-    stop_token_id = resolve_stop_token_id(model)
+    stop_token_id = int(model.eos_id)
     base_vocabulary_size = model.pad_token_id
 
     for _ in range(max_new_tokens):
@@ -164,15 +167,6 @@ def generate_answer(
         clean_up_tokenization_spaces=False,
     )
     return text, generated_ids, len(prompt_ids)
-
-
-def resolve_stop_token_id(model: Any) -> int:
-    stop_token_id = getattr(model, "eos_id", None)
-    if stop_token_id is None:
-        stop_token_id = model.tokenizer.eos_token_id
-    if stop_token_id is None:
-        raise ValueError("no generation stop token is configured")
-    return int(stop_token_id)
 
 
 def run_smoke(config: InferenceConfig) -> dict[str, object]:
@@ -223,7 +217,7 @@ def run_smoke(config: InferenceConfig) -> dict[str, object]:
         },
         "context_token_count": context_token_count,
         "prompt_token_count": prompt_token_count,
-        "stop_token_id": resolve_stop_token_id(model),
+        "stop_token_id": int(model.eos_id),
         "memory_shape": list(memory.shape),
         "memory_dtype": str(memory.dtype),
         "memory_is_finite": memory_is_finite,

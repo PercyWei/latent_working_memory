@@ -110,10 +110,7 @@ def load_model_from_training_checkpoint(
 
 
 def _load_payload(path: Path) -> object:
-    try:
-        return torch.load(path, map_location="cpu", weights_only=False)
-    except TypeError:
-        return torch.load(path, map_location="cpu")
+    return torch.load(path, map_location="cpu")
 
 
 def _capture_rng_state() -> dict[str, object]:

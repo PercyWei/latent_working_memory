@@ -33,21 +33,6 @@ class MscEpisode:
             raise ValueError("MSC episode must contain at least one turn")
 
 
-def resolve_msc_dialogue_root(data_root: Path) -> Path:
-    candidates = (
-        data_root,
-        data_root / "msc_dialogue",
-        data_root / "msc" / "msc_dialogue",
-    )
-    for candidate in candidates:
-        if candidate.name == "msc_dialogue" and candidate.is_dir():
-            return candidate
-    raise FileNotFoundError(
-        f"could not locate msc_dialogue below {data_root}; expected "
-        "msc/msc_dialogue or msc_dialogue"
-    )
-
-
 def msc_split_path(data_root: Path, session_id: int, split: str) -> Path:
     if session_id < 2 or session_id > 5:
         raise ValueError("session_id must be between 2 and 5")
@@ -55,7 +40,7 @@ def msc_split_path(data_root: Path, session_id: int, split: str) -> Path:
         raise ValueError("split must be train, valid, or test")
     if split == "train" and session_id == 5:
         raise ValueError("official MSC session 5 has no training split")
-    path = resolve_msc_dialogue_root(data_root) / f"session_{session_id}" / f"{split}.txt"
+    path = data_root / "msc" / "msc_dialogue" / f"session_{session_id}" / f"{split}.txt"
     if not path.is_file():
         raise FileNotFoundError(f"MSC split file does not exist: {path}")
     return path
@@ -80,8 +65,6 @@ def load_msc_episodes(
         for line_number, line in enumerate(source, start=1):
             if max_episodes is not None and len(episodes) >= max_episodes:
                 break
-            if not line.strip():
-                continue
             record = json.loads(line)
             episodes.append(
                 _parse_episode(

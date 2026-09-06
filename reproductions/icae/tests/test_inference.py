@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from icae_repro.inference import InferenceConfig, resolve_stop_token_id
+from icae_repro.inference import InferenceConfig
 
 
 def make_config(**overrides: object) -> InferenceConfig:
@@ -38,10 +38,3 @@ def test_inference_defaults_match_icae_v1() -> None:
 def test_invalid_inference_config_is_rejected(overrides: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         make_config(**overrides)
-
-
-def test_icae_stop_token_takes_precedence_over_tokenizer_eos() -> None:
-    tokenizer = type("Tokenizer", (), {"eos_token_id": 2})()
-    model = type("Model", (), {"eos_id": 1, "tokenizer": tokenizer})()
-
-    assert resolve_stop_token_id(model) == 1

@@ -20,7 +20,6 @@ from cdic_repro.generation_metrics import score_generation_records
 from cdic_repro.icae_adapter import (
     IcaeV1AdapterConfig,
     IcaeV1TrainingAdapter,
-    resolve_stop_token_id,
     torch_cosine_similarity,
 )
 from cdic_repro.memory_state import MemoryBank
@@ -273,7 +272,7 @@ def run(config: AlignmentConfig) -> None:
     write_json(output_dir / "runtime.json", {
         "torch_version": torch.__version__, "device": config.device,
         "gpu_name": torch.cuda.get_device_name(config.device),
-        "stop_token_id": resolve_stop_token_id(adapter.model),
+        "stop_token_id": int(adapter.model.eos_id),
         "training_progress": progress,
     })
     with output_path.open("a", encoding="utf-8") as output, torch.inference_mode():

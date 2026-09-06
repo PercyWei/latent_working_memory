@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 
-
-IsTensor = Callable[[object], bool]
+LORA_A_WEIGHT_SUFFIX = ".lora_A.default.weight"
+ICAE_V1_LORA_RANK = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,26 +21,9 @@ class CheckpointLoadReport:
     unexpected_keys: tuple[str, ...]
 
 
-def infer_lora_rank(state_dict: Mapping[str, object]) -> int:
-    ranks: set[int] = set()
-    for key, value in state_dict.items():
-        if ".lora_A." not in key or not key.endswith(".weight"):
-            continue
-        shape = getattr(value, "shape", None)
-        if shape is None or len(shape) != 2:
-            raise ValueError(f"unexpected LoRA A value for {key}")
-        ranks.add(int(shape[0]))
-    if not ranks:
-        raise ValueError("checkpoint contains no LoRA A weights")
-    if len(ranks) != 1:
-        raise ValueError(f"checkpoint contains inconsistent LoRA ranks: {sorted(ranks)}")
-    return ranks.pop()
-
-
 def restore_zero_weight_state_dict(
     checkpoint_state: Mapping[str, object],
     base_state: Mapping[str, object],
-    is_tensor: IsTensor,
 ) -> tuple[OrderedDict[str, object], int]:
     missing = sorted(set(base_state) - set(checkpoint_state))
     unexpected = sorted(set(checkpoint_state) - set(base_state))
@@ -51,7 +35,7 @@ def restore_zero_weight_state_dict(
     restored: OrderedDict[str, object] = OrderedDict()
     placeholder_count = 0
     for key, value in checkpoint_state.items():
-        if is_tensor(value):
+        if isinstance(value, torch.Tensor):
             restored[key] = value
         elif isinstance(value, float) and value == 0.0:
             restored[key] = base_state[key]
@@ -63,30 +47,44 @@ def restore_zero_weight_state_dict(
 
 def apply_zero_weight_checkpoint(
     model: object,
-    checkpoint_state: object,
+    checkpoint_state: Mapping[str, object],
 ) -> CheckpointLoadReport:
-    if not isinstance(checkpoint_state, Mapping):
-        raise TypeError("ICAE checkpoint must be a state-dict mapping")
-    lora_rank = infer_lora_rank(checkpoint_state)
     restored_state, placeholder_count = restore_zero_weight_state_dict(
         checkpoint_state,
         model.state_dict(),
-        is_tensor=torch.is_tensor,
     )
     load_result = model.load_state_dict(restored_state, strict=True)
     return CheckpointLoadReport(
         checkpoint_entries=len(checkpoint_state),
         tensor_entries=sum(torch.is_tensor(value) for value in checkpoint_state.values()),
         zero_placeholders_restored=placeholder_count,
-        lora_rank=lora_rank,
+        lora_rank=ICAE_V1_LORA_RANK,
         missing_keys=tuple(load_result.missing_keys),
         unexpected_keys=tuple(load_result.unexpected_keys),
     )
 
 
-def load_zero_weight_checkpoint(
-    model: object,
-    checkpoint_path: str,
-) -> CheckpointLoadReport:
-    checkpoint_state = torch.load(checkpoint_path, map_location="cpu")
-    return apply_zero_weight_checkpoint(model, checkpoint_state)
+def load_checkpoint_state_dict(checkpoint_path: Path) -> Mapping[str, object]:
+    """Load the direct state-dict format published for ICAE v1."""
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    if not isinstance(checkpoint, Mapping):
+        raise TypeError("ICAE checkpoint must be a direct state-dict mapping")
+    lora_a_weights = 0
+    for key, value in checkpoint.items():
+        if not isinstance(key, str):
+            raise TypeError("ICAE checkpoint keys must be strings")
+        if isinstance(value, torch.Tensor):
+            if key.endswith(LORA_A_WEIGHT_SUFFIX):
+                if value.ndim != 2 or value.shape[0] != ICAE_V1_LORA_RANK:
+                    raise ValueError(
+                        f"invalid ICAE v1 LoRA A weight shape for {key}: {tuple(value.shape)}"
+                    )
+                lora_a_weights += 1
+            continue
+        if isinstance(value, float) and value == 0.0:
+            continue
+        raise TypeError(f"unsupported ICAE checkpoint value for {key}")
+    if lora_a_weights == 0:
+        raise ValueError("ICAE v1 checkpoint contains no LoRA A weights")
+    return checkpoint

@@ -1,8 +1,8 @@
-# ICAE v1 复现（20260905 10:35:18 CST）
+# ICAE v1 复现（20260906 22:24:15 CST）
 
 创建时间：20260904 10:13:57 CST（UTC+08:00）
 
-最后修订时间：20260905 10:35:18 CST（UTC+08:00）
+最后修订时间：20260906 22:24:15 CST（UTC+08:00）
 
 本目录保存后续复现 C-DIC 所需的 ICAE v1 压缩器代码，目标是论文使用的 Llama-2-7B-Chat 路径，而不是后续基于 Mistral 的 ICAE v2。
 
@@ -54,11 +54,13 @@ CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/icae --no-sync \
 
 公开的 v1 checkpoint 使用标量 `0.0` 作为冻结 Llama 参数的占位符。推理入口会从本地基础模型恢复这些参数，再使用 `strict=True` 严格加载完整 state dict，不会通过 `strict=False` 跳过不匹配项。
 
+Checkpoint 格式固定为上游发布的 direct state dict：key 为参数名，value 只能是 PyTorch Tensor 或标量 `0.0`；不接受 `state_dict`、`model_state_dict`、`model` 等额外包装层。ICAE v1 的 LoRA rank 固定为 128。
+
 ICAE 上游说明要求训练使用 bfloat16 而不是 fp16，且公开训练路径只支持 batch size 1。在受控兼容性测试证明可以修改之前，应保留这些限制。
 
 ## PwC 结果生成
 
-`icae-reproduce-pwc` 分别生成 ICAE-128 与完整上下文基线的结果，支持按 sample ID 断点续跑。两个条件应写入不同文件；如需并行，可分别使用物理 GPU 0 和 1：
+`icae-reproduce-pwc` 支持按 sample ID 断点续跑。本轮只运行 ICAE-128，并按 sample index 奇偶拆分到物理 GPU 0 和 1：
 
 ```bash
 export HF_HOME=/data/bywei/cache/huggingface
@@ -72,17 +74,22 @@ CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/icae --no-sync \
   --model-path /data/bywei/models/meta-llama/Llama-2-7b-chat-hf \
   --checkpoint /data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt \
   --input /data/bywei/projects/latent_working_memory/data/raw/pwc/PwC_test.jsonl \
-  --output artifacts/icae/20260904_pwc_reproduction/run/predictions_icae.jsonl
+  --output artifacts/icae/20260904_pwc_reproduction/run/predictions_icae_shard0.jsonl \
+  --num-shards 2 \
+  --shard-index 0
 
 CUDA_VISIBLE_DEVICES=1 uv run --project reproductions/icae --no-sync \
   icae-reproduce-pwc \
-  --condition full-context \
+  --condition icae-128 \
   --model-path /data/bywei/models/meta-llama/Llama-2-7b-chat-hf \
+  --checkpoint /data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt \
   --input /data/bywei/projects/latent_working_memory/data/raw/pwc/PwC_test.jsonl \
-  --output artifacts/icae/20260904_pwc_reproduction/run/predictions_full_context.jsonl
+  --output artifacts/icae/20260904_pwc_reproduction/run/predictions_icae_shard1.jsonl \
+  --num-shards 2 \
+  --shard-index 1
 ```
 
-ICAE 条件遵循上游的 `[FT] prompt [FT]`、greedy decoding 和 token `1` 停止规则。上游未发布完整上下文 baseline 代码；当前 baseline 将最多 512 个原始上下文 tokens 与 prompt tokens 直接拼接，并使用 Llama tokenizer 的 EOS。该选择必须在结果中标记为实现假设。
+ICAE 条件遵循上游的 `[FT] prompt [FT]`、greedy decoding 和 token `1` 停止规则。两个 shard 完成后按 `sample_index` 合并。本轮不运行完整上下文 baseline，因此不能报告论文 Table 4 的成对 win、lose、tie 指标。
 
 ## 当前迁移边界
 

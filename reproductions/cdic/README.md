@@ -1,8 +1,8 @@
-# C-DIC 论文复现（20260906 21:52:47 CST）
+# C-DIC 论文复现（20260906 22:24:15 CST）
 
 创建时间：20260904 16:19:08 CST（UTC+08:00）
 
-最后修订时间：20260906 21:52:47 CST（UTC+08:00）
+最后修订时间：20260906 22:24:15 CST（UTC+08:00）
 
 本目录用于分阶段复现 Context-Driven Incremental Compression（C-DIC）。由于当前没有公开的官方实现，所有论文未明确的行为均记录在 `ASSUMPTIONS.md`。
 
@@ -16,7 +16,7 @@
 - 确定性的 insert/replace write-back；
 - one-hop retrieval-aware credit plan；
 - 可审计的 turn trace 与 adapter-driven inference loop；
-- checkpoint schema 检查与 LoRA rank 推断；
+- ICAE v1 direct state-dict schema 与固定 LoRA rank 128 校验；
 - inference-only ICAE v1 adapter；
 - 多轮 JSONL smoke CLI。
 
@@ -76,6 +76,8 @@ uv run --project reproductions/cdic --no-sync \
 uv run --project reproductions/cdic --no-sync cdic-inspect-checkpoint \
   /data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt
 ```
+
+Checkpoint 只接受 ICAE v1 上游发布的 direct state dict，LoRA rank 固定为 128；不兼容额外 wrapper 格式。MSC 的 `data_root` 固定指向项目内 `data/raw/msc`，loader 读取其下的 `msc/msc_dialogue/`。
 
 `cdic-run-dialogue` 接收 JSONL 输入，每行至少包含 `query`，可选 `id`。输出包含 generated response 和该 turn 的完整 memory trace。
 

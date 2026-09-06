@@ -8,10 +8,13 @@ from typing import Any
 import torch
 from torch import Tensor
 from icae.llama_icae_modeling import LlamaICAE, ModelArguments, TrainingArguments
-from icae_repro.checkpoint import restore_zero_weight_state_dict
+from icae_repro.checkpoint import (
+    ICAE_V1_LORA_RANK,
+    load_checkpoint_state_dict,
+    restore_zero_weight_state_dict,
+)
 from peft import LoraConfig
 
-from cdic_repro.checkpoint import infer_lora_rank, load_checkpoint_state_dict
 from cdic_repro.credit import CreditPlan, build_compression_gradient_plan
 from cdic_repro.memory_state import ThreadState
 from cdic_repro.model_protocol import CompressedTurn, TrainingLoss
@@ -43,6 +46,8 @@ class IcaeV1AdapterConfig:
             raise ValueError("max_turn_tokens must be positive")
         if self.max_new_tokens < 1:
             raise ValueError("max_new_tokens must be positive")
+        if self.dtype != "bfloat16":
+            raise ValueError("dtype must be bfloat16 for the ICAE v1 reproduction")
         if self.lora_rank is not None and self.lora_rank < 1:
             raise ValueError("lora_rank must be positive")
         if self.gradient_window_size < 1:
@@ -81,7 +86,7 @@ class IcaeV1InferenceAdapter:
             generated_ids: list[int] = []
             past_key_values = None
             current_input = decoder_input
-            stop_token_id = resolve_stop_token_id(self.model)
+            stop_token_id = int(self.model.eos_id)
             base_vocabulary_size = self.model.pad_token_id
 
             for _ in range(self.config.max_new_tokens):
@@ -112,7 +117,7 @@ class IcaeV1InferenceAdapter:
         response: str,
     ) -> CompressedTurn:
         with torch.inference_mode():
-            turn_text = format_turn(self.config.turn_template, query=query, response=response)
+            turn_text = self.config.turn_template.format(query=query, response=response)
             token_ids = self._tokenize(turn_text, add_special_tokens=False)
             latent = self._compress_token_ids(supports, token_ids)
             return CompressedTurn(
@@ -210,7 +215,9 @@ class IcaeV1InferenceAdapter:
         if gradient_state_ids is not None:
             unknown_state_ids = gradient_state_ids.difference(state.state_id for state in supports)
             if unknown_state_ids:
-                raise ValueError(f"gradient states are not present in supports: {sorted(unknown_state_ids)}")
+                raise ValueError(
+                    f"gradient states are not present in supports: {sorted(unknown_state_ids)}"
+                )
         if not supports:
             return torch.empty(
                 (1, 0, self.model.dim),
@@ -220,7 +227,10 @@ class IcaeV1InferenceAdapter:
         tensors = []
         for state in supports:
             latent = state.latent
-            if not hasattr(latent, "shape") or tuple(latent.shape) != (self.config.memory_size, self.model.dim):
+            if not hasattr(latent, "shape") or tuple(latent.shape) != (
+                self.config.memory_size,
+                self.model.dim,
+            ):
                 raise ValueError(f"invalid latent shape for {state.state_id}")
             if gradient_state_ids is not None and state.state_id not in gradient_state_ids:
                 # 仅保留明确纳入当前 gradient window 的 latent state, 其余 state
@@ -324,7 +334,7 @@ class IcaeV1TrainingAdapter(IcaeV1InferenceAdapter):
         )
         prompt_embeddings = self._query_prompt_embeddings(query)
         response_ids = self._tokenize(response, add_special_tokens=False)
-        response_ids.append(resolve_stop_token_id(self.model))
+        response_ids.append(int(self.model.eos_id))
         response_embeddings = self._embed_base_ids(response_ids)
         inputs_embeds = torch.cat(
             (support_embeddings, prompt_embeddings, response_embeddings),
@@ -370,7 +380,7 @@ class IcaeV1TrainingAdapter(IcaeV1InferenceAdapter):
         response: str,
         credit: CreditPlan,
     ) -> CompressedTurn:
-        turn_text = format_turn(self.config.turn_template, query=query, response=response)
+        turn_text = self.config.turn_template.format(query=query, response=response)
         token_ids = self._tokenize(turn_text, add_special_tokens=False)
         gradient_plan = build_compression_gradient_plan(
             supports,
@@ -438,30 +448,6 @@ def torch_cosine_similarity(left: object, right: object) -> float:
     return float(similarity.item())
 
 
-def format_turn(template: str, query: str, response: str) -> str:
-    return template.format(query=query, response=response)
-
-
-def resolve_stop_token_id(model: Any) -> int:
-    stop_token_id = getattr(model, "eos_id", None)
-    if stop_token_id is None:
-        stop_token_id = model.tokenizer.eos_token_id
-    if stop_token_id is None:
-        raise ValueError("no generation stop token is configured")
-    return int(stop_token_id)
-
-
-def _resolve_dtype(dtype: str) -> torch.dtype:
-    supported = {
-        "bfloat16": torch.bfloat16,
-        "float16": torch.float16,
-    }
-    try:
-        return supported[dtype]
-    except KeyError as error:
-        raise ValueError(f"unsupported dtype: {dtype}") from error
-
-
 def _load_icae_model(config: IcaeV1AdapterConfig, do_train: bool) -> LlamaICAE:
     state_dict = load_checkpoint_state_dict(config.checkpoint_path)
     if config.device.startswith("cuda") and not torch.cuda.is_available():
@@ -469,27 +455,25 @@ def _load_icae_model(config: IcaeV1AdapterConfig, do_train: bool) -> LlamaICAE:
     torch.manual_seed(config.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(config.seed)
-    inferred_rank = infer_lora_rank(state_dict)
-    if config.lora_rank is not None and config.lora_rank != inferred_rank:
+    if config.lora_rank is not None and config.lora_rank != ICAE_V1_LORA_RANK:
         raise ValueError(
             f"configured LoRA rank {config.lora_rank} does not match checkpoint rank "
-            f"{inferred_rank}"
+            f"{ICAE_V1_LORA_RANK}"
         )
 
-    dtype = _resolve_dtype(config.dtype)
     model_arguments = ModelArguments(
         model_name_or_path=str(config.model_path),
         memory_head=False,
         better_transformer=False,
         mem_size=config.memory_size,
-        lora_r=inferred_rank,
+        lora_r=ICAE_V1_LORA_RANK,
         lora_dropout=config.lora_dropout,
     )
     training_arguments = TrainingArguments(
         output_dir="/tmp/cdic_icae_runtime",
         do_train=do_train,
-        bf16=dtype is torch.bfloat16,
-        fp16=dtype is torch.float16,
+        bf16=True,
+        fp16=False,
         per_device_train_batch_size=1,
         model_max_length=config.max_turn_tokens,
         report_to=[],
@@ -497,7 +481,7 @@ def _load_icae_model(config: IcaeV1AdapterConfig, do_train: bool) -> LlamaICAE:
         gradient_checkpointing=do_train and config.gradient_checkpointing,
     )
     lora_config = LoraConfig(
-        r=inferred_rank,
+        r=ICAE_V1_LORA_RANK,
         lora_alpha=config.lora_alpha,
         lora_dropout=config.lora_dropout,
         bias="none",
@@ -507,7 +491,6 @@ def _load_icae_model(config: IcaeV1AdapterConfig, do_train: bool) -> LlamaICAE:
     restored_state, _ = restore_zero_weight_state_dict(
         state_dict,
         model.state_dict(),
-        is_tensor=torch.is_tensor,
     )
     model.load_state_dict(restored_state, strict=True)
     _validate_execution_devices((config.device,))

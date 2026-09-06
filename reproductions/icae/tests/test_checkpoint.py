@@ -1,34 +1,33 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from pathlib import Path
 
 import pytest
+import torch
 
-from icae_repro.checkpoint import infer_lora_rank, restore_zero_weight_state_dict
-
-
-class FakeTensor:
-    def __init__(self, shape: tuple[int, ...]) -> None:
-        self.shape = shape
-
-
-def is_fake_tensor(value: object) -> bool:
-    return isinstance(value, FakeTensor)
+from icae_repro.checkpoint import (
+    ICAE_V1_LORA_RANK,
+    load_checkpoint_state_dict,
+    restore_zero_weight_state_dict,
+)
 
 
-def test_infer_lora_rank_from_checkpoint() -> None:
+def test_checkpoint_loader_accepts_canonical_lora_rank(tmp_path: Path) -> None:
+    path = tmp_path / "checkpoint.pt"
     state = {
-        "q_proj.lora_A.default.weight": FakeTensor((128, 4096)),
-        "q_proj.lora_B.default.weight": FakeTensor((4096, 128)),
-        "v_proj.lora_A.default.weight": FakeTensor((128, 4096)),
+        "q_proj.lora_A.default.weight": torch.zeros(ICAE_V1_LORA_RANK, 4),
+        "q_proj.lora_B.default.weight": torch.zeros(4, ICAE_V1_LORA_RANK),
+        "v_proj.lora_A.default.weight": torch.zeros(ICAE_V1_LORA_RANK, 4),
     }
+    torch.save(state, path)
 
-    assert infer_lora_rank(state) == 128
+    assert load_checkpoint_state_dict(path).keys() == state.keys()
 
 
 def test_restore_zero_weight_checkpoint_uses_base_parameters() -> None:
-    trained = FakeTensor((128, 4096))
-    base = FakeTensor((4096, 4096))
+    trained = torch.zeros(ICAE_V1_LORA_RANK, 4)
+    base = torch.zeros(4, 4)
     checkpoint = OrderedDict(
         {
             "base.weight": 0.0,
@@ -37,14 +36,10 @@ def test_restore_zero_weight_checkpoint_uses_base_parameters() -> None:
     )
     base_state = {
         "base.weight": base,
-        "q_proj.lora_A.default.weight": FakeTensor((128, 4096)),
+        "q_proj.lora_A.default.weight": torch.zeros(ICAE_V1_LORA_RANK, 4),
     }
 
-    restored, count = restore_zero_weight_state_dict(
-        checkpoint,
-        base_state,
-        is_tensor=is_fake_tensor,
-    )
+    restored, count = restore_zero_weight_state_dict(checkpoint, base_state)
 
     assert count == 1
     assert restored["base.weight"] is base
@@ -55,6 +50,13 @@ def test_restore_rejects_key_mismatch() -> None:
     with pytest.raises(ValueError, match="key mismatch"):
         restore_zero_weight_state_dict(
             {"checkpoint-only": 0.0},
-            {"base-only": FakeTensor((1,))},
-            is_tensor=is_fake_tensor,
+            {"base-only": torch.zeros(1)},
         )
+
+
+def test_checkpoint_loader_rejects_wrapped_state_dict(tmp_path: Path) -> None:
+    path = tmp_path / "checkpoint.pt"
+    torch.save({"state_dict": {"weight": torch.zeros(1)}}, path)
+
+    with pytest.raises(TypeError, match="unsupported ICAE checkpoint value"):
+        load_checkpoint_state_dict(path)
