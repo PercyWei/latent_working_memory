@@ -32,7 +32,6 @@ class WriteBackResult:
 
 def apply_write_back(
     memory: MemoryBank,
-    *,
     retrieval: RetrievalResult,
     payload: NewStatePayload,
     turn: int,

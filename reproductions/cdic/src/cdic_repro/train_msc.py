@@ -58,7 +58,6 @@ def main() -> None:
 
 def run_training(
     config: CdicMscTrainingConfig,
-    *,
     episodes: tuple[MscEpisode, ...],
     data_summary: dict[str, float | int],
 ) -> None:
@@ -79,7 +78,6 @@ def run_training(
 
 def _run_training_worker(
     config: CdicMscTrainingConfig,
-    *,
     episodes: tuple[MscEpisode, ...],
     data_summary: dict[str, float | int],
     distributed: DistributedContext,
@@ -263,7 +261,7 @@ def _run_training_worker(
         distributed.barrier()
 
 
-def _prepare_output_directory(output_dir: Path, *, resume_from: Path | None) -> None:
+def _prepare_output_directory(output_dir: Path, resume_from: Path | None) -> None:
     if resume_from is None and output_dir.exists() and any(output_dir.iterdir()):
         raise FileExistsError(
             f"training output directory is not empty: {output_dir}; use a new path or --resume-from"
@@ -273,7 +271,6 @@ def _prepare_output_directory(output_dir: Path, *, resume_from: Path | None) -> 
 
 def _apply_cli_overrides(
     config: CdicMscTrainingConfig,
-    *,
     seed: int | None,
     output_dir: Path | None,
     resume_from: Path | None,
@@ -288,14 +285,14 @@ def _apply_cli_overrides(
     return replace(config, model=model, training=training)
 
 
-def _episode_order(size: int, *, seed: int, epoch: int, shuffle: bool) -> list[int]:
+def _episode_order(size: int, seed: int, epoch: int, shuffle: bool) -> list[int]:
     order = list(range(size))
     if shuffle:
         random.Random(seed + epoch).shuffle(order)
     return order
 
 
-def _prune_step_checkpoints(checkpoint_dir: Path, *, keep_last: int | None) -> None:
+def _prune_step_checkpoints(checkpoint_dir: Path, keep_last: int | None) -> None:
     if keep_last is None:
         return
     checkpoints = sorted(checkpoint_dir.glob("step-*.pt"))
@@ -304,12 +301,11 @@ def _prune_step_checkpoints(checkpoint_dir: Path, *, keep_last: int | None) -> N
 
 
 def _next_progress(
-    *,
     epoch: int,
     position: int,
     epoch_size: int,
-    world_size: int = 1,
     global_step: int,
+    world_size: int = 1,
 ) -> TrainingProgress:
     next_position = min(position + world_size, epoch_size)
     if next_position == epoch_size:
@@ -346,7 +342,6 @@ def _peak_memory_by_device(devices: tuple[str, ...]) -> dict[str, int]:
 
 def _gradient_norm_and_clip(
     parameters: tuple[object, ...],
-    *,
     max_norm: float | None,
 ) -> float:
     gradients = [parameter.grad for parameter in parameters if parameter.grad is not None]
@@ -369,7 +364,7 @@ def _write_json(path: Path, payload: object) -> None:
     )
 
 
-def _truncate_jsonl_after_step(path: Path, *, max_step: int) -> None:
+def _truncate_jsonl_after_step(path: Path, max_step: int) -> None:
     if not path.exists():
         return
     retained: list[str] = []

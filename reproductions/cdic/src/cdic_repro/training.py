@@ -60,7 +60,6 @@ class CdicTrainingEngine:
 
     def __init__(
         self,
-        *,
         model: CdicTrainingAdapter,
         similarity: SimilarityFunction,
         retrieval_config: RetrievalConfig | None = None,

@@ -23,7 +23,6 @@ class CdicInferenceEngine:
 
     def __init__(
         self,
-        *,
         model: CdicModelAdapter,
         similarity: SimilarityFunction,
         retrieval_config: RetrievalConfig | None = None,
@@ -35,7 +34,7 @@ class CdicInferenceEngine:
         self.memory = memory or MemoryBank()
         self._next_turn = 1
 
-    def step(self, query: str, *, query_id: str | None = None) -> TurnOutput:
+    def step(self, query: str, query_id: str | None = None) -> TurnOutput:
         turn = self._next_turn
         query_key = self.model.encode_query(query)
         retrieval = retrieve(

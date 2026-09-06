@@ -43,7 +43,7 @@ def _load_gpu_config(pytestconfig: pytest.Config) -> tuple[Path, dict[str, objec
     return config_path, config
 
 
-def _assert_transition(output: object, *, memory_size_before: int) -> None:
+def _assert_transition(output: object, memory_size_before: int) -> None:
     trace = output.trace  # type: ignore[attr-defined]
     action = trace.write_back.action
 

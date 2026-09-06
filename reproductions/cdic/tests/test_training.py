@@ -22,7 +22,7 @@ def cosine(left: object, right: object) -> float:
 
 
 class FakeLoss:
-    def __init__(self, value: float, *, requires_grad: bool) -> None:
+    def __init__(self, value: float, requires_grad: bool) -> None:
         self.value = value
         self.requires_grad = requires_grad
 
@@ -69,7 +69,7 @@ class FakeTrainingAdapter:
             provenance=("gold-response",),
         )
 
-    def backward(self, loss: object, *, scale: float) -> None:
+    def backward(self, loss: object, scale: float) -> None:
         assert isinstance(loss, FakeLoss)
         self.backward_scales.append(scale)
 
@@ -90,7 +90,6 @@ class FakeTrainingAdapter:
     def load_trainable_state_dict(
         self,
         state_dict: Mapping[str, object],
-        *,
         strict: bool = True,
     ) -> None:
         assert not state_dict

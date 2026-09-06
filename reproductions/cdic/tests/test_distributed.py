@@ -9,7 +9,7 @@ from cdic_repro.distributed import DistributedContext, initialize_distributed
 def test_distributed_gradient_average_materializes_missing_gradients(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_all_reduce(tensor: torch.Tensor, *, op: object) -> None:
+    def fake_all_reduce(tensor: torch.Tensor, op: object) -> None:
         assert op is torch.distributed.ReduceOp.SUM
         tensor.mul_(2.0)
 

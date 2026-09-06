@@ -88,7 +88,7 @@ def load_config(path: Path) -> Table1MscConfig:
     )
 
 
-def run(config: Table1MscConfig, *, config_path: Path) -> None:
+def run(config: Table1MscConfig, config_path: Path) -> None:
     _validate_resources(config)
     episodes = load_msc_episodes(
         config.data_root,
@@ -212,7 +212,6 @@ def run(config: Table1MscConfig, *, config_path: Path) -> None:
 def evaluate_episode(
     adapter: Any,
     episode: MscEpisode,
-    *,
     retrieval_config: RetrievalConfig,
     target_min_session: int,
     completed_ids: set[str],

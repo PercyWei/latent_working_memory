@@ -36,7 +36,6 @@ class RetrievalResult:
 
 def retrieve(
     memory: MemoryBank,
-    *,
     query_key: object,
     turn: int,
     similarity: SimilarityFunction,

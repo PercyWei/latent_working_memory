@@ -23,7 +23,6 @@ class _AdjacentProbe:
 def evaluate_msc_episodes(
     model: CdicEvaluationAdapter,
     episodes: tuple[MscEpisode, ...],
-    *,
     similarity: SimilarityFunction,
     retrieval_config: RetrievalConfig,
 ) -> dict[str, object]:
@@ -132,7 +131,6 @@ def evaluate_msc_episodes(
 
 def _summarize_adjacent_probes(
     probes: list[_AdjacentProbe],
-    *,
     similarity: SimilarityFunction,
     retrieval_config: RetrievalConfig,
 ) -> dict[str, object]:

@@ -22,7 +22,6 @@ class TrainingProgress:
 
 def save_training_checkpoint(
     path: Path,
-    *,
     model: CdicTrainingAdapter,
     optimizer: Any,
     progress: TrainingProgress,
@@ -50,7 +49,6 @@ def save_training_checkpoint(
 
 def load_training_checkpoint(
     path: Path,
-    *,
     model: CdicTrainingAdapter,
     optimizer: Any,
     expected_config_fingerprint: str,
@@ -87,7 +85,6 @@ def load_training_checkpoint(
 
 def load_model_from_training_checkpoint(
     path: Path,
-    *,
     model: TrainableStateAdapter,
 ) -> TrainingProgress:
     """Restore only trainable model tensors for evaluation or inference."""

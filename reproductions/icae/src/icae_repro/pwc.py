@@ -11,6 +11,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 
+import torch
+import transformers
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
 from icae_repro.inference import (
     InferenceConfig,
     compress_context,
@@ -79,10 +83,7 @@ class ConditionRunner(Protocol):
 
 class IcaeRunner:
     def __init__(self, config: BatchConfig) -> None:
-        import torch
-
         self.config = config
-        self.torch = torch
         inference_config = InferenceConfig(
             model_path=config.model_path,
             checkpoint_path=_require_checkpoint(config),
@@ -99,8 +100,7 @@ class IcaeRunner:
         self.load_report = asdict(report)
 
     def run(self, record: PwcRecord) -> dict[str, object]:
-        torch = self.torch
-        _reset_peak_memory(torch, self.config.device)
+        _reset_peak_memory(self.config.device)
         with torch.inference_mode():
             compression_started = time.perf_counter()
             memory, context_token_count = compress_context(
@@ -108,7 +108,7 @@ class IcaeRunner:
                 record.context,
                 device=self.config.device,
             )
-            _synchronize(torch, self.config.device)
+            _synchronize(self.config.device)
             compression_seconds = time.perf_counter() - compression_started
             if not bool(torch.isfinite(memory).all().item()):
                 raise RuntimeError("compressed memory contains NaN or Inf")
@@ -121,7 +121,7 @@ class IcaeRunner:
                 device=self.config.device,
                 max_new_tokens=self.config.max_new_tokens,
             )
-            _synchronize(torch, self.config.device)
+            _synchronize(self.config.device)
             generation_seconds = time.perf_counter() - generation_started
 
         return {
@@ -133,19 +133,15 @@ class IcaeRunner:
             "memory_dtype": str(memory.dtype),
             "compression_seconds": compression_seconds,
             "generation_seconds": generation_seconds,
-            "peak_cuda_memory_bytes": _peak_memory(torch, self.config.device),
+            "peak_cuda_memory_bytes": _peak_memory(self.config.device),
         }
 
 
 class FullContextRunner:
     def __init__(self, config: BatchConfig) -> None:
-        import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-
         if config.device.startswith("cuda") and not torch.cuda.is_available():
             raise RuntimeError("CUDA is unavailable")
         self.config = config
-        self.torch = torch
         torch.manual_seed(config.seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(config.seed)
@@ -167,7 +163,6 @@ class FullContextRunner:
         }
 
     def run(self, record: PwcRecord) -> dict[str, object]:
-        torch = self.torch
         context_ids = self.tokenizer(
             record.context,
             add_special_tokens=True,
@@ -194,7 +189,7 @@ class FullContextRunner:
                 f"full-context input length {input_ids.shape[1]} exceeds model limit {maximum}"
             )
 
-        _reset_peak_memory(torch, self.config.device)
+        _reset_peak_memory(self.config.device)
         with torch.inference_mode():
             generation_started = time.perf_counter()
             token_ids = _greedy_generate(
@@ -202,9 +197,8 @@ class FullContextRunner:
                 input_ids=input_ids,
                 max_new_tokens=self.config.max_new_tokens,
                 stop_token_id=self.tokenizer.eos_token_id,
-                torch_module=torch,
             )
-            _synchronize(torch, self.config.device)
+            _synchronize(self.config.device)
             generation_seconds = time.perf_counter() - generation_started
 
         text = self.tokenizer.decode(
@@ -221,11 +215,11 @@ class FullContextRunner:
             "memory_dtype": None,
             "compression_seconds": 0.0,
             "generation_seconds": generation_seconds,
-            "peak_cuda_memory_bytes": _peak_memory(torch, self.config.device),
+            "peak_cuda_memory_bytes": _peak_memory(self.config.device),
         }
 
 
-def parse_record(value: object, *, sample_index: int) -> PwcRecord:
+def parse_record(value: object, sample_index: int) -> PwcRecord:
     if not isinstance(value, Mapping):
         raise TypeError("PwC record must be a JSON object")
     required = ("input", "prompt", "answer")
@@ -360,12 +354,10 @@ def run_batch(config: BatchConfig) -> dict[str, object]:
 
 
 def _greedy_generate(
-    *,
     model: Any,
     input_ids: Any,
     max_new_tokens: int,
     stop_token_id: int | None,
-    torch_module: Any,
 ) -> list[int]:
     if stop_token_id is None:
         raise ValueError("tokenizer has no EOS token")
@@ -378,7 +370,7 @@ def _greedy_generate(
             past_key_values=past_key_values,
             use_cache=True,
         )
-        next_token = torch_module.argmax(output.logits[:, -1, :], dim=-1)
+        next_token = torch.argmax(output.logits[:, -1, :], dim=-1)
         next_token_id = int(next_token.item())
         past_key_values = output.past_key_values
         if next_token_id == stop_token_id:
@@ -391,13 +383,9 @@ def _greedy_generate(
 def _manifest(
     config: BatchConfig,
     load_report: Mapping[str, object],
-    *,
     load_seconds: float,
     status: str,
 ) -> dict[str, object]:
-    import torch
-    import transformers
-
     return {
         "status": status,
         "condition": config.condition.value,
@@ -454,20 +442,20 @@ def _require_checkpoint(config: BatchConfig) -> Path:
     return config.checkpoint_path
 
 
-def _synchronize(torch_module: Any, device: str) -> None:
+def _synchronize(device: str) -> None:
     if device.startswith("cuda"):
-        torch_module.cuda.synchronize()
+        torch.cuda.synchronize()
 
 
-def _peak_memory(torch_module: Any, device: str) -> int | None:
+def _peak_memory(device: str) -> int | None:
     if not device.startswith("cuda"):
         return None
-    return int(torch_module.cuda.max_memory_allocated())
+    return int(torch.cuda.max_memory_allocated())
 
 
-def _reset_peak_memory(torch_module: Any, device: str) -> None:
+def _reset_peak_memory(device: str) -> None:
     if device.startswith("cuda"):
-        torch_module.cuda.reset_peak_memory_stats()
+        torch.cuda.reset_peak_memory_stats()
 
 
 def _write_json(path: Path, value: object) -> None:

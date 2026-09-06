@@ -55,7 +55,7 @@ class IcaeV1AdapterConfig:
 class IcaeV1InferenceAdapter:
     """Inference-only ICAE v1 adapter for the C-DIC state machine."""
 
-    def __init__(self, *, config: IcaeV1AdapterConfig, model: LlamaICAE) -> None:
+    def __init__(self, config: IcaeV1AdapterConfig, model: LlamaICAE) -> None:
         self.config = config
         self.model = model
         self.device = torch.device(config.device)
@@ -120,7 +120,6 @@ class IcaeV1InferenceAdapter:
     def load_trainable_state_dict(
         self,
         state_dict: Mapping[str, object],
-        *,
         strict: bool = True,
     ) -> None:
         parameters = {
@@ -147,7 +146,6 @@ class IcaeV1InferenceAdapter:
         self,
         supports: tuple[ThreadState, ...],
         token_ids: list[int],
-        *,
         detach_supports: bool = False,
     ) -> Any:
         pieces = [
@@ -187,7 +185,6 @@ class IcaeV1InferenceAdapter:
     def _support_embeddings(
         self,
         supports: tuple[ThreadState, ...],
-        *,
         connected_state_id: str | None = None,
         detach_unconnected: bool = False,
         detach_all: bool = False,
@@ -240,7 +237,7 @@ class IcaeV1InferenceAdapter:
     def _base_embeddings(self, token_ids: Any) -> Any:
         return self.model.icae.get_base_model().model.embed_tokens(token_ids)
 
-    def _tokenize(self, text: str, *, add_special_tokens: bool) -> list[int]:
+    def _tokenize(self, text: str, add_special_tokens: bool) -> list[int]:
         encoded = self.model.tokenizer(
             text,
             add_special_tokens=add_special_tokens,
@@ -268,7 +265,7 @@ class IcaeV1InferenceAdapter:
 class IcaeV1TrainingAdapter(IcaeV1InferenceAdapter):
     """Differentiable ICAE adapter for teacher-forced C-DIC training."""
 
-    def __init__(self, *, config: IcaeV1AdapterConfig, model: LlamaICAE) -> None:
+    def __init__(self, config: IcaeV1AdapterConfig, model: LlamaICAE) -> None:
         super().__init__(config=config, model=model)
         _configure_trainable_parameters(self.model)
         self.model.train()
@@ -344,7 +341,7 @@ class IcaeV1TrainingAdapter(IcaeV1InferenceAdapter):
             provenance=("gold-response",),
         )
 
-    def backward(self, loss: object, *, scale: float) -> None:
+    def backward(self, loss: object, scale: float) -> None:
         if scale <= 0.0:
             raise ValueError("loss scale must be positive")
         (loss * scale).backward()  # type: ignore[operator, union-attr]
@@ -407,7 +404,7 @@ def torch_cosine_similarity(left: object, right: object) -> float:
     return float(similarity.item())
 
 
-def format_turn(template: str, *, query: str, response: str) -> str:
+def format_turn(template: str, query: str, response: str) -> str:
     return template.format(query=query, response=response)
 
 
@@ -431,7 +428,7 @@ def _resolve_dtype(dtype: str) -> torch.dtype:
         raise ValueError(f"unsupported dtype: {dtype}") from error
 
 
-def _load_icae_model(config: IcaeV1AdapterConfig, *, do_train: bool) -> LlamaICAE:
+def _load_icae_model(config: IcaeV1AdapterConfig, do_train: bool) -> LlamaICAE:
     state_dict = load_checkpoint_state_dict(config.checkpoint_path)
     if config.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable for the configured ICAE device")

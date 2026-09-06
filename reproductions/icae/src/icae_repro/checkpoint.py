@@ -4,6 +4,8 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
+import torch
+
 
 IsTensor = Callable[[object], bool]
 
@@ -37,7 +39,6 @@ def infer_lora_rank(state_dict: Mapping[str, object]) -> int:
 def restore_zero_weight_state_dict(
     checkpoint_state: Mapping[str, object],
     base_state: Mapping[str, object],
-    *,
     is_tensor: IsTensor,
 ) -> tuple[OrderedDict[str, object], int]:
     missing = sorted(set(base_state) - set(checkpoint_state))
@@ -63,7 +64,6 @@ def restore_zero_weight_state_dict(
 def apply_zero_weight_checkpoint(
     model: object,
     checkpoint_state: object,
-    torch_module: object,
 ) -> CheckpointLoadReport:
     if not isinstance(checkpoint_state, Mapping):
         raise TypeError("ICAE checkpoint must be a state-dict mapping")
@@ -71,12 +71,12 @@ def apply_zero_weight_checkpoint(
     restored_state, placeholder_count = restore_zero_weight_state_dict(
         checkpoint_state,
         model.state_dict(),
-        is_tensor=torch_module.is_tensor,
+        is_tensor=torch.is_tensor,
     )
     load_result = model.load_state_dict(restored_state, strict=True)
     return CheckpointLoadReport(
         checkpoint_entries=len(checkpoint_state),
-        tensor_entries=sum(torch_module.is_tensor(value) for value in checkpoint_state.values()),
+        tensor_entries=sum(torch.is_tensor(value) for value in checkpoint_state.values()),
         zero_placeholders_restored=placeholder_count,
         lora_rank=lora_rank,
         missing_keys=tuple(load_result.missing_keys),
@@ -87,7 +87,6 @@ def apply_zero_weight_checkpoint(
 def load_zero_weight_checkpoint(
     model: object,
     checkpoint_path: str,
-    torch_module: object,
 ) -> CheckpointLoadReport:
-    checkpoint_state = torch_module.load(checkpoint_path, map_location="cpu")
-    return apply_zero_weight_checkpoint(model, checkpoint_state, torch_module)
+    checkpoint_state = torch.load(checkpoint_path, map_location="cpu")
+    return apply_zero_weight_checkpoint(model, checkpoint_state)

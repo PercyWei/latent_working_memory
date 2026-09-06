@@ -33,7 +33,7 @@ class FakeEvaluationAdapter:
     def loss_to_float(self, loss: object) -> float:
         return float(loss)
 
-    def load_trainable_state_dict(self, state_dict: object, *, strict: bool = True) -> None:
+    def load_trainable_state_dict(self, state_dict: object, strict: bool = True) -> None:
         del state_dict, strict
 
 

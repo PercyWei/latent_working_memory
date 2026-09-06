@@ -48,7 +48,7 @@ def resolve_msc_dialogue_root(data_root: Path) -> Path:
     )
 
 
-def msc_split_path(data_root: Path, *, session_id: int, split: str) -> Path:
+def msc_split_path(data_root: Path, session_id: int, split: str) -> Path:
     if session_id < 2 or session_id > 5:
         raise ValueError("session_id must be between 2 and 5")
     if split not in {"train", "valid", "test"}:
@@ -63,7 +63,6 @@ def msc_split_path(data_root: Path, *, session_id: int, split: str) -> Path:
 
 def load_msc_episodes(
     data_root: Path,
-    *,
     session_id: int = 4,
     split: str = "train",
     max_episodes: int | None = None,
@@ -138,7 +137,6 @@ def summarize_msc_episodes(episodes: tuple[MscEpisode, ...]) -> dict[str, float 
 
 def _parse_episode(
     record: object,
-    *,
     source_session_id: int,
     line_number: int,
     max_turns: int | None,

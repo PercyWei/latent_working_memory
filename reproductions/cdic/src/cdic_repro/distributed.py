@@ -34,7 +34,6 @@ class DistributedContext:
     def average_gradients(
         self,
         parameters: tuple[object, ...],
-        *,
         active_workers: int,
     ) -> None:
         if active_workers < 1 or active_workers > self.world_size:
@@ -69,7 +68,6 @@ class DistributedContext:
 
 
 def initialize_distributed(
-    *,
     primary_device: str,
     devices: tuple[str, ...],
 ) -> DistributedContext:

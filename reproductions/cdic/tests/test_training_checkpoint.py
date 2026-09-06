@@ -23,7 +23,6 @@ class FakeModel:
     def load_trainable_state_dict(
         self,
         state_dict: dict[str, object],
-        *,
         strict: bool = True,
     ) -> None:
         assert strict

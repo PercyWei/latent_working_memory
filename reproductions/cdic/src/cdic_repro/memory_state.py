@@ -56,7 +56,6 @@ class MemoryBank:
 
     def insert(
         self,
-        *,
         latent: object,
         retrieval_key: object,
         turn: int,
@@ -82,7 +81,6 @@ class MemoryBank:
     def replace(
         self,
         state_id: str,
-        *,
         latent: object,
         retrieval_key: object,
         turn: int,
@@ -110,7 +108,7 @@ class MemoryBank:
         self._states[index] = state
         return state
 
-    def mark_retrieved(self, state_ids: Iterable[str], *, turn: int) -> None:
+    def mark_retrieved(self, state_ids: Iterable[str], turn: int) -> None:
         self._validate_turn(turn)
         requested = set(state_ids)
         unknown = requested.difference(self.state_ids)

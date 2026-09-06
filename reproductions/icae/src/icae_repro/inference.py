@@ -9,6 +9,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+import torch
+from icae.llama_icae_modeling import LlamaICAE, ModelArguments, TrainingArguments
+from peft import LoraConfig
+
 from icae_repro.checkpoint import apply_zero_weight_checkpoint, infer_lora_rank
 
 
@@ -37,12 +41,7 @@ class InferenceConfig:
             raise ValueError("repeat must be positive")
 
 
-def load_model(config: InferenceConfig) -> tuple[Any, object]:
-    import torch
-    from peft import LoraConfig
-
-    from icae.llama_icae_modeling import LlamaICAE, ModelArguments, TrainingArguments
-
+def load_model(config: InferenceConfig) -> tuple[LlamaICAE, object]:
     if config.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable")
     raw_checkpoint = torch.load(config.checkpoint_path, map_location="cpu")
@@ -73,7 +72,7 @@ def load_model(config: InferenceConfig) -> tuple[Any, object]:
     )
     with contextlib.redirect_stdout(io.StringIO()):
         model = LlamaICAE(model_arguments, training_arguments, lora_config)
-    report = apply_zero_weight_checkpoint(model, raw_checkpoint, torch)
+    report = apply_zero_weight_checkpoint(model, raw_checkpoint)
     if report.missing_keys or report.unexpected_keys:
         raise RuntimeError(
             f"strict checkpoint load failed: missing={report.missing_keys}, "
@@ -84,9 +83,7 @@ def load_model(config: InferenceConfig) -> tuple[Any, object]:
     return model, report
 
 
-def compress_context(model: Any, context: str, *, device: str) -> tuple[Any, int]:
-    import torch
-
+def compress_context(model: Any, context: str, device: str) -> tuple[Any, int]:
     encoded = model.tokenizer(
         context,
         truncation=True,
@@ -120,12 +117,9 @@ def generate_answer(
     model: Any,
     memory: Any,
     prompt: str,
-    *,
     device: str,
     max_new_tokens: int,
 ) -> tuple[str, list[int], int]:
-    import torch
-
     prompt_ids = model.tokenizer(
         prompt,
         add_special_tokens=False,
@@ -182,8 +176,6 @@ def resolve_stop_token_id(model: Any) -> int:
 
 
 def run_smoke(config: InferenceConfig) -> dict[str, object]:
-    import torch
-
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
     load_started = time.perf_counter()
