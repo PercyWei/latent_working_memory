@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 import pytest
+import torch
 
 from cdic_repro.config import RetrievalConfig, SupportOrder
 from cdic_repro.evaluation import evaluate_msc_episodes
@@ -36,8 +37,6 @@ def test_msc_heldout_initialization_vs_trained(pytestconfig: pytest.Config) -> N
     config = json.loads(config_path.read_text(encoding="utf-8"))
     if not isinstance(config, dict):
         pytest.fail("MSC evaluation configuration must be a JSON object")
-
-    import torch
 
     model_path = _required_path(config, "model_path")
     checkpoint_path = _required_path(config, "checkpoint_path")
@@ -93,7 +92,6 @@ def test_msc_heldout_initialization_vs_trained(pytestconfig: pytest.Config) -> N
     progress = load_model_from_training_checkpoint(
         training_checkpoint_path,
         model=adapter,
-        torch_module=torch,
     )
     adapter.model.eval()
     trained, trained_seconds, trained_peak_memory = run_condition()

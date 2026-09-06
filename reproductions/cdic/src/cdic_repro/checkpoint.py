@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+import torch
+
 
 @dataclass(frozen=True, slots=True)
 class TensorRecord:
@@ -103,8 +105,6 @@ def describe_state_dict(path: Path, state_dict: Mapping[str, object]) -> Checkpo
 
 
 def load_checkpoint_state_dict(path: Path) -> Mapping[str, object]:
-    import torch
-
     checkpoint = torch.load(path, map_location="cpu")
     return unwrap_state_dict(checkpoint)
 

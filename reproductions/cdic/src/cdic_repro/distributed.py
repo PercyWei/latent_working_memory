@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any
+
+import torch
 
 
 @dataclass(frozen=True, slots=True)
@@ -11,7 +12,6 @@ class DistributedContext:
     local_rank: int
     world_size: int
     device: str
-    torch: Any
 
     @property
     def enabled(self) -> bool:
@@ -23,13 +23,13 @@ class DistributedContext:
 
     def barrier(self) -> None:
         if self.enabled:
-            self.torch.distributed.barrier()
+            torch.distributed.barrier()
 
     def broadcast_parameters(self, parameters: tuple[object, ...]) -> None:
         if not self.enabled:
             return
         for parameter in parameters:
-            self.torch.distributed.broadcast(parameter.data, src=0)
+            torch.distributed.broadcast(parameter.data, src=0)
 
     def average_gradients(
         self,
@@ -43,33 +43,32 @@ class DistributedContext:
             return
         for parameter in parameters:
             if parameter.grad is None:
-                parameter.grad = self.torch.zeros_like(parameter)
-            self.torch.distributed.all_reduce(
+                parameter.grad = torch.zeros_like(parameter)
+            torch.distributed.all_reduce(
                 parameter.grad,
-                op=self.torch.distributed.ReduceOp.SUM,
+                op=torch.distributed.ReduceOp.SUM,
             )
             parameter.grad.div_(active_workers)
 
     def gather_rng_states(self) -> list[dict[str, object]]:
         local_state = {
-            "torch": self.torch.get_rng_state(),
-            "cuda": self.torch.cuda.get_rng_state(self.torch.device(self.device)),
+            "torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state(torch.device(self.device)),
         }
         if not self.enabled:
             return [local_state]
         gathered: list[dict[str, object] | None] = [None] * self.world_size
-        self.torch.distributed.all_gather_object(gathered, local_state)
+        torch.distributed.all_gather_object(gathered, local_state)
         if any(state is None for state in gathered):
             raise RuntimeError("failed to gather RNG state from every distributed worker")
         return [state for state in gathered if state is not None]
 
     def close(self) -> None:
-        if self.enabled and self.torch.distributed.is_initialized():
-            self.torch.distributed.destroy_process_group()
+        if self.enabled and torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
 
 
 def initialize_distributed(
-    torch_module: Any,
     *,
     primary_device: str,
     devices: tuple[str, ...],
@@ -89,18 +88,17 @@ def initialize_distributed(
     if not 0 <= rank < world_size or not 0 <= local_rank < world_size:
         raise RuntimeError("invalid distributed rank assignment")
     device = configured_devices[local_rank]
-    parsed = torch_module.device(device)
+    parsed = torch.device(device)
     if parsed.type != "cuda":
         raise ValueError("distributed C-DIC training requires CUDA devices")
-    torch_module.cuda.set_device(parsed)
+    torch.cuda.set_device(parsed)
     if world_size > 1:
-        if not torch_module.distributed.is_available():
+        if not torch.distributed.is_available():
             raise RuntimeError("torch.distributed is unavailable")
-        torch_module.distributed.init_process_group(backend="nccl")
+        torch.distributed.init_process_group(backend="nccl")
     return DistributedContext(
         rank=rank,
         local_rank=local_rank,
         world_size=world_size,
         device=device,
-        torch=torch_module,
     )

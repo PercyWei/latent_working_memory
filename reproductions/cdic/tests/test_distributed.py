@@ -1,64 +1,33 @@
 from __future__ import annotations
 
 import pytest
+import torch
 
 from cdic_repro.distributed import DistributedContext, initialize_distributed
 
 
-class FakeTensor:
-    def __init__(self, value: float) -> None:
-        self.value = value
+def test_distributed_gradient_average_materializes_missing_gradients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_all_reduce(tensor: torch.Tensor, *, op: object) -> None:
+        assert op is torch.distributed.ReduceOp.SUM
+        tensor.mul_(2.0)
 
-    def div_(self, denominator: int) -> None:
-        self.value /= denominator
-
-
-class FakeParameter:
-    def __init__(self, gradient: FakeTensor | None) -> None:
-        self.grad = gradient
-
-
-class FakeDistributed:
-    class ReduceOp:
-        SUM = "sum"
-
-    def all_reduce(self, tensor: FakeTensor, *, op: str) -> None:
-        assert op == self.ReduceOp.SUM
-        tensor.value *= 2.0
-
-
-class FakeCuda:
-    def set_device(self, _device: object) -> None:
-        raise AssertionError("set_device must not be reached for an invalid launch")
-
-
-class FakeTorch:
-    def __init__(self) -> None:
-        self.distributed = FakeDistributed()
-        self.cuda = FakeCuda()
-
-    def zeros_like(self, _parameter: object) -> FakeTensor:
-        return FakeTensor(0.0)
-
-    def device(self, value: str) -> object:
-        return type("Device", (), {"type": value.split(":", 1)[0]})()
-
-
-def test_distributed_gradient_average_materializes_missing_gradients() -> None:
+    monkeypatch.setattr(torch.distributed, "all_reduce", fake_all_reduce)
     context = DistributedContext(
         rank=0,
         local_rank=0,
         world_size=2,
         device="cuda:0",
-        torch=FakeTorch(),
     )
-    first = FakeParameter(FakeTensor(3.0))
-    second = FakeParameter(None)
+    first = torch.nn.Parameter(torch.tensor([1.0]))
+    first.grad = torch.tensor([3.0])
+    second = torch.nn.Parameter(torch.tensor([2.0]))
 
     context.average_gradients((first, second), active_workers=2)
 
-    assert first.grad is not None and first.grad.value == 3.0
-    assert second.grad is not None and second.grad.value == 0.0
+    assert first.grad is not None and first.grad.item() == 3.0
+    assert second.grad is not None and second.grad.item() == 0.0
 
 
 def test_multiple_devices_require_matching_torchrun_world(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -66,7 +35,6 @@ def test_multiple_devices_require_matching_torchrun_world(monkeypatch: pytest.Mo
 
     with pytest.raises(RuntimeError, match="torchrun"):
         initialize_distributed(
-            FakeTorch(),
             primary_device="cuda:0",
             devices=("cuda:0", "cuda:1"),
         )

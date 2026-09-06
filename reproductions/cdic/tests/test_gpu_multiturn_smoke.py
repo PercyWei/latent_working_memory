@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 
 import pytest
+import torch
 
 from cdic_repro.config import RetrievalConfig
 from cdic_repro.engine import CdicInferenceEngine
@@ -75,8 +76,6 @@ def _assert_transition(output: object, *, memory_size_before: int) -> None:
 
 def test_real_icae_multiturn_state_machine(pytestconfig: pytest.Config) -> None:
     config_path, config = _load_gpu_config(pytestconfig)
-    import torch
-
     model_path = _required_resource(config.get("model_path"), "model_path")
     checkpoint_path = _required_resource(config.get("checkpoint_path"), "checkpoint_path")
     training_checkpoint_value = config.get("training_checkpoint_path")
@@ -110,7 +109,6 @@ def test_real_icae_multiturn_state_machine(pytestconfig: pytest.Config) -> None:
         training_progress = load_model_from_training_checkpoint(
             training_checkpoint_path,
             model=adapter,
-            torch_module=torch,
         )
         adapter.model.eval()
     engine = CdicInferenceEngine(

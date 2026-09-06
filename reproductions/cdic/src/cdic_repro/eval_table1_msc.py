@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import torch
+
 from cdic_repro.config import RetrievalConfig, SupportOrder
 from cdic_repro.credit import build_credit_plan
 from cdic_repro.generation_metrics import score_generation_records
@@ -87,8 +89,6 @@ def load_config(path: Path) -> Table1MscConfig:
 
 
 def run(config: Table1MscConfig, *, config_path: Path) -> None:
-    import torch
-
     _validate_resources(config)
     episodes = load_msc_episodes(
         config.data_root,
@@ -118,7 +118,6 @@ def run(config: Table1MscConfig, *, config_path: Path) -> None:
     progress = load_model_from_training_checkpoint(
         config.training_checkpoint_path,
         model=adapter,
-        torch_module=torch,
     )
     adapter.model.eval()
     retrieval_config = RetrievalConfig(

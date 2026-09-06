@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+import torch
+
 from cdic_repro.model_protocol import CdicTrainingAdapter, TrainableStateAdapter
 
 
@@ -25,7 +27,6 @@ def save_training_checkpoint(
     optimizer: Any,
     progress: TrainingProgress,
     config_fingerprint: str,
-    torch_module: Any,
     rng_states: list[dict[str, object]] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -36,9 +37,9 @@ def save_training_checkpoint(
         "progress": asdict(progress),
         "model_state": dict(model.trainable_state_dict()),
         "optimizer_state": optimizer.state_dict(),
-        "rng_states": rng_states or [_capture_rng_state(torch_module)],
+        "rng_states": rng_states or [_capture_rng_state()],
     }
-    torch_module.save(payload, temporary)
+    torch.save(payload, temporary)
     temporary.replace(path)
     latest = path.parent / "latest.json"
     latest.write_text(
@@ -53,15 +54,11 @@ def load_training_checkpoint(
     model: CdicTrainingAdapter,
     optimizer: Any,
     expected_config_fingerprint: str,
-    torch_module: Any,
     rank: int = 0,
 ) -> TrainingProgress:
     if not path.is_file():
         raise FileNotFoundError(f"training checkpoint does not exist: {path}")
-    try:
-        payload = torch_module.load(path, map_location="cpu", weights_only=False)
-    except TypeError:
-        payload = torch_module.load(path, map_location="cpu")
+    payload = _load_payload(path)
     if not isinstance(payload, dict):
         raise TypeError("training checkpoint must contain a mapping")
     if payload.get("version") != CHECKPOINT_VERSION:
@@ -80,7 +77,7 @@ def load_training_checkpoint(
     rng_states = payload.get("rng_states")
     if not isinstance(rng_states, list) or rank >= len(rng_states):
         raise ValueError("training checkpoint has no RNG state for this rank")
-    _restore_rng_state(torch_module, rng_states[rank])
+    _restore_rng_state(rng_states[rank])
     return TrainingProgress(
         epoch=int(progress["epoch"]),
         next_episode_position=int(progress["next_episode_position"]),
@@ -92,15 +89,11 @@ def load_model_from_training_checkpoint(
     path: Path,
     *,
     model: TrainableStateAdapter,
-    torch_module: Any,
 ) -> TrainingProgress:
     """Restore only trainable model tensors for evaluation or inference."""
     if not path.is_file():
         raise FileNotFoundError(f"training checkpoint does not exist: {path}")
-    try:
-        payload = torch_module.load(path, map_location="cpu", weights_only=False)
-    except TypeError:
-        payload = torch_module.load(path, map_location="cpu")
+    payload = _load_payload(path)
     if not isinstance(payload, dict):
         raise TypeError("training checkpoint must contain a mapping")
     if payload.get("version") != CHECKPOINT_VERSION:
@@ -119,17 +112,24 @@ def load_model_from_training_checkpoint(
     )
 
 
-def _capture_rng_state(torch_module: Any) -> dict[str, object]:
+def _load_payload(path: Path) -> object:
+    try:
+        return torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
+
+
+def _capture_rng_state() -> dict[str, object]:
     return {
-        "torch": torch_module.get_rng_state(),
-        "cuda": torch_module.cuda.get_rng_state() if torch_module.cuda.is_available() else None,
+        "torch": torch.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
     }
 
 
-def _restore_rng_state(torch_module: Any, state: object) -> None:
+def _restore_rng_state(state: object) -> None:
     if not isinstance(state, dict) or "torch" not in state:
         raise TypeError("invalid RNG state in training checkpoint")
-    torch_module.set_rng_state(state["torch"])
+    torch.set_rng_state(state["torch"])
     cuda_state = state.get("cuda")
-    if cuda_state is not None and torch_module.cuda.is_available():
-        torch_module.cuda.set_rng_state(cuda_state)
+    if cuda_state is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state(cuda_state)

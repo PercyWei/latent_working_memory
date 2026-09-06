@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import pickle
 from pathlib import Path
 
 import pytest
+import torch
 
 from cdic_repro.training_checkpoint import (
     TrainingProgress,
@@ -11,38 +11,6 @@ from cdic_repro.training_checkpoint import (
     load_training_checkpoint,
     save_training_checkpoint,
 )
-
-
-class FakeCuda:
-    def __init__(self) -> None:
-        self.state = ["cuda-state"]
-
-    def is_available(self) -> bool:
-        return True
-
-    def get_rng_state(self) -> list[str]:
-        return list(self.state)
-
-    def set_rng_state(self, value: list[str]) -> None:
-        self.state = list(value)
-
-
-class FakeTorch:
-    def __init__(self) -> None:
-        self.state = "cpu-state"
-        self.cuda = FakeCuda()
-
-    def get_rng_state(self) -> str:
-        return self.state
-
-    def set_rng_state(self, value: str) -> None:
-        self.state = value
-
-    def save(self, payload: object, path: Path) -> None:
-        path.write_bytes(pickle.dumps(payload))
-
-    def load(self, path: Path, **_: object) -> object:
-        return pickle.loads(path.read_bytes())
 
 
 class FakeModel:
@@ -77,7 +45,8 @@ def test_training_checkpoint_restores_model_optimizer_progress_and_rng(tmp_path:
     path = tmp_path / "checkpoint.pt"
     model = FakeModel()
     optimizer = FakeOptimizer()
-    torch = FakeTorch()
+    torch.manual_seed(123)
+    expected_rng_state = torch.get_rng_state().clone()
     progress = TrainingProgress(epoch=1, next_episode_position=7, global_step=18)
     save_training_checkpoint(
         path,
@@ -85,40 +54,34 @@ def test_training_checkpoint_restores_model_optimizer_progress_and_rng(tmp_path:
         optimizer=optimizer,
         progress=progress,
         config_fingerprint="fingerprint",
-        torch_module=torch,
     )
     model.state = {"weight": 9}
     optimizer.state = {"step": 99}
-    torch.state = "changed"
-    torch.cuda.state = ["changed"]
+    torch.manual_seed(999)
 
     restored = load_training_checkpoint(
         path,
         model=model,  # type: ignore[arg-type]
         optimizer=optimizer,
         expected_config_fingerprint="fingerprint",
-        torch_module=torch,
     )
 
     assert restored == progress
     assert model.state == {"weight": 1}
     assert optimizer.state == {"step": 1}
-    assert torch.state == "cpu-state"
-    assert torch.cuda.state == ["cuda-state"]
+    assert torch.equal(torch.get_rng_state(), expected_rng_state)
 
 
 def test_training_checkpoint_rejects_different_config(tmp_path: Path) -> None:
     path = tmp_path / "checkpoint.pt"
     model = FakeModel()
     optimizer = FakeOptimizer()
-    torch = FakeTorch()
     save_training_checkpoint(
         path,
         model=model,  # type: ignore[arg-type]
         optimizer=optimizer,
         progress=TrainingProgress(),
         config_fingerprint="expected",
-        torch_module=torch,
     )
 
     with pytest.raises(ValueError, match="fingerprint"):
@@ -127,7 +90,6 @@ def test_training_checkpoint_rejects_different_config(tmp_path: Path) -> None:
             model=model,  # type: ignore[arg-type]
             optimizer=optimizer,
             expected_config_fingerprint="different",
-            torch_module=torch,
         )
 
 
@@ -135,7 +97,7 @@ def test_evaluation_restore_loads_only_model_state(tmp_path: Path) -> None:
     path = tmp_path / "checkpoint.pt"
     model = FakeModel()
     optimizer = FakeOptimizer()
-    torch = FakeTorch()
+    torch.manual_seed(321)
     progress = TrainingProgress(epoch=2, next_episode_position=0, global_step=1002)
     save_training_checkpoint(
         path,
@@ -143,21 +105,18 @@ def test_evaluation_restore_loads_only_model_state(tmp_path: Path) -> None:
         optimizer=optimizer,
         progress=progress,
         config_fingerprint="training-fingerprint",
-        torch_module=torch,
     )
     model.state = {"weight": 9}
     optimizer.state = {"step": 99}
-    torch.state = "changed"
-    torch.cuda.state = ["changed"]
+    torch.manual_seed(654)
+    changed_rng_state = torch.get_rng_state().clone()
 
     restored = load_model_from_training_checkpoint(
         path,
         model=model,
-        torch_module=torch,
     )
 
     assert restored == progress
     assert model.state == {"weight": 1}
     assert optimizer.state == {"step": 99}
-    assert torch.state == "changed"
-    assert torch.cuda.state == ["changed"]
+    assert torch.equal(torch.get_rng_state(), changed_rng_state)

@@ -7,7 +7,8 @@ import random
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+
+import torch
 
 from cdic_repro.distributed import DistributedContext, initialize_distributed
 from cdic_repro.icae_adapter import IcaeV1TrainingAdapter, torch_cosine_similarity
@@ -61,10 +62,7 @@ def run_training(
     episodes: tuple[MscEpisode, ...],
     data_summary: dict[str, float | int],
 ) -> None:
-    import torch
-
     distributed = initialize_distributed(
-        torch,
         primary_device=config.model.device,
         devices=config.model.devices,
     )
@@ -74,7 +72,6 @@ def run_training(
             episodes=episodes,
             data_summary=data_summary,
             distributed=distributed,
-            torch_module=torch,
         )
     finally:
         distributed.close()
@@ -86,7 +83,6 @@ def _run_training_worker(
     episodes: tuple[MscEpisode, ...],
     data_summary: dict[str, float | int],
     distributed: DistributedContext,
-    torch_module: Any,
 ) -> None:
     output_dir = config.training.output_dir
     _prepare_output_directory(output_dir, resume_from=config.training.resume_from)
@@ -96,7 +92,7 @@ def _run_training_worker(
     adapter = IcaeV1TrainingAdapter.load(local_model_config)
     trainable_parameters = tuple(adapter.trainable_parameters())
     distributed.broadcast_parameters(trainable_parameters)
-    optimizer = torch_module.optim.AdamW(
+    optimizer = torch.optim.AdamW(
         trainable_parameters,
         lr=config.training.learning_rate,
         weight_decay=config.training.weight_decay,
@@ -114,7 +110,6 @@ def _run_training_worker(
             model=adapter,
             optimizer=optimizer,
             expected_config_fingerprint=config.fingerprint(),
-            torch_module=torch_module,
             rank=distributed.rank,
         )
 
@@ -151,8 +146,8 @@ def _run_training_worker(
                 position = batch_start + distributed.rank
                 active_workers = min(distributed.world_size, len(order) - batch_start)
                 optimizer.zero_grad(set_to_none=True)
-                _synchronize_cuda_devices(torch_module, (distributed.device,))
-                _reset_peak_memory(torch_module, (distributed.device,))
+                _synchronize_cuda_devices((distributed.device,))
+                _reset_peak_memory((distributed.device,))
                 started_at = time.perf_counter()
                 result = (
                     engine.train_episode(episodes[order[position]])
@@ -169,12 +164,9 @@ def _run_training_worker(
                     max_norm=config.training.max_grad_norm,
                 )
                 optimizer.step()
-                _synchronize_cuda_devices(torch_module, (distributed.device,))
+                _synchronize_cuda_devices((distributed.device,))
                 duration_seconds = time.perf_counter() - started_at
-                peak_memory_by_device = _peak_memory_by_device(
-                    torch_module,
-                    (distributed.device,),
-                )
+                peak_memory_by_device = _peak_memory_by_device((distributed.device,))
                 peak_memory_bytes = sum(peak_memory_by_device.values())
                 global_step += 1
                 if result is not None:
@@ -241,7 +233,6 @@ def _run_training_worker(
                             optimizer=optimizer,
                             progress=next_progress,
                             config_fingerprint=config.fingerprint(),
-                            torch_module=torch_module,
                             rng_states=rng_states,
                         )
                         _prune_step_checkpoints(
@@ -267,7 +258,6 @@ def _run_training_worker(
                     global_step=global_step,
                 ),
                 config_fingerprint=config.fingerprint(),
-                torch_module=torch_module,
                 rng_states=rng_states,
             )
         distributed.barrier()
@@ -331,25 +321,25 @@ def _next_progress(
     )
 
 
-def _synchronize_cuda_devices(torch_module: Any, devices: tuple[str, ...]) -> None:
-    if not torch_module.cuda.is_available():
+def _synchronize_cuda_devices(devices: tuple[str, ...]) -> None:
+    if not torch.cuda.is_available():
         return
     for device in devices:
-        torch_module.cuda.synchronize(torch_module.device(device))
+        torch.cuda.synchronize(torch.device(device))
 
 
-def _reset_peak_memory(torch_module: Any, devices: tuple[str, ...]) -> None:
-    if not torch_module.cuda.is_available():
+def _reset_peak_memory(devices: tuple[str, ...]) -> None:
+    if not torch.cuda.is_available():
         return
     for device in devices:
-        torch_module.cuda.reset_peak_memory_stats(torch_module.device(device))
+        torch.cuda.reset_peak_memory_stats(torch.device(device))
 
 
-def _peak_memory_by_device(torch_module: Any, devices: tuple[str, ...]) -> dict[str, int]:
-    if not torch_module.cuda.is_available():
+def _peak_memory_by_device(devices: tuple[str, ...]) -> dict[str, int]:
+    if not torch.cuda.is_available():
         return {}
     return {
-        device: int(torch_module.cuda.max_memory_allocated(torch_module.device(device)))
+        device: int(torch.cuda.max_memory_allocated(torch.device(device)))
         for device in devices
     }
 
