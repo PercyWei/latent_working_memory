@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "framework_version": "v1",
+  "model_name_or_path": "/data/bywei/models/meta-llama/Llama-2-7b-chat-hf",
+  "model_revision": null,
+  "teacher_model_name_or_path": "/data/bywei/models/meta-llama/Llama-2-7b-chat-hf",
+  "teacher_model_revision": null,
+  "distill_mode": "token_kl",
+  "distill_temperature": 1.0,
+  "reader_lora_rank": 16,
+  "reader_lora_alpha": 32,
+  "reader_lora_target_modules": [
+    "q_proj",
+    "v_proj"
+  ],
+  "reader_lora_dropout": 0.0,
+  "d_mem": 512,
+  "num_layers": 3,
+  "num_heads": 8,
+  "ffn_dim": 2048,
+  "cell_tokens": 64,
+  "update_chunk_cells": [
+    1,
+    2,
+    4
+  ],
+  "k_init": 16,
+  "k_limit": 512,
+  "growth_actions": [
+    0,
+    8,
+    16
+  ],
+  "exploration_probs": [
+    0.7,
+    0.25,
+    0.05
+  ],
+  "data_seed": 20260907,
+  "model_seed": 42,
+  "train_episodes": 256,
+  "dev_episodes": 64,
+  "test_episodes": 64,
+  "min_episode_tokens": 512,
+  "max_episode_tokens": 2048,
+  "learning_rate": 0.0001,
+  "weight_decay": 0.01,
+  "gradient_clip": 1.0,
+  "bptt_cells": 8,
+  "supervise_every_cells": 4,
+  "probes_per_prefix": 3,
+  "lambda_distill": 0.1,
+  "lambda_partition": 0.1,
+  "partition_every_episodes": 4,
+  "capacity_label_roots": 64,
+  "capacity_horizon_cells": 4,
+  "capacity_score_offsets": [
+    0,
+    2,
+    4
+  ],
+  "cost_reference_slots": 64,
+  "state_cost_weight": 0.05,
+  "write_cost_weight": 0.01,
+  "read_cost_weight": 0.05,
+  "outer_rounds": 2,
+  "max_new_tokens": 64
+}

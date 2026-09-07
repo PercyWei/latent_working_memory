@@ -1,6 +1,6 @@
-# latent_working_memory（20260906 17:05:27 CST）
+# latent_working_memory（20260907 17:52:00 CST）
 
-最后修订时间：20260906 17:05:27 CST（UTC+08:00）
+最后修订时间：20260907 17:52:00 CST（UTC+08:00）
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理；ICAE v1 和 C-DIC 分别位于 `reproductions/icae/` 与 `reproductions/cdic/`，各自使用独立的 `uv` 环境。
 
@@ -9,6 +9,20 @@
 ```bash
 uv sync --frozen
 uv run pytest
+```
+
+## 可增长记忆 v1
+
+第一版新方法直接位于 `src/latent_working_memory/v1/`；未来版本使用同级目录，不增加额外的方法族目录。配置位于 `configs/v1/`，测试位于 `tests/v1/`，数据、checkpoint 与运行产物分别使用 Git-ignored 的 `data/v1/`、`checkpoints/v1/` 和 `artifacts/v1/`。
+
+当前已完成不依赖 7B 权重的 M0–M2：严格配置、合成 episode、encoder cells/update partitions、递归 memory state、joint updater、增长价值网络、容量成本、纯张量目标/指标、checkpoint 和 feature rollout。实际 Llama/LoRA 与 P0–P3 尚未接入。详见 [v1 实施总计划](notes/v1/20260907_growing_latent_working_memory_implementation_plan.md)。
+
+服务器具备模型 tokenizer 后，可生成 canonical pilot 数据：
+
+```bash
+uv run python -m latent_working_memory.v1.prepare_data \
+  --config configs/v1/pilot.json \
+  --output-dir data/v1
 ```
 
 ## 服务器目录

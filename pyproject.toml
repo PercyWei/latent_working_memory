@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Research infrastructure for streaming mutable latent memory"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
-dependencies = []
+dependencies = [
+    "torch>=2.7,<3",
+    "transformers>=4.55,<5",
+]
 
 [build-system]
 requires = ["hatchling"]
