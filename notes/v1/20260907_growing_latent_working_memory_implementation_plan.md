@@ -2,9 +2,9 @@
 
 创建时间：20260907 16:58:30 UTC+08:00
 
-最后修订时间：20260907 17:52:00 UTC+08:00
+最后修订时间：20260907 21:50:07 UTC+08:00
 
-状态：M0–M2 已完成并通过 CPU 测试；停在 M3 实际 Llama/LoRA 接入之前，尚未运行 GPU 实验。
+状态：M0–M2 已完成；M3 与 P0 的工程链路已用真实 Transformers/PEFT tiny Llama 通过 CPU 集成测试。服务器 Llama-2-7B-Chat smoke test、16-episode P0 训练和独立 dev 关卡尚未运行，因此当前停在进入 M5 之前。
 
 本文把 [v1 框架设计](../20260907_growing_latent_working_memory_framework_v1.md) 转换为工程边界、依赖顺序和验收关卡。研究目标、公式、数据定义和实验口径以框架设计为准；本文只决定如何落地，不另行发明第二套方法定义。
 
@@ -172,13 +172,13 @@ artifacts/v1/<run_id>/
 
 推进条件：`g=0/8/16` 形状与 dtype 正确；旧 tensor 不原位修改；新位置对旧 memory 有梯度，旧位置对当前 chunk 有梯度；非法动作直接失败或在策略选择处被 mask。
 
-### M3：Teacher、encoder 与学生 reader 链路（下一批）
+### M3：Teacher、encoder 与学生 reader 链路（工程实现完成，服务器关卡待验证）
 
 接入 Llama-2-7B-Chat、冻结 teacher/`E0`、`W_in/P` 和 reader LoRA；实现 teacher/student prompt、answer-relative logits 对齐、gold NLL 与 token KL。基础 encoder 明确禁用学生 adapter。
 
 推进条件：服务器单卡 smoke test 证明 `T/E0` 无梯度且输出不随 reader LoRA 更新变化；梯度能到达 `W_in/U/P/LoRA`；EOS 两种统计口径可复算。所有 GPU 命令显式使用物理 GPU 0 或 1。
 
-### M4：P0 单次压缩预热
+### M4：P0 单次压缩预热（训练驱动完成，真实 P0 实验待运行）
 
 完成一次前缀写入、三类 probes、teacher cache 和 checkpoint/resume；先过拟合 16 个 train episodes，再在独立 dev 上比较 teacher、no-memory 和学生 memory。
 
@@ -211,7 +211,7 @@ artifacts/v1/<run_id>/
 ## 7. 测试分层
 
 - **CPU unit**：配置、JSONL、事实真值、cell/partition、state、动作 mask、成本公式、checkpoint 字段和指标聚合。
-- **CPU tensor integration**：缩小 `d_mem/layers/heads` 的真实 PyTorch updater、value network、梯度与非原位语义。
+- **CPU tensor integration**：缩小 `d_mem/layers/heads` 的真实 PyTorch updater、value network、梯度与非原位语义；本地 tiny Llama 使用标准 Transformers/PEFT 构造、保存和重新加载，不以伪模块替代模型接口。
 - **单卡 model smoke**：真实 tokenizer/Llama 权重上的 prompt、E0、teacher/student 对齐、LoRA 梯度和 greedy generation；使用 `CUDA_VISIBLE_DEVICES=0`。
 - **单卡 training smoke**：每个 phase 只跑极少 episodes/steps，验证 checkpoint/resume 与产物。
 - **双卡并行实验**：GPU 0/1 分别运行独立条件；v1 不因有两张卡就引入 DDP。
@@ -233,11 +233,13 @@ artifacts/v1/<run_id>/
 
 ## 9. 首个实现批次
 
-第一批已经完成 M0–M2：版本目录、严格配置、合成数据与状态契约、checkpoint、joint updater、value network、纯张量目标/指标、feature rollout 及 CPU 测试。当前根测试集共 32 项通过，新增代码的 Ruff 检查通过，lockfile 与 `pyproject.toml` 一致。这样在占用 7B 模型和 GPU 前，先锁定了最容易审计且影响后续所有阶段的边界。
+第一批已经完成并以提交 `3a18d6a` 固定 M0–M2：版本目录、严格配置、合成数据与状态契约、checkpoint、joint updater、value network、纯张量目标/指标、feature rollout 及 CPU 测试。
 
-第二批完成 M3–M4，先证明单次压缩和读取链路成立；第三批再进入 P1/P2/P3。每个批次通过对应关卡后再扩展，避免一次实现整条训练链导致错误来源不可辨认。
+第二批已经实现 `backbone.py`、`training.py` 和 `train.py` 的实际职责：一份冻结基础 Llama 由 teacher、`E0` 和学生 reader 共享；teacher/`E0` 显式禁用 LoRA，学生 reader 启用 `q_proj/v_proj` LoRA；`W_in/P` 保持可训练；teacher/student 只切取答案相对位置 logits。P0 会从 16 起按 8 抽样容量，将完整 cell 前缀以 `g=0` 写入一次，联合优化 gold NLL 与 teacher KL，并持久化只含 `W_in/U/P/LoRA/V` 的 checkpoint。Teacher cache 同时绑定模型、revision、dtype、tokenizer、完整序列化输入和目标长度；resume 恢复模型、optimizer 与 RNG。独立 dev 输出 teacher、学生 memory、学生 no-memory 三者含/不含 EOS 的 token-weighted NLL/PPL、greedy prediction 与 EM；run 同时记录分段日志、memory trace 和资源用量。
 
-本批次没有创建 `backbone.py`、`baselines.py`、`training.py`、`train.py` 和 `evaluate.py` 的空文件。下一批接入 PEFT 与实际模型时再创建对应模块。`prepare_data` 已具备真实 tokenizer 入口，但本地没有加载服务器上的 Llama tokenizer；生成逻辑通过确定性的测试 tokenizer 完成 CPU 验证。
+当前根测试集共 45 项通过，新增 v1 代码的 Ruff 与格式检查通过，lockfile 与 `pyproject.toml` 一致。测试覆盖 tiny Llama 的 adapter 隔离、cell 分组不变性、答案位置对齐、完整梯度路径、greedy generation、teacher cache 绑定、P0 下一 step 精确恢复，以及通过 `save_pretrained/from_pretrained` 的一整次 P0 运行与恢复。这里证明的是接口和状态机正确，不等同于 7B 质量关卡已经通过。
+
+下一步应先在服务器执行 M3 单卡 smoke 和 16-episode P0 overfit/dev 对照。只有 dev 上 `student_memory` 明显优于同一 reader 的 `student_no_memory`，且恢复后的下一 step 一致，才进入 M5；否则按停止条件审计 prompt、writer-reader 接口或训练信号。第三批才实现 P1/P2/P3，不预先创建 `baselines.py` 或 `evaluate.py` 空壳。
 
 ## 10. v1 完成定义
 

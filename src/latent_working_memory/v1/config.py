@@ -121,6 +121,10 @@ def _validate_config(config: ExperimentConfig) -> None:
         value = getattr(config, name)
         if value is not None and (not isinstance(value, str) or not value):
             raise ValueError(f"{name} must be null or a non-empty string")
+    if config.teacher_model_name_or_path != config.model_name_or_path:
+        raise ValueError("v1 teacher and student must use the same base model")
+    if config.teacher_model_revision != config.model_revision:
+        raise ValueError("v1 teacher and student must use the same model revision")
     if config.distill_mode != "token_kl":
         raise ValueError("v1 only supports distill_mode='token_kl'")
 
@@ -156,8 +160,12 @@ def _validate_config(config: ExperimentConfig) -> None:
 
     if config.d_mem % config.num_heads != 0:
         raise ValueError("d_mem must be divisible by num_heads")
+    if config.k_init != 16:
+        raise ValueError("v1 k_init must be 16")
     if config.k_init > config.k_limit:
         raise ValueError("k_init must not exceed k_limit")
+    if config.k_limit % 8 != 0:
+        raise ValueError("k_limit must be divisible by 8")
     if config.min_episode_tokens > config.max_episode_tokens:
         raise ValueError("min_episode_tokens must not exceed max_episode_tokens")
     if config.supervise_every_cells > config.bptt_cells:

@@ -14,13 +14,16 @@ def sinusoidal_positions(
     width: int,
     device: torch.device | str,
     dtype: torch.dtype,
+    start: int = 0,
 ) -> Tensor:
     if type(length) is not int or length <= 0:
         raise ValueError("length must be a positive integer")
     if type(width) is not int or width <= 0:
         raise ValueError("width must be a positive integer")
+    if type(start) is not int or start < 0:
+        raise ValueError("start must be a non-negative integer")
 
-    positions = torch.arange(length, device=device, dtype=torch.float32).unsqueeze(1)
+    positions = torch.arange(start, start + length, device=device, dtype=torch.float32).unsqueeze(1)
     frequencies = torch.exp(
         torch.arange(0, width, 2, device=device, dtype=torch.float32)
         * (-math.log(10_000.0) / width)
@@ -113,7 +116,11 @@ class JointMemoryWriter(nn.Module):
         nn.init.normal_(self.output_projection.weight, mean=0.0, std=1e-3)
         nn.init.zeros_(self.output_projection.bias)
 
-    def initialize_state(self, num_slots: int) -> MemoryState:
+    def initialize_state(
+        self,
+        num_slots: int,
+        dtype: torch.dtype | None = None,
+    ) -> MemoryState:
         if type(num_slots) is not int or num_slots <= 0:
             raise ValueError("num_slots must be a positive integer")
         if num_slots > self.slot_limit:
@@ -127,23 +134,35 @@ class JointMemoryWriter(nn.Module):
             parameter.dtype,
         )
         values = self.initial_seed + self.initial_projection(positions)
+        if dtype is not None:
+            if not dtype.is_floating_point:
+                raise TypeError("state dtype must be floating-point")
+            values = values.to(dtype=dtype)
         return MemoryState(values, seen_tokens=0)
 
     def forward(self, state: MemoryState, features: Tensor, grow_by: int) -> MemoryState:
         self._validate_update(state, features, grow_by)
         old_values = state.values
         next_slots = state.num_slots + grow_by
-        source = torch.cat(
-            (old_values + self.old_type, features + self.new_type),
-            dim=0,
-        ).unsqueeze(0)
+        activation_dtype = old_values.dtype
+        source = (
+            torch.cat(
+                (
+                    old_values + self.old_type.to(dtype=activation_dtype),
+                    features + self.new_type.to(dtype=activation_dtype),
+                ),
+                dim=0,
+            )
+            .to(dtype=activation_dtype)
+            .unsqueeze(0)
+        )
 
         if grow_by:
             birth = (
-                self.birth_seed
+                self.birth_seed.to(dtype=activation_dtype)
                 + self.birth_from_input(features.mean(dim=0))
                 + self.birth_from_memory(old_values.mean(dim=0))
-            )
+            ).to(dtype=activation_dtype)
             born_values = birth.unsqueeze(0).expand(grow_by, -1)
             queries = torch.cat((old_values, born_values), dim=0)
         else:
@@ -158,7 +177,9 @@ class JointMemoryWriter(nn.Module):
 
         for block in self.blocks:
             queries = block(queries, source)
-        delta = self.output_projection(self.output_norm(queries.squeeze(0)))
+        delta = self.output_projection(self.output_norm(queries.squeeze(0))).to(
+            dtype=activation_dtype
+        )
         base = torch.cat((old_values, old_values.new_zeros(grow_by, self.d_mem)), dim=0)
         return MemoryState(base + delta, state.seen_tokens + features.shape[0])
 
@@ -178,8 +199,8 @@ class JointMemoryWriter(nn.Module):
         parameter = self.initial_seed
         if state.values.device != parameter.device or features.device != parameter.device:
             raise ValueError("state, features, and writer must be on the same device")
-        if state.values.dtype != parameter.dtype or features.dtype != parameter.dtype:
-            raise ValueError("state, features, and writer must have the same dtype")
+        if state.values.dtype != features.dtype:
+            raise ValueError("state and features must have the same dtype")
 
 
 class GrowthValueNetwork(nn.Module):

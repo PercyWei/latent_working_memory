@@ -27,6 +27,10 @@ def test_sinusoidal_positions_are_deterministic_and_distinct() -> None:
     assert positions.shape == (3, 7)
     assert torch.equal(positions, sinusoidal_positions(3, 7, "cpu", torch.float32))
     assert not torch.equal(positions[0], positions[1])
+    assert torch.equal(
+        positions[1:],
+        sinusoidal_positions(2, 7, "cpu", torch.float32, start=1),
+    )
 
 
 def test_writer_shapes_seen_tokens_and_non_mutation() -> None:
@@ -51,6 +55,20 @@ def test_writer_preserves_bfloat16_runtime_state() -> None:
     output = writer(state, torch.randn(3, 8, dtype=torch.bfloat16), 8)
     assert state.values.dtype == torch.bfloat16
     assert output.values.dtype == torch.bfloat16
+
+
+def test_writer_keeps_fp32_parameters_with_bfloat16_autocast_state() -> None:
+    writer = _writer()
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        state = writer.initialize_state(2, dtype=torch.bfloat16)
+        output = writer(state, torch.randn(3, 8, dtype=torch.bfloat16), 0)
+    output.values.float().sum().backward()
+
+    assert writer.initial_seed.dtype == torch.float32
+    assert state.values.dtype == torch.bfloat16
+    assert output.values.dtype == torch.bfloat16
+    assert writer.output_projection.weight.grad is not None
+    assert writer.output_projection.weight.grad.dtype == torch.float32
 
 
 def test_new_and_old_outputs_depend_on_old_memory_and_current_features() -> None:

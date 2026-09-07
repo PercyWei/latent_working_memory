@@ -45,3 +45,11 @@ def test_config_rejects_inconsistent_dimensions_and_probabilities() -> None:
         replace(ExperimentConfig(), d_mem=10, num_heads=4)
     with pytest.raises(ValueError, match="sum to 1"):
         replace(ExperimentConfig(), exploration_probs=(0.5, 0.25, 0.05))
+    with pytest.raises(ValueError, match="same base model"):
+        replace(ExperimentConfig(), teacher_model_name_or_path="different-model")
+    with pytest.raises(ValueError, match="same model revision"):
+        replace(ExperimentConfig(), teacher_model_revision="different-revision")
+    with pytest.raises(ValueError, match="k_init"):
+        replace(ExperimentConfig(), k_init=24)
+    with pytest.raises(ValueError, match="divisible by 8"):
+        replace(ExperimentConfig(), k_limit=510)

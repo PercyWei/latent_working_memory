@@ -1,10 +1,10 @@
-# 20260907 可增长 Latent Working Memory 框架设计 v1（20260907 17:52:00 CST）
+# 20260907 可增长 Latent Working Memory 框架设计 v1（20260907 21:50:07 CST）
 
 创建时间：20260907 11:30:02 CST（UTC+08:00）
 
-最后修订时间：20260907 17:52:00 CST（UTC+08:00）
+最后修订时间：20260907 21:50:07 CST（UTC+08:00）
 
-状态：第一版设计；M0–M2 的 CPU 工程骨架已经实现并通过测试，实际 Llama/LoRA、P0–P3 训练及 GPU 实验尚未开始。当前主线为完整上下文输出蒸馏、学生 writer–reader 联合训练与容量策略交替学习；数值配置是 pilot 起点，不是已验证的最优参数。
+状态：第一版设计；M0–M2 以及 M3/P0 的工程链路已经实现，并以标准 Transformers/PEFT tiny Llama 通过 CPU 集成测试。服务器 Llama-2-7B-Chat smoke、16-episode P0 训练、P1–P3 和 GPU 实验尚未完成。当前主线为完整上下文输出蒸馏、学生 writer–reader 联合训练与容量策略交替学习；数值配置是 pilot 起点，不是已验证的最优参数。
 
 ## 1. 已达成的研究判断
 
@@ -517,7 +517,7 @@ v1 将更新器最后一层 cross-attention 的来源分配、latent 范数/有�
 
 ## 11. 代码落点、接口和持久化
 
-以下是目标实现位置；截至本次修订，配置、数据/状态、纯张量模型、目标函数、feature rollout、容量成本、基础指标、checkpoint 和数据生成入口已经创建，依赖实际语言模型的模块仍待实现。v1 作为完整的纵向切片放在独立目录中；未来版本使用同级 `v2/`、`v3/`，不覆盖 v1 的代码、配置、测试或产物。当前不预建后续版本目录，也不提前抽取跨版本兼容层；只有多个已实现版本确认共享稳定契约后，才把相同逻辑提升到版本目录之外。详细实施顺序见 [v1 实施总计划](v1/20260907_growing_latent_working_memory_implementation_plan.md)。
+以下是目标实现位置；截至本次修订，配置、数据/状态、纯张量模型、目标函数、feature rollout、容量成本、基础指标、checkpoint、数据生成入口，以及实际 Transformers/PEFT backbone 和 P0 训练入口已经创建。P1–P3、baselines 与完整 evaluate 入口仍待对应里程碑实现。v1 作为完整的纵向切片放在独立目录中；未来版本使用同级 `v2/`、`v3/`，不覆盖 v1 的代码、配置、测试或产物。当前不预建后续版本目录，也不提前抽取跨版本兼容层；只有多个已实现版本确认共享稳定契约后，才把相同逻辑提升到版本目录之外。详细实施顺序见 [v1 实施总计划](v1/20260907_growing_latent_working_memory_implementation_plan.md)。
 
 ```text
 src/latent_working_memory/
@@ -545,17 +545,18 @@ notes/v1/
 核心签名与返回约定：
 
 ```python
-encode_cells(cell_input_ids, source_start) -> Tensor            # [c,512]
-teacher_logits(prefix_input_ids, question_ids, answer_ids) -> Tensor  # [L,V]
+frozen_cell_encoding(cells) -> CellEncoding                     # [c,d_lm]，无梯度
+project_cell_encoding(cell_encoding) -> Tensor                  # [c,512]
+teacher_output(prefix_input_ids, qa_tokens) -> ReaderOutput      # [L,V]
 initialize_state(num_slots) -> MemoryState
 predict_growth_costs(state, features) -> Tensor                 # [3]
 choose_growth(costs, num_slots, slot_limit) -> int               # 0/8/16
 update_memory(state, features, grow_by) -> MemoryState
-read_memory(memory, question_ids, answer_ids) -> ReaderOutput
+student_output(memory, qa_tokens) -> ReaderOutput
 build_capacity_targets(state, features, continuation, probes) -> CapacityTarget
 ```
 
-`teacher_logits` 只供训练器使用，返回答案相对位置上的完整词表 logits；`compress_prefix(prefix_features,num_slots)` 仅属于全量压缩对照。主学生训练与部署都不调用 `C_phi`。模型组件持有各自参数；容量评估器绑定同一个完整学生 checkpoint 后才展开分支。
+`teacher_output` 只供训练器使用，返回答案相对位置上的完整词表 logits；`frozen_cell_encoding` 与可训练的 `project_cell_encoding` 分开，使后续阶段只能缓存无梯度的 `E0` 输出。`compress_prefix(prefix_features,num_slots)` 仅属于全量压缩对照。主学生训练与部署都不调用 `C_phi`。模型组件持有各自参数；容量评估器绑定同一个完整学生 checkpoint 后才展开分支。
 
 部署主循环只有以下数据通路；`evaluation_queries` 由外部驱动器提供，不传入容量网络或 writer：
 
