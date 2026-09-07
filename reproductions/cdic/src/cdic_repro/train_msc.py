@@ -10,15 +10,15 @@ from pathlib import Path
 
 import torch
 
+from cdic_repro.checkpoint import (
+    TrainingProgress,
+    load_cdic_checkpoint,
+    save_cdic_checkpoint,
+)
 from cdic_repro.distributed import DistributedContext, initialize_distributed
 from cdic_repro.icae_adapter import IcaeV1TrainingAdapter, torch_cosine_similarity
 from cdic_repro.msc import MscEpisode, load_msc_episodes, summarize_msc_episodes
 from cdic_repro.training import CdicTrainingEngine, EpisodeTrainingResult
-from cdic_repro.training_checkpoint import (
-    TrainingProgress,
-    load_training_checkpoint,
-    save_training_checkpoint,
-)
 from cdic_repro.training_config import CdicMscTrainingConfig, load_training_config
 
 
@@ -105,7 +105,7 @@ def _run_training_worker(
     )
     progress = TrainingProgress()
     if config.training.resume_from is not None:
-        progress = load_training_checkpoint(
+        progress = load_cdic_checkpoint(
             config.training.resume_from,
             model=adapter,
             optimizer=optimizer,
@@ -227,7 +227,7 @@ def _run_training_worker(
                     rng_states = distributed.gather_rng_states()
                     checkpoint_dir = output_dir / "checkpoints"
                     if distributed.is_main:
-                        save_training_checkpoint(
+                        save_cdic_checkpoint(
                             checkpoint_dir / f"step-{global_step:06d}.pt",
                             model=adapter,
                             optimizer=optimizer,
@@ -248,7 +248,7 @@ def _run_training_worker(
     if config.training.save_final_checkpoint and not last_step_was_saved:
         rng_states = distributed.gather_rng_states()
         if distributed.is_main:
-            save_training_checkpoint(
+            save_cdic_checkpoint(
                 output_dir / "checkpoints" / "final.pt",
                 model=adapter,
                 optimizer=optimizer,

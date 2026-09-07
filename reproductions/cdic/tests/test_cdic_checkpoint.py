@@ -5,11 +5,11 @@ from pathlib import Path
 import pytest
 import torch
 
-from cdic_repro.training_checkpoint import (
+from cdic_repro.checkpoint import (
     TrainingProgress,
-    load_model_from_training_checkpoint,
-    load_training_checkpoint,
-    save_training_checkpoint,
+    load_cdic_checkpoint,
+    load_cdic_model_checkpoint,
+    save_cdic_checkpoint,
 )
 
 
@@ -40,14 +40,14 @@ class FakeOptimizer:
         self.state = dict(state_dict)
 
 
-def test_training_checkpoint_restores_model_optimizer_progress_and_rng(tmp_path: Path) -> None:
+def test_cdic_checkpoint_restores_model_optimizer_progress_and_rng(tmp_path: Path) -> None:
     path = tmp_path / "checkpoint.pt"
     model = FakeModel()
     optimizer = FakeOptimizer()
     torch.manual_seed(123)
     expected_rng_state = torch.get_rng_state().clone()
     progress = TrainingProgress(epoch=1, next_episode_position=7, global_step=18)
-    save_training_checkpoint(
+    save_cdic_checkpoint(
         path,
         model=model,  # type: ignore[arg-type]
         optimizer=optimizer,
@@ -58,7 +58,7 @@ def test_training_checkpoint_restores_model_optimizer_progress_and_rng(tmp_path:
     optimizer.state = {"step": 99}
     torch.manual_seed(999)
 
-    restored = load_training_checkpoint(
+    restored = load_cdic_checkpoint(
         path,
         model=model,  # type: ignore[arg-type]
         optimizer=optimizer,
@@ -71,11 +71,11 @@ def test_training_checkpoint_restores_model_optimizer_progress_and_rng(tmp_path:
     assert torch.equal(torch.get_rng_state(), expected_rng_state)
 
 
-def test_training_checkpoint_rejects_different_config(tmp_path: Path) -> None:
+def test_cdic_checkpoint_rejects_different_config(tmp_path: Path) -> None:
     path = tmp_path / "checkpoint.pt"
     model = FakeModel()
     optimizer = FakeOptimizer()
-    save_training_checkpoint(
+    save_cdic_checkpoint(
         path,
         model=model,  # type: ignore[arg-type]
         optimizer=optimizer,
@@ -84,7 +84,7 @@ def test_training_checkpoint_rejects_different_config(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="fingerprint"):
-        load_training_checkpoint(
+        load_cdic_checkpoint(
             path,
             model=model,  # type: ignore[arg-type]
             optimizer=optimizer,
@@ -98,7 +98,7 @@ def test_evaluation_restore_loads_only_model_state(tmp_path: Path) -> None:
     optimizer = FakeOptimizer()
     torch.manual_seed(321)
     progress = TrainingProgress(epoch=2, next_episode_position=0, global_step=1002)
-    save_training_checkpoint(
+    save_cdic_checkpoint(
         path,
         model=model,  # type: ignore[arg-type]
         optimizer=optimizer,
@@ -110,7 +110,7 @@ def test_evaluation_restore_loads_only_model_state(tmp_path: Path) -> None:
     torch.manual_seed(654)
     changed_rng_state = torch.get_rng_state().clone()
 
-    restored = load_model_from_training_checkpoint(
+    restored = load_cdic_model_checkpoint(
         path,
         model=model,
     )

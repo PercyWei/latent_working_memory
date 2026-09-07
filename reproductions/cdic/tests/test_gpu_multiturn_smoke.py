@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from cdic_repro.checkpoint import load_cdic_model_checkpoint
 from cdic_repro.config import RetrievalConfig
 from cdic_repro.engine import CdicInferenceEngine
 from cdic_repro.icae_adapter import (
@@ -14,7 +15,6 @@ from cdic_repro.icae_adapter import (
     IcaeV1InferenceAdapter,
     torch_cosine_similarity,
 )
-from cdic_repro.training_checkpoint import load_model_from_training_checkpoint
 from cdic_repro.writeback import WriteAction
 
 
@@ -106,7 +106,7 @@ def test_real_icae_multiturn_state_machine(pytestconfig: pytest.Config) -> None:
     )
     training_progress = None
     if training_checkpoint_path is not None:
-        training_progress = load_model_from_training_checkpoint(
+        training_progress = load_cdic_model_checkpoint(
             training_checkpoint_path,
             model=adapter,
         )

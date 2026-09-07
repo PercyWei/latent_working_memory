@@ -8,12 +8,15 @@ from pathlib import Path
 import pytest
 import torch
 
+from cdic_repro.checkpoint import load_cdic_model_checkpoint
 from cdic_repro.config import RetrievalConfig, SupportOrder
 from cdic_repro.evaluation import evaluate_msc_episodes
-from cdic_repro.icae_adapter import IcaeV1AdapterConfig, IcaeV1TrainingAdapter
+from cdic_repro.icae_adapter import (
+    IcaeV1AdapterConfig,
+    IcaeV1TrainingAdapter,
+    torch_cosine_similarity,
+)
 from cdic_repro.msc import load_msc_episodes, summarize_msc_episodes
-from cdic_repro.training_checkpoint import load_model_from_training_checkpoint
-from cdic_repro.icae_adapter import torch_cosine_similarity
 
 
 pytestmark = [pytest.mark.gpu, pytest.mark.slow]
@@ -89,7 +92,7 @@ def test_msc_heldout_initialization_vs_trained(pytestconfig: pytest.Config) -> N
         return result, time.perf_counter() - started_at, torch.cuda.max_memory_allocated(device)
 
     initial, initial_seconds, initial_peak_memory = run_condition()
-    progress = load_model_from_training_checkpoint(
+    progress = load_cdic_model_checkpoint(
         training_checkpoint_path,
         model=adapter,
     )

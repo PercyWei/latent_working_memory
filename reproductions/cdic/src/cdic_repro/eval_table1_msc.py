@@ -9,6 +9,7 @@ from typing import Any
 
 import torch
 
+from cdic_repro.checkpoint import load_cdic_model_checkpoint
 from cdic_repro.config import RetrievalConfig, SupportOrder
 from cdic_repro.credit import build_credit_plan
 from cdic_repro.generation_metrics import score_generation_records
@@ -20,7 +21,6 @@ from cdic_repro.icae_adapter import (
 from cdic_repro.memory_state import MemoryBank
 from cdic_repro.msc import MscEpisode, load_msc_episodes, summarize_msc_episodes
 from cdic_repro.retrieval import retrieve
-from cdic_repro.training_checkpoint import load_model_from_training_checkpoint
 from cdic_repro.writeback import NewStatePayload, apply_write_back
 
 
@@ -115,7 +115,7 @@ def run(config: Table1MscConfig, config_path: Path) -> None:
             gradient_checkpointing=False,
         )
     )
-    progress = load_model_from_training_checkpoint(
+    progress = load_cdic_model_checkpoint(
         config.training_checkpoint_path,
         model=adapter,
     )

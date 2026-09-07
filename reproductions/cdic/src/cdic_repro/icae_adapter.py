@@ -1,20 +1,20 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Mapping
 from typing import Any
 
 import torch
 from torch import Tensor
 from icae.llama_icae_modeling import LlamaICAE, ModelArguments, TrainingArguments
-from icae_repro.checkpoint import (
-    ICAE_V1_LORA_RANK,
-    load_checkpoint_state_dict,
-    restore_zero_placeholder_checkpoint,
-)
 from peft import LoraConfig
 
+from cdic_repro.checkpoint import (
+    ICAE_V1_LORA_RANK,
+    load_icae_checkpoint_state_dict,
+    restore_icae_checkpoint_state,
+)
 from cdic_repro.credit import CreditPlan, build_compression_gradient_plan
 from cdic_repro.memory_state import ThreadState
 from cdic_repro.model_protocol import CompressedTurn, TrainingLoss
@@ -449,7 +449,7 @@ def torch_cosine_similarity(left: object, right: object) -> float:
 
 
 def _load_icae_model(config: IcaeV1AdapterConfig, do_train: bool) -> LlamaICAE:
-    state_dict = load_checkpoint_state_dict(config.checkpoint_path)
+    state_dict = load_icae_checkpoint_state_dict(config.checkpoint_path)
     if config.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable for the configured ICAE device")
     torch.manual_seed(config.seed)
@@ -488,7 +488,7 @@ def _load_icae_model(config: IcaeV1AdapterConfig, do_train: bool) -> LlamaICAE:
         task_type="CAUSAL_LM",
     )
     model = LlamaICAE(model_arguments, training_arguments, lora_config)
-    restored_state, _ = restore_zero_placeholder_checkpoint(
+    restored_state, _ = restore_icae_checkpoint_state(
         state_dict,
         model.state_dict(),
     )

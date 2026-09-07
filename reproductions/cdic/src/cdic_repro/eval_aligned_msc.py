@@ -14,6 +14,7 @@ from typing import Any
 
 import torch
 
+from cdic_repro.checkpoint import load_cdic_model_checkpoint
 from cdic_repro.config import RetrievalConfig
 from cdic_repro.credit import build_credit_plan
 from cdic_repro.generation_metrics import score_generation_records
@@ -25,7 +26,6 @@ from cdic_repro.icae_adapter import (
 from cdic_repro.memory_state import MemoryBank
 from cdic_repro.msc import MscEpisode, load_msc_episodes
 from cdic_repro.retrieval import SimilarityFunction, retrieve
-from cdic_repro.training_checkpoint import load_model_from_training_checkpoint
 from cdic_repro.writeback import NewStatePayload, apply_write_back
 
 
@@ -264,7 +264,7 @@ def run(config: AlignmentConfig) -> None:
     ))
     progress = None
     if config.training_checkpoint_path is not None:
-        progress = asdict(load_model_from_training_checkpoint(
+        progress = asdict(load_cdic_model_checkpoint(
             Path(config.training_checkpoint_path), model=adapter,
         ))
     adapter.model.eval()

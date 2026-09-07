@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 import torch
-from icae_repro.checkpoint import ICAE_V1_LORA_RANK, load_checkpoint_state_dict
 
-from cdic_repro.checkpoint import describe_state_dict
+from cdic_repro.checkpoint import ICAE_V1_LORA_RANK, load_icae_checkpoint_state_dict
+from cdic_repro.inspect_checkpoint import describe_state_dict
 
 
 def test_checkpoint_loader_requires_direct_state_dict(tmp_path: Path) -> None:
@@ -14,7 +14,7 @@ def test_checkpoint_loader_requires_direct_state_dict(tmp_path: Path) -> None:
     torch.save({"state_dict": {"layer.weight": torch.zeros(2, 2)}}, path)
 
     with pytest.raises(TypeError, match="unsupported ICAE checkpoint value"):
-        load_checkpoint_state_dict(path)
+        load_icae_checkpoint_state_dict(path)
 
 
 def test_checkpoint_schema_uses_canonical_icae_v1_rank() -> None:
@@ -41,4 +41,4 @@ def test_noncanonical_lora_rank_is_rejected(tmp_path: Path) -> None:
     torch.save({"q_proj.lora_A.default.weight": torch.zeros(64, 4)}, path)
 
     with pytest.raises(ValueError, match="invalid ICAE v1 LoRA A weight shape"):
-        load_checkpoint_state_dict(path)
+        load_icae_checkpoint_state_dict(path)
