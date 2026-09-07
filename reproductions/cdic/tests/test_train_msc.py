@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from cdic_repro.train_msc import (
+from cdic_repro.experiments.train_msc import (
     _apply_cli_overrides,
     _episode_order,
     _next_progress,
     _prune_step_checkpoints,
     _truncate_jsonl_after_step,
 )
-from cdic_repro.training_config import load_training_config
+from cdic_repro.experiments.training_config import load_training_config
 
 
 def test_episode_order_is_deterministic_per_epoch() -> None:

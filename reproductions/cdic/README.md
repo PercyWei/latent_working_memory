@@ -140,7 +140,7 @@ uv run --project reproductions/cdic --no-sync cdic-train-msc \
 ```bash
 uv run --project reproductions/cdic --no-sync \
   torchrun --standalone --nproc-per-node=2 \
-  -m cdic_repro.train_msc \
+  -m cdic_repro.experiments.train_msc \
   --config reproductions/cdic/configs/msc_pilot_a800.json
 ```
 
@@ -149,7 +149,7 @@ pilot 通过后运行 seed 42 的论文规模训练：
 ```bash
 uv run --project reproductions/cdic --no-sync \
   torchrun --standalone --nproc-per-node=2 \
-  -m cdic_repro.train_msc \
+  -m cdic_repro.experiments.train_msc \
   --config reproductions/cdic/configs/msc_paper_a800.json
 ```
 
@@ -158,7 +158,7 @@ uv run --project reproductions/cdic --no-sync \
 ```bash
 uv run --project reproductions/cdic --no-sync \
   torchrun --standalone --nproc-per-node=2 \
-  -m cdic_repro.train_msc \
+  -m cdic_repro.experiments.train_msc \
   --config reproductions/cdic/configs/msc_paper_a800.json \
   --resume-from /data/bywei/projects/latent_working_memory/checkpoints/cdic/msc_paper_seed42/checkpoints/step-000050.pt
 ```
@@ -196,7 +196,7 @@ CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/cdic --no-sync \
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/cdic --no-sync \
-  python -m cdic_repro.eval_table1_msc \
+  python -m cdic_repro.experiments.eval_table1_msc \
   --config reproductions/cdic/configs/table1_msc_pilot_a800.json
 ```
 
@@ -208,14 +208,14 @@ CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/cdic --no-sync \
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/cdic --no-sync \
-  python -m cdic_repro.eval_aligned_msc \
+  python -m cdic_repro.experiments.eval_aligned_msc \
   --config reproductions/cdic/configs/msc_alignment_initialization_a800.json
 
 CUDA_VISIBLE_DEVICES=1 uv run --project reproductions/cdic --no-sync \
-  python -m cdic_repro.eval_aligned_msc \
+  python -m cdic_repro.experiments.eval_aligned_msc \
   --config reproductions/cdic/configs/msc_alignment_final_a800.json
 
-PYTHONPATH=reproductions/cdic/src uv run python -m cdic_repro.eval_aligned_msc \
+PYTHONPATH=reproductions/cdic/src uv run python -m cdic_repro.experiments.eval_aligned_msc \
   --compare <initialization_dir> <final_dir> --output <comparison.json>
 ```
 

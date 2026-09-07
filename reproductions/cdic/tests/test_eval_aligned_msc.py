@@ -7,7 +7,7 @@ from dataclasses import asdict
 import pytest
 
 from cdic_repro.config import RetrievalConfig
-from cdic_repro.eval_aligned_msc import (
+from cdic_repro.experiments.eval_aligned_msc import (
     AlignmentConfig,
     compare_runs,
     evaluate_episode,

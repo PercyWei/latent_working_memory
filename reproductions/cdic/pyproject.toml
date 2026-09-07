@@ -11,8 +11,8 @@ dependencies = [
 [project.scripts]
 cdic-inspect-checkpoint = "cdic_repro.inspect_checkpoint:main"
 cdic-run-dialogue = "cdic_repro.run_dialogue:main"
-cdic-train-msc = "cdic_repro.train_msc:main"
-cdic-eval-table1-msc = "cdic_repro.eval_table1_msc:main"
+cdic-train-msc = "cdic_repro.experiments.train_msc:main"
+cdic-eval-table1-msc = "cdic_repro.experiments.eval_table1_msc:main"
 
 [build-system]
 requires = ["hatchling"]

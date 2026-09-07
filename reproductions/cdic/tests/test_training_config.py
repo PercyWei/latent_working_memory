@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from cdic_repro.config import SupportOrder
-from cdic_repro.training_config import load_training_config
+from cdic_repro.experiments.training_config import load_training_config
 
 
 def test_training_config_loads_paper_defaults(tmp_path: Path) -> None:
