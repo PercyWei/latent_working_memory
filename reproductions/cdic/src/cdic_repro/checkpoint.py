@@ -23,11 +23,7 @@ from icae_repro.checkpoint import (
 from cdic_repro.model_protocol import TrainableStateAdapter
 
 
-CDIC_CHECKPOINT_VERSION = 2
-
-
 __all__ = [
-    "CDIC_CHECKPOINT_VERSION",
     "ICAE_V1_LORA_RANK",
     "TrainingProgress",
     "load_cdic_checkpoint",
@@ -56,7 +52,6 @@ def save_cdic_checkpoint(
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     payload = {
-        "version": CDIC_CHECKPOINT_VERSION,
         "config_fingerprint": config_fingerprint,
         "progress": asdict(progress),
         "model_state": dict(model.trainable_state_dict()),
@@ -84,8 +79,6 @@ def load_cdic_checkpoint(
     payload = _load_cdic_checkpoint_payload(path)
     if not isinstance(payload, dict):
         raise TypeError("C-DIC checkpoint must contain a mapping")
-    if payload.get("version") != CDIC_CHECKPOINT_VERSION:
-        raise ValueError(f"unsupported C-DIC checkpoint version: {payload.get('version')}")
     if payload.get("config_fingerprint") != expected_config_fingerprint:
         raise ValueError("C-DIC checkpoint config fingerprint does not match")
     model_state = payload.get("model_state")
@@ -118,8 +111,6 @@ def load_cdic_model_checkpoint(
     payload = _load_cdic_checkpoint_payload(path)
     if not isinstance(payload, dict):
         raise TypeError("C-DIC checkpoint must contain a mapping")
-    if payload.get("version") != CDIC_CHECKPOINT_VERSION:
-        raise ValueError(f"unsupported C-DIC checkpoint version: {payload.get('version')}")
     model_state = payload.get("model_state")
     progress = payload.get("progress")
     if not isinstance(model_state, dict):

@@ -112,7 +112,7 @@ def test_paired_bootstrap_preserves_a_constant_per_token_difference():
     assert result["percentile_95_interval"] == [0.5, 0.5]
 
 
-def test_comparison_rejects_incomplete_mismatched_or_mixed_protocols(tmp_path):
+def test_comparison_rejects_incomplete_or_mismatched_runs(tmp_path):
     rows = collect(Adapter())
     folders = [tmp_path / "init", tmp_path / "final"]
     for folder, condition in zip(folders, ("initialization", "final")):
@@ -122,7 +122,7 @@ def test_comparison_rejects_incomplete_mismatched_or_mixed_protocols(tmp_path):
             "data", str(folder), condition,
         )
         (folder / "protocol.json").write_text(json.dumps({
-            "version": "test", "config": asdict(config),
+            "config": asdict(config),
             "episode_ids": ["example"], "expected_scored_turns": 8,
         }))
         (folder / "predictions.jsonl").write_text("\n".join(json.dumps(row) for row in rows))

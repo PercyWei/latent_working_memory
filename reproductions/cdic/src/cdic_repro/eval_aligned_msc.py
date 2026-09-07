@@ -29,7 +29,6 @@ from cdic_repro.retrieval import SimilarityFunction, retrieve
 from cdic_repro.writeback import NewStatePayload, apply_write_back
 
 
-PROTOCOL_VERSION = "msc-alignment-v1"
 SCOPES = ("all_turns_s2_s5", "session_final_s2_s5", "episode_final_s5")
 
 
@@ -231,7 +230,6 @@ def run(config: AlignmentConfig) -> None:
     expected_ids = {turn.turn_id for episode in episodes for turn in episode.turns
                     if turn.session_index >= 2}
     protocol = {
-        "version": PROTOCOL_VERSION,
         "config": asdict(config),
         "episode_ids": [episode.episode_id for episode in episodes],
         "expected_scored_turns": len(expected_ids),
@@ -305,8 +303,6 @@ def run(config: AlignmentConfig) -> None:
 def compare_runs(initialization: Path, final: Path, output: Path) -> dict[str, Any]:
     protocols = [json.loads((folder / "protocol.json").read_text())
                  for folder in (initialization, final)]
-    if protocols[0]["version"] != protocols[1]["version"]:
-        raise ValueError("protocol versions differ")
     ignored = {"condition", "training_checkpoint_path", "artifact_dir", "device"}
     configs = [{key: value for key, value in protocol["config"].items() if key not in ignored}
                for protocol in protocols]
@@ -329,7 +325,6 @@ def compare_runs(initialization: Path, final: Path, output: Path) -> dict[str, A
             if left[field] != right[field]:
                 raise ValueError(f"paired target mismatch: {row_id}, {field}")
     report: dict[str, Any] = {
-        "protocol_version": protocols[0]["version"],
         "episode_ids": protocols[0]["episode_ids"], "common_config": configs[0], "scopes": {},
     }
     for scope in SCOPES:
