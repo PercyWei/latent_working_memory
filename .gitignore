@@ -16,3 +16,5 @@ reports/generated/
 *.pth
 *.bin
 *.safetensors
+
+AGENTS.md
