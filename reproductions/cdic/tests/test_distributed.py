@@ -38,3 +38,10 @@ def test_multiple_devices_require_matching_torchrun_world(monkeypatch: pytest.Mo
             primary_device="cuda:0",
             devices=("cuda:0", "cuda:1"),
         )
+
+
+def test_single_worker_gather_objects_returns_the_local_value() -> None:
+    context = DistributedContext(rank=0, local_rank=0, world_size=1, device="cuda:0")
+    value = {"loss": 2.0}
+
+    assert context.gather_objects(value) == (value,)

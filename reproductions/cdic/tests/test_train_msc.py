@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from cdic_repro.experiments.msc.train import (
+    _aggregate_training_metrics,
     _apply_cli_overrides,
     _episode_order,
     load_training_config,
@@ -91,3 +92,44 @@ def test_cli_seed_and_output_overrides_update_model_and_training(tmp_path: Path)
     assert config.training.seed == 43
     assert config.training.output_dir == Path("/new")
     assert config.training.resume_from == Path("/resume.pt")
+
+
+def test_swanlab_training_metrics_aggregate_active_workers() -> None:
+    metrics = _aggregate_training_metrics(
+        (
+            {
+                "loss_sum": 6.0,
+                "turns": 3,
+                "backward_turns": 2,
+                "retrieval_turns": 2,
+                "on_topic_turns": 2,
+                "selected_states": 3,
+                "final_memory_states": 2,
+                "duration_seconds": 1.5,
+                "peak_memory_bytes": 2 * 1024**3,
+            },
+            {
+                "loss_sum": 4.0,
+                "turns": 2,
+                "backward_turns": 1,
+                "retrieval_turns": 1,
+                "on_topic_turns": 1,
+                "selected_states": 4,
+                "final_memory_states": 4,
+                "duration_seconds": 2.0,
+                "peak_memory_bytes": 3 * 1024**3,
+            },
+        ),
+        gradient_norm=1.25,
+    )
+
+    assert metrics == {
+        "train/mean_turn_nll": 2.0,
+        "train/gradient_norm": 1.25,
+        "train/backward_fraction": 0.6,
+        "retrieval/on_topic_rate": 1.0,
+        "retrieval/mean_selected_states": 7 / 3,
+        "memory/mean_final_states": 3.0,
+        "resources/step_seconds": 2.0,
+        "resources/peak_memory_gib": 3.0,
+    }

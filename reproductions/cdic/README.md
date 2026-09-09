@@ -1,8 +1,8 @@
-# C-DIC 论文复现（20260909 11:44:10 CST）
+# C-DIC 论文复现（20260909 15:22:35 CST）
 
 创建时间：20260904 16:19:08 CST（UTC+08:00）
 
-最后修订时间：20260909 11:44:10 CST（UTC+08:00）
+最后修订时间：20260909 15:22:35 CST（UTC+08:00）
 
 本目录用于分阶段复现 Context-Driven Incremental Compression（C-DIC）。由于当前没有公开的官方实现，所有论文未明确的行为均记录在 `ASSUMPTIONS.md`。
 
@@ -54,6 +54,33 @@ R2 训练代码已实现：
 ```bash
 PYTHONPATH=reproductions/cdic/src uv run pytest -q reproductions/cdic/tests
 uv run ruff check reproductions/cdic/src reproductions/cdic/tests
+```
+
+## SwanLab 可视化
+
+训练和评估入口均支持 `--swanlab-mode disabled|offline|online`，默认不记录；所有 runs 默认保存在 `latent-working-memory` project 中。启用记录时必须通过 `--swanlab-group` 指定实验系列，同一实验的训练、评估和配对比较使用相同 group，并分别标记为 `train`、`evaluate` 和 `compare`。代码自动附加 `scope:reproduction`、`method:cdic` 和 `data:msc`，实验性质等额外标签通过可重复的 `--swanlab-tag` 添加；学习率、阈值和 seed 等具体参数只保存在 config 中。
+
+在线模式复用服务器已有登录，离线数据保存在实验输出目录的 `swanlab/`，实验 ID、group、job type、tags 和链接写入 `swanlab.json`。恢复训练或重复评估同一输出目录时会校验这些组织信息并续接该实验，也可在独立评估时通过 `--swanlab-run-id` 指定已有实验。接口行为参见 [SwanLab 初始化与续接文档](https://docs.swanlab.cn/api/py-init.html)和[实验分组文档](https://docs.swanlab.cn/guide_cloud/experiment_track/grouping.html)。
+
+训练看板只记录 mean turn NLL、gradient norm、有效反传比例、检索命中率、平均检索状态数、最终 memory 状态数、step 时间和峰值显存；两个检索指标排除尚无 memory 的 episode 首轮。多卡训练由主进程记录所有活跃 rank 的聚合值。正式评估只记录三个计分范围的关键 PPL、全部轮次与 session 5 最终轮的 BLEU/ROUGE-L、检索指标和最多八条覆盖首尾的均匀抽取文本样例；配对比较记录各计分范围的 NLL 差与改善轮次比例。
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 uv run --project reproductions/cdic --no-sync \
+  torchrun --standalone --nproc-per-node=2 \
+  -m cdic_repro.experiments.msc.train \
+  --config reproductions/cdic/configs/msc_paper_a800.json \
+  --swanlab-mode online \
+  --swanlab-group cdic-msc-paper-seed42 \
+  --swanlab-tag study:paper-reproduction \
+  --swanlab-tag scale:full
+
+CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/cdic --no-sync \
+  python -m cdic_repro.experiments.msc.evaluate \
+  --config reproductions/cdic/configs/msc_alignment_final_a800.json \
+  --swanlab-mode online \
+  --swanlab-group cdic-msc-paper-seed42 \
+  --swanlab-tag study:paper-reproduction \
+  --swanlab-tag scale:full
 ```
 
 ## 服务器环境

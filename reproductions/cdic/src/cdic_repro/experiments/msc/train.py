@@ -22,11 +22,13 @@ from cdic_repro.experiments.checkpoint import (
     save_cdic_checkpoint,
 )
 from cdic_repro.experiments.distributed import DistributedContext, initialize_distributed
+from cdic_repro.experiments.msc import MSC_SWANLAB_TAGS
 from cdic_repro.experiments.msc.data import (
     MscEpisode,
     load_msc_episodes,
     summarize_msc_episodes,
 )
+from cdic_repro.experiments.tracking import SWANLAB_MODES, swanlab_run
 from cdic_repro.icae.adapter import (
     IcaeV1AdapterConfig,
     IcaeV1TrainingAdapter,
@@ -328,6 +330,10 @@ def main() -> None:
     parser.add_argument("--resume-from", type=Path)
     parser.add_argument("--seed", type=int)
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--swanlab-mode", choices=SWANLAB_MODES, default="disabled")
+    parser.add_argument("--swanlab-project", default="latent-working-memory")
+    parser.add_argument("--swanlab-group")
+    parser.add_argument("--swanlab-tag", action="append", default=[])
     parser.add_argument(
         "--validate-data-only",
         action="store_true",
@@ -353,14 +359,28 @@ def main() -> None:
     if arguments.validate_data_only:
         print(json.dumps(data_summary, indent=2, sort_keys=True))
         return
-    run_training(config, episodes=episodes, data_summary=data_summary)
+    run_training(
+        config,
+        episodes=episodes,
+        data_summary=data_summary,
+        swanlab_mode=arguments.swanlab_mode,
+        swanlab_project=arguments.swanlab_project,
+        swanlab_group=arguments.swanlab_group,
+        swanlab_tags=MSC_SWANLAB_TAGS + tuple(arguments.swanlab_tag),
+    )
 
 
 def run_training(
     config: MscTrainingConfig,
     episodes: tuple[MscEpisode, ...],
     data_summary: dict[str, float | int],
+    swanlab_mode: str = "disabled",
+    swanlab_project: str = "latent-working-memory",
+    swanlab_group: str | None = None,
+    swanlab_tags: tuple[str, ...] = MSC_SWANLAB_TAGS,
 ) -> None:
+    if swanlab_mode != "disabled" and not swanlab_group:
+        raise ValueError("enabled SwanLab runs require a group")
     distributed = initialize_distributed(
         primary_device=config.model.device,
         devices=config.model.devices,
@@ -371,6 +391,10 @@ def run_training(
             episodes=episodes,
             data_summary=data_summary,
             distributed=distributed,
+            swanlab_mode=swanlab_mode,
+            swanlab_project=swanlab_project,
+            swanlab_group=swanlab_group,
+            swanlab_tags=swanlab_tags,
         )
     finally:
         distributed.close()
@@ -381,6 +405,10 @@ def _run_training_worker(
     episodes: tuple[MscEpisode, ...],
     data_summary: dict[str, float | int],
     distributed: DistributedContext,
+    swanlab_mode: str,
+    swanlab_project: str,
+    swanlab_group: str | None,
+    swanlab_tags: tuple[str, ...],
 ) -> None:
     output_dir = config.training.output_dir
     _prepare_output_directory(output_dir, resume_from=config.training.resume_from)
@@ -431,6 +459,15 @@ def _run_training_worker(
     mode = "a" if config.training.resume_from is not None else "w"
     global_step = progress.global_step
     with (
+        swanlab_run(
+            output_dir,
+            config.to_dict() | {"data_summary": data_summary},
+            mode=swanlab_mode if distributed.is_main else "disabled",
+            project=swanlab_project,
+            group=swanlab_group,
+            tags=swanlab_tags,
+            job_type="train",
+        ) as tracking,
         metrics_path.open(mode, encoding="utf-8") as metrics_file,
         traces_path.open(mode, encoding="utf-8") as traces_file,
     ):
@@ -516,6 +553,22 @@ def _run_training_worker(
                         duration_seconds,
                         peak_memory_bytes,
                     )
+                if (
+                    swanlab_mode != "disabled"
+                    and global_step % config.training.log_every_steps == 0
+                ):
+                    tracking_records = distributed.gather_objects(
+                        _training_tracking_record(
+                            result,
+                            duration_seconds=duration_seconds,
+                            peak_memory_bytes=peak_memory_bytes,
+                        )
+                    )
+                    if tracking is not None:
+                        tracking.log(
+                            _aggregate_training_metrics(tracking_records, grad_norm),
+                            step=global_step,
+                        )
                 next_progress = _next_progress(
                     epoch=epoch,
                     position=batch_start,
@@ -656,6 +709,73 @@ def _gradient_norm_and_clip(
         for gradient in gradients:
             gradient.mul_(scale)
     return total_norm
+
+
+def _training_tracking_record(
+    result: EpisodeTrainingResult | None,
+    duration_seconds: float,
+    peak_memory_bytes: int,
+) -> dict[str, float | int] | None:
+    if result is None:
+        return None
+    retrieval_records = [record for record in result.records if record.trace.turn > 1]
+    return {
+        "loss_sum": result.mean_loss * result.turns,
+        "turns": result.turns,
+        "backward_turns": result.backward_turns,
+        "retrieval_turns": len(retrieval_records),
+        "on_topic_turns": sum(record.trace.retrieval.on_topic for record in retrieval_records),
+        "selected_states": sum(
+            len(record.trace.retrieval.selected_state_ids) for record in retrieval_records
+        ),
+        "final_memory_states": result.final_memory_states,
+        "duration_seconds": duration_seconds,
+        "peak_memory_bytes": peak_memory_bytes,
+    }
+
+
+def _aggregate_training_metrics(
+    gathered: tuple[object, ...],
+    gradient_norm: float,
+) -> dict[str, float]:
+    records = [record for record in gathered if record is not None]
+    if not records or not all(isinstance(record, dict) for record in records):
+        raise TypeError("distributed SwanLab records must be mappings")
+    turns = sum(int(record["turns"]) for record in records)
+    metrics = {
+        "train/mean_turn_nll": sum(float(record["loss_sum"]) for record in records) / turns,
+        "train/gradient_norm": gradient_norm,
+        "train/backward_fraction": sum(
+            int(record["backward_turns"]) for record in records
+        )
+        / turns,
+        "memory/mean_final_states": sum(
+            int(record["final_memory_states"]) for record in records
+        )
+        / len(records),
+        "resources/step_seconds": max(
+            float(record["duration_seconds"]) for record in records
+        ),
+        "resources/peak_memory_gib": max(
+            int(record["peak_memory_bytes"]) for record in records
+        )
+        / 1024**3,
+    }
+    retrieval_turns = sum(int(record["retrieval_turns"]) for record in records)
+    if retrieval_turns:
+        metrics.update(
+            {
+                "retrieval/on_topic_rate": sum(
+                    int(record["on_topic_turns"]) for record in records
+                )
+                / retrieval_turns,
+                "retrieval/mean_selected_states": sum(
+                    int(record["selected_states"]) for record in records
+                )
+                / retrieval_turns,
+            }
+        )
+    return metrics
 
 
 def _write_json(path: Path, payload: object) -> None:

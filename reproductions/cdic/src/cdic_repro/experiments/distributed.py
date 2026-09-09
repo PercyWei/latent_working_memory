@@ -62,6 +62,13 @@ class DistributedContext:
             raise RuntimeError("failed to gather RNG state from every distributed worker")
         return [state for state in gathered if state is not None]
 
+    def gather_objects(self, value: object) -> tuple[object, ...]:
+        if not self.enabled:
+            return (value,)
+        gathered: list[object | None] = [None] * self.world_size
+        torch.distributed.all_gather_object(gathered, value)
+        return tuple(gathered)
+
     def close(self) -> None:
         if self.enabled and torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
