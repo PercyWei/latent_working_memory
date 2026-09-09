@@ -8,15 +8,15 @@ from pathlib import Path
 import pytest
 import torch
 
-from cdic_repro.checkpoint import load_cdic_model_checkpoint
 from cdic_repro.config import RetrievalConfig, RetrievedStateOrder
-from cdic_repro.evaluation import evaluate_msc_episodes
-from cdic_repro.icae_adapter import (
+from cdic_repro.experiments.checkpoint import load_cdic_model_checkpoint
+from cdic_repro.experiments.evaluation import evaluate_msc_episodes
+from cdic_repro.experiments.msc import load_msc_episodes, summarize_msc_episodes
+from cdic_repro.icae.adapter import (
     IcaeV1AdapterConfig,
     IcaeV1TrainingAdapter,
     torch_cosine_similarity,
 )
-from cdic_repro.msc import load_msc_episodes, summarize_msc_episodes
 
 
 pytestmark = [pytest.mark.gpu, pytest.mark.slow]

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from cdic_repro.config import RetrievalConfig
 from cdic_repro.engine import CdicInferenceEngine
-from cdic_repro.icae_adapter import (
+from cdic_repro.icae.adapter import (
     IcaeV1AdapterConfig,
     IcaeV1InferenceAdapter,
     torch_cosine_similarity,

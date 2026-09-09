@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from cdic_repro.config import RetrievalConfig
-from cdic_repro.evaluation import evaluate_msc_episodes
+from cdic_repro.experiments.evaluation import evaluate_msc_episodes
 from cdic_repro.model_protocol import CompressedTurn, TrainingLoss
-from cdic_repro.msc import MscEpisode, MscTurn
+from cdic_repro.experiments.msc import MscEpisode, MscTurn
 
 
 class FakeEvaluationAdapter:

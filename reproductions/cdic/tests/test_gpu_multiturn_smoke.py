@@ -7,10 +7,10 @@ from pathlib import Path
 import pytest
 import torch
 
-from cdic_repro.checkpoint import load_cdic_model_checkpoint
+from cdic_repro.experiments.checkpoint import load_cdic_model_checkpoint
 from cdic_repro.config import RetrievalConfig
 from cdic_repro.engine import CdicInferenceEngine
-from cdic_repro.icae_adapter import (
+from cdic_repro.icae.adapter import (
     IcaeV1AdapterConfig,
     IcaeV1InferenceAdapter,
     torch_cosine_similarity,

@@ -10,7 +10,8 @@ from torch import Tensor
 from torch.nn import functional
 
 from cdic_repro.credit import CreditPlan, build_compression_gradient_plan
-from cdic_repro.icae import IcaeConfig, LlamaICAE, load_icae_checkpoint
+from cdic_repro.icae.checkpoint import load_icae_checkpoint
+from cdic_repro.icae.modeling import IcaeConfig, LlamaICAE
 from cdic_repro.memory_state import ThreadState
 from cdic_repro.model_protocol import CompressedTurn, TrainingLoss
 

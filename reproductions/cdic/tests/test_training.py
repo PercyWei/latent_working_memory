@@ -6,8 +6,8 @@ from cdic_repro.config import RetrievalConfig
 from cdic_repro.credit import CreditPlan, build_compression_gradient_plan
 from cdic_repro.memory_state import ThreadState
 from cdic_repro.model_protocol import CompressedTurn, TrainingLoss
-from cdic_repro.msc import MscEpisode, MscTurn
-from cdic_repro.training import CdicTrainingEngine
+from cdic_repro.experiments.msc import MscEpisode, MscTurn
+from cdic_repro.experiments.training import CdicTrainingEngine
 from cdic_repro.writeback import WriteAction
 
 

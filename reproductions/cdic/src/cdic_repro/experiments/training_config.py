@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from cdic_repro.config import RetrievalConfig, RetrievedStateOrder
-from cdic_repro.icae_adapter import IcaeV1AdapterConfig
+from cdic_repro.icae.adapter import IcaeV1AdapterConfig
 
 
 @dataclass(frozen=True, slots=True)

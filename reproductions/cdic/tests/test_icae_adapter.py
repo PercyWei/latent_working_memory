@@ -8,7 +8,7 @@ from transformers import LlamaConfig, LlamaForCausalLM
 
 from cdic_repro.credit import CreditPlan
 from cdic_repro.icae import IcaeConfig, LlamaICAE
-from cdic_repro.icae_adapter import (
+from cdic_repro.icae.adapter import (
     IcaeV1AdapterConfig,
     IcaeV1TrainingAdapter,
     _is_trainable_icae_parameter,

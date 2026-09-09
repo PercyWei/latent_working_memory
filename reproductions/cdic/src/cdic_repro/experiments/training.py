@@ -6,7 +6,7 @@ from cdic_repro.config import RetrievalConfig
 from cdic_repro.credit import build_compression_gradient_plan, build_credit_plan
 from cdic_repro.memory_state import MemoryBank
 from cdic_repro.model_protocol import CdicTrainingAdapter
-from cdic_repro.msc import MscEpisode
+from cdic_repro.experiments.msc import MscEpisode
 from cdic_repro.retrieval import SimilarityFunction, retrieve
 from cdic_repro.trace import TurnTrace
 from cdic_repro.writeback import NewStatePayload, apply_write_back

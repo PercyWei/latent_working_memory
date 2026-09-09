@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from cdic_repro.generation_metrics import score_generation_records
+from cdic_repro.experiments.generation_metrics import score_generation_records
 
 
 def test_exact_predictions_receive_perfect_generation_scores() -> None:

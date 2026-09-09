@@ -17,7 +17,7 @@ from cdic_repro.experiments.eval_aligned_msc import (
     summarize_records,
 )
 from cdic_repro.model_protocol import CompressedTurn, TrainingLoss
-from cdic_repro.msc import MscEpisode, MscTurn
+from cdic_repro.experiments.msc import MscEpisode, MscTurn
 
 
 def episode(name="example"):

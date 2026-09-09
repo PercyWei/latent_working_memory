@@ -9,7 +9,7 @@ from cdic_repro.config import RetrievalConfig
 from cdic_repro.credit import build_credit_plan
 from cdic_repro.memory_state import MemoryBank
 from cdic_repro.model_protocol import CdicEvaluationAdapter
-from cdic_repro.msc import MscEpisode
+from cdic_repro.experiments.msc import MscEpisode
 from cdic_repro.retrieval import SimilarityFunction, retrieve
 from cdic_repro.writeback import NewStatePayload, apply_write_back
 

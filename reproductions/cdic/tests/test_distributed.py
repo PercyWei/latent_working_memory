@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from cdic_repro.distributed import DistributedContext, initialize_distributed
+from cdic_repro.experiments.distributed import DistributedContext, initialize_distributed
 
 
 def test_distributed_gradient_average_materializes_missing_gradients(

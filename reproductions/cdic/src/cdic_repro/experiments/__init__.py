@@ -1,1 +1,1 @@
-"""C-DIC training and evaluation experiments."""
+"""C-DIC 训练与评估实验。"""

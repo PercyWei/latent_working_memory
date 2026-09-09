@@ -1,8 +1,8 @@
-# C-DIC 论文复现（20260908 15:31:54 CST）
+# C-DIC 论文复现（20260909 10:47:53 CST）
 
 创建时间：20260904 16:19:08 CST（UTC+08:00）
 
-最后修订时间：20260908 15:31:54 CST（UTC+08:00）
+最后修订时间：20260909 10:47:53 CST（UTC+08:00）
 
 本目录用于分阶段复现 Context-Driven Incremental Compression（C-DIC）。由于当前没有公开的官方实现，所有论文未明确的行为均记录在 `ASSUMPTIONS.md`。
 
@@ -36,7 +36,9 @@ R2 训练代码已实现：
 
 ## 目录结构
 
-- `src/cdic_repro/`：论文核心机制、ICAE adapter 与运行接口；
+- `src/cdic_repro/`：retrieval、write-back、memory state 等论文核心机制与推理入口；
+- `src/cdic_repro/icae/`：现代 ICAE 实现、checkpoint 和 C-DIC adapter；
+- `src/cdic_repro/experiments/`：MSC 数据、训练、评估、checkpoint、分布式运行和指标；
 - `configs/paper.yaml`：论文默认参数和显式复现选择；
 - `configs/msc_pilot_a800.json`：两条 episode、每条八轮的 GPU pilot；
 - `configs/msc_paper_a800.json`：论文规模两 epoch 配置；

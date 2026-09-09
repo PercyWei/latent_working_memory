@@ -10,16 +10,16 @@ from pathlib import Path
 
 import torch
 
-from cdic_repro.checkpoint import (
+from cdic_repro.experiments.checkpoint import (
     TrainingProgress,
     load_cdic_checkpoint,
     save_cdic_checkpoint,
 )
-from cdic_repro.distributed import DistributedContext, initialize_distributed
+from cdic_repro.experiments.distributed import DistributedContext, initialize_distributed
 from cdic_repro.experiments.training_config import CdicMscTrainingConfig, load_training_config
-from cdic_repro.icae_adapter import IcaeV1TrainingAdapter, torch_cosine_similarity
-from cdic_repro.msc import MscEpisode, load_msc_episodes, summarize_msc_episodes
-from cdic_repro.training import CdicTrainingEngine, EpisodeTrainingResult
+from cdic_repro.experiments.msc import MscEpisode, load_msc_episodes, summarize_msc_episodes
+from cdic_repro.experiments.training import CdicTrainingEngine, EpisodeTrainingResult
+from cdic_repro.icae.adapter import IcaeV1TrainingAdapter, torch_cosine_similarity
 
 
 def main() -> None:

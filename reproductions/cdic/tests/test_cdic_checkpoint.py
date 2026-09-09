@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from cdic_repro.checkpoint import (
+from cdic_repro.experiments.checkpoint import (
     TrainingProgress,
     load_cdic_checkpoint,
     load_cdic_model_checkpoint,
