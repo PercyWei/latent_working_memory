@@ -5,11 +5,12 @@ description = "Paper-based reproduction of Context-Driven Incremental Compressio
 readme = "README.md"
 requires-python = ">=3.10,<3.11"
 dependencies = [
-    "icae-reproduction",
+    "peft>=0.17,<1",
+    "torch>=2.7,<3",
+    "transformers>=4.55,<5",
 ]
 
 [project.scripts]
-cdic-inspect-checkpoint = "cdic_repro.inspect_checkpoint:main"
 cdic-run-dialogue = "cdic_repro.run_dialogue:main"
 cdic-train-msc = "cdic_repro.experiments.train_msc:main"
 cdic-eval-table1-msc = "cdic_repro.experiments.eval_table1_msc:main"
@@ -43,11 +44,6 @@ extend-select = ["PLC0415"]
 
 [tool.uv]
 environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
-find-links = ["https://mirrors.aliyun.com/pytorch-wheels/cu118"]
-
-[tool.uv.sources]
-icae-reproduction = { path = "../icae", editable = true }
-peft = { path = "../icae/vendor/peft", editable = true }
 
 [[tool.uv.index]]
 name = "aliyun-pypi"

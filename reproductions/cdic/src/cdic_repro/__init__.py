@@ -1,6 +1,4 @@
-"""Core contracts for the paper-based C-DIC reproduction."""
-
-from cdic_repro.config import RetrievalConfig, SupportOrder
+from cdic_repro.config import RetrievalConfig, RetrievedStateOrder
 from cdic_repro.credit import (
     CompressionGradientPlan,
     CreditPlan,
@@ -43,7 +41,7 @@ __all__ = [
     "RetrievalConfig",
     "RetrievalResult",
     "ScoreRecord",
-    "SupportOrder",
+    "RetrievedStateOrder",
     "ThreadState",
     "TrainingLoss",
     "TurnOutput",

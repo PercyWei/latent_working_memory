@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from cdic_repro.config import RetrievalConfig, SupportOrder
+from cdic_repro.config import RetrievalConfig, RetrievedStateOrder
 from cdic_repro.memory_state import MemoryBank
 from cdic_repro.retrieval import retrieve
 
@@ -108,7 +108,7 @@ def test_equality_is_on_topic() -> None:
     assert result.selected_state_ids == (state.state_id,)
 
 
-def test_bounded_retrieval_takes_top_scores_before_support_ordering() -> None:
+def test_bounded_retrieval_takes_top_scores_before_retrieved_state_ordering() -> None:
     memory = MemoryBank()
     first = memory.insert(latent="a", retrieval_key="a", turn=0)
     second = memory.insert(latent="b", retrieval_key="b", turn=0)
@@ -123,7 +123,7 @@ def test_bounded_retrieval_takes_top_scores_before_support_ordering() -> None:
         config=RetrievalConfig(
             threshold=0.8,
             decay=0.0,
-            support_order=SupportOrder.MEMORY_ORDER,
+            retrieved_state_order=RetrievedStateOrder.MEMORY_ORDER,
             max_retrieved=2,
         ),
     )

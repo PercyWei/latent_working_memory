@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from enum import Enum
 
 
-class SupportOrder(str, Enum):
-    """Deterministic order used when latent supports are concatenated."""
+class RetrievedStateOrder(str, Enum):
+    """Deterministic order used when retrieved states are concatenated."""
 
     SCORE_DESC = "score_desc"
     MEMORY_ORDER = "memory_order"
@@ -17,7 +17,7 @@ class RetrievalConfig:
 
     threshold: float = 0.8
     decay: float = 0.05
-    support_order: SupportOrder = SupportOrder.SCORE_DESC
+    retrieved_state_order: RetrievedStateOrder = RetrievedStateOrder.SCORE_DESC
     max_retrieved: int | None = None
 
     def __post_init__(self) -> None:

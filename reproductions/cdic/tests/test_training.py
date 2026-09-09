@@ -69,12 +69,14 @@ class FakeTrainingAdapter:
 
     def response_loss(
         self,
-        supports: tuple[ThreadState, ...],
+        retrieved_states: tuple[ThreadState, ...],
         query: str,
         response: str,
         credit: CreditPlan,
     ) -> TrainingLoss:
-        self.loss_calls.append((tuple(state.state_id for state in supports), response, credit))
+        self.loss_calls.append(
+            (tuple(state.state_id for state in retrieved_states), response, credit)
+        )
         return TrainingLoss(
             value=FakeLoss(
                 float(len(response)),
@@ -87,14 +89,14 @@ class FakeTrainingAdapter:
 
     def compress_gold(
         self,
-        supports: tuple[ThreadState, ...],
+        retrieved_states: tuple[ThreadState, ...],
         query: str,
         response: str,
         credit: CreditPlan,
     ) -> CompressedTurn:
         self.compression_responses.append(response)
         gradient_plan = build_compression_gradient_plan(
-            supports,
+            retrieved_states,
             credit,
             gradient_window_size=self.gradient_window_size,
         )

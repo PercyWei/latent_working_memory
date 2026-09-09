@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from cdic_repro.checkpoint import load_cdic_model_checkpoint
-from cdic_repro.config import RetrievalConfig, SupportOrder
+from cdic_repro.config import RetrievalConfig, RetrievedStateOrder
 from cdic_repro.evaluation import evaluate_msc_episodes
 from cdic_repro.icae_adapter import (
     IcaeV1AdapterConfig,
@@ -50,7 +50,9 @@ def test_msc_heldout_initialization_vs_trained(pytestconfig: pytest.Config) -> N
     retrieval_config = RetrievalConfig(
         threshold=float(config.get("threshold", 0.8)),
         decay=float(config.get("decay", 0.05)),
-        support_order=SupportOrder(str(config.get("support_order", "score_desc"))),
+        retrieved_state_order=RetrievedStateOrder(
+            str(config.get("retrieved_state_order", "score_desc"))
+        ),
         max_retrieved=(
             int(config["max_retrieved"]) if config.get("max_retrieved") is not None else None
         ),

@@ -19,7 +19,6 @@ class TurnOutput:
 
 
 class CdicInferenceEngine:
-    """Model-independent implementation of paper Algorithm 1."""
 
     def __init__(
         self,
@@ -44,9 +43,9 @@ class CdicInferenceEngine:
             similarity=self.similarity,
             config=self.retrieval_config,
         )
-        supports = self.memory.select(retrieval.selected_state_ids)
-        response = self.model.generate(supports, query)
-        compressed = self.model.compress(supports, query, response)
+        retrieved_states = self.memory.select(retrieval.selected_state_ids)
+        response = self.model.generate(retrieved_states, query)
+        compressed = self.model.compress(retrieved_states, query, response)
         credit = build_credit_plan(retrieval)
         write_back = apply_write_back(
             self.memory,

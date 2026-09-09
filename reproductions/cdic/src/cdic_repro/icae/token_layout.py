@@ -10,20 +10,19 @@ ICAE_CONTROL_TOKEN_COUNT = 3
 
 @dataclass(frozen=True, slots=True)
 class IcaeTokenLayout:
-    """ICAE 在 tokenizer 词表之后追加的 token 布局."""
 
-    text_vocabulary_size: int
+    tokenizer_vocabulary_size: int
     memory_size: int
 
     def __post_init__(self) -> None:
-        if self.text_vocabulary_size < 1:
-            raise ValueError("text_vocabulary_size must be positive")
+        if self.tokenizer_vocabulary_size < 1:
+            raise ValueError("tokenizer_vocabulary_size must be positive")
         if self.memory_size < 1:
             raise ValueError("memory_size must be positive")
 
     @property
     def memory_token_start(self) -> int:
-        return self.text_vocabulary_size
+        return self.tokenizer_vocabulary_size
 
     @property
     def memory_token_end(self) -> int:
@@ -46,8 +45,8 @@ class IcaeTokenLayout:
         return self.lm_token_id + 1
 
     @property
-    def model_vocabulary_size(self) -> int:
-        return self.text_vocabulary_size + self.memory_size + ICAE_CONTROL_TOKEN_COUNT
+    def token_id_upper_bound(self) -> int:
+        return self.tokenizer_vocabulary_size + self.memory_size + ICAE_CONTROL_TOKEN_COUNT
 
 
 def prepare_icae_token_layout(
@@ -66,6 +65,6 @@ def prepare_icae_token_layout(
         raise ValueError("tokenizer must define one eos_token_id")
 
     return IcaeTokenLayout(
-        text_vocabulary_size=len(tokenizer),
+        tokenizer_vocabulary_size=len(tokenizer),
         memory_size=memory_size,
     )

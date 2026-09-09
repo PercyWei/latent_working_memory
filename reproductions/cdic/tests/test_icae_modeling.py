@@ -72,12 +72,12 @@ def test_token_layout_uses_tokenizer_ids_and_preserves_published_offsets() -> No
 
     assert tokenizer.pad_token_id == 32
     assert tokenizer.eos_token_id == 2
-    assert layout.text_vocabulary_size == 33
+    assert layout.tokenizer_vocabulary_size == 33
     assert layout.memory_token_ids == [33, 34, 35, 36]
     assert layout.ae_token_id == 37
     assert layout.lm_token_id == 38
     assert layout.ft_token_id == 39
-    assert layout.model_vocabulary_size == 40
+    assert layout.token_id_upper_bound == 40
 
 
 def test_token_layout_requires_tokenizer_eos_token() -> None:
@@ -101,7 +101,10 @@ def test_training_forward_uses_modern_llama_and_peft() -> None:
 
     assert outputs.loss is not None
     assert outputs.loss.ndim == 0
-    assert outputs.logits.shape == (1, 3, model.token_layout.model_vocabulary_size)
+    assert model.icae.get_input_embeddings().num_embeddings == len(model.tokenizer)
+    assert model.token_layout.memory_token_start == len(model.tokenizer)
+    assert model.token_layout.ft_token_id >= len(model.tokenizer)
+    assert outputs.logits.shape == (1, 3, len(model.tokenizer))
 
 
 @pytest.mark.parametrize(

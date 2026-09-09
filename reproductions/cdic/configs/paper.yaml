@@ -12,7 +12,7 @@ retrieval:
   threshold_inclusive: true
   decay: 0.05
   pooling: "mean"
-  support_order: "score_desc"
+  retrieved_state_order: "score_desc"
   max_retrieved: null
 
 training:

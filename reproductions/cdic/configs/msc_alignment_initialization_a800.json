@@ -1,6 +1,6 @@
 {
   "model_path": "/data/bywei/models/meta-llama/Llama-2-7b-chat-hf",
-  "checkpoint_path": "/data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt",
+  "checkpoint_path": "/data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae.pt",
   "training_checkpoint_path": null,
   "data_root": "/data/bywei/projects/latent_working_memory/data/raw/msc",
   "artifact_dir": "/data/bywei/projects/latent_working_memory/artifacts/cdic/20260906_evaluation_alignment/initialization",

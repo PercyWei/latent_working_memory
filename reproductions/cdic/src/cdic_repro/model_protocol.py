@@ -42,11 +42,11 @@ class CdicModelAdapter(Protocol):
 
     def encode_query(self, query: str) -> object: ...
 
-    def generate(self, supports: tuple[ThreadState, ...], query: str) -> str: ...
+    def generate(self, retrieved_states: tuple[ThreadState, ...], query: str) -> str: ...
 
     def compress(
         self,
-        supports: tuple[ThreadState, ...],
+        retrieved_states: tuple[ThreadState, ...],
         query: str,
         response: str,
     ) -> CompressedTurn: ...
@@ -75,7 +75,7 @@ class CdicTrainingAdapter(Protocol):
 
     def response_loss(
         self,
-        supports: tuple[ThreadState, ...],
+        retrieved_states: tuple[ThreadState, ...],
         query: str,
         response: str,
         credit: CreditPlan,
@@ -83,7 +83,7 @@ class CdicTrainingAdapter(Protocol):
 
     def compress_gold(
         self,
-        supports: tuple[ThreadState, ...],
+        retrieved_states: tuple[ThreadState, ...],
         query: str,
         response: str,
         credit: CreditPlan,
@@ -96,7 +96,7 @@ class CdicEvaluationAdapter(Protocol):
 
     def response_loss(
         self,
-        supports: tuple[ThreadState, ...],
+        retrieved_states: tuple[ThreadState, ...],
         query: str,
         response: str,
         credit: CreditPlan,
@@ -104,7 +104,7 @@ class CdicEvaluationAdapter(Protocol):
 
     def compress_gold(
         self,
-        supports: tuple[ThreadState, ...],
+        retrieved_states: tuple[ThreadState, ...],
         query: str,
         response: str,
         credit: CreditPlan,

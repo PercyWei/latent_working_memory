@@ -89,11 +89,11 @@ def evaluate_episode(
             memory, query_key=adapter.encode_query(turn.query), turn=turn_number,
             similarity=similarity, config=retrieval_config,
         )
-        supports = memory.select(retrieval.selected_state_ids)
+        retrieved_states = memory.select(retrieval.selected_state_ids)
         credit = build_credit_plan(retrieval)
         if turn.session_index >= 2 and turn.turn_id not in completed_ids:
             response_loss = adapter.response_loss(
-                supports, turn.query, turn.response, credit,
+                retrieved_states, turn.query, turn.response, credit,
                 collect_token_nll=True,
             )
             token_nll = response_loss.token_nll
@@ -114,7 +114,7 @@ def evaluate_episode(
                 "is_episode_final": turn.turn_id == episode.turns[-1].turn_id,
                 "query": turn.query,
                 "reference": turn.response,
-                "prediction": adapter.generate(supports, turn.query),
+                "prediction": adapter.generate(retrieved_states, turn.query),
                 "loss": loss,
                 "loss_tokens": response_loss.token_count,
                 "token_nll": list(token_nll),
@@ -128,7 +128,12 @@ def evaluate_episode(
             }
         # Replay gold history even for previously completed or unscored turns.
         # The current reference is written only after that turn has been scored.
-        compressed = adapter.compress_gold(supports, turn.query, turn.response, credit)
+        compressed = adapter.compress_gold(
+            retrieved_states,
+            turn.query,
+            turn.response,
+            credit,
+        )
         apply_write_back(
             memory, retrieval=retrieval,
             payload=NewStatePayload(
@@ -236,7 +241,7 @@ def run(config: AlignmentConfig) -> None:
         "history": "all sessions 1-5; gold write-back after scoring; no turn-count truncation",
         "initial_memory": "empty; Algorithm 1 interpretation, instruction seed unspecified",
         "scopes": SCOPES,
-        "generation": "greedy; ICAE model.eos_id stop; max_new_tokens fixed across conditions",
+        "generation": "greedy; tokenizer EOS stop; max_new_tokens fixed across conditions",
         "metrics": "corpus BLEU-4; casefold regex tokenization; no smoothing; macro ROUGE recall/F1; no stemming",
         "paper_alignment": "Appendix K explicitly uses session-5 final turn; Table 1 scope and metric implementation remain unconfirmed",
     }
@@ -270,7 +275,7 @@ def run(config: AlignmentConfig) -> None:
     write_json(output_dir / "runtime.json", {
         "torch_version": torch.__version__, "device": config.device,
         "gpu_name": torch.cuda.get_device_name(config.device),
-        "stop_token_id": int(adapter.model.eos_id),
+        "stop_token_id": int(adapter.model.tokenizer.eos_token_id),
         "training_progress": progress,
     })
     with output_path.open("a", encoding="utf-8") as output, torch.inference_mode():

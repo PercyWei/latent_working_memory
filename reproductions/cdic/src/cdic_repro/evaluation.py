@@ -33,7 +33,7 @@ def evaluate_msc_episodes(
     probes: list[_AdjacentProbe] = []
     action_counts: Counter[str] = Counter()
     peak_scores: list[float] = []
-    selected_supports: list[int] = []
+    selected_state_counts: list[int] = []
     final_memory_sizes: list[int] = []
     loss_sum = 0.0
     weighted_loss_sum = 0.0
@@ -57,10 +57,10 @@ def evaluate_msc_episodes(
                 similarity=similarity,
                 config=retrieval_config,
             )
-            supports = memory.select(retrieval.selected_state_ids)
+            retrieved_states = memory.select(retrieval.selected_state_ids)
             credit = build_credit_plan(retrieval)
             response_loss = model.response_loss(
-                supports,
+                retrieved_states,
                 turn.query,
                 turn.response,
                 credit,
@@ -68,7 +68,12 @@ def evaluate_msc_episodes(
             loss = float(response_loss.value)  # type: ignore[arg-type]
             if not math.isfinite(loss):
                 raise ValueError(f"non-finite loss for {turn.turn_id}")
-            compressed = model.compress_gold(supports, turn.query, turn.response, credit)
+            compressed = model.compress_gold(
+                retrieved_states,
+                turn.query,
+                turn.response,
+                credit,
+            )
             write_back = apply_write_back(
                 memory,
                 retrieval=retrieval,
@@ -85,7 +90,7 @@ def evaluate_msc_episodes(
             weighted_loss_sum += loss * response_loss.token_count
             loss_tokens += response_loss.token_count
             action_counts[write_back.action.value] += 1
-            selected_supports.append(len(retrieval.selected_state_ids))
+            selected_state_counts.append(len(retrieval.selected_state_ids))
             if retrieval.peak_score is not None:
                 peak_scores.append(retrieval.peak_score)
             records.append(
@@ -100,7 +105,7 @@ def evaluate_msc_episodes(
                     "peak_score": retrieval.peak_score,
                     "on_topic": retrieval.on_topic,
                     "used_fallback": retrieval.used_fallback,
-                    "selected_supports": len(retrieval.selected_state_ids),
+                    "selected_states": len(retrieval.selected_state_ids),
                     "write_action": write_back.action.value,
                     "memory_states": len(memory),
                 }
@@ -118,7 +123,7 @@ def evaluate_msc_episodes(
         "action_counts": dict(sorted(action_counts.items())),
         "on_topic_rate_after_first_turn": action_counts["replace"]
         / max(1, len(records) - len(episodes)),
-        "mean_selected_supports": statistics.fmean(selected_supports),
+        "mean_selected_states": statistics.fmean(selected_state_counts),
         "mean_final_memory_states": statistics.fmean(final_memory_sizes),
         "peak_score": _score_summary(peak_scores),
         "adjacent_vs_cross_episode": _summarize_adjacent_probes(

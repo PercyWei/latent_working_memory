@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from cdic_repro.config import RetrievalConfig, SupportOrder
+from cdic_repro.config import RetrievalConfig, RetrievedStateOrder
 from cdic_repro.icae_adapter import IcaeV1AdapterConfig
 
 
@@ -110,7 +110,7 @@ def load_training_config(path: Path) -> CdicMscTrainingConfig:
             max_new_tokens=int(model.get("max_new_tokens", 128)),
             lora_alpha=int(model.get("lora_alpha", 32)),
             lora_dropout=float(model.get("lora_dropout", 0.05)),
-            lora_rank=_optional_int(model.get("lora_rank")),
+            lora_rank=int(model.get("lora_rank", 128)),
             seed=int(training.get("seed", 42)),
             use_ft_markers=bool(model.get("use_ft_markers", True)),
             turn_template=str(
@@ -130,7 +130,9 @@ def load_training_config(path: Path) -> CdicMscTrainingConfig:
         retrieval=RetrievalConfig(
             threshold=float(retrieval.get("threshold", 0.8)),
             decay=float(retrieval.get("decay", 0.05)),
-            support_order=SupportOrder(str(retrieval.get("support_order", "score_desc"))),
+            retrieved_state_order=RetrievedStateOrder(
+                str(retrieval.get("retrieved_state_order", "score_desc"))
+            ),
             max_retrieved=_optional_int(retrieval.get("max_retrieved")),
         ),
         training=OptimizationConfig(
@@ -197,6 +199,6 @@ def _serialize_paths(value: object) -> object:
         return [_serialize_paths(item) for item in value]
     if isinstance(value, tuple):
         return [_serialize_paths(item) for item in value]
-    if isinstance(value, SupportOrder):
+    if isinstance(value, RetrievedStateOrder):
         return value.value
     return value

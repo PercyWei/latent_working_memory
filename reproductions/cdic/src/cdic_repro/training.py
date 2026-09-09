@@ -85,10 +85,10 @@ class CdicTrainingEngine:
                 similarity=self.similarity,
                 config=self.retrieval_config,
             )
-            supports = memory.select(retrieval.selected_state_ids)
+            retrieved_states = memory.select(retrieval.selected_state_ids)
             credit = build_credit_plan(retrieval)
             training_loss = self.model.response_loss(
-                supports,
+                retrieved_states,
                 turn.query,
                 turn.response,
                 credit,
@@ -96,7 +96,7 @@ class CdicTrainingEngine:
             loss_value = float(training_loss.value)
             backward_applied = training_loss.value.requires_grad
             compression_gradient_plan = build_compression_gradient_plan(
-                supports,
+                retrieved_states,
                 credit,
                 gradient_window_size=self.model.gradient_window_size,
             )
@@ -108,7 +108,7 @@ class CdicTrainingEngine:
                 backward_turns += 1
 
             compressed = self.model.compress_gold(
-                supports,
+                retrieved_states,
                 turn.query,
                 turn.response,
                 credit,

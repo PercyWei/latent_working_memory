@@ -1,10 +1,3 @@
-"""C-DIC checkpoint API.
-
-The ICAE v1 checkpoint implementation is shared with the sibling reproduction for
-now. C-DIC callers import it through this module so that the dependency boundary
-stays local and can later be replaced without changing the rest of the package.
-"""
-
 from __future__ import annotations
 
 import json
@@ -14,24 +7,7 @@ from typing import Any
 
 import torch
 
-from icae_repro.checkpoint import (
-    ICAE_V1_LORA_RANK,
-    load_checkpoint_state_dict as load_icae_checkpoint_state_dict,
-    restore_zero_placeholder_checkpoint as restore_icae_checkpoint_state,
-)
-
 from cdic_repro.model_protocol import TrainableStateAdapter
-
-
-__all__ = [
-    "ICAE_V1_LORA_RANK",
-    "TrainingProgress",
-    "load_cdic_checkpoint",
-    "load_cdic_model_checkpoint",
-    "load_icae_checkpoint_state_dict",
-    "restore_icae_checkpoint_state",
-    "save_cdic_checkpoint",
-]
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +81,6 @@ def load_cdic_model_checkpoint(
     path: Path,
     model: TrainableStateAdapter,
 ) -> TrainingProgress:
-    """Restore only trainable model tensors for evaluation or inference."""
     if not path.is_file():
         raise FileNotFoundError(f"C-DIC checkpoint does not exist: {path}")
     payload = _load_cdic_checkpoint_payload(path)

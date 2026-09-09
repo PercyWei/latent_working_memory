@@ -1,8 +1,8 @@
-# C-DIC 论文复现（20260906 22:24:15 CST）
+# C-DIC 论文复现（20260908 15:31:54 CST）
 
 创建时间：20260904 16:19:08 CST（UTC+08:00）
 
-最后修订时间：20260906 22:24:15 CST（UTC+08:00）
+最后修订时间：20260908 15:31:54 CST（UTC+08:00）
 
 本目录用于分阶段复现 Context-Driven Incremental Compression（C-DIC）。由于当前没有公开的官方实现，所有论文未明确的行为均记录在 `ASSUMPTIONS.md`。
 
@@ -16,8 +16,8 @@
 - 确定性的 insert/replace write-back；
 - one-hop retrieval-aware credit plan；
 - 可审计的 turn trace 与 adapter-driven inference loop；
-- ICAE v1 direct state-dict schema 与固定 LoRA rank 128 校验；
-- inference-only ICAE v1 adapter；
+- ICAE canonical checkpoint 与固定 LoRA rank 128 校验；
+- C-DIC 内置的现代 ICAE 实现及训练、推理 adapter；
 - 多轮 JSONL smoke CLI。
 
 R2 训练代码已实现：
@@ -30,7 +30,7 @@ R2 训练代码已实现：
 - checkpoint/resume、resolved config、metrics 与 memory trace；
 - pilot 和论文规模 JSON 配置。
 
-ICAE adapter 已在 A800 上通过真实 Llama-2-7B-Chat、公开 checkpoint 和五轮对话的工程 smoke test。MSC 训练代码已通过本地单元测试、官方数据 schema 检查、单卡 autograd/checkpoint smoke test 和双卡官方 MSC pilot。seed 42 的两 epoch 完整训练已完成，共执行 1002 个 optimizer steps；最终 checkpoint 位于 `checkpoints/cdic/msc_paper_seed42/checkpoints/final.pt`。训练完成仅证明训练链路可运行，论文效果仍需单独评估。
+旧 ICAE 后端曾在 A800 上通过真实 Llama-2-7B-Chat、公开 checkpoint 和五轮对话的工程 smoke test。MSC 训练代码也曾通过本地单元测试、官方数据 schema 检查、单卡 autograd/checkpoint smoke test 和双卡官方 MSC pilot。seed 42 的两 epoch 完整训练已完成，共执行 1002 个 optimizer steps；最终 checkpoint 位于 `checkpoints/cdic/msc_paper_seed42/checkpoints/final.pt`。这些历史结果证明旧训练链路可运行，不代表本次现代 ICAE 后端已经通过服务器复验，论文效果仍需单独评估。
 
 `gradient_window_size` 表示一个 latent state 的计算图最多包含多少次连续 compression。默认值 `1` 保持原复现的 one-hop 行为；大于 `1` 时，仅 argmax write path 可跨 revision 继续反传，到达上限后 detach 并开始新的图分段。因此它是 bounded/chunked TBPTT，而不是逐轮平移的严格 sliding window。
 
@@ -55,7 +55,9 @@ uv run ruff check reproductions/cdic/src reproductions/cdic/tests
 
 ## 服务器环境
 
-C-DIC compatibility environment 依赖同级 ICAE reproduction，但使用独立的 `reproductions/cdic/.venv`。两者共享依赖版本、ICAE path dependency 和 uv cache，不共享 Python interpreter 或虚拟环境。
+C-DIC 直接依赖当前 PyTorch、Transformers 和 PEFT，并在 `cdic_repro.icae` 中维护所需的 ICAE 实现，不再从同级 ICAE 复现仓库导入运行时代码。
+
+当前 lockfile 解析到 CUDA Toolkit 13.0 runtime，符合服务器最高支持 CUDA 13.0 的约束。
 
 `reproductions/cdic/.python-version` 已固定 Python 3.10，因此创建环境时不需要传入 ICAE 环境的 interpreter：
 
@@ -70,14 +72,7 @@ uv run --project reproductions/cdic --no-sync \
 
 后续实验默认仅使用物理 GPU 0 和 1；单进程 smoke test 优先使用 GPU 0。
 
-加载 7B 模型前，先检查公开 checkpoint：
-
-```bash
-uv run --project reproductions/cdic --no-sync cdic-inspect-checkpoint \
-  /data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt
-```
-
-Checkpoint 只接受 ICAE v1 上游发布的 direct state dict，LoRA rank 固定为 128；不兼容额外 wrapper 格式。MSC 的 `data_root` 固定指向项目内 `data/raw/msc`，loader 读取其下的 `msc/msc_dialogue/`。
+ICAE checkpoint 使用转换后的 direct state dict，只保存当前参数名下的 LoRA 与 memory/control token embeddings；不接受上游 zero-placeholder 格式或额外 wrapper。MSC 的 `data_root` 固定指向项目内 `data/raw/msc`，loader 读取其下的 `msc/msc_dialogue/`。
 
 `cdic-run-dialogue` 接收 JSONL 输入，每行至少包含 `query`，可选 `id`。输出包含 generated response 和该 turn 的完整 memory trace。
 
@@ -93,7 +88,7 @@ uv run --project reproductions/cdic --no-sync pytest -q -s \
 
 该测试只验证真实模型上的工程链路和状态转移，不将未经过 MSC 训练的 ICAE initialization 当作 C-DIC 论文效果。
 
-截至 20260904 21:26:56 CST，环境变量版与 JSON 配置版均已通过真实 GPU test；JSON 配置版结果为：
+截至 20260904 21:26:56 CST，旧 ICAE 后端的环境变量版与 JSON 配置版均已通过真实 GPU test；JSON 配置版结果为：
 
 - `1 passed`，耗时约 173 秒；
 - 五轮 latent 均为 `[128, 4096]`、bfloat16 且数值有限；

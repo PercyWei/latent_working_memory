@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from cdic_repro.config import RetrievalConfig, SupportOrder
+from cdic_repro.config import RetrievalConfig, RetrievedStateOrder
 
 
 def test_paper_retrieval_defaults() -> None:
@@ -10,7 +10,7 @@ def test_paper_retrieval_defaults() -> None:
 
     assert config.threshold == 0.8
     assert config.decay == 0.05
-    assert config.support_order is SupportOrder.SCORE_DESC
+    assert config.retrieved_state_order is RetrievedStateOrder.SCORE_DESC
     assert config.max_retrieved is None
 
 

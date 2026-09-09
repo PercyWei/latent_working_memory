@@ -37,7 +37,7 @@ def build_credit_plan(retrieval: RetrievalResult) -> CreditPlan:
 
 
 def build_compression_gradient_plan(
-    supports: tuple[ThreadState, ...],
+    retrieved_states: tuple[ThreadState, ...],
     credit: CreditPlan,
     gradient_window_size: int,
 ) -> CompressionGradientPlan:
@@ -56,11 +56,11 @@ def build_compression_gradient_plan(
         )
 
     connected_state = next(
-        (state for state in supports if state.state_id == credit.connected_state_id),
+        (state for state in retrieved_states if state.state_id == credit.connected_state_id),
         None,
     )
     if connected_state is None:
-        raise ValueError("connected state must be present in compression supports")
+        raise ValueError("connected state must be present in retrieved states")
     if connected_state.gradient_depth >= gradient_window_size:
         return CompressionGradientPlan(
             retained_state_id=None,

@@ -10,7 +10,7 @@ from typing import Any
 import torch
 
 from cdic_repro.checkpoint import load_cdic_model_checkpoint
-from cdic_repro.config import RetrievalConfig, SupportOrder
+from cdic_repro.config import RetrievalConfig, RetrievedStateOrder
 from cdic_repro.credit import build_credit_plan
 from cdic_repro.generation_metrics import score_generation_records
 from cdic_repro.icae_adapter import (
@@ -41,7 +41,7 @@ class Table1MscConfig:
     max_new_tokens: int = 128
     threshold: float = 0.8
     decay: float = 0.05
-    support_order: SupportOrder = SupportOrder.SCORE_DESC
+    retrieved_state_order: RetrievedStateOrder = RetrievedStateOrder.SCORE_DESC
     max_retrieved: int | None = None
     shard_index: int = 0
     num_shards: int = 1
@@ -81,7 +81,9 @@ def load_config(path: Path) -> Table1MscConfig:
         max_new_tokens=int(payload.get("max_new_tokens", 128)),
         threshold=float(payload.get("threshold", 0.8)),
         decay=float(payload.get("decay", 0.05)),
-        support_order=SupportOrder(str(payload.get("support_order", "score_desc"))),
+        retrieved_state_order=RetrievedStateOrder(
+            str(payload.get("retrieved_state_order", "score_desc"))
+        ),
         max_retrieved=_optional_int(payload.get("max_retrieved")),
         shard_index=int(payload.get("shard_index", 0)),
         num_shards=int(payload.get("num_shards", 1)),
@@ -123,7 +125,7 @@ def run(config: Table1MscConfig, config_path: Path) -> None:
     retrieval_config = RetrievalConfig(
         threshold=config.threshold,
         decay=config.decay,
-        support_order=config.support_order,
+        retrieved_state_order=config.retrieved_state_order,
         max_retrieved=config.max_retrieved,
     )
 
@@ -227,12 +229,17 @@ def evaluate_episode(
             similarity=torch_cosine_similarity,
             config=retrieval_config,
         )
-        supports = memory.select(retrieval.selected_state_ids)
+        retrieved_states = memory.select(retrieval.selected_state_ids)
         credit = build_credit_plan(retrieval)
         record_id = turn.turn_id
         if turn.session_index >= target_min_session and record_id not in completed_ids:
-            response_loss = adapter.response_loss(supports, turn.query, turn.response, credit)
-            prediction = adapter.generate(supports, turn.query)
+            response_loss = adapter.response_loss(
+                retrieved_states,
+                turn.query,
+                turn.response,
+                credit,
+            )
+            prediction = adapter.generate(retrieved_states, turn.query)
             results.append(
                 {
                     "id": record_id,
@@ -253,7 +260,12 @@ def evaluate_episode(
                     },
                 }
             )
-        compressed = adapter.compress_gold(supports, turn.query, turn.response, credit)
+        compressed = adapter.compress_gold(
+            retrieved_states,
+            turn.query,
+            turn.response,
+            credit,
+        )
         apply_write_back(
             memory,
             retrieval=retrieval,
@@ -306,7 +318,13 @@ def _optional_int(value: object) -> int | None:
 
 def _serialize_config(config: Table1MscConfig) -> dict[str, object]:
     return {
-        field: (str(value) if isinstance(value, Path) else value.value if isinstance(value, SupportOrder) else value)
+        field: (
+            str(value)
+            if isinstance(value, Path)
+            else value.value
+            if isinstance(value, RetrievedStateOrder)
+            else value
+        )
         for field, value in ((name, getattr(config, name)) for name in config.__dataclass_fields__)
     }
 

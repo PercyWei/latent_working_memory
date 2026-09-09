@@ -35,16 +35,16 @@ class Adapter:
     def encode_query(self, query):
         return query
 
-    def response_loss(self, supports, query, response, credit, collect_token_nll):
+    def response_loss(self, retrieved_states, query, response, credit, collect_token_nll):
         assert collect_token_nll
         assert response not in self.history
         self.scored.append((query, tuple(self.history)))
         return TrainingLoss(2.0, 3, (1.0, 2.0, 3.0))
 
-    def generate(self, supports, query):
+    def generate(self, retrieved_states, query):
         return f"answer to {query}"
 
-    def compress_gold(self, supports, query, response, credit):
+    def compress_gold(self, retrieved_states, query, response, credit):
         del credit
         self.history.append(response)
         return CompressedTurn(response, response)

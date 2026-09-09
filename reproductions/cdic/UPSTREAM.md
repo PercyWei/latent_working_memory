@@ -1,8 +1,8 @@
-# C-DIC 上游来源与复现边界（20260904 22:09:00 CST）
+# C-DIC 上游来源与复现边界（20260908 15:31:54 CST）
 
 创建时间：20260904 16:19:08 CST（UTC+08:00）
 
-最后修订时间：20260904 22:09:00 CST（UTC+08:00）
+最后修订时间：20260908 15:31:54 CST（UTC+08:00）
 
 ## 论文信息
 
@@ -26,9 +26,9 @@
 
 当前 loader 直接读取官方 JSONL，不依赖 ParlAI runtime。原始数据中的空 utterance、无配对尾项和解析统计会写入 training artifact。
 
-## ICAE 兼容修复
+## ICAE 现代适配
 
-ICAE v1 的 gradient-checkpoint branch 原先未把 `enable_lora` 传入 decoder layer。启用 gradient checkpointing 时会导致 compressor LoRA 不参与 forward，表现为训练可运行但全部 LoRA gradients 缺失。本项目在 `reproductions/icae/src/icae/base/modeling_llama_icae.py` 中补充参数转发；两轮 A800 autograd smoke test 已确认 128/128 LoRA tensors 获得 gradient。
+C-DIC 在 `cdic_repro.icae` 内维护基于现代 Transformers 与 PEFT 的 ICAE 实现，不修改、也不在运行时导入同级 ICAE 复现仓库。公开 checkpoint 已离线转换为 canonical state dict：删除无参数占位符，并将 LoRA 与 memory/control token embeddings 重命名为当前模型键名。现代实现直接使用上游 gradient-checkpointing 接口，不再保留旧 `enable_lora` 分支；本地 tiny-model backward 已验证 LoRA 梯度链路，真实 A800 复验尚未执行。
 
 ## 代码开放状态
 

@@ -12,22 +12,22 @@ class FakeEvaluationAdapter:
 
     def response_loss(
         self,
-        supports: tuple[object, ...],
+        retrieved_states: tuple[object, ...],
         query: str,
         response: str,
         credit: object,
     ) -> TrainingLoss:
-        del supports, query, credit
+        del retrieved_states, query, credit
         return TrainingLoss(value=float(response), token_count=1)
 
     def compress_gold(
         self,
-        supports: tuple[object, ...],
+        retrieved_states: tuple[object, ...],
         query: str,
         response: str,
         credit: object,
     ) -> CompressedTurn:
-        del supports, query, credit
+        del retrieved_states, query, credit
         value = float(response)
         return CompressedTurn(latent=value, retrieval_key=value)
 

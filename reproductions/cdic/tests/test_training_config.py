@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from cdic_repro.config import SupportOrder
+from cdic_repro.config import RetrievedStateOrder
 from cdic_repro.experiments.training_config import load_training_config
 
 
@@ -35,7 +35,7 @@ def test_training_config_loads_paper_defaults(tmp_path: Path) -> None:
     assert config.data.session_id == 4
     assert config.data.strict_pairs is False
     assert config.retrieval.threshold == 0.8
-    assert config.retrieval.support_order is SupportOrder.SCORE_DESC
+    assert config.retrieval.retrieved_state_order is RetrievedStateOrder.SCORE_DESC
     assert config.training.epochs == 2
     assert config.training.learning_rate == 2e-4
     assert len(config.fingerprint()) == 64

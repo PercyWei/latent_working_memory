@@ -65,8 +65,8 @@ def test_compression_gradient_window_resets_at_configured_depth() -> None:
     assert reset.new_state_gradient_depth == 1
 
 
-def test_compression_gradient_window_rejects_missing_connected_support() -> None:
+def test_compression_gradient_window_rejects_missing_connected_state() -> None:
     credit = CreditPlan(connected_state_id="missing", detached_state_ids=())
 
-    with pytest.raises(ValueError, match="present in compression supports"):
+    with pytest.raises(ValueError, match="present in retrieved states"):
         build_compression_gradient_plan((), credit, gradient_window_size=2)

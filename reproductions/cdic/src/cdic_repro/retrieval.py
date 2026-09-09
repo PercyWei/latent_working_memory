@@ -4,7 +4,7 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from cdic_repro.config import RetrievalConfig, SupportOrder
+from cdic_repro.config import RetrievalConfig, RetrievedStateOrder
 from cdic_repro.memory_state import MemoryBank
 
 
@@ -88,7 +88,7 @@ def retrieve(
     if config.max_retrieved is not None:
         selected.sort(key=lambda record: (-record.score, record.memory_index))
         selected = selected[: config.max_retrieved]
-    if config.support_order is SupportOrder.SCORE_DESC:
+    if config.retrieved_state_order is RetrievedStateOrder.SCORE_DESC:
         selected.sort(key=lambda record: (-record.score, record.memory_index))
     else:
         selected.sort(key=lambda record: record.memory_index)

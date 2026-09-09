@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -24,6 +24,7 @@ from cdic_repro.icae.token_layout import prepare_icae_token_layout
 
 @dataclass(frozen=True, slots=True)
 class IcaeConfig:
+
     memory_size: int = 128
     lora_rank: int = 128
     lora_alpha: int = 32
@@ -42,6 +43,7 @@ class IcaeConfig:
 
 
 class MemoryHead(nn.Module):
+
     def __init__(self, hidden_size: int) -> None:
         super().__init__()
         self.dense_in = nn.Linear(hidden_size, hidden_size)
@@ -55,6 +57,7 @@ class MemoryHead(nn.Module):
 
 
 class LlamaICAE(nn.Module):
+
     def __init__(
         self,
         base_model: PreTrainedModel,
@@ -74,7 +77,7 @@ class LlamaICAE(nn.Module):
         self.tokenizer = tokenizer
         self.token_layout = prepare_icae_token_layout(tokenizer, config.memory_size)
         base_model.resize_token_embeddings(
-            self.token_layout.model_vocabulary_size,
+            self.token_layout.tokenizer_vocabulary_size,
             mean_resizing=False,
         )
         base_model.config.pad_token_id = tokenizer.pad_token_id
@@ -143,7 +146,7 @@ class LlamaICAE(nn.Module):
         if tokens.numel() > 0:
             minimum = int(tokens.min().item())
             maximum = int(tokens.max().item())
-            if minimum < 0 or maximum >= self.token_layout.model_vocabulary_size:
+            if minimum < 0 or maximum >= self.token_layout.token_id_upper_bound:
                 raise ValueError("tokens contain values outside the ICAE token layout")
 
         special_mask = tokens >= self.token_layout.memory_token_start
@@ -178,8 +181,29 @@ class LlamaICAE(nn.Module):
                 "each encoder input must end with the ordered ICAE memory token sequence"
             )
 
+        return self.compress_embeddings(
+            self.embed_tokens(encoder_tokens),
+            encoder_attention_mask=encoder_attention_mask,
+        )
+
+    def compress_embeddings(
+        self,
+        encoder_embeddings: Tensor,
+        encoder_attention_mask: Tensor | None = None,
+    ) -> Tensor:
+        """编码以有序 memory embeddings 结尾的输入并返回 memory slots。"""
+
+        if encoder_embeddings.ndim != 3:
+            raise ValueError(
+                "encoder_embeddings must have shape [batch_size, seq_len, hidden_size]"
+            )
+        if encoder_embeddings.shape[1] < self.config.memory_size:
+            raise ValueError("encoder_embeddings contain fewer positions than memory slots")
+        if encoder_embeddings.shape[2] != self.hidden_size:
+            raise ValueError("encoder_embeddings hidden size does not match the ICAE model")
+
         encoder_outputs = self.icae(
-            inputs_embeds=self.embed_tokens(encoder_tokens),
+            inputs_embeds=encoder_embeddings,
             attention_mask=encoder_attention_mask,
             output_hidden_states=True,
             use_cache=False,
@@ -229,9 +253,9 @@ class LlamaICAE(nn.Module):
             selected_labels = labels[valid_labels]
             if (
                 int(selected_labels.min().item()) < 0
-                or int(selected_labels.max().item()) >= self.token_layout.text_vocabulary_size
+                or int(selected_labels.max().item()) >= self.token_layout.tokenizer_vocabulary_size
             ):
-                raise ValueError("labels must contain only text token IDs or -100")
+                raise ValueError("labels must contain only tokenizer token IDs or -100")
 
         memory_embeddings = self.compress(
             encoder_tokens,
@@ -295,7 +319,7 @@ class LlamaICAE(nn.Module):
         self.icae.gradient_checkpointing_disable()
 
     @contextmanager
-    def _disable_adapter_for_decode(self) -> Iterator[None]:
+    def _disable_adapter_for_decode(self) -> Generator[None, None, None]:
         """在解码路径中禁用 LoRA adapter, 以确保使用冻结的 base model."""
         context_token = self._decode_without_adapter.set(True)
         try:

@@ -1,7 +1,7 @@
 {
   "model": {
     "model_path": "/data/bywei/models/meta-llama/Llama-2-7b-chat-hf",
-    "checkpoint_path": "/data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt",
+    "checkpoint_path": "/data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae.pt",
     "device": "cuda:0",
     "devices": ["cuda:0", "cuda:1"],
     "dtype": "bfloat16",
@@ -24,7 +24,7 @@
   "retrieval": {
     "threshold": 0.8,
     "decay": 0.05,
-    "support_order": "score_desc",
+    "retrieved_state_order": "score_desc",
     "max_retrieved": null
   },
   "training": {

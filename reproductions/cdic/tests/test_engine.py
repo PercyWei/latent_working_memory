@@ -26,18 +26,20 @@ class FakeAdapter:
             "topic-a-2": (0.99, 0.01),
             "topic-b": (0.0, 1.0),
         }
-        self.support_history: list[tuple[str, ...]] = []
+        self.retrieved_state_history: list[tuple[str, ...]] = []
 
     def encode_query(self, query: str) -> object:
         return self.query_keys[query]
 
-    def generate(self, supports: tuple[ThreadState, ...], query: str) -> str:
-        self.support_history.append(tuple(state.state_id for state in supports))
+    def generate(self, retrieved_states: tuple[ThreadState, ...], query: str) -> str:
+        self.retrieved_state_history.append(
+            tuple(state.state_id for state in retrieved_states)
+        )
         return f"response:{query}"
 
     def compress(
         self,
-        supports: tuple[ThreadState, ...],
+        retrieved_states: tuple[ThreadState, ...],
         query: str,
         response: str,
     ) -> CompressedTurn:
@@ -67,9 +69,9 @@ def test_inference_engine_runs_retrieve_generate_compress_writeback() -> None:
     assert second.state.revision == 1
     assert third.trace.write_back.action is WriteAction.INSERT
     assert len(engine.memory) == 2
-    assert adapter.support_history[0] == ()
-    assert adapter.support_history[1] == (first.state.state_id,)
-    assert adapter.support_history[2] == (second.state.state_id,)
+    assert adapter.retrieved_state_history[0] == ()
+    assert adapter.retrieved_state_history[1] == (first.state.state_id,)
+    assert adapter.retrieved_state_history[2] == (second.state.state_id,)
 
     serialized = json.loads(third.trace.to_json())
     assert serialized["write_back"]["action"] == "insert"
