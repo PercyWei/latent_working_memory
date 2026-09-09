@@ -1,8 +1,8 @@
-# 20260909_数据准备流程重构（11:49:58 UTC+08:00）
+# 20260909_数据准备流程重构（15:15:21 UTC+08:00）
 
 创建时间：20260909 11:40:55 UTC+08:00
 
-最后修订时间：20260909 11:49:58 UTC+08:00
+最后修订时间：20260909 15:15:21 UTC+08:00
 
 数据准备统一位于 `src/latent_working_memory/data_preparation/`，训练、模型和评估位于 `src/latent_working_memory/v1/`。准备入口读取本地公开语料与已安装模型，输出可供训练直接读取的数据及审计记录。
 
@@ -19,7 +19,8 @@
 | `scoring.py` | 独立窗口 NLL、模型句段判定与评分缓存 |
 | `fineweb.py` | 自然粒度候选、AE/LM 目标、容量合法性和数据契约 |
 | `pipeline.py` | 候选池、划分、筛选、样本输出和完成记录 |
-| `audit.py` | 原文连续性、来源隔离、长度统计、随机抽查和采样预演 |
+| `audit.py` | 原文连续性、来源隔离、长度统计与采样预演 |
+| `inspection.py` | 完成数据的独立随机与分层抽查、复核结果汇总 |
 
 执行顺序为：候选读取与粗筛 → 文档聚类及来源划分 → 已配置模型评分 → 自然片段构造 → 来源与预算审计 → 写入完成记录。候选池固定后，近重复簇 ID 使用簇内最小归一化 URL；各簇按固定哈希分配 train/dev/test，保留按候选顺序遇到的首篇具有合法视图的文档。
 
@@ -52,7 +53,7 @@ L=\lambda_{AE}\frac{\sum_i L_{AE,i}}{N_{AE}}+
 
 ## 3. 配置与输出
 
-`configs/data_preparation/fineweb.json` 指定候选预算、来源配额、近重复参数、评分模型和抽查规模。实验配置保存基座、自然片段长度预算、任务提示、长度采样及容量参数。默认准备配方使用规则质检；设置 fluency_model_name_or_path、review_model_name_or_path 可分别启用本地 NLL 和语义质检模型。
+`configs/data_preparation/fineweb.json` 指定候选预算、来源配额、近重复参数与评分模型。抽查规模及 seed 由独立抽查命令指定。实验配置保存基座、自然片段长度预算、任务提示、长度采样及容量参数。默认准备配方使用规则质检；设置 fluency_model_name_or_path、review_model_name_or_path 可分别启用本地 NLL 和语义质检模型。
 
 ```bash
 uv run python -m latent_working_memory.data_preparation \
@@ -70,20 +71,18 @@ uv run python -m latent_working_memory.data_preparation \
 | `document-decisions.jsonl` | 每个候选的划分、状态、理由与评分结果 |
 | `documents.jsonl` | 入选文档原文、重复簇及排除区间 |
 | `train.jsonl`、`dev.jsonl`、`test.jsonl` | 统一 episode 格式的训练与评估视图 |
-| `audit-random-documents.jsonl` | 分别从保留、质量排除文档随机抽取的完整原文，reviewer 初始为 null |
-| `audit-stratified-views.jsonl` | 按划分、粒度、长度分层选取的完整 X 及可用 Y |
 | `audit.json` | 连续性、来源隔离、合法容量、长度分位数及采样预演 |
 | `preparation.json` | 所有构造及审计完成后写入的训练消费记录 |
 
 审计统计包含输入和续写的样本数、token 总数、均值、P50/P90/P95/P99。确定性预演模拟 1000 次采样访问，报告长度、粒度、容量、有效压缩率与独立文档覆盖。预演的容量课程 step 按 batch_size × gradient_accumulation_steps 换算；正文统计使用内容 tokens，训练累计目标数包含 EOS。
 
-随机文档面板用于完成独立复核后估计筛选误差，分层视图用于定位问题。quality_audit.status 初始为 pending_review。数据配额和自动契约审计完成后写入 preparation.json；人工或助手复核的结论单独记录。训练与独立评估使用固定数据目录。
+数据配额和自动契约检查完成后写入 preparation.json，训练与独立评估直接使用固定数据目录。质量抽查在数据构造完成后单独执行，输出到数据目录之外；随机视图估计该 split 的均匀样本缺陷率，分层视图定位长度及粒度问题。复核状态与汇总保存在独立抽查目录中，具体操作见 [评分与后置抽查方案](20260909_quality_scoring_and_inspection.md)。
 
 本次数据与 sampler checkpoint 按新接口生成；历史实验使用各自冻结的代码和数据复现。上轮 ID 排除清单由助手抽查产生，记录保留在历史实验目录中。
 
 ## 4. 验证与后续实验
 
-v1 的 59 项测试通过。新增覆盖 AE 文末保留、完整句末续写、独立 NLL 窗口、评分缓存复用与失效、质量输出契约、近重复分组、局部排除、准备失败的完成记录、长度采样恢复、混合目标的梯度归一化及 AE-only 评估。
+v1 的 61 项测试通过。独立抽查新增覆盖固定 seed 的可重复性、准备数据保持原样、复核存疑状态及缺陷比例汇总。新增覆盖 AE 文末保留、完整句末续写、独立 NLL 窗口、评分缓存复用与失效、质量输出契约、近重复分组、局部排除、准备失败的完成记录、长度采样恢复、混合目标的梯度归一化及 AE-only 评估。
 
 完整链路测试通过本地 Parquet、tiny Llama NLL 评分、缓存、数据准备、审计、一次训练更新、评估和 checkpoint 保存；该测试屏蔽网络连接，验证工程行为。语义判定协议使用固定响应及原文区间测试，其实际筛选质量由选定强模型后的独立复核评估。
 

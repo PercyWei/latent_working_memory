@@ -12,6 +12,7 @@ from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 from latent_working_memory.v1.backbone import LatentMemoryBackbone
 from latent_working_memory.v1.config import ExperimentConfig
 from latent_working_memory.v1.model import JointMemoryWriter
+from latent_working_memory.data_preparation.config import PreparationConfig
 
 
 @pytest.fixture
@@ -135,3 +136,36 @@ def source_records():
         )
         for i in range(64)
     ]
+
+
+@pytest.fixture
+def preparation_records(source_records):
+    return [
+        dict(row, text=row["text"].replace("sentence", f"sentence number {i}"))
+        for i, row in enumerate(source_records)
+    ]
+
+
+@pytest.fixture
+def preparation_recipe():
+    return PreparationConfig(
+        max_documents=64,
+        samples_per_task=(12, 4, 4),
+        min_document_chars=1,
+        length_bounds=(8, 32, 64),
+        near_duplicate_min_words=128,
+    )
+
+
+@pytest.fixture
+def accepting_scorer():
+    class AcceptSamples:
+        protocol = {"model": "test-only-accepting-service"}
+
+        def score_batch(self, samples):
+            return [
+                {"decision": "keep", "reason": "Interface test response", "cache_key": str(i)}
+                for i, _ in enumerate(samples)
+            ]
+
+    return AcceptSamples()

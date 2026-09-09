@@ -1,8 +1,8 @@
-# 20260909_可增长 Latent Working Memory v1 实施计划（02:13:59 UTC+08:00）
+# 20260909_可增长 Latent Working Memory v1 实施计划（14:52:14 UTC+08:00）
 
 创建时间：20260907 16:58:30 UTC+08:00
 
-最后修订时间：20260909 02:13:59 UTC+08:00
+最后修订时间：20260909 14:52:14 UTC+08:00
 
 结构、公式和训练协议以 [框架设计](../20260907_growing_latent_working_memory_framework_v1.md) 为准。实现依次推进 FineWeb AE/LM 预训练、MSC 动态训练和容量学习。当前预训练代码已通过本地与服务器测试，真实 FineWeb 数据准备、7B GPU 训练、保存恢复和多容量评估已跑通。质量试验见 [预训练记录](20260908_fineweb_pretraining_pilot_record.md)。
 
@@ -72,7 +72,7 @@ FineWeb 原始 Parquet 保存在 `data/raw/HuggingFaceFW-fineweb/sample-10BT/`�
 
 ## 4. 本地验收与真实数据实验
 
-本地工程验证通过 49 项 v1 与根项目回归测试，服务器通过 43 项 v1 测试；Ruff 检查与格式检查通过。当前测试记录位于 `artifacts/v1/pretrain-generalization-20260908/local-tests.xml` 与 `server-tests.xml`。
+本地工程验证通过 49 项 v1 与根项目回归测试，服务器通过 43 项 v1 测试；Ruff 检查与格式检查通过。当前测试记录位于 `artifacts/v1/experiments/pretrain-generalization-20260908/local-tests.xml` 与 `server-tests.xml`。
 
 本地使用标准 Transformers/PEFT 构造、保存并加载 tiny Llama，以接口样例验证程序行为。核心验收包括：
 

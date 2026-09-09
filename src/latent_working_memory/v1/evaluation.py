@@ -145,10 +145,13 @@ def evaluate_pretraining(
     backbone.eval()
     writer.eval()
     records, generation_jobs = [], []
+    generated_ae_views = 0
     try:
-        for position, episode in enumerate(panel):
+        for episode in panel:
             source = episode.sources[0]
             ae, lm = read_tokens(episode, tokenizer)
+            if ae is not None:
+                generated_ae_views += 1
             capacities = capacity_weights(config, len(episode.input_ids), ae, lm, step)
             if not capacities:
                 raise ValueError(f"no legal evaluation capacity for {episode.episode_id}")
@@ -218,7 +221,7 @@ def evaluate_pretraining(
                         if (
                             task_name == "ae"
                             and condition == "memory"
-                            and position < config.eval_generation_examples
+                            and generated_ae_views <= config.eval_generation_examples
                             and step % config.eval_generation_every == 0
                         ):
                             record["reference"] = episode.reads[0].references[0].text

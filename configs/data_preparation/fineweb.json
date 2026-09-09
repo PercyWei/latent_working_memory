@@ -1,16 +1,25 @@
 {
   "max_documents": 18000,
-  "split_document_limits": [
-    10000,
-    512,
-    512
+  "samples_per_task": [
+    100000,
+    2000,
+    2000
   ],
+  "min_document_chars": 64,
   "near_duplicate_threshold": 0.9,
   "near_duplicate_min_words": 64,
-  "score_block_tokens": 512,
-  "scoring_batch_size": 8,
+  "dedup_input_min_tokens": 32,
+  "length_bounds": [
+    64,
+    128,
+    256,
+    512,
+    1024
+  ],
+  "random_candidates_per_document": 64,
+  "review_base_url": "http://127.0.0.1:8000/v1",
+  "review_model": "Qwen/Qwen3.8-27B",
   "review_max_new_tokens": 256,
-  "fluency_model_name_or_path": null,
-  "review_model_name_or_path": null,
-  "audit_examples": 200
+  "scoring_batch_size": 8,
+  "review_timeout_seconds": 120
 }

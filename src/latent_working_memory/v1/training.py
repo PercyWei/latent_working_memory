@@ -36,7 +36,7 @@ def precision_context(device: torch.device):
 @dataclass(frozen=True, slots=True)
 class PretrainOutput:
     loss: Tensor
-    ae: list[ReaderOutput]
+    ae: list[ReaderOutput | None]
     lm: list[ReaderOutput | None]
 
 
@@ -55,22 +55,24 @@ def pretrain_forward(
         [e.capacity for e in examples],
     )
     memories = [state.values for state in states]
-    ae = backbone.read_batch(memories, [e.ae for e in examples])
-    positions = [i for i, example in enumerate(examples) if example.lm is not None]
-    lm = [None] * len(examples)
-    if positions:
-        outputs = backbone.read_batch(
-            [memories[i] for i in positions], [examples[i].lm for i in positions]
-        )
-        for i, output in zip(positions, outputs, strict=True):
-            lm[i] = output
-    ae_count, lm_count = task_counts or (len(examples), len(positions))
-    loss = config.ae_weight * torch.stack([o.mean_nll for o in ae]).sum() / ae_count
-    if positions:
-        loss = (
-            loss
-            + config.lm_weight * torch.stack([lm[i].mean_nll for i in positions]).sum() / lm_count
-        )
+    ae, lm = [None] * len(examples), [None] * len(examples)
+    ae_count, lm_count = task_counts or (
+        sum(e.ae is not None for e in examples),
+        sum(e.lm is not None for e in examples),
+    )
+    loss = memories[0].sum() * 0
+    for name, destination, count, weight in (
+        ("ae", ae, ae_count, config.ae_weight),
+        ("lm", lm, lm_count, config.lm_weight),
+    ):
+        positions = [i for i, example in enumerate(examples) if getattr(example, name) is not None]
+        if positions:
+            outputs = backbone.read_batch(
+                [memories[i] for i in positions], [getattr(examples[i], name) for i in positions]
+            )
+            for i, output in zip(positions, outputs, strict=True):
+                destination[i] = output
+            loss = loss + weight * torch.stack([o.mean_nll for o in outputs]).sum() / count
     return PretrainOutput(loss, ae, lm)
 
 
@@ -99,8 +101,11 @@ class PretrainTrainer:
             examples,
             key=lambda e: max(e.input_length, len(e.lm.target_ids) if e.lm else 0) + e.capacity,
         )
-        task_counts = (len(examples), sum(e.lm is not None for e in examples))
-        if self.config.ae_weight == 0 and task_counts[1] == 0:
+        task_counts = (
+            sum(e.ae is not None for e in examples),
+            sum(e.lm is not None for e in examples),
+        )
+        if not (self.config.ae_weight * task_counts[0] + self.config.lm_weight * task_counts[1]):
             raise ValueError("the optimizer step has no targets for an enabled task")
         records, loss_value = [], 0.0
         for start in range(0, len(ordered), self.config.batch_size):
@@ -131,7 +136,7 @@ class PretrainTrainer:
                         "continuation_tokens": len(example.lm.target_ids) - 1 if example.lm else 0,
                         "capacity": example.capacity,
                         "effective_ratio": example.input_length / example.capacity,
-                        "ae_nll": float(ae.mean_nll.detach()),
+                        "ae_nll": float(ae.mean_nll.detach()) if ae is not None else None,
                         "lm_nll": float(lm.mean_nll.detach()) if lm is not None else None,
                     }
                 )
@@ -151,7 +156,8 @@ class PretrainTrainer:
             ),
             "input_tokens": sum(e.input_length for e in examples),
             "target_tokens": sum(
-                len(e.ae.target_ids) + (len(e.lm.target_ids) if e.lm else 0) for e in examples
+                (len(e.ae.target_ids) if e.ae else 0) + (len(e.lm.target_ids) if e.lm else 0)
+                for e in examples
             ),
         }
 

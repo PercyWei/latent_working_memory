@@ -7,7 +7,6 @@ import torch
 from transformers import LlamaConfig, LlamaForCausalLM
 
 from latent_working_memory.v1.checkpoint import load_model_checkpoint
-from latent_working_memory.data_preparation.config import PreparationConfig
 from latent_working_memory.v1.data import EpisodeIndex
 from latent_working_memory.v1.evaluate import main as evaluate_main
 from latent_working_memory.data_preparation.pipeline import prepare_fineweb
@@ -19,18 +18,22 @@ def test_joint_objective_uses_one_write_and_updates_all_four_modules(
     tmp_path,
     tiny_config,
     tokenizer,
-    source_records,
+    preparation_records,
+    preparation_recipe,
+    accepting_scorer,
     components,
     monkeypatch,
 ):
     data = tmp_path / "data"
     prepare_fineweb(
-        source_records,
+        preparation_records,
         tokenizer,
         tiny_config,
         data,
-        PreparationConfig(max_documents=len(source_records)),
+        preparation_recipe,
+        accepting_scorer,
     )
+    data = data / "semantic"
     sampler = PretrainSampler(EpisodeIndex(data / "train.jsonl"), tokenizer, tiny_config)
     examples = [sampler.sample(0), sampler.sample(0)]
     backbone, writer = components
@@ -77,7 +80,9 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
     tmp_path,
     tiny_config,
     tokenizer,
-    source_records,
+    preparation_records,
+    preparation_recipe,
+    accepting_scorer,
 ):
     model_dir = tmp_path / "tiny-llama"
     torch.manual_seed(3)
@@ -104,14 +109,17 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
         gradient_checkpointing=True,
         split_fractions=(0.6, 0.2, 0.2),
     )
+    preparation_recipe = replace(preparation_recipe, samples_per_task=(16, 16, 16))
     data = tmp_path / "data"
     prepare_fineweb(
-        source_records,
+        preparation_records,
         tokenizer,
         config,
         data,
-        PreparationConfig(max_documents=len(source_records)),
+        preparation_recipe,
+        accepting_scorer,
     )
+    data = data / "semantic"
     full = run_pretraining(
         config, data, tmp_path / "full", torch.device("cpu"), max_steps=2, save_every=1
     )

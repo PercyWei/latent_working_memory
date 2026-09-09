@@ -15,7 +15,7 @@ from latent_working_memory.v1.data import Episode, EpisodeIndex
 @dataclass(frozen=True, slots=True)
 class PretrainExample:
     episode: Episode
-    ae: ReadTokens
+    ae: ReadTokens | None
     lm: ReadTokens | None
     capacity: int
 
@@ -26,36 +26,30 @@ class PretrainExample:
 
 def read_tokens(
     episode: Episode, tokenizer: PreTrainedTokenizerBase
-) -> tuple[ReadTokens, ReadTokens | None]:
-    ae_read = episode.reads[0]
-    ae_ids = tuple(tokenizer.encode(ae_read.references[0].text, add_special_tokens=False))
-    if ae_ids != episode.input_ids:
+) -> tuple[ReadTokens | None, ReadTokens | None]:
+    read = episode.reads[0]
+    ids = tuple(tokenizer.encode(read.references[0].text, add_special_tokens=False))
+    if read.task == "ae" and ids != episode.input_ids:
         raise ValueError(
             "AE reference tokens must equal write input_ids; check tokenizer provenance"
         )
-    eos = (tokenizer.eos_token_id,)
-    lm = None
-    if len(episode.reads) == 2:
-        lm_read = episode.reads[1]
-        lm = ReadTokens(
-            tuple(tokenizer.encode(lm_read.prompt, add_special_tokens=False)),
-            tuple(tokenizer.encode(lm_read.references[0].text, add_special_tokens=False)) + eos,
-        )
-    return (
-        ReadTokens(tuple(tokenizer.encode(ae_read.prompt, add_special_tokens=False)), ae_ids + eos),
-        lm,
+    target = ReadTokens(
+        tuple(tokenizer.encode(read.prompt, add_special_tokens=False)),
+        ids + (tokenizer.eos_token_id,),
     )
+    return (target, None) if read.task == "ae" else (None, target)
 
 
 def capacity_weights(
     config: ExperimentConfig,
     input_length: int,
-    ae: ReadTokens,
+    ae: ReadTokens | None,
     lm: ReadTokens | None,
     step: int,
 ) -> dict[int, float]:
     if (
-        not 0 < input_length <= config.max_input_tokens
+        (ae is None and lm is None)
+        or not 0 < input_length <= config.max_input_tokens
         or input_length + 1 > config.write_context_tokens
         or (lm is not None and len(lm.target_ids) - 1 > config.max_continuation_tokens)
     ):
@@ -94,11 +88,18 @@ class PretrainSampler:
         self.index, self.tokenizer, self.config = index, tokenizer, config
         self.rng = random.Random(config.data_seed)
         allowed = set(index.panel(example_limit, config.data_seed)) if example_limit else None
-        weights = dict(zip(GRANULARITIES, config.granularity_weights, strict=True))
+        weights = dict(zip(GRANULARITIES, config.granularity_weights, strict=True)) | {
+            "random": 1.0
+        }
         self.groups = {}
         for document, groups in index.groups.items():
             selected = {
-                g: [i for i in indices if allowed is None or i in allowed]
+                g: [
+                    i
+                    for i in indices
+                    if (allowed is None or i in allowed)
+                    and (config.ae_weight if index.tasks[i] == "ae" else config.lm_weight) > 0
+                ]
                 for g, indices in groups.items()
                 if weights[g] > 0
             }
@@ -153,7 +154,9 @@ class PretrainSampler:
         self.cursors[key] += 1
         self.visits += 1
         groups = self.pools[key][document]
-        weights = dict(zip(GRANULARITIES, self.config.granularity_weights, strict=True))
+        weights = dict(zip(GRANULARITIES, self.config.granularity_weights, strict=True)) | {
+            "random": 1.0
+        }
         granularity = self.rng.choices(list(groups), [weights[g] for g in groups])[0]
         episode = self.index[self.rng.choice(groups[granularity])]
         ae, lm = read_tokens(episode, self.tokenizer)

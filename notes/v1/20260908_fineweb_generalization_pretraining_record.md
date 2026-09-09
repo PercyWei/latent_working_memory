@@ -1,8 +1,8 @@
-# 20260909_FineWeb 扩大数据预训练记录（11:40:55 UTC+08:00）
+# 20260909_FineWeb 扩大数据预训练记录（14:52:14 UTC+08:00）
 
 创建时间：20260908 22:43:52 UTC+08:00
 
-最后修订时间：20260909 11:40:55 UTC+08:00
+最后修订时间：20260909 14:52:14 UTC+08:00
 
 ## 1. 实验问题与设置
 
@@ -60,9 +60,9 @@ AE 自由生成按长度分组，每批最多 8 个输入，左侧 padding 支�
 
 代码快照位于服务器项目的 `artifacts/v1/pretrain-generalization-code-20260908/`，复用已有 v1 依赖环境。训练数据、质量分数与检查结果位于 `artifacts/v1/pretrain-generalization-20260908/`。实际运行数据和模型均从服务器本地读取；SwanLab 使用服务器已有登录与直连网络。
 
-两个训练目录分别为 `artifacts/v1/pretrain-generalization-lr1e-4-20260908/` 和 `artifacts/v1/pretrain-generalization-lr3e-5-20260908/`。每个目录保存配置、来源记录、逐步训练日志、验证结果、checkpoint 和 `swanlab.json`。
+服务器上的两个训练目录分别为 `artifacts/v1/pretrain-generalization-lr1e-4-20260908/` 和 `artifacts/v1/pretrain-generalization-lr3e-5-20260908/`。每个目录保存配置、来源记录、逐步训练日志、验证结果、checkpoint 和 `swanlab.json`。
 
-启动及准备脚本保存在 [`实验脚本目录`](../../artifacts/v1/pretrain-generalization-20260908/scripts/)。运行流程依次执行候选评分、数据配额构建、原文与来源检查、分层抽查及两组预训练启动。
+启动及准备脚本保存在 [`实验脚本目录`](../../artifacts/v1/experiments/pretrain-generalization-20260908/scripts/)。运行流程依次执行候选评分、数据配额构建、原文与来源检查、分层抽查及两组预训练启动。
 
 两组于 20260908 23:28:05 UTC+08:00 建立 SwanLab 运行：
 
@@ -179,4 +179,4 @@ AE 自由重建完整匹配为 0/192，平均归一化 token 编辑距离为 0.9
 
 测试运行见 [SwanLab 2pxha39h](https://swanlab.cn/@percyWeeeeei/latent-working-memory/runs/2pxha39h/chart)。云端 AE/LM NLL、AE 错误记忆对照收益、完整匹配和编辑距离均已与本地结果核对，记录在 `test-swanlab-verification.json`。SwanLab 的重建媒体预览保留前 108 项，完整 192 项位于测试目录的 `dev-step-002000.jsonl`；标量指标使用全部生成样本。
 
-测试结果已同步到本地 `artifacts/v1/pretrain-generalization-test-20260909/`，汇总位于 `artifacts/v1/pretrain-generalization-20260908/test-summary.json`。两组训练和独立测试均已正常退出，GPU 0、1 已释放；本轮 2000 步比较与独立测试流程完成，节点自动跟进已暂停。
+测试结果已同步到本地 `artifacts/v1/evaluations/pretrain-generalization-test-20260909/`，汇总位于 `artifacts/v1/experiments/pretrain-generalization-20260908/test-summary.json`。本地目录分类见 [产物整理记录](20260909_artifact_organization.md)。两组训练和独立测试均已正常退出，GPU 0、1 已释放；本轮 2000 步比较与独立测试流程完成，节点自动跟进已暂停。

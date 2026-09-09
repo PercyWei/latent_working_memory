@@ -1,8 +1,8 @@
-# 20260908_真实公开数据与记忆训练路线（16:11:24 UTC+08:00）
+# 20260909_真实公开数据与记忆训练路线（20:13:30 UTC+08:00）
 
 创建时间：20260907 22:31:33 UTC+08:00
 
-最后修订时间：20260908 16:11:24 UTC+08:00
+最后修订时间：20260909 20:13:30 UTC+08:00
 
 本文整理公开数据的训练用途、相关文献的训练配方及本项目的数据协议。结构与计算公式见 [可增长 Latent Working Memory 框架 v1](20260907_growing_latent_working_memory_framework_v1.md)。本文中的方案是实验执行依据，效果由对应训练与评估验证。
 
@@ -12,7 +12,7 @@
 
 写入时，基座处理当前文本，$W_{\mathrm{in}}$ 将内部表示映射到记忆空间，$U$ 结合旧记忆与新输入生成全部记忆位置。读取时，$P$ 将记忆映射为基座的输入向量，启用读取 LoRA 的基座完成当前任务。$V$ 在已有记忆的状态上选择增长数量。
 
-记忆从形状为 $[0,512]$ 的空张量开始，首次写入分配 16 个位置，随后按动作 $\{0,8,16\}$ 增长至上限 512。新位置采用零内容初值与固定位置向量。共享可学习初值是独立的结构消融项。
+记忆从形状为 $[0,512]$ 的空张量开始，动态阶段首次写入分配 16 个位置，随后按动作 $\{0,8,16\}$ 增长至上限 512。新位置采用零内容初值与固定位置向量。共享可学习初值是独立的结构消融项。
 
 训练分为三个阶段：
 
@@ -47,23 +47,25 @@
 
 ### 3.1 原文 AE 与 LM
 
-[FineWeb](https://huggingface.co/datasets/HuggingFaceFW/fineweb)与 [SlimPajama](https://huggingface.co/datasets/cerebras/SlimPajama-627B)提供公开原文训练来源。[ComprExIT 官方配置](https://github.com/Jiangnan0522/ComprExIT#datasets)提供 SlimPajama 与 MRQA 的衔接示例。单次运行固定一个原文来源、subset、revision、文档抽样范围和训练 tokens。
+预训练使用 [FineWeb](https://huggingface.co/datasets/HuggingFaceFW/fineweb) 的 `sample-10BT` 子集。原文通过字段与最短长度检查后，按来源与近重复簇去重并固定 train/dev/test，再构造段落、连续句子组、单句和相邻段落组。最终样本的内容质量由强模型判定。
 
-每个样本从同一文档中取得前段 $X$ 与后续 $Y$，从空记忆开始写入 $X$，得到 $M_X$：
+完整自然父片段为 $S$。AE 写入并重建 $S$；LM 在 $S$ 的合法内部句界随机切分，写入前缀 $X$，监督剩余后缀 $Y$ 的全部 tokens 与 EOS。两项分别构造成独立 episode，每个 episode 完成一次写入与一次任务读取。实际写入文本 $T$ 的记忆为：
 
 $$
-M_X=\operatorname{Write}_\theta(\varnothing,X;K_{\mathrm{first}}),
+M_T=\operatorname{Write}_\theta(\varnothing,T;K_T),
 $$
 
 $$
 \mathcal L_{\mathrm{pre}}
-=\lambda_{\mathrm{AE}}\ell_\eta(M_X,q_{\mathrm{AE}},X)
-+\lambda_{\mathrm{LM}}\ell_\eta(M_X,q_{\mathrm{continue}},Y).
+=\lambda_{\mathrm{AE}}\mathbb E[\ell_\eta(M_S,q_{\mathrm{AE}},S)]
++\lambda_{\mathrm{LM}}\mathbb E[\ell_\eta(M_X,q_{\mathrm{continue}},Y)].
 $$
 
-AE 训练原文重建，LM 训练基于已保存内容预测后续文本。$X$ 是写入输入，$Y$ 是未来预测目标。两项采用同一读写模块，权重在配置中记录并依据 dev 调整。
+基座完整处理每个实际写入片段。当前输入上限为 1024 tokens，LM 目标上限为 256 tokens；单句父片段用于 AE。容量根据实际输入长度按压缩率 $\{2,4,8\}$ 采样，取整后落在 $[1,512]$ 并满足完整读取预算。每次参数更新分别按两项任务的有效样本数归一化损失，权重由配置指定。
 
-原文先按文档划分 train/dev，再切出样本。初始 $X$ 长度为 512–2048 tokens，课程从短文本推进；目标长度和生成预算覆盖完整目标及 EOS。基座按最多 64 tokens 的 cells 独立处理原文，更新器在预训练中一次接收所选 $X$ 的全部 cell 表示。
+数据构造完整句界 `semantic` 与随机截断 `random` 两套独立版本，共用固定来源划分。先构造 semantic 并由 Qwen3.8-27B 判定最终 X/Y，再统计各 split、各任务的入选输入长度区间；random 根据该分布独立选择来源和原文跨度，并接受模型判定。两类提示词共享内容标准，分别处理完整句界和随机截断要求。
+
+每个版本、每个 split 的 AE 与 LM 各自达到相同的最终入选配额，示例配置为每项任务 train/dev/test 各 100000／2000／2000 条。random 匹配 semantic 的任务内输入区间计数，LM 目标长度与监督 token 量单独记录。数据完成后通过独立模型或人工抽查评估质量，正式训练验证使用 semantic。代码流程与验证范围见 [独立 AE/LM 数据构造实现](v1/20260909_independent_ae_lm_data_preparation.md)。
 
 预训练评价包括重建 NLL、token 准确率、序列匹配和续写 NLL/PPL，并比较正确记忆、空记忆和其他文档的记忆。16 条公开 train 样本的过拟合用于链路调试；正式训练从统一初始化开始，以独立文档上的记忆利用作为推进依据。
 

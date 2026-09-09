@@ -18,7 +18,6 @@ from latent_working_memory.v1.evaluation import (
     persistent_memory_bytes,
     normalized_token_edit_distance,
 )
-from latent_working_memory.data_preparation.config import PreparationConfig
 from latent_working_memory.v1.data import EpisodeIndex
 from latent_working_memory.data_preparation.pipeline import prepare_fineweb
 from latent_working_memory.v1.state import MemoryState
@@ -125,19 +124,24 @@ def test_evaluation_controls_share_targets_budgets_and_write_test_split(
     tmp_path,
     tiny_config,
     tokenizer,
-    source_records,
+    preparation_records,
+    preparation_recipe,
+    accepting_scorer,
     components,
     monkeypatch,
 ):
     tiny_config = replace(tiny_config, split_fractions=(0.6, 0.2, 0.2))
+    preparation_recipe = replace(preparation_recipe, samples_per_task=(16, 16, 16))
     data = tmp_path / "data"
     prepare_fineweb(
-        source_records,
+        preparation_records,
         tokenizer,
         tiny_config,
         data,
-        PreparationConfig(max_documents=len(source_records)),
+        preparation_recipe,
+        accepting_scorer,
     )
+    data = data / "semantic"
     index = EpisodeIndex(data / "test.jsonl")
     backbone, writer = components
     original = backbone.read_batch
@@ -169,6 +173,8 @@ def test_evaluation_controls_share_targets_budgets_and_write_test_split(
         selected = [
             r for r in records if r["episode_id"] == episode_id and r["task"] == "continuation"
         ]
+        if not selected:
+            continue
         assert len({r["target_tokens"] for r in selected}) == 1
         for capacity in {r["capacity"] for r in selected}:
             paired = {r["condition"]: r for r in selected if r["capacity"] == capacity}
@@ -182,6 +188,8 @@ def test_evaluation_controls_share_targets_budgets_and_write_test_split(
     cursor = 0
     for i in index.evaluation_panel(tiny_config.eval_examples, tiny_config.data_seed + 1):
         episode = index[i]
+        if episode.reads[0].task == "ae":
+            continue
         task, context, lora = raw_calls[cursor]
         assert context == episode.input_ids and lora
         assert raw_calls[cursor + 1] == (task, episode.input_ids, False)

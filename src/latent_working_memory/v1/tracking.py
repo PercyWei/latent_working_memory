@@ -78,7 +78,6 @@ def log_training(
     metrics = {
         "train/loss": record["loss"],
         "train/gradient_norm": record["gradient_norm"],
-        "train/ae_nll": sum(s["ae_nll"] for s in samples) / len(samples),
         "resources/step_seconds": record["seconds"],
         "resources/input_tokens_per_second": record["input_tokens_per_second"],
         "resources/peak_memory_gib": record["peak_memory_bytes"] / 1024**3,
@@ -87,6 +86,10 @@ def log_training(
         "progress/distinct_documents": record["distinct_documents"],
         "progress/document_visits": record["document_visits"],
     }
+    ae_samples = [s for s in samples if s["ae_nll"] is not None]
+    metrics["batch/ae_fraction"] = len(ae_samples) / len(samples)
+    if ae_samples:
+        metrics["train/ae_nll"] = sum(s["ae_nll"] for s in ae_samples) / len(ae_samples)
     lm_samples = [s for s in samples if s["lm_nll"] is not None]
     metrics["batch/lm_fraction"] = len(lm_samples) / len(samples)
     if lm_samples:
@@ -102,14 +105,18 @@ def log_training(
         )
     granularities = Counter(s["granularity"] for s in samples)
     metrics.update(
-        {f"batch/{name}_fraction": granularities[name] / len(samples) for name in GRANULARITIES}
+        {
+            f"batch/{name}_fraction": granularities[name] / len(samples)
+            for name in (*GRANULARITIES, "random")
+        }
     )
     for upper in record["input_length_bounds"]:
         selected = [s for s in samples if s["length_bucket"] == upper]
         metrics[f"batch_by_length/{upper}/samples"] = len(selected)
         metrics[f"batch_by_length/{upper}/input_tokens"] = sum(s["input_tokens"] for s in selected)
         metrics[f"batch_by_length/{upper}/target_tokens"] = sum(
-            s["input_tokens"] + 1 + s["continuation_tokens"] + (s["lm_nll"] is not None)
+            (s["input_tokens"] + 1 if s["ae_nll"] is not None else 0)
+            + (s["continuation_tokens"] + 1 if s["lm_nll"] is not None else 0)
             for s in selected
         )
     run.log(metrics, step=record["step"])

@@ -166,6 +166,7 @@ class EpisodeIndex:
         self.offsets: list[int] = []
         self.ids: list[str] = []
         self.input_lengths: list[int] = []
+        self.tasks: list[str] = []
         self.source_ids: set[str] = set()
         self.cluster_ids: set[str] = set()
         seen_ids = set()
@@ -183,11 +184,11 @@ class EpisodeIndex:
                     len(episode.sources) != 1
                     or episode.write_ends != (len(episode.input_ids),)
                     or tuple(read.task for read in episode.reads)
-                    not in {("ae",), ("ae", "continuation")}
+                    not in {("ae",), ("continuation",)}
                     or any(read.prefix_end != len(episode.input_ids) for read in episode.reads)
                 ):
                     raise ValueError(
-                        "pretraining requires one write with AE and optional continuation"
+                        "pretraining requires one write and one AE or continuation task"
                     )
                 source = episode.sources[0]
                 if (source.token_start, source.token_end) != (0, len(episode.input_ids)):
@@ -200,6 +201,7 @@ class EpisodeIndex:
                 self.offsets.append(offset)
                 self.ids.append(episode.episode_id)
                 self.input_lengths.append(len(episode.input_ids))
+                self.tasks.append(episode.reads[0].task)
         if not self.offsets:
             raise ValueError(f"no episodes in {self.path}")
 
@@ -234,11 +236,20 @@ class EpisodeIndex:
             for granularity, indices in groups.items():
                 for i in indices:
                     bucket = sum(self.input_lengths[i] > upper for upper in (32, 128, 512))
-                    cells[(granularity, bucket)].append((document, i))
+                    cells[(self.tasks[i], granularity, bucket)].append((document, i))
         for values in cells.values():
             rng.shuffle(values)
-        keys = list(cells)
-        rng.shuffle(keys)
+        task_cells = defaultdict(list)
+        for key in cells:
+            task_cells[key[0]].append(key)
+        queues = list(task_cells.values())
+        rng.shuffle(queues)
+        for queue in queues:
+            rng.shuffle(queue)
+        keys = []
+        while queues:
+            keys.extend(queue.pop() for queue in queues)
+            queues = [queue for queue in queues if queue]
         result, seen = [], set()
         while keys and len(result) < limit:
             active = []
