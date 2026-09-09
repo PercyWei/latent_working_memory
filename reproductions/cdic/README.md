@@ -1,8 +1,8 @@
-# C-DIC 论文复现（20260909 11:15:48 CST）
+# C-DIC 论文复现（20260909 11:44:10 CST）
 
 创建时间：20260904 16:19:08 CST（UTC+08:00）
 
-最后修订时间：20260909 11:15:48 CST（UTC+08:00）
+最后修订时间：20260909 11:44:10 CST（UTC+08:00）
 
 本目录用于分阶段复现 Context-Driven Incremental Compression（C-DIC）。由于当前没有公开的官方实现，所有论文未明确的行为均记录在 `ASSUMPTIONS.md`。
 
@@ -38,7 +38,8 @@ R2 训练代码已实现：
 
 - `src/cdic_repro/`：retrieval、write-back、memory state 等论文核心机制与推理入口；
 - `src/cdic_repro/icae/`：现代 ICAE 实现、checkpoint 和 C-DIC adapter；
-- `src/cdic_repro/experiments/`：MSC 数据、训练、评估、checkpoint、分布式运行和指标；
+- `src/cdic_repro/experiments/msc/`：MSC 数据、训练与评估的完整工作流；
+- `src/cdic_repro/experiments/`：checkpoint、分布式运行和生成指标等可复用实验基础设施；
 - `configs/paper.yaml`：论文默认参数和显式复现选择；
 - `configs/msc_pilot_a800.json`：两条 episode、每条八轮的 GPU pilot；
 - `configs/msc_paper_a800.json`：论文规模两 epoch 配置；
@@ -137,7 +138,7 @@ uv run --project reproductions/cdic --no-sync cdic-train-msc \
 ```bash
 uv run --project reproductions/cdic --no-sync \
   torchrun --standalone --nproc-per-node=2 \
-  -m cdic_repro.experiments.train_msc \
+  -m cdic_repro.experiments.msc.train \
   --config reproductions/cdic/configs/msc_pilot_a800.json
 ```
 
@@ -146,7 +147,7 @@ pilot 通过后运行 seed 42 的论文规模训练：
 ```bash
 uv run --project reproductions/cdic --no-sync \
   torchrun --standalone --nproc-per-node=2 \
-  -m cdic_repro.experiments.train_msc \
+  -m cdic_repro.experiments.msc.train \
   --config reproductions/cdic/configs/msc_paper_a800.json
 ```
 
@@ -155,7 +156,7 @@ uv run --project reproductions/cdic --no-sync \
 ```bash
 uv run --project reproductions/cdic --no-sync \
   torchrun --standalone --nproc-per-node=2 \
-  -m cdic_repro.experiments.train_msc \
+  -m cdic_repro.experiments.msc.train \
   --config reproductions/cdic/configs/msc_paper_a800.json \
   --resume-from /data/bywei/projects/latent_working_memory/checkpoints/cdic/msc_paper_seed42/checkpoints/step-000050.pt
 ```
@@ -189,7 +190,7 @@ CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/cdic --no-sync \
 
 ## MSC 统一评估
 
-`eval_msc.py` 统一承担原 Table 1 MSC 评估与 initialization/final 对齐比较。入口固定加载 session 5 数据：session 1 只构建 gold memory，sessions 2–5 执行 teacher-forced PPL 与 greedy generation。配置中的 `condition` 决定是否加载 C-DIC 训练 checkpoint，`split` 可选择 `valid` 或 `test`，因此同一执行协议可以直接用于 Table 1 test 设置下的训练前后比较。
+`msc/evaluate.py` 统一承担 Table 1 MSC 评估与 initialization/final 对齐比较。入口固定加载 session 5 数据：session 1 只构建 gold memory，sessions 2–5 执行 teacher-forced PPL 与 greedy generation。配置中的 `condition` 决定是否加载 C-DIC 训练 checkpoint，`split` 可选择 `valid` 或 `test`，因此同一执行协议可以直接用于 Table 1 test 设置下的训练前后比较。
 
 每轮只运行一次生成，再分别汇总 sessions 2–5 全部轮次、每 session 最后一轮和 session 5 最后一轮；PPL 区分含／不含 EOS，ROUGE 区分 recall／F1。逐 token NLL、目标 ID 和协议均保存，允许不重跑模型即可重新汇总。`episode_count` 为 `null` 时评估全部 episodes；指定数量且 `sample_seed` 为 `null` 时取数据集前 N 条，提供 seed 时执行固定随机抽样。
 
@@ -197,14 +198,14 @@ CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/cdic --no-sync \
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/cdic --no-sync \
-  python -m cdic_repro.experiments.eval_msc \
+  python -m cdic_repro.experiments.msc.evaluate \
   --config reproductions/cdic/configs/msc_alignment_initialization_a800.json
 
 CUDA_VISIBLE_DEVICES=1 uv run --project reproductions/cdic --no-sync \
-  python -m cdic_repro.experiments.eval_msc \
+  python -m cdic_repro.experiments.msc.evaluate \
   --config reproductions/cdic/configs/msc_alignment_final_a800.json
 
-PYTHONPATH=reproductions/cdic/src uv run python -m cdic_repro.experiments.eval_msc \
+PYTHONPATH=reproductions/cdic/src uv run python -m cdic_repro.experiments.msc.evaluate \
   --compare <initialization_dir> <final_dir> --output <comparison.json>
 ```
 
@@ -212,14 +213,14 @@ Table 1 test 两条 episode pilot 的训练前后配对评估：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/cdic --no-sync \
-  python -m cdic_repro.experiments.eval_msc \
+  python -m cdic_repro.experiments.msc.evaluate \
   --config reproductions/cdic/configs/table1_msc_initialization_pilot_a800.json
 
 CUDA_VISIBLE_DEVICES=1 uv run --project reproductions/cdic --no-sync \
-  python -m cdic_repro.experiments.eval_msc \
+  python -m cdic_repro.experiments.msc.evaluate \
   --config reproductions/cdic/configs/table1_msc_pilot_a800.json
 
-PYTHONPATH=reproductions/cdic/src uv run python -m cdic_repro.experiments.eval_msc \
+PYTHONPATH=reproductions/cdic/src uv run python -m cdic_repro.experiments.msc.evaluate \
   --compare \
   /data/bywei/projects/latent_working_memory/artifacts/cdic/20260905_table1_msc_pilot/initialization \
   /data/bywei/projects/latent_working_memory/artifacts/cdic/20260905_table1_msc_pilot/final \

@@ -10,8 +10,8 @@ import torch
 
 from cdic_repro.config import RetrievalConfig, RetrievedStateOrder
 from cdic_repro.experiments.checkpoint import load_cdic_model_checkpoint
-from cdic_repro.experiments.evaluation import evaluate_msc_episodes
-from cdic_repro.experiments.msc import load_msc_episodes, summarize_msc_episodes
+from cdic_repro.experiments.msc.data import load_msc_episodes, summarize_msc_episodes
+from cdic_repro.experiments.msc.evaluate import evaluate_msc_diagnostics
 from cdic_repro.icae.adapter import (
     IcaeV1AdapterConfig,
     IcaeV1TrainingAdapter,
@@ -84,7 +84,7 @@ def test_msc_heldout_initialization_vs_trained(pytestconfig: pytest.Config) -> N
         torch.cuda.synchronize()
         started_at = time.perf_counter()
         with torch.inference_mode():
-            result = evaluate_msc_episodes(
+            result = evaluate_msc_diagnostics(
                 adapter,
                 episodes,
                 similarity=torch_cosine_similarity,

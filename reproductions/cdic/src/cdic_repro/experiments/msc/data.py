@@ -1,3 +1,5 @@
+"""MSC 数据结构、官方数据解析与数据集统计。"""
+
 from __future__ import annotations
 
 import json
@@ -81,19 +83,7 @@ def load_msc_episodes(
 
 
 def iter_episode_pairs(record: dict[str, object]) -> Iterator[tuple[int, int, str, str]]:
-    previous_dialogs = record.get("previous_dialogs")
-    current_dialog = record.get("dialog")
-    if not isinstance(previous_dialogs, list) or not isinstance(current_dialog, list):
-        raise TypeError("MSC record must contain previous_dialogs and dialog lists")
-
-    sessions: list[object] = [
-        previous.get("dialog") if isinstance(previous, dict) else None
-        for previous in previous_dialogs
-    ]
-    sessions.append(current_dialog)
-    for session_index, dialogue in enumerate(sessions, start=1):
-        if not isinstance(dialogue, list):
-            raise TypeError(f"MSC session {session_index} dialogue must be a list")
+    for session_index, dialogue in enumerate(_dialogues(record), start=1):
         for pair_index in range(0, len(dialogue) - 1, 2):
             query = _utterance_text(dialogue[pair_index])
             response = _utterance_text(dialogue[pair_index + 1])
@@ -134,29 +124,20 @@ def _parse_episode(
     if not isinstance(episode_id, str) or not episode_id:
         raise ValueError(f"MSC line {line_number} has no initial_data_id")
 
-    sessions = record.get("previous_dialogs")
-    current = record.get("dialog")
-    if not isinstance(sessions, list) or not isinstance(current, list):
-        raise TypeError(f"MSC line {line_number} has invalid dialogue fields")
-    dialogue_lists = [
-        previous.get("dialog") if isinstance(previous, dict) else None for previous in sessions
-    ] + [current]
+    dialogue_lists = _dialogues(record)
     if strict_pairs:
         for session_index, dialogue in enumerate(dialogue_lists, start=1):
-            if not isinstance(dialogue, list):
-                raise TypeError(f"MSC episode {episode_id} session {session_index} is invalid")
             if len(dialogue) % 2 != 0:
                 raise ValueError(
                     f"MSC episode {episode_id} session {session_index} has an odd utterance count"
                 )
 
     dropped_unpaired_utterances = sum(
-        len(dialogue) % 2 for dialogue in dialogue_lists if isinstance(dialogue, list)
+        len(dialogue) % 2 for dialogue in dialogue_lists
     )
     replaced_empty_utterances = sum(
         1
         for dialogue in dialogue_lists
-        if isinstance(dialogue, list)
         for utterance in dialogue
         if _is_empty_utterance(utterance)
     )
@@ -181,6 +162,21 @@ def _parse_episode(
         dropped_unpaired_utterances=dropped_unpaired_utterances,
         replaced_empty_utterances=replaced_empty_utterances,
     )
+
+
+def _dialogues(record: dict[str, object]) -> tuple[list[object], ...]:
+    previous_dialogs = record.get("previous_dialogs")
+    current_dialog = record.get("dialog")
+    if not isinstance(previous_dialogs, list) or not isinstance(current_dialog, list):
+        raise TypeError("MSC record must contain previous_dialogs and dialog lists")
+    dialogues: list[list[object]] = []
+    for session_index, previous in enumerate(previous_dialogs, start=1):
+        dialogue = previous.get("dialog") if isinstance(previous, dict) else None
+        if not isinstance(dialogue, list):
+            raise TypeError(f"MSC session {session_index} dialogue must be a list")
+        dialogues.append(dialogue)
+    dialogues.append(current_dialog)
+    return tuple(dialogues)
 
 
 def _utterance_text(value: object) -> str:

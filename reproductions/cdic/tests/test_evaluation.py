@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from cdic_repro.config import RetrievalConfig
-from cdic_repro.experiments.evaluation import evaluate_msc_episodes
+from cdic_repro.experiments.msc.evaluate import evaluate_msc_diagnostics
 from cdic_repro.model_protocol import CompressedTurn, TrainingLoss
-from cdic_repro.experiments.msc import MscEpisode, MscTurn
+from cdic_repro.experiments.msc.data import MscEpisode, MscTurn
 
 
 class FakeEvaluationAdapter:
@@ -54,7 +54,7 @@ def test_heldout_evaluation_reports_loss_routing_and_separation() -> None:
         _episode("b", (("1.0", "0.8"), ("0.8", "0.9"))),
     )
 
-    result = evaluate_msc_episodes(
+    result = evaluate_msc_diagnostics(
         FakeEvaluationAdapter(),  # type: ignore[arg-type]
         episodes,
         similarity=lambda left, right: 1.0 - abs(float(left) - float(right)),

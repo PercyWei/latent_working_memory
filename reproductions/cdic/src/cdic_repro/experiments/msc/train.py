@@ -1,25 +1,325 @@
+"""MSC 训练配置、单 episode 训练逻辑与完整训练入口。"""
+
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import random
 import time
-from dataclasses import replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import Any
 
 import torch
 
+from cdic_repro.config import RetrievalConfig, RetrievedStateOrder
+from cdic_repro.credit import build_compression_gradient_plan, build_credit_plan
 from cdic_repro.experiments.checkpoint import (
     TrainingProgress,
     load_cdic_checkpoint,
     save_cdic_checkpoint,
 )
 from cdic_repro.experiments.distributed import DistributedContext, initialize_distributed
-from cdic_repro.experiments.training_config import CdicMscTrainingConfig, load_training_config
-from cdic_repro.experiments.msc import MscEpisode, load_msc_episodes, summarize_msc_episodes
-from cdic_repro.experiments.training import CdicTrainingEngine, EpisodeTrainingResult
-from cdic_repro.icae.adapter import IcaeV1TrainingAdapter, torch_cosine_similarity
+from cdic_repro.experiments.msc.data import (
+    MscEpisode,
+    load_msc_episodes,
+    summarize_msc_episodes,
+)
+from cdic_repro.icae.adapter import (
+    IcaeV1AdapterConfig,
+    IcaeV1TrainingAdapter,
+    torch_cosine_similarity,
+)
+from cdic_repro.memory_state import MemoryBank
+from cdic_repro.model_protocol import CdicTrainingAdapter
+from cdic_repro.retrieval import SimilarityFunction, retrieve
+from cdic_repro.trace import TurnTrace
+from cdic_repro.writeback import NewStatePayload, apply_write_back
+
+
+@dataclass(frozen=True, slots=True)
+class MscDataConfig:
+    root: Path
+    split: str = "train"
+    session_id: int = 4
+    max_episodes: int | None = None
+    max_turns_per_episode: int | None = None
+    strict_pairs: bool = False
+
+    def __post_init__(self) -> None:
+        if self.split not in {"train", "valid", "test"}:
+            raise ValueError("data.split must be train, valid, or test")
+        if not 2 <= self.session_id <= 5:
+            raise ValueError("data.session_id must be between 2 and 5")
+        if self.split == "train" and self.session_id == 5:
+            raise ValueError("official MSC session 5 has no training split")
+        if self.max_episodes is not None and self.max_episodes < 1:
+            raise ValueError("data.max_episodes must be positive")
+        if self.max_turns_per_episode is not None and self.max_turns_per_episode < 1:
+            raise ValueError("data.max_turns_per_episode must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class OptimizationConfig:
+    output_dir: Path
+    epochs: int = 2
+    learning_rate: float = 2e-4
+    weight_decay: float = 0.0
+    seed: int = 42
+    shuffle: bool = True
+    max_grad_norm: float | None = None
+    save_every_steps: int = 50
+    keep_last_checkpoints: int | None = 2
+    save_final_checkpoint: bool = True
+    log_every_steps: int = 1
+    resume_from: Path | None = None
+
+    def __post_init__(self) -> None:
+        if self.epochs < 1:
+            raise ValueError("training.epochs must be positive")
+        if self.learning_rate <= 0.0:
+            raise ValueError("training.learning_rate must be positive")
+        if self.weight_decay < 0.0:
+            raise ValueError("training.weight_decay must be non-negative")
+        if self.max_grad_norm is not None and self.max_grad_norm <= 0.0:
+            raise ValueError("training.max_grad_norm must be positive")
+        if self.save_every_steps < 1:
+            raise ValueError("training.save_every_steps must be positive")
+        if self.keep_last_checkpoints is not None and self.keep_last_checkpoints < 1:
+            raise ValueError("training.keep_last_checkpoints must be positive")
+        if self.log_every_steps < 1:
+            raise ValueError("training.log_every_steps must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class MscTrainingConfig:
+    model: IcaeV1AdapterConfig
+    data: MscDataConfig
+    retrieval: RetrievalConfig
+    training: OptimizationConfig
+
+    def to_dict(self) -> dict[str, object]:
+        return _serialize_paths(asdict(self))
+
+    def fingerprint(self) -> str:
+        serialized = self.to_dict()
+        model = dict(serialized["model"])  # type: ignore[arg-type]
+        if model.get("gradient_window_size") == 1:
+            model.pop("gradient_window_size")
+        serialized["model"] = model
+        training = dict(serialized["training"])  # type: ignore[arg-type]
+        training["resume_from"] = None
+        serialized["training"] = training
+        payload = json.dumps(serialized, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingTurnRecord:
+    turn_id: str
+    query: str
+    response: str
+    loss: float
+    loss_tokens: int
+    backward_applied: bool
+    trace: TurnTrace
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "turn_id": self.turn_id,
+            "query": self.query,
+            "response": self.response,
+            "loss": self.loss,
+            "loss_tokens": self.loss_tokens,
+            "backward_applied": self.backward_applied,
+            "trace": self.trace.to_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodeTrainingResult:
+    episode_id: str
+    mean_loss: float
+    turns: int
+    loss_tokens: int
+    backward_turns: int
+    final_memory_states: int
+    records: tuple[TrainingTurnRecord, ...]
+
+    def to_summary_dict(self) -> dict[str, object]:
+        return {
+            "episode_id": self.episode_id,
+            "mean_loss": self.mean_loss,
+            "turns": self.turns,
+            "loss_tokens": self.loss_tokens,
+            "backward_turns": self.backward_turns,
+            "final_memory_states": self.final_memory_states,
+        }
+
+
+class MscTrainingEngine:
+    """在一个 MSC episode 内执行 teacher forcing 和检索感知的有限梯度回传。"""
+
+    def __init__(
+        self,
+        model: CdicTrainingAdapter,
+        similarity: SimilarityFunction,
+        retrieval_config: RetrievalConfig | None = None,
+    ) -> None:
+        self.model = model
+        self.similarity = similarity
+        self.retrieval_config = retrieval_config or RetrievalConfig()
+
+    def train_episode(self, episode: MscEpisode) -> EpisodeTrainingResult:
+        memory = MemoryBank()
+        loss_scale = 1.0 / len(episode.turns)
+        records: list[TrainingTurnRecord] = []
+        backward_turns = 0
+        total_loss = 0.0
+        total_loss_tokens = 0
+
+        for turn_number, turn in enumerate(episode.turns, start=1):
+            retrieval = retrieve(
+                memory,
+                query_key=self.model.encode_query(turn.query),
+                turn=turn_number,
+                similarity=self.similarity,
+                config=self.retrieval_config,
+            )
+            retrieved_states = memory.select(retrieval.selected_state_ids)
+            credit = build_credit_plan(retrieval)
+            training_loss = self.model.response_loss(
+                retrieved_states,
+                turn.query,
+                turn.response,
+                credit,
+            )
+            loss_value = float(training_loss.value)
+            backward_applied = training_loss.value.requires_grad
+            gradient_plan = build_compression_gradient_plan(
+                retrieved_states,
+                credit,
+                gradient_window_size=self.model.gradient_window_size,
+            )
+            if backward_applied:
+                (training_loss.value * loss_scale).backward(
+                    retain_graph=gradient_plan.retained_state_id is not None,
+                )
+                backward_turns += 1
+
+            compressed = self.model.compress_gold(
+                retrieved_states,
+                turn.query,
+                turn.response,
+                credit,
+            )
+            write_back = apply_write_back(
+                memory,
+                retrieval=retrieval,
+                payload=NewStatePayload(
+                    latent=compressed.latent,
+                    retrieval_key=compressed.retrieval_key,
+                    provenance=compressed.provenance,
+                    graph_connected=True,
+                    gradient_depth=compressed.gradient_depth,
+                ),
+                turn=turn_number,
+            )
+            records.append(
+                TrainingTurnRecord(
+                    turn_id=turn.turn_id,
+                    query=turn.query,
+                    response=turn.response,
+                    loss=loss_value,
+                    loss_tokens=training_loss.token_count,
+                    backward_applied=backward_applied,
+                    trace=TurnTrace(
+                        turn=turn_number,
+                        query_id=turn.turn_id,
+                        retrieval=retrieval,
+                        credit=credit,
+                        write_back=write_back,
+                    ),
+                )
+            )
+            total_loss += loss_value
+            total_loss_tokens += training_loss.token_count
+
+        return EpisodeTrainingResult(
+            episode_id=episode.episode_id,
+            mean_loss=total_loss / len(episode.turns),
+            turns=len(episode.turns),
+            loss_tokens=total_loss_tokens,
+            backward_turns=backward_turns,
+            final_memory_states=len(memory),
+            records=tuple(records),
+        )
+
+
+def load_training_config(path: Path) -> MscTrainingConfig:
+    with path.open(encoding="utf-8") as source:
+        payload = json.load(source)
+    if not isinstance(payload, dict):
+        raise TypeError("training config must contain a JSON object")
+
+    model = _mapping(payload, "model")
+    data = _mapping(payload, "data")
+    retrieval = _mapping(payload, "retrieval")
+    training = _mapping(payload, "training")
+    return MscTrainingConfig(
+        model=IcaeV1AdapterConfig(
+            model_path=Path(_required_string(model, "model_path")),
+            checkpoint_path=Path(_required_string(model, "checkpoint_path")),
+            device=str(model.get("device", "cuda:0")),
+            devices=_device_tuple(model.get("devices")),
+            dtype=str(model.get("dtype", "bfloat16")),
+            memory_size=int(model.get("memory_size", 128)),
+            max_turn_tokens=int(model.get("max_turn_tokens", 512)),
+            max_new_tokens=int(model.get("max_new_tokens", 128)),
+            lora_alpha=int(model.get("lora_alpha", 32)),
+            lora_dropout=float(model.get("lora_dropout", 0.05)),
+            lora_rank=int(model.get("lora_rank", 128)),
+            seed=int(training.get("seed", 42)),
+            use_ft_markers=bool(model.get("use_ft_markers", True)),
+            turn_template=str(
+                model.get("turn_template", "<s>[INST] {query} [/INST] {response} </s>")
+            ),
+            gradient_checkpointing=bool(model.get("gradient_checkpointing", True)),
+            gradient_window_size=int(model.get("gradient_window_size", 1)),
+        ),
+        data=MscDataConfig(
+            root=Path(_required_string(data, "root")),
+            split=str(data.get("split", "train")),
+            session_id=int(data.get("session_id", 4)),
+            max_episodes=_optional_int(data.get("max_episodes")),
+            max_turns_per_episode=_optional_int(data.get("max_turns_per_episode")),
+            strict_pairs=bool(data.get("strict_pairs", False)),
+        ),
+        retrieval=RetrievalConfig(
+            threshold=float(retrieval.get("threshold", 0.8)),
+            decay=float(retrieval.get("decay", 0.05)),
+            retrieved_state_order=RetrievedStateOrder(
+                str(retrieval.get("retrieved_state_order", "score_desc"))
+            ),
+            max_retrieved=_optional_int(retrieval.get("max_retrieved")),
+        ),
+        training=OptimizationConfig(
+            output_dir=Path(_required_string(training, "output_dir")),
+            epochs=int(training.get("epochs", 2)),
+            learning_rate=float(training.get("learning_rate", 2e-4)),
+            weight_decay=float(training.get("weight_decay", 0.0)),
+            seed=int(training.get("seed", 42)),
+            shuffle=bool(training.get("shuffle", True)),
+            max_grad_norm=_optional_float(training.get("max_grad_norm")),
+            save_every_steps=int(training.get("save_every_steps", 50)),
+            keep_last_checkpoints=_optional_int(training.get("keep_last_checkpoints", 2)),
+            save_final_checkpoint=bool(training.get("save_final_checkpoint", True)),
+            log_every_steps=int(training.get("log_every_steps", 1)),
+            resume_from=_optional_path(training.get("resume_from")),
+        ),
+    )
 
 
 def main() -> None:
@@ -57,7 +357,7 @@ def main() -> None:
 
 
 def run_training(
-    config: CdicMscTrainingConfig,
+    config: MscTrainingConfig,
     episodes: tuple[MscEpisode, ...],
     data_summary: dict[str, float | int],
 ) -> None:
@@ -77,7 +377,7 @@ def run_training(
 
 
 def _run_training_worker(
-    config: CdicMscTrainingConfig,
+    config: MscTrainingConfig,
     episodes: tuple[MscEpisode, ...],
     data_summary: dict[str, float | int],
     distributed: DistributedContext,
@@ -98,7 +398,7 @@ def _run_training_worker(
         weight_decay=config.training.weight_decay,
         foreach=False,
     )
-    engine = CdicTrainingEngine(
+    engine = MscTrainingEngine(
         model=adapter,
         similarity=torch_cosine_similarity,
         retrieval_config=config.retrieval,
@@ -272,11 +572,11 @@ def _prepare_output_directory(output_dir: Path, resume_from: Path | None) -> Non
 
 
 def _apply_cli_overrides(
-    config: CdicMscTrainingConfig,
+    config: MscTrainingConfig,
     seed: int | None,
     output_dir: Path | None,
     resume_from: Path | None,
-) -> CdicMscTrainingConfig:
+) -> MscTrainingConfig:
     model = config.model if seed is None else replace(config.model, seed=seed)
     training = replace(
         config.training,
@@ -414,6 +714,56 @@ def _print_progress(
         ),
         flush=True,
     )
+
+
+def _mapping(payload: dict[str, Any], key: str) -> dict[str, Any]:
+    value = payload.get(key)
+    if not isinstance(value, dict):
+        raise TypeError(f"training config field {key!r} must be an object")
+    return value
+
+
+def _required_string(payload: dict[str, Any], key: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"training config field {key!r} must be a non-empty string")
+    return value
+
+
+def _optional_int(value: object) -> int | None:
+    return None if value is None else int(value)
+
+
+def _optional_float(value: object) -> float | None:
+    return None if value is None else float(value)
+
+
+def _optional_path(value: object) -> Path | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError("resume_from must be null or a non-empty path")
+    return Path(value)
+
+
+def _device_tuple(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) for item in value):
+        raise ValueError("model.devices must be a non-empty list of device strings")
+    return tuple(value)
+
+
+def _serialize_paths(value: object) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _serialize_paths(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_serialize_paths(item) for item in value]
+    if isinstance(value, RetrievedStateOrder):
+        return value.value
+    return value
 
 
 if __name__ == "__main__":

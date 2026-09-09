@@ -12,8 +12,8 @@ dependencies = [
 
 [project.scripts]
 cdic-run-dialogue = "cdic_repro.run_dialogue:main"
-cdic-train-msc = "cdic_repro.experiments.train_msc:main"
-cdic-eval-msc = "cdic_repro.experiments.eval_msc:main"
+cdic-train-msc = "cdic_repro.experiments.msc.train:main"
+cdic-eval-msc = "cdic_repro.experiments.msc.evaluate:main"
 
 [build-system]
 requires = ["hatchling"]

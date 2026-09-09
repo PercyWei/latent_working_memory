@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from cdic_repro.config import RetrievalConfig
-from cdic_repro.experiments.eval_msc import (
+from cdic_repro.experiments.msc.evaluate import (
     MscEvaluationConfig,
     _serialize_config,
     compare_runs,
@@ -18,7 +18,7 @@ from cdic_repro.experiments.eval_msc import (
     select_episodes,
     summarize_records,
 )
-from cdic_repro.experiments.msc import MscEpisode, MscTurn
+from cdic_repro.experiments.msc.data import MscEpisode, MscTurn
 from cdic_repro.model_protocol import CompressedTurn, TrainingLoss
 
 

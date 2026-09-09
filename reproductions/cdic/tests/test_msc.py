@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from cdic_repro.experiments.msc import SILENCE_TOKEN, load_msc_episodes, summarize_msc_episodes
+from cdic_repro.experiments.msc.data import (
+    SILENCE_TOKEN,
+    load_msc_episodes,
+    summarize_msc_episodes,
+)
 
 
 def write_msc_record(root: Path, record: dict[str, object]) -> None:

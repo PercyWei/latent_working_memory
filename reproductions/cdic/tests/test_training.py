@@ -6,8 +6,8 @@ from cdic_repro.config import RetrievalConfig
 from cdic_repro.credit import CreditPlan, build_compression_gradient_plan
 from cdic_repro.memory_state import ThreadState
 from cdic_repro.model_protocol import CompressedTurn, TrainingLoss
-from cdic_repro.experiments.msc import MscEpisode, MscTurn
-from cdic_repro.experiments.training import CdicTrainingEngine
+from cdic_repro.experiments.msc.data import MscEpisode, MscTurn
+from cdic_repro.experiments.msc.train import MscTrainingEngine
 from cdic_repro.writeback import WriteAction
 
 
@@ -121,7 +121,7 @@ def make_episode() -> MscEpisode:
 
 def test_training_engine_uses_gold_responses_and_one_hop_credit() -> None:
     adapter = FakeTrainingAdapter()
-    engine = CdicTrainingEngine(
+    engine = MscTrainingEngine(
         model=adapter,
         similarity=cosine,
         retrieval_config=RetrievalConfig(threshold=0.8, decay=0.0),
@@ -155,7 +155,7 @@ def test_training_engine_retains_graph_only_inside_gradient_window() -> None:
             MscTurn("turn-3", "a3", "gold-3", 1, 3),
         ),
     )
-    engine = CdicTrainingEngine(
+    engine = MscTrainingEngine(
         model=adapter,
         similarity=cosine,
         retrieval_config=RetrievalConfig(threshold=0.8, decay=0.0),
