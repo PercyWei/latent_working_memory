@@ -10,18 +10,12 @@ from typing import Any
 
 import torch
 
-from latent_working_memory.v1.config import (
-    FRAMEWORK_VERSION,
-    SCHEMA_VERSION,
-    ExperimentConfig,
-)
+from latent_working_memory.v1.config import ExperimentConfig
 from latent_working_memory.v1.state import MemoryState
 
 
 MODEL_CHECKPOINT_FIELDS = frozenset(
     {
-        "schema_version",
-        "framework_version",
         "phase",
         "config",
         "model_state",
@@ -30,9 +24,7 @@ MODEL_CHECKPOINT_FIELDS = frozenset(
         "rng_state",
     }
 )
-RUNTIME_MEMORY_FIELDS = frozenset(
-    {"schema_version", "framework_version", "model_checkpoint", "values", "seen_tokens"}
-)
+RUNTIME_MEMORY_FIELDS = frozenset({"model_checkpoint", "values", "seen_tokens"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,8 +70,6 @@ def save_model_checkpoint(
         raise ValueError("phase must not be empty")
     _require_exact_fields(rng_state, {"python", "torch", "cuda"}, "rng_state")
     payload = {
-        "schema_version": SCHEMA_VERSION,
-        "framework_version": FRAMEWORK_VERSION,
         "phase": phase,
         "config": config.to_dict(),
         "model_state": dict(model_state),
@@ -96,7 +86,6 @@ def load_model_checkpoint(
 ) -> LoadedModelCheckpoint:
     payload = _load_payload(Path(path), map_location)
     _require_exact_fields(payload, MODEL_CHECKPOINT_FIELDS, "model checkpoint")
-    _validate_versions(payload)
     if not isinstance(payload["phase"], str) or not payload["phase"]:
         raise ValueError("checkpoint phase must be a non-empty string")
     config_raw = payload["config"]
@@ -127,8 +116,6 @@ def save_runtime_memory(
     if state.values.dtype != torch.bfloat16:
         raise TypeError("v1 runtime memory must use torch.bfloat16")
     payload = {
-        "schema_version": SCHEMA_VERSION,
-        "framework_version": FRAMEWORK_VERSION,
         "model_checkpoint": model_checkpoint,
         "values": state.values.detach().to(device="cpu"),
         "seen_tokens": state.seen_tokens,
@@ -148,7 +135,6 @@ def load_runtime_memory(
         raise ValueError("expected_width must be a positive integer")
     payload = _load_payload(Path(path), map_location)
     _require_exact_fields(payload, RUNTIME_MEMORY_FIELDS, "runtime memory")
-    _validate_versions(payload)
     if payload["model_checkpoint"] != expected_model_checkpoint:
         raise ValueError("runtime memory belongs to a different model checkpoint")
     values = payload["values"]
@@ -167,13 +153,6 @@ def _load_payload(path: Path, map_location: str | torch.device) -> Mapping[str, 
     if not isinstance(payload, Mapping):
         raise TypeError("checkpoint root must be a mapping")
     return payload
-
-
-def _validate_versions(payload: Mapping[str, Any]) -> None:
-    if payload["schema_version"] != SCHEMA_VERSION:
-        raise ValueError(f"schema_version must be {SCHEMA_VERSION}")
-    if payload["framework_version"] != FRAMEWORK_VERSION:
-        raise ValueError(f"framework_version must be {FRAMEWORK_VERSION!r}")
 
 
 def _require_exact_fields(

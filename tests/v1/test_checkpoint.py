@@ -31,7 +31,7 @@ def test_model_checkpoint_round_trip_and_rng_restore(tmp_path: Path) -> None:
     path = tmp_path / "model.pt"
     save_model_checkpoint(
         path,
-        "p0",
+        "pretrain",
         config,
         writer.state_dict(),
         {},
@@ -39,7 +39,7 @@ def test_model_checkpoint_round_trip_and_rng_restore(tmp_path: Path) -> None:
         rng_state,
     )
     loaded = load_model_checkpoint(path)
-    assert loaded.phase == "p0"
+    assert loaded.phase == "pretrain"
     assert loaded.config == config
     assert loaded.progress == {"episode": 2}
 
@@ -62,17 +62,16 @@ def test_runtime_memory_is_bf16_and_bound_to_model_checkpoint(tmp_path: Path) ->
         save_runtime_memory(path, "checkpoints/v1/p1.pt", MemoryState(torch.zeros(3, 8), 0))
 
 
-def test_other_framework_versions_are_rejected(tmp_path: Path) -> None:
-    path = tmp_path / "runtime-v2.pt"
+def test_checkpoint_rejects_unknown_fields(tmp_path: Path) -> None:
+    path = tmp_path / "runtime.pt"
     torch.save(
         {
-            "schema_version": 1,
-            "framework_version": "v2",
+            "unexpected": 1,
             "model_checkpoint": "model.pt",
             "values": torch.zeros(1, 2, dtype=torch.bfloat16),
             "seen_tokens": 0,
         },
         path,
     )
-    with pytest.raises(ValueError, match="framework_version"):
+    with pytest.raises(ValueError, match="invalid runtime memory fields"):
         load_runtime_memory(path, "model.pt", 2)

@@ -1,6 +1,6 @@
-# latent_working_memory（20260907 21:50:07 CST）
+# latent_working_memory（20260909 11:40:55 UTC+08:00）
 
-最后修订时间：20260907 21:50:07 CST（UTC+08:00）
+最后修订时间：20260909 11:40:55 UTC+08:00
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理；ICAE v1 和 C-DIC 分别位于 `reproductions/icae/` 与 `reproductions/cdic/`，各自使用独立的 `uv` 环境。
 
@@ -15,27 +15,76 @@ uv run pytest
 
 第一版新方法直接位于 `src/latent_working_memory/v1/`；未来版本使用同级目录，不增加额外的方法族目录。配置位于 `configs/v1/`，测试位于 `tests/v1/`，数据、checkpoint 与运行产物分别使用 Git-ignored 的 `data/v1/`、`checkpoints/v1/` 和 `artifacts/v1/`。
 
-当前已完成 M0–M2，以及 M3/P0 的工程链路：共享冻结 Llama 基础权重、teacher/`E0` adapter 隔离、`W_in/P`、reader LoRA、答案相对位置对齐、P0 单次压缩、teacher logits cache、checkpoint/resume 和独立 dev 的 teacher/memory/no-memory NLL 对照。上述链路已用本地构造并通过标准 Transformers 保存/加载的 tiny Llama 做 CPU 集成验证；服务器上的 Llama-2-7B-Chat smoke test 和 16-episode P0 训练关卡尚未运行，P1–P3 也尚未实现。详见 [v1 实施总计划](notes/v1/20260907_growing_latent_working_memory_implementation_plan.md)。
+当前已实现 FineWeb 自然片段与多容量 AE/LM 预训练链路：空记忆首次分配、完整自然单元前向、变长 batch 与 mask、共享记忆的重建和续写、按长度与文档采样、容量课程、checkpoint/resume，以及独立文档的多容量 memory/no-memory/wrong-memory 评估。语言模型基座冻结，联合训练写入投影、记忆更新器、读取投影与读取 LoRA。
 
-服务器具备模型 tokenizer 后，可生成 canonical pilot 数据：
+v1 的 59 项测试通过，覆盖损失与梯度、原文边界、质量筛选、文档配额、分层评估、自由生成、原文对照的因果位置、BLEU 聚合、精确恢复和 SwanLab 记录。FineWeb `sample-10BT` 已下载到服务器；512 篇真实文档的多粒度准备、Llama-2-7B-Chat 单卡训练、保存恢复和多容量评估已跑通。实验结果见 [FineWeb 预训练记录](notes/v1/20260908_fineweb_pretraining_pilot_record.md)，后续实现顺序见 [v1 实施计划](notes/v1/20260907_growing_latent_working_memory_implementation_plan.md)。
+
+固定 16 样本的 100 步试验完成训练集拟合验证；独立文档表现呈现过拟合，该 checkpoint 用于工程验证，扩大数据试验从统一初始化开始验证泛化收益。
+
+[扩大数据预训练](notes/v1/20260908_fineweb_generalization_pretraining_record.md) 已准备 10,000／512／512 篇训练、验证和测试文档，训练集包含 126,278 个 AE/LM 样本对。1e-4 与 3e-5 两组均已完成 2000 步实验，每组访问 10,000 篇不同文档和约 140 万输入 tokens。dev 选择 3e-5 第 2000 步 checkpoint，512 文档独立 test 已完成：AE/LM NLL 为 2.2532/2.3914，相对空记忆收益为 0.1409/0.1242；64 文档、三个容量的自由重建仍为 0/192 完整匹配，平均归一化 token 编辑距离为 0.9391。记忆已辅助条件预测，原文重建能力仍需改进。该实验增加句段质量筛选、基座流畅度过滤和来源抽查，记录初始化验证、128 文档的周期性 NLL 与 64 文档的自由重建。
+
+数据准备代码位于 `src/latent_working_memory/data_preparation/`，统一负责候选读取、质量规则、模型评分缓存、近重复分组、自然片段构造和审计。具体组成与契约见 [数据准备重构记录](notes/v1/20260909_data_preparation_refactor.md)。
+
+`configs/v1/pretrain_a800.json` 保存模型与训练采样设置，`configs/data_preparation/fineweb.json` 保存准备配方。以下命令读取服务器已有的 `sample-10BT`，执行规则筛选，并按新数据格式生成固定训练与评估数据：
 
 ```bash
-uv run python -m latent_working_memory.v1.prepare_data \
-  --config configs/v1/pilot.json \
-  --output-dir data/v1
+uv run python -m latent_working_memory.data_preparation \
+  --config configs/v1/pretrain_a800.json \
+  --recipe configs/data_preparation/fineweb.json \
+  --dataset-dir data/raw/HuggingFaceFW-fineweb \
+  --output-dir data/v1/fineweb-pretrain
 ```
 
-生成数据后，可在物理 GPU 0 上启动 P0；入口目前有意只接受已经实现的 `p0`：
+配方中的 `fluency_model_name_or_path` 与 `review_model_name_or_path` 分别控制本地 NLL 和语义质检。启用评分时增加 `--score-cache data/v1/quality-cache/scores.jsonl`；GPU 评分增加 `CUDA_VISIBLE_DEVICES=0` 与 `--device cuda`。所有模型通过本地文件加载，新增下载由用户确认。
+
+合法输入均可用于 AE，具有合格紧邻原文的输入附加 LM 目标。每个粒度优先覆盖不同自然长度，续写终点在 token 预算内的完整句末采样。新配置的长度访问权重为 10%／30%／40%／20%，对应 1–32、33–128、129–512、513–1024 tokens，是待实验验证的初始设置。
+
+准备结果保存候选原文、文档判定、入选来源、三个 split 和质量抽查面板。`audit.json` 包含来源隔离、原文连续性、长度分位数与采样预演；配额和自动审计通过后写入 `preparation.json`。质量面板等待独立复核。训练直接使用这份固定数据。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 uv run python -m latent_working_memory.v1.train \
-  --phase p0 \
-  --config configs/v1/pilot.json \
-  --data-dir data/v1 \
-  --output-dir artifacts/v1/p0-pilot
+  --phase pretrain \
+  --config configs/v1/pretrain_a800.json \
+  --data-dir data/v1/fineweb-pretrain \
+  --output-dir artifacts/v1/pretrain-pilot \
+  --max-steps 1000
 ```
 
-恢复时增加 `--resume artifacts/v1/p0-pilot/checkpoints/<checkpoint>.pt`，并把 `--max-steps` 设为新的总 step 上限。运行会保存 resolved config、环境 manifest、分段日志、memory trace、资源统计、严格绑定模型/tokenizer/输入的 teacher cache、训练 checkpoint、逐 probe dev 预测和含/不含 EOS 的汇总指标。
+`--train-example-limit 16` 固定一个优先覆盖不同文档的小样本池，供过拟合检查使用；常规训练使用全部已准备样本。恢复时增加 `--resume artifacts/v1/pretrain-pilot/checkpoints/pretrain-step-000100.pt`，并把 `--max-steps` 设为新的总 step 上限。checkpoint 保存完整可训练模块、优化器、文档采样与容量课程进度及随机状态。运行产物包含逐样本容量和损失、文档覆盖、token 监督量、吞吐、显存及分层验证指标。
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run python -m latent_working_memory.v1.evaluate \
+  --checkpoint artifacts/v1/pretrain-pilot/checkpoints/pretrain-step-001000.pt \
+  --data-dir data/v1/fineweb-pretrain \
+  --output-dir artifacts/v1/pretrain-pilot-test \
+  --split test
+```
+
+评估使用固定的独立文档面板，每篇选一个自然片段，遍历各压缩率对应的唯一合法容量。结果按实际划分写入 `{dev|test}-step-XXXXXX.json` 与 `.jsonl`，分别保存聚合指标和逐次读取记录；摘要包含 step、累计训练输入 tokens、评估口径和 SacreBLEU 签名。
+
+| 评估项 | 口径 |
+|---|---|
+| AE/LM 条件预测 | 正确、空、错误记忆的 NLL、PPL、teacher-forcing token accuracy；NLL 按目标正文 token 数加权，另存包含 EOS 的 NLL |
+| AE 自由重建 | 贪心生成，最多生成参考正文长度加一个 EOS 位置；完整序列匹配包含 EOS，连续正确前缀比例与归一化编辑距离使用正文 tokens，并按生成读取求均值 |
+| AE BLEU-4 | SacreBLEU 语料级统计，范围 0–100，13a 分词、区分大小写、指数平滑；短句组启用 effective order，实际配置签名随结果保存 |
+| LM 原文对照 | `full_context` 读取完整 X，`recent_context` 读取 X 最后的 K 个 tokens；二者使用当前 reader LoRA，`base_full_context` 单独关闭 LoRA |
+| LM 对照差值 | `gain_vs_* = NLL(对照) − NLL(memory)`，正值表示记忆收益；`nll_gap_to_* = NLL(memory) − NLL(完整原文)`，同时记录对应 PPL 比值 |
+
+LM 的全部条件预测相同的 Y，并使用同一任务提示。最近文本与记忆按读取时的 K 个上下文位置对齐，原文不足 K 时使用全部 X；`memory_bytes` 单列记忆张量的字节数。完整原文对照每篇计算一次，在各容量上按相同的文档、片段与目标 token 权重参与比较。完整原文与提示、目标共同受基座上下文上限约束。分层结果覆盖粒度、输入长度、容量、实际压缩率和句界来源。
+
+补齐后的评估已使用上轮 3e-5 第 2000 步 checkpoint 在物理 GPU 0 验证：16 篇 dev 文档、每篇三个容量，共完成 432 次条件读取与 24 次自由重建，退出码为 0。SwanLab 离线记录完成；本次结果位于 `artifacts/v1/evaluation-smoke-20260909/`。
+
+### SwanLab 可视化
+
+训练或独立评估命令增加 `--swanlab-mode online`，使用服务器已有登录。`--swanlab-mode offline` 将记录保存在运行目录；默认值为 `disabled`。项目名由 `--swanlab-project` 指定，默认 `latent-working-memory`，新建项目为私有。
+
+看板记录 AE/LM 损失、梯度范数、吞吐和显存、输入长度与记忆容量、文档覆盖，以及各评估条件的 NLL、PPL、准确率和对照差值。长度、粒度、容量与压缩率分别提供分层 NLL、自由重建指标及读取数量。`progress/input_tokens` 与评估 step 同步记录，支持按训练曝光量分析学习曲线。
+
+自由生成记录 BLEU-4、连续正确前缀比例、完整匹配和归一化 token 编辑距离；文本样例按每页 100 条记录。`eval_generation_every` 控制生成评估频率；独立评估可用 `--examples 512 --generation-examples 128` 扩大面板。SwanLab 配置包含本次数据准备与质量筛选记录，独立评估额外记录 checkpoint 路径与实际划分。
+
+`swanlab.json` 保存实验 ID 和链接；在同一输出目录恢复训练时沿用该实验。独立评估可通过 `--swanlab-run-id` 写入对应训练实验，并使用 checkpoint 的 step 作为横轴。可视化参数由命令行管理，与模型配置分开保存。[SwanLab 初始化与续接接口](https://docs.swanlab.cn/api/py-init.html)
+
+已有 100 步小样本试验可在 [SwanLab 看板](https://swanlab.cn/@percyWeeeeei/latent-working-memory/runs/hzg2z87k/chart) 查看。历史日志按 optimizer step 导入，时间轴显示本次导入时间。
 
 ## 服务器目录
 
@@ -44,6 +93,8 @@ CUDA_VISIBLE_DEVICES=0 uv run python -m latent_working_memory.v1.train \
 ```text
 data/raw/pwc/          PwC 原始数据
 data/raw/msc/          MSC 原始数据与归档
+data/raw/HuggingFaceFW-fineweb/  FineWeb 原始 Parquet，子目录为 sample-10BT
+data/v1/              自然片段 AE/LM 数据与准备记录
 checkpoints/icae/v1/  ICAE v1 公开 checkpoint
 checkpoints/cdic/      C-DIC pilot 与完整训练 checkpoint
 artifacts/             生成结果、测试报告和日志

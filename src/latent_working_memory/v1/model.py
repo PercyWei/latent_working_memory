@@ -4,6 +4,7 @@ import math
 
 import torch
 from torch import Tensor, nn
+from torch.nn.utils.rnn import pad_sequence
 
 from latent_working_memory.v1.config import GROWTH_ACTIONS
 from latent_working_memory.v1.state import MemoryState
@@ -60,12 +61,15 @@ class UpdaterBlock(nn.Module):
             nn.Linear(ffn_dim, d_mem),
         )
 
-    def forward(self, queries: Tensor, source: Tensor) -> Tensor:
+    def forward(
+        self, queries: Tensor, source: Tensor, query_padding: Tensor, source_padding: Tensor
+    ) -> Tensor:
         normalized_queries = self.self_norm(queries)
         attended, _ = self.self_attention(
             normalized_queries,
             normalized_queries,
             normalized_queries,
+            key_padding_mask=query_padding,
             need_weights=False,
         )
         queries = queries + attended
@@ -75,6 +79,7 @@ class UpdaterBlock(nn.Module):
             self.cross_query_norm(queries),
             normalized_source,
             normalized_source,
+            key_padding_mask=source_padding,
             need_weights=False,
         )
         queries = queries + attended
@@ -101,13 +106,8 @@ class JointMemoryWriter(nn.Module):
         self.d_mem = d_mem
         self.growth_actions = GROWTH_ACTIONS
         self.slot_limit = slot_limit
-        self.initial_seed = nn.Parameter(torch.zeros(d_mem))
-        self.initial_projection = nn.Linear(d_mem, d_mem, bias=False)
         self.old_type = nn.Parameter(torch.zeros(d_mem))
         self.new_type = nn.Parameter(torch.zeros(d_mem))
-        self.birth_seed = nn.Parameter(torch.zeros(d_mem))
-        self.birth_from_input = nn.Linear(d_mem, d_mem)
-        self.birth_from_memory = nn.Linear(d_mem, d_mem)
         self.blocks = nn.ModuleList(
             UpdaterBlock(d_mem, num_heads, ffn_dim) for _ in range(num_layers)
         )
@@ -116,91 +116,97 @@ class JointMemoryWriter(nn.Module):
         nn.init.normal_(self.output_projection.weight, mean=0.0, std=1e-3)
         nn.init.zeros_(self.output_projection.bias)
 
-    def initialize_state(
+    def initialize_state(self, dtype: torch.dtype | None = None) -> MemoryState:
+        parameter = self.old_type
+        return MemoryState(parameter.new_empty((0, self.d_mem), dtype=dtype), seen_tokens=0)
+
+    def forward(
         self,
-        num_slots: int,
-        dtype: torch.dtype | None = None,
+        state: MemoryState,
+        features: Tensor,
+        grow_by: int = 0,
+        first_slots: int | None = None,
     ) -> MemoryState:
-        if type(num_slots) is not int or num_slots <= 0:
-            raise ValueError("num_slots must be a positive integer")
-        if num_slots > self.slot_limit:
-            raise ValueError("num_slots must not exceed slot_limit")
+        return self.update_batch([state], [features], [grow_by], [first_slots])[0]
 
-        parameter = self.initial_seed
-        positions = sinusoidal_positions(
-            num_slots,
-            self.d_mem,
-            parameter.device,
-            parameter.dtype,
-        )
-        values = self.initial_seed + self.initial_projection(positions)
-        if dtype is not None:
-            if not dtype.is_floating_point:
-                raise TypeError("state dtype must be floating-point")
-            values = values.to(dtype=dtype)
-        return MemoryState(values, seen_tokens=0)
-
-    def forward(self, state: MemoryState, features: Tensor, grow_by: int) -> MemoryState:
-        self._validate_update(state, features, grow_by)
-        old_values = state.values
-        next_slots = state.num_slots + grow_by
-        activation_dtype = old_values.dtype
-        source = (
-            torch.cat(
-                (
-                    old_values + self.old_type.to(dtype=activation_dtype),
-                    features + self.new_type.to(dtype=activation_dtype),
-                ),
-                dim=0,
+    def update_batch(
+        self,
+        states: list[MemoryState],
+        features: list[Tensor],
+        growth: list[int],
+        first_slots: list[int | None],
+    ) -> list[MemoryState]:
+        if not states or not (len(states) == len(features) == len(growth) == len(first_slots)):
+            raise ValueError("states, features, growth and first_slots must align and be non-empty")
+        bases, queries, sources = [], [], []
+        for state, current, grow_by, first in zip(
+            states, features, growth, first_slots, strict=True
+        ):
+            if (
+                state.width != self.d_mem
+                or current.ndim != 2
+                or current.shape[0] == 0
+                or current.shape[1] != self.d_mem
+            ):
+                raise ValueError("state and non-empty features must match d_mem")
+            if (
+                state.values.device != self.old_type.device
+                or current.device != self.old_type.device
+            ):
+                raise ValueError("state, features, and writer must be on the same device")
+            if state.values.dtype != current.dtype or current.dtype != features[0].dtype:
+                raise ValueError("state and features must have the same dtype")
+            if not bool(torch.isfinite(current.detach()).all()):
+                raise ValueError("features must contain only finite values")
+            if state.num_slots == 0:
+                if type(first) is not int or not 1 <= first <= self.slot_limit or grow_by != 0:
+                    raise ValueError(
+                        "empty memory requires first_slots in [1, slot_limit] and growth=0"
+                    )
+                added = first
+            else:
+                if (
+                    first is not None
+                    or type(grow_by) is not int
+                    or grow_by not in self.growth_actions
+                ):
+                    raise ValueError(
+                        "existing memory requires a legal growth action and no first_slots"
+                    )
+                added = grow_by
+            if state.num_slots + added > self.slot_limit:
+                raise ValueError("growth action exceeds slot_limit")
+            base = torch.cat((state.values, current.new_zeros(added, self.d_mem)))
+            bases.append(base)
+            queries.append(
+                base + sinusoidal_positions(len(base), self.d_mem, base.device, base.dtype)
             )
-            .to(dtype=activation_dtype)
-            .unsqueeze(0)
+            sources.append(
+                torch.cat(
+                    (
+                        state.values + self.old_type.to(current.dtype),
+                        current + self.new_type.to(current.dtype),
+                    )
+                )
+            )
+        query_batch = pad_sequence(queries, batch_first=True)
+        source_batch = pad_sequence(sources, batch_first=True)
+        device = query_batch.device
+        query_padding = (
+            torch.arange(query_batch.shape[1], device=device)[None, :]
+            >= torch.tensor([len(q) for q in queries], device=device)[:, None]
         )
-
-        if grow_by:
-            birth = (
-                self.birth_seed.to(dtype=activation_dtype)
-                + self.birth_from_input(features.mean(dim=0))
-                + self.birth_from_memory(old_values.mean(dim=0))
-            ).to(dtype=activation_dtype)
-            born_values = birth.unsqueeze(0).expand(grow_by, -1)
-            queries = torch.cat((old_values, born_values), dim=0)
-        else:
-            queries = old_values
-        queries = queries + sinusoidal_positions(
-            next_slots,
-            self.d_mem,
-            queries.device,
-            queries.dtype,
+        source_padding = (
+            torch.arange(source_batch.shape[1], device=device)[None, :]
+            >= torch.tensor([len(s) for s in sources], device=device)[:, None]
         )
-        queries = queries.unsqueeze(0)
-
         for block in self.blocks:
-            queries = block(queries, source)
-        delta = self.output_projection(self.output_norm(queries.squeeze(0))).to(
-            dtype=activation_dtype
-        )
-        base = torch.cat((old_values, old_values.new_zeros(grow_by, self.d_mem)), dim=0)
-        return MemoryState(base + delta, state.seen_tokens + features.shape[0])
-
-    def _validate_update(self, state: MemoryState, features: Tensor, grow_by: int) -> None:
-        if state.width != self.d_mem:
-            raise ValueError(f"state width must be {self.d_mem}")
-        if features.ndim != 2 or features.shape[0] <= 0 or features.shape[1] != self.d_mem:
-            raise ValueError(f"features must have shape [c, {self.d_mem}] with c > 0")
-        if not features.is_floating_point():
-            raise TypeError("features must have a floating-point dtype")
-        if not bool(torch.isfinite(features.detach()).all()):
-            raise ValueError("features must contain only finite values")
-        if grow_by not in self.growth_actions:
-            raise ValueError(f"grow_by must be one of {self.growth_actions}")
-        if state.num_slots + grow_by > self.slot_limit:
-            raise ValueError("growth action exceeds slot_limit")
-        parameter = self.initial_seed
-        if state.values.device != parameter.device or features.device != parameter.device:
-            raise ValueError("state, features, and writer must be on the same device")
-        if state.values.dtype != features.dtype:
-            raise ValueError("state and features must have the same dtype")
+            query_batch = block(query_batch, source_batch, query_padding, source_padding)
+        delta = self.output_projection(self.output_norm(query_batch)).to(features[0].dtype)
+        return [
+            MemoryState(base + row[: len(base)], state.seen_tokens + len(current))
+            for base, row, state, current in zip(bases, delta, states, features, strict=True)
+        ]
 
 
 class GrowthValueNetwork(nn.Module):
@@ -229,6 +235,8 @@ class GrowthValueNetwork(nn.Module):
         if state.values.device != features.device:
             raise ValueError("state and features must be on the same device")
 
+        if state.num_slots == 0:
+            raise ValueError("capacity policy requires allocated memory")
         memory = state.values.detach().to(dtype=torch.float32)
         current = features.detach().to(dtype=torch.float32)
         counts = torch.tensor(

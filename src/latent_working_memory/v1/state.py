@@ -18,14 +18,16 @@ class MemoryState:
             raise TypeError("values must be a torch.Tensor")
         if self.values.ndim != 2:
             raise ValueError("values must have shape [K, d_mem]")
-        if self.values.shape[0] <= 0 or self.values.shape[1] <= 0:
-            raise ValueError("values must have non-zero slot and feature dimensions")
+        if self.values.shape[1] <= 0:
+            raise ValueError("values must have a non-zero feature dimension")
         if not self.values.is_floating_point():
             raise TypeError("values must have a floating-point dtype")
         if not bool(torch.isfinite(self.values.detach()).all()):
             raise ValueError("values must contain only finite values")
         if type(self.seen_tokens) is not int or self.seen_tokens < 0:
             raise ValueError("seen_tokens must be a non-negative integer")
+        if self.num_slots == 0 and self.seen_tokens != 0:
+            raise ValueError("empty memory must have seen_tokens=0")
 
     @property
     def num_slots(self) -> int:

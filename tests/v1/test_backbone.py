@@ -1,168 +1,176 @@
 from __future__ import annotations
 
 import torch
-from transformers import LlamaConfig, LlamaForCausalLM
+import pytest
 
-from latent_working_memory.v1.backbone import (
-    LatentMemoryBackbone,
-    QuestionAnswerTokens,
-    tokenize_question_answer,
-)
-from latent_working_memory.v1.data import EncoderCell
-from latent_working_memory.v1.model import JointMemoryWriter
-from latent_working_memory.v1.objectives import teacher_student_kl
+from latent_working_memory.v1.backbone import ReadTokens
 
 
-class RecordingTokenizer:
-    eos_token_id = 2
-
-    def __init__(self) -> None:
-        self.inputs: list[str] = []
-
-    def encode(self, text: str, add_special_tokens: bool) -> list[int]:
-        assert not add_special_tokens
-        self.inputs.append(text)
-        return [3 + index for index, _ in enumerate(text.split(), start=0)]
-
-
-def _backbone() -> LatentMemoryBackbone:
-    torch.manual_seed(19)
-    base_model = LlamaForCausalLM(
-        LlamaConfig(
-            vocab_size=64,
-            hidden_size=16,
-            intermediate_size=32,
-            num_hidden_layers=2,
-            num_attention_heads=4,
-            num_key_value_heads=4,
-            max_position_embeddings=128,
-            bos_token_id=1,
-            eos_token_id=2,
-            pad_token_id=0,
-            attention_dropout=0.0,
-        )
-    )
-    return LatentMemoryBackbone(
-        base_model=base_model,
-        bos_token_id=1,
-        eos_token_id=2,
-        d_mem=8,
-        lora_rank=2,
-        lora_alpha=4,
-        lora_target_modules=("q_proj", "v_proj"),
-        lora_dropout=0.0,
-    )
-
-
-def test_question_and_answer_are_tokenized_as_separate_segments() -> None:
-    tokenizer = RecordingTokenizer()
-    tokens = tokenize_question_answer(tokenizer, "Where now?", "North")
-    assert tokenizer.inputs == ["Question: Where now?\nAnswer:", " North"]
-    assert tokens.target_ids[-1] == tokenizer.eos_token_id
-    assert tokens.answer_token_count == len(tokens.target_ids) - 1
-
-
-def test_teacher_and_cell_encoder_disable_reader_adapter() -> None:
-    backbone = _backbone()
-    cells = (
-        EncoderCell((7, 8), source_start=0),
-        EncoderCell((9, 10), source_start=2),
-    )
-    qa = QuestionAnswerTokens(prompt_ids=(11, 12), target_ids=(13, 14, 2))
-
-    first_encoding = backbone.frozen_cell_encoding(cells)
-    first_teacher = backbone.teacher_output((7, 8, 9, 10), qa)
+def test_whole_unit_features_preserve_context_and_ignore_reader_lora(components):
+    backbone, _ = components
+    backbone.eval()
+    units = [(4, 5, 6, 7), (7, 6)]
+    batch = backbone.text_features(units, [0, 9])
+    for unit, start, row in zip(units, [0, 9], batch):
+        torch.testing.assert_close(row, backbone.text_features([unit], [start])[0])
+    changed_prefix = backbone.text_features([(8, 5, 6, 7)], [0])[0]
+    assert not torch.allclose(batch[0][-1], changed_prefix[-1])
     with torch.no_grad():
         for name, parameter in backbone.language_model.named_parameters():
             if "lora_" in name:
-                parameter.add_(0.75)
-
-    second_encoding = backbone.frozen_cell_encoding(cells)
-    second_teacher = backbone.teacher_output((7, 8, 9, 10), qa)
-    assert torch.equal(first_encoding.hidden_states, second_encoding.hidden_states)
-    assert torch.equal(first_teacher.target_logits, second_teacher.target_logits)
+                parameter.fill_(0.7)
+    after = backbone.text_features(units, [0, 9])
+    for first, second in zip(batch, after):
+        torch.testing.assert_close(first, second, rtol=0, atol=0)
 
 
-def test_cell_features_are_invariant_to_update_grouping() -> None:
-    backbone = _backbone()
-    cells = (
-        EncoderCell((7, 8), source_start=4),
-        EncoderCell((9, 10), source_start=6),
+def test_reader_batch_mask_target_alignment_and_gradient_path(components):
+    backbone, writer = components
+    backbone.eval()
+    units = [(4, 5, 6), (7, 6, 5, 4, 8)]
+    features = backbone.text_features(units, [0, 0])
+    states = writer.update_batch(
+        [writer.initialize_state(), writer.initialize_state()], features, [0, 0], [2, 5]
     )
-    joint_encoding = backbone.frozen_cell_encoding(cells)
-    separate_encodings = tuple(backbone.frozen_cell_encoding((cell,)) for cell in cells)
-    assert torch.equal(
-        joint_encoding.hidden_states,
-        torch.cat(tuple(encoding.hidden_states for encoding in separate_encodings)),
-    )
-    assert torch.equal(
-        backbone.project_cell_encoding(joint_encoding),
-        torch.cat(
-            tuple(backbone.project_cell_encoding(encoding) for encoding in separate_encodings)
-        ),
-    )
-
-
-def test_answer_relative_alignment_and_student_gradient_path() -> None:
-    backbone = _backbone()
-    writer = JointMemoryWriter(
-        d_mem=8,
-        num_layers=1,
-        num_heads=2,
-        ffn_dim=16,
-        slot_limit=16,
-    )
-    cells = (EncoderCell((7, 8, 9, 10), source_start=0),)
-    qa = QuestionAnswerTokens(prompt_ids=(11, 12, 15), target_ids=(13, 14, 2))
-
-    frozen = backbone.frozen_cell_encoding(cells)
-    features = backbone.project_cell_encoding(frozen)
-    memory = writer(writer.initialize_state(2), features, grow_by=0).values
-    teacher = backbone.teacher_output((7, 8, 9, 10), qa)
-    student = backbone.student_output(memory, qa)
-
-    assert teacher.target_logits.shape == student.target_logits.shape == (3, 64)
-    assert not teacher.target_logits.requires_grad
-    assert student.target_logits.requires_grad
-    assert all(
-        not parameter.requires_grad
-        for name, parameter in backbone.language_model.named_parameters()
-        if "lora_" not in name
-    )
-
-    loss = student.mean_nll + 0.1 * teacher_student_kl(teacher.target_logits, student.target_logits)
+    tokens = [ReadTokens((11, 12), (4, 5, 2)), ReadTokens((12,), (7, 8, 9, 10, 2))]
+    outputs = backbone.read_batch([s.values for s in states], tokens)
+    for state, task, output in zip(states, tokens, outputs):
+        single = backbone.read_batch([state.values], [task])[0]
+        torch.testing.assert_close(output.target_logits, single.target_logits, atol=1e-6, rtol=1e-5)
+    loss = sum(o.mean_nll for o in outputs)
     loss.backward()
-    assert backbone.input_projection.weight.grad is not None
-    assert torch.count_nonzero(backbone.input_projection.weight.grad).item() > 0
-    assert backbone.memory_projection.weight.grad is not None
-    assert torch.count_nonzero(backbone.memory_projection.weight.grad).item() > 0
-    assert writer.output_projection.weight.grad is not None
-    assert torch.count_nonzero(writer.output_projection.weight.grad).item() > 0
+    assert backbone.input_projection.weight.grad.abs().sum() > 0
+    assert backbone.memory_projection.weight.grad.abs().sum() > 0
+    assert writer.output_projection.weight.grad.abs().sum() > 0
     assert any(
-        parameter.grad is not None and torch.count_nonzero(parameter.grad).item() > 0
-        for name, parameter in backbone.language_model.named_parameters()
-        if "lora_" in name
+        p.grad is not None and p.grad.abs().sum() > 0
+        for n, p in backbone.language_model.named_parameters()
+        if "lora_" in n
     )
     assert all(
-        parameter.grad is None
-        for name, parameter in backbone.language_model.named_parameters()
-        if "lora_" not in name
+        p.grad is None and not p.requires_grad
+        for n, p in backbone.language_model.named_parameters()
+        if "lora_" not in n
+    )
+    empty_output = backbone.read_batch([writer.initialize_state().values], [tokens[0]])[0]
+    assert torch.isfinite(empty_output.mean_nll)
+
+
+def test_target_token_is_predicted_before_it_is_seen(components):
+    backbone, writer = components
+    backbone.eval()
+    memory = writer.initialize_state().values
+    original = backbone.read_batch([memory], [ReadTokens((11,), (4, 5, 2))])[0]
+    changed = backbone.read_batch([memory], [ReadTokens((11,), (8, 5, 2))])[0]
+    torch.testing.assert_close(original.target_logits[0], changed.target_logits[0])
+    assert not torch.allclose(original.target_logits[1], changed.target_logits[1])
+
+
+def test_raw_context_controls_match_causal_model_and_restore_reader_lora(components):
+    backbone, writer = components
+    backbone.eval()
+    empty = writer.initialize_state().values
+    tasks = [ReadTokens((11, 12), (4, 5, 2)), ReadTokens((12,), (7, 8, 9, 2))]
+    contexts = [(6, 7, 8, 9), (8, 9)]
+    with torch.no_grad():
+        for name, parameter in backbone.language_model.named_parameters():
+            if "lora_" in name:
+                parameter.normal_(std=0.3)
+        for enabled in (True, False):
+            outputs = backbone.read_batch([empty, empty], tasks, contexts, enabled)
+            for task, context, output in zip(tasks, contexts, outputs):
+                ids = torch.tensor([(1, *context, *task.prompt_ids, *task.target_ids)])
+                if enabled:
+                    direct = backbone.language_model(input_ids=ids).logits[0]
+                else:
+                    with backbone.language_model.disable_adapter():
+                        direct = backbone.language_model(input_ids=ids).logits[0]
+                start = len(context) + len(task.prompt_ids)
+                torch.testing.assert_close(
+                    output.target_logits,
+                    direct[start : start + len(task.target_ids)],
+                    rtol=1e-5,
+                    atol=1e-6,
+                )
+        enabled = backbone.read_batch([empty], tasks[:1], contexts[:1])[0]
+        disabled = backbone.read_batch([empty], tasks[:1], contexts[:1], False)[0]
+        restored = backbone.read_batch([empty], tasks[:1], contexts[:1])[0]
+        torch.testing.assert_close(enabled.target_logits, restored.target_logits, rtol=0, atol=0)
+        assert not torch.allclose(enabled.target_logits, disabled.target_logits)
+        changed = backbone.read_batch(
+            [empty], [ReadTokens(tasks[0].prompt_ids, (8, 5, 2))], contexts[:1]
+        )[0]
+        torch.testing.assert_close(enabled.target_logits[0], changed.target_logits[0])
+        assert not torch.allclose(enabled.target_logits[1], changed.target_logits[1])
+    backbone.train()
+    backbone.read_batch([empty], tasks[:1], contexts[:1], False)
+    assert backbone.language_model.training
+    with pytest.raises(ValueError, match="exceeds model limit"):
+        backbone.read_batch([empty], tasks[:1], [(4,) * 256])
+
+
+def test_reader_padding_preserves_gradients_and_bf16_execution(components):
+    backbone, writer = components
+    backbone.eval()
+    memories = [torch.randn(2, 8, requires_grad=True), torch.randn(7, 8, requires_grad=True)]
+    tokens = [ReadTokens((11,), (4, 5, 2)), ReadTokens((11, 12, 13), (7, 8, 9, 10, 2))]
+    batched = backbone.read_batch(memories, tokens)
+    batch_grads = torch.autograd.grad(sum(o.mean_nll for o in batched), memories, retain_graph=True)
+    single_grads = [
+        torch.autograd.grad(backbone.read_batch([m], [t])[0].mean_nll, m)[0]
+        for m, t in zip(memories, tokens)
+    ]
+    for batch, single in zip(batch_grads, single_grads):
+        torch.testing.assert_close(batch, single, rtol=2e-5, atol=1e-7)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        features = backbone.text_features([(4, 5, 6), (7, 8, 9, 10)], [0, 0])
+        states = writer.update_batch(
+            [writer.initialize_state(dtype=f.dtype) for f in features], features, [0, 0], [2, 5]
+        )
+        output = backbone.read_batch([s.values for s in states], tokens)
+        loss = sum(o.mean_nll for o in output)
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert backbone.input_projection.weight.grad.abs().sum() > 0
+    assert all(s.values.dtype == torch.bfloat16 for s in states)
+
+
+def test_cached_generation_logits_match_full_prefix_read(components):
+    backbone, _ = components
+    backbone.eval()
+    memory = torch.randn(4, backbone.d_mem)
+    prompt = (11, 12)
+    model = backbone.language_model.get_base_model()
+    model.generation_config.min_new_tokens = 4
+    cached_logits = []
+
+    def capture_logits(module, args, kwargs, output):
+        cached_logits.append(output.logits[0, -1].detach().clone())
+
+    handle = model.register_forward_hook(capture_logits, with_kwargs=True)
+    try:
+        generated = backbone.greedy_students([memory], [prompt], [4])[0]
+    finally:
+        handle.remove()
+    assert len(generated) == 4
+    with torch.no_grad():
+        full = backbone.read_batch(
+            [memory], [ReadTokens(prompt, generated + (backbone.eos_token_id,))]
+        )[0]
+    torch.testing.assert_close(
+        torch.stack(cached_logits), full.target_logits[:4], atol=1e-6, rtol=1e-5
     )
 
 
-def test_trainable_backbone_state_round_trip_and_greedy_generation() -> None:
-    source = _backbone()
-    state = source.trainable_state_dict()
-    target = _backbone()
-    target.load_trainable_state_dict(state)
-
-    qa = QuestionAnswerTokens(prompt_ids=(11, 12), target_ids=(13, 2))
-    memory = torch.randn(2, 8)
-    assert torch.equal(
-        source.student_output(memory, qa).target_logits,
-        target.student_output(memory, qa).target_logits,
-    )
-    generated = target.greedy_student(memory, qa.prompt_ids, max_new_tokens=3)
-    assert 1 <= len(generated) <= 3
-    teacher_generated = target.greedy_teacher((7, 8, 9, 10), qa.prompt_ids, max_new_tokens=3)
-    assert 1 <= len(teacher_generated) <= 3
+def test_batched_generation_matches_individual_with_different_lengths(components):
+    backbone, _ = components
+    backbone.eval()
+    memories = [torch.randn(2, backbone.d_mem), torch.randn(7, backbone.d_mem)]
+    prompts = [(11,), (11, 12, 13)]
+    limits = [4, 6]
+    batch = backbone.greedy_students(memories, prompts, limits)
+    single = [
+        backbone.greedy_students([m], [p], [limit])[0]
+        for m, p, limit in zip(memories, prompts, limits)
+    ]
+    assert batch == single

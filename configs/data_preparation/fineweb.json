@@ -1,0 +1,16 @@
+{
+  "max_documents": 18000,
+  "split_document_limits": [
+    10000,
+    512,
+    512
+  ],
+  "near_duplicate_threshold": 0.9,
+  "near_duplicate_min_words": 64,
+  "score_block_tokens": 512,
+  "scoring_batch_size": 8,
+  "review_max_new_tokens": 256,
+  "fluency_model_name_or_path": null,
+  "review_model_name_or_path": null,
+  "audit_examples": 200
+}

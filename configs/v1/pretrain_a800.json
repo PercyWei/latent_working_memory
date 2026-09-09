@@ -1,5 +1,5 @@
 {
-  "model_name_or_path": "meta-llama/Llama-2-7b-chat-hf",
+  "model_name_or_path": "/data/bywei/models/meta-llama/Llama-2-7b-chat-hf",
   "model_revision": null,
   "reader_lora_rank": 16,
   "reader_lora_alpha": 32,
@@ -67,13 +67,26 @@
   "lm_weight": 1.0,
   "batch_size": 2,
   "gradient_accumulation_steps": 4,
-  "learning_rate": 0.0001,
+  "learning_rate": 3e-05,
   "weight_decay": 0.01,
   "gradient_clip": 1.0,
   "gradient_checkpointing": true,
   "data_seed": 20260907,
   "model_seed": 42,
-  "eval_every": 100,
-  "eval_examples": 16,
-  "eval_generation_examples": 4
+  "eval_every": 250,
+  "eval_examples": 128,
+  "eval_generation_examples": 64,
+  "eval_generation_every": 1000,
+  "input_length_bounds": [
+    32,
+    128,
+    512,
+    1024
+  ],
+  "input_length_weights": [
+    0.1,
+    0.3,
+    0.4,
+    0.2
+  ]
 }

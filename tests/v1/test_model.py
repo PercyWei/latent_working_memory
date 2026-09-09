@@ -35,7 +35,7 @@ def test_sinusoidal_positions_are_deterministic_and_distinct() -> None:
 
 def test_writer_shapes_seen_tokens_and_non_mutation() -> None:
     writer = _writer()
-    initial = writer.initialize_state(2)
+    initial = MemoryState(torch.zeros(2, 8, dtype=writer.old_type.dtype), 0)
     old_copy = initial.values.detach().clone()
 
     unchanged_size = writer(initial, torch.randn(3, 8), 0)
@@ -51,7 +51,7 @@ def test_writer_shapes_seen_tokens_and_non_mutation() -> None:
 
 def test_writer_preserves_bfloat16_runtime_state() -> None:
     writer = _writer().to(dtype=torch.bfloat16)
-    state = writer.initialize_state(2)
+    state = MemoryState(torch.zeros(2, 8, dtype=writer.old_type.dtype), 0)
     output = writer(state, torch.randn(3, 8, dtype=torch.bfloat16), 8)
     assert state.values.dtype == torch.bfloat16
     assert output.values.dtype == torch.bfloat16
@@ -60,11 +60,11 @@ def test_writer_preserves_bfloat16_runtime_state() -> None:
 def test_writer_keeps_fp32_parameters_with_bfloat16_autocast_state() -> None:
     writer = _writer()
     with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
-        state = writer.initialize_state(2, dtype=torch.bfloat16)
+        state = MemoryState(torch.zeros(2, 8, dtype=torch.bfloat16), 0)
         output = writer(state, torch.randn(3, 8, dtype=torch.bfloat16), 0)
     output.values.float().sum().backward()
 
-    assert writer.initial_seed.dtype == torch.float32
+    assert writer.old_type.dtype == torch.float32
     assert state.values.dtype == torch.bfloat16
     assert output.values.dtype == torch.bfloat16
     assert writer.output_projection.weight.grad is not None
@@ -96,7 +96,7 @@ def test_new_and_old_outputs_depend_on_old_memory_and_current_features() -> None
     loss.backward()
     assert old_values.grad is not None and torch.count_nonzero(old_values.grad).item() > 0
     assert features.grad is not None and torch.count_nonzero(features.grad).item() > 0
-    assert writer.birth_from_memory.weight.grad is not None
+    assert writer.blocks[0].cross_attention.in_proj_weight.grad is not None
 
 
 def test_growth_value_features_are_detached_and_policy_rollout_is_auditable() -> None:
@@ -133,3 +133,22 @@ def test_growth_value_features_are_detached_and_policy_rollout_is_auditable() ->
     assert [item.selected_action for item in traces] == [8, 8]
     assert final_state.num_slots == 18
     assert final_state.seen_tokens == 8
+
+
+def test_empty_first_allocation_and_batch_masks():
+    writer = _writer()
+    empty = writer.initialize_state()
+    assert empty.num_slots == 0 and empty.seen_tokens == 0
+    assert not any("seed" in name or "birth" in name for name, _ in writer.named_parameters())
+    features = [torch.randn(3, 8, requires_grad=True), torch.randn(11, 8, requires_grad=True)]
+    batched = writer.update_batch([empty, empty], features, [0, 0], [3, 7])
+    individual = [writer(empty, f, first_slots=k) for f, k in zip(features, (3, 7))]
+    for first, second in zip(batched, individual):
+        torch.testing.assert_close(first.values, second.values, rtol=1e-5, atol=1e-7)
+    grads = torch.autograd.grad(batched[0].values.square().sum(), features, allow_unused=True)
+    assert grads[0].abs().sum() > 0
+    assert grads[1].abs().sum() == 0
+    with torch.no_grad():
+        writer.output_projection.weight.zero_()
+        writer.output_projection.bias.zero_()
+    assert torch.count_nonzero(writer(empty, features[0], first_slots=5).values) == 0
