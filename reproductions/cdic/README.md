@@ -1,8 +1,8 @@
-# C-DIC 论文复现（20260909 10:47:53 CST）
+# C-DIC 论文复现（20260909 11:15:48 CST）
 
 创建时间：20260904 16:19:08 CST（UTC+08:00）
 
-最后修订时间：20260909 10:47:53 CST（UTC+08:00）
+最后修订时间：20260909 11:15:48 CST（UTC+08:00）
 
 本目录用于分阶段复现 Context-Driven Incremental Compression（C-DIC）。由于当前没有公开的官方实现，所有论文未明确的行为均记录在 `ASSUMPTIONS.md`。
 
@@ -187,35 +187,49 @@ CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/cdic --no-sync \
 
 首轮 8 episodes × 8 turns pilot 已完成。训练后 token-weighted loss 略升，且 threshold `0.8` 下 cross-episode false accept rate 从 12.5% 升至 100%；该结果只构成诊断信号，需扩大样本并补充 threshold-independent 指标。详细记录见 `notes/reproduction_results/20260905_c_dic_evaluation_reproduction_record.md`。
 
-## Table 1 MSC 评估
+## MSC 统一评估
 
-当前入口使用 session 5 test，session 1 只构建 gold memory，sessions 2–5 执行 teacher-forced PPL 与 greedy generation：
+`eval_msc.py` 统一承担原 Table 1 MSC 评估与 initialization/final 对齐比较。入口固定加载 session 5 数据：session 1 只构建 gold memory，sessions 2–5 执行 teacher-forced PPL 与 greedy generation。配置中的 `condition` 决定是否加载 C-DIC 训练 checkpoint，`split` 可选择 `valid` 或 `test`，因此同一执行协议可以直接用于 Table 1 test 设置下的训练前后比较。
 
-```bash
-CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/cdic --no-sync \
-  python -m cdic_repro.experiments.eval_table1_msc \
-  --config reproductions/cdic/configs/table1_msc_pilot_a800.json
-```
+每轮只运行一次生成，再分别汇总 sessions 2–5 全部轮次、每 session 最后一轮和 session 5 最后一轮；PPL 区分含／不含 EOS，ROUGE 区分 recall／F1。逐 token NLL、目标 ID 和协议均保存，允许不重跑模型即可重新汇总。`episode_count` 为 `null` 时评估全部 episodes；指定数量且 `sample_seed` 为 `null` 时取数据集前 N 条，提供 seed 时执行固定随机抽样。
 
-两 episode pilot 已完成，PPL 高于论文、BLEU 低于论文。由于作者未公开 prompt serialization、instruction initialization 和 metric 实现，暂不启动全量运行。协议与结果记录见 `notes/experiment_designs/20260905_c_dic_table1_reproduction_plan.md` 和 `notes/reproduction_results/20260905_c_dic_evaluation_reproduction_record.md`。
-
-## 评估口径对齐
-
-`eval_aligned_msc.py` 在固定抽样的 32 个 session 5 validation episodes 上，使用完整 gold history 比较 initialization 与 final。每轮只运行一次生成，再分别汇总 sessions 2–5 全部轮次、每 session 最后一轮、session 5 最后一轮；PPL 区分含／不含 EOS，ROUGE 区分 recall／F1。逐 token NLL、目标 ID 和协议均保存，允许不重跑模型即可重新汇总。
+固定抽样的 32 条 validation 对齐评估：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/cdic --no-sync \
-  python -m cdic_repro.experiments.eval_aligned_msc \
+  python -m cdic_repro.experiments.eval_msc \
   --config reproductions/cdic/configs/msc_alignment_initialization_a800.json
 
 CUDA_VISIBLE_DEVICES=1 uv run --project reproductions/cdic --no-sync \
-  python -m cdic_repro.experiments.eval_aligned_msc \
+  python -m cdic_repro.experiments.eval_msc \
   --config reproductions/cdic/configs/msc_alignment_final_a800.json
 
-PYTHONPATH=reproductions/cdic/src uv run python -m cdic_repro.experiments.eval_aligned_msc \
+PYTHONPATH=reproductions/cdic/src uv run python -m cdic_repro.experiments.eval_msc \
   --compare <initialization_dir> <final_dir> --output <comparison.json>
 ```
+
+Table 1 test 两条 episode pilot 的训练前后配对评估：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/cdic --no-sync \
+  python -m cdic_repro.experiments.eval_msc \
+  --config reproductions/cdic/configs/table1_msc_initialization_pilot_a800.json
+
+CUDA_VISIBLE_DEVICES=1 uv run --project reproductions/cdic --no-sync \
+  python -m cdic_repro.experiments.eval_msc \
+  --config reproductions/cdic/configs/table1_msc_pilot_a800.json
+
+PYTHONPATH=reproductions/cdic/src uv run python -m cdic_repro.experiments.eval_msc \
+  --compare \
+  /data/bywei/projects/latent_working_memory/artifacts/cdic/20260905_table1_msc_pilot/initialization \
+  /data/bywei/projects/latent_working_memory/artifacts/cdic/20260905_table1_msc_pilot/final \
+  --output /data/bywei/projects/latent_working_memory/artifacts/cdic/20260905_table1_msc_pilot/comparison.json
+```
+
+test split 可用于最终报告，但 threshold、生成长度等选择应先在 validation 上完成，避免用测试集调参。设置 `num_shards > 1` 时，各分片结果写入 `artifact_dir/shard-XX-of-YY/`；配对比较时传入 initialization 和 final 对应的同编号分片目录。
 
 initialization 指相同 C-DIC 状态机加载公开 ICAE 权重，不等同于论文的 ICAE incremental baseline。Appendix K 明确使用 session 5 最后一轮；Table 1 的具体轮次、split 和指标库仍未完全确认。操作、分母和结果见 [20260906 评估口径对齐记录](../../notes/reproduction_results/20260906_c_dic_evaluation_alignment_record.md)。
 
 本次两条件均完成 753 个计分轮次。全部轮次 PPL 从 initialization 的 16.9929 升至 final 的 23.0159；session 5 最后一轮从 22.5589 升至 28.2935。三种计分范围的 paired episode bootstrap 区间均支持 NLL 恶化；final 在 sessions 2–5 的 753 次检索全部走 fallback/insert，后续应优先审计跨 session 的检索与压缩状态。
+
+此前 final-only 的两 episode Table 1 pilot 已完成，PPL 高于论文、BLEU 低于论文。由于作者未公开 prompt serialization、instruction initialization 和 metric 实现，暂不启动全量运行。协议与结果记录见 `notes/experiment_designs/20260905_c_dic_table1_reproduction_plan.md` 和 `notes/reproduction_results/20260905_c_dic_evaluation_reproduction_record.md`。

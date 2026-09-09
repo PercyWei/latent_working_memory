@@ -6,7 +6,7 @@
   "artifact_dir": "/data/bywei/projects/latent_working_memory/artifacts/cdic/20260906_evaluation_alignment/final",
   "condition": "final",
   "split": "valid",
-  "sample_size": 32,
+  "episode_count": 32,
   "sample_seed": 20260906,
   "device": "cuda:0",
   "max_turn_tokens": 512,

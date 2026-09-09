@@ -2,22 +2,24 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict
+from pathlib import Path
 
 import pytest
 
 from cdic_repro.config import RetrievalConfig
-from cdic_repro.experiments.eval_aligned_msc import (
-    AlignmentConfig,
+from cdic_repro.experiments.eval_msc import (
+    MscEvaluationConfig,
+    _serialize_config,
     compare_runs,
     evaluate_episode,
+    load_config,
     paired_episode_bootstrap,
     scoped_records,
     select_episodes,
     summarize_records,
 )
-from cdic_repro.model_protocol import CompressedTurn, TrainingLoss
 from cdic_repro.experiments.msc import MscEpisode, MscTurn
+from cdic_repro.model_protocol import CompressedTurn, TrainingLoss
 
 
 def episode(name="example"):
@@ -84,14 +86,34 @@ def test_resume_replays_gold_history_without_rescoring_completed_turns():
     assert len(adapter.scored) == 5
 
 
-def test_episode_selection_is_deterministic_and_preserves_all_sessions():
+def test_episode_selection_supports_full_first_n_and_seeded_sampling():
     data = tuple(episode(str(i)) for i in range(40))
-    selected = select_episodes(data, size=8, seed=20260906)
-    assert selected == select_episodes(data, size=8, seed=20260906)
+    selected = select_episodes(data, count=8, seed=20260906)
+    assert selected == select_episodes(data, count=8, seed=20260906)
     assert len({e.episode_id for e in selected}) == 8
+    assert select_episodes(data, count=8, seed=None) == data[:8]
+    assert select_episodes(data, count=None, seed=None) == data
     incomplete = MscEpisode("short", 5, episode().turns[:2])
     with pytest.raises(ValueError, match="complete sessions"):
-        select_episodes((incomplete,), size=1, seed=0)
+        select_episodes((incomplete,), count=None, seed=None)
+
+
+@pytest.mark.parametrize(
+    ("name", "condition", "split", "episode_count"),
+    (
+        ("msc_alignment_initialization_a800.json", "initialization", "valid", 32),
+        ("msc_alignment_final_a800.json", "final", "valid", 32),
+        ("table1_msc_initialization_pilot_a800.json", "initialization", "test", 2),
+        ("table1_msc_pilot_a800.json", "final", "test", 2),
+    ),
+)
+def test_shipped_configs_use_the_unified_schema(name, condition, split, episode_count):
+    config = load_config(Path(__file__).parents[1] / "configs" / name)
+    assert (config.condition, config.split, config.episode_count) == (
+        condition,
+        split,
+        episode_count,
+    )
 
 
 def test_ppl_uses_token_weighting_and_keeps_eos_out_of_content():
@@ -117,12 +139,18 @@ def test_comparison_rejects_incomplete_or_mismatched_runs(tmp_path):
     folders = [tmp_path / "init", tmp_path / "final"]
     for folder, condition in zip(folders, ("initialization", "final")):
         folder.mkdir()
-        config = AlignmentConfig(
-            "model", "icae.pt", "final.pt" if condition == "final" else None,
-            "data", str(folder), condition,
+        config = MscEvaluationConfig(
+            model_path=Path("model"),
+            checkpoint_path=Path("icae.pt"),
+            training_checkpoint_path=(
+                Path("final.pt") if condition == "final" else None
+            ),
+            data_root=Path("data"),
+            artifact_dir=folder,
+            condition=condition,
         )
         (folder / "protocol.json").write_text(json.dumps({
-            "config": asdict(config),
+            "config": _serialize_config(config),
             "episode_ids": ["example"], "expected_scored_turns": 8,
         }))
         (folder / "predictions.jsonl").write_text("\n".join(json.dumps(row) for row in rows))
