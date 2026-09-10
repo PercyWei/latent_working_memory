@@ -1,7 +1,7 @@
-# 20260910_预训练边界类型对比计划（23:02:48 UTC+08:00）
+# 20260910_预训练边界类型对比计划（23:07:49 UTC+08:00）
 
 创建时间：20260910 22:52:20 UTC+08:00
-最后修订时间：20260910 23:02:48 UTC+08:00
+最后修订时间：20260910 23:07:49 UTC+08:00
 
 ## 实验设计
 
@@ -38,3 +38,15 @@ SwanLab project 为 `latent-working-memory`，三组使用共同 group，训练�
 - 启动文件：`artifacts/v1/experiment-plans/boundary-comparison-2048-20260910/`，包含三组训练命令、三组测试命令、`evaluation-dirs.json` 和环境检查结果。命令已生成，正式运行已经授权。
 
 数据选择结果：`data/v1/boundary-comparison-2048-20260910/selection.json`。筛选检查确认来源隔离及所有压缩率、完整上下文基线的窗口预算；跨来源去除 train 19 条、test 1 条重复内容。80 项 v1 测试通过；CPU 集成测试覆盖双验证集及课程日程下的精确断点恢复。
+
+## 运行记录
+
+20260910 23:05:42 UTC+08:00 启动，代码提交 `2ed8f6d`。semantic 使用 GPU 0，random 使用 GPU 1；mixed 在先完成训练与测试的卡上执行。每组先记录双 dev 基线，再完成训练与双 test 评估。
+
+| 设置 | SwanLab run | 初始状态 |
+|---|---|---|
+| semantic | [x8iu95kx](https://swanlab.cn/@percyWeeeeei/latent-working-memory/runs/x8iu95kx) | 双 dev 基线评估 |
+| random | [9xc65gwy](https://swanlab.cn/@percyWeeeeei/latent-working-memory/runs/9xc65gwy) | 双 dev 基线评估 |
+| mixed | 待分配 | 等待空闲 GPU |
+
+共同 group 为 `lwm-boundary-comparison-2048-20260910`，训练标签包含 `scope:main`、`method:latent-working-memory`、`study:boundary-comparison`、`data:fineweb` 及所用来源标签。实际进度保存在运行计划目录的各 run 状态与日志中。
