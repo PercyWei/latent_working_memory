@@ -37,7 +37,12 @@ def quality_service():
                 "decision": "reject" if sample["X"] == "bad" else "keep",
                 "reason": "Test service judgment",
             }
-            content = "invalid JSON" if behavior["invalid"] else json.dumps(review)
+            invalid = (
+                behavior["invalid"] is True
+                or behavior["invalid"] == sample["X"]
+                or behavior.pop("invalid_once", False)
+            )
+            content = "invalid JSON" if invalid else json.dumps(review)
             encoded = json.dumps(
                 {
                     "choices": [
@@ -117,11 +122,52 @@ def test_model_failure_never_becomes_a_keep_decision(
     scorer = SampleScorer(
         replace(preparation_recipe, review_base_url=url), tmp_path / "cache.jsonl"
     )
-    with pytest.raises((ValueError, HTTPError)):
-        scorer.score_batch(
-            [{"boundary_variant": "semantic", "task": "ae", "X": "A sentence.", "Y": None}]
-        )
-    assert not scorer.cache
+    samples = [{"boundary_variant": "semantic", "task": "ae", "X": "A sentence.", "Y": None}]
+    if failure == "error":
+        with pytest.raises(HTTPError):
+            scorer.score_batch(samples)
+        assert not scorer.cache
+    else:
+        assert scorer.score_batch(samples)[0]["decision"] == "error"
+        assert len(next(iter(scorer.cache.values()))["failures"]) == 2
+
+
+def test_invalid_sample_does_not_discard_valid_batch_results(
+    tmp_path, preparation_recipe, quality_service
+):
+    url, requests, behavior = quality_service
+    behavior["invalid"] = "broken"
+    recipe = replace(preparation_recipe, review_base_url=url)
+    path = tmp_path / "cache.jsonl"
+    scorer = SampleScorer(recipe, path)
+    samples = [
+        {"boundary_variant": "semantic", "task": "ae", "X": x, "Y": None}
+        for x in ("broken", "A sentence.", "bad")
+    ]
+    result = scorer.score_batch(samples)
+    assert [r["decision"] for r in result] == ["error", "keep", "reject"]
+    assert len(requests) == 4
+    assert SampleScorer(recipe, path).score_batch(samples) == result
+    assert len(requests) == 4
+    error_row = scorer.cache[result[0]["cache_key"]]
+    assert all(
+        r["response"]["choices"][0]["message"]["content"] == "invalid JSON"
+        for r in error_row["failures"]
+    )
+
+
+def test_format_retry_can_recover_a_valid_judgment(tmp_path, preparation_recipe, quality_service):
+    url, requests, behavior = quality_service
+    behavior["invalid_once"] = True
+    scorer = SampleScorer(
+        replace(preparation_recipe, review_base_url=url), tmp_path / "cache.jsonl"
+    )
+    review = scorer.score_batch(
+        [{"boundary_variant": "semantic", "task": "ae", "X": "A sentence.", "Y": None}]
+    )[0]
+    assert review["decision"] == "keep"
+    assert len(requests) == 2
+    assert len(scorer.cache[review["cache_key"]]["failures"]) == 1
 
 
 @pytest.mark.parametrize(
@@ -132,6 +178,7 @@ def test_model_failure_never_becomes_a_keep_decision(
         '{"decision":"keep","reason":""}',
         '{"decision":"keep","reason":"ok","extra":1}',
         json.dumps({"decision": "keep", "reason": "x" * 241}),
+        '{"decision":"keep","reason":"invalid\tcontrol"}',
     ],
 )
 def test_quality_response_requires_exact_contract(raw):
@@ -147,7 +194,7 @@ def test_cli_stages_and_posthoc_model_inspection(
     preparation_recipe,
     quality_service,
 ):
-    url, requests, _ = quality_service
+    url, requests, behavior = quality_service
     model = tmp_path / "tokenizer"
     tokenizer.save_pretrained(model)
     config = replace(tiny_config, model_name_or_path=str(model))
@@ -178,3 +225,11 @@ def test_cli_stages_and_posthoc_model_inspection(
         before = len(requests)
         judge_inspection(inspection, scorer)
         assert len(requests) == before
+    behavior["invalid"] = True
+    inspection = tmp_path / "inspection-format-errors"
+    sample_inspection(root / "semantic", inspection, examples=2)
+    scorer = SampleScorer(recipe, tmp_path / "inspection-errors-cache.jsonl", "inspection")
+    report = judge_inspection(inspection, scorer)["panels"]["random-views"]["all"]
+    assert report["unreviewed"] == report["samples"]
+    assert not report["complete"]
+    assert report["failure_rate"] is None

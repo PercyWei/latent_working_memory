@@ -78,6 +78,7 @@ def test_independent_variants_balance_post_review_tasks_and_intervals(
         assert [resumed.sample(i) for i in range(10)] == expected
 
 
+@pytest.mark.parametrize("decision", ["reject", "error"])
 def test_rejections_refill_quotas_independently(
     tmp_path,
     tiny_config,
@@ -85,6 +86,7 @@ def test_rejections_refill_quotas_independently(
     preparation_records,
     preparation_recipe,
     accepting_scorer,
+    decision,
 ):
     original = accepting_scorer.score_batch
     visits = Counter()
@@ -95,7 +97,7 @@ def test_rejections_refill_quotas_independently(
             variant, task = sample["boundary_variant"], sample["task"]
             visits[(variant, task)] += 1
             if visits[(variant, task)] <= 3:
-                result.update(decision="reject", reason="Test rejection before quota accounting")
+                result.update(decision=decision, reason="Test rejection before quota accounting")
         return results
 
     accepting_scorer.score_batch = reject_some
@@ -108,7 +110,7 @@ def test_rejections_refill_quotas_independently(
         accepting_scorer,
     )
     for variant in result:
-        assert result[variant]["statistics"]["review/reject"] > 0
+        assert result[variant]["statistics"][f"review/{decision}"] > 0
         assert result[variant]["statistics"]["train/ae"] == preparation_recipe.samples_per_task[0]
         assert (
             result[variant]["statistics"]["train/continuation"]

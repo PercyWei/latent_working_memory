@@ -201,9 +201,12 @@ def judge_inspection(directory: Path, scorer: SampleScorer) -> dict[str, Any]:
             )
             for row, review in zip(batch, reviews, strict=True):
                 row.update(
-                    judgment={"keep": "pass", "reject": "fail", "uncertain": "uncertain"}[
-                        review["decision"]
-                    ],
+                    judgment={
+                        "keep": "pass",
+                        "reject": "fail",
+                        "uncertain": "uncertain",
+                        "error": None,
+                    }[review["decision"]],
                     reviewer=scorer.protocol["model"],
                     review_reason=review["reason"],
                     review_cache_key=review["cache_key"],

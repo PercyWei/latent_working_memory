@@ -111,15 +111,27 @@ class SampleScorer:
             data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json"},
         )
-        # Use a direct connection, including for a scorer served on the local GPU server.
-        with build_opener(ProxyHandler({})).open(
-            request, timeout=self.config.review_timeout_seconds
-        ) as response:
-            raw = json.load(response)
-        choice = raw["choices"][0]
-        if choice["finish_reason"] != "stop":
-            raise ValueError(f"quality response did not finish: {choice['finish_reason']}")
-        return {"result": parse_review(choice["message"]["content"]), "usage": raw.get("usage")}
+        failures = []
+        for _ in range(2):
+            # Service/connection errors propagate; malformed judgments are isolated per sample.
+            with build_opener(ProxyHandler({})).open(
+                request, timeout=self.config.review_timeout_seconds
+            ) as response:
+                raw = json.load(response)
+            choice = raw["choices"][0]
+            try:
+                if choice["finish_reason"] != "stop":
+                    raise ValueError(f"quality response did not finish: {choice['finish_reason']}")
+                result = parse_review(choice["message"]["content"])
+            except ValueError as error:
+                failures.append({"error": str(error), "response": raw})
+            else:
+                return {"result": result, "usage": raw.get("usage"), "failures": failures}
+        return {
+            "result": {"decision": "error", "reason": failures[-1]["error"]},
+            "usage": raw.get("usage"),
+            "failures": failures,
+        }
 
     def score_batch(self, samples: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         pending, keys = {}, []
