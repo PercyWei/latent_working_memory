@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import random
@@ -36,6 +37,7 @@ def prepare_experiment(spec: dict, config, tokenizer, output: Path) -> dict:
     identities = {}
     registry = {}
     rejected = defaultdict(int)
+    seen_content = {}
     for name, directory in sources.items():
         meta = json.loads((directory / "preparation.json").read_text())
         if meta["contract"] != data_contract(config):
@@ -80,6 +82,21 @@ def prepare_experiment(spec: dict, config, tokenizer, output: Path) -> dict:
                     ):
                         rejected[f"{name}/{split}/window_or_target_length"] += 1
                         continue
+                    content_key = hashlib.blake2b(
+                        json.dumps(
+                            (
+                                episode.reads[0].task,
+                                source.provenance["input_text_key"],
+                                " ".join(episode.reads[0].references[0].text.split()),
+                            )
+                        ).encode()
+                    ).hexdigest()
+                    if content_key in seen_content:
+                        if seen_content[content_key] != split:
+                            raise ValueError("duplicate content crosses splits")
+                        rejected[f"{name}/{split}/duplicate_content"] += 1
+                        continue
+                    seen_content[content_key] = split
                     bucket = next(b for b in bounds if len(episode.input_ids) <= b)
                     groups[(episode.reads[0].task, bucket)].append((offset, episode.episode_id))
             cells[name, split] = groups
