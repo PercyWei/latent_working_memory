@@ -671,6 +671,7 @@ def compare_runs(
             ),
             "paired_episode_bootstrap": paired_episode_bootstrap(selected[0], maps[1]),
         }
+    output.parent.mkdir(parents=True, exist_ok=True)
     write_json(output, report)
     return report
 

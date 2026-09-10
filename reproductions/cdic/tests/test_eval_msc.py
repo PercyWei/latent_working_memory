@@ -154,12 +154,14 @@ def test_comparison_rejects_incomplete_or_mismatched_runs(tmp_path):
             "episode_ids": ["example"], "expected_scored_turns": 8,
         }))
         (folder / "predictions.jsonl").write_text("\n".join(json.dumps(row) for row in rows))
-    result = compare_runs(*folders, tmp_path / "comparison.json")
+    output = tmp_path / "nested" / "comparison.json"
+    result = compare_runs(*folders, output)
     assert result["scopes"]["all_turns_s2_s5"]["token_weighted_nll_delta"] == 0
+    assert output.is_file()
     (folders[1] / "predictions.jsonl").write_text("\n".join(json.dumps(row) for row in rows[:-1]))
     with pytest.raises(ValueError, match="complete"):
-        compare_runs(*folders, tmp_path / "comparison.json")
+        compare_runs(*folders, output)
     rows[0]["reference"] = "wrong target"
     (folders[1] / "predictions.jsonl").write_text("\n".join(json.dumps(row) for row in rows))
     with pytest.raises(ValueError, match="target mismatch"):
-        compare_runs(*folders, tmp_path / "comparison.json")
+        compare_runs(*folders, output)
