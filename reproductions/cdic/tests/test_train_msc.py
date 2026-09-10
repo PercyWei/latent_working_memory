@@ -91,6 +91,7 @@ def test_cli_seed_and_output_overrides_update_model_and_training(tmp_path: Path)
     assert config.model.seed == 43
     assert config.training.seed == 43
     assert config.training.output_dir == Path("/new")
+    assert config.training.final_checkpoint_path == Path("/new/checkpoints/final.pt")
     assert config.training.resume_from == Path("/resume.pt")
 
 

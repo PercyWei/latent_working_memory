@@ -94,6 +94,10 @@ class OptimizationConfig:
         if self.log_every_steps < 1:
             raise ValueError("training.log_every_steps must be positive")
 
+    @property
+    def final_checkpoint_path(self) -> Path:
+        return self.output_dir / "checkpoints" / "final.pt"
+
 
 @dataclass(frozen=True, slots=True)
 class MscTrainingConfig:
@@ -602,7 +606,7 @@ def _run_training_worker(
         rng_states = distributed.gather_rng_states()
         if distributed.is_main:
             save_cdic_checkpoint(
-                output_dir / "checkpoints" / "final.pt",
+                config.training.final_checkpoint_path,
                 model=adapter,
                 optimizer=optimizer,
                 progress=TrainingProgress(
