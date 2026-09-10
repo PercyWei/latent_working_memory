@@ -105,6 +105,12 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
         model_name_or_path=str(model_dir),
         gradient_checkpointing=True,
         split_fractions=(0.6, 0.2, 0.2),
+        warmup_steps=1,
+        lr_decay_steps=4,
+        input_length_bounds=(32, 64),
+        input_length_weights=(0.8, 0.2),
+        input_length_weights_end=(0.5, 0.5),
+        input_length_curriculum_steps=2,
     )
     preparation_recipe = replace(
         preparation_recipe, samples_per_task=(16, 16, 16), candidates_per_document=16

@@ -50,6 +50,8 @@ def test_selection_equal_cells_mixture_and_curriculum(
     assert list(sampler.length_weights(5).values()) == pytest.approx(
         [(a + 1 / 3) / 2 for a in [0.5, 0.3, 0.2]]
     )
+    for step in range(5):
+        sampler.sample(step)
     state = sampler.state_dict()
     expected = [sampler.sample(step).episode.episode_id for step in range(12)]
     restored = PretrainSampler(index, tokenizer, config)

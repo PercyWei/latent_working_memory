@@ -93,8 +93,8 @@
     0.16666666666666666,
     0.16666666666666666
   ],
-  "input_length_curriculum_steps": 3000,
-  "warmup_steps": 300,
-  "lr_decay_steps": 10000,
+  "input_length_curriculum_steps": 6000,
+  "warmup_steps": 600,
+  "lr_decay_steps": 20000,
   "min_lr_fraction": 0.1
 }

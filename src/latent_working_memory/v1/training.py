@@ -233,7 +233,9 @@ def run_pretraining(
     if metadata["contract"] != data_contract(config):
         raise ValueError("data preparation contract differs from the training config")
     train_index = EpisodeIndex(data_dir / "train.jsonl")
-    evaluation_dirs = evaluation_dirs or {"dev": data_dir}
+    evaluation_dirs = {"dev": data_dir} if evaluation_dirs is None else evaluation_dirs
+    if not evaluation_dirs:
+        raise ValueError("at least one evaluation dataset is required")
     dev_indices = {}
     evaluation_ids = {}
     for name, directory in evaluation_dirs.items():
@@ -246,8 +248,6 @@ def run_pretraining(
         dev_indices[name] = EpisodeIndex(directory / "dev.jsonl")
         for split in ("dev", "test"):
             path = directory / f"{split}.jsonl"
-            if split == "test" and not path.exists():
-                continue
             index = dev_indices[name] if split == "dev" else EpisodeIndex(path)
             if (
                 train_index.source_ids & index.source_ids
