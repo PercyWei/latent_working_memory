@@ -1,7 +1,7 @@
-# 20260910_预训练数据构建策略与实现（18:53:55 UTC+08:00）
+# 20260910_预训练数据构建策略与实现（19:11:19 UTC+08:00）
 
 创建时间：20260910 15:44:35 UTC+08:00
-最后修订时间：20260910 18:53:55 UTC+08:00
+最后修订时间：20260910 19:11:19 UTC+08:00
 
 ## 1. 数据来源
 
@@ -111,3 +111,27 @@ python -m latent_working_memory.data_preparation \
 阶段依次为 `sources`、`semantic`、`random`，默认 `all`。输出包括共享 `sources.jsonl` 与 `source-pool.json`，各版本的 train/dev/test、documents、sample-decisions、audit、preparation，以及最终 comparison。
 
 ## 6. 运行记录
+
+### 配额与运行配置
+
+本轮目标为 408,800 条，来源候选预算为 100,000 篇。semantic/random × AE/LM 四种组合分别采用以下配额：
+
+| 每种组合 | train | dev | test |
+|---|---:|---:|---:|
+| 样本数 | 98,000 | 2,100 | 2,100 |
+| 每个 X 长度档 | 14,000 | 300 | 300 |
+
+使用本地已有 FineWeb `sample-10BT` 和 Llama-2-7B-Chat tokenizer。来源 seed 为 20260907，split 比例为 0.9/0.05/0.05；X/Y 长度及 LM 比例沿用本文契约。每篇文档最多尝试 64 次，候选窗口为 4 篇文档。
+
+服务器项目目录为 `/data/bywei/projects/latent_working_memory`。运行前通过 GitHub 同步本地提交，连接失败时使用 Gitee；实际执行导入服务器项目的 `src`。构造仅使用 CPU，依次完成 sources、semantic、random 和自动审计，再为 semantic 各 split 准备独立抽查面板，每个随机／分层面板最多 200 条，抽样 seed 为 20260910。
+
+- 运行目录：`artifacts/v1/data-preparation/rule-independent-409k-20260910/`。
+- 数据目录：`data/v1/fineweb-rule-independent-409k-20260910/`。
+- `config.json`、`recipe.json`：本轮实际配置。
+- `run.py`、`run.json`：调度入口及实际提交、启动信息。
+- `status.json`、分阶段日志：进度、进程与退出状态。
+- `inspection/`：构造完成后的独立抽查面板。
+
+### 状态
+
+配置已准备，等待仓库同步完成后启动。实际开始时间和进度以 `run.json`、`status.json` 为准。
