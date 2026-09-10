@@ -56,7 +56,6 @@ def test_generated_corpus_bleu_and_paired_token_weighted_comparisons():
         common = {
             "episode_id": f"episode-{i}",
             "document_id": f"document-{i}",
-            "granularity": "sentence",
             "boundary_method": "natural",
             "input_tokens": 4,
             "capacity": i + 1,

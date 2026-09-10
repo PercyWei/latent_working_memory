@@ -219,7 +219,7 @@ class VariantBuilder:
             self.counts[f"{split}/{task}"] += 1
             self.histogram[split][task][bucket] += 1
 
-    def progress_contract(self, topic_annotations):
+    def progress_contract(self):
         recipe = self.recipe.to_dict()
         return json.loads(
             json.dumps(
@@ -229,7 +229,6 @@ class VariantBuilder:
                     "data": data_contract(self.config),
                     "recipe": recipe,
                     "sentence_boundaries": "pysbd_conservative",
-                    "topic_annotations": topic_annotations,
                 }
             )
         )
@@ -286,15 +285,12 @@ class VariantBuilder:
         ):
             raise ValueError("paused rows exceed target quotas")
 
-    def build_samplers(self, sources, topic_annotations):
+    def build_samplers(self, sources):
         samplers = []
         for source in sources:
             record = source["record"]
-            annotation = (
-                topic_annotations.get(record["id"]) if topic_annotations is not None else None
-            )
             sampler = (
-                SemanticSpans(record, self.tokenizer, self.config, self.recipe, annotation)
+                SemanticSpans(record, self.tokenizer, self.config, self.recipe)
                 if self.variant == "semantic"
                 else RandomSpans(record, self.tokenizer, self.config, self.recipe)
             )
@@ -325,10 +321,10 @@ class VariantBuilder:
                     candidates.append((episode, source))
         return candidates
 
-    def run(self, sources: list[dict], topic_annotations: dict | None) -> dict:
+    def run(self, sources: list[dict]) -> dict:
         rng = random.Random(f"{self.config.data_seed}:{self.variant}:sources")
         rng.shuffle(sources)
-        contract = self.progress_contract(topic_annotations)
+        contract = self.progress_contract()
         start = 0
         if self.resume:
             state = load_progress(self.directory, contract)
@@ -345,9 +341,7 @@ class VariantBuilder:
             save_progress(self.directory, handles, contract, start, dict(self.counts))
             cpu = stack.enter_context(ThreadPoolExecutor(max_workers=1))
             width = self.recipe.candidate_window_documents
-            future = cpu.submit(
-                self.build_samplers, sources[start : start + width], topic_annotations
-            )
+            future = cpu.submit(self.build_samplers, sources[start : start + width])
             for i in range(start, len(sources), width):
                 # Fixed windows preserve proposal and commit order during CPU prefetch.
                 remaining = {
@@ -366,9 +360,7 @@ class VariantBuilder:
                     break
                 began = perf_counter()
                 samplers = future.result()
-                future = cpu.submit(
-                    self.build_samplers, sources[i + width : i + 2 * width], topic_annotations
-                )
+                future = cpu.submit(self.build_samplers, sources[i + width : i + 2 * width])
                 candidates = self.prepare_window(samplers, remaining)
                 prepared = perf_counter() - began
                 self.consider(candidates, handles)
@@ -435,7 +427,6 @@ def prepare_variant(
     tokenizer: PreTrainedTokenizerBase,
     config: ExperimentConfig,
     preparation: PreparationConfig,
-    topic_annotations: dict | None = None,
     resume: bool = False,
 ) -> dict[str, Any]:
     if variant not in {"semantic", "random"}:
@@ -464,7 +455,7 @@ def prepare_variant(
     )
     sources = [json.loads(line) for line in (root / "sources.jsonl").read_text().splitlines()]
     builder = VariantBuilder(root, variant, tokenizer, config, preparation, pool, reference, resume)
-    result = builder.run([row for row in sources if row["status"] == "eligible"], topic_annotations)
+    result = builder.run([row for row in sources if row["status"] == "eligible"])
     if variant == "random":
         comparison = compare_preparations(root, result)
         (root / "comparison.json").write_text(json.dumps(comparison, indent=2) + "\n")
@@ -480,13 +471,8 @@ def prepare_fineweb(
     config: ExperimentConfig,
     output_dir: Path,
     preparation: PreparationConfig,
-    topic_annotations: dict | None = None,
 ) -> dict[str, Any]:
     prepare_sources(records, config, output_dir, preparation)
-    semantic = prepare_variant(
-        output_dir, "semantic", tokenizer, config, preparation, topic_annotations
-    )
-    random_data = prepare_variant(
-        output_dir, "random", tokenizer, config, preparation, topic_annotations
-    )
+    semantic = prepare_variant(output_dir, "semantic", tokenizer, config, preparation)
+    random_data = prepare_variant(output_dir, "random", tokenizer, config, preparation)
     return {"semantic": semantic, "random": random_data}

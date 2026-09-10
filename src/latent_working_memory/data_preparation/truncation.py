@@ -78,7 +78,6 @@ class RandomSpans:
             end,
             target_end,
             "random",
-            "random",
         )
         if episode is None or not lower <= len(episode.input_ids) <= upper:
             return None

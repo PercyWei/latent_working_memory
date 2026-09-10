@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import json
-import pytest
 from latent_working_memory.v1.data import Episode
-from latent_working_memory.data_preparation.fineweb import validate_topic_ranges
 from latent_working_memory.data_preparation.segmentation import sentence_spans
 from latent_working_memory.v1.sampling import capacity_weights, read_tokens
 
@@ -13,9 +11,12 @@ def test_natural_views_preserve_exact_original_text(
 ):
     record = source_records[0]
     episodes = semantic_examples(record, tokenizer, tiny_config)
-    assert {"paragraph", "sentence", "sentence_group"} <= {
-        e.sources[0].provenance["granularity"] for e in episodes
-    }
+    assert all("granularity" not in e.sources[0].provenance for e in episodes)
+    assert any(
+        e.sources[0].provenance["sentence_range"][1] - e.sources[0].provenance["sentence_range"][0]
+        == 1
+        for e in episodes
+    )
     assert len({len(e.input_ids) for e in episodes}) > 2
     for episode in episodes:
         assert Episode.from_record(json.loads(json.dumps(episode.to_record()))) == episode
@@ -46,26 +47,6 @@ def test_sentence_spans_handle_abbreviations_and_keep_offsets():
         "Next sentence!",
         "Third paragraph ends.",
     ]
-    assert spans[0].paragraph == spans[1].paragraph != spans[2].paragraph
     quoted = "“We left. He stayed.”"
     spans = sentence_spans(quoted)
     assert [quoted[s.start : s.end] for s in spans] == ["“We left. He stayed.”"]
-
-
-def test_topic_annotations_require_order_range_and_coverage(
-    tiny_config, tokenizer, source_records, semantic_examples
-):
-    record = source_records[0]
-    count = len(sentence_spans(record["text"]))
-    annotation = {"ranges": [[0, 2], [2, count]], "model": "offline-fixture"}
-    episodes = semantic_examples(record, tokenizer, tiny_config, annotation)
-    topic_episodes = [
-        e for e in episodes if e.sources[0].provenance["granularity"] == "topic_group"
-    ]
-    assert {e.reads[0].task for e in topic_episodes} == {"ae", "continuation"}
-    assert all(
-        e.sources[0].provenance["boundary_model"] == "offline-fixture" for e in topic_episodes
-    )
-    for ranges in ([[1, count]], [[0, 3], [2, count]], [[0, count + 1]], [[0, count - 1]]):
-        with pytest.raises(ValueError, match="topic ranges"):
-            validate_topic_ranges(ranges, count)

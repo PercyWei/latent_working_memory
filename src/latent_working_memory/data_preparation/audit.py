@@ -62,7 +62,6 @@ def audit_preparation(
             boundaries[key] = ({s.start for s in spans}, {s.end for s in spans})
     seen_ids, cluster_splits, source_splits = set(), {}, {}
     lengths, counts = defaultdict(list), Counter()
-    composition = defaultdict(lambda: defaultdict(Counter))
     for split in ("train", "dev", "test"):
         with (directory / f"{split}.jsonl").open() as handle:
             for line in handle:
@@ -140,13 +139,8 @@ def audit_preparation(
                 bucket = next(b for b in preparation.length_bounds if size <= b)
                 lengths[f"{split}/input"].append(size)
                 lengths[f"{split}/{task}/input"].append(size)
-                lengths[f"{split}/granularity/{provenance['granularity']}"].append(size)
                 counts[f"{split}/{task}/length_up_to/{bucket}"] += 1
                 counts[f"{split}/{task}"] += 1
-                for group in (f"{split}/{task}", f"{split}/{task}/length_up_to/{bucket}"):
-                    cell = composition[group][provenance["granularity"]]
-                    cell["samples"] += 1
-                    cell["input_tokens"] += size
                 if directory.name == "random":
                     counts[f"{split}/{task}/input_boundary_cut"] += not (
                         provenance["input_starts_at_sentence"]
@@ -161,18 +155,6 @@ def audit_preparation(
             **({"semantic_rule_endpoints": True} if directory.name == "semantic" else {}),
         },
         "statistics": dict(counts),
-        "composition": {
-            group: {
-                granularity: dict(cell)
-                | {
-                    "sample_fraction": cell["samples"] / sum(c["samples"] for c in cells.values()),
-                    "input_token_fraction": cell["input_tokens"]
-                    / sum(c["input_tokens"] for c in cells.values()),
-                }
-                for granularity, cell in sorted(cells.items())
-            }
-            for group, cells in sorted(composition.items())
-        },
         "lengths": {key: length_statistics(values) for key, values in sorted(lengths.items())},
     }
     (directory / "audit.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")

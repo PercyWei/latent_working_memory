@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -9,7 +8,6 @@ from typing import Any, Iterator
 import swanlab
 
 from latent_working_memory.v1.checkpoint import capture_rng_state, restore_rng_state
-from latent_working_memory.v1.config import GRANULARITIES
 
 
 @contextmanager
@@ -103,13 +101,6 @@ def log_training(
                 f"batch/{field}_max": max(values),
             }
         )
-    granularities = Counter(s["granularity"] for s in samples)
-    metrics.update(
-        {
-            f"batch/{name}_fraction": granularities[name] / len(samples)
-            for name in (*GRANULARITIES, "random")
-        }
-    )
     for upper in record["input_length_bounds"]:
         selected = [s for s in samples if s["length_bucket"] == upper]
         metrics[f"batch_by_length/{upper}/samples"] = len(selected)
@@ -139,7 +130,7 @@ def log_evaluation(
         "correct_prefix_ratio",
         "bleu_4",
     )
-    strata = {"granularity", "length_up_to", "ratio_up_to", "capacity"}
+    strata = {"length_up_to", "ratio_up_to", "capacity"}
     for group, summary in metrics["groups"].items():
         category, name = group.split("/", 1)
         if category == "all":

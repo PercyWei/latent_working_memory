@@ -177,7 +177,6 @@ def evaluate_pretraining(
                 common = {
                     "episode_id": episode.episode_id,
                     "document_id": source.document_id,
-                    "granularity": source.provenance["granularity"],
                     "boundary_method": source.provenance["boundary_method"],
                     "input_tokens": len(episode.input_ids),
                     "capacity": capacity,
@@ -323,7 +322,6 @@ def aggregate_pretrain_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
         ratio_bin = 2 ** math.ceil(math.log2(max(record["effective_ratio"], 1)))
         for group in (
             f"all/{task_condition}",
-            f"granularity/{record['granularity']}/{task_condition}",
             f"capacity/{record['capacity']}/{task_condition}",
             f"length_up_to/{length_bin}/{task_condition}",
             f"ratio_up_to/{ratio_bin}/{task_condition}",

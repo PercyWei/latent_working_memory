@@ -40,7 +40,6 @@ def tiny_config():
         eval_generation_examples=1,
         eval_generation_every=2,
         eval_every=2,
-        views_per_granularity=2,
     )
 
 
@@ -169,9 +168,9 @@ def preparation_recipe():
 
 @pytest.fixture
 def semantic_examples(preparation_recipe):
-    def generate(record, tokenizer, config, topic_annotation=None, recipe=None):
+    def generate(record, tokenizer, config, recipe=None):
         recipe = recipe or preparation_recipe
-        sampler = SemanticSpans(record, tokenizer, config, recipe, topic_annotation)
+        sampler = SemanticSpans(record, tokenizer, config, recipe)
         rows = []
         for task in ("ae", "continuation"):
             rng = random.Random(f"{config.data_seed}:{task}")

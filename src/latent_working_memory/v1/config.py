@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any, Mapping
 
 GROWTH_ACTIONS = (0, 8, 16)
-GRANULARITIES = ("paragraph", "sentence_group", "sentence", "paragraph_group", "topic_group")
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,8 +29,6 @@ class ExperimentConfig:
     pretrain_dataset: str = "HuggingFaceFW/fineweb"
     pretrain_subset: str = "sample-10BT"
     split_fractions: tuple[float, ...] = (0.90, 0.05, 0.05)
-    granularity_weights: tuple[float, ...] = (0.30, 0.35, 0.20, 0.15, 0.0)
-    views_per_granularity: int = 4
     input_length_bounds: tuple[int, ...] = (32, 128, 512, 1024)
     input_length_weights: tuple[float, ...] | None = None
     pretrain_compression_ratios: tuple[int, ...] = (2, 4, 8)
@@ -96,7 +93,6 @@ class ExperimentConfig:
             raise ValueError("pretrain_compression_ratios must be sorted and unique")
         for name, size in (
             ("split_fractions", 3),
-            ("granularity_weights", len(GRANULARITIES)),
             ("exploration_probs", 3),
             ("ratio_weights_start", len(ratios)),
             ("ratio_weights_end", len(ratios)),

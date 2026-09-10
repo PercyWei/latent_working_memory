@@ -123,7 +123,6 @@ class PretrainTrainer:
                     {
                         "episode_id": example.episode.episode_id,
                         "document_id": source.document_id,
-                        "granularity": source.provenance["granularity"],
                         "input_tokens": example.input_length,
                         "length_bucket": next(
                             (

@@ -102,7 +102,6 @@ def test_two_4096_token_halves_are_legal_without_training_capacity_filter(
             len(sentence),
             len(record["text"]),
             "random",
-            "random",
         )
         is not None
     )
@@ -128,13 +127,9 @@ def test_lm_sampling_never_builds_an_ae_parent(
 ):
     tasks = []
 
-    def observed_span(
-        record, tokenizer, config, recipe, start, end, target_end, variant, granularity
-    ):
+    def observed_span(record, tokenizer, config, recipe, start, end, target_end, variant):
         tasks.append("ae" if target_end is None else "continuation")
-        return span_episode(
-            record, tokenizer, config, recipe, start, end, target_end, variant, granularity
-        )
+        return span_episode(record, tokenizer, config, recipe, start, end, target_end, variant)
 
     monkeypatch.setattr(
         "latent_working_memory.data_preparation.fineweb.span_episode", observed_span

@@ -39,7 +39,6 @@ def test_offline_metrics_match_local_reports_and_close_run(tmp_path, monkeypatch
                     "length_bucket": 32,
                     "capacity": 2,
                     "effective_ratio": 2.0,
-                    "granularity": "sentence",
                 },
                 {
                     "ae_nll": 3.0,
@@ -49,7 +48,6 @@ def test_offline_metrics_match_local_reports_and_close_run(tmp_path, monkeypatch
                     "length_bucket": 32,
                     "capacity": 2,
                     "effective_ratio": 4.0,
-                    "granularity": "paragraph",
                 },
             ],
         }
@@ -58,8 +56,6 @@ def test_offline_metrics_match_local_reports_and_close_run(tmp_path, monkeypatch
         assert step == 3
         assert logged["train/ae_nll"] == 2.0 and logged["train/lm_nll"] == 3.0
         assert logged["batch/capacity_mean"] == 2.0
-        assert logged["batch/sentence_fraction"] == 0.5
-        assert logged["batch/sentence_group_fraction"] == 0.0
         assert logged["resources/peak_memory_gib"] == 2.0
         assert logged["progress/input_tokens"] == 36
         groups = {

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import bisect
-import re
 from dataclasses import dataclass
 
 import pysbd
@@ -11,7 +9,6 @@ import pysbd
 class Sentence:
     start: int
     end: int
-    paragraph: int
 
 
 def sentence_spans(text: str) -> list[Sentence]:
@@ -22,7 +19,6 @@ def sentence_spans(text: str) -> list[Sentence]:
     """
     segmenter = pysbd.Segmenter(language="en", clean=False, char_span=True)
     boundary_text = text.translate(str.maketrans({"\r": " ", "\n": " "}))
-    line_starts = [0, *(m.end() for m in re.finditer(r"\n", text))]
     sentences = []
     start = len(text) - len(text.lstrip())
     for span in segmenter.segment(boundary_text):
@@ -43,6 +39,6 @@ def sentence_spans(text: str) -> list[Sentence]:
             continue
         opening = text[start:end].lstrip("\"'“‘([{")
         if opening and not opening[0].islower():
-            sentences.append(Sentence(start, end, bisect.bisect_right(line_starts, start) - 1))
+            sentences.append(Sentence(start, end))
         start = after
     return sentences

@@ -50,7 +50,6 @@ def sample_inspection(
                 "episode_id": episode.episode_id,
                 "document_id": source.document_id,
                 "split": split,
-                "granularity": provenance["granularity"],
                 "input_tokens": size,
                 "length_up_to": bucket,
                 "task": episode.reads[0].task,
@@ -75,7 +74,7 @@ def sample_inspection(
                 },
             }
             rows.append(row)
-            cells[(row["task"], row["granularity"], bucket)].append(row)
+            cells[(row["task"], bucket)].append(row)
     if not rows:
         raise ValueError("the selected split has no prepared views")
     random_panel = random.Random(seed).sample(rows, min(examples, len(rows)))
@@ -109,7 +108,7 @@ def sample_inspection(
         "random_views": len(random_panel),
         "stratified_views": len(stratified_panel),
         "random_protocol": "uniform views without replacement; estimates complete-sample boundary correctness",
-        "stratified_protocol": "rotate task/granularity/length cells; distinct documents; diagnostic",
+        "stratified_protocol": "rotate task/length cells; distinct documents; diagnostic",
         "judgment_protocol": "pass: all external cuts are sentence boundaries; fail: any cut inside a sentence; uncertain: unresolved. Content quality and context dependence are not defects.",
         "acceptance_threshold": 0.98,
     }
@@ -191,7 +190,6 @@ def summarize_inspection(directory: Path) -> dict[str, Any]:
         groups = defaultdict(list)
         for row in rows:
             groups[f"task/{row['task']}"].append(row)
-            groups[f"granularity/{row['granularity']}"].append(row)
             groups[f"length_up_to/{row['length_up_to']}"].append(row)
         report["panels"][name] = {
             "all": judgment_statistics(rows),

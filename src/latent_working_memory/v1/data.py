@@ -162,7 +162,7 @@ class EpisodeIndex:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self.groups: dict[str, dict[str, list[int]]] = {}
+        self.groups: dict[str, list[int]] = {}
         self.offsets: list[int] = []
         self.ids: list[str] = []
         self.input_lengths: list[int] = []
@@ -193,9 +193,7 @@ class EpisodeIndex:
                 source = episode.sources[0]
                 if (source.token_start, source.token_end) != (0, len(episode.input_ids)):
                     raise ValueError("pretraining source must cover the complete write input")
-                granularity = source.provenance["granularity"]
-                group = self.groups.setdefault(source.document_id, defaultdict(list))
-                group[granularity].append(len(self.offsets))
+                self.groups.setdefault(source.document_id, []).append(len(self.offsets))
                 self.source_ids.add(source.source_id)
                 self.cluster_ids.add(source.provenance["dedup_cluster"])
                 self.offsets.append(offset)
@@ -217,7 +215,7 @@ class EpisodeIndex:
         rng.shuffle(documents)
         queues = []
         for document in documents:
-            indices = [i for group in self.groups[document].values() for i in group]
+            indices = list(self.groups[document])
             rng.shuffle(indices)
             queues.append(indices)
         result = []
@@ -232,11 +230,10 @@ class EpisodeIndex:
     def evaluation_panel(self, limit: int, seed: int) -> list[int]:
         rng = random.Random(seed)
         cells = defaultdict(list)
-        for document, groups in self.groups.items():
-            for granularity, indices in groups.items():
-                for i in indices:
-                    bucket = sum(self.input_lengths[i] > upper for upper in (32, 128, 512))
-                    cells[(self.tasks[i], granularity, bucket)].append((document, i))
+        for document, indices in self.groups.items():
+            for i in indices:
+                bucket = sum(self.input_lengths[i] > upper for upper in (32, 128, 512))
+                cells[(self.tasks[i], bucket)].append((document, i))
         for values in cells.values():
             rng.shuffle(values)
         task_cells = defaultdict(list)

@@ -89,9 +89,7 @@ def test_continuation_has_no_eight_sentence_cap(
     )
     counts = []
     for seed in range(12):
-        config = replace(
-            tiny_config, data_seed=seed, max_continuation_tokens=128, views_per_granularity=32
-        )
+        config = replace(tiny_config, data_seed=seed, max_continuation_tokens=128)
         for episode in semantic_examples(
             record,
             tokenizer,

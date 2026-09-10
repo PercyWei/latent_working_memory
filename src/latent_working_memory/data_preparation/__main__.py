@@ -25,7 +25,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--dataset-dir", type=Path, help="Local HuggingFaceFW-fineweb directory")
     parser.add_argument("--max-documents", type=int)
-    parser.add_argument("--topic-annotations", type=Path)
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args(argv)
     if args.resume and args.stage not in {"semantic", "random"}:
@@ -47,9 +46,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         tokenizer = AutoTokenizer.from_pretrained(
             config.model_name_or_path, revision=config.model_revision, local_files_only=True
         )
-        annotations = (
-            json.loads(args.topic_annotations.read_text()) if args.topic_annotations else None
-        )
         for variant in ("semantic", "random") if args.stage == "all" else (args.stage,):
             report[variant] = prepare_variant(
                 args.output_dir,
@@ -57,7 +53,6 @@ def main(argv: Sequence[str] | None = None) -> None:
                 tokenizer,
                 config,
                 recipe,
-                annotations,
                 resume=args.resume,
             )
     print(json.dumps(report, ensure_ascii=False, indent=2))

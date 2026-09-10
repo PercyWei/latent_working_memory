@@ -8,7 +8,7 @@ from typing import Any
 from transformers import PreTrainedTokenizerBase
 
 from latent_working_memory.v1.backbone import ReadTokens
-from latent_working_memory.v1.config import GRANULARITIES, ExperimentConfig
+from latent_working_memory.v1.config import ExperimentConfig
 from latent_working_memory.v1.data import Episode, EpisodeIndex
 
 
@@ -76,7 +76,7 @@ def capacity_weights(
 
 
 class PretrainSampler:
-    """Choose length pool, cycle through documents, then choose granularity/view/capacity."""
+    """Choose length pool, cycle through documents, then choose view/capacity."""
 
     def __init__(
         self,
@@ -88,26 +88,18 @@ class PretrainSampler:
         self.index, self.tokenizer, self.config = index, tokenizer, config
         self.rng = random.Random(config.data_seed)
         allowed = set(index.panel(example_limit, config.data_seed)) if example_limit else None
-        weights = dict(zip(GRANULARITIES, config.granularity_weights, strict=True)) | {
-            "random": 1.0
-        }
         self.groups = {}
-        for document, groups in index.groups.items():
-            selected = {
-                g: [
-                    i
-                    for i in indices
-                    if (allowed is None or i in allowed)
-                    and (config.ae_weight if index.tasks[i] == "ae" else config.lm_weight) > 0
-                ]
-                for g, indices in groups.items()
-                if weights[g] > 0
-            }
-            selected = {g: indices for g, indices in selected.items() if indices}
+        for document, indices in index.groups.items():
+            selected = [
+                i
+                for i in indices
+                if (allowed is None or i in allowed)
+                and (config.ae_weight if index.tasks[i] == "ae" else config.lm_weight) > 0
+            ]
             if selected:
                 self.groups[document] = selected
         if not self.groups:
-            raise ValueError("no training views have a positive granularity weight")
+            raise ValueError("no training views have a positive task weight")
         self.documents = sorted(self.groups)
         self.pools = {}
         if config.input_length_weights is None:
@@ -120,12 +112,8 @@ class PretrainSampler:
                 config.input_length_bounds, config.input_length_weights, strict=True
             ):
                 pool = {}
-                for document, groups in self.groups.items():
-                    selected = {
-                        g: [i for i in indices if lower < index.input_lengths[i] <= upper]
-                        for g, indices in groups.items()
-                    }
-                    selected = {g: indices for g, indices in selected.items() if indices}
+                for document, indices in self.groups.items():
+                    selected = [i for i in indices if lower < index.input_lengths[i] <= upper]
                     if selected:
                         pool[document] = selected
                 if weight > 0 and lower < config.max_input_tokens:
@@ -153,12 +141,7 @@ class PretrainSampler:
         document = order[self.cursors[key]]
         self.cursors[key] += 1
         self.visits += 1
-        groups = self.pools[key][document]
-        weights = dict(zip(GRANULARITIES, self.config.granularity_weights, strict=True)) | {
-            "random": 1.0
-        }
-        granularity = self.rng.choices(list(groups), [weights[g] for g in groups])[0]
-        episode = self.index[self.rng.choice(groups[granularity])]
+        episode = self.index[self.rng.choice(self.pools[key][document])]
         ae, lm = read_tokens(episode, self.tokenizer)
         candidates = capacity_weights(self.config, len(episode.input_ids), ae, lm, step)
         if not candidates or sum(candidates.values()) <= 0:
