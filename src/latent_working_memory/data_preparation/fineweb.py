@@ -90,7 +90,6 @@ def span_episode(
         "x_char_span": [start, end],
         "y_char_span": [end, target_end] if target_end is not None else None,
         "granularity": granularity,
-        "source_granularity": granularity,
         "boundary_variant": variant,
         "boundary_method": "random_token" if variant == "random" else "pysbd",
         "tokenizer_name_or_path": config.model_name_or_path,

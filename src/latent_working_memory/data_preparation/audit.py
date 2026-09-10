@@ -134,7 +134,7 @@ def audit_preparation(
                 counts[f"{split}/{task}/length_up_to/{bucket}"] += 1
                 counts[f"{split}/{task}"] += 1
                 for group in (f"{split}/{task}", f"{split}/{task}/length_up_to/{bucket}"):
-                    cell = composition[group][provenance["source_granularity"]]
+                    cell = composition[group][provenance["granularity"]]
                     cell["samples"] += 1
                     cell["input_tokens"] += size
                 if directory.name == "random":

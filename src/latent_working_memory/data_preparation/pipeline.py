@@ -233,8 +233,10 @@ class VariantBuilder:
                 annotation = (
                     topic_annotations.get(record["id"]) if topic_annotations is not None else None
                 )
-                sampler = (SemanticSpans if self.variant == "semantic" else RandomSpans)(
-                    record, self.tokenizer, self.config, self.recipe, annotation
+                sampler = (
+                    SemanticSpans(record, self.tokenizer, self.config, self.recipe, annotation)
+                    if self.variant == "semantic"
+                    else RandomSpans(record, self.tokenizer, self.config, self.recipe)
                 )
                 cell_rng = random.Random(
                     f"{self.config.data_seed}:{record['id']}:{self.variant}:cells"

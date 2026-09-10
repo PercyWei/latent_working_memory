@@ -6,7 +6,7 @@ from typing import Any, Mapping
 from transformers import PreTrainedTokenizerBase
 
 from latent_working_memory.data_preparation.config import PreparationConfig
-from latent_working_memory.data_preparation.fineweb import span_episode, validate_topic_ranges
+from latent_working_memory.data_preparation.fineweb import span_episode
 from latent_working_memory.data_preparation.segmentation import sentence_spans
 from latent_working_memory.v1.config import ExperimentConfig
 from latent_working_memory.v1.data import Episode
@@ -21,7 +21,6 @@ class RandomSpans:
         tokenizer: PreTrainedTokenizerBase,
         config: ExperimentConfig,
         preparation: PreparationConfig,
-        topic_annotation: dict[str, Any] | None = None,
     ):
         if not tokenizer.is_fast:
             raise ValueError("random spans require a fast tokenizer with character offsets")
@@ -37,10 +36,6 @@ class RandomSpans:
         self.sentences = sentence_spans(record["text"])
         self.sentence_starts = {s.start for s in self.sentences}
         self.sentence_ends = {s.end for s in self.sentences}
-        self.topic_ranges = []
-        if topic_annotation is not None:
-            validate_topic_ranges(topic_annotation["ranges"], len(self.sentences))
-            self.topic_ranges = topic_annotation["ranges"]
 
     def sample(self, task: str, lower: int, upper: int, rng: random.Random) -> Episode | None:
         continuation = task == "continuation"
@@ -85,7 +80,6 @@ class RandomSpans:
         text = self.record["text"]
         x = text[start:end]
         episode.sources[0].provenance.update(
-            source_granularity=self._source_granularity(start, end),
             input_starts_at_sentence=start + len(x) - len(x.lstrip()) in self.sentence_starts,
             input_ends_at_sentence=start + len(x.rstrip()) in self.sentence_ends,
             target_ends_at_sentence=(end + len(text[end:target_end].rstrip()) in self.sentence_ends)
@@ -93,19 +87,3 @@ class RandomSpans:
             else None,
         )
         return episode
-
-    def _source_granularity(self, start: int, end: int) -> str:
-        covered = [
-            i
-            for i, sentence in enumerate(self.sentences)
-            if sentence.start < end and sentence.end > start
-        ]
-        if not covered:
-            return "unsegmented"
-        if len(covered) == 1:
-            return "sentence"
-        if any(a <= covered[0] and covered[-1] < b for a, b in self.topic_ranges):
-            return "topic_group"
-        if self.sentences[covered[0]].paragraph == self.sentences[covered[-1]].paragraph:
-            return "paragraph"
-        return "sentence_group"

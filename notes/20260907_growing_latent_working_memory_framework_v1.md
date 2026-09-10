@@ -1,8 +1,8 @@
-# 20260909_可增长 Latent Working Memory 框架 v1（20:13:30 UTC+08:00）
+# 20260910_可增长 Latent Working Memory 框架 v1（16:33:29 UTC+08:00）
 
 创建时间：20260907 11:30:02 UTC+08:00
 
-最后修订时间：20260909 20:13:30 UTC+08:00
+最后修订时间：20260910 16:33:29 UTC+08:00
 
 本文定义语言模型基座上的可增长工作记忆、推理计算、三阶段训练和实验协议。模型参数在训练中学习，记忆状态在推理中随输入持续更新。工程接入与验证范围见第 11、12 节。
 
@@ -477,40 +477,11 @@ SQuAD/MRQA 实验分别报告动态训练模型直接读取和 QA 适配后的�
 
 [MuSiQue](https://github.com/StonyBrookNLP/musique)承担困难组合推理；使用 SQuAD/NQ 训练来源时，按官方 dev/test 单跳种子清单隔离共享样本。[StreamingQA](https://proceedings.mlr.press/v162/liska22a.html)的人写问题及带日期新闻承担自然时间到达实验。[DynaQuest](https://github.com/nusnlp/DynaQuest)的修订实验绑定实际 Wikipedia 新旧版本、页面修订时间和事实有效范围。[LongBench](https://github.com/THUDM/LongBench)按组成数据的来源关系归并统计。
 
-### 8.5 FineWeb 获取与多粒度样本构造
+### 8.5 FineWeb 预训练数据
 
-预训练来源为 `HuggingFaceFW/fineweb`，本地目录使用 `data/raw/HuggingFaceFW-fineweb/sample-10BT/`。程序按配置的子集、数据 seed 和文档预算直接分批读取本地 Parquet。公开的 `sample-10BT` 等子集可以提供固定抽样池，实际训练量由运行预算确定。[FineWeb 数据说明](https://huggingface.co/datasets/HuggingFaceFW/fineweb#smaller-sample-versions)
+FineWeb 使用独立 AE/LM 样本，构造 semantic 与 random 两种边界版本。两者共用来源划分，按任务和 X 长度区间匹配最终入选数量。数据契约、候选构造、模型判定、独立抽查和运行记录统一见 [预训练数据构建](v1/20260910_pretraining_data_construction.md)。
 
-数据处理依次完成以下操作：
-
-1. 读取固定候选池，保留原文、文档 ID、URL、抓取来源及日期。基础检查校验字段及最短文本长度，随后按 ID、规范化 URL、全文和近重复关系去重。
-2. 为每个来源簇确定唯一 train/dev/test 归属，建立两套数据共用的来源登记。每簇保留一个通过基础检查的代表，其全部派生片段继承相同 split。
-3. 识别原始段落和句子边界，构造多粒度 semantic 候选，每个粒度覆盖不同自然长度。合法自然片段 $S$ 生成 AE 样本；在内部合法句界随机切分，生成以 $X$ 写入、以剩余后缀 $Y$ 监督的独立 LM 样本。$Y$ 的全部 tokens 与 EOS 参与损失。单句片段用于 AE。
-4. Qwen3.8-27B 判定最终 AE 的 $X$ 或 LM 的 $X/Y$，评价内容质量及句界完整性。模型保留且通过样本去重的候选计入配额，各 split 的 AE 与 LM 分别达到相同目标数量。构造过程持续访问候选并补足筛选造成的缺额。
-5. 统计 semantic 入选样本在各 split、各任务中的实际输入长度区间分布。random 使用独立来源顺序和原文 token 起点，在所需区间构造 AE 或内部续写 LM 候选。模型沿用共同内容标准，并接受随机边界造成的句子或词片段。保留结果按任务和区间补足配额。
-6. 两套数据分别保存到 `semantic/` 与 `random/`，来源位置保持可追溯。检查原文连续性、共享来源划分、容量、任务配额和区间计数后写入完成记录；比较文件记录输入分布、LM 目标长度和句界截断统计。正式训练验证使用 semantic。
-
-`samples_per_task` 按 train/dev/test 指定每个版本、每项任务的最终数量，示例默认值为 100000／2000／2000。实际输入长度区间为 1–64、65–128、129–256、257–512、513–1024 tokens。random 按 semantic 入选后的区间计数构造，区间内的具体长度和来源独立选择；LM 目标长度与监督 token 总量单独统计。样本任务去重和跨 split 相同长输入检查在模型入选过程中执行。
-
-模型评分返回 `keep / reject / uncertain` 与理由，`keep` 进入最终配额。提示词覆盖技术文字、叙事、对话、自然指代及话题变化，通过语义判定识别损坏文本与网页噪声。评分缓存绑定模型、提示协议和实际 X/Y。数据准备代码统一位于 `src/latent_working_memory/data_preparation/`，入口和契约见 [独立 AE/LM 数据构造实现](v1/20260909_independent_ae_lm_data_preparation.md)。
-
-质量抽查使用独立后置入口，对完整数据抽取随机与分层面板，再由模型或人工复核。抽查结果用于定位筛选遗漏和调整下一次构造配方。强模型选型与资源预算见 [评分与后置抽查方案](v1/20260909_quality_scoring_and_inspection.md)。
-
-扩大数据 pilot 的历史评分、阈值与助手抽查排除理由，以及两组学习率实验，见 [扩大数据预训练记录](v1/20260908_fineweb_generalization_pretraining_record.md)。
-
-| 粒度 | 构造规则 | 训练作用 |
-|---|---|---|
-| 完整段落 | 保留原始段落 | 完整叙述和多句关系 |
-| 主题相近的连续句子组 | 在原文连续句子间选择主题边界 | 语义较集中的信息写入 |
-| 随机连续句子组 | 随机选择句间边界，保留原文顺序 | 混合主题与不规则到达边界 |
-| 单句 | 保留原始完整句子 | 短输入与细粒度写入 |
-| 相邻段落组合 | 合并同一文档中相邻段落 | 较长输入与跨段关系 |
-
-原始段落、可靠句界识别和随机合并、拆分相邻句子组构成基础数据路线。主题边界样本由离线大模型标注提供：输入带编号的原文句子，输出连续索引区间，正文由程序按索引提取。标注结果保存复用，并检查索引顺序、范围和切分覆盖。其训练占比通过匹配长度分布与训练预算的 dev 对照确定。相邻句子表示的相似度可作为另一种边界标注对照。
-
-多粒度视图持续混合，单句的局部表达与段落的上下文关系共同进入训练。长度、主题混合程度和容量预算分别记录。MSC train 的实际 turn 长度分布用于检查预训练覆盖；动态阶段直接使用人工对话及实际轮次边界。
-
-预训练边界对照使用按任务对齐输入长度区间的两套独立数据，统一训练预算、容量策略和曝光统计，并在固定的 semantic 与 random 评估面板上比较。各条件记录实际来源覆盖、目标长度及监督 token 量，用于分析边界与数据组成的共同影响。
+边界对照统一训练预算、容量策略与曝光统计，并在固定的 semantic 和 random 评估面板上比较。记录实际来源覆盖、目标长度及监督 token 量，以分析边界与数据组成的共同影响。
 
 ## 9. 评估与对照
 
@@ -574,16 +545,16 @@ SQuAD/MRQA 实验分别报告动态训练模型直接读取和 QA 适配后的�
 
 ### 11.1 实现状态与接入范围
 
-预训练链路已实现空状态、统一零初值、外部首批容量、自然单元完整前向、变长 batch、FineWeb 多粒度 adapter、AE/LM 联合目标、多压缩率采样、训练恢复和独立文档多容量评估。本地 65 项 v1 测试通过。当前数据流程已实现共享来源池、semantic/random 独立构造、最终样本模型判定、等量任务配额、入选长度区间对齐及独立抽查，并通过本地 HTTP 测试服务验证完整命令链。Qwen3.8-27B 权重已下载到服务器，真实评分服务与正式数据生成是下一执行步骤。实现见 [独立 AE/LM 数据构造](v1/20260909_independent_ae_lm_data_preparation.md)。
+预训练已实现空状态、零初值、变长写入、多容量训练、保存恢复和独立文档评估。当前数据构建及运行状态见 [预训练数据构建](v1/20260910_pretraining_data_construction.md)；MSC 对话调度、动态训练和容量学习仍为后续工作。
 
-FineWeb `sample-10BT` 已下载到服务器，Llama-2-7B-Chat 单卡训练、保存恢复与多容量评估已跑通。历史扩大数据实验准备了 10,000 篇训练文档及各 512 篇 dev/test 文档，训练集包含 126,278 个样本对；两组学习率预训练各完成 2000 步；dev 选择 3e-5 第 2000 步 checkpoint。512 文档独立 test 的 AE/LM 正确记忆 NLL 为 2.2532/2.3914，相对空记忆收益为 0.1409/0.1242；64 文档、三个容量的自由重建完整匹配为 0/192，平均归一化 token 编辑距离为 0.9391。结果详见 [扩大数据预训练记录](v1/20260908_fineweb_generalization_pretraining_record.md)。此前逐样本配对数据每套包含 226,022／11,610／11,685 个 train/dev/test 样本，作为历史记录保留，见 [配对数据构造](v1/20260909_paired_boundary_pretraining_data.md)。后续框架任务为 MSC 对话调度、动态训练、容量学习及完整系统对照。
+FineWeb `sample-10BT` 已下载到服务器，Llama-2-7B-Chat 单卡训练、保存恢复与多容量评估已跑通。历史扩大数据实验准备了 10,000 篇训练文档及各 512 篇 dev/test 文档，训练集包含 126,278 个样本对；两组学习率预训练各完成 2000 步；dev 选择 3e-5 第 2000 步 checkpoint。512 文档独立 test 的 AE/LM 正确记忆 NLL 为 2.2532/2.3914，相对空记忆收益为 0.1409/0.1242；64 文档、三个容量的自由重建完整匹配为 0/192，平均归一化 token 编辑距离为 0.9391。此前逐样本配对数据每套包含 226,022／11,610／11,685 个 train/dev/test 样本，作为历史记录保留，见 [预训练数据构建](v1/20260910_pretraining_data_construction.md)。后续框架任务为 MSC 对话调度、动态训练、容量学习及完整系统对照。
 
 | 文件 | 本版目标职责 |
 |---|---|
 | `state.py` | 空记忆、容量、源位置及状态持久化契约 |
 | `backbone.py` | 自然单元完整前向、变长 batch 与 mask、写入/读取投影和读取 LoRA |
 | `model.py` | 零填充、联合更新器、来源类型向量和容量网络 |
-| `data.py / fineweb.py / prepare_data.py` | FineWeb 来源与自然边界、多粒度片段、读取目标与统一 episode；后续接入 MSC turn |
+| `v1/data.py / data_preparation/` | FineWeb 来源与自然边界、多粒度片段、读取目标与统一 episode；后续接入 MSC turn |
 | `objectives.py` | AE、LM、回复/QA 损失及辅助目标 |
 | `sampling.py / rollout.py / training.py` | 粒度与容量采样、AE/LM 联合目标与恢复；后续接入变长对话调度、时间反传和容量训练 |
 | `capacity.py` | 同根动作分支、代价标签与价值回归 |
@@ -591,7 +562,7 @@ FineWeb `sample-10BT` 已下载到服务器，Llama-2-7B-Chat 单卡训练、保
 | `config.py / checkpoint.py` | 单次实验配置、训练恢复与运行时状态 |
 | `train.py / evaluate.py` | 训练和评估入口 |
 
-详细工程任务见 [v1 实施总计划](v1/20260907_growing_latent_working_memory_implementation_plan.md)；结构、数据与训练协议以本文为准。
+详细工程任务见 [框架设计与后续阶段](20260907_growing_latent_working_memory_framework_v1.md)；结构、数据与训练协议以本文为准。
 
 ### 11.2 输入、状态与恢复
 
@@ -635,7 +606,7 @@ FineWeb `sample-10BT` 已下载到服务器，Llama-2-7B-Chat 单卡训练、保
 
 运行配置另外固定 FineWeb 子集与来源划分、粒度采样权重、边界标注来源与占比、预训练 $K_{\min}$、容量课程、AE/LM 权重、合法上下文与输出预算、训练规模、资源代价权重及评估设置。上述预训练参数在启动前完整解析。记录实际文本长度、$K_X$、$r_{\mathrm{eff}}$、目标长度与有效监督量。
 
-代码位于 `src/latent_working_memory/v1/`，产物位于 `data/v1/`、`checkpoints/v1/`、`artifacts/v1/experiments/<run_id>/`。独立评估保存到 `artifacts/v1/evaluations/<run_id>/`，本地历史产物的分类见 [产物整理记录](v1/20260909_artifact_organization.md)。实现采用 PyTorch、Transformers、PEFT 和 `uv` 管理的环境。SwanLab 记录训练与独立评估指标、分层曲线和重建样例，实验 ID 与可视化选项独立于模型配置保存。GPU 实验限定物理 GPU 0、1；启动命令显式设置 `CUDA_VISIBLE_DEVICES=0`、`1` 或 `0,1`。
+代码位于 `src/latent_working_memory/v1/`，产物位于 `data/v1/`、`checkpoints/v1/`、`artifacts/v1/experiments/<run_id>/`。独立评估保存到 `artifacts/v1/evaluations/<run_id>/`，本地历史产物的分类见 [文档索引](README.md)。实现采用 PyTorch、Transformers、PEFT 和 `uv` 管理的环境。SwanLab 记录训练与独立评估指标、分层曲线和重建样例，实验 ID 与可视化选项独立于模型配置保存。GPU 实验限定物理 GPU 0、1；启动命令显式设置 `CUDA_VISIBLE_DEVICES=0`、`1` 或 `0,1`。
 
 ## 12. 实施与验收顺序
 

@@ -44,6 +44,10 @@ def test_independent_variants_balance_post_review_tasks_and_intervals(
     for variant in ("semantic", "random"):
         assert result[variant]["input_histogram"] == preparation_recipe.balanced_histogram()
         for group in result[variant]["audit"]["composition"].values():
+            if variant == "random":
+                assert set(group) == {"random"}
+            else:
+                assert set(group) <= {"sentence", "paragraph", "sentence_group", "topic_group"}
             assert sum(c["sample_fraction"] for c in group.values()) == pytest.approx(1)
             assert sum(c["input_token_fraction"] for c in group.values()) == pytest.approx(1)
     different_exact_lengths = False
@@ -54,6 +58,7 @@ def test_independent_variants_balance_post_review_tasks_and_intervals(
         for rows in (a, b):
             assert Counter(e.reads[0].task for e in rows) == {"ae": quota, "continuation": quota}
             assert all("pair_id" not in e.sources[0].provenance for e in rows)
+            assert all("source_granularity" not in e.sources[0].provenance for e in rows)
         different_exact_lengths |= Counter(len(e.input_ids) for e in a) != Counter(
             len(e.input_ids) for e in b
         )
@@ -251,6 +256,9 @@ def test_independent_inspection_is_repeatable_and_does_not_mutate_data(
         rows = [
             json.loads(line) for line in (first / "random-views.jsonl").read_text().splitlines()
         ]
+        assert all("source_granularity" not in row for row in rows)
+        if variant == "random":
+            assert {row["granularity"] for row in rows} == {"random"}
         for row, decision in zip(rows, ("pass", "fail", "uncertain", None), strict=True):
             row.update(judgment=decision, reviewer="test reviewer", review_reason="test reason")
         (first / "random-views.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
