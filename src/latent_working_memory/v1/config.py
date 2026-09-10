@@ -23,7 +23,7 @@ class ExperimentConfig:
     num_heads: int = 8
     ffn_dim: int = 2048
     dynamic_k_first: int = 16
-    k_limit: int = 512
+    k_limit: int = 4096
     growth_actions: tuple[int, ...] = GROWTH_ACTIONS
     exploration_probs: tuple[float, ...] = (0.70, 0.25, 0.05)
     bptt_tokens: int = 1024

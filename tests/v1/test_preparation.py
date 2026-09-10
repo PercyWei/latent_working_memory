@@ -8,7 +8,6 @@ import pytest
 
 from latent_working_memory.data_preparation.audit import audit_preparation, compare_preparations
 from latent_working_memory.data_preparation.dedup import cluster_documents
-from latent_working_memory.data_preparation.fineweb import document_episodes
 from latent_working_memory.data_preparation.inspection import (
     sample_inspection,
     summarize_inspection,
@@ -42,6 +41,11 @@ def test_independent_variants_balance_post_review_tasks_and_intervals(
     root = tmp_path / "data"
     assert result["semantic"]["source_pool_id"] == result["random"]["source_pool_id"]
     assert result["random"]["reference_preparation_id"] == result["semantic"]["preparation_id"]
+    for variant in ("semantic", "random"):
+        assert result[variant]["input_histogram"] == preparation_recipe.balanced_histogram()
+        for group in result[variant]["audit"]["composition"].values():
+            assert sum(c["sample_fraction"] for c in group.values()) == pytest.approx(1)
+            assert sum(c["input_token_fraction"] for c in group.values()) == pytest.approx(1)
     different_exact_lengths = False
     for split, quota in zip(
         ("train", "dev", "test"), preparation_recipe.samples_per_task, strict=True
@@ -209,15 +213,15 @@ def test_source_text_audit_detects_offset_corruption(
     with pytest.raises(
         ValueError, match="source text|character span|reference tokens|input text key"
     ):
-        audit_preparation(
-            root / "random", tokenizer, tiny_config, preparation_recipe.length_bounds, root
-        )
+        audit_preparation(root / "random", tokenizer, tiny_config, preparation_recipe, root)
 
 
-def test_only_explicit_properties_filter_before_model(tiny_config, tokenizer, preparation_records):
+def test_only_explicit_properties_filter_before_model(
+    tiny_config, tokenizer, preparation_records, semantic_examples
+):
     record = dict(preparation_records[0], text="Read more. Privacy policy. Sign up for updates.")
     assert document_rejection_reason(record, 1) is None
-    assert document_episodes(record, tokenizer, tiny_config)
+    assert semantic_examples(record, tokenizer, tiny_config)
     assert document_rejection_reason(dict(record, text="  "), 1) == "too_short"
 
 

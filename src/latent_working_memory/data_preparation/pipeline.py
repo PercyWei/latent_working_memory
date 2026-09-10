@@ -17,7 +17,7 @@ from latent_working_memory.data_preparation.config import PreparationConfig
 from latent_working_memory.data_preparation.dedup import cluster_documents
 from latent_working_memory.data_preparation.fineweb import (
     data_contract,
-    document_episodes,
+    SemanticSpans,
     document_split,
 )
 from latent_working_memory.data_preparation.quality import document_rejection_reason
@@ -88,8 +88,6 @@ class VariantBuilder:
         self.directory = root / variant
         if self.directory.exists():
             raise FileExistsError(f"use a new variant directory: {self.directory}")
-        if preparation.length_bounds[-1] < config.max_input_tokens:
-            raise ValueError("length_bounds must cover max_input_tokens")
         self.tokenizer, self.config = tokenizer, config
         self.recipe, self.scorer, self.source_pool = preparation, scorer, source_pool
         self.quotas = dict(zip(SPLITS, preparation.samples_per_task, strict=True))
@@ -108,7 +106,16 @@ class VariantBuilder:
             raise ValueError(
                 "random construction must use the semantic source pool, quotas and bins"
             )
-        self.targets = reference["input_histogram"] if reference is not None else None
+        self.targets = preparation.balanced_histogram()
+        recipe_record = json.loads(json.dumps(preparation.to_dict()))
+        if reference is not None and (
+            reference["input_histogram"] != self.targets
+            or any(
+                reference["recipe"][key] != recipe_record[key]
+                for key in ("min_sample_tokens", "max_sample_tokens", "lm_prefix_fraction")
+            )
+        ):
+            raise ValueError("datasets must share length constraints and balanced input quotas")
         self.seen_samples = set()
         self.fragment_splits = {}
         if reference is not None:
@@ -121,7 +128,7 @@ class VariantBuilder:
                             self.fragment_splits[key] = split
 
     def remaining(self, split: str, task: str, bucket: str | None = None) -> int:
-        if self.targets is not None and bucket is not None:
+        if bucket is not None:
             return self.targets[split][task][bucket] - self.histogram[split][task][bucket]
         return self.quotas[split] - self.counts[f"{split}/{task}"]
 
@@ -223,55 +230,42 @@ class VariantBuilder:
                 split, record = source["split"], source["record"]
                 if all(self.remaining(split, task) == 0 for task in TASKS):
                     continue
-                if self.variant == "semantic":
-                    episodes = document_episodes(
-                        record,
-                        self.tokenizer,
-                        self.config,
-                        topic_annotations.get(record["id"])
-                        if topic_annotations is not None
-                        else None,
+                annotation = (
+                    topic_annotations.get(record["id"]) if topic_annotations is not None else None
+                )
+                sampler = (SemanticSpans if self.variant == "semantic" else RandomSpans)(
+                    record, self.tokenizer, self.config, self.recipe, annotation
+                )
+                cell_rng = random.Random(
+                    f"{self.config.data_seed}:{record['id']}:{self.variant}:cells"
+                )
+                task_rngs = {
+                    task: random.Random(
+                        f"{self.config.data_seed}:{record['id']}:{self.variant}:{task}"
                     )
-                    for offset in range(0, len(episodes), self.recipe.scoring_batch_size):
-                        self.consider(
-                            episodes[offset : offset + self.recipe.scoring_batch_size],
-                            source,
-                            handles,
-                        )
-                else:
-                    sampler = RandomSpans(record, self.tokenizer, self.config)
-                    local_rng = random.Random(f"{self.config.data_seed}:{record['id']}:random")
-                    for offset in range(
-                        0,
-                        self.recipe.random_candidates_per_document,
-                        self.recipe.scoring_batch_size,
-                    ):
-                        cells = [
-                            (task, lower, upper, self.remaining(split, task, str(upper)))
-                            for task in TASKS
-                            for lower, upper in zip(
-                                (0, *self.recipe.length_bounds[:-1]),
-                                self.recipe.length_bounds,
-                                strict=True,
-                            )
-                            if self.remaining(split, task, str(upper)) > 0
-                            and lower < len(sampler.offsets) - (task == "continuation")
-                        ]
-                        if not cells:
-                            break
-                        episodes = []
-                        attempts = min(
-                            self.recipe.scoring_batch_size,
-                            self.recipe.random_candidates_per_document - offset,
-                        )
-                        for _ in range(attempts):
-                            task, lower, upper, _ = local_rng.choices(cells, [c[3] for c in cells])[
-                                0
-                            ]
-                            episode = sampler.sample(task, lower, upper, local_rng)
-                            if episode is not None:
-                                episodes.append(episode)
-                        self.consider(episodes, source, handles)
+                    for task in TASKS
+                }
+                for offset in range(
+                    0, self.recipe.candidates_per_document, self.recipe.scoring_batch_size
+                ):
+                    cells = [
+                        (task, lower, upper, self.remaining(split, task, str(upper)))
+                        for task in TASKS
+                        for lower, upper in self.recipe.length_intervals()
+                        if self.remaining(split, task, str(upper)) > 0
+                    ]
+                    if not cells:
+                        break
+                    episodes = []
+                    attempts = min(
+                        self.recipe.scoring_batch_size, self.recipe.candidates_per_document - offset
+                    )
+                    for _ in range(attempts):
+                        task, lower, upper, _ = cell_rng.choices(cells, [c[3] for c in cells])[0]
+                        episode = sampler.sample(task, lower, upper, task_rngs[task])
+                        if episode is not None:
+                            episodes.append(episode)
+                    self.consider(episodes, source, handles)
                 if (i + 1) % 100 == 0:
                     print(
                         json.dumps(
@@ -290,26 +284,22 @@ class VariantBuilder:
         }
         missing = {s: tasks for s, tasks in missing.items() if tasks}
         if missing:
-            gaps = (
-                {
-                    s: {
-                        t: {
-                            b: self.remaining(s, t, b)
-                            for b in self.histogram[s][t]
-                            if self.remaining(s, t, b)
-                        }
-                        for t in missing[s]
+            gaps = {
+                s: {
+                    t: {
+                        b: self.remaining(s, t, b)
+                        for b in self.histogram[s][t]
+                        if self.remaining(s, t, b)
                     }
-                    for s in missing
+                    for t in missing[s]
                 }
-                if self.targets is not None
-                else {}
-            )
+                for s in missing
+            }
             raise ValueError(
                 f"{self.variant} sample quotas not reached: {missing}; bin gaps: {gaps}"
             )
         audit = audit_preparation(
-            self.directory, self.tokenizer, self.config, self.recipe.length_bounds, self.root
+            self.directory, self.tokenizer, self.config, self.recipe, self.root
         )
         metadata = {
             "preparation_id": str(uuid.uuid4()),
@@ -319,6 +309,7 @@ class VariantBuilder:
             "recipe": self.recipe.to_dict(),
             "samples_per_task": list(self.recipe.samples_per_task),
             "length_bounds": list(self.recipe.length_bounds),
+            "target_input_histogram": self.targets,
             "input_histogram": self.histogram,
             "statistics": {k: v for k, v in self.counts.items() if not k.startswith("document/")},
             "scoring_protocol": self.scorer.protocol,
@@ -357,8 +348,6 @@ def prepare_variant(
         )
     ):
         raise ValueError("source pool configuration differs; reuse its original split definition")
-    if variant == "semantic" and config.granularity_weights[-1] > 0 and topic_annotations is None:
-        raise ValueError("positive topic_group weight requires topic annotations")
     reference = (
         json.loads((root / "semantic/preparation.json").read_text())
         if variant == "random"
@@ -389,5 +378,7 @@ def prepare_fineweb(
     semantic = prepare_variant(
         output_dir, "semantic", tokenizer, config, preparation, scorer, topic_annotations
     )
-    random_data = prepare_variant(output_dir, "random", tokenizer, config, preparation, scorer)
+    random_data = prepare_variant(
+        output_dir, "random", tokenizer, config, preparation, scorer, topic_annotations
+    )
     return {"semantic": semantic, "random": random_data}

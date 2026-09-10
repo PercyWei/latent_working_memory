@@ -45,6 +45,7 @@ def sample_inspection(
                 "document_id": source.document_id,
                 "split": split,
                 "granularity": provenance["granularity"],
+                "source_granularity": provenance["source_granularity"],
                 "input_tokens": size,
                 "length_up_to": bucket,
                 "task": episode.reads[0].task,
@@ -61,7 +62,7 @@ def sample_inspection(
                 "review_cache_key": None,
             }
             rows.append(row)
-            cells[(row["task"], row["granularity"], bucket)].append(row)
+            cells[(row["task"], row["source_granularity"], bucket)].append(row)
     if not rows:
         raise ValueError("the selected split has no prepared views")
     random_panel = random.Random(seed).sample(rows, min(examples, len(rows)))
@@ -95,7 +96,7 @@ def sample_inspection(
         "random_views": len(random_panel),
         "stratified_views": len(stratified_panel),
         "random_protocol": "uniform views without replacement; estimates prepared-view quality",
-        "stratified_protocol": "rotate task/granularity/length cells; distinct documents; diagnostic",
+        "stratified_protocol": "rotate task/source-granularity/length cells; distinct documents; diagnostic",
         "judgment_protocol": "pass: usable original X and available Y; fail: clear defect; uncertain: unresolved",
     }
     output_dir.mkdir(parents=True)
@@ -160,6 +161,7 @@ def summarize_inspection(directory: Path) -> dict[str, Any]:
         for row in rows:
             groups[f"task/{row['task']}"].append(row)
             groups[f"granularity/{row['granularity']}"].append(row)
+            groups[f"source_granularity/{row['source_granularity']}"].append(row)
             groups[f"length_up_to/{row['length_up_to']}"].append(row)
         report["panels"][name] = {
             "all": judgment_statistics(rows),

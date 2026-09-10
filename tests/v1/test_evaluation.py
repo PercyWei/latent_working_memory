@@ -131,7 +131,9 @@ def test_evaluation_controls_share_targets_budgets_and_write_test_split(
     monkeypatch,
 ):
     tiny_config = replace(tiny_config, split_fractions=(0.6, 0.2, 0.2))
-    preparation_recipe = replace(preparation_recipe, samples_per_task=(16, 16, 16))
+    preparation_recipe = replace(
+        preparation_recipe, samples_per_task=(16, 16, 16), candidates_per_document=16
+    )
     data = tmp_path / "data"
     prepare_fineweb(
         preparation_records,

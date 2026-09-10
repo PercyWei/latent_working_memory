@@ -13,7 +13,7 @@
   "num_heads": 8,
   "ffn_dim": 2048,
   "dynamic_k_first": 16,
-  "k_limit": 512,
+  "k_limit": 4096,
   "growth_actions": [
     0,
     8,

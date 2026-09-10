@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import torch
-from latent_working_memory.data_preparation.fineweb import document_episodes
 from latent_working_memory.v1.sampling import PretrainExample, read_tokens
 from latent_working_memory.v1.training import PretrainTrainer, pretrain_forward
 
 
 def test_mixed_ae_only_objective_and_microbatch_gradients(
-    tmp_path, tiny_config, tokenizer, source_records, components
+    tmp_path, tiny_config, tokenizer, source_records, components, semantic_examples
 ):
-    episodes = document_episodes(source_records[0], tokenizer, tiny_config)
+    episodes = semantic_examples(source_records[0], tokenizer, tiny_config)
     continuation = next(e for e in episodes if e.reads[0].task == "continuation")
     only = next(e for e in episodes if e.reads[0].task == "ae")
     ae, _ = read_tokens(only, tokenizer)

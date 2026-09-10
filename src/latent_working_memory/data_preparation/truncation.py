@@ -5,7 +5,8 @@ from typing import Any, Mapping
 
 from transformers import PreTrainedTokenizerBase
 
-from latent_working_memory.data_preparation.fineweb import span_episode
+from latent_working_memory.data_preparation.config import PreparationConfig
+from latent_working_memory.data_preparation.fineweb import span_episode, validate_topic_ranges
 from latent_working_memory.data_preparation.segmentation import sentence_spans
 from latent_working_memory.v1.config import ExperimentConfig
 from latent_working_memory.v1.data import Episode
@@ -19,10 +20,13 @@ class RandomSpans:
         record: Mapping[str, Any],
         tokenizer: PreTrainedTokenizerBase,
         config: ExperimentConfig,
+        preparation: PreparationConfig,
+        topic_annotation: dict[str, Any] | None = None,
     ):
         if not tokenizer.is_fast:
             raise ValueError("random spans require a fast tokenizer with character offsets")
         self.record, self.tokenizer, self.config = record, tokenizer, config
+        self.recipe = preparation
         self.offsets = [
             (a, b)
             for a, b in tokenizer(
@@ -30,42 +34,58 @@ class RandomSpans:
             )["offset_mapping"]
             if a < b
         ]
-        sentences = sentence_spans(record["text"])
-        self.sentence_starts = {s.start for s in sentences}
-        self.sentence_ends = {s.end for s in sentences}
+        self.sentences = sentence_spans(record["text"])
+        self.sentence_starts = {s.start for s in self.sentences}
+        self.sentence_ends = {s.end for s in self.sentences}
+        self.topic_ranges = []
+        if topic_annotation is not None:
+            validate_topic_ranges(topic_annotation["ranges"], len(self.sentences))
+            self.topic_ranges = topic_annotation["ranges"]
 
     def sample(self, task: str, lower: int, upper: int, rng: random.Random) -> Episode | None:
         continuation = task == "continuation"
         maximum = min(
             upper,
-            self.config.max_input_tokens - int(continuation),
-            len(self.offsets) - int(continuation),
+            self.recipe.max_sample_tokens,
+            len(self.offsets) - (self.recipe.min_sample_tokens if continuation else 0),
         )
-        if maximum <= lower:
+        lower = max(lower, self.recipe.min_sample_tokens)
+        if maximum < lower:
             return None
-        length = rng.randint(lower + 1, maximum)
-        first = rng.randrange(len(self.offsets) - length + 1 - int(continuation))
+        length = rng.randint(lower, maximum)
+        first = rng.randrange(
+            len(self.offsets) - length + 1 - (self.recipe.min_sample_tokens if continuation else 0)
+        )
         start, end = self.offsets[first][0], self.offsets[first + length - 1][1]
         target_end = None
         if continuation:
-            target_length = rng.randint(
-                1,
-                min(
-                    self.config.max_continuation_tokens,
-                    len(self.offsets) - first - length,
-                    self.config.max_input_tokens - length,
-                ),
+            input_length = len(
+                self.tokenizer.encode(self.record["text"][start:end], add_special_tokens=False)
             )
+            target_min, target_max = self.recipe.target_length_range(input_length)
+            target_max = min(target_max, len(self.offsets) - first - length)
+            if target_min > target_max:
+                return None
+            target_length = rng.randint(target_min, target_max)
             target_end = self.offsets[first + length + target_length - 1][1]
         episode = span_episode(
-            self.record, self.tokenizer, self.config, start, end, target_end, "random", "random"
+            self.record,
+            self.tokenizer,
+            self.config,
+            self.recipe,
+            start,
+            end,
+            target_end,
+            "random",
+            "random",
         )
-        if episode is None or not lower < len(episode.input_ids) <= upper:
+        if episode is None or not lower <= len(episode.input_ids) <= upper:
             return None
         # Isolated raw slices may tokenize differently at their boundary. Only the interval matters.
         text = self.record["text"]
         x = text[start:end]
         episode.sources[0].provenance.update(
+            source_granularity=self._source_granularity(start, end),
             input_starts_at_sentence=start + len(x) - len(x.lstrip()) in self.sentence_starts,
             input_ends_at_sentence=start + len(x.rstrip()) in self.sentence_ends,
             target_ends_at_sentence=(end + len(text[end:target_end].rstrip()) in self.sentence_ends)
@@ -73,3 +93,19 @@ class RandomSpans:
             else None,
         )
         return episode
+
+    def _source_granularity(self, start: int, end: int) -> str:
+        covered = [
+            i
+            for i, sentence in enumerate(self.sentences)
+            if sentence.start < end and sentence.end > start
+        ]
+        if not covered:
+            return "unsegmented"
+        if len(covered) == 1:
+            return "sentence"
+        if any(a <= covered[0] and covered[-1] < b for a, b in self.topic_ranges):
+            return "topic_group"
+        if self.sentences[covered[0]].paragraph == self.sentences[covered[-1]].paragraph:
+            return "paragraph"
+        return "sentence_group"

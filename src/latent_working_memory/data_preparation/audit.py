@@ -11,7 +11,7 @@ from transformers import PreTrainedTokenizerBase
 
 from latent_working_memory.v1.config import ExperimentConfig
 from latent_working_memory.v1.data import Episode
-from latent_working_memory.v1.sampling import capacity_weights, read_tokens
+from latent_working_memory.data_preparation.config import PreparationConfig
 
 
 def length_statistics(values: list[int]) -> dict[str, Any]:
@@ -36,7 +36,7 @@ def audit_preparation(
     directory: Path,
     tokenizer: PreTrainedTokenizerBase,
     config: ExperimentConfig,
-    length_bounds: tuple[int, ...],
+    preparation: PreparationConfig,
     root: Path,
 ) -> dict[str, Any]:
     registry = {}
@@ -56,6 +56,7 @@ def audit_preparation(
             originals[document_id] = row
     seen_ids, cluster_splits, source_splits = set(), {}, {}
     lengths, counts = defaultdict(list), Counter()
+    composition = defaultdict(lambda: defaultdict(Counter))
     for split in ("train", "dev", "test"):
         with (directory / f"{split}.jsonl").open() as handle:
             for line in handle:
@@ -70,7 +71,21 @@ def audit_preparation(
                 start, end = provenance["x_char_span"]
                 if not 0 <= start < end <= len(text):
                     raise ValueError("invalid input character span")
-                ae, lm = read_tokens(episode, tokenizer)
+                task = episode.reads[0].task
+                if (
+                    provenance["tokenizer_name_or_path"] != config.model_name_or_path
+                    or provenance["tokenizer_revision"] != config.model_revision
+                    or provenance["dataset"] != config.pretrain_dataset
+                    or provenance["subset"] != config.pretrain_subset
+                    or episode.reads[0].prompt
+                    != (config.ae_prompt if task == "ae" else config.lm_prompt)
+                ):
+                    raise ValueError(
+                        "sample tokenizer, dataset or task prompt differs from its contract"
+                    )
+                target_length = len(
+                    tokenizer.encode(episode.reads[0].references[0].text, add_special_tokens=False)
+                )
                 if episode.episode_id in seen_ids:
                     raise ValueError("duplicate prepared episode ID")
                 seen_ids.add(episode.episode_id)
@@ -78,7 +93,7 @@ def audit_preparation(
                     original["split"] != split
                     or tuple(tokenizer.encode(text[start:end], add_special_tokens=False))
                     != episode.input_ids
-                    or (ae is not None and text[start:end] != episode.reads[0].references[0].text)
+                    or (task == "ae" and text[start:end] != episode.reads[0].references[0].text)
                 ):
                     raise ValueError("input source text or split mismatch")
                 key = hashlib.blake2b(" ".join(text[start:end].split()).encode()).hexdigest()
@@ -87,13 +102,13 @@ def audit_preparation(
                 if provenance["quality_review"]["decision"] != "keep":
                     raise ValueError("retained sample lacks a keep quality decision")
                 final_end = end
-                if lm is not None:
+                if task == "continuation":
                     y_start, final_end = provenance["y_char_span"]
                     if not end == y_start < final_end <= len(text) or (
                         text[y_start:final_end] != episode.reads[0].references[0].text
                     ):
                         raise ValueError("LM target must be the contiguous original continuation")
-                    lengths[f"{split}/continuation/target"].append(len(lm.target_ids) - 1)
+                    lengths[f"{split}/continuation/target"].append(target_length)
                 elif provenance["y_char_span"] is not None:
                     raise ValueError("AE views must have no continuation span")
                 if provenance["parent_char_span"] != [start, final_end]:
@@ -105,15 +120,23 @@ def audit_preparation(
                     if key in mapping and mapping[key] != split:
                         raise ValueError("source or duplicate cluster crosses data splits")
                     mapping[key] = split
-                if not capacity_weights(config, len(episode.input_ids), ae, lm, 0):
-                    raise ValueError("sample has no legal memory capacity")
+                if not preparation.accepts_lengths(
+                    len(episode.input_ids), target_length if task == "continuation" else None
+                ):
+                    raise ValueError(
+                        "sample lengths or LM prefix fraction violate the preparation recipe"
+                    )
                 task, size = episode.reads[0].task, len(episode.input_ids)
-                bucket = next(b for b in length_bounds if size <= b)
+                bucket = next(b for b in preparation.length_bounds if size <= b)
                 lengths[f"{split}/input"].append(size)
                 lengths[f"{split}/{task}/input"].append(size)
                 lengths[f"{split}/granularity/{provenance['granularity']}"].append(size)
                 counts[f"{split}/{task}/length_up_to/{bucket}"] += 1
                 counts[f"{split}/{task}"] += 1
+                for group in (f"{split}/{task}", f"{split}/{task}/length_up_to/{bucket}"):
+                    cell = composition[group][provenance["source_granularity"]]
+                    cell["samples"] += 1
+                    cell["input_tokens"] += size
                 if directory.name == "random":
                     counts[f"{split}/{task}/input_boundary_cut"] += not (
                         provenance["input_starts_at_sentence"]
@@ -124,10 +147,22 @@ def audit_preparation(
             "original_text_continuity": True,
             "shared_source_assignments": True,
             "source_and_cluster_split_isolation": True,
-            "legal_capacities": True,
+            "sample_lengths_and_lm_fraction": True,
             "model_keep_decisions": True,
         },
         "statistics": dict(counts),
+        "composition": {
+            group: {
+                granularity: dict(cell)
+                | {
+                    "sample_fraction": cell["samples"] / sum(c["samples"] for c in cells.values()),
+                    "input_token_fraction": cell["input_tokens"]
+                    / sum(c["input_tokens"] for c in cells.values()),
+                }
+                for granularity, cell in sorted(cells.items())
+            }
+            for group, cells in sorted(composition.items())
+        },
         "lengths": {key: length_statistics(values) for key, values in sorted(lengths.items())},
     }
     (directory / "audit.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
@@ -144,15 +179,28 @@ def compare_preparations(
     semantic, random_data = metadata["semantic"], metadata["random"]
     if (
         semantic["source_pool_id"] != random_data["source_pool_id"]
+        or semantic["contract"] != random_data["contract"]
         or semantic["length_bounds"] != random_data["length_bounds"]
         or semantic["samples_per_task"] != random_data["samples_per_task"]
     ):
         raise ValueError("datasets must share source assignments, task quotas and length intervals")
     # Audit each persisted leaf against the shared registry, then compare aggregate distributions.
-    audits = {
-        v: audit_preparation(root / v, tokenizer, config, tuple(m["length_bounds"]), root)
+    recipes = {
+        v: PreparationConfig(
+            **{
+                key: tuple(value) if isinstance(value, list) else value
+                for key, value in m["recipe"].items()
+            }
+        )
         for v, m in metadata.items()
     }
+    if any(
+        getattr(recipes["semantic"], key) != getattr(recipes["random"], key)
+        for key in ("min_sample_tokens", "max_sample_tokens", "lm_prefix_fraction")
+    ):
+        raise ValueError("datasets must share sample length and LM fraction constraints")
+    audits = {v: audit_preparation(root / v, tokenizer, config, recipes[v], root) for v in metadata}
+    targets = recipes["semantic"].balanced_histogram()
     groups = {}
     for split, quota in zip(("train", "dev", "test"), semantic["samples_per_task"], strict=True):
         for task in ("ae", "continuation"):
@@ -166,8 +214,9 @@ def compare_preparations(
                 ]
                 for v in ("semantic", "random")
             )
-            if a != b:
-                raise ValueError("input length interval counts differ")
+            expected = [targets[split][task][str(bound)] for bound in semantic["length_bounds"]]
+            if a != b or a != expected:
+                raise ValueError("input length interval counts differ from balanced quotas")
             groups[f"{split}/{task}"] = {
                 "semantic_counts": a,
                 "random_counts": b,
@@ -182,6 +231,7 @@ def compare_preparations(
             "shared_source_split_isolation": True,
             "equal_task_quotas": True,
             "equal_input_length_interval_counts": True,
+            "balanced_input_length_intervals": True,
         },
         "length_bounds": semantic["length_bounds"],
         "groups": groups,

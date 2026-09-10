@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import random
+
+from latent_working_memory.data_preparation.fineweb import SemanticSpans
 
 import pytest
 import torch
@@ -27,7 +30,7 @@ def tiny_config():
         reader_lora_rank=2,
         reader_lora_alpha=4,
         max_input_tokens=64,
-        max_continuation_tokens=32,
+        max_continuation_tokens=64,
         write_context_tokens=256,
         read_context_tokens=256,
         gradient_checkpointing=False,
@@ -141,7 +144,12 @@ def source_records():
 @pytest.fixture
 def preparation_records(source_records):
     return [
-        dict(row, text=row["text"].replace("sentence", f"sentence number {i}"))
+        dict(
+            row,
+            text=(row["text"] + "\n" + row["text"].replace("sentence", "passage")).replace(
+                "sentence", f"sentence number {i}"
+            ),
+        )
         for i, row in enumerate(source_records)
     ]
 
@@ -152,6 +160,8 @@ def preparation_recipe():
         max_documents=64,
         samples_per_task=(12, 4, 4),
         min_document_chars=1,
+        min_sample_tokens=4,
+        max_sample_tokens=64,
         length_bounds=(8, 32, 64),
         near_duplicate_min_words=128,
     )
@@ -169,3 +179,21 @@ def accepting_scorer():
             ]
 
     return AcceptSamples()
+
+
+@pytest.fixture
+def semantic_examples(preparation_recipe):
+    def generate(record, tokenizer, config, topic_annotation=None, recipe=None):
+        recipe = recipe or preparation_recipe
+        sampler = SemanticSpans(record, tokenizer, config, recipe, topic_annotation)
+        rows = []
+        for task in ("ae", "continuation"):
+            rng = random.Random(f"{config.data_seed}:{task}")
+            for lower, upper in recipe.length_intervals():
+                for _ in range(32):
+                    row = sampler.sample(task, lower, upper, rng)
+                    if row is not None:
+                        rows.append(row)
+        return rows
+
+    return generate

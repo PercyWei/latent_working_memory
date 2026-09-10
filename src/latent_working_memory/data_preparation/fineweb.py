@@ -3,14 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from typing import Any, Mapping
 
 from transformers import PreTrainedTokenizerBase
 
-from latent_working_memory.v1.config import GRANULARITIES, ExperimentConfig
+from latent_working_memory.v1.config import ExperimentConfig
+from latent_working_memory.data_preparation.config import PreparationConfig
 from latent_working_memory.v1.data import Episode, Read, Reference, Source
-from latent_working_memory.v1.sampling import capacity_weights, read_tokens
 from latent_working_memory.data_preparation.dedup import source_key
 from latent_working_memory.data_preparation.segmentation import sentence_spans
 
@@ -20,18 +21,9 @@ DATA_CONFIG_FIELDS = (
     "pretrain_dataset",
     "pretrain_subset",
     "split_fractions",
-    "views_per_granularity",
-    "input_length_bounds",
     "data_seed",
-    "max_input_tokens",
-    "max_continuation_tokens",
-    "write_context_tokens",
-    "read_context_tokens",
     "ae_prompt",
     "lm_prompt",
-    "pretrain_compression_ratios",
-    "pretrain_k_min",
-    "k_limit",
 )
 
 
@@ -66,20 +58,24 @@ def span_episode(
     record: Mapping[str, Any],
     tokenizer: PreTrainedTokenizerBase,
     config: ExperimentConfig,
+    preparation: PreparationConfig,
     start: int,
     end: int,
     target_end: int | None,
     variant: str,
     granularity: str,
 ) -> Episode | None:
-    """Build one task from original character spans and enforce tokenizer/context budgets."""
+    """Build one task from original spans using data constraints and actual token counts."""
     text = record["text"]
     x = text[start:end]
     target = text[end:target_end] if target_end is not None else x
     if not x.strip() or not target.strip():
         return None
     ids = tuple(tokenizer.encode(x, add_special_tokens=False))
-    if not ids or len(ids) > config.max_input_tokens:
+    target_length = (
+        len(tokenizer.encode(target, add_special_tokens=False)) if target_end is not None else None
+    )
+    if not preparation.accepts_lengths(len(ids), target_length):
         return None
     task = "continuation" if target_end is not None else "ae"
     episode_id = f"{record['id']}:{variant}:{granularity}:{task}:{start}:{end}:{target_end}"
@@ -94,6 +90,7 @@ def span_episode(
         "x_char_span": [start, end],
         "y_char_span": [end, target_end] if target_end is not None else None,
         "granularity": granularity,
+        "source_granularity": granularity,
         "boundary_variant": variant,
         "boundary_method": "random_token" if variant == "random" else "pysbd",
         "tokenizer_name_or_path": config.model_name_or_path,
@@ -114,134 +111,115 @@ def span_episode(
             ),
         ),
     )
-    ae, lm = read_tokens(episode, tokenizer)
-    return episode if capacity_weights(config, len(ids), ae, lm, 0) else None
+    return episode
 
 
-def document_episodes(
-    record: Mapping[str, Any],
-    tokenizer: PreTrainedTokenizerBase,
-    config: ExperimentConfig,
-    topic_annotation: dict[str, Any] | None = None,
-) -> list[Episode]:
-    """Generate sentence-boundary candidates; semantic quality is judged after construction."""
-    text = record["text"]
-    sentences = sentence_spans(text)
-    if not sentences:
-        return []
-    rng = random.Random(f"{config.data_seed}:{record['id']}:semantic")
-    paragraphs = []
-    for i, sentence in enumerate(sentences):
-        if not paragraphs or sentences[paragraphs[-1][0]].paragraph != sentence.paragraph:
-            paragraphs.append((i, i + 1))
-        else:
-            paragraphs[-1] = (paragraphs[-1][0], i + 1)
-    candidates = {g: set() for g in GRANULARITIES}
-    candidates["sentence"].update((i, i + 1) for i in range(len(sentences)))
-    candidates["paragraph"].update(paragraphs)
-    candidates["paragraph_group"].update(
-        (first[0], second[1]) for first, second in zip(paragraphs, paragraphs[1:])
-    )
-    cursor = 0
-    while cursor < len(sentences):
-        stop = cursor + 1
-        while stop < len(sentences):
-            if (
-                len(
-                    tokenizer.encode(
-                        text[sentences[cursor].start : sentences[stop].end],
-                        add_special_tokens=False,
-                    )
-                )
-                > config.max_input_tokens
-            ):
-                break
-            stop += 1
-        if stop - cursor > 1:
-            candidates["sentence_group"].add((cursor, stop))
-        cursor = stop
-    for _ in range(config.views_per_granularity * 16):
-        start = rng.randrange(len(sentences))
-        end = rng.randint(start + 1, len(sentences))
-        if end - start > 1:
-            candidates["sentence_group"].add((start, end))
-    if topic_annotation is not None:
-        validate_topic_ranges(topic_annotation["ranges"], len(sentences))
-        candidates["topic_group"].update(tuple(pair) for pair in topic_annotation["ranges"])
-    episodes = []
-    for granularity in GRANULARITIES:
-        ranges = sorted(candidates[granularity])
-        rng.shuffle(ranges)
-        by_length = defaultdict(list)
-        for start, end in ranges:
-            episode = span_episode(
-                record,
-                tokenizer,
-                config,
-                sentences[start].start,
-                sentences[end - 1].end,
-                None,
-                "semantic",
-                granularity,
+class SemanticSpans:
+    """Draw X for each task independently; LM adds a contiguous sentence-boundary Y."""
+
+    def __init__(
+        self,
+        record: Mapping[str, Any],
+        tokenizer: PreTrainedTokenizerBase,
+        config: ExperimentConfig,
+        preparation: PreparationConfig,
+        topic_annotation: dict[str, Any] | None = None,
+    ):
+        self.record, self.tokenizer, self.config, self.recipe = (
+            record,
+            tokenizer,
+            config,
+            preparation,
+        )
+        if not tokenizer.is_fast:
+            raise ValueError("semantic spans require a fast tokenizer with character offsets")
+        text = record["text"]
+        self.sentences = sentence_spans(text)
+        offsets = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)[
+            "offset_mapping"
+        ]
+        token_ends = [b for a, b in offsets if a < b]
+        self.sentence_token_ends = [bisect_right(token_ends, s.end) for s in self.sentences]
+        self.topic_annotation = topic_annotation
+        ranges = {
+            "sentence": {(i, i + 1) for i in range(len(self.sentences))},
+            "paragraph": set(),
+            "sentence_group": set(),
+            "topic_group": set(),
+        }
+        paragraphs = []
+        for i, sentence in enumerate(self.sentences):
+            if paragraphs and self.sentences[paragraphs[-1][0]].paragraph == sentence.paragraph:
+                paragraphs[-1] = (paragraphs[-1][0], i + 1)
+            else:
+                paragraphs.append((i, i + 1))
+        ranges["paragraph"].update(paragraphs)
+        if topic_annotation is not None:
+            validate_topic_ranges(topic_annotation["ranges"], len(self.sentences))
+            ranges["topic_group"].update(tuple(pair) for pair in topic_annotation["ranges"])
+        # Propose continuous sentence groups across length intervals without a granularity quota.
+        rng = random.Random(f"{config.data_seed}:{record['id']}:semantic:candidates")
+        starts = rng.sample(
+            range(len(self.sentences)),
+            min(len(self.sentences), preparation.candidates_per_document),
+        )
+        for start in starts:
+            origin = bisect_right(token_ends, self.sentences[start].start)
+            for lower, upper in preparation.length_intervals():
+                first = bisect_left(self.sentence_token_ends, origin + lower, lo=start + 1)
+                stop = bisect_right(self.sentence_token_ends, origin + upper, lo=start + 1)
+                if first < stop:
+                    ranges["sentence_group"].add((start, rng.randrange(first, stop) + 1))
+        self.candidates = defaultdict(list)
+        for granularity, spans in ranges.items():
+            for start, end in sorted(spans):
+                x = text[self.sentences[start].start : self.sentences[end - 1].end]
+                length = len(tokenizer.encode(x, add_special_tokens=False))
+                if preparation.accepts_lengths(length, None):
+                    bucket = next(b for b in preparation.length_bounds if length <= b)
+                    self.candidates[bucket].append((granularity, start, end, length))
+
+    def sample(self, task: str, lower: int, upper: int, rng: random.Random) -> Episode | None:
+        candidates = self.candidates[upper]
+        if task == "continuation":
+            candidates = [c for c in candidates if self._target_ends(c[2], c[3])]
+        if not candidates:
+            return None
+        granularity, start, end, length = rng.choice(candidates)
+        target_sentence_end = None
+        if task == "continuation":
+            target_sentence_end = rng.choice(self._target_ends(end, length))
+        episode = span_episode(
+            self.record,
+            self.tokenizer,
+            self.config,
+            self.recipe,
+            self.sentences[start].start,
+            self.sentences[end - 1].end,
+            self.sentences[target_sentence_end - 1].end
+            if target_sentence_end is not None
+            else None,
+            "semantic",
+            granularity,
+        )
+        if episode is None or not lower <= len(episode.input_ids) <= upper:
+            return None
+        provenance = episode.sources[0].provenance
+        provenance.update(
+            sentence_range=[start, end],
+            continuation_sentence_range=[end, target_sentence_end]
+            if target_sentence_end is not None
+            else None,
+        )
+        if granularity == "topic_group":
+            provenance.update(
+                boundary_method="offline_topic", boundary_model=self.topic_annotation["model"]
             )
-            if episode is None:
-                continue
-            provenance = episode.sources[0].provenance
-            provenance["sentence_range"] = [start, end]
-            provenance["continuation_sentence_range"] = None
-            if granularity == "topic_group":
-                provenance.update(
-                    boundary_method="offline_topic", boundary_model=topic_annotation["model"]
-                )
-            bucket = next(b for b in config.input_length_bounds if len(episode.input_ids) <= b)
-            by_length[bucket].append(episode)
-        buckets = sorted(by_length)
-        rng.shuffle(buckets)
-        selected = []
-        while buckets and len(selected) < config.views_per_granularity:
-            remaining = []
-            for bucket in buckets:
-                selected.append(by_length[bucket].pop())
-                if by_length[bucket]:
-                    remaining.append(bucket)
-                if len(selected) == config.views_per_granularity:
-                    break
-            buckets = remaining
-        for episode in selected:
-            episodes.append(episode)
-            provenance = episode.sources[0].provenance
-            start, end = provenance["sentence_range"]
-            x_start, parent_end = provenance["parent_char_span"]
-            cuts = [
-                cut
-                for cut in range(start + 1, end)
-                if len(
-                    tokenizer.encode(
-                        text[sentences[cut - 1].end : parent_end], add_special_tokens=False
-                    )
-                )
-                <= config.max_continuation_tokens
-            ]
-            if not cuts:
-                continue
-            cut = rng.choice(cuts)
-            lm = span_episode(
-                record,
-                tokenizer,
-                config,
-                x_start,
-                sentences[cut - 1].end,
-                parent_end,
-                "semantic",
-                granularity,
-            )
-            if lm is not None:
-                lm.sources[0].provenance.update(
-                    sentence_range=[start, cut],
-                    continuation_sentence_range=[cut, end],
-                    boundary_method=provenance["boundary_method"],
-                )
-                if granularity == "topic_group":
-                    lm.sources[0].provenance["boundary_model"] = provenance["boundary_model"]
-                episodes.append(lm)
-    return episodes
+        return episode
+
+    def _target_ends(self, start: int, input_length: int) -> range:
+        lower, upper = self.recipe.target_length_range(input_length)
+        origin = self.sentence_token_ends[start - 1]
+        first = bisect_left(self.sentence_token_ends, origin + lower, lo=start)
+        stop = bisect_right(self.sentence_token_ends, origin + upper, lo=start)
+        return range(first + 1, stop + 1)

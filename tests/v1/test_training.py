@@ -109,7 +109,9 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
         gradient_checkpointing=True,
         split_fractions=(0.6, 0.2, 0.2),
     )
-    preparation_recipe = replace(preparation_recipe, samples_per_task=(16, 16, 16))
+    preparation_recipe = replace(
+        preparation_recipe, samples_per_task=(16, 16, 16), candidates_per_document=16
+    )
     data = tmp_path / "data"
     prepare_fineweb(
         preparation_records,

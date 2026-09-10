@@ -19,7 +19,7 @@ def test_invalid_config_fails_at_boundary():
         ExperimentConfig.from_mapping({"cell_tokens": 64})
     for values in [
         dict(d_mem=10),
-        dict(pretrain_k_min=1024),
+        dict(pretrain_k_min=8192),
         dict(max_input_tokens=4096),
         dict(ratio_weights_start=(0.1, 0.2, 0.3)),
         dict(batch_size=True),
