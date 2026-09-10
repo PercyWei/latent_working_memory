@@ -1,6 +1,6 @@
-# latent_working_memory（20260910 11:05:54 UTC+08:00）
+# latent_working_memory（20260910 12:55:13 UTC+08:00）
 
-最后修订时间：20260910 11:05:54 UTC+08:00
+最后修订时间：20260910 12:55:13 UTC+08:00
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理；ICAE v1 和 C-DIC 分别位于 `reproductions/icae/` 与 `reproductions/cdic/`，各自使用独立的 `uv` 环境。
 
@@ -39,6 +39,8 @@ uv run python -m latent_working_memory.data_preparation \
 ```
 
 配方通过 `review_base_url` 与 `review_model` 连接独立评分服务，默认使用直连接口 `http://127.0.0.1:8000/v1` 和模型名 `Qwen/Qwen3.8-27B`。该模型权重已下载到服务器 `/data/bywei/models/Qwen/Qwen3.8-27B`。数据准备入口调用 HTTP 服务，tokenizer 从已有本地模型加载。
+
+Qwen 评分服务使用 xgrammar 的紧凑 JSON 输出，启动 vLLM 时增加 `--structured-outputs-config '{"backend":"xgrammar","disable_any_whitespace":true}'`。判定理由由 JSON schema 限制为最多 240 字符；紧凑格式约束阻止模型在字段外反复生成空格或制表符。客户端只接收完整结束且符合 schema 的回复。当前服务器单卡评分设置 `CUDA_VISIBLE_DEVICES=1`、`--tensor-parallel-size 1`。
 
 每次候选先选择任务与尚有缺额的 X 长度区间，再用任务独立的随机序列抽取 X；AE 直接重建 X，LM 独立选择符合长度和比例要求的连续 Y。semantic 在完整句界选取，random 在原文 token 位置选取。候选仅生成被选中的任务。两类提示词使用共同质量标准，分别描述句界与随机边界要求。`audit.json` 同时记录任务、长度、来源粒度的样本比例和输入 token 比例。
 
