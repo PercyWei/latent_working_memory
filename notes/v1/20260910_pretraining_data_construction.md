@@ -1,7 +1,7 @@
-# 20260910_预训练数据构建策略与实现（19:18:04 UTC+08:00）
+# 20260910_预训练数据构建策略与实现（22:24:09 UTC+08:00）
 
 创建时间：20260910 15:44:35 UTC+08:00
-最后修订时间：20260910 19:18:04 UTC+08:00
+最后修订时间：20260910 22:24:09 UTC+08:00
 
 ## 1. 数据来源
 
@@ -123,15 +123,18 @@ python -m latent_working_memory.data_preparation \
 
 使用本地已有 FineWeb `sample-10BT` 和 Llama-2-7B-Chat tokenizer。来源 seed 为 20260907，split 比例为 0.9/0.05/0.05；X/Y 长度及 LM 比例沿用本文契约。每篇文档最多尝试 64 次，候选窗口为 4 篇文档。
 
-服务器项目目录为 `/data/bywei/projects/latent_working_memory`。运行前通过 GitHub 同步本地提交，连接失败时使用 Gitee；实际执行导入服务器项目的 `src`。构造仅使用 CPU，依次完成 sources、semantic、random 和自动审计，再为 semantic 各 split 准备独立抽查面板，每个随机／分层面板最多 200 条，抽样 seed 为 20260910。
+服务器项目目录为 `/data/bywei/projects/latent_working_memory`。运行前通过 GitHub 同步本地提交，连接失败时使用 Gitee；实际执行导入服务器项目的 `src`。构造仅使用 CPU，依次完成 sources、semantic、random 和自动审计，完成两类数据的联合检查。本轮独立抽查按用户安排暂缓。
 
 - 运行目录：`artifacts/v1/data-preparation/rule-independent-409k-20260910/`。
 - 数据目录：`data/v1/fineweb-rule-independent-409k-20260910/`。
 - `config.json`、`recipe.json`：本轮实际配置。
 - `run.py`、`run.json`：调度入口及实际提交、启动信息。
 - `status.json`、分阶段日志：进度、进程与退出状态。
-- `inspection/`：构造完成后的独立抽查面板。
 
 ### 状态
 
-20260910 19:17:29 UTC+08:00 已在服务器启动，启动提交为 `50fdcbe`，调度进程 PID 为 `599728`。本地与服务器通过 Gitee SSH 同步后运行，当前进入 sources 阶段。首次启动因运行配置的旧长度档未覆盖 4096 tokens 而被校验拦截；修正为七档均衡配置后重新启动，首次失败日志保存在运行目录。实际进度以 `run.json`、`status.json` 为准。
+20260910 19:17:29 UTC+08:00 启动，22:12:07 UTC+08:00 完成，耗时约 2 小时 55 分钟。启动提交为 `50fdcbe`，本地与服务器通过 Gitee SSH 同步后运行。首次启动的长度档配置校验错误修正后重新启动，日志保存在运行目录。
+
+semantic 和 random 各生成 204,400 条，总计 408,800 条。四种组合的 train/dev/test 均达到 98,000/2,100/2,100 条，每个 X 长度档分别为 14,000/300/300 条。两类数据的原文一致性、来源及去重簇划分、长度和 LM 比例审计均通过；semantic 规则切点检查通过。联合检查确认共享来源划分、任务配额及长度档配额一致。
+
+独立边界抽查暂缓，真实句界正确率待复核。本轮调度父进程在 random 检查期间停止，子进程完成审计与联合检查后退出，最终状态保存在 `status.json`。本轮使用原审计流程；后续提交 `4dbc6d6` 使联合检查复用各版本已完成的审计，省去两次重复全量扫描。
