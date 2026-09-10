@@ -23,12 +23,19 @@ from latent_working_memory.v1.sampling import PretrainSampler
 
 
 def test_independent_variants_balance_tasks_and_intervals(
+    monkeypatch,
     tmp_path,
     tiny_config,
     tokenizer,
     preparation_records,
     preparation_recipe,
 ):
+    def repeated_audit(*args):
+        pytest.fail("comparison must reuse completed audits")
+
+    monkeypatch.setattr(
+        "latent_working_memory.data_preparation.audit.audit_preparation", repeated_audit
+    )
     result = prepare_fineweb(
         preparation_records,
         tokenizer,
@@ -62,9 +69,9 @@ def test_independent_variants_balance_tasks_and_intervals(
         )
     assert different_exact_lengths
     assert all(
-        compare_preparations(
-            root, tokenizer, tiny_config, json.loads((root / "random/preparation.json").read_text())
-        )["checks"].values()
+        compare_preparations(root, json.loads((root / "random/preparation.json").read_text()))[
+            "checks"
+        ].values()
     )
     for variant in ("semantic", "random"):
         index = EpisodeIndex(root / variant / "train.jsonl")
@@ -148,9 +155,7 @@ def test_shared_registry_detects_cross_variant_split_leakage(
         out.write(lines[0] + "\n")
     path.write_text("\n".join(lines[1:]) + "\n")
     with pytest.raises(ValueError, match="split mismatch"):
-        compare_preparations(
-            root, tokenizer, tiny_config, json.loads((root / "random/preparation.json").read_text())
-        )
+        audit_preparation(root / "random", tokenizer, tiny_config, preparation_recipe, root)
 
 
 def test_source_text_audit_detects_offset_corruption(
@@ -259,3 +264,18 @@ def test_existing_source_pool_rejects_a_changed_split_definition(
             preparation_recipe,
         )
     assert not (root / "semantic").exists()
+
+
+@pytest.mark.parametrize("count_type", ["task", "length_interval"])
+def test_comparison_rejects_inconsistent_audited_counts(
+    tmp_path, tiny_config, tokenizer, preparation_records, preparation_recipe, count_type
+):
+    root = tmp_path / "data"
+    result = prepare_fineweb(preparation_records, tokenizer, tiny_config, root, preparation_recipe)
+    statistics = result["random"]["audit"]["statistics"]
+    statistic = "train/ae"
+    if count_type == "length_interval":
+        statistic += f"/length_up_to/{preparation_recipe.length_bounds[0]}"
+    statistics[statistic] += 1
+    with pytest.raises(ValueError, match="quotas"):
+        compare_preparations(root, result["random"])

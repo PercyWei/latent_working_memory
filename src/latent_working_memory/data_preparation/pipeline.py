@@ -466,7 +466,7 @@ def prepare_variant(
     builder = VariantBuilder(root, variant, tokenizer, config, preparation, pool, reference, resume)
     result = builder.run([row for row in sources if row["status"] == "eligible"], topic_annotations)
     if variant == "random":
-        comparison = compare_preparations(root, tokenizer, config, result)
+        comparison = compare_preparations(root, result)
         (root / "comparison.json").write_text(json.dumps(comparison, indent=2) + "\n")
     (root / variant / "preparation.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2) + "\n"

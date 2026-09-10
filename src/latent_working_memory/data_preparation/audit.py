@@ -179,9 +179,7 @@ def audit_preparation(
     return report
 
 
-def compare_preparations(
-    root: Path, tokenizer: PreTrainedTokenizerBase, config: ExperimentConfig, random_metadata: dict
-) -> dict:
+def compare_preparations(root: Path, random_metadata: dict) -> dict:
     metadata = {
         "semantic": json.loads((root / "semantic/preparation.json").read_text()),
         "random": random_metadata,
@@ -194,7 +192,7 @@ def compare_preparations(
         or semantic["samples_per_task"] != random_data["samples_per_task"]
     ):
         raise ValueError("datasets must share source assignments, task quotas and length intervals")
-    # Audit each persisted leaf against the shared registry, then compare aggregate distributions.
+    # Completed preparations contain the audit against the same shared source registry.
     recipes = {
         v: PreparationConfig(
             **{
@@ -209,7 +207,7 @@ def compare_preparations(
         for key in ("min_sample_tokens", "max_sample_tokens", "lm_prefix_fraction")
     ):
         raise ValueError("datasets must share sample length and LM fraction constraints")
-    audits = {v: audit_preparation(root / v, tokenizer, config, recipes[v], root) for v in metadata}
+    audits = {v: m["audit"] for v, m in metadata.items()}
     targets = recipes["semantic"].balanced_histogram()
     groups = {}
     for split, quota in zip(("train", "dev", "test"), semantic["samples_per_task"], strict=True):
