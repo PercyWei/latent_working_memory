@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Sequence
 from urllib.request import ProxyHandler, Request, build_opener
@@ -143,13 +143,22 @@ class SampleScorer:
                 pending[key] = payload
         if pending:
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            # Refill as individual requests finish; return in candidate order below.
+            # A bounded future set avoids an unbounded executor work queue.
             with (
                 ThreadPoolExecutor(max_workers=self.config.scoring_batch_size) as pool,
                 self.cache_path.open("a") as handle,
             ):
-                for key, response in zip(
-                    pending, pool.map(self._request, pending.values()), strict=True
-                ):
+                entries = iter(pending.items())
+                futures = {}
+
+                def submit_one():
+                    entry = next(entries, None)
+                    if entry is not None:
+                        key, payload = entry
+                        futures[pool.submit(self._request, payload)] = key
+
+                def persist(key, response):
                     row = {
                         "key": key,
                         "protocol": self.protocol,
@@ -159,4 +168,22 @@ class SampleScorer:
                     self.cache[key] = row
                     handle.write(json.dumps(row, ensure_ascii=False) + "\n")
                     handle.flush()
+
+                for _ in range(self.config.scoring_batch_size):
+                    submit_one()
+                try:
+                    while futures:
+                        done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                        for future in done:
+                            key = futures.pop(future)
+                            persist(key, future.result())
+                            submit_one()
+                finally:
+                    # Drain already-running successful requests even on interruption/service
+                    # failure. The original exception still propagates; no new work is submitted.
+                    pool.shutdown(wait=True, cancel_futures=True)
+                    for future, key in futures.items():
+                        if not future.cancelled() and future.exception() is None:
+                            persist(key, future.result())
+
         return [{"cache_key": key, **self.cache[key]["result"]} for key in keys]

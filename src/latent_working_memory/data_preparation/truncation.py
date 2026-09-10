@@ -37,6 +37,12 @@ class RandomSpans:
         self.sentence_starts = {s.start for s in self.sentences}
         self.sentence_ends = {s.end for s in self.sentences}
 
+    def available(self, task: str, lower: int, upper: int) -> bool:
+        required = lower
+        if task == "continuation":
+            required += self.recipe.target_length_range(lower)[0]
+        return len(self.offsets) >= required
+
     def sample(self, task: str, lower: int, upper: int, rng: random.Random) -> Episode | None:
         continuation = task == "continuation"
         maximum = min(

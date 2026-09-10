@@ -25,6 +25,7 @@ class PreparationConfig:
     review_base_url: str = "http://127.0.0.1:8000/v1"
     review_model: str = "Qwen/Qwen3.8-27B"
     review_max_new_tokens: int = 256
+    candidate_window_documents: int = 4
     scoring_batch_size: int = 8
     review_timeout_seconds: int = 120
 
@@ -39,6 +40,7 @@ class PreparationConfig:
             "candidates_per_document",
             "review_max_new_tokens",
             "scoring_batch_size",
+            "candidate_window_documents",
             "review_timeout_seconds",
         ):
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:

@@ -28,7 +28,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--dataset-dir", type=Path, help="Local HuggingFaceFW-fineweb directory")
     parser.add_argument("--max-documents", type=int)
     parser.add_argument("--topic-annotations", type=Path)
+    recovery = parser.add_mutually_exclusive_group()
+    recovery.add_argument("--resume", action="store_true")
+    recovery.add_argument(
+        "--adopt-paused", action="store_true", help="Import a paused run without a progress cursor"
+    )
     args = parser.parse_args(argv)
+    if (args.resume or args.adopt_paused) and args.stage not in {"semantic", "random"}:
+        parser.error("recovery requires an explicit semantic or random stage")
     config = load_config(args.config)
     recipe = PreparationConfig.load(args.recipe)
     if args.max_documents is not None:
@@ -54,7 +61,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         for variant in ("semantic", "random") if args.stage == "all" else (args.stage,):
             report[variant] = prepare_variant(
-                args.output_dir, variant, tokenizer, config, recipe, scorer, annotations
+                args.output_dir,
+                variant,
+                tokenizer,
+                config,
+                recipe,
+                scorer,
+                annotations,
+                resume=args.resume,
+                adopt_paused=args.adopt_paused,
             )
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

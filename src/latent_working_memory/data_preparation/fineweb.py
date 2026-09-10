@@ -170,24 +170,36 @@ class SemanticSpans:
                 if first < stop:
                     ranges["sentence_group"].add((start, rng.randrange(first, stop) + 1))
         self.candidates = defaultdict(list)
-        for granularity, spans in ranges.items():
-            for start, end in sorted(spans):
-                x = text[self.sentences[start].start : self.sentences[end - 1].end]
-                length = len(tokenizer.encode(x, add_special_tokens=False))
-                if preparation.accepts_lengths(length, None):
-                    bucket = next(b for b in preparation.length_bounds if length <= b)
-                    self.candidates[bucket].append((granularity, start, end, length))
+        spans = [(g, a, b) for g, values in ranges.items() for a, b in sorted(values)]
+        # Batch exact slice tokenization; full-document offsets are only proposal estimates.
+        texts = [text[self.sentences[a].start : self.sentences[b - 1].end] for _, a, b in spans]
+        encoded = tokenizer(texts, add_special_tokens=False)["input_ids"] if texts else []
+        for (granularity, start, end), ids in zip(spans, encoded, strict=True):
+            length = len(ids)
+            if preparation.accepts_lengths(length, None):
+                bucket = next(b for b in preparation.length_bounds if length <= b)
+                self.candidates[bucket].append((granularity, start, end, length))
+        self.continuations = {}
+        self.lm_candidates = defaultdict(list)
+        for bucket, candidates in self.candidates.items():
+            for candidate in candidates:
+                end, length = candidate[2:]
+                ends = self._target_ends(end, length)
+                self.continuations[(end, length)] = ends
+                if ends:
+                    self.lm_candidates[bucket].append(candidate)
+
+    def available(self, task: str, lower: int, upper: int) -> bool:
+        return bool((self.lm_candidates if task == "continuation" else self.candidates)[upper])
 
     def sample(self, task: str, lower: int, upper: int, rng: random.Random) -> Episode | None:
-        candidates = self.candidates[upper]
-        if task == "continuation":
-            candidates = [c for c in candidates if self._target_ends(c[2], c[3])]
+        candidates = (self.lm_candidates if task == "continuation" else self.candidates)[upper]
         if not candidates:
             return None
         granularity, start, end, length = rng.choice(candidates)
         target_sentence_end = None
         if task == "continuation":
-            target_sentence_end = rng.choice(self._target_ends(end, length))
+            target_sentence_end = rng.choice(self.continuations[(end, length)])
         episode = span_episode(
             self.record,
             self.tokenizer,
