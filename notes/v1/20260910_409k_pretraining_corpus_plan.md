@@ -1,7 +1,7 @@
-# 20260910_40.88 万条预训练数据构造计划（11:20:20 UTC+08:00）
+# 20260910_40.88 万条预训练数据构造计划（11:24:22 UTC+08:00）
 
 创建时间：20260910 11:20:20 UTC+08:00  
-最后修订时间：20260910 11:20:20 UTC+08:00
+最后修订时间：20260910 11:24:22 UTC+08:00
 
 ## 规模依据
 
@@ -37,7 +37,7 @@ semantic 训练集共 196,000 条。由区间边界可得其 X 总量范围约 1
 
 代码快照：`09a57f1`。从现有 FineWeb sample-10BT 取 100,000 篇候选文档建立共同来源池，执行属性检查、去重与来源划分，然后依次构造 semantic 和 random。来源不足时由程序报告具体 task/split/长度区间缺口。
 
-Qwen/Qwen3.8-27B 使用服务器已有权重，物理 GPU 0、1，BF16、tensor parallel 2；服务上下文 16,384，支持长 X/Y 的联合判定；请求并发 16，最大输出 1,024 tokens，超时 600 秒。网络连接使用直连。数据构造使用独立代码快照和现有 Python 环境。
+Qwen/Qwen3.8-27B 使用服务器已有权重，物理 GPU 1，BF16、tensor parallel 1；服务上下文 16,384，支持长 X/Y 的联合判定；请求并发 16，最大输出 1,024 tokens，超时 600 秒。网络连接使用直连。数据构造使用独立代码快照和现有 Python 环境。
 
 运行目录：`/data/bywei/projects/latent_working_memory/artifacts/v1/data-preparation/independent-409k-20260910`。数据目录：`/data/bywei/projects/latent_working_memory/data/v1/fineweb-independent-409k-20260910`。运行目录保存 recipe、配置、代码快照、进程号、分阶段日志、评分缓存及 status.json。
 
