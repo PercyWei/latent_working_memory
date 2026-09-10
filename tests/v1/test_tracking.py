@@ -12,7 +12,9 @@ def test_offline_metrics_match_local_reports_and_close_run(tmp_path, monkeypatch
 
     monkeypatch.setattr(socket.socket, "connect", reject_network)
     calls = []
-    with swanlab_run(tmp_path, {}, mode="offline") as run:
+    with swanlab_run(
+        tmp_path, {}, mode="offline", group="lwm-pretrain-test", tags=("study:pretraining",)
+    ) as run:
         original_log = run.log
 
         def capture(data, step):
@@ -118,3 +120,12 @@ def test_offline_metrics_match_local_reports_and_close_run(tmp_path, monkeypatch
         assert "dev/ae/memory/nll" not in logged
     assert not run.alive
     assert json.loads((tmp_path / "swanlab.json").read_text())["mode"] == "offline"
+    identity = json.loads((tmp_path / "swanlab.json").read_text())
+    assert identity["group"] == "lwm-pretrain-test"
+    assert identity["job_type"] == "train"
+    assert identity["tags"] == [
+        "data:fineweb",
+        "method:latent-working-memory",
+        "scope:main",
+        "study:pretraining",
+    ]

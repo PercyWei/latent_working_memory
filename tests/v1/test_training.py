@@ -122,7 +122,13 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
         config, data, tmp_path / "full", torch.device("cpu"), max_steps=2, save_every=1
     )
     first = run_pretraining(
-        config, data, tmp_path / "resumed", torch.device("cpu"), max_steps=1, swanlab_mode="offline"
+        config,
+        data,
+        tmp_path / "resumed",
+        torch.device("cpu"),
+        max_steps=1,
+        swanlab_mode="offline",
+        swanlab_group="lwm-pretrain-test",
     )
     identity_path = tmp_path / "resumed/swanlab.json"
     first_swanlab_id = json.loads(identity_path.read_text())["id"]
@@ -134,6 +140,7 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
         max_steps=2,
         resume=first.final_checkpoint,
         swanlab_mode="offline",
+        swanlab_group="lwm-pretrain-test",
     )
     expected, actual = (
         load_model_checkpoint(full.final_checkpoint),
@@ -168,6 +175,8 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
             "4",
             "--generation-examples",
             "1",
+            "--swanlab-group",
+            "lwm-pretrain-test",
             "--swanlab-mode",
             "offline",
         ]

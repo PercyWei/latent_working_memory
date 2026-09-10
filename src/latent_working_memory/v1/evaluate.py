@@ -30,6 +30,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--swanlab-mode", choices=("disabled", "offline", "online"), default="disabled"
     )
     parser.add_argument("--swanlab-project", default="latent-working-memory")
+    parser.add_argument("--swanlab-group")
+    parser.add_argument("--swanlab-tag", action="append", default=[])
     parser.add_argument("--swanlab-run-id")
     parser.add_argument("--examples", type=int)
     parser.add_argument("--generation-examples", type=int)
@@ -81,6 +83,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.swanlab_project,
         args.swanlab_run_id,
         job_type="evaluate",
+        group=args.swanlab_group,
+        tags=tuple(args.swanlab_tag),
     ) as tracking:
         step = checkpoint.progress["next_step"]
         log_evaluation(

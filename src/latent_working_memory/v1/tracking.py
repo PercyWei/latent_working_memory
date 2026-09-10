@@ -17,15 +17,31 @@ def swanlab_run(
     mode: str = "disabled",
     project: str = "latent-working-memory",
     run_id: str | None = None,
-    job_type: str = "pretrain",
+    job_type: str = "train",
+    group: str | None = None,
+    tags: tuple[str, ...] = (),
 ) -> Iterator[swanlab.Run | None]:
     if mode == "disabled":
         yield None
         return
+    if not group:
+        raise ValueError("enabled SwanLab runs require a group")
+    fixed_tags = {"scope:main", "method:latent-working-memory", "data:fineweb"}
+    if "data_preparation" in config:
+        fixed_tags.add(f"data:{config['data_preparation']['boundary_variant']}")
+    tags = tuple(sorted(fixed_tags | set(tags)))
     identity_path = output_dir / "swanlab.json"
     if identity_path.exists():
         identity = json.loads(identity_path.read_text())
-        if identity["project"] != project or (run_id is not None and identity["id"] != run_id):
+        if any(
+            identity[k] != v
+            for k, v in {
+                "project": project,
+                "group": group,
+                "tags": list(tags),
+                "job_type": job_type,
+            }.items()
+        ) or (run_id is not None and identity["id"] != run_id):
             raise ValueError("SwanLab project/run differs from the output directory")
         run_id = identity["id"]
     rng_state = capture_rng_state()
@@ -37,6 +53,8 @@ def swanlab_run(
             mode=mode,
             public=False,
             job_type=job_type,
+            group=group,
+            tags=list(tags),
             log_dir=str(output_dir / "swanlab"),
             id=run_id,
             resume="allow" if run_id is not None else "never",
@@ -54,6 +72,9 @@ def swanlab_run(
                 {
                     "id": run.id,
                     "project": project,
+                    "group": group,
+                    "tags": list(tags),
+                    "job_type": job_type,
                     "mode": mode,
                     "url": run.url if mode == "online" else None,
                 },

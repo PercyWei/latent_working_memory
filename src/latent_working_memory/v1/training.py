@@ -202,6 +202,8 @@ def run_pretraining(
     train_example_limit: int | None = None,
     swanlab_mode: str = "disabled",
     swanlab_project: str = "latent-working-memory",
+    swanlab_group: str | None = None,
+    swanlab_tags: tuple[str, ...] = (),
 ) -> PretrainRunResult:
     if (
         max_steps <= 0
@@ -296,6 +298,8 @@ def run_pretraining(
             config.to_dict() | run_identity | {"data_preparation": metadata},
             swanlab_mode,
             swanlab_project,
+            group=swanlab_group,
+            tags=swanlab_tags,
         ) as tracking,
         log_path.open("x", encoding="utf-8") as log,
     ):

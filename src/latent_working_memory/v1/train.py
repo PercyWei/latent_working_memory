@@ -27,6 +27,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--swanlab-mode", choices=("disabled", "offline", "online"), default="disabled"
     )
     parser.add_argument("--swanlab-project", default="latent-working-memory")
+    parser.add_argument("--swanlab-group")
+    parser.add_argument("--swanlab-tag", action="append", default=[])
     return parser.parse_args(argv)
 
 
@@ -46,6 +48,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         resume=args.resume,
         swanlab_mode=args.swanlab_mode,
         swanlab_project=args.swanlab_project,
+        swanlab_group=args.swanlab_group,
+        swanlab_tags=tuple(args.swanlab_tag),
     )
     print(
         json.dumps(
