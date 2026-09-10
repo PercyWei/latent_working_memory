@@ -1,0 +1,19 @@
+{
+  "sources": {
+    "semantic": "/data/bywei/projects/latent_working_memory/data/v1/fineweb-rule-independent-409k-20260910/semantic",
+    "random": "/data/bywei/projects/latent_working_memory/data/v1/fineweb-rule-independent-409k-20260910/random"
+  },
+  "runs": {
+    "semantic": {
+      "semantic": 1
+    },
+    "random": {
+      "random": 1
+    },
+    "mixed": {
+      "semantic": 0.5,
+      "random": 0.5
+    }
+  },
+  "seed": 20260910
+}

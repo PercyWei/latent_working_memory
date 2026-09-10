@@ -185,3 +185,15 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
     assert test_metrics["split"] == "test"
     assert test_metrics["training_input_tokens"] == actual.progress["input_tokens"]
     assert "nll_gap_to_full_context" in test_metrics["comparisons"]["all/continuation"]
+
+    multi = run_pretraining(
+        config,
+        data,
+        tmp_path / "multi",
+        torch.device("cpu"),
+        max_steps=1,
+        evaluation_dirs={"first": data, "second": data.parent / "random"},
+    )
+    assert set(multi.dev_metrics) == {"first", "second"}
+    assert (tmp_path / "multi/first/dev-step-000001.json").exists()
+    assert (tmp_path / "multi/second/dev-step-000001.json").exists()

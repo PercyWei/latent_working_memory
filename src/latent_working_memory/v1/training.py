@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import time
 import uuid
@@ -27,6 +28,20 @@ from latent_working_memory.v1.model import GrowthValueNetwork, JointMemoryWriter
 from latent_working_memory.v1.objectives import ReaderOutput
 from latent_working_memory.v1.sampling import PretrainExample, PretrainSampler
 from latent_working_memory.v1.tracking import log_evaluation, log_training, swanlab_run
+
+
+def learning_rate_at(config: ExperimentConfig, step: int) -> float:
+    if config.warmup_steps and step < config.warmup_steps:
+        return config.learning_rate * (step + 1) / config.warmup_steps
+    if not config.lr_decay_steps:
+        return config.learning_rate
+    progress = min(
+        max((step - config.warmup_steps) / (config.lr_decay_steps - config.warmup_steps), 0), 1
+    )
+    return config.learning_rate * (
+        config.min_lr_fraction
+        + (1 - config.min_lr_fraction) * (1 + math.cos(math.pi * progress)) / 2
+    )
 
 
 def precision_context(device: torch.device):
@@ -204,6 +219,7 @@ def run_pretraining(
     swanlab_project: str = "latent-working-memory",
     swanlab_group: str | None = None,
     swanlab_tags: tuple[str, ...] = (),
+    evaluation_dirs: dict[str, Path] | None = None,
 ) -> PretrainRunResult:
     if (
         max_steps <= 0
@@ -216,16 +232,29 @@ def run_pretraining(
     metadata = json.loads((data_dir / "preparation.json").read_text())
     if metadata["contract"] != data_contract(config):
         raise ValueError("data preparation contract differs from the training config")
-    train_index, dev_index = (
-        EpisodeIndex(data_dir / "train.jsonl"),
-        EpisodeIndex(data_dir / "dev.jsonl"),
-    )
-    if (
-        train_index.source_ids & dev_index.source_ids
-        or train_index.cluster_ids & dev_index.cluster_ids
-        or train_index.groups.keys() & dev_index.groups.keys()
-    ):
-        raise ValueError("train/dev source leakage")
+    train_index = EpisodeIndex(data_dir / "train.jsonl")
+    evaluation_dirs = evaluation_dirs or {"dev": data_dir}
+    dev_indices = {}
+    evaluation_ids = {}
+    for name, directory in evaluation_dirs.items():
+        if not name or Path(name).name != name or name in {".", ".."}:
+            raise ValueError("evaluation names must be simple directory names")
+        evaluation_metadata = json.loads((directory / "preparation.json").read_text())
+        if evaluation_metadata["contract"] != data_contract(config):
+            raise ValueError("evaluation contract differs from training config")
+        evaluation_ids[name] = evaluation_metadata["preparation_id"]
+        dev_indices[name] = EpisodeIndex(directory / "dev.jsonl")
+        for split in ("dev", "test"):
+            path = directory / f"{split}.jsonl"
+            if split == "test" and not path.exists():
+                continue
+            index = dev_indices[name] if split == "dev" else EpisodeIndex(path)
+            if (
+                train_index.source_ids & index.source_ids
+                or train_index.cluster_ids & index.cluster_ids
+                or train_index.groups.keys() & index.groups.keys()
+            ):
+                raise ValueError("train/evaluation source leakage")
     random.seed(config.model_seed)
     torch.manual_seed(config.model_seed)
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
@@ -245,6 +274,7 @@ def run_pretraining(
     run_identity = {
         "preparation_id": metadata["preparation_id"],
         "train_example_limit": train_example_limit,
+        "evaluation_preparations": evaluation_ids,
     }
     next_step, input_tokens, target_tokens = 0, 0, 0
     seen_documents: set[str] = set()
@@ -303,12 +333,27 @@ def run_pretraining(
         ) as tracking,
         log_path.open("x", encoding="utf-8") as log,
     ):
-        if next_step == 0:
-            with precision_context(device):
-                initial_metrics = evaluate_pretraining(
-                    config, tokenizer, backbone, writer, dev_index, output_dir, 0, input_tokens
+
+        def evaluate_sets(step):
+            results = {}
+            for name, index in dev_indices.items():
+                destination = output_dir if name == "dev" else output_dir / name
+                with precision_context(device):
+                    metrics = evaluate_pretraining(
+                        config, tokenizer, backbone, writer, index, destination, step, input_tokens
+                    )
+                log_evaluation(
+                    tracking,
+                    metrics,
+                    destination / f"dev-step-{step:06d}.jsonl",
+                    step,
+                    "dev" if name == "dev" else f"dev/{name}",
                 )
-            log_evaluation(tracking, initial_metrics, output_dir / "dev-step-000000.jsonl", 0)
+                results[name] = metrics
+            return results["dev"] if list(results) == ["dev"] else results
+
+        if next_step == 0:
+            evaluate_sets(0)
         for step in range(next_step, max_steps):
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
@@ -317,7 +362,11 @@ def run_pretraining(
                 sampler.sample(step)
                 for _ in range(config.batch_size * config.gradient_accumulation_steps)
             ]
+            for group in trainer.optimizer.param_groups:
+                group["lr"] = learning_rate_at(config, step)
             result = trainer.step(examples)
+            result["learning_rate"] = learning_rate_at(config, step)
+            result["length_sampling_weights"] = sampler.length_weights(step)
             input_tokens += result["input_tokens"]
             target_tokens += result["target_tokens"]
             seen_documents.update(e.episode.sources[0].document_id for e in examples)
@@ -357,20 +406,7 @@ def run_pretraining(
                     capture_rng_state(),
                 )
             if (step + 1) % config.eval_every == 0 or step + 1 == max_steps:
-                with precision_context(device):
-                    dev_metrics = evaluate_pretraining(
-                        config,
-                        tokenizer,
-                        backbone,
-                        writer,
-                        dev_index,
-                        output_dir,
-                        step + 1,
-                        input_tokens,
-                    )
-                log_evaluation(
-                    tracking, dev_metrics, output_dir / f"dev-step-{step + 1:06d}.jsonl", step + 1
-                )
+                dev_metrics = evaluate_sets(step + 1)
     (output_dir / f"resources-from-{segment_id}.json").write_text(
         json.dumps(
             {

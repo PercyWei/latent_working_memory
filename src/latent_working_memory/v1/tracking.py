@@ -28,7 +28,11 @@ def swanlab_run(
         raise ValueError("enabled SwanLab runs require a group")
     fixed_tags = {"scope:main", "method:latent-working-memory", "data:fineweb"}
     if "data_preparation" in config:
-        fixed_tags.add(f"data:{config['data_preparation']['boundary_variant']}")
+        metadata = config["data_preparation"]
+        if "source_weights" in metadata:
+            fixed_tags.update(f"data:{name}" for name in metadata["source_weights"])
+        else:
+            fixed_tags.add(f"data:{metadata['boundary_variant']}")
     tags = tuple(sorted(fixed_tags | set(tags)))
     identity_path = output_dir / "swanlab.json"
     if identity_path.exists():
@@ -105,6 +109,14 @@ def log_training(
         "progress/distinct_documents": record["distinct_documents"],
         "progress/document_visits": record["document_visits"],
     }
+    if "learning_rate" in record:
+        metrics["train/learning_rate"] = record["learning_rate"]
+        metrics.update(
+            {
+                f"sampling/length_up_to_{bound}": weight
+                for bound, weight in record["length_sampling_weights"].items()
+            }
+        )
     ae_samples = [s for s in samples if s["ae_nll"] is not None]
     metrics["batch/ae_fraction"] = len(ae_samples) / len(samples)
     if ae_samples:

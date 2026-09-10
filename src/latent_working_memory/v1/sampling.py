@@ -76,7 +76,7 @@ def capacity_weights(
 
 
 class PretrainSampler:
-    """Choose length pool, cycle through documents, then choose view/capacity."""
+    """Choose a length pool, cycle through its samples, then choose capacity."""
 
     def __init__(
         self,
@@ -103,7 +103,7 @@ class PretrainSampler:
         self.documents = sorted(self.groups)
         self.pools = {}
         if config.input_length_weights is None:
-            self.pools["all"] = self.groups
+            self.pools["all"] = [i for indices in self.groups.values() for i in indices]
             self.pool_weights = {"all": 1.0}
         else:
             self.pool_weights = {}
@@ -116,32 +116,53 @@ class PretrainSampler:
                     selected = [i for i in indices if lower < index.input_lengths[i] <= upper]
                     if selected:
                         pool[document] = selected
-                if weight > 0 and lower < config.max_input_tokens:
+                end_weight = (
+                    config.input_length_weights_end[config.input_length_bounds.index(upper)]
+                    if config.input_length_weights_end is not None
+                    else weight
+                )
+                if max(weight, end_weight) > 0 and lower < config.max_input_tokens:
                     if not pool:
                         raise ValueError(
                             f"positive length weight has no views in ({lower}, {upper}]"
                         )
-                    self.pools[str(upper)] = pool
+                    self.pools[str(upper)] = [i for indices in pool.values() for i in indices]
                     self.pool_weights[str(upper)] = weight
                 lower = upper
         if not self.pools:
             raise ValueError("no input lengths have a positive sampling weight")
-        self.orders = {key: sorted(pool) for key, pool in self.pools.items()}
+        self.orders = {key: list(pool) for key, pool in self.pools.items()}
         for order in self.orders.values():
             self.rng.shuffle(order)
         self.cursors = dict.fromkeys(self.orders, 0)
         self.visits = 0
 
+    def length_weights(self, step: int) -> dict[str, float]:
+        if self.config.input_length_weights_end is None:
+            return self.pool_weights.copy()
+        progress = min(max(step / self.config.input_length_curriculum_steps, 0), 1)
+        return {
+            str(bound): early * (1 - progress) + late * progress
+            for bound, early, late in zip(
+                self.config.input_length_bounds,
+                self.config.input_length_weights,
+                self.config.input_length_weights_end,
+                strict=True,
+            )
+            if str(bound) in self.pools
+        }
+
     def sample(self, step: int) -> PretrainExample:
-        key = self.rng.choices(list(self.pools), list(self.pool_weights.values()))[0]
+        weights = self.length_weights(step)
+        key = self.rng.choices(list(weights), list(weights.values()))[0]
         order = self.orders[key]
         if self.cursors[key] == len(order):
             self.rng.shuffle(order)
             self.cursors[key] = 0
-        document = order[self.cursors[key]]
+        index = order[self.cursors[key]]
         self.cursors[key] += 1
         self.visits += 1
-        episode = self.index[self.rng.choice(self.pools[key][document])]
+        episode = self.index[index]
         ae, lm = read_tokens(episode, self.tokenizer)
         candidates = capacity_weights(self.config, len(episode.input_ids), ae, lm, step)
         if not candidates or sum(candidates.values()) <= 0:
@@ -165,7 +186,7 @@ class PretrainSampler:
             raise ValueError("sampler checkpoint length pools differ from the training data")
         for key, order in state["orders"].items():
             if sorted(order) != sorted(self.pools[key]):
-                raise ValueError("sampler checkpoint documents differ from the training data")
+                raise ValueError("sampler checkpoint samples differ from the training data")
             if not 0 <= state["cursors"][key] <= len(order):
                 raise ValueError("invalid sampler cursor")
         self.orders = {key: order.copy() for key, order in state["orders"].items()}

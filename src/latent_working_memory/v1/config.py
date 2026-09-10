@@ -31,6 +31,8 @@ class ExperimentConfig:
     split_fractions: tuple[float, ...] = (0.90, 0.05, 0.05)
     input_length_bounds: tuple[int, ...] = (32, 128, 512, 1024)
     input_length_weights: tuple[float, ...] | None = None
+    input_length_weights_end: tuple[float, ...] | None = None
+    input_length_curriculum_steps: int = 0
     pretrain_compression_ratios: tuple[int, ...] = (2, 4, 8)
     pretrain_k_min: int = 1
     ratio_weights_start: tuple[float, ...] = (0.45, 0.45, 0.10)
@@ -47,6 +49,9 @@ class ExperimentConfig:
     batch_size: int = 2
     gradient_accumulation_steps: int = 4
     learning_rate: float = 0.0001
+    warmup_steps: int = 0
+    lr_decay_steps: int = 0
+    min_lr_fraction: float = 0.1
     weight_decay: float = 0.01
     gradient_clip: float = 1.0
     gradient_checkpointing: bool = True
@@ -58,7 +63,14 @@ class ExperimentConfig:
     eval_generation_every: int = 1000
 
     def __post_init__(self) -> None:
-        non_negative_ints = {"data_seed", "model_seed", "eval_generation_examples"}
+        non_negative_ints = {
+            "data_seed",
+            "model_seed",
+            "eval_generation_examples",
+            "input_length_curriculum_steps",
+            "warmup_steps",
+            "lr_decay_steps",
+        }
         for field in fields(self):
             value = getattr(self, field.name)
             if field.type == "int":
@@ -130,6 +142,22 @@ class ExperimentConfig:
                 or not math.isclose(sum(weights), 1.0, abs_tol=1e-8)
             ):
                 raise ValueError("input_length_weights must sum to 1 and cover the input budget")
+        if self.input_length_weights_end is not None:
+            weights = self.input_length_weights_end
+            if (
+                self.input_length_weights is None
+                or self.input_length_curriculum_steps <= 0
+                or len(weights) != len(bounds)
+                or any(not math.isfinite(w) or w < 0 for w in weights)
+                or not math.isclose(sum(weights), 1)
+            ):
+                raise ValueError(
+                    "length curriculum requires valid start/end weights and positive steps"
+                )
+        if not 0 <= self.min_lr_fraction <= 1 or (
+            self.lr_decay_steps and self.lr_decay_steps <= self.warmup_steps
+        ):
+            raise ValueError("invalid learning rate schedule")
         for name in (
             "reader_lora_dropout",
             "weight_decay",

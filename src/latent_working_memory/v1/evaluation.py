@@ -136,7 +136,12 @@ def evaluate_pretraining(
 ) -> dict[str, Any]:
     if split not in {"dev", "test"}:
         raise ValueError("evaluation split must be dev or test")
-    panel = [index[i] for i in index.evaluation_panel(config.eval_examples, config.data_seed + 1)]
+    panel = [
+        index[i]
+        for i in index.evaluation_panel(
+            config.eval_examples, config.data_seed + 1, config.input_length_bounds
+        )
+    ]
     if len({e.sources[0].source_id for e in panel}) < 2:
         raise ValueError(
             "evaluation needs at least two independent sources for wrong-memory controls"

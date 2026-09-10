@@ -227,12 +227,14 @@ class EpisodeIndex:
             queues = [q for q in queues if q]
         return result
 
-    def evaluation_panel(self, limit: int, seed: int) -> list[int]:
+    def evaluation_panel(
+        self, limit: int, seed: int, length_bounds: tuple[int, ...] = (32, 128, 512)
+    ) -> list[int]:
         rng = random.Random(seed)
         cells = defaultdict(list)
         for document, indices in self.groups.items():
             for i in indices:
-                bucket = sum(self.input_lengths[i] > upper for upper in (32, 128, 512))
+                bucket = sum(self.input_lengths[i] > upper for upper in length_bounds)
                 cells[(self.tasks[i], bucket)].append((document, i))
         for values in cells.values():
             rng.shuffle(values)

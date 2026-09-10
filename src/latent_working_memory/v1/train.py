@@ -17,6 +17,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--phase", choices=("pretrain",), required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--data-dir", type=Path, required=True)
+    parser.add_argument(
+        "--evaluation-dirs",
+        type=Path,
+        help="JSON mapping of names to prepared evaluation directories",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--max-steps", type=int, default=2000)
@@ -50,6 +55,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         swanlab_project=args.swanlab_project,
         swanlab_group=args.swanlab_group,
         swanlab_tags=tuple(args.swanlab_tag),
+        evaluation_dirs={
+            k: Path(v) for k, v in json.loads(args.evaluation_dirs.read_text()).items()
+        }
+        if args.evaluation_dirs
+        else None,
     )
     print(
         json.dumps(
