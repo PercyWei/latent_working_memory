@@ -22,13 +22,12 @@ from latent_working_memory.v1.data import EpisodeIndex, read_episodes
 from latent_working_memory.v1.sampling import PretrainSampler
 
 
-def test_independent_variants_balance_post_review_tasks_and_intervals(
+def test_independent_variants_balance_tasks_and_intervals(
     tmp_path,
     tiny_config,
     tokenizer,
     preparation_records,
     preparation_recipe,
-    accepting_scorer,
 ):
     result = prepare_fineweb(
         preparation_records,
@@ -36,7 +35,6 @@ def test_independent_variants_balance_post_review_tasks_and_intervals(
         tiny_config,
         tmp_path / "data",
         preparation_recipe,
-        accepting_scorer,
     )
     root = tmp_path / "data"
     assert result["semantic"]["source_pool_id"] == result["random"]["source_pool_id"]
@@ -83,46 +81,6 @@ def test_independent_variants_balance_post_review_tasks_and_intervals(
         assert [resumed.sample(i) for i in range(10)] == expected
 
 
-@pytest.mark.parametrize("decision", ["reject", "error"])
-def test_rejections_refill_quotas_independently(
-    tmp_path,
-    tiny_config,
-    tokenizer,
-    preparation_records,
-    preparation_recipe,
-    accepting_scorer,
-    decision,
-):
-    original = accepting_scorer.score_batch
-    visits = Counter()
-
-    def reject_some(samples):
-        results = original(samples)
-        for sample, result in zip(samples, results, strict=True):
-            variant, task = sample["boundary_variant"], sample["task"]
-            visits[(variant, task)] += 1
-            if visits[(variant, task)] <= 3:
-                result.update(decision=decision, reason="Test rejection before quota accounting")
-        return results
-
-    accepting_scorer.score_batch = reject_some
-    result = prepare_fineweb(
-        preparation_records,
-        tokenizer,
-        tiny_config,
-        tmp_path / "data",
-        preparation_recipe,
-        accepting_scorer,
-    )
-    for variant in result:
-        assert result[variant]["statistics"][f"review/{decision}"] > 0
-        assert result[variant]["statistics"]["train/ae"] == preparation_recipe.samples_per_task[0]
-        assert (
-            result[variant]["statistics"]["train/continuation"]
-            == preparation_recipe.samples_per_task[0]
-        )
-
-
 def test_source_pool_budget_and_near_duplicates_are_shared(
     tmp_path,
     tiny_config,
@@ -153,25 +111,23 @@ def test_source_pool_budget_and_near_duplicates_are_shared(
 
 
 def test_failed_random_stage_preserves_completed_semantic(
+    monkeypatch,
     tmp_path,
     tiny_config,
     tokenizer,
     preparation_records,
     preparation_recipe,
-    accepting_scorer,
 ):
     root = tmp_path / "data"
     prepare_sources(preparation_records, tiny_config, root, preparation_recipe)
-    prepare_variant(root, "semantic", tokenizer, tiny_config, preparation_recipe, accepting_scorer)
+    prepare_variant(root, "semantic", tokenizer, tiny_config, preparation_recipe)
     before = (root / "semantic/preparation.json").read_bytes()
-    accepting_scorer.score_batch = lambda samples: [
-        {"decision": "uncertain", "reason": "Test uncertainty", "cache_key": "fixture"}
-        for _ in samples
-    ]
+    monkeypatch.setattr(
+        "latent_working_memory.data_preparation.pipeline.RandomSpans.available",
+        lambda *args: False,
+    )
     with pytest.raises(ValueError, match="sample quotas not reached"):
-        prepare_variant(
-            root, "random", tokenizer, tiny_config, preparation_recipe, accepting_scorer
-        )
+        prepare_variant(root, "random", tokenizer, tiny_config, preparation_recipe)
     assert (root / "semantic/preparation.json").read_bytes() == before
     assert not (root / "random/preparation.json").exists()
     assert not (root / "comparison.json").exists()
@@ -183,12 +139,9 @@ def test_shared_registry_detects_cross_variant_split_leakage(
     tokenizer,
     preparation_records,
     preparation_recipe,
-    accepting_scorer,
 ):
     root = tmp_path / "data"
-    prepare_fineweb(
-        preparation_records, tokenizer, tiny_config, root, preparation_recipe, accepting_scorer
-    )
+    prepare_fineweb(preparation_records, tokenizer, tiny_config, root, preparation_recipe)
     path = root / "random/train.jsonl"
     lines = path.read_text().splitlines()
     with (root / "random/test.jsonl").open("a") as out:
@@ -206,12 +159,9 @@ def test_source_text_audit_detects_offset_corruption(
     tokenizer,
     preparation_records,
     preparation_recipe,
-    accepting_scorer,
 ):
     root = tmp_path / "data"
-    prepare_fineweb(
-        preparation_records, tokenizer, tiny_config, root, preparation_recipe, accepting_scorer
-    )
+    prepare_fineweb(preparation_records, tokenizer, tiny_config, root, preparation_recipe)
     path = root / "random/train.jsonl"
     lines = path.read_text().splitlines()
     first = json.loads(lines[0])
@@ -223,7 +173,7 @@ def test_source_text_audit_detects_offset_corruption(
         audit_preparation(root / "random", tokenizer, tiny_config, preparation_recipe, root)
 
 
-def test_only_explicit_properties_filter_before_model(
+def test_only_explicit_properties_filter_sources(
     tiny_config, tokenizer, preparation_records, semantic_examples
 ):
     record = dict(preparation_records[0], text="Read more. Privacy policy. Sign up for updates.")
@@ -238,13 +188,10 @@ def test_independent_inspection_is_repeatable_and_does_not_mutate_data(
     tokenizer,
     preparation_records,
     preparation_recipe,
-    accepting_scorer,
 ):
     root = tmp_path / "data"
-    prepare_fineweb(
-        preparation_records, tokenizer, tiny_config, root, preparation_recipe, accepting_scorer
-    )
-    for variant in ("semantic", "random"):
+    prepare_fineweb(preparation_records, tokenizer, tiny_config, root, preparation_recipe)
+    for variant in ("semantic",):
         leaf = root / variant
         before = {p.name: p.read_bytes() for p in leaf.iterdir()}
         first, second = tmp_path / f"{variant}-inspect1", tmp_path / f"{variant}-inspect2"
@@ -276,12 +223,11 @@ def test_failed_cross_variant_comparison_has_no_random_completion_record(
     tokenizer,
     preparation_records,
     preparation_recipe,
-    accepting_scorer,
     monkeypatch,
 ):
     root = tmp_path / "data"
     prepare_sources(preparation_records, tiny_config, root, preparation_recipe)
-    prepare_variant(root, "semantic", tokenizer, tiny_config, preparation_recipe, accepting_scorer)
+    prepare_variant(root, "semantic", tokenizer, tiny_config, preparation_recipe)
 
     def failed_comparison(*args):
         raise ValueError("test comparison failure")
@@ -290,9 +236,7 @@ def test_failed_cross_variant_comparison_has_no_random_completion_record(
         "latent_working_memory.data_preparation.pipeline.compare_preparations", failed_comparison
     )
     with pytest.raises(ValueError, match="test comparison failure"):
-        prepare_variant(
-            root, "random", tokenizer, tiny_config, preparation_recipe, accepting_scorer
-        )
+        prepare_variant(root, "random", tokenizer, tiny_config, preparation_recipe)
     assert (root / "semantic/preparation.json").exists()
     assert not (root / "random/preparation.json").exists()
 
@@ -303,7 +247,6 @@ def test_existing_source_pool_rejects_a_changed_split_definition(
     tokenizer,
     preparation_records,
     preparation_recipe,
-    accepting_scorer,
 ):
     root = tmp_path / "data"
     prepare_sources(preparation_records, tiny_config, root, preparation_recipe)
@@ -314,6 +257,5 @@ def test_existing_source_pool_rejects_a_changed_split_definition(
             tokenizer,
             replace(tiny_config, data_seed=2),
             preparation_recipe,
-            accepting_scorer,
         )
     assert not (root / "semantic").exists()

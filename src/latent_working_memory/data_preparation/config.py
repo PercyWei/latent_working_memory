@@ -6,7 +6,6 @@ from dataclasses import asdict, dataclass, fields
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,12 +21,7 @@ class PreparationConfig:
     lm_prefix_fraction: tuple[float, float] = (0.3, 0.7)
     length_bounds: tuple[int, ...] = (64, 128, 256, 512, 1024, 2048, 4096)
     candidates_per_document: int = 64
-    review_base_url: str = "http://127.0.0.1:8000/v1"
-    review_model: str = "Qwen/Qwen3.8-27B"
-    review_max_new_tokens: int = 256
     candidate_window_documents: int = 4
-    scoring_batch_size: int = 8
-    review_timeout_seconds: int = 120
 
     def __post_init__(self) -> None:
         for name in (
@@ -38,10 +32,7 @@ class PreparationConfig:
             "min_sample_tokens",
             "max_sample_tokens",
             "candidates_per_document",
-            "review_max_new_tokens",
-            "scoring_batch_size",
             "candidate_window_documents",
-            "review_timeout_seconds",
         ):
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be a positive integer")
@@ -70,11 +61,6 @@ class PreparationConfig:
         value = self.near_duplicate_threshold
         if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value <= 1:
             raise ValueError("near_duplicate_threshold must lie in (0, 1]")
-        if not isinstance(self.review_model, str) or not self.review_model.strip():
-            raise ValueError("review_model must be a non-empty served model name")
-        url = urlsplit(self.review_base_url)
-        if url.scheme not in {"http", "https"} or not url.netloc or url.query or url.fragment:
-            raise ValueError("review_base_url must be an HTTP(S) API base URL")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

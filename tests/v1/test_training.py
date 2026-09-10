@@ -20,7 +20,6 @@ def test_joint_objective_uses_one_write_and_updates_all_four_modules(
     tokenizer,
     preparation_records,
     preparation_recipe,
-    accepting_scorer,
     components,
     monkeypatch,
 ):
@@ -31,7 +30,6 @@ def test_joint_objective_uses_one_write_and_updates_all_four_modules(
         tiny_config,
         data,
         preparation_recipe,
-        accepting_scorer,
     )
     data = data / "semantic"
     sampler = PretrainSampler(EpisodeIndex(data / "train.jsonl"), tokenizer, tiny_config)
@@ -82,7 +80,6 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
     tokenizer,
     preparation_records,
     preparation_recipe,
-    accepting_scorer,
 ):
     model_dir = tmp_path / "tiny-llama"
     torch.manual_seed(3)
@@ -119,7 +116,6 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
         config,
         data,
         preparation_recipe,
-        accepting_scorer,
     )
     data = data / "semantic"
     full = run_pretraining(

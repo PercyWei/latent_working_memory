@@ -3,13 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import math
+from statistics import NormalDist
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Sequence
 
 from latent_working_memory.v1.data import Episode
-from latent_working_memory.data_preparation.config import PreparationConfig
-from latent_working_memory.data_preparation.scoring import SampleScorer
 
 
 def sample_inspection(
@@ -19,7 +19,7 @@ def sample_inspection(
     examples: int = 200,
     seed: int = 20260909,
 ) -> dict[str, Any]:
-    """Sample completed data into a separate, editable quality inspection directory."""
+    """Sample completed data into a separate, editable sentence-boundary inspection directory."""
     if split not in {"train", "dev", "test"} or examples <= 0:
         raise ValueError("use a valid split and a positive inspection sample count")
     if output_dir.resolve().is_relative_to(data_dir.resolve()):
@@ -27,6 +27,8 @@ def sample_inspection(
     if output_dir.exists():
         raise FileExistsError("use a new inspection directory")
     metadata = json.loads((data_dir / "preparation.json").read_text())
+    if metadata["boundary_variant"] != "semantic":
+        raise ValueError("sentence-boundary inspection requires semantic data")
     bounds = metadata["length_bounds"]
     originals = {
         row["record"]["id"]: row["record"]["text"]
@@ -40,6 +42,10 @@ def sample_inspection(
             provenance = source.provenance
             size = len(episode.input_ids)
             bucket = next((b for b in bounds if size <= b), size)
+            text = originals[source.document_id]
+            cuts = {"x_start": provenance["x_char_span"][0], "x_end": provenance["x_char_span"][1]}
+            if provenance["y_char_span"] is not None:
+                cuts["y_end"] = provenance["y_char_span"][1]
             row = {
                 "episode_id": episode.episode_id,
                 "document_id": source.document_id,
@@ -58,7 +64,15 @@ def sample_inspection(
                 "judgment": None,
                 "review_reason": None,
                 "reviewer": None,
-                "review_cache_key": None,
+                "boundaries": {
+                    name: {
+                        "offset": offset,
+                        "left": text[max(0, offset - 400) : offset],
+                        "right": text[offset : offset + 400],
+                        "at_document_edge": offset in (0, len(text)),
+                    }
+                    for name, offset in cuts.items()
+                },
             }
             rows.append(row)
             cells[(row["task"], row["granularity"], bucket)].append(row)
@@ -94,9 +108,10 @@ def sample_inspection(
         "population_views": len(rows),
         "random_views": len(random_panel),
         "stratified_views": len(stratified_panel),
-        "random_protocol": "uniform views without replacement; estimates prepared-view quality",
+        "random_protocol": "uniform views without replacement; estimates complete-sample boundary correctness",
         "stratified_protocol": "rotate task/granularity/length cells; distinct documents; diagnostic",
-        "judgment_protocol": "pass: usable original X and available Y; fail: clear defect; uncertain: unresolved",
+        "judgment_protocol": "pass: all external cuts are sentence boundaries; fail: any cut inside a sentence; uncertain: unresolved. Content quality and context dependence are not defects.",
+        "acceptance_threshold": 0.98,
     }
     output_dir.mkdir(parents=True)
     for name, panel in (("random-views", random_panel), ("stratified-views", stratified_panel)):
@@ -109,7 +124,7 @@ def sample_inspection(
     return report
 
 
-def judgment_statistics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def judgment_statistics(rows: list[dict[str, Any]], threshold: float = 0.98) -> dict[str, Any]:
     counts = Counter()
     for row in rows:
         judgment = row["judgment"]
@@ -122,7 +137,23 @@ def judgment_statistics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         counts[judgment or "unreviewed"] += 1
     total = len(rows)
     unresolved = counts["uncertain"] + counts["unreviewed"]
+    rate = counts["pass"] / total if total and not unresolved else None
+    z = NormalDist().inv_cdf(0.95)
+    lower = (
+        (
+            rate
+            + z * z / (2 * total)
+            - z * math.sqrt(rate * (1 - rate) / total + z * z / (4 * total * total))
+        )
+        / (1 + z * z / total)
+        if rate is not None
+        else None
+    )
     return {
+        "success_rate": rate,
+        "wilson_one_sided_95_lower": lower,
+        "above_threshold": rate > threshold if rate is not None else None,
+        "lower_bound_above_threshold": lower > threshold if lower is not None else None,
         "samples": total,
         "pass": counts["pass"],
         "fail": counts["fail"],
@@ -145,8 +176,9 @@ def summarize_inspection(directory: Path) -> dict[str, Any]:
         "preparation_id": metadata["preparation_id"],
         "split": metadata["split"],
         "population_views": metadata["population_views"],
-        "rate_scope": "random panel estimates uniform prepared-view defect rate; stratified panel is diagnostic",
-        "bounds_scope": "sample fractions with unresolved judgments; not confidence intervals",
+        "rate_scope": "random panel estimates uniform prepared-sample boundary defect rate; stratified panel is diagnostic",
+        "bounds_scope": "failure fraction bounds include unresolved judgments; Wilson lower bound is approximate and does not account for shared-document dependence",
+        "acceptance_threshold": metadata["acceptance_threshold"],
         "panels": {},
     }
     for name, count_key in (
@@ -169,60 +201,14 @@ def summarize_inspection(directory: Path) -> dict[str, Any]:
     return report
 
 
-def judge_inspection(directory: Path, scorer: SampleScorer) -> dict[str, Any]:
-    if scorer.protocol["purpose"] != "inspection":
-        raise ValueError("independent inspection requires the inspection scoring purpose")
-    metadata_path = directory / "inspection.json"
-    metadata = json.loads(metadata_path.read_text())
-    if "scoring_protocol" in metadata and metadata["scoring_protocol"] != scorer.protocol:
-        raise ValueError("use a new inspection directory when changing the scoring protocol")
-    metadata["scoring_protocol"] = scorer.protocol
-    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
-    for name, count in (("random-views", "random_views"), ("stratified-views", "stratified_views")):
-        path = directory / f"{name}.jsonl"
-        rows = [json.loads(line) for line in path.read_text().splitlines()]
-        if len(rows) != metadata[count] or len({r["episode_id"] for r in rows}) != len(rows):
-            raise ValueError("inspection panel was truncated or contains duplicate views")
-        pending = [row for row in rows if row["judgment"] is None]
-        for offset in range(0, len(pending), scorer.config.scoring_batch_size):
-            batch = pending[offset : offset + scorer.config.scoring_batch_size]
-            reviews = scorer.score_batch(
-                [
-                    {
-                        "boundary_variant": row["boundary_variant"],
-                        "task": row["task"],
-                        "X": row["input"],
-                        "Y": row["continuation"],
-                    }
-                    for row in batch
-                ]
-            )
-            for row, review in zip(batch, reviews, strict=True):
-                row.update(
-                    judgment={
-                        "keep": "pass",
-                        "reject": "fail",
-                        "uncertain": "uncertain",
-                        "error": None,
-                    }[review["decision"]],
-                    reviewer=scorer.protocol["model"],
-                    review_reason=review["reason"],
-                    review_cache_key=review["cache_key"],
-                )
-            temporary = path.with_suffix(".jsonl.tmp")
-            temporary.write_text(
-                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
-            )
-            temporary.replace(path)
-    return summarize_inspection(directory)
-
-
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description="Inspect a completed pretraining dataset separately"
     )
     commands = parser.add_subparsers(dest="command", required=True)
-    sample = commands.add_parser("sample", help="create independent quality inspection panels")
+    sample = commands.add_parser(
+        "sample", help="create independent sentence-boundary inspection panels"
+    )
     sample.add_argument("--data-dir", type=Path, required=True)
     sample.add_argument("--output-dir", type=Path, required=True)
     sample.add_argument("--split", choices=("train", "dev", "test"), default="train")
@@ -230,20 +216,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     sample.add_argument("--seed", type=int, default=20260909)
     summarize = commands.add_parser("summarize", help="summarize judgments entered in the panels")
     summarize.add_argument("--inspection-dir", type=Path, required=True)
-    judge = commands.add_parser(
-        "judge", help="review unjudged inspection samples through the model"
-    )
-    judge.add_argument("--inspection-dir", type=Path, required=True)
-    judge.add_argument("--recipe", type=Path, required=True)
-    judge.add_argument("--score-cache", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "sample":
         report = sample_inspection(
             args.data_dir, args.output_dir, args.split, args.examples, args.seed
         )
-    elif args.command == "judge":
-        scorer = SampleScorer(PreparationConfig.load(args.recipe), args.score_cache, "inspection")
-        report = judge_inspection(args.inspection_dir, scorer)
     else:
         report = summarize_inspection(args.inspection_dir)
     print(json.dumps(report, ensure_ascii=False, indent=2))

@@ -17,7 +17,7 @@ uv run pytest
 
 当前已实现 FineWeb 完整句界／随机截断双版本数据与多容量 AE/LM 预训练链路：空记忆首次分配、完整自然单元前向、变长 batch 与 mask、独立 AE/LM 样本的重建和续写、按长度与文档采样、容量课程、checkpoint/resume，以及独立文档的多容量 memory/no-memory/wrong-memory 评估。语言模型基座冻结，联合训练写入投影、记忆更新器、读取投影与读取 LoRA。
 
-v1 测试覆盖损失与梯度、原文边界、模型评分接口、任务配额与长度区间、来源隔离、独立抽查、分层评估、自由生成、原文对照的因果位置、BLEU 聚合、精确恢复和 SwanLab 记录。FineWeb `sample-10BT` 已下载到服务器；512 篇真实文档的多粒度准备、Llama-2-7B-Chat 单卡训练、保存恢复和多容量评估已跑通。后续实现顺序见 [框架设计与后续阶段](notes/20260907_growing_latent_working_memory_framework_v1.md)。
+v1 测试覆盖损失与梯度、原文边界、规则句界、任务配额与长度区间、来源隔离、独立抽查、分层评估、自由生成、原文对照的因果位置、BLEU 聚合、精确恢复和 SwanLab 记录。FineWeb `sample-10BT` 已下载到服务器；512 篇真实文档的多粒度准备、Llama-2-7B-Chat 单卡训练、保存恢复和多容量评估已跑通。后续实现顺序见 [框架设计与后续阶段](notes/20260907_growing_latent_working_memory_framework_v1.md)。
 
 固定 16 样本的 100 步试验完成训练集拟合验证；独立文档表现呈现过拟合，该 checkpoint 用于工程验证，扩大数据试验从统一初始化开始验证泛化收益。
 

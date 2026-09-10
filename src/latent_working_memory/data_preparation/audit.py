@@ -12,6 +12,7 @@ from transformers import PreTrainedTokenizerBase
 from latent_working_memory.v1.config import ExperimentConfig
 from latent_working_memory.v1.data import Episode
 from latent_working_memory.data_preparation.config import PreparationConfig
+from latent_working_memory.data_preparation.segmentation import sentence_spans
 
 
 def length_statistics(values: list[int]) -> dict[str, Any]:
@@ -54,6 +55,11 @@ def audit_preparation(
             if any(row[k] != registered[k] for k in ("record", "split", "cluster")):
                 raise ValueError("document differs from the shared source registry")
             originals[document_id] = row
+    boundaries = {}
+    if directory.name == "semantic":
+        for key, original in originals.items():
+            spans = sentence_spans(original["record"]["text"])
+            boundaries[key] = ({s.start for s in spans}, {s.end for s in spans})
     seen_ids, cluster_splits, source_splits = set(), {}, {}
     lengths, counts = defaultdict(list), Counter()
     composition = defaultdict(lambda: defaultdict(Counter))
@@ -99,8 +105,6 @@ def audit_preparation(
                 key = hashlib.blake2b(" ".join(text[start:end].split()).encode()).hexdigest()
                 if provenance["input_text_key"] != key:
                     raise ValueError("input text key differs from original text")
-                if provenance["quality_review"]["decision"] != "keep":
-                    raise ValueError("retained sample lacks a keep quality decision")
                 final_end = end
                 if task == "continuation":
                     y_start, final_end = provenance["y_char_span"]
@@ -111,6 +115,12 @@ def audit_preparation(
                     lengths[f"{split}/continuation/target"].append(target_length)
                 elif provenance["y_char_span"] is not None:
                     raise ValueError("AE views must have no continuation span")
+                if directory.name == "semantic":
+                    starts, ends = boundaries[source.document_id]
+                    if start not in starts or end not in ends or final_end not in ends:
+                        raise ValueError(
+                            "semantic endpoints differ from the construction boundary rules"
+                        )
                 if provenance["parent_char_span"] != [start, final_end]:
                     raise ValueError("AE/LM text must equal its parent sample span")
                 for key, mapping in (
@@ -148,7 +158,7 @@ def audit_preparation(
             "shared_source_assignments": True,
             "source_and_cluster_split_isolation": True,
             "sample_lengths_and_lm_fraction": True,
-            "model_keep_decisions": True,
+            **({"semantic_rule_endpoints": True} if directory.name == "semantic" else {}),
         },
         "statistics": dict(counts),
         "composition": {
@@ -235,5 +245,5 @@ def compare_preparations(
         },
         "length_bounds": semantic["length_bounds"],
         "groups": groups,
-        "protocol": "independent sources and samples; compare post-review split/task/input-length intervals",
+        "protocol": "independent sources and samples; compare split/task/input-length intervals",
     }

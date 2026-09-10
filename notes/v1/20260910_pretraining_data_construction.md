@@ -1,7 +1,7 @@
-# 20260910_预训练数据构建策略与实现（16:40:58 UTC+08:00）
+# 20260910_预训练数据构建策略与实现（18:53:55 UTC+08:00）
 
 创建时间：20260910 15:44:35 UTC+08:00
-最后修订时间：20260910 16:40:58 UTC+08:00
+最后修订时间：20260910 18:53:55 UTC+08:00
 
 ## 1. 数据来源
 
@@ -35,7 +35,7 @@ AE 与 LM 独立抽样，每个 episode 只有一次写入和一个读取目标�
 
 - AE 的 X、LM 的 X 与 Y 均为 **32–4096 tokens**；LM 满足 **0.3 ≤ |X| / (|X| + |Y|) ≤ 0.7**，X 与 Y 对应相邻字符区间。
 - 按 X 长度划分七档：32–64、65–128、129–256、257–512、513–1024、1025–2048、2049–4096。
-- 每个 split 的四类数据分别均衡分配七档配额。总数不能被七整除时，余数依次分配到前几档，各档最多相差一条；仅通过模型判定及去重的入选样本计入配额。
+- 每个 split 的四类数据分别均衡分配七档配额。总数不能被七整除时，余数依次分配到前几档，各档最多相差一条；通过长度检查及去重的入选样本计入配额。
 
 ### 文本粒度
 
@@ -43,8 +43,8 @@ AE 与 LM 独立抽样，每个 episode 只有一次写入和一个读取目标�
 
 | 粒度 | 含义及 semantic 构造方式 |
 |---|---|
-| 单句 `sentence` | 取分句器识别的一条完整句子 |
-| 段落 `paragraph` | 取同一原文段落内识别出的完整句子范围 |
+| 单句 `sentence` | 取分句器识别的保守句段，可包含引语内的多句话 |
+| 段落 `paragraph` | 取起点位于同一原文行的保守句段范围；行号仅用于粒度归类 |
 | 连续句子集 `sentence_group` | 按长度档选取原文中连续的多句话，可跨段落，不要求主题相同 |
 | 主题区间 `topic_group` | 按外部主题标注选取连续句子范围；仅在提供 `--topic-annotations` 时使用 |
 
@@ -52,128 +52,62 @@ semantic 的标签记录实际采用的候选构造方式。同一原文范围�
 
 random 的粒度固定为 `random`。
 
-semantic 的粒度不设独立配额，最终占比由候选分布、长度配额和质量筛选共同决定。`audit.json` 在各 split、任务和长度档下统计各粒度的样本数、样本占比、输入 token 数及其占比；random 在相同统计结构中只有 `random` 一类。独立抽查对 semantic 按任务、粒度和长度分层，对 random 按任务和长度分层。
+semantic 的粒度不设独立配额，最终占比由候选分布、长度配额和去重共同决定。`audit.json` 在各 split、任务和长度档下统计各粒度的样本数、样本占比、输入 token 数及其占比；random 在相同统计结构中只有 `random` 一类。独立边界抽查对 semantic 按任务、粒度和长度分层。
 
-## 3. 构建流程
+## 3. 主构造流程
 
-### 主流程
+**固定来源池 → 基本属性检查、去重与来源划分 → semantic 构造 → random 构造 → 自动审计。**
 
-**固定来源池 → 属性检查与去重划分 → semantic 构造与评分 → random 构造与评分 → 自动审计。**
+1. 检查来源字段和最小文档长度；按 ID、规范化 URL、全文及近重复关系聚类。每簇选择代表并固定 split，全部派生样本继承来源划分。
+2. 按各 split、任务及 X 长度档的剩余配额选择候选。AE 与 LM 使用独立随机序列，每篇文档最多尝试 `candidates_per_document` 次。
+3. semantic 在原文保守句界上选择 X 和紧邻 Y；random 在 token 位置抽取连续原文。最终切片独立分词，检查 32–4096 tokens 及 LM 比例约束。
+4. 按任务及规范化 X/Y 去重，长输入登记阻止跨 split 重复；random 同时查询 semantic 的输入登记。符合配额的候选直接入选，状态写入 `sample-decisions.jsonl`。
+5. 补足各档后检查原文连续性、字符跨度、token 长度、来源隔离及配额，写入完成记录。random 完成后核对两类数据的来源契约与长度档数量。
 
-1. **来源检查与划分。** 检查 ID、URL 和文本字段，剔除去首尾空白后不足 64 字符的文档。按 ID、规范化 URL、全文和近重复关系聚类；近重复采用词 5-gram Jaccard，相似度阈值 0.9，至少 64 词的文档参与。每簇保留一个通过基础检查的代表，按簇和 seed 固定 train/dev/test。全部派生片段继承来源 split。
-2. **选择任务与长度档。** 按剩余配额加权选择任务及 X 长度档，再使用 AE、LM 各自的随机序列抽取文本。每个版本、每篇文档最多尝试 64 次候选构造。
-3. **构造原文片段。** semantic 从句子、段落、连续句子集提供的候选区间抽取 X；LM 再从 X 后选择满足长度和比例的 Y。random 独立抽取 token 起点及长度，映射为字符跨度后重新分词检查。未提供 `--topic-annotations` 时不使用主题标注。
-4. **去重与模型判定。** 同一版本内按任务和规范化 X/Y 去重，跨 split 排除相同长输入；random 同时对照已完成 semantic 的输入登记。Qwen/Qwen3.8-27B 判断最终 AE 的 X 或 LM 的 X/Y，仅 `keep` 入选，`reject`、`uncertain` 和 `error` 不计入配额。已评分候选的理由及处理状态写入决策日志。
-5. **补足配额并审计。** 遍历来源，补足任务及长度档缺额。来源池耗尽仍不足时，报告具体 split、任务和长度档。自动检查原文跨度、token 长度、比例、任务提示、来源隔离及入选判定，输出统计；检查通过后写入 `preparation.json`。random 还须通过两版本来源契约及任务内长度分布核对，再写入 `comparison.json` 和完成记录。
+数据用途是 AE 忠实重建及 LM 对记忆条件的适配。内容风格、自然上下文依赖、话题变化及表述水平保留为原始数据属性。
 
-模型质量标准为内容可读、连贯且有实际信息，排除乱码、错误拼接及占主导的导航或广告模板；接受技术文字、叙事、口语、自然指代和话题变化。semantic 额外检查真实句法边界；random 的预期边界残缺不视为质量缺陷。Y 可以包含 X 中没有的新信息。
+### semantic 边界规则
 
-评分通过独立 HTTP 服务直连调用，temperature 为 0，关闭 thinking，返回 `decision` 和不超过 240 字符的 `reason`。缓存绑定完整 X/Y、模型、地址和评分协议，逐条保存。输出截断或判定格式错误时重试一次，仍失败则记为 `error` 并跳过候选；连接或服务错误直接中止阶段。完成目录保留。运行中的阶段按固定来源窗口提交进度，恢复使用已提交位置、已有样本与评分缓存。
+`segmentation.py` 使用 pySBD 提议边界，并实施保守切点处理。分句副本将换行等长映射为空格，保留引号；所有样本仍从未经改写的原文按字符偏移截取。换行位置只记录原文结构。
 
-### 独立抽查
+候选终点须有句末标点，允许标点后的闭引号或括号。省略号结尾作为不确定切点并入后续句段。句界右侧为小写续接等不确定情况时合并为更长句段。文档起始的小写残片及缺少可靠句末的尾部不提供外部切点。该规则提高边界精度，也会减少某些小写风格和无标点文本的 semantic 候选；random 保留这些原文的采样可能。
 
-在某个版本完成后，独立执行 **sample → judge → summarize**，结果写到数据目录之外。
+AE 检查 X 起点和终点；LM 检查 X 起点、X/Y 切点及 Y 终点。内部出现标题或列表属于原文结构。自动审计确认切点符合构造规则，真实句界正确率由独立复核估计。
 
-- `sample` 生成两个面板：随机面板无放回均匀抽样，用于估计成品样本质量；分层面板对 semantic 覆盖任务、粒度和长度档，对 random 覆盖任务和长度档，每篇文档最多一个样本，用于定位问题。样本包含实际 X/Y 和来源位置。
-- `judge` 使用独立抽查提示词与缓存协议重新判定，不将“已入选”作为质量依据。结果映射为 `pass/fail/uncertain`，逐批保存；接口返回 `error` 的样本保留为未复核。人工也可填写 `judgment`、`review_reason` 和 `reviewer`。
-- `summarize` 分面板及分层汇总通过、失败、存疑和未复核数量。存在未决样本时报告缺陷比例上下界；分层面板不用于直接估计总体缺陷率。同模型复核可能重复筛选偏差，应结合人工复核分析。
+## 4. 抽样检查
 
-抽查发现系统性问题后，修改配方并生成下一份数据，保留原数据及其复核记录。
+抽样检查在数据构造完成后独立执行，按检查目标预先定义判定标准、抽样方案和验收条件。检查结果用于评估构造流程并定位问题。
 
-## 4. 代码实现
+1. **抽取样本。** 随机面板对成品样本无放回均匀抽样，用于估计总体表现；分层诊断面板覆盖任务、粒度与长度档，并限制同一文档的重复出现，用于定位系统性问题。
+2. **准备检查材料。** 保留样本 X/Y、来源文档和字符位置，并根据检查目标提供必要的原文上下文，使复核者能够区分原文属性与构造操作造成的问题。
+3. **逐条复核。** 根据预先约定的标准记录通过、失败或存疑，同时保存理由与复核者信息。存疑项保持待确认状态。
+4. **汇总与反馈。** 汇总随机面板的通过比例、未决数量及统计不确定性，按任务、粒度和长度分析分布。分层面板用于诊断，同文档样本的相关性及抽样代表性单独分析。发现系统性问题后优化构造流程，再使用独立样本复核。
 
-代码位于 [`src/latent_working_memory/data_preparation/`](../../src/latent_working_memory/data_preparation/)。
+当前检查目标是 semantic 样本的外部句界：AE 检查 X 起点和终点，LM 检查 X 起点、X/Y 切点及 Y 终点。全部切点正确才判为通过，任一切点位于句中则判为失败。检查依据切点两侧的原文；自然指代、叙述尚未结束和内容风格属于原文属性。
+
+## 5. 实现、调度与恢复
+
+代码位于 `src/latent_working_memory/data_preparation/`。
 
 | 模块 | 职责 |
 |---|---|
-| `config.py`、`__main__.py` | 配方、长度及配额契约；`sources/semantic/random/all` 阶段入口 |
-| `sources.py`、`quality.py`、`dedup.py` | Parquet 混合读取、基本属性检查、来源去重聚类 |
-| `segmentation.py`、`fineweb.py`、`truncation.py` | 原文句界与字符位置；semantic 和 random 的独立任务构造 |
-| `scoring.py` | 样本评分提示、结构化响应、并发请求与缓存 |
-| `pipeline.py`、`audit.py` | 来源登记、入选配额、样本去重、完成审计与跨版本比较 |
-| `inspection.py` | 独立抽样、模型／人工复核与统计汇总 |
+| `config.py`、`__main__.py` | 配方、长度配额及分阶段入口 |
+| `sources.py`、`quality.py`、`dedup.py` | 本地 Parquet 读取、属性检查与来源去重 |
+| `segmentation.py`、`fineweb.py`、`truncation.py` | 保守句界、semantic/random 独立任务构造 |
+| `pipeline.py`、`resume.py` | 候选窗口、配额接收及原子恢复 |
+| `audit.py` | 原文、来源、长度和规则切点审计 |
+| `inspection.py` | 独立边界抽样与复核统计 |
 
-准备配方控制来源预算、长度、数量和评分服务；实验配置提供 tokenizer、来源划分、seed 与任务提示。训练通过 `v1/data.py` 读取单任务 episode。相关测试位于 `tests/v1/test_preparation*.py`、`test_truncation.py` 和 `test_sample_scoring.py`。
-
-输出布局：
-
-```text
-fineweb-independent-409k-20260910/
-  source-pool.json          来源池配置与统计
-  sources.jsonl             候选原文、重复簇、split 和基础判定
-  semantic/ random/
-    train.jsonl  dev.jsonl  test.jsonl
-    documents.jsonl         入选样本的来源原文
-    sample-decisions.jsonl  已评分候选的判定及配额处理
-    audit.json              长度、任务、粒度与来源统计
-    preparation.json        通过审计后的完成记录
-  comparison.json           两版本来源与配额分布核对
-```
-
-样本保存文档标识、重复簇、原文字符跨度、边界类型、粒度与评分缓存键；完成记录关联来源池和数据准备标识。`audit.json` 同时报告样本数和输入 token 数的组成比例。
-
-## 5. 本轮运行与结果
-
-### 运行配置与命令
-
-本轮目标为 **408,800 条**入选样本，候选来源预算为 100,000 篇文档。以下是计划配额，实际产量待构建完成后填写。
-
-| 每种组合（semantic/random × AE/LM） | train | dev | test |
-|---|---:|---:|---:|
-| 总样本配额 | 98,000 | 2,100 | 2,100 |
-| 每个 X 长度档 | 14,000 | 300 | 300 |
-| 四种组合合计 | 392,000 | 8,400 | 8,400 |
-
-运行根目录为服务器 `/data/bywei/projects/latent_working_memory/artifacts/v1/data-preparation/independent-409k-20260910`，数据目录为 `/data/bywei/projects/latent_working_memory/data/v1/fineweb-independent-409k-20260910`。本地同步记录位于 [`artifacts/v1/data-preparation/independent-409k-20260910/`](../../artifacts/v1/data-preparation/independent-409k-20260910/)。本轮使用该目录的 `config.json`、`recipe.json`，不是仓库默认的 100,000／2,000／2,000 单任务配额。
-
-Qwen 评分服务使用物理 GPU 1、BF16、单卡，窗口 16,384 tokens；客户端并发 16、最大输出 1,024 tokens、超时 600 秒。服务入口为运行目录的 `serve.sh`，使用 xgrammar 紧凑 JSON 输出，禁止字段间生成多余空白。数据构造进程通过 HTTP 请求评分，不加载 GPU 模型。
-
-通用完整构造命令如下，需使用尚不存在的数据输出目录；分阶段运行时依次指定 `--stage sources`、`semantic`、`random`：
+CPU 预取下一窗口的分句与分词，主线程处理当前窗口并按顺序接收。每个窗口刷入样本和来源后原子更新 `progress.json`。同一构造契约使用 `--resume` 恢复，回退未提交尾部并重做该窗口。新构造使用独立输出目录。
 
 ```bash
-cd /data/bywei/projects/latent_working_memory
-run_dir=/data/bywei/projects/latent_working_memory/artifacts/v1/data-preparation/independent-409k-20260910
-uv run python -m latent_working_memory.data_preparation \
-  --config "$run_dir/config.json" \
-  --recipe "$run_dir/recipe.json" \
+python -m latent_working_memory.data_preparation \
+  --config /path/to/config.json \
+  --recipe configs/data_preparation/fineweb.json \
   --dataset-dir data/raw/HuggingFaceFW-fineweb \
-  --output-dir data/v1/fineweb-independent-409k-20260910 \
-  --score-cache "$run_dir/selection-bounded-cache.jsonl"
+  --output-dir /path/to/new-data
 ```
 
-本轮恢复运行使用 `run.json` 记录的 `code-review-errors/` 快照和 `construct_review_errors.py`，依次执行 semantic、random；来源池已建立。实际解释器、环境与阶段命令保存在该脚本中，最终代码记录在构建结束后汇总。
+阶段依次为 `sources`、`semantic`、`random`，默认 `all`。输出包括共享 `sources.jsonl` 与 `source-pool.json`，各版本的 train/dev/test、documents、sample-decisions、audit、preparation，以及最终 comparison。
 
-成品抽查命令示例（semantic train，每个面板最多 200 条；其余版本与 split 分别执行）：
-
-```bash
-uv run python -m latent_working_memory.data_preparation.inspection sample \
-  --data-dir data/v1/fineweb-independent-409k-20260910/semantic \
-  --output-dir "$run_dir/inspection/semantic/train" \
-  --split train --examples 200 --seed 20260909
-uv run python -m latent_working_memory.data_preparation.inspection judge \
-  --inspection-dir "$run_dir/inspection/semantic/train" \
-  --recipe "$run_dir/recipe.json" \
-  --score-cache "$run_dir/inspection-cache.jsonl"
-```
-
-`judge` 自动生成 `summary.json`；人工修改后使用同一模块的 `summarize --inspection-dir ...` 重新汇总。
-
-### 结果状态
-
-本地 `status.json` 在 20260910 13:31:49 UTC+08:00 记录 semantic 阶段运行中，尚无可确认全量完成的本地记录。完成后补充：最终代码与配置、起止时间和耗时、各 split/task 的入选文档数与样本数、X/Y token 总量及长度分布、模型判定与错误数量、自动审计结果，以及独立抽查统计和主要缺陷。
-
-历史数据与本轮分开保存：`data/v1/fineweb-paired-20260909/` 为旧逐样本等长配对方案，每个版本 train/dev/test 为 226,022／11,610／11,685 条，本地报告位于 `artifacts/v1/data-preparation/fineweb-paired-20260909/`。旧独立方案的 semantic/random 各 100 条复核记录位于 `artifacts/v1/data-preparation/independent-100-20260909/`，不作为本轮 4k 数据的质量统计。
-
-## 6. 执行调度与恢复
-
-候选窗口由 `candidate_window_documents` 控制，默认包含四篇来源文档；评分并发数由 `scoring_batch_size` 单独控制。每个窗口按当前剩余配额抽取候选，只选择该文档能够提供的任务与长度档。每篇文档仍最多尝试 `candidates_per_document` 次，质量提示词、长度约束和最终配额保持一致。窗口改变了旧流程逐小批更新抽样权重的时点，后续候选序列按新窗口规则生成。
-
-CPU 工作线程提前处理下一个窗口的分句、批量分词及合法续写范围，主线程提交当前窗口的评分请求。评分端保持有界并发，请求完成后立即补入下一个，并逐条持久化评分缓存。窗口内按候选原始顺序接收判定、去重和扣减配额，HTTP 返回先后顺序只影响评分缓存中的行顺序。窗口大小固定时，客户端并发数不会改变候选及接收顺序；模型推理自身的数值差异仍可能影响边缘判定。
-
-每个窗口完成后，先将样本、来源和判定文件刷入磁盘，再原子更新阶段目录中的 `progress.json`，记录下一来源位置、文件提交偏移、计数及运行契约。恢复命令在原阶段参数上添加 `--resume`；程序检查契约，回退文件中超出最后提交偏移的尾部，从保存位置继续，未提交窗口的评分结果由缓存复用。允许调整评分并发与请求超时，数据配方、窗口大小和评分协议保持一致。
-
-旧版暂停目录通过 `--adopt-paused` 显式导入：从已有样本和判定恢复配额与去重状态，并从最后出现判定的文档之后继续。已有记录原样保留，已判定 episode 和已入选文本用于避免重复；之后使用正常 `--resume`。旧文件无法完整恢复文档内部随机游标，因此导入时跳过最后一篇文档的剩余尝试，保持每篇文档的候选尝试上限；总配额继续由后续文档补足。
-
-对应实现为 `pipeline.py` 的窗口预取与按序接收、`scoring.py` 的有界评分、`fineweb.py` 的批量候选分词及续写缓存，以及 `resume.py` 的进度提交与恢复。
-
-本轮单卡评分基准选择并发 32，结果与限制见 [执行效率优化记录](../experiment_results/20260910_data_preparation_efficiency.md)。
+## 6. 运行记录

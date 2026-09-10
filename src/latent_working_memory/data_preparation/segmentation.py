@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 import re
 from dataclasses import dataclass
 
@@ -14,25 +15,34 @@ class Sentence:
 
 
 def sentence_spans(text: str) -> list[Sentence]:
+    """Conservative sentence units with offsets into unchanged source text.
+
+    Line breaks are layout hints, not sentence boundaries. Uncertain proposed cuts
+    are merged, and an unfinished document tail is not a semantic endpoint.
+    """
     segmenter = pysbd.Segmenter(language="en", clean=False, char_span=True)
+    boundary_text = text.translate(str.maketrans({"\r": " ", "\n": " "}))
+    line_starts = [0, *(m.end() for m in re.finditer(r"\n", text))]
     sentences = []
-    for paragraph, match in enumerate(re.finditer(r"[^\r\n]+", text)):
-        # Quotes keep their original offsets but do not hide internal sentence boundaries.
-        boundary_text = match.group().translate(str.maketrans({'"': " ", "“": " ", "”": " "}))
-        for span in segmenter.segment(boundary_text):
-            start, end = match.start() + span.start, match.start() + span.end
-            while start > match.start() and text[start - 1] in '"“':
-                start -= 1
-            while start < end and text[start].isspace():
-                start += 1
-            while end > start and text[end - 1].isspace():
-                end -= 1
-            if end > start + 1 and (
-                text[end - 1] == "“" or (text[end - 1] == '"' and text[end - 2].isspace())
-            ):
-                end -= 1
-                while end > start and text[end - 1].isspace():
-                    end -= 1
-            if start < end:
-                sentences.append(Sentence(start, end, paragraph))
+    start = len(text) - len(text.lstrip())
+    for span in segmenter.segment(boundary_text):
+        end = span.end
+        while end > start and text[end - 1].isspace():
+            end -= 1
+        terminal = text[start:end].rstrip("\"'”’)]}")
+        if terminal.endswith(("..", "…", "….")):
+            continue
+        if not terminal.endswith((".", "?", "!")):
+            continue
+        after = end
+        while after < len(text) and text[after].isspace():
+            after += 1
+        following = text[after:].lstrip("\"'“‘([{")
+        # A lowercase continuation often marks quoted speech attribution or a false cut.
+        if following and following[0].islower():
+            continue
+        opening = text[start:end].lstrip("\"'“‘([{")
+        if opening and not opening[0].islower():
+            sentences.append(Sentence(start, end, bisect.bisect_right(line_starts, start) - 1))
+        start = after
     return sentences

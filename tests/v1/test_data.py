@@ -49,7 +49,7 @@ def test_sentence_spans_handle_abbreviations_and_keep_offsets():
     assert spans[0].paragraph == spans[1].paragraph != spans[2].paragraph
     quoted = "“We left. He stayed.”"
     spans = sentence_spans(quoted)
-    assert [quoted[s.start : s.end] for s in spans] == ["“We left.", "He stayed.”"]
+    assert [quoted[s.start : s.end] for s in spans] == ["“We left. He stayed.”"]
 
 
 def test_topic_annotations_require_order_range_and_coverage(

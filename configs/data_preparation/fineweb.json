@@ -18,11 +18,6 @@
     2048,
     4096
   ],
-  "review_base_url": "http://127.0.0.1:8000/v1",
-  "review_model": "Qwen/Qwen3.8-27B",
-  "review_max_new_tokens": 256,
-  "scoring_batch_size": 32,
-  "review_timeout_seconds": 120,
   "min_sample_tokens": 32,
   "max_sample_tokens": 4096,
   "lm_prefix_fraction": [

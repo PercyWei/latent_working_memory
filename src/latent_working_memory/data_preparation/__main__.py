@@ -13,7 +13,6 @@ from latent_working_memory.v1.config import load_config
 from latent_working_memory.data_preparation.pipeline import prepare_sources, prepare_variant
 from latent_working_memory.data_preparation.config import PreparationConfig
 from latent_working_memory.data_preparation.sources import parquet_records
-from latent_working_memory.data_preparation.scoring import SampleScorer
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -23,25 +22,18 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--recipe", type=Path, required=True)
     parser.add_argument("--stage", choices=("sources", "semantic", "random", "all"), default="all")
-    parser.add_argument("--score-cache", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--dataset-dir", type=Path, help="Local HuggingFaceFW-fineweb directory")
     parser.add_argument("--max-documents", type=int)
     parser.add_argument("--topic-annotations", type=Path)
-    recovery = parser.add_mutually_exclusive_group()
-    recovery.add_argument("--resume", action="store_true")
-    recovery.add_argument(
-        "--adopt-paused", action="store_true", help="Import a paused run without a progress cursor"
-    )
+    parser.add_argument("--resume", action="store_true")
     args = parser.parse_args(argv)
-    if (args.resume or args.adopt_paused) and args.stage not in {"semantic", "random"}:
+    if args.resume and args.stage not in {"semantic", "random"}:
         parser.error("recovery requires an explicit semantic or random stage")
     config = load_config(args.config)
     recipe = PreparationConfig.load(args.recipe)
     if args.max_documents is not None:
         recipe = replace(recipe, max_documents=args.max_documents)
-    if args.stage != "sources" and args.score_cache is None:
-        parser.error("sample model scoring requires --score-cache")
     report = {}
     if args.stage in {"sources", "all"}:
         if args.dataset_dir is None:
@@ -55,7 +47,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         tokenizer = AutoTokenizer.from_pretrained(
             config.model_name_or_path, revision=config.model_revision, local_files_only=True
         )
-        scorer = SampleScorer(recipe, args.score_cache)
         annotations = (
             json.loads(args.topic_annotations.read_text()) if args.topic_annotations else None
         )
@@ -66,10 +57,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 tokenizer,
                 config,
                 recipe,
-                scorer,
                 annotations,
                 resume=args.resume,
-                adopt_paused=args.adopt_paused,
             )
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

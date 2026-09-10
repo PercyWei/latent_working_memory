@@ -126,7 +126,6 @@ def test_evaluation_controls_share_targets_budgets_and_write_test_split(
     tokenizer,
     preparation_records,
     preparation_recipe,
-    accepting_scorer,
     components,
     monkeypatch,
 ):
@@ -141,7 +140,6 @@ def test_evaluation_controls_share_targets_budgets_and_write_test_split(
         tiny_config,
         data,
         preparation_recipe,
-        accepting_scorer,
     )
     data = data / "semantic"
     index = EpisodeIndex(data / "test.jsonl")

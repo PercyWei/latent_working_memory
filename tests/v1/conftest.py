@@ -168,20 +168,6 @@ def preparation_recipe():
 
 
 @pytest.fixture
-def accepting_scorer():
-    class AcceptSamples:
-        protocol = {"model": "test-only-accepting-service"}
-
-        def score_batch(self, samples):
-            return [
-                {"decision": "keep", "reason": "Interface test response", "cache_key": str(i)}
-                for i, _ in enumerate(samples)
-            ]
-
-    return AcceptSamples()
-
-
-@pytest.fixture
 def semantic_examples(preparation_recipe):
     def generate(record, tokenizer, config, topic_annotation=None, recipe=None):
         recipe = recipe or preparation_recipe

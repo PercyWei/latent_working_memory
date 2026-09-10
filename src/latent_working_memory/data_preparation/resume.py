@@ -31,7 +31,7 @@ def save_progress(directory: Path, handles: dict, contract: dict, next_source: i
 def load_progress(directory: Path, contract: dict) -> dict:
     state = json.loads((directory / "progress.json").read_text())
     if state["contract"] != contract:
-        raise ValueError("resume configuration or scoring protocol differs")
+        raise ValueError("resume configuration or construction protocol differs")
     # A crash can leave rows beyond the last committed window. Only that tail is rolled back.
     for name, offset in state["offsets"].items():
         path = directory / f"{name}.jsonl"

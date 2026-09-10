@@ -23,7 +23,6 @@ from latent_working_memory.data_preparation.fineweb import (
     document_split,
 )
 from latent_working_memory.data_preparation.quality import document_rejection_reason
-from latent_working_memory.data_preparation.scoring import SampleScorer
 from latent_working_memory.data_preparation.resume import FILES, load_progress, save_progress
 from latent_working_memory.data_preparation.truncation import RandomSpans
 from latent_working_memory.v1.config import ExperimentConfig
@@ -82,7 +81,7 @@ def prepare_sources(
 
 
 class VariantBuilder:
-    """Account for post-review task/bin quotas and write one independent dataset."""
+    """Account for task/bin quotas and write one independent dataset."""
 
     def __init__(
         self,
@@ -91,21 +90,19 @@ class VariantBuilder:
         tokenizer,
         config,
         preparation,
-        scorer,
         source_pool,
         reference,
         resume=False,
-        adopt_paused=False,
     ):
         self.root, self.variant = root, variant
         self.directory = root / variant
-        self.resume, self.adopt_paused = resume, adopt_paused
+        self.resume = resume
         if (self.directory / "preparation.json").exists():
             raise FileExistsError(f"variant is already complete: {self.directory}")
-        if self.directory.exists() and not (resume or adopt_paused):
+        if self.directory.exists() and not resume:
             raise FileExistsError(f"use a new variant directory: {self.directory}")
         self.tokenizer, self.config = tokenizer, config
-        self.recipe, self.scorer, self.source_pool = preparation, scorer, source_pool
+        self.recipe, self.source_pool = preparation, source_pool
         self.quotas = dict(zip(SPLITS, preparation.samples_per_task, strict=True))
         self.counts = Counter()
         self.histogram = {
@@ -132,7 +129,7 @@ class VariantBuilder:
             )
         ):
             raise ValueError("datasets must share length constraints and balanced input quotas")
-        self.reviewed_episodes = set()
+        self.considered_episodes = set()
         self.seen_samples = set()
         self.fragment_splits = {}
         if reference is not None:
@@ -153,7 +150,7 @@ class VariantBuilder:
         pending, batch_keys, input_splits = [], set(), {}
         for episode, source in candidates:
             record, cluster, split = source["record"], source["cluster"], source["split"]
-            if episode.episode_id in self.reviewed_episodes:
+            if episode.episode_id in self.considered_episodes:
                 continue
             task = episode.reads[0].task
             bucket = str(next(b for b in self.recipe.length_bounds if len(episode.input_ids) <= b))
@@ -175,27 +172,10 @@ class VariantBuilder:
                 input_splits[input_key] = split
             batch_keys.add(key)
             pending.append((episode, task, bucket, key, input_key, source))
-        reviews = self.scorer.score_batch(
-            [
-                {
-                    "boundary_variant": self.variant,
-                    "task": task,
-                    "X": source["record"]["text"][
-                        slice(*episode.sources[0].provenance["x_char_span"])
-                    ],
-                    "Y": episode.reads[0].references[0].text if task == "continuation" else None,
-                }
-                for episode, task, _, _, _, source in pending
-            ]
-        )
-        for row, review in zip(pending, reviews, strict=True):
-            episode, task, bucket, key, input_key, source = row
+        for episode, task, bucket, key, input_key, source in pending:
             record, cluster, split = source["record"], source["cluster"], source["split"]
-            self.reviewed_episodes.add(episode.episode_id)
-            self.counts[f"review/{review['decision']}"] += 1
-            status = review["decision"]
-            if status == "keep":
-                status = "accepted" if self.remaining(split, task, bucket) > 0 else "quota_filled"
+            self.considered_episodes.add(episode.episode_id)
+            status = "accepted" if self.remaining(split, task, bucket) > 0 else "quota_filled"
             handles["sample-decisions"].write(
                 json.dumps(
                     {
@@ -205,7 +185,6 @@ class VariantBuilder:
                         "task": task,
                         "input_length_up_to": int(bucket),
                         "status": status,
-                        "review": review,
                         "x_char_span": episode.sources[0].provenance["x_char_span"],
                         "y_char_span": episode.sources[0].provenance["y_char_span"],
                     },
@@ -235,7 +214,6 @@ class VariantBuilder:
             episode.sources[0].provenance.update(
                 dedup_cluster=cluster,
                 input_text_key=input_key,
-                quality_review=review,
             )
             handles[split].write(json.dumps(episode.to_record(), ensure_ascii=False) + "\n")
             self.counts[f"{split}/{task}"] += 1
@@ -243,8 +221,6 @@ class VariantBuilder:
 
     def progress_contract(self, topic_annotations):
         recipe = self.recipe.to_dict()
-        for key in ("scoring_batch_size", "review_timeout_seconds"):
-            recipe.pop(key)
         return json.loads(
             json.dumps(
                 {
@@ -252,7 +228,7 @@ class VariantBuilder:
                     "variant": self.variant,
                     "data": data_contract(self.config),
                     "recipe": recipe,
-                    "scoring": self.scorer.protocol,
+                    "sentence_boundaries": "pysbd_conservative",
                     "topic_annotations": topic_annotations,
                 }
             )
@@ -294,15 +270,12 @@ class VariantBuilder:
                     if not self.counts[f"document/{record['id']}"]:
                         self.counts[f"{split}/documents"] += 1
                     self.counts[f"document/{record['id']}"] += 1
-        last_document = None
         accepted = 0
         with (self.directory / "sample-decisions.jsonl").open() as handle:
             for line in handle:
                 row = json.loads(line)
-                self.reviewed_episodes.add(row["episode_id"])
-                self.counts[f"review/{row['review']['decision']}"] += 1
+                self.considered_episodes.add(row["episode_id"])
                 accepted += row["status"] == "accepted"
-                last_document = row["document_id"]
         if accepted != sum(self.counts[f"{s}/{t}"] for s in SPLITS for t in TASKS):
             raise ValueError("paused decisions and accepted rows disagree")
         if any(
@@ -312,7 +285,6 @@ class VariantBuilder:
             for b in self.recipe.length_bounds
         ):
             raise ValueError("paused rows exceed target quotas")
-        return last_document
 
     def build_samplers(self, sources, topic_annotations):
         samplers = []
@@ -363,17 +335,6 @@ class VariantBuilder:
             self.restore_rows()
             self.counts = Counter(state["counts"])
             start = state["next_source"]
-        elif self.adopt_paused:
-            if (self.directory / "progress.json").exists():
-                raise ValueError("paused data already has progress; use --resume")
-            last = self.restore_rows()
-            # Old runs lack the per-document RNG cursor. Continue after the last reviewed
-            # document so adoption never exceeds its original candidate-attempt budget.
-            start = (
-                next(i for i, row in enumerate(sources) if row["record"]["id"] == last) + 1
-                if last
-                else 0
-            )
         else:
             self.directory.mkdir()
         with ExitStack() as stack:
@@ -388,8 +349,7 @@ class VariantBuilder:
                 self.build_samplers, sources[start : start + width], topic_annotations
             )
             for i in range(start, len(sources), width):
-                # Fixed windows decouple proposal/commit order from scoring concurrency.
-                # CPU prepares the next window while this window's HTTP requests are running.
+                # Fixed windows preserve proposal and commit order during CPU prefetch.
                 remaining = {
                     s: {
                         t: {str(b): self.remaining(s, t, str(b)) for b in self.recipe.length_bounds}
@@ -462,7 +422,6 @@ class VariantBuilder:
             "target_input_histogram": self.targets,
             "input_histogram": self.histogram,
             "statistics": {k: v for k, v in self.counts.items() if not k.startswith("document/")},
-            "scoring_protocol": self.scorer.protocol,
             "audit": audit,
         }
         if self.reference is not None:
@@ -476,13 +435,9 @@ def prepare_variant(
     tokenizer: PreTrainedTokenizerBase,
     config: ExperimentConfig,
     preparation: PreparationConfig,
-    scorer: SampleScorer,
     topic_annotations: dict | None = None,
     resume: bool = False,
-    adopt_paused: bool = False,
 ) -> dict[str, Any]:
-    if resume and adopt_paused:
-        raise ValueError("choose resume or adopt_paused")
     if variant not in {"semantic", "random"}:
         raise ValueError("variant must be semantic or random")
     pool = json.loads((root / "source-pool.json").read_text())
@@ -508,9 +463,7 @@ def prepare_variant(
         else None
     )
     sources = [json.loads(line) for line in (root / "sources.jsonl").read_text().splitlines()]
-    builder = VariantBuilder(
-        root, variant, tokenizer, config, preparation, scorer, pool, reference, resume, adopt_paused
-    )
+    builder = VariantBuilder(root, variant, tokenizer, config, preparation, pool, reference, resume)
     result = builder.run([row for row in sources if row["status"] == "eligible"], topic_annotations)
     if variant == "random":
         comparison = compare_preparations(root, tokenizer, config, result)
@@ -527,14 +480,13 @@ def prepare_fineweb(
     config: ExperimentConfig,
     output_dir: Path,
     preparation: PreparationConfig,
-    scorer: SampleScorer,
     topic_annotations: dict | None = None,
 ) -> dict[str, Any]:
     prepare_sources(records, config, output_dir, preparation)
     semantic = prepare_variant(
-        output_dir, "semantic", tokenizer, config, preparation, scorer, topic_annotations
+        output_dir, "semantic", tokenizer, config, preparation, topic_annotations
     )
     random_data = prepare_variant(
-        output_dir, "random", tokenizer, config, preparation, scorer, topic_annotations
+        output_dir, "random", tokenizer, config, preparation, topic_annotations
     )
     return {"semantic": semantic, "random": random_data}
