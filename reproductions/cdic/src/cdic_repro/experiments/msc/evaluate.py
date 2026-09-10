@@ -14,19 +14,16 @@ from pathlib import Path
 from typing import Any
 
 import torch
-import swanlab
 
 from cdic_repro.config import RetrievalConfig, RetrievedStateOrder
 from cdic_repro.credit import build_credit_plan
 from cdic_repro.experiments.checkpoint import load_cdic_model_checkpoint
 from cdic_repro.experiments.generation_metrics import score_generation_records
-from cdic_repro.experiments.msc import MSC_SWANLAB_TAGS
 from cdic_repro.experiments.msc.data import (
     MscEpisode,
     load_msc_episodes,
     summarize_msc_episodes,
 )
-from cdic_repro.experiments.tracking import SWANLAB_MODES, swanlab_run
 from cdic_repro.icae.adapter import (
     IcaeV1AdapterConfig,
     IcaeV1TrainingAdapter,
@@ -433,33 +430,12 @@ def paired_episode_bootstrap(
     }
 
 
-def run(
-    config: MscEvaluationConfig,
-    swanlab_mode: str = "disabled",
-    swanlab_project: str = "latent-working-memory",
-    swanlab_group: str | None = None,
-    swanlab_tags: tuple[str, ...] = MSC_SWANLAB_TAGS,
-    swanlab_run_id: str | None = None,
-) -> None:
+def run(config: MscEvaluationConfig) -> None:
     _validate_resources(config)
-    output_dir = _output_dir(config)
-    with swanlab_run(
-        output_dir,
-        _serialize_config(config),
-        mode=swanlab_mode,
-        project=swanlab_project,
-        group=swanlab_group,
-        tags=swanlab_tags,
-        run_id=swanlab_run_id,
-        job_type="evaluate",
-    ) as tracking:
-        _run_evaluation(config, tracking)
+    _run_evaluation(config)
 
 
-def _run_evaluation(
-    config: MscEvaluationConfig,
-    tracking: swanlab.Run | None,
-) -> None:
+def _run_evaluation(config: MscEvaluationConfig) -> None:
     loaded_episodes = load_msc_episodes(
         config.data_root,
         session_id=5,
@@ -621,13 +597,6 @@ def _run_evaluation(
         },
     }
     write_json(output_dir / "summary.json", summary)
-    if tracking is not None:
-        step = int(progress["global_step"]) if progress is not None else 0
-        tracking.log(
-            _evaluation_tracking_metrics(summary)
-            | {"evaluation/examples": _prediction_examples(records)},
-            step=step,
-        )
     print(
         json.dumps(
             {
@@ -644,11 +613,6 @@ def compare_runs(
     initialization: Path,
     final: Path,
     output: Path,
-    swanlab_mode: str = "disabled",
-    swanlab_project: str = "latent-working-memory",
-    swanlab_group: str | None = None,
-    swanlab_tags: tuple[str, ...] = MSC_SWANLAB_TAGS,
-    swanlab_run_id: str | None = None,
 ) -> dict[str, Any]:
     protocols = [
         json.loads((folder / "protocol.json").read_text(encoding="utf-8"))
@@ -708,18 +672,6 @@ def compare_runs(
             "paired_episode_bootstrap": paired_episode_bootstrap(selected[0], maps[1]),
         }
     write_json(output, report)
-    with swanlab_run(
-        output.parent,
-        report["common_config"] | {"evaluation": "initialization_vs_final"},
-        mode=swanlab_mode,
-        project=swanlab_project,
-        group=swanlab_group,
-        tags=swanlab_tags,
-        run_id=swanlab_run_id,
-        job_type="compare",
-    ) as tracking:
-        if tracking is not None:
-            tracking.log(_comparison_tracking_metrics(report), step=0)
     return report
 
 
@@ -778,61 +730,6 @@ def _score_summary(values: list[float]) -> dict[str, float | int | None]:
     }
 
 
-def _evaluation_tracking_metrics(summary: dict[str, Any]) -> dict[str, float]:
-    scopes = summary["scopes"]
-    all_turns = scopes["all_turns_s2_s5"]
-    session_final = scopes["session_final_s2_s5"]
-    session_5_final = scopes["episode_final_s5"]
-    return {
-        "evaluation/ppl/all_turns": float(all_turns["ppl_including_eos"]),
-        "evaluation/ppl/session_final": float(session_final["ppl_including_eos"]),
-        "evaluation/ppl/session_5_final": float(session_5_final["ppl_including_eos"]),
-        "evaluation/bleu/all_turns": float(all_turns["bleu"]),
-        "evaluation/bleu/session_5_final": float(session_5_final["bleu"]),
-        "evaluation/rouge_l_f1/all_turns": float(all_turns["rouge_l_f1"]),
-        "evaluation/rouge_l_f1/session_5_final": float(session_5_final["rouge_l_f1"]),
-        "retrieval/on_topic_rate": float(all_turns["on_topic_rate"]),
-        "retrieval/mean_selected_states": float(all_turns["mean_retrieved_states"]),
-    }
-
-
-def _comparison_tracking_metrics(report: dict[str, Any]) -> dict[str, float]:
-    metrics: dict[str, float] = {}
-    for scope, result in report["scopes"].items():
-        metrics[f"comparison/nll_delta/{scope}"] = float(
-            result["token_weighted_nll_delta"]
-        )
-        metrics[f"comparison/improved_fraction/{scope}"] = (
-            int(result["paired_turns_improved"]) / int(result["paired_turns"])
-        )
-    return metrics
-
-
-def _prediction_examples(
-    records: list[dict[str, Any]],
-    limit: int = 8,
-) -> list[swanlab.Text]:
-    if len(records) <= limit:
-        selected = records
-    else:
-        selected = [
-            records[round(index * (len(records) - 1) / (limit - 1))]
-            for index in range(limit)
-        ]
-    return [
-        swanlab.Text(
-            f"Query:\n{record['query']}\n\n"
-            f"Reference:\n{record['reference']}\n\n"
-            f"Prediction:\n{record['prediction']}",
-            caption=(
-                f"session={record['session_index']}, pair={record['pair_index']}, "
-                f"retrieved={len(record['retrieval']['selected_state_ids'])}"
-            ),
-        )
-        for record in selected
-    ]
-
-
 def _validate_resources(config: MscEvaluationConfig) -> None:
     resources = {
         "model_path": config.model_path,
@@ -877,33 +774,13 @@ def main() -> None:
         metavar=("INITIALIZATION", "FINAL"),
     )
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--swanlab-mode", choices=SWANLAB_MODES, default="disabled")
-    parser.add_argument("--swanlab-project", default="latent-working-memory")
-    parser.add_argument("--swanlab-group")
-    parser.add_argument("--swanlab-tag", action="append", default=[])
-    parser.add_argument("--swanlab-run-id")
     arguments = parser.parse_args()
     if arguments.config:
-        run(
-            load_config(arguments.config),
-            swanlab_mode=arguments.swanlab_mode,
-            swanlab_project=arguments.swanlab_project,
-            swanlab_group=arguments.swanlab_group,
-            swanlab_tags=MSC_SWANLAB_TAGS + tuple(arguments.swanlab_tag),
-            swanlab_run_id=arguments.swanlab_run_id,
-        )
+        run(load_config(arguments.config))
     else:
         if arguments.output is None:
             parser.error("--compare requires --output")
-        compare_runs(
-            *arguments.compare,
-            arguments.output,
-            swanlab_mode=arguments.swanlab_mode,
-            swanlab_project=arguments.swanlab_project,
-            swanlab_group=arguments.swanlab_group,
-            swanlab_tags=MSC_SWANLAB_TAGS + tuple(arguments.swanlab_tag),
-            swanlab_run_id=arguments.swanlab_run_id,
-        )
+        compare_runs(*arguments.compare, arguments.output)
 
 
 if __name__ == "__main__":

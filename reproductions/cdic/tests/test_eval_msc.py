@@ -9,7 +9,6 @@ import pytest
 from cdic_repro.config import RetrievalConfig
 from cdic_repro.experiments.msc.evaluate import (
     MscEvaluationConfig,
-    _evaluation_tracking_metrics,
     _serialize_config,
     compare_runs,
     evaluate_episode,
@@ -125,24 +124,6 @@ def test_ppl_uses_token_weighting_and_keeps_eos_out_of_content():
     assert metrics["ppl_including_eos"] == pytest.approx(math.exp(16 / 6))
     assert metrics["ppl_excluding_eos"] == pytest.approx(math.exp(6 / 4))
     assert metrics["mean_turn_nll"] == 2
-
-
-def test_swanlab_evaluation_metrics_keep_only_key_charts():
-    metrics = summarize_records(collect(Adapter()))
-    logged = _evaluation_tracking_metrics(
-        {
-            "scopes": {
-                "all_turns_s2_s5": metrics,
-                "session_final_s2_s5": metrics,
-                "episode_final_s5": metrics,
-            }
-        }
-    )
-
-    assert len(logged) == 9
-    assert logged["evaluation/ppl/all_turns"] == metrics["ppl_including_eos"]
-    assert logged["evaluation/rouge_l_f1/session_5_final"] == metrics["rouge_l_f1"]
-    assert logged["retrieval/on_topic_rate"] == metrics["on_topic_rate"]
 
 
 def test_paired_bootstrap_preserves_a_constant_per_token_difference():
