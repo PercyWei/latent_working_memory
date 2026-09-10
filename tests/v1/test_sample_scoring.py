@@ -93,6 +93,8 @@ def test_http_prompt_contract_cache_and_independent_inspection(
     }
     assert requests[0]["chat_template_kwargs"] == {"enable_thinking": False}
     assert requests[0]["response_format"]["json_schema"]["strict"]
+    reason_schema = requests[0]["response_format"]["json_schema"]["schema"]["properties"]["reason"]
+    assert reason_schema == {"type": "string", "minLength": 1, "maxLength": 240}
     again = SampleScorer(recipe, cache)
     assert again.score_batch(samples) == scorer.score_batch(samples)
     assert len(requests) == 2
@@ -129,6 +131,7 @@ def test_model_failure_never_becomes_a_keep_decision(
         '{"decision":"maybe","reason":"ok"}',
         '{"decision":"keep","reason":""}',
         '{"decision":"keep","reason":"ok","extra":1}',
+        json.dumps({"decision": "keep", "reason": "x" * 241}),
     ],
 )
 def test_quality_response_requires_exact_contract(raw):

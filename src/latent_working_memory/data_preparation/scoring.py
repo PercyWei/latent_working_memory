@@ -35,7 +35,7 @@ REVIEW_SCHEMA = {
     "type": "object",
     "properties": {
         "decision": {"type": "string", "enum": ["keep", "reject", "uncertain"]},
-        "reason": {"type": "string"},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 240},
     },
     "required": ["decision", "reason"],
     "additionalProperties": False,
@@ -50,6 +50,8 @@ def parse_review(raw: str) -> dict[str, str]:
         raise ValueError("invalid sample quality decision")
     if not isinstance(result["reason"], str) or not result["reason"].strip():
         raise ValueError("sample quality decision requires a reason")
+    if len(result["reason"]) > REVIEW_SCHEMA["properties"]["reason"]["maxLength"]:
+        raise ValueError("sample quality reason exceeds the response length limit")
     return result
 
 
