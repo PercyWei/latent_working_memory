@@ -58,7 +58,7 @@ uv run ruff check reproductions/cdic/src reproductions/cdic/tests
 
 ## SwanLab 可视化
 
-训练入口和评估汇总入口支持 `--swanlab-mode disabled|offline|online`，默认不记录；所有 runs 默认保存在 `latent-working-memory` project 中。启用记录时必须通过 `--swanlab-group` 指定实验系列。训练 run 标记为 `train`，集中展示过程曲线；评估和配对比较只写本地 JSON，完成后由唯一的 `evaluation-summary` run 用柱状图和表格统一展示，避免为单个最终值生成折线图。代码自动附加 `scope:reproduction`、`method:cdic` 和 `data:msc`，实验性质等额外标签通过可重复的 `--swanlab-tag` 添加；学习率、阈值和 seed 等具体参数只保存在 config 中。
+训练入口和评估汇总入口支持 `--swanlab-mode disabled|offline|online`，默认不记录；所有 runs 默认保存在专用的 `latent-working-memory-cdic-repro` project 中。启用记录时必须通过 `--swanlab-group` 指定实验系列。训练 run 标记为 `train`，集中展示过程曲线；评估和配对比较只写本地 JSON，完成后由唯一的 `evaluation-summary` run 用柱状图和表格统一展示，避免为单个最终值生成折线图。代码自动附加 `scope:reproduction`、`method:cdic` 和 `data:msc`，实验性质等额外标签通过可重复的 `--swanlab-tag` 添加；学习率、阈值和 seed 等具体参数只保存在 config 中。
 
 在线模式复用服务器已有登录，离线数据保存在对应 run 输出目录的 `swanlab/`，实验 ID、group、job type、tags 和链接写入 `swanlab.json`。恢复同一输出目录时会校验这些组织信息并续接该实验，也可通过 `--swanlab-run-id` 指定已有实验。接口行为参见 [SwanLab 初始化与续接文档](https://docs.swanlab.cn/api/py-init.html)和[实验分组文档](https://docs.swanlab.cn/guide_cloud/experiment_track/grouping.html)。
 
@@ -70,6 +70,7 @@ CUDA_VISIBLE_DEVICES=0,1 uv run --project reproductions/cdic --no-sync \
   -m cdic_repro.experiments.msc.train \
   --config reproductions/cdic/configs/msc_paper_a800.json \
   --swanlab-mode online \
+  --swanlab-project latent-working-memory-cdic-repro \
   --swanlab-group cdic-msc-paper-seed42 \
   --swanlab-tag study:paper-reproduction \
   --swanlab-tag scale:full
@@ -78,6 +79,7 @@ uv run --project reproductions/cdic --no-sync \
   python -m cdic_repro.experiments.msc.report \
   --config <evaluation-summary-config.json> \
   --swanlab-mode online \
+  --swanlab-project latent-working-memory-cdic-repro \
   --swanlab-group cdic-msc-paper-seed42 \
   --swanlab-tag study:paper-reproduction \
   --swanlab-tag scale:full
@@ -259,6 +261,7 @@ uv run --project reproductions/cdic --no-sync \
   python -m cdic_repro.experiments.msc.report \
   --config <evaluation-summary-config.json> \
   --swanlab-mode online \
+  --swanlab-project latent-working-memory-cdic-repro \
   --swanlab-group cdic-msc-hyperparameter-screen-20260909 \
   --swanlab-tag study:ablation \
   --swanlab-tag scale:full

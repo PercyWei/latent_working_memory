@@ -33,7 +33,7 @@ def test_offline_swanlab_run_records_identity_without_changing_rng(tmp_path, mon
 
     identity = json.loads((tmp_path / "swanlab.json").read_text(encoding="utf-8"))
     assert identity["mode"] == "offline"
-    assert identity["project"] == "latent-working-memory"
+    assert identity["project"] == "latent-working-memory-cdic-repro"
     assert identity["group"] == "cdic-msc-test"
     assert identity["job_type"] == "train"
     assert identity["tags"] == ["data:msc", "method:cdic", "scope:reproduction"]

@@ -28,7 +28,11 @@ from cdic_repro.experiments.msc.data import (
     load_msc_episodes,
     summarize_msc_episodes,
 )
-from cdic_repro.experiments.tracking import SWANLAB_MODES, swanlab_run
+from cdic_repro.experiments.tracking import (
+    CDIC_SWANLAB_PROJECT,
+    SWANLAB_MODES,
+    swanlab_run,
+)
 from cdic_repro.icae.adapter import (
     IcaeV1AdapterConfig,
     IcaeV1TrainingAdapter,
@@ -335,7 +339,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--swanlab-mode", choices=SWANLAB_MODES, default="disabled")
-    parser.add_argument("--swanlab-project", default="latent-working-memory")
+    parser.add_argument("--swanlab-project", default=CDIC_SWANLAB_PROJECT)
     parser.add_argument("--swanlab-group")
     parser.add_argument("--swanlab-tag", action="append", default=[])
     parser.add_argument(
@@ -379,7 +383,7 @@ def run_training(
     episodes: tuple[MscEpisode, ...],
     data_summary: dict[str, float | int],
     swanlab_mode: str = "disabled",
-    swanlab_project: str = "latent-working-memory",
+    swanlab_project: str = CDIC_SWANLAB_PROJECT,
     swanlab_group: str | None = None,
     swanlab_tags: tuple[str, ...] = MSC_SWANLAB_TAGS,
 ) -> None:

@@ -14,6 +14,7 @@ import torch
 
 
 SWANLAB_MODES = ("disabled", "offline", "online")
+CDIC_SWANLAB_PROJECT = "latent-working-memory-cdic-repro"
 
 
 @contextmanager
@@ -21,7 +22,7 @@ def swanlab_run(
     output_dir: Path,
     config: dict[str, Any],
     mode: str = "disabled",
-    project: str = "latent-working-memory",
+    project: str = CDIC_SWANLAB_PROJECT,
     group: str | None = None,
     tags: tuple[str, ...] = (),
     run_id: str | None = None,

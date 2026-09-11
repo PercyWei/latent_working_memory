@@ -13,7 +13,11 @@ import swanlab
 
 from cdic_repro.experiments.msc import MSC_SWANLAB_TAGS
 from cdic_repro.experiments.msc.evaluate import SCOPES, write_json
-from cdic_repro.experiments.tracking import SWANLAB_MODES, swanlab_run
+from cdic_repro.experiments.tracking import (
+    CDIC_SWANLAB_PROJECT,
+    SWANLAB_MODES,
+    swanlab_run,
+)
 
 
 SCOPE_LABELS = {
@@ -88,7 +92,7 @@ def build_report(config: MscEvaluationSummaryConfig) -> dict[str, Any]:
 def run(
     config: MscEvaluationSummaryConfig,
     swanlab_mode: str = "disabled",
-    swanlab_project: str = "latent-working-memory",
+    swanlab_project: str = CDIC_SWANLAB_PROJECT,
     swanlab_group: str | None = None,
     swanlab_tags: tuple[str, ...] = MSC_SWANLAB_TAGS,
     swanlab_run_id: str | None = None,
@@ -328,7 +332,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--swanlab-mode", choices=SWANLAB_MODES, default="disabled")
-    parser.add_argument("--swanlab-project", default="latent-working-memory")
+    parser.add_argument("--swanlab-project", default=CDIC_SWANLAB_PROJECT)
     parser.add_argument("--swanlab-group")
     parser.add_argument("--swanlab-tag", action="append", default=[])
     parser.add_argument("--swanlab-run-id")
