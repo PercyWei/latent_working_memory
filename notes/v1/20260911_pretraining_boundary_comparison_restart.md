@@ -17,4 +17,4 @@ semantic、random、mixed 三组从相同模型种子重新初始化，依次使
 
 配置：`configs/v1/pretrain_boundary_comparison_dual_a800.json`。训练产物：`artifacts/v1/experiments/boundary-comparison-2048-20260911/`。测试产物：`artifacts/v1/evaluations/boundary-comparison-2048-20260911/`。调度状态：`artifacts/v1/experiment-plans/boundary-comparison-2048-20260911/`。
 
-本次重跑沿用现有数据集。原 20260910 系列本地与服务器训练产物和调度日志按用户要求清理；单卡、双卡性能测试报告与基准结果保留。云端旧记录的删除状态单独核实，不将新旧 run 混用。
+本次重跑沿用现有数据集。原 20260910 系列本地与服务器训练产物和调度日志按用户要求清理；单卡、双卡性能测试报告和结果按用户要求清理，测试代码保留。云端旧记录的删除状态单独核实，不将新旧 run 混用。
