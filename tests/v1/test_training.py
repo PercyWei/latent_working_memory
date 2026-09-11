@@ -4,6 +4,8 @@ from dataclasses import replace
 import json
 
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 from transformers import LlamaConfig, LlamaForCausalLM
 
 from latent_working_memory.v1.checkpoint import load_model_checkpoint
@@ -203,3 +205,29 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
     assert set(multi.dev_metrics) == {"first", "second"}
     assert (tmp_path / "multi/first/dev-step-000001.json").exists()
     assert (tmp_path / "multi/second/dev-step-000001.json").exists()
+
+    for name, steps, resume_step in (("distributed-full", 2, None), ("distributed-resumed", 1, None), ("distributed-resumed", 2, 1)):
+        mp.spawn(
+            _distributed_train_worker,
+            args=(str(tmp_path / f"rendezvous-{name}-{steps}"), config, data, tmp_path / name, steps, resume_step),
+            nprocs=2,
+            join=True,
+        )
+    expected = load_model_checkpoint(tmp_path / "distributed-full/checkpoints/pretrain-step-000002.pt")
+    actual = load_model_checkpoint(tmp_path / "distributed-resumed/checkpoints/pretrain-step-000002.pt")
+    _assert_equal_nested(expected.model_state, actual.model_state)
+    _assert_equal_nested(expected.optimizer_state, actual.optimizer_state)
+    _assert_equal_nested(expected.progress, actual.progress)
+    assert actual.progress["run_identity"]["world_size"] == 2
+    assert len(actual.progress["rank_rng_states"]) == 2
+
+
+def _distributed_train_worker(rank, rendezvous, config, data, output, steps, resume_step):
+    torch.set_num_threads(1)
+    dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=2)
+    run_pretraining(
+        config, data, output, torch.device("cpu"), max_steps=steps, save_every=1,
+        resume=output / f"checkpoints/pretrain-step-{resume_step:06d}.pt" if resume_step else None,
+        evaluation_dirs={"first": data, "second": data.parent / "random"},
+    )
+    dist.destroy_process_group()

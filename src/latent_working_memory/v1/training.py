@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from torch import Tensor
 
 from latent_working_memory.v1.backbone import LatentMemoryBackbone, load_backbone
@@ -22,6 +23,7 @@ from latent_working_memory.v1.checkpoint import (
 )
 from latent_working_memory.v1.config import ExperimentConfig, write_resolved_config
 from latent_working_memory.v1.data import EpisodeIndex
+from latent_working_memory.v1.distributed import synchronize_gradients
 from latent_working_memory.v1.evaluation import evaluate_pretraining
 from latent_working_memory.data_preparation.fineweb import data_contract
 from latent_working_memory.v1.model import GrowthValueNetwork, JointMemoryWriter
@@ -122,6 +124,9 @@ class PretrainTrainer:
         )
         if not (self.config.ae_weight * task_counts[0] + self.config.lm_weight * task_counts[1]):
             raise ValueError("the optimizer step has no targets for an enabled task")
+        distributed = dist.is_initialized()
+        if distributed:
+            ordered = ordered[dist.get_rank()::dist.get_world_size()]
         records, loss_value = [], 0.0
         for start in range(0, len(ordered), self.config.batch_size):
             batch = ordered[start : start + self.config.batch_size]
@@ -155,6 +160,14 @@ class PretrainTrainer:
                     }
                 )
             del output, scaled_loss
+        if distributed:
+            synchronize_gradients(self.parameters)
+            loss_tensor = torch.tensor(loss_value, device=self.device)
+            dist.all_reduce(loss_tensor)
+            loss_value = loss_tensor.item()
+            rank_records = [None] * dist.get_world_size()
+            dist.all_gather_object(rank_records, records)
+            records = [row for rows in rank_records for row in rows]
         grad_norm = torch.nn.utils.clip_grad_norm_(
             self.parameters,
             self.config.gradient_clip,
@@ -221,6 +234,9 @@ def run_pretraining(
     swanlab_tags: tuple[str, ...] = (),
     evaluation_dirs: dict[str, Path] | None = None,
 ) -> PretrainRunResult:
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    primary = rank == 0
     if (
         max_steps <= 0
         or save_every <= 0
@@ -272,6 +288,7 @@ def run_pretraining(
     trainer = PretrainTrainer(config, backbone, writer, device)
     sampler = PretrainSampler(train_index, tokenizer, config, train_example_limit)
     run_identity = {
+        "world_size": world_size,
         "preparation_id": metadata["preparation_id"],
         "train_example_limit": train_example_limit,
         "evaluation_preparations": evaluation_ids,
@@ -294,23 +311,26 @@ def run_pretraining(
         seen_documents = set(checkpoint.progress["seen_documents"])
         if max_steps <= next_step:
             raise ValueError("max_steps must exceed the resumed completed step count")
-        restore_rng_state(checkpoint.rng_state)
+        restore_rng_state(checkpoint.progress["rank_rng_states"][rank])
+    if world_size > 1:
+        dist.barrier()
     output_dir.mkdir(parents=True, exist_ok=True)
-    write_resolved_config(config, output_dir / "config.json")
-    (output_dir / "provenance.json").write_text(
-        json.dumps(
-            {
-                "preparation": metadata,
-                "torch": torch.__version__,
-                "device": str(device),
-                "model_dtype": str(dtype),
-                "run_identity": run_identity,
-            },
-            ensure_ascii=False,
-            indent=2,
+    if primary:
+        write_resolved_config(config, output_dir / "config.json")
+        (output_dir / "provenance.json").write_text(
+            json.dumps(
+                {
+                    "preparation": metadata,
+                    "torch": torch.__version__,
+                    "device": str(device),
+                    "model_dtype": str(dtype),
+                    "run_identity": run_identity,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n"
         )
-        + "\n"
-    )
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_dir.mkdir(exist_ok=True)
     # A resume segment has its own log, so prior completed or interrupted logs remain reviewable.
@@ -325,18 +345,20 @@ def run_pretraining(
     with (
         swanlab_run(
             output_dir,
-            config.to_dict() | run_identity | {"data_preparation": metadata},
-            swanlab_mode,
+            config.to_dict() | run_identity | {"data_preparation": metadata, "global_batch_size": config.batch_size * config.gradient_accumulation_steps * world_size},
+            swanlab_mode if primary else "disabled",
             swanlab_project,
             group=swanlab_group,
             tags=swanlab_tags,
         ) as tracking,
-        log_path.open("x", encoding="utf-8") as log,
+        (log_path.open("x", encoding="utf-8") if primary else nullcontext()) as log,
     ):
 
         def evaluate_sets(step):
             results = {}
-            for name, index in dev_indices.items():
+            if world_size > 1:
+                dist.barrier()
+            for name, index in dev_indices.items() if primary else ():
                 destination = output_dir if name == "dev" else output_dir / name
                 with precision_context(device):
                     metrics = evaluate_pretraining(
@@ -350,6 +372,8 @@ def run_pretraining(
                     "dev" if name == "dev" else f"dev/{name}",
                 )
                 results[name] = metrics
+            if world_size > 1:
+                dist.barrier()
             return results["dev"] if list(results) == ["dev"] else results
 
         if next_step == 0:
@@ -360,7 +384,7 @@ def run_pretraining(
             step_begin = time.perf_counter()
             examples = [
                 sampler.sample(step)
-                for _ in range(config.batch_size * config.gradient_accumulation_steps)
+                for _ in range(config.batch_size * config.gradient_accumulation_steps * world_size)
             ]
             for group in trainer.optimizer.param_groups:
                 group["lr"] = learning_rate_at(config, step)
@@ -375,53 +399,64 @@ def run_pretraining(
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             elapsed = time.perf_counter() - step_begin
+            peak_memory = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
+            if world_size > 1:
+                resources = torch.tensor([elapsed, peak_memory], dtype=torch.float64, device=device)
+                dist.all_reduce(resources, op=dist.ReduceOp.MAX)
+                elapsed, peak_memory = resources.tolist()
             result.update(
                 step=step + 1,
                 seconds=elapsed,
                 input_tokens_per_second=result["input_tokens"] / elapsed,
-                peak_memory_bytes=torch.cuda.max_memory_allocated(device)
-                if device.type == "cuda"
-                else 0,
+                peak_memory_bytes=int(peak_memory),
             )
-            log.write(json.dumps(result, ensure_ascii=False) + "\n")
-            log.flush()
-            print(json.dumps({k: v for k, v in result.items() if k != "samples"}), flush=True)
-            log_training(tracking, result, input_tokens, target_tokens)
+            if primary:
+                log.write(json.dumps(result, ensure_ascii=False) + "\n")
+                log.flush()
+                print(json.dumps({k: v for k, v in result.items() if k != "samples"}), flush=True)
+                log_training(tracking, result, input_tokens, target_tokens)
             if (step + 1) % save_every == 0 or step + 1 == max_steps:
                 path = checkpoint_dir / f"pretrain-step-{step + 1:06d}.pt"
-                save_model_checkpoint(
-                    path,
-                    "pretrain",
-                    config,
-                    trainable_model_state(backbone, writer, value),
-                    trainer.optimizer.state_dict(),
-                    {
-                        "next_step": step + 1,
-                        "sampler": sampler.state_dict(),
-                        "input_tokens": input_tokens,
-                        "target_tokens": target_tokens,
-                        "seen_documents": sorted(seen_documents),
-                        "run_identity": run_identity,
-                    },
-                    capture_rng_state(),
-                )
+                rank_rng_states = [capture_rng_state()]
+                if world_size > 1:
+                    rank_rng_states = [None] * world_size
+                    dist.all_gather_object(rank_rng_states, capture_rng_state())
+                if primary:
+                    save_model_checkpoint(
+                        path,
+                        "pretrain",
+                        config,
+                        trainable_model_state(backbone, writer, value),
+                        trainer.optimizer.state_dict(),
+                        {
+                            "next_step": step + 1,
+                            "rank_rng_states": rank_rng_states,
+                            "sampler": sampler.state_dict(),
+                            "input_tokens": input_tokens,
+                            "target_tokens": target_tokens,
+                            "seen_documents": sorted(seen_documents),
+                            "run_identity": run_identity,
+                        },
+                        capture_rng_state(),
+                    )
             if (step + 1) % config.eval_every == 0 or step + 1 == max_steps:
                 dev_metrics = evaluate_sets(step + 1)
-    (output_dir / f"resources-from-{segment_id}.json").write_text(
-        json.dumps(
-            {
-                "seconds": time.perf_counter() - begin,
-                "completed_steps": max_steps,
-                "cumulative_input_tokens": input_tokens,
-                "cumulative_target_tokens": target_tokens,
-                "distinct_documents": len(seen_documents),
-                "document_visits": sampler.visits,
-                "peak_memory_bytes": torch.cuda.max_memory_allocated(device)
-                if device.type == "cuda"
-                else 0,
-            },
-            indent=2,
+    if primary:
+        (output_dir / f"resources-from-{segment_id}.json").write_text(
+            json.dumps(
+                {
+                    "seconds": time.perf_counter() - begin,
+                    "completed_steps": max_steps,
+                    "cumulative_input_tokens": input_tokens,
+                    "cumulative_target_tokens": target_tokens,
+                    "distinct_documents": len(seen_documents),
+                    "document_visits": sampler.visits,
+                    "peak_memory_bytes": torch.cuda.max_memory_allocated(device)
+                    if device.type == "cuda"
+                    else 0,
+                },
+                indent=2,
+            )
+            + "\n"
         )
-        + "\n"
-    )
     return PretrainRunResult(final_checkpoint, max_steps, dev_metrics)

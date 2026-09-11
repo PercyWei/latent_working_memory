@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+from datetime import timedelta
 from pathlib import Path
 from typing import Sequence
 
 import torch
+import torch.distributed as dist
 
 from latent_working_memory.devices import validate_device
 from latent_working_memory.v1.config import load_config
@@ -39,7 +42,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
-    device = torch.device(args.device)
+    if int(os.environ.get("WORLD_SIZE", 1)) > 1:
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        dist.init_process_group("nccl", timeout=timedelta(hours=2), device_id=torch.device("cuda", local_rank))
+        device = torch.device("cuda", local_rank)
+    else:
+        device = torch.device(args.device)
     validate_device(device)
     config = load_config(args.config)
     result = run_pretraining(
@@ -61,6 +70,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.evaluation_dirs
         else None,
     )
+    if dist.is_initialized() and dist.get_rank() != 0:
+        dist.destroy_process_group()
+        return
     print(
         json.dumps(
             {
@@ -72,6 +84,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             indent=2,
         )
     )
+
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
