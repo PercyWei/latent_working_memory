@@ -1,12 +1,13 @@
-# 20260912_研究文档索引（15:57:54 UTC+08:00）
+# 20260912_研究文档索引（16:11:15 UTC+08:00）
 
 创建时间：20260910 11:36:22 UTC+08:00
-最后修订时间：20260912 15:57:54 UTC+08:00
+最后修订时间：20260912 16:11:15 UTC+08:00
 
 | 内容 | 文档 |
 |---|---|
 | 当前预训练数据策略、实现与构建记录 | [预训练数据构建](v1/20260910_pretraining_data_construction.md) |
-| 预训练数据类型对比：训练、完整评估与产物路径 | [实验记录](v1/20260911_pretraining_boundary_comparison_restart.md) |
+| 预训练阶段：训练流程、AE/LM 损失与评估 | [预训练与评估](v1/20260910_pretraining_and_evaluation.md) |
+| 预训练数据类型对比：训练、完整评估与产物路径 | [实验记录](v1/20260911_pretraining_data_comparison.md) |
 | 方法结构与后续训练阶段 | [框架 v1](20260907_growing_latent_working_memory_framework_v1.md) |
 | 数据与任务路线 | [真实数据训练路线](20260907_real_data_training_route_review.md) |
 | 文献背景与创新边界 | [方向查重](streaming_mutable_latent_memory_prior_art_2026_09.md) |

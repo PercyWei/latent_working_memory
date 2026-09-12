@@ -1,17 +1,25 @@
-# 20260912_双卡预训练数据类型对比实验（15:57:54 UTC+08:00）
+# 20260912_双卡预训练数据类型对比实验（16:11:15 UTC+08:00）
 
 创建时间：20260911 16:27:19 UTC+08:00
-最后修订时间：20260912 15:57:54 UTC+08:00
+最后修订时间：20260912 16:11:15 UTC+08:00
 
-## 实验设置
+本文记录预训练数据类型对比的具体配置、运行与结果。阶段目标、记忆写入与读取、损失和评估方法见 [预训练与 AE/LM 评估](20260910_pretraining_and_evaluation.md)。
+
+## 1. 数据与实验设置
 
 semantic、random、mixed 三组从相同模型种子重新初始化，并行进行同步数据并行训练：semantic 使用物理 GPU 0、1，random 使用 4、5，mixed 使用 6、7。每卡 microbatch 2，梯度累积 2，全局有效 batch 8；关闭梯度检查点，BF16。每组 20,000 步，模型种子 42，数据种子 20260907。学习率峰值 3e-5，600 步 warmup，余弦衰减至 3e-6；长度课程为前 6,000 步，压缩率 2/4/8 等概率。AE/LM 权重均为 1。
 
 沿用 `data/v1/boundary-comparison-2048-20260910`，每组训练集 157,320 条，AE/LM 数量相等，mixed 两来源各占一半。输入和 LM 目标各不超过 2048 tokens。三组共享 semantic/random 两套 dev/test。每 1,000 步保存 checkpoint 并评估两套 dev，各取固定 120 条；每 2,000 步及初始基线进行小规模 AE 生成评估。每组结束后，在该组分配的两卡分别评估两套 test，各组独立推进。
 
-数据并行按全局 AE/LM 样本数归一化损失，按长度交错分配样本，每次参数更新前合并梯度。主进程写入指标和 checkpoint，保存全局采样状态以及每个 rank 的随机状态，恢复时校验 world_size、配置及数据身份。周期 dev 由主进程执行，另一进程等待。
+基座为 Llama-2-7B-Chat，写入与读取窗口均为 4096，memory 上限为 4096。记忆维度 512，Writer 为 3 层、8 个注意力头、前馈维度 2048；读取 LoRA rank=16、alpha=32，作用于 q_proj/v_proj，dropout=0。AdamW 的 weight decay 为 0.01，梯度裁剪阈值为 1.0。
 
-## SwanLab 与产物
+AE 输入 X、LM 输入 X 与目标 Y 均为 32–2048 tokens。按 X 长度分为 32–64、65–128、129–256、257–512、513–1024、1025–2048 六档。每组每档每任务有 13,110 条；mixed 的两种来源各 6,555 条。每套 dev 共 3,468 条，每档每任务 289 条；每套 test 共 3,108 条，每档每任务 259 条。
+
+长度课程的六档起始概率为 25%、25%、20%、15%、10%、5%，前 6,000 步线性过渡到各 1/6。实验数据选择 seed 为 20260910。每组采样 160,000 次，约为训练集数量的 1.02 倍；各长度池的实际遍历次数受课程采样影响。
+
+数据选择配置为 `configs/data_preparation/boundary_comparison.json`，入口为 `python -m latent_working_memory.data_preparation.experiment`，结果记录在 `data/v1/boundary-comparison-2048-20260910/selection.json`。筛选保持来源划分、完整样本和上下文预算，跨来源按任务及 X/Y 去重，train 去除 19 条、test 去除 1 条重复内容。
+
+## 2. SwanLab 与产物
 
 项目为 `latent-working-memory-v1`，group 为 `lwm-boundary-comparison-2048-20260911`。训练 run 名称为 `pretrain-semantic-157k-20260911`、`pretrain-random-157k-20260911`、`pretrain-mixed-157k-20260911`。首次测试 run 名称采用 `evaluate-训练来源-test-测试来源-157k-20260911`，其中 157k 仍表示对应模型的训练集规模，评估样本数记录在 config 中。job_type 为 train/evaluate，tags 保留 scope:main、method:latent-working-memory、study:boundary-comparison、data:fineweb 及实际来源。
 
@@ -29,13 +37,15 @@ semantic、random、mixed 三组从相同模型种子重新初始化，并行进
 
 本次重跑沿用现有数据集。原 20260910 系列本地与服务器训练产物和调度日志按用户要求清理；单卡、双卡性能测试报告、结果和独立测试入口按用户要求清理；正式训练的梯度同步模块保留。云端旧记录的删除状态单独核实，不将新旧 run 混用。
 
-## 启动记录
+## 3. 训练运行记录
+
+20260910 23:05:42 UTC+08:00 曾启动单卡配置，代码提交为 `2ed8f6d`，每卡 microbatch 1、梯度累积 8、开启梯度检查点。semantic 与 random 分别在 GPU 0、1 执行，mixed 排队；该轮随后停止，原产物已清理。以下正式结果来自重新初始化的双卡训练。
 
 20260911 16:29:25 UTC+08:00 启动双卡系列，训练代码提交为 `5b32bb4`。首组 `pretrain-semantic-157k-20260911` 已建立 [SwanLab 运行](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/vb5bos79)，首先执行初始双 dev 基线评估，之后进行参数更新。后续改为三组并行调度。
 
 20260911 16:54:34 UTC+08:00，按用户授权将 random 分配到 GPU 4、5，mixed 分配到 GPU 6、7；semantic 继续使用 GPU 0、1。各组显式设置 `CUDA_VISIBLE_DEVICES` 和 `LWM_ALLOWED_PHYSICAL_GPUS` 为该组设备编号，训练配置保持一致。
 
-## 最终结果
+## 4. 训练结束与首次测试结果
 
 三组均完成 20,000 步训练、最终双 dev 评估和两套 test。全部任务于 20260912 00:39:22 UTC+08:00 结束。最终 checkpoint 为各训练目录下的 `checkpoints/pretrain-step-020000.pt`，六次 test 均正常退出；全部训练记录中的 loss 和梯度范数均为有限值。
 
@@ -65,19 +75,11 @@ mixed 的 semantic test LM NLL 为 1.9852，保留等量近期原文的对照为
 
 SwanLab 测试记录：semantic 训练组的 [semantic test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/q830jqgt)、[random test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/aaho5zki)；random 训练组的 [semantic test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/zkkxq86z)、[random test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/zo41umze)；mixed 训练组的 [semantic test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/9vqipeih)、[random test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/ew086khr)。
 
-## 当前评估与展示
+## 5. 完整评估设置与发布
 
-AE 的正确记忆、错误记忆、完整原文及关闭 reader LoRA 的完整原文四种条件均评估 NLL/PPL、BLEU-4 和正确前缀比例。四种条件共享生成样本、任务提示和目标；完整原文位于任务提示之前。完整原文条件的损失与生成每篇各计算一次，再复用于各容量的配对统计。生成采用 KV cache，基座对照关闭 reader LoRA。LM 评估正确记忆、错误记忆、空记忆、完整原文及关闭 reader LoRA 的完整原文，记录 NLL/PPL。NLL 按目标内容 token 加权，BLEU 按语料计算，正确前缀比例按生成记录宏平均；表格同时记录评估次数、目标 token 数及生成次数。重建样例保留原文和预测文本。
+采用 [预训练评估方法](20260910_pretraining_and_evaluation.md#5-aelm-评估) 中的 AE 四条件与 LM 五条件。各模型使用 step 20,000 checkpoint，每套 test 请求 120 个独立文档样本，AE 生成面板取 12 条，容量按名义压缩率 2/4/8 展开。正文上一节保留首次测试时的指标和诊断；本轮补齐 AE 完整原文与基座原文对照。
 
-统计分为总体与长度×压缩率联合分组。联合分组从逐条记录重新聚合，长度与有效压缩率均按 2 的幂次上界分桶。原始记录保留实际 memory 容量。每个模型评估 run 有 12 张图：总体 AE 四项、LM 两项，以及正确记忆的联合分组 AE 四项、LM 两项。总体图按对照条件分组，两套测试来源相邻；联合图横轴依次为长度、ratio，每个位置的 semantic/random 相邻。对照条件使用不同色系，测试来源使用同色系的深浅色。图例逐项列出 `condition=条件 / test=测试来源` 与对应颜色，条目较多时翻页查看；同一条件下两套测试结果保持相邻。浮点展示最多四位小数，柱顶数值隐藏，精确值保留在报告中，缺失分组留空。
-
-图、表、样例分别位于 `charts/*`、`tables/*`、`examples/*`。单模型评估同时比较两套测试来源；跨模型汇总比较三种训练来源，分别使用蓝、橙、绿色系，两套测试来源使用同色系深浅色；图例逐项列出 `train=训练来源 / test=测试来源`。重建样例标明对照条件。
-
-`python -m latent_working_memory.v1.publish_reports` 从已有 JSONL 重新聚合结果并发布，不运行模型推理。`--reports` 指向 JSON 列表，每项包含 `training_source`、`evaluation_source`、`report`；report 指向原始 JSON，逐条记录使用同名 JSONL。重复传入 `--evaluation-output 训练来源 输出目录` 为每个模型发布评估，`--output-dir` 发布跨模型汇总。项目、group、tags 和 online 模式通过启动参数指定。
-
-完整评估结果保存在现有 `latent-working-memory-v1` 项目及原 group 中。原始六份测试报告保留；正文最终结果章节记录首次完成时的评估结果。
-
-静态评估与比较 run 只在媒体 step 0 发布一次，config 中的 `checkpoint_step`（汇总发布时位于各 report 条目）记录对应模型的训练步数 20,000。已有发布身份的输出目录拒绝追加，重新制作报告使用新目录。SwanLab 的媒体步数表示上传位置。图表使用百分比定位绘图区，长横轴标签分行，适配普通卡片与放大查看。
+单模型评估 run 各有 12 张图：总体 AE 四项、LM 两项，以及记忆条件下长度 × 压缩率联合分组的对应六项。跨模型比较使用 6 张图，总计 42 张图。semantic、random、mixed 训练来源分别使用蓝、橙、绿色系；两套测试来源使用同色系深浅色，图例显示完整来源标签。图、表和样例分别发布，媒体 step 固定为 0，checkpoint_step 为 20,000。
 
 本轮完整评估的 run 名称为 `pretrain-semantic-157k-eval-20260912`、`pretrain-random-157k-eval-20260912`、`pretrain-mixed-157k-eval-20260912`；跨模型比较为 `pretrain-157k-compare-20260912`。run 名称直接取输出目录名，项目和 group 沿用本系列设置。完整 AE 对照通过重新执行模型评估获得。
 
@@ -95,7 +97,7 @@ CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src artifacts/v1/pretrain-code-20260908/.venv/
 
 三组评估完成后，汇总清单的 report 路径指向各新评估目录下的 `{semantic,random}/test-step-020000.json`，使用 `publish_reports --reports 清单路径 --output-dir artifacts/v1/pretrain-data-comparison-2048_20260911/compare/pretrain-157k-compare-20260912` 发布跨模型比较，并指定同一项目、group、tags 和 online 模式。单模型评估已在执行结束时发布，汇总命令只创建 compare run。
 
-## 完整评估运行记录
+## 6. 完整评估运行记录
 
 20260912 13:51:57 UTC+08:00 开始，14:13:26 完成，代码提交为 `5ded1be`。semantic、random 模型分别在 GPU 0、1 完成两套测试；mixed 的两套测试分别在 GPU 0、1 并行完成。三组使用原有 step 20,000 checkpoint。每组 semantic test 实际覆盖 120 个独立文档，random test 覆盖 117 个独立文档，与原评估面板一致；每套测试的 AE 四种条件各有 36 条配对生成记录，完整原文条件每篇仅推理一次并复用于各容量。
 
