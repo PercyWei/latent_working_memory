@@ -1,7 +1,7 @@
 # 20260912_动态梯度传播对比实验
 
 创建时间：20260912 23:54:16 UTC+08:00
-最后修订时间：20260912 23:59:32 UTC+08:00
+最后修订时间：20260913 00:02:00 UTC+08:00
 
 本系列比较完整 BPTT、源 token TBPTT 和更新次数 TBPTT。各组共享初始化参数、文本课程与评估记录。训练方法见[动态训练与 QA 评估](20260911_dynamic_training_and_evaluation.md)。本轮先运行完整 BPTT。
 
@@ -96,3 +96,9 @@ GPU 6、7 上的 K=1024 完整 BPTT 测试结果如下，每步使用 2 份文�
 | 初始化文本最长 | 13.21 秒 | 20.10 GiB |
 
 两种测试均完成一次完整反向传播，截断次数为 0。性能测试仅写入 `plan/profile-full-k1024.jsonl` 和本地日志。正式训练使用相同 BF16、QA 激活重算和显存分配设置。
+
+## 6. 正式运行
+
+完整 BPTT 于 20260913 00:00:29 UTC+08:00 启动，启动时仓库提交为 `ae6248f`，调度进程 PID 为 959569。命令与启动信息分别保存在 `plan/commands-full.sh`、`plan/launch-full.json`，训练及后续 test 的终端日志为 `plan/full-train-and-eval.log`。
+
+训练 run：[dynamic-full_squad_mixed-157k_20260912](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/3sibkt6l)。进程依次执行初始化 dev、训练与周期 dev、最终 dev，以及独立 test。
