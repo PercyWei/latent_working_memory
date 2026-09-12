@@ -40,7 +40,7 @@ def main():
         checkpoint,
         config=replace(
             checkpoint.config,
-            gradient_checkpointing=recipe.gradient_checkpointing,
+            gradient_checkpointing=False,
         ),
     )
     tokenizer, backbone, writer, _ = load_components(checkpoint, device)
@@ -75,7 +75,7 @@ def main():
         )
         if world > 1:
             dist.all_reduce(resources, op=dist.ReduceOp.MAX)
-        result.update(case=label, gradient_checkpointing=recipe.gradient_checkpointing)
+        result.update(case=label, gradient_checkpointing=False)
         result["seconds"], result["peak_allocated_bytes"], result["peak_reserved_bytes"] = (
             resources.tolist()
         )

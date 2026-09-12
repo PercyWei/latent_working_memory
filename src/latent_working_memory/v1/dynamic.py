@@ -483,7 +483,7 @@ def run_dynamic(
         raise ValueError("initialization needs pretrain; resume needs dynamic checkpoint")
     checkpoint = replace(
         checkpoint,
-        config=replace(checkpoint.config, gradient_checkpointing=recipe.gradient_checkpointing),
+        config=replace(checkpoint.config, gradient_checkpointing=False),
     )
     data = SquadDataset(index_path)
     docs = data.select("train", recipe.min_tokens, recipe.max_tokens)
@@ -583,6 +583,15 @@ def run_dynamic(
                 (output_dir / "dev-000000.jsonl").write_text(
                     "".join(json.dumps(r) + "\n" for r in rows)
                 )
+            if tracking is not None:
+                tracking.log(
+                    {
+                        f"evaluation/{group}/{key}": value
+                        for group, values in metrics.items()
+                        for key, value in values.items()
+                    },
+                    step=0,
+                )
         article_stream = shuffled_articles(docs, recipe.seed, articles_seen)
         for step in range(next_step, steps):
             article_indices = range(
@@ -630,7 +639,11 @@ def run_dynamic(
                 )
             if tracking is not None:
                 tracking.log(
-                    {f"train/{k}": v for k, v in result.items() if isinstance(v, (int, float))},
+                    {
+                        f"{'resources' if k in {'seconds', 'peak_memory_bytes', 'input_tokens_per_second'} else 'train'}/{k}": v
+                        for k, v in result.items()
+                        if isinstance(v, (int, float))
+                    },
                     step=step + 1,
                 )
             if (step + 1) % eval_every == 0 or step + 1 == steps:

@@ -655,3 +655,22 @@ def test_distributed_dynamic_matches_single_process(components, tiny_config, tok
     assert len(rank0["rows"]) == len(rows)
     for group, values in metrics.items():
         assert rank0["metrics"][group] == pytest.approx(values, rel=1e-5)
+
+
+@pytest.mark.parametrize("span", [0, 1])
+def test_full_reader_checkpoint_preserves_gradients(components, tiny_config, tokenizer, span):
+    backbone, writer = components
+    other_backbone, other_writer = deepcopy(components)
+    recipe = DynamicConfig(4, 0, 128, bptt_span=span)
+    plain = DynamicTrainer(backbone, writer, tiny_config, recipe, torch.device("cpu"))
+    recompute = DynamicTrainer(
+        other_backbone,
+        other_writer,
+        tiny_config,
+        replace(recipe, gradient_checkpointing=True),
+        torch.device("cpu"),
+    )
+    episodes = [example(tokenizer)]
+    assert plain.step(episodes, tokenizer, [42]) == recompute.step(episodes, tokenizer, [42])
+    for a, b in zip(plain.parameters, recompute.parameters, strict=True):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
