@@ -1,7 +1,7 @@
 # 20260910_预训练数据构建策略与实现
 
 创建时间：20260910 15:44:35 UTC+08:00
-最后修订时间：20260912 22:53:53 UTC+08:00
+最后修订时间：20260912 22:57:45 UTC+08:00
 
 ## 1. 数据来源
 
@@ -89,7 +89,7 @@ CPU 预取下一窗口的分句与分词，主线程处理当前窗口并按顺�
 
 ```bash
 uv run --frozen python -m latent_working_memory.data_preparation \
-  --config configs/data_preparation/fineweb-4096-204k.json \
+  --config configs/data_preparation/fineweb-4096.json \
   --dataset-dir data/raw/HuggingFaceFW-fineweb \
   --output-dir /path/to/new-data
 ```
@@ -102,7 +102,7 @@ uv run --frozen python -m latent_working_memory.data_preparation \
 
 输出按数据集名称组织为 `<输出目录>/<数据集名称>/`。来源数据集保存 `dev.jsonl`、`test.jsonl`；配置中的训练数据集保存 `train.jsonl`。同名来源与训练数据集合并到一个目录，并使用同一份 `preparation.json` 记录全部划分的数量、数据身份、来源和契约；同名训练数据集的配比须为该来源的 100%。混合训练集保存训练划分，评估显式引用各来源数据集。
 
-根目录的 `selection.json` 记录选择配置、各任务／长度档配额、筛选统计，以及训练目录和评估目录映射。当前实验使用 `data/v1/fineweb-2048-164k_20260910/`，具体布局、配置与复现命令见 [预训练数据类型对比实验](20260911_pretraining_data_comparison.md)。
+根目录的 `selection.json` 记录选择配置、各任务／长度档配额、筛选统计，以及训练目录和评估目录映射。当前实验使用 `data/v1/fineweb-2048_20260910/`，具体布局、配置与复现命令见 [预训练数据类型对比实验](20260911_pretraining_data_comparison.md)。
 
 ## 6. 运行记录
 
@@ -112,7 +112,7 @@ uv run --frozen python -m latent_working_memory.data_preparation \
 
 | 设置 | 值 |
 |---|---|
-| 正式构造配置 | `configs/data_preparation/fineweb-4096-204k.json` |
+| 正式构造配置 | `configs/data_preparation/fineweb-4096.json` |
 | tokenizer | `/data/bywei/models/meta-llama/Llama-2-7b-chat-hf` |
 | 来源候选预算 | 100,000 篇；本轮去重后保留 99,998 篇 |
 | 来源 seed | 20260907 |
@@ -137,9 +137,9 @@ semantic/random × AE/LM 四种组合的目标与实际数量一致：
 | 构造代码与阶段调度 | `src/latent_working_memory/data_preparation/` |
 | 主环境 | `.venv/` |
 | 本地 FineWeb Parquet | `data/raw/HuggingFaceFW-fineweb/sample-10BT/` |
-| 数据成品、准备元数据及审计报告 | `data/v1/fineweb-4096-204k_20260910/` |
+| 数据成品、准备元数据及审计报告 | `data/v1/fineweb-4096_20260910/` |
 
-目录名中的 4096 表示 X/Y 各自的 token 长度上限；204k 表示 semantic 或 random 单类数据集的完整规模 204,400 条（train 196,000 + dev 4,200 + test 4,200），两类合计 408,800 条。训练 run 名称中的规模按实际训练集样本数。
+目录名记录 FineWeb 来源、X/Y 各自的 token 长度上限 4096 和创建日期。实际规模保存在 `preparation.json`：semantic 和 random 各 204,400 条（train 196,000 + dev 4,200 + test 4,200），两类合计 408,800 条。训练 run 名称中的规模按实际训练集样本数。
 
 ### 生成命令
 
@@ -153,9 +153,9 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 export TOKENIZERS_PARALLELISM=false OMP_NUM_THREADS=4
 
 python -u -m latent_working_memory.data_preparation \
-  --config configs/data_preparation/fineweb-4096-204k.json \
+  --config configs/data_preparation/fineweb-4096.json \
   --dataset-dir data/raw/HuggingFaceFW-fineweb \
-  --output-dir data/v1/fineweb-4096-204k_20260910 \
+  --output-dir data/v1/fineweb-4096_20260910 \
   --stage all
 ```
 
@@ -165,19 +165,19 @@ python -u -m latent_working_memory.data_preparation \
 
 ```bash
 python -u -m latent_working_memory.data_preparation \
-  --config configs/data_preparation/fineweb-4096-204k.json \
+  --config configs/data_preparation/fineweb-4096.json \
   --dataset-dir data/raw/HuggingFaceFW-fineweb \
-  --output-dir data/v1/fineweb-4096-204k_20260910 \
+  --output-dir data/v1/fineweb-4096_20260910 \
   --stage sources
 
 python -u -m latent_working_memory.data_preparation \
-  --config configs/data_preparation/fineweb-4096-204k.json \
-  --output-dir data/v1/fineweb-4096-204k_20260910 \
+  --config configs/data_preparation/fineweb-4096.json \
+  --output-dir data/v1/fineweb-4096_20260910 \
   --stage semantic
 
 python -u -m latent_working_memory.data_preparation \
-  --config configs/data_preparation/fineweb-4096-204k.json \
-  --output-dir data/v1/fineweb-4096-204k_20260910 \
+  --config configs/data_preparation/fineweb-4096.json \
+  --output-dir data/v1/fineweb-4096_20260910 \
   --stage random
 ```
 
