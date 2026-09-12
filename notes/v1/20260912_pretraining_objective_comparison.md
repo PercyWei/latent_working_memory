@@ -1,7 +1,7 @@
 # 20260912_短文本预训练目标对比实验
 
 创建时间：20260912 23:38:14 UTC+08:00
-最后修订时间：20260912 23:58:40 UTC+08:00
+最后修订时间：20260913 00:02:23 UTC+08:00
 
 本实验比较 AE-only、从开始联合 AE/LM、AE warm-up 后联合训练。目标是在短文本、低压缩率条件下判断读写结构能否建立忠实重建，以及 LM 目标对这一能力的影响。实验沿用[预训练数据类型对比](20260911_pretraining_data_comparison.md)的产物与报告布局。本轮用户明确指定仅使用物理 GPU 4、5。
 
@@ -82,3 +82,7 @@ LWM_ALLOWED_PHYSICAL_GPUS=4,5 CUDA_VISIBLE_DEVICES=4,5 OMP_NUM_THREADS=1 TOKENIZ
 20260912 23:58:40 UTC+08:00：服务器相关测试 25 项通过；真实双卡 joint smoke 完成 16 步，每步全局 8 条、AE/LM 各 4 条，step 中位耗时 0.448 秒，每卡每任务峰值约 14.97 GiB。额外两个双卡任务并发各完成 64 步，中位耗时分别为 0.623、0.617 秒，短时总吞吐约提高 44%。据此采用最大并发数 2，仍仅使用物理 GPU 4、5，单任务 batch、梯度累积与优化设置不变。这是调度测速，不作为方法效率结论；正式任务的耗时包含共享 GPU 的竞争。测速产物独立标记为 smoke，不参与科学比较。
 
 GitHub 首次同步成功；后续服务器连接 GitHub 出现 TLS 错误，按约定通过 Gitee 完成仓库同步。首个 smoke 因默认 GPU 白名单仅允许 0、1 而在模型加载前退出，修正为显式 `LWM_ALLOWED_PHYSICAL_GPUS=4,5` 后通过；未使用其他卡。
+
+20260913 00:01:20 UTC+08:00：正式调度启动，初始代码提交 `ae6248f`，调度 PID 为 `960164`。A（AE-only，16k 可用 AE 样本）与 B（joint，32k 样本）并发双卡运行；C 等待 A 完成后从 A 的 step 5,000 派生。各命令同时显式设置 `CUDA_VISIBLE_DEVICES=4,5` 和 `LWM_ALLOWED_PHYSICAL_GPUS=4,5`。系列目录及 run 名称的 `20260912` 保留创建日期，实际执行跨入 20260913。
+
+运行状态和失败原因保存在 `plan/status.json`，完整命令在 `plan/commands.json`，训练 stdout 分别为 `plan/{ae-only,joint,ae-warmup}-train.log`。调度器独立于 SSH 会话运行；训练后自动执行独立 test、前缀诊断和 SwanLab 比较发布，并追加最终结果。当前正式实验尚未完成。
