@@ -159,19 +159,16 @@ def log_evaluation(
     values: dict[str, Any] = {"progress/input_tokens": metrics["training_input_tokens"]}
     generation_metrics = (
         "generated_reads",
-        "sequence_match",
-        "normalized_token_edit_distance",
         "correct_prefix_ratio",
         "bleu_4",
     )
-    strata = {"length_up_to", "ratio_up_to", "capacity"}
+    strata = {"length_ratio"}
     for group, summary in metrics["groups"].items():
         category, name = group.split("/", 1)
         if category == "all":
             for metric in (
                 "nll",
                 "ppl",
-                "token_accuracy",
                 "reads",
                 *generation_metrics,
             ):

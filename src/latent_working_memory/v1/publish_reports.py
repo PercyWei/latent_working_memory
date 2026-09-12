@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
+from latent_working_memory.v1.evaluation import aggregate_pretrain_metrics
 from latent_working_memory.v1.reporting import (
     comparison_charts,
     build_evaluation_charts,
@@ -49,7 +50,15 @@ def main(argv=None) -> None:
         seen.add((train, test))
         path = (args.reports.parent / entry["report"]).resolve()
         entry["report"] = str(path)
-        report = json.loads(path.read_text())
+        # Re-aggregate saved reads for the current evaluation protocol.
+        records = [json.loads(line) for line in path.with_suffix(".jsonl").read_text().splitlines()]
+        records = [
+            record
+            for record in records
+            if record["condition"] != "recent_context"
+            and not (record["task"] == "ae" and record["condition"] == "no_memory")
+        ]
+        report = aggregate_pretrain_metrics(records)
         reports.append((train, test, report))
     charts = comparison_charts(reports)
     outputs = dict(args.evaluation_output)

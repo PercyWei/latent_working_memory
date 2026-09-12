@@ -1,7 +1,7 @@
-# 20260912_双卡预训练边界对比实验（11:12:05 UTC+08:00）
+# 20260912_双卡预训练边界对比实验（12:39:04 UTC+08:00）
 
 创建时间：20260911 16:27:19 UTC+08:00
-最后修订时间：20260912 11:12:05 UTC+08:00
+最后修订时间：20260912 12:39:04 UTC+08:00
 
 ## 实验设置
 
@@ -55,14 +55,14 @@ mixed 的 semantic test LM NLL 为 1.9852，保留等量近期原文的对照为
 
 SwanLab 测试记录：semantic 训练组的 [semantic test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/q830jqgt)、[random test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/aaho5zki)；random 训练组的 [semantic test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/zkkxq86z)、[random test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/zo41umze)；mixed 训练组的 [semantic test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/9vqipeih)、[random test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/ew086khr)。
 
-## 结果展示
+## 当前评估与展示
 
-周期 dev 以训练 step 为横轴记录标量曲线；独立 checkpoint 评估按 `charts/*`、`tables/*`、`examples/*` 三个顶层面板展示，包含总体与分层指标表、按条件或分桶比较的柱状图，以及重建文本。指标分别绘图，缺失的分桶值保持为空。表中的 reads 表示容量展开后的评估次数。
+AE 评估正确记忆与错误记忆，记录 NLL、PPL、BLEU-4 和正确前缀比例。LM 评估正确记忆、错误记忆、空记忆、完整原文及关闭 reader LoRA 的完整原文，记录 NLL/PPL。NLL 按目标内容 token 加权，BLEU 按语料计算，正确前缀比例按生成记录宏平均；表格同时记录评估次数、目标 token 数及生成次数。重建样例保留原文和预测文本。
 
-`python -m latent_working_memory.v1.publish_reports` 从已有报告发布展示，不运行模型推理。`--reports` 指向 JSON 列表，每项包含 `training_source`、`evaluation_source`、`report`；报告路径相对清单所在目录解析。`--output-dir` 指定比较 run 的目录及名称；重复传入 `--evaluation-output 训练来源 输出目录`，为每个模型建立一个包含全部测试来源的评估 run。`--swanlab-project`、`--swanlab-group` 和 `--swanlab-tag` 显式指定实验归属，`--swanlab-mode online` 发布云端展示。
+统计分为总体与长度×压缩率联合分组。联合分组从逐条记录重新聚合，长度与有效压缩率均按 2 的幂次上界分桶。原始记录保留实际 memory 容量。每个模型评估 run 有 12 张图：总体 AE 四项、LM 两项，以及正确记忆的联合分组 AE 四项、LM 两项。总体图按对照条件分组，两套测试来源相邻；联合图横轴依次为长度、ratio，每个位置的 semantic/random 相邻。对照条件使用不同色系，测试来源使用同色系的深浅色。浮点展示最多四位小数，柱顶数值隐藏，精确值保留在报告中，缺失分组留空。
 
-当前按三个模型组织评估 run：`evaluate-semantic-157k-20260912`、`evaluate-random-157k-20260912`、`evaluate-mixed-157k-20260912`。每个 run 的总体表与分层表保留两套测试结果，柱状图比较测试来源及记忆对照，重建样例按测试来源分组。跨模型汇总 run 为 `compare-boundary-157k-20260912`。直接运行 `evaluate.py --evaluation-dirs ...` 也在同一评估 run 中汇总全部测试来源。
+图、表、样例分别位于 `charts/*`、`tables/*`、`examples/*`。单模型评估同时比较两套测试来源；跨模型汇总比较三种训练来源。
 
-图表与表格中的浮点数最多保留四位小数，计数保持整数；柱顶数值隐藏，悬停查看数值，图例可滚动。原始 JSON/JSONL 保留完整精度。缺失分桶保持空值。旧六个评估 run 的删除由用户处理，本地及服务器原始报告作为结果来源保留。
+`python -m latent_working_memory.v1.publish_reports` 从已有 JSONL 重新聚合结果并发布，不运行模型推理。`--reports` 指向 JSON 列表，每项包含 `training_source`、`evaluation_source`、`report`；report 指向原始 JSON，逐条记录使用同名 JSONL。重复传入 `--evaluation-output 训练来源 输出目录` 为每个模型发布评估，`--output-dir` 发布跨模型汇总。项目、group、tags 和 online 模式通过启动参数指定。
 
-评估与跨模型比较均将柱状图放在 `charts/*`，数值表放在 `tables/*`；评估重建样例按测试来源放在 `examples/*`。向已有 run 发布后，历史 `report/*`、`comparison/*` 指标仍保留，新面板使用上述命名。
+本轮精简结果发布到 `evaluate-{semantic,random,mixed}-joint-157k-20260912`，跨模型 run 为 `compare-boundary-joint-157k-20260912`，均保存在现有 `latent-working-memory-v1` 项目及原 group 中。原始六份测试报告保留；正文最终结果章节记录首次完成时的评估结果。

@@ -160,7 +160,7 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
     assert full.dev_metrics == resumed.dev_metrics
     groups = resumed.dev_metrics["groups"]
     assert {"all/ae/memory", "all/ae/wrong_memory", "all/continuation/no_memory"} <= groups.keys()
-    assert len([key for key in groups if key.startswith("capacity/")]) > 6
+    assert len([key for key in groups if key.startswith("length_ratio/")]) > 6
     assert groups["all/ae/memory"]["generated_reads"] > 0
     assert "bleu_4" in groups["all/ae/memory"]
     assert "all/continuation/full_context" in groups

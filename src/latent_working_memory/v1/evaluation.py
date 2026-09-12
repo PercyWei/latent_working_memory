@@ -60,20 +60,6 @@ def exact_match(prediction: str, reference: str) -> bool:
     return normalize_exact_match_text(prediction) == normalize_exact_match_text(reference)
 
 
-def normalized_token_edit_distance(
-    prediction: tuple[int, ...], reference: tuple[int, ...]
-) -> float:
-    previous = list(range(len(reference) + 1))
-    for i, predicted in enumerate(prediction, 1):
-        current = [i]
-        for j, expected in enumerate(reference, 1):
-            current.append(
-                min(current[-1] + 1, previous[j] + 1, previous[j - 1] + (predicted != expected))
-            )
-        previous = current
-    return previous[-1] / max(len(prediction), len(reference), 1)
-
-
 def correct_prefix_ratio(prediction: tuple[int, ...], reference: tuple[int, ...]) -> float:
     """Fraction of reference content tokens matched before the first mismatch or stop."""
     if not reference:
@@ -195,17 +181,19 @@ def evaluate_pretraining(
                 )
                 conditions = {
                     "memory": memories[0].values,
-                    "no_memory": memories[0].values[:0],
                     "wrong_memory": memories[1].values,
                 }
                 for task_name, task in (("ae", ae), ("continuation", lm)):
                     if task is None:
                         continue
+                    task_conditions = dict(conditions)
+                    if task_name == "continuation":
+                        task_conditions["no_memory"] = memories[0].values[:0]
                     outputs = backbone.read_batch(
-                        list(conditions.values()), [task] * len(conditions)
+                        list(task_conditions.values()), [task] * len(task_conditions)
                     )
                     for (condition, memory), output in zip(
-                        conditions.items(), outputs, strict=True
+                        task_conditions.items(), outputs, strict=True
                     ):
                         record = (
                             common
@@ -233,13 +221,8 @@ def evaluate_pretraining(
                         records.append(record)
                 if lm is None:
                     continue
-                recent = episode.input_ids[-capacity:]
-                recent_context = _read_statistics(
-                    backbone.read_batch([empty], [lm], [recent])[0], lm
-                )
                 for condition, statistics, context_length, reader_lora in (
                     ("full_context", full_context, len(episode.input_ids), True),
-                    ("recent_context", recent_context, len(recent), True),
                     ("base_full_context", base_full_context, len(episode.input_ids), False),
                 ):
                     records.append(
@@ -264,14 +247,10 @@ def evaluate_pretraining(
                 [len(task.target_ids) for _, _, task in batch],
             )
             for (record, _, task), prediction in zip(batch, predictions, strict=True):
-                record["sequence_match"] = prediction == task.target_ids
                 content = (
                     prediction[:-1]
                     if prediction and prediction[-1] == tokenizer.eos_token_id
                     else prediction
-                )
-                record["normalized_token_edit_distance"] = normalized_token_edit_distance(
-                    content, task.target_ids[:-1]
                 )
                 record["correct_prefix_ratio"] = correct_prefix_ratio(content, task.target_ids[:-1])
                 record["prediction"] = tokenizer.decode(prediction, skip_special_tokens=True)
@@ -288,12 +267,8 @@ def evaluate_pretraining(
             "panel": "one view per independent document; every unique legal capacity",
             "control_weighting": "paired document/view/capacity; full-context reads reused across K",
             "reader_prefix": "BOS + memory or raw X + identical task prompt; targets are identical",
-            "recent_context": "last min(K, len(X)) raw input tokens; budget is K reader prefix positions",
             "reader_lora": "enabled except base_full_context",
             "generation": "greedy; EOS stop; at most reference content length + 1 tokens",
-            "sequence_match": (
-                "exact token sequence including EOS; macro average over generated reads"
-            ),
             "correct_prefix_ratio": (
                 "matched initial content tokens / reference content length; macro average"
             ),
@@ -310,12 +285,10 @@ def evaluate_pretraining(
 
 
 def _read_statistics(output: ReaderOutput, task: ReadTokens) -> dict[str, Any]:
-    target = torch.tensor(task.target_ids, device=output.target_logits.device)
     return {
         "target_tokens": len(task.target_ids) - 1,
         "nll_sum": float(output.token_nll[:-1].sum()),
         "eos_nll": float(output.token_nll[-1]),
-        "correct_tokens": int((output.target_logits[:-1].argmax(-1) == target[:-1]).sum()),
     }
 
 
@@ -327,10 +300,7 @@ def aggregate_pretrain_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
         ratio_bin = 2 ** math.ceil(math.log2(max(record["effective_ratio"], 1)))
         for group in (
             f"all/{task_condition}",
-            f"capacity/{record['capacity']}/{task_condition}",
-            f"length_up_to/{length_bin}/{task_condition}",
-            f"ratio_up_to/{ratio_bin}/{task_condition}",
-            f"boundary/{record['boundary_method']}/{task_condition}",
+            f"length_ratio/{length_bin}/{ratio_bin}/{task_condition}",
         ):
             groups[group].append(record)
     summaries = {}
@@ -348,16 +318,11 @@ def aggregate_pretrain_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
             "nll": mean,
             "ppl": math.exp(mean),
             "nll_with_eos": (total + sum(r["eos_nll"] for r in values)) / (tokens + len(values)),
-            "token_accuracy": sum(r["correct_tokens"] for r in values) / tokens,
         }
-        generation = [r for r in values if "sequence_match" in r]
+        generation = [r for r in values if "prediction" in r]
         if generation:
             summary["generated_reads"] = len(generation)
-            for metric in (
-                "sequence_match",
-                "normalized_token_edit_distance",
-                "correct_prefix_ratio",
-            ):
+            for metric in ("correct_prefix_ratio",):
                 summary[metric] = sum(r[metric] for r in generation) / len(generation)
             summary["bleu_4"] = bleu.corpus_score(
                 [r["prediction"] for r in generation], [[r["reference"] for r in generation]]
@@ -370,7 +335,7 @@ def aggregate_pretrain_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
             continue
         prefix = group.removesuffix("/memory")
         comparison = {}
-        for control in ("no_memory", "wrong_memory", "recent_context"):
+        for control in ("no_memory", "wrong_memory"):
             control_group = f"{prefix}/{control}"
             if control_group in summaries:
                 comparison[f"gain_vs_{control}"] = summaries[control_group]["nll"] - summary["nll"]

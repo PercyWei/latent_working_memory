@@ -66,7 +66,7 @@ def test_offline_metrics_match_local_reports_and_close_run(tmp_path, monkeypatch
             for condition, nll in (("memory", 1.0), ("no_memory", 3.0), ("wrong_memory", 2.0))
         }
         groups["all/continuation/full_context"] = {"nll": 0.5, "ppl": 1.65}
-        groups["capacity/1/ae/memory"] = {
+        groups["length_ratio/32/2/ae/memory"] = {
             "nll": 1.0,
             "bleu_4": 90.0,
             "correct_prefix_ratio": 0.8,
@@ -77,7 +77,7 @@ def test_offline_metrics_match_local_reports_and_close_run(tmp_path, monkeypatch
             for task in ("ae", "continuation")
         }
         comparisons["all/continuation"]["nll_gap_to_full_context"] = 0.5
-        comparisons["capacity/1/continuation"] = {"gain_vs_recent_context": 0.4}
+        comparisons["length_ratio/32/2/continuation"] = {"gain_vs_wrong_memory": 0.4}
         path = tmp_path / "evaluation.jsonl"
         path.write_text(
             (
@@ -111,9 +111,9 @@ def test_offline_metrics_match_local_reports_and_close_run(tmp_path, monkeypatch
         assert logged["test/ae/gain_vs_no_memory"] == 2.0
         assert logged["test/continuation/gain_vs_wrong_memory"] == 1.0
         assert logged["test/continuation/nll_gap_to_full_context"] == 0.5
-        assert logged["test_by_capacity/1/ae/memory/bleu_4"] == 90.0
-        assert logged["test_by_capacity/1/ae/memory/correct_prefix_ratio"] == 0.8
-        assert logged["test_by_capacity/1/continuation/gain_vs_recent_context"] == 0.4
+        assert logged["test_by_length_ratio/32/2/ae/memory/bleu_4"] == 90.0
+        assert logged["test_by_length_ratio/32/2/ae/memory/correct_prefix_ratio"] == 0.8
+        assert logged["test_by_length_ratio/32/2/continuation/gain_vs_wrong_memory"] == 0.4
         assert logged["progress/input_tokens"] == 36
         assert len(logged["test/reconstruction"]) == 100
         assert len(logged["test/reconstruction/page_2"]) == 10
