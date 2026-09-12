@@ -17,7 +17,7 @@ from latent_working_memory.v1.model import GrowthValueNetwork, JointMemoryWriter
 from latent_working_memory.devices import validate_device
 from latent_working_memory.v1.training import load_trainable_model_state, precision_context
 from latent_working_memory.v1.tracking import swanlab_run
-from latent_working_memory.v1.reporting import log_test_report
+from latent_working_memory.v1.reporting import build_evaluation_charts, reconstruction_media
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -85,29 +85,33 @@ def main(argv: Sequence[str] | None = None) -> None:
                 args.split,
             )
         results[name] = result
-        with swanlab_run(
-            destination,
-            config.to_dict()
-            | {
-                "evaluation_checkpoint": str(args.checkpoint.resolve()),
-                "evaluation_split": args.split,
-                "training_input_tokens": checkpoint.progress["input_tokens"],
-                "data_preparation": metadata[name],
-            },
-            args.swanlab_mode,
-            args.swanlab_project,
-            args.swanlab_run_id,
-            job_type="evaluate",
-            group=args.swanlab_group,
-            tags=tuple(args.swanlab_tag),
-        ) as tracking:
+    with swanlab_run(
+        args.output_dir,
+        config.to_dict()
+        | {
+            "evaluation_checkpoint": str(args.checkpoint.resolve()),
+            "evaluation_split": args.split,
+            "training_input_tokens": checkpoint.progress["input_tokens"],
+            "evaluation_preparations": metadata,
+        },
+        args.swanlab_mode,
+        args.swanlab_project,
+        args.swanlab_run_id,
+        job_type="evaluate",
+        group=args.swanlab_group,
+        tags=tuple(args.swanlab_tag),
+    ) as tracking:
+        if tracking is not None:
+            charts = build_evaluation_charts(list(results.items()))
             step = checkpoint.progress["next_step"]
-            log_test_report(
-                tracking,
-                result,
-                destination / f"{args.split}-step-{step:06d}.jsonl",
-                f"report/{name}" if args.evaluation_dirs else "report",
-            )
+            for name in directories:
+                destination = args.output_dir / name if args.evaluation_dirs else args.output_dir
+                charts.update(
+                    reconstruction_media(
+                        destination / f"{args.split}-step-{step:06d}.jsonl", f"report/{name}"
+                    )
+                )
+            tracking.log(charts)
     print(json.dumps(results, ensure_ascii=False, indent=2))
 
 

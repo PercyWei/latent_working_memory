@@ -41,42 +41,62 @@ def reconstruction_media(records_path: Path, prefix: str) -> dict[str, Any]:
 
 def _table(rows: list[dict[str, Any]]) -> Any:
     headers = list(dict.fromkeys(key for row in rows for key in row))
-    return swanlab.echarts.Table().add(headers, [[row.get(k) for k in headers] for row in rows])
+    return swanlab.echarts.Table().add(
+        headers,
+        [
+            [round(row[k], 4) if isinstance(row.get(k), float) else row.get(k) for k in headers]
+            for row in rows
+        ],
+    )
 
 
 def _bar(labels: list[str], series: dict[str, list[Any]]) -> Any:
     chart = swanlab.echarts.Bar().add_xaxis(labels)
     for label, values in series.items():
-        chart.add_yaxis(label, values)
-    chart.set_global_opts(tooltip_opts={"trigger": "axis"}, legend_opts={"type": "scroll"})
+        chart.add_yaxis(
+            label,
+            [round(v, 4) if isinstance(v, float) else v for v in values],
+            label_opts={"is_show": False},
+        )
+    chart.set_global_opts(
+        tooltip_opts={"trigger": "axis"},
+        legend_opts={"type": "scroll"},
+        xaxis_opts={"axislabel_opts": {"rotate": 20}},
+        yaxis_opts={"min_interval": 0.001},
+    )
     return chart
 
 
-def build_test_report_charts(metrics: dict[str, Any], prefix: str = "report") -> dict[str, Any]:
-    """Render a single checkpoint report; axes represent conditions or strata, never steps."""
+def build_evaluation_charts(
+    reports: list[tuple[str, dict[str, Any]]], prefix: str = "report"
+) -> dict[str, Any]:
+    """Compare evaluation sources and controls for one checkpoint."""
     values = {}
     for section in ("groups", "comparisons"):
         rows = defaultdict(list)
-        for key, summary in metrics[section].items():
-            category, label = key.split("/", 1)
-            rows[category].append({"group": label, **summary})
+        for source, metrics in reports:
+            for key, summary in metrics[section].items():
+                category, label = key.split("/", 1)
+                rows[category].append({"evaluation_source": source, "group": label, **summary})
         for category, entries in rows.items():
             values[f"{prefix}/tables/{section}/{category}"] = _table(entries)
     panels = defaultdict(dict)
-    for key, summary in metrics["groups"].items():
-        parts = key.split("/")
-        category = parts[0]
-        if category == "all":
-            _, task, condition = parts
-            bucket = condition
-            series = task
-        else:
-            category, bucket, task, condition = parts
-            series = condition
-        for metric in CHART_METRICS:
-            if metric in summary:
-                panel = panels[(category, task, metric)]
-                panel.setdefault(series, {})[bucket] = summary[metric]
+    for source, metrics in reports:
+        for key, summary in metrics["groups"].items():
+            parts = key.split("/")
+            category = parts[0]
+            if category == "all":
+                _, task, condition = parts
+                bucket = condition
+                series = source or task
+            else:
+                category, bucket, task, condition = parts
+                series = f"{source}/{condition}" if source else condition
+            for metric in CHART_METRICS:
+                if metric in summary:
+                    panels[(category, task, metric)].setdefault(series, {})[bucket] = summary[
+                        metric
+                    ]
     for (category, task, metric), series in panels.items():
         labels = list(dict.fromkeys(label for points in series.values() for label in points))
         if category in {"length_up_to", "ratio_up_to", "capacity"}:
@@ -86,6 +106,10 @@ def build_test_report_charts(metrics: dict[str, Any], prefix: str = "report") ->
             {name: [points.get(label) for label in labels] for name, points in series.items()},
         )
     return values
+
+
+def build_test_report_charts(metrics: dict[str, Any], prefix: str = "report") -> dict[str, Any]:
+    return build_evaluation_charts([("", metrics)], prefix)
 
 
 def log_test_report(run, metrics, records_path: Path, prefix: str = "report") -> None:

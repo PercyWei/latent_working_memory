@@ -1,5 +1,9 @@
 from latent_working_memory.v1.tracking import swanlab_run
-from latent_working_memory.v1.reporting import comparison_charts, build_test_report_charts
+from latent_working_memory.v1.reporting import (
+    build_evaluation_charts,
+    comparison_charts,
+    build_test_report_charts,
+)
 
 
 def test_report_axes_and_missing_values():
@@ -21,7 +25,7 @@ def test_report_axes_and_missing_values():
     assert chart["xAxis"][0]["data"] == ["32", "128"]
     assert chart["series"][1]["data"] == [None, 3.5]
     rows = charts["report/tables/groups/all"].options["rows"]
-    assert rows == [["ae/memory", 2.0, 6], ["ae/no_memory", 3.0, 6]]
+    assert rows == [["", "ae/memory", 2.0, 6], ["", "ae/no_memory", 3.0, 6]]
 
 
 def test_comparison_uses_explicit_labels_and_separate_metrics():
@@ -42,3 +46,13 @@ def test_offline_chart_serialization(tmp_path):
     with swanlab_run(tmp_path, {}, mode="offline", group="report-test", job_type="evaluate") as run:
         run.log(build_test_report_charts(report))
     assert not run.alive
+
+
+def test_grouped_sources_and_display_precision():
+    report = {"groups": {"all/ae/memory": {"nll": 1.23456789}}, "comparisons": {}}
+    charts = build_evaluation_charts([("semantic", report), ("random", report)])
+    series = charts["report/all/ae/nll"].options["series"]
+    assert [s["name"] for s in series] == ["semantic", "random"]
+    assert all(s["data"] == [1.2346] for s in series)
+    assert charts["report/tables/groups/all"].options["rows"][0][-1] == 1.2346
+    assert report["groups"]["all/ae/memory"]["nll"] == 1.23456789

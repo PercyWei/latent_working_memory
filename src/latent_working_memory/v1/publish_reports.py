@@ -6,7 +6,7 @@ from pathlib import Path
 
 from latent_working_memory.v1.reporting import (
     comparison_charts,
-    build_test_report_charts,
+    build_evaluation_charts,
     reconstruction_media,
 )
 from latent_working_memory.v1.tracking import swanlab_run
@@ -28,15 +28,18 @@ def main(argv=None) -> None:
     parser.add_argument("--swanlab-tag", action="append", default=[])
     parser.add_argument("--swanlab-mode", choices=("offline", "online"), default="offline")
     parser.add_argument(
-        "--publish-individual",
-        action="store_true",
-        help="Append report charts to each report directory's existing SwanLab run",
+        "--evaluation-output",
+        nargs=2,
+        action="append",
+        default=[],
+        metavar=("TRAINING_SOURCE", "DIRECTORY"),
+        help="Publish all test sources for one training source into one evaluation run",
     )
     args = parser.parse_args(argv)
     entries = json.loads(args.reports.read_text())
     if not isinstance(entries, list) or not entries:
         raise ValueError("reports must be a non-empty list")
-    reports, seen, identities = [], set(), []
+    reports, seen = [], set()
     for entry in entries:
         train, test = entry["training_source"], entry["evaluation_source"]
         if not isinstance(train, str) or not train or not isinstance(test, str) or not test:
@@ -48,44 +51,44 @@ def main(argv=None) -> None:
         entry["report"] = str(path)
         report = json.loads(path.read_text())
         reports.append((train, test, report))
-        if args.publish_individual:
-            identity = json.loads((path.parent / "swanlab.json").read_text())
-            if (identity["project"], identity["group"], identity["job_type"]) != (
-                args.swanlab_project,
-                args.swanlab_group,
-                "evaluate",
-            ):
-                raise ValueError("report run must belong to the requested evaluation group")
-            if not path.with_suffix(".jsonl").is_file():
-                raise FileNotFoundError(path.with_suffix(".jsonl"))
-            identities.append(identity)
-    # Validate/render comparison before making any cloud writes.
     charts = comparison_charts(reports)
-    individual_charts = (
-        [
-            build_test_report_charts(report)
-            | reconstruction_media(Path(entry["report"]).with_suffix(".jsonl"), "report")
-            for entry, (_, _, report) in zip(entries, reports, strict=True)
-        ]
-        if args.publish_individual
-        else []
-    )
-    if args.publish_individual:
-        for entry, report_charts, identity in zip(
-            entries, individual_charts, identities, strict=True
-        ):
-            path = Path(entry["report"])
-            with swanlab_run(
-                path.parent,
-                {"report_path": str(path)},
-                args.swanlab_mode,
-                args.swanlab_project,
-                identity["id"],
-                job_type="evaluate",
-                group=args.swanlab_group,
-                tags=tuple(identity["tags"]),
-            ) as run:
-                run.log(report_charts)
+    outputs = dict(args.evaluation_output)
+    if len(outputs) != len(args.evaluation_output):
+        raise ValueError("duplicate evaluation output source")
+    if (
+        len({Path(p).resolve() for p in outputs.values()} | {args.output_dir.resolve()})
+        != len(outputs) + 1
+    ):
+        raise ValueError("each run needs its own output directory")
+    bundles = []
+    for train, directory in outputs.items():
+        selected = [(test, report) for source, test, report in reports if source == train]
+        if not selected:
+            raise ValueError(f"unknown training source: {train}")
+        selected_entries = [entry for entry in entries if entry["training_source"] == train]
+        rendered = build_evaluation_charts(selected)
+        for entry in selected_entries:
+            rendered.update(
+                reconstruction_media(
+                    Path(entry["report"]).with_suffix(".jsonl"),
+                    f"report/{entry['evaluation_source']}",
+                )
+            )
+        bundles.append((Path(directory), selected_entries, rendered))
+    # Render every report before cloud writes; source reports keep full precision.
+    for directory, selected_entries, rendered in bundles:
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "reports.json").write_text(json.dumps(selected_entries, indent=2) + "\n")
+        with swanlab_run(
+            directory,
+            {"reports": selected_entries},
+            args.swanlab_mode,
+            args.swanlab_project,
+            job_type="evaluate",
+            group=args.swanlab_group,
+            tags=tuple(args.swanlab_tag),
+        ) as run:
+            run.log(rendered)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "reports.json").write_text(json.dumps(entries, indent=2) + "\n")
     with swanlab_run(
