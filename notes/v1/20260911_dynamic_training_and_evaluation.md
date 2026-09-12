@@ -1,7 +1,7 @@
 # 20260911_动态训练与 QA 评估
 
 创建时间：20260911 15:23:05 UTC+08:00  
-最后修订时间：20260912 23:29:14 UTC+08:00
+最后修订时间：20260912 23:52:40 UTC+08:00
 
 本文记录动态训练与 QA 评估的执行流程。记忆容量、micro epoch 规模、阶段比例及截断跨度通过训练配置确定。
 
@@ -126,7 +126,9 @@ QA 激活重算可按显存需求启用，通过重新计算读取过程减少�
 
 ## 8. 定期评估并保存训练状态
 
-训练开始、指定 step 间隔及训练结束时，在固定的 dev 评估文本上评估。评估固定问题、读取位置、随机种子和生成预算，分别汇总各 K 及实际长度、压缩率下的结果。
+训练前生成共享 dev/test 评估记录，固定文本、问题、读取位置和生成预算。每份文本从当前问题与历史问题的读取记录中分别抽取最多 `eval_reads_per_kind` 次读取，三个梯度传播实验使用相同记录。
+
+训练开始、指定 step 间隔及训练结束时进行 dev 评估。`eval_every` 控制 NLL 评估间隔，`eval_generation_every` 控制自由生成间隔；初始化与训练结束同时执行两者。
 
 相同问题使用以下五个条件：
 
@@ -140,7 +142,7 @@ QA 激活重算可按显存需求启用，通过重新计算读取过程减少�
 
 评估使用 greedy decoding，遇 EOS 停止，并设置统一的生成 token 上限。EM/F1 采用 SQuAD 1.1 归一化规则，多参考答案取最高分；NLL 按目标 tokens 加权，包含 EOS。同时记录生成触顶率。
 
-结果区分当前问题与历史问题，逐题保存预测、参考答案、证据到达后的源 token 距离和更新次数。训练完成后，在固定的 test 评估文本上进行最终评估。
+结果区分当前问题与历史问题，逐题保存问题、预测、参考答案、证据到达后的源 token 距离和更新次数。汇总按 K、目标压缩率、回答时的实际压缩率及保持距离分组，保留文本数、QA 数和目标 token 数。配对差异采用同一次读取的 memory 指标减去相应对照指标。相同问题在上下文相同的对照条件下复用计算结果。训练完成后，通过独立评估入口在固定 test 文本上执行五种条件的条件预测和自由生成。
 
 每个 micro epoch 记录候选文章数、有效训练文本数、实际使用的样本数、实际长度与压缩率、动态更新次数和 QA 数量；epoch 结束时汇总各 $(K,r)$ 的实际样本占比。Checkpoint 保存模型、optimizer、epoch、micro epoch、样本遍历位置、累计统计及随机状态。恢复训练使用原运行目录和相同的总 epoch 数。
 
@@ -148,40 +150,46 @@ SwanLab 使用 `latent-working-memory-v1` 项目，同一实验的训练与评�
 
 当前 micro epoch 完成后，继续下一个 micro epoch，继承模型和 optimizer 状态。完成本轮全部 $5m$ 个 micro epoch 后，更新目标压缩率占比策略，并重新安排下一轮的容量执行顺序。
 
-## 9. 代码对应
+## 9. 配置、入口与产物
+
+正式配置位于 `configs/v1/dynamic-bptt-comparison-squad/`，包含 `full.json`、`tokens1024.json` 和 `updates4.json`。配置集中记录容量、压缩率课程、QA 抽样、优化器、训练量、保存及评估安排。模型结构从初始化 checkpoint 继承。
+
+| 参数 | 含义 |
+|---|---|
+| `epochs` | 总 epoch 数 |
+| `micro_epochs_per_capacity` | 每个 K 在一个 epoch 中出现的次数 m |
+| `samples_per_micro_epoch` | 每个 micro epoch 选取的文本数 |
+| `global_batch_size` | 每次 optimizer 更新的全局样本数 B |
+| `qa_activation_checkpointing` | QA 读取激活重算 |
+| `stage_ends`、`ratio_weights` | 压缩率课程的阶段终点及各阶段占比 |
+| `eval_texts_per_ratio` | 每个 K 下，各目标压缩率的评估文本数 |
+| `eval_reads_per_kind` | 每份评估文本中，当前／历史问题各自的读取数量上限 |
+
+每卡 microbatch 为 1，梯度累积次数为 B 除以进程数；B 须能被进程数整除。训练使用 AdamW 和配置指定的固定学习率。
 
 | 文件 | 职责 |
 |---|---|
-| [data_preparation/squad.py](../../src/latent_working_memory/data_preparation/squad.py) | 原始数据校验、来源划分及 tokenizer 长度记录 |
-| [v1/squad.py](../../src/latent_working_memory/v1/squad.py) | 连续段落读取、文本与问题答案对组织、问题抽样 |
-| [v1/dynamic_data.py](../../src/latent_working_memory/v1/dynamic_data.py) | 动态配置、文本筛选与配额、micro epoch 调度及固定评估文本 |
-| [v1/dynamic.py](../../src/latent_working_memory/v1/dynamic.py) | 记忆初始化、动态训练、梯度传播、多容量 QA 评估和 checkpoint |
-| [v1/backbone.py](../../src/latent_working_memory/v1/backbone.py)、[v1/model.py](../../src/latent_working_memory/v1/model.py) | 文本特征提取、位置编码、记忆更新、读取与答案生成 |
-| [test_squad_preparation.py](../../tests/v1/test_squad_preparation.py)、[test_dynamic.py](../../tests/v1/test_dynamic.py) | 数据构造、训练梯度、恢复与评估行为测试 |
+| [data_preparation/squad.py](../../src/latent_working_memory/data_preparation/squad.py) | 原始标注、来源划分及 tokenizer 长度记录 |
+| [data_preparation/dynamic.py](../../src/latent_working_memory/data_preparation/dynamic.py) | 检查全部 micro epoch 的文本配额及上下文预算，保存共享评估记录 |
+| [v1/dynamic_config.py](../../src/latent_working_memory/v1/dynamic_config.py) | 动态实验配置与课程参数 |
+| [v1/dynamic_data.py](../../src/latent_working_memory/v1/dynamic_data.py)、[v1/squad.py](../../src/latent_working_memory/v1/squad.py) | 文本构造、micro epoch 调度、原文读取和问题抽样 |
+| [v1/dynamic_training.py](../../src/latent_working_memory/v1/dynamic_training.py) | 记忆初始化、逐段更新、QA 损失及完整／截断反向传播 |
+| [v1/dynamic_evaluation.py](../../src/latent_working_memory/v1/dynamic_evaluation.py) | 固定问题的五条件评估、分组与配对统计 |
+| [v1/dynamic.py](../../src/latent_working_memory/v1/dynamic.py) | 训练／独立评估入口、checkpoint、恢复和运行记录 |
+| [v1/dynamic_reporting.py](../../src/latent_working_memory/v1/dynamic_reporting.py) | QA 图表、样例和已有报告的跨运行比较 |
+| [v1/dynamic_profile.py](../../src/latent_working_memory/v1/dynamic_profile.py) | 指定 K 下的显存与速度测试 |
 
-[默认示例配置](../../configs/v1/dynamic_squad_example.json)采用 m=1、每个 micro epoch 选取 100 条文本、全局 batch B=2。`micro_epochs_per_capacity`、`samples_per_micro_epoch` 和 `batch_size` 分别设置这三个参数。`stage_ends` 与 `ratio_weights` 设置各训练阶段的终点及压缩率占比。
+数据准备、训练、评估和性能测试统一使用仓库根目录 `.venv`。通过 Git 同步仓库后，从项目根目录运行源码模块。
 
-三种梯度传播配置为 [full](../../configs/v1/dynamic_squad/full.json)、[tokens1024](../../configs/v1/dynamic_squad/tokens1024.json) 和 [updates4](../../configs/v1/dynamic_squad/updates4.json)。训练入口为 `.venv/bin/python -m latent_working_memory.v1.dynamic train`，`--epochs` 设置总轮数，`--steps` 可设置计划内的停止步数。评估入口使用 `evaluate`，`--eval-texts-per-ratio` 设置每个容量下各目标压缩率的评估文本数。
+训练入口为 `.venv/bin/python -m latent_working_memory.v1.dynamic train`，使用 `--config`、`--checkpoint`、`--index`、`--evaluation-plan` 和 `--output-dir`。`--steps` 设置计划内停止位置；恢复时以 `--checkpoint` 指向动态 checkpoint，添加 `--resume` 并使用原运行目录。独立评估使用 `evaluate --split test`。
 
-输出包括训练日志、`data_plans/` 下的 micro epoch 文本记录与统计、固定 dev/test 评估结果及动态 checkpoint。性能测试入口 [dynamic_profile.py](../../src/latent_working_memory/v1/dynamic_profile.py)通过 `--capacity` 选择要测试的记忆容量。
+产物按 `artifacts/v1/<实验系列>/{train,eval,compare,plan}/` 组织：
 
-## 10. 运行环境与入口
+- `plan/` 保存共享评估记录、数据检查结果、配置快照、启动命令和报告清单。
+- `train/<run_name>/` 保存 `config.json`、`provenance.json`、`data_plans/`、`dev/` 和 `checkpoints/`；每次启动独立保存含起始 step 的训练日志、环境与资源记录。
+- `eval/<run_name>/` 保存评估来源、汇总 JSON 和逐题 JSONL。
+- `compare/<run_name>/` 保存输入报告清单及重新聚合的比较结果。
 
-动态数据准备、训练、评估和性能测试使用仓库根目录 `.venv/`，依赖由根目录 `pyproject.toml` 与 `uv.lock` 管理。运行前通过 Git 同步仓库，命令在仓库根目录执行。训练 `run.json`、独立评估 `evaluation.json` 和性能测试日志记录 Python 路径、环境目录、源码路径、Git commit 及核心依赖版本。
+SwanLab 使用 `latent-working-memory-v1`，同系列训练、评估与比较共享显式 group；`job_type` 分别为 `train`、`evaluate`、`compare`，`study:*` 标签通过启动参数传入。图表、表格和问答样例分别放在 `charts/*`、`tables/*`、`examples/*`。测试设置 `--swanlab-mode disabled`，正式实验设置 `online`。
 
-双卡启动使用 `.venv/bin/python -m torch.distributed.run`。以下为 GPU 6、7 上的性能测试命令，`full` 可替换为 `tokens1024` 或 `updates4`：
-
-```bash
-CUDA_VISIBLE_DEVICES=6,7 LWM_ALLOWED_PHYSICAL_GPUS=6,7 \
-  .venv/bin/python -m torch.distributed.run --standalone --nproc_per_node=2 \
-  -m latent_working_memory.v1.dynamic_profile \
-  --checkpoint artifacts/v1/pretrain-data-comparison-2048_20260911/train/pretrain-mixed-157k-20260911/checkpoints/pretrain-step-020000.pt \
-  --index data/v1/squad/llama-2-7b-chat_index.json \
-  --recipe configs/v1/dynamic_squad/full.json \
-  --capacity 1024 \
-  --output artifacts/v1/dynamic-env-validation_20260912/plan/profile-full-k1024.jsonl
-```
-
-训练入口同样通过上述双卡启动前缀调用 `-m latent_working_memory.v1.dynamic train`，传入 `--checkpoint`、`--index`、`--recipe` 和 `--output-dir`。训练输出使用 `artifacts/v1/<series>/train/<run_name>/`；独立评估使用 `evaluate --split test`，输出到同系列 `eval/<run_name>/`。SwanLab 由 `--swanlab-mode` 控制，测试设为 `disabled`，正式运行设为 `online` 并显式指定 `--swanlab-group`。
-
-根目录 `.venv` 已完成本地与服务器各 36 项动态测试，以及 GPU 6、7 上三种梯度设置的真实文本检查。运行环境和性能记录见[主环境验证](../../artifacts/v1/dynamic-env-validation_20260912/plan/20260912_environment_validation.md)。
+本轮设置和运行记录见[动态梯度传播对比实验](20260912_dynamic_bptt_comparison.md)。

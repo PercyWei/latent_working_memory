@@ -13,12 +13,9 @@ import torch.distributed as dist
 
 from latent_working_memory.devices import validate_device
 from latent_working_memory.v1.checkpoint import load_model_checkpoint
-from latent_working_memory.v1.dynamic import (
-    DynamicConfig,
-    DynamicTrainer,
-    load_components,
-    runtime_info,
-)
+from latent_working_memory.v1.dynamic import runtime_info
+from latent_working_memory.v1.dynamic_config import load_dynamic_config
+from latent_working_memory.v1.dynamic_training import DynamicTrainer, load_components
 from latent_working_memory.v1.squad import SquadDataset
 from latent_working_memory.v1.dynamic_data import DynamicTextSampler
 
@@ -27,10 +24,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--index", type=Path, required=True)
-    parser.add_argument("--recipe", type=Path, required=True)
+    parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--capacity", type=int, required=True)
-    parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--qa-activation-checkpointing", action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
     runtime = runtime_info()
     rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -40,9 +37,9 @@ def main():
     world = int(os.environ.get("WORLD_SIZE", "1"))
     if world > 1:
         dist.init_process_group("nccl", timeout=timedelta(minutes=30), device_id=device)
-    recipe = DynamicConfig(**json.loads(args.recipe.read_text()))
-    if args.gradient_checkpointing is not None:
-        recipe = replace(recipe, gradient_checkpointing=args.gradient_checkpointing)
+    recipe = load_dynamic_config(args.config)
+    if args.qa_activation_checkpointing is not None:
+        recipe = replace(recipe, qa_activation_checkpointing=args.qa_activation_checkpointing)
     checkpoint = load_model_checkpoint(args.checkpoint)
     checkpoint = replace(
         checkpoint,
@@ -66,7 +63,7 @@ def main():
     trainer = DynamicTrainer(backbone, writer, checkpoint.config, recipe, device)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     for label, ordered in cases.items():
-        episodes = [text.episode(data) for text in ordered[: recipe.batch_size]]
+        episodes = [text.episode(data) for text in ordered[: recipe.global_batch_size]]
         torch.cuda.synchronize(device)
         torch.cuda.reset_peak_memory_stats(device)
         start = time.perf_counter()
@@ -87,7 +84,7 @@ def main():
             dist.all_reduce(resources, op=dist.ReduceOp.MAX)
         result.update(
             case=label,
-            gradient_checkpointing=recipe.gradient_checkpointing,
+            qa_activation_checkpointing=recipe.qa_activation_checkpointing,
             layer_checkpointing=False,
             runtime=runtime,
         )

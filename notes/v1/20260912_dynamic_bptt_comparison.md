@@ -1,0 +1,83 @@
+# 20260912_动态梯度传播对比实验
+
+创建时间：20260912 23:54:16 UTC+08:00
+最后修订时间：20260912 23:54:16 UTC+08:00
+
+本系列比较完整 BPTT、源 token TBPTT 和更新次数 TBPTT。各组共享初始化参数、文本课程与评估记录。训练方法见[动态训练与 QA 评估](20260911_dynamic_training_and_evaluation.md)。本轮先运行完整 BPTT。
+
+## 1. 数据与训练设置
+
+| 项目 | 设置 |
+|---|---|
+| 数据 | SQuAD 1.1；398 篇训练文章、44 篇 dev、48 篇 test |
+| 长度记录 | `data/v1/squad/llama-2-7b-chat_index.json` |
+| 初始化 | mixed-157k 预训练 step 20,000 |
+| K | 64、128、256、512、1024 |
+| 目标压缩率 r | 2、4、8；文本长度在 [0.9rK, 1.5rK] 内 |
+| 训练量 | 3 个 epoch；每轮 5 个 micro epoch；每个 100 条文本；共 1,500 篇次 |
+| 参数更新 | 双卡，每卡 microbatch 1，全局 batch 2；共 750 步 |
+| QA | 每次更新抽取 1 个当前问题、1 个历史问题；每题最多访问 2 次 |
+| 数值精度 | BF16 |
+| 激活重算 | QA 读取启用，基座逐层梯度检查点关闭 |
+| 优化器 | AdamW；学习率 3e-5，weight decay 0.01，梯度裁剪 1.0 |
+| GPU | 物理 GPU 6、7 |
+| 环境 | 项目根目录 `.venv`，仓库源码 |
+
+三个 epoch 的 r=2/4/8 占比分别为 60/30/10%、30/40/30%、10/30/60%。每个 K 在每个 epoch 出现一次。正式配置位于 `configs/v1/dynamic-bptt-comparison-squad/`：`full.json`、`tokens1024.json`、`updates4.json`。
+
+初始化 checkpoint 为：
+
+```text
+artifacts/v1/pretrain-data-comparison-2048_20260911/train/pretrain-mixed-157k-20260911/checkpoints/pretrain-step-020000.pt
+```
+
+## 2. 保存与评估
+
+每 100 步及训练结束保存 checkpoint，并进行 dev NLL 评估。初始化、每 250 步及训练结束进行 dev 自由生成。训练完成后独立执行 test 评估。
+
+每个 split 在 5 个 K、3 个目标压缩率下各取 2 份文本，共 30 份。每份文本最多选取 2 次当前问题读取和 2 次历史问题读取；五种条件共用这些记录，生成上限为 64 tokens。结果保存 EM、F1、含 EOS 的 NLL、触顶率、保持距离与配对差异。
+
+## 3. 命名与产物
+
+实验系列和 SwanLab group 为 `dynamic-bptt-comparison-squad_20260912`，project 为 `latent-working-memory-v1`，研究标签为 `study:dynamic-bptt-comparison`。
+
+| 产物 | 相对实验系列目录的位置 |
+|---|---|
+| 共享评估记录与数据检查 | `plan/evaluation-plan.json`、`plan/data-validation.json` |
+| 完整 BPTT 训练 | `train/dynamic-full_squad_mixed-157k_20260912/` |
+| 最终 test | `eval/dynamic-full-eval_squad_mixed-157k_20260912/` |
+| 启动和性能记录 | `plan/` |
+| 后续跨组比较 | `compare/` |
+
+训练 run 保存配置、初始化来源、运行环境、逐步日志、micro epoch 文本记录、dev 报告及 `checkpoints/dynamic-step-000750.pt`。恢复日志名称包含恢复起始 step。
+
+## 4. 执行命令
+
+从服务器仓库根目录执行。先准备共享记录：
+
+```bash
+.venv/bin/python -m latent_working_memory.data_preparation.dynamic \
+  --config configs/v1/dynamic-bptt-comparison-squad/full.json \
+  --checkpoint artifacts/v1/pretrain-data-comparison-2048_20260911/train/pretrain-mixed-157k-20260911/checkpoints/pretrain-step-020000.pt \
+  --index data/v1/squad/llama-2-7b-chat_index.json \
+  --output-dir artifacts/v1/dynamic-bptt-comparison-squad_20260912/plan
+```
+
+正式训练：
+
+```bash
+CUDA_VISIBLE_DEVICES=6,7 LWM_ALLOWED_PHYSICAL_GPUS=6,7 \
+OMP_NUM_THREADS=1 TOKENIZERS_PARALLELISM=false \
+PYTORCH_ALLOC_CONF=expandable_segments:True \
+.venv/bin/python -m torch.distributed.run --standalone --nproc_per_node=2 \
+  -m latent_working_memory.v1.dynamic train \
+  --config configs/v1/dynamic-bptt-comparison-squad/full.json \
+  --checkpoint artifacts/v1/pretrain-data-comparison-2048_20260911/train/pretrain-mixed-157k-20260911/checkpoints/pretrain-step-020000.pt \
+  --index data/v1/squad/llama-2-7b-chat_index.json \
+  --evaluation-plan artifacts/v1/dynamic-bptt-comparison-squad_20260912/plan/evaluation-plan.json \
+  --output-dir artifacts/v1/dynamic-bptt-comparison-squad_20260912/train/dynamic-full_squad_mixed-157k_20260912 \
+  --swanlab-mode online --swanlab-group dynamic-bptt-comparison-squad_20260912 \
+  --swanlab-tag study:dynamic-bptt-comparison
+```
+
+独立 test 使用同一双卡启动前缀，将模式改为 `evaluate --split test`，checkpoint 指向本轮 `checkpoints/dynamic-step-000750.pt`，输出目录使用上表的 eval 路径，其余配置、共享评估记录及 SwanLab 分组相同。

@@ -155,15 +155,20 @@ def prepare_squad(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Index original SQuAD articles and lengths")
-    parser.add_argument("--train-file", type=Path, required=True)
-    parser.add_argument("--dev-file", type=Path, required=True)
-    parser.add_argument("--tokenizer", type=Path, required=True)
-    parser.add_argument("--output-file", type=Path, required=True)
-    parser.add_argument("--seed", type=int, default=20260907)
+    parser = argparse.ArgumentParser(description="Record SQuAD splits and tokenizer lengths")
+    parser.add_argument("--config", type=Path, required=True)
     args = parser.parse_args()
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, local_files_only=True)
-    report = prepare_squad(args.train_file, args.dev_file, tokenizer, args.output_file, args.seed)
+    config = json.loads(args.config.read_text())
+    if set(config) != {"train_file", "dev_file", "tokenizer", "output_file", "seed"}:
+        raise ValueError("SQuAD preparation configuration fields differ")
+    tokenizer = AutoTokenizer.from_pretrained(config["tokenizer"], local_files_only=True)
+    report = prepare_squad(
+        Path(config["train_file"]),
+        Path(config["dev_file"]),
+        tokenizer,
+        Path(config["output_file"]),
+        config["seed"],
+    )
     print(json.dumps(report["splits"], ensure_ascii=False, indent=2))
 
 

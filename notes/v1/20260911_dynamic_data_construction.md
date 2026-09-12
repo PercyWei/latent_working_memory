@@ -1,13 +1,13 @@
 # 20260911_动态训练数据分布与使用流程
 
 创建时间：20260911 10:54:45 UTC+08:00  
-最后修订时间：20260912 22:20:27 UTC+08:00
+最后修订时间：20260912 23:52:40 UTC+08:00
 
 ## 1. 数据来源
 
 使用官方 SQuAD 1.1 原始文件 `data/raw/squad/train-v1.1.json`、`dev-v1.1.json`。数据按文章、段落及问题答案对组织，正文、段落顺序、问题、答案和字符标注完整保留。本文的文章指 SQuAD 已发布的同篇文章段落集合，不表示完整 Wikipedia 页面。
 
-准备阶段记录数据划分及指定 tokenizer 下的 token 长度；训练和评估据此选择文章，读取原始文本后再构造写入与问答任务。阶段安排见[动态训练方案](20260910_dynamic_memory_training_plan.md)。
+准备阶段记录数据划分及指定 tokenizer 下的 token 长度；训练和评估据此选择文章，读取原始文本后再构造写入与问答任务。训练安排见[动态训练与 QA 评估](20260911_dynamic_training_and_evaluation.md)。
 
 ## 2. 数据分布与训练选择
 
@@ -61,7 +61,7 @@ P90 为第 90 百分位；长度均以 tokens 计。
 4. **构造文本。** `DynamicTextSampler` 按 split、K 和 r 筛选文章并划分连续段落，按比例选取有效文本。`SquadDataset.episode` 使用 `paragraph_start` 和 `paragraph_count` 将指定段落范围转换为 Episode，保留原始问题与段落来源，文本内的 token 位置从 0 开始。
 5. **构造读取候选。** 以答案所在的完整段落作为保守证据范围，在该段提交后将对应问题加入可读取候选池。同一问题的参考答案按原序去除重复文本。
 6. **运行时采样。** 首次压缩后的每次动态更新完成后，`sample_reads` 从当前段落问题与更早段落问题中分别抽样。输入参数明确指定 `new_count`、`history_count` 和 `max_visits`，由调用方提供本次轨迹的随机源与访问计数。候选不足时按实际数量读取。
-7. **模型使用。** 调用方将已提交记忆和选中问题交给读取路径。参考答案用于 teacher-forcing NLL；问题、gold 和生成回答均不写回记忆。动态 trainer 负责模型前向、反传和本次上下文预算检查。
+7. **模型使用。** 调用方将已提交记忆和选中问题交给读取路径。参考答案用于 teacher-forcing NLL；问题、gold 和生成回答均不写回记忆。动态 trainer 负责模型前向与反传；实验准备入口检查整个课程的配额和上下文预算，并保存共享 dev/test 文本与问题读取记录。
 
 ### 读取的因果边界
 
@@ -105,14 +105,10 @@ Answer:
 
 ```bash
 .venv/bin/python -m latent_working_memory.data_preparation.squad \
-  --train-file data/raw/squad/train-v1.1.json \
-  --dev-file data/raw/squad/dev-v1.1.json \
-  --tokenizer data/models/Llama-2-7b-chat-hf \
-  --output-file data/v1/squad/llama-2-7b-chat_index.json \
-  --seed 20260907
+  --config configs/data_preparation/squad-llama-2-7b-chat.json
 ```
 
-输出为显式指定的 JSON 文件，例如 `llama-2-7b-chat_index.json`，保存原始文件和本地 tokenizer 路径、来源划分及长度信息。正文与问答仍从原始 JSON 加载。目标文件必须不存在，允许不同 tokenizer 的记录保存在同一目录；源文件或 tokenizer 改变后重新生成对应记录。
+配置记录原始文件、tokenizer、划分 seed 和输出路径。输出为指定的 JSON 文件，例如 `llama-2-7b-chat_index.json`，保存原始文件和本地 tokenizer 路径、来源划分及长度信息。正文与问答仍从原始 JSON 加载。目标文件必须不存在，允许不同 tokenizer 的记录保存在同一目录；源文件或 tokenizer 改变后重新生成对应记录。
 
 训练时传入此长度记录、预训练 checkpoint 和动态配置，由 trainer 构造文本并执行初始化、更新及 QA。配置与运行入口见[动态训练与 QA 评估](20260911_dynamic_training_and_evaluation.md)。
 

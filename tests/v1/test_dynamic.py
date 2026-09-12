@@ -9,6 +9,7 @@ import torch.distributed as dist
 from transformers import LlamaConfig, LlamaForCausalLM
 
 from latent_working_memory.data_preparation.squad import prepare_squad
+from latent_working_memory.data_preparation.dynamic import prepare_dynamic
 from latent_working_memory.v1.backbone import load_backbone
 from latent_working_memory.v1.checkpoint import (
     capture_rng_state,
@@ -16,15 +17,11 @@ from latent_working_memory.v1.checkpoint import (
     save_model_checkpoint,
 )
 from latent_working_memory.v1.data import Episode, Read, Reference, Source
-from latent_working_memory.v1.dynamic import (
-    DynamicConfig,
-    DynamicTrainer,
-    answer_scores,
-    evaluate_qa,
-    read_schedule,
-    run_dynamic,
-    main,
-)
+from latent_working_memory.v1.dynamic import run_dynamic, main
+from latent_working_memory.v1.dynamic_config import DynamicConfig
+from latent_working_memory.v1.dynamic_training import DynamicTrainer, read_schedule
+from latent_working_memory.v1.dynamic_evaluation import answer_scores, evaluate_qa, aggregate_qa
+from latent_working_memory.v1.dynamic_reporting import qa_media, main as publish_qa
 from latent_working_memory.v1.dynamic_data import (
     DynamicTextSampler,
     allocate_counts,
@@ -59,7 +56,11 @@ def example(tokenizer, name="doc", paragraphs=6):
 
 def small_recipe(**kwargs):
     return DynamicConfig(
-        capacities=(4, 8), batch_size=1, generation_tokens=2, gradient_checkpointing=False, **kwargs
+        capacities=(4, 8),
+        global_batch_size=1,
+        generation_tokens=2,
+        qa_activation_checkpointing=False,
+        **kwargs,
     )
 
 
@@ -169,7 +170,7 @@ def test_reader_recomputation_matches_gradients(components, tiny_config, tokeniz
         other_b,
         other_w,
         tiny_config,
-        replace(recipe, gradient_checkpointing=True),
+        replace(recipe, qa_activation_checkpointing=True),
         torch.device("cpu"),
     )
     episodes = [example(tokenizer)]
@@ -193,7 +194,9 @@ def test_equal_sample_weight_and_memory_reset(
         grads.append(
             [torch.zeros_like(p) if p.grad is None else p.grad.clone() for p in trainer.parameters]
         )
-    trainer = DynamicTrainer(b, w, tiny_config, replace(recipe, batch_size=2), torch.device("cpu"))
+    trainer = DynamicTrainer(
+        b, w, tiny_config, replace(recipe, global_batch_size=2), torch.device("cpu")
+    )
     calls = []
     original = w.initialize_state
 
@@ -208,7 +211,7 @@ def test_equal_sample_weight_and_memory_reset(
     for p, g, h in zip(trainer.parameters, *grads, strict=True):
         actual = torch.zeros_like(p) if p.grad is None else p.grad
         torch.testing.assert_close(actual, (g + h) / 2, atol=1e-6, rtol=1e-4)
-    with pytest.raises(ValueError, match="batch_size samples"):
+    with pytest.raises(ValueError, match="global_batch_size samples"):
         trainer.step(episodes[:1], tokenizer, [42], 4)
 
 
@@ -261,8 +264,8 @@ def test_squad_scoring():
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"batch_size": 0},
-        {"batch_size": True},
+        {"global_batch_size": 0},
+        {"global_batch_size": True},
         {"samples_per_micro_epoch": 1},
         {"micro_epochs_per_capacity": 0},
         {"capacities": (4, 4)},
@@ -330,7 +333,7 @@ def training_data(tmp_path, tokenizer):
 
 def test_text_construction_no_overlap_offsets_quotas_drop_last(training_data):
     _, data = training_data
-    recipe = DynamicConfig(capacities=(4, 8), samples_per_micro_epoch=7, batch_size=2)
+    recipe = DynamicConfig(capacities=(4, 8), samples_per_micro_epoch=7, global_batch_size=2)
     sampler = DynamicTextSampler(data, recipe, 256)
     k, texts, report = sampler.micro_epoch(0, 0, 3)
     assert len(texts) == 6 and report["dropped_samples"] == 1
@@ -428,13 +431,15 @@ def test_run_resume_across_micro_epochs_and_final_test(
     recipe = DynamicConfig(
         capacities=(4, 8),
         samples_per_micro_epoch=5,
-        batch_size=2,
+        global_batch_size=2,
         generation_tokens=1,
-        gradient_checkpointing=False,
+        qa_activation_checkpointing=False,
         bptt_unit="updates",
         bptt_span=2,
     )
-    opts = dict(epochs=2, save_every=1, eval_every=100, eval_texts_per_ratio=1)
+    recipe = replace(recipe, epochs=2, save_every=1, eval_every=100, eval_texts_per_ratio=1)
+    prepare_dynamic(index, recipe, config, tmp_path / "plan")
+    opts = dict(evaluation_plan=tmp_path / "plan/evaluation-plan.json")
     full = run_dynamic(initial, index, tmp_path / "full", recipe, torch.device("cpu"), **opts)
     first = run_dynamic(
         initial, index, tmp_path / "resume", recipe, torch.device("cpu"), steps=3, **opts
@@ -442,7 +447,9 @@ def test_run_resume_across_micro_epochs_and_final_test(
     resumed = run_dynamic(
         first, index, tmp_path / "resume", recipe, torch.device("cpu"), resume=True, **opts
     )
-    runtime = json.loads((tmp_path / "full/run.json").read_text())["runtime"]
+    runtime = json.loads(next((tmp_path / "full").glob("runtime-from-*.json")).read_text())[
+        "runtime"
+    ]
     assert runtime["python_executable"] == sys.executable
     assert runtime["environment"] == sys.prefix
     assert runtime["source_file"].endswith("src/latent_working_memory/v1/dynamic.py")
@@ -457,10 +464,10 @@ def test_run_resume_across_micro_epochs_and_final_test(
         0,
         0,
     )
-    for split in ("dev", "test"):
-        assert json.loads((tmp_path / f"full/{split}-000008.json").read_text()) == json.loads(
-            (tmp_path / f"resume/{split}-000008.json").read_text()
-        )
+    for split in ("dev",):
+        assert json.loads(
+            (tmp_path / f"full/dev/{split}-step-000008.json").read_text()
+        ) == json.loads((tmp_path / f"resume/dev/{split}-step-000008.json").read_text())
     rows = []
     for path in (tmp_path / "full").glob("train-*.jsonl"):
         rows.extend(json.loads(line) for line in path.read_text().splitlines())
@@ -503,25 +510,27 @@ def test_run_resume_across_micro_epochs_and_final_test(
             str(full),
             "--index",
             str(index),
-            "--recipe",
+            "--config",
             str(recipe_path),
             "--output-dir",
             str(tmp_path / "evaluation"),
-            "--eval-texts-per-ratio",
-            "1",
+            "--evaluation-plan",
+            str(tmp_path / "plan/evaluation-plan.json"),
+            "--device",
+            "cpu",
             "--split",
             "test",
         ],
     )
     main()
-    assert (tmp_path / "evaluation/metrics.json").is_file()
+    assert (tmp_path / "evaluation/test-step-000008.json").is_file()
 
 
 def distributed_worker(rank, rendezvous, output, components, config, tokenizer):
     dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=2)
     try:
         b, w = deepcopy(components)
-        recipe = replace(small_recipe(), batch_size=2)
+        recipe = replace(small_recipe(), global_batch_size=2)
         trainer = DynamicTrainer(b, w, config, recipe, torch.device("cpu"))
         episodes = [example(tokenizer, "a", 4), example(tokenizer, "b", 6)]
         result = trainer.step(episodes, tokenizer, [42, 43], 4)
@@ -549,7 +558,7 @@ def test_distributed_matches_single_process(components, tiny_config, tokenizer, 
         join=True,
     )
     b, w = components
-    recipe = replace(small_recipe(), batch_size=2)
+    recipe = replace(small_recipe(), global_batch_size=2)
     trainer = DynamicTrainer(b, w, tiny_config, recipe, torch.device("cpu"))
     episodes = [example(tokenizer, "a", 4), example(tokenizer, "b", 6)]
     result = trainer.step(episodes, tokenizer, [42, 43], 4)
@@ -565,3 +574,78 @@ def test_distributed_matches_single_process(components, tiny_config, tokenizer, 
     assert len(a["rows"]) == len(rows)
     for key, values in metrics.items():
         assert a["metrics"][key] == pytest.approx(values, rel=1e-5)
+
+
+def test_evaluation_without_generation_matches_nll_and_caches_controls(
+    components, tiny_config, tokenizer, monkeypatch, tmp_path
+):
+    b, w = components
+    recipe = replace(small_recipe(max_visits=6), eval_reads_per_kind=20)
+    episodes = [example(tokenizer, "a", 7), example(tokenizer, "b", 7)]
+    _, generated = evaluate_qa(
+        b, w, tokenizer, tiny_config, recipe, episodes, torch.device("cpu"), 4
+    )
+    calls = []
+    original = b.read_batch
+
+    def read(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    def no_generation(*args, **kwargs):
+        raise AssertionError("NLL-only evaluation invoked generation")
+
+    monkeypatch.setattr(b, "read_batch", read)
+    monkeypatch.setattr(b, "greedy_students", no_generation)
+    metrics, rows = evaluate_qa(
+        b,
+        w,
+        tokenizer,
+        tiny_config,
+        recipe,
+        episodes,
+        torch.device("cpu"),
+        4,
+        generate=False,
+    )
+    assert len(calls) < len(rows)
+    for a, c in zip(generated, rows, strict=True):
+        assert a["nll_sum"] == c["nll_sum"]
+        assert a["target_tokens"] == c["target_tokens"]
+        assert "prediction" not in c
+    assert all("em" not in values and values["generations"] == 0 for values in metrics.values())
+    for row in generated:
+        row["target_ratio"] = 8
+    report = aggregate_qa(generated)
+    media = qa_media(report, generated)
+    assert "charts/f1" in media and "tables/paired" in media and media["examples/qa"]
+    assert report["paired/memory-minus-no_memory"]["reads"] == len(generated) // 5
+    records = tmp_path / "test.jsonl"
+    records.write_text("".join(json.dumps(row) + "\n" for row in generated))
+    reports = tmp_path / "reports.json"
+    reports.write_text(
+        json.dumps(
+            [
+                {"name": "full", "report": "test.json"},
+                {"name": "tokens", "report": "test.json"},
+            ]
+        )
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "report",
+            "--reports",
+            str(reports),
+            "--output-dir",
+            str(tmp_path / "comparison"),
+            "--swanlab-group",
+            "test",
+            "--swanlab-mode",
+            "disabled",
+        ],
+    )
+    publish_qa()
+    comparison = json.loads((tmp_path / "comparison/comparison.json").read_text())
+    assert comparison["full"] == comparison["tokens"] == report
+    assert not list(tmp_path.rglob("swanlab.json"))

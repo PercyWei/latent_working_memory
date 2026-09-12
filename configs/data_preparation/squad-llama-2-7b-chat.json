@@ -1,0 +1,7 @@
+{
+  "train_file": "data/raw/squad/train-v1.1.json",
+  "dev_file": "data/raw/squad/dev-v1.1.json",
+  "tokenizer": "/data/bywei/models/meta-llama/Llama-2-7b-chat-hf",
+  "output_file": "data/v1/squad/llama-2-7b-chat_index.json",
+  "seed": 20260907
+}
