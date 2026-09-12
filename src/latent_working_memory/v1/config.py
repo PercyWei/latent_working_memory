@@ -44,6 +44,8 @@ class ExperimentConfig:
     read_context_tokens: int = 4096
     ae_prompt: str = "Reconstruct the text stored in memory:\n"
     lm_prompt: str = "Continue the text stored in memory:\n"
+    pretrain_balanced_batches: bool = False
+    pretrain_ae_warmup_steps: int = 0
     ae_weight: float = 1.0
     lm_weight: float = 1.0
     batch_size: int = 2
@@ -61,6 +63,7 @@ class ExperimentConfig:
     eval_examples: int = 16
     eval_generation_examples: int = 4
     eval_generation_every: int = 1000
+    eval_generation_steps: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         non_negative_ints = {
@@ -70,6 +73,7 @@ class ExperimentConfig:
             "input_length_curriculum_steps",
             "warmup_steps",
             "lr_decay_steps",
+            "pretrain_ae_warmup_steps",
         }
         for field in fields(self):
             value = getattr(self, field.name)
@@ -178,6 +182,14 @@ class ExperimentConfig:
             raise ValueError("learning rate, gradient clip and total task weight must be positive")
         if self.reader_lora_dropout >= 1:
             raise ValueError("reader_lora_dropout must be less than 1")
+        if any(type(s) is not int or s < 0 for s in self.eval_generation_steps):
+            raise ValueError("eval_generation_steps must contain non-negative steps")
+        if type(self.pretrain_balanced_batches) is not bool:
+            raise ValueError("pretrain_balanced_batches must be boolean")
+        if self.pretrain_ae_warmup_steps and (
+            not self.pretrain_balanced_batches or min(self.ae_weight, self.lm_weight) <= 0
+        ):
+            raise ValueError("AE warm-up requires balanced batches and two positive task weights")
         if type(self.gradient_checkpointing) is not bool:
             raise ValueError("gradient_checkpointing must be boolean")
         if not self.reader_lora_target_modules or any(

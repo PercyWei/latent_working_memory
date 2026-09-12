@@ -6,7 +6,7 @@ import random
 import time
 import uuid
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +28,9 @@ from latent_working_memory.v1.evaluation import evaluate_pretraining
 from latent_working_memory.data_preparation.fineweb import data_contract
 from latent_working_memory.v1.model import GrowthValueNetwork, JointMemoryWriter
 from latent_working_memory.v1.objectives import ReaderOutput
-from latent_working_memory.v1.sampling import PretrainExample, PretrainSampler
+from latent_working_memory.v1.sampling import (
+    PretrainExample, PretrainSampler, BalancedPretrainSampler, task_weights_at,
+)
 from latent_working_memory.v1.tracking import log_evaluation, log_training, swanlab_run
 
 
@@ -78,18 +80,15 @@ def pretrain_forward(
         sum(e.lm is not None for e in examples),
     )
     loss = memories[0].sum() * 0
-    for name, destination, count, weight in (
-        ("ae", ae, ae_count, config.ae_weight),
-        ("lm", lm, lm_count, config.lm_weight),
-    ):
-        positions = [i for i, example in enumerate(examples) if getattr(example, name) is not None]
-        if positions:
-            outputs = backbone.read_batch(
-                [memories[i] for i in positions], [getattr(examples[i], name) for i in positions]
-            )
-            for i, output in zip(positions, outputs, strict=True):
-                destination[i] = output
-            loss = loss + weight * torch.stack([o.mean_nll for o in outputs]).sum() / count
+    positions = [(i, "ae" if e.ae is not None else "lm") for i, e in enumerate(examples)]
+    outputs = backbone.read_batch(memories, [getattr(examples[i], name) for i, name in positions])
+    for (i, name), output in zip(positions, outputs, strict=True):
+        destination, count, weight = (
+            (ae, ae_count, config.ae_weight) if name == "ae"
+            else (lm, lm_count, config.lm_weight)
+        )
+        destination[i] = output
+        loss = loss + weight * output.mean_nll / count
     return PretrainOutput(loss, ae, lm)
 
 
@@ -143,6 +142,7 @@ class PretrainTrainer:
                     {
                         "episode_id": example.episode.episode_id,
                         "document_id": source.document_id,
+                        "boundary_variant": source.provenance["boundary_variant"],
                         "input_tokens": example.input_length,
                         "length_bucket": next(
                             (
@@ -233,6 +233,7 @@ def run_pretraining(
     swanlab_group: str | None = None,
     swanlab_tags: tuple[str, ...] = (),
     evaluation_dirs: dict[str, Path] | None = None,
+    fork_from: Path | None = None,
 ) -> PretrainRunResult:
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     rank = dist.get_rank() if dist.is_initialized() else 0
@@ -243,6 +244,8 @@ def run_pretraining(
         or (train_example_limit is not None and train_example_limit <= 0)
     ):
         raise ValueError("step counts and optional example limit must be positive")
+    if resume is not None and fork_from is not None:
+        raise ValueError("resume and fork_from are mutually exclusive")
     if output_dir.exists() and resume is None:
         raise FileExistsError("use a new output directory or resume an existing run")
     metadata = json.loads((data_dir / "preparation.json").read_text())
@@ -286,7 +289,12 @@ def run_pretraining(
     value = GrowthValueNetwork(config.d_mem).to(device)
     value.requires_grad_(False)
     trainer = PretrainTrainer(config, backbone, writer, device)
-    sampler = PretrainSampler(train_index, tokenizer, config, train_example_limit)
+    if config.pretrain_balanced_batches:
+        if train_example_limit is not None:
+            raise ValueError("balanced batches use the complete prepared pools")
+        sampler = BalancedPretrainSampler(train_index, tokenizer, config)
+    else:
+        sampler = PretrainSampler(train_index, tokenizer, config, train_example_limit)
     run_identity = {
         "world_size": world_size,
         "preparation_id": metadata["preparation_id"],
@@ -296,9 +304,18 @@ def run_pretraining(
     next_step, input_tokens, target_tokens = 0, 0, 0
     seen_documents: set[str] = set()
     checkpoint = None
-    if resume:
-        checkpoint = load_model_checkpoint(resume)
-        if checkpoint.phase != "pretrain" or checkpoint.config != config:
+    if resume or fork_from:
+        checkpoint = load_model_checkpoint(resume or fork_from)
+        if fork_from:
+            changed = {k for k, v in config.to_dict().items()
+                       if checkpoint.config.to_dict()[k] != v}
+            if (not config.pretrain_balanced_batches
+                    or changed - {"ae_weight", "lm_weight", "pretrain_ae_warmup_steps"}
+                    or config.pretrain_ae_warmup_steps != checkpoint.progress["next_step"]
+                    or checkpoint.config.lm_weight != 0
+                    or checkpoint.config.ae_weight != 1):
+                raise ValueError("fork must inherit the complete identical AE warm-up prefix")
+        if checkpoint.phase != "pretrain" or (not fork_from and checkpoint.config != config):
             raise ValueError("checkpoint phase/config differs from this pretraining run")
         if checkpoint.progress["run_identity"] != run_identity:
             raise ValueError("checkpoint data preparation or sampling limit differs")
@@ -325,6 +342,8 @@ def run_pretraining(
                     "device": str(device),
                     "model_dtype": str(dtype),
                     "run_identity": run_identity,
+                    "fork_from": str(fork_from.resolve()) if fork_from else None,
+                    "inherited_steps": next_step if fork_from else 0,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -355,23 +374,29 @@ def run_pretraining(
     ):
 
         def evaluate_sets(step):
+            # Each GPU evaluates one source; rank zero publishes the combined reports.
             results = {}
             if world_size > 1:
                 dist.barrier()
-            for name, index in dev_indices.items() if primary else ():
+            for number, (name, index) in enumerate(dev_indices.items()):
+                if number % world_size != rank:
+                    continue
                 destination = output_dir if name == "dev" else output_dir / name
                 with precision_context(device):
-                    metrics = evaluate_pretraining(
-                        config, tokenizer, backbone, writer, index, destination, step, input_tokens
+                    results[name] = evaluate_pretraining(
+                        config, tokenizer, backbone, writer, index, destination,
+                        step, input_tokens,
                     )
-                log_evaluation(
-                    tracking,
-                    metrics,
-                    destination / f"dev-step-{step:06d}.jsonl",
-                    step,
-                    "dev" if name == "dev" else f"dev/{name}",
-                )
-                results[name] = metrics
+            if world_size > 1:
+                gathered = [None] * world_size
+                dist.all_gather_object(gathered, results)
+                results = {k: v for item in gathered for k, v in item.items()}
+            if primary:
+                for name in dev_indices:
+                    destination = output_dir if name == "dev" else output_dir / name
+                    log_evaluation(tracking, results[name],
+                                   destination / f"dev-step-{step:06d}.jsonl", step,
+                                   "dev" if name == "dev" else f"dev/{name}")
             if world_size > 1:
                 dist.barrier()
             return results["dev"] if list(results) == ["dev"] else results
@@ -382,13 +407,16 @@ def run_pretraining(
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             step_begin = time.perf_counter()
-            examples = [
-                sampler.sample(step)
-                for _ in range(config.batch_size * config.gradient_accumulation_steps * world_size)
-            ]
+            batch_size = config.batch_size * config.gradient_accumulation_steps * world_size
+            examples = (sampler.sample_batch(step, batch_size) if config.pretrain_balanced_batches
+                        else [sampler.sample(step) for _ in range(batch_size)])
+            ae_weight, lm_weight = task_weights_at(config, step)
+            trainer.config = replace(config, ae_weight=ae_weight, lm_weight=lm_weight,
+                                     pretrain_ae_warmup_steps=0)
             for group in trainer.optimizer.param_groups:
                 group["lr"] = learning_rate_at(config, step)
             result = trainer.step(examples)
+            result["task_weights"] = {"ae": ae_weight, "continuation": lm_weight}
             result["learning_rate"] = learning_rate_at(config, step)
             result["length_sampling_weights"] = sampler.length_weights(step)
             input_tokens += result["input_tokens"]

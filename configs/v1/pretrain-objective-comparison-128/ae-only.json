@@ -1,0 +1,83 @@
+{
+  "model_name_or_path": "/data/bywei/models/meta-llama/Llama-2-7b-chat-hf",
+  "model_revision": null,
+  "reader_lora_rank": 16,
+  "reader_lora_alpha": 32,
+  "reader_lora_target_modules": [
+    "q_proj",
+    "v_proj"
+  ],
+  "reader_lora_dropout": 0.0,
+  "d_mem": 512,
+  "num_layers": 3,
+  "num_heads": 8,
+  "ffn_dim": 2048,
+  "dynamic_k_first": 16,
+  "k_limit": 4096,
+  "growth_actions": [
+    0,
+    8,
+    16
+  ],
+  "exploration_probs": [
+    0.7,
+    0.25,
+    0.05
+  ],
+  "bptt_tokens": 1024,
+  "pretrain_dataset": "HuggingFaceFW/fineweb",
+  "pretrain_subset": "sample-10BT",
+  "split_fractions": [
+    0.9,
+    0.05,
+    0.05
+  ],
+  "pretrain_compression_ratios": [
+    2
+  ],
+  "pretrain_k_min": 1,
+  "ratio_weights_start": [
+    1
+  ],
+  "ratio_weights_end": [
+    1
+  ],
+  "ratio_curriculum_steps": 1000,
+  "max_input_tokens": 128,
+  "max_continuation_tokens": 128,
+  "write_context_tokens": 4096,
+  "read_context_tokens": 4096,
+  "ae_prompt": "Reconstruct the text stored in memory:\n",
+  "lm_prompt": "Continue the text stored in memory:\n",
+  "ae_weight": 1,
+  "lm_weight": 0,
+  "batch_size": 2,
+  "gradient_accumulation_steps": 2,
+  "learning_rate": 3e-05,
+  "weight_decay": 0.01,
+  "gradient_clip": 1.0,
+  "gradient_checkpointing": false,
+  "data_seed": 20260907,
+  "model_seed": 42,
+  "eval_every": 1000,
+  "eval_examples": 240,
+  "eval_generation_examples": 60,
+  "eval_generation_every": 2000,
+  "input_length_bounds": [
+    103,
+    111,
+    119,
+    128
+  ],
+  "input_length_weights": null,
+  "input_length_weights_end": null,
+  "input_length_curriculum_steps": 0,
+  "warmup_steps": 600,
+  "lr_decay_steps": 20000,
+  "min_lr_fraction": 0.1,
+  "pretrain_balanced_batches": true,
+  "pretrain_ae_warmup_steps": 0,
+  "eval_generation_steps": [
+    5000
+  ]
+}

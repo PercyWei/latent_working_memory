@@ -1,0 +1,28 @@
+{
+  "source_root": "data/v1/fineweb-4096-doc100k_20260910",
+  "seed": 20260912,
+  "train_per_source_task": 8000,
+  "evaluation_per_source_task": 120,
+  "workers": 8,
+  "recipe": {
+    "max_documents": 100000,
+    "samples_per_task": [
+      16000,
+      240,
+      240
+    ],
+    "min_sample_tokens": 96,
+    "max_sample_tokens": 128,
+    "length_bounds": [
+      103,
+      111,
+      119,
+      128
+    ],
+    "lm_prefix_fraction": [
+      0.3,
+      0.7
+    ],
+    "candidates_per_document": 64
+  }
+}

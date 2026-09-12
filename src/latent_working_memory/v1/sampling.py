@@ -192,3 +192,77 @@ class PretrainSampler:
         self.orders = {key: order.copy() for key, order in state["orders"].items()}
         self.cursors, self.visits = state["cursors"].copy(), state["visits"]
         self.rng.setstate(state["rng"])
+
+
+def task_weights_at(config: ExperimentConfig, step: int) -> tuple[float, float]:
+    if step < config.pretrain_ae_warmup_steps:
+        return 1.0, 0.0
+    return config.ae_weight, config.lm_weight
+
+
+class BalancedPretrainSampler:
+    """Exact task/source quotas per update, with independent shuffled pool streams."""
+
+    def __init__(self, index, tokenizer, config):
+        self.index, self.tokenizer, self.config = index, tokenizer, config
+        self.pools = {}
+        for i in range(len(index.offsets)):
+            episode = index[i]
+            source = episode.sources[0].provenance["boundary_variant"]
+            key = f"{episode.reads[0].task}/{source}"
+            self.pools.setdefault(key, []).append(i)
+        expected = {f"{task}/{source}" for task in ("ae", "continuation")
+                    for source in ("semantic", "random")}
+        if self.pools.keys() != expected:
+            raise ValueError("balanced pretraining requires both tasks and both boundary sources")
+        self.orders = {key: self.pools[key].copy() for key in sorted(self.pools)}
+        self.rngs = {key: random.Random(f"{config.data_seed}:{key}") for key in self.orders}
+        for key, order in self.orders.items():
+            self.rngs[key].shuffle(order)
+        self.cursors = dict.fromkeys(self.orders, 0)
+        self.visits = 0
+
+    def sample_batch(self, step, size):
+        weights = task_weights_at(self.config, step)
+        tasks = [t for t, w in zip(("ae", "continuation"), weights, strict=True) if w > 0]
+        keys = [f"{task}/{source}" for task in tasks for source in ("semantic", "random")]
+        if size % len(keys):
+            raise ValueError("global batch must divide evenly across enabled task/source cells")
+        examples = []
+        for key in keys:
+            order, rng = self.orders[key], self.rngs[key]
+            for _ in range(size // len(keys)):
+                if self.cursors[key] == len(order):
+                    rng.shuffle(order)
+                    self.cursors[key] = 0
+                episode = self.index[order[self.cursors[key]]]
+                self.cursors[key] += 1
+                self.visits += 1
+                ae, lm = read_tokens(episode, self.tokenizer)
+                capacities = capacity_weights(self.config, len(episode.input_ids), ae, lm, step)
+                if not capacities or sum(capacities.values()) <= 0:
+                    raise ValueError(f"no legal capacity for {episode.episode_id}")
+                capacity = rng.choices(list(capacities), list(capacities.values()))[0]
+                examples.append(PretrainExample(episode, ae, lm, capacity))
+        return examples
+
+    def length_weights(self, step):
+        return {str(self.config.max_input_tokens): 1.0}
+
+    def state_dict(self):
+        return {"orders": {k: v.copy() for k, v in self.orders.items()},
+                "cursors": self.cursors.copy(), "visits": self.visits,
+                "rngs": {k: r.getstate() for k, r in self.rngs.items()}}
+
+    def load_state_dict(self, state):
+        if state["orders"].keys() != self.pools.keys():
+            raise ValueError("balanced sampler pools differ")
+        for key, order in state["orders"].items():
+            if sorted(order) != sorted(self.pools[key]):
+                raise ValueError("balanced sampler data differ")
+            if not 0 <= state["cursors"][key] <= len(order):
+                raise ValueError("invalid balanced sampler cursor")
+        self.orders = {k: v.copy() for k, v in state["orders"].items()}
+        self.cursors, self.visits = state["cursors"].copy(), state["visits"]
+        for key, rng in self.rngs.items():
+            rng.setstate(state["rngs"][key])

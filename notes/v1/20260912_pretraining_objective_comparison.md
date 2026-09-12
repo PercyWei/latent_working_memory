@@ -1,0 +1,67 @@
+# 20260912_短文本预训练目标对比实验
+
+创建时间：20260912 23:38:14 UTC+08:00
+最后修订时间：20260912 23:38:14 UTC+08:00
+
+本实验比较 AE-only、从开始联合 AE/LM、AE warm-up 后联合训练。目标是在短文本、低压缩率条件下判断读写结构能否建立忠实重建，以及 LM 目标对这一能力的影响。实验沿用[预训练数据类型对比](20260911_pretraining_data_comparison.md)的产物与报告布局。本轮用户明确指定仅使用物理 GPU 4、5。
+
+## 1. 数据来源与对比设计
+
+来源池为 `data/v1/fineweb-4096-doc100k_20260910/`。直接筛选旧样本无法满足短 LM 独立评估面板，因此从同一来源池的 eligible 原文重新构造，继承原文档 train/dev/test 划分及近重复簇身份。semantic 保留完整句界；random 从原文 token 边界随机截断。X 与 LM 的 Y 均为 96–128 tokens，Y 紧邻 X。AE 重建完整 X；不进行 QA 或下游适配。
+
+| 配置／数据 | 位置 |
+|---|---|
+| 数据构造配置 | `configs/data_preparation/fineweb-4096-doc100k_pretrain-objective-comparison-128.json` |
+| 训练配置 | `configs/v1/pretrain-objective-comparison-128/{ae-only,joint,ae-warmup}.json` |
+| 派生数据 | `data/v1/fineweb-4096-doc100k_20260910/derived/pretrain-objective-comparison-128_20260912/` |
+
+计划训练集共 32,000 条，AE/LM × semantic/random 各 8,000 条；每个单元按 X 的 96–103、104–111、112–119、120–128 四档各取 2,000 条。三组共享同一个 mixed 训练目录，采样器决定启用任务。每套来源的 dev/test 各 240 条（AE/LM 各 120），同一 split 的两来源、两任务之间也使用独立文档，共 480 篇。目标长度受相同区间约束，精确长度分布随产物记录，不宣称逐 token 完全匹配。
+
+## 2. 训练与评估设置
+
+| 组别 | 前 5,000 步 | 后 15,000 步 | AE／LM 累计样本访问 |
+|---|---|---|---|
+| ae-only | AE | AE | 160,000／0 |
+| joint | AE+LM | AE+LM | 80,000／80,000 |
+| ae-warmup | AE | AE+LM | 100,000／60,000 |
+
+每组 20,000 次 optimizer 更新。AE-only 每步 8 条 AE（两来源各 4）；联合每步 4 条 AE 与 4 条 LM（每个任务两来源各 2）。样本在各任务／来源池内独立打乱轮转。AE-only 的损失权重为 1／0，联合为 0.5／0.5；样本先按目标 tokens 平均，任务内部再等权平均。三组固定总访问预算，AE／LM 暴露量不同，因此不能把 warm-up 的收益单独解释为顺序效应。
+
+| 配置项 | 设置 |
+|---|---|
+| 基座 | Llama-2-7B-Chat，冻结 |
+| Writer | 512 维，3 层，8 头，FFN 2048 |
+| 读取 LoRA | rank 16，alpha 32，dropout 0，q_proj/v_proj |
+| 容量 | 固定名义压缩率 2，K=ceil(len(X)/2)，48–64 个位置 |
+| 课程 | 关闭长度／压缩率课程；仅 ae-warmup 在完成 5,000 步后切换任务 |
+| Batch | 双卡 × 每卡 microbatch 2 × 梯度累积 2，全局 8 |
+| 精度 | BF16，关闭梯度检查点 |
+| 优化 | AdamW，weight decay 0.01，梯度裁剪 1 |
+| 学习率 | 峰值 3e-5，600 步 warmup，20,000 步余弦衰减至 3e-6 |
+| Seeds | 模型 42，训练采样 20260907，数据构造 20260912 |
+| GPU | 仅物理 4、5；双卡训练显式设置 CUDA_VISIBLE_DEVICES=4,5 |
+
+A、C 共用完全相同的前 5,000 步 AE 轨迹。先完成 A，再从 A 的 step 5,000 checkpoint 派生 C；继承所有可训练参数、optimizer、各任务／来源采样流及每个 rank 的 RNG 状态，C 从 step 5,001 继续原学习率进度。实际执行 55,000 次训练更新，三条逻辑轨迹均为 20,000 步。派生只允许目标权重及 warm-up 配置变化，并保存来源 checkpoint。C 的前段指标引用 A，不伪装为独立训练。
+
+每 1,000 步保存 checkpoint 并评估 dev NLL；初始化、每 2,000 步及 step 5,000 做 AE 自由生成。每来源固定 60 条 AE 自由生成样本，共 120 条。两 GPU 按来源分担 dev 评估。
+
+AE 对照为 memory、wrong_memory、full_context、base_full_context；LM 另加 no_memory。报告 token 加权 NLL/PPL、AE BLEU-4、正确前缀比例和整段 token 完全匹配率。最终 test 使用 step 20,000，不用 test 选择训练方案。AE-only 的 LM 结果仅作为无 LM 训练的迁移诊断。真实前缀后缀生成属于独立诊断，不改变正式自由生成口径。
+
+## 3. 复现命令与产物
+
+命令在服务器项目根目录 `/data/bywei/projects/latent_working_memory`，使用根目录 `.venv/` 执行。
+
+```bash
+.venv/bin/python -m latent_working_memory.data_preparation.objective_comparison \
+  --spec configs/data_preparation/fineweb-4096-doc100k_pretrain-objective-comparison-128.json \
+  --config configs/v1/pretrain-objective-comparison-128/joint.json \
+  --output-dir data/v1/fineweb-4096-doc100k_20260910/derived/pretrain-objective-comparison-128_20260912
+```
+
+实验系列根目录为 `artifacts/v1/pretrain-objective-comparison-128_20260912/`。训练目录采用 `train/pretrain-{ae-only,joint,ae-warmup}-r2_mixed-32k_20260912/`；评估和跨组比较分别放在 `eval/`、`compare/`，调度命令、状态、日志、报告清单及结果汇总放在 `plan/`。
+
+SwanLab project 为 `latent-working-memory-v1`，group 为 `pretrain-objective-comparison-128_20260912`，显式标签 `study:pretrain-objective-comparison`。job_type 使用 train/evaluate/compare；超参数保存在 config。
+
+## 4. 执行记录与结果
+
+20260912 23:38:14 UTC+08:00：完成配置及训练支持；目标配额、warm-up 边界、任务损失、配置、训练 CLI、评估等 15 项相关测试通过。两端当前已提交代码一致，GPU 4、5 空闲。数据构造与正式运行尚未开始。

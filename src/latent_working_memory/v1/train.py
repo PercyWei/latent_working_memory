@@ -31,6 +31,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--train-example-limit", type=int)
     parser.add_argument("--save-every", type=int, default=100)
     parser.add_argument("--resume", type=Path)
+    parser.add_argument("--fork-from", type=Path, help="Inherit the identical AE warm-up prefix")
     parser.add_argument(
         "--swanlab-mode", choices=("disabled", "offline", "online"), default="disabled"
     )
@@ -60,6 +61,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         train_example_limit=args.train_example_limit,
         save_every=args.save_every,
         resume=args.resume,
+        fork_from=args.fork_from,
         swanlab_mode=args.swanlab_mode,
         swanlab_project=args.swanlab_project,
         swanlab_group=args.swanlab_group,

@@ -157,7 +157,7 @@ def evaluate_pretraining(
             generate_ae = (
                 ae is not None
                 and generated_ae_views <= config.eval_generation_examples
-                and step % config.eval_generation_every == 0
+                and (step % config.eval_generation_every == 0 or step in config.eval_generation_steps)
             )
             for task_name, task in (("ae", ae), ("continuation", lm)):
                 if task is not None:
@@ -284,6 +284,7 @@ def evaluate_pretraining(
                     for record in paired_records:
                         record["correct_prefix_ratio"] = prefix_ratio
                         record["prediction"] = text
+                        record["exact_match"] = content == task.target_ids[:-1]
     finally:
         backbone.train(was_training[0])
         writer.train(was_training[1])
@@ -354,6 +355,8 @@ def aggregate_pretrain_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
             summary["generated_reads"] = len(generation)
             for metric in ("correct_prefix_ratio",):
                 summary[metric] = sum(r[metric] for r in generation) / len(generation)
+            if all("exact_match" in r for r in generation):
+                summary["exact_match"] = sum(r["exact_match"] for r in generation) / len(generation)
             summary["bleu_4"] = bleu.corpus_score(
                 [r["prediction"] for r in generation], [[r["reference"] for r in generation]]
             ).score
