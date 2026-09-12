@@ -10,6 +10,7 @@ def test_report_axes_and_missing_values():
             "length_up_to/128/ae/memory": {"nll": 2.5},
             "length_up_to/32/ae/memory": {"nll": 1.5},
             "length_up_to/128/ae/no_memory": {"nll": 3.5},
+            "boundary_method/pysbd_conservative/ae/memory": {"nll": 2.0},
         },
         "comparisons": {"all/ae": {"gain_vs_no_memory": 1.0}},
     }

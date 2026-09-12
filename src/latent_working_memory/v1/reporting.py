@@ -79,7 +79,7 @@ def build_test_report_charts(metrics: dict[str, Any], prefix: str = "report") ->
                 panel.setdefault(series, {})[bucket] = summary[metric]
     for (category, task, metric), series in panels.items():
         labels = list(dict.fromkeys(label for points in series.values() for label in points))
-        if category != "all":
+        if category in {"length_up_to", "ratio_up_to", "capacity"}:
             labels.sort(key=float)
         values[f"{prefix}/{category}/{task}/{metric}"] = _bar(
             labels,

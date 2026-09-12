@@ -4,7 +4,11 @@ import argparse
 import json
 from pathlib import Path
 
-from latent_working_memory.v1.reporting import comparison_charts, log_test_report
+from latent_working_memory.v1.reporting import (
+    comparison_charts,
+    build_test_report_charts,
+    reconstruction_media,
+)
 from latent_working_memory.v1.tracking import swanlab_run
 
 
@@ -57,8 +61,19 @@ def main(argv=None) -> None:
             identities.append(identity)
     # Validate/render comparison before making any cloud writes.
     charts = comparison_charts(reports)
+    individual_charts = (
+        [
+            build_test_report_charts(report)
+            | reconstruction_media(Path(entry["report"]).with_suffix(".jsonl"), "report")
+            for entry, (_, _, report) in zip(entries, reports, strict=True)
+        ]
+        if args.publish_individual
+        else []
+    )
     if args.publish_individual:
-        for entry, (_, _, report), identity in zip(entries, reports, identities, strict=True):
+        for entry, report_charts, identity in zip(
+            entries, individual_charts, identities, strict=True
+        ):
             path = Path(entry["report"])
             with swanlab_run(
                 path.parent,
@@ -70,7 +85,7 @@ def main(argv=None) -> None:
                 group=args.swanlab_group,
                 tags=tuple(identity["tags"]),
             ) as run:
-                log_test_report(run, report, path.with_suffix(".jsonl"))
+                run.log(report_charts)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "reports.json").write_text(json.dumps(entries, indent=2) + "\n")
     with swanlab_run(
