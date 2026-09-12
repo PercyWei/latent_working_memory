@@ -8,6 +8,7 @@ from typing import Any, Iterator
 import swanlab
 
 from latent_working_memory.v1.checkpoint import capture_rng_state, restore_rng_state
+from latent_working_memory.v1.reporting import reconstruction_media
 
 
 @contextmanager
@@ -187,19 +188,5 @@ def log_evaluation(
             values.update(
                 {f"{prefix}/{name}/{metric}": value for metric, value in comparison.items()}
             )
-    examples = []
-    for line in records_path.read_text().splitlines():
-        record = json.loads(line)
-        if "prediction" in record:
-            examples.append(
-                swanlab.Text(
-                    f"Reference:\n{record['reference']}\n\nPrediction:\n{record['prediction']}",
-                    caption=f"{record['input_tokens']} tokens, K={record['capacity']}, "
-                    f"exact={record['sequence_match']}, prefix={record['correct_prefix_ratio']:.3f}",
-                )
-            )
-    # SwanLab caps one media list at 108 items. Keep every generated read visible.
-    for start in range(0, len(examples), 100):
-        suffix = "" if start == 0 else f"/page_{start // 100 + 1}"
-        values[f"{split}/reconstruction{suffix}"] = examples[start : start + 100]
+    values.update(reconstruction_media(records_path, split))
     run.log(values, step=step)

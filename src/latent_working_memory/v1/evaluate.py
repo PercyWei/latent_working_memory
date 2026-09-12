@@ -16,7 +16,8 @@ from latent_working_memory.data_preparation.fineweb import data_contract
 from latent_working_memory.v1.model import GrowthValueNetwork, JointMemoryWriter
 from latent_working_memory.devices import validate_device
 from latent_working_memory.v1.training import load_trainable_model_state, precision_context
-from latent_working_memory.v1.tracking import log_evaluation, swanlab_run
+from latent_working_memory.v1.tracking import swanlab_run
+from latent_working_memory.v1.reporting import log_test_report
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -101,12 +102,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             tags=tuple(args.swanlab_tag),
         ) as tracking:
             step = checkpoint.progress["next_step"]
-            log_evaluation(
+            log_test_report(
                 tracking,
                 result,
                 destination / f"{args.split}-step-{step:06d}.jsonl",
-                step,
-                f"{args.split}/{name}" if args.evaluation_dirs else args.split,
+                f"report/{name}" if args.evaluation_dirs else "report",
             )
     print(json.dumps(results, ensure_ascii=False, indent=2))
 
