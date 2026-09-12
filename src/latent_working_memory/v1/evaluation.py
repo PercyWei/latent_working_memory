@@ -119,6 +119,7 @@ def evaluate_pretraining(
     step: int,
     training_input_tokens: int,
     split: str = "dev",
+    prefix_tokens: tuple[int, ...] = (),
 ) -> dict[str, Any]:
     if split not in {"dev", "test"}:
         raise ValueError("evaluation split must be dev or test")
@@ -132,6 +133,9 @@ def evaluate_pretraining(
         raise ValueError(
             "evaluation needs at least two independent sources for wrong-memory controls"
         )
+    if any(type(n) is not int or n <= 0 for n in prefix_tokens):
+        raise ValueError("diagnostic prefix lengths must be positive integers")
+    prefix_records = []
     was_training = backbone.training, writer.training
     backbone.eval()
     writer.eval()
@@ -225,6 +229,21 @@ def evaluate_pretraining(
                             generation_jobs.append(
                                 ([record], memory.clone(), task.prompt_ids, task, True)
                             )
+                            for prefix_length in prefix_tokens:
+                                if prefix_length >= len(task.target_ids) - 1:
+                                    raise ValueError("diagnostic prefix must leave a nonempty suffix")
+                                suffix = task.target_ids[prefix_length:]
+                                prompt = task.prompt_ids + task.target_ids[:prefix_length]
+                                diagnostic = common | {
+                                    "condition": condition, "prefix_tokens": prefix_length,
+                                    "reference": tokenizer.decode(suffix[:-1], skip_special_tokens=True),
+                                    "target_tokens": len(suffix) - 1,
+                                }
+                                prefix_records.append(diagnostic)
+                                generation_jobs.append(
+                                    ([diagnostic], memory.clone(), prompt,
+                                     ReadTokens(prompt, suffix), True)
+                                )
                         records.append(record)
                     for condition, use_lora in (
                         ("full_context", True),
@@ -305,7 +324,24 @@ def evaluate_pretraining(
             ),
         },
     )
+    if prefix_records:
+        diagnostic_groups = defaultdict(list)
+        for row in prefix_records:
+            diagnostic_groups[f"{row['condition']}/prefix-{row['prefix_tokens']}"].append(row)
+        bleu = BLEU(tokenize="13a", lowercase=False, smooth_method="exp", effective_order=True)
+        metrics["prefix_diagnostics"] = {
+            key: {"generated_reads": len(rows),
+                  "correct_prefix_ratio": sum(r["correct_prefix_ratio"] for r in rows) / len(rows),
+                  "exact_match": sum(r["exact_match"] for r in rows) / len(rows),
+                  "bleu_4": bleu.corpus_score([r["prediction"] for r in rows],
+                                              [[r["reference"] for r in rows]]).score}
+            for key, rows in diagnostic_groups.items()
+        }
     output_dir.mkdir(parents=True, exist_ok=True)
+    if prefix_records:
+        with (output_dir / f"{split}-step-{step:06d}-prefix.jsonl").open("w") as handle:
+            for row in prefix_records:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
     with (output_dir / f"{split}-step-{step:06d}.jsonl").open("w", encoding="utf-8") as handle:
         for record in records:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")

@@ -14,6 +14,7 @@ CHART_METRICS = (
     "ppl",
     "correct_prefix_ratio",
     "bleu_4",
+    "exact_match",
 )
 
 

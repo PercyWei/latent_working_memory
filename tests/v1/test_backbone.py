@@ -198,3 +198,34 @@ def test_generation_can_disable_reader_lora_and_restore_it(components):
         assert backbone.language_model.training
     finally:
         hook.remove()
+
+
+def test_frozen_feature_cache_keeps_projection_trainable_and_positions_live(components, monkeypatch):
+    backbone, _ = components
+    units = [(4, 5, 6), (7, 6)]
+    expected = backbone.text_features(units, [0, 5])
+    backbone.text_feature_cache = {}
+    calls = []
+    original = backbone.frozen_text_features
+
+    def encode(batch):
+        calls.append(batch)
+        return original(batch)
+
+    monkeypatch.setattr(backbone, 'frozen_text_features', encode)
+    cached = backbone.text_features(units, [0, 5])
+    again = backbone.text_features(units, [0, 5])
+    assert calls == [units]
+    for a, b, c in zip(expected, cached, again, strict=True):
+        torch.testing.assert_close(a, b)
+        torch.testing.assert_close(a, c)
+    assert all(not value.requires_grad and value.device.type == 'cpu'
+               for value in backbone.text_feature_cache.values())
+    sum(row.sum() for row in again).backward()
+    assert backbone.input_projection.weight.grad.abs().sum() > 0
+    shifted = backbone.text_features(units, [9, 5])
+    assert not torch.allclose(shifted[0], again[0])
+    with torch.no_grad():
+        backbone.input_projection.bias.add_(1)
+    changed = backbone.text_features(units, [0, 5])
+    torch.testing.assert_close(changed[0], again[0] + 1)

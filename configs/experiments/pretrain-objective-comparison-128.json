@@ -1,0 +1,33 @@
+{
+  "gpus": [
+    4,
+    5
+  ],
+  "project": "latent-working-memory-v1",
+  "group": "pretrain-objective-comparison-128_20260912",
+  "data_dir": "data/v1/fineweb-4096-doc100k_20260910/derived/pretrain-objective-comparison-128_20260912",
+  "max_steps": 20000,
+  "note": "notes/v1/20260912_pretraining_objective_comparison.md",
+  "comparison_name": "pretrain-objective-r2-compare_mixed-32k_20260912",
+  "runs": [
+    {
+      "label": "ae-only",
+      "name": "pretrain-ae-only-r2_mixed-32k_20260912",
+      "evaluation_name": "pretrain-ae-only-r2-eval_mixed-32k_20260912",
+      "config": "configs/v1/pretrain-objective-comparison-128/ae-only.json"
+    },
+    {
+      "label": "joint",
+      "name": "pretrain-joint-r2_mixed-32k_20260912",
+      "evaluation_name": "pretrain-joint-r2-eval_mixed-32k_20260912",
+      "config": "configs/v1/pretrain-objective-comparison-128/joint.json"
+    },
+    {
+      "label": "ae-warmup",
+      "name": "pretrain-ae-warmup-r2_mixed-32k_20260912",
+      "evaluation_name": "pretrain-ae-warmup-r2-eval_mixed-32k_20260912",
+      "config": "configs/v1/pretrain-objective-comparison-128/ae-warmup.json",
+      "fork_from_run": "pretrain-ae-only-r2_mixed-32k_20260912"
+    }
+  ]
+}

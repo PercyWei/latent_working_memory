@@ -1,7 +1,7 @@
 # 20260912_短文本预训练目标对比实验
 
 创建时间：20260912 23:38:14 UTC+08:00
-最后修订时间：20260912 23:38:14 UTC+08:00
+最后修订时间：20260912 23:50:50 UTC+08:00
 
 本实验比较 AE-only、从开始联合 AE/LM、AE warm-up 后联合训练。目标是在短文本、低压缩率条件下判断读写结构能否建立忠实重建，以及 LM 目标对这一能力的影响。实验沿用[预训练数据类型对比](20260911_pretraining_data_comparison.md)的产物与报告布局。本轮用户明确指定仅使用物理 GPU 4、5。
 
@@ -15,7 +15,7 @@
 | 训练配置 | `configs/v1/pretrain-objective-comparison-128/{ae-only,joint,ae-warmup}.json` |
 | 派生数据 | `data/v1/fineweb-4096-doc100k_20260910/derived/pretrain-objective-comparison-128_20260912/` |
 
-计划训练集共 32,000 条，AE/LM × semantic/random 各 8,000 条；每个单元按 X 的 96–103、104–111、112–119、120–128 四档各取 2,000 条。三组共享同一个 mixed 训练目录，采样器决定启用任务。每套来源的 dev/test 各 240 条（AE/LM 各 120），同一 split 的两来源、两任务之间也使用独立文档，共 480 篇。目标长度受相同区间约束，精确长度分布随产物记录，不宣称逐 token 完全匹配。
+实际训练集共 32,000 条，来自 3,200 篇原文档，AE/LM × semantic/random 各 8,000 条；每个单元按 X 的 96–103、104–111、112–119、120–128 四档各取 2,000 条。三组共享同一个 mixed 训练目录，采样器决定启用任务。每套来源的 dev/test 各 240 条（AE/LM 各 120），同一 split 的两来源、两任务之间也使用独立文档，共 480 篇。目标长度受相同区间约束，精确长度分布随产物记录，不宣称逐 token 完全匹配。
 
 ## 2. 训练与评估设置
 
@@ -64,4 +64,17 @@ SwanLab project 为 `latent-working-memory-v1`，group 为 `pretrain-objective-c
 
 ## 4. 执行记录与结果
 
-20260912 23:38:14 UTC+08:00：完成配置及训练支持；目标配额、warm-up 边界、任务损失、配置、训练 CLI、评估等 15 项相关测试通过。两端当前已提交代码一致，GPU 4、5 空闲。数据构造与正式运行尚未开始。
+20260912 23:38:14 UTC+08:00：完成配置及训练支持；目标配额、warm-up 边界、任务损失、配置、训练 CLI、评估等 15 项相关测试通过。两端已提交代码一致，GPU 4、5 空闲。
+
+20260912 23:50:50 UTC+08:00：数据构造完成。训练集 32,000 条、3,200 篇文档；semantic/random 的 dev/test 各 240 篇独立文档。逐样本验证 X/Y 长度、AE token 目标一致性、文档／来源／近重复簇跨 split 隔离。统计保存在 `plan/data-statistics.json`，不是下载完整性检查。四个训练单元的 X 平均长度在 111.62–112.00 tokens，LM Y 平均长度为 semantic 112.13、random 110.62。训练集约 3.58M 输入 tokens；各组累计访问 160,000 次，不等于 160,000 条独立文本。
+
+为减少重复计算，所有组在 CPU 内存中缓存冻结基座的文本隐藏状态；不缓存可训练投影、Writer 或读取输出。每次运行独立建立缓存，不新增持久化缓存格式。每个 microbatch 的不同任务共享一次读取前向；双卡分别评估一个来源。冻结特征缓存、梯度路径与派生继承 optimizer 等测试通过。
+
+调度入口如下；前一训练完成后进行该组两来源并行 test，三组均完成后自动发布评估与跨组比较，生成 `plan/results.md` 并追加到本文。最终评估额外提供 1／8／32 个真实前缀 tokens，只计分剩余后缀；诊断逐条记录单独保存为 `test-step-020000-prefix.jsonl`，不混入正式自由重建指标。
+
+```bash
+CUDA_VISIBLE_DEVICES=4,5 OMP_NUM_THREADS=1 TOKENIZERS_PARALLELISM=false \
+  .venv/bin/python -m latent_working_memory.data_preparation.pretrain_objective_series \
+  --spec configs/experiments/pretrain-objective-comparison-128.json \
+  --output-dir artifacts/v1/pretrain-objective-comparison-128_20260912
+```

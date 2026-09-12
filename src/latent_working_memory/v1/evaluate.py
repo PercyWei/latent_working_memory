@@ -42,6 +42,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--swanlab-tag", action="append", default=[])
     parser.add_argument("--examples", type=int)
     parser.add_argument("--generation-examples", type=int)
+    parser.add_argument("--prefix-tokens", type=int, nargs="+", default=())
     args = parser.parse_args(argv)
     if args.swanlab_mode != "disabled" and (args.output_dir / "swanlab.json").exists():
         raise ValueError("static report already published; use a new output directory")
@@ -89,6 +90,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 checkpoint.progress["next_step"],
                 checkpoint.progress["input_tokens"],
                 args.split,
+                tuple(args.prefix_tokens),
             )
         results[name] = result
     with swanlab_run(

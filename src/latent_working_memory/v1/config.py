@@ -44,6 +44,7 @@ class ExperimentConfig:
     read_context_tokens: int = 4096
     ae_prompt: str = "Reconstruct the text stored in memory:\n"
     lm_prompt: str = "Continue the text stored in memory:\n"
+    cache_text_features: bool = False
     pretrain_balanced_batches: bool = False
     pretrain_ae_warmup_steps: int = 0
     ae_weight: float = 1.0
@@ -184,6 +185,8 @@ class ExperimentConfig:
             raise ValueError("reader_lora_dropout must be less than 1")
         if any(type(s) is not int or s < 0 for s in self.eval_generation_steps):
             raise ValueError("eval_generation_steps must contain non-negative steps")
+        if type(self.cache_text_features) is not bool:
+            raise ValueError("cache_text_features must be boolean")
         if type(self.pretrain_balanced_batches) is not bool:
             raise ValueError("pretrain_balanced_batches must be boolean")
         if self.pretrain_ae_warmup_steps and (

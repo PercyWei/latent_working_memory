@@ -162,6 +162,7 @@ def log_evaluation(
         "generated_reads",
         "correct_prefix_ratio",
         "bleu_4",
+        "exact_match",
     )
     strata = {"length_ratio"}
     for group, summary in metrics["groups"].items():

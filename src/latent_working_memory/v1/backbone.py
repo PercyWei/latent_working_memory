@@ -90,6 +90,7 @@ class LatentMemoryBackbone(nn.Module):
         self.d_lm = hidden_size
         self.d_mem = d_mem
         self.max_position_embeddings = max_positions
+        self.text_feature_cache: dict[tuple[int, ...], Tensor] | None = None
 
     def text_features(
         self,
@@ -103,6 +104,26 @@ class LatentMemoryBackbone(nn.Module):
             _validate_token_ids(unit, "write unit")
             if type(start) is not int or start < 0:
                 raise ValueError("source_starts must be non-negative integers")
+        if self.text_feature_cache is None:
+            hidden = self.frozen_text_features(units)
+        else:
+            missing = list(dict.fromkeys(unit for unit in units if unit not in self.text_feature_cache))
+            if missing:
+                encoded = self.frozen_text_features(missing)
+                for unit, row in zip(missing, encoded, strict=True):
+                    self.text_feature_cache[unit] = row.detach().cpu().clone()
+            hidden = [self.text_feature_cache[unit].to(device) for unit in units]
+        projected = self.input_projection(
+            pad_sequence(hidden, batch_first=True).to(self.input_projection.weight.dtype)
+        )
+        return [
+            row[: len(unit)]
+            + sinusoidal_positions(len(unit), self.d_mem, device, row.dtype, start=start)
+            for row, unit, start in zip(projected, units, source_starts, strict=True)
+        ]
+
+    def frozen_text_features(self, units: list[tuple[int, ...]]) -> list[Tensor]:
+        device = self._model_device
         rows = [torch.tensor((self.bos_token_id, *unit), device=device) for unit in units]
         input_ids = pad_sequence(rows, batch_first=True, padding_value=self.eos_token_id)
         self._validate_sequence_length(input_ids.shape[1])
@@ -111,24 +132,13 @@ class LatentMemoryBackbone(nn.Module):
         mask = positions < lengths[:, None]
         position_ids = positions.expand_as(input_ids).masked_fill(~mask, 0)
         with self._frozen_base():
-            # Llama body returns only final hidden states; the vocabulary head is unused here.
             hidden = (
-                self.language_model.get_base_model()
-                .model(
-                    input_ids=input_ids,
-                    attention_mask=mask,
-                    position_ids=position_ids,
-                    use_cache=False,
-                    return_dict=True,
-                )
-                .last_hidden_state.detach()
+                self.language_model.get_base_model().model(
+                    input_ids=input_ids, attention_mask=mask, position_ids=position_ids,
+                    use_cache=False, return_dict=True,
+                ).last_hidden_state.detach()
             )
-        projected = self.input_projection(hidden[:, 1:].to(self.input_projection.weight.dtype))
-        return [
-            row[: len(unit)]
-            + sinusoidal_positions(len(unit), self.d_mem, device, row.dtype, start=start)
-            for row, unit, start in zip(projected, units, source_starts, strict=True)
-        ]
+        return [row[1:1 + len(unit)] for row, unit in zip(hidden, units, strict=True)]
 
     def read_batch(
         self,
@@ -342,6 +352,8 @@ def load_backbone(
         lora_target_modules=config.reader_lora_target_modules,
         lora_dropout=config.reader_lora_dropout,
     )
+    if config.cache_text_features:
+        backbone.text_feature_cache = {}
     backbone.input_projection.to(device=device)
     backbone.memory_projection.to(device=device)
     return tokenizer, backbone

@@ -221,6 +221,22 @@ def test_evaluation_controls_share_targets_budgets_and_write_test_split(
     ) + 2 * len({r["episode_id"] for r in records if "prediction" in r})
 
 
+    diagnostic = evaluate_pretraining(
+        tiny_config, tokenizer, backbone, writer, index, tmp_path / "prefix", 2, 1234,
+        "test", prefix_tokens=(1,),
+    )
+    assert set(diagnostic["prefix_diagnostics"]) == {"memory/prefix-1", "wrong_memory/prefix-1"}
+    assert diagnostic["groups"]["all/ae/memory"]["nll"] == metrics["groups"]["all/ae/memory"]["nll"]
+    suffix_rows = [json.loads(line) for line in
+                   (tmp_path / "prefix/test-step-000002-prefix.jsonl").read_text().splitlines()]
+    for row in suffix_rows:
+        episode = panel_episodes[row["episode_id"]]
+        target, _ = read_tokens(episode, tokenizer)
+        assert row["reference"] == tokenizer.decode(target.target_ids[1:-1], skip_special_tokens=True)
+        assert row["target_tokens"] == len(target.target_ids) - 2
+
+
+
 def test_memory_bytes_and_byte_token_area() -> None:
     state = MemoryState(torch.zeros(4, 8, dtype=torch.bfloat16), seen_tokens=10)
     assert persistent_memory_bytes(state, metadata_bytes=8) == 72

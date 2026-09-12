@@ -79,5 +79,6 @@
   "pretrain_ae_warmup_steps": 0,
   "eval_generation_steps": [
     5000
-  ]
+  ],
+  "cache_text_features": true
 }
