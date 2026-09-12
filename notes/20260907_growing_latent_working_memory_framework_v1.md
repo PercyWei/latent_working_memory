@@ -1,8 +1,8 @@
-# 20260910_可增长 Latent Working Memory 框架 v1（18:36:49 UTC+08:00）
+# 20260912_可增长 Latent Working Memory 框架 v1（15:41:37 UTC+08:00）
 
 创建时间：20260907 11:30:02 UTC+08:00
 
-最后修订时间：20260910 18:36:49 UTC+08:00
+最后修订时间：20260912 15:41:37 UTC+08:00
 
 本文定义语言模型基座上的可增长工作记忆、推理计算、三阶段训练和实验协议。模型参数在训练中学习，记忆状态在推理中随输入持续更新。工程接入与验证范围见第 11、12 节。
 
@@ -606,7 +606,7 @@ FineWeb `sample-10BT` 已下载到服务器，Llama-2-7B-Chat 单卡训练、保
 
 运行配置另外固定 FineWeb 子集与来源划分、粒度采样权重、边界标注来源与占比、预训练 $K_{\min}$、容量课程、AE/LM 权重、合法上下文与输出预算、训练规模、资源代价权重及评估设置。上述预训练参数在启动前完整解析。记录实际文本长度、$K_X$、$r_{\mathrm{eff}}$、目标长度与有效监督量。
 
-代码位于 `src/latent_working_memory/v1/`，产物位于 `data/v1/`、`checkpoints/v1/`、`artifacts/v1/experiments/<run_id>/`。独立评估保存到 `artifacts/v1/evaluations/<run_id>/`，本地历史产物的分类见 [文档索引](README.md)。实现采用 PyTorch、Transformers、PEFT 和 `uv` 管理的环境。SwanLab 记录训练与独立评估指标、分层曲线和重建样例，实验 ID 与可视化选项独立于模型配置保存。GPU 实验限定物理 GPU 0、1；启动命令显式设置 `CUDA_VISIBLE_DEVICES=0`、`1` 或 `0,1`。
+代码位于 `src/latent_working_memory/v1/`，数据位于 `data/v1/`，实验产物统一组织为 `artifacts/v1/<实验系列>/`，下设 `train/<run_id>/`、`eval/<run_id>/`、`compare/<run_id>/` 与 `plan/`；checkpoint 位于对应训练 run 的 `checkpoints/` 下。当前预训练数据类型对比系列位于 `artifacts/v1/pretrain-data-comparison-2048-20260911/`，运行记录见 [预训练数据类型对比实验](v1/20260911_pretraining_boundary_comparison_restart.md)。实现采用 PyTorch、Transformers、PEFT 和 `uv` 管理的环境。SwanLab 记录训练与独立评估指标、分层曲线和重建样例，实验 ID 与可视化选项独立于模型配置保存。GPU 实验限定物理 GPU 0、1；启动命令显式设置 `CUDA_VISIBLE_DEVICES=0`、`1` 或 `0,1`。
 
 ## 12. 实施与验收顺序
 

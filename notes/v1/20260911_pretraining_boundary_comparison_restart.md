@@ -1,7 +1,7 @@
-# 20260912_双卡预训练边界对比实验（14:15:45 UTC+08:00）
+# 20260912_双卡预训练数据类型对比实验（15:41:37 UTC+08:00）
 
 创建时间：20260911 16:27:19 UTC+08:00
-最后修订时间：20260912 14:15:45 UTC+08:00
+最后修订时间：20260912 15:41:37 UTC+08:00
 
 ## 实验设置
 
@@ -13,9 +13,19 @@ semantic、random、mixed 三组从相同模型种子重新初始化，并行进
 
 ## SwanLab 与产物
 
-项目为 `latent-working-memory-v1`，group 为 `lwm-boundary-comparison-2048-20260911`。训练 run 名称为 `pretrain-semantic-157k-20260911`、`pretrain-random-157k-20260911`、`pretrain-mixed-157k-20260911`。测试 run 名称采用 `evaluate-训练来源-test-测试来源-157k-20260911`，其中 157k 仍表示对应模型的训练集规模，评估样本数记录在 config 中。job_type 为 train/evaluate，tags 保留 scope:main、method:latent-working-memory、study:boundary-comparison、data:fineweb 及实际来源。
+项目为 `latent-working-memory-v1`，group 为 `lwm-boundary-comparison-2048-20260911`。训练 run 名称为 `pretrain-semantic-157k-20260911`、`pretrain-random-157k-20260911`、`pretrain-mixed-157k-20260911`。首次测试 run 名称采用 `evaluate-训练来源-test-测试来源-157k-20260911`，其中 157k 仍表示对应模型的训练集规模，评估样本数记录在 config 中。job_type 为 train/evaluate，tags 保留 scope:main、method:latent-working-memory、study:boundary-comparison、data:fineweb 及实际来源。
 
-配置：`configs/v1/pretrain_boundary_comparison_dual_a800.json`。训练产物：`artifacts/v1/experiments/boundary-comparison-2048-20260911/`。测试产物：`artifacts/v1/evaluations/boundary-comparison-2048-20260911/`。调度状态：`artifacts/v1/experiment-plans/boundary-comparison-2048-20260911/`。
+配置：`configs/v1/pretrain_boundary_comparison_dual_a800.json`。服务器仓库根目录为 `/data/bywei/projects/latent_working_memory`，本系列产物统一位于 `artifacts/v1/pretrain-data-comparison-2048-20260911/`：
+
+| 子目录 | 内容 |
+|---|---|
+| `train/pretrain-{semantic,random,mixed}-157k-20260911/` | 三组训练配置、来源记录、逐步指标、dev 结果、checkpoint 与 SwanLab 记录 |
+| `eval/pretrain-{semantic,random,mixed}-157k-eval-20260912/` | 各模型完整评估，两套测试来源分别保存 JSON/JSONL |
+| `eval/evaluate-{训练来源}-test-{测试来源}-157k-20260911/` | 首次六组测试的原始 JSON/JSONL |
+| `compare/pretrain-157k-compare-20260912/` | 跨模型比较清单与 SwanLab 记录 |
+| `plan/` | 调度脚本、命令、任务状态、启动日志与评估清单 |
+
+后续训练、评估和比较的输出目录分别使用本系列下的 `train/`、`eval/`、`compare/`，各次运行使用独立的 run 目录；恢复训练使用原训练目录及其 checkpoint。`plan/run_jobs.py` 与 `plan/commands.json` 记录该轮训练和首次测试的调度，完整评估清单为 `plan/complete-ae-reports.json`，首次测试清单为 `plan/reports.json`。历史日志与 SwanLab 缓存中的原始启动命令保留执行时的位置；可执行脚本和可读取的报告清单使用迁移后的路径。
 
 本次重跑沿用现有数据集。原 20260910 系列本地与服务器训练产物和调度日志按用户要求清理；单卡、双卡性能测试报告、结果和独立测试入口按用户要求清理；正式训练的梯度同步模块保留。云端旧记录的删除状态单独核实，不将新旧 run 混用。
 
@@ -51,7 +61,7 @@ mixed 的 semantic test LM NLL 为 1.9852，保留等量近期原文的对照为
 
 上述计数仅统计训练，不含评估；三组均采样 160,000 次，长度课程和循环采样使其不等同于完整遍历训练集一次。
 
-测试报告位于 `artifacts/v1/evaluations/boundary-comparison-2048-20260911/evaluate-{训练来源}-test-{测试来源}-157k-20260911/test-step-020000.json`，逐条结果位于同名 `.jsonl`。
+测试报告位于 `artifacts/v1/pretrain-data-comparison-2048-20260911/eval/evaluate-{训练来源}-test-{测试来源}-157k-20260911/test-step-020000.json`，逐条结果位于同名 `.jsonl`。
 
 SwanLab 测试记录：semantic 训练组的 [semantic test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/q830jqgt)、[random test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/aaho5zki)；random 训练组的 [semantic test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/zkkxq86z)、[random test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/zo41umze)；mixed 训练组的 [semantic test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/9vqipeih)、[random test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/ew086khr)。
 
@@ -71,19 +81,19 @@ AE 的正确记忆、错误记忆、完整原文及关闭 reader LoRA 的完整�
 
 本轮完整评估的 run 名称为 `pretrain-semantic-157k-eval-20260912`、`pretrain-random-157k-eval-20260912`、`pretrain-mixed-157k-eval-20260912`；跨模型比较为 `pretrain-157k-compare-20260912`。run 名称直接取输出目录名，项目和 group 沿用本系列设置。完整 AE 对照通过重新执行模型评估获得。
 
-单模型启动示例（在服务器仓库中运行）：
+本轮单模型启动命令（输出目录现已有发布记录，再次评估时使用新的 run 目录）：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src artifacts/v1/pretrain-code-20260908/.venv/bin/python -m latent_working_memory.v1.evaluate \
-  --checkpoint artifacts/v1/experiments/boundary-comparison-2048-20260911/pretrain-random-157k-20260911/checkpoints/pretrain-step-020000.pt \
-  --evaluation-dirs artifacts/v1/experiment-plans/boundary-comparison-2048-20260911/evaluation-dirs.json \
-  --output-dir artifacts/v1/evaluations/boundary-comparison-2048-20260911/pretrain-random-157k-eval-20260912 \
+  --checkpoint artifacts/v1/pretrain-data-comparison-2048-20260911/train/pretrain-random-157k-20260911/checkpoints/pretrain-step-020000.pt \
+  --evaluation-dirs artifacts/v1/pretrain-data-comparison-2048-20260911/plan/evaluation-dirs.json \
+  --output-dir artifacts/v1/pretrain-data-comparison-2048-20260911/eval/pretrain-random-157k-eval-20260912 \
   --split test --examples 120 --generation-examples 12 \
   --swanlab-mode online --swanlab-project latent-working-memory-v1 \
   --swanlab-group lwm-boundary-comparison-2048-20260911 --swanlab-tag study:boundary-comparison
 ```
 
-三组评估完成后，汇总清单的 report 路径指向各新评估目录下的 `{semantic,random}/test-step-020000.json`，使用 `publish_reports --reports 清单路径 --output-dir artifacts/v1/evaluations/boundary-comparison-2048-20260911/pretrain-157k-compare-20260912` 发布跨模型比较，并指定同一项目、group、tags 和 online 模式。单模型评估已在执行结束时发布，汇总命令只创建 compare run。
+三组评估完成后，汇总清单的 report 路径指向各新评估目录下的 `{semantic,random}/test-step-020000.json`，使用 `publish_reports --reports 清单路径 --output-dir artifacts/v1/pretrain-data-comparison-2048-20260911/compare/pretrain-157k-compare-20260912` 发布跨模型比较，并指定同一项目、group、tags 和 online 模式。单模型评估已在执行结束时发布，汇总命令只创建 compare run。
 
 ## 完整评估运行记录
 
@@ -98,6 +108,6 @@ CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src artifacts/v1/pretrain-code-20260908/.venv/
 | `pretrain-mixed-157k-eval-20260912` | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/d3z6hkfd) |
 | `pretrain-157k-compare-20260912` | [比较](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/xltjprbj) |
 
-原始结果位于 `artifacts/v1/evaluations/boundary-comparison-2048-20260911/pretrain-{训练来源}-157k-eval-20260912/{测试来源}/test-step-020000.{json,jsonl}`；汇总清单位于本系列调度目录的 `complete-ae-reports.json`。
+原始结果位于 `artifacts/v1/pretrain-data-comparison-2048-20260911/eval/pretrain-{训练来源}-157k-eval-20260912/{测试来源}/test-step-020000.{json,jsonl}`；汇总清单位于本系列调度目录的 `complete-ae-reports.json`。
 
 服务器已清理 12 个旧合并展示目录、原六组独立测试的 SwanLab 缓存及被替代的 mixed 串行启动日志。原六份 JSON/JSONL、正式训练记录、checkpoint 和新评估产物保留。云端旧 run 由用户手动清理。
