@@ -34,7 +34,7 @@ def test_single_config_runs_all_stages(
 
 
 def test_formal_config_contains_only_construction_parameters():
-    config = ConstructionConfig.load(Path("configs/data_preparation/fineweb-4096.json"))
+    config = ConstructionConfig.load(Path("configs/data_preparation/fineweb-4096-doc100k.json"))
     assert config.recipe.samples_per_task == (98000, 2100, 2100)
     assert config.recipe.max_documents == 100000
     assert config.recipe.max_sample_tokens == 4096

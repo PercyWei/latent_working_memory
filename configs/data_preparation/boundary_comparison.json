@@ -1,7 +1,7 @@
 {
   "sources": {
-    "semantic": "/data/bywei/projects/latent_working_memory/data/v1/fineweb-4096_20260910/semantic",
-    "random": "/data/bywei/projects/latent_working_memory/data/v1/fineweb-4096_20260910/random"
+    "semantic": "/data/bywei/projects/latent_working_memory/data/v1/fineweb-4096-doc100k_20260910/semantic",
+    "random": "/data/bywei/projects/latent_working_memory/data/v1/fineweb-4096-doc100k_20260910/random"
   },
   "runs": {
     "semantic": {

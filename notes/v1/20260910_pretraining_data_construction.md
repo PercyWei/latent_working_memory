@@ -1,7 +1,7 @@
 # 20260910_预训练数据构建策略与实现
 
 创建时间：20260910 15:44:35 UTC+08:00
-最后修订时间：20260912 22:57:45 UTC+08:00
+最后修订时间：20260912 23:00:47 UTC+08:00
 
 ## 1. 数据来源
 
@@ -89,7 +89,7 @@ CPU 预取下一窗口的分句与分词，主线程处理当前窗口并按顺�
 
 ```bash
 uv run --frozen python -m latent_working_memory.data_preparation \
-  --config configs/data_preparation/fineweb-4096.json \
+  --config configs/data_preparation/fineweb-4096-doc100k.json \
   --dataset-dir data/raw/HuggingFaceFW-fineweb \
   --output-dir /path/to/new-data
 ```
@@ -112,7 +112,7 @@ uv run --frozen python -m latent_working_memory.data_preparation \
 
 | 设置 | 值 |
 |---|---|
-| 正式构造配置 | `configs/data_preparation/fineweb-4096.json` |
+| 正式构造配置 | `configs/data_preparation/fineweb-4096-doc100k.json` |
 | tokenizer | `/data/bywei/models/meta-llama/Llama-2-7b-chat-hf` |
 | 来源候选预算 | 100,000 篇；本轮去重后保留 99,998 篇 |
 | 来源 seed | 20260907 |
@@ -137,9 +137,9 @@ semantic/random × AE/LM 四种组合的目标与实际数量一致：
 | 构造代码与阶段调度 | `src/latent_working_memory/data_preparation/` |
 | 主环境 | `.venv/` |
 | 本地 FineWeb Parquet | `data/raw/HuggingFaceFW-fineweb/sample-10BT/` |
-| 数据成品、准备元数据及审计报告 | `data/v1/fineweb-4096_20260910/` |
+| 数据成品、准备元数据及审计报告 | `data/v1/fineweb-4096-doc100k_20260910/` |
 
-目录名记录 FineWeb 来源、X/Y 各自的 token 长度上限 4096 和创建日期。实际规模保存在 `preparation.json`：semantic 和 random 各 204,400 条（train 196,000 + dev 4,200 + test 4,200），两类合计 408,800 条。训练 run 名称中的规模按实际训练集样本数。
+目录名记录 FineWeb 来源、X/Y 各自的 token 长度上限 4096、来源候选预算 `doc100k` 和创建日期。`doc100k` 表示最多读取 100,000 篇候选文档，包含随后被过滤或去重的文档。本轮保留 99,998 篇来源文档，semantic 和 random 各生成 204,400 条样本（train 196,000 + dev 4,200 + test 4,200），两类合计 408,800 条；实际数量保存在来源及数据准备元数据中。训练 run 名称中的规模按实际训练集样本数。
 
 ### 生成命令
 
@@ -153,9 +153,9 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 export TOKENIZERS_PARALLELISM=false OMP_NUM_THREADS=4
 
 python -u -m latent_working_memory.data_preparation \
-  --config configs/data_preparation/fineweb-4096.json \
+  --config configs/data_preparation/fineweb-4096-doc100k.json \
   --dataset-dir data/raw/HuggingFaceFW-fineweb \
-  --output-dir data/v1/fineweb-4096_20260910 \
+  --output-dir data/v1/fineweb-4096-doc100k_20260910 \
   --stage all
 ```
 
@@ -165,19 +165,19 @@ python -u -m latent_working_memory.data_preparation \
 
 ```bash
 python -u -m latent_working_memory.data_preparation \
-  --config configs/data_preparation/fineweb-4096.json \
+  --config configs/data_preparation/fineweb-4096-doc100k.json \
   --dataset-dir data/raw/HuggingFaceFW-fineweb \
-  --output-dir data/v1/fineweb-4096_20260910 \
+  --output-dir data/v1/fineweb-4096-doc100k_20260910 \
   --stage sources
 
 python -u -m latent_working_memory.data_preparation \
-  --config configs/data_preparation/fineweb-4096.json \
-  --output-dir data/v1/fineweb-4096_20260910 \
+  --config configs/data_preparation/fineweb-4096-doc100k.json \
+  --output-dir data/v1/fineweb-4096-doc100k_20260910 \
   --stage semantic
 
 python -u -m latent_working_memory.data_preparation \
-  --config configs/data_preparation/fineweb-4096.json \
-  --output-dir data/v1/fineweb-4096_20260910 \
+  --config configs/data_preparation/fineweb-4096-doc100k.json \
+  --output-dir data/v1/fineweb-4096-doc100k_20260910 \
   --stage random
 ```
 
