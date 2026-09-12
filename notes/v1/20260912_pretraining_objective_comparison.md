@@ -58,7 +58,7 @@ AE 对照为 memory、wrong_memory、full_context、base_full_context；LM 另�
   --output-dir data/v1/fineweb-4096-doc100k_20260910/derived/pretrain-objective-comparison-128_20260912
 ```
 
-实验系列根目录为 `artifacts/v1/pretrain-objective-comparison-128_20260912/`。训练目录采用 `train/pretrain-{ae-only,joint,ae-warmup}-r2_mixed-32k_20260912/`；评估和跨组比较分别放在 `eval/`、`compare/`，调度命令、状态、日志、报告清单及结果汇总放在 `plan/`。
+实验系列根目录为 `artifacts/v1/pretrain-objective-comparison-128_20260912/`。训练目录为 `train/pretrain-ae-only-r2_mixed-16k_20260912/` 和 `train/pretrain-{joint,ae-warmup}-r2_mixed-32k_20260912/`，规模表示该组可参与训练的样本数；AE-only 仅访问共享目录中的 16,000 条 AE，另外两组使用全部 32,000 条；评估和跨组比较分别放在 `eval/`、`compare/`，调度命令、状态、日志、报告清单及结果汇总放在 `plan/`。
 
 SwanLab project 为 `latent-working-memory-v1`，group 为 `pretrain-objective-comparison-128_20260912`，显式标签 `study:pretrain-objective-comparison`。job_type 使用 train/evaluate/compare；超参数保存在 config。
 

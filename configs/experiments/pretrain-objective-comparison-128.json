@@ -12,8 +12,8 @@
   "runs": [
     {
       "label": "ae-only",
-      "name": "pretrain-ae-only-r2_mixed-32k_20260912",
-      "evaluation_name": "pretrain-ae-only-r2-eval_mixed-32k_20260912",
+      "name": "pretrain-ae-only-r2_mixed-16k_20260912",
+      "evaluation_name": "pretrain-ae-only-r2-eval_mixed-16k_20260912",
       "config": "configs/v1/pretrain-objective-comparison-128/ae-only.json"
     },
     {
@@ -27,7 +27,7 @@
       "name": "pretrain-ae-warmup-r2_mixed-32k_20260912",
       "evaluation_name": "pretrain-ae-warmup-r2-eval_mixed-32k_20260912",
       "config": "configs/v1/pretrain-objective-comparison-128/ae-warmup.json",
-      "fork_from_run": "pretrain-ae-only-r2_mixed-32k_20260912"
+      "fork_from_run": "pretrain-ae-only-r2_mixed-16k_20260912"
     }
   ],
   "training_concurrency": 2
