@@ -79,7 +79,7 @@ def build_evaluation_charts(
                 category, label = key.split("/", 1)
                 rows[category].append({"evaluation_source": source, "group": label, **summary})
         for category, entries in rows.items():
-            values[f"{prefix}/tables/{section}/{category}"] = _table(entries)
+            values[f"tables/{prefix}/{section}/{category}"] = _table(entries)
     panels = defaultdict(dict)
     for source, metrics in reports:
         for key, summary in metrics["groups"].items():
@@ -101,7 +101,7 @@ def build_evaluation_charts(
         labels = list(dict.fromkeys(label for points in series.values() for label in points))
         if category in {"length_up_to", "ratio_up_to", "capacity"}:
             labels.sort(key=float)
-        values[f"{prefix}/{category}/{task}/{metric}"] = _bar(
+        values[f"charts/{prefix}/{category}/{task}/{metric}"] = _bar(
             labels,
             {name: [points.get(label) for label in labels] for name, points in series.items()},
         )
@@ -115,7 +115,7 @@ def build_test_report_charts(metrics: dict[str, Any], prefix: str = "report") ->
 def log_test_report(run, metrics, records_path: Path, prefix: str = "report") -> None:
     if run is not None:
         run.log(
-            build_test_report_charts(metrics, prefix) | reconstruction_media(records_path, prefix)
+            build_test_report_charts(metrics, prefix) | reconstruction_media(records_path, f"examples/{prefix}")
         )
 
 
@@ -141,9 +141,9 @@ def comparison_charts(reports: list[tuple[str, str, dict[str, Any]]]) -> dict[st
                 for metric in CHART_METRICS:
                     if metric in summary:
                         panels[(task, metric)].setdefault(test, {})[train] = summary[metric]
-    values = {"comparison/summary": _table(rows)}
+    values = {"tables/comparison/summary": _table(rows)}
     for (task, metric), series in panels.items():
-        values[f"comparison/{task}/{metric}"] = _bar(
+        values[f"charts/comparison/{task}/{metric}"] = _bar(
             training_sources,
             {
                 test: [points.get(train) for train in training_sources]

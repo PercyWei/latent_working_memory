@@ -108,7 +108,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 destination = args.output_dir / name if args.evaluation_dirs else args.output_dir
                 charts.update(
                     reconstruction_media(
-                        destination / f"{args.split}-step-{step:06d}.jsonl", f"report/{name}"
+                        destination / f"{args.split}-step-{step:06d}.jsonl", f"examples/{name}"
                     )
                 )
             tracking.log(charts)

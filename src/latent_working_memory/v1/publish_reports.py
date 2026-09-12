@@ -71,7 +71,7 @@ def main(argv=None) -> None:
             rendered.update(
                 reconstruction_media(
                     Path(entry["report"]).with_suffix(".jsonl"),
-                    f"report/{entry['evaluation_source']}",
+                    f"examples/{entry['evaluation_source']}",
                 )
             )
         bundles.append((Path(directory), selected_entries, rendered))

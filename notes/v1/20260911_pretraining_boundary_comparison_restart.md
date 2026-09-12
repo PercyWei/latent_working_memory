@@ -1,7 +1,7 @@
-# 20260912_双卡预训练边界对比实验（11:07:52 UTC+08:00）
+# 20260912_双卡预训练边界对比实验（11:12:05 UTC+08:00）
 
 创建时间：20260911 16:27:19 UTC+08:00
-最后修订时间：20260912 11:07:52 UTC+08:00
+最后修订时间：20260912 11:12:05 UTC+08:00
 
 ## 实验设置
 
@@ -57,10 +57,12 @@ SwanLab 测试记录：semantic 训练组的 [semantic test](https://swanlab.cn/
 
 ## 结果展示
 
-周期 dev 以训练 step 为横轴记录标量曲线；独立 checkpoint 评估使用 `report/*` 图表，包含总体与分层指标表、按条件或分桶比较的柱状图，以及重建文本。指标分别绘图，缺失的分桶值保持为空。表中的 reads 表示容量展开后的评估次数。
+周期 dev 以训练 step 为横轴记录标量曲线；独立 checkpoint 评估按 `charts/*`、`tables/*`、`examples/*` 三个顶层面板展示，包含总体与分层指标表、按条件或分桶比较的柱状图，以及重建文本。指标分别绘图，缺失的分桶值保持为空。表中的 reads 表示容量展开后的评估次数。
 
 `python -m latent_working_memory.v1.publish_reports` 从已有报告发布展示，不运行模型推理。`--reports` 指向 JSON 列表，每项包含 `training_source`、`evaluation_source`、`report`；报告路径相对清单所在目录解析。`--output-dir` 指定比较 run 的目录及名称；重复传入 `--evaluation-output 训练来源 输出目录`，为每个模型建立一个包含全部测试来源的评估 run。`--swanlab-project`、`--swanlab-group` 和 `--swanlab-tag` 显式指定实验归属，`--swanlab-mode online` 发布云端展示。
 
 当前按三个模型组织评估 run：`evaluate-semantic-157k-20260912`、`evaluate-random-157k-20260912`、`evaluate-mixed-157k-20260912`。每个 run 的总体表与分层表保留两套测试结果，柱状图比较测试来源及记忆对照，重建样例按测试来源分组。跨模型汇总 run 为 `compare-boundary-157k-20260912`。直接运行 `evaluate.py --evaluation-dirs ...` 也在同一评估 run 中汇总全部测试来源。
 
 图表与表格中的浮点数最多保留四位小数，计数保持整数；柱顶数值隐藏，悬停查看数值，图例可滚动。原始 JSON/JSONL 保留完整精度。缺失分桶保持空值。旧六个评估 run 的删除由用户处理，本地及服务器原始报告作为结果来源保留。
+
+评估与跨模型比较均将柱状图放在 `charts/*`，数值表放在 `tables/*`；评估重建样例按测试来源放在 `examples/*`。向已有 run 发布后，历史 `report/*`、`comparison/*` 指标仍保留，新面板使用上述命名。
