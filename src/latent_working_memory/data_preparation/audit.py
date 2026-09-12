@@ -9,9 +9,8 @@ from typing import Any
 
 from transformers import PreTrainedTokenizerBase
 
-from latent_working_memory.v1.config import ExperimentConfig
 from latent_working_memory.v1.data import Episode
-from latent_working_memory.data_preparation.config import PreparationConfig
+from latent_working_memory.data_preparation.config import DataConfig, PreparationConfig
 from latent_working_memory.data_preparation.segmentation import sentence_spans
 
 
@@ -36,7 +35,7 @@ def length_statistics(values: list[int]) -> dict[str, Any]:
 def audit_preparation(
     directory: Path,
     tokenizer: PreTrainedTokenizerBase,
-    config: ExperimentConfig,
+    config: DataConfig,
     preparation: PreparationConfig,
     root: Path,
 ) -> dict[str, Any]:

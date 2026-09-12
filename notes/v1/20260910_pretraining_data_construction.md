@@ -1,7 +1,7 @@
 # 20260910_预训练数据构建策略与实现
 
 创建时间：20260910 15:44:35 UTC+08:00
-最后修订时间：20260912 22:16:47 UTC+08:00
+最后修订时间：20260912 22:43:23 UTC+08:00
 
 ## 1. 数据来源
 
@@ -74,7 +74,7 @@ AE 检查 X 起点和终点；LM 检查 X 起点、X/Y 切点及 Y 终点。内�
 
 | 模块 | 职责 |
 |---|---|
-| `config.py`、`__main__.py` | 配方、长度配额及分阶段入口 |
+| `config.py`、`__main__.py` | 专用构造配置、长度配额及分阶段入口 |
 | `sources.py`、`quality.py`、`dedup.py` | 本地 Parquet 读取、属性检查与来源去重 |
 | `segmentation.py`、`fineweb.py`、`truncation.py` | 保守句界、semantic/random 独立任务构造 |
 | `pipeline.py`、`resume.py` | 候选窗口、配额接收及原子恢复 |
@@ -83,10 +83,13 @@ AE 检查 X 起点和终点；LM 检查 X 起点、X/Y 切点及 Y 终点。内�
 
 CPU 预取下一窗口的分句与分词，主线程处理当前窗口并按顺序接收。每个窗口刷入样本和来源后原子更新 `progress.json`。同一构造契约使用 `--resume` 恢复，回退未提交尾部并重做该窗口。新构造使用独立输出目录。
 
+正式配置保存在 `configs/data_preparation/`。单份 JSON 包含 `data`（tokenizer、数据来源、seed、来源划分与读取提示）和 `recipe`（候选预算、长度及任务配额）两部分；构造入口直接读取这份配置。
+
+数据构造、主实验训练与评估共用项目根目录 `.venv/`，依赖由根目录 `pyproject.toml` 和 `uv.lock` 管理。环境准备使用 `uv sync --frozen`，执行入口为：
+
 ```bash
-python -m latent_working_memory.data_preparation \
-  --config /path/to/config.json \
-  --recipe configs/data_preparation/fineweb.json \
+uv run --frozen python -m latent_working_memory.data_preparation \
+  --config configs/data_preparation/fineweb-4096-204k.json \
   --dataset-dir data/raw/HuggingFaceFW-fineweb \
   --output-dir /path/to/new-data
 ```
@@ -105,7 +108,20 @@ python -m latent_working_memory.data_preparation \
 
 ### 配置与产物
 
-本轮使用 FineWeb `sample-10BT` 和 Llama-2-7B-Chat tokenizer，来源候选预算为 100,000 篇，去重后保留 99,998 篇。来源 seed 为 20260907，split 比例为 0.9/0.05/0.05。X/Y 长度及 LM 比例沿用本文契约，每篇文档最多尝试 64 次，候选窗口为 4 篇文档，构造与审计使用 CPU。
+本轮使用 FineWeb `sample-10BT` 和 Llama-2-7B-Chat tokenizer，构造与自动审计在 CPU 上执行。
+
+| 设置 | 值 |
+|---|---|
+| 正式构造配置 | `configs/data_preparation/fineweb-4096-204k.json` |
+| tokenizer | `/data/bywei/models/meta-llama/Llama-2-7b-chat-hf` |
+| 来源候选预算 | 100,000 篇；本轮去重后保留 99,998 篇 |
+| 来源 seed | 20260907 |
+| train/dev/test 来源比例 | 0.9 / 0.05 / 0.05 |
+| X/Y 长度范围 | 各 32–4096 tokens |
+| LM 的 X 占 X+Y 比例 | 0.3–0.7 |
+| X 长度档上限 | 64、128、256、512、1024、2048、4096 |
+| 每篇文档候选尝试上限 | 64 |
+| 候选窗口 | 4 篇文档 |
 
 semantic/random × AE/LM 四种组合的目标与实际数量一致：
 
@@ -116,10 +132,63 @@ semantic/random × AE/LM 四种组合的目标与实际数量一致：
 
 服务器项目目录为 `/data/bywei/projects/latent_working_memory`，以下路径相对此目录：
 
-- 运行目录：`artifacts/v1/data-preparation/rule-independent-409k-20260910/`，保存实际配置 `config.json`、`recipe.json`、运行元数据及日志。
-- 数据目录：`data/v1/fineweb-4096-204k_20260910/`，保存 semantic/random 样本、各版本的 `audit.json`、`preparation.json` 及联合检查报告 `comparison.json`。
+| 内容 | 位置 |
+|---|---|
+| 构造代码与阶段调度 | `src/latent_working_memory/data_preparation/` |
+| 主环境 | `.venv/` |
+| 本地 FineWeb Parquet | `data/raw/HuggingFaceFW-fineweb/sample-10BT/` |
+| 数据成品、准备元数据及审计报告 | `data/v1/fineweb-4096-204k_20260910/` |
+| 历史运行记录及日志 | `artifacts/v1/data-preparation/fineweb-4096-204k_20260910/` |
 
-目录名中的 4096 表示 X/Y 各自的 token 长度上限；204k 表示 semantic 或 random 单类数据集的完整规模 204,400 条（train 196,000 + dev 4,200 + test 4,200），两类合计 408,800 条。数据集目录规模按 train/dev/test 合计，训练 run 名称中的规模仍按实际训练集样本数。
+目录名中的 4096 表示 X/Y 各自的 token 长度上限；204k 表示 semantic 或 random 单类数据集的完整规模 204,400 条（train 196,000 + dev 4,200 + test 4,200），两类合计 408,800 条。训练 run 名称中的规模按实际训练集样本数。
+
+### 生成命令
+
+以下命令采用当前源码入口与正式配置。执行目录为服务器项目根目录；FineWeb 原文与 tokenizer 使用已有本地文件。环境首次安装或依赖更新时在项目根目录执行 `uv sync --frozen`；环境就绪后的运行命令为：
+
+```bash
+cd /data/bywei/projects/latent_working_memory
+source .venv/bin/activate
+export CUDA_VISIBLE_DEVICES=""
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+export TOKENIZERS_PARALLELISM=false OMP_NUM_THREADS=4
+
+python -u -m latent_working_memory.data_preparation \
+  --config configs/data_preparation/fineweb-4096-204k.json \
+  --dataset-dir data/raw/HuggingFaceFW-fineweb \
+  --output-dir data/v1/fineweb-4096-204k_20260910 \
+  --stage all
+```
+
+`all` 依次完成 `sources`、`semantic` 和 `random`，包括各阶段自动审计及最终联合检查。执行日志可由 shell 重定向到 `artifacts/v1/data-preparation/<本次构造名称>/build.log`，构造命令只依赖源码、正式配置、主环境及输入数据。
+
+分阶段执行时，在相同环境中使用：
+
+```bash
+python -u -m latent_working_memory.data_preparation \
+  --config configs/data_preparation/fineweb-4096-204k.json \
+  --dataset-dir data/raw/HuggingFaceFW-fineweb \
+  --output-dir data/v1/fineweb-4096-204k_20260910 \
+  --stage sources
+
+python -u -m latent_working_memory.data_preparation \
+  --config configs/data_preparation/fineweb-4096-204k.json \
+  --output-dir data/v1/fineweb-4096-204k_20260910 \
+  --stage semantic
+
+python -u -m latent_working_memory.data_preparation \
+  --config configs/data_preparation/fineweb-4096-204k.json \
+  --output-dir data/v1/fineweb-4096-204k_20260910 \
+  --stage random
+```
+
+整轮执行与分阶段执行是两种启动方式。`sources` 创建新的来源池；后两阶段依次复用该池。未完成的 semantic 或 random 阶段保持原配置并追加 `--resume`，从对应 `progress.json` 恢复。现有目标目录已完成构造；重新构造须替换为尚未存在的输出目录。独立抽样检查通过 `data_preparation.inspection` 另行执行。
+
+### 历史记录与当前入口
+
+现有数据于 20260910 使用提交 `50fdcbe` 生成，当时按 sources、semantic、random 分阶段运行。历史实际配置已归入运行目录 `run.json` 的 `config` 和 `recipe`，日志及 `status.json` 保留当时执行状态。
+
+当前正式配置保留本轮 tokenizer、来源划分、seed、长度与配额；构造入口直接使用专用数据配置。当前规则统一按句界与长度档采样，因此以上命令用于按当前实现重新构造相同目标规模，具体样本与历史数据可能不同。
 
 ### 结果
 

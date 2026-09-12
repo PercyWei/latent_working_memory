@@ -1,7 +1,7 @@
 # 20260911_预训练数据类型对比实验
 
 创建时间：20260911 16:27:19 UTC+08:00
-最后修订时间：20260912 22:16:47 UTC+08:00
+最后修订时间：20260912 22:43:23 UTC+08:00
 
 本文记录预训练数据类型对比的具体配置、运行与结果。阶段目标、记忆写入与读取、损失和评估方法见 [预训练与 AE/LM 评估](20260910_pretraining_and_evaluation.md)。
 
@@ -69,7 +69,7 @@ semantic/random 的训练与评估划分使用同一份准备记录；mixed 的�
 按原配置重新选择数据的命令为：
 
 ```bash
-PYTHONPATH=src artifacts/v1/pretrain-code-20260908/.venv/bin/python \
+.venv/bin/python \
   -m latent_working_memory.data_preparation.experiment \
   --spec configs/data_preparation/boundary_comparison.json \
   --config configs/v1/pretrain_boundary_comparison_dual_a800.json \
@@ -219,7 +219,7 @@ mixed 的 semantic test LM NLL 为 1.9852，保留等量近期原文的对照为
 本轮单模型启动命令（输出目录现已有发布记录，再次评估时使用新的 run 目录）：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src artifacts/v1/pretrain-code-20260908/.venv/bin/python -m latent_working_memory.v1.evaluate \
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m latent_working_memory.v1.evaluate \
   --checkpoint artifacts/v1/pretrain-data-comparison-2048_20260911/train/pretrain-random-157k-20260911/checkpoints/pretrain-step-020000.pt \
   --evaluation-dirs artifacts/v1/pretrain-data-comparison-2048_20260911/plan/evaluation-dirs.json \
   --output-dir artifacts/v1/pretrain-data-comparison-2048_20260911/eval/pretrain-random-157k-eval-20260912 \

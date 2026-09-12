@@ -103,10 +103,65 @@ class PreparationConfig:
 
     @classmethod
     def load(cls, path: Path) -> PreparationConfig:
-        raw = json.loads(path.read_text())
+        return cls.from_mapping(json.loads(path.read_text()))
+
+    @classmethod
+    def from_mapping(cls, raw: dict[str, Any]) -> PreparationConfig:
         if not isinstance(raw, dict) or set(raw) - {f.name for f in fields(cls)}:
             raise ValueError("invalid preparation configuration fields")
+        raw = dict(raw)
         for name in ("samples_per_task", "length_bounds", "lm_prefix_fraction"):
             if name in raw:
                 raw[name] = tuple(raw[name])
         return cls(**raw)
+
+
+@dataclass(frozen=True, slots=True)
+class DataConfig:
+    model_name_or_path: str
+    model_revision: str | None = None
+    pretrain_dataset: str = "HuggingFaceFW/fineweb"
+    pretrain_subset: str = "sample-10BT"
+    split_fractions: tuple[float, ...] = (0.9, 0.05, 0.05)
+    data_seed: int = 20260907
+    ae_prompt: str = "Reconstruct the text stored in memory:\n"
+    lm_prompt: str = "Continue the text stored in memory:\n"
+
+    def __post_init__(self) -> None:
+        for name in ("model_name_or_path", "pretrain_subset", "ae_prompt", "lm_prompt"):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
+                raise ValueError(f"{name} must be a non-empty string")
+        if self.model_revision is not None and not isinstance(self.model_revision, str):
+            raise ValueError("model_revision must be null or a string")
+        if self.pretrain_dataset != "HuggingFaceFW/fineweb":
+            raise ValueError("pretrain_dataset must be HuggingFaceFW/fineweb")
+        if type(self.data_seed) is not int or self.data_seed < 0:
+            raise ValueError("data_seed must be a non-negative integer")
+        if (
+            len(self.split_fractions) != 3
+            or any(type(x) not in (int, float) or not math.isfinite(x) or x <= 0
+                   for x in self.split_fractions)
+            or not math.isclose(sum(self.split_fractions), 1.0)
+        ):
+            raise ValueError("split_fractions must contain three positive fractions summing to one")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class ConstructionConfig:
+    data: DataConfig
+    recipe: PreparationConfig
+
+    @classmethod
+    def load(cls, path: Path) -> ConstructionConfig:
+        raw = json.loads(path.read_text())
+        if not isinstance(raw, dict) or set(raw) != {"data", "recipe"}:
+            raise ValueError("construction config requires data and recipe sections")
+        data = raw["data"]
+        if not isinstance(data, dict) or set(data) - {f.name for f in fields(DataConfig)}:
+            raise ValueError("invalid data configuration fields")
+        if "split_fractions" in data:
+            data["split_fractions"] = tuple(data["split_fractions"])
+        return cls(DataConfig(**data), PreparationConfig.from_mapping(raw["recipe"]))

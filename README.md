@@ -1,10 +1,12 @@
-# latent_working_memory（20260912 16:11:15 UTC+08:00）
+# 20260912_latent_working_memory
 
-最后修订时间：20260912 16:11:15 UTC+08:00
+最后修订时间：20260912 22:43:23 UTC+08:00
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理；ICAE v1 和 C-DIC 分别位于 `reproductions/icae/` 与 `reproductions/cdic/`，各自使用独立的 `uv` 环境。
 
-## 本地开发
+## 主环境与开发
+
+数据构造、主实验训练与评估统一使用项目根目录 `.venv/`，依赖由根目录 `pyproject.toml` 与 `uv.lock` 管理。构造入口位于 `src/latent_working_memory/data_preparation/`，正式构造配置位于 `configs/data_preparation/`；执行记录与日志写入 `artifacts/`。
 
 ```bash
 uv sync --frozen

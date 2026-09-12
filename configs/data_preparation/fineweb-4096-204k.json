@@ -1,0 +1,45 @@
+{
+  "data": {
+    "model_name_or_path": "/data/bywei/models/meta-llama/Llama-2-7b-chat-hf",
+    "model_revision": null,
+    "pretrain_dataset": "HuggingFaceFW/fineweb",
+    "pretrain_subset": "sample-10BT",
+    "split_fractions": [
+      0.9,
+      0.05,
+      0.05
+    ],
+    "data_seed": 20260907,
+    "ae_prompt": "Reconstruct the text stored in memory:\n",
+    "lm_prompt": "Continue the text stored in memory:\n"
+  },
+  "recipe": {
+    "max_documents": 100000,
+    "samples_per_task": [
+      98000,
+      2100,
+      2100
+    ],
+    "min_document_chars": 64,
+    "near_duplicate_threshold": 0.9,
+    "near_duplicate_min_words": 64,
+    "dedup_input_min_tokens": 32,
+    "length_bounds": [
+      64,
+      128,
+      256,
+      512,
+      1024,
+      2048,
+      4096
+    ],
+    "min_sample_tokens": 32,
+    "max_sample_tokens": 4096,
+    "lm_prefix_fraction": [
+      0.3,
+      0.7
+    ],
+    "candidates_per_document": 64,
+    "candidate_window_documents": 4
+  }
+}

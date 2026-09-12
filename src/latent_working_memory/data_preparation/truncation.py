@@ -5,10 +5,9 @@ from typing import Any, Mapping
 
 from transformers import PreTrainedTokenizerBase
 
-from latent_working_memory.data_preparation.config import PreparationConfig
+from latent_working_memory.data_preparation.config import DataConfig, PreparationConfig
 from latent_working_memory.data_preparation.fineweb import span_episode
 from latent_working_memory.data_preparation.segmentation import sentence_spans
-from latent_working_memory.v1.config import ExperimentConfig
 from latent_working_memory.v1.data import Episode
 
 
@@ -19,7 +18,7 @@ class RandomSpans:
         self,
         record: Mapping[str, Any],
         tokenizer: PreTrainedTokenizerBase,
-        config: ExperimentConfig,
+        config: DataConfig,
         preparation: PreparationConfig,
     ):
         if not tokenizer.is_fast:

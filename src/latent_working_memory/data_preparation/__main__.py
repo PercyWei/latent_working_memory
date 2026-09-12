@@ -9,9 +9,8 @@ from typing import Sequence
 
 from transformers import AutoTokenizer
 
-from latent_working_memory.v1.config import load_config
 from latent_working_memory.data_preparation.pipeline import prepare_sources, prepare_variant
-from latent_working_memory.data_preparation.config import PreparationConfig
+from latent_working_memory.data_preparation.config import ConstructionConfig
 from latent_working_memory.data_preparation.sources import parquet_records
 
 
@@ -20,7 +19,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         description="Prepare independent, balanced FineWeb AE/LM datasets"
     )
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--recipe", type=Path, required=True)
     parser.add_argument("--stage", choices=("sources", "semantic", "random", "all"), default="all")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--dataset-dir", type=Path, help="Local HuggingFaceFW-fineweb directory")
@@ -29,8 +27,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.resume and args.stage not in {"semantic", "random"}:
         parser.error("recovery requires an explicit semantic or random stage")
-    config = load_config(args.config)
-    recipe = PreparationConfig.load(args.recipe)
+    construction = ConstructionConfig.load(args.config)
+    config, recipe = construction.data, construction.recipe
     if args.max_documents is not None:
         recipe = replace(recipe, max_documents=args.max_documents)
     report = {}

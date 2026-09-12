@@ -15,7 +15,7 @@ from typing import Any, Iterable, Mapping
 from transformers import PreTrainedTokenizerBase
 
 from latent_working_memory.data_preparation.audit import audit_preparation, compare_preparations
-from latent_working_memory.data_preparation.config import PreparationConfig
+from latent_working_memory.data_preparation.config import DataConfig, PreparationConfig
 from latent_working_memory.data_preparation.dedup import cluster_documents
 from latent_working_memory.data_preparation.fineweb import (
     data_contract,
@@ -25,7 +25,6 @@ from latent_working_memory.data_preparation.fineweb import (
 from latent_working_memory.data_preparation.quality import document_rejection_reason
 from latent_working_memory.data_preparation.resume import FILES, load_progress, save_progress
 from latent_working_memory.data_preparation.truncation import RandomSpans
-from latent_working_memory.v1.config import ExperimentConfig
 from latent_working_memory.v1.data import Episode
 
 SPLITS = ("train", "dev", "test")
@@ -34,7 +33,7 @@ TASKS = ("ae", "continuation")
 
 def prepare_sources(
     records: Iterable[Mapping[str, Any]],
-    config: ExperimentConfig,
+    config: DataConfig,
     output_dir: Path,
     preparation: PreparationConfig,
 ) -> dict[str, Any]:
@@ -425,7 +424,7 @@ def prepare_variant(
     root: Path,
     variant: str,
     tokenizer: PreTrainedTokenizerBase,
-    config: ExperimentConfig,
+    config: DataConfig,
     preparation: PreparationConfig,
     resume: bool = False,
 ) -> dict[str, Any]:
@@ -468,7 +467,7 @@ def prepare_variant(
 def prepare_fineweb(
     records: Iterable[Mapping[str, Any]],
     tokenizer: PreTrainedTokenizerBase,
-    config: ExperimentConfig,
+    config: DataConfig,
     output_dir: Path,
     preparation: PreparationConfig,
 ) -> dict[str, Any]:

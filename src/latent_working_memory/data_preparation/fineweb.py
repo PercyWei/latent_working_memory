@@ -9,8 +9,7 @@ from typing import Any, Mapping
 
 from transformers import PreTrainedTokenizerBase
 
-from latent_working_memory.v1.config import ExperimentConfig
-from latent_working_memory.data_preparation.config import PreparationConfig
+from latent_working_memory.data_preparation.config import DataConfig, PreparationConfig
 from latent_working_memory.v1.data import Episode, Read, Reference, Source
 from latent_working_memory.data_preparation.dedup import source_key
 from latent_working_memory.data_preparation.segmentation import sentence_spans
@@ -27,12 +26,12 @@ DATA_CONFIG_FIELDS = (
 )
 
 
-def data_contract(config: ExperimentConfig) -> dict[str, Any]:
+def data_contract(config) -> dict[str, Any]:
     raw = json.loads(json.dumps(config.to_dict()))
     return {key: raw[key] for key in DATA_CONFIG_FIELDS}
 
 
-def document_split(source_id: str, config: ExperimentConfig) -> str:
+def document_split(source_id: str, config: DataConfig) -> str:
     digest = hashlib.blake2b(f"{config.data_seed}:{source_id}".encode(), digest_size=8).digest()
     value = int.from_bytes(digest, "big") / 2**64
     train, dev, _ = config.split_fractions
@@ -42,7 +41,7 @@ def document_split(source_id: str, config: ExperimentConfig) -> str:
 def span_episode(
     record: Mapping[str, Any],
     tokenizer: PreTrainedTokenizerBase,
-    config: ExperimentConfig,
+    config: DataConfig,
     preparation: PreparationConfig,
     start: int,
     end: int,
@@ -103,7 +102,7 @@ class SemanticSpans:
         self,
         record: Mapping[str, Any],
         tokenizer: PreTrainedTokenizerBase,
-        config: ExperimentConfig,
+        config: DataConfig,
         preparation: PreparationConfig,
     ):
         self.record, self.tokenizer, self.config, self.recipe = (
