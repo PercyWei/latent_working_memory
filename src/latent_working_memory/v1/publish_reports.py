@@ -50,6 +50,7 @@ def main(argv=None) -> None:
         seen.add((train, test))
         path = (args.reports.parent / entry["report"]).resolve()
         entry["report"] = str(path)
+        entry["checkpoint_step"] = json.loads(path.read_text())["step"]
         # Re-aggregate saved reads for the current evaluation protocol.
         records = [json.loads(line) for line in path.with_suffix(".jsonl").read_text().splitlines()]
         records = [
@@ -69,6 +70,9 @@ def main(argv=None) -> None:
         != len(outputs) + 1
     ):
         raise ValueError("each run needs its own output directory")
+    for directory in [args.output_dir, *(Path(p) for p in outputs.values())]:
+        if (directory / "swanlab.json").exists():
+            raise ValueError(f"static report already published; use a new output directory: {directory}")
     bundles = []
     for train, directory in outputs.items():
         selected = [(test, report) for source, test, report in reports if source == train]
@@ -97,7 +101,7 @@ def main(argv=None) -> None:
             group=args.swanlab_group,
             tags=tuple(args.swanlab_tag),
         ) as run:
-            run.log(rendered)
+            run.log(rendered, step=0)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "reports.json").write_text(json.dumps(entries, indent=2) + "\n")
     with swanlab_run(
@@ -109,7 +113,7 @@ def main(argv=None) -> None:
         group=args.swanlab_group,
         tags=tuple(args.swanlab_tag),
     ) as run:
-        run.log(charts)
+        run.log(charts, step=0)
 
 
 if __name__ == "__main__":

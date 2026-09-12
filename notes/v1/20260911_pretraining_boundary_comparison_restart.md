@@ -1,7 +1,7 @@
-# 20260912_双卡预训练边界对比实验（12:53:07 UTC+08:00）
+# 20260912_双卡预训练边界对比实验（13:07:09 UTC+08:00）
 
 创建时间：20260911 16:27:19 UTC+08:00
-最后修订时间：20260912 12:53:07 UTC+08:00
+最后修订时间：20260912 13:07:09 UTC+08:00
 
 ## 实验设置
 
@@ -65,4 +65,6 @@ AE 的 NLL/PPL 同时评估正确记忆与错误记忆；BLEU-4 和正确前缀�
 
 `python -m latent_working_memory.v1.publish_reports` 从已有 JSONL 重新聚合结果并发布，不运行模型推理。`--reports` 指向 JSON 列表，每项包含 `training_source`、`evaluation_source`、`report`；report 指向原始 JSON，逐条记录使用同名 JSONL。重复传入 `--evaluation-output 训练来源 输出目录` 为每个模型发布评估，`--output-dir` 发布跨模型汇总。项目、group、tags 和 online 模式通过启动参数指定。
 
-本轮精简结果发布到 `evaluate-{semantic,random,mixed}-joint-157k-20260912`，跨模型 run 为 `compare-boundary-joint-157k-20260912`，均保存在现有 `latent-working-memory-v1` 项目及原 group 中。原始六份测试报告保留；正文最终结果章节记录首次完成时的评估结果。
+当前静态结果发布到 `evaluate-{semantic,random,mixed}-static-157k-20260912`，跨模型 run 为 `compare-boundary-static-157k-20260912`，均保存在现有 `latent-working-memory-v1` 项目及原 group 中。原始六份测试报告保留；正文最终结果章节记录首次完成时的评估结果。
+
+静态评估与比较 run 只在媒体 step 0 发布一次，config 中的 `checkpoint_step`（汇总发布时位于各 report 条目）记录对应模型的训练步数 20,000。已有发布身份的输出目录拒绝追加，重新制作报告使用新目录。SwanLab 的媒体步数表示上传位置。图表使用百分比定位绘图区，长横轴标签分行，适配普通卡片与放大查看。

@@ -35,10 +35,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--swanlab-project", default="latent-working-memory")
     parser.add_argument("--swanlab-group")
     parser.add_argument("--swanlab-tag", action="append", default=[])
-    parser.add_argument("--swanlab-run-id")
     parser.add_argument("--examples", type=int)
     parser.add_argument("--generation-examples", type=int)
     args = parser.parse_args(argv)
+    if args.swanlab_mode != "disabled" and (args.output_dir / "swanlab.json").exists():
+        raise ValueError("static report already published; use a new output directory")
     device = torch.device(args.device)
     validate_device(device)
     checkpoint = load_model_checkpoint(args.checkpoint)
@@ -91,12 +92,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         | {
             "evaluation_checkpoint": str(args.checkpoint.resolve()),
             "evaluation_split": args.split,
+            "checkpoint_step": checkpoint.progress["next_step"],
             "training_input_tokens": checkpoint.progress["input_tokens"],
             "evaluation_preparations": metadata,
         },
         args.swanlab_mode,
         args.swanlab_project,
-        args.swanlab_run_id,
         job_type="evaluate",
         group=args.swanlab_group,
         tags=tuple(args.swanlab_tag),
@@ -111,7 +112,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                         destination / f"{args.split}-step-{step:06d}.jsonl", f"examples/{name}"
                     )
                 )
-            tracking.log(charts)
+            tracking.log(charts, step=0)
     print(json.dumps(results, ensure_ascii=False, indent=2))
 
 

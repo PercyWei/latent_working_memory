@@ -22,11 +22,11 @@ def test_joint_axes_source_pairing_and_numeric_precision():
     del b["groups"]["length_ratio/64/4/ae/memory"]
     charts = build_evaluation_charts([("semantic", a), ("random", b)])
     opts = charts["charts/report/length_ratio/ae/nll"].options
-    assert opts["xAxis"][0]["data"] == ["64/r2", "64/r4", "128/r2"]
+    assert opts["xAxis"][0]["data"] == ["64\nr2", "64\nr4", "128\nr2"]
     assert [s["name"] for s in opts["series"]] == ["semantic", "random"]
     assert opts["series"][1]["data"][1]["value"] is None
     opts = charts["charts/report/all/ae/nll"].options
-    assert opts["xAxis"][0]["data"] == ["memory", "wrong_memory"]
+    assert opts["xAxis"][0]["data"] == ["memory", "wrong\nmemory"]
     assert opts["series"][0]["data"][0]["value"] == 1.2346
     assert (
         opts["series"][0]["data"][0]["itemStyle"]["color"]
@@ -75,15 +75,17 @@ def test_serialized_labels_and_metric_coverage():
         )
         assert options["xAxis"][0]["data"] == [
             "memory",
-            "wrong_memory",
-            "no_memory",
-            "full_context",
-            "base_full_context",
+            "wrong\nmemory",
+            "no\nmemory",
+            "full\ncontext",
+            "base\nfull\ncontext",
         ]
         assert options["xAxis"][0]["axisLabel"]["interval"] == 0
         assert options["yAxis"][0]["minInterval"] == 0.001
         assert all(s["label"]["show"] is False for s in options["series"])
-        assert options["grid"]["containLabel"] is True
+        assert options["grid"]["containLabel"] is False
+        assert options["grid"]["height"] == "55%"
+        assert options["grid"]["top"] == "20%"
         assert all(len(s["data"]) == 5 for s in options["series"])
     for metric in ["bleu_4", "correct_prefix_ratio"]:
         options = json.loads(charts[f"charts/report/all/ae/{metric}"].dump_options_with_quotes())

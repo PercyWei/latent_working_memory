@@ -66,7 +66,9 @@ def _shade(condition: str, source_index: int, source_count: int) -> str:
 
 
 def _bar(labels: list[str], series: dict[str, list[Any]], colors=None, subtitle=None) -> Any:
-    chart = swanlab.echarts.Bar().add_xaxis(labels)
+    chart = swanlab.echarts.Bar().add_xaxis(
+        [label.replace("_", "\n").replace("/r", "\nr") for label in labels]
+    )
     for label, values in series.items():
         points = [round(v, 4) if isinstance(v, float) else v for v in values]
         if colors is not None:
@@ -84,15 +86,15 @@ def _bar(labels: list[str], series: dict[str, list[Any]], colors=None, subtitle=
         tooltip_opts={"trigger": "axis"},
         legend_opts={"type": "scroll", "top": 28 if subtitle else 0},
         title_opts={"subtext": subtitle, "left": "center", "top": 0} if subtitle else None,
-        xaxis_opts={"axisLabel": {"interval": 0, "rotate": 25, "fontSize": 10}},
-        yaxis_opts={"minInterval": 0.001},
+        xaxis_opts={"axisLabel": {"interval": 0, "rotate": 0, "fontSize": 10, "lineHeight": 11}},
+        yaxis_opts={"minInterval": 0.001, "splitNumber": 3},
     )
     chart.options["grid"] = {
-        "left": "5%",
+        "left": "12%",
         "right": "4%",
-        "top": 65,
-        "bottom": 85,
-        "containLabel": True,
+        "top": "30%" if subtitle else "20%",
+        "height": "45%" if subtitle else "55%",
+        "containLabel": False,
     }
     return chart
 
