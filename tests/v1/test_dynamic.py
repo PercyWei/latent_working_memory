@@ -5,6 +5,7 @@ import json
 
 import pytest
 import torch
+import torch.distributed as dist
 from transformers import LlamaConfig, LlamaForCausalLM
 
 from latent_working_memory.data_preparation.squad import prepare_squad
@@ -221,7 +222,7 @@ def test_dynamic_run_resume_matches_uninterrupted(
         save_every=1,
         eval_every=1,
         eval_articles=2,
-        swanlab_mode="offline",
+        swanlab_mode="disabled",
         swanlab_group="dynamic-test",
     )
     resumed = run_dynamic(
@@ -234,7 +235,7 @@ def test_dynamic_run_resume_matches_uninterrupted(
         save_every=1,
         eval_every=1,
         eval_articles=2,
-        swanlab_mode="offline",
+        swanlab_mode="disabled",
         swanlab_group="dynamic-test",
         resume=True,
     )
@@ -256,7 +257,7 @@ def test_dynamic_run_resume_matches_uninterrupted(
     a, b = load_model_checkpoint(full), load_model_checkpoint(resumed)
     equal(a.model_state, b.model_state)
     equal(a.optimizer_state, b.optimizer_state)
-    assert a.progress == b.progress
+    equal(a.progress, b.progress)
     assert json.loads((tmp_path / "full/dev-000002.json").read_text()) == json.loads(
         (tmp_path / "resume/dev-000002.json").read_text()
     )
@@ -295,10 +296,12 @@ def test_dynamic_run_resume_matches_uninterrupted(
         ),
         key=lambda row: row["step"],
     )
-    assert rows == resumed_rows
-    identity = json.loads((tmp_path / "resume/swanlab.json").read_text())
-    assert "data:squad" in identity["tags"] and "data:fineweb" not in identity["tags"]
-    assert identity["project"] == "latent-working-memory-v1"
+    for row, resumed_row in zip(rows, resumed_rows, strict=True):
+        for key in ("seconds", "input_tokens_per_second"):
+            row.pop(key)
+            resumed_row.pop(key)
+        assert row == resumed_row
+    assert not (tmp_path / "resume/swanlab.json").exists()
     recipe_path = tmp_path / "recipe.json"
     from_dataclass = {name: getattr(recipe, name) for name in recipe.__dataclass_fields__}
     recipe_path.write_text(json.dumps(from_dataclass))
@@ -324,6 +327,21 @@ def test_dynamic_run_resume_matches_uninterrupted(
     main()
     assert (tmp_path / "evaluation/metrics.json").is_file()
     assert json.loads((tmp_path / "evaluation/evaluation.json").read_text())["split"] == "test"
+    if accumulation == 10:
+        exact = run_dynamic(
+            first,
+            index,
+            tmp_path / "resume",
+            recipe,
+            torch.device("cpu"),
+            100,
+            eval_articles=2,
+            resume=True,
+            epochs=1,
+        )
+        exact_checkpoint = load_model_checkpoint(exact)
+        assert exact_checkpoint.progress["articles_seen"] == len(train_docs)
+        assert exact_checkpoint.progress["next_step"] == 2
     with pytest.raises(ValueError, match="configuration differs"):
         run_dynamic(
             resumed,
@@ -549,3 +567,91 @@ def test_shuffled_article_epochs_cover_every_document_and_resume():
     batches = [[next(stream) for _ in range(8)] for _ in range(2)]
     assert batches[0] + batches[1] == sequence[:16]
     assert list(islice(shuffled_articles(["only"], 42, 3), 4)) == ["only"] * 4
+
+
+def test_partial_final_batch_uses_actual_article_weight(components, tiny_config, tokenizer):
+    b, w = components
+    other_b, other_w = deepcopy((b, w))
+    episode = example(tokenizer)
+    single = DynamicTrainer(b, w, tiny_config, DynamicConfig(4, 0, 128), torch.device("cpu"))
+    partial = DynamicTrainer(
+        other_b,
+        other_w,
+        tiny_config,
+        DynamicConfig(4, 0, 128, gradient_accumulation_steps=2),
+        torch.device("cpu"),
+    )
+    single_result = single.step([episode], tokenizer, [42])
+    partial_result = partial.step([episode], tokenizer, [42], allow_partial=True)
+    assert single_result == partial_result
+    for a, b in zip(single.parameters, partial.parameters, strict=True):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
+
+
+def _distributed_dynamic_worker(rank, rendezvous, output_dir, components, config, tokenizer):
+    dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=2)
+    try:
+        backbone, writer = deepcopy(components)
+        recipe = DynamicConfig(4, 0, 128, gradient_accumulation_steps=2, generation_tokens=2)
+        trainer = DynamicTrainer(backbone, writer, config, recipe, torch.device("cpu"))
+        episodes = [example(tokenizer, "a"), example(tokenizer, "b")]
+        full = trainer.step(episodes, tokenizer, [42, 43])
+        # On the last partial batch rank 1 has no article, but must synchronize.
+        partial = trainer.step(episodes[:1], tokenizer, [44], allow_partial=True)
+        metrics, rows = evaluate_qa(
+            backbone,
+            writer,
+            tokenizer,
+            config,
+            recipe,
+            episodes,
+            torch.device("cpu"),
+        )
+        torch.save(
+            {
+                "parameters": [p.detach() for p in trainer.parameters],
+                "full": full,
+                "partial": partial,
+                "metrics": metrics,
+                "rows": rows,
+            },
+            output_dir / f"rank-{rank}.pt",
+        )
+    finally:
+        dist.destroy_process_group()
+
+
+def test_distributed_dynamic_matches_single_process(components, tiny_config, tokenizer, tmp_path):
+    torch.multiprocessing.spawn(
+        _distributed_dynamic_worker,
+        args=((tmp_path / "gloo").as_uri(), tmp_path, deepcopy(components), tiny_config, tokenizer),
+        nprocs=2,
+        join=True,
+    )
+    backbone, writer = components
+    recipe = DynamicConfig(4, 0, 128, gradient_accumulation_steps=2, generation_tokens=2)
+    trainer = DynamicTrainer(backbone, writer, tiny_config, recipe, torch.device("cpu"))
+    episodes = [example(tokenizer, "a"), example(tokenizer, "b")]
+    full = trainer.step(episodes, tokenizer, [42, 43])
+    partial = trainer.step(episodes[:1], tokenizer, [44], allow_partial=True)
+    metrics, rows = evaluate_qa(
+        backbone,
+        writer,
+        tokenizer,
+        tiny_config,
+        recipe,
+        episodes,
+        torch.device("cpu"),
+    )
+    rank0 = torch.load(tmp_path / "rank-0.pt", weights_only=True)
+    rank1 = torch.load(tmp_path / "rank-1.pt", weights_only=True)
+    for expected, a, b in zip(
+        trainer.parameters, rank0["parameters"], rank1["parameters"], strict=True
+    ):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
+        torch.testing.assert_close(a, expected, rtol=1e-4, atol=1e-6)
+    assert rank0["full"]["loss"] == pytest.approx(full["loss"])
+    assert rank0["partial"]["loss"] == pytest.approx(partial["loss"])
+    assert len(rank0["rows"]) == len(rows)
+    for group, values in metrics.items():
+        assert rank0["metrics"][group] == pytest.approx(values, rel=1e-5)

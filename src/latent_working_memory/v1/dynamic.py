@@ -16,6 +16,7 @@ import uuid
 
 import torch
 import torch.distributed as dist
+from torch.utils.checkpoint import checkpoint as activation_checkpoint
 
 from latent_working_memory.devices import validate_device
 from latent_working_memory.v1.backbone import ReadTokens, load_backbone
@@ -179,6 +180,9 @@ class DynamicTrainer:
             "gradient_norm": float(grad_norm),
         }
 
+    def _read_loss(self, memory, tokens):
+        return self.backbone.read_batch([memory], [tokens])[0].mean_nll
+
     def _backward_episode(self, episode, tokenizer, seed, batch_size):
         schedule = read_schedule(episode, tokenizer, self.recipe, self.model_config, seed)
         count = sum(len(jobs) for jobs in schedule.values())
@@ -201,11 +205,17 @@ class DynamicTrainer:
                 else:
                     state = self.writer(state, features)
                 for _, tokens in schedule[end]:
-                    output = self.backbone.read_batch([state.values], [tokens])[0]
-                    pending.append(output.mean_nll / count / batch_size)
-                    loss_value += float(output.mean_nll.detach()) / count
-                    token_nll += float(output.token_nll.detach().sum())
-                    target_tokens += output.target_length
+                    mean_nll = (
+                        activation_checkpoint(
+                            self._read_loss, state.values, tokens, use_reentrant=False
+                        )
+                        if self.recipe.gradient_checkpointing
+                        else self._read_loss(state.values, tokens)
+                    )
+                    pending.append(mean_nll / count / batch_size)
+                    loss_value += float(mean_nll.detach()) / count
+                    token_nll += float(mean_nll.detach()) * len(tokens.target_ids)
+                    target_tokens += len(tokens.target_ids)
             segment_updates += 1
             span = end - segment_start if self.recipe.bptt_unit == "tokens" else segment_updates
             boundary = self.recipe.bptt_span and span >= self.recipe.bptt_span
