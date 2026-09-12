@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left
 from collections import Counter
 from contextlib import nullcontext
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, replace
 from datetime import timedelta
 import json
+from importlib.metadata import version
+import math
 import os
 import time
 from pathlib import Path
 import random
 import re
 import string
+import subprocess
+import sys
 import uuid
 
 import torch
@@ -29,6 +34,11 @@ from latent_working_memory.v1.checkpoint import (
 from latent_working_memory.v1.distributed import synchronize_gradients
 from latent_working_memory.v1.model import GrowthValueNetwork, JointMemoryWriter
 from latent_working_memory.v1.squad import SquadDataset, sample_reads
+from latent_working_memory.v1.dynamic_data import (
+    DynamicConfig,
+    DynamicTextSampler,
+    write_boundaries,
+)
 from latent_working_memory.v1.tracking import swanlab_run
 from latent_working_memory.v1.training import (
     load_trainable_model_state,
@@ -37,61 +47,20 @@ from latent_working_memory.v1.training import (
 )
 
 
-@dataclass(frozen=True)
-class DynamicConfig:
-    capacity: int
-    min_tokens: int
-    max_tokens: int
-    new_count: int = 1
-    history_count: int = 1
-    max_visits: int = 2
-    bptt_unit: str = "tokens"
-    bptt_span: int = 0  # Zero uses full BPTT.
-    gradient_accumulation_steps: int = 1
-    gradient_checkpointing: bool = False
-    learning_rate: float = 0.00003
-    weight_decay: float = 0.01
-    gradient_clip: float = 1.0
-    generation_tokens: int = 64
-    seed: int = 42
-
-    def __post_init__(self):
-        for name in (
-            "capacity",
-            "max_tokens",
-            "max_visits",
-            "generation_tokens",
-            "gradient_accumulation_steps",
-        ):
-            if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
-                raise ValueError(f"{name} must be a positive integer")
-        for name in ("min_tokens", "new_count", "history_count", "bptt_span", "seed"):
-            if type(getattr(self, name)) is not int or getattr(self, name) < 0:
-                raise ValueError(f"{name} must be a non-negative integer")
-        if type(self.gradient_checkpointing) is not bool:
-            raise ValueError("gradient_checkpointing must be boolean")
-        if self.bptt_unit not in {"tokens", "updates"}:
-            raise ValueError("bptt_unit must be tokens or updates")
-        if self.min_tokens > self.max_tokens or self.new_count + self.history_count == 0:
-            raise ValueError("invalid length interval or empty reading policy")
-        if not (
-            0 < self.learning_rate < float("inf")
-            and 0 < self.gradient_clip < float("inf")
-            and 0 <= self.weight_decay < float("inf")
-        ):
-            raise ValueError("invalid optimizer parameters")
-
-
-def read_schedule(episode, tokenizer, recipe, model_config, seed, generation=False):
-    if recipe.capacity > model_config.k_limit:
+def read_schedule(episode, tokenizer, recipe, model_config, seed, capacity, generation=False):
+    if capacity > model_config.k_limit:
         raise ValueError("capacity exceeds model slot limit")
     previous = 0
     rng, visits, schedule = random.Random(seed), {}, {}
-    for end in episode.write_ends:
+    boundaries = write_boundaries(episode, capacity)
+    for end in boundaries:
         if end - previous + 1 > model_config.write_context_tokens:
-            raise ValueError("complete paragraph exceeds write context budget")
+            raise ValueError("initial compression or paragraph exceeds write context budget")
         previous = end
         jobs = []
+        if end == boundaries[0]:
+            schedule[end] = jobs
+            continue
         for read in sample_reads(
             episode, end, recipe.new_count, recipe.history_count, rng, visits, recipe.max_visits
         ):
@@ -106,7 +75,7 @@ def read_schedule(episode, tokenizer, recipe, model_config, seed, generation=Fal
                 else len(tokens.target_ids)
             )
             if (
-                1 + recipe.capacity + len(tokens.prompt_ids) + target_budget
+                1 + capacity + len(tokens.prompt_ids) + target_budget
                 > model_config.read_context_tokens
             ):
                 raise ValueError(f"QA read exceeds context budget: {read.read_id}")
@@ -115,17 +84,6 @@ def read_schedule(episode, tokenizer, recipe, model_config, seed, generation=Fal
     if not any(schedule.values()):
         raise ValueError("episode has no selected reads")
     return schedule
-
-
-def shuffled_articles(documents, seed, start=0):
-    """Yield complete shuffled epochs, resuming at a global article offset."""
-    epoch, offset = divmod(start, len(documents))
-    while True:
-        order = list(documents)
-        random.Random(f"{seed}:epoch:{epoch}").shuffle(order)
-        yield from order[offset:]
-        epoch += 1
-        offset = 0
 
 
 class DynamicTrainer:
@@ -137,24 +95,19 @@ class DynamicTrainer:
             self.parameters, lr=recipe.learning_rate, weight_decay=recipe.weight_decay
         )
 
-    def step(self, episodes, tokenizer, seeds, allow_partial=False):
+    def step(self, episodes, tokenizer, seeds, capacity):
         batch_size = len(episodes)
-        expected = self.recipe.gradient_accumulation_steps
-        if (
-            len(seeds) != batch_size
-            or not 1 <= batch_size <= expected
-            or (batch_size != expected and not allow_partial)
-        ):
-            raise ValueError(
-                "one optimizer step requires gradient_accumulation_steps articles and seeds"
-            )
+        if len(seeds) != batch_size or batch_size != self.recipe.batch_size:
+            raise ValueError("one optimizer step requires batch_size samples and seeds")
+        if capacity not in self.recipe.capacities:
+            raise ValueError("capacity is not configured for dynamic training")
         self.backbone.train()
         self.writer.train()
         self.optimizer.zero_grad(set_to_none=True)
         world_size = dist.get_world_size() if dist.is_initialized() else 1
         rank = dist.get_rank() if dist.is_initialized() else 0
         articles = [
-            self._backward_episode(episodes[i], tokenizer, seeds[i], batch_size)
+            self._backward_episode(episodes[i], tokenizer, seeds[i], batch_size, capacity)
             for i in range(rank, batch_size, world_size)
         ]
         if world_size > 1:
@@ -168,11 +121,19 @@ class DynamicTrainer:
         self.optimizer.step()
         totals = {
             key: sum(article[key] for article in articles)
-            for key in ("target_tokens", "input_tokens", "reads", "writes", "truncations")
+            for key in (
+                "target_tokens",
+                "input_tokens",
+                "reads",
+                "writes",
+                "updates",
+                "truncations",
+            )
         }
         return {
-            "articles": batch_size,
-            "article_metrics": articles,
+            "samples": batch_size,
+            "capacity": capacity,
+            "sample_metrics": articles,
             "loss": sum(a["loss"] for a in articles) / batch_size,
             "target_nll": sum(a["target_nll"] * a["target_tokens"] for a in articles)
             / totals["target_tokens"],
@@ -183,15 +144,15 @@ class DynamicTrainer:
     def _read_loss(self, memory, tokens):
         return self.backbone.read_batch([memory], [tokens])[0].mean_nll
 
-    def _backward_episode(self, episode, tokenizer, seed, batch_size):
-        schedule = read_schedule(episode, tokenizer, self.recipe, self.model_config, seed)
+    def _backward_episode(self, episode, tokenizer, seed, batch_size, capacity):
+        schedule = read_schedule(episode, tokenizer, self.recipe, self.model_config, seed, capacity)
         count = sum(len(jobs) for jobs in schedule.values())
         state = None
         previous = segment_start = 0
         pending, loss_value, token_nll, target_tokens = [], 0.0, 0.0, 0
         truncations = segment_updates = 0
         segments = []
-        for end in episode.write_ends:
+        for end in schedule:
             with precision_context(self.device):
                 features = self.backbone.text_features(
                     [episode.input_ids[previous:end]], [previous]
@@ -200,7 +161,7 @@ class DynamicTrainer:
                     state = self.writer(
                         self.writer.initialize_state(features.dtype),
                         features,
-                        first_slots=self.recipe.capacity,
+                        first_slots=capacity,
                     )
                 else:
                     state = self.writer(state, features)
@@ -219,6 +180,8 @@ class DynamicTrainer:
             segment_updates += 1
             span = end - segment_start if self.recipe.bptt_unit == "tokens" else segment_updates
             boundary = self.recipe.bptt_span and span >= self.recipe.bptt_span
+            if not segments and not pending:
+                boundary = False
             if boundary or end == episode.write_ends[-1]:
                 if pending:
                     torch.stack(pending).sum().backward()
@@ -236,7 +199,9 @@ class DynamicTrainer:
             "target_tokens": target_tokens,
             "input_tokens": len(episode.input_ids),
             "reads": count,
-            "writes": len(episode.write_ends),
+            "writes": len(schedule),
+            "updates": len(schedule) - 1,
+            "initial_tokens": next(iter(schedule)),
             "truncations": truncations,
             "bptt_segments": segments,
         }
@@ -261,7 +226,7 @@ def answer_scores(prediction, references):
 
 def encode_episode(backbone, writer, episode, capacity):
     state, previous = None, 0
-    for end in episode.write_ends:
+    for end in write_boundaries(episode, capacity):
         f = backbone.text_features([episode.input_ids[previous:end]], [previous])[0]
         state = (
             writer(writer.initialize_state(f.dtype), f, first_slots=capacity)
@@ -281,6 +246,7 @@ def evaluate_qa(
     recipe,
     episodes,
     device,
+    capacity,
     conditions=("memory", "no_memory", "wrong_memory", "gold_paragraph", "gold_paragraph_base"),
 ):
     if not episodes or not conditions or len(set(conditions)) != len(conditions):
@@ -308,6 +274,7 @@ def evaluate_qa(
             recipe,
             model_config,
             f"{recipe.seed}:eval:{episode.episode_id}",
+            capacity,
             generation=True,
         )
         with precision_context(device):
@@ -321,15 +288,19 @@ def evaluate_qa(
                 # Validate the donor's write budget too; donor QA targets are not used.
                 if any(
                     b - a + 1 > model_config.write_context_tokens
-                    for a, b in zip((0, *donor.write_ends[:-1]), donor.write_ends)
+                    for a, b in zip(
+                        (0, *write_boundaries(donor, capacity)[:-1]),
+                        write_boundaries(donor, capacity),
+                    )
                 ):
                     raise ValueError("donor paragraph exceeds write context budget")
-                wrong = encode_episode(backbone, writer, donor, recipe.capacity).values
+                wrong = encode_episode(backbone, writer, donor, capacity).values
             state, previous = None, 0
-            for end in episode.write_ends:
+            boundaries = tuple(schedule)
+            for end in boundaries:
                 f = backbone.text_features([episode.input_ids[previous:end]], [previous])[0]
                 state = (
-                    writer(writer.initialize_state(f.dtype), f, first_slots=recipe.capacity)
+                    writer(writer.initialize_state(f.dtype), f, first_slots=capacity)
                     if state is None
                     else writer(state, f)
                 )
@@ -393,8 +364,12 @@ def evaluate_qa(
                                 "prefix_end": end,
                                 "condition": condition,
                                 "delay_tokens": end - evidence_end,
-                                "delay_writes": episode.write_ends.index(end)
-                                - episode.write_ends.index(evidence_end),
+                                "delay_writes": boundaries.index(end)
+                                - bisect_left(boundaries, evidence_end),
+                                "capacity": capacity,
+                                "input_tokens": len(episode.input_ids),
+                                "compression_ratio": end / capacity,
+                                "final_compression_ratio": len(episode.input_ids) / capacity,
                                 "kind": "arrival" if end == evidence_end else "delayed",
                                 "prediction": prediction,
                                 "references": [r.text for r in read.references],
@@ -409,15 +384,16 @@ def evaluate_qa(
     if world_size > 1:
         gathered = [None] * world_size
         dist.all_gather_object(gathered, records)
-        records = sorted(
-            [row for rank_rows in gathered for row in rank_rows],
-            key=lambda row: (
-                row["episode_id"],
-                row["prefix_end"],
-                row["read_id"],
-                row["condition"],
-            ),
-        )
+        records = [row for rank_rows in gathered for row in rank_rows]
+    records = sorted(
+        records,
+        key=lambda row: (
+            row["episode_id"],
+            row["prefix_end"],
+            row["read_id"],
+            row["condition"],
+        ),
+    )
     metrics = {}
     for condition in conditions:
         for kind in ("all", "arrival", "delayed"):
@@ -427,13 +403,7 @@ def evaluate_qa(
                 if r["condition"] == condition and (kind == "all" or r["kind"] == kind)
             ]
             if rows:
-                metrics[f"{condition}/{kind}"] = {
-                    "reads": len(rows),
-                    "em": sum(r["em"] for r in rows) / len(rows),
-                    "f1": sum(r["f1"] for r in rows) / len(rows),
-                    "nll": sum(r["nll_sum"] for r in rows) / sum(r["target_tokens"] for r in rows),
-                    "hit_limit_rate": sum(r["hit_limit"] for r in rows) / len(rows),
-                }
+                metrics[f"{condition}/{kind}"] = qa_summary(rows)
     return metrics, records
 
 
@@ -456,49 +426,143 @@ def load_components(checkpoint, device):
     return tokenizer, backbone, writer, value
 
 
+def evaluate_panel(backbone, writer, tokenizer, model_config, recipe, data, panel, device):
+    metrics, records = {}, []
+    for capacity, texts in panel.items():
+        episodes = [text.episode(data) for text in texts]
+        groups, rows = evaluate_qa(
+            backbone, writer, tokenizer, model_config, recipe, episodes, device, capacity
+        )
+        metadata = {episode.episode_id: text for episode, text in zip(episodes, texts, strict=True)}
+        metrics.update({f"k{capacity}/{key}": values for key, values in groups.items()})
+        for row in rows:
+            text = metadata[row["episode_id"]]
+            row["target_ratio"] = text.ratio
+            row["document_id"] = text.document_id
+            row["paragraph_start"] = text.paragraph_start
+            row["paragraph_end"] = text.paragraph_end
+        buckets = {}
+        for row in rows:
+            labels = (
+                f"target-r{row['target_ratio']}",
+                f"length-le{2 ** (row['input_tokens'] - 1).bit_length()}",
+                f"final-r-le{math.ceil(row['final_compression_ratio'])}",
+            )
+            for label in labels:
+                for kind in ("all", row["kind"]):
+                    key = f"k{capacity}/{label}/{row['condition']}/{kind}"
+                    buckets.setdefault(key, []).append(row)
+        metrics.update({key: qa_summary(values) for key, values in buckets.items()})
+        records.extend(rows)
+    return metrics, records
+
+
+def qa_summary(rows):
+    return {
+        "reads": len(rows),
+        "em": sum(r["em"] for r in rows) / len(rows),
+        "f1": sum(r["f1"] for r in rows) / len(rows),
+        "nll": sum(r["nll_sum"] for r in rows) / sum(r["target_tokens"] for r in rows),
+        "hit_limit_rate": sum(r["hit_limit"] for r in rows) / len(rows),
+    }
+
+
+def write_evaluation(output_dir, name, metrics, rows):
+    (output_dir / f"{name}.json").write_text(json.dumps(metrics, indent=2) + "\n")
+    (output_dir / f"{name}.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+
+def runtime_info():
+    source = Path(__file__).resolve()
+    repository = source.parents[3]
+    return {
+        "python_executable": sys.executable,
+        "environment": sys.prefix,
+        "python_version": sys.version.split()[0],
+        "source_file": str(source),
+        "repository": str(repository),
+        "git_commit": subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip(),
+        "git_dirty": bool(
+            subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        ),
+        "packages": {
+            name: version(name) for name in ("torch", "transformers", "peft", "swanlab", "pyarrow")
+        },
+    }
+
+
 def run_dynamic(
     checkpoint_path,
     index_path,
     output_dir,
     recipe,
     device,
-    steps,
+    steps=None,
     save_every=100,
     eval_every=100,
-    eval_articles=8,
+    eval_texts_per_ratio=2,
     resume=False,
     swanlab_mode="disabled",
     swanlab_group=None,
-    epochs=None,
+    epochs=3,
 ):
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     rank = dist.get_rank() if dist.is_initialized() else 0
     primary = rank == 0
-    if min(steps, save_every, eval_every, eval_articles) <= 0:
-        raise ValueError("run counts must be positive")
+    for name, count in (
+        ("epochs", epochs),
+        ("save_every", save_every),
+        ("eval_every", eval_every),
+        ("eval_texts_per_ratio", eval_texts_per_ratio),
+    ):
+        if type(count) is not int or count <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    total_steps = epochs * recipe.micro_epochs_per_epoch * recipe.steps_per_micro_epoch
+    if steps is not None and (type(steps) is not int or not 0 < steps <= total_steps):
+        raise ValueError("steps must be positive and within the configured epoch schedule")
+    stop_step = total_steps if steps is None else steps
     if output_dir.exists() and not resume:
         raise FileExistsError("use a new output directory")
+    if resume and output_dir.resolve() != checkpoint_path.resolve().parent:
+        raise ValueError("resume requires the original run directory")
     checkpoint = load_model_checkpoint(checkpoint_path)
     if checkpoint.phase != ("dynamic" if resume else "pretrain"):
         raise ValueError("initialization needs pretrain; resume needs dynamic checkpoint")
     checkpoint = replace(
-        checkpoint,
-        config=replace(checkpoint.config, gradient_checkpointing=False),
+        checkpoint, config=replace(checkpoint.config, gradient_checkpointing=False)
     )
+    if max(recipe.capacities) > checkpoint.config.k_limit:
+        raise ValueError("capacity exceeds model slot limit")
     data = SquadDataset(index_path)
-    docs = data.select("train", recipe.min_tokens, recipe.max_tokens)
-    dev_docs = data.select("dev", recipe.min_tokens, recipe.max_tokens)[:eval_articles]
-    if not docs or len(dev_docs) < 2:
-        raise ValueError("selection needs training articles and at least two dev articles")
+    sampler = DynamicTextSampler(data, recipe, checkpoint.config.write_context_tokens)
+    dev = sampler.evaluation_texts("dev", eval_texts_per_ratio)
+    test = sampler.evaluation_texts("test", eval_texts_per_ratio)
     identity = {
         "recipe": asdict(recipe),
         "data_index": data.index,
-        "eval_documents": dev_docs,
-        "article_sampling": "shuffled_epochs",
+        "epochs": epochs,
+        "eval_texts_per_ratio": eval_texts_per_ratio,
         "world_size": world_size,
+        "dev_texts": {k: [asdict(t) for t in texts] for k, texts in dev.items()},
+        "test_texts": {k: [asdict(t) for t in texts] for k, texts in test.items()},
     }
     if resume and checkpoint.progress["identity"] != identity:
-        raise ValueError("resume data index, sampling policy or dynamic configuration differs")
+        raise ValueError("resume data, schedule or dynamic configuration differs")
+    next_step = checkpoint.progress["next_step"] if resume else 0
+    if stop_step <= next_step:
+        raise ValueError("steps must exceed completed steps")
     random.seed(recipe.seed)
     torch.manual_seed(recipe.seed)
     tokenizer, backbone, writer, value = load_components(checkpoint, device)
@@ -508,65 +572,33 @@ def run_dynamic(
     ) != (data.tokenizer.bos_token_id, data.tokenizer.eos_token_id):
         raise ValueError("SQuAD tokenizer differs from checkpoint tokenizer")
     trainer = DynamicTrainer(backbone, writer, checkpoint.config, recipe, device)
-    next_step = checkpoint.progress["next_step"] if resume else 0
-    articles_seen = checkpoint.progress["articles_seen"] if resume else 0
-    if epochs is not None:
-        if type(epochs) is not int or epochs <= 0:
-            raise ValueError("epochs must be a positive integer")
-        total_articles = epochs * len(docs)
-        remaining = total_articles - articles_seen
-        steps = (
-            next_step
-            + (remaining + recipe.gradient_accumulation_steps - 1)
-            // recipe.gradient_accumulation_steps
-        )
-    else:
-        total_articles = articles_seen + (steps - next_step) * recipe.gradient_accumulation_steps
-    if steps <= next_step:
-        raise ValueError("steps must exceed completed steps")
     if resume:
         trainer.optimizer.load_state_dict(checkpoint.optimizer_state)
         restore_rng_state(checkpoint.progress["rank_rng_states"][rank])
     if world_size > 1:
         dist.barrier()
     output_dir.mkdir(parents=True, exist_ok=True)
+    plans_dir = output_dir / "data_plans"
+    plans_dir.mkdir(exist_ok=True)
     origin = checkpoint.progress["initial_checkpoint"] if resume else str(checkpoint_path.resolve())
+    run_info = identity | {
+        "initial_checkpoint": origin,
+        "target_steps": total_steps,
+        "stop_step": stop_step,
+        "nll_includes_eos": True,
+        "model_config": checkpoint.config.to_dict(),
+        "runtime": runtime_info(),
+    }
     if primary:
-        (output_dir / "run.json").write_text(
-            json.dumps(
-                identity
-                | {
-                    "initial_checkpoint": origin,
-                    "train_articles": len(docs),
-                    "eval_documents": dev_docs,
-                    "nll_includes_eos": True,
-                    "target_articles": total_articles,
-                    "target_epochs": epochs,
-                    "target_steps": steps,
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-            + "\n"
-        )
-    dev = [data.episode(doc) for doc in dev_docs]
+        (output_dir / "run.json").write_text(json.dumps(run_info, indent=2) + "\n")
     final = None
     with (
         swanlab_run(
             output_dir,
-            asdict(recipe)
-            | {
-                "target_epochs": epochs,
-                "target_steps": steps,
-                "target_articles": total_articles,
-                "world_size": world_size,
-                "train_articles": len(docs),
-                "article_sampling": "shuffled_epochs",
-                "initial_checkpoint": origin,
-                "model_config": checkpoint.config.to_dict(),
-            },
+            run_info,
             mode=swanlab_mode if primary else "disabled",
             project="latent-working-memory-v1",
+            job_type="train",
             group=swanlab_group,
             fixed_tags=("scope:main", "method:joint", "data:squad"),
         ) as tracking,
@@ -574,41 +606,51 @@ def run_dynamic(
             (output_dir / f"train-{uuid.uuid4().hex}.jsonl").open("x") if primary else nullcontext()
         ) as log,
     ):
-        if next_step == 0:
-            metrics, rows = evaluate_qa(
-                backbone, writer, tokenizer, checkpoint.config, recipe, dev, device
+
+        def evaluate(split, panel, step):
+            metrics, rows = evaluate_panel(
+                backbone, writer, tokenizer, checkpoint.config, recipe, data, panel, device
             )
             if primary:
-                (output_dir / "dev-000000.json").write_text(json.dumps(metrics, indent=2) + "\n")
-                (output_dir / "dev-000000.jsonl").write_text(
-                    "".join(json.dumps(r) + "\n" for r in rows)
-                )
+                write_evaluation(output_dir, f"{split}-{step:06d}", metrics, rows)
             if tracking is not None:
                 tracking.log(
                     {
-                        f"evaluation/{group}/{key}": value
+                        f"evaluation/{split}/{group}/{key}": val
                         for group, values in metrics.items()
-                        for key, value in values.items()
+                        for key, val in values.items()
                     },
-                    step=0,
+                    step=step,
                 )
-        article_stream = shuffled_articles(docs, recipe.seed, articles_seen)
-        for step in range(next_step, steps):
-            article_indices = range(
-                articles_seen,
-                min(articles_seen + recipe.gradient_accumulation_steps, total_articles),
-            )
-            episodes = [data.episode(next(article_stream)) for _ in article_indices]
+
+        if next_step == 0:
+            evaluate("dev", dev, 0)
+        active_micro = None
+        micro_totals = Counter(checkpoint.progress["micro_totals"]) if resume else Counter()
+        for step in range(next_step, stop_step):
+            micro_index, batch_index = divmod(step, recipe.steps_per_micro_epoch)
+            epoch, micro = divmod(micro_index, recipe.micro_epochs_per_epoch)
+            if active_micro != micro_index:
+                if batch_index == 0:
+                    micro_totals.clear()
+                capacity, texts, report = sampler.micro_epoch(epoch, micro, epochs)
+                if primary:
+                    (plans_dir / f"micro-{epoch:06d}-{micro:04d}.json").write_text(
+                        json.dumps(report, indent=2) + "\n"
+                    )
+                active_micro = micro_index
+            offset = batch_index * recipe.batch_size
+            batch = texts[offset : offset + recipe.batch_size]
+            episodes = [text.episode(data) for text in batch]
+            seeds = [f"{recipe.seed}:read:{epoch}:{micro}:{offset + i}" for i in range(len(batch))]
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
                 torch.cuda.reset_peak_memory_stats(device)
             begin = time.perf_counter()
-            result = trainer.step(
-                episodes,
-                tokenizer,
-                [f"{recipe.seed}:read:{i}" for i in article_indices],
-                allow_partial=True,
-            )
+            result = trainer.step(episodes, tokenizer, seeds, capacity)
+            for row, text in zip(result["sample_metrics"], batch, strict=True):
+                row.update(asdict(text))
+                row["actual_ratio"] = text.input_tokens / capacity
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             resources = torch.tensor(
@@ -622,19 +664,34 @@ def run_dynamic(
             if world_size > 1:
                 dist.all_reduce(resources, op=dist.ReduceOp.MAX)
             result["seconds"], peak_memory = resources.tolist()
-            result["peak_memory_bytes"] = int(peak_memory)
-            result["input_tokens_per_second"] = result["input_tokens"] / result["seconds"]
-            articles_seen += len(episodes)
-            result["articles_seen"] = articles_seen
-            result["epochs_completed"], result["articles_into_epoch"] = divmod(
-                result["articles_seen"], len(docs)
+            result.update(
+                peak_memory_bytes=int(peak_memory),
+                step=step + 1,
+                epoch=epoch,
+                micro_epoch=micro,
+                batch_in_micro_epoch=batch_index,
+                samples_seen=(step + 1) * recipe.batch_size,
             )
-            result["step"] = step + 1
+            result["input_tokens_per_second"] = result["input_tokens"] / result["seconds"]
+            micro_totals.update(
+                {
+                    key: result[key]
+                    for key in (
+                        "samples",
+                        "input_tokens",
+                        "target_tokens",
+                        "reads",
+                        "writes",
+                        "updates",
+                        "truncations",
+                    )
+                }
+            )
             if primary:
                 log.write(json.dumps(result) + "\n")
                 log.flush()
                 print(
-                    json.dumps({k: v for k, v in result.items() if k != "article_metrics"}),
+                    json.dumps({k: v for k, v in result.items() if k != "sample_metrics"}),
                     flush=True,
                 )
             if tracking is not None:
@@ -646,32 +703,43 @@ def run_dynamic(
                     },
                     step=step + 1,
                 )
-            if (step + 1) % eval_every == 0 or step + 1 == steps:
-                metrics, rows = evaluate_qa(
-                    backbone, writer, tokenizer, checkpoint.config, recipe, dev, device
+            if batch_index + 1 == recipe.steps_per_micro_epoch and primary:
+                report["training_totals"] = dict(micro_totals)
+                (plans_dir / f"micro-{epoch:06d}-{micro:04d}.json").write_text(
+                    json.dumps(report, indent=2) + "\n"
                 )
-                if primary:
-                    (output_dir / f"dev-{step + 1:06d}.json").write_text(
-                        json.dumps(metrics, indent=2) + "\n"
+                if micro + 1 == recipe.micro_epochs_per_epoch:
+                    counts = Counter()
+                    for m in range(recipe.micro_epochs_per_epoch):
+                        plan = json.loads(
+                            (plans_dir / f"micro-{epoch:06d}-{m:04d}.json").read_text()
+                        )
+                        for r, n in plan["used_counts"].items():
+                            counts[f"k{plan['capacity']}/r{r}"] += n
+                    total = sum(counts.values())
+                    (plans_dir / f"epoch-{epoch:06d}.json").write_text(
+                        json.dumps(
+                            {
+                                "epoch": epoch,
+                                "used_counts": dict(counts),
+                                "sample_proportions": {k: n / total for k, n in counts.items()},
+                            },
+                            indent=2,
+                        )
+                        + "\n"
                     )
-                    (output_dir / f"dev-{step + 1:06d}.jsonl").write_text(
-                        "".join(json.dumps(r) + "\n" for r in rows)
-                    )
-                if tracking is not None:
-                    tracking.log(
-                        {
-                            f"evaluation/{group}/{key}": value
-                            for group, values in metrics.items()
-                            for key, value in values.items()
-                        },
-                        step=step + 1,
-                    )
-            if (step + 1) % save_every == 0 or step + 1 == steps:
+            if (step + 1) % eval_every == 0 or step + 1 == stop_step:
+                evaluate("dev", dev, step + 1)
+            if step + 1 == total_steps:
+                evaluate("test", test, step + 1)
+            if (step + 1) % save_every == 0 or step + 1 == stop_step:
                 final = output_dir / f"dynamic-step-{step + 1:06d}.pt"
                 rank_rng_states = [capture_rng_state()]
                 if world_size > 1:
                     rank_rng_states = [None] * world_size
                     dist.all_gather_object(rank_rng_states, capture_rng_state())
+                next_micro, next_batch = divmod(step + 1, recipe.steps_per_micro_epoch)
+                next_epoch, next_micro = divmod(next_micro, recipe.micro_epochs_per_epoch)
                 if primary:
                     save_model_checkpoint(
                         final,
@@ -681,7 +749,11 @@ def run_dynamic(
                         trainer.optimizer.state_dict(),
                         {
                             "next_step": step + 1,
-                            "articles_seen": articles_seen,
+                            "epoch": next_epoch,
+                            "micro_epoch": next_micro,
+                            "batch_in_micro_epoch": next_batch,
+                            "samples_seen": (step + 1) * recipe.batch_size,
+                            "micro_totals": dict(micro_totals) if next_batch else {},
                             "identity": identity,
                             "initial_checkpoint": origin,
                             "rank_rng_states": rank_rng_states,
@@ -701,13 +773,13 @@ def main():
     parser.add_argument("--recipe", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--steps", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument(
-        "--epochs", type=int, help="Train exactly this many epochs; overrides --steps"
+        "--steps", type=int, help="Stop after this global step within the epoch schedule"
     )
     parser.add_argument("--save-every", type=int, default=100)
     parser.add_argument("--eval-every", type=int, default=100)
-    parser.add_argument("--eval-articles", type=int, default=8)
+    parser.add_argument("--eval-texts-per-ratio", type=int, default=2)
     parser.add_argument("--split", choices=("dev", "test"), default="dev")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
@@ -716,8 +788,6 @@ def main():
     parser.add_argument("--swanlab-group")
     args = parser.parse_args()
     if int(os.environ.get("WORLD_SIZE", "1")) > 1:
-        if args.mode != "train":
-            raise ValueError("distributed launch is supported by the train entry point")
         local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(local_rank)
         device = torch.device("cuda", local_rank)
@@ -736,59 +806,53 @@ def main():
             args.steps,
             args.save_every,
             args.eval_every,
-            args.eval_articles,
+            args.eval_texts_per_ratio,
             args.resume,
             args.swanlab_mode,
             args.swanlab_group,
             args.epochs,
         )
     else:
-        if args.resume or args.output_dir.exists() or args.eval_articles < 2:
-            raise ValueError("evaluation needs a new directory, no resume and >=2 articles")
+        if args.resume or args.output_dir.exists() or args.eval_texts_per_ratio < 1:
+            raise ValueError("evaluation needs a new directory and positive text count")
         checkpoint = load_model_checkpoint(args.checkpoint)
+        checkpoint = replace(
+            checkpoint, config=replace(checkpoint.config, gradient_checkpointing=False)
+        )
         data = SquadDataset(args.index)
-        docs = data.select(args.split, recipe.min_tokens, recipe.max_tokens)[: args.eval_articles]
+        sampler = DynamicTextSampler(data, recipe, checkpoint.config.write_context_tokens)
+        panel = sampler.evaluation_texts(args.split, args.eval_texts_per_ratio)
         tokenizer, backbone, writer, _ = load_components(checkpoint, device)
         if tokenizer.get_vocab() != data.tokenizer.get_vocab() or (
             tokenizer.bos_token_id,
             tokenizer.eos_token_id,
         ) != (data.tokenizer.bos_token_id, data.tokenizer.eos_token_id):
             raise ValueError("SQuAD tokenizer differs from checkpoint tokenizer")
-        metrics, rows = evaluate_qa(
-            backbone,
-            writer,
-            tokenizer,
-            checkpoint.config,
-            recipe,
-            [data.episode(doc) for doc in docs],
-            device,
+        metrics, rows = evaluate_panel(
+            backbone, writer, tokenizer, checkpoint.config, recipe, data, panel, device
         )
-        args.output_dir.mkdir(parents=True)
-        (args.output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
-        (args.output_dir / "reads.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
-        (args.output_dir / "evaluation.json").write_text(
-            json.dumps(
-                {
-                    "checkpoint": str(args.checkpoint.resolve()),
-                    "index": str(args.index.resolve()),
-                    "split": args.split,
-                    "documents": docs,
-                    "recipe": asdict(recipe),
-                },
-                indent=2,
+        primary = not dist.is_initialized() or dist.get_rank() == 0
+        if primary:
+            args.output_dir.mkdir(parents=True)
+            write_evaluation(args.output_dir, "metrics", metrics, rows)
+            (args.output_dir / "evaluation.json").write_text(
+                json.dumps(
+                    {
+                        "checkpoint": str(args.checkpoint.resolve()),
+                        "index": str(args.index.resolve()),
+                        "split": args.split,
+                        "runtime": runtime_info(),
+                        "recipe": asdict(recipe),
+                        "texts": {k: [asdict(t) for t in texts] for k, texts in panel.items()},
+                    },
+                    indent=2,
+                )
+                + "\n"
             )
-            + "\n"
-        )
         with swanlab_run(
             args.output_dir,
-            asdict(recipe)
-            | {
-                "checkpoint": str(args.checkpoint),
-                "training_phase": checkpoint.phase,
-                "evaluation_split": args.split,
-                "evaluation_articles": len(docs),
-            },
-            mode=args.swanlab_mode,
+            asdict(recipe) | {"checkpoint": str(args.checkpoint), "split": args.split},
+            mode=args.swanlab_mode if primary else "disabled",
             project="latent-working-memory-v1",
             job_type="evaluate",
             group=args.swanlab_group,
@@ -797,12 +861,11 @@ def main():
             if tracking is not None:
                 tracking.log(
                     {
-                        f"evaluation/{group}/{key}": value
+                        f"evaluation/{group}/{key}": val
                         for group, values in metrics.items()
-                        for key, value in values.items()
+                        for key, val in values.items()
                     }
                 )
-
     if dist.is_initialized():
         dist.destroy_process_group()
 

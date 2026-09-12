@@ -39,7 +39,7 @@
   "history_count": 1,
   "max_visits": 2,
   "bptt_unit": "tokens",
-  "bptt_span": 0,
+  "bptt_span": 1024,
   "batch_size": 2,
   "gradient_checkpointing": true,
   "learning_rate": 3e-05,

@@ -1,7 +1,7 @@
-# 20260911_动态训练数据分布与使用流程（17:41:08 UTC+08:00）
+# 20260911_动态训练数据分布与使用流程
 
 创建时间：20260911 10:54:45 UTC+08:00  
-最后修订时间：20260911 17:41:08 UTC+08:00
+最后修订时间：20260912 22:20:27 UTC+08:00
 
 ## 1. 数据来源
 
@@ -47,22 +47,20 @@ P90 为第 90 百分位；长度均以 tokens 计。
 
 ### 训练选择
 
-一篇文章对应一条从空记忆开始的轨迹，一个完整段落对应一次写入。所有原始段落均能在当前 4096-token 基座写入窗口内加 BOS 处理；标题仅用于来源记录。
+每个 micro epoch 固定记忆容量 K，按当前目标压缩率 r 的占比构造并选取训练文本。候选文章长度须大于 $1.5rK$；从文章中顺序选取连续完整段落，形成长度位于 $[\lceil0.9rK\rceil,\lfloor1.5rK\rfloor]$ 的文本。同一 micro epoch 内选中的文本在来源段落上互不重叠。
 
-运行时按完整文章长度选择训练来源。完整轨迹主要位于 4K–16K，另有少量 16K–24K 轨迹；≤2K 的文章在官方 train 中只有 8 篇，内部 dev 和官方 dev 均没有。需要短轨迹时，可从既定来源划分内显式选择文章开头的连续完整段落，并与全文任务分别报告。
-
-文章长度范围、每次读取的问题数、重复次数、记忆容量 K 和反传窗口由运行配置确定。轨迹内 K 固定，累计写入长度为 N_t 时，token/记忆位置比为 N_t/K。前向轨迹长度与 BPTT/TBPTT 反传窗口分别设置，不要求一次运行使用全部数据或对全文执行完整反传。派生前缀、问题和读取位置不计为新的独立文章来源。
+每份文本独立开始记忆轨迹。累计文本长度首次超过 $1.5K$ 的段落末执行首次压缩，随后逐段更新并回答当前问题和历史问题。有效文本须包含首次压缩后的动态更新及 QA 监督。具体调度、损失与评估流程见[动态训练与 QA 评估](20260911_dynamic_training_and_evaluation.md)。
 
 ## 3. 准备与运行时流程
 
-**读取原始 JSON → 标注检查与来源分组 → 记录划分与 token 长度 → 运行时筛选文章 → 按段落写入 → 按策略读取。**
+**读取原始 JSON → 标注检查与来源分组 → 记录划分与 token 长度 → 按 K 和 r 构造文本 → 初始化并逐段更新记忆 → 按策略读取。**
 
 1. **原始标注检查。** 检查 SQuAD 1.1 标识、文章标题、段落、问题 ID 及答案。验证 `context[answer_start:answer_start + len(text)] == text`，不匹配时明确报错，不搜索其他位置替代。
 2. **来源划分。** 同标题或含完全相同段落的文章按传递关系归组。仅来自官方 train 的来源组用 seed `20260907` 确定约 90:10 的内部 train/dev。含官方 dev 的组保留官方 dev 作最终评估，训练侧重叠文章标记 excluded。原始文件不删除记录。
 3. **长度记录。** 保存每篇文章的原始位置、来源组、split、段落 token 数、文章总长度和问题数量，供运行时筛选。
-4. **选择轨迹。** `SquadDataset.select` 按 split 和闭区间 `[min_tokens, max_tokens]` 返回完整文章标识。`episode` 按需将选中文章转换为内存中的统一 Episode；`paragraph_count` 可显式选择连续前缀。
+4. **构造文本。** `DynamicTextSampler` 按 split、K 和 r 筛选文章并划分连续段落，按比例选取有效文本。`SquadDataset.episode` 使用 `paragraph_start` 和 `paragraph_count` 将指定段落范围转换为 Episode，保留原始问题与段落来源，文本内的 token 位置从 0 开始。
 5. **构造读取候选。** 以答案所在的完整段落作为保守证据范围，在该段提交后将对应问题加入可读取候选池。同一问题的参考答案按原序去除重复文本。
-6. **运行时采样。** 每个写入完成后，`sample_reads` 从当前段落问题与更早段落问题中分别抽样。输入参数明确指定 `new_count`、`history_count` 和 `max_visits`，由调用方提供本次轨迹的随机源与访问计数。候选不足时按实际数量读取。
+6. **运行时采样。** 首次压缩后的每次动态更新完成后，`sample_reads` 从当前段落问题与更早段落问题中分别抽样。输入参数明确指定 `new_count`、`history_count` 和 `max_visits`，由调用方提供本次轨迹的随机源与访问计数。候选不足时按实际数量读取。
 7. **模型使用。** 调用方将已提交记忆和选中问题交给读取路径。参考答案用于 teacher-forcing NLL；问题、gold 和生成回答均不写回记忆。动态 trainer 负责模型前向、反传和本次上下文预算检查。
 
 ### 读取的因果边界
@@ -88,7 +86,7 @@ Answer:
 数据测试覆盖以下行为：
 
 - 答案字符标注错误明确失败；同源文章跨划分隔离。
-- 运行时正文 tokens 与原始段落逐一对应，前缀视图仅包含指定前缀。
+- 运行时正文 tokens 与原始段落逐一对应，连续文本仅包含指定段落范围。
 - 读取只使用已到达证据，抽样可重现、无同次重复，并遵守每题访问上限。
 - 运行时采样不改变候选池；文章终点在零读取预算下不产生自动重问。
 - 原文或 tokenizer 的段落长度与记录不一致时提示重新计算。
@@ -100,7 +98,8 @@ Answer:
 | 模块 | 职责 |
 |---|---|
 | [`data_preparation/squad.py`](../../src/latent_working_memory/data_preparation/squad.py) | 原始数据校验、来源划分及 token 长度记录 |
-| [`v1/squad.py`](../../src/latent_working_memory/v1/squad.py) | 完整文章筛选、按需构造内存视图和运行时问题抽样 |
+| [`v1/squad.py`](../../src/latent_working_memory/v1/squad.py) | 按连续段落范围读取文本及运行时问题抽样 |
+| [`v1/dynamic_data.py`](../../src/latent_working_memory/v1/dynamic_data.py) | 训练文本构造、micro epoch 调度与评估文本选择 |
 | [`v1/data.py`](../../src/latent_working_memory/v1/data.py) | 复用已有 Episode/Source/Read/Reference 契约 |
 | [`test_squad_preparation.py`](../../tests/v1/test_squad_preparation.py) | 数据划分、token 长度及运行时采样测试 |
 
@@ -115,24 +114,7 @@ Answer:
 
 输出为显式指定的 JSON 文件，例如 `llama-2-7b-chat_index.json`，保存原始文件和本地 tokenizer 路径、来源划分及长度信息。正文与问答仍从原始 JSON 加载。目标文件必须不存在，允许不同 tokenizer 的记录保存在同一目录；源文件或 tokenizer 改变后重新生成对应记录。
 
-最小运行时调用：
-
-```python
-from pathlib import Path
-import random
-from latent_working_memory.v1.squad import SquadDataset, sample_reads
-
-squad = SquadDataset(Path("data/v1/squad/llama-2-7b-chat_index.json"))
-documents = squad.select("train", min_tokens=2048, max_tokens=4096)
-episode = squad.episode(documents[0])
-visits = {}
-rng = random.Random(42)
-for prefix_end in episode.write_ends:
-    # 实际 trainer 先完成对应原文写入，再取得当前读取任务。
-    reads = sample_reads(episode, prefix_end, 1, 1, rng, visits, max_visits=2)
-```
-
-示例选择 2K–4K 文章，每个边界至多抽取一个新问题和一个历史问题，每题最多读取两次；这些数值仅展示调用方式，正式配置由实验确定。
+训练时传入此长度记录、预训练 checkpoint 和动态配置，由 trainer 构造文本并执行初始化、更新及 QA。配置与运行入口见[动态训练与 QA 评估](20260911_dynamic_training_and_evaluation.md)。
 
 ## 6. 运行记录
 

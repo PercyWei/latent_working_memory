@@ -1,153 +1,185 @@
-# 20260912_动态训练与 QA 评估（16:06:12 UTC+08:00）
+# 20260911_动态训练与 QA 评估
 
 创建时间：20260911 15:23:05 UTC+08:00  
-最后修订时间：20260912 16:06:12 UTC+08:00
+最后修订时间：20260912 23:20:25 UTC+08:00
 
-## 1. 训练过程
+本文记录动态训练与 QA 评估的执行流程。记忆容量、micro epoch 规模、阶段比例及截断跨度通过训练配置确定。
 
-动态阶段从预训练 checkpoint 初始化，在固定容量的记忆上学习连续写入和问答。训练按指定 tokenizer 的完整文章长度筛选 SQuAD 数据，每篇文章构成一次训练轨迹。数据来源、划分和长度统计见 [动态数据构建](20260911_dynamic_data_construction.md)。
+## 1. 准备数据与模型
 
-每卡 microbatch 固定为 1 篇文章；`gradient_accumulation_steps=B` 指定一次参数更新累积的文章数，默认为 1，有效文章 batch size 为 B。
+本文使用以下名称：
 
-双卡时将 B 篇文章分配到两个进程，各自完成轨迹反传后求和同步已按全局 B 归一化的梯度，再共同更新参数。
+- **原始文章**：SQuAD 1.1 中按文章组织的原始数据，包含段落及其问题答案对，用于构造训练或评估样本。
+- **训练/评估文本**：从原始文章中选取、实际逐段输入模型的连续正文，由若干完整段落组成。
+- **段落**：原始文章中的一个正文段落，附带若干问题及对应参考答案。
+- **训练/评估样本**：一份训练或评估文本、关联的问题答案对及本次使用的记忆容量 K 等设置。
 
-每个 optimizer step 的流程为：
+训练时，按顺序传入段落，积累初始文本并完成首次压缩；随后在每个段落末更新记忆，再利用更新后的记忆回答指定问题。
 
-1. 清空参数梯度，从打乱后的文章序列中依次取 B 篇。
-2. 逐篇从空记忆开始，按原始顺序逐段编码，每个完整段落执行一次记忆更新。
-3. 每次写入后，抽取当前段落问题和历史段落问题，计算回答损失。
-4. 按配置执行完整或截断反向传播；每篇损失按读取数归一化后再除以 B，累积参数梯度。
-5. B 篇文章全部完成后，统一裁剪梯度并更新一次参数。
+先按文章来源确定 train/dev/test，再在各划分内构造训练与评估文本。文章筛选使用训练模型对应 tokenizer 的长度记录，数据来源与统计见[动态数据构建](20260911_dynamic_data_construction.md)。
 
-每个 epoch 完整遍历一次符合长度条件的文章，遍历完成后重新打乱。若轮末不足 B 篇，从下一轮继续取文章补足；一次参数更新可以跨越 epoch 边界，不丢弃尾部文章。使用 `--epochs` 指定精确轮数时，仅训练终点允许不足 B 篇，并按实际篇数归一化。
+模型从预训练 checkpoint 初始化，创建独立的 AdamW optimizer。动态阶段训练写入特征投影、Writer、记忆读取投影和 Reader LoRA；语言模型基座与容量网络保持冻结。
 
-文章之间不延续记忆或计算图，仅累积参数梯度。step、评估间隔和 checkpoint 间隔均按 optimizer 更新次数计量。
+一次训练轨迹指从记忆初始化到读完整份文本的处理过程，期间 K 保持固定。
 
-## 2. 记忆写入与读取
+## 2. epoch 与 micro epoch
 
-### 2.1 固定容量的连续更新
+一个 **epoch** 由 $5m$ 个 micro epoch 组成，五种记忆容量 $K\in\{64,128,256,512,1024\}$ 各出现 m 次，使各容量在训练过程中保持均衡的出现次数。
 
-记第 t 个段落为 $x_t$，此前累计写入的源 token 数为 $S_t$：
+每个 epoch 开始时，将五种容量各重复 m 次，随机打乱后确定这 $5m$ 个 micro epoch 对应的 K 及执行顺序。
 
-$$
-H_t[i]=P_{\mathrm{in}}(\mathrm{LM}_{\mathrm{frozen}}(x_t)[i]) + \mathrm{PE}(S_t+i)
-$$
+每个 **micro epoch** 使用分配的 K，按目标压缩率 $r\in\{2,4,8\}$ 的占比筛选候选文章、构造并选取训练文本，再遍历样本完成训练，包含多次 optimizer step。
 
-$$
-M_t=\mathrm{Writer}(M_{t-1},H_t)
-$$
+记忆容量与目标压缩率分别选择，各容量共用同一套随训练进度调整的目标压缩率占比策略。以训练 10000 个 epoch 为例：
 
-冻结语言模型独立编码当前段落，BOS 的局部位置为 0，正文从 1 开始。提取特征后，通过可训练投影映射到记忆维度，再加入固定的正弦全文位置编码。全文位置按实际写入 tokens 累计，包含段落分隔符，不包含 BOS、问题和答案。
+| Epoch | r=2 | r=4 | r=8 |
+|---|---:|---:|---:|
+| 1–3000 | 60% | 30% | 10% |
+| 3001–7000 | 30% | 40% | 30% |
+| 7001–10000 | 10% | 30% | 60% |
 
-Writer 接收旧记忆和当前段落特征。首次写入分配 K 个记忆位置，之后容量保持为 K；跨段落信息通过记忆传递。全文位置不作为语言模型的 position IDs，但其长距离泛化仍需实验验证。
+表中比例按一个 micro epoch 内实际选用的训练文本数量计算，具体数值由训练配置确定。各目标压缩率的文本数量按整数分配，允许取整差异。
 
-源长度与记忆位置数之比为 L/K，随写入增加而上升。例如 K=512 时，2K–4K 完整文章对应最终约 4–8 个源 tokens/记忆位置；轨迹初期的比值更小。
+以下流程以一个 micro epoch 为基本单元展开。
 
-### 2.2 QA 读取
+## 3. 为当前 micro epoch 构造训练文本
 
-读取输入为 BOS、投影后的记忆、问题提示及答案。当前段落原文不直接进入记忆条件下的回答上下文。
-
-同一写入位置的各个问题独立读取相同记忆；问题和答案不写回记忆，也不成为下一题的上下文。训练采用 teacher forcing，仅对参考答案及 EOS 计算损失；多参考问题使用首个参考答案作为训练目标。
-
-### 2.3 可训练参数
-
-| 模块 | 动态阶段 |
-|---|---|
-| 语言模型基座 | 冻结 |
-| 写入特征投影、Writer | 训练 |
-| 记忆读取投影、读取 LoRA | 训练 |
-| 容量网络 | 冻结 |
-
-读取损失经过冻结语言模型的计算传回记忆，监督写入与更新。新运行继承预训练模型参数，创建独立的 AdamW optimizer。
-
-## 3. 问题采样与损失
-
-每次写入后，从当前段落和此前段落的问题中分别均匀抽样。候选不足时使用全部候选；达到本次轨迹访问上限的问题不再入选。
-
-| 配置 | 含义 | 示例值 |
-|---|---|---:|
-| `new_count` | 每次写入后的当前问题数上限 | 1 |
-| `history_count` | 每次写入后的历史问题数上限 | 1 |
-| `max_visits` | 每题在一篇文章轨迹内的访问上限 | 2 |
-
-历史候选包括此前段落的全部问题，不要求之前已被问过。最后一个写入位置使用同样的抽样规则。读取计划在文章开始时确定，每个位置只能选择证据已经到达的问题。
-
-文章顺序由 seed 与 epoch 编号确定，每轮独立打乱；问题抽样由 seed 与累计文章序号确定。第 step 次更新的第 i 篇对应序号 step×B+i（均从 0 开始），同一文章在不同轮次可得到不同问题计划。
-
-恢复训练时，使用 checkpoint 中的累计文章数还原 epoch 与轮内位置，继续原有顺序，并恢复各进程随机状态。checkpoint 核对文章采样策略、数据、配置与进程数。评估固定文章面板及问题种子。
-
-假设文章共选择 $R$ 次读取，第 $r$ 个目标包含 $T_r$ 个 tokens（含 EOS）：
-
+使用当前 micro epoch 的 K，对每个目标压缩率 r 分别确定训练文本长度范围：
 
 $$
-\ell_r=-\frac{1}{T_r}\sum_{j=1}^{T_r}\log p_\theta(y_{r,j}\mid M_{t_r},q_r,y_{r,<j}),
+L_{\min}=\lceil0.9rK\rceil,\qquad L_{\max}=\lfloor1.5rK\rfloor.
+$$
+
+候选文章长度须大于 $L_{\max}$。打乱候选文章顺序，按每篇文章的原始顺序累计完整段落，每份训练文本取满足长度上限的最长连续段落序列，然后从下一段继续构造。同一篇文章可产生多份训练文本，互不重叠。
+
+单段超过长度上限时跳过该段，从其后重新构造训练文本。文章末尾剩余的文本按相同条件筛选。有效训练文本须同时满足：
+
+- 总长度位于 $[L_{\min},L_{\max}]$。
+- 首次压缩后至少有一次动态更新。
+- 后续动态更新具有可用的 QA 监督。
+
+其中 r 为目标压缩率，用于确定训练文本的长度范围；实际最终压缩率为 $\rho=L/K$，允许范围为 $[0.9r,1.5r]$。例如 r=8 对应的实际最终压缩率为 7.2–12。
+
+按各目标压缩率对应的数量选取有效训练文本，合并为当前 micro epoch 的训练样本。选取过程检查原始段落范围，使不同目标压缩率选中的文本也互不重叠；有效文本不足时提示调整样本数量。每份文本保留来源文章、段落范围、目标压缩率和问题标识，独立开始记忆轨迹。
+
+## 4. 遍历当前 micro epoch 的样本
+
+混合并打乱当前 micro epoch 中不同目标压缩率的训练样本，依次组成 batch。各样本共用当前记忆容量 K。
+
+每卡 microbatch 为 1 个训练样本，通过多卡与梯度累积组成全局 batch B。每个 micro epoch 按打乱后的顺序遍历完整 batch，舍弃末尾不足 B 个的样本。每次参数更新使用 B 个样本。
+
+micro epoch 顺序、候选文章顺序、样本顺序和问题抽样使用由 seed、epoch、micro epoch 及训练实例标识确定的随机源。各梯度传播实验共用数据构造与抽样设置。
+
+## 5. 初始化 memory
+
+每个训练样本从空记忆开始，按顺序积累完整段落。在累计源文本长度首次超过 $1.5K$ 的段落末，执行首次压缩：
+
+$$
+M_0=C_\theta(X_{\mathrm{init}};K).
+$$
+
+$X_{\mathrm{init}}$ 为初始累计文本，$M_0$ 包含 K 个记忆向量。初始化输入须满足编码器上下文预算。
+
+QA 监督从后续动态更新开始。初始化文本中的问题进入历史候选池，首次压缩通过后续 QA 损失获得梯度。
+
+## 6. 逐段更新并计算 QA 损失
+
+剩余段落依次传入，每次根据旧记忆和当前段落特征生成 K 个新记忆向量：
+
+$$
+H_t[i]=P_{\mathrm{in}}(\mathrm{LM}_{\mathrm{frozen}}(X_t)[i])+\mathrm{PE}(S_t+i),
+\qquad M_t=\mathrm{Writer}(M_{t-1},H_t;K).
+$$
+
+编码器使用当前输入内的局部 RoPE 位置。特征经过可训练投影后，添加固定正弦位置编码，表示各 token 在整份训练文本中的位置。$S_t$ 按已读源 tokens 累计，包含段落分隔符。
+
+每次更新后，从当前段落问题和历史段落问题中分别均匀抽样。历史候选包含初始化文本及此前段落的问题，所有候选的证据均已读入。`new_count`、`history_count` 和 `max_visits` 分别控制两类问题的抽取数量及每题在本次轨迹中的访问上限。
+
+每个问题独立读取当前 memory。Reader 输入由 BOS、投影后的 memory、问题提示及 teacher-forcing 答案组成。训练目标采用首个参考答案并附加 EOS，仅对目标 tokens 计算平均 NLL：
+
+$$
+\ell_{a,q}=-\frac{1}{T_{a,q}}\sum_{j=1}^{T_{a,q}}
+\log p_\theta(y_{a,q,j}\mid M_{t_q},q,y_{a,q,<j}).
+$$
+
+一个训练样本内的各次 QA 等权，当前问题与历史问题使用相同权重。若样本 a 有 $R_a$ 次读取，每个 step 包含 B 个样本，则：
+
+$$
+\mathcal L_a=\frac{1}{R_a}\sum_{q=1}^{R_a}\ell_{a,q},
 \qquad
-\mathcal L_a=\frac{1}{R_a}\sum_{r=1}^{R_a}\ell_{a,r}
+\mathcal L_{\mathrm{step}}=\frac{1}{B}\sum_{a=1}^{B}\mathcal L_a.
 $$
 
-文章内每次读取等权，当前问题与历史问题不另加权。一次参数更新的目标为 B 篇文章损失的均值：
+因此，每个样本对当前 step 的目标权重为 $1/B$。长文章通过生成更多训练样本获得更多训练机会。
 
-$$
-\mathcal L_{\mathrm{step}}=\frac{1}{B}\sum_{a=1}^{B}\mathcal L_a
-$$
+## 7. 反向传播与参数更新
 
-不同文章的读取数、TBPTT 反传次数可以不同，文章权重仍为 1/B。日志中的 `loss` 为文章损失均值，`target_nll` 按本次更新全部目标 tokens 加权。读取数、写入数、token 数和截断次数记录本次更新总量；`article_metrics` 保存逐文章损失及分段记录，`articles_seen` 记录累计处理的文章次数，`epochs_completed` 记录完成轮数，`articles_into_epoch` 记录当前轮已处理的文章数。
+三个实验分别使用完整 BPTT、按源 token 数截断的 TBPTT，以及按 memory 更新次数截断的 TBPTT。
 
-## 4. 梯度截断
+完整 BPTT 保留整份训练文本的更新计算图，处理完整份文本后对全部 QA 损失反向传播。TBPTT 按前向处理顺序划分分段，在完成当前段落更新和 QA 后检查累计源 token 数或更新次数；达到阈值时，对本段损失反向传播，再 detach memory，并重新开始计数。段落边界使实际跨度可以超过阈值。
 
-`bptt_span=0` 使用完整 BPTT，文章结束后对全部读取损失反向传播。正值使用分段 TBPTT，记忆数值贯穿全文，梯度仅在当前分段内传播。
+首个 TBPTT 分段至少包含首次压缩和一次具有 QA 监督的后续动态更新，以便首次压缩获得梯度。此后按配置阈值划分分段，处理完整份文本时，对最后一个分段反向传播。
 
-| 配置 | 截断条件 |
-|---|---|
-| `bptt_unit="tokens"` | 本段累计新写入源 tokens 达到 `bptt_span` |
-| `bptt_unit="updates"` | 本段累计记忆更新次数达到 `bptt_span` |
+各分段损失统一按所在样本的总读取数和全局 batch size B 归一化。各卡累积本地样本梯度，同步求和后统一裁剪梯度并执行一次 optimizer step。记忆 detach 边界控制梯度传播跨度，batch 边界控制参数更新频率。
 
-两种模式均在完成当前段落写入及 QA 后检查边界，窗口不随各个 loss 移动。达到边界或文章结束时，对本段损失反向传播，再 detach 记忆。各段统一按文章总读取数及 B 归一化，完成 B 篇后更新参数；没有读取的分段直接 detach。
+QA 激活重算可按显存需求启用，通过重新计算读取过程减少激活占用，并保持对应 BPTT 设置的梯度传播范围。
 
-按 tokens 截断允许超过阈值。例如阈值为 1024、首段为 1500 tokens 时，先完成整段写入、QA 和反传，再截断。单段仍须满足编码窗口预算。
+## 8. 定期评估并保存训练状态
 
-按更新次数截断直接控制递归链深度，但每段覆盖的文本量随段落长度变化。逐文章日志 `bptt_segments` 记录每段实际的 tokens 和 updates，另记录截断次数。
+训练开始、指定 step 间隔及训练结束时，在固定的 dev 评估文本上评估。评估固定问题、读取位置、随机种子和生成预算，分别汇总各 K 及实际长度、压缩率下的结果。
 
-`gradient_checkpointing=true` 时，对完整 QA 读取执行激活重算，以计算换显存；该设置不截断记忆梯度链。
+相同问题使用以下五个条件：
 
-截断后，历史信息仍可用于回答，但后续损失无法跨越边界直接监督早期写入。分段开头的 loss 可回溯范围较短；完整 BPTT 则允许延迟问题沿整条更新链回传。
-
-## 5. QA 评估
-
-各条件共用问题、读取位置、参考答案和生成预算：
-
-| 条件 | 回答输入 | 读取 LoRA |
+| 条件 | 回答输入 | Reader LoRA |
 |---|---|---|
-| `memory` | 当前文章在该位置的记忆 + 问题 | 启用 |
+| `memory` | 当前评估文本在该位置的 memory + 问题 | 启用 |
 | `no_memory` | 问题 | 启用 |
-| `wrong_memory` | 另一篇文章完整写入后的同容量记忆 + 问题 | 启用 |
-| `gold_paragraph` | 问题所属的原始证据段落 + 问题 | 启用 |
-| `gold_paragraph_base` | 同一原始证据段落 + 问题 | 关闭 |
+| `wrong_memory` | 来自另一篇原始文章的评估文本所生成的同容量 memory + 问题 | 启用 |
+| `gold_paragraph` | 答案所在的完整原始段落 + 问题 | 启用 |
+| `gold_paragraph_base` | 同一原始段落 + 问题 | 关闭 |
 
-原文条件提供完整证据段落，不标亮答案；历史问题使用其最初所属段落。提示要求根据提供的文本作答，仅输出答案。两个原文条件均不输入记忆，并检查段落、问题和答案预算的总上下文长度。
+评估使用 greedy decoding，遇 EOS 停止，并设置统一的生成 token 上限。EM/F1 采用 SQuAD 1.1 归一化规则，多参考答案取最高分；NLL 按目标 tokens 加权，包含 EOS。同时记录生成触顶率。
 
-证据段落是获得正确证据定位帮助的强参照，其与记忆条件的差距包含证据定位和压缩读取条件的差异。错误记忆仅匹配容量，不匹配源长度与更新次数，用于诊断对正确内容的依赖。
+结果区分当前问题与历史问题，逐题保存预测、参考答案、证据到达后的源 token 距离和更新次数。训练完成后，在固定的 test 评估文本上进行最终评估。
 
-评估使用 greedy decoding，遇 EOS 停止，每题采用固定的新 token 上限。指标按各条件及 `all/arrival/delayed` 汇总：
+每个 micro epoch 记录候选文章数、有效训练文本数、实际使用的样本数、实际长度与压缩率、动态更新次数和 QA 数量；epoch 结束时汇总各 $(K,r)$ 的实际样本占比。Checkpoint 保存模型、optimizer、epoch、micro epoch、样本遍历位置、累计统计及随机状态。恢复训练使用原运行目录和相同的总 epoch 数。
 
-- EM/F1：采用 SQuAD 1.1 归一化规则，多参考取最大值，数值范围 0–1。
-- NLL：按目标 tokens 加权，包含 EOS。
-- 生成触顶率：达到生成上限且未产生 EOS 的比例。
+SwanLab 使用 `latent-working-memory-v1` 项目，同一实验的训练与评估共享显式指定的 group。性能测试写入本地日志。
 
-逐读取结果保存预测、参考答案、证据到达后的 token 距离和更新次数。训练前评估 step 0，之后按间隔及最后一步评估固定内部 dev 面板；独立评估可选择内部 dev 或官方 dev 派生的本地 test。默认面板按长度筛选后的记录顺序取前 N 篇，至少需要两篇不同文章。
+当前 micro epoch 完成后，继续下一个 micro epoch，继承模型和 optimizer 状态。完成本轮全部 $5m$ 个 micro epoch 后，更新目标压缩率占比策略，并重新安排下一轮的容量执行顺序。
 
-## 6. 配置与代码实现
+## 9. 代码对应
 
-[示例配置](../../configs/v1/dynamic_squad_example.json)采用 2K–4K 完整文章、K=512、文章梯度累积数 B=1、按 1024 个源 tokens 截断、学习率 3e-5、weight decay 0.01、梯度裁剪 1.0 和生成上限 64 tokens。该范围的内部训练集有 64 篇文章；这些参数用于 pilot，尚未验证真实模型效果。
-
-| 文件 | 功能 |
+| 文件 | 职责 |
 |---|---|
-| [squad.py](../../src/latent_working_memory/v1/squad.py) | 根据长度记录选择文章，构造运行时轨迹并采样问题 |
-| [dynamic.py](../../src/latent_working_memory/v1/dynamic.py) | 动态配置、训练、两种 TBPTT、五条件 QA 评估及运行入口 |
-| [backbone.py](../../src/latent_working_memory/v1/backbone.py) | 段落特征提取、记忆读取与答案生成，支持读取 LoRA 开关 |
-| [model.py](../../src/latent_working_memory/v1/model.py) | 联合记忆更新器及正弦位置编码 |
-| [test_dynamic.py](../../tests/v1/test_dynamic.py)、[test_backbone.py](../../tests/v1/test_backbone.py) | 截断梯度、分段边界、评估输入、LoRA 开关与动态恢复测试 |
+| [data_preparation/squad.py](../../src/latent_working_memory/data_preparation/squad.py) | 原始数据校验、来源划分及 tokenizer 长度记录 |
+| [v1/squad.py](../../src/latent_working_memory/v1/squad.py) | 连续段落读取、文本与问题答案对组织、问题抽样 |
+| [v1/dynamic_data.py](../../src/latent_working_memory/v1/dynamic_data.py) | 动态配置、文本筛选与配额、micro epoch 调度及固定评估文本 |
+| [v1/dynamic.py](../../src/latent_working_memory/v1/dynamic.py) | 记忆初始化、动态训练、梯度传播、多容量 QA 评估和 checkpoint |
+| [v1/backbone.py](../../src/latent_working_memory/v1/backbone.py)、[v1/model.py](../../src/latent_working_memory/v1/model.py) | 文本特征提取、位置编码、记忆更新、读取与答案生成 |
+| [test_squad_preparation.py](../../tests/v1/test_squad_preparation.py)、[test_dynamic.py](../../tests/v1/test_dynamic.py) | 数据构造、训练梯度、恢复与评估行为测试 |
 
-运行入口为 `python -m latent_working_memory.v1.dynamic train` 或 `evaluate`，分别传入 checkpoint、SQuAD token 长度记录、配置文件和输出目录。训练输出包括运行配置、训练日志、dev 汇总与逐读取结果、动态 checkpoint；恢复时核对配置和数据记录，恢复 optimizer、随机状态与步数。
+[默认示例配置](../../configs/v1/dynamic_squad_example.json)采用 m=1、每个 micro epoch 选取 100 条文本、全局 batch B=2。`micro_epochs_per_capacity`、`samples_per_micro_epoch` 和 `batch_size` 分别设置这三个参数。`stage_ends` 与 `ratio_weights` 设置各训练阶段的终点及压缩率占比。
 
-SwanLab 使用 `latent-working-memory-v1` 项目，训练与配对评估共享显式指定的 group。K=1024 的双卡运行使用 [full](../../configs/v1/dynamic_squad_k1024/full.json)、[tokens1024](../../configs/v1/dynamic_squad_k1024/tokens1024.json)、[updates4](../../configs/v1/dynamic_squad_k1024/updates4.json) 三份配置；性能测试入口为 `dynamic_profile.py`，仅写本地日志。
+三种梯度传播配置为 [full](../../configs/v1/dynamic_squad/full.json)、[tokens1024](../../configs/v1/dynamic_squad/tokens1024.json) 和 [updates4](../../configs/v1/dynamic_squad/updates4.json)。训练入口为 `.venv/bin/python -m latent_working_memory.v1.dynamic train`，`--epochs` 设置总轮数，`--steps` 可设置计划内的停止步数。评估入口使用 `evaluate`，`--eval-texts-per-ratio` 设置每个容量下各目标压缩率的评估文本数。
+
+输出包括训练日志、`data_plans/` 下的 micro epoch 文本记录与统计、固定 dev/test 评估结果及动态 checkpoint。性能测试入口 [dynamic_profile.py](../../src/latent_working_memory/v1/dynamic_profile.py)通过 `--capacity` 选择要测试的记忆容量。
+
+## 10. 运行环境与入口
+
+动态数据准备、训练、评估和性能测试使用仓库根目录 `.venv/`，依赖由根目录 `pyproject.toml` 与 `uv.lock` 管理。运行前通过 Git 同步仓库，命令在仓库根目录执行。训练 `run.json`、独立评估 `evaluation.json` 和性能测试日志记录 Python 路径、环境目录、源码路径、Git commit 及核心依赖版本。
+
+双卡启动使用 `.venv/bin/python -m torch.distributed.run`。以下为 GPU 6、7 上的性能测试命令，`full` 可替换为 `tokens1024` 或 `updates4`：
+
+```bash
+CUDA_VISIBLE_DEVICES=6,7 LWM_ALLOWED_PHYSICAL_GPUS=6,7 \
+  .venv/bin/python -m torch.distributed.run --standalone --nproc_per_node=2 \
+  -m latent_working_memory.v1.dynamic_profile \
+  --checkpoint artifacts/v1/pretrain-data-comparison-2048_20260911/train/pretrain-mixed-157k-20260911/checkpoints/pretrain-step-020000.pt \
+  --index data/v1/squad/llama-2-7b-chat_index.json \
+  --recipe configs/v1/dynamic_squad/full.json \
+  --capacity 1024 \
+  --output artifacts/v1/dynamic-env-validation_20260912/plan/profile-full-k1024.jsonl
+```
+
+训练入口同样通过上述双卡启动前缀调用 `-m latent_working_memory.v1.dynamic train`，传入 `--checkpoint`、`--index`、`--recipe` 和 `--output-dir`。训练输出使用 `artifacts/v1/<series>/train/<run_name>/`；独立评估使用 `evaluate --split test`，输出到同系列 `eval/<run_name>/`。SwanLab 由 `--swanlab-mode` 控制，测试设为 `disabled`，正式运行设为 `online` 并显式指定 `--swanlab-group`。

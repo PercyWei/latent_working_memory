@@ -44,17 +44,24 @@ class SquadDataset:
             if r["split"] == split and min_tokens <= r["input_tokens"] <= max_tokens
         ]
 
-    def episode(self, document_id: str, paragraph_count: int | None = None) -> Episode:
-        """Create a full article or an explicitly requested leading paragraph prefix."""
+    def episode(
+        self, document_id: str, paragraph_count: int | None = None, paragraph_start: int = 0
+    ) -> Episode:
+        """Create an episode from a continuous range of original paragraphs."""
         article = self.articles[document_id]
         if self.records[document_id]["split"] == "excluded":
             raise ValueError("article excluded by source isolation")
-        paragraphs = article["paragraphs"]
-        if paragraph_count is not None:
-            if type(paragraph_count) is not int or not 1 <= paragraph_count <= len(paragraphs):
-                raise ValueError("paragraph_count must identify a non-empty article prefix")
-            paragraphs = paragraphs[:paragraph_count]
-        episode_id = f"{document_id}:prefix:{len(paragraphs)}"
+        all_paragraphs = article["paragraphs"]
+        if type(paragraph_start) is not int or not 0 <= paragraph_start < len(all_paragraphs):
+            raise ValueError("paragraph_start must identify an article paragraph")
+        count = (
+            len(all_paragraphs) - paragraph_start if paragraph_count is None else paragraph_count
+        )
+        if type(count) is not int or not 1 <= count <= len(all_paragraphs) - paragraph_start:
+            raise ValueError("paragraph_count must identify a non-empty paragraph range")
+        paragraph_end = paragraph_start + count
+        paragraphs = all_paragraphs[paragraph_start:paragraph_end]
+        episode_id = f"{document_id}:paragraphs:{paragraph_start}:{paragraph_end}"
         ids, ends, sources, reads = [], [], [], []
         for i, paragraph in enumerate(paragraphs):
             start = len(ids)
@@ -72,7 +79,7 @@ class SquadDataset:
                     {
                         "official_split": article["official_split"],
                         "title": article["title"],
-                        "paragraph_index": i,
+                        "paragraph_index": paragraph_start + i,
                         "context": paragraph["context"],
                         "char_span": [0, len(paragraph["context"])],
                         "questions": paragraph["qas"],
@@ -94,7 +101,7 @@ class SquadDataset:
                 )
         if [b - a for a, b in zip((0, *ends[:-1]), ends)] != self.records[document_id][
             "paragraph_tokens"
-        ][: len(paragraphs)]:
+        ][paragraph_start:paragraph_end]:
             raise ValueError("source/tokenizer lengths differ from index; rebuild the index")
         return Episode(episode_id, tuple(ids), tuple(ends), tuple(sources), tuple(reads))
 

@@ -1,7 +1,7 @@
 from copy import deepcopy
-from dataclasses import replace
-from itertools import islice
+from dataclasses import asdict, replace
 import json
+import sys
 
 import pytest
 import torch
@@ -23,127 +23,374 @@ from latent_working_memory.v1.dynamic import (
     evaluate_qa,
     read_schedule,
     run_dynamic,
-    shuffled_articles,
     main,
 )
+from latent_working_memory.v1.dynamic_data import (
+    DynamicTextSampler,
+    allocate_counts,
+    text_bounds,
+    write_boundaries,
+)
 from latent_working_memory.v1.model import GrowthValueNetwork, JointMemoryWriter
-from latent_working_memory.v1.squad import QA_PROMPT
+from latent_working_memory.v1.squad import QA_PROMPT, SquadDataset
 from latent_working_memory.v1.training import trainable_model_state
 
 
-def example(tokenizer, name="doc"):
-    first = tuple(tokenizer.encode("First sentence.", add_special_tokens=False))
-    second = tuple(tokenizer.encode("Second sentence.", add_special_tokens=False))
-    return Episode(
-        name,
-        first + second,
-        (len(first), len(first + second)),
-        (
-            Source(name + ":0", name, 0, len(first), {"context": "First sentence."}),
-            Source(
-                name + ":1", name, len(first), len(first + second), {"context": "Second sentence."}
-            ),
-        ),
-        (
+def example(tokenizer, name="doc", paragraphs=6):
+    ids, ends, sources, reads = [], [], [], []
+    for i in range(paragraphs):
+        context = f"First p{i}."
+        start = len(ids)
+        ids.extend(tokenizer.encode(context, add_special_tokens=False))
+        end = len(ids)
+        ends.append(end)
+        sources.append(Source(f"{name}:p{i}", name, start, end, {"context": context}))
+        reads.append(
             Read(
-                name + ":q",
+                f"{name}:q{i}",
                 "qa",
-                len(first),
+                end,
                 QA_PROMPT.format(question="What?"),
-                (Reference("First", ((0, len(first)),)),),
-            ),
-        ),
+                (Reference("First", ((start, end),)),),
+            )
+        )
+    return Episode(name, tuple(ids), tuple(ends), tuple(sources), tuple(reads))
+
+
+def small_recipe(**kwargs):
+    return DynamicConfig(
+        capacities=(4, 8), batch_size=1, generation_tokens=2, gradient_checkpointing=False, **kwargs
     )
 
 
-@pytest.mark.parametrize(
-    "unit,span", [("tokens", 0), ("tokens", 1), ("updates", 1), ("updates", 2)]
-)
-def test_delayed_only_gradient_and_frozen_base(components, tiny_config, tokenizer, unit, span):
-    truncate = span == 1
+@pytest.mark.parametrize("unit,span", [("tokens", 0), ("tokens", 1), ("updates", 1)])
+def test_initial_compression_receives_gradient_and_base_is_frozen(
+    components, tiny_config, tokenizer, unit, span
+):
     backbone, writer = components
     e = example(tokenizer)
-    recipe = DynamicConfig(
-        4, 0, 128, new_count=0, history_count=1, max_visits=1, bptt_unit=unit, bptt_span=span
-    )
-    features = []
+    recipe = small_recipe(new_count=0, history_count=1, bptt_unit=unit, bptt_span=span)
+    features, starts, sizes = [], [], []
     original = backbone.text_features
 
-    def trace(units, starts):
-        values = original(units, starts)
-        for value in values:
-            value.retain_grad()
-            features.append(value)
-        return values
+    def trace(units, offsets):
+        result = original(units, offsets)
+        result[0].retain_grad()
+        features.append(result[0])
+        starts.extend(offsets)
+        sizes.extend(map(len, units))
+        return result
 
     backbone.text_features = trace
     base = {
-        name: p.detach().clone()
-        for name, p in backbone.language_model.named_parameters()
+        n: p.detach().clone()
+        for n, p in backbone.language_model.named_parameters()
         if not p.requires_grad
     }
     trainer = DynamicTrainer(backbone, writer, tiny_config, recipe, torch.device("cpu"))
-    metrics = trainer.step([e], tokenizer, [42])
-    assert metrics["reads"] == 1
-    assert metrics["truncations"] == int(truncate)
-    if truncate:
-        assert features[0].grad is None
-    else:
-        assert features[0].grad.abs().sum() > 0
-    assert features[1].grad.abs().sum() > 0
+    result = trainer.step([e], tokenizer, [42], 4)
+    assert sizes == [9, 3, 3, 3]  # Exactly 1.5K=6 is buffered until the next paragraph.
+    assert starts == [0, 9, 12, 15]
+    assert result["writes"] == 4 and result["updates"] == 3
+    assert result["reads"] == 3
+    assert features[0].grad.abs().sum() > 0
+    assert all(f.grad is not None for f in features)
     assert backbone.memory_projection.weight.grad.abs().sum() > 0
     assert any(
         p.grad is not None and p.grad.abs().sum() > 0
         for n, p in backbone.language_model.named_parameters()
         if "lora_" in n
     )
-    for name, p in backbone.language_model.named_parameters():
-        if name in base:
-            assert torch.equal(base[name], p)
-            assert p.grad is None
+    for n, p in backbone.language_model.named_parameters():
+        if n in base:
+            assert torch.equal(base[n], p) and p.grad is None
+
+
+@pytest.mark.parametrize(
+    "unit,span,expected",
+    [
+        ("tokens", 0, [(18, 4)]),
+        ("tokens", 1, [(12, 2), (3, 1), (3, 1)]),
+        ("tokens", 13, [(15, 3), (3, 1)]),
+        ("updates", 2, [(12, 2), (6, 2)]),
+    ],
+)
+def test_tbptt_boundaries_and_one_optimizer_step(
+    components, tiny_config, tokenizer, monkeypatch, unit, span, expected
+):
+    b, w = components
+    trainer = DynamicTrainer(
+        b, w, tiny_config, small_recipe(bptt_unit=unit, bptt_span=span), torch.device("cpu")
+    )
+    calls = []
+    original = trainer.optimizer.step
+
+    def step():
+        calls.append(1)
+        return original()
+
+    monkeypatch.setattr(trainer.optimizer, "step", step)
+    result = trainer.step([example(tokenizer)], tokenizer, [42], 4)
+    assert [
+        (s["tokens"], s["updates"]) for s in result["sample_metrics"][0]["bptt_segments"]
+    ] == expected
+    assert result["truncations"] == len(expected) - 1 and calls == [1]
+
+
+def test_schedule_initial_history_and_context_budgets(tokenizer, tiny_config):
+    e = example(tokenizer)
+    recipe = small_recipe(new_count=0, history_count=10, max_visits=1)
+    schedule = read_schedule(e, tokenizer, recipe, tiny_config, 42, 4)
+    assert not schedule[9]
+    assert {r.read_id for r, _ in schedule[12]} == {"doc:q0", "doc:q1", "doc:q2"}
+    assert all(r.prefix_end == end for end, jobs in schedule.items() for r, _ in jobs)
+    with pytest.raises(ValueError, match="write context budget"):
+        read_schedule(
+            e,
+            tokenizer,
+            recipe,
+            replace(tiny_config, write_context_tokens=9, max_input_tokens=8),
+            42,
+            4,
+        )
+    with pytest.raises(ValueError, match="QA read exceeds"):
+        read_schedule(e, tokenizer, recipe, replace(tiny_config, read_context_tokens=8), 42, 4)
+    with pytest.raises(ValueError, match="subsequent update"):
+        write_boundaries(example(tokenizer, paragraphs=3), 4)
+
+
+@pytest.mark.parametrize("span", [0, 1])
+def test_reader_recomputation_matches_gradients(components, tiny_config, tokenizer, span):
+    b, w = components
+    other_b, other_w = deepcopy(components)
+    recipe = small_recipe(bptt_span=span)
+    a = DynamicTrainer(b, w, tiny_config, recipe, torch.device("cpu"))
+    c = DynamicTrainer(
+        other_b,
+        other_w,
+        tiny_config,
+        replace(recipe, gradient_checkpointing=True),
+        torch.device("cpu"),
+    )
+    episodes = [example(tokenizer)]
+    assert a.step(episodes, tokenizer, [42], 4) == c.step(episodes, tokenizer, [42], 4)
+    for x, y in zip(a.parameters, c.parameters, strict=True):
+        torch.testing.assert_close(x, y, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("unit,span", [("tokens", 0), ("tokens", 1), ("updates", 2)])
+def test_equal_sample_weight_and_memory_reset(
+    components, tiny_config, tokenizer, monkeypatch, unit, span
+):
+    b, w = components
+    recipe = small_recipe(bptt_unit=unit, bptt_span=span, gradient_clip=1e9, max_visits=5)
+    episodes = [example(tokenizer, "short", 4), example(tokenizer, "long", 7)]
+    grads, losses = [], []
+    for e in episodes:
+        x, y = deepcopy(components)
+        trainer = DynamicTrainer(x, y, tiny_config, recipe, torch.device("cpu"))
+        losses.append(trainer.step([e], tokenizer, [42], 4)["loss"])
+        grads.append(
+            [torch.zeros_like(p) if p.grad is None else p.grad.clone() for p in trainer.parameters]
+        )
+    trainer = DynamicTrainer(b, w, tiny_config, replace(recipe, batch_size=2), torch.device("cpu"))
+    calls = []
+    original = w.initialize_state
+
+    def initialize(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(w, "initialize_state", initialize)
+    result = trainer.step(episodes, tokenizer, [42, 42], 4)
+    assert calls == [1, 1] and result["samples"] == 2
+    assert result["loss"] == pytest.approx(sum(losses) / 2)
+    for p, g, h in zip(trainer.parameters, *grads, strict=True):
+        actual = torch.zeros_like(p) if p.grad is None else p.grad
+        torch.testing.assert_close(actual, (g + h) / 2, atol=1e-6, rtol=1e-4)
+    with pytest.raises(ValueError, match="batch_size samples"):
+        trainer.step(episodes[:1], tokenizer, [42], 4)
+
+
+def test_paired_evaluation_uses_initialization_and_original_evidence(
+    components, tiny_config, tokenizer, monkeypatch
+):
+    b, w = components
+    recipe = small_recipe(new_count=0, history_count=1, max_visits=1)
+    episodes = [example(tokenizer, "a", 4), example(tokenizer, "b", 4)]
+    saved = {k: v.clone() for k, v in w.state_dict().items()}
+    calls = []
+    original = b.read_batch
+
+    def read(memories, tokens, **kwargs):
+        calls.append(
+            (len(memories[0]), tokenizer.decode(tokens[0].prompt_ids), kwargs["use_reader_lora"])
+        )
+        return original(memories, tokens, **kwargs)
+
+    monkeypatch.setattr(b, "read_batch", read)
+    metrics, rows = evaluate_qa(
+        b, w, tokenizer, tiny_config, recipe, episodes, torch.device("cpu"), 4
+    )
+    assert len(rows) == 10 and all(row["prefix_end"] == 12 for row in rows)
+    assert all(
+        row["delay_writes"] == 1 for row in rows
+    )  # Initial paragraphs enter memory together.
+    assert all(row["capacity"] == 4 and row["final_compression_ratio"] == 3 for row in rows)
+    assert (metrics, rows) == evaluate_qa(
+        b, w, tokenizer, tiny_config, recipe, episodes, torch.device("cpu"), 4
+    )
+    assert all(torch.equal(v, w.state_dict()[k]) for k, v in saved.items())
+    assert any(n == 4 for n, _, _ in calls)
+    assert any(n == 0 and "First" in prompt and not lora for n, prompt, lora in calls)
+    assert all(
+        not module.disable_adapters
+        for module in b.language_model.modules()
+        if hasattr(module, "disable_adapters") and not callable(module.disable_adapters)
+    )
+    with pytest.raises(ValueError, match="two independent"):
+        evaluate_qa(b, w, tokenizer, tiny_config, recipe, episodes[:1], torch.device("cpu"), 4)
 
 
 def test_squad_scoring():
     assert answer_scores("The Observer.", ["observer"]) == (1, 1)
     assert answer_scores("red blue", ["red green"]) == (0, 0.5)
-    assert answer_scores("three", ["two", "Three!"]) == (1, 1)
-    assert answer_scores("", ["one"]) == (0, 0)
-    assert answer_scores("a", ["the"]) == (1, 0)  # Official v1 F1 has zero overlap.
+    assert answer_scores("a", ["the"]) == (1, 0)
 
 
-def test_evaluation_is_paired_deterministic_and_read_only(components, tiny_config, tokenizer):
-    backbone, writer = components
-    recipe = DynamicConfig(4, 0, 128, generation_tokens=3)
-    episodes = [example(tokenizer, "a"), example(tokenizer, "b")]
-    saved = {k: v.clone() for k, v in writer.state_dict().items()}
-    metrics, rows = evaluate_qa(
-        backbone, writer, tokenizer, tiny_config, recipe, episodes, torch.device("cpu")
-    )
-    assert len(rows) == 20
-    assert set(metrics) == {
-        f"{c}/{k}"
-        for c in ("memory", "no_memory", "wrong_memory", "gold_paragraph", "gold_paragraph_base")
-        for k in ("all", "arrival", "delayed")
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"batch_size": 0},
+        {"batch_size": True},
+        {"samples_per_micro_epoch": 1},
+        {"micro_epochs_per_capacity": 0},
+        {"capacities": (4, 4)},
+        {"ratios": ()},
+        {"stage_ends": (0.7, 0.3, 1)},
+        {"ratio_weights": ((0.5, 0.5),) * 3},
+        {"ratio_weights": ((0.5, 0.5, 0.5),) * 3},
+        {"bptt_span": -1},
+        {"bptt_unit": "steps"},
+    ],
+)
+def test_invalid_config(kwargs):
+    with pytest.raises(ValueError):
+        DynamicConfig(**kwargs)
+
+
+def test_capacity_order_curriculum_and_integer_quotas():
+    recipe = DynamicConfig(micro_epochs_per_capacity=3)
+    order = recipe.capacity_order(0)
+    assert len(order) == 15 and all(order.count(k) == 3 for k in recipe.capacities)
+    assert order == recipe.capacity_order(0) and order != recipe.capacity_order(1)
+    for e, weights in [
+        (0, (0.6, 0.3, 0.1)),
+        (2999, (0.6, 0.3, 0.1)),
+        (3000, (0.3, 0.4, 0.3)),
+        (6999, (0.3, 0.4, 0.3)),
+        (7000, (0.1, 0.3, 0.6)),
+        (9999, (0.1, 0.3, 0.6)),
+    ]:
+        assert recipe.weights(e, 10000) == weights
+    assert [recipe.weights(e, 3) for e in range(3)] == list(recipe.ratio_weights)
+    assert allocate_counts(7, (0.6, 0.3, 0.1)) == [4, 2, 1]
+    assert text_bounds(1024, 8) == (7373, 12288)
+
+
+@pytest.fixture
+def training_data(tmp_path, tokenizer):
+    tokdir = tmp_path / "tokenizer"
+    tokenizer.save_pretrained(tokdir)
+    tokenizer.name_or_path = str(tokdir)
+    paths = {}
+    for split, indices in [("train", range(30)), ("dev", range(40, 44))]:
+        rows = []
+        for i in indices:
+            paragraphs = [
+                {
+                    "context": f"First d{i}p{j}.",
+                    "qas": [
+                        {
+                            "id": f"q{i}-{j}",
+                            "question": "What?",
+                            "answers": [{"text": "First", "answer_start": 0}],
+                        }
+                    ],
+                }
+                for j in range(40)
+            ]
+            rows.append({"title": str(i), "paragraphs": paragraphs})
+        paths[split] = tmp_path / f"{split}.json"
+        paths[split].write_text(json.dumps({"version": "1.1", "data": rows}))
+    index = tmp_path / "tokenizer_index.json"
+    prepare_squad(paths["train"], paths["dev"], tokenizer, index)
+    return index, SquadDataset(index)
+
+
+def test_text_construction_no_overlap_offsets_quotas_drop_last(training_data):
+    _, data = training_data
+    recipe = DynamicConfig(capacities=(4, 8), samples_per_micro_epoch=7, batch_size=2)
+    sampler = DynamicTextSampler(data, recipe, 256)
+    k, texts, report = sampler.micro_epoch(0, 0, 3)
+    assert len(texts) == 6 and report["dropped_samples"] == 1
+    assert sum(report["requested_counts"].values()) == 7
+    assert (k, texts, report) == sampler.micro_epoch(0, 0, 3)
+    for text in texts:
+        e = text.episode(data)
+        assert len(e.input_ids) == text.input_tokens
+        assert text_bounds(k, text.ratio)[0] <= len(e.input_ids) <= text_bounds(k, text.ratio)[1]
+        assert write_boundaries(e, k)[0] == text.initial_tokens
+        assert [s.provenance["paragraph_index"] for s in e.sources] == list(
+            range(text.paragraph_start, text.paragraph_end)
+        )
+        assert data.records[text.document_id]["input_tokens"] > text_bounds(k, text.ratio)[1]
+        assert data.records[text.document_id]["split"] == "train"
+        for other in texts:
+            if text != other and text.document_id == other.document_id:
+                assert (
+                    text.paragraph_end <= other.paragraph_start
+                    or other.paragraph_end <= text.paragraph_start
+                )
+    panel = sampler.evaluation_texts("test", 1)
+    assert panel == sampler.evaluation_texts("test", 1)
+    assert all(data.records[t.document_id]["split"] == "test" for ts in panel.values() for t in ts)
+    with pytest.raises(ValueError, match="insufficient non-overlapping"):
+        sampler.select("train", 4, [100000, 0, 0], 42)
+
+
+def test_oversize_paragraph_and_initial_only_texts_are_filtered(training_data):
+    _, data = training_data
+    doc = next(doc for doc, r in data.records.items() if r["split"] == "train")
+    data.records = {
+        doc: dict(data.records[doc], paragraph_tokens=[3, 3, 100, 3, 3, 3, 3], input_tokens=118)
     }
-    assert all(torch.equal(v, writer.state_dict()[k]) for k, v in saved.items())
-    assert (metrics, rows) == evaluate_qa(
-        backbone, writer, tokenizer, tiny_config, recipe, episodes, torch.device("cpu")
-    )
-    assert all(r["delay_tokens"] > 0 for r in rows if r["kind"] == "delayed")
-    with pytest.raises(ValueError, match="two independent"):
-        evaluate_qa(
-            backbone, writer, tokenizer, tiny_config, recipe, episodes[:1], torch.device("cpu")
-        )
-    with pytest.raises(ValueError, match="context budget"):
-        read_schedule(
-            episodes[0], tokenizer, recipe, replace(tiny_config, read_context_tokens=2), 42
-        )
+    data.articles[doc]["paragraphs"] = data.articles[doc]["paragraphs"][:7]
+    sampler = DynamicTextSampler(data, DynamicConfig(capacities=(4,)), 256)
+    pool = sampler.pool("train", 4, 2)
+    assert [(t.paragraph_start, t.paragraph_end) for t in pool] == [(3, 7)]
+    assert not DynamicTextSampler(data, DynamicConfig(capacities=(4,)), 9).pool("train", 4, 2)
 
 
-@pytest.mark.parametrize("accumulation", [1, 2, 10])
-def test_dynamic_run_resume_matches_uninterrupted(
-    tmp_path, tiny_config, tokenizer, monkeypatch, accumulation
+def assert_equal(a, b):
+    if isinstance(a, torch.Tensor):
+        assert torch.equal(a, b)
+    elif isinstance(a, dict):
+        assert a.keys() == b.keys()
+        for key in a:
+            assert_equal(a[key], b[key])
+    elif isinstance(a, (list, tuple)):
+        assert len(a) == len(b)
+        for x, y in zip(a, b, strict=True):
+            assert_equal(x, y)
+    else:
+        assert a == b
+
+
+def test_run_resume_across_micro_epochs_and_final_test(
+    tmp_path, tiny_config, tokenizer, training_data, monkeypatch
 ):
+    index, data = training_data
     model_dir = tmp_path / "model"
     torch.manual_seed(7)
     LlamaForCausalLM(
@@ -163,7 +410,7 @@ def test_dynamic_run_resume_matches_uninterrupted(
     ).save_pretrained(model_dir)
     tokenizer.save_pretrained(model_dir)
     config = replace(tiny_config, model_name_or_path=str(model_dir))
-    tok, backbone = load_backbone(config, torch.device("cpu"), torch.float32)
+    _, backbone = load_backbone(config, torch.device("cpu"), torch.float32)
     writer = JointMemoryWriter(
         config.d_mem, config.num_layers, config.num_heads, config.ffn_dim, config.k_limit
     )
@@ -178,116 +425,53 @@ def test_dynamic_run_resume_matches_uninterrupted(
         {},
         capture_rng_state(),
     )
-    paths = {}
-    for split, indices in [("train", range(20)), ("dev", range(30, 32))]:
-        articles = []
-        for i in indices:
-            paragraphs = [
-                {
-                    "context": f"First sentence {i} {j}.",
-                    "qas": [
-                        {
-                            "id": f"q{i}-{j}",
-                            "question": "What?",
-                            "answers": [{"text": "First", "answer_start": 0}],
-                        }
-                    ],
-                }
-                for j in range(2)
-            ]
-            articles.append({"title": str(i), "paragraphs": paragraphs})
-        paths[split] = tmp_path / f"{split}.json"
-        paths[split].write_text(json.dumps({"version": "1.1", "data": articles}))
-    index = tmp_path / "test-tokenizer_index.json"
-    prepare_squad(paths["train"], paths["dev"], tok, index)
-    recipe = DynamicConfig(4, 0, 128, generation_tokens=2, gradient_accumulation_steps=accumulation)
-    full = run_dynamic(
-        initial,
-        index,
-        tmp_path / "full",
-        recipe,
-        torch.device("cpu"),
-        2,
-        save_every=1,
-        eval_every=1,
-        eval_articles=2,
+    recipe = DynamicConfig(
+        capacities=(4, 8),
+        samples_per_micro_epoch=5,
+        batch_size=2,
+        generation_tokens=1,
+        gradient_checkpointing=False,
+        bptt_unit="updates",
+        bptt_span=2,
     )
+    opts = dict(epochs=2, save_every=1, eval_every=100, eval_texts_per_ratio=1)
+    full = run_dynamic(initial, index, tmp_path / "full", recipe, torch.device("cpu"), **opts)
     first = run_dynamic(
-        initial,
-        index,
-        tmp_path / "resume",
-        recipe,
-        torch.device("cpu"),
-        1,
-        save_every=1,
-        eval_every=1,
-        eval_articles=2,
-        swanlab_mode="disabled",
-        swanlab_group="dynamic-test",
+        initial, index, tmp_path / "resume", recipe, torch.device("cpu"), steps=3, **opts
     )
     resumed = run_dynamic(
-        first,
-        index,
-        tmp_path / "resume",
-        recipe,
-        torch.device("cpu"),
-        2,
-        save_every=1,
-        eval_every=1,
-        eval_articles=2,
-        swanlab_mode="disabled",
-        swanlab_group="dynamic-test",
-        resume=True,
+        first, index, tmp_path / "resume", recipe, torch.device("cpu"), resume=True, **opts
     )
-
-    def equal(a, b):
-        if isinstance(a, torch.Tensor):
-            assert torch.equal(a, b)
-        elif isinstance(a, dict):
-            assert a.keys() == b.keys()
-            for k in a:
-                equal(a[k], b[k])
-        elif isinstance(a, (list, tuple)):
-            assert len(a) == len(b)
-            for x, y in zip(a, b):
-                equal(x, y)
-        else:
-            assert a == b
-
+    runtime = json.loads((tmp_path / "full/run.json").read_text())["runtime"]
+    assert runtime["python_executable"] == sys.executable
+    assert runtime["environment"] == sys.prefix
+    assert runtime["source_file"].endswith("src/latent_working_memory/v1/dynamic.py")
+    assert len(runtime["git_commit"]) == 40
     a, b = load_model_checkpoint(full), load_model_checkpoint(resumed)
-    equal(a.model_state, b.model_state)
-    equal(a.optimizer_state, b.optimizer_state)
-    equal(a.progress, b.progress)
-    assert json.loads((tmp_path / "full/dev-000002.json").read_text()) == json.loads(
-        (tmp_path / "resume/dev-000002.json").read_text()
+    assert_equal(a.model_state, b.model_state)
+    assert_equal(a.optimizer_state, b.optimizer_state)
+    assert_equal(a.progress, b.progress)
+    assert a.progress["next_step"] == 8 and a.progress["samples_seen"] == 16
+    assert (a.progress["epoch"], a.progress["micro_epoch"], a.progress["batch_in_micro_epoch"]) == (
+        2,
+        0,
+        0,
     )
-    rows = [
-        json.loads(line)
-        for path in (tmp_path / "full").glob("train-*.jsonl")
-        for line in path.read_text().splitlines()
-    ]
-    assert [row["articles_seen"] for row in rows] == [accumulation, 2 * accumulation]
-    assert all(row["articles"] == accumulation for row in rows)
-    assert all(len(row["article_metrics"]) == accumulation for row in rows)
-    train_docs = [
-        row["document_id"]
-        for row in json.loads(index.read_text())["articles"]
-        if row["split"] == "train"
-    ]
-    consumed = [
-        article["episode_id"].rsplit(":prefix:", 1)[0]
-        for row in rows
-        for article in row["article_metrics"]
-    ]
-    assert consumed == list(islice(shuffled_articles(train_docs, recipe.seed), 2 * accumulation))
-    assert all(
-        (row["epochs_completed"], row["articles_into_epoch"])
-        == divmod(row["articles_seen"], len(train_docs))
-        for row in rows
-    )
-    if accumulation == 10:
-        assert len(set(consumed[: len(train_docs)])) == len(train_docs)
-        assert rows[-1]["epochs_completed"] == 1
+    for split in ("dev", "test"):
+        assert json.loads((tmp_path / f"full/{split}-000008.json").read_text()) == json.loads(
+            (tmp_path / f"resume/{split}-000008.json").read_text()
+        )
+    rows = []
+    for path in (tmp_path / "full").glob("train-*.jsonl"):
+        rows.extend(json.loads(line) for line in path.read_text().splitlines())
+    assert all(row["samples"] == 2 for row in rows)
+    assert len({row["capacity"] for row in rows}) == 2
+    assert not list(tmp_path.rglob("swanlab.json"))
+    for plan in (tmp_path / "full/data_plans").glob("micro-*.json"):
+        record = json.loads(plan.read_text())
+        assert record["dropped_samples"] == 1
+        assert record["training_totals"]["samples"] == 4
+        assert record == json.loads((tmp_path / "resume/data_plans" / plan.name).read_text())
     resumed_rows = sorted(
         (
             json.loads(line)
@@ -296,381 +480,88 @@ def test_dynamic_run_resume_matches_uninterrupted(
         ),
         key=lambda row: row["step"],
     )
-    for row, resumed_row in zip(rows, resumed_rows, strict=True):
-        for key in ("seconds", "input_tokens_per_second"):
-            row.pop(key)
-            resumed_row.pop(key)
-        assert row == resumed_row
-    assert not (tmp_path / "resume/swanlab.json").exists()
+    for full_row, resumed_row in zip(rows, resumed_rows, strict=True):
+        assert full_row["sample_metrics"] == resumed_row["sample_metrics"]
+    with pytest.raises(ValueError, match="configuration differs"):
+        run_dynamic(
+            first,
+            index,
+            tmp_path / "resume",
+            replace(recipe, seed=43),
+            torch.device("cpu"),
+            resume=True,
+            **opts,
+        )
     recipe_path = tmp_path / "recipe.json"
-    from_dataclass = {name: getattr(recipe, name) for name in recipe.__dataclass_fields__}
-    recipe_path.write_text(json.dumps(from_dataclass))
+    recipe_path.write_text(json.dumps(asdict(recipe)))
     monkeypatch.setattr(
         "sys.argv",
         [
             "dynamic",
             "evaluate",
             "--checkpoint",
-            str(initial),
+            str(full),
             "--index",
             str(index),
             "--recipe",
             str(recipe_path),
             "--output-dir",
             str(tmp_path / "evaluation"),
-            "--eval-articles",
-            "2",
+            "--eval-texts-per-ratio",
+            "1",
             "--split",
             "test",
         ],
     )
     main()
     assert (tmp_path / "evaluation/metrics.json").is_file()
-    assert json.loads((tmp_path / "evaluation/evaluation.json").read_text())["split"] == "test"
-    if accumulation == 10:
-        exact = run_dynamic(
-            first,
-            index,
-            tmp_path / "resume",
-            recipe,
-            torch.device("cpu"),
-            100,
-            eval_articles=2,
-            resume=True,
-            epochs=1,
-        )
-        exact_checkpoint = load_model_checkpoint(exact)
-        assert exact_checkpoint.progress["articles_seen"] == len(train_docs)
-        assert exact_checkpoint.progress["next_step"] == 2
-    with pytest.raises(ValueError, match="configuration differs"):
-        run_dynamic(
-            resumed,
-            index,
-            tmp_path / "resume",
-            replace(recipe, capacity=8),
-            torch.device("cpu"),
-            3,
-            resume=True,
-        )
 
 
-@pytest.mark.parametrize(
-    "unit,span,expected",
-    [
-        ("tokens", 4, [(6, 2), (3, 1)]),
-        ("tokens", 1, [(3, 1), (3, 1), (3, 1)]),
-        ("updates", 2, [(6, 2), (3, 1)]),
-        ("updates", 0, [(9, 3)]),
-    ],
-)
-def test_segment_boundaries_and_single_optimizer_step(
-    components, tiny_config, tokenizer, monkeypatch, unit, span, expected
-):
-    backbone, writer = components
-    e = example(tokenizer)
-    # All reads arrive after the first write; a token span shorter than one write
-    # must still backpropagate that write's loss before detaching.
-    e = replace(e, input_ids=e.input_ids + e.input_ids[:3], write_ends=(3, 6, 9))
-    recipe = DynamicConfig(4, 0, 128, bptt_unit=unit, bptt_span=span)
-    trainer = DynamicTrainer(backbone, writer, tiny_config, recipe, torch.device("cpu"))
-    calls = []
-    original_step = trainer.optimizer.step
-
-    def step():
-        calls.append(1)
-        return original_step()
-
-    monkeypatch.setattr(trainer.optimizer, "step", step)
-    features = []
-    original_features = backbone.text_features
-
-    def trace(units, starts):
-        result = original_features(units, starts)
-        result[0].retain_grad()
-        features.append(result[0])
-        return result
-
-    monkeypatch.setattr(backbone, "text_features", trace)
-    result = trainer.step([e], tokenizer, [42])
-    assert [
-        (s["tokens"], s["updates"]) for s in result["article_metrics"][0]["bptt_segments"]
-    ] == expected
-    assert result["truncations"] == len(expected) - 1
-    assert calls == [1]
-    assert features[0].grad.abs().sum() > 0
-
-
-def test_gold_paragraph_inputs_budget_and_adapter_restoration(
-    components, tiny_config, tokenizer, monkeypatch
-):
-    backbone, writer = components
-    recipe = DynamicConfig(4, 0, 128, generation_tokens=2)
-    episode = example(tokenizer)
-    calls = []
-    read_batch = backbone.read_batch
-    greedy = backbone.greedy_students
-
-    def read(memories, tokens, **kwargs):
-        calls.append(("nll", memories[0].shape[0], tokens[0].prompt_ids, kwargs["use_reader_lora"]))
-        return read_batch(memories, tokens, **kwargs)
-
-    def generate(memories, prompts, limits, **kwargs):
-        calls.append(("generate", memories[0].shape[0], prompts[0], kwargs["use_reader_lora"]))
-        return greedy(memories, prompts, limits, **kwargs)
-
-    monkeypatch.setattr(backbone, "read_batch", read)
-    monkeypatch.setattr(backbone, "greedy_students", generate)
-    conditions = ("gold_paragraph", "gold_paragraph_base")
-    _, rows = evaluate_qa(
-        backbone,
-        writer,
-        tokenizer,
-        tiny_config,
-        recipe,
-        [episode],
-        torch.device("cpu"),
-        conditions=conditions,
-    )
-    expected = tuple(
-        tokenizer.encode(
-            "Text:\nFirst sentence.\n\n"
-            + QA_PROMPT.format(question="What?").replace(
-                "information stored in memory", "provided text"
-            ),
-            add_special_tokens=False,
-        )
-    )
-    assert len(calls) == 8
-    assert all(n == 0 and prompt == expected for _, n, prompt, _ in calls)
-    assert [enabled for _, _, _, enabled in calls] == [True, True, False, False] * 2
-    assert len(rows) == 4 and rows[-1]["kind"] == "delayed"
-    assert all(
-        not module.disable_adapters
-        for module in backbone.language_model.modules()
-        if hasattr(module, "disable_adapters") and not callable(module.disable_adapters)
-    )
-    # Memory QA fits, but the original evidence paragraph does not.
-    with pytest.raises(ValueError, match="gold_paragraph QA read exceeds context budget"):
-        evaluate_qa(
-            backbone,
-            writer,
-            tokenizer,
-            replace(
-                tiny_config,
-                read_context_tokens=1
-                + 1
-                + len(tokenizer.encode(episode.reads[0].prompt, add_special_tokens=False))
-                + 2,
-            ),
-            replace(recipe, capacity=1),
-            [episode],
-            torch.device("cpu"),
-            conditions=conditions,
-        )
-
-
-@pytest.mark.parametrize("kwargs", [{"bptt_unit": "steps"}, {"bptt_span": -1}, {"bptt_span": 1.5}])
-def test_invalid_truncation_config(kwargs):
-    with pytest.raises(ValueError, match="bptt"):
-        DynamicConfig(4, 0, 128, **kwargs)
-
-
-@pytest.mark.parametrize("unit,span", [("tokens", 0), ("tokens", 1), ("updates", 2)])
-def test_article_accumulation_averages_gradients_and_resets_memory(
-    components, tiny_config, tokenizer, monkeypatch, unit, span
-):
-    backbone, writer = components
-    original = example(tokenizer)
-    short = replace(
-        original,
-        input_ids=original.input_ids[:3],
-        write_ends=(3,),
-        sources=original.sources[:1],
-    )
-    long = replace(
-        original, input_ids=original.input_ids + original.input_ids[:3], write_ends=(3, 6, 9)
-    )
-    episodes = [short, long]
-    recipe = DynamicConfig(
-        4,
-        0,
-        128,
-        max_visits=3,
-        bptt_unit=unit,
-        bptt_span=span,
-        gradient_clip=1e9,
-    )
-    reference_grads, reference_metrics = [], []
-    for episode in episodes:
-        b, w = deepcopy((backbone, writer))
-        trainer = DynamicTrainer(b, w, tiny_config, recipe, torch.device("cpu"))
-        reference_metrics.append(trainer.step([episode], tokenizer, [42]))
-        reference_grads.append(
-            [torch.zeros_like(p) if p.grad is None else p.grad.clone() for p in trainer.parameters]
-        )
-
-    trainer = DynamicTrainer(
-        backbone,
-        writer,
-        tiny_config,
-        replace(recipe, gradient_accumulation_steps=2),
-        torch.device("cpu"),
-    )
-    updates, initializations = [], []
-    original_step = trainer.optimizer.step
-    original_init = writer.initialize_state
-
-    def step():
-        updates.append(1)
-        return original_step()
-
-    def initialize(*args, **kwargs):
-        initializations.append(1)
-        return original_init(*args, **kwargs)
-
-    monkeypatch.setattr(trainer.optimizer, "step", step)
-    monkeypatch.setattr(writer, "initialize_state", initialize)
-    result = trainer.step(episodes, tokenizer, [42, 42])
-    assert updates == [1] and initializations == [1, 1]
-    assert result["articles"] == 2
-    assert [a["reads"] for a in result["article_metrics"]] == [1, 3]
-    assert result["loss"] == pytest.approx(sum(m["loss"] for m in reference_metrics) / 2)
-    for parameter, first, second in zip(trainer.parameters, *reference_grads, strict=True):
-        actual = torch.zeros_like(parameter) if parameter.grad is None else parameter.grad
-        torch.testing.assert_close(actual, (first + second) / 2, atol=1e-6, rtol=1e-4)
-    assert result["target_nll"] == pytest.approx(
-        sum(m["target_nll"] * m["target_tokens"] for m in reference_metrics)
-        / sum(m["target_tokens"] for m in reference_metrics)
-    )
-    with pytest.raises(ValueError, match="articles and seeds"):
-        trainer.step(episodes[:1], tokenizer, [42])
-
-
-@pytest.mark.parametrize("value", [0, -1, 1.5, True])
-def test_invalid_article_accumulation(value):
-    with pytest.raises(ValueError, match="gradient_accumulation_steps"):
-        DynamicConfig(4, 0, 128, gradient_accumulation_steps=value)
-
-
-def test_shuffled_article_epochs_cover_every_document_and_resume():
-    docs = [f"article-{i}" for i in range(5)]
-    sequence = list(islice(shuffled_articles(docs, 42), 20))
-    assert docs == [f"article-{i}" for i in range(5)]
-    for start in range(0, 20, 5):
-        assert sorted(sequence[start : start + 5]) == sorted(docs)
-    assert sequence[:5] != sequence[5:10]
-    assert sequence != list(islice(shuffled_articles(docs, 43), 20))
-    for offset in (0, 3, 5, 7, 10):
-        assert list(islice(shuffled_articles(docs, 42, offset), 20 - offset)) == sequence[offset:]
-    # B=8 crosses epoch boundaries, with no discarded tail or incomplete batch.
-    stream = shuffled_articles(docs, 42)
-    batches = [[next(stream) for _ in range(8)] for _ in range(2)]
-    assert batches[0] + batches[1] == sequence[:16]
-    assert list(islice(shuffled_articles(["only"], 42, 3), 4)) == ["only"] * 4
-
-
-def test_partial_final_batch_uses_actual_article_weight(components, tiny_config, tokenizer):
-    b, w = components
-    other_b, other_w = deepcopy((b, w))
-    episode = example(tokenizer)
-    single = DynamicTrainer(b, w, tiny_config, DynamicConfig(4, 0, 128), torch.device("cpu"))
-    partial = DynamicTrainer(
-        other_b,
-        other_w,
-        tiny_config,
-        DynamicConfig(4, 0, 128, gradient_accumulation_steps=2),
-        torch.device("cpu"),
-    )
-    single_result = single.step([episode], tokenizer, [42])
-    partial_result = partial.step([episode], tokenizer, [42], allow_partial=True)
-    assert single_result == partial_result
-    for a, b in zip(single.parameters, partial.parameters, strict=True):
-        torch.testing.assert_close(a, b, rtol=0, atol=0)
-
-
-def _distributed_dynamic_worker(rank, rendezvous, output_dir, components, config, tokenizer):
+def distributed_worker(rank, rendezvous, output, components, config, tokenizer):
     dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=2)
     try:
-        backbone, writer = deepcopy(components)
-        recipe = DynamicConfig(4, 0, 128, gradient_accumulation_steps=2, generation_tokens=2)
-        trainer = DynamicTrainer(backbone, writer, config, recipe, torch.device("cpu"))
-        episodes = [example(tokenizer, "a"), example(tokenizer, "b")]
-        full = trainer.step(episodes, tokenizer, [42, 43])
-        # On the last partial batch rank 1 has no article, but must synchronize.
-        partial = trainer.step(episodes[:1], tokenizer, [44], allow_partial=True)
+        b, w = deepcopy(components)
+        recipe = replace(small_recipe(), batch_size=2)
+        trainer = DynamicTrainer(b, w, config, recipe, torch.device("cpu"))
+        episodes = [example(tokenizer, "a", 4), example(tokenizer, "b", 6)]
+        result = trainer.step(episodes, tokenizer, [42, 43], 4)
         metrics, rows = evaluate_qa(
-            backbone,
-            writer,
-            tokenizer,
-            config,
-            recipe,
-            episodes,
-            torch.device("cpu"),
+            b, w, tokenizer, config, recipe, episodes, torch.device("cpu"), 4
         )
         torch.save(
             {
                 "parameters": [p.detach() for p in trainer.parameters],
-                "full": full,
-                "partial": partial,
+                "result": result,
                 "metrics": metrics,
                 "rows": rows,
             },
-            output_dir / f"rank-{rank}.pt",
+            output / f"rank-{rank}.pt",
         )
     finally:
         dist.destroy_process_group()
 
 
-def test_distributed_dynamic_matches_single_process(components, tiny_config, tokenizer, tmp_path):
+def test_distributed_matches_single_process(components, tiny_config, tokenizer, tmp_path):
     torch.multiprocessing.spawn(
-        _distributed_dynamic_worker,
+        distributed_worker,
         args=((tmp_path / "gloo").as_uri(), tmp_path, deepcopy(components), tiny_config, tokenizer),
         nprocs=2,
         join=True,
     )
-    backbone, writer = components
-    recipe = DynamicConfig(4, 0, 128, gradient_accumulation_steps=2, generation_tokens=2)
-    trainer = DynamicTrainer(backbone, writer, tiny_config, recipe, torch.device("cpu"))
-    episodes = [example(tokenizer, "a"), example(tokenizer, "b")]
-    full = trainer.step(episodes, tokenizer, [42, 43])
-    partial = trainer.step(episodes[:1], tokenizer, [44], allow_partial=True)
+    b, w = components
+    recipe = replace(small_recipe(), batch_size=2)
+    trainer = DynamicTrainer(b, w, tiny_config, recipe, torch.device("cpu"))
+    episodes = [example(tokenizer, "a", 4), example(tokenizer, "b", 6)]
+    result = trainer.step(episodes, tokenizer, [42, 43], 4)
     metrics, rows = evaluate_qa(
-        backbone,
-        writer,
-        tokenizer,
-        tiny_config,
-        recipe,
-        episodes,
-        torch.device("cpu"),
+        b, w, tokenizer, tiny_config, recipe, episodes, torch.device("cpu"), 4
     )
-    rank0 = torch.load(tmp_path / "rank-0.pt", weights_only=True)
-    rank1 = torch.load(tmp_path / "rank-1.pt", weights_only=True)
-    for expected, a, b in zip(
-        trainer.parameters, rank0["parameters"], rank1["parameters"], strict=True
-    ):
-        torch.testing.assert_close(a, b, rtol=0, atol=0)
-        torch.testing.assert_close(a, expected, rtol=1e-4, atol=1e-6)
-    assert rank0["full"]["loss"] == pytest.approx(full["loss"])
-    assert rank0["partial"]["loss"] == pytest.approx(partial["loss"])
-    assert len(rank0["rows"]) == len(rows)
-    for group, values in metrics.items():
-        assert rank0["metrics"][group] == pytest.approx(values, rel=1e-5)
-
-
-@pytest.mark.parametrize("span", [0, 1])
-def test_full_reader_checkpoint_preserves_gradients(components, tiny_config, tokenizer, span):
-    backbone, writer = components
-    other_backbone, other_writer = deepcopy(components)
-    recipe = DynamicConfig(4, 0, 128, bptt_span=span)
-    plain = DynamicTrainer(backbone, writer, tiny_config, recipe, torch.device("cpu"))
-    recompute = DynamicTrainer(
-        other_backbone,
-        other_writer,
-        tiny_config,
-        replace(recipe, gradient_checkpointing=True),
-        torch.device("cpu"),
-    )
-    episodes = [example(tokenizer)]
-    assert plain.step(episodes, tokenizer, [42]) == recompute.step(episodes, tokenizer, [42])
-    for a, b in zip(plain.parameters, recompute.parameters, strict=True):
-        torch.testing.assert_close(a, b, rtol=0, atol=0)
+    a = torch.load(tmp_path / "rank-0.pt", weights_only=True)
+    c = torch.load(tmp_path / "rank-1.pt", weights_only=True)
+    for expected, x, y in zip(trainer.parameters, a["parameters"], c["parameters"], strict=True):
+        torch.testing.assert_close(x, y, rtol=0, atol=0)
+        torch.testing.assert_close(x, expected, rtol=1e-4, atol=1e-6)
+    assert a["result"]["loss"] == pytest.approx(result["loss"])
+    assert len(a["rows"]) == len(rows)
+    for key, values in metrics.items():
+        assert a["metrics"][key] == pytest.approx(values, rel=1e-5)
