@@ -21,13 +21,14 @@ def swanlab_run(
     job_type: str = "train",
     group: str | None = None,
     tags: tuple[str, ...] = (),
+    fixed_tags: tuple[str, ...] = ("scope:main", "method:latent-working-memory", "data:fineweb"),
 ) -> Iterator[swanlab.Run | None]:
     if mode == "disabled":
         yield None
         return
     if not group:
         raise ValueError("enabled SwanLab runs require a group")
-    fixed_tags = {"scope:main", "method:latent-working-memory", "data:fineweb"}
+    fixed_tags = set(fixed_tags)
     if "data_preparation" in config:
         metadata = config["data_preparation"]
         if "source_weights" in metadata:

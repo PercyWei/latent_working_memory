@@ -1,0 +1,16 @@
+{
+  "capacity": 512,
+  "min_tokens": 2048,
+  "max_tokens": 4096,
+  "new_count": 1,
+  "history_count": 1,
+  "max_visits": 2,
+  "bptt_unit": "tokens",
+  "bptt_span": 1024,
+  "gradient_accumulation_steps": 1,
+  "learning_rate": 0.00003,
+  "weight_decay": 0.01,
+  "gradient_clip": 1.0,
+  "generation_tokens": 64,
+  "seed": 42
+}
