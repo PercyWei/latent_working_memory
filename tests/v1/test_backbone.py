@@ -174,3 +174,27 @@ def test_batched_generation_matches_individual_with_different_lengths(components
         for m, p, limit in zip(memories, prompts, limits)
     ]
     assert batch == single
+
+
+def test_generation_can_disable_reader_lora_and_restore_it(components):
+    backbone, writer = components
+    backbone.train()
+    memories = [writer.initialize_state().values]
+    observed = []
+    adapter = next(
+        module for module in backbone.language_model.modules() if hasattr(module, "lora_A")
+    )
+    hook = adapter.register_forward_pre_hook(
+        lambda module, args: observed.append(module.disable_adapters)
+    )
+    try:
+        backbone.greedy_students(memories, [(4, 5)], [2], use_reader_lora=False)
+        assert observed and all(observed)
+        assert not adapter.disable_adapters
+        assert backbone.language_model.training
+        observed.clear()
+        backbone.greedy_students(memories, [(4, 5)], [2])
+        assert observed and not any(observed)
+        assert backbone.language_model.training
+    finally:
+        hook.remove()

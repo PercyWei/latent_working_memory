@@ -1,4 +1,5 @@
 import json
+import colorsys
 from latent_working_memory.v1.reporting import build_evaluation_charts, comparison_charts
 from latent_working_memory.v1.tracking import swanlab_run
 
@@ -23,24 +24,41 @@ def test_joint_axes_source_pairing_and_numeric_precision():
     charts = build_evaluation_charts([("semantic", a), ("random", b)])
     opts = charts["charts/report/length_ratio/ae/nll"].options
     assert opts["xAxis"][0]["data"] == ["64\nr2", "64\nr4", "128\nr2"]
-    assert [s["name"] for s in opts["series"]] == ["semantic", "random"]
-    assert opts["series"][1]["data"][1]["value"] is None
+    assert [s["name"] for s in opts["series"]] == [
+        "condition=memory / test=semantic",
+        "condition=memory / test=random",
+    ]
+    assert opts["series"][1]["data"][1] is None
     opts = charts["charts/report/all/ae/nll"].options
     assert opts["xAxis"][0]["data"] == ["memory", "wrong\nmemory"]
-    assert opts["series"][0]["data"][0]["value"] == 1.2346
-    assert (
-        opts["series"][0]["data"][0]["itemStyle"]["color"]
-        != opts["series"][1]["data"][0]["itemStyle"]["color"]
-    )
+    assert opts["series"][0]["data"][0] == 1.2346
+    assert opts["series"][0]["itemStyle"]["color"] != opts["series"][1]["itemStyle"]["color"]
     assert a["groups"]["all/ae/memory"]["nll"] == 1.23456789
     assert {k.split("/")[0] for k in charts} == {"charts", "tables"}
 
 
 def test_comparison_labels_and_separate_metrics():
-    charts = comparison_charts([("A", "test-X", report()), ("B", "test-X", report())])
+    trains, tests = ["semantic", "random", "mixed"], ["semantic", "random"]
+    charts = comparison_charts([(train, test, report()) for train in trains for test in tests])
     opts = charts["charts/comparison/ae/nll"].options
-    assert opts["xAxis"][0]["data"] == ["A", "B"]
-    assert [v["value"] for v in opts["series"][0]["data"]] == [1.2346, 1.2346]
+    assert opts["xAxis"][0]["data"] == trains
+    assert len(opts["series"]) == 6
+    hues = []
+    for i, train in enumerate(trains):
+        pair = opts["series"][2 * i : 2 * i + 2]
+        color_components = []
+        for series, test in zip(pair, tests, strict=True):
+            assert series["name"] == f"train={train} / test={test}"
+            assert series["stack"] == test
+            assert series["data"] == [1.2346 if j == i else None for j in range(3)]
+            color = series["itemStyle"]["color"].lstrip("#")
+            color_components.append(
+                colorsys.rgb_to_hls(*(int(color[j : j + 2], 16) / 255 for j in (0, 2, 4)))
+            )
+        assert abs(color_components[0][0] - color_components[1][0]) < 0.01
+        assert color_components[0][1] < color_components[1][1]
+        hues.append(round(color_components[0][0], 1))
+    assert len(set(hues)) == 3
     assert {k.split("/")[0] for k in charts} == {"charts", "tables"}
 
 
@@ -64,7 +82,15 @@ def test_serialized_labels_and_metric_coverage():
                 ]
             },
             "all/ae/memory": {"nll": 2.0, "ppl": 7.4, "bleu_4": 1.0, "correct_prefix_ratio": 0.02},
-            "all/ae/wrong_memory": {"nll": 3.0, "ppl": 20.0},
+            **{
+                f"all/ae/{c}": {
+                    "nll": 3.0,
+                    "ppl": 20.0,
+                    "bleu_4": 0.5,
+                    "correct_prefix_ratio": 0.01,
+                }
+                for c in ["wrong_memory", "full_context", "base_full_context"]
+            },
         },
         "comparisons": {},
     }
@@ -87,7 +113,21 @@ def test_serialized_labels_and_metric_coverage():
         assert options["grid"]["height"] == "55%"
         assert options["grid"]["top"] == "20%"
         assert all(len(s["data"]) == 5 for s in options["series"])
+        assert len(options["series"]) == 10
+        assert {s["stack"] for s in options["series"]} == {"semantic", "random"}
+        for i, condition in enumerate(
+            ["memory", "wrong_memory", "no_memory", "full_context", "base_full_context"]
+        ):
+            for j, source in enumerate(["semantic", "random"]):
+                series = options["series"][2 * i + j]
+                assert series["name"] == f"condition={condition} / test={source}"
+                assert sum(v is not None for v in series["data"]) == 1
+                assert series["data"][i] is not None
     for metric in ["bleu_4", "correct_prefix_ratio"]:
         options = json.loads(charts[f"charts/report/all/ae/{metric}"].dump_options_with_quotes())
-        assert options["xAxis"][0]["data"] == ["memory"]
-        assert "错误记忆未评估" in options["title"]["subtext"]
+        assert options["xAxis"][0]["data"] == [
+            "memory",
+            "wrong\nmemory",
+            "full\ncontext",
+            "base\nfull\ncontext",
+        ]

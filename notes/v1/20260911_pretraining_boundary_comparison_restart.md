@@ -1,7 +1,7 @@
-# 20260912_双卡预训练边界对比实验（13:07:09 UTC+08:00）
+# 20260912_双卡预训练边界对比实验（13:47:39 UTC+08:00）
 
 创建时间：20260911 16:27:19 UTC+08:00
-最后修订时间：20260912 13:07:09 UTC+08:00
+最后修订时间：20260912 13:47:39 UTC+08:00
 
 ## 实验设置
 
@@ -57,14 +57,30 @@ SwanLab 测试记录：semantic 训练组的 [semantic test](https://swanlab.cn/
 
 ## 当前评估与展示
 
-AE 的 NLL/PPL 同时评估正确记忆与错误记忆；BLEU-4 和正确前缀比例仅评估正确记忆的自由生成。LM 评估正确记忆、错误记忆、空记忆、完整原文及关闭 reader LoRA 的完整原文，记录 NLL/PPL。NLL 按目标内容 token 加权，BLEU 按语料计算，正确前缀比例按生成记录宏平均；表格同时记录评估次数、目标 token 数及生成次数。重建样例保留原文和预测文本。
+AE 的正确记忆、错误记忆、完整原文及关闭 reader LoRA 的完整原文四种条件均评估 NLL/PPL、BLEU-4 和正确前缀比例。四种条件共享生成样本、任务提示和目标；完整原文位于任务提示之前。完整原文条件的损失与生成每篇各计算一次，再复用于各容量的配对统计。生成采用 KV cache，基座对照关闭 reader LoRA。LM 评估正确记忆、错误记忆、空记忆、完整原文及关闭 reader LoRA 的完整原文，记录 NLL/PPL。NLL 按目标内容 token 加权，BLEU 按语料计算，正确前缀比例按生成记录宏平均；表格同时记录评估次数、目标 token 数及生成次数。重建样例保留原文和预测文本。
 
-统计分为总体与长度×压缩率联合分组。联合分组从逐条记录重新聚合，长度与有效压缩率均按 2 的幂次上界分桶。原始记录保留实际 memory 容量。每个模型评估 run 有 12 张图：总体 AE 四项、LM 两项，以及正确记忆的联合分组 AE 四项、LM 两项。总体图按对照条件分组，两套测试来源相邻；联合图横轴依次为长度、ratio，每个位置的 semantic/random 相邻。对照条件使用不同色系，测试来源使用同色系的深浅色。浮点展示最多四位小数，柱顶数值隐藏，精确值保留在报告中，缺失分组留空。
+统计分为总体与长度×压缩率联合分组。联合分组从逐条记录重新聚合，长度与有效压缩率均按 2 的幂次上界分桶。原始记录保留实际 memory 容量。每个模型评估 run 有 12 张图：总体 AE 四项、LM 两项，以及正确记忆的联合分组 AE 四项、LM 两项。总体图按对照条件分组，两套测试来源相邻；联合图横轴依次为长度、ratio，每个位置的 semantic/random 相邻。对照条件使用不同色系，测试来源使用同色系的深浅色。图例逐项列出 `condition=条件 / test=测试来源` 与对应颜色，条目较多时翻页查看；同一条件下两套测试结果保持相邻。浮点展示最多四位小数，柱顶数值隐藏，精确值保留在报告中，缺失分组留空。
 
-图、表、样例分别位于 `charts/*`、`tables/*`、`examples/*`。单模型评估同时比较两套测试来源；跨模型汇总比较三种训练来源。
+图、表、样例分别位于 `charts/*`、`tables/*`、`examples/*`。单模型评估同时比较两套测试来源；跨模型汇总比较三种训练来源，分别使用蓝、橙、绿色系，两套测试来源使用同色系深浅色；图例逐项列出 `train=训练来源 / test=测试来源`。重建样例标明对照条件。
 
 `python -m latent_working_memory.v1.publish_reports` 从已有 JSONL 重新聚合结果并发布，不运行模型推理。`--reports` 指向 JSON 列表，每项包含 `training_source`、`evaluation_source`、`report`；report 指向原始 JSON，逐条记录使用同名 JSONL。重复传入 `--evaluation-output 训练来源 输出目录` 为每个模型发布评估，`--output-dir` 发布跨模型汇总。项目、group、tags 和 online 模式通过启动参数指定。
 
 当前静态结果发布到 `evaluate-{semantic,random,mixed}-static-157k-20260912`，跨模型 run 为 `compare-boundary-static-157k-20260912`，均保存在现有 `latent-working-memory-v1` 项目及原 group 中。原始六份测试报告保留；正文最终结果章节记录首次完成时的评估结果。
 
 静态评估与比较 run 只在媒体 step 0 发布一次，config 中的 `checkpoint_step`（汇总发布时位于各 report 条目）记录对应模型的训练步数 20,000。已有发布身份的输出目录拒绝追加，重新制作报告使用新目录。SwanLab 的媒体步数表示上传位置。图表使用百分比定位绘图区，长横轴标签分行，适配普通卡片与放大查看。
+
+下一轮完整评估的 run 名称为 `pretrain-semantic-157k-eval-20260912`、`pretrain-random-157k-eval-20260912`、`pretrain-mixed-157k-eval-20260912`；跨模型比较为 `pretrain-157k-compare-20260912`。run 名称直接取输出目录名，项目和 group 沿用本系列设置。上述完整 AE 对照需要重新执行模型评估，现有 static 云端报告仍对应上一轮评估协议。
+
+单模型启动示例（在服务器仓库中运行）：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src artifacts/v1/pretrain-code-20260908/.venv/bin/python -m latent_working_memory.v1.evaluate \
+  --checkpoint artifacts/v1/experiments/boundary-comparison-2048-20260911/pretrain-random-157k-20260911/checkpoints/pretrain-step-020000.pt \
+  --evaluation-dirs artifacts/v1/experiment-plans/boundary-comparison-2048-20260911/evaluation-dirs.json \
+  --output-dir artifacts/v1/evaluations/boundary-comparison-2048-20260911/pretrain-random-157k-eval-20260912 \
+  --split test --examples 120 --generation-examples 12 \
+  --swanlab-mode online --swanlab-project latent-working-memory-v1 \
+  --swanlab-group lwm-boundary-comparison-2048-20260911 --swanlab-tag study:boundary-comparison
+```
+
+三组评估完成后，汇总清单的 report 路径指向各新评估目录下的 `{semantic,random}/test-step-020000.json`，使用 `publish_reports --reports 清单路径 --output-dir artifacts/v1/evaluations/boundary-comparison-2048-20260911/pretrain-157k-compare-20260912` 发布跨模型比较，并指定同一项目、group、tags 和 online 模式。单模型评估已在执行结束时发布，汇总命令只创建 compare run。

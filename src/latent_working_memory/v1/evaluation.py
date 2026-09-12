@@ -150,19 +150,29 @@ def evaluate_pretraining(
                 (e for e in panel if e.sources[0].source_id != source.source_id),
                 key=lambda e: (abs(len(e.input_ids) - len(episode.input_ids)), e.episode_id),
             )
-            # All LM controls use the same prompt and Y. Only the prefix and LoRA differ.
-            # Cache full-context statistics once, then pair them with every legal K.
+            # Raw-context controls are independent of K and are evaluated once per task.
             empty = writer.initialize_state().values
-            if lm is not None:
-                full_context = _read_statistics(
-                    backbone.read_batch([empty], [lm], [episode.input_ids])[0], lm
-                )
-                base_full_context = _read_statistics(
-                    backbone.read_batch([empty], [lm], [episode.input_ids], use_reader_lora=False)[
-                        0
-                    ],
-                    lm,
-                )
+            raw_statistics = {}
+            raw_generation_records = {"full_context": [], "base_full_context": []}
+            generate_ae = (
+                ae is not None
+                and generated_ae_views <= config.eval_generation_examples
+                and step % config.eval_generation_every == 0
+            )
+            for task_name, task in (("ae", ae), ("continuation", lm)):
+                if task is not None:
+                    raw_statistics[task_name] = {
+                        condition: _read_statistics(
+                            backbone.read_batch(
+                                [empty], [task], [episode.input_ids], use_reader_lora=use_lora
+                            )[0],
+                            task,
+                        )
+                        for condition, use_lora in (
+                            ("full_context", True),
+                            ("base_full_context", False),
+                        )
+                    }
             features = backbone.text_features([episode.input_ids, donor.input_ids], [0, 0])
             for capacity in sorted(capacities):
                 common = {
@@ -210,50 +220,70 @@ def evaluate_pretraining(
                                 else None,
                             }
                         )
-                        if (
-                            task_name == "ae"
-                            and condition == "memory"
-                            and generated_ae_views <= config.eval_generation_examples
-                            and step % config.eval_generation_every == 0
-                        ):
+                        if task_name == "ae" and generate_ae:
                             record["reference"] = episode.reads[0].references[0].text
-                            generation_jobs.append((record, memory.clone(), task))
+                            generation_jobs.append(
+                                ([record], memory.clone(), task.prompt_ids, task, True)
+                            )
                         records.append(record)
-                if lm is None:
-                    continue
-                for condition, statistics, context_length, reader_lora in (
-                    ("full_context", full_context, len(episode.input_ids), True),
-                    ("base_full_context", base_full_context, len(episode.input_ids), False),
-                ):
-                    records.append(
-                        common
-                        | statistics
-                        | {
-                            "condition": condition,
-                            "task": "continuation",
-                            "memory_bytes": 0,
-                            "memory_tokens": 0,
-                            "text_context_tokens": context_length,
-                            "reader_lora": reader_lora,
-                            "wrong_memory_episode_id": None,
-                        }
+                    for condition, use_lora in (
+                        ("full_context", True),
+                        ("base_full_context", False),
+                    ):
+                        record = (
+                            common
+                            | raw_statistics[task_name][condition]
+                            | {
+                                "condition": condition,
+                                "task": task_name,
+                                "memory_bytes": 0,
+                                "memory_tokens": 0,
+                                "text_context_tokens": len(episode.input_ids),
+                                "reader_lora": use_lora,
+                                "wrong_memory_episode_id": None,
+                            }
+                        )
+                        records.append(record)
+                        if task_name == "ae" and generate_ae:
+                            record["reference"] = episode.reads[0].references[0].text
+                            raw_generation_records[condition].append(record)
+            if generate_ae:
+                for condition, use_lora in (("full_context", True), ("base_full_context", False)):
+                    generation_jobs.append(
+                        (
+                            raw_generation_records[condition],
+                            empty,
+                            (*episode.input_ids, *ae.prompt_ids),
+                            ae,
+                            use_lora,
+                        )
                     )
-        generation_jobs.sort(key=lambda job: len(job[2].target_ids))
-        for start in range(0, len(generation_jobs), 8):
-            batch = generation_jobs[start : start + 8]
-            predictions = backbone.greedy_students(
-                [memory for _, memory, _ in batch],
-                [task.prompt_ids for _, _, task in batch],
-                [len(task.target_ids) for _, _, task in batch],
+        for use_lora in (True, False):
+            jobs = sorted(
+                (job for job in generation_jobs if job[4] == use_lora),
+                key=lambda job: len(job[1]) + len(job[2]) + len(job[3].target_ids),
             )
-            for (record, _, task), prediction in zip(batch, predictions, strict=True):
-                content = (
-                    prediction[:-1]
-                    if prediction and prediction[-1] == tokenizer.eos_token_id
-                    else prediction
+            for start in range(0, len(jobs), 8):
+                batch = jobs[start : start + 8]
+                predictions = backbone.greedy_students(
+                    [job[1] for job in batch],
+                    [job[2] for job in batch],
+                    [len(job[3].target_ids) for job in batch],
+                    use_reader_lora=use_lora,
                 )
-                record["correct_prefix_ratio"] = correct_prefix_ratio(content, task.target_ids[:-1])
-                record["prediction"] = tokenizer.decode(prediction, skip_special_tokens=True)
+                for (paired_records, _, _, task, _), prediction in zip(
+                    batch, predictions, strict=True
+                ):
+                    content = (
+                        prediction[:-1]
+                        if prediction and prediction[-1] == tokenizer.eos_token_id
+                        else prediction
+                    )
+                    prefix_ratio = correct_prefix_ratio(content, task.target_ids[:-1])
+                    text = tokenizer.decode(prediction, skip_special_tokens=True)
+                    for record in paired_records:
+                        record["correct_prefix_ratio"] = prefix_ratio
+                        record["prediction"] = text
     finally:
         backbone.train(was_training[0])
         writer.train(was_training[1])

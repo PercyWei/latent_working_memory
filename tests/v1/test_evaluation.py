@@ -20,6 +20,7 @@ from latent_working_memory.v1.evaluation import (
 from latent_working_memory.v1.data import EpisodeIndex
 from latent_working_memory.data_preparation.pipeline import prepare_fineweb
 from latent_working_memory.v1.state import MemoryState
+from latent_working_memory.v1.sampling import read_tokens
 
 
 def test_exact_match_only_normalizes_whitespace() -> None:
@@ -131,6 +132,17 @@ def test_evaluation_controls_share_targets_budgets_and_write_test_split(
     backbone, writer = components
     original = backbone.read_batch
     raw_calls = []
+    generation_calls = []
+    original_generate = backbone.greedy_students
+
+    def traced_generate(memories, prompts, limits, use_reader_lora=True):
+        generation_calls.extend(
+            (len(m), p, limit, use_reader_lora)
+            for m, p, limit in zip(memories, prompts, limits, strict=True)
+        )
+        return original_generate(memories, prompts, limits, use_reader_lora=use_reader_lora)
+
+    monkeypatch.setattr(backbone, "greedy_students", traced_generate)
 
     def traced(memories, tokens, text_contexts=None, use_reader_lora=True):
         if text_contexts is not None:
@@ -155,23 +167,26 @@ def test_evaluation_controls_share_targets_budgets_and_write_test_split(
         for line in (tmp_path / "eval/test-step-000002.jsonl").read_text().splitlines()
     ]
     for episode_id in {r["episode_id"] for r in records}:
-        selected = [
-            r for r in records if r["episode_id"] == episode_id and r["task"] == "continuation"
-        ]
+        selected = [r for r in records if r["episode_id"] == episode_id]
         if not selected:
             continue
         assert len({r["target_tokens"] for r in selected}) == 1
         for capacity in {r["capacity"] for r in selected}:
             paired = {r["condition"]: r for r in selected if r["capacity"] == capacity}
-            assert len(paired) == 5
+            assert set(paired) == (
+                {"memory", "wrong_memory", "full_context", "base_full_context"}
+                | ({"no_memory"} if selected[0]["task"] == "continuation" else set())
+            )
             for condition in ("full_context", "base_full_context"):
                 assert paired[condition]["text_context_tokens"] == paired[condition]["input_tokens"]
             assert paired["base_full_context"]["reader_lora"] is False
     cursor = 0
-    for i in index.evaluation_panel(tiny_config.eval_examples, tiny_config.data_seed + 1):
+    panel_episodes = {}
+    for i in index.evaluation_panel(
+        tiny_config.eval_examples, tiny_config.data_seed + 1, tiny_config.input_length_bounds
+    ):
         episode = index[i]
-        if episode.reads[0].task == "ae":
-            continue
+        panel_episodes[episode.episode_id] = episode
         task, context, lora = raw_calls[cursor]
         assert context == episode.input_ids and lora
         assert raw_calls[cursor + 1] == (task, episode.input_ids, False)
@@ -182,8 +197,28 @@ def test_evaluation_controls_share_targets_budgets_and_write_test_split(
     removed = {"sequence_match", "normalized_token_edit_distance", "correct_tokens"}
     assert all(not removed.intersection(r) for r in records)
     assert all("token_accuracy" not in v for v in metrics["groups"].values())
-    ae = metrics["groups"]["all/ae/memory"]
-    assert 0 <= ae["bleu_4"] <= 100 and 0 <= ae["correct_prefix_ratio"] <= 1
+    for condition in ("memory", "wrong_memory", "full_context", "base_full_context"):
+        ae = metrics["groups"][f"all/ae/{condition}"]
+        assert 0 <= ae["bleu_4"] <= 100 and 0 <= ae["correct_prefix_ratio"] <= 1
+        assert ae["generated_reads"] == metrics["groups"]["all/ae/memory"]["generated_reads"]
+    # Full-text generation is done once per document and adapter setting, shared across K.
+    for episode_id in {r["episode_id"] for r in records if "prediction" in r}:
+        selected = [r for r in records if r["episode_id"] == episode_id]
+        episode = panel_episodes[episode_id]
+        ae, _ = read_tokens(episode, tokenizer)
+        for use_lora, condition in [(True, "full_context"), (False, "base_full_context")]:
+            assert (
+                generation_calls.count(
+                    (0, (*episode.input_ids, *ae.prompt_ids), len(ae.target_ids), use_lora)
+                )
+                == 1
+            )
+            paired = [r for r in selected if r["condition"] == condition]
+            assert len({r["prediction"] for r in paired}) == 1
+            assert len({r["nll_sum"] for r in paired}) == 1
+    assert len(generation_calls) == sum(
+        r["memory_tokens"] > 0 for r in records if "prediction" in r
+    ) + 2 * len({r["episode_id"] for r in records if "prediction" in r})
 
 
 def test_memory_bytes_and_byte_token_area() -> None:

@@ -26,7 +26,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     datasets = parser.add_mutually_exclusive_group(required=True)
     datasets.add_argument("--data-dir", type=Path)
     datasets.add_argument("--evaluation-dirs", type=Path)
-    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="Run directory and name, e.g. pretrain-random-157k-eval-20260912",
+    )
     parser.add_argument("--split", choices=("dev", "test"), default="dev")
     parser.add_argument("--device", default="cuda")
     parser.add_argument(

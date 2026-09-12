@@ -23,7 +23,12 @@ def main(argv=None) -> None:
         type=Path,
         help="JSON list: training_source, evaluation_source, report (JSON path)",
     )
-    parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument(
+        "--output-dir",
+        required=True,
+        type=Path,
+        help="Comparison run directory and name, e.g. pretrain-157k-compare-20260912",
+    )
     parser.add_argument("--swanlab-project", required=True)
     parser.add_argument("--swanlab-group", required=True)
     parser.add_argument("--swanlab-tag", action="append", default=[])
@@ -34,7 +39,7 @@ def main(argv=None) -> None:
         action="append",
         default=[],
         metavar=("TRAINING_SOURCE", "DIRECTORY"),
-        help="Publish all test sources for one training source into one evaluation run",
+        help="Evaluation run directory/name, e.g. pretrain-random-157k-eval-20260912",
     )
     args = parser.parse_args(argv)
     entries = json.loads(args.reports.read_text())
@@ -72,7 +77,9 @@ def main(argv=None) -> None:
         raise ValueError("each run needs its own output directory")
     for directory in [args.output_dir, *(Path(p) for p in outputs.values())]:
         if (directory / "swanlab.json").exists():
-            raise ValueError(f"static report already published; use a new output directory: {directory}")
+            raise ValueError(
+                f"static report already published; use a new output directory: {directory}"
+            )
     bundles = []
     for train, directory in outputs.items():
         selected = [(test, report) for source, test, report in reports if source == train]

@@ -185,6 +185,7 @@ class LatentMemoryBackbone(nn.Module):
         memories: list[Tensor],
         prompts: list[tuple[int, ...]],
         token_limits: list[int],
+        use_reader_lora: bool = True,
     ) -> list[tuple[int, ...]]:
         if not memories or not len(memories) == len(prompts) == len(token_limits):
             raise ValueError("generation memories, prompts and token limits must align")
@@ -195,7 +196,10 @@ class LatentMemoryBackbone(nn.Module):
         was_training = self.language_model.training
         self.language_model.eval()
         try:
-            with torch.no_grad():
+            with (
+                torch.no_grad(),
+                nullcontext() if use_reader_lora else self.language_model.disable_adapter(),
+            ):
                 rows = []
                 for memory, prompt in zip(memories, prompts, strict=True):
                     self._validate_memory(memory)

@@ -83,6 +83,7 @@ def test_offline_metrics_match_local_reports_and_close_run(tmp_path, monkeypatch
             (
                 json.dumps(
                     {
+                        "condition": "memory",
                         "reference": "A.",
                         "prediction": "A.",
                         "input_tokens": 2,
