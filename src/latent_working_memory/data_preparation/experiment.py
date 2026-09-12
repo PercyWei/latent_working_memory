@@ -32,6 +32,9 @@ def prepare_experiment(spec: dict, config, tokenizer, output: Path) -> dict:
             or not math.isclose(sum(weights.values()), 1)
         ):
             raise ValueError("run source weights must be positive and sum to one")
+    for name in sources.keys() & runs.keys():
+        if runs[name] != {name: 1}:
+            raise ValueError("a dataset named after a source must use only that source")
     bounds = config.input_length_bounds
     cells = {}
     identities = {}
@@ -165,32 +168,31 @@ def prepare_experiment(spec: dict, config, tokenizer, output: Path) -> dict:
                     handle.close()
         return len(selected)
 
-    for name in sources:
-        dest = output / "evaluation" / name
-        counts = {split: write_selection(dest, split, {name: 1}) for split in ("dev", "test")}
-        metadata = {
-            "preparation_id": str(uuid.uuid4()),
-            "contract": data_contract(config),
-            "source_preparations": identities,
-            "source_weights": {name: 1},
-            "counts": counts,
-        }
-        (dest / "preparation.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    dataset_weights = {name: {name: 1} for name in sources} | runs
     report["runs"] = {}
-    for name, weights in runs.items():
-        dest = output / "runs" / name
-        count = write_selection(dest, "train", weights)
+    for name, weights in dataset_weights.items():
+        dest = output / name
+        counts = {}
+        if name in runs:
+            counts["train"] = write_selection(dest, "train", weights)
+            report["runs"][name] = {
+                "data_dir": str(dest.resolve()),
+                "samples": counts["train"],
+            }
+        if name in sources:
+            counts.update(
+                {split: write_selection(dest, split, weights) for split in ("dev", "test")}
+            )
         metadata = {
             "preparation_id": str(uuid.uuid4()),
             "contract": data_contract(config),
             "source_preparations": identities,
             "source_weights": weights,
-            "counts": {"train": count},
+            "counts": counts,
         }
         (dest / "preparation.json").write_text(json.dumps(metadata, indent=2) + "\n")
-        report["runs"][name] = {"data_dir": str(dest.resolve()), "samples": count}
     report["evaluation_dirs"] = {
-        name: str((output / "evaluation" / name).resolve()) for name in sources
+        name: str((output / name).resolve()) for name in sources
     }
     (output / "selection.json").write_text(json.dumps(report, indent=2) + "\n")
     return report

@@ -1,29 +1,139 @@
-# 20260912_双卡预训练数据类型对比实验（16:11:15 UTC+08:00）
+# 20260911_预训练数据类型对比实验
 
 创建时间：20260911 16:27:19 UTC+08:00
-最后修订时间：20260912 16:11:15 UTC+08:00
+最后修订时间：20260912 17:28:08 UTC+08:00
 
 本文记录预训练数据类型对比的具体配置、运行与结果。阶段目标、记忆写入与读取、损失和评估方法见 [预训练与 AE/LM 评估](20260910_pretraining_and_evaluation.md)。
 
 ## 1. 数据与实验设置
 
-semantic、random、mixed 三组从相同模型种子重新初始化，并行进行同步数据并行训练：semantic 使用物理 GPU 0、1，random 使用 4、5，mixed 使用 6、7。每卡 microbatch 2，梯度累积 2，全局有效 batch 8；关闭梯度检查点，BF16。每组 20,000 步，模型种子 42，数据种子 20260907。学习率峰值 3e-5，600 步 warmup，余弦衰减至 3e-6；长度课程为前 6,000 步，压缩率 2/4/8 等概率。AE/LM 权重均为 1。
+### 1.1 对比组
 
-沿用 `data/v1/boundary-comparison-2048-20260910`，每组训练集 157,320 条，AE/LM 数量相等，mixed 两来源各占一半。输入和 LM 目标各不超过 2048 tokens。三组共享 semantic/random 两套 dev/test。每 1,000 步保存 checkpoint 并评估两套 dev，各取固定 120 条；每 2,000 步及初始基线进行小规模 AE 生成评估。每组结束后，在该组分配的两卡分别评估两套 test，各组独立推进。
+三组从相同模型种子重新初始化，使用等规模数据及相同训练配置，并行执行同步数据并行训练。三组共享 semantic/random 两套 dev/test。
 
-基座为 Llama-2-7B-Chat，写入与读取窗口均为 4096，memory 上限为 4096。记忆维度 512，Writer 为 3 层、8 个注意力头、前馈维度 2048；读取 LoRA rank=16、alpha=32，作用于 q_proj/v_proj，dropout=0。AdamW 的 weight decay 为 0.01，梯度裁剪阈值为 1.0。
+| 训练组 | semantic 占比 | random 占比 | 训练样本数 | 物理 GPU |
+|---|---:|---:|---:|---|
+| semantic | 100% | 0% | 157,320 | 0、1 |
+| random | 0% | 100% | 157,320 | 4、5 |
+| mixed | 50% | 50% | 157,320 | 6、7 |
 
-AE 输入 X、LM 输入 X 与目标 Y 均为 32–2048 tokens。按 X 长度分为 32–64、65–128、129–256、257–512、513–1024、1025–2048 六档。每组每档每任务有 13,110 条；mixed 的两种来源各 6,555 条。每套 dev 共 3,468 条，每档每任务 289 条；每套 test 共 3,108 条，每档每任务 259 条。
+### 1.2 数据配额与长度课程
 
-长度课程的六档起始概率为 25%、25%、20%、15%、10%、5%，前 6,000 步线性过渡到各 1/6。实验数据选择 seed 为 20260910。每组采样 160,000 次，约为训练集数量的 1.02 倍；各长度池的实际遍历次数受课程采样影响。
+数据位于 `data/v1/fineweb-2048-157k_20260910/`。AE 输入 X、LM 输入 X 与目标 Y 均为 32–2048 tokens；按 X 长度分为六档，各档 AE/LM 数量相等。
 
-数据选择配置为 `configs/data_preparation/boundary_comparison.json`，入口为 `python -m latent_working_memory.data_preparation.experiment`，结果记录在 `data/v1/boundary-comparison-2048-20260910/selection.json`。筛选保持来源划分、完整样本和上下文预算，跨来源按任务及 X/Y 去重，train 去除 19 条、test 去除 1 条重复内容。
+| 数据划分 | 每组／每套总数 | 每长度档、每任务样本数 | 来源安排 |
+|---|---:|---:|---|
+| train | 157,320 | 13,110 | 按训练组配比；mixed 每档每任务的两来源各 6,555 条 |
+| dev | 3,468 | 289 | semantic、random 各一套，三组共享 |
+| test | 3,108 | 259 | semantic、random 各一套，三组共享 |
+
+长度采样概率在前 6,000 步线性过渡，之后保持目标分布：
+
+| X 长度（tokens） | 起始概率 | 目标概率 |
+|---|---:|---:|
+| 32–64 | 25% | 1/6 |
+| 65–128 | 25% | 1/6 |
+| 129–256 | 20% | 1/6 |
+| 257–512 | 15% | 1/6 |
+| 513–1024 | 10% | 1/6 |
+| 1025–2048 | 5% | 1/6 |
+
+每组采样 160,000 次，约为训练集数量的 1.02 倍；各长度池的实际遍历次数受课程采样影响。
+
+数据选择配置为 `configs/data_preparation/boundary_comparison.json`，入口为 `python -m latent_working_memory.data_preparation.experiment`，结果记录在数据目录的 `selection.json`。筛选保持来源划分、完整样本和上下文预算；跨来源按任务及 X/Y 去重，train 去除 19 条、test 去除 1 条重复内容。
+
+### 1.3 数据目录与复现
+
+目录名 `fineweb-2048-157k_20260910` 表示 FineWeb、X/Y 上限 2048 tokens、每类训练集约 157k 条及创建日期。精确数量写入各数据集的 `preparation.json`。
+
+```text
+fineweb-2048-157k_20260910/
+├── semantic/
+│   ├── train.jsonl
+│   ├── dev.jsonl
+│   ├── test.jsonl
+│   └── preparation.json
+├── random/
+│   ├── train.jsonl
+│   ├── dev.jsonl
+│   ├── test.jsonl
+│   └── preparation.json
+├── mixed/
+│   ├── train.jsonl
+│   └── preparation.json
+└── selection.json
+```
+
+semantic/random 的训练与评估划分使用同一份准备记录；mixed 的训练通过 `--evaluation-dirs` 显式引用 semantic/random 两套评估数据。该映射由 `selection.json` 的 `evaluation_dirs` 提供，本实验将其保存为产物目录下的 `plan/evaluation-dirs.json`。`selection.json` 同时记录来源配置、配额、筛选统计和训练数据目录。
+
+按原配置重新选择数据的命令为：
+
+```bash
+PYTHONPATH=src artifacts/v1/pretrain-code-20260908/.venv/bin/python \
+  -m latent_working_memory.data_preparation.experiment \
+  --spec configs/data_preparation/boundary_comparison.json \
+  --config configs/v1/pretrain_boundary_comparison_dual_a800.json \
+  --output-dir data/v1/fineweb-2048-157k_20260910
+```
+
+重新构造使用尚未存在的输出目录，并保留相同来源文件、选择 seed 和训练配置。样本筛选与顺序可重复生成；每次独立准备产生新的数据身份。
+
+### 1.4 模型与记忆配置
+
+| 配置项 | 设置 |
+|---|---|
+| 语言模型基座 | Llama-2-7B-Chat |
+| 写入／读取窗口 | 各 4096 tokens |
+| 记忆维度 | 512 |
+| Writer | 3 层，8 个注意力头，前馈维度 2048 |
+| 读取 LoRA | rank=16，alpha=32，dropout=0；作用于 q_proj/v_proj |
+| memory 容量上限 | 4096 个位置 |
+| 名义压缩率 | 2、4、8，各以 1/3 概率采样 |
+
+### 1.5 优化与执行配置
+
+训练配置见 `configs/v1/pretrain_boundary_comparison_dual_a800.json`。
+
+| 配置项 | 设置 |
+|---|---|
+| 每组训练步数 | 20,000 次 optimizer 更新 |
+| 每卡 microbatch | 2 条样本 |
+| 梯度累积 | 2 次 |
+| 全局有效 batch | 8 条样本（2 卡 × 2 × 2） |
+| 数值精度／梯度检查点 | BF16／关闭 |
+| 优化器 | AdamW，weight decay=0.01 |
+| 学习率 | 峰值 3e-5；600 步 warmup，余弦衰减至 3e-6 |
+| 梯度裁剪阈值 | 1.0 |
+| AE／LM 损失权重 | 各 1 |
+| 模型 seed | 42 |
+| 训练采样 seed | 20260907 |
+| 实验数据选择 seed | 20260910 |
+
+### 1.6 保存与周期评估
+
+| 项目 | 时机 | 面板／产物 |
+|---|---|---|
+| dev 条件预测 | 初始化、每 1,000 步及最后一步 | 每套固定 120 条样本 |
+| dev AE 自由生成 | 初始化、每 2,000 步 | 每套选取 12 条 AE 样本 |
+| checkpoint | 每 1,000 步 | 保存可训练参数、optimizer 与恢复状态 |
+| 独立 test | 每组训练结束后 | 在该组两卡分别评估 semantic/random test |
+
+各训练组独立推进，完成训练后即执行自己的两套 test。
 
 ## 2. SwanLab 与产物
 
-项目为 `latent-working-memory-v1`，group 为 `lwm-boundary-comparison-2048-20260911`。训练 run 名称为 `pretrain-semantic-157k-20260911`、`pretrain-random-157k-20260911`、`pretrain-mixed-157k-20260911`。首次测试 run 名称采用 `evaluate-训练来源-test-测试来源-157k-20260911`，其中 157k 仍表示对应模型的训练集规模，评估样本数记录在 config 中。job_type 为 train/evaluate，tags 保留 scope:main、method:latent-working-memory、study:boundary-comparison、data:fineweb 及实际来源。
+| 元数据 | 设置 |
+|---|---|
+| project | `latent-working-memory-v1` |
+| group | `lwm-boundary-comparison-2048-20260911` |
+| job_type | `train`、`evaluate`、`compare` |
+| 公共 tags | `scope:main`、`method:latent-working-memory`、`study:boundary-comparison`、`data:fineweb`，另附实际来源标签 |
+| 训练 run 名称 | `pretrain-{semantic,random,mixed}-157k-20260911` |
+| 首次测试 run 名称 | `evaluate-{训练来源}-test-{测试来源}-157k-20260911` |
 
-配置：`configs/v1/pretrain_boundary_comparison_dual_a800.json`。服务器仓库根目录为 `/data/bywei/projects/latent_working_memory`，本系列产物统一位于 `artifacts/v1/pretrain-data-comparison-2048_20260911/`。名称用 `-` 连接同一语义组内的词，用 `_` 分隔语义组；这里 `pretrain-data-comparison-2048` 为实验属性组，`20260911` 为日期组：
+名称中的 157k 表示对应模型的训练集规模，评估样本数记录在 config 中。
+
+服务器仓库根目录为 `/data/bywei/projects/latent_working_memory`，本系列产物统一位于 `artifacts/v1/pretrain-data-comparison-2048_20260911/`。名称用 `-` 连接同一语义组内的词，用 `_` 分隔语义组；这里 `pretrain-data-comparison-2048` 为实验属性组，`20260911` 为日期组：
 
 | 子目录 | 内容 |
 |---|---|
@@ -73,13 +183,34 @@ mixed 的 semantic test LM NLL 为 1.9852，保留等量近期原文的对照为
 
 测试报告位于 `artifacts/v1/pretrain-data-comparison-2048_20260911/eval/evaluate-{训练来源}-test-{测试来源}-157k-20260911/test-step-020000.json`，逐条结果位于同名 `.jsonl`。
 
-SwanLab 测试记录：semantic 训练组的 [semantic test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/q830jqgt)、[random test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/aaho5zki)；random 训练组的 [semantic test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/zkkxq86z)、[random test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/zo41umze)；mixed 训练组的 [semantic test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/9vqipeih)、[random test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/ew086khr)。
+首次测试的 SwanLab 记录：
+
+| 训练来源 | semantic test | random test |
+|---|---|---|
+| semantic | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/q830jqgt) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/aaho5zki) |
+| random | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/zkkxq86z) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/zo41umze) |
+| mixed | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/9vqipeih) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/ew086khr) |
 
 ## 5. 完整评估设置与发布
 
-采用 [预训练评估方法](20260910_pretraining_and_evaluation.md#5-aelm-评估) 中的 AE 四条件与 LM 五条件。各模型使用 step 20,000 checkpoint，每套 test 请求 120 个独立文档样本，AE 生成面板取 12 条，容量按名义压缩率 2/4/8 展开。正文上一节保留首次测试时的指标和诊断；本轮补齐 AE 完整原文与基座原文对照。
+采用 [预训练评估方法](20260910_pretraining_and_evaluation.md#5-aelm-评估) 中的 AE 四条件与 LM 五条件，补齐 AE 完整原文与基座原文对照。上一节保留首次测试时的指标和诊断。
 
-单模型评估 run 各有 12 张图：总体 AE 四项、LM 两项，以及记忆条件下长度 × 压缩率联合分组的对应六项。跨模型比较使用 6 张图，总计 42 张图。semantic、random、mixed 训练来源分别使用蓝、橙、绿色系；两套测试来源使用同色系深浅色，图例显示完整来源标签。图、表和样例分别发布，媒体 step 固定为 0，checkpoint_step 为 20,000。
+| 评估项 | 设置 |
+|---|---|
+| checkpoint | 三组均为 step 20,000 |
+| 测试来源 | semantic、random |
+| 条件预测面板 | 每套请求 120 个独立文档样本 |
+| AE 生成面板 | 每套 12 条 AE 样本 |
+| 容量设置 | 按名义压缩率 2、4、8 展开 |
+| 媒体 step／checkpoint_step | 0／20,000 |
+
+| 图表范围 | 每个 run 的图数 | 内容 |
+|---|---:|---|
+| 单模型总体 | 6 | AE 四项、LM 两项，比较两套测试来源及各对照条件 |
+| 单模型联合分组 | 6 | memory 条件的上述六项，按长度 × 压缩率分组 |
+| 跨模型比较 | 6 | 三种训练来源 × 两种测试来源的总体六项 |
+
+三组单模型评估加一组跨模型比较，共 42 张图。semantic、random、mixed 训练来源分别使用蓝、橙、绿色系；两套测试来源使用同色系深浅色，图例显示完整来源标签。图、表和样例分别发布。
 
 本轮完整评估的 run 名称为 `pretrain-semantic-157k-eval-20260912`、`pretrain-random-157k-eval-20260912`、`pretrain-mixed-157k-eval-20260912`；跨模型比较为 `pretrain-157k-compare-20260912`。run 名称直接取输出目录名，项目和 group 沿用本系列设置。完整 AE 对照通过重新执行模型评估获得。
 

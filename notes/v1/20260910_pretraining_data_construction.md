@@ -1,7 +1,7 @@
-# 20260910_预训练数据构建策略与实现（22:35:01 UTC+08:00）
+# 20260910_预训练数据构建策略与实现
 
 创建时间：20260910 15:44:35 UTC+08:00
-最后修订时间：20260910 22:35:01 UTC+08:00
+最后修订时间：20260912 17:28:08 UTC+08:00
 
 ## 1. 数据来源
 
@@ -92,6 +92,14 @@ python -m latent_working_memory.data_preparation \
 ```
 
 阶段依次为 `sources`、`semantic`、`random`，默认 `all`。输出包括共享 `sources.jsonl` 与 `source-pool.json`，各版本的 train/dev/test、documents、sample-decisions、audit、preparation，以及最终 comparison。
+
+### 实验数据选择
+
+`python -m latent_working_memory.data_preparation.experiment` 从构造完成的样本中，按来源比例、任务与长度配额选择实验数据，并验证训练及原文评估的上下文预算。输入为来源／配比配置 `--spec`、训练配置 `--config` 和新目录 `--output-dir`。
+
+输出按数据集名称组织为 `<输出目录>/<数据集名称>/`。来源数据集保存 `dev.jsonl`、`test.jsonl`；配置中的训练数据集保存 `train.jsonl`。同名来源与训练数据集合并到一个目录，并使用同一份 `preparation.json` 记录全部划分的数量、数据身份、来源和契约；同名训练数据集的配比须为该来源的 100%。混合训练集保存训练划分，评估显式引用各来源数据集。
+
+根目录的 `selection.json` 记录选择配置、各任务／长度档配额、筛选统计，以及训练目录和评估目录映射。当前实验使用 `data/v1/fineweb-2048-157k_20260910/`，具体布局、配置与复现命令见 [预训练数据类型对比实验](20260911_pretraining_data_comparison.md)。
 
 ## 6. 运行记录
 
