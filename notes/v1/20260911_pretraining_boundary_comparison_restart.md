@@ -1,7 +1,7 @@
-# 20260912_双卡预训练边界对比实验（13:47:39 UTC+08:00）
+# 20260912_双卡预训练边界对比实验（14:15:45 UTC+08:00）
 
 创建时间：20260911 16:27:19 UTC+08:00
-最后修订时间：20260912 13:47:39 UTC+08:00
+最后修订时间：20260912 14:15:45 UTC+08:00
 
 ## 实验设置
 
@@ -65,11 +65,11 @@ AE 的正确记忆、错误记忆、完整原文及关闭 reader LoRA 的完整�
 
 `python -m latent_working_memory.v1.publish_reports` 从已有 JSONL 重新聚合结果并发布，不运行模型推理。`--reports` 指向 JSON 列表，每项包含 `training_source`、`evaluation_source`、`report`；report 指向原始 JSON，逐条记录使用同名 JSONL。重复传入 `--evaluation-output 训练来源 输出目录` 为每个模型发布评估，`--output-dir` 发布跨模型汇总。项目、group、tags 和 online 模式通过启动参数指定。
 
-当前静态结果发布到 `evaluate-{semantic,random,mixed}-static-157k-20260912`，跨模型 run 为 `compare-boundary-static-157k-20260912`，均保存在现有 `latent-working-memory-v1` 项目及原 group 中。原始六份测试报告保留；正文最终结果章节记录首次完成时的评估结果。
+完整评估结果保存在现有 `latent-working-memory-v1` 项目及原 group 中。原始六份测试报告保留；正文最终结果章节记录首次完成时的评估结果。
 
 静态评估与比较 run 只在媒体 step 0 发布一次，config 中的 `checkpoint_step`（汇总发布时位于各 report 条目）记录对应模型的训练步数 20,000。已有发布身份的输出目录拒绝追加，重新制作报告使用新目录。SwanLab 的媒体步数表示上传位置。图表使用百分比定位绘图区，长横轴标签分行，适配普通卡片与放大查看。
 
-下一轮完整评估的 run 名称为 `pretrain-semantic-157k-eval-20260912`、`pretrain-random-157k-eval-20260912`、`pretrain-mixed-157k-eval-20260912`；跨模型比较为 `pretrain-157k-compare-20260912`。run 名称直接取输出目录名，项目和 group 沿用本系列设置。上述完整 AE 对照需要重新执行模型评估，现有 static 云端报告仍对应上一轮评估协议。
+本轮完整评估的 run 名称为 `pretrain-semantic-157k-eval-20260912`、`pretrain-random-157k-eval-20260912`、`pretrain-mixed-157k-eval-20260912`；跨模型比较为 `pretrain-157k-compare-20260912`。run 名称直接取输出目录名，项目和 group 沿用本系列设置。完整 AE 对照通过重新执行模型评估获得。
 
 单模型启动示例（在服务器仓库中运行）：
 
@@ -84,3 +84,20 @@ CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src artifacts/v1/pretrain-code-20260908/.venv/
 ```
 
 三组评估完成后，汇总清单的 report 路径指向各新评估目录下的 `{semantic,random}/test-step-020000.json`，使用 `publish_reports --reports 清单路径 --output-dir artifacts/v1/evaluations/boundary-comparison-2048-20260911/pretrain-157k-compare-20260912` 发布跨模型比较，并指定同一项目、group、tags 和 online 模式。单模型评估已在执行结束时发布，汇总命令只创建 compare run。
+
+## 完整评估运行记录
+
+20260912 13:51:57 UTC+08:00 开始，14:13:26 完成，代码提交为 `5ded1be`。semantic、random 模型分别在 GPU 0、1 完成两套测试；mixed 的两套测试分别在 GPU 0、1 并行完成。三组使用原有 step 20,000 checkpoint。每组 semantic test 实际覆盖 120 个独立文档，random test 覆盖 117 个独立文档，与原评估面板一致；每套测试的 AE 四种条件各有 36 条配对生成记录，完整原文条件每篇仅推理一次并复用于各容量。
+
+六份新报告均通过指标有限性、对照条件覆盖、目标长度配对、生成覆盖和样本身份检查。三组模型在同一测试集上的基座完整原文损失及生成结果一致。云端 42 张图已核对条件、图例、配色与单次 step 0 上传。
+
+| 运行 | SwanLab |
+|---|---|
+| `pretrain-semantic-157k-eval-20260912` | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/19fgzh1r) |
+| `pretrain-random-157k-eval-20260912` | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/81yl0lnd) |
+| `pretrain-mixed-157k-eval-20260912` | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/d3z6hkfd) |
+| `pretrain-157k-compare-20260912` | [比较](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/xltjprbj) |
+
+原始结果位于 `artifacts/v1/evaluations/boundary-comparison-2048-20260911/pretrain-{训练来源}-157k-eval-20260912/{测试来源}/test-step-020000.{json,jsonl}`；汇总清单位于本系列调度目录的 `complete-ae-reports.json`。
+
+服务器已清理 12 个旧合并展示目录、原六组独立测试的 SwanLab 缓存及被替代的 mixed 串行启动日志。原六份 JSON/JSONL、正式训练记录、checkpoint 和新评估产物保留。云端旧 run 由用户手动清理。
