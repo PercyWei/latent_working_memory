@@ -1,7 +1,7 @@
-# 20260912_研究文档索引（15:42:35 UTC+08:00）
+# 20260912_研究文档索引（15:57:54 UTC+08:00）
 
 创建时间：20260910 11:36:22 UTC+08:00
-最后修订时间：20260912 15:42:35 UTC+08:00
+最后修订时间：20260912 15:57:54 UTC+08:00
 
 | 内容 | 文档 |
 |---|---|
@@ -17,4 +17,4 @@
 
 `v1/` 保存预训练数据构建、实验计划与运行记录。旧数据构建说明已合并，旧方案正文可从 Git 历史查阅。
 
-实验产物按 `artifacts/v1/<实验系列>/{train,eval,compare,plan}/` 组织。当前系列位于 `artifacts/v1/pretrain-data-comparison-2048-20260911/`；数据准备、工程验证和历史辅助文件分别保存在 `data-preparation/`、`validation/` 和 `legacy/`。历史日志保留执行时的原始路径。
+实验产物按 `artifacts/v1/<实验系列>/{train,eval,compare,plan}/` 组织。当前系列位于 `artifacts/v1/pretrain-data-comparison-2048_20260911/`；数据准备、工程验证和历史辅助文件分别保存在 `data-preparation/`、`validation/` 和 `legacy/`。历史日志保留执行时的原始路径。

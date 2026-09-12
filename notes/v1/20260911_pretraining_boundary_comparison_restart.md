@@ -1,7 +1,7 @@
-# 20260912_双卡预训练数据类型对比实验（15:41:37 UTC+08:00）
+# 20260912_双卡预训练数据类型对比实验（15:57:54 UTC+08:00）
 
 创建时间：20260911 16:27:19 UTC+08:00
-最后修订时间：20260912 15:41:37 UTC+08:00
+最后修订时间：20260912 15:57:54 UTC+08:00
 
 ## 实验设置
 
@@ -15,7 +15,7 @@ semantic、random、mixed 三组从相同模型种子重新初始化，并行进
 
 项目为 `latent-working-memory-v1`，group 为 `lwm-boundary-comparison-2048-20260911`。训练 run 名称为 `pretrain-semantic-157k-20260911`、`pretrain-random-157k-20260911`、`pretrain-mixed-157k-20260911`。首次测试 run 名称采用 `evaluate-训练来源-test-测试来源-157k-20260911`，其中 157k 仍表示对应模型的训练集规模，评估样本数记录在 config 中。job_type 为 train/evaluate，tags 保留 scope:main、method:latent-working-memory、study:boundary-comparison、data:fineweb 及实际来源。
 
-配置：`configs/v1/pretrain_boundary_comparison_dual_a800.json`。服务器仓库根目录为 `/data/bywei/projects/latent_working_memory`，本系列产物统一位于 `artifacts/v1/pretrain-data-comparison-2048-20260911/`：
+配置：`configs/v1/pretrain_boundary_comparison_dual_a800.json`。服务器仓库根目录为 `/data/bywei/projects/latent_working_memory`，本系列产物统一位于 `artifacts/v1/pretrain-data-comparison-2048_20260911/`。名称用 `-` 连接同一语义组内的词，用 `_` 分隔语义组；这里 `pretrain-data-comparison-2048` 为实验属性组，`20260911` 为日期组：
 
 | 子目录 | 内容 |
 |---|---|
@@ -61,7 +61,7 @@ mixed 的 semantic test LM NLL 为 1.9852，保留等量近期原文的对照为
 
 上述计数仅统计训练，不含评估；三组均采样 160,000 次，长度课程和循环采样使其不等同于完整遍历训练集一次。
 
-测试报告位于 `artifacts/v1/pretrain-data-comparison-2048-20260911/eval/evaluate-{训练来源}-test-{测试来源}-157k-20260911/test-step-020000.json`，逐条结果位于同名 `.jsonl`。
+测试报告位于 `artifacts/v1/pretrain-data-comparison-2048_20260911/eval/evaluate-{训练来源}-test-{测试来源}-157k-20260911/test-step-020000.json`，逐条结果位于同名 `.jsonl`。
 
 SwanLab 测试记录：semantic 训练组的 [semantic test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/q830jqgt)、[random test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/aaho5zki)；random 训练组的 [semantic test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/zkkxq86z)、[random test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/zo41umze)；mixed 训练组的 [semantic test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/9vqipeih)、[random test](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/ew086khr)。
 
@@ -85,15 +85,15 @@ AE 的正确记忆、错误记忆、完整原文及关闭 reader LoRA 的完整�
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src artifacts/v1/pretrain-code-20260908/.venv/bin/python -m latent_working_memory.v1.evaluate \
-  --checkpoint artifacts/v1/pretrain-data-comparison-2048-20260911/train/pretrain-random-157k-20260911/checkpoints/pretrain-step-020000.pt \
-  --evaluation-dirs artifacts/v1/pretrain-data-comparison-2048-20260911/plan/evaluation-dirs.json \
-  --output-dir artifacts/v1/pretrain-data-comparison-2048-20260911/eval/pretrain-random-157k-eval-20260912 \
+  --checkpoint artifacts/v1/pretrain-data-comparison-2048_20260911/train/pretrain-random-157k-20260911/checkpoints/pretrain-step-020000.pt \
+  --evaluation-dirs artifacts/v1/pretrain-data-comparison-2048_20260911/plan/evaluation-dirs.json \
+  --output-dir artifacts/v1/pretrain-data-comparison-2048_20260911/eval/pretrain-random-157k-eval-20260912 \
   --split test --examples 120 --generation-examples 12 \
   --swanlab-mode online --swanlab-project latent-working-memory-v1 \
   --swanlab-group lwm-boundary-comparison-2048-20260911 --swanlab-tag study:boundary-comparison
 ```
 
-三组评估完成后，汇总清单的 report 路径指向各新评估目录下的 `{semantic,random}/test-step-020000.json`，使用 `publish_reports --reports 清单路径 --output-dir artifacts/v1/pretrain-data-comparison-2048-20260911/compare/pretrain-157k-compare-20260912` 发布跨模型比较，并指定同一项目、group、tags 和 online 模式。单模型评估已在执行结束时发布，汇总命令只创建 compare run。
+三组评估完成后，汇总清单的 report 路径指向各新评估目录下的 `{semantic,random}/test-step-020000.json`，使用 `publish_reports --reports 清单路径 --output-dir artifacts/v1/pretrain-data-comparison-2048_20260911/compare/pretrain-157k-compare-20260912` 发布跨模型比较，并指定同一项目、group、tags 和 online 模式。单模型评估已在执行结束时发布，汇总命令只创建 compare run。
 
 ## 完整评估运行记录
 
@@ -108,6 +108,6 @@ CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src artifacts/v1/pretrain-code-20260908/.venv/
 | `pretrain-mixed-157k-eval-20260912` | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/d3z6hkfd) |
 | `pretrain-157k-compare-20260912` | [比较](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/xltjprbj) |
 
-原始结果位于 `artifacts/v1/pretrain-data-comparison-2048-20260911/eval/pretrain-{训练来源}-157k-eval-20260912/{测试来源}/test-step-020000.{json,jsonl}`；汇总清单位于本系列调度目录的 `complete-ae-reports.json`。
+原始结果位于 `artifacts/v1/pretrain-data-comparison-2048_20260911/eval/pretrain-{训练来源}-157k-eval-20260912/{测试来源}/test-step-020000.{json,jsonl}`；汇总清单位于本系列调度目录的 `complete-ae-reports.json`。
 
 服务器已清理 12 个旧合并展示目录、原六组独立测试的 SwanLab 缓存及被替代的 mixed 串行启动日志。原六份 JSON/JSONL、正式训练记录、checkpoint 和新评估产物保留。云端旧 run 由用户手动清理。
