@@ -65,7 +65,7 @@ def _shade(condition: str, source_index: int, source_count: int) -> str:
     return "#" + "".join(f"{round(c * 255):02x}" for c in colorsys.hls_to_rgb(h, light, saturation))
 
 
-def _bar(labels: list[str], series: dict[str, list[Any]], colors=None) -> Any:
+def _bar(labels: list[str], series: dict[str, list[Any]], colors=None, subtitle=None) -> Any:
     chart = swanlab.echarts.Bar().add_xaxis(labels)
     for label, values in series.items():
         points = [round(v, 4) if isinstance(v, float) else v for v in values]
@@ -77,15 +77,23 @@ def _bar(labels: list[str], series: dict[str, list[Any]], colors=None) -> Any:
         chart.add_yaxis(
             label,
             points,
-            label_opts={"is_show": False},
+            label_opts={"show": False},
             itemstyle_opts={"color": colors[label][0]} if colors is not None else None,
         )
     chart.set_global_opts(
         tooltip_opts={"trigger": "axis"},
-        legend_opts={"type": "scroll"},
-        xaxis_opts={"axislabel_opts": {"rotate": 20}},
-        yaxis_opts={"min_interval": 0.001},
+        legend_opts={"type": "scroll", "top": 28 if subtitle else 0},
+        title_opts={"subtext": subtitle, "left": "center", "top": 0} if subtitle else None,
+        xaxis_opts={"axisLabel": {"interval": 0, "rotate": 25, "fontSize": 10}},
+        yaxis_opts={"minInterval": 0.001},
     )
+    chart.options["grid"] = {
+        "left": "5%",
+        "right": "4%",
+        "top": 65,
+        "bottom": 85,
+        "containLabel": True,
+    }
     return chart
 
 
@@ -140,6 +148,9 @@ def build_evaluation_charts(
             labels,
             {name: [points.get(label) for label in labels] for name, points in series.items()},
             colors,
+            "仅正确记忆自由生成；错误记忆未评估"
+            if task == "ae" and metric in {"bleu_4", "correct_prefix_ratio"}
+            else None,
         )
     return values
 
