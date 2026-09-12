@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime
 import json
 import os
@@ -47,28 +47,55 @@ def run_series(spec, output):
             result = subprocess.run(argv, env=env, stdout=handle, stderr=subprocess.STDOUT)
         return result.returncode
 
-    def stage(jobs):
+    def stage(jobs, dependencies=None, max_workers=None):
+        dependencies = {} if dependencies is None else dependencies
+        max_workers = len(jobs) if max_workers is None else max_workers
         for name, argv, devices in jobs:
-            status["jobs"][name] = {"status": "running", "started": now()}
-            commands.append({"name": name, "argv": argv, "CUDA_VISIBLE_DEVICES": devices})
+            status["jobs"][name] = {"status": "pending"}
+            commands.append({"name": name, "argv": argv, "CUDA_VISIBLE_DEVICES": devices,
+                             "LWM_ALLOWED_PHYSICAL_GPUS": [4, 5]})
         (plan / "commands.json").write_text(json.dumps(commands, indent=2) + "\n")
         save_status()
-        with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
-            futures = [(name, executor.submit(execute, name, argv, devices)) for name, argv, devices in jobs]
-            failures = []
-            for name, future in futures:
-                code = future.result()
-                status["jobs"][name].update(status="complete" if code == 0 else "failed",
-                                             exit_code=code, finished=now())
+        pending, active, failures = list(jobs), {}, []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            while pending or active:
+                for job in list(pending):
+                    name, argv, devices = job
+                    parent = dependencies.get(name)
+                    if parent and status["jobs"][parent]["status"] == "failed":
+                        status["jobs"][name] = {"status": "blocked", "dependency": parent}
+                        pending.remove(job)
+                        failures.append(name)
+                        continue
+                    if len(active) >= max_workers or (
+                        parent and status["jobs"][parent]["status"] != "complete"
+                    ):
+                        continue
+                    status["jobs"][name] = {"status": "running", "started": now()}
+                    active[executor.submit(execute, name, argv, devices)] = name
+                    pending.remove(job)
                 save_status()
-                if code:
-                    failures.append(name)
+                if not active:
+                    if pending:
+                        raise ValueError("unresolved job dependencies")
+                    break
+                completed, _ = wait(active, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    name = active.pop(future)
+                    code = future.result()
+                    status["jobs"][name].update(status="complete" if code == 0 else "failed",
+                                                 exit_code=code, finished=now())
+                    if code:
+                        failures.append(name)
+                save_status()
         if failures:
             raise RuntimeError(f"failed jobs: {failures}; see plan logs")
 
     save_status()
     reports, evaluation_outputs = [], []
     try:
+        training_jobs, dependencies = [], {}
+        labels = {run["name"]: run["label"] for run in spec["runs"]}
         for run in spec["runs"]:
             directory = output / "train" / run["name"]
             argv = [python, "-m", "torch.distributed.run", "--standalone", "--nproc_per_node=2",
@@ -80,7 +107,11 @@ def run_series(spec, output):
             if "fork_from_run" in run:
                 argv += ["--fork-from", str(output / "train" / run["fork_from_run"] /
                                           "checkpoints/pretrain-step-005000.pt")]
-            stage([(run["label"] + "-train", argv, spec["gpus"])])
+                dependencies[run["label"] + "-train"] = labels[run["fork_from_run"]] + "-train"
+            training_jobs.append((run["label"] + "-train", argv, spec["gpus"]))
+        stage(training_jobs, dependencies, spec["training_concurrency"])
+        for run in spec["runs"]:
+            directory = output / "train" / run["name"]
             checkpoint = directory / f"checkpoints/pretrain-step-{spec['max_steps']:06d}.pt"
             eval_output = output / "eval" / run["evaluation_name"]
             jobs = []

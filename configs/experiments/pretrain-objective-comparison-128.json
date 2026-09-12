@@ -29,5 +29,6 @@
       "config": "configs/v1/pretrain-objective-comparison-128/ae-warmup.json",
       "fork_from_run": "pretrain-ae-only-r2_mixed-32k_20260912"
     }
-  ]
+  ],
+  "training_concurrency": 2
 }
