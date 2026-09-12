@@ -1,7 +1,7 @@
 # 20260911_动态训练与 QA 评估
 
 创建时间：20260911 15:23:05 UTC+08:00  
-最后修订时间：20260912 23:20:25 UTC+08:00
+最后修订时间：20260912 23:29:14 UTC+08:00
 
 本文记录动态训练与 QA 评估的执行流程。记忆容量、micro epoch 规模、阶段比例及截断跨度通过训练配置确定。
 
@@ -183,3 +183,5 @@ CUDA_VISIBLE_DEVICES=6,7 LWM_ALLOWED_PHYSICAL_GPUS=6,7 \
 ```
 
 训练入口同样通过上述双卡启动前缀调用 `-m latent_working_memory.v1.dynamic train`，传入 `--checkpoint`、`--index`、`--recipe` 和 `--output-dir`。训练输出使用 `artifacts/v1/<series>/train/<run_name>/`；独立评估使用 `evaluate --split test`，输出到同系列 `eval/<run_name>/`。SwanLab 由 `--swanlab-mode` 控制，测试设为 `disabled`，正式运行设为 `online` 并显式指定 `--swanlab-group`。
+
+根目录 `.venv` 已完成本地与服务器各 36 项动态测试，以及 GPU 6、7 上三种梯度设置的真实文本检查。运行环境和性能记录见[主环境验证](../../artifacts/v1/dynamic-env-validation_20260912/plan/20260912_environment_validation.md)。
