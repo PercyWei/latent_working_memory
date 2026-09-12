@@ -75,7 +75,11 @@ def main():
         )
         if world > 1:
             dist.all_reduce(resources, op=dist.ReduceOp.MAX)
-        result.update(case=label, gradient_checkpointing=False)
+        result.update(
+            case=label,
+            gradient_checkpointing=recipe.gradient_checkpointing,
+            layer_checkpointing=False,
+        )
         result["seconds"], result["peak_allocated_bytes"], result["peak_reserved_bytes"] = (
             resources.tolist()
         )
