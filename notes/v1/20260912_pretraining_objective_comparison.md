@@ -73,7 +73,7 @@ SwanLab project 为 `latent-working-memory-v1`，group 为 `pretrain-objective-c
 调度入口如下；前一训练完成后进行该组两来源并行 test，三组均完成后自动发布评估与跨组比较，生成 `plan/results.md` 并追加到本文。最终评估额外提供 1／8／32 个真实前缀 tokens，只计分剩余后缀；诊断逐条记录单独保存为 `test-step-020000-prefix.jsonl`，不混入正式自由重建指标。
 
 ```bash
-CUDA_VISIBLE_DEVICES=4,5 OMP_NUM_THREADS=1 TOKENIZERS_PARALLELISM=false \
+LWM_ALLOWED_PHYSICAL_GPUS=4,5 CUDA_VISIBLE_DEVICES=4,5 OMP_NUM_THREADS=1 TOKENIZERS_PARALLELISM=false \
   .venv/bin/python -m latent_working_memory.data_preparation.pretrain_objective_series \
   --spec configs/experiments/pretrain-objective-comparison-128.json \
   --output-dir artifacts/v1/pretrain-objective-comparison-128_20260912

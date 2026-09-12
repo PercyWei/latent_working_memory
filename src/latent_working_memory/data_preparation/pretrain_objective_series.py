@@ -39,7 +39,7 @@ def run_series(spec, output):
         temporary.replace(plan / "status.json")
 
     def execute(name, argv, devices):
-        env = os.environ | {"CUDA_VISIBLE_DEVICES": ",".join(map(str, devices)),
+        env = os.environ | {"LWM_ALLOWED_PHYSICAL_GPUS": "4,5", "CUDA_VISIBLE_DEVICES": ",".join(map(str, devices)),
                             "OMP_NUM_THREADS": "1", "TOKENIZERS_PARALLELISM": "false"}
         with (plan / f"{name}.log").open("a") as handle:
             handle.write(f"\n{now()}\n")
