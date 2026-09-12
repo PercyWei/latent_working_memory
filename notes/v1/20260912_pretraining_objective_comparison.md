@@ -1,7 +1,7 @@
 # 20260912_短文本预训练目标对比实验
 
 创建时间：20260912 23:38:14 UTC+08:00
-最后修订时间：20260913 00:02:23 UTC+08:00
+最后修订时间：20260913 00:07:17 UTC+08:00
 
 本实验比较 AE-only、从开始联合 AE/LM、AE warm-up 后联合训练。目标是在短文本、低压缩率条件下判断读写结构能否建立忠实重建，以及 LM 目标对这一能力的影响。实验沿用[预训练数据类型对比](20260911_pretraining_data_comparison.md)的产物与报告布局。本轮用户明确指定仅使用物理 GPU 4、5。
 
@@ -86,3 +86,11 @@ GitHub 首次同步成功；后续服务器连接 GitHub 出现 TLS 错误，按
 20260913 00:01:20 UTC+08:00：正式调度启动，初始代码提交 `ae6248f`，调度 PID 为 `960164`。A（AE-only，16k 可用 AE 样本）与 B（joint，32k 样本）并发双卡运行；C 等待 A 完成后从 A 的 step 5,000 派生。各命令同时显式设置 `CUDA_VISIBLE_DEVICES=4,5` 和 `LWM_ALLOWED_PHYSICAL_GPUS=4,5`。系列目录及 run 名称的 `20260912` 保留创建日期，实际执行跨入 20260913。
 
 运行状态和失败原因保存在 `plan/status.json`，完整命令在 `plan/commands.json`，训练 stdout 分别为 `plan/{ae-only,joint,ae-warmup}-train.log`。调度器独立于 SSH 会话运行；训练后自动执行独立 test、前缀诊断和 SwanLab 比较发布，并追加最终结果。当前正式实验尚未完成。
+
+20260913 00:07:17 UTC+08:00：A、B 的 step 0 dev 评估完成，均已完成超过 60 次正式 optimizer 更新。A 每步 AE=8，B 每步 AE=4／LM=4；正式并发步耗时约 0.62 秒，损失与梯度有限。通过进程 PID 与 GPU UUID 的对应关系确认四个训练进程仅占用物理 GPU 4、5。
+
+| 训练组 | 当前运行 |
+|---|---|
+| AE-only | [SwanLab](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/p6wovabv) |
+| 直接联合 | [SwanLab](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/2pkz4uim) |
+| AE warm-up | 等待 A 完成后自动创建；前 5,000 步引用 A |
