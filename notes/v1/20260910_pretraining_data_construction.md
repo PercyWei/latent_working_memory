@@ -1,7 +1,7 @@
 # 20260910_预训练数据构建策略与实现
 
 创建时间：20260910 15:44:35 UTC+08:00
-最后修订时间：20260912 17:28:08 UTC+08:00
+最后修订时间：20260912 22:16:47 UTC+08:00
 
 ## 1. 数据来源
 
@@ -99,7 +99,7 @@ python -m latent_working_memory.data_preparation \
 
 输出按数据集名称组织为 `<输出目录>/<数据集名称>/`。来源数据集保存 `dev.jsonl`、`test.jsonl`；配置中的训练数据集保存 `train.jsonl`。同名来源与训练数据集合并到一个目录，并使用同一份 `preparation.json` 记录全部划分的数量、数据身份、来源和契约；同名训练数据集的配比须为该来源的 100%。混合训练集保存训练划分，评估显式引用各来源数据集。
 
-根目录的 `selection.json` 记录选择配置、各任务／长度档配额、筛选统计，以及训练目录和评估目录映射。当前实验使用 `data/v1/fineweb-2048-157k_20260910/`，具体布局、配置与复现命令见 [预训练数据类型对比实验](20260911_pretraining_data_comparison.md)。
+根目录的 `selection.json` 记录选择配置、各任务／长度档配额、筛选统计，以及训练目录和评估目录映射。当前实验使用 `data/v1/fineweb-2048-164k_20260910/`，具体布局、配置与复现命令见 [预训练数据类型对比实验](20260911_pretraining_data_comparison.md)。
 
 ## 6. 运行记录
 
@@ -117,7 +117,9 @@ semantic/random × AE/LM 四种组合的目标与实际数量一致：
 服务器项目目录为 `/data/bywei/projects/latent_working_memory`，以下路径相对此目录：
 
 - 运行目录：`artifacts/v1/data-preparation/rule-independent-409k-20260910/`，保存实际配置 `config.json`、`recipe.json`、运行元数据及日志。
-- 数据目录：`data/v1/fineweb-rule-independent-409k-20260910/`，保存 semantic/random 样本、各版本的 `audit.json`、`preparation.json` 及联合检查报告 `comparison.json`。
+- 数据目录：`data/v1/fineweb-4096-204k_20260910/`，保存 semantic/random 样本、各版本的 `audit.json`、`preparation.json` 及联合检查报告 `comparison.json`。
+
+目录名中的 4096 表示 X/Y 各自的 token 长度上限；204k 表示 semantic 或 random 单类数据集的完整规模 204,400 条（train 196,000 + dev 4,200 + test 4,200），两类合计 408,800 条。数据集目录规模按 train/dev/test 合计，训练 run 名称中的规模仍按实际训练集样本数。
 
 ### 结果
 

@@ -1,7 +1,7 @@
 # 20260911_预训练数据类型对比实验
 
 创建时间：20260911 16:27:19 UTC+08:00
-最后修订时间：20260912 17:33:36 UTC+08:00
+最后修订时间：20260912 22:16:47 UTC+08:00
 
 本文记录预训练数据类型对比的具体配置、运行与结果。阶段目标、记忆写入与读取、损失和评估方法见 [预训练与 AE/LM 评估](20260910_pretraining_and_evaluation.md)。
 
@@ -19,7 +19,7 @@
 
 ### 1.2 数据配额与长度课程
 
-数据位于 `data/v1/fineweb-2048-157k_20260910/`。AE 输入 X、LM 输入 X 与目标 Y 均为 32–2048 tokens；按 X 长度分为六档，各档 AE/LM 数量相等。
+数据位于 `data/v1/fineweb-2048-164k_20260910/`。AE 输入 X、LM 输入 X 与目标 Y 均为 32–2048 tokens；按 X 长度分为六档，各档 AE/LM 数量相等。
 
 | 数据划分 | 每组／每套总数 | 每长度档、每任务样本数 | 来源安排 |
 |---|---:|---:|---|
@@ -44,10 +44,10 @@
 
 ### 1.3 数据目录与复现
 
-目录名 `fineweb-2048-157k_20260910` 表示 FineWeb、X/Y 上限 2048 tokens、每类训练集约 157k 条及创建日期。精确数量写入各数据集的 `preparation.json`。
+目录名 `fineweb-2048-164k_20260910` 表示 FineWeb、X/Y 上限 2048 tokens、semantic/random 单类数据集共 163,896 条（train 157,320 + dev 3,468 + test 3,108）及创建日期。164k 是完整划分的合计规模；mixed 仅保存 157,320 条训练样本，评估共用两套来源数据。精确数量写入各数据集的 `preparation.json`。
 
 ```text
-fineweb-2048-157k_20260910/
+fineweb-2048-164k_20260910/
 ├── semantic/
 │   ├── train.jsonl
 │   ├── dev.jsonl
@@ -73,7 +73,7 @@ PYTHONPATH=src artifacts/v1/pretrain-code-20260908/.venv/bin/python \
   -m latent_working_memory.data_preparation.experiment \
   --spec configs/data_preparation/boundary_comparison.json \
   --config configs/v1/pretrain_boundary_comparison_dual_a800.json \
-  --output-dir data/v1/fineweb-2048-157k_20260910
+  --output-dir data/v1/fineweb-2048-164k_20260910
 ```
 
 重新构造使用尚未存在的输出目录，并保留相同来源文件、选择 seed 和训练配置。样本筛选与顺序可重复生成；每次独立准备产生新的数据身份。
