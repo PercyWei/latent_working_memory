@@ -1,0 +1,17 @@
+{
+  "capacity": 1024,
+  "min_tokens": 4096,
+  "max_tokens": 8192,
+  "new_count": 1,
+  "history_count": 1,
+  "max_visits": 2,
+  "bptt_unit": "tokens",
+  "bptt_span": 1024,
+  "gradient_accumulation_steps": 2,
+  "learning_rate": 3e-05,
+  "weight_decay": 0.01,
+  "gradient_clip": 1.0,
+  "generation_tokens": 64,
+  "seed": 42,
+  "gradient_checkpointing": false
+}

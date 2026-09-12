@@ -136,9 +136,14 @@ class DynamicTrainer:
             self.parameters, lr=recipe.learning_rate, weight_decay=recipe.weight_decay
         )
 
-    def step(self, episodes, tokenizer, seeds):
-        batch_size = self.recipe.gradient_accumulation_steps
-        if len(episodes) != batch_size or len(seeds) != batch_size:
+    def step(self, episodes, tokenizer, seeds, allow_partial=False):
+        batch_size = len(episodes)
+        expected = self.recipe.gradient_accumulation_steps
+        if (
+            len(seeds) != batch_size
+            or not 1 <= batch_size <= expected
+            or (batch_size != expected and not allow_partial)
+        ):
             raise ValueError(
                 "one optimizer step requires gradient_accumulation_steps articles and seeds"
             )
@@ -148,7 +153,7 @@ class DynamicTrainer:
         world_size = dist.get_world_size() if dist.is_initialized() else 1
         rank = dist.get_rank() if dist.is_initialized() else 0
         articles = [
-            self._backward_episode(episodes[i], tokenizer, seeds[i])
+            self._backward_episode(episodes[i], tokenizer, seeds[i], batch_size)
             for i in range(rank, batch_size, world_size)
         ]
         if world_size > 1:
@@ -174,7 +179,7 @@ class DynamicTrainer:
             "gradient_norm": float(grad_norm),
         }
 
-    def _backward_episode(self, episode, tokenizer, seed):
+    def _backward_episode(self, episode, tokenizer, seed, batch_size):
         schedule = read_schedule(episode, tokenizer, self.recipe, self.model_config, seed)
         count = sum(len(jobs) for jobs in schedule.values())
         state = None
@@ -197,9 +202,7 @@ class DynamicTrainer:
                     state = self.writer(state, features)
                 for _, tokens in schedule[end]:
                     output = self.backbone.read_batch([state.values], [tokens])[0]
-                    pending.append(
-                        output.mean_nll / count / self.recipe.gradient_accumulation_steps
-                    )
+                    pending.append(output.mean_nll / count / batch_size)
                     loss_value += float(output.mean_nll.detach()) / count
                     token_nll += float(output.token_nll.detach().sum())
                     target_tokens += output.target_length
@@ -456,6 +459,7 @@ def run_dynamic(
     resume=False,
     swanlab_mode="disabled",
     swanlab_group=None,
+    epochs=None,
 ):
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     rank = dist.get_rank() if dist.is_initialized() else 0
@@ -495,6 +499,19 @@ def run_dynamic(
         raise ValueError("SQuAD tokenizer differs from checkpoint tokenizer")
     trainer = DynamicTrainer(backbone, writer, checkpoint.config, recipe, device)
     next_step = checkpoint.progress["next_step"] if resume else 0
+    articles_seen = checkpoint.progress["articles_seen"] if resume else 0
+    if epochs is not None:
+        if type(epochs) is not int or epochs <= 0:
+            raise ValueError("epochs must be a positive integer")
+        total_articles = epochs * len(docs)
+        remaining = total_articles - articles_seen
+        steps = (
+            next_step
+            + (remaining + recipe.gradient_accumulation_steps - 1)
+            // recipe.gradient_accumulation_steps
+        )
+    else:
+        total_articles = articles_seen + (steps - next_step) * recipe.gradient_accumulation_steps
     if steps <= next_step:
         raise ValueError("steps must exceed completed steps")
     if resume:
@@ -513,6 +530,9 @@ def run_dynamic(
                     "train_articles": len(docs),
                     "eval_documents": dev_docs,
                     "nll_includes_eos": True,
+                    "target_articles": total_articles,
+                    "target_epochs": epochs,
+                    "target_steps": steps,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -526,6 +546,9 @@ def run_dynamic(
             output_dir,
             asdict(recipe)
             | {
+                "target_epochs": epochs,
+                "target_steps": steps,
+                "target_articles": total_articles,
                 "world_size": world_size,
                 "train_articles": len(docs),
                 "article_sampling": "shuffled_epochs",
@@ -550,13 +573,11 @@ def run_dynamic(
                 (output_dir / "dev-000000.jsonl").write_text(
                     "".join(json.dumps(r) + "\n" for r in rows)
                 )
-        article_stream = shuffled_articles(
-            docs, recipe.seed, next_step * recipe.gradient_accumulation_steps
-        )
+        article_stream = shuffled_articles(docs, recipe.seed, articles_seen)
         for step in range(next_step, steps):
             article_indices = range(
-                step * recipe.gradient_accumulation_steps,
-                (step + 1) * recipe.gradient_accumulation_steps,
+                articles_seen,
+                min(articles_seen + recipe.gradient_accumulation_steps, total_articles),
             )
             episodes = [data.episode(next(article_stream)) for _ in article_indices]
             if device.type == "cuda":
@@ -564,7 +585,10 @@ def run_dynamic(
                 torch.cuda.reset_peak_memory_stats(device)
             begin = time.perf_counter()
             result = trainer.step(
-                episodes, tokenizer, [f"{recipe.seed}:read:{i}" for i in article_indices]
+                episodes,
+                tokenizer,
+                [f"{recipe.seed}:read:{i}" for i in article_indices],
+                allow_partial=True,
             )
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
@@ -581,7 +605,8 @@ def run_dynamic(
             result["seconds"], peak_memory = resources.tolist()
             result["peak_memory_bytes"] = int(peak_memory)
             result["input_tokens_per_second"] = result["input_tokens"] / result["seconds"]
-            result["articles_seen"] = (step + 1) * recipe.gradient_accumulation_steps
+            articles_seen += len(episodes)
+            result["articles_seen"] = articles_seen
             result["epochs_completed"], result["articles_into_epoch"] = divmod(
                 result["articles_seen"], len(docs)
             )
@@ -633,6 +658,7 @@ def run_dynamic(
                         trainer.optimizer.state_dict(),
                         {
                             "next_step": step + 1,
+                            "articles_seen": articles_seen,
                             "identity": identity,
                             "initial_checkpoint": origin,
                             "rank_rng_states": rank_rng_states,
@@ -653,6 +679,9 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--steps", type=int, default=100)
+    parser.add_argument(
+        "--epochs", type=int, help="Train exactly this many epochs; overrides --steps"
+    )
     parser.add_argument("--save-every", type=int, default=100)
     parser.add_argument("--eval-every", type=int, default=100)
     parser.add_argument("--eval-articles", type=int, default=8)
@@ -688,6 +717,7 @@ def main():
             args.resume,
             args.swanlab_mode,
             args.swanlab_group,
+            args.epochs,
         )
     else:
         if args.resume or args.output_dir.exists() or args.eval_articles < 2:
