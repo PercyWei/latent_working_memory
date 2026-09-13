@@ -1,7 +1,7 @@
 # 20260912_短文本预训练目标对比实验
 
 创建时间：20260912 23:38:14 UTC+08:00
-最后修订时间：20260913 14:33:13 UTC+08:00
+最后修订时间：20260913 18:56:10 UTC+08:00
 
 本实验比较 AE-only、从开始联合 AE/LM、AE warm-up 后联合训练。目标是在短文本、低压缩率条件下判断读写结构能否建立忠实重建，以及 LM 目标对这一能力的影响。实验沿用[预训练数据类型对比](20260911_pretraining_data_comparison.md)的产物与报告布局。本轮用户明确指定仅使用物理 GPU 4、5。
 
@@ -92,7 +92,7 @@ GitHub 首次同步成功；后续服务器连接 GitHub 出现 TLS 错误，按
 | 训练组 | 当前运行 |
 |---|---|
 | AE-only | [SwanLab](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/ej11zqrt) |
-| 直接联合 | [SwanLab](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/7cxvhc3a) |
+| 直接联合 | [SwanLab](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/ys3xqui7) |
 | AE warm-up | 等待 A 完成后自动创建；前 5,000 步引用 A |
 
 完成时间：20260913 09:16:53 UTC+08:00
@@ -111,8 +111,8 @@ GitHub 首次同步成功；后续服务器连接 GitHub 出现 TLS 错误，按
 | 训练组 | 训练 | 评估 |
 |---|---|---|
 | ae-only | [训练](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/ej11zqrt) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/y4qrfh4w) |
-| joint | [训练](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/7cxvhc3a) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/28xxvtjk) |
-| ae-warmup | [训练](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/ie55bu45) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/xyb659i7) |
+| joint | [训练](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/ys3xqui7) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/28xxvtjk) |
+| ae-warmup | [训练](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/i6ilbppk) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/xyb659i7) |
 
 跨组比较：[SwanLab](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/6ih300w5)。
 
@@ -216,3 +216,21 @@ A 在首个数据点上传前经云端检查，只有 6 张 dev 原生图、Hidd
 原生 dev 曲线按条件分配色系：memory 为蓝色、wrong_memory 为橙色、no_memory 为灰色、full_context 为绿色、base_full_context 为紫色。同一条件中 semantic 使用深色、random 使用浅色；即使 LM 按来源拆成两张图，来源对应的深浅也保持一致。图例按条件优先、来源次之排列，使 semantic/memory 与 random/memory 相邻，随后是 wrong_memory 的两条曲线。颜色和简短标签直接写入原生面板的序列样式，后续新建 run 自动沿用。
 
 用户要求重新上传 A，检查发现 `xhnc9qbf` 已被删除，因此重建为 `ej11zqrt`。仅更新 A，B/C 仍等待确认。6 张 dev 原生图的颜色与图例顺序均已回读验证；训练相关 140,001 个标量点、666 个 dev 标量点、最终 test 图表和样例核对通过。dev/evaluation 均为 10 个面板，Hidden 为 0。相关测试本地及服务器各通过 7 项；上传日志和核验结果见 `plan/ae-only-color-reupload.log`、`plan/ae-only-color-verification.json`。
+
+
+## 11. A 验收后发布 B、C 与展示规则
+
+用户确认 A 的训练、dev 和最终 test 展示后，按同一记录逻辑重建已删除的 B、C。A 保持 `ej11zqrt`；B 从 `7cxvhc3a` 重建为 `ys3xqui7`，C 从 `ie55bu45` 重建为 `i6ilbppk`。本次仅上传已有产物，没有重新训练或推理。
+
+B 回放 20,000 步及 21 次 dev；C 回放自身第 5,001–20,000 步及 15 次 dev。云端分别核对 160,001／120,000 个训练相关标量点、666／462 个 dev 标量点，配置、原生曲线配色与图例顺序、最终 test 核心图及生成样例均与原始产物一致。两组 dev/evaluation 各 10 个面板，Hidden 为 0，无额外单序列分区。
+
+当前链接已更新，新旧身份及评估发布凭据在训练目录归档；上传日志为 `plan/{joint,ae-warmup}-color-reupload.log`，核验结果为 `plan/{joint,ae-warmup}-color-verification.json`，三组完成状态见 `plan/direct-panel-review.json`。展示约定同时保存于本地和服务器的 `AGENTS.md`：
+
+- 同一实验的训练、训练中验证和最终测试默认展示在同一个 run 中，按 `train/*`、`dev/*`、`evaluation/*` 分区。评估追加到对应训练 run，保留原训练配置和身份；跨实验比较按需使用独立 compare run。展示分区与组织 runs 的 `group` 是不同概念。
+- 同一设置在不同数据来源或评估环境下使用同色系的不同深浅，不同设置使用不同色系。同色系图例相邻排列；设置、来源与颜色的对应关系在不同面板和可比 runs 之间保持一致。当前对照图按条件分配色系，semantic 用深色、random 用浅色，图例按条件优先、来源次之排列。
+- `train` 和 `dev` 使用原生增量曲线：初始化时配置面板，运行中只追加当前 optimizer step 的指标数据，不在每步上传累计曲线图片或图表快照。横轴使用真实 optimizer step；未执行的评估指标不补零，不提前写入后续结果。
+- `evaluation` 默认仅评估最后一个 checkpoint，每个核心指标上传一张合并各来源和条件的汇总图。确需比较多个 checkpoint 的变化时，采用与 `train`、`dev` 相同的原生增量曲线，并使用实际 checkpoint step。统计表和生成样例可按检查点保留快照，步数选择器仅用于这类确有多个版本的内容。
+- 同一指标的可比序列尽量合并，不同量纲不强行共用坐标轴。超出平台单图序列上限时按明确语义拆分，并保持配色一致。核心看板保留主要指标；样本计数、分层统计和辅助诊断汇入表格，同一输入的各条件生成结果合并展示。
+- 无用面板应从指标注册和记录路径上避免生成，不以隐藏代替精简，也不依赖先生成再清理。已有冗余面板需要迁移时删除面板并保留底层指标；完整统计和逐样本结果保存在本地 JSON/JSONL。
+- 事后重传与正式训练共用配置构造和记录函数，保证相同原始记录得到相同指标、步数、配色、图例和布局。重传后核对云端数据与本地产物，保存新旧 run 身份及发布记录；原训练耗时以原始日志为准。
+
