@@ -17,6 +17,7 @@ from latent_working_memory.data_preparation.pipeline import (
     prepare_sources,
     prepare_variant,
 )
+from latent_working_memory.data_preparation.sources import load_sources
 from latent_working_memory.data_preparation.quality import document_rejection_reason
 from latent_working_memory.v1.prepared_data import pretraining_index
 from latent_working_memory.data_preparation.text_samples import TextSample
@@ -24,6 +25,7 @@ from latent_working_memory.v1.sampling import PretrainSampler
 
 
 def test_independent_variants_balance_tasks_and_intervals(
+    parquet_source,
     monkeypatch,
     tmp_path,
     tiny_config,
@@ -38,7 +40,7 @@ def test_independent_variants_balance_tasks_and_intervals(
         "latent_working_memory.data_preparation.audit.audit_preparation", repeated_audit
     )
     result = prepare_fineweb(
-        preparation_records,
+        parquet_source(preparation_records),
         tokenizer,
         tiny_config,
         tmp_path / "data",
@@ -96,6 +98,7 @@ def test_independent_variants_balance_tasks_and_intervals(
 
 
 def test_source_pool_budget_and_near_duplicates_are_shared(
+    parquet_source,
     tmp_path,
     tiny_config,
     preparation_records,
@@ -110,21 +113,16 @@ def test_source_pool_budget_and_near_duplicates_are_shared(
     ]
     recipe = replace(preparation_recipe, max_documents=3, near_duplicate_min_words=64)
     assert len(set(cluster_documents(records, recipe))) == 1
-    consumed = []
-
-    def source():
-        for row in records + preparation_records:
-            consumed.append(row)
-            yield row
-
-    prepare_sources(source(), tiny_config, tmp_path / "pool", recipe)
-    rows = [json.loads(line) for line in (tmp_path / "pool/sources.jsonl").read_text().splitlines()]
-    assert len(consumed) == 3
+    prepare_sources(parquet_source(records + records), tiny_config, tmp_path / "pool", recipe)
+    rows = load_sources(tmp_path / "pool/source-pool.json")
+    assert not (tmp_path / "pool/sources.jsonl").exists()
+    assert len(rows) == 3
     assert len({r["split"] for r in rows}) == 1
     assert [r["status"] for r in rows].count("eligible") == 1
 
 
 def test_failed_random_stage_preserves_completed_semantic(
+    parquet_source,
     monkeypatch,
     tmp_path,
     tiny_config,
@@ -133,7 +131,7 @@ def test_failed_random_stage_preserves_completed_semantic(
     preparation_recipe,
 ):
     root = tmp_path / "data"
-    prepare_sources(preparation_records, tiny_config, root, preparation_recipe)
+    prepare_sources(parquet_source(preparation_records), tiny_config, root, preparation_recipe)
     prepare_variant(root, "semantic", tokenizer, tiny_config, preparation_recipe)
     before = (root / "semantic/preparation.json").read_bytes()
     monkeypatch.setattr(
@@ -148,6 +146,7 @@ def test_failed_random_stage_preserves_completed_semantic(
 
 
 def test_shared_registry_detects_cross_variant_split_leakage(
+    parquet_source,
     tmp_path,
     tiny_config,
     tokenizer,
@@ -155,7 +154,7 @@ def test_shared_registry_detects_cross_variant_split_leakage(
     preparation_recipe,
 ):
     root = tmp_path / "data"
-    prepare_fineweb(preparation_records, tokenizer, tiny_config, root, preparation_recipe)
+    prepare_fineweb(parquet_source(preparation_records), tokenizer, tiny_config, root, preparation_recipe)
     path = root / "random/train.jsonl"
     lines = path.read_text().splitlines()
     with (root / "random/test.jsonl").open("a") as out:
@@ -166,6 +165,7 @@ def test_shared_registry_detects_cross_variant_split_leakage(
 
 
 def test_source_text_audit_detects_offset_corruption(
+    parquet_source,
     tmp_path,
     tiny_config,
     tokenizer,
@@ -173,7 +173,7 @@ def test_source_text_audit_detects_offset_corruption(
     preparation_recipe,
 ):
     root = tmp_path / "data"
-    prepare_fineweb(preparation_records, tokenizer, tiny_config, root, preparation_recipe)
+    prepare_fineweb(parquet_source(preparation_records), tokenizer, tiny_config, root, preparation_recipe)
     path = root / "random/train.jsonl"
     lines = path.read_text().splitlines()
     first = json.loads(lines[0])
@@ -195,6 +195,7 @@ def test_only_explicit_properties_filter_sources(
 
 
 def test_independent_inspection_is_repeatable_and_does_not_mutate_data(
+    parquet_source,
     tmp_path,
     tiny_config,
     tokenizer,
@@ -202,7 +203,7 @@ def test_independent_inspection_is_repeatable_and_does_not_mutate_data(
     preparation_recipe,
 ):
     root = tmp_path / "data"
-    prepare_fineweb(preparation_records, tokenizer, tiny_config, root, preparation_recipe)
+    prepare_fineweb(parquet_source(preparation_records), tokenizer, tiny_config, root, preparation_recipe)
     for variant in ("semantic",):
         leaf = root / variant
         before = {p.name: p.read_bytes() for p in leaf.iterdir()}
@@ -229,6 +230,7 @@ def test_independent_inspection_is_repeatable_and_does_not_mutate_data(
 
 
 def test_failed_cross_variant_comparison_has_no_random_completion_record(
+    parquet_source,
     tmp_path,
     tiny_config,
     tokenizer,
@@ -237,7 +239,7 @@ def test_failed_cross_variant_comparison_has_no_random_completion_record(
     monkeypatch,
 ):
     root = tmp_path / "data"
-    prepare_sources(preparation_records, tiny_config, root, preparation_recipe)
+    prepare_sources(parquet_source(preparation_records), tiny_config, root, preparation_recipe)
     prepare_variant(root, "semantic", tokenizer, tiny_config, preparation_recipe)
 
     def failed_comparison(*args):
@@ -253,6 +255,7 @@ def test_failed_cross_variant_comparison_has_no_random_completion_record(
 
 
 def test_existing_source_pool_rejects_a_changed_split_definition(
+    parquet_source,
     tmp_path,
     tiny_config,
     tokenizer,
@@ -260,7 +263,7 @@ def test_existing_source_pool_rejects_a_changed_split_definition(
     preparation_recipe,
 ):
     root = tmp_path / "data"
-    prepare_sources(preparation_records, tiny_config, root, preparation_recipe)
+    prepare_sources(parquet_source(preparation_records), tiny_config, root, preparation_recipe)
     with pytest.raises(ValueError, match="source pool configuration differs"):
         prepare_variant(
             root,
@@ -274,10 +277,11 @@ def test_existing_source_pool_rejects_a_changed_split_definition(
 
 @pytest.mark.parametrize("count_type", ["task", "length_interval"])
 def test_comparison_rejects_inconsistent_audited_counts(
+    parquet_source,
     tmp_path, tiny_config, tokenizer, preparation_records, preparation_recipe, count_type
 ):
     root = tmp_path / "data"
-    result = prepare_fineweb(preparation_records, tokenizer, tiny_config, root, preparation_recipe)
+    result = prepare_fineweb(parquet_source(preparation_records), tokenizer, tiny_config, root, preparation_recipe)
     if count_type == "task":
         result["random"]["statistics"]["train/ae"] += 1
     else:

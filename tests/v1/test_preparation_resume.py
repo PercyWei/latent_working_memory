@@ -11,11 +11,12 @@ from latent_working_memory.data_preparation.pipeline import (
 
 
 def test_resume_rolls_back_uncommitted_tail_and_matches_uninterrupted(
+    parquet_source,
     tmp_path, tiny_config, tokenizer, preparation_records, preparation_recipe, monkeypatch
 ):
     recipe = replace(preparation_recipe, candidate_window_documents=1)
     root = tmp_path / "resume"
-    prepare_sources(preparation_records, tiny_config, root, recipe)
+    prepare_sources(parquet_source(preparation_records), tiny_config, root, recipe)
     original = VariantBuilder.consider
     calls = 0
 
@@ -36,7 +37,7 @@ def test_resume_rolls_back_uncommitted_tail_and_matches_uninterrupted(
     monkeypatch.setattr(VariantBuilder, "consider", original)
     result = prepare_variant(root, "semantic", tokenizer, tiny_config, recipe, resume=True)
     baseline = tmp_path / "baseline"
-    prepare_sources(preparation_records, tiny_config, baseline, recipe)
+    prepare_sources(parquet_source(preparation_records), tiny_config, baseline, recipe)
     expected = prepare_variant(baseline, "semantic", tokenizer, tiny_config, recipe)
     assert result["statistics"] == expected["statistics"]
     for name in ("train", "dev", "test"):
@@ -46,10 +47,11 @@ def test_resume_rolls_back_uncommitted_tail_and_matches_uninterrupted(
 
 
 def test_resume_rejects_recipe_change_without_touching_output(
+    parquet_source,
     tmp_path, tiny_config, tokenizer, preparation_records, preparation_recipe, monkeypatch
 ):
     root = tmp_path / "data"
-    prepare_sources(preparation_records, tiny_config, root, preparation_recipe)
+    prepare_sources(parquet_source(preparation_records), tiny_config, root, preparation_recipe)
 
     def interrupt(*args):
         raise RuntimeError("stop")

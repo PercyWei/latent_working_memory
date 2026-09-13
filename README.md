@@ -17,7 +17,7 @@ uv run pytest
 
 第一版新方法直接位于 `src/latent_working_memory/v1/`；未来版本使用同级目录，不增加额外的方法族目录。配置位于 `configs/v1/`，测试位于 `tests/v1/`，数据与运行产物分别使用 Git-ignored 的 `data/v1/` 和 `artifacts/v1/`。实验产物按系列组织为 `artifacts/v1/<实验系列>/`，其中 `train/` 保存训练及 checkpoint，`eval/` 保存独立评估，`compare/` 保存跨运行比较，`plan/` 保存调度与清单。当前预训练数据类型对比系列位于 `artifacts/v1/pretrain-data-comparison-2048_20260911/`，完整记录及路径见 [预训练数据类型对比实验](notes/v1/20260911_pretraining_data_comparison.md)。数据准备与工程验证产物仍分别位于 `artifacts/v1/data-preparation/` 和 `artifacts/v1/validation/`。
 
-FineWeb 基础语料的 `semantic/`、`random/` 各只保存 `train.jsonl`、`dev.jsonl`、`test.jsonl` 和 `preparation.json`。样本保存原始 X、LM 后续 Y、来源与字符跨度，以及构造 tokenizer 的参考长度；AE 不重复保存目标，不落盘 token IDs、训练提示词或读写位置。共享原文及来源划分位于父目录的 `sources.jsonl`、`source-pool.json`。
+FineWeb 基础语料的 `semantic/`、`random/` 各只保存 `train.jsonl`、`dev.jsonl`、`test.jsonl` 和 `preparation.json`。样本保存原始 X、LM 后续 Y、来源与字符跨度，以及构造 tokenizer 的参考长度；AE 不重复保存目标，不落盘 token IDs、训练提示词或读写位置。父目录的 `source-pool.json` 只记录原始 Parquet 文件路径、随机种子、构造规则和统计，不保存来源正文副本。构造、恢复构造及原文边界检查按该记录重新读取原始文件，在内存中重建候选来源与划分；训练和评估不需要原始文件。迁移原始文件位置后需相应更新 `source_files` 路径。
 
 训练和评估可直接读取基础目录：同 tokenizer 复用参考长度筛选，不同 tokenizer 重新分词计算长度，采样时按当前提示词构造 Episode，不生成分词副本。构造未完成时用 `progress.json` 和临时接收记录支持恢复，完成后自动清理。已有独立构造实验仍可读取原 Episode 数据。仅筛选与混合时使用 `--data-selection <配置> --data-run <训练集名>`，评估使用相同的 `--data-selection`；来源、seed、配额及比例由配置指定，混合仅组合内存索引。`balance_task_lengths` 决定是否均衡任务与长度档，`samples_per_split` 指定各划分数量，非均衡模式可用 null 表示全部取用（混合训练须指定数量以保证比例）。run 中的 `data-selection.json` 保存可直接复用的选择配置，实际数量与来源身份保存在 provenance 中，不生成样本清单或 token 副本。
 

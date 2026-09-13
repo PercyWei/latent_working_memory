@@ -107,6 +107,7 @@ def test_generated_corpus_bleu_and_paired_token_weighted_comparisons():
 
 
 def test_evaluation_controls_share_targets_budgets_and_write_test_split(
+    parquet_source,
     tmp_path,
     tiny_config,
     tokenizer,
@@ -121,7 +122,7 @@ def test_evaluation_controls_share_targets_budgets_and_write_test_split(
     )
     data = tmp_path / "data"
     prepare_fineweb(
-        preparation_records,
+        parquet_source(preparation_records),
         tokenizer,
         tiny_config,
         data,

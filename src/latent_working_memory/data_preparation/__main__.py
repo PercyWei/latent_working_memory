@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from typing import Sequence
@@ -11,7 +10,6 @@ from transformers import AutoTokenizer
 
 from latent_working_memory.data_preparation.pipeline import prepare_sources, prepare_variant
 from latent_working_memory.data_preparation.config import ConstructionConfig
-from latent_working_memory.data_preparation.sources import parquet_records
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -38,8 +36,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         files = sorted((args.dataset_dir / config.pretrain_subset).glob("*.parquet"))
         if not files:
             parser.error("no local Parquet files found")
-        with closing(parquet_records(files, config.data_seed)) as records:
-            report["sources"] = prepare_sources(records, config, args.output_dir, recipe)
+        report["sources"] = prepare_sources(files, config, args.output_dir, recipe)
     if args.stage != "sources":
         tokenizer = AutoTokenizer.from_pretrained(
             config.model_name_or_path, revision=config.model_revision, local_files_only=True

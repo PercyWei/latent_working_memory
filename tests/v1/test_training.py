@@ -17,6 +17,7 @@ from latent_working_memory.v1.training import PretrainTrainer, pretrain_forward,
 
 
 def test_joint_objective_uses_one_write_and_updates_all_four_modules(
+    parquet_source,
     tmp_path,
     tiny_config,
     tokenizer,
@@ -27,7 +28,7 @@ def test_joint_objective_uses_one_write_and_updates_all_four_modules(
 ):
     data = tmp_path / "data"
     prepare_fineweb(
-        preparation_records,
+        parquet_source(preparation_records),
         tokenizer,
         tiny_config,
         data,
@@ -77,6 +78,7 @@ def _assert_equal_nested(first, second):
 
 
 def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
+    parquet_source,
     tmp_path,
     tiny_config,
     tokenizer,
@@ -119,7 +121,7 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
     )
     data = tmp_path / "data"
     prepare_fineweb(
-        preparation_records,
+        parquet_source(preparation_records),
         tokenizer,
         config,
         data,

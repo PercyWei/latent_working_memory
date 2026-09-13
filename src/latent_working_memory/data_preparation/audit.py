@@ -8,6 +8,7 @@ from typing import Any
 
 from transformers import PreTrainedTokenizerBase
 
+from latent_working_memory.data_preparation.sources import load_sources
 from latent_working_memory.data_preparation.text_samples import TextSample
 from latent_working_memory.data_preparation.dedup import source_key
 from latent_working_memory.data_preparation.config import DataConfig, PreparationConfig
@@ -38,13 +39,11 @@ def audit_preparation(
     config: DataConfig,
     preparation: PreparationConfig,
     root: Path,
+    sources: list[dict] | None = None,
 ) -> dict[str, Any]:
-    registry = {}
-    with (root / "sources.jsonl").open() as handle:
-        for line in handle:
-            row = json.loads(line)
-            if row["status"] == "eligible":
-                registry[row["record"]["id"]] = row
+    if sources is None:
+        sources = load_sources(root / "source-pool.json")
+    registry = {row["record"]["id"]: row for row in sources if row["status"] == "eligible"}
     boundaries = {}
     seen_ids, cluster_splits, source_splits = set(), {}, {}
     lengths, counts = defaultdict(list), Counter()

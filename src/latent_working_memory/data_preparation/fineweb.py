@@ -31,10 +31,10 @@ def data_contract(config) -> dict[str, Any]:
     return {key: raw[key] for key in DATA_CONFIG_FIELDS}
 
 
-def document_split(source_id: str, config: DataConfig) -> str:
-    digest = hashlib.blake2b(f"{config.data_seed}:{source_id}".encode(), digest_size=8).digest()
+def document_split(source_id: str, data_seed: int, split_fractions: tuple[float, ...]) -> str:
+    digest = hashlib.blake2b(f"{data_seed}:{source_id}".encode(), digest_size=8).digest()
     value = int.from_bytes(digest, "big") / 2**64
-    train, dev, _ = config.split_fractions
+    train, dev, _ = split_fractions
     return "train" if value < train else "dev" if value < train + dev else "test"
 
 

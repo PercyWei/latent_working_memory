@@ -7,6 +7,7 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 import hashlib
 import json
+
 from pathlib import Path
 import random
 import uuid
@@ -14,6 +15,7 @@ import os
 
 from transformers import AutoTokenizer
 
+from latent_working_memory.data_preparation.sources import load_sources
 from latent_working_memory.data_preparation.config import PreparationConfig
 from latent_working_memory.data_preparation.fineweb import SemanticSpans
 from latent_working_memory.data_preparation.truncation import RandomSpans
@@ -67,12 +69,7 @@ def prepare(spec, config_path, output):
         cfg.split_fractions
     ):
         raise ValueError("source split protocol differs")
-    rows = []
-    with (root / "sources.jsonl").open() as handle:
-        for line in handle:
-            row = json.loads(line)
-            if row["status"] == "eligible":
-                rows.append(row)
+    rows = [row for row in load_sources(root / "source-pool.json") if row["status"] == "eligible"]
     random.Random(spec["seed"]).shuffle(rows)
     recipe_config = PreparationConfig.from_mapping(spec["recipe"])
     bounds = recipe_config.length_bounds

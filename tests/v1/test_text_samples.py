@@ -13,10 +13,11 @@ from latent_working_memory.v1.sampling import read_tokens
 
 
 def test_text_index_reuses_lengths_and_retokenizes_other_models(
+    parquet_source,
     tmp_path, tiny_config, tokenizer, preparation_records, preparation_recipe, monkeypatch
 ):
     root = tmp_path / "data"
-    prepare_fineweb(preparation_records, tokenizer, tiny_config, root, preparation_recipe)
+    prepare_fineweb(parquet_source(preparation_records), tokenizer, tiny_config, root, preparation_recipe)
     path = root / "semantic/train.jsonl"
     before = path.read_bytes()
     calls = []
@@ -59,11 +60,12 @@ def test_text_index_reuses_lengths_and_retokenizes_other_models(
 
 @pytest.mark.parametrize("corrupt", [False, True])
 def test_migration_preserves_text_order_and_rolls_back_on_invalid_input(
+    parquet_source,
     tmp_path, tiny_config, tokenizer, preparation_records, preparation_recipe, corrupt
 ):
     root = tmp_path / "data"
     metadata = prepare_fineweb(
-        preparation_records, tokenizer, tiny_config, root, preparation_recipe
+        parquet_source(preparation_records), tokenizer, tiny_config, root, preparation_recipe
     )
     expected = {}
     for variant in ("semantic", "random"):

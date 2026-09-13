@@ -56,6 +56,7 @@ def test_warmup_configuration_requires_enabled_joint_objective(tiny_config):
 
 
 def test_fork_inherits_optimizer_and_continues_with_joint_batch(
+    parquet_source,
     tmp_path, tiny_config, tokenizer, preparation_records, preparation_recipe
 ):
     model_dir = tmp_path / 'model'
@@ -71,7 +72,7 @@ def test_fork_inherits_optimizer_and_continues_with_joint_batch(
     preparation_recipe = replace(preparation_recipe, samples_per_task=(16, 16, 16),
                                  candidates_per_document=16)
     root = tmp_path / 'data'
-    prepare_fineweb(preparation_records, tokenizer, config, root, preparation_recipe)
+    prepare_fineweb(parquet_source(preparation_records), tokenizer, config, root, preparation_recipe)
     mixed = root / 'mixed'
     mixed.mkdir()
     # Historical objective-comparison datasets remain tokenized Episode files.

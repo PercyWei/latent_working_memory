@@ -8,6 +8,7 @@ from pathlib import Path
 
 from transformers import AutoTokenizer
 
+from latent_working_memory.data_preparation.sources import load_sources
 from latent_working_memory.data_preparation.audit import compare_preparations
 from latent_working_memory.data_preparation.text_samples import TextSample, compact_metadata
 from latent_working_memory.v1.data import Episode
@@ -33,12 +34,8 @@ def migrate(root, tokenizer):
             raise ValueError(
                 f"unexpected files in {variant}; preserve and inspect before migration"
             )
-    documents = {}
-    with (root / "sources.jsonl").open() as handle:
-        for line in handle:
-            row = json.loads(line)
-            if row["status"] == "eligible":
-                documents[row["record"]["id"]] = row
+    documents = {row["record"]["id"]: row for row in load_sources(root / "source-pool.json")
+                 if row["status"] == "eligible"}
     stage = root / ".text-migration"
     stage.mkdir()
     report = {}

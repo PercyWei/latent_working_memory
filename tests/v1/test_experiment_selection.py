@@ -5,6 +5,7 @@ from latent_working_memory.v1.evaluate import main as evaluate_main
 from latent_working_memory.v1.checkpoint import load_model_checkpoint
 from dataclasses import replace
 import json
+import re
 
 import pytest
 
@@ -16,6 +17,7 @@ from latent_working_memory.v1.training import learning_rate_at
 
 @pytest.mark.parametrize("shared_names", [True, False])
 def test_selection_equal_cells_mixture_and_curriculum(
+    parquet_source,
     tmp_path, tokenizer, tiny_config, preparation_records, preparation_recipe, shared_names
 ):
     config = replace(
@@ -30,7 +32,7 @@ def test_selection_equal_cells_mixture_and_curriculum(
         lr_decay_steps=10,
     )
     raw = tmp_path / "raw"
-    prepare_fineweb(preparation_records, tokenizer, config, raw, preparation_recipe)
+    prepare_fineweb(parquet_source(preparation_records), tokenizer, config, raw, preparation_recipe)
     names = ("first", "second") if shared_names else ("one", "two")
     spec = {
         "sources": {"first": str(raw / "semantic"), "second": str(raw / "random")},
@@ -95,10 +97,11 @@ def test_source_dataset_name_cannot_describe_a_different_mixture(tmp_path, tiny_
 
 
 def test_count_all_and_insufficient_selection(
+    parquet_source,
     tmp_path, tokenizer, tiny_config, preparation_records, preparation_recipe
 ):
     raw = tmp_path / "raw"
-    prepare_fineweb(preparation_records, tokenizer, tiny_config, raw, preparation_recipe)
+    prepare_fineweb(parquet_source(preparation_records), tokenizer, tiny_config, raw, preparation_recipe)
     spec = {
         "sources": {"semantic": str(raw / "semantic")},
         "runs": {"semantic": {"semantic": 1}},
@@ -119,6 +122,7 @@ def test_count_all_and_insufficient_selection(
 
 
 def test_selection_train_resume_and_evaluate(
+    parquet_source,
     tmp_path, tokenizer, tiny_config, preparation_records, preparation_recipe
 ):
     model = tmp_path / "model"
@@ -145,8 +149,13 @@ def test_selection_train_resume_and_evaluate(
         split_fractions=(0.6, 0.2, 0.2),
     )
     raw = tmp_path / "raw"
+    # Keep fragments from distinct fixture documents distinct after Parquet shuffling.
+    preparation_records = [
+        dict(row, text=re.sub(r"\b\w+\b", lambda m: m[0] + str(i), row["text"]))
+        for i, row in enumerate(preparation_records)
+    ]
     recipe = replace(preparation_recipe, samples_per_task=(16, 16, 16), candidates_per_document=16)
-    prepare_fineweb(preparation_records, tokenizer, cfg, raw, recipe)
+    prepare_fineweb(parquet_source(preparation_records), tokenizer, cfg, raw, recipe)
     spec = {
         "sources": {v: str(raw / v) for v in ("semantic", "random")},
         "runs": {"mixed": {"semantic": 0.5, "random": 0.5}},

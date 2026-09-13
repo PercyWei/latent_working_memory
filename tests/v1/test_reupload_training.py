@@ -31,13 +31,14 @@ class RecordingRun:
 
 
 def test_live_training_and_saved_replay_emit_identical_records(
+    parquet_source,
     tmp_path, tiny_config, tokenizer, preparation_records, preparation_recipe, components, monkeypatch,
 ):
     config = replace(tiny_config, split_fractions=(0.6, 0.2, 0.2), eval_every=1)
     preparation_recipe = replace(preparation_recipe, samples_per_task=(16, 16, 16),
                                  candidates_per_document=16)
     data = tmp_path / "data"
-    prepare_fineweb(preparation_records, tokenizer, config, data, preparation_recipe)
+    prepare_fineweb(parquet_source(preparation_records), tokenizer, config, data, preparation_recipe)
     live = RecordingRun()
     configs = []
 

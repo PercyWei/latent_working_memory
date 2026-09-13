@@ -12,6 +12,7 @@ from latent_working_memory.v1.config import write_resolved_config
 
 
 def test_objective_constructor_writes_reusable_text_sources(
+    parquet_source,
     tmp_path, tokenizer, tiny_config, preparation_records
 ):
     model = tmp_path / "tokenizer"
@@ -28,7 +29,7 @@ def test_objective_constructor_writes_reusable_text_sources(
         samples_per_task=(2, 2, 2),
     )
     pool = tmp_path / "pool"
-    prepare_sources(preparation_records, cfg, pool, recipe)
+    prepare_sources(parquet_source(preparation_records), cfg, pool, recipe)
     spec = {
         "source_root": str(pool),
         "seed": 20260912,

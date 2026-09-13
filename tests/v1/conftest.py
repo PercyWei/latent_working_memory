@@ -5,6 +5,8 @@ import random
 
 from latent_working_memory.data_preparation.fineweb import SemanticSpans
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 import torch
 from tokenizers import Tokenizer
@@ -182,3 +184,13 @@ def semantic_examples(preparation_recipe):
         return rows
 
     return generate
+
+
+@pytest.fixture
+def parquet_source(tmp_path):
+    def write(records):
+        path = tmp_path / "original.parquet"
+        pq.write_table(pa.Table.from_pylist(list(records)), path)
+        return [path]
+
+    return write

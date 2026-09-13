@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import itertools
 import json
 import random
 import uuid
@@ -10,19 +9,17 @@ from concurrent.futures import ThreadPoolExecutor
 from time import perf_counter
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from transformers import PreTrainedTokenizerBase
 
 from latent_working_memory.data_preparation.audit import audit_preparation, compare_preparations
 from latent_working_memory.data_preparation.config import DataConfig, PreparationConfig
-from latent_working_memory.data_preparation.dedup import cluster_documents
+from latent_working_memory.data_preparation.sources import collect_sources, load_sources
 from latent_working_memory.data_preparation.fineweb import (
     data_contract,
     SemanticSpans,
-    document_split,
 )
-from latent_working_memory.data_preparation.quality import document_rejection_reason
 from latent_working_memory.data_preparation.resume import FILES, load_progress, save_progress
 from latent_working_memory.data_preparation.truncation import RandomSpans
 from latent_working_memory.v1.data import Episode
@@ -37,49 +34,29 @@ TASKS = ("ae", "continuation")
 
 
 def prepare_sources(
-    records: Iterable[Mapping[str, Any]],
+    files: list[Path],
     config: DataConfig,
     output_dir: Path,
     preparation: PreparationConfig,
 ) -> dict[str, Any]:
     if output_dir.exists():
         raise FileExistsError(f"use a new source pool directory: {output_dir}")
-    candidates = list(itertools.islice(records, preparation.max_documents))
-    reasons = [document_rejection_reason(row, preparation.min_document_chars) for row in candidates]
-    clusters = cluster_documents(candidates, preparation)
-    output_dir.mkdir(parents=True)
-    seen = set()
+    sources = collect_sources(files, config.data_seed, config.split_fractions, preparation)
     counts = Counter()
-    with (output_dir / "sources.jsonl").open("w") as handle:
-        for record, cluster, reason in zip(candidates, clusters, reasons, strict=True):
-            status = "basic_rejected" if reason else "duplicate" if cluster in seen else "eligible"
-            if status == "eligible":
-                seen.add(cluster)
-            split = document_split(cluster, config)
-            counts[status] += 1
-            counts[f"{split}/{status}"] += 1
-            handle.write(
-                json.dumps(
-                    {
-                        "record": dict(record),
-                        "cluster": cluster,
-                        "split": split,
-                        "status": status,
-                        "reason": reason,
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
+    for row in sources:
+        counts[row["status"]] += 1
+        counts[f"{row['split']}/{row['status']}"] += 1
     metadata = {
         "source_pool_id": str(uuid.uuid4()),
         "data_seed": config.data_seed,
         "split_fractions": list(config.split_fractions),
         "dataset": config.pretrain_dataset,
         "subset": config.pretrain_subset,
+        "source_files": [str(path.resolve()) for path in files],
         "recipe": preparation.to_dict(),
         "statistics": dict(counts),
     }
+    output_dir.mkdir(parents=True)
     (output_dir / "source-pool.json").write_text(json.dumps(metadata, indent=2) + "\n")
     return metadata
 
@@ -395,7 +372,7 @@ class VariantBuilder:
                 f"{self.variant} sample quotas not reached: {missing}; bin gaps: {gaps}"
             )
         audit = audit_preparation(
-            self.directory, self.tokenizer, self.config, self.recipe, self.root
+            self.directory, self.tokenizer, self.config, self.recipe, self.root, sources
         )
         metadata = {
             "preparation_id": str(uuid.uuid4()),
@@ -446,7 +423,7 @@ def prepare_variant(
         if variant == "random"
         else None
     )
-    sources = [json.loads(line) for line in (root / "sources.jsonl").read_text().splitlines()]
+    sources = load_sources(root / "source-pool.json")
     builder = VariantBuilder(root, variant, tokenizer, config, preparation, pool, reference, resume)
     result = builder.run([row for row in sources if row["status"] == "eligible"])
     if variant == "random":
@@ -461,13 +438,13 @@ def prepare_variant(
 
 
 def prepare_fineweb(
-    records: Iterable[Mapping[str, Any]],
+    files: list[Path],
     tokenizer: PreTrainedTokenizerBase,
     config: DataConfig,
     output_dir: Path,
     preparation: PreparationConfig,
 ) -> dict[str, Any]:
-    prepare_sources(records, config, output_dir, preparation)
+    prepare_sources(files, config, output_dir, preparation)
     semantic = prepare_variant(output_dir, "semantic", tokenizer, config, preparation)
     random_data = prepare_variant(output_dir, "random", tokenizer, config, preparation)
     return {"semantic": semantic, "random": random_data}
