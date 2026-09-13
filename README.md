@@ -1,6 +1,6 @@
 # 20260912_latent_working_memory
 
-最后修订时间：20260912 22:43:23 UTC+08:00
+最后修订时间：20260913 21:10:35 UTC+08:00
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理；ICAE v1 和 C-DIC 分别位于 `reproductions/icae/` 与 `reproductions/cdic/`，各自使用独立的 `uv` 环境。
 
@@ -16,6 +16,10 @@ uv run pytest
 ## 可增长记忆 v1
 
 第一版新方法直接位于 `src/latent_working_memory/v1/`；未来版本使用同级目录，不增加额外的方法族目录。配置位于 `configs/v1/`，测试位于 `tests/v1/`，数据与运行产物分别使用 Git-ignored 的 `data/v1/` 和 `artifacts/v1/`。实验产物按系列组织为 `artifacts/v1/<实验系列>/`，其中 `train/` 保存训练及 checkpoint，`eval/` 保存独立评估，`compare/` 保存跨运行比较，`plan/` 保存调度与清单。当前预训练数据类型对比系列位于 `artifacts/v1/pretrain-data-comparison-2048_20260911/`，完整记录及路径见 [预训练数据类型对比实验](notes/v1/20260911_pretraining_data_comparison.md)。数据准备与工程验证产物仍分别位于 `artifacts/v1/data-preparation/` 和 `artifacts/v1/validation/`。
+
+FineWeb 基础语料的 `semantic/`、`random/` 各只保存 `train.jsonl`、`dev.jsonl`、`test.jsonl` 和 `preparation.json`。样本保存原始 X、LM 后续 Y、来源与字符跨度，以及构造 tokenizer 的参考长度；AE 不重复保存目标，不落盘 token IDs、训练提示词或读写位置。共享原文及来源划分位于父目录的 `sources.jsonl`、`source-pool.json`。
+
+训练和评估可直接读取基础目录：同 tokenizer 复用参考长度筛选，不同 tokenizer 重新分词计算长度，采样时按当前提示词构造 Episode，不生成分词副本。构造未完成时用 `progress.json` 和临时接收记录支持恢复，完成后自动清理。已有派生实验仍可读取原 Episode 数据；历史选择命令也已适配文本基础语料。
 
 当前已实现 FineWeb 完整句界／随机截断双版本数据与多容量 AE/LM 预训练链路：空记忆首次分配、完整自然单元前向、变长 batch 与 mask、独立 AE/LM 样本的重建和续写、按长度与文档采样、容量课程、checkpoint/resume，以及独立文档的多容量 memory/no-memory/wrong-memory 评估。语言模型基座冻结，联合训练写入投影、记忆更新器、读取投影与读取 LoRA。
 

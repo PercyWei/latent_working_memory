@@ -22,10 +22,9 @@ from latent_working_memory.v1.checkpoint import (
     save_model_checkpoint,
 )
 from latent_working_memory.v1.config import ExperimentConfig, write_resolved_config
-from latent_working_memory.v1.data import EpisodeIndex
+from latent_working_memory.v1.prepared_data import pretraining_index, validate_preparation
 from latent_working_memory.v1.distributed import synchronize_gradients
 from latent_working_memory.v1.evaluation import evaluate_pretraining
-from latent_working_memory.data_preparation.fineweb import data_contract
 from latent_working_memory.v1.model import GrowthValueNetwork, JointMemoryWriter
 from latent_working_memory.v1.objectives import ReaderOutput
 from latent_working_memory.v1.sampling import (
@@ -249,9 +248,12 @@ def run_pretraining(
     if output_dir.exists() and resume is None:
         raise FileExistsError("use a new output directory or resume an existing run")
     metadata = json.loads((data_dir / "preparation.json").read_text())
-    if metadata["contract"] != data_contract(config):
-        raise ValueError("data preparation contract differs from the training config")
-    train_index = EpisodeIndex(data_dir / "train.jsonl")
+    validate_preparation(metadata, config)
+    random.seed(config.model_seed)
+    torch.manual_seed(config.model_seed)
+    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+    tokenizer, backbone = load_backbone(config, device, dtype)
+    train_index = pretraining_index(data_dir / "train.jsonl", tokenizer, config)
     evaluation_dirs = {"dev": data_dir} if evaluation_dirs is None else evaluation_dirs
     if not evaluation_dirs:
         raise ValueError("at least one evaluation dataset is required")
@@ -261,23 +263,18 @@ def run_pretraining(
         if not name or Path(name).name != name or name in {".", ".."}:
             raise ValueError("evaluation names must be simple directory names")
         evaluation_metadata = json.loads((directory / "preparation.json").read_text())
-        if evaluation_metadata["contract"] != data_contract(config):
-            raise ValueError("evaluation contract differs from training config")
+        validate_preparation(evaluation_metadata, config)
         evaluation_ids[name] = evaluation_metadata["preparation_id"]
-        dev_indices[name] = EpisodeIndex(directory / "dev.jsonl")
+        dev_indices[name] = pretraining_index(directory / "dev.jsonl", tokenizer, config)
         for split in ("dev", "test"):
             path = directory / f"{split}.jsonl"
-            index = dev_indices[name] if split == "dev" else EpisodeIndex(path)
+            index = dev_indices[name] if split == "dev" else pretraining_index(path, tokenizer, config)
             if (
                 train_index.source_ids & index.source_ids
                 or train_index.cluster_ids & index.cluster_ids
                 or train_index.groups.keys() & index.groups.keys()
             ):
                 raise ValueError("train/evaluation source leakage")
-    random.seed(config.model_seed)
-    torch.manual_seed(config.model_seed)
-    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-    tokenizer, backbone = load_backbone(config, device, dtype)
     if (
         max(config.write_context_tokens, config.read_context_tokens)
         > backbone.max_position_embeddings

@@ -2,6 +2,8 @@ import json
 import torch
 from transformers import LlamaConfig, LlamaForCausalLM
 from latent_working_memory.data_preparation.pipeline import prepare_fineweb
+from latent_working_memory.data_preparation.fineweb import data_contract
+from latent_working_memory.data_preparation.text_samples import TextSample
 from latent_working_memory.v1.checkpoint import load_model_checkpoint
 from latent_working_memory.v1.training import run_pretraining
 
@@ -72,9 +74,15 @@ def test_fork_inherits_optimizer_and_continues_with_joint_batch(
     prepare_fineweb(preparation_records, tokenizer, config, root, preparation_recipe)
     mixed = root / 'mixed'
     mixed.mkdir()
-    (mixed / 'train.jsonl').write_text(
-        (root / 'semantic/train.jsonl').read_text() + (root / 'random/train.jsonl').read_text())
-    (mixed / 'preparation.json').write_text((root / 'semantic/preparation.json').read_text())
+    # Historical objective-comparison datasets remain tokenized Episode files.
+    rows = [TextSample(**json.loads(line)).to_episode(tokenizer, config, variant)
+            for variant in ('semantic', 'random')
+            for line in (root / variant / 'train.jsonl').read_text().splitlines()]
+    write_episodes(rows, mixed / 'train.jsonl')
+    (mixed / 'preparation.json').write_text(json.dumps({
+        'preparation_id': 'mixed-fixture', 'contract': data_contract(config),
+        'source_weights': {'semantic': .5, 'random': .5},
+    }))
     evaluation_dirs = {name: root / name for name in ('semantic', 'random')}
     first = run_pretraining(config, mixed, tmp_path / 'ae', torch.device('cpu'),
                             max_steps=1, save_every=1, evaluation_dirs=evaluation_dirs)

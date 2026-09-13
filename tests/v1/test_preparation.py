@@ -18,7 +18,8 @@ from latent_working_memory.data_preparation.pipeline import (
     prepare_variant,
 )
 from latent_working_memory.data_preparation.quality import document_rejection_reason
-from latent_working_memory.v1.data import EpisodeIndex, read_episodes
+from latent_working_memory.v1.prepared_data import pretraining_index
+from latent_working_memory.data_preparation.text_samples import TextSample
 from latent_working_memory.v1.sampling import PretrainSampler
 
 
@@ -48,18 +49,30 @@ def test_independent_variants_balance_tasks_and_intervals(
     assert result["random"]["reference_preparation_id"] == result["semantic"]["preparation_id"]
     for variant in ("semantic", "random"):
         assert result[variant]["input_histogram"] == preparation_recipe.balanced_histogram()
-        assert "composition" not in result[variant]["audit"]
+        assert "audit" not in result[variant]
+        assert {p.name for p in (root / variant).iterdir()} == {
+            "train.jsonl",
+            "dev.jsonl",
+            "test.jsonl",
+            "preparation.json",
+        }
     different_exact_lengths = False
     for split, quota in zip(
         ("train", "dev", "test"), preparation_recipe.samples_per_task, strict=True
     ):
-        a, b = [read_episodes(root / v / f"{split}.jsonl") for v in ("semantic", "random")]
+        a, b = [
+            [
+                TextSample(**json.loads(line))
+                for line in (root / v / f"{split}.jsonl").read_text().splitlines()
+            ]
+            for v in ("semantic", "random")
+        ]
         for rows in (a, b):
-            assert Counter(e.reads[0].task for e in rows) == {"ae": quota, "continuation": quota}
-            assert all("pair_id" not in e.sources[0].provenance for e in rows)
-            assert all("granularity" not in e.sources[0].provenance for e in rows)
-        different_exact_lengths |= Counter(len(e.input_ids) for e in a) != Counter(
-            len(e.input_ids) for e in b
+            assert Counter(e.task for e in rows) == {"ae": quota, "continuation": quota}
+            assert all("pair_id" not in e.to_record() for e in rows)
+            assert all("granularity" not in e.to_record() for e in rows)
+        different_exact_lengths |= Counter(e.reference_input_tokens for e in a) != Counter(
+            e.reference_input_tokens for e in b
         )
     assert different_exact_lengths
     assert all(
@@ -68,7 +81,7 @@ def test_independent_variants_balance_tasks_and_intervals(
         ].values()
     )
     for variant in ("semantic", "random"):
-        index = EpisodeIndex(root / variant / "train.jsonl")
+        index = pretraining_index(root / variant / "train.jsonl", tokenizer, tiny_config)
         for task, weights in (("ae", {"lm_weight": 0}), ("continuation", {"ae_weight": 0})):
             only_task = PretrainSampler(index, tokenizer, replace(tiny_config, **weights))
             assert all(only_task.sample(0).episode.reads[0].task == task for _ in range(20))
@@ -164,7 +177,7 @@ def test_source_text_audit_detects_offset_corruption(
     path = root / "random/train.jsonl"
     lines = path.read_text().splitlines()
     first = json.loads(lines[0])
-    first["sources"][0]["provenance"]["x_char_span"][0] += 1
+    first["x_char_span"][0] += 1
     path.write_text("\n".join([json.dumps(first), *lines[1:]]) + "\n")
     with pytest.raises(
         ValueError, match="source text|character span|reference tokens|input text key"
@@ -265,10 +278,11 @@ def test_comparison_rejects_inconsistent_audited_counts(
 ):
     root = tmp_path / "data"
     result = prepare_fineweb(preparation_records, tokenizer, tiny_config, root, preparation_recipe)
-    statistics = result["random"]["audit"]["statistics"]
-    statistic = "train/ae"
-    if count_type == "length_interval":
-        statistic += f"/length_up_to/{preparation_recipe.length_bounds[0]}"
-    statistics[statistic] += 1
+    if count_type == "task":
+        result["random"]["statistics"]["train/ae"] += 1
+    else:
+        result["random"]["input_histogram"]["train"]["ae"][
+            str(preparation_recipe.length_bounds[0])
+        ] += 1
     with pytest.raises(ValueError, match="quotas"):
         compare_preparations(root, result["random"])

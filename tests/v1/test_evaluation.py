@@ -17,7 +17,7 @@ from latent_working_memory.v1.evaluation import (
     exact_match,
     persistent_memory_bytes,
 )
-from latent_working_memory.v1.data import EpisodeIndex
+from latent_working_memory.v1.prepared_data import pretraining_index
 from latent_working_memory.data_preparation.pipeline import prepare_fineweb
 from latent_working_memory.v1.state import MemoryState
 from latent_working_memory.v1.sampling import read_tokens
@@ -128,7 +128,7 @@ def test_evaluation_controls_share_targets_budgets_and_write_test_split(
         preparation_recipe,
     )
     data = data / "semantic"
-    index = EpisodeIndex(data / "test.jsonl")
+    index = pretraining_index(data / "test.jsonl", tokenizer, tiny_config)
     backbone, writer = components
     original = backbone.read_batch
     raw_calls = []

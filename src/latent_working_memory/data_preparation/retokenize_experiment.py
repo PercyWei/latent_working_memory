@@ -9,6 +9,7 @@ from pathlib import Path
 from transformers import AutoTokenizer
 
 from latent_working_memory.data_preparation.fineweb import data_contract
+from latent_working_memory.data_preparation.text_samples import TextSample
 from latent_working_memory.v1.config import load_config
 from latent_working_memory.v1.data import Episode
 from latent_working_memory.v1.sampling import capacity_weights, read_tokens
@@ -35,6 +36,10 @@ def prepare(spec, config, tokenizer, output):
             with source_path.open() as inp, (directory / f'{split}.jsonl').open('w') as out:
                 for line in inp:
                     row = json.loads(line)
+                    if 'contract' not in parent_metadata:
+                        row = TextSample(**row).to_episode(
+                            tokenizer, config, parent_metadata['boundary_variant']
+                        ).to_record()
                     source = row['sources'][0]
                     provenance = source['provenance']
                     text, document_split = documents[source['document_id']]
@@ -73,7 +78,8 @@ def prepare(spec, config, tokenizer, output):
             print(name, split, kept, dict(rejected), flush=True)
         metadata = {'preparation_id': str(uuid.uuid4()), 'contract': data_contract(config),
                     'source_preparations': source_preparations, 'counts': counts,
-                    'source_weights': parent_metadata['source_weights']}
+                    'source_weights': (parent_metadata['source_weights'] if 'contract' in parent_metadata
+                                       else {parent_metadata['boundary_variant']: 1})}
         (directory / 'preparation.json').write_text(json.dumps(metadata, indent=2) + '\n')
         report['datasets'][name] = statistics
     report['evaluation_dirs'] = {n: str((output / n).resolve()) for n in spec['datasets'] if n != 'mixed'}

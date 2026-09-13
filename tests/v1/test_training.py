@@ -9,7 +9,7 @@ import torch.multiprocessing as mp
 from transformers import LlamaConfig, LlamaForCausalLM
 
 from latent_working_memory.v1.checkpoint import load_model_checkpoint
-from latent_working_memory.v1.data import EpisodeIndex
+from latent_working_memory.v1.prepared_data import pretraining_index
 from latent_working_memory.v1.evaluate import main as evaluate_main
 from latent_working_memory.data_preparation.pipeline import prepare_fineweb
 from latent_working_memory.v1.sampling import PretrainSampler
@@ -34,7 +34,7 @@ def test_joint_objective_uses_one_write_and_updates_all_four_modules(
         preparation_recipe,
     )
     data = data / "semantic"
-    sampler = PretrainSampler(EpisodeIndex(data / "train.jsonl"), tokenizer, tiny_config)
+    sampler = PretrainSampler(pretraining_index(data / "train.jsonl", tokenizer, tiny_config), tokenizer, tiny_config)
     examples = [sampler.sample(0), sampler.sample(0)]
     backbone, writer = components
     calls = []

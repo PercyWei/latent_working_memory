@@ -11,7 +11,7 @@ from latent_working_memory.v1.sampling import read_tokens
 def test_retokenization_uses_original_spans_and_preserves_split(tmp_path, tokenizer, tiny_config):
     source = tmp_path / 'old'
     source.mkdir()
-    (source / 'preparation.json').write_text(json.dumps({'preparation_id': 'original', 'source_weights': {'semantic': 1}}))
+    (source / 'preparation.json').write_text(json.dumps({'preparation_id': 'original', 'contract': {}, 'source_weights': {'semantic': 1}}))
     raw = 'A B C D'
     rows = []
     for task in ['ae', 'continuation']:

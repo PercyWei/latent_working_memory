@@ -10,9 +10,8 @@ import torch
 
 from latent_working_memory.v1.backbone import load_backbone
 from latent_working_memory.v1.checkpoint import load_model_checkpoint
-from latent_working_memory.v1.data import EpisodeIndex
+from latent_working_memory.v1.prepared_data import pretraining_index, validate_preparation
 from latent_working_memory.v1.evaluation import evaluate_pretraining
-from latent_working_memory.data_preparation.fineweb import data_contract
 from latent_working_memory.v1.model import GrowthValueNetwork, JointMemoryWriter
 from latent_working_memory.devices import validate_device
 from latent_working_memory.v1.training import load_trainable_model_state, precision_context
@@ -78,8 +77,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         if not name or Path(name).name != name or name in {".", ".."}:
             raise ValueError("evaluation names must be simple directory names")
         metadata[name] = json.loads((directory / "preparation.json").read_text())
-        if metadata[name]["contract"] != data_contract(config):
-            raise ValueError("evaluation data contract differs from checkpoint")
+        validate_preparation(metadata[name], config)
     tokenizer, backbone = load_backbone(
         config, device, torch.bfloat16 if device.type == "cuda" else torch.float32
     )
@@ -97,7 +95,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 tokenizer,
                 backbone,
                 writer,
-                EpisodeIndex(directory / f"{args.split}.jsonl"),
+                pretraining_index(directory / f"{args.split}.jsonl", tokenizer, config),
                 destination,
                 checkpoint.progress["next_step"],
                 checkpoint.progress["input_tokens"],

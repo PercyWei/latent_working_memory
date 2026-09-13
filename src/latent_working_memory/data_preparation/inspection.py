@@ -9,7 +9,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Sequence
 
-from latent_working_memory.v1.data import Episode
+from latent_working_memory.data_preparation.text_samples import TextSample
 
 
 def sample_inspection(
@@ -29,35 +29,32 @@ def sample_inspection(
     metadata = json.loads((data_dir / "preparation.json").read_text())
     if metadata["boundary_variant"] != "semantic":
         raise ValueError("sentence-boundary inspection requires semantic data")
-    bounds = metadata["length_bounds"]
+    bounds = metadata["recipe"]["length_bounds"]
     originals = {
         row["record"]["id"]: row["record"]["text"]
-        for row in map(json.loads, (data_dir / "documents.jsonl").read_text().splitlines())
+        for row in map(json.loads, (data_dir.parent / "sources.jsonl").read_text().splitlines())
     }
     rows, cells = [], defaultdict(list)
     with (data_dir / f"{split}.jsonl").open() as handle:
         for line in handle:
-            episode = Episode.from_record(json.loads(line))
-            source = episode.sources[0]
-            provenance = source.provenance
-            size = len(episode.input_ids)
+            sample = TextSample(**json.loads(line))
+            provenance = sample.to_record()
+            size = sample.reference_input_tokens
             bucket = next((b for b in bounds if size <= b), size)
-            text = originals[source.document_id]
+            text = originals[sample.document_id]
             cuts = {"x_start": provenance["x_char_span"][0], "x_end": provenance["x_char_span"][1]}
             if provenance["y_char_span"] is not None:
                 cuts["y_end"] = provenance["y_char_span"][1]
             row = {
-                "episode_id": episode.episode_id,
-                "document_id": source.document_id,
+                "episode_id": sample.sample_id,
+                "document_id": sample.document_id,
                 "split": split,
                 "input_tokens": size,
                 "length_up_to": bucket,
-                "task": episode.reads[0].task,
-                "boundary_variant": provenance["boundary_variant"],
-                "input": originals[source.document_id][slice(*provenance["x_char_span"])],
-                "continuation": episode.reads[0].references[0].text
-                if episode.reads[0].task == "continuation"
-                else None,
+                "task": sample.task,
+                "boundary_variant": metadata["boundary_variant"],
+                "input": originals[sample.document_id][slice(*provenance["x_char_span"])],
+                "continuation": sample.continuation if sample.task == "continuation" else None,
                 "x_char_span": provenance["x_char_span"],
                 "y_char_span": provenance["y_char_span"],
                 "judgment": None,

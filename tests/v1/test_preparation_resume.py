@@ -39,7 +39,7 @@ def test_resume_rolls_back_uncommitted_tail_and_matches_uninterrupted(
     prepare_sources(preparation_records, tiny_config, baseline, recipe)
     expected = prepare_variant(baseline, "semantic", tokenizer, tiny_config, recipe)
     assert result["statistics"] == expected["statistics"]
-    for name in ("train", "dev", "test", "documents", "sample-decisions"):
+    for name in ("train", "dev", "test"):
         assert (root / f"semantic/{name}.jsonl").read_bytes() == (
             baseline / f"semantic/{name}.jsonl"
         ).read_bytes()

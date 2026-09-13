@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-FILES = ("train", "dev", "test", "documents", "sample-decisions")
+FILES = ("train", "dev", "test", "sample-decisions")
 
 
 def save_progress(directory: Path, handles: dict, contract: dict, next_source: int, counts: dict):

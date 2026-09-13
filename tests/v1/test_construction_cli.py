@@ -29,7 +29,8 @@ def test_single_config_runs_all_stages(
     assert (output / "comparison.json").is_file()
     for variant in ("semantic", "random"):
         metadata = json.loads((output / variant / "preparation.json").read_text())
-        assert metadata["contract"] == data
+        assert metadata["tokenizer"] == {"name_or_path": str(tokenizer_dir), "revision": None}
+        assert "contract" not in metadata
         assert metadata["input_histogram"] == preparation_recipe.balanced_histogram()
 
 

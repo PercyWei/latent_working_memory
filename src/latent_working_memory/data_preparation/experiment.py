@@ -15,6 +15,8 @@ from transformers import AutoTokenizer
 
 from latent_working_memory.v1.config import load_config
 from latent_working_memory.v1.data import Episode
+from latent_working_memory.data_preparation.text_samples import TextSample
+from latent_working_memory.v1.prepared_data import validate_preparation
 from latent_working_memory.v1.sampling import capacity_weights, read_tokens
 from latent_working_memory.data_preparation.fineweb import data_contract
 
@@ -38,13 +40,14 @@ def prepare_experiment(spec: dict, config, tokenizer, output: Path) -> dict:
     bounds = config.input_length_bounds
     cells = {}
     identities = {}
+    source_metadata = {}
     registry = {}
     rejected = defaultdict(int)
     seen_content = {}
     for name, directory in sources.items():
         meta = json.loads((directory / "preparation.json").read_text())
-        if meta["contract"] != data_contract(config):
-            raise ValueError("source data contract differs from training config")
+        validate_preparation(meta, config)
+        source_metadata[name] = meta
         identities[name] = meta["preparation_id"]
         for split in ("train", "dev", "test"):
             groups = defaultdict(list)
@@ -55,7 +58,14 @@ def prepare_experiment(spec: dict, config, tokenizer, output: Path) -> dict:
                     line = handle.readline()
                     if not line:
                         break
-                    episode = Episode.from_record(json.loads(line))
+                    row = json.loads(line)
+                    episode = (
+                        Episode.from_record(row)
+                        if "contract" in meta
+                        else TextSample(**row).to_episode(
+                            tokenizer, config, meta["boundary_variant"]
+                        )
+                    )
                     source = episode.sources[0]
                     for kind, key in [
                         ("document", source.document_id),
@@ -162,7 +172,13 @@ def prepare_experiment(spec: dict, config, tokenizer, output: Path) -> dict:
                         raise ValueError("duplicate selected episode ID")
                     seen.add(identity)
                     handles[name].seek(offset)
-                    out.write(handles[name].readline())
+                    line = handles[name].readline()
+                    if "contract" not in source_metadata[name]:
+                        episode = TextSample(**json.loads(line)).to_episode(
+                            tokenizer, config, source_metadata[name]["boundary_variant"]
+                        )
+                        line = (json.dumps(episode.to_record(), ensure_ascii=False) + "\n").encode()
+                    out.write(line)
             finally:
                 for handle in handles.values():
                     handle.close()
@@ -191,9 +207,7 @@ def prepare_experiment(spec: dict, config, tokenizer, output: Path) -> dict:
             "counts": counts,
         }
         (dest / "preparation.json").write_text(json.dumps(metadata, indent=2) + "\n")
-    report["evaluation_dirs"] = {
-        name: str((output / name).resolve()) for name in sources
-    }
+    report["evaluation_dirs"] = {name: str((output / name).resolve()) for name in sources}
     (output / "selection.json").write_text(json.dumps(report, indent=2) + "\n")
     return report
 

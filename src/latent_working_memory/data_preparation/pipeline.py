@@ -26,6 +26,11 @@ from latent_working_memory.data_preparation.quality import document_rejection_re
 from latent_working_memory.data_preparation.resume import FILES, load_progress, save_progress
 from latent_working_memory.data_preparation.truncation import RandomSpans
 from latent_working_memory.v1.data import Episode
+from latent_working_memory.data_preparation.text_samples import (
+    TextSample,
+    input_text_key,
+    tokenizer_identity,
+)
 
 SPLITS = ("train", "dev", "test")
 TASKS = ("ae", "continuation")
@@ -111,9 +116,9 @@ class VariantBuilder:
         self.reference = reference
         if reference is not None and (
             reference["source_pool_id"] != source_pool["source_pool_id"]
-            or reference["contract"] != data_contract(config)
-            or reference["samples_per_task"] != list(preparation.samples_per_task)
-            or reference["length_bounds"] != list(preparation.length_bounds)
+            or reference["tokenizer"] != tokenizer_identity(config)
+            or reference["recipe"]["samples_per_task"] != list(preparation.samples_per_task)
+            or reference["recipe"]["length_bounds"] != list(preparation.length_bounds)
         ):
             raise ValueError(
                 "random construction must use the semantic source pool, quotas and bins"
@@ -135,9 +140,9 @@ class VariantBuilder:
             for split in SPLITS:
                 with (root / "semantic" / f"{split}.jsonl").open() as handle:
                     for line in handle:
-                        episode = Episode.from_record(json.loads(line))
-                        key = episode.sources[0].provenance["input_text_key"]
-                        if len(episode.input_ids) >= preparation.dedup_input_min_tokens:
+                        sample = TextSample(**json.loads(line))
+                        key = input_text_key(sample.text)
+                        if sample.reference_input_tokens >= preparation.dedup_input_min_tokens:
                             self.fragment_splits[key] = split
 
     def remaining(self, split: str, task: str, bucket: str | None = None) -> int:
@@ -194,17 +199,6 @@ class VariantBuilder:
             if status != "accepted":
                 continue
             if not self.counts[f"document/{record['id']}"]:
-                handles["documents"].write(
-                    json.dumps(
-                        {
-                            "record": record,
-                            "cluster": cluster,
-                            "split": split,
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
-                )
                 self.counts[f"{split}/documents"] += 1
             self.counts[f"document/{record['id']}"] += 1
             self.seen_samples.add(key)
@@ -214,7 +208,8 @@ class VariantBuilder:
                 dedup_cluster=cluster,
                 input_text_key=input_key,
             )
-            handles[split].write(json.dumps(episode.to_record(), ensure_ascii=False) + "\n")
+            sample = TextSample.from_episode(episode, record["text"], self.tokenizer)
+            handles[split].write(json.dumps(sample.to_record(), ensure_ascii=False) + "\n")
             self.counts[f"{split}/{task}"] += 1
             self.histogram[split][task][bucket] += 1
 
@@ -233,27 +228,23 @@ class VariantBuilder:
         )
 
     def restore_rows(self):
-        documents = {}
-        with (self.directory / "documents.jsonl").open() as handle:
-            for line in handle:
-                row = json.loads(line)
-                documents[row["record"]["id"]] = row["record"]
         for split in SPLITS:
             with (self.directory / f"{split}.jsonl").open() as handle:
                 for line in handle:
-                    episode = Episode.from_record(json.loads(line))
-                    source = episode.sources[0]
-                    record = documents[source.document_id]
-                    p = source.provenance
-                    x = " ".join(record["text"][slice(*p["x_char_span"])].split())
-                    y = " ".join(episode.reads[0].references[0].text.split())
-                    task = episode.reads[0].task
+                    sample = TextSample(**json.loads(line))
+                    x = " ".join(sample.text.split())
+                    y = " ".join(
+                        (
+                            sample.continuation if sample.task == "continuation" else sample.text
+                        ).split()
+                    )
+                    task = sample.task
                     key = hashlib.blake2b(json.dumps((task, x, y)).encode()).hexdigest()
                     input_key = hashlib.blake2b(x.encode()).hexdigest()
                     if key in self.seen_samples:
                         raise ValueError("duplicate accepted sample in paused data")
                     self.seen_samples.add(key)
-                    if len(episode.input_ids) >= self.recipe.dedup_input_min_tokens:
+                    if sample.reference_input_tokens >= self.recipe.dedup_input_min_tokens:
                         if (
                             input_key in self.fragment_splits
                             and self.fragment_splits[input_key] != split
@@ -261,13 +252,17 @@ class VariantBuilder:
                             raise ValueError("cross-split fragment in paused data")
                         self.fragment_splits[input_key] = split
                     bucket = str(
-                        next(b for b in self.recipe.length_bounds if len(episode.input_ids) <= b)
+                        next(
+                            b
+                            for b in self.recipe.length_bounds
+                            if sample.reference_input_tokens <= b
+                        )
                     )
                     self.histogram[split][task][bucket] += 1
                     self.counts[f"{split}/{task}"] += 1
-                    if not self.counts[f"document/{record['id']}"]:
+                    if not self.counts[f"document/{sample.document_id}"]:
                         self.counts[f"{split}/documents"] += 1
-                    self.counts[f"document/{record['id']}"] += 1
+                    self.counts[f"document/{sample.document_id}"] += 1
         accepted = 0
         with (self.directory / "sample-decisions.jsonl").open() as handle:
             for line in handle:
@@ -406,18 +401,17 @@ class VariantBuilder:
             "preparation_id": str(uuid.uuid4()),
             "source_pool_id": self.source_pool["source_pool_id"],
             "boundary_variant": self.variant,
-            "contract": data_contract(self.config),
+            "tokenizer": tokenizer_identity(self.config),
+            "source_pool": "../source-pool.json",
             "recipe": self.recipe.to_dict(),
-            "samples_per_task": list(self.recipe.samples_per_task),
-            "length_bounds": list(self.recipe.length_bounds),
-            "target_input_histogram": self.targets,
             "input_histogram": self.histogram,
             "statistics": {k: v for k, v in self.counts.items() if not k.startswith("document/")},
-            "audit": audit,
+            "checks": audit["checks"],
+            "lengths": audit["lengths"],
         }
         if self.reference is not None:
             metadata["reference_preparation_id"] = self.reference["preparation_id"]
-        return metadata
+        return json.loads(json.dumps(metadata))
 
 
 def prepare_variant(
@@ -461,6 +455,8 @@ def prepare_variant(
     (root / variant / "preparation.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2) + "\n"
     )
+    for filename in ("progress.json", "sample-decisions.jsonl"):
+        (root / variant / filename).unlink()
     return result
 
 
