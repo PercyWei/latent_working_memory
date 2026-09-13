@@ -45,36 +45,10 @@ class TextSampleIndex(EpisodeIndex):
                 if sample.sample_id in seen:
                     raise ValueError("duplicate sample_id")
                 seen.add(sample.sample_id)
-                size = (
-                    sample.reference_input_tokens
-                    if self.reference_lengths
-                    else len(tokenizer.encode(sample.text, add_special_tokens=False))
+                size = eligible_input_length(
+                    sample, tokenizer, config, self.reference_lengths, prompt_lengths
                 )
-                if (
-                    size <= 0
-                    or size > config.max_input_tokens
-                    or size + 1 > config.write_context_tokens
-                ):
-                    continue
-                target_length = (
-                    sample.reference_target_tokens
-                    if self.reference_lengths
-                    else (
-                        size
-                        if sample.task == "ae"
-                        else len(tokenizer.encode(sample.continuation, add_special_tokens=False))
-                    )
-                )
-                if sample.task == "continuation" and target_length > config.max_continuation_tokens:
-                    continue
-                # The full-context control must fit as well as compressed-memory reads.
-                if (
-                    2
-                    + max(size, config.pretrain_k_min)
-                    + prompt_lengths[sample.task]
-                    + target_length
-                    > config.read_context_tokens
-                ):
+                if size is None:
                     continue
                 self.groups.setdefault(sample.document_id, []).append(len(self.offsets))
                 self.offsets.append(offset)
@@ -102,3 +76,31 @@ def pretraining_index(path, tokenizer, config):
     if "contract" in metadata:
         return EpisodeIndex(path)
     return TextSampleIndex(path, tokenizer, config, metadata)
+
+
+def eligible_input_length(sample, tokenizer, config, reference_lengths, prompt_lengths):
+    size = (
+        sample.reference_input_tokens
+        if reference_lengths
+        else len(tokenizer.encode(sample.text, add_special_tokens=False))
+    )
+    if size <= 0 or size > config.max_input_tokens or size + 1 > config.write_context_tokens:
+        return None
+    target_length = (
+        sample.reference_target_tokens
+        if reference_lengths
+        else (
+            size
+            if sample.task == "ae"
+            else len(tokenizer.encode(sample.continuation, add_special_tokens=False))
+        )
+    )
+    if sample.task == "continuation" and target_length > config.max_continuation_tokens:
+        return None
+    # The full-context control must fit as well as compressed-memory reads.
+    if (
+        2 + max(size, config.pretrain_k_min) + prompt_lengths[sample.task] + target_length
+        > config.read_context_tokens
+    ):
+        return None
+    return size

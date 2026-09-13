@@ -1,6 +1,6 @@
 # 20260912_latent_working_memory
 
-最后修订时间：20260913 21:10:35 UTC+08:00
+最后修订时间：20260913 22:00:33 UTC+08:00
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理；ICAE v1 和 C-DIC 分别位于 `reproductions/icae/` 与 `reproductions/cdic/`，各自使用独立的 `uv` 环境。
 
@@ -19,7 +19,9 @@ uv run pytest
 
 FineWeb 基础语料的 `semantic/`、`random/` 各只保存 `train.jsonl`、`dev.jsonl`、`test.jsonl` 和 `preparation.json`。样本保存原始 X、LM 后续 Y、来源与字符跨度，以及构造 tokenizer 的参考长度；AE 不重复保存目标，不落盘 token IDs、训练提示词或读写位置。共享原文及来源划分位于父目录的 `sources.jsonl`、`source-pool.json`。
 
-训练和评估可直接读取基础目录：同 tokenizer 复用参考长度筛选，不同 tokenizer 重新分词计算长度，采样时按当前提示词构造 Episode，不生成分词副本。构造未完成时用 `progress.json` 和临时接收记录支持恢复，完成后自动清理。已有派生实验仍可读取原 Episode 数据；历史选择命令也已适配文本基础语料。
+训练和评估可直接读取基础目录：同 tokenizer 复用参考长度筛选，不同 tokenizer 重新分词计算长度，采样时按当前提示词构造 Episode，不生成分词副本。构造未完成时用 `progress.json` 和临时接收记录支持恢复，完成后自动清理。已有独立构造实验仍可读取原 Episode 数据。仅筛选与混合时使用 `--data-selection <配置> --data-run <训练集名>`，评估使用相同的 `--data-selection`；来源、seed、配额及比例由配置指定，混合仅组合内存索引。`balance_task_lengths` 决定是否均衡任务与长度档，`samples_per_split` 指定各划分数量，非均衡模式可用 null 表示全部取用（混合训练须指定数量以保证比例）。run 中的 `data-selection.json` 保存可直接复用的选择配置，实际数量与来源身份保存在 provenance 中，不生成样本清单或 token 副本。
+
+短文本目标对比使用独立构造的 `data/v1/fineweb-128-doc100k_20260912/{semantic,random}/` 文本基础数据，复用原 FineWeb 来源池。构造配置为 `configs/data_preparation/fineweb-128-doc100k.json`，选择配置为 `configs/data_preparation/fineweb-128-doc100k_pretrain-objective-comparison.json`；不再保存该实验的派生目录和 mixed 副本。
 
 当前已实现 FineWeb 完整句界／随机截断双版本数据与多容量 AE/LM 预训练链路：空记忆首次分配、完整自然单元前向、变长 batch 与 mask、独立 AE/LM 样本的重建和续写、按长度与文档采样、容量课程、checkpoint/resume，以及独立文档的多容量 memory/no-memory/wrong-memory 评估。语言模型基座冻结，联合训练写入投影、记忆更新器、读取投影与读取 LoRA。
 

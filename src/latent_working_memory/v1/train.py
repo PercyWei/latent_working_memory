@@ -19,7 +19,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train latent working-memory v1")
     parser.add_argument("--phase", choices=("pretrain",), required=True)
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--data-dir", type=Path, required=True)
+    datasets = parser.add_mutually_exclusive_group(required=True)
+    datasets.add_argument("--data-dir", type=Path)
+    datasets.add_argument("--data-selection", type=Path)
+    parser.add_argument("--data-run", help="Training dataset name in the selection configuration")
     parser.add_argument(
         "--evaluation-dirs",
         type=Path,
@@ -55,6 +58,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     result = run_pretraining(
         config=config,
         data_dir=args.data_dir,
+        data_selection=args.data_selection,
+        data_run=args.data_run,
         output_dir=args.output_dir,
         device=device,
         max_steps=args.max_steps,

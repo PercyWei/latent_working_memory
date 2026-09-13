@@ -1,12 +1,15 @@
+import torch
+from transformers import LlamaConfig, LlamaForCausalLM
+from latent_working_memory.v1.training import run_pretraining
+from latent_working_memory.v1.evaluate import main as evaluate_main
+from latent_working_memory.v1.checkpoint import load_model_checkpoint
 from dataclasses import replace
 import json
-from pathlib import Path
 
 import pytest
 
-from latent_working_memory.data_preparation.experiment import prepare_experiment
+from latent_working_memory.data_preparation.experiment import select_experiment
 from latent_working_memory.data_preparation.pipeline import prepare_fineweb
-from latent_working_memory.v1.data import EpisodeIndex
 from latent_working_memory.v1.sampling import PretrainSampler
 from latent_working_memory.v1.training import learning_rate_at
 
@@ -31,39 +34,20 @@ def test_selection_equal_cells_mixture_and_curriculum(
     names = ("first", "second") if shared_names else ("one", "two")
     spec = {
         "sources": {"first": str(raw / "semantic"), "second": str(raw / "random")},
-        "runs": {names[0]: {"first": 1}, names[1]: {"second": 1}, "both": {"first": 0.5, "second": 0.5}},
+        "runs": {
+            names[0]: {"first": 1},
+            names[1]: {"second": 1},
+            "both": {"first": 0.5, "second": 0.5},
+        },
         "seed": 3,
+        "balance_task_lengths": True,
+        "samples_per_split": {"train": 12, "dev": 6, "test": 6},
     }
-    output = tmp_path / "selected"
-    report = prepare_experiment(spec, config, tokenizer, output)
-    assert len({r["samples"] for r in report["runs"].values()}) == 1
-    q = report["quota_per_task_length"]["train"]
-    assert {p.name for p in output.iterdir()} == (
-        spec["sources"].keys() | spec["runs"].keys() | {"selection.json"}
-    )
-    preparations = []
-    for name in spec["sources"].keys() | spec["runs"].keys():
-        directory = output / name
-        metadata = json.loads((directory / "preparation.json").read_text())
-        preparations.append(metadata["preparation_id"])
-        splits = ({"train"} if name in spec["runs"] else set()) | (
-            {"dev", "test"} if name in spec["sources"] else set()
-        )
-        assert set(metadata["counts"]) == splits
-        assert {p.name for p in directory.iterdir()} == (
-            {f"{split}.jsonl" for split in splits} | {"preparation.json"}
-        )
-        for split in splits:
-            assert len(EpisodeIndex(directory / f"{split}.jsonl").offsets) == (
-                metadata["counts"][split]
-            )
-        if name in report["runs"]:
-            assert Path(report["runs"][name]["data_dir"]) == directory
-        if name in report["evaluation_dirs"]:
-            assert Path(report["evaluation_dirs"][name]) == directory
-    assert len(set(preparations)) == len(preparations)
-    assert json.loads((output / "selection.json").read_text()) == report
-    index = EpisodeIndex(output / "both/train.jsonl")
+    before = {str(p): p.stat().st_size for p in raw.rglob("*") if p.is_file()}
+    indices, report = select_experiment(spec, config, tokenizer)
+    q = 2
+    assert {report["counts"][f"{name}/train"] for name in spec["runs"]} == {12}
+    index = indices["both", "train"]
     counts = {}
     for i in range(len(index.offsets)):
         e = index[i]
@@ -93,10 +77,9 @@ def test_selection_equal_cells_mixture_and_curriculum(
         config.learning_rate * config.min_lr_fraction
     )
 
-    repeated = tmp_path / "repeated"
-    prepare_experiment(spec, config, tokenizer, repeated)
-    for path in output.glob("*/*.jsonl"):
-        assert path.read_bytes() == (repeated / path.relative_to(output)).read_bytes()
+    repeated, _ = select_experiment(spec, config, tokenizer)
+    assert all(index.ids == repeated[key].ids for key, index in indices.items())
+    assert before == {str(p): p.stat().st_size for p in raw.rglob("*") if p.is_file()}
 
 
 def test_source_dataset_name_cannot_describe_a_different_mixture(tmp_path, tiny_config, tokenizer):
@@ -104,8 +87,129 @@ def test_source_dataset_name_cannot_describe_a_different_mixture(tmp_path, tiny_
         "sources": {"first": "unused/first", "second": "unused/second"},
         "runs": {"first": {"first": 0.5, "second": 0.5}},
         "seed": 3,
+        "balance_task_lengths": True,
+        "samples_per_split": {"train": 12, "dev": 6, "test": 6},
     }
-    output = tmp_path / "selected"
     with pytest.raises(ValueError, match="named after a source"):
-        prepare_experiment(spec, tiny_config, tokenizer, output)
-    assert not output.exists()
+        select_experiment(spec, tiny_config, tokenizer)
+
+
+def test_count_all_and_insufficient_selection(
+    tmp_path, tokenizer, tiny_config, preparation_records, preparation_recipe
+):
+    raw = tmp_path / "raw"
+    prepare_fineweb(preparation_records, tokenizer, tiny_config, raw, preparation_recipe)
+    spec = {
+        "sources": {"semantic": str(raw / "semantic")},
+        "runs": {"semantic": {"semantic": 1}},
+        "seed": 5,
+        "balance_task_lengths": False,
+        "samples_per_split": {"train": None, "dev": None, "test": None},
+    }
+    all_indices, _ = select_experiment(spec, tiny_config, tokenizer)
+    spec["samples_per_split"] = {"train": 5, "dev": 2, "test": 2}
+    small, _ = select_experiment(spec, tiny_config, tokenizer)
+    assert small["semantic", "train"].ids == all_indices["semantic", "train"].ids[:5] or set(
+        small["semantic", "train"].ids
+    ) <= set(all_indices["semantic", "train"].ids)
+    assert len(small["semantic", "train"].ids) == 5
+    spec["samples_per_split"]["train"] = 100000
+    with pytest.raises(ValueError, match="insufficient data"):
+        select_experiment(spec, tiny_config, tokenizer)
+
+
+def test_selection_train_resume_and_evaluate(
+    tmp_path, tokenizer, tiny_config, preparation_records, preparation_recipe
+):
+    model = tmp_path / "model"
+    LlamaForCausalLM(
+        LlamaConfig(
+            vocab_size=len(tokenizer),
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=256,
+            bos_token_id=1,
+            eos_token_id=2,
+            pad_token_id=0,
+        )
+    ).save_pretrained(model)
+    tokenizer.save_pretrained(model)
+    cfg = replace(
+        tiny_config,
+        model_name_or_path=str(model),
+        eval_generation_examples=0,
+        input_length_weights=None,
+        split_fractions=(0.6, 0.2, 0.2),
+    )
+    raw = tmp_path / "raw"
+    recipe = replace(preparation_recipe, samples_per_task=(16, 16, 16), candidates_per_document=16)
+    prepare_fineweb(preparation_records, tokenizer, cfg, raw, recipe)
+    spec = {
+        "sources": {v: str(raw / v) for v in ("semantic", "random")},
+        "runs": {"mixed": {"semantic": 0.5, "random": 0.5}},
+        "seed": 7,
+        "balance_task_lengths": False,
+        "samples_per_split": {"train": 12, "dev": None, "test": None},
+    }
+    path = tmp_path / "selection.json"
+    path.write_text(json.dumps(spec))
+    run = tmp_path / "train"
+    first = run_pretraining(
+        cfg, None, run, torch.device("cpu"), max_steps=1, data_selection=path, data_run="mixed"
+    )
+    assert json.loads((run / "data-selection.json").read_text()) == spec
+    result = run_pretraining(
+        cfg,
+        None,
+        run,
+        torch.device("cpu"),
+        max_steps=2,
+        data_selection=run / "data-selection.json",
+        data_run="mixed",
+        resume=first.final_checkpoint,
+    )
+    assert load_model_checkpoint(result.final_checkpoint).progress["next_step"] == 2
+    out = tmp_path / "evaluation"
+    evaluate_main(
+        [
+            "--checkpoint",
+            str(result.final_checkpoint),
+            "--data-selection",
+            str(path),
+            "--output-dir",
+            str(out),
+            "--split",
+            "test",
+            "--device",
+            "cpu",
+            "--generation-examples",
+            "0",
+        ]
+    )
+    assert all((out / v / "test-step-000002.json").exists() for v in spec["sources"])
+    assert json.loads((out / "data-selection.json").read_text()) == spec
+
+    single = tmp_path / "single-evaluation"
+    evaluate_main(
+        [
+            "--checkpoint",
+            str(result.final_checkpoint),
+            "--data-selection",
+            str(path),
+            "--evaluation-source",
+            "semantic",
+            "--output-dir",
+            str(single),
+            "--split",
+            "test",
+            "--device",
+            "cpu",
+            "--generation-examples",
+            "0",
+        ]
+    )
+    assert (single / "test-step-000002.json").exists()
+    assert not (single / "random").exists()

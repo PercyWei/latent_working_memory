@@ -32,7 +32,7 @@ def sample_inspection(
     bounds = metadata["recipe"]["length_bounds"]
     originals = {
         row["record"]["id"]: row["record"]["text"]
-        for row in map(json.loads, (data_dir.parent / "sources.jsonl").read_text().splitlines())
+        for row in map(json.loads, ((data_dir / metadata["source_pool"]).resolve().parent / "sources.jsonl").read_text().splitlines())
     }
     rows, cells = [], defaultdict(list)
     with (data_dir / f"{split}.jsonl").open() as handle:

@@ -1,32 +1,74 @@
-"""从已构造数据选择等规模实验样本，保留原始 split 与文本。"""
-
-from __future__ import annotations
+"""按实验配置从基础原文选择内存索引，不生成派生数据副本。"""
 
 import argparse
 import hashlib
 import json
 import math
 import random
-import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from transformers import AutoTokenizer
 
+from latent_working_memory.data_preparation.text_samples import (
+    TextSample,
+    input_text_key,
+    tokenizer_identity,
+)
 from latent_working_memory.v1.config import load_config
-from latent_working_memory.v1.data import Episode
-from latent_working_memory.data_preparation.text_samples import TextSample
-from latent_working_memory.v1.prepared_data import validate_preparation
-from latent_working_memory.v1.sampling import capacity_weights, read_tokens
-from latent_working_memory.data_preparation.fineweb import data_contract
+from latent_working_memory.v1.data import EpisodeIndex
+from latent_working_memory.v1.prepared_data import eligible_input_length
 
 
-def prepare_experiment(spec: dict, config, tokenizer, output: Path) -> dict:
-    if output.exists():
-        raise FileExistsError(output)
+class SelectedIndex(EpisodeIndex):
+    def __init__(self, sources, entries, tokenizer, config):
+        self.sources, self.entries = sources, entries
+        self.tokenizer, self.config = tokenizer, config
+        self.offsets, self.ids, self.input_lengths, self.tasks = [], [], [], []
+        self.groups, self.source_ids, self.cluster_ids = {}, set(), set()
+        for name, offset, sample_id, document_id, source_id, cluster, task, size in entries:
+            self.groups.setdefault(document_id, []).append(len(self.offsets))
+            self.offsets.append(offset)
+            self.ids.append(sample_id)
+            self.input_lengths.append(size)
+            self.tasks.append(task)
+            self.source_ids.add(source_id)
+            self.cluster_ids.add(cluster)
+        if not entries or len(set(self.ids)) != len(self.ids):
+            raise ValueError("selection is empty or contains duplicate sample IDs")
+
+    def __getitem__(self, index):
+        name, offset, *_ = self.entries[index]
+        path, variant = self.sources[name]
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            sample = TextSample(**json.loads(handle.readline()))
+        return sample.to_episode(self.tokenizer, self.config, variant)
+
+
+def select_experiment(spec, config, tokenizer, splits=("train", "dev", "test")):
     sources = {name: Path(path) for name, path in spec["sources"].items()}
     runs = spec["runs"]
-    for weights in runs.values():
+    if (
+        not sources
+        or not runs
+        or any(
+            not name or Path(name).name != name or name in {".", ".."}
+            for name in sources.keys() | runs.keys()
+        )
+    ):
+        raise ValueError("sources and runs require simple non-empty dataset names")
+    balanced = spec["balance_task_lengths"]
+    requested = spec["samples_per_split"]
+    if type(spec["seed"]) is not int or spec["seed"] < 0:
+        raise ValueError("selection seed must be a non-negative integer")
+    if type(balanced) is not bool or set(requested) != {"train", "dev", "test"}:
+        raise ValueError("specify balance_task_lengths and train/dev/test sample counts")
+    if any(n is not None and (type(n) is not int or n <= 0) for n in requested.values()):
+        raise ValueError("sample counts must be positive integers or null for all")
+    if balanced and any(n is None for n in requested.values()):
+        raise ValueError("balanced selection requires explicit sample counts")
+    for name, weights in runs.items():
         if (
             not weights
             or set(weights) - sources.keys()
@@ -34,202 +76,157 @@ def prepare_experiment(spec: dict, config, tokenizer, output: Path) -> dict:
             or not math.isclose(sum(weights.values()), 1)
         ):
             raise ValueError("run source weights must be positive and sum to one")
-    for name in sources.keys() & runs.keys():
-        if runs[name] != {name: 1}:
+        if name in sources and weights != {name: 1}:
             raise ValueError("a dataset named after a source must use only that source")
+        if requested["train"] is None and len(weights) > 1:
+            raise ValueError("mixed training requires a sample count to enforce source proportions")
     bounds = config.input_length_bounds
-    cells = {}
-    identities = {}
-    source_metadata = {}
-    registry = {}
-    rejected = defaultdict(int)
-    seen_content = {}
+    keys = [(t, b) for t in ("ae", "continuation") for b in bounds] if balanced else [("all", 0)]
+    cell_counts = {}
+    for split, n in requested.items():
+        if n is not None and n % len(keys):
+            raise ValueError(f"{split} sample count must divide evenly across task/length cells")
+        cell_counts[split] = n // len(keys) if n is not None else None
+    metadata = {
+        name: json.loads((directory / "preparation.json").read_text())
+        for name, directory in sources.items()
+    }
+    prompt_lengths = {
+        t: len(tokenizer.encode(prompt, add_special_tokens=False))
+        for t, prompt in [("ae", config.ae_prompt), ("continuation", config.lm_prompt)]
+    }
+    cells, registry, seen_content = {}, {}, {}
+    rejected = Counter()
     for name, directory in sources.items():
-        meta = json.loads((directory / "preparation.json").read_text())
-        validate_preparation(meta, config)
-        source_metadata[name] = meta
-        identities[name] = meta["preparation_id"]
-        for split in ("train", "dev", "test"):
+        meta = metadata[name]
+        reuse_lengths = meta["tokenizer"] == tokenizer_identity(config)
+        method = "pysbd_conservative" if meta["boundary_variant"] == "semantic" else "random_token"
+        for split in splits:
             groups = defaultdict(list)
-            path = directory / f"{split}.jsonl"
-            with path.open("rb") as handle:
+            seen_ids = set()
+            with (directory / f"{split}.jsonl").open("rb") as handle:
                 while True:
                     offset = handle.tell()
                     line = handle.readline()
                     if not line:
                         break
-                    row = json.loads(line)
-                    episode = (
-                        Episode.from_record(row)
-                        if "contract" in meta
-                        else TextSample(**row).to_episode(
-                            tokenizer, config, meta["boundary_variant"]
-                        )
-                    )
-                    source = episode.sources[0]
+                    sample = TextSample(**json.loads(line))
+                    if sample.sample_id in seen_ids or sample.boundary_method != method:
+                        raise ValueError("duplicate sample ID or inconsistent boundary source")
+                    seen_ids.add(sample.sample_id)
                     for kind, key in [
-                        ("document", source.document_id),
-                        ("source", source.source_id),
-                        ("cluster", source.provenance["dedup_cluster"]),
+                        ("document", sample.document_id),
+                        ("source", sample.source_id),
+                        ("cluster", sample.dedup_cluster),
                     ]:
-                        previous = registry.setdefault((kind, key), split)
-                        if previous != split:
+                        if registry.setdefault((kind, key), split) != split:
                             raise ValueError("source crosses splits")
-                    if len(episode.input_ids) > config.max_input_tokens:
-                        rejected[f"{name}/{split}/input_length"] += 1
+                    size = eligible_input_length(
+                        sample, tokenizer, config, reuse_lengths, prompt_lengths
+                    )
+                    if size is None:
+                        rejected[f"{name}/{split}/length_or_window"] += 1
                         continue
-                    ae, lm = read_tokens(episode, tokenizer)
-                    capacities = capacity_weights(config, len(episode.input_ids), ae, lm, 0)
-                    # All configured ratios must fit, including the full-context LM baseline.
-                    expected = {
-                        max(
-                            config.pretrain_k_min,
-                            min(config.k_limit, math.ceil(len(episode.input_ids) / r)),
-                        )
-                        for r in config.pretrain_compression_ratios
-                    }
-                    if set(capacities) != expected or (
-                        lm
-                        and 1 + len(episode.input_ids) + len(lm.prompt_ids) + len(lm.target_ids)
-                        > config.read_context_tokens
-                    ):
-                        rejected[f"{name}/{split}/window_or_target_length"] += 1
-                        continue
-                    content_key = hashlib.blake2b(
+                    target = sample.text if sample.task == "ae" else sample.continuation
+                    content = hashlib.blake2b(
                         json.dumps(
-                            (
-                                episode.reads[0].task,
-                                source.provenance["input_text_key"],
-                                " ".join(episode.reads[0].references[0].text.split()),
-                            )
+                            (sample.task, input_text_key(sample.text), " ".join(target.split()))
                         ).encode()
                     ).hexdigest()
-                    if content_key in seen_content:
-                        if seen_content[content_key] != split:
+                    if content in seen_content:
+                        if seen_content[content] != split:
                             raise ValueError("duplicate content crosses splits")
                         rejected[f"{name}/{split}/duplicate_content"] += 1
                         continue
-                    seen_content[content_key] = split
-                    bucket = next(b for b in bounds if len(episode.input_ids) <= b)
-                    groups[(episode.reads[0].task, bucket)].append((offset, episode.episode_id))
-            cells[name, split] = groups
-            print(
-                json.dumps(
-                    {"source": name, "split": split, "eligible": sum(map(len, groups.values()))}
-                ),
-                flush=True,
-            )
-    keys = [(task, b) for task in ("ae", "continuation") for b in bounds]
-    quotas = {
-        split: min(len(cells[name, split][key]) for name in sources for key in keys)
-        for split in ("train", "dev", "test")
-    }
-    # Exact source proportions are required at each task/length cell.
-    while quotas["train"] and any(
-        not math.isclose(quotas["train"] * w, round(quotas["train"] * w))
-        for weights in runs.values()
-        for w in weights.values()
-    ):
-        quotas["train"] -= 1
-    if min(quotas.values()) <= 0:
-        raise ValueError("some source/task/length cells have no eligible examples")
-    output.mkdir(parents=True)
-    report = {
-        "source_preparations": identities,
-        "selection": spec,
-        "quota_per_task_length": quotas,
-        "rejected": dict(rejected),
-        "available": {
-            f"{name}/{split}": {f"{t}/{b}": len(cells[name, split][t, b]) for t, b in keys}
-            for name in sources
-            for split in ("train", "dev", "test")
-        },
-        "checks": {
-            "source_split_isolation": True,
-            "all_ratios_fit": True,
-            "full_context_fits": True,
-        },
-    }
-
-    def write_selection(destination, split, weights):
-        destination.mkdir(parents=True, exist_ok=True)
-        selected = []
-        for name, weight in weights.items():
-            for key in keys:
-                pool = list(cells[name, split][key])
-                random.Random(f"{spec['seed']}:{name}:{split}:{key}").shuffle(pool)
-                selected.extend(
-                    (name, offset, identity)
-                    for offset, identity in pool[: round(quotas[split] * weight)]
-                )
-        random.Random(spec["seed"]).shuffle(selected)
-        seen = set()
-        with (destination / f"{split}.jsonl").open("wb") as out:
-            handles = {name: (sources[name] / f"{split}.jsonl").open("rb") for name in weights}
-            try:
-                for name, offset, identity in selected:
-                    if identity in seen:
-                        raise ValueError("duplicate selected episode ID")
-                    seen.add(identity)
-                    handles[name].seek(offset)
-                    line = handles[name].readline()
-                    if "contract" not in source_metadata[name]:
-                        episode = TextSample(**json.loads(line)).to_episode(
-                            tokenizer, config, source_metadata[name]["boundary_variant"]
+                    seen_content[content] = split
+                    key = (
+                        (sample.task, next(b for b in bounds if size <= b)) if balanced else keys[0]
+                    )
+                    groups[key].append(
+                        (
+                            name,
+                            offset,
+                            sample.sample_id,
+                            sample.document_id,
+                            sample.source_id,
+                            sample.dedup_cluster,
+                            sample.task,
+                            size,
                         )
-                        line = (json.dumps(episode.to_record(), ensure_ascii=False) + "\n").encode()
-                    out.write(line)
-            finally:
-                for handle in handles.values():
-                    handle.close()
-        return len(selected)
-
-    dataset_weights = {name: {name: 1} for name in sources} | runs
-    report["runs"] = {}
-    for name, weights in dataset_weights.items():
-        dest = output / name
-        counts = {}
-        if name in runs:
-            counts["train"] = write_selection(dest, "train", weights)
-            report["runs"][name] = {
-                "data_dir": str(dest.resolve()),
-                "samples": counts["train"],
+                    )
+            cells[name, split] = groups
+    indices, summaries = {}, {}
+    weights_by_name = {name: {name: 1} for name in sources} | runs
+    for name, weights in weights_by_name.items():
+        for split in (("train",) if name in runs else ()) + (
+            ("dev", "test") if name in sources else ()
+        ):
+            if split not in splits:
+                continue
+            entries = []
+            for source, weight in weights.items():
+                for key in keys:
+                    pool = list(cells[source, split][key])
+                    # Keep the historical per-cell shuffle and final shuffle exactly.
+                    random.Random(f"{spec['seed']}:{source}:{split}:{key}").shuffle(pool)
+                    quota = cell_counts[split]
+                    n = len(pool) if quota is None else quota * weight
+                    if not math.isclose(n, round(n)):
+                        raise ValueError("sample counts must allow exact source proportions")
+                    n = round(n)
+                    if len(pool) < n:
+                        raise ValueError(
+                            f"insufficient data: {source}/{split}/{key} needs {n}, has {len(pool)}"
+                        )
+                    entries.extend(pool[:n])
+            random.Random(spec["seed"]).shuffle(entries)
+            paths = {
+                source: (sources[source] / f"{split}.jsonl", metadata[source]["boundary_variant"])
+                for source in weights
             }
-        if name in sources:
-            counts.update(
-                {split: write_selection(dest, split, weights) for split in ("dev", "test")}
+            indices[name, split] = SelectedIndex(paths, entries, tokenizer, config)
+            summaries[f"{name}/{split}"] = dict(
+                Counter(f"{source}/{task}" for source, _, _, _, _, _, task, _ in entries)
             )
-        metadata = {
-            "preparation_id": str(uuid.uuid4()),
-            "contract": data_contract(config),
-            "source_preparations": identities,
-            "source_weights": weights,
-            "counts": counts,
-        }
-        (dest / "preparation.json").write_text(json.dumps(metadata, indent=2) + "\n")
-    report["evaluation_dirs"] = {name: str((output / name).resolve()) for name in sources}
-    (output / "selection.json").write_text(json.dumps(report, indent=2) + "\n")
-    return report
+    report = {
+        "selection": spec,
+        "tokenizer": tokenizer_identity(config),
+        "source_preparations": {name: meta["preparation_id"] for name, meta in metadata.items()},
+        "counts": {
+            f"{name}/{split}": len(index.offsets) for (name, split), index in indices.items()
+        },
+        "task_source_counts": summaries,
+        "rejected": dict(rejected),
+    }
+    return indices, report
+
+
+def selection_metadata(report, name):
+    identity = {
+        "source_preparations": report["source_preparations"],
+        "selection": report["selection"],
+        "dataset": name,
+    }
+    return {
+        "preparation_id": hashlib.blake2b(
+            json.dumps(identity, sort_keys=True).encode(), digest_size=16
+        ).hexdigest(),
+        "source_weights": report["selection"]["runs"].get(name, {name: 1}),
+        "selection": report,
+    }
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--spec", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     config = load_config(args.config)
     tokenizer = AutoTokenizer.from_pretrained(
         config.model_name_or_path, revision=config.model_revision, local_files_only=True
     )
-    print(
-        json.dumps(
-            prepare_experiment(
-                json.loads(args.spec.read_text()), config, tokenizer, args.output_dir
-            ),
-            indent=2,
-        )
-    )
+    _, report = select_experiment(json.loads(args.spec.read_text()), config, tokenizer)
+    print(json.dumps(report, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":

@@ -5,7 +5,6 @@
   ],
   "project": "latent-working-memory-v1",
   "group": "pretrain-objective-comparison-128_20260912",
-  "data_dir": "data/v1/fineweb-4096-doc100k_20260910/derived/pretrain-objective-comparison-128_20260912",
   "max_steps": 20000,
   "note": "notes/v1/20260912_pretraining_objective_comparison.md",
   "comparison_name": "pretrain_r2_mixed-32k_compare_20260912",
@@ -30,5 +29,6 @@
       "fork_from_run": "pretrain_ae-only_r2_mixed-16k_20260912"
     }
   ],
-  "training_concurrency": 2
+  "training_concurrency": 2,
+  "data_selection": "configs/data_preparation/fineweb-128-doc100k_pretrain-objective-comparison.json"
 }

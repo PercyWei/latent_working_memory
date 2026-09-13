@@ -20,9 +20,9 @@ def run_series(spec, output):
     output.mkdir(parents=True, exist_ok=True)
     plan = output / "plan"
     plan.mkdir(exist_ok=True)
-    selection = json.loads((Path(spec["data_dir"]) / "selection.json").read_text())
-    evaluation_dirs = selection["evaluation_dirs"]
-    (plan / "evaluation-dirs.json").write_text(json.dumps(evaluation_dirs, indent=2) + "\n")
+    selection = json.loads(Path(spec["data_selection"]).read_text())
+    evaluation_sources = list(selection["sources"])
+    (plan / "data-selection.json").write_text(json.dumps(selection, indent=2) + "\n")
     (plan / "series.json").write_text(json.dumps(spec, indent=2) + "\n")
     status = {"started": now(), "pid": os.getpid(), "status": "running", "jobs": {},
               "code_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
@@ -100,8 +100,8 @@ def run_series(spec, output):
             directory = output / "train" / run["name"]
             argv = [python, "-m", "torch.distributed.run", "--standalone", "--nproc_per_node=2",
                     "-m", "latent_working_memory.v1.train", "--phase", "pretrain",
-                    "--config", run["config"], "--data-dir", str(Path(spec["data_dir"]) / "mixed"),
-                    "--evaluation-dirs", str(plan / "evaluation-dirs.json"),
+                    "--config", run["config"], "--data-selection", str(plan / "data-selection.json"),
+                    "--data-run", "mixed",
                     "--output-dir", str(directory), "--max-steps", str(spec["max_steps"]),
                     "--save-every", "1000", "--swanlab-mode", "online", *groups]
             if "fork_from_run" in run:
@@ -115,9 +115,10 @@ def run_series(spec, output):
             checkpoint = directory / f"checkpoints/pretrain-step-{spec['max_steps']:06d}.pt"
             eval_output = output / "eval" / run["evaluation_name"]
             jobs = []
-            for (source, data_dir), gpu in zip(evaluation_dirs.items(), spec["gpus"], strict=True):
+            for source, gpu in zip(evaluation_sources, spec["gpus"], strict=True):
                 argv = [python, "-m", "latent_working_memory.v1.evaluate", "--checkpoint", str(checkpoint),
-                        "--data-dir", data_dir, "--output-dir", str(eval_output / source),
+                        "--data-selection", str(plan / "data-selection.json"), "--evaluation-source", source,
+                        "--output-dir", str(eval_output / source),
                         "--split", "test", "--examples", "240", "--generation-examples", "60",
                         "--prefix-tokens", "1", "8", "32",
                         "--swanlab-mode", "disabled"]

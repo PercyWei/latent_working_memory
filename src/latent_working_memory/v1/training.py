@@ -22,6 +22,7 @@ from latent_working_memory.v1.checkpoint import (
     save_model_checkpoint,
 )
 from latent_working_memory.v1.config import ExperimentConfig, write_resolved_config
+from latent_working_memory.data_preparation.experiment import select_experiment, selection_metadata
 from latent_working_memory.v1.prepared_data import pretraining_index, validate_preparation
 from latent_working_memory.v1.distributed import synchronize_gradients
 from latent_working_memory.v1.evaluation import evaluate_pretraining
@@ -220,7 +221,7 @@ class PretrainRunResult:
 
 def run_pretraining(
     config: ExperimentConfig,
-    data_dir: Path,
+    data_dir: Path | None,
     output_dir: Path,
     device: torch.device,
     max_steps: int,
@@ -233,6 +234,8 @@ def run_pretraining(
     swanlab_tags: tuple[str, ...] = (),
     evaluation_dirs: dict[str, Path] | None = None,
     fork_from: Path | None = None,
+    data_selection: Path | None = None,
+    data_run: str | None = None,
 ) -> PretrainRunResult:
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     rank = dist.get_rank() if dist.is_initialized() else 0
@@ -247,34 +250,44 @@ def run_pretraining(
         raise ValueError("resume and fork_from are mutually exclusive")
     if output_dir.exists() and resume is None:
         raise FileExistsError("use a new output directory or resume an existing run")
-    metadata = json.loads((data_dir / "preparation.json").read_text())
-    validate_preparation(metadata, config)
+    if (data_dir is None) == (data_selection is None):
+        raise ValueError("choose either data_dir or data_selection")
+    if data_selection is not None and (not data_run or evaluation_dirs is not None or train_example_limit is not None):
+        raise ValueError("selection requires data_run and defines evaluation and sample counts itself")
+    if data_selection is None and data_run is not None:
+        raise ValueError("data_run requires data_selection")
     random.seed(config.model_seed)
     torch.manual_seed(config.model_seed)
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     tokenizer, backbone = load_backbone(config, device, dtype)
-    train_index = pretraining_index(data_dir / "train.jsonl", tokenizer, config)
-    evaluation_dirs = {"dev": data_dir} if evaluation_dirs is None else evaluation_dirs
-    if not evaluation_dirs:
-        raise ValueError("at least one evaluation dataset is required")
-    dev_indices = {}
-    evaluation_ids = {}
-    for name, directory in evaluation_dirs.items():
-        if not name or Path(name).name != name or name in {".", ".."}:
-            raise ValueError("evaluation names must be simple directory names")
-        evaluation_metadata = json.loads((directory / "preparation.json").read_text())
-        validate_preparation(evaluation_metadata, config)
-        evaluation_ids[name] = evaluation_metadata["preparation_id"]
-        dev_indices[name] = pretraining_index(directory / "dev.jsonl", tokenizer, config)
-        for split in ("dev", "test"):
-            path = directory / f"{split}.jsonl"
-            index = dev_indices[name] if split == "dev" else pretraining_index(path, tokenizer, config)
-            if (
-                train_index.source_ids & index.source_ids
-                or train_index.cluster_ids & index.cluster_ids
-                or train_index.groups.keys() & index.groups.keys()
-            ):
-                raise ValueError("train/evaluation source leakage")
+    dev_indices, test_indices, evaluation_ids = {}, {}, {}
+    if data_selection is not None:
+        spec = json.loads(data_selection.read_text())
+        indices, selection_report = select_experiment(spec, config, tokenizer)
+        train_index = indices[data_run, "train"]
+        metadata = selection_metadata(selection_report, data_run)
+        for name in spec["sources"]:
+            dev_indices[name], test_indices[name] = indices[name, "dev"], indices[name, "test"]
+            evaluation_ids[name] = selection_metadata(selection_report, name)["preparation_id"]
+    else:
+        metadata = json.loads((data_dir / "preparation.json").read_text())
+        validate_preparation(metadata, config)
+        train_index = pretraining_index(data_dir / "train.jsonl", tokenizer, config)
+        evaluation_dirs = {"dev": data_dir} if evaluation_dirs is None else evaluation_dirs
+        if not evaluation_dirs:
+            raise ValueError("at least one evaluation dataset is required")
+        for name, directory in evaluation_dirs.items():
+            if not name or Path(name).name != name or name in {".", ".."}:
+                raise ValueError("evaluation names must be simple directory names")
+            evaluation_metadata = json.loads((directory / "preparation.json").read_text())
+            validate_preparation(evaluation_metadata, config)
+            evaluation_ids[name] = evaluation_metadata["preparation_id"]
+            dev_indices[name] = pretraining_index(directory / "dev.jsonl", tokenizer, config)
+            test_indices[name] = pretraining_index(directory / "test.jsonl", tokenizer, config)
+    for index in [*dev_indices.values(), *test_indices.values()]:
+        if (train_index.source_ids & index.source_ids or train_index.cluster_ids & index.cluster_ids
+                or train_index.groups.keys() & index.groups.keys()):
+            raise ValueError("train/evaluation source leakage")
     if (
         max(config.write_context_tokens, config.read_context_tokens)
         > backbone.max_position_embeddings
@@ -331,6 +344,8 @@ def run_pretraining(
     output_dir.mkdir(parents=True, exist_ok=True)
     if primary:
         write_resolved_config(config, output_dir / "config.json")
+        if data_selection is not None:
+            (output_dir / "data-selection.json").write_text(json.dumps(spec, indent=2) + "\n")
         (output_dir / "provenance.json").write_text(
             json.dumps(
                 {
