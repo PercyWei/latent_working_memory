@@ -6,7 +6,9 @@ from pathlib import Path
 
 import swanlab
 
-from latent_working_memory.v1.dev_scalars import configure_development_panels, development_scalars
+from latent_working_memory.v1.dev_scalars import (
+    configure_development_panels, development_scalars, remove_individual_dev_panels,
+)
 from latent_working_memory.v1.reporting import OVERVIEW_METRICS
 from latent_working_memory.v1.reupload_training import prepare_replay
 from latent_working_memory.v1.tracking import swanlab_training_run
@@ -42,13 +44,11 @@ def migrate(training_dir):
     charts = [checked(api._get(f"{base}/chart/{index}/info")) for index in section["chartIndex"]]
     titles = {f"dev/overview/{task}/{metric}" for task, metric in OVERVIEW_METRICS}
     old = [c["index"] for c in charts if c["type"] == "ECHARTS" and c["title"] in titles]
-    hidden = checked(api._get(f"{base}/sections/protected", params={"types": "HIDDEN"}))[0]
-    checked(api._put(f"{base}/chart/order", data={"sections": [
-        {"index": section["index"], "chartIndex": [i for i in section["chartIndex"] if i not in old]},
-        {"index": hidden["index"], "chartIndex": list(dict.fromkeys(hidden["chartIndex"] + old))},
-    ]}))
+    for index in old:
+        checked(api._delete(f"{base}/chart/{index}/hard"))
+    individual = remove_individual_dev_panels(run, sources)
     audit = {"run_id": identity["id"], "dev_steps": sorted(prepared["dev"]),
-             "archived_snapshot_panels": old,
+             "deleted_snapshot_panels": old, "deleted_individual_panels": individual,
              "native_panels": [c["title"] for c in charts if c["type"] == "LINE"]}
     audit_path.write_text(json.dumps(audit, indent=2) + "\n")
     print(json.dumps(audit), flush=True)

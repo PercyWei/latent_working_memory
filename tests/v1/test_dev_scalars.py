@@ -23,7 +23,7 @@ def test_sparse_generation_points_and_eight_curve_limit():
 
 
 def test_native_panels_created_once_before_scalar_upload(monkeypatch):
-    definitions, posts = [], []
+    posts = []
     section = {'index': 'dev-section', 'name': 'dev', 'chartIndex': []}
     charts = {}
 
@@ -32,25 +32,66 @@ def test_native_panels_created_once_before_scalar_upload(monkeypatch):
             return SimpleNamespace(run_id='cloud-id')
 
         def _get(self, path, params=None):
-            if path.endswith('/sections'):
-                data = [section] if posts else []
-            else:
-                data = charts[path.split('/')[-2]]
+            data = ([section] if posts else []) if path.endswith('/sections') else charts[path.split('/')[-2]]
             return SimpleNamespace(ok=True, data=data)
 
         def _post(self, path, data):
-            posts.append((path, data))
-            if path.endswith('/chart/line'):
-                index = str(len(charts))
-                charts[index] = dict(data, index=index, type='LINE')
-                section['chartIndex'].append(index)
-            return SimpleNamespace(ok=True, data=section)
+            assert path.endswith('/columns')
+            posts.append(data)
+            for column in data:
+                index = column['chartIndex']
+                if index not in charts:
+                    charts[index] = {'title': column['chartName'], 'index': index, 'type': 'LINE',
+                                     'config': {'yAxis': []}}
+                    section['chartIndex'].append(index)
+                charts[index]['config']['yAxis'].append(column['key'])
+            return SimpleNamespace(ok=True, data=[])
+
+        def _put(self, path, data):
+            index = path.split('/')[-3]
+            charts[index].update(data)
+            return SimpleNamespace(ok=True, data=None)
 
     monkeypatch.setattr('latent_working_memory.v1.dev_scalars.swanlab.Api', Api)
-    run = SimpleNamespace(id='slug', url='https://swanlab.cn/@user/project/runs/slug',
-                          define_metric=lambda key, **kw: definitions.append((key, kw)))
+    run = SimpleNamespace(id='slug', url='https://swanlab.cn/@user/project/runs/slug')
     configure_development_panels(run, ['semantic', 'random'], 'online')
-    assert len(posts) == 7  # one section and six native panels
-    assert all(kw == {'hidden': True} for _, kw in definitions)
+    assert len(posts) == 1 and len(posts[0]) == 42
+    assert len(charts) == 6
+    assert all('hidden' not in column and column['sectionName'] == 'dev' for column in posts[0])
     configure_development_panels(run, ['semantic', 'random'], 'online')
-    assert len(posts) == 7
+    assert len(posts) == 1
+
+
+def test_delete_only_redundant_panels_and_empty_sections(monkeypatch):
+    from latent_working_memory.v1.dev_scalars import remove_individual_dev_panels
+    key = 'dev/overview/ae/nll/semantic/memory'
+    deleted = []
+    sections = [{'name': 'dev', 'index': 'main', 'chartIndex': ['grouped']},
+                {'name': 'dev/overview/ae/nll/semantic', 'index': 'auto', 'chartIndex': ['single']}]
+    hidden = [{'name': 'Hidden', 'type': 'HIDDEN', 'index': 'hidden', 'chartIndex': ['old', 'other']}]
+    charts = {
+        'grouped': {'title': 'dev/overview/ae/nll', 'type': 'LINE', 'config': {'yAxis': [key]}},
+        'single': {'title': key, 'type': 'LINE', 'config': {'yAxis': [key]}},
+        'old': {'title': key, 'type': 'LINE', 'config': {'yAxis': [key]}},
+        'other': {'title': 'train/loss', 'type': 'LINE', 'config': {'yAxis': ['train/loss']}},
+    }
+
+    class Api:
+        def run(self, path):
+            return SimpleNamespace(run_id='cloud')
+        def _get(self, path, params=None):
+            data = hidden if path.endswith('/protected') else sections if path.endswith('/sections') else charts[path.split('/')[-2]]
+            return SimpleNamespace(ok=True, data=data)
+        def _delete(self, path):
+            deleted.append(path)
+            if path.endswith('/hard'):
+                index = path.split('/')[-2]
+                for section in sections + hidden:
+                    section['chartIndex'] = [i for i in section['chartIndex'] if i != index]
+            return SimpleNamespace(ok=True, data=None)
+
+    monkeypatch.setattr('latent_working_memory.v1.dev_scalars.swanlab.Api', Api)
+    run = SimpleNamespace(id='slug', url='https://swanlab.cn/@user/project/runs/slug')
+    assert remove_individual_dev_panels(run, ['semantic']) == ['single', 'old']
+    assert deleted == ['/experiment/cloud/chart/single/hard', '/experiment/cloud/chart/old/hard',
+                       '/experiment/cloud/section/auto']

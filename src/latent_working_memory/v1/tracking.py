@@ -8,7 +8,9 @@ from typing import Any, Iterator
 import swanlab
 
 from latent_working_memory.v1.checkpoint import capture_rng_state, restore_rng_state
-from latent_working_memory.v1.dev_scalars import configure_development_panels, development_scalars
+from latent_working_memory.v1.dev_scalars import (
+    configure_development_panels, development_scalars,
+)
 from latent_working_memory.v1.reporting import (
     evaluation_overview, paired_reconstructions, evaluation_tables,
 )
