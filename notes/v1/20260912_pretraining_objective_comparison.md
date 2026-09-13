@@ -1,7 +1,7 @@
 # 20260912_短文本预训练目标对比实验
 
 创建时间：20260912 23:38:14 UTC+08:00
-最后修订时间：20260913 12:51:55 UTC+08:00
+最后修订时间：20260913 12:55:47 UTC+08:00
 
 本实验比较 AE-only、从开始联合 AE/LM、AE warm-up 后联合训练。目标是在短文本、低压缩率条件下判断读写结构能否建立忠实重建，以及 LM 目标对这一能力的影响。实验沿用[预训练数据类型对比](20260911_pretraining_data_comparison.md)的产物与报告布局。本轮用户明确指定仅使用物理 GPU 4、5。
 
@@ -146,3 +146,5 @@ GitHub 首次同步成功；后续服务器连接 GitHub 出现 TLS 错误，按
 ```
 
 调度器后续默认把最终测试写回训练 run，跨组 compare 继续独立保存；仍支持显式创建独立 eval run。本次历史 eval/compare 记录保留。SwanLab 恢复并结束 run 可能更新云端结束时间，原训练时间以执行日志及资源记录为准。
+
+20260913 12:55:47 UTC+08:00：追加功能已在本地和服务器分别通过 16 项相关测试，通过 GitHub 同步后从服务器仓库补写 A/B/C 三组的 semantic/random 测试报告。未运行新的训练或模型推理，未新建或删除云端 run。云端核对 30 个测试标量与本地报告一致、step 均为 20,000；每组存在 25 个评估媒体指标（图表、表格、样例及元数据）。按 key、step、值和时间戳核对原训练 loss/AE NLL 共 9,000 个曲线采样点，全部一致；云端配置、名称、job_type、group、tags、创建及结束时间保持不变。查询接口的近似汇总 median 会变化，不将其用于数据完整性判断。执行命令、日志和核验结果分别保存在 `plan/evaluation-append-command.json`、`plan/evaluation-append.log`、`plan/evaluation-append-verification.json`。
