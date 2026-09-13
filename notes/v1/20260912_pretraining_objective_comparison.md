@@ -1,7 +1,7 @@
 # 20260912_短文本预训练目标对比实验
 
 创建时间：20260912 23:38:14 UTC+08:00
-最后修订时间：20260913 14:02:02 UTC+08:00
+最后修订时间：20260913 14:22:30 UTC+08:00
 
 本实验比较 AE-only、从开始联合 AE/LM、AE warm-up 后联合训练。目标是在短文本、低压缩率条件下判断读写结构能否建立忠实重建，以及 LM 目标对这一能力的影响。实验沿用[预训练数据类型对比](20260911_pretraining_data_comparison.md)的产物与报告布局。本轮用户明确指定仅使用物理 GPU 4、5。
 
@@ -91,8 +91,8 @@ GitHub 首次同步成功；后续服务器连接 GitHub 出现 TLS 错误，按
 
 | 训练组 | 当前运行 |
 |---|---|
-| AE-only | [SwanLab](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/ul50zs7s) |
-| 直接联合 | [SwanLab](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/qsfx08ca) |
+| AE-only | [SwanLab](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/xhnc9qbf) |
+| 直接联合 | [SwanLab](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/7cxvhc3a) |
 | AE warm-up | 等待 A 完成后自动创建；前 5,000 步引用 A |
 
 完成时间：20260913 09:16:53 UTC+08:00
@@ -110,9 +110,9 @@ GitHub 首次同步成功；后续服务器连接 GitHub 出现 TLS 错误，按
 
 | 训练组 | 训练 | 评估 |
 |---|---|---|
-| ae-only | [训练](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/ul50zs7s) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/y4qrfh4w) |
-| joint | [训练](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/qsfx08ca) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/28xxvtjk) |
-| ae-warmup | [训练](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/6ufuyuyr) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/xyb659i7) |
+| ae-only | [训练](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/xhnc9qbf) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/y4qrfh4w) |
+| joint | [训练](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/7cxvhc3a) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/28xxvtjk) |
+| ae-warmup | [训练](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/ie55bu45) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/xyb659i7) |
 
 跨组比较：[SwanLab](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/6ih300w5)。
 
@@ -198,3 +198,14 @@ A/B/C 已在原 run 上补写全部 dev 标量，ID 和链接未变；原 5 张 
 本地和服务器各通过 13 项相关测试，覆盖稀疏生成指标、每图曲线限制、面板仅初始化一次，以及实际训练／回放逐项一致。云端核验三组共 1,794 个 dev 标量点、18 个原生面板的指标关联和横轴配置；9,000 个原训练曲线采样点仍与日志一致，其他可见分区布局未变。
 
 执行命令和核验结果见 `plan/dev-scalars-commands.json`、`plan/dev-scalars-verification.json`；日志为 `plan/{ae-only,joint,ae-warmup}-dev-scalars.log`。各训练目录的 `evaluation-publications/layout-before-dev-scalars.json` 和 `dev-scalar-migration.json` 保存迁移前布局及迁移结果。
+
+
+## 9. 在注册指标时直接绑定合并面板：A 组待验收
+
+用户要求无用面板不应生成，已将初始化改为使用当前项目的 v0 指标注册接口：每条 dev 标量显式指定合并图的 `chartIndex`，42 条序列直接注册到 6 张原生折线图，再开始正常 SDK 数据记录。此路径不设置 Hidden，不创建单序列面板，也不执行生成后的清理。`define_metric(hidden=True)` 不适用于该项目实际使用的旧版上传接口，已从正常发布路径移除。旧运行的独立迁移工具改为删除冗余面板，不删除底层指标数据。
+
+本轮先上传了 A/B/C 中间 run，随后用户要求先验收一组，因此只进一步替换 A。当前供验收的 A 为 `xhnc9qbf`，完整回放 20,000 步；B 的 `7cxvhc3a`、C 的 `ie55bu45` 是暂停要求到达前创建的中间 run，尚未按最终直接绑定方案重新发布，等待用户确认 A 后再处理。A 的中间 run `0jwrcqyw` 已撤销；新旧身份及报告发布凭据仍按训练目录中的归档保留。
+
+A 在首个数据点上传前经云端检查，只有 6 张 dev 原生图、Hidden 为 0。上传完成后，dev 为 10 个面板、evaluation 为 10 个面板，Hidden 仍为 0，且无额外单序列分区；完整训练曲线、21 次 dev 表格历史、生成样例和最终 test 均已恢复。核对 140,001 个训练相关标量点、666 个 dev 标量点、5 张 test 核心图，以及最终 dev/test 各 120 组生成样例，结果与产物一致。相关测试在本地和服务器各通过 14 项。
+
+当前验收状态和命令见 `plan/direct-panel-review.json`，首点前布局及最终核验见 `plan/ae-only-direct-panel-initialization.json`、`plan/ae-only-direct-panel-verification.json`，上传日志为 `plan/ae-only-direct-panel-reupload.log`。本轮未重新训练或推理。
