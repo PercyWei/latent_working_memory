@@ -8,7 +8,9 @@ from typing import Any, Iterator
 import swanlab
 
 from latent_working_memory.v1.checkpoint import capture_rng_state, restore_rng_state
-from latent_working_memory.v1.reporting import reconstruction_media, build_evaluation_charts
+from latent_working_memory.v1.reporting import (
+    evaluation_overview, paired_reconstructions, development_overview,
+)
 
 
 @contextmanager
@@ -148,46 +150,11 @@ def log_training(
     run.log(metrics, step=record["step"])
 
 
-def log_evaluation(
-    run: swanlab.Run | None,
-    metrics: dict[str, Any],
-    records_path: Path,
-    step: int,
-    split: str = "dev",
-) -> None:
+def log_evaluation(run, metrics, records_paths, step):
     if run is None:
         return
-    values: dict[str, Any] = {"progress/input_tokens": metrics["training_input_tokens"]}
-    generation_metrics = (
-        "generated_reads",
-        "correct_prefix_ratio",
-        "bleu_4",
-        "exact_match",
-    )
-    strata = {"length_ratio"}
-    for group, summary in metrics["groups"].items():
-        category, name = group.split("/", 1)
-        if category == "all":
-            for metric in (
-                "nll",
-                "ppl",
-                "reads",
-                *generation_metrics,
-            ):
-                if metric in summary:
-                    values[f"{split}/{name}/{metric}"] = summary[metric]
-        elif category in strata:
-            for metric in ("nll", "reads", *generation_metrics):
-                if metric in summary:
-                    values[f"{split}_by_{category}/{name}/{metric}"] = summary[metric]
-    for group, comparison in metrics["comparisons"].items():
-        category, name = group.split("/", 1)
-        if category == "all" or category in strata:
-            prefix = split if category == "all" else f"{split}_by_{category}"
-            values.update(
-                {f"{prefix}/{name}/{metric}": value for metric, value in comparison.items()}
-            )
-    values.update(reconstruction_media(records_path, split))
+    values = development_overview(list(records_paths.items()), step)
+    values["progress/input_tokens"] = next(iter(metrics.values()))["training_input_tokens"]
     run.log(values, step=step)
 
 
@@ -207,28 +174,28 @@ def append_evaluation_reports(training_dir: Path, entries: list[dict[str, Any]])
     receipt = training_dir / "evaluation-publications" / f"{split}-step-{step:06d}.json"
     if receipt.exists():
         raise ValueError(f"evaluation already appended: {receipt}")
-    prefix = f"evaluation/{split}"
-    values = {f"{prefix}/{key}": value
-              for key, value in build_evaluation_charts(reports).items()}
-    for (source, report), entry in zip(reports, entries, strict=True):
-        if not source or Path(source).name != source or source in {".", ".."}:
-            raise ValueError("evaluation sources must be simple names")
-        for section in ("groups", "comparisons"):
-            for group, summary in report[section].items():
-                label = group.removeprefix("all/")
-                for metric, value in summary.items():
-                    if isinstance(value, (int, float)):
-                        values[f"{prefix}/{source}/{label}/{metric}"] = value
-        for group, summary in report.get("prefix_diagnostics", {}).items():
-            for metric, value in summary.items():
-                values[f"{prefix}/{source}/prefix_diagnostics/{group}/{metric}"] = value
-        values.update(reconstruction_media(
-            Path(entry["report"]).with_suffix(".jsonl"), f"{prefix}/examples/{source}"
-        ))
+    prefix = f"evaluation/{split}/overview"
+    values = evaluation_overview(reports, prefix)
+    values.update(paired_reconstructions(
+        [(entry["evaluation_source"], Path(entry["report"]).with_suffix(".jsonl"))
+         for entry in entries], prefix,
+    ))
     metadata = {"training_run_id": identity["id"], "split": split,
                 "checkpoint_step": step, "reports": entries,
                 "protocols": {source: report.get("protocol", {}) for source, report in reports}}
     values[f"{prefix}/metadata"] = swanlab.Text(json.dumps(metadata, ensure_ascii=False))
+    with swanlab_training_run(training_dir) as run:
+        run.log(values, step=step)
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
+
+
+@contextmanager
+def swanlab_training_run(training_dir):
+    """Resume a finished training run while preserving its identity and configuration."""
+    identity = json.loads((training_dir / "swanlab.json").read_text())
+    if identity["job_type"] != "train" or identity["mode"] != "online":
+        raise ValueError("evaluation append requires an online training run")
     # The saved URL identifies the workspace as well as the project; IDs alone are not global.
     project_path = identity["url"].split("/@", 1)[1].split("/runs/", 1)[0]
     workspace, project = project_path.split("/")
@@ -253,6 +220,4 @@ def append_evaluation_reports(training_dir: Path, entries: list[dict[str, Any]])
     finally:
         restore_rng_state(rng_state)
     with run:
-        run.log(values, step=step)
-    receipt.parent.mkdir(parents=True, exist_ok=True)
-    receipt.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
+        yield run

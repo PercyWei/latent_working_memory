@@ -204,3 +204,97 @@ def comparison_charts(reports: list[tuple[str, str, dict[str, Any]]]) -> dict[st
             "train",
         )
     return values
+
+
+OVERVIEW_METRICS = (("ae", "nll"), ("continuation", "nll"), ("ae", "bleu_4"),
+                    ("ae", "correct_prefix_ratio"), ("ae", "exact_match"))
+
+
+def evaluation_overview(reports, prefix):
+    """Five comparable panels; redundant and stratified metrics remain in two tables."""
+    values = {}
+    for task, metric in OVERVIEW_METRICS:
+        conditions = [c for c in CONDITION_COLORS if any(
+            metric in report["groups"].get(f"all/{task}/{c}", {}) for _, report in reports
+        )]
+        if conditions:
+            values[f"{prefix}/{task}/{metric}"] = _bar(
+                conditions,
+                {source: [report["groups"].get(f"all/{task}/{c}", {}).get(metric)
+                          for c in conditions] for source, report in reports},
+                conditions, CONDITION_COLORS, "condition",
+            )
+    values.update(evaluation_tables(reports, prefix))
+    return values
+
+
+def evaluation_tables(reports, prefix):
+    summary, details = [], []
+    for source, report in reports:
+        for section in ("groups", "comparisons", "prefix_diagnostics"):
+            for group, metrics in report.get(section, {}).items():
+                row = {"source": source, "section": section, "group": group, **metrics}
+                (summary if section == "groups" and group.startswith("all/") else details).append(row)
+    return {f"{prefix}/{name}": _table(rows)
+            for name, rows in (("summary", summary), ("details", details)) if rows}
+
+
+def paired_reconstructions(paths, prefix):
+    """Keep all generated examples, with controls of the same input in one text card."""
+    samples = {}
+    for source, path in paths:
+        for line in path.read_text().splitlines():
+            row = json.loads(line)
+            if "prediction" not in row:
+                continue
+            key = source, row["episode_id"], row["capacity"]
+            samples.setdefault(key, []).append(row)
+    texts = []
+    for (source, episode, capacity), rows in samples.items():
+        texts.append(swanlab.Text(
+            "Reference:\n" + rows[0]["reference"] + "\n\n" + "\n\n".join(
+                f"{row['condition']} (prefix={row['correct_prefix_ratio']:.4f}):\n{row['prediction']}"
+                for row in rows
+            ), caption=f"{source}, {episode}, K={capacity}",
+        ))
+    return {f"{prefix}/examples" + (f"/page_{start // 100 + 1}" if start else ""):
+            texts[start:start + 100] for start in range(0, len(texts), 100)}
+
+
+def development_overview(paths, step):
+    """Reconstruct cumulative dev curves from saved reports, including sparse generation steps."""
+    histories = {
+        source: [(int(path.stem.removeprefix("dev-step-")), json.loads(path.read_text()))
+                 for path in sorted(records.parent.glob("dev-step-*.json"))
+                 if int(path.stem.removeprefix("dev-step-")) <= step]
+        for source, records in paths
+    }
+    values = {}
+    for task, metric in OVERVIEW_METRICS:
+        observed = sorted({n for history in histories.values() for n, report in history
+                           if any(metric in report["groups"].get(f"all/{task}/{c}", {})
+                                  for c in CONDITION_COLORS)})
+        if not observed:
+            continue
+        chart = swanlab.echarts.Line().add_xaxis(observed)
+        for source_index, (source, history) in enumerate(histories.items()):
+            lookup = dict(history)
+            for condition, color in CONDITION_COLORS.items():
+                points = [lookup.get(n, {}).get("groups", {}).get(
+                    f"all/{task}/{condition}", {}).get(metric) for n in observed]
+                if any(value is not None for value in points):
+                    chart.add_yaxis(
+                        f"{source}/{condition}", points, is_smooth=False, is_connect_nones=False,
+                        label_opts={"show": False},
+                        itemstyle_opts={"color": _shade(color, source_index, len(histories))},
+                    )
+        chart.set_global_opts(
+            xaxis_opts={"type": "value", "name": "optimizer step"},
+            yaxis_opts={"name": metric}, tooltip_opts={"trigger": "axis"},
+            legend_opts={"type": "scroll"},
+        )
+        values[f"dev/overview/{task}/{metric}"] = chart
+    latest = [(source, history[-1][1]) for source, history in histories.items() if history]
+    values.update(evaluation_tables(latest, "dev/overview"))
+    values.update(paired_reconstructions(paths, "dev/overview"))
+    return values

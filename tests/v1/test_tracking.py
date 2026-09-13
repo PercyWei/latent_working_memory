@@ -78,7 +78,7 @@ def test_offline_metrics_match_local_reports_and_close_run(tmp_path, monkeypatch
         }
         comparisons["all/continuation"]["nll_gap_to_full_context"] = 0.5
         comparisons["length_ratio/32/2/continuation"] = {"gain_vs_wrong_memory": 0.4}
-        path = tmp_path / "evaluation.jsonl"
+        path = tmp_path / "dev-step-000003.jsonl"
         path.write_text(
             (
                 json.dumps(
@@ -96,29 +96,19 @@ def test_offline_metrics_match_local_reports_and_close_run(tmp_path, monkeypatch
             )
             * 110
         )
-        log_evaluation(
-            run,
-            {
-                "groups": groups,
-                "comparisons": comparisons,
-                "training_input_tokens": 36,
-            },
-            path,
-            3,
-            "test",
-        )
+        rows = [json.loads(line) | {"episode_id": str(i)}
+                for i, line in enumerate(path.read_text().splitlines())]
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+        metrics = {"groups": groups, "comparisons": comparisons, "training_input_tokens": 36}
+        path.with_suffix(".json").write_text(json.dumps(metrics))
+        log_evaluation(run, {"semantic": metrics}, {"semantic": path}, 3)
         logged, step = calls[-1]
-        assert step == 3
-        assert logged["test/ae/gain_vs_no_memory"] == 2.0
-        assert logged["test/continuation/gain_vs_wrong_memory"] == 1.0
-        assert logged["test/continuation/nll_gap_to_full_context"] == 0.5
-        assert logged["test_by_length_ratio/32/2/ae/memory/bleu_4"] == 90.0
-        assert logged["test_by_length_ratio/32/2/ae/memory/correct_prefix_ratio"] == 0.8
-        assert logged["test_by_length_ratio/32/2/continuation/gain_vs_wrong_memory"] == 0.4
-        assert logged["progress/input_tokens"] == 36
-        assert len(logged["test/reconstruction"]) == 100
-        assert len(logged["test/reconstruction/page_2"]) == 10
-        assert "dev/ae/memory/nll" not in logged
+        assert step == 3 and logged["progress/input_tokens"] == 36
+        assert "dev/overview/ae/nll" in logged
+        assert "dev/overview/summary" in logged and "dev/overview/details" in logged
+        assert len(logged["dev/overview/examples"]) == 100
+        assert len(logged["dev/overview/examples/page_2"]) == 10
+        assert all(key.startswith("dev/overview/") or key == "progress/input_tokens" for key in logged)
     assert not run.alive
     assert json.loads((tmp_path / "swanlab.json").read_text())["mode"] == "offline"
     identity = json.loads((tmp_path / "swanlab.json").read_text())

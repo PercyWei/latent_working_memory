@@ -131,3 +131,38 @@ def test_serialized_labels_and_metric_coverage():
             "full\ncontext",
             "base\nfull\ncontext",
         ]
+
+
+def test_compact_reports_keep_details_and_pair_all_controls(tmp_path):
+    from latent_working_memory.v1.reporting import evaluation_overview, paired_reconstructions
+    data = report()
+    data["prefix_diagnostics"] = {"memory/prefix-8": {"bleu_4": 20}}
+    charts = evaluation_overview([("semantic", data)], "evaluation/test/overview")
+    assert set(charts) == {"evaluation/test/overview/ae/nll", "evaluation/test/overview/summary",
+                           "evaluation/test/overview/details"}
+    # PPL, stratified metrics and prefix diagnostics remain in the tables.
+    serialized = str(charts["evaluation/test/overview/details"].html_content)
+    assert "prefix-8" in serialized and "length_ratio" in serialized
+    path = tmp_path / "reads.jsonl"
+    rows = [{"episode_id": "one", "capacity": 32, "condition": c, "reference": "original",
+             "prediction": c, "correct_prefix_ratio": 0.0} for c in ("memory", "wrong_memory")]
+    path.write_text("\n".join(json.dumps(row) for row in rows))
+    media = paired_reconstructions([("semantic", path), ("random", path)], "dev/overview")
+    assert len(media["dev/overview/examples"]) == 2
+
+
+def test_dev_overview_uses_real_steps_and_sparse_generation(tmp_path):
+    from latent_working_memory.v1.reporting import development_overview
+    path = tmp_path / "dev-step-000003.jsonl"
+    path.write_text("")
+    for step in (0, 1, 3, 9):
+        data = report()
+        if step in (0, 3):
+            data["groups"]["all/ae/memory"]["bleu_4"] = step
+        (tmp_path / f"dev-step-{step:06d}.json").write_text(json.dumps(data))
+    charts = development_overview([("semantic", path)], 3)
+    nll = charts["dev/overview/ae/nll"].options
+    bleu = charts["dev/overview/ae/bleu_4"].options
+    assert nll["xAxis"][0]["data"] == [0, 1, 3]
+    assert bleu["xAxis"][0]["data"] == [0, 3]
+    assert nll["series"][0]["data"][0] == [0, 1.23456789]

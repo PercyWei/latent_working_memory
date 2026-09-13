@@ -392,11 +392,12 @@ def run_pretraining(
                 dist.all_gather_object(gathered, results)
                 results = {k: v for item in gathered for k, v in item.items()}
             if primary:
-                for name in dev_indices:
-                    destination = output_dir if name == "dev" else output_dir / name
-                    log_evaluation(tracking, results[name],
-                                   destination / f"dev-step-{step:06d}.jsonl", step,
-                                   "dev" if name == "dev" else f"dev/{name}")
+                records_paths = {
+                    name: (output_dir if name == "dev" else output_dir / name)
+                          / f"dev-step-{step:06d}.jsonl"
+                    for name in dev_indices
+                }
+                log_evaluation(tracking, results, records_paths, step)
             if world_size > 1:
                 dist.barrier()
             return results["dev"] if list(results) == ["dev"] else results

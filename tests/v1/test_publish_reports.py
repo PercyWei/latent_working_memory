@@ -120,7 +120,8 @@ def test_append_uses_training_identity_config_and_checkpoint_step(tmp_path, monk
     assert "job_type" not in calls[0] and "tags" not in calls[0] and "group" not in calls[0]
     values, step = logs[0]
     assert step == 20000
-    assert values["evaluation/test/semantic/ae/memory/nll"] == 2.0
+    assert values["evaluation/test/overview/ae/nll"].options["series"][0]["data"] == [2.0]
+    assert "evaluation/test/semantic/ae/memory/nll" not in values
     assert all(key.startswith("evaluation/test/") for key in values)
     assert json.loads((training / "swanlab.json").read_text()) == identity
     assert (training / "evaluation-publications/test-step-020000.json").exists()
