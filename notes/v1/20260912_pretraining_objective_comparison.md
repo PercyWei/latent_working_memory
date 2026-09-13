@@ -1,7 +1,7 @@
 # 20260912_短文本预训练目标对比实验
 
 创建时间：20260912 23:38:14 UTC+08:00
-最后修订时间：20260913 00:07:17 UTC+08:00
+最后修订时间：20260913 12:43:08 UTC+08:00
 
 本实验比较 AE-only、从开始联合 AE/LM、AE warm-up 后联合训练。目标是在短文本、低压缩率条件下判断读写结构能否建立忠实重建，以及 LM 目标对这一能力的影响。实验沿用[预训练数据类型对比](20260911_pretraining_data_comparison.md)的产物与报告布局。本轮用户明确指定仅使用物理 GPU 4、5。
 
@@ -58,7 +58,7 @@ AE 对照为 memory、wrong_memory、full_context、base_full_context；LM 另�
   --output-dir data/v1/fineweb-4096-doc100k_20260910/derived/pretrain-objective-comparison-128_20260912
 ```
 
-实验系列根目录为 `artifacts/v1/pretrain-objective-comparison-128_20260912/`。训练目录为 `train/pretrain-ae-only-r2_mixed-16k_20260912/` 和 `train/pretrain-{joint,ae-warmup}-r2_mixed-32k_20260912/`，规模表示该组可参与训练的样本数；AE-only 仅访问共享目录中的 16,000 条 AE，另外两组使用全部 32,000 条；评估和跨组比较分别放在 `eval/`、`compare/`，调度命令、状态、日志、报告清单及结果汇总放在 `plan/`。
+实验系列根目录为 `artifacts/v1/pretrain-objective-comparison-128_20260912/`。训练目录为 `train/pretrain_ae-only_r2_mixed-16k_20260912/` 和 `train/pretrain_{joint,ae-warmup}_r2_mixed-32k_20260912/`，规模表示该组可参与训练的样本数；AE-only 仅访问共享目录中的 16,000 条 AE，另外两组使用全部 32,000 条；评估和跨组比较分别放在 `eval/`、`compare/`，调度命令、状态、日志、报告清单及结果汇总放在 `plan/`。
 
 SwanLab project 为 `latent-working-memory-v1`，group 为 `pretrain-objective-comparison-128_20260912`，显式标签 `study:pretrain-objective-comparison`。job_type 使用 train/evaluate/compare；超参数保存在 config。
 
@@ -85,7 +85,7 @@ GitHub 首次同步成功；后续服务器连接 GitHub 出现 TLS 错误，按
 
 20260913 00:01:20 UTC+08:00：正式调度启动，初始代码提交 `ae6248f`，调度 PID 为 `960164`。A（AE-only，16k 可用 AE 样本）与 B（joint，32k 样本）并发双卡运行；C 等待 A 完成后从 A 的 step 5,000 派生。各命令同时显式设置 `CUDA_VISIBLE_DEVICES=4,5` 和 `LWM_ALLOWED_PHYSICAL_GPUS=4,5`。系列目录及 run 名称的 `20260912` 保留创建日期，实际执行跨入 20260913。
 
-运行状态和失败原因保存在 `plan/status.json`，完整命令在 `plan/commands.json`，训练 stdout 分别为 `plan/{ae-only,joint,ae-warmup}-train.log`。调度器独立于 SSH 会话运行；训练后自动执行独立 test、前缀诊断和 SwanLab 比较发布，并追加最终结果。当前正式实验尚未完成。
+运行状态和失败原因保存在 `plan/status.json`，完整命令在 `plan/commands.json`，训练 stdout 分别为 `plan/{ae-only,joint,ae-warmup}-train.log`。调度器独立于 SSH 会话运行；训练后自动执行独立 test、前缀诊断和 SwanLab 比较发布，并追加最终结果。当时正式实验尚未完成，最终结果见下文。
 
 20260913 00:07:17 UTC+08:00：A、B 的 step 0 dev 评估完成，均已完成超过 60 次正式 optimizer 更新。A 每步 AE=8，B 每步 AE=4／LM=4；正式并发步耗时约 0.62 秒，损失与梯度有限。通过进程 PID 与 GPU UUID 的对应关系确认四个训练进程仅占用物理 GPU 4、5。
 
@@ -94,3 +94,36 @@ GitHub 首次同步成功；后续服务器连接 GitHub 出现 TLS 错误，按
 | AE-only | [SwanLab](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/p6wovabv) |
 | 直接联合 | [SwanLab](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/2pkz4uim) |
 | AE warm-up | 等待 A 完成后自动创建；前 5,000 步引用 A |
+
+完成时间：20260913 09:16:53 UTC+08:00
+
+| 训练组 | 测试来源 | AE NLL | LM NLL | AE BLEU-4 | 正确前缀 | 整段匹配 |
+|---|---|---:|---:|---:|---:|---:|
+| ae-only | semantic | 2.5189 | 3.1072 | 1.875 | 0.316% | 0.000% |
+| ae-only | random | 2.4843 | 3.1531 | 1.609 | 0.891% | 0.000% |
+| joint | semantic | 2.4397 | 2.3957 | 1.363 | 0.187% | 0.000% |
+| joint | random | 2.3843 | 2.5497 | 1.805 | 0.714% | 0.000% |
+| ae-warmup | semantic | 2.4311 | 2.3982 | 1.780 | 0.263% | 0.000% |
+| ae-warmup | random | 2.3790 | 2.5387 | 1.470 | 0.827% | 0.000% |
+
+以上为固定 step 20,000 的独立 test，NLL 不含 EOS。结果来自单模型 seed；warm-up 与直接联合的目标暴露量不同。C 前 5,000 步继承 A，完整轨迹关联见 plan/series.json。
+
+| 训练组 | 训练 | 评估 |
+|---|---|---|
+| ae-only | [训练](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/p6wovabv) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/y4qrfh4w) |
+| joint | [训练](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/2pkz4uim) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/28xxvtjk) |
+| ae-warmup | [训练](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/zgt0wyfd) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/xyb659i7) |
+
+跨组比较：[SwanLab](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/6ih300w5)。
+
+20260913 12:43:08 UTC+08:00：规整本系列 7 个 SwanLab 运行名，保留原 run ID、状态、配置和已有指标。训练、评估和比较产物目录同步改名，更新配置及当前报告清单；原执行命令、日志、provenance、checkpoint 内嵌路径及云端既有 config 保留执行时原值，旧路径按 `plan/run-renames.json` 映射到新路径。未重新训练、评估或合并云端运行。
+
+| 职责 | 当前运行名 | Run ID |
+|---|---|---|
+| train | `pretrain_ae-only_r2_mixed-16k_20260912` | `p6wovabv` |
+| train | `pretrain_joint_r2_mixed-32k_20260912` | `2pkz4uim` |
+| train | `pretrain_ae-warmup_r2_mixed-32k_20260912` | `zgt0wyfd` |
+| eval | `pretrain_ae-only_r2_mixed-16k_eval_20260912` | `y4qrfh4w` |
+| eval | `pretrain_joint_r2_mixed-32k_eval_20260912` | `28xxvtjk` |
+| eval | `pretrain_ae-warmup_r2_mixed-32k_eval_20260912` | `xyb659i7` |
+| compare | `pretrain_r2_mixed-32k_compare_20260912` | `6ih300w5` |
