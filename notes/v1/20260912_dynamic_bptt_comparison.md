@@ -1,7 +1,7 @@
 # 20260912_动态梯度传播对比实验
 
 创建时间：20260912 23:54:16 UTC+08:00
-最后修订时间：20260913 12:42:48 UTC+08:00
+最后修订时间：20260913 12:49:58 UTC+08:00
 
 本系列比较完整 BPTT、源 token TBPTT 和更新次数 TBPTT。各组共享初始化参数、文本课程与评估记录。训练方法见[动态训练与 QA 评估](20260911_dynamic_training_and_evaluation.md)。本轮先运行完整 BPTT。
 
@@ -108,3 +108,5 @@ GPU 6、7 上的 K=1024 完整 BPTT 测试结果如下，每步使用 2 份文�
 训练 run 使用 8 张评估图，总体图位于 `evaluation/dev/*`，容量图位于 `evaluation/dev/by-capacity/*`。总体图中，NLL、EM、F1 和触顶率各使用一张历史折线图，以真实 optimizer step 为横轴，五种对照条件为五条曲线。NLL 包含全部 dev 评估点；EM、F1 和触顶率包含 step 0、250、500、750 的生成评估结果。容量图按同样的四个指标比较各 K 的 memory 表现。每张图可切换 `all`、`arrival`、`delayed`；总体 NLL、EM、F1 图还可切换 `paired` 查看配对差值。默认显示 `all`。完整评估数值保存在本地 JSON/JSONL。
 
 已完成的 run 可从 `dev/dev-step-*.json` 重绘历史图。发布命令为 `.venv/bin/python -m latent_working_memory.v1.dynamic_reporting --training-run <train_run_dir> --media-step 753 --swanlab-mode online`。媒体发布位置 753 用于追加新图，图内横轴和实际训练终点均为 750；发布记录保存为 `evaluation-history-000753.json`。
+
+重建展示 run 使用 `.venv/bin/python -m latent_working_memory.v1.dynamic_reporting --training-run <train_run_dir> --output-dir <series_dir>/plan/swanlab/dynamic_BPTT_squad_mixed-157k_20260912 --swanlab-mode online`。新 run 按原始 step 0–750 发布训练指标、8 张评估图、分组表格和问答样例，沿用原配置、group 和 tags。发布目录保存新 `swanlab.json` 与 `republication.json`，后者记录源训练目录、源 run ID 和评估步数；训练日志与 checkpoint 位于原训练目录。

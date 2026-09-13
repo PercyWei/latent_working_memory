@@ -30,7 +30,7 @@ from latent_working_memory.v1.dynamic_data import DynamicTextSampler
 from latent_working_memory.data_preparation.dynamic import load_evaluation_plan
 from latent_working_memory.v1.dynamic_training import DynamicTrainer, load_components
 from latent_working_memory.v1.dynamic_evaluation import evaluate_panel, write_evaluation
-from latent_working_memory.v1.dynamic_reporting import log_qa
+from latent_working_memory.v1.dynamic_reporting import log_qa, training_metrics
 from latent_working_memory.v1.squad import SquadDataset
 from latent_working_memory.v1.tracking import swanlab_run
 from latent_working_memory.v1.training import trainable_model_state
@@ -290,15 +290,7 @@ def run_dynamic(
                     flush=True,
                 )
             if tracking is not None:
-                tracking.log(
-                    {
-                        f"{'resources' if k in {'seconds', 'peak_memory_bytes', 'input_tokens_per_second'} else 'train'}/{k}": v
-                        for k, v in result.items()
-                        if isinstance(v, (int, float))
-                    }
-                    | {f"train/cumulative_{k}": v for k, v in cumulative.items()},
-                    step=step + 1,
-                )
+                tracking.log(training_metrics(result), step=step + 1)
             if batch_index + 1 == recipe.steps_per_micro_epoch and primary:
                 report["training_totals"] = dict(micro_totals)
                 (plans_dir / f"micro-{epoch:06d}-{micro:04d}.json").write_text(

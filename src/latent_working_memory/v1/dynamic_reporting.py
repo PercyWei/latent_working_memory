@@ -169,6 +169,14 @@ def training_curves(history_dir, through_step):
     return charts
 
 
+def training_metrics(record):
+    return {
+        f"{'resources' if key in {'seconds', 'peak_memory_bytes', 'input_tokens_per_second'} else 'train'}/{key}": value
+        for key, value in record.items()
+        if isinstance(value, (int, float))
+    } | {f"train/cumulative_{key}": value for key, value in record["cumulative"].items()}
+
+
 def log_qa(run, metrics, rows, step, prefix, media=False, history_dir=None):
     if run is None:
         return
@@ -225,12 +233,83 @@ def publish_training_history(directory, media_step, mode):
     )
 
 
+def rebuild_training_run(directory, output_dir, mode):
+    provenance = json.loads((directory / "provenance.json").read_text())
+    identity = json.loads((directory / "swanlab.json").read_text())
+    total_steps = provenance["target_steps"]
+    completed = [
+        json.loads(path.read_text())["completed_steps"]
+        for path in directory.glob("resources-from-*.json")
+    ]
+    if total_steps not in completed:
+        raise ValueError("rebuilding requires a completed training run")
+    records = sorted(
+        (
+            json.loads(line)
+            for path in directory.glob("train-from-*.jsonl")
+            for line in path.read_text().splitlines()
+        ),
+        key=lambda record: record["step"],
+    )
+    if [record["step"] for record in records] != list(range(1, total_steps + 1)):
+        raise ValueError("rebuilding requires exactly one training record per step")
+    reports = {
+        int(path.stem.removeprefix("dev-step-")): (
+            json.loads(path.read_text()),
+            [json.loads(line) for line in path.with_suffix(".jsonl").read_text().splitlines()],
+        )
+        for path in sorted((directory / "dev").glob("dev-step-*.json"))
+    }
+    if 0 not in reports or total_steps not in reports or max(reports) > total_steps:
+        raise ValueError("rebuilding requires initial and final dev reports within training steps")
+    source = {"training_run": str(directory.resolve()), "swanlab_id": identity["id"]}
+    output_dir.mkdir(parents=True, exist_ok=False)
+    with swanlab_run(
+        output_dir,
+        {**provenance, "report_source": source},
+        mode,
+        identity["project"],
+        job_type="train",
+        group=identity["group"],
+        tags=tuple(identity["tags"]),
+        fixed_tags=(),
+    ) as run:
+        for step in range(total_steps + 1):
+            if run is not None and step:
+                run.log(training_metrics(records[step - 1]), step=step)
+            if step in reports:
+                metrics, rows = reports[step]
+                log_qa(
+                    run,
+                    metrics,
+                    rows,
+                    step,
+                    "dev",
+                    media=any("prediction" in row for row in rows),
+                    history_dir=directory / "dev",
+                )
+    (output_dir / "republication.json").write_text(
+        json.dumps(
+            {
+                "source": source,
+                "training_steps": total_steps,
+                "dev_steps": sorted(reports),
+                "evaluation_charts": sorted(training_curves(directory / "dev", total_steps)),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     inputs = parser.add_mutually_exclusive_group(required=True)
     inputs.add_argument("--reports", type=Path, help="JSON list of {name, report}")
     inputs.add_argument(
-        "--training-run", type=Path, help="Publish history into a completed training run"
+        "--training-run",
+        type=Path,
+        help="Completed training run; add --output-dir to rebuild into a new run",
     )
     parser.add_argument(
         "--media-step", type=int, help="New media upload step for the completed run"
@@ -243,7 +322,12 @@ def main():
     )
     args = parser.parse_args()
     if args.training_run:
-        publish_training_history(args.training_run, args.media_step, args.swanlab_mode)
+        if args.output_dir is not None:
+            if args.media_step is not None:
+                parser.error("rebuilding uses original training steps; omit --media-step")
+            rebuild_training_run(args.training_run, args.output_dir, args.swanlab_mode)
+        else:
+            publish_training_history(args.training_run, args.media_step, args.swanlab_mode)
         return
     if args.output_dir is None or not args.swanlab_group:
         parser.error("--reports requires --output-dir and --swanlab-group")

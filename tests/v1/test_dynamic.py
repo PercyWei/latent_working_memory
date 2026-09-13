@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, replace
 import json
@@ -10,6 +11,7 @@ from transformers import LlamaConfig, LlamaForCausalLM
 
 from latent_working_memory.data_preparation.squad import prepare_squad
 from latent_working_memory.data_preparation.dynamic import prepare_dynamic
+from latent_working_memory.v1 import dynamic_reporting
 from latent_working_memory.v1.backbone import load_backbone
 from latent_working_memory.v1.checkpoint import (
     capture_rng_state,
@@ -746,3 +748,64 @@ def test_training_curves_keep_real_steps_and_generation_schedule(tmp_path):
     publish_training_history(tmp_path, 251, "disabled")
     record = json.loads((tmp_path / "evaluation-history-000251.json").read_text())
     assert record["checkpoint_step"] == 250 and record["media_step"] == 251
+
+
+def test_rebuild_training_run_replays_original_steps_without_old_charts(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    dev = source / "dev"
+    dev.mkdir()
+    identity = {"id": "original", "project": "test", "group": "series", "tags": []}
+    (source / "swanlab.json").write_text(json.dumps(identity))
+    (source / "provenance.json").write_text(json.dumps({"target_steps": 2}))
+    (source / "resources-from-000000.json").write_text(json.dumps({"completed_steps": 2}))
+    records = [
+        {
+            "step": step,
+            "loss": 3.0 / step,
+            "seconds": 12.0,
+            "cumulative": {"input_tokens": 200 * step},
+            "sample_metrics": [],
+        }
+        for step in (1, 2)
+    ]
+    (source / "train-from-000000.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records)
+    )
+    for step in (0, 2):
+        (dev / f"dev-step-{step:06d}.json").write_text(
+            json.dumps({"overall/memory/all": {"nll": 4.0 - step}})
+        )
+        (dev / f"dev-step-{step:06d}.jsonl").write_text("")
+    calls = []
+
+    class Recorder:
+        def log(self, values, step):
+            calls.append((step, values))
+
+    @contextmanager
+    def fake_run(output_dir, config, mode, project, **kwargs):
+        assert config["report_source"]["swanlab_id"] == "original"
+        assert project == "test" and kwargs["group"] == "series"
+        yield Recorder()
+
+    monkeypatch.setattr(dynamic_reporting, "swanlab_run", fake_run)
+    output = tmp_path / "rebuilt"
+    dynamic_reporting.rebuild_training_run(source, output, "disabled")
+    assert [step for step, _ in calls] == [0, 1, 2, 2]
+    assert calls[1][1] == {
+        "train/step": 1,
+        "train/loss": 3.0,
+        "resources/seconds": 12.0,
+        "train/cumulative_input_tokens": 200,
+    }
+    assert set(calls[0][1]) == set(calls[-1][1]) == {"evaluation/dev/nll"}
+    assert json.loads((source / "swanlab.json").read_text()) == identity
+    assert json.loads((output / "republication.json").read_text())["training_steps"] == 2
+    with pytest.raises(FileExistsError):
+        dynamic_reporting.rebuild_training_run(source, output, "disabled")
+    with (source / "train-from-000000.jsonl").open("a") as stream:
+        stream.write(json.dumps(records[-1]) + "\n")
+    with pytest.raises(ValueError, match="exactly one training record"):
+        dynamic_reporting.rebuild_training_run(source, tmp_path / "invalid", "disabled")
+    assert not (tmp_path / "invalid").exists()
