@@ -1,7 +1,7 @@
 # 20260912_短文本预训练目标对比实验
 
 创建时间：20260912 23:38:14 UTC+08:00
-最后修订时间：20260913 12:55:47 UTC+08:00
+最后修订时间：20260913 13:13:38 UTC+08:00
 
 本实验比较 AE-only、从开始联合 AE/LM、AE warm-up 后联合训练。目标是在短文本、低压缩率条件下判断读写结构能否建立忠实重建，以及 LM 目标对这一能力的影响。实验沿用[预训练数据类型对比](20260911_pretraining_data_comparison.md)的产物与报告布局。本轮用户明确指定仅使用物理 GPU 4、5。
 
@@ -148,3 +148,21 @@ GitHub 首次同步成功；后续服务器连接 GitHub 出现 TLS 错误，按
 调度器后续默认把最终测试写回训练 run，跨组 compare 继续独立保存；仍支持显式创建独立 eval run。本次历史 eval/compare 记录保留。SwanLab 恢复并结束 run 可能更新云端结束时间，原训练时间以执行日志及资源记录为准。
 
 20260913 12:55:47 UTC+08:00：追加功能已在本地和服务器分别通过 16 项相关测试，通过 GitHub 同步后从服务器仓库补写 A/B/C 三组的 semantic/random 测试报告。未运行新的训练或模型推理，未新建或删除云端 run。云端核对 30 个测试标量与本地报告一致、step 均为 20,000；每组存在 25 个评估媒体指标（图表、表格、样例及元数据）。按 key、step、值和时间戳核对原训练 loss/AE NLL 共 9,000 个曲线采样点，全部一致；云端配置、名称、job_type、group、tags、创建及结束时间保持不变。查询接口的近似汇总 median 会变化，不将其用于数据完整性判断。执行命令、日志和核验结果分别保存在 `plan/evaluation-append-command.json`、`plan/evaluation-append.log`、`plan/evaluation-append-verification.json`。
+
+## 6. 精简 dev 与 evaluation 看板
+
+三组训练 run 的主看板均由 dev 204 张、evaluation 361 张，精简为 dev 9 张、evaluation 10 张。每类保留 AE NLL、LM NLL、AE BLEU-4、正确前缀比例、整段匹配率共 5 张核心图；每张合并 semantic/random 与各对照条件。dev 使用原始 optimizer step 的累计曲线，自由生成指标仅连接实际执行过生成的评估步，不补造未执行的点。C 仅展示自身已有的 dev 历史，前 5,000 步的继承关系仍按原记录解释。
+
+PPL、样本计数、分层统计、配对差值和真实前缀诊断合并到 summary/details 两张表；数值量纲不同的核心指标不共用坐标轴。同一输入的各条件预测合成一张文本卡片，保留两个来源全部 120 组样例，分两页展示；evaluation 另保留一个元数据面板。
+
+新版训练记录与评估追加入口默认生成该布局，不再逐项创建这些冗余标量图；完整统计与逐样本记录继续保存在原 JSON/JSONL。历史 565 张旧图通过看板布局接口移入 Hidden，未删除底层指标或实验；每个训练目录的 `evaluation-publications/chart-layout-before-compaction.json` 保存原布局，`chart-compaction.json` 保存迁移统计。训练、资源等其他分区以及独立 eval/compare run 未变。
+
+旧实验的迁移入口如下，在服务器仓库根目录执行，本轮 A/B/C 均已完成：
+
+```bash
+.venv/bin/python -m latent_working_memory.v1.compact_reports \
+  --training-run artifacts/v1/pretrain-objective-comparison-128_20260912/train/pretrain_ae-only_r2_mixed-16k_20260912 \
+  --step 20000
+```
+
+20260913 13:13:38 UTC+08:00：本地和服务器分别通过 14 项相关测试；服务器 GitHub 拉取超时后经 Gitee 同步。使用已有报告重新组织图表，未训练或重新推理。逐张读取三组共 15 张云端 dev 核心图，验证全部曲线名称、真实步数和数值与本地生成结果一致；原训练配置及 loss/AE NLL 共 9,000 个训练曲线采样点保持不变。核验结果见 `plan/chart-compaction-verification.json`，执行日志见 `plan/{ae-only,joint,ae-warmup}-chart-compaction.log`。
