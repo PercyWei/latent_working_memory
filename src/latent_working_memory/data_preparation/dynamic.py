@@ -5,12 +5,15 @@ from dataclasses import asdict
 import json
 from pathlib import Path
 
+from transformers import AutoTokenizer
+
 from latent_working_memory.v1.checkpoint import load_model_checkpoint
 from latent_working_memory.v1.dynamic_config import load_dynamic_config
 from latent_working_memory.v1.dynamic_data import DynamicTextSampler, TrainingText
 from latent_working_memory.v1.dynamic_evaluation import evaluation_schedule
 from latent_working_memory.v1.dynamic_training import read_schedule
 from latent_working_memory.v1.squad import SquadDataset
+from latent_working_memory.v1.personamem import PersonaMemDataset
 
 
 def evaluation_identity(recipe):
@@ -30,8 +33,20 @@ def evaluation_identity(recipe):
     }
 
 
-def prepare_dynamic(index_path, recipe, model_config, output_dir):
-    data = SquadDataset(index_path)
+def prepare_dynamic(index_path, recipe, model_config, output_dir, dataset="squad"):
+    if dataset not in {"squad", "personamem"}:
+        raise ValueError("unsupported dynamic dataset")
+    if dataset == "personamem":
+        if output_dir.resolve().is_relative_to(index_path.resolve()):
+            raise ValueError("experiment plans must be saved outside the shared dataset directory")
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_config.model_name_or_path,
+            revision=model_config.model_revision,
+            local_files_only=True,
+        )
+        data = PersonaMemDataset(index_path, tokenizer)
+    else:
+        data = SquadDataset(index_path)
     if max(recipe.capacities) > model_config.k_limit:
         raise ValueError("capacity exceeds checkpoint slot limit")
     sampler = DynamicTextSampler(data, recipe, model_config.write_context_tokens)
@@ -122,14 +137,25 @@ def load_evaluation_plan(path, data, recipe):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--index", type=Path, required=True)
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--index", type=Path, help="SQuAD data index")
+    inputs.add_argument(
+        "--dataset-dir", type=Path, help="Shared PersonaMem original-text/QA directory"
+    )
+    parser.add_argument("--dataset", choices=("squad", "personamem"), default="squad")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
+    if (args.dataset == "personamem") != (args.dataset_dir is not None):
+        parser.error("personamem requires --dataset-dir; squad requires --index")
     checkpoint = load_model_checkpoint(args.checkpoint)
     rows = prepare_dynamic(
-        args.index, load_dynamic_config(args.config), checkpoint.config, args.output_dir
+        args.dataset_dir if args.dataset == "personamem" else args.index,
+        load_dynamic_config(args.config),
+        checkpoint.config,
+        args.output_dir,
+        dataset=args.dataset,
     )
     print(
         json.dumps(

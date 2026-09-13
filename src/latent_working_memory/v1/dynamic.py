@@ -17,6 +17,7 @@ import uuid
 
 import torch
 import torch.distributed as dist
+from transformers import AutoTokenizer
 
 from latent_working_memory.devices import validate_device
 from latent_working_memory.v1.checkpoint import (
@@ -37,6 +38,7 @@ from latent_working_memory.v1.dynamic_reporting import (
     append_qa_report,
 )
 from latent_working_memory.v1.squad import SquadDataset
+from latent_working_memory.v1.personamem import PersonaMemDataset
 from latent_working_memory.v1.tracking import swanlab_run
 from latent_working_memory.v1.training import trainable_model_state
 
@@ -84,6 +86,7 @@ def run_dynamic(
     swanlab_mode="disabled",
     swanlab_group=None,
     swanlab_tags=(),
+    dataset="squad",
 ):
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     rank = dist.get_rank() if dist.is_initialized() else 0
@@ -107,7 +110,17 @@ def run_dynamic(
     )
     if max(recipe.capacities) > checkpoint.config.k_limit:
         raise ValueError("capacity exceeds model slot limit")
-    data = SquadDataset(index_path)
+    if dataset not in {"squad", "personamem"}:
+        raise ValueError("unsupported dynamic dataset")
+    if dataset == "personamem":
+        tokenizer = AutoTokenizer.from_pretrained(
+            checkpoint.config.model_name_or_path,
+            revision=checkpoint.config.model_revision,
+            local_files_only=True,
+        )
+        data = PersonaMemDataset(index_path, tokenizer)
+    else:
+        data = SquadDataset(index_path)
     sampler = DynamicTextSampler(data, recipe, checkpoint.config.write_context_tokens)
     shared_plan, panels = load_evaluation_plan(evaluation_plan, data, recipe)
     identity = {
@@ -127,7 +140,7 @@ def run_dynamic(
         tokenizer.bos_token_id,
         tokenizer.eos_token_id,
     ) != (data.tokenizer.bos_token_id, data.tokenizer.eos_token_id):
-        raise ValueError("SQuAD tokenizer differs from checkpoint tokenizer")
+        raise ValueError("dataset tokenizer differs from checkpoint tokenizer")
     trainer = DynamicTrainer(backbone, writer, checkpoint.config, recipe, device)
     if resume:
         trainer.optimizer.load_state_dict(checkpoint.optimizer_state)
@@ -182,7 +195,7 @@ def run_dynamic(
             job_type="train",
             group=swanlab_group,
             tags=swanlab_tags,
-            fixed_tags=("scope:main", "method:latent-working-memory", "data:squad"),
+            fixed_tags=("scope:main", "method:latent-working-memory", f"data:{dataset}"),
         ) as tracking,
         (
             (output_dir / f"train-from-{segment_id}.jsonl").open("x") if primary else nullcontext()
@@ -381,7 +394,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("train", "evaluate"))
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--index", type=Path, required=True)
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--index", type=Path, help="SQuAD data index")
+    inputs.add_argument(
+        "--dataset-dir", type=Path, help="Shared PersonaMem original-text/QA directory"
+    )
+    parser.add_argument("--dataset", choices=("squad", "personamem"), default="squad")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--evaluation-plan", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -395,6 +413,9 @@ def main():
     parser.add_argument("--swanlab-group")
     parser.add_argument("--swanlab-tag", action="append", default=[])
     args = parser.parse_args()
+    if (args.dataset == "personamem") != (args.dataset_dir is not None):
+        parser.error("personamem requires --dataset-dir; squad requires --index")
+    data_path = args.dataset_dir if args.dataset == "personamem" else args.index
     if int(os.environ.get("WORLD_SIZE", "1")) > 1:
         local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(local_rank)
@@ -407,7 +428,7 @@ def main():
     if args.mode == "train":
         run_dynamic(
             args.checkpoint,
-            args.index,
+            data_path,
             args.output_dir,
             recipe,
             device,
@@ -417,6 +438,7 @@ def main():
             swanlab_mode=args.swanlab_mode,
             swanlab_group=args.swanlab_group,
             swanlab_tags=tuple(args.swanlab_tag),
+            dataset=args.dataset,
         )
     else:
         if args.resume or args.steps or args.output_dir.exists():
@@ -425,14 +447,22 @@ def main():
         checkpoint = replace(
             checkpoint, config=replace(checkpoint.config, gradient_checkpointing=False)
         )
-        data = SquadDataset(args.index)
+        if args.dataset == "personamem":
+            data_tokenizer = AutoTokenizer.from_pretrained(
+                checkpoint.config.model_name_or_path,
+                revision=checkpoint.config.model_revision,
+                local_files_only=True,
+            )
+            data = PersonaMemDataset(data_path, data_tokenizer)
+        else:
+            data = SquadDataset(data_path)
         shared_plan, panels = load_evaluation_plan(args.evaluation_plan, data, recipe)
         tokenizer, backbone, writer, _ = load_components(checkpoint, device)
         if tokenizer.get_vocab() != data.tokenizer.get_vocab() or (
             tokenizer.bos_token_id,
             tokenizer.eos_token_id,
         ) != (data.tokenizer.bos_token_id, data.tokenizer.eos_token_id):
-            raise ValueError("SQuAD tokenizer differs from checkpoint tokenizer")
+            raise ValueError("dataset tokenizer differs from checkpoint tokenizer")
         metrics, rows = evaluate_panel(
             backbone,
             writer,
@@ -449,7 +479,7 @@ def main():
         evaluation_info = {
             "checkpoint": str(args.checkpoint.resolve()),
             "checkpoint_step": step,
-            "index": str(args.index.resolve()),
+            "index": str(data_path.resolve()),
             "split": args.split,
             "config": asdict(recipe),
             "evaluation_plan": str(args.evaluation_plan.resolve()),
@@ -475,7 +505,7 @@ def main():
                 job_type="evaluate",
                 group=args.swanlab_group,
                 tags=tuple(args.swanlab_tag),
-                fixed_tags=("scope:main", "method:latent-working-memory", "data:squad"),
+                fixed_tags=("scope:main", "method:latent-working-memory", f"data:{args.dataset}"),
             ) as tracking:
                 configure_dynamic_panels(tracking, args.swanlab_mode)
                 log_qa(tracking, metrics, rows, step, "dev", media=True)
