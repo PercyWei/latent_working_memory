@@ -1,7 +1,7 @@
 # 20260912_动态梯度传播对比实验
 
 创建时间：20260912 23:54:16 UTC+08:00
-最后修订时间：20260913 12:49:58 UTC+08:00
+最后修订时间：20260913 12:51:40 UTC+08:00
 
 本系列比较完整 BPTT、源 token TBPTT 和更新次数 TBPTT。各组共享初始化参数、文本课程与评估记录。训练方法见[动态训练与 QA 评估](20260911_dynamic_training_and_evaluation.md)。本轮先运行完整 BPTT。
 
@@ -110,3 +110,5 @@ GPU 6、7 上的 K=1024 完整 BPTT 测试结果如下，每步使用 2 份文�
 已完成的 run 可从 `dev/dev-step-*.json` 重绘历史图。发布命令为 `.venv/bin/python -m latent_working_memory.v1.dynamic_reporting --training-run <train_run_dir> --media-step 753 --swanlab-mode online`。媒体发布位置 753 用于追加新图，图内横轴和实际训练终点均为 750；发布记录保存为 `evaluation-history-000753.json`。
 
 重建展示 run 使用 `.venv/bin/python -m latent_working_memory.v1.dynamic_reporting --training-run <train_run_dir> --output-dir <series_dir>/plan/swanlab/dynamic_BPTT_squad_mixed-157k_20260912 --swanlab-mode online`。新 run 按原始 step 0–750 发布训练指标、8 张评估图、分组表格和问答样例，沿用原配置、group 和 tags。发布目录保存新 `swanlab.json` 与 `republication.json`，后者记录源训练目录、源 run ID 和评估步数；训练日志与 checkpoint 位于原训练目录。
+
+当前展示 run：[dynamic_BPTT_squad_mixed-157k_20260912](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/djvzusxn)。已恢复 750 步训练指标、10 次 dev 评估、8 张评估图、分组表格和问答样例，云端 750 个 loss 值与原始日志逐项一致。原 run `3sibkt6l` 保留。新 run 的创建时间和上传时间对应重建时刻，曲线以原始 optimizer step 为横轴。
