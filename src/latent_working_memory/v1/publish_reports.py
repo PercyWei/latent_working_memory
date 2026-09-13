@@ -10,7 +10,7 @@ from latent_working_memory.v1.reporting import (
     build_evaluation_charts,
     reconstruction_media,
 )
-from latent_working_memory.v1.tracking import swanlab_run
+from latent_working_memory.v1.tracking import swanlab_run, append_evaluation_reports
 
 
 def main(argv=None) -> None:
@@ -25,12 +25,11 @@ def main(argv=None) -> None:
     )
     parser.add_argument(
         "--output-dir",
-        required=True,
         type=Path,
         help="Comparison run directory and name, e.g. pretrain-157k-compare-20260912",
     )
-    parser.add_argument("--swanlab-project", required=True)
-    parser.add_argument("--swanlab-group", required=True)
+    parser.add_argument("--swanlab-project")
+    parser.add_argument("--swanlab-group")
     parser.add_argument("--swanlab-tag", action="append", default=[])
     parser.add_argument("--swanlab-mode", choices=("offline", "online"), default="offline")
     parser.add_argument(
@@ -41,10 +40,36 @@ def main(argv=None) -> None:
         metavar=("TRAINING_SOURCE", "DIRECTORY"),
         help="Evaluation run directory/name, e.g. pretrain-random-157k-eval-20260912",
     )
+    parser.add_argument(
+        "--training-run", nargs=2, action="append", default=[],
+        metavar=("TRAINING_SOURCE", "DIRECTORY"),
+        help="Append evaluation to the online training run identified by DIRECTORY/swanlab.json",
+    )
     args = parser.parse_args(argv)
+    training_runs = dict(args.training_run)
+    if len(training_runs) != len(args.training_run):
+        raise ValueError("duplicate training run source")
+    if training_runs and (args.evaluation_output or args.swanlab_mode != "online"):
+        raise ValueError("training-run append requires online mode and no evaluation-output")
+    if args.output_dir is None and not training_runs:
+        raise ValueError("provide output-dir for comparison or training-run for append")
+    if args.output_dir and not (args.swanlab_project and args.swanlab_group):
+        raise ValueError("comparison publication requires swanlab-project and swanlab-group")
     entries = json.loads(args.reports.read_text())
     if not isinstance(entries, list) or not entries:
         raise ValueError("reports must be a non-empty list")
+    if training_runs:
+        if set(training_runs) != {entry["training_source"] for entry in entries}:
+            raise ValueError("training-run mappings must cover exactly the report sources")
+        if args.output_dir and (args.output_dir / "swanlab.json").exists():
+            raise ValueError("static report already published; use a new output directory")
+        for entry in entries:
+            entry["report"] = str((args.reports.parent / entry["report"]).resolve())
+        for source, directory in training_runs.items():
+            append_evaluation_reports(Path(directory), [entry for entry in entries
+                                                       if entry["training_source"] == source])
+        if args.output_dir is None:
+            return
     reports, seen = [], set()
     for entry in entries:
         train, test = entry["training_source"], entry["evaluation_source"]

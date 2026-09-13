@@ -16,7 +16,7 @@ from latent_working_memory.data_preparation.fineweb import data_contract
 from latent_working_memory.v1.model import GrowthValueNetwork, JointMemoryWriter
 from latent_working_memory.devices import validate_device
 from latent_working_memory.v1.training import load_trainable_model_state, precision_context
-from latent_working_memory.v1.tracking import swanlab_run
+from latent_working_memory.v1.tracking import swanlab_run, append_evaluation_reports
 from latent_working_memory.v1.reporting import build_evaluation_charts, reconstruction_media
 
 
@@ -40,15 +40,27 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--swanlab-project", default="latent-working-memory")
     parser.add_argument("--swanlab-group")
     parser.add_argument("--swanlab-tag", action="append", default=[])
+    parser.add_argument("--training-run", type=Path, help="Append to this training directory’s SwanLab run")
     parser.add_argument("--examples", type=int)
     parser.add_argument("--generation-examples", type=int)
     parser.add_argument("--prefix-tokens", type=int, nargs="+", default=())
     args = parser.parse_args(argv)
-    if args.swanlab_mode != "disabled" and (args.output_dir / "swanlab.json").exists():
+    if args.training_run:
+        if args.swanlab_mode != "online":
+            raise ValueError("training-run append requires online mode")
+        identity = json.loads((args.training_run / "swanlab.json").read_text())
+        if identity["job_type"] != "train" or identity["mode"] != "online":
+            raise ValueError("evaluation append requires an online training run")
+        if args.checkpoint.resolve().parent.parent != args.training_run.resolve():
+            raise ValueError("checkpoint must belong to the target training directory")
+    if not args.training_run and args.swanlab_mode != "disabled" and (args.output_dir / "swanlab.json").exists():
         raise ValueError("static report already published; use a new output directory")
     device = torch.device(args.device)
     validate_device(device)
     checkpoint = load_model_checkpoint(args.checkpoint)
+    if args.training_run and (args.training_run / "evaluation-publications" /
+                              f"{args.split}-step-{checkpoint.progress['next_step']:06d}.json").exists():
+        raise ValueError("evaluation already appended")
     config = checkpoint.config
     evaluation_options = {"eval_generation_every": 1}
     if args.examples is not None:
@@ -93,6 +105,17 @@ def main(argv: Sequence[str] | None = None) -> None:
                 tuple(args.prefix_tokens),
             )
         results[name] = result
+    if args.training_run:
+        step = checkpoint.progress["next_step"]
+        entries = [
+            {"evaluation_source": name,
+             "report": str(((args.output_dir / name if args.evaluation_dirs else args.output_dir)
+                            / f"{args.split}-step-{step:06d}.json").resolve())}
+            for name in directories
+        ]
+        append_evaluation_reports(args.training_run, entries)
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+        return
     with swanlab_run(
         args.output_dir,
         config.to_dict()

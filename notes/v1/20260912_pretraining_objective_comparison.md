@@ -1,7 +1,7 @@
 # 20260912_短文本预训练目标对比实验
 
 创建时间：20260912 23:38:14 UTC+08:00
-最后修订时间：20260913 12:43:08 UTC+08:00
+最后修订时间：20260913 12:51:55 UTC+08:00
 
 本实验比较 AE-only、从开始联合 AE/LM、AE warm-up 后联合训练。目标是在短文本、低压缩率条件下判断读写结构能否建立忠实重建，以及 LM 目标对这一能力的影响。实验沿用[预训练数据类型对比](20260911_pretraining_data_comparison.md)的产物与报告布局。本轮用户明确指定仅使用物理 GPU 4、5。
 
@@ -127,3 +127,22 @@ GitHub 首次同步成功；后续服务器连接 GitHub 出现 TLS 错误，按
 | eval | `pretrain_joint_r2_mixed-32k_eval_20260912` | `28xxvtjk` |
 | eval | `pretrain_ae-warmup_r2_mixed-32k_eval_20260912` | `xyb659i7` |
 | compare | `pretrain_r2_mixed-32k_compare_20260912` | `6ih300w5` |
+
+## 5. 评估追加到训练运行
+
+评估程序增加 `--training-run <训练目录>`；要求 online 模式，checkpoint 必须来自该训练目录。读取训练目录的 `swanlab.json`，使用原 run ID 和 `resume="must"` 追加到已完成的训练 run；不接管仍在运行的训练。云端训练配置和名称沿用原值，不以评估配置覆盖，也不设置新的 job_type、group 或 tags。
+
+指标、图表、生成样例和评估元数据统一放在 `evaluation/<split>/*`，横轴使用实际 checkpoint step。本轮为 `evaluation/test/*`、step 20,000。评估报告仍保存于 `eval/`；每次成功追加在训练目录的 `evaluation-publications/<split>-step-<step>.json` 记录来源，拦截重复发布。同次发布必须包含同一 checkpoint、同一 split 的全部待比较来源；不能分两次追加同一步的 semantic/random。
+
+已保存的报告可直接补写，无需模型推理。以下命令在服务器仓库根目录执行，仅追加三组测试结果，不重新发布跨组比较：
+
+```bash
+.venv/bin/python -m latent_working_memory.v1.publish_reports \
+  --reports artifacts/v1/pretrain-objective-comparison-128_20260912/plan/reports.json \
+  --training-run ae-only artifacts/v1/pretrain-objective-comparison-128_20260912/train/pretrain_ae-only_r2_mixed-16k_20260912 \
+  --training-run joint artifacts/v1/pretrain-objective-comparison-128_20260912/train/pretrain_joint_r2_mixed-32k_20260912 \
+  --training-run ae-warmup artifacts/v1/pretrain-objective-comparison-128_20260912/train/pretrain_ae-warmup_r2_mixed-32k_20260912 \
+  --swanlab-mode online
+```
+
+调度器后续默认把最终测试写回训练 run，跨组 compare 继续独立保存；仍支持显式创建独立 eval run。本次历史 eval/compare 记录保留。SwanLab 恢复并结束 run 可能更新云端结束时间，原训练时间以执行日志及资源记录为准。

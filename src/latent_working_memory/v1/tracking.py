@@ -8,7 +8,7 @@ from typing import Any, Iterator
 import swanlab
 
 from latent_working_memory.v1.checkpoint import capture_rng_state, restore_rng_state
-from latent_working_memory.v1.reporting import reconstruction_media
+from latent_working_memory.v1.reporting import reconstruction_media, build_evaluation_charts
 
 
 @contextmanager
@@ -189,3 +189,70 @@ def log_evaluation(
             )
     values.update(reconstruction_media(records_path, split))
     run.log(values, step=step)
+
+
+def append_evaluation_reports(training_dir: Path, entries: list[dict[str, Any]]) -> None:
+    """Append saved reports to a finished online training run without changing its config."""
+    identity = json.loads((training_dir / "swanlab.json").read_text())
+    if identity["job_type"] != "train" or identity["mode"] != "online":
+        raise ValueError("evaluation append requires an online training run")
+    reports = [(entry["evaluation_source"], json.loads(Path(entry["report"]).read_text()))
+               for entry in entries]
+    coordinates = {(report["split"], report["step"]) for _, report in reports}
+    if len(coordinates) != 1 or len({source for source, _ in reports}) != len(reports):
+        raise ValueError("append requires one split/checkpoint and distinct evaluation sources")
+    split, step = coordinates.pop()
+    if split not in {"dev", "test"} or not isinstance(step, int) or step < 0:
+        raise ValueError("invalid evaluation split or checkpoint step")
+    receipt = training_dir / "evaluation-publications" / f"{split}-step-{step:06d}.json"
+    if receipt.exists():
+        raise ValueError(f"evaluation already appended: {receipt}")
+    prefix = f"evaluation/{split}"
+    values = {f"{prefix}/{key}": value
+              for key, value in build_evaluation_charts(reports).items()}
+    for (source, report), entry in zip(reports, entries, strict=True):
+        if not source or Path(source).name != source or source in {".", ".."}:
+            raise ValueError("evaluation sources must be simple names")
+        for section in ("groups", "comparisons"):
+            for group, summary in report[section].items():
+                label = group.removeprefix("all/")
+                for metric, value in summary.items():
+                    if isinstance(value, (int, float)):
+                        values[f"{prefix}/{source}/{label}/{metric}"] = value
+        for group, summary in report.get("prefix_diagnostics", {}).items():
+            for metric, value in summary.items():
+                values[f"{prefix}/{source}/prefix_diagnostics/{group}/{metric}"] = value
+        values.update(reconstruction_media(
+            Path(entry["report"]).with_suffix(".jsonl"), f"{prefix}/examples/{source}"
+        ))
+    metadata = {"training_run_id": identity["id"], "split": split,
+                "checkpoint_step": step, "reports": entries,
+                "protocols": {source: report.get("protocol", {}) for source, report in reports}}
+    values[f"{prefix}/metadata"] = swanlab.Text(json.dumps(metadata, ensure_ascii=False))
+    # The saved URL identifies the workspace as well as the project; IDs alone are not global.
+    project_path = identity["url"].split("/@", 1)[1].split("/runs/", 1)[0]
+    workspace, project = project_path.split("/")
+    if project != identity["project"]:
+        raise ValueError("training run URL differs from its project")
+    remote = swanlab.Api().run(f"{project_path}/{identity['id']}")
+    if remote.state != "FINISHED":
+        raise ValueError("append requires a finished training run; do not resume active training")
+    # SwanLab's canonical API config is {key: {value, desc, sort}}.
+    config = {key: item["value"] for key, item in sorted(
+        remote.profile["config"].items(), key=lambda pair: pair[1]["sort"]
+    )}
+    rng_state = capture_rng_state()
+    try:
+        run = swanlab.init(
+            project=project, workspace=workspace, name=remote.name, config=config,
+            id=identity["id"], resume="must", mode="online",
+            log_dir=str(training_dir / "swanlab"),
+            settings=swanlab.Settings(interactive=False, terminal={"proxy_type": "none"},
+                                      probe={"git": False, "monitor": False}),
+        )
+    finally:
+        restore_rng_state(rng_state)
+    with run:
+        run.log(values, step=step)
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")

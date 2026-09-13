@@ -126,7 +126,7 @@ def run_series(spec, output):
                                 "report": str((eval_output / source /
                                                f"test-step-{spec['max_steps']:06d}.json").resolve())})
             stage(jobs)
-            evaluation_outputs += ["--evaluation-output", run["label"], str(eval_output)]
+            evaluation_outputs += ["--training-run", run["label"], str(directory)]
         (plan / "reports.json").write_text(json.dumps(reports, indent=2) + "\n")
         argv = [python, "-m", "latent_working_memory.v1.publish_reports", "--reports", str(plan / "reports.json"),
                 "--output-dir", str(output / "compare" / spec["comparison_name"]),
@@ -161,7 +161,7 @@ def summarize(spec, output, reports):
               "| 训练组 | 训练 | 评估 |", "|---|---|---|"]
     for run in spec["runs"]:
         train = json.loads((output / "train" / run["name"] / "swanlab.json").read_text())
-        evaluation = json.loads((output / "eval" / run["evaluation_name"] / "swanlab.json").read_text())
+        evaluation = train
         lines.append(f"| {run['label']} | [训练]({train['url']}) | [评估]({evaluation['url']}) |")
     comparison = json.loads((output / "compare" / spec["comparison_name"] / "swanlab.json").read_text())
     lines += ["", f"跨组比较：[SwanLab]({comparison['url']})。", ""]
