@@ -676,10 +676,12 @@ def test_training_curves_keep_real_steps_and_generation_schedule(tmp_path):
             values = {"nll": nll}
             if em is not None:
                 values.update(em=em, f1=em + 0.1, hit_limit_rate=0.0)
-            report[f"overall/{condition}/all"] = values
+            for kind, offset in (("all", 0.0), ("arrival", -0.5), ("delayed", 0.5)):
+                report[f"overall/{condition}/{kind}"] = {**values, "nll": nll + offset}
             if condition == "memory":
                 for capacity in (64, 1024):
-                    report[f"k{capacity}/memory/all"] = values
+                    for kind, offset in (("all", 0.0), ("arrival", -0.5), ("delayed", 0.5)):
+                        report[f"k{capacity}/memory/{kind}"] = {**values, "nll": nll + offset}
             else:
                 paired = {"nll_difference": -0.5}
                 if em is not None:
@@ -687,12 +689,21 @@ def test_training_curves_keep_real_steps_and_generation_schedule(tmp_path):
                 report[f"paired/memory-minus-{condition}"] = paired
         (history / f"dev-step-{step:06d}.json").write_text(json.dumps(report))
     curves = training_curves(history, 250)
-    assert len(curves) == 11
+    assert len(curves) == 8
     assert all(key.startswith("evaluation/dev/") for key in curves)
-    capacity = curves["evaluation/dev/by-capacity/nll"].options["series"]
-    assert [series["name"] for series in capacity] == ["k64", "k1024"]
-    paired = curves["evaluation/dev/paired/em_difference"].options["series"]
+    capacity_chart = curves["evaluation/dev/by-capacity/nll"].options
+    assert capacity_chart["baseOption"]["timeline"]["data"] == ["all", "arrival", "delayed"]
+    capacity = capacity_chart["options"][0]["series"]
+    assert [series["name"] for series in capacity] == ["K=64", "K=1024"]
+    em_chart = curves["evaluation/dev/em"].options
+    assert em_chart["baseOption"]["timeline"]["data"] == ["all", "arrival", "delayed", "paired"]
+    assert em_chart["baseOption"]["timeline"]["replaceMerge"] == ["series"]
+    assert em_chart["baseOption"]["timeline"]["autoPlay"] is False
+    paired = em_chart["options"][3]["series"]
     assert len(paired) == 4 and paired[0]["data"] == [[0, 0.1], [250, 0.1]]
+    assert em_chart["options"][3]["yAxis"][0]["name"] == "em_difference"
+    for chart in curves.values():
+        assert json.loads(chart.dump_options())["baseOption"]["timeline"]["currentIndex"] == 0
 
     class Recorder:
         def log(self, values, step):
@@ -706,14 +717,20 @@ def test_training_curves_keep_real_steps_and_generation_schedule(tmp_path):
         "tables/dev/paired",
         "examples/dev/qa",
     }
-    nll = curves["evaluation/dev/nll"].options
+    nll_views = curves["evaluation/dev/nll"].options["options"]
+    assert nll_views[1]["series"][0]["data"] == [[0, 3.5], [100, 2.5], [250, 1.5]]
+    assert nll_views[2]["series"][0]["data"] == [[0, 4.5], [100, 3.5], [250, 2.5]]
+    nll = nll_views[0]
     assert nll["xAxis"][0]["type"] == "value"
     assert nll["series"][0]["data"] == [[0, 4.0], [100, 3.0], [250, 2.0]]
     assert len(nll["series"]) == 5 and all(s["type"] == "line" for s in nll["series"])
-    assert curves["evaluation/dev/em"].options["series"][0]["data"] == [[0, 0.1], [250, 0.4]]
-    assert training_curves(history, 100)["evaluation/dev/em"].options["series"][0]["data"] == [
-        [0, 0.1]
+    assert curves["evaluation/dev/em"].options["options"][0]["series"][0]["data"] == [
+        [0, 0.1],
+        [250, 0.4],
     ]
+    assert training_curves(history, 100)["evaluation/dev/em"].options["options"][0]["series"][0][
+        "data"
+    ] == [[0, 0.1]]
     (tmp_path / "config.json").write_text(
         json.dumps({"eval_every": 100, "eval_generation_every": 250})
     )

@@ -96,52 +96,76 @@ def training_curves(history_dir, through_step):
         for path in history_dir.glob("dev-step-*.json")
         if int(path.stem.removeprefix("dev-step-")) <= through_step
     )
-    groups = {
-        "": {c: f"overall/{c}/all" for c in CONDITIONS},
-        "by-capacity/": {
-            key.split("/")[0]: key
+    capacities = sorted(
+        {
+            int(key.split("/")[0][1:])
             for _, report in history
             for key in report
             if key.startswith("k") and key.count("/") == 2 and key.endswith("/memory/all")
-        },
-        "paired/": {c: f"paired/memory-minus-{c}" for c in CONDITIONS if c != "memory"},
+        }
+    )
+    groups = {
+        "": {c: f"overall/{c}" for c in CONDITIONS},
+        "by-capacity/": {f"K={k}": f"k{k}/memory" for k in capacities},
     }
     charts = {}
     for group, series in groups.items():
-        metrics = (
-            ("nll_difference", "em_difference", "f1_difference")
-            if group == "paired/"
-            else (
-                "nll",
-                "em",
-                "f1",
-                "hit_limit_rate",
-            )
-        )
-        for metric in metrics:
-            observed = [
-                (step, report)
-                for step, report in history
-                if any(metric in report.get(key, {}) for key in series.values())
-            ]
-            if not observed:
-                continue
-            chart = swanlab.echarts.Line().add_xaxis([step for step, _ in observed])
-            for label, key in series.items():
-                chart.add_yaxis(
-                    label,
-                    [report.get(key, {}).get(metric) for _, report in observed],
-                    is_smooth=False,
-                    is_connect_nones=False,
-                    label_opts={"show": False},
+        for metric in ("nll", "em", "f1", "hit_limit_rate"):
+            views = {
+                kind: (metric, {label: f"{key}/{kind}" for label, key in series.items()})
+                for kind in ("all", "arrival", "delayed")
+            }
+            if group == "" and metric != "hit_limit_rate":
+                views["paired"] = (
+                    f"{metric}_difference",
+                    {c: f"paired/memory-minus-{c}" for c in CONDITIONS if c != "memory"},
                 )
-            chart.set_global_opts(
-                xaxis_opts={"type": "value", "name": "optimizer step", "min": 0},
-                yaxis_opts={"name": metric},
-                tooltip_opts={"trigger": "axis"},
-                legend_opts={"type": "scroll"},
-            )
-            charts[f"evaluation/dev/{group}{metric}"] = chart
+            options, labels = [], []
+            for view, (value_key, view_series) in views.items():
+                observed = [
+                    (step, report)
+                    for step, report in history
+                    if any(value_key in report.get(key, {}) for key in view_series.values())
+                ]
+                if not observed:
+                    continue
+                chart = swanlab.echarts.Line().add_xaxis([step for step, _ in observed])
+                for label, key in view_series.items():
+                    chart.add_yaxis(
+                        label,
+                        [report.get(key, {}).get(value_key) for _, report in observed],
+                        is_smooth=False,
+                        is_connect_nones=False,
+                        label_opts={"show": False},
+                    )
+                chart.set_global_opts(
+                    xaxis_opts={"type": "value", "name": "optimizer step", "min": 0},
+                    yaxis_opts={"name": value_key},
+                    tooltip_opts={"trigger": "axis"},
+                    legend_opts={"type": "scroll"},
+                )
+                options.append(chart.options)
+                labels.append(view)
+            if options:
+                chart = swanlab.echarts.Line()
+                chart.options = {
+                    "baseOption": {
+                        "timeline": {
+                            "axisType": "category",
+                            "autoPlay": False,
+                            "currentIndex": 0,
+                            "data": labels,
+                            "bottom": 0,
+                            "left": "15%",
+                            "right": "15%",
+                            "controlStyle": {"show": False},
+                            "replaceMerge": ["series"],
+                        },
+                        "grid": {"left": "12%", "right": "15%", "top": 70, "bottom": 90},
+                    },
+                    "options": options,
+                }
+                charts[f"evaluation/dev/{group}{metric}"] = chart
     return charts
 
 
