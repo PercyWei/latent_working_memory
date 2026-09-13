@@ -10,6 +10,7 @@ data/
 models/
 checkpoints/
 artifacts/
+notes/
 reports/generated/
 
 *.pt
