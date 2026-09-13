@@ -93,8 +93,8 @@ def reupload_training(training_dir):
     else:
         project_path = identity["url"].split("/@", 1)[1].split("/runs/", 1)[0]
         response = swanlab.Api()._get(f"/project/{project_path}/runs/{identity['id']}")
-        if response.ok or "Disabled_Resource" not in response.errmsg:
-            raise ValueError("only an explicitly deleted cloud run can be replaced")
+        if response.ok or not any(code in response.errmsg for code in ("Disabled_Resource", "Not_Found")):
+            raise ValueError("only a deleted or missing cloud run can be replaced")
         archive = training_dir / "swanlab-archive" / identity["id"]
         archive.mkdir(parents=True, exist_ok=False)
         shutil.copy2(identity_path, archive / "swanlab.json")
