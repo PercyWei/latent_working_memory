@@ -2,6 +2,8 @@
 
 import argparse
 import json
+from importlib.metadata import version
+import subprocess
 from pathlib import Path
 
 import swanlab
@@ -281,27 +283,41 @@ def rebuild_training_run(directory, output_dir, mode):
         tags=tuple(identity["tags"]),
         fixed_tags=(),
     ) as run:
-        for step in range(total_steps + 1):
-            if run is not None and step:
-                run.log(training_metrics(records[step - 1]), step=step)
-            if step in reports:
-                metrics, rows = reports[step]
-                log_qa(
-                    run,
-                    metrics,
-                    rows,
-                    step,
-                    "dev",
-                    media=any("prediction" in row for row in rows),
-                    history_dir=directory / "dev",
-                )
+        for record in records:
+            if run is not None:
+                run.log(training_metrics(record), step=record["step"])
+        metrics, rows = reports[total_steps]
+        log_qa(
+            run,
+            metrics,
+            rows,
+            total_steps,
+            "dev",
+            media=any("prediction" in row for row in rows),
+            history_dir=directory / "dev",
+        )
+    charts = training_curves(directory / "dev", total_steps)
+    (output_dir / "evaluation-charts.json").write_text(
+        json.dumps(
+            {key: json.loads(chart.dump_options()) for key, chart in charts.items()}, indent=2
+        )
+        + "\n"
+    )
     (output_dir / "republication.json").write_text(
         json.dumps(
             {
                 "source": source,
                 "training_steps": total_steps,
                 "dev_steps": sorted(reports),
-                "evaluation_charts": sorted(training_curves(directory / "dev", total_steps)),
+                "evaluation_charts": sorted(charts),
+                "media_step": total_steps,
+                "snapshot_policy": "final-history",
+                "publication_git_commit": subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=Path(__file__).resolve().parents[3],
+                    text=True,
+                ).strip(),
+                "publication_packages": {name: version(name) for name in ("swanlab", "pyecharts")},
             },
             indent=2,
         )

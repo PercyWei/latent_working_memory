@@ -1,7 +1,7 @@
 # 20260911_动态训练与 QA 评估
 
 创建时间：20260911 15:23:05 UTC+08:00  
-最后修订时间：20260913 12:42:48 UTC+08:00
+最后修订时间：20260913 13:09:50 UTC+08:00
 
 本文记录动态训练与 QA 评估的执行流程。记忆容量、micro epoch 规模、阶段比例及截断跨度通过训练配置确定。
 
@@ -190,6 +190,6 @@ SwanLab 使用 `latent-working-memory-v1` 项目，同一实验的训练与评�
 - `eval/<run_name>/` 保存评估来源、汇总 JSON 和逐题 JSONL。
 - `compare/<run_name>/` 保存输入报告清单及重新聚合的比较结果。
 
-SwanLab 使用 `latent-working-memory-v1`，同系列训练、评估与比较共享显式 group；`job_type` 分别为 `train`、`evaluate`、`compare`，`study:*` 标签通过启动参数传入。训练 run 使用 8 张评估图：总体图位于 `evaluation/dev/*`，容量图位于 `evaluation/dev/by-capacity/*`。总体图中，NLL、EM、F1、触顶率各一张历史折线图，横轴为 optimizer step，五条曲线对应五种对照条件。容量图按同样的四个指标比较各 K 的 memory 表现。每张图可切换 `all`（全部问题）、`arrival`（当前文本问题）和 `delayed`（历史问题）；总体 NLL、EM、F1 图还可切换 `paired`，查看 memory 相对各对照的差值。默认显示 `all`。每次评估更新历史曲线，生成指标使用实际生成评估点。完整数值及数量统计保存在本地 JSON/JSONL，分组与配对表格、问答样例位于 `tables/*`、`examples/*`。独立评估与跨运行比较的汇总图同样位于 `evaluation/*`。测试设置 `--swanlab-mode disabled`，正式实验设置 `online`。
+SwanLab 使用 `latent-working-memory-v1`，同系列训练、评估与比较共享显式 group；`job_type` 分别为 `train`、`evaluate`、`compare`，`study:*` 标签通过启动参数传入。训练 run 使用 8 张评估图：总体图位于 `evaluation/dev/*`，容量图位于 `evaluation/dev/by-capacity/*`。总体图中，NLL、EM、F1、触顶率各一张历史折线图，横轴为 optimizer step，五条曲线对应五种对照条件。容量图按同样的四个指标比较各 K 的 memory 表现。每张图可切换 `all`（全部问题）、`arrival`（当前文本问题）和 `delayed`（历史问题）；总体 NLL、EM、F1 图还可切换 `paired`，查看 memory 相对各对照的差值。默认显示 `all`。训练过程中保存各次评估结果；达到计划训练终点时，每个指标发布一张完整历史图，表格与问答样例取最终评估结果。图内横轴包含全部实际评估步数，生成指标使用实际生成评估点。已完成实验的重建采用相同发布规则。完整数值及数量统计保存在本地 JSON/JSONL，分组与配对表格、问答样例位于 `tables/*`、`examples/*`。独立评估与跨运行比较的汇总图同样位于 `evaluation/*`。测试设置 `--swanlab-mode disabled`，正式实验设置 `online`。
 
 本轮设置和运行记录见[动态梯度传播对比实验](20260912_dynamic_bptt_comparison.md)。

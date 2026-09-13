@@ -448,6 +448,11 @@ def test_run_resume_across_micro_epochs_and_final_test(
     recipe = replace(recipe, epochs=2, save_every=1, eval_every=100, eval_texts_per_ratio=1)
     prepare_dynamic(index, recipe, config, tmp_path / "plan")
     opts = dict(evaluation_plan=tmp_path / "plan/evaluation-plan.json")
+    published_steps = []
+    monkeypatch.setattr(
+        "latent_working_memory.v1.dynamic.log_qa",
+        lambda run, metrics, rows, step, *args, **kwargs: published_steps.append(step),
+    )
     full = run_dynamic(initial, index, tmp_path / "full", recipe, torch.device("cpu"), **opts)
     first = run_dynamic(
         initial, index, tmp_path / "resume", recipe, torch.device("cpu"), steps=3, **opts
@@ -455,6 +460,7 @@ def test_run_resume_across_micro_epochs_and_final_test(
     resumed = run_dynamic(
         first, index, tmp_path / "resume", recipe, torch.device("cpu"), resume=True, **opts
     )
+    assert published_steps == [8, 8]
     runtime = json.loads(next((tmp_path / "full").glob("runtime-from-*.json")).read_text())[
         "runtime"
     ]
@@ -796,16 +802,25 @@ def test_rebuild_training_run_replays_original_steps_without_old_charts(tmp_path
     monkeypatch.setattr(dynamic_reporting, "swanlab_run", fake_run)
     output = tmp_path / "rebuilt"
     dynamic_reporting.rebuild_training_run(source, output, "disabled")
-    assert [step for step, _ in calls] == [0, 1, 2, 2]
-    assert calls[1][1] == {
+    assert [step for step, _ in calls] == [1, 2, 2]
+    assert calls[0][1] == {
         "train/step": 1,
         "train/loss": 3.0,
         "resources/seconds": 12.0,
         "train/cumulative_input_tokens": 200,
     }
-    assert set(calls[0][1]) == set(calls[-1][1]) == {"evaluation/dev/nll"}
+    assert set(calls[-1][1]) == {"evaluation/dev/nll"}
     assert json.loads((source / "swanlab.json").read_text()) == identity
     assert json.loads((output / "republication.json").read_text())["training_steps"] == 2
+    first_payload = (output / "evaluation-charts.json").read_text()
+    repeated = tmp_path / "repeated"
+    dynamic_reporting.rebuild_training_run(source, repeated, "disabled")
+    assert (repeated / "evaluation-charts.json").read_text() == first_payload
+    assert (repeated / "republication.json").read_text() == (
+        output / "republication.json"
+    ).read_text()
+    manifest = json.loads((output / "republication.json").read_text())
+    assert manifest["media_step"] == 2 and manifest["snapshot_policy"] == "final-history"
     (output / "swanlab.json").write_text(json.dumps({**identity, "id": "rebuilt"}))
     dynamic_reporting.publish_training_history(source, 3, "disabled", output)
     assert calls[-1][0] == 3 and set(calls[-1][1]) == {"evaluation/dev/nll"}
