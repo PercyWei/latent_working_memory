@@ -229,6 +229,7 @@ class LatentMemoryBackbone(nn.Module):
                     inputs_embeds=current,
                     attention_mask=attention_mask,
                     do_sample=False,
+                    repetition_penalty=1.0,
                     max_new_tokens=max(token_limits),
                     eos_token_id=self.eos_token_id,
                     pad_token_id=self.eos_token_id,
