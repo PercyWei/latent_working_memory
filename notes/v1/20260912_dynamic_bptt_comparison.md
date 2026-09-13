@@ -1,7 +1,7 @@
 # 20260912_动态梯度传播对比实验
 
 创建时间：20260912 23:54:16 UTC+08:00
-最后修订时间：20260913 13:09:50 UTC+08:00
+最后修订时间：20260913 13:12:39 UTC+08:00
 
 本系列比较完整 BPTT、源 token TBPTT 和更新次数 TBPTT。各组共享初始化参数、文本课程与评估记录。训练方法见[动态训练与 QA 评估](20260911_dynamic_training_and_evaluation.md)。本轮先运行完整 BPTT。
 
@@ -112,3 +112,5 @@ GPU 6、7 上的 K=1024 完整 BPTT 测试结果如下，每步使用 2 份文�
 重建命令为 `.venv/bin/python -m latent_working_memory.v1.dynamic_reporting --training-run <train_run_dir> --output-dir <series_dir>/plan/swanlab/dynamic_BPTT_squad_mixed-157k_20260912 --swanlab-mode online`。输出目录使用新的空目录；云端沿用原配置、group 和 tags。源训练日志与 checkpoint 保存在原训练目录。
 
 展示目录保存 `swanlab.json`、完整图表内容 `evaluation-charts.json` 和发布记录 `republication.json`。发布记录包含源训练目录、源 run ID、评估步数、媒体记录位置、发布规则、Git commit 及 SwanLab/pyecharts 版本。同一份结果数据通过相同代码与依赖重新发布时，图表内容保持一致；新 run 的 ID、创建时间和上传时间由云端重新生成。
+
+当前展示 run：[dynamic_BPTT_squad_mixed-157k_20260912](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/qo91dlgm)。发布代码为 `37191b5`。云端核对确认 8 张评估图各只有一份 step 750 记录，图表内容与 `evaluation-charts.json` 完全一致；750 步训练 loss 与原始日志在 `1e-12` 绝对误差内一致。核对结果保存在 `cloud-verification.json`。
