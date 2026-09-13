@@ -1,7 +1,7 @@
 # 20260912_动态梯度传播对比实验
 
 创建时间：20260912 23:54:16 UTC+08:00
-最后修订时间：20260913 19:13:20 UTC+08:00
+最后修订时间：20260913 19:24:04 UTC+08:00
 
 本系列比较完整 BPTT、源 token TBPTT 和更新次数 TBPTT。各组共享初始化参数、文本课程与评估记录。训练方法见[动态训练与 QA 评估](20260911_dynamic_training_and_evaluation.md)。本轮先运行完整 BPTT。
 
@@ -131,4 +131,6 @@ GPU 6、7 上的 K=1024 完整 BPTT 测试结果如下，每步使用 2 份文�
 
 展示目录保存逐步标量 `scalar-records.jsonl`、原生面板定义 `dev-panels.json`、最终汇总图 `evaluation-charts.json`、run 身份 `swanlab.json` 和发布记录 `republication.json`。发布记录关联原训练、旧展示和新 run，记录 dev 步数、test 来源、原始日志中的训练步耗时合计、Git commit 与依赖版本。重传后核对云端标量、图表、图例和配色，并保存核对结果。
 
-待替换展示 run 为 [dynamic_BPTT_squad_mixed-157k_20260912](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/qo91dlgm)。该 run 的旧展示仅包含 dev 历史图；本次先完成代码与离线验证，待用户删除旧云端记录后重新上传。源训练日志与 checkpoint 保存在原训练目录。
+当前展示 run 为 [dynamic_BPTT_squad_mixed-157k_20260912](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/c1ogvb44)，于 20260913 19:18:12 UTC+08:00 重新发布，发布代码为 `40b935b`，替换旧展示 run `qo91dlgm`。源训练日志与 checkpoint 保存在原训练目录。
+
+云端核对覆盖 29 条标量序列、10,590 个数据点，最大绝对误差为 `2.28e-13`；三张 dev 原生面板的配置和配色与代码一致，三张最终 test 汇总图的内容与本地产物完全一致。dev 表格及样例保留 step 0、250、500、750，test 表格及样例仅保留 step 750。核对结果保存在展示目录的 `cloud-verification.json`。
