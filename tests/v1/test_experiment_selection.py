@@ -9,7 +9,7 @@ import re
 
 import pytest
 
-from latent_working_memory.data_preparation.experiment import select_experiment
+from latent_working_memory.v1.data_selection import select_experiment
 from latent_working_memory.data_preparation.pipeline import prepare_fineweb
 from latent_working_memory.v1.sampling import PretrainSampler
 from latent_working_memory.v1.training import learning_rate_at

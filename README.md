@@ -6,7 +6,7 @@
 
 ## 主环境与开发
 
-数据构造、主实验训练与评估统一使用项目根目录 `.venv/`，依赖由根目录 `pyproject.toml` 与 `uv.lock` 管理。构造入口位于 `src/latent_working_memory/data_preparation/`，正式构造配置位于 `configs/data_preparation/`；执行记录与日志写入 `artifacts/`。
+数据构造、主实验训练与评估统一使用项目根目录 `.venv/`，依赖由根目录 `pyproject.toml` 与 `uv.lock` 管理。通用数据构造入口位于 `src/latent_working_memory/data_preparation/`，实验专用代码放在 `src/latent_working_memory/v1/` 的对应子目录，正式配置位于 `configs/`；执行记录与日志写入 `artifacts/`。
 
 ```bash
 uv sync --frozen
@@ -119,3 +119,22 @@ C-DIC 的论文实现位于 `reproductions/cdic/`，复现实验统一记录在 
 PYTHONPATH=reproductions/cdic/src uv run pytest -q reproductions/cdic/tests
 uv sync --project reproductions/cdic --frozen
 ```
+
+### 预训练实验入口
+
+不同实验使用独立启动脚本，共用 `v1/train.py`、`evaluate.py`、`publish_reports.py`、`data_selection.py` 和 `experiment_execution.py`。最后一个模块只负责命令执行、日志、状态和 GPU 分配检查，不决定实验步骤。
+
+- 数据类型对比：`v1/pretrain_data_comparison/run.py`，分别训练 semantic、random、mixed。
+- 目标对比：`v1/pretrain_objective_comparison/run.py`，分别训练 AE-only、联合训练和 AE warm-up；专用短文本构造入口为同目录的 `prepare_data.py`。
+
+```bash
+.venv/bin/python -m latent_working_memory.v1.pretrain_data_comparison.run \
+  --spec configs/experiments/pretrain-data-comparison-2048.json \
+  --output-dir artifacts/v1/<新的数据对比实验目录>
+
+.venv/bin/python -m latent_working_memory.v1.pretrain_objective_comparison.run \
+  --spec configs/experiments/pretrain-objective-comparison-128.json \
+  --output-dir artifacts/v1/<新的目标对比实验目录>
+```
+
+两者均串行执行双卡训练，按来源单卡并行测试，将最终 test 追加到训练 run，并单独发布跨组比较。正式配置显式指定 GPU、保存间隔与测试数量；目标对比另行指定 warm-up 继承步数和 prefix 诊断。旧 `artifacts/` 下的调度脚本仅为历史记录，不作为启动入口。

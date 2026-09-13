@@ -26,9 +26,19 @@
       "name": "pretrain_ae-warmup_r2_mixed-32k_20260912",
       "evaluation_name": "pretrain_ae-warmup_r2_mixed-32k_eval_20260912",
       "config": "configs/v1/pretrain-objective-comparison-128/ae-warmup.json",
-      "fork_from_run": "pretrain_ae-only_r2_mixed-16k_20260912"
+      "fork_from_run": "pretrain_ae-only_r2_mixed-16k_20260912",
+      "fork_step": 5000
     }
   ],
-  "training_concurrency": 2,
-  "data_selection": "configs/data_preparation/fineweb-128-doc100k_pretrain-objective-comparison.json"
+  "data_selection": "configs/data_preparation/fineweb-128-doc100k_pretrain-objective-comparison.json",
+  "save_every": 1000,
+  "evaluation": {
+    "examples": 240,
+    "generation_examples": 60,
+    "prefix_tokens": [
+      1,
+      8,
+      32
+    ]
+  }
 }

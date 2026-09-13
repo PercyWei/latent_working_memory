@@ -22,7 +22,7 @@ from latent_working_memory.v1.checkpoint import (
     save_model_checkpoint,
 )
 from latent_working_memory.v1.config import ExperimentConfig, write_resolved_config
-from latent_working_memory.data_preparation.experiment import select_experiment, selection_metadata
+from latent_working_memory.v1.data_selection import select_experiment, selection_metadata
 from latent_working_memory.v1.prepared_data import pretraining_index, validate_preparation
 from latent_working_memory.v1.distributed import synchronize_gradients
 from latent_working_memory.v1.evaluation import evaluate_pretraining

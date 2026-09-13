@@ -1,19 +1,12 @@
-"""依次运行短文本目标对比，双卡训练、双来源并行测试，并保存比较报告。"""
+"""运行 AE-only、联合训练及 AE warm-up 对比实验。"""
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from datetime import datetime
 import json
-import os
 from pathlib import Path
-import subprocess
 import sys
-from zoneinfo import ZoneInfo
 
-
-def now():
-    return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d %H:%M:%S UTC+08:00")
+from latent_working_memory.v1.experiment_execution import ExperimentExecution, now
 
 
 def run_series(spec, output):
@@ -24,78 +17,14 @@ def run_series(spec, output):
     evaluation_sources = list(selection["sources"])
     (plan / "data-selection.json").write_text(json.dumps(selection, indent=2) + "\n")
     (plan / "series.json").write_text(json.dumps(spec, indent=2) + "\n")
-    status = {"started": now(), "pid": os.getpid(), "status": "running", "jobs": {},
-              "code_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-              "gpus": spec["gpus"]}
-    commands = []
+    execution = ExperimentExecution(plan, spec["gpus"])
     python = str(Path(sys.executable).absolute())
     groups = ["--swanlab-project", spec["project"], "--swanlab-group", spec["group"],
               "--swanlab-tag", "study:pretrain-objective-comparison"]
-
-    def save_status():
-        status["updated"] = now()
-        temporary = plan / "status.tmp"
-        temporary.write_text(json.dumps(status, indent=2) + "\n")
-        temporary.replace(plan / "status.json")
-
-    def execute(name, argv, devices):
-        env = os.environ | {"LWM_ALLOWED_PHYSICAL_GPUS": "4,5", "CUDA_VISIBLE_DEVICES": ",".join(map(str, devices)),
-                            "OMP_NUM_THREADS": "1", "TOKENIZERS_PARALLELISM": "false"}
-        with (plan / f"{name}.log").open("a") as handle:
-            handle.write(f"\n{now()}\n")
-            handle.flush()
-            result = subprocess.run(argv, env=env, stdout=handle, stderr=subprocess.STDOUT)
-        return result.returncode
-
-    def stage(jobs, dependencies=None, max_workers=None):
-        dependencies = {} if dependencies is None else dependencies
-        max_workers = len(jobs) if max_workers is None else max_workers
-        for name, argv, devices in jobs:
-            status["jobs"][name] = {"status": "pending"}
-            commands.append({"name": name, "argv": argv, "CUDA_VISIBLE_DEVICES": devices,
-                             "LWM_ALLOWED_PHYSICAL_GPUS": [4, 5]})
-        (plan / "commands.json").write_text(json.dumps(commands, indent=2) + "\n")
-        save_status()
-        pending, active, failures = list(jobs), {}, []
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            while pending or active:
-                for job in list(pending):
-                    name, argv, devices = job
-                    parent = dependencies.get(name)
-                    if parent and status["jobs"][parent]["status"] == "failed":
-                        status["jobs"][name] = {"status": "blocked", "dependency": parent}
-                        pending.remove(job)
-                        failures.append(name)
-                        continue
-                    if len(active) >= max_workers or (
-                        parent and status["jobs"][parent]["status"] != "complete"
-                    ):
-                        continue
-                    status["jobs"][name] = {"status": "running", "started": now()}
-                    active[executor.submit(execute, name, argv, devices)] = name
-                    pending.remove(job)
-                save_status()
-                if not active:
-                    if pending:
-                        raise ValueError("unresolved job dependencies")
-                    break
-                completed, _ = wait(active, return_when=FIRST_COMPLETED)
-                for future in completed:
-                    name = active.pop(future)
-                    code = future.result()
-                    status["jobs"][name].update(status="complete" if code == 0 else "failed",
-                                                 exit_code=code, finished=now())
-                    if code:
-                        failures.append(name)
-                save_status()
-        if failures:
-            raise RuntimeError(f"failed jobs: {failures}; see plan logs")
-
-    save_status()
+    stage = execution.stage
     reports, evaluation_outputs = [], []
     try:
-        training_jobs, dependencies = [], {}
-        labels = {run["name"]: run["label"] for run in spec["runs"]}
+        training_jobs = []
         for run in spec["runs"]:
             directory = output / "train" / run["name"]
             argv = [python, "-m", "torch.distributed.run", "--standalone", "--nproc_per_node=2",
@@ -103,13 +32,14 @@ def run_series(spec, output):
                     "--config", run["config"], "--data-selection", str(plan / "data-selection.json"),
                     "--data-run", "mixed",
                     "--output-dir", str(directory), "--max-steps", str(spec["max_steps"]),
-                    "--save-every", "1000", "--swanlab-mode", "online", *groups]
+                    "--save-every", str(spec["save_every"]), "--swanlab-mode", "online", *groups]
             if "fork_from_run" in run:
                 argv += ["--fork-from", str(output / "train" / run["fork_from_run"] /
-                                          "checkpoints/pretrain-step-005000.pt")]
-                dependencies[run["label"] + "-train"] = labels[run["fork_from_run"]] + "-train"
+                                          f"checkpoints/pretrain-step-{run['fork_step']:06d}.pt")]
             training_jobs.append((run["label"] + "-train", argv, spec["gpus"]))
-        stage(training_jobs, dependencies, spec["training_concurrency"])
+        # Each training job occupies both GPUs; the parent finishes before warm-up forks.
+        for job in training_jobs:
+            stage([job])
         for run in spec["runs"]:
             directory = output / "train" / run["name"]
             checkpoint = directory / f"checkpoints/pretrain-step-{spec['max_steps']:06d}.pt"
@@ -119,8 +49,9 @@ def run_series(spec, output):
                 argv = [python, "-m", "latent_working_memory.v1.evaluate", "--checkpoint", str(checkpoint),
                         "--data-selection", str(plan / "data-selection.json"), "--evaluation-source", source,
                         "--output-dir", str(eval_output / source),
-                        "--split", "test", "--examples", "240", "--generation-examples", "60",
-                        "--prefix-tokens", "1", "8", "32",
+                        "--split", "test", "--examples", str(spec["evaluation"]["examples"]),
+                        "--generation-examples", str(spec["evaluation"]["generation_examples"]),
+                        "--prefix-tokens", *map(str, spec["evaluation"]["prefix_tokens"]),
                         "--swanlab-mode", "disabled"]
                 jobs.append((run["label"] + "-test-" + source, argv, [gpu]))
                 reports.append({"training_source": run["label"], "evaluation_source": source,
@@ -140,11 +71,9 @@ def run_series(spec, output):
         text = "\n".join("最后修订时间：" + now() if line.startswith("最后修订时间：") else line
                          for line in text.splitlines())
         note.write_text(text + "\n\n" + result)
-        status.update(status="complete", finished=now())
-        save_status()
+        execution.finish()
     except BaseException as error:
-        status.update(status="failed", error=str(error), finished=now())
-        save_status()
+        execution.finish(error)
         raise
 
 
@@ -157,8 +86,8 @@ def summarize(spec, output, reports):
         lm = result["groups"]["all/continuation/memory"]
         lines.append(f"| {entry['training_source']} | {entry['evaluation_source']} | {ae['nll']:.4f} | "
                      f"{lm['nll']:.4f} | {ae['bleu_4']:.3f} | {ae['correct_prefix_ratio']:.3%} | {ae['exact_match']:.3%} |")
-    lines += ["", "以上为固定 step 20,000 的独立 test，NLL 不含 EOS。结果来自单模型 seed；"
-              "warm-up 与直接联合的目标暴露量不同。C 前 5,000 步继承 A，完整轨迹关联见 plan/series.json。", "",
+    lines += ["", f"以上为 step {spec['max_steps']} 的独立 test，NLL 不含 EOS。结果来自单模型 seed；"
+              "warm-up 与直接联合的目标暴露量不同。继承的 checkpoint 见 plan/series.json。", "",
               "| 训练组 | 训练 | 评估 |", "|---|---|---|"]
     for run in spec["runs"]:
         train = json.loads((output / "train" / run["name"] / "swanlab.json").read_text())
@@ -174,8 +103,8 @@ def main():
     parser.add_argument("--spec", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
-    if (args.output_dir / "plan/status.json").exists():
-        raise FileExistsError("series already has execution state; inspect it before restarting")
+    if args.output_dir.exists():
+        raise FileExistsError("use a new experiment directory")
     spec = json.loads(args.spec.read_text())
     if spec["gpus"] != [4, 5]:
         raise ValueError("this experiment is authorized only on physical GPUs 4 and 5")

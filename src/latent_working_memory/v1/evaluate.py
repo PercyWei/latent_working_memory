@@ -10,7 +10,7 @@ import torch
 
 from latent_working_memory.v1.backbone import load_backbone
 from latent_working_memory.v1.checkpoint import load_model_checkpoint
-from latent_working_memory.data_preparation.experiment import select_experiment, selection_metadata
+from latent_working_memory.v1.data_selection import select_experiment, selection_metadata
 from latent_working_memory.v1.prepared_data import pretraining_index, validate_preparation
 from latent_working_memory.v1.evaluation import evaluate_pretraining
 from latent_working_memory.v1.model import GrowthValueNetwork, JointMemoryWriter

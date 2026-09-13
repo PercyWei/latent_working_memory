@@ -1,13 +1,14 @@
 from types import SimpleNamespace
-import latent_working_memory.data_preparation.pretrain_objective_series as series
+import latent_working_memory.v1.pretrain_objective_comparison.run as series
+import latent_working_memory.v1.experiment_execution as execution
 import json
 from dataclasses import replace
 
 from latent_working_memory.data_preparation.config import PreparationConfig
 from latent_working_memory.data_preparation.pipeline import prepare_sources
-from latent_working_memory.data_preparation.objective_comparison import prepare
+from latent_working_memory.v1.pretrain_objective_comparison.prepare_data import prepare
 from latent_working_memory.data_preparation.text_samples import TextSample
-from latent_working_memory.data_preparation.experiment import select_experiment
+from latent_working_memory.v1.data_selection import select_experiment
 from latent_working_memory.v1.config import write_resolved_config
 
 
@@ -85,8 +86,8 @@ def test_series_uses_selection_and_parallel_source_evaluation(tmp_path, monkeypa
         commands.append(argv)
         return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr(series.subprocess, "run", execute)
-    monkeypatch.setattr(series.subprocess, "check_output", lambda *a, **k: "test-commit")
+    monkeypatch.setattr(execution.subprocess, "run", execute)
+    monkeypatch.setattr(execution.subprocess, "check_output", lambda *a, **k: "test-commit")
     monkeypatch.setattr(series, "summarize", lambda *a: "test summary")
     spec = {
         "data_selection": str(path),
@@ -94,7 +95,8 @@ def test_series_uses_selection_and_parallel_source_evaluation(tmp_path, monkeypa
         "project": "test",
         "group": "test",
         "max_steps": 1,
-        "training_concurrency": 1,
+        "save_every": 1,
+        "evaluation": {"examples": 4, "generation_examples": 2, "prefix_tokens": [1]},
         "comparison_name": "compare",
         "note": str(note),
         "runs": [
