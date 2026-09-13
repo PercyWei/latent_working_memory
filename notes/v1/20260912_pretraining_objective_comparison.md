@@ -1,7 +1,7 @@
 # 20260912_短文本预训练目标对比实验
 
 创建时间：20260912 23:38:14 UTC+08:00
-最后修订时间：20260913 14:22:30 UTC+08:00
+最后修订时间：20260913 14:33:13 UTC+08:00
 
 本实验比较 AE-only、从开始联合 AE/LM、AE warm-up 后联合训练。目标是在短文本、低压缩率条件下判断读写结构能否建立忠实重建，以及 LM 目标对这一能力的影响。实验沿用[预训练数据类型对比](20260911_pretraining_data_comparison.md)的产物与报告布局。本轮用户明确指定仅使用物理 GPU 4、5。
 
@@ -91,7 +91,7 @@ GitHub 首次同步成功；后续服务器连接 GitHub 出现 TLS 错误，按
 
 | 训练组 | 当前运行 |
 |---|---|
-| AE-only | [SwanLab](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/xhnc9qbf) |
+| AE-only | [SwanLab](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/ej11zqrt) |
 | 直接联合 | [SwanLab](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/7cxvhc3a) |
 | AE warm-up | 等待 A 完成后自动创建；前 5,000 步引用 A |
 
@@ -110,7 +110,7 @@ GitHub 首次同步成功；后续服务器连接 GitHub 出现 TLS 错误，按
 
 | 训练组 | 训练 | 评估 |
 |---|---|---|
-| ae-only | [训练](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/xhnc9qbf) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/y4qrfh4w) |
+| ae-only | [训练](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/ej11zqrt) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/y4qrfh4w) |
 | joint | [训练](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/7cxvhc3a) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/28xxvtjk) |
 | ae-warmup | [训练](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/ie55bu45) | [评估](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/xyb659i7) |
 
@@ -209,3 +209,10 @@ A/B/C 已在原 run 上补写全部 dev 标量，ID 和链接未变；原 5 张 
 A 在首个数据点上传前经云端检查，只有 6 张 dev 原生图、Hidden 为 0。上传完成后，dev 为 10 个面板、evaluation 为 10 个面板，Hidden 仍为 0，且无额外单序列分区；完整训练曲线、21 次 dev 表格历史、生成样例和最终 test 均已恢复。核对 140,001 个训练相关标量点、666 个 dev 标量点、5 张 test 核心图，以及最终 dev/test 各 120 组生成样例，结果与产物一致。相关测试在本地和服务器各通过 14 项。
 
 当前验收状态和命令见 `plan/direct-panel-review.json`，首点前布局及最终核验见 `plan/ae-only-direct-panel-initialization.json`、`plan/ae-only-direct-panel-verification.json`，上传日志为 `plan/ae-only-direct-panel-reupload.log`。本轮未重新训练或推理。
+
+
+## 10. A 组配色与图例顺序
+
+原生 dev 曲线按条件分配色系：memory 为蓝色、wrong_memory 为橙色、no_memory 为灰色、full_context 为绿色、base_full_context 为紫色。同一条件中 semantic 使用深色、random 使用浅色；即使 LM 按来源拆成两张图，来源对应的深浅也保持一致。图例按条件优先、来源次之排列，使 semantic/memory 与 random/memory 相邻，随后是 wrong_memory 的两条曲线。颜色和简短标签直接写入原生面板的序列样式，后续新建 run 自动沿用。
+
+用户要求重新上传 A，检查发现 `xhnc9qbf` 已被删除，因此重建为 `ej11zqrt`。仅更新 A，B/C 仍等待确认。6 张 dev 原生图的颜色与图例顺序均已回读验证；训练相关 140,001 个标量点、666 个 dev 标量点、最终 test 图表和样例核对通过。dev/evaluation 均为 10 个面板，Hidden 为 0。相关测试本地及服务器各通过 7 项；上传日志和核验结果见 `plan/ae-only-color-reupload.log`、`plan/ae-only-color-verification.json`。
