@@ -104,7 +104,8 @@ def test_offline_metrics_match_local_reports_and_close_run(tmp_path, monkeypatch
         log_evaluation(run, {"semantic": metrics}, {"semantic": path}, 3)
         logged, step = calls[-1]
         assert step == 3 and logged["progress/input_tokens"] == 36
-        assert "dev/overview/ae/nll" in logged
+        assert "dev/overview/ae/nll/semantic/memory" in logged
+        assert "dev/overview/ae/nll" not in logged
         assert "dev/overview/summary" in logged and "dev/overview/details" in logged
         assert len(logged["dev/overview/examples"]) == 100
         assert len(logged["dev/overview/examples/page_2"]) == 10

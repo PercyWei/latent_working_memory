@@ -8,8 +8,9 @@ from typing import Any, Iterator
 import swanlab
 
 from latent_working_memory.v1.checkpoint import capture_rng_state, restore_rng_state
+from latent_working_memory.v1.dev_scalars import configure_development_panels, development_scalars
 from latent_working_memory.v1.reporting import (
-    evaluation_overview, paired_reconstructions, development_overview,
+    evaluation_overview, paired_reconstructions, evaluation_tables,
 )
 
 
@@ -93,6 +94,8 @@ def swanlab_run(
             )
             + "\n"
         )
+        if job_type == "train" and "evaluation_preparations" in config:
+            configure_development_panels(run, list(config["evaluation_preparations"]), mode)
         yield run
 
 
@@ -164,7 +167,9 @@ def log_training(
 def log_evaluation(run, metrics, records_paths, step):
     if run is None:
         return
-    values = development_overview(list(records_paths.items()), step)
+    values = development_scalars(metrics)
+    values.update(evaluation_tables(list(metrics.items()), "dev/overview"))
+    values.update(paired_reconstructions(list(records_paths.items()), "dev/overview"))
     values["progress/input_tokens"] = next(iter(metrics.values()))["training_input_tokens"]
     run.log(values, step=step)
 

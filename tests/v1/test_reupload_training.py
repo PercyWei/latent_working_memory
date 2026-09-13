@@ -57,8 +57,10 @@ def test_live_training_and_saved_replay_emit_identical_records(
     assert prepared["config"] == json.loads(json.dumps(configs[0]))
     assert replay.events == live.events
     assert [step for step, _ in replay.events] == [0, 1, 1, 2, 2]
-    # The step-0 dev payload is reconstructed while future dev files already exist.
-    assert replay.events[0][1]["dev/overview/ae/nll"]["xAxis"][0]["data"] == [0]
+    # Future reports already exist, but each event contains only its own scalar data.
+    first = replay.events[0][1]
+    assert isinstance(first["dev/overview/ae/nll/dev/memory"], float)
+    assert "dev/overview/ae/nll" not in first
 
 
 def test_replay_preserves_inherited_token_counters(tmp_path):
