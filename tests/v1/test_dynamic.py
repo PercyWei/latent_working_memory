@@ -21,7 +21,12 @@ from latent_working_memory.v1.dynamic import run_dynamic, main
 from latent_working_memory.v1.dynamic_config import DynamicConfig
 from latent_working_memory.v1.dynamic_training import DynamicTrainer, read_schedule
 from latent_working_memory.v1.dynamic_evaluation import answer_scores, evaluate_qa, aggregate_qa
-from latent_working_memory.v1.dynamic_reporting import qa_media, main as publish_qa
+from latent_working_memory.v1.dynamic_reporting import (
+    qa_media,
+    main as publish_qa,
+    training_curves,
+    publish_training_history,
+)
 from latent_working_memory.v1.dynamic_data import (
     DynamicTextSampler,
     allocate_counts,
@@ -649,3 +654,45 @@ def test_evaluation_without_generation_matches_nll_and_caches_controls(
     comparison = json.loads((tmp_path / "comparison/comparison.json").read_text())
     assert comparison["full"] == comparison["tokens"] == report
     assert not list(tmp_path.rglob("swanlab.json"))
+
+
+def test_training_curves_keep_real_steps_and_generation_schedule(tmp_path):
+    history = tmp_path / "dev"
+    history.mkdir()
+    for step, nll, em in ((0, 4.0, 0.1), (100, 3.0, None), (250, 2.0, 0.4)):
+        report = {}
+        for condition in (
+            "memory",
+            "no_memory",
+            "wrong_memory",
+            "gold_paragraph",
+            "gold_paragraph_base",
+        ):
+            values = {"nll": nll}
+            if em is not None:
+                values.update(em=em, f1=em + 0.1, hit_limit_rate=0.0)
+            report[f"overall/{condition}/all"] = values
+        (history / f"dev-step-{step:06d}.json").write_text(json.dumps(report))
+    curves = training_curves(history, 250)
+    assert len(curves) == 4
+    nll = curves["charts/nll"].options
+    assert nll["xAxis"][0]["type"] == "value"
+    assert nll["series"][0]["data"] == [[0, 4.0], [100, 3.0], [250, 2.0]]
+    assert len(nll["series"]) == 5 and all(s["type"] == "line" for s in nll["series"])
+    assert curves["charts/em"].options["series"][0]["data"] == [[0, 0.1], [250, 0.4]]
+    assert training_curves(history, 100)["charts/em"].options["series"][0]["data"] == [[0, 0.1]]
+    (tmp_path / "config.json").write_text(
+        json.dumps({"eval_every": 100, "eval_generation_every": 250})
+    )
+    (tmp_path / "provenance.json").write_text(json.dumps({"target_steps": 250}))
+    with pytest.raises(ValueError, match="completed training run"):
+        publish_training_history(tmp_path, 251, "disabled")
+    (tmp_path / "resources-from-000000-test.json").write_text(json.dumps({"completed_steps": 250}))
+    (tmp_path / "swanlab.json").write_text(
+        json.dumps({"project": "test", "group": "test", "tags": []})
+    )
+    with pytest.raises(ValueError, match="media step"):
+        publish_training_history(tmp_path, 250, "disabled")
+    publish_training_history(tmp_path, 251, "disabled")
+    record = json.loads((tmp_path / "charts-history-000251.json").read_text())
+    assert record["checkpoint_step"] == 250 and record["media_step"] == 251

@@ -1,7 +1,7 @@
 # 20260911_动态训练与 QA 评估
 
 创建时间：20260911 15:23:05 UTC+08:00  
-最后修订时间：20260912 23:52:40 UTC+08:00
+最后修订时间：20260913 12:11:49 UTC+08:00
 
 本文记录动态训练与 QA 评估的执行流程。记忆容量、micro epoch 规模、阶段比例及截断跨度通过训练配置确定。
 
@@ -190,6 +190,6 @@ SwanLab 使用 `latent-working-memory-v1` 项目，同一实验的训练与评�
 - `eval/<run_name>/` 保存评估来源、汇总 JSON 和逐题 JSONL。
 - `compare/<run_name>/` 保存输入报告清单及重新聚合的比较结果。
 
-SwanLab 使用 `latent-working-memory-v1`，同系列训练、评估与比较共享显式 group；`job_type` 分别为 `train`、`evaluate`、`compare`，`study:*` 标签通过启动参数传入。图表、表格和问答样例分别放在 `charts/*`、`tables/*`、`examples/*`。测试设置 `--swanlab-mode disabled`，正式实验设置 `online`。
+SwanLab 使用 `latent-working-memory-v1`，同系列训练、评估与比较共享显式 group；`job_type` 分别为 `train`、`evaluate`、`compare`，`study:*` 标签通过启动参数传入。训练 run 的 `charts/*` 为累计历史折线图：NLL、EM、F1、触顶率各一张，横轴为 optimizer step，五条曲线对应五种对照条件。每次评估更新历史曲线，生成指标使用实际生成评估点。数值表格与问答样例保存在 `tables/*`、`examples/*`。独立评估与跨运行比较使用汇总对比图。测试设置 `--swanlab-mode disabled`，正式实验设置 `online`。
 
 本轮设置和运行记录见[动态梯度传播对比实验](20260912_dynamic_bptt_comparison.md)。

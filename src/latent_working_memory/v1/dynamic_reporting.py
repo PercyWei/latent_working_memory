@@ -90,7 +90,41 @@ def qa_media(metrics, rows):
     return media
 
 
-def log_qa(run, metrics, rows, step, prefix, media=False):
+def training_curves(history_dir, through_step):
+    history = sorted(
+        (int(path.stem.removeprefix("dev-step-")), json.loads(path.read_text()))
+        for path in history_dir.glob("dev-step-*.json")
+        if int(path.stem.removeprefix("dev-step-")) <= through_step
+    )
+    charts = {}
+    for metric in ("nll", "em", "f1", "hit_limit_rate"):
+        observed = [
+            (step, report)
+            for step, report in history
+            if any(metric in report.get(f"overall/{condition}/all", {}) for condition in CONDITIONS)
+        ]
+        if not observed:
+            continue
+        chart = swanlab.echarts.Line().add_xaxis([step for step, _ in observed])
+        for condition in CONDITIONS:
+            chart.add_yaxis(
+                condition,
+                [report.get(f"overall/{condition}/all", {}).get(metric) for _, report in observed],
+                is_smooth=False,
+                is_connect_nones=False,
+                label_opts={"show": False},
+            )
+        chart.set_global_opts(
+            xaxis_opts={"type": "value", "name": "optimizer step", "min": 0},
+            yaxis_opts={"name": metric},
+            tooltip_opts={"trigger": "axis"},
+            legend_opts={"type": "scroll"},
+        )
+        charts[f"charts/{metric}"] = chart
+    return charts
+
+
+def log_qa(run, metrics, rows, step, prefix, media=False, history_dir=None):
     if run is None:
         return
     values = {
@@ -100,21 +134,84 @@ def log_qa(run, metrics, rows, step, prefix, media=False):
         or (group.startswith("k") and group.count("/") == 2 and "/memory/" in group)
         for key, value in scores.items()
     }
+    if history_dir is not None:
+        values.update(
+            {f"{key}/{prefix}": val for key, val in training_curves(history_dir, step).items()}
+        )
     if media:
-        values.update({f"{key}/{prefix}": val for key, val in qa_media(metrics, rows).items()})
+        values.update(
+            {
+                f"{key}/{prefix}": val
+                for key, val in qa_media(metrics, rows).items()
+                if history_dir is None or not key.startswith("charts/")
+            }
+        )
     run.log(values, step=step)
+
+
+def publish_training_history(directory, media_step, mode):
+    config = json.loads((directory / "config.json").read_text())
+    provenance = json.loads((directory / "provenance.json").read_text())
+    total_steps = provenance["target_steps"]
+    completed = [
+        json.loads(p.read_text())["completed_steps"]
+        for p in directory.glob("resources-from-*.json")
+    ]
+    if total_steps not in completed:
+        raise ValueError("history publishing requires a completed training run")
+    if media_step is None or media_step <= total_steps:
+        raise ValueError("media step must follow the completed training steps")
+    identity = json.loads((directory / "swanlab.json").read_text())
+    charts = training_curves(directory / "dev", total_steps)
+    with swanlab_run(
+        directory,
+        provenance,
+        mode,
+        identity["project"],
+        job_type="train",
+        group=identity["group"],
+        tags=tuple(identity["tags"]),
+        fixed_tags=(),
+    ) as run:
+        if run is not None:
+            run.log({f"{key}/dev": value for key, value in charts.items()}, step=media_step)
+    (directory / f"charts-history-{media_step:06d}.json").write_text(
+        json.dumps(
+            {
+                "checkpoint_step": total_steps,
+                "media_step": media_step,
+                "eval_every": config["eval_every"],
+                "eval_generation_every": config["eval_generation_every"],
+                "reports": [p.name for p in sorted((directory / "dev").glob("dev-step-*.json"))],
+            },
+            indent=2,
+        )
+        + "\n"
+    )
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--reports", type=Path, required=True, help="JSON list of {name, report}")
-    parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--swanlab-group", required=True)
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--reports", type=Path, help="JSON list of {name, report}")
+    inputs.add_argument(
+        "--training-run", type=Path, help="Publish history into a completed training run"
+    )
+    parser.add_argument(
+        "--media-step", type=int, help="New media upload step for the completed run"
+    )
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--swanlab-group")
     parser.add_argument("--swanlab-tag", action="append", default=[])
     parser.add_argument(
         "--swanlab-mode", choices=("disabled", "offline", "online"), default="disabled"
     )
     args = parser.parse_args()
+    if args.training_run:
+        publish_training_history(args.training_run, args.media_step, args.swanlab_mode)
+        return
+    if args.output_dir is None or not args.swanlab_group:
+        parser.error("--reports requires --output-dir and --swanlab-group")
     entries = json.loads(args.reports.read_text())
     if not entries or len({e["name"] for e in entries}) != len(entries):
         raise ValueError("reports require unique run names")

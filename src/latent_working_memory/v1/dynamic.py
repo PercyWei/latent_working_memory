@@ -199,7 +199,9 @@ def run_dynamic(
             )
             if primary:
                 write_evaluation(output_dir / "dev", f"dev-step-{step:06d}", metrics, rows)
-            log_qa(tracking, metrics, rows, step, "dev", media=generate)
+            log_qa(
+                tracking, metrics, rows, step, "dev", media=generate, history_dir=output_dir / "dev"
+            )
 
         if next_step == 0:
             evaluate(0, True)
