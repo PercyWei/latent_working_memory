@@ -4,7 +4,7 @@ import secrets
 
 import swanlab
 
-from latent_working_memory.v1.reporting import CONDITION_COLORS, OVERVIEW_METRICS
+from latent_working_memory.v1.reporting import CONDITION_COLORS, OVERVIEW_METRICS, _shade
 
 
 def development_scalars(reports):
@@ -32,12 +32,23 @@ def development_panels(sources):
                 "config": {
                     "xAxis": {"key": "step", "name": "step", "type": "FLOAT", "class": "SYSTEM"},
                     "yAxis": [{"key": key, "name": key, "type": "FLOAT", "class": "CUSTOM"}
-                              for source in selected for condition in conditions
+                              for condition in conditions for source in selected
                               for key in [f"dev/overview/{task}/{metric}/{source}/{condition}"]],
                     "xName": "optimizer step", "yName": metric,
                 },
             }
     return panels
+
+
+def development_panel_style(panel, sources, run_id):
+    custom = {}
+    for axis in panel["config"]["yAxis"]:
+        source, condition = axis["key"].split("/")[-2:]
+        color = _shade(CONDITION_COLORS[condition], sources.index(source), len(sources))
+        custom[f"{run_id}-{axis['key']}"] = {
+            "name": f"{source}/{condition}", "colors": [color, color],
+        }
+    return custom
 
 
 def configure_development_panels(run, sources, mode):
@@ -58,13 +69,16 @@ def configure_development_panels(run, sources, mode):
     charts = [] if section is None else [
         checked(api._get(f"{base}/chart/{index}/info")) for index in section["chartIndex"]
     ]
-    missing = {}
+    panels_by_index = {}
     columns = []
     for title, panel in development_panels(list(sources)).items():
-        if any(c["title"] == title and c["type"] == "LINE" for c in charts):
+        panel["custom"] = development_panel_style(panel, list(sources), remote.run_id)
+        existing = next((c for c in charts if c["title"] == title and c["type"] == "LINE"), None)
+        if existing is not None:
+            panels_by_index[existing["index"]] = panel
             continue
         index = secrets.token_hex(4)
-        missing[index] = panel
+        panels_by_index[index] = panel
         for axis in panel["config"]["yAxis"]:
             columns.append({
                 "key": axis["key"], "type": "FLOAT", "class": "CUSTOM",
@@ -75,8 +89,8 @@ def configure_development_panels(run, sources, mode):
         # This project's v0 endpoint binds each new column directly to its shared chart.
         # Register before SDK log() so it never creates an individual fallback panel.
         checked(api._post(f"{base}/columns", data=columns))
-        for index, panel in missing.items():
-            checked(api._put(f"{base}/chart/{index}/info/line", data=panel))
+    for index, panel in panels_by_index.items():
+        checked(api._put(f"{base}/chart/{index}/info/line", data=panel))
 
 
 def remove_individual_dev_panels(run, sources):

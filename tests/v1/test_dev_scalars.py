@@ -95,3 +95,29 @@ def test_delete_only_redundant_panels_and_empty_sections(monkeypatch):
     assert remove_individual_dev_panels(run, ['semantic']) == ['single', 'old']
     assert deleted == ['/experiment/cloud/chart/single/hard', '/experiment/cloud/chart/old/hard',
                        '/experiment/cloud/section/auto']
+
+
+def test_condition_colors_and_adjacent_source_legends():
+    import colorsys
+    from latent_working_memory.v1.dev_scalars import development_panel_style
+    sources = ['semantic', 'random']
+    panels = development_panels(sources)
+    panel = panels['dev/overview/ae/nll']
+    style = development_panel_style(panel, sources, 'run')
+    labels = [value['name'] for value in style.values()]
+    assert labels == [f'{source}/{condition}' for condition in
+                      ['memory', 'wrong_memory', 'full_context', 'base_full_context']
+                      for source in sources]
+    hues = []
+    for i in range(0, len(labels), 2):
+        pair = list(style.values())[i:i + 2]
+        hls = [colorsys.rgb_to_hls(*(int(v['colors'][0][j:j + 2], 16) / 255
+                                    for j in (1, 3, 5))) for v in pair]
+        assert abs(hls[0][0] - hls[1][0]) < 0.005
+        assert hls[1][1] - hls[0][1] > 0.2
+        hues.append(round(hls[0][0], 1))
+    assert len(set(hues)) == 4
+    # A source keeps its shade even when LM panels split the sources.
+    lm = panels['dev/overview/continuation/nll/random']
+    lm_style = development_panel_style(lm, sources, 'run')
+    assert next(iter(lm_style.values()))['colors'] == list(style.values())[1]['colors']
