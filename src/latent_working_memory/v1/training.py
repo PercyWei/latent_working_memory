@@ -31,7 +31,7 @@ from latent_working_memory.v1.objectives import ReaderOutput
 from latent_working_memory.v1.sampling import (
     PretrainExample, PretrainSampler, BalancedPretrainSampler, task_weights_at,
 )
-from latent_working_memory.v1.tracking import log_evaluation, log_training, swanlab_run
+from latent_working_memory.v1.tracking import pretraining_tracking_config, log_evaluation, log_training, swanlab_run
 
 
 def learning_rate_at(config: ExperimentConfig, step: int) -> float:
@@ -364,7 +364,7 @@ def run_pretraining(
     with (
         swanlab_run(
             output_dir,
-            config.to_dict() | run_identity | {"data_preparation": metadata, "global_batch_size": config.batch_size * config.gradient_accumulation_steps * world_size},
+            pretraining_tracking_config(config.to_dict(), run_identity, metadata),
             swanlab_mode if primary else "disabled",
             swanlab_project,
             group=swanlab_group,

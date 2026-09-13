@@ -24,6 +24,7 @@ def swanlab_run(
     group: str | None = None,
     tags: tuple[str, ...] = (),
     fixed_tags: tuple[str, ...] = ("scope:main", "method:latent-working-memory", "data:fineweb"),
+    new_run: bool = False,
 ) -> Iterator[swanlab.Run | None]:
     if mode == "disabled":
         yield None
@@ -39,7 +40,9 @@ def swanlab_run(
             fixed_tags.add(f"data:{metadata['boundary_variant']}")
     tags = tuple(sorted(fixed_tags | set(tags)))
     identity_path = output_dir / "swanlab.json"
-    if identity_path.exists():
+    if new_run and run_id is not None:
+        raise ValueError("a new run cannot reuse an explicit run ID")
+    if identity_path.exists() and not new_run:
         identity = json.loads(identity_path.read_text())
         if any(
             identity[k] != v
@@ -91,6 +94,14 @@ def swanlab_run(
             + "\n"
         )
         yield run
+
+
+def pretraining_tracking_config(config, run_identity, preparation):
+    return config | run_identity | {
+        "data_preparation": preparation,
+        "global_batch_size": config["batch_size"] * config["gradient_accumulation_steps"]
+                             * run_identity["world_size"],
+    }
 
 
 def log_training(
