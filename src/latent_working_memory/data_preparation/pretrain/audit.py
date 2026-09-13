@@ -8,11 +8,11 @@ from typing import Any
 
 from transformers import PreTrainedTokenizerBase
 
-from latent_working_memory.data_preparation.sources import load_sources
-from latent_working_memory.data_preparation.text_samples import TextSample
-from latent_working_memory.data_preparation.dedup import source_key
-from latent_working_memory.data_preparation.config import DataConfig, PreparationConfig
-from latent_working_memory.data_preparation.segmentation import sentence_spans
+from latent_working_memory.data_preparation.pretrain.sources import load_sources
+from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
+from latent_working_memory.data_preparation.pretrain.dedup import source_key
+from latent_working_memory.data_preparation.pretrain.config import DataConfig, PreparationConfig
+from latent_working_memory.data_preparation.pretrain.segmentation import sentence_spans
 
 
 def length_statistics(values: list[int]) -> dict[str, Any]:

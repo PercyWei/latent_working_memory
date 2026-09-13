@@ -6,21 +6,21 @@ from dataclasses import replace
 
 import pytest
 
-from latent_working_memory.data_preparation.audit import audit_preparation, compare_preparations
-from latent_working_memory.data_preparation.dedup import cluster_documents
-from latent_working_memory.data_preparation.inspection import (
+from latent_working_memory.data_preparation.pretrain.audit import audit_preparation, compare_preparations
+from latent_working_memory.data_preparation.pretrain.dedup import cluster_documents
+from latent_working_memory.data_preparation.pretrain.inspection import (
     sample_inspection,
     summarize_inspection,
 )
-from latent_working_memory.data_preparation.pipeline import (
+from latent_working_memory.data_preparation.pretrain.pipeline import (
     prepare_fineweb,
     prepare_sources,
     prepare_variant,
 )
-from latent_working_memory.data_preparation.sources import load_sources
-from latent_working_memory.data_preparation.quality import document_rejection_reason
+from latent_working_memory.data_preparation.pretrain.sources import load_sources
+from latent_working_memory.data_preparation.pretrain.quality import document_rejection_reason
 from latent_working_memory.v1.prepared_data import pretraining_index
-from latent_working_memory.data_preparation.text_samples import TextSample
+from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
 from latent_working_memory.v1.sampling import PretrainSampler
 
 
@@ -37,7 +37,7 @@ def test_independent_variants_balance_tasks_and_intervals(
         pytest.fail("comparison must reuse completed audits")
 
     monkeypatch.setattr(
-        "latent_working_memory.data_preparation.audit.audit_preparation", repeated_audit
+        "latent_working_memory.data_preparation.pretrain.audit.audit_preparation", repeated_audit
     )
     result = prepare_fineweb(
         parquet_source(preparation_records),
@@ -135,7 +135,7 @@ def test_failed_random_stage_preserves_completed_semantic(
     prepare_variant(root, "semantic", tokenizer, tiny_config, preparation_recipe)
     before = (root / "semantic/preparation.json").read_bytes()
     monkeypatch.setattr(
-        "latent_working_memory.data_preparation.pipeline.RandomSpans.available",
+        "latent_working_memory.data_preparation.pretrain.pipeline.RandomSpans.available",
         lambda *args: False,
     )
     with pytest.raises(ValueError, match="sample quotas not reached"):
@@ -246,7 +246,7 @@ def test_failed_cross_variant_comparison_has_no_random_completion_record(
         raise ValueError("test comparison failure")
 
     monkeypatch.setattr(
-        "latent_working_memory.data_preparation.pipeline.compare_preparations", failed_comparison
+        "latent_working_memory.data_preparation.pretrain.pipeline.compare_preparations", failed_comparison
     )
     with pytest.raises(ValueError, match="test comparison failure"):
         prepare_variant(root, "random", tokenizer, tiny_config, preparation_recipe)

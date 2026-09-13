@@ -9,8 +9,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Sequence
 
-from latent_working_memory.data_preparation.sources import load_sources
-from latent_working_memory.data_preparation.text_samples import TextSample
+from latent_working_memory.data_preparation.pretrain.sources import load_sources
+from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
 
 
 def sample_inspection(

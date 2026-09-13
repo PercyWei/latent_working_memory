@@ -1,13 +1,14 @@
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from latent_working_memory.data_preparation.__main__ import main
-from latent_working_memory.data_preparation.config import ConstructionConfig
-from latent_working_memory.data_preparation.fineweb import data_contract
+from latent_working_memory.data_preparation.pretrain.config import ConstructionConfig
+from latent_working_memory.data_preparation.pretrain.fineweb import data_contract
 
 
 def test_single_config_runs_all_stages(
@@ -22,10 +23,17 @@ def test_single_config_runs_all_stages(
     source.mkdir(parents=True)
     pq.write_table(pa.Table.from_pylist(preparation_records), source / "fixture.parquet")
     output = tmp_path / "prepared"
-    main([
-        "--config", str(config_path), "--dataset-dir", str(source.parent),
-        "--output-dir", str(output),
-    ])
+    subprocess.run(
+        [
+            sys.executable, "-m", "latent_working_memory.data_preparation.pretrain",
+            "--config", str(config_path), "--dataset-dir", str(source.parent),
+            "--output-dir", str(output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
     assert (output / "comparison.json").is_file()
     for variant in ("semantic", "random"):
         metadata = json.loads((output / variant / "preparation.json").read_text())

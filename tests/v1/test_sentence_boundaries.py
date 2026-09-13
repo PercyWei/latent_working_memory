@@ -1,7 +1,7 @@
 import pytest
 
-from latent_working_memory.data_preparation.segmentation import sentence_spans
-from latent_working_memory.data_preparation.inspection import judgment_statistics
+from latent_working_memory.data_preparation.pretrain.segmentation import sentence_spans
+from latent_working_memory.data_preparation.pretrain.inspection import judgment_statistics
 
 
 @pytest.mark.parametrize(

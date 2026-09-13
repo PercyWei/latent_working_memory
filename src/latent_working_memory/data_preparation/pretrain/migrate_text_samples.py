@@ -8,9 +8,9 @@ from pathlib import Path
 
 from transformers import AutoTokenizer
 
-from latent_working_memory.data_preparation.sources import load_sources
-from latent_working_memory.data_preparation.audit import compare_preparations
-from latent_working_memory.data_preparation.text_samples import TextSample, compact_metadata
+from latent_working_memory.data_preparation.pretrain.sources import load_sources
+from latent_working_memory.data_preparation.pretrain.audit import compare_preparations
+from latent_working_memory.data_preparation.pretrain.text_samples import TextSample, compact_metadata
 from latent_working_memory.v1.data import Episode
 
 

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from transformers import AutoTokenizer
 
-from latent_working_memory.data_preparation.text_samples import (
+from latent_working_memory.data_preparation.pretrain.text_samples import (
     TextSample,
     input_text_key,
     tokenizer_identity,

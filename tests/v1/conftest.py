@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import random
 
-from latent_working_memory.data_preparation.fineweb import SemanticSpans
+from latent_working_memory.data_preparation.pretrain.fineweb import SemanticSpans
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -17,7 +17,7 @@ from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 from latent_working_memory.v1.backbone import LatentMemoryBackbone
 from latent_working_memory.v1.config import ExperimentConfig
 from latent_working_memory.v1.model import JointMemoryWriter
-from latent_working_memory.data_preparation.config import PreparationConfig
+from latent_working_memory.data_preparation.pretrain.config import PreparationConfig
 
 
 @pytest.fixture

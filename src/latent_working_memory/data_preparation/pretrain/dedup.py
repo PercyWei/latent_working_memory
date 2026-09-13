@@ -7,7 +7,7 @@ from collections import Counter, defaultdict
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
-from latent_working_memory.data_preparation.config import PreparationConfig
+from latent_working_memory.data_preparation.pretrain.config import PreparationConfig
 
 
 def source_key(url: str) -> str:

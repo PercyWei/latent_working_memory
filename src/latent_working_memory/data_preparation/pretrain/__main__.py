@@ -8,8 +8,8 @@ from typing import Sequence
 
 from transformers import AutoTokenizer
 
-from latent_working_memory.data_preparation.pipeline import prepare_sources, prepare_variant
-from latent_working_memory.data_preparation.config import ConstructionConfig
+from latent_working_memory.data_preparation.pretrain.pipeline import prepare_sources, prepare_variant
+from latent_working_memory.data_preparation.pretrain.config import ConstructionConfig
 
 
 def main(argv: Sequence[str] | None = None) -> None:

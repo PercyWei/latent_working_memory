@@ -5,7 +5,7 @@ from dataclasses import replace
 import swanlab
 import torch
 
-from latent_working_memory.data_preparation.pipeline import prepare_fineweb
+from latent_working_memory.data_preparation.pretrain.pipeline import prepare_fineweb
 from latent_working_memory.v1 import training
 from latent_working_memory.v1.reupload_training import prepare_replay, replay_training
 

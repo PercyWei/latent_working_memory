@@ -3,8 +3,8 @@
 import json
 from pathlib import Path
 
-from latent_working_memory.data_preparation.fineweb import data_contract
-from latent_working_memory.data_preparation.text_samples import TextSample, tokenizer_identity
+from latent_working_memory.data_preparation.pretrain.fineweb import data_contract
+from latent_working_memory.data_preparation.pretrain.text_samples import TextSample, tokenizer_identity
 from latent_working_memory.v1.data import EpisodeIndex
 
 

@@ -1,6 +1,6 @@
 # 20260912_latent_working_memory
 
-最后修订时间：20260913 22:00:33 UTC+08:00
+最后修订时间：20260913 22:57:48 UTC+08:00
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理；ICAE v1 和 C-DIC 分别位于 `reproductions/icae/` 与 `reproductions/cdic/`，各自使用独立的 `uv` 环境。
 
@@ -8,10 +8,24 @@
 
 数据构造、主实验训练与评估统一使用项目根目录 `.venv/`，依赖由根目录 `pyproject.toml` 与 `uv.lock` 管理。通用数据构造入口位于 `src/latent_working_memory/data_preparation/`，实验专用代码放在 `src/latent_working_memory/v1/` 的对应子目录，正式配置位于 `configs/`；执行记录与日志写入 `artifacts/`。
 
+数据构造按流程分包：[pretrain/](src/latent_working_memory/data_preparation/pretrain/) 负责 FineWeb 预训练文本构造、质量审查与恢复，[personamem/](src/latent_working_memory/data_preparation/personamem/) 负责事实 QA 构造。预训练的来源、句界、截断、文本格式、审查和恢复模块均位于 `pretrain/`；训练时的数据读取与实验选样继续使用 `v1/prepared_data.py` 和 `v1/data_selection.py`。
+
 ```bash
 uv sync --frozen
 uv run pytest
 ```
+
+通用预训练构造入口为：
+
+```bash
+.venv/bin/python -m latent_working_memory.data_preparation.pretrain \
+  --config configs/data_preparation/fineweb-4096-doc100k.json \
+  --dataset-dir data/raw/HuggingFaceFW-fineweb \
+  --output-dir /path/to/new-data \
+  --stage all
+```
+
+`--stage` 支持 `sources`、`semantic`、`random` 和默认的 `all`；恢复未完成的 `semantic` 或 `random` 时使用原配置、原输出目录并追加 `--resume`。独立抽查入口为 `latent_working_memory.data_preparation.pretrain.inspection`，既有 Episode 语料的显式迁移工具为 `latent_working_memory.data_preparation.pretrain.migrate_text_samples`。原 `python -m latent_working_memory.data_preparation` 入口和根层预训练模块已迁入 `pretrain/`，调用方应更新模块路径；配置字段、文本格式、构造产物与恢复协议保持一致。
 
 ## 可增长记忆 v1
 

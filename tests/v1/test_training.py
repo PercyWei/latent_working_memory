@@ -11,7 +11,7 @@ from transformers import LlamaConfig, LlamaForCausalLM
 from latent_working_memory.v1.checkpoint import load_model_checkpoint
 from latent_working_memory.v1.prepared_data import pretraining_index
 from latent_working_memory.v1.evaluate import main as evaluate_main
-from latent_working_memory.data_preparation.pipeline import prepare_fineweb
+from latent_working_memory.data_preparation.pretrain.pipeline import prepare_fineweb
 from latent_working_memory.v1.sampling import PretrainSampler
 from latent_working_memory.v1.training import PretrainTrainer, pretrain_forward, run_pretraining
 

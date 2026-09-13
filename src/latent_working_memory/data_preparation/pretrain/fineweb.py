@@ -9,10 +9,10 @@ from typing import Any, Mapping
 
 from transformers import PreTrainedTokenizerBase
 
-from latent_working_memory.data_preparation.config import DataConfig, PreparationConfig
+from latent_working_memory.data_preparation.pretrain.config import DataConfig, PreparationConfig
 from latent_working_memory.v1.data import Episode, Read, Reference, Source
-from latent_working_memory.data_preparation.dedup import source_key
-from latent_working_memory.data_preparation.segmentation import sentence_spans
+from latent_working_memory.data_preparation.pretrain.dedup import source_key
+from latent_working_memory.data_preparation.pretrain.segmentation import sentence_spans
 
 DATA_CONFIG_FIELDS = (
     "model_name_or_path",

@@ -4,10 +4,10 @@ import latent_working_memory.v1.experiment_execution as execution
 import json
 from dataclasses import replace
 
-from latent_working_memory.data_preparation.config import PreparationConfig
-from latent_working_memory.data_preparation.pipeline import prepare_sources
+from latent_working_memory.data_preparation.pretrain.config import PreparationConfig
+from latent_working_memory.data_preparation.pretrain.pipeline import prepare_sources
 from latent_working_memory.v1.pretrain_objective_comparison.prepare_data import prepare
-from latent_working_memory.data_preparation.text_samples import TextSample
+from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
 from latent_working_memory.v1.data_selection import select_experiment
 from latent_working_memory.v1.config import write_resolved_config
 

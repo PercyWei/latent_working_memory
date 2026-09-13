@@ -8,7 +8,7 @@ from tokenizers.models import BPE
 from tokenizers.pre_tokenizers import ByteLevel
 from transformers import PreTrainedTokenizerFast
 
-from latent_working_memory.data_preparation.truncation import RandomSpans
+from latent_working_memory.data_preparation.pretrain.truncation import RandomSpans
 
 
 def test_random_samples_obey_actual_length_interval_and_raw_continuity(

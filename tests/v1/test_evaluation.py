@@ -18,7 +18,7 @@ from latent_working_memory.v1.evaluation import (
     persistent_memory_bytes,
 )
 from latent_working_memory.v1.prepared_data import pretraining_index
-from latent_working_memory.data_preparation.pipeline import prepare_fineweb
+from latent_working_memory.data_preparation.pretrain.pipeline import prepare_fineweb
 from latent_working_memory.v1.state import MemoryState
 from latent_working_memory.v1.sampling import read_tokens
 

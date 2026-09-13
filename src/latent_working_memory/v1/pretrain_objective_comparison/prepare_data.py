@@ -15,13 +15,13 @@ import os
 
 from transformers import AutoTokenizer
 
-from latent_working_memory.data_preparation.sources import load_sources
-from latent_working_memory.data_preparation.config import PreparationConfig
-from latent_working_memory.data_preparation.fineweb import SemanticSpans
-from latent_working_memory.data_preparation.truncation import RandomSpans
+from latent_working_memory.data_preparation.pretrain.sources import load_sources
+from latent_working_memory.data_preparation.pretrain.config import PreparationConfig
+from latent_working_memory.data_preparation.pretrain.fineweb import SemanticSpans
+from latent_working_memory.data_preparation.pretrain.truncation import RandomSpans
 from latent_working_memory.v1.config import load_config
-from latent_working_memory.data_preparation.text_samples import TextSample, tokenizer_identity
-from latent_working_memory.data_preparation.audit import length_statistics
+from latent_working_memory.data_preparation.pretrain.text_samples import TextSample, tokenizer_identity
+from latent_working_memory.data_preparation.pretrain.audit import length_statistics
 
 
 def initialize_worker(config_path, recipe_mapping):

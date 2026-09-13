@@ -3,7 +3,7 @@ from dataclasses import replace
 
 import pytest
 
-from latent_working_memory.data_preparation.pipeline import (
+from latent_working_memory.data_preparation.pretrain.pipeline import (
     VariantBuilder,
     prepare_sources,
     prepare_variant,

@@ -1,9 +1,9 @@
 import json
 import torch
 from transformers import LlamaConfig, LlamaForCausalLM
-from latent_working_memory.data_preparation.pipeline import prepare_fineweb
-from latent_working_memory.data_preparation.fineweb import data_contract
-from latent_working_memory.data_preparation.text_samples import TextSample
+from latent_working_memory.data_preparation.pretrain.pipeline import prepare_fineweb
+from latent_working_memory.data_preparation.pretrain.fineweb import data_contract
+from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
 from latent_working_memory.v1.checkpoint import load_model_checkpoint
 from latent_working_memory.v1.training import run_pretraining
 

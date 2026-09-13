@@ -13,17 +13,17 @@ from typing import Any
 
 from transformers import PreTrainedTokenizerBase
 
-from latent_working_memory.data_preparation.audit import audit_preparation, compare_preparations
-from latent_working_memory.data_preparation.config import DataConfig, PreparationConfig
-from latent_working_memory.data_preparation.sources import collect_sources, load_sources
-from latent_working_memory.data_preparation.fineweb import (
+from latent_working_memory.data_preparation.pretrain.audit import audit_preparation, compare_preparations
+from latent_working_memory.data_preparation.pretrain.config import DataConfig, PreparationConfig
+from latent_working_memory.data_preparation.pretrain.sources import collect_sources, load_sources
+from latent_working_memory.data_preparation.pretrain.fineweb import (
     data_contract,
     SemanticSpans,
 )
-from latent_working_memory.data_preparation.resume import FILES, load_progress, save_progress
-from latent_working_memory.data_preparation.truncation import RandomSpans
+from latent_working_memory.data_preparation.pretrain.resume import FILES, load_progress, save_progress
+from latent_working_memory.data_preparation.pretrain.truncation import RandomSpans
 from latent_working_memory.v1.data import Episode
-from latent_working_memory.data_preparation.text_samples import (
+from latent_working_memory.data_preparation.pretrain.text_samples import (
     TextSample,
     input_text_key,
     tokenizer_identity,

@@ -9,10 +9,10 @@ from typing import Any, Iterator
 
 import pyarrow.parquet as pq
 
-from latent_working_memory.data_preparation.config import PreparationConfig
-from latent_working_memory.data_preparation.dedup import cluster_documents
-from latent_working_memory.data_preparation.fineweb import document_split
-from latent_working_memory.data_preparation.quality import document_rejection_reason
+from latent_working_memory.data_preparation.pretrain.config import PreparationConfig
+from latent_working_memory.data_preparation.pretrain.dedup import cluster_documents
+from latent_working_memory.data_preparation.pretrain.fineweb import document_split
+from latent_working_memory.data_preparation.pretrain.quality import document_rejection_reason
 
 
 def parquet_records(files: list[Path], seed: int) -> Iterator[dict[str, Any]]:

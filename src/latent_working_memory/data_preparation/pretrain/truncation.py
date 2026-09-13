@@ -5,9 +5,9 @@ from typing import Any, Mapping
 
 from transformers import PreTrainedTokenizerBase
 
-from latent_working_memory.data_preparation.config import DataConfig, PreparationConfig
-from latent_working_memory.data_preparation.fineweb import span_episode
-from latent_working_memory.data_preparation.segmentation import sentence_spans
+from latent_working_memory.data_preparation.pretrain.config import DataConfig, PreparationConfig
+from latent_working_memory.data_preparation.pretrain.fineweb import span_episode
+from latent_working_memory.data_preparation.pretrain.segmentation import sentence_spans
 from latent_working_memory.v1.data import Episode
 
 

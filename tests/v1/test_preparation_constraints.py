@@ -6,13 +6,13 @@ from dataclasses import replace
 
 import pytest
 
-from latent_working_memory.data_preparation.config import PreparationConfig
-from latent_working_memory.data_preparation.fineweb import (
+from latent_working_memory.data_preparation.pretrain.config import PreparationConfig
+from latent_working_memory.data_preparation.pretrain.fineweb import (
     SemanticSpans,
     data_contract,
     span_episode,
 )
-from latent_working_memory.data_preparation.truncation import RandomSpans
+from latent_working_memory.data_preparation.pretrain.truncation import RandomSpans
 from latent_working_memory.v1.config import ExperimentConfig
 from latent_working_memory.v1.sampling import capacity_weights, read_tokens
 
@@ -132,7 +132,7 @@ def test_lm_sampling_never_builds_an_ae_parent(
         return span_episode(record, tokenizer, config, recipe, start, end, target_end, variant)
 
     monkeypatch.setattr(
-        "latent_working_memory.data_preparation.fineweb.span_episode", observed_span
+        "latent_working_memory.data_preparation.pretrain.fineweb.span_episode", observed_span
     )
     sampler = SemanticSpans(preparation_records[0], tokenizer, tiny_config, preparation_recipe)
     rng = random.Random(5)

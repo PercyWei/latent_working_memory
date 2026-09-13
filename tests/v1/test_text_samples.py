@@ -4,10 +4,10 @@ from dataclasses import replace
 import pytest
 from tokenizers.pre_tokenizers import Split
 
-from latent_working_memory.data_preparation.fineweb import data_contract
-from latent_working_memory.data_preparation.migrate_text_samples import migrate
-from latent_working_memory.data_preparation.pipeline import prepare_fineweb
-from latent_working_memory.data_preparation.text_samples import TextSample
+from latent_working_memory.data_preparation.pretrain.fineweb import data_contract
+from latent_working_memory.data_preparation.pretrain.migrate_text_samples import migrate
+from latent_working_memory.data_preparation.pretrain.pipeline import prepare_fineweb
+from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
 from latent_working_memory.v1.prepared_data import pretraining_index
 from latent_working_memory.v1.sampling import read_tokens
 
