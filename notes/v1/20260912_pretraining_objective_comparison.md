@@ -1,7 +1,7 @@
 # 20260912_短文本预训练目标对比实验
 
 创建时间：20260912 23:38:14 UTC+08:00
-最后修订时间：20260913 13:44:49 UTC+08:00
+最后修订时间：20260913 14:02:02 UTC+08:00
 
 本实验比较 AE-only、从开始联合 AE/LM、AE warm-up 后联合训练。目标是在短文本、低压缩率条件下判断读写结构能否建立忠实重建，以及 LM 目标对这一能力的影响。实验沿用[预训练数据类型对比](20260911_pretraining_data_comparison.md)的产物与报告布局。本轮用户明确指定仅使用物理 GPU 4、5。
 
@@ -185,3 +185,16 @@ PPL、样本计数、分层统计、配对差值和真实前缀诊断合并到 s
 训练目录的 `swanlab.json` 已更新为新身份，`reupload.json` 保存新旧 ID、回放范围和完成状态；旧身份及旧评估发布凭据归档于 `swanlab-archive/<旧 ID>/`。新发布凭据引用新训练 run。执行命令、上传日志和核验结果分别保存于 `plan/reupload-commands.json`、`plan/{ae-only,joint,ae-warmup}-reupload.log`、`plan/reupload-verification.json`。
 
 此次仅重传，不重新训练或推理。新 run 的创建时间、上传时间和 SDK 环境记录对应本次上传；原训练耗时、吞吐和显存指标仍来自原日志。后续重新训练沿用同一记录逻辑与布局；具体测量值由新的训练过程产生。
+
+
+## 8. dev 改为原生增量曲线
+
+dev 的训练轨迹改用 SwanLab 原生 `LINE` 面板。每次评估仅记录该 optimizer step 的标量，如 `dev/overview/ae/correct_prefix_ratio/semantic/memory`；同指标的来源／对照序列在一个面板中合并。原生面板在 run 初始化时配置一次，后续评估和事后回放只追加数据点，不再上传累计历史图。未执行自由生成的步数不记录生成指标，也不补零。
+
+SwanLab 原生折线图的云端接口限制每图最多 8 个 Y 指标。四个 AE 指标各合并 semantic/random × 4 个条件，共 4 张；LM NLL 的 10 条曲线按来源拆为 2 张，每张保留全部 5 个条件。dev 当前共 10 个可见面板：6 张原生曲线、2 张统计表和2 页生成样例。曲线横轴直接使用 optimizer step，无媒体快照的步数切换；统计表和生成样例继续按检查点浏览。最终 test 的 evaluation 面板保持原样。
+
+A/B/C 已在原 run 上补写全部 dev 标量，ID 和链接未变；原 5 张 ECharts 累计图移入 Hidden。单序列自动面板默认隐藏，仅展示合并后的原生曲线。完整历史快照与 JSON/JSONL 保留。迁移入口为 `latent_working_memory.v1.migrate_dev_scalars --training-run <训练目录>`；正常训练与删除后重传均自动采用新记录方式，不需要再执行旧的累计图迁移命令。
+
+本地和服务器各通过 13 项相关测试，覆盖稀疏生成指标、每图曲线限制、面板仅初始化一次，以及实际训练／回放逐项一致。云端核验三组共 1,794 个 dev 标量点、18 个原生面板的指标关联和横轴配置；9,000 个原训练曲线采样点仍与日志一致，其他可见分区布局未变。
+
+执行命令和核验结果见 `plan/dev-scalars-commands.json`、`plan/dev-scalars-verification.json`；日志为 `plan/{ae-only,joint,ae-warmup}-dev-scalars.log`。各训练目录的 `evaluation-publications/layout-before-dev-scalars.json` 和 `dev-scalar-migration.json` 保存迁移前布局及迁移结果。
