@@ -149,6 +149,8 @@ def training_curves(history_dir, through_step):
             if options:
                 chart = swanlab.echarts.Line()
                 chart.options = {
+                    # SwanLab checks the rendered series count against this top-level field.
+                    "series": options[0]["series"],
                     "baseOption": {
                         "timeline": {
                             "axisType": "category",
@@ -192,7 +194,7 @@ def log_qa(run, metrics, rows, step, prefix, media=False, history_dir=None):
     run.log(values, step=step)
 
 
-def publish_training_history(directory, media_step, mode):
+def publish_training_history(directory, media_step, mode, output_dir=None):
     config = json.loads((directory / "config.json").read_text())
     provenance = json.loads((directory / "provenance.json").read_text())
     total_steps = provenance["target_steps"]
@@ -204,10 +206,15 @@ def publish_training_history(directory, media_step, mode):
         raise ValueError("history publishing requires a completed training run")
     if media_step is None or media_step <= total_steps:
         raise ValueError("media step must follow the completed training steps")
-    identity = json.loads((directory / "swanlab.json").read_text())
+    output_dir = directory if output_dir is None else output_dir
+    identity = json.loads((output_dir / "swanlab.json").read_text())
+    if output_dir != directory:
+        provenance["report_source"] = json.loads((output_dir / "republication.json").read_text())[
+            "source"
+        ]
     charts = training_curves(directory / "dev", total_steps)
     with swanlab_run(
-        directory,
+        output_dir,
         provenance,
         mode,
         identity["project"],
@@ -218,7 +225,7 @@ def publish_training_history(directory, media_step, mode):
     ) as run:
         if run is not None:
             run.log(charts, step=media_step)
-    (directory / f"evaluation-history-{media_step:06d}.json").write_text(
+    (output_dir / f"evaluation-history-{media_step:06d}.json").write_text(
         json.dumps(
             {
                 "checkpoint_step": total_steps,
@@ -322,12 +329,12 @@ def main():
     )
     args = parser.parse_args()
     if args.training_run:
-        if args.output_dir is not None:
-            if args.media_step is not None:
-                parser.error("rebuilding uses original training steps; omit --media-step")
+        if args.output_dir is not None and args.media_step is None:
             rebuild_training_run(args.training_run, args.output_dir, args.swanlab_mode)
         else:
-            publish_training_history(args.training_run, args.media_step, args.swanlab_mode)
+            publish_training_history(
+                args.training_run, args.media_step, args.swanlab_mode, args.output_dir
+            )
         return
     if args.output_dir is None or not args.swanlab_group:
         parser.error("--reports requires --output-dir and --swanlab-group")

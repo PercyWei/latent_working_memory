@@ -705,7 +705,10 @@ def test_training_curves_keep_real_steps_and_generation_schedule(tmp_path):
     assert len(paired) == 4 and paired[0]["data"] == [[0, 0.1], [250, 0.1]]
     assert em_chart["options"][3]["yAxis"][0]["name"] == "em_difference"
     for chart in curves.values():
-        assert json.loads(chart.dump_options())["baseOption"]["timeline"]["currentIndex"] == 0
+        option = json.loads(chart.dump_options())
+        assert option["baseOption"]["timeline"]["currentIndex"] == 0
+        assert option["series"] == option["options"][0]["series"]
+        assert option["series"] and all(series["type"] == "line" for series in option["series"])
 
     class Recorder:
         def log(self, values, step):
@@ -758,6 +761,7 @@ def test_rebuild_training_run_replays_original_steps_without_old_charts(tmp_path
     identity = {"id": "original", "project": "test", "group": "series", "tags": []}
     (source / "swanlab.json").write_text(json.dumps(identity))
     (source / "provenance.json").write_text(json.dumps({"target_steps": 2}))
+    (source / "config.json").write_text(json.dumps({"eval_every": 2, "eval_generation_every": 2}))
     (source / "resources-from-000000.json").write_text(json.dumps({"completed_steps": 2}))
     records = [
         {
@@ -802,6 +806,12 @@ def test_rebuild_training_run_replays_original_steps_without_old_charts(tmp_path
     assert set(calls[0][1]) == set(calls[-1][1]) == {"evaluation/dev/nll"}
     assert json.loads((source / "swanlab.json").read_text()) == identity
     assert json.loads((output / "republication.json").read_text())["training_steps"] == 2
+    (output / "swanlab.json").write_text(json.dumps({**identity, "id": "rebuilt"}))
+    dynamic_reporting.publish_training_history(source, 3, "disabled", output)
+    assert calls[-1][0] == 3 and set(calls[-1][1]) == {"evaluation/dev/nll"}
+    assert (output / "evaluation-history-000003.json").exists()
+    assert not (source / "evaluation-history-000003.json").exists()
+    assert json.loads((source / "swanlab.json").read_text())["id"] == "original"
     with pytest.raises(FileExistsError):
         dynamic_reporting.rebuild_training_run(source, output, "disabled")
     with (source / "train-from-000000.jsonl").open("a") as stream:
