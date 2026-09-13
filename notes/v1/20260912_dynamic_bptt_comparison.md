@@ -1,7 +1,7 @@
 # 20260912_动态梯度传播对比实验
 
 创建时间：20260912 23:54:16 UTC+08:00
-最后修订时间：20260913 13:12:39 UTC+08:00
+最后修订时间：20260913 19:13:20 UTC+08:00
 
 本系列比较完整 BPTT、源 token TBPTT 和更新次数 TBPTT。各组共享初始化参数、文本课程与评估记录。训练方法见[动态训练与 QA 评估](20260911_dynamic_training_and_evaluation.md)。本轮先运行完整 BPTT。
 
@@ -103,14 +103,32 @@ GPU 6、7 上的 K=1024 完整 BPTT 测试结果如下，每步使用 2 份文�
 
 训练 run：[dynamic-full_squad_mixed-157k_20260912](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/3sibkt6l)。进程依次执行初始化 dev、训练与周期 dev、最终 dev，以及独立 test。
 
-### 训练曲线展示
+### SwanLab 展示与重传
 
-训练 run 使用 8 张评估图，总体图位于 `evaluation/dev/*`，容量图位于 `evaluation/dev/by-capacity/*`。总体图中，NLL、EM、F1 和触顶率各使用一张历史折线图，以真实 optimizer step 为横轴，五种对照条件为五条曲线。NLL 包含全部 dev 评估点；EM、F1 和触顶率包含 step 0、250、500、750 的生成评估结果。容量图按同样的四个指标比较各 K 的 memory 表现。每张图可切换 `all`、`arrival`、`delayed`；总体 NLL、EM、F1 图还可切换 `paired` 查看配对差值。默认显示 `all`。完整评估数值保存在本地 JSON/JSONL。
+训练、训练中 dev 和最终 test 展示在同一个 run 中。运行名为 `dynamic_BPTT_squad_mixed-157k_20260912`，沿用原训练配置、group 和 tags。
 
-正式动态训练与重建展示 run 均在训练终点发布一次评估媒体：8 张完整历史图、最终评估表格和问答样例。训练标量按原始 step 1–750 记录，图内保留 10 次 dev 评估的数据点；每张评估图仅有一份媒体记录，记录位置为 step 750。
+| 分区 | 内容 | 记录时机 |
+|---|---|---|
+| `train/*` | loss、目标 token NLL、梯度范数、学习率 | optimizer step 1–750 |
+| `dev/overview/*` | NLL、EM、F1 三张原生增量折线图，每张合并五种条件 | NLL：10 次 dev；EM、F1：step 0、250、500、750 |
+| `evaluation/test/overview/*` | NLL、EM、F1 三张最终测试汇总图，每张合并五种条件 | 最终 checkpoint，step 750 |
+| `resources/*`、`progress/*`、`sampling/*` | 每步耗时、吞吐、显存、累计处理量与当前 K | 对应 optimizer step |
 
-重建命令为 `.venv/bin/python -m latent_working_memory.v1.dynamic_reporting --training-run <train_run_dir> --output-dir <series_dir>/plan/swanlab/dynamic_BPTT_squad_mixed-157k_20260912 --swanlab-mode online`。输出目录使用新的空目录；云端沿用原配置、group 和 tags。源训练日志与 checkpoint 保存在原训练目录。
+各条件在 dev 与 test 中保持一致的颜色与顺序：`memory`、`wrong_memory`、`no_memory`、`gold_paragraph`、`gold_paragraph_base`。dev 折线使用真实 optimizer step；生成指标仅记录实际执行生成评估的步数。总体计数、arrival/delayed、容量、压缩率、延迟、触顶率与配对差值汇入 summary/details 表格，同一问题的五种条件回答合并为一个样例。dev 表格与样例按生成评估步数保存，test 保存最终结果。
 
-展示目录保存 `swanlab.json`、完整图表内容 `evaluation-charts.json` 和发布记录 `republication.json`。发布记录包含源训练目录、源 run ID、评估步数、媒体记录位置、发布规则、Git commit 及 SwanLab/pyecharts 版本。同一份结果数据通过相同代码与依赖重新发布时，图表内容保持一致；新 run 的 ID、创建时间和上传时间由云端重新生成。
+最终 test 来自 `eval/dynamic-full-eval_squad_mixed-157k_20260912/test-step-000750.json` 及同名 JSONL，共 30 份文本、104 次问题读取、520 条条件结果。重传前核对该报告的训练配置、评估方案及最终 checkpoint。正常训练逐步调用同一组指标函数，后续 test 评估追加到对应训练 run；重传则依次读取原始训练日志、dev 和 test 报告。
 
-当前展示 run：[dynamic_BPTT_squad_mixed-157k_20260912](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/qo91dlgm)。发布代码为 `37191b5`。云端核对确认 8 张评估图各只有一份 step 750 记录，图表内容与 `evaluation-charts.json` 完全一致；750 步训练 loss 与原始日志在 `1e-12` 绝对误差内一致。核对结果保存在 `cloud-verification.json`。
+重传命令如下，其中 `series` 为 `artifacts/v1/dynamic-bptt-comparison-squad_20260912`，输出目录须为新的空目录：
+
+```bash
+.venv/bin/python -m latent_working_memory.v1.dynamic_reporting \
+  --training-run "$series/train/dynamic-full_squad_mixed-157k_20260912" \
+  --test-report "$series/eval/dynamic-full-eval_squad_mixed-157k_20260912/test-step-000750.json" \
+  --previous-run-dir "$series/plan/swanlab/dynamic_BPTT_squad_mixed-157k_20260912" \
+  --output-dir "$series/plan/swanlab-unified_20260913/dynamic_BPTT_squad_mixed-157k_20260912" \
+  --swanlab-mode online
+```
+
+展示目录保存逐步标量 `scalar-records.jsonl`、原生面板定义 `dev-panels.json`、最终汇总图 `evaluation-charts.json`、run 身份 `swanlab.json` 和发布记录 `republication.json`。发布记录关联原训练、旧展示和新 run，记录 dev 步数、test 来源、原始日志中的训练步耗时合计、Git commit 与依赖版本。重传后核对云端标量、图表、图例和配色，并保存核对结果。
+
+待替换展示 run 为 [dynamic_BPTT_squad_mixed-157k_20260912](https://swanlab.cn/@percyWeeeeei/latent-working-memory-v1/runs/qo91dlgm)。该 run 的旧展示仅包含 dev 历史图；本次先完成代码与离线验证，待用户删除旧云端记录后重新上传。源训练日志与 checkpoint 保存在原训练目录。

@@ -27,8 +27,6 @@ from latent_working_memory.v1.dynamic_reporting import (
     qa_media,
     log_qa,
     main as publish_qa,
-    training_curves,
-    publish_training_history,
 )
 from latent_working_memory.v1.dynamic_data import (
     DynamicTextSampler,
@@ -460,7 +458,7 @@ def test_run_resume_across_micro_epochs_and_final_test(
     resumed = run_dynamic(
         first, index, tmp_path / "resume", recipe, torch.device("cpu"), resume=True, **opts
     )
-    assert published_steps == [8, 8]
+    assert published_steps == [0, 8, 0, 3, 8]
     runtime = json.loads(next((tmp_path / "full").glob("runtime-from-*.json")).read_text())[
         "runtime"
     ]
@@ -633,9 +631,9 @@ def test_evaluation_without_generation_matches_nll_and_caches_controls(
     report = aggregate_qa(generated)
     media = qa_media(report, generated)
     assert (
-        "evaluation/test/f1" in media
-        and "tables/test/paired" in media
-        and media["examples/test/qa"]
+        "evaluation/test/overview/f1" in media
+        and "evaluation/test/overview/details" in media
+        and media["evaluation/test/overview/examples"]
     )
     assert report["paired/memory-minus-no_memory"]["reads"] == len(generated) // 5
     records = tmp_path / "test.jsonl"
@@ -669,105 +667,69 @@ def test_evaluation_without_generation_matches_nll_and_caches_controls(
     assert not list(tmp_path.rglob("swanlab.json"))
 
 
-def test_training_curves_keep_real_steps_and_generation_schedule(tmp_path):
-    history = tmp_path / "dev"
-    history.mkdir()
-    for step, nll, em in ((0, 4.0, 0.1), (100, 3.0, None), (250, 2.0, 0.4)):
-        report = {}
-        for condition in (
-            "memory",
-            "no_memory",
-            "wrong_memory",
-            "gold_paragraph",
-            "gold_paragraph_base",
-        ):
-            values = {"nll": nll}
-            if em is not None:
-                values.update(em=em, f1=em + 0.1, hit_limit_rate=0.0)
-            for kind, offset in (("all", 0.0), ("arrival", -0.5), ("delayed", 0.5)):
-                report[f"overall/{condition}/{kind}"] = {**values, "nll": nll + offset}
-            if condition == "memory":
-                for capacity in (64, 1024):
-                    for kind, offset in (("all", 0.0), ("arrival", -0.5), ("delayed", 0.5)):
-                        report[f"k{capacity}/memory/{kind}"] = {**values, "nll": nll + offset}
-            else:
-                paired = {"nll_difference": -0.5}
-                if em is not None:
-                    paired.update(em_difference=0.1, f1_difference=0.2)
-                report[f"paired/memory-minus-{condition}"] = paired
-        (history / f"dev-step-{step:06d}.json").write_text(json.dumps(report))
-    curves = training_curves(history, 250)
-    assert len(curves) == 8
-    assert all(key.startswith("evaluation/dev/") for key in curves)
-    capacity_chart = curves["evaluation/dev/by-capacity/nll"].options
-    assert capacity_chart["baseOption"]["timeline"]["data"] == ["all", "arrival", "delayed"]
-    capacity = capacity_chart["options"][0]["series"]
-    assert [series["name"] for series in capacity] == ["K=64", "K=1024"]
-    em_chart = curves["evaluation/dev/em"].options
-    assert em_chart["baseOption"]["timeline"]["data"] == ["all", "arrival", "delayed", "paired"]
-    assert em_chart["baseOption"]["timeline"]["replaceMerge"] == ["series"]
-    assert em_chart["baseOption"]["timeline"]["autoPlay"] is False
-    paired = em_chart["options"][3]["series"]
-    assert len(paired) == 4 and paired[0]["data"] == [[0, 0.1], [250, 0.1]]
-    assert em_chart["options"][3]["yAxis"][0]["name"] == "em_difference"
-    for chart in curves.values():
-        option = json.loads(chart.dump_options())
-        assert option["baseOption"]["timeline"]["currentIndex"] == 0
-        assert option["series"] == option["options"][0]["series"]
-        assert option["series"] and all(series["type"] == "line" for series in option["series"])
+def test_dev_curves_are_sparse_native_series_and_share_final_colors():
+    calls = []
 
     class Recorder:
         def log(self, values, step):
-            self.values, self.step = values, step
+            calls.append((step, values))
 
     run = Recorder()
-    log_qa(run, report, [], 250, "dev", media=True, history_dir=history)
-    assert run.step == 250
-    assert set(run.values) == set(curves) | {
-        "tables/dev/capacity-and-ratio",
-        "tables/dev/paired",
-        "examples/dev/qa",
+    for step, nll, em in ((0, 4.0, 0.1), (100, 3.0, None), (250, 2.0, 0.4)):
+        report = {}
+        for condition in dynamic_reporting.CONDITIONS:
+            values = {"nll": nll}
+            if em is not None:
+                values.update(em=em, f1=em + 0.1)
+            report[f"overall/{condition}/all"] = values
+        log_qa(run, report, [], step, "dev")
+    assert [step for step, _ in calls] == [0, 100, 250]
+    assert len(calls[1][1]) == 5
+    assert all("/nll/" in key for key in calls[1][1])
+    assert all(isinstance(value, float) for _, values in calls for value in values.values())
+    assert [
+        values["dev/overview/em/memory"]
+        for _, values in calls
+        if "dev/overview/em/memory" in values
+    ] == [0.1, 0.4]
+    panels = dynamic_reporting.dev_panels()
+    assert len(panels) == 3
+    assert all(panel["config"]["xAxis"]["key"] == "step" for panel in panels.values())
+    assert all(len(panel["config"]["yAxis"]) == 5 for panel in panels.values())
+    styles = dynamic_reporting.dev_panel_style(panels["dev/overview/nll"], "run")
+    media = qa_media(report, [])
+    assert set(media) == {
+        f"evaluation/test/overview/{key}" for key in ("nll", "em", "f1", "summary")
     }
-    nll_views = curves["evaluation/dev/nll"].options["options"]
-    assert nll_views[1]["series"][0]["data"] == [[0, 3.5], [100, 2.5], [250, 1.5]]
-    assert nll_views[2]["series"][0]["data"] == [[0, 4.5], [100, 3.5], [250, 2.5]]
-    nll = nll_views[0]
-    assert nll["xAxis"][0]["type"] == "value"
-    assert nll["series"][0]["data"] == [[0, 4.0], [100, 3.0], [250, 2.0]]
-    assert len(nll["series"]) == 5 and all(s["type"] == "line" for s in nll["series"])
-    assert curves["evaluation/dev/em"].options["options"][0]["series"][0]["data"] == [
-        [0, 0.1],
-        [250, 0.4],
-    ]
-    assert training_curves(history, 100)["evaluation/dev/em"].options["options"][0]["series"][0][
-        "data"
-    ] == [[0, 0.1]]
-    (tmp_path / "config.json").write_text(
-        json.dumps({"eval_every": 100, "eval_generation_every": 250})
-    )
-    (tmp_path / "provenance.json").write_text(json.dumps({"target_steps": 250}))
-    with pytest.raises(ValueError, match="completed training run"):
-        publish_training_history(tmp_path, 251, "disabled")
-    (tmp_path / "resources-from-000000-test.json").write_text(json.dumps({"completed_steps": 250}))
-    (tmp_path / "swanlab.json").write_text(
-        json.dumps({"project": "test", "group": "test", "tags": []})
-    )
-    with pytest.raises(ValueError, match="media step"):
-        publish_training_history(tmp_path, 250, "disabled")
-    publish_training_history(tmp_path, 251, "disabled")
-    record = json.loads((tmp_path / "evaluation-history-000251.json").read_text())
-    assert record["checkpoint_step"] == 250 and record["media_step"] == 251
+    series = json.loads(media["evaluation/test/overview/nll"].dump_options())["series"]
+    for condition, item in zip(dynamic_reporting.CONDITIONS, series, strict=True):
+        assert item["name"] == f"condition={condition} / test=squad"
+        assert (
+            styles[f"run-dev/overview/nll/{condition}"]["colors"][0].lower()
+            == item["itemStyle"]["color"].lower()
+        )
 
 
-def test_rebuild_training_run_replays_original_steps_without_old_charts(tmp_path, monkeypatch):
+@pytest.fixture
+def saved_dynamic_run(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     dev = source / "dev"
     dev.mkdir()
-    identity = {"id": "original", "project": "test", "group": "series", "tags": []}
+    identity = {
+        "id": "original",
+        "project": "test",
+        "group": "series",
+        "tags": [],
+        "mode": "online",
+    }
+    provenance = {
+        "target_steps": 2,
+        "config": {"epochs": 1},
+        "evaluation_plan": str(tmp_path / "evaluation-plan.json"),
+    }
     (source / "swanlab.json").write_text(json.dumps(identity))
-    (source / "provenance.json").write_text(json.dumps({"target_steps": 2}))
-    (source / "config.json").write_text(json.dumps({"eval_every": 2, "eval_generation_every": 2}))
+    (source / "provenance.json").write_text(json.dumps(provenance))
     (source / "resources-from-000000.json").write_text(json.dumps({"completed_steps": 2}))
     records = [
         {
@@ -787,7 +749,32 @@ def test_rebuild_training_run_replays_original_steps_without_old_charts(tmp_path
             json.dumps({"overall/memory/all": {"nll": 4.0 - step}})
         )
         (dev / f"dev-step-{step:06d}.jsonl").write_text("")
+    test = tmp_path / "test"
+    test.mkdir()
+    report = test / "test-step-000002.json"
+    report.write_text(json.dumps({"overall/memory/all": {"nll": 1.5, "em": 0.2, "f1": 0.3}}))
+    report.with_suffix(".jsonl").write_text("")
+    (test / "evaluation.json").write_text(
+        json.dumps(
+            {
+                "checkpoint": str(source / "checkpoints/dynamic-step-000002.pt"),
+                "checkpoint_step": 2,
+                "split": "test",
+                "config": provenance["config"],
+                "evaluation_plan": provenance["evaluation_plan"],
+            }
+        )
+    )
+    return source, report
+
+
+def test_rebuild_training_run_replays_all_dev_then_final_test(
+    saved_dynamic_run, tmp_path, monkeypatch
+):
+    source, report = saved_dynamic_run
     calls = []
+    provenance = json.loads((source / "provenance.json").read_text())
+    identity = json.loads((source / "swanlab.json").read_text())
 
     class Recorder:
         def log(self, values, step):
@@ -795,42 +782,99 @@ def test_rebuild_training_run_replays_original_steps_without_old_charts(tmp_path
 
     @contextmanager
     def fake_run(output_dir, config, mode, project, **kwargs):
-        assert config["report_source"]["swanlab_id"] == "original"
+        assert config == provenance
         assert project == "test" and kwargs["group"] == "series"
         yield Recorder()
 
     monkeypatch.setattr(dynamic_reporting, "swanlab_run", fake_run)
     output = tmp_path / "rebuilt"
-    dynamic_reporting.rebuild_training_run(source, output, "disabled")
-    assert [step for step, _ in calls] == [1, 2, 2]
-    assert calls[0][1] == {
-        "train/step": 1,
+    dynamic_reporting.rebuild_training_run(source, output, "disabled", report)
+    assert [step for step, _ in calls] == [0, 1, 2, 2, 2]
+    assert calls[0][1] == {"dev/overview/nll/memory": 4.0}
+    assert calls[1][1] == {
         "train/loss": 3.0,
-        "resources/seconds": 12.0,
-        "train/cumulative_input_tokens": 200,
+        "resources/step_seconds": 12.0,
+        "progress/input_tokens": 200,
     }
-    assert set(calls[-1][1]) == {"evaluation/dev/nll"}
+    assert calls[-2][1] == {"dev/overview/nll/memory": 2.0}
+    assert set(calls[-1][1]) == {
+        f"evaluation/test/overview/{key}" for key in ("nll", "em", "f1", "summary")
+    }
     assert json.loads((source / "swanlab.json").read_text()) == identity
-    assert json.loads((output / "republication.json").read_text())["training_steps"] == 2
-    first_payload = (output / "evaluation-charts.json").read_text()
-    repeated = tmp_path / "repeated"
-    dynamic_reporting.rebuild_training_run(source, repeated, "disabled")
-    assert (repeated / "evaluation-charts.json").read_text() == first_payload
-    assert (repeated / "republication.json").read_text() == (
-        output / "republication.json"
-    ).read_text()
+    scalars = [
+        json.loads(line) for line in (output / "scalar-records.jsonl").read_text().splitlines()
+    ]
+    assert [item["step"] for item in scalars] == [0, 1, 2]
+    assert scalars[2]["values"] == calls[2][1] | calls[3][1]
+    assert not any(key.startswith("dev/") for key in scalars[1]["values"])
     manifest = json.loads((output / "republication.json").read_text())
-    assert manifest["media_step"] == 2 and manifest["snapshot_policy"] == "final-history"
-    (output / "swanlab.json").write_text(json.dumps({**identity, "id": "rebuilt"}))
-    dynamic_reporting.publish_training_history(source, 3, "disabled", output)
-    assert calls[-1][0] == 3 and set(calls[-1][1]) == {"evaluation/dev/nll"}
-    assert (output / "evaluation-history-000003.json").exists()
-    assert not (source / "evaluation-history-000003.json").exists()
-    assert json.loads((source / "swanlab.json").read_text())["id"] == "original"
+    assert manifest["training_steps"] == manifest["test_step"] == 2
+    assert manifest["previous_run"] == identity
+    assert manifest["dev_steps"] == [0, 2]
+    assert manifest["original_training_seconds"] == 24.0
+    repeated = tmp_path / "repeated"
+    dynamic_reporting.rebuild_training_run(source, repeated, "disabled", report)
+    for name in (
+        "evaluation-charts.json",
+        "scalar-records.jsonl",
+        "dev-panels.json",
+        "republication.json",
+    ):
+        assert (repeated / name).read_text() == (output / name).read_text()
     with pytest.raises(FileExistsError):
-        dynamic_reporting.rebuild_training_run(source, output, "disabled")
+        dynamic_reporting.rebuild_training_run(source, output, "disabled", report)
     with (source / "train-from-000000.jsonl").open("a") as stream:
-        stream.write(json.dumps(records[-1]) + "\n")
+        stream.write(json.dumps({"step": 2}) + "\n")
     with pytest.raises(ValueError, match="exactly one training record"):
-        dynamic_reporting.rebuild_training_run(source, tmp_path / "invalid", "disabled")
+        dynamic_reporting.rebuild_training_run(source, tmp_path / "invalid", "disabled", report)
     assert not (tmp_path / "invalid").exists()
+
+
+def test_final_test_must_match_training_checkpoint_and_plan(saved_dynamic_run, tmp_path):
+    source, report = saved_dynamic_run
+    info_path = report.parent / "evaluation.json"
+    info = json.loads(info_path.read_text())
+    for changes in (
+        {"checkpoint_step": 1},
+        {"checkpoint": "/other/dynamic-step-000002.pt"},
+        {"evaluation_plan": "/other/plan.json"},
+        {"config": {"epochs": 3}},
+        {"split": "dev"},
+    ):
+        info_path.write_text(json.dumps(info | changes))
+        with pytest.raises(ValueError, match="final checkpoint and evaluation plan"):
+            dynamic_reporting.rebuild_training_run(source, tmp_path / "invalid", "disabled", report)
+        assert not (tmp_path / "invalid").exists()
+
+
+def test_final_test_appends_to_original_training_run_once(saved_dynamic_run, monkeypatch):
+    source, report = saved_dynamic_run
+    calls = []
+
+    class Recorder:
+        def log(self, values, step):
+            calls.append((step, values))
+
+    @contextmanager
+    def resume(directory):
+        assert directory == source
+        yield Recorder()
+
+    monkeypatch.setattr(dynamic_reporting, "swanlab_training_run", resume)
+    dynamic_reporting.append_qa_report(source, report, "online")
+    assert len(calls) == 1 and calls[0][0] == 2
+    assert all(key.startswith("evaluation/test/overview/") for key in calls[0][1])
+    receipt = json.loads((source / "evaluation-publications/test-step-000002.json").read_text())
+    assert receipt["training_run_id"] == "original" and receipt["checkpoint_step"] == 2
+    with pytest.raises(ValueError, match="already published"):
+        dynamic_reporting.append_qa_report(source, report, "online")
+    assert len(calls) == 1
+
+
+def test_offline_append_cannot_overwrite_online_identity(saved_dynamic_run):
+    source, report = saved_dynamic_run
+    identity = (source / "swanlab.json").read_text()
+    with pytest.raises(ValueError, match="offline training run"):
+        dynamic_reporting.append_qa_report(source, report, "offline")
+    assert (source / "swanlab.json").read_text() == identity
+    assert not (source / "evaluation-publications").exists()

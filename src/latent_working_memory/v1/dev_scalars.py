@@ -52,6 +52,14 @@ def development_panel_style(panel, sources, run_id):
 
 
 def configure_development_panels(run, sources, mode):
+    configure_line_panels(
+        run, development_panels(list(sources)), mode,
+        lambda panel, run_id: development_panel_style(panel, list(sources), run_id),
+    )
+
+
+def configure_line_panels(run, panels, mode, style):
+    """Register dev columns directly into shared native panels before logging data."""
     if mode != "online":
         return
     api = swanlab.Api()
@@ -71,8 +79,8 @@ def configure_development_panels(run, sources, mode):
     ]
     panels_by_index = {}
     columns = []
-    for title, panel in development_panels(list(sources)).items():
-        panel["custom"] = development_panel_style(panel, list(sources), remote.run_id)
+    for title, original in panels.items():
+        panel = {**original, "custom": style(original, remote.run_id)}
         existing = next((c for c in charts if c["title"] == title and c["type"] == "LINE"), None)
         if existing is not None:
             panels_by_index[existing["index"]] = panel

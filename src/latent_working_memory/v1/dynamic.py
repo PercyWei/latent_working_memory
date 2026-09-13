@@ -30,7 +30,12 @@ from latent_working_memory.v1.dynamic_data import DynamicTextSampler
 from latent_working_memory.data_preparation.dynamic import load_evaluation_plan
 from latent_working_memory.v1.dynamic_training import DynamicTrainer, load_components
 from latent_working_memory.v1.dynamic_evaluation import evaluate_panel, write_evaluation
-from latent_working_memory.v1.dynamic_reporting import log_qa, training_metrics
+from latent_working_memory.v1.dynamic_reporting import (
+    log_qa,
+    training_metrics,
+    configure_dynamic_panels,
+    append_qa_report,
+)
 from latent_working_memory.v1.squad import SquadDataset
 from latent_working_memory.v1.tracking import swanlab_run
 from latent_working_memory.v1.training import trainable_model_state
@@ -183,6 +188,7 @@ def run_dynamic(
             (output_dir / f"train-from-{segment_id}.jsonl").open("x") if primary else nullcontext()
         ) as log,
     ):
+        configure_dynamic_panels(tracking, swanlab_mode if primary else "disabled")
 
         def evaluate(step, generate):
             metrics, rows = evaluate_panel(
@@ -199,7 +205,6 @@ def run_dynamic(
             )
             if primary:
                 write_evaluation(output_dir / "dev", f"dev-step-{step:06d}", metrics, rows)
-            if step == total_steps:
                 log_qa(
                     tracking,
                     metrics,
@@ -207,7 +212,6 @@ def run_dynamic(
                     step,
                     "dev",
                     media=generate,
-                    history_dir=output_dir / "dev",
                 )
 
         if next_step == 0:
@@ -456,17 +460,25 @@ def main():
             (args.output_dir / "evaluation.json").write_text(
                 json.dumps(evaluation_info | {"runtime": runtime_info()}, indent=2) + "\n"
             )
-        with swanlab_run(
-            args.output_dir,
-            evaluation_info,
-            mode=args.swanlab_mode if primary else "disabled",
-            project="latent-working-memory-v1",
-            job_type="evaluate",
-            group=args.swanlab_group,
-            tags=tuple(args.swanlab_tag),
-            fixed_tags=("scope:main", "method:latent-working-memory", "data:squad"),
-        ) as tracking:
-            log_qa(tracking, metrics, rows, 0, args.split, media=True)
+        if primary and args.split == "test":
+            append_qa_report(
+                args.checkpoint.parent.parent,
+                args.output_dir / f"test-step-{step:06d}.json",
+                args.swanlab_mode,
+            )
+        elif primary:
+            with swanlab_run(
+                args.output_dir,
+                evaluation_info,
+                mode=args.swanlab_mode,
+                project="latent-working-memory-v1",
+                job_type="evaluate",
+                group=args.swanlab_group,
+                tags=tuple(args.swanlab_tag),
+                fixed_tags=("scope:main", "method:latent-working-memory", "data:squad"),
+            ) as tracking:
+                configure_dynamic_panels(tracking, args.swanlab_mode)
+                log_qa(tracking, metrics, rows, step, "dev", media=True)
     if dist.is_initialized():
         dist.destroy_process_group()
 
