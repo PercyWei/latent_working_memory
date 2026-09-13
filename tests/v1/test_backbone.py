@@ -229,3 +229,36 @@ def test_frozen_feature_cache_keeps_projection_trainable_and_positions_live(comp
         backbone.input_projection.bias.add_(1)
     changed = backbone.text_features(units, [0, 5])
     torch.testing.assert_close(changed[0], again[0] + 1)
+
+
+def test_qwen2_load_padded_vocabulary_and_memory_gradient(tmp_path, tokenizer, tiny_config):
+    from dataclasses import replace
+    from transformers import Qwen2Config, Qwen2ForCausalLM
+    from latent_working_memory.v1.backbone import load_backbone
+
+    tokenizer.bos_token = None
+    tokenizer.save_pretrained(tmp_path)
+    Qwen2ForCausalLM(Qwen2Config(
+        vocab_size=len(tokenizer) + 8, hidden_size=16, intermediate_size=32,
+        num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=1,
+        max_position_embeddings=256, bos_token_id=1, eos_token_id=tokenizer.eos_token_id,
+    )).save_pretrained(tmp_path)
+    _, backbone = load_backbone(replace(tiny_config, model_name_or_path=str(tmp_path)),
+                                'cpu', torch.float32)
+    backbone.eval()
+    assert backbone.bos_token_id == 1
+    memories = backbone.text_features([(4, 5), (6, 7, 8)], [0, 0])
+    tasks = [ReadTokens((11,), (4, 5, tokenizer.eos_token_id)),
+             ReadTokens((11,), (6, 7, tokenizer.eos_token_id))]
+    batch = backbone.read_batch(memories, tasks)
+    for memory, task, result in zip(memories, tasks, batch):
+        single = backbone.read_batch([memory], [task])[0]
+        torch.testing.assert_close(result.target_logits, single.target_logits)
+    sum(result.mean_nll for result in batch).backward()
+    assert backbone.input_projection.weight.grad.abs().sum() > 0
+    assert backbone.memory_projection.weight.grad.abs().sum() > 0
+    assert any(p.grad is not None and p.grad.abs().sum() > 0
+               for n, p in backbone.language_model.named_parameters() if 'lora_' in n)
+    batched = backbone.greedy_students([m.detach() for m in memories], [(11,), (11,)], [3, 3])
+    for memory, prediction in zip(memories, batched):
+        assert prediction == backbone.greedy_students([memory.detach()], [(11,)], [3])[0]

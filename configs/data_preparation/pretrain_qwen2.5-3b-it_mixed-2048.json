@@ -1,0 +1,16 @@
+{
+  "source_pool": "data/v1/fineweb-4096-doc100k_20260910/sources.jsonl",
+  "datasets": {
+    "mixed": {
+      "train": "data/v1/fineweb-4096-doc100k_20260910/derived/pretrain-data-comparison-2048_20260910/mixed/train.jsonl"
+    },
+    "semantic": {
+      "dev": "data/v1/fineweb-4096-doc100k_20260910/derived/pretrain-data-comparison-2048_20260910/semantic/dev.jsonl",
+      "test": "data/v1/fineweb-4096-doc100k_20260910/derived/pretrain-data-comparison-2048_20260910/semantic/test.jsonl"
+    },
+    "random": {
+      "dev": "data/v1/fineweb-4096-doc100k_20260910/derived/pretrain-data-comparison-2048_20260910/random/dev.jsonl",
+      "test": "data/v1/fineweb-4096-doc100k_20260910/derived/pretrain-data-comparison-2048_20260910/random/test.jsonl"
+    }
+  }
+}

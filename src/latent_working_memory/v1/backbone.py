@@ -321,20 +321,26 @@ def load_backbone(
         config.model_name_or_path,
         revision=config.model_revision,
     )
-    if tokenizer.bos_token_id is None or tokenizer.eos_token_id is None:
-        raise ValueError("the tokenizer must define BOS and EOS token IDs")
     base_model = AutoModelForCausalLM.from_pretrained(
         config.model_name_or_path,
         revision=config.model_revision,
         dtype=dtype,
     )
-    if getattr(base_model.config, "model_type", None) != "llama":
-        raise ValueError("v1 requires a Llama causal language model")
-    if base_model.config.bos_token_id != tokenizer.bos_token_id:
+    model_type = base_model.config.model_type
+    if model_type not in {"llama", "qwen2"}:
+        raise ValueError("v1 supports Llama and Qwen2 causal language models")
+    # Qwen2.5 has no tokenizer BOS; use its model-defined end-of-text prefix.
+    bos_token_id = base_model.config.bos_token_id
+    if tokenizer.bos_token_id != bos_token_id and not (
+        model_type == "qwen2" and tokenizer.bos_token_id is None
+    ):
         raise ValueError("model and tokenizer BOS token IDs do not match")
+    if tokenizer.eos_token_id is None:
+        raise ValueError("the tokenizer must define an EOS token ID")
     if base_model.config.eos_token_id != tokenizer.eos_token_id:
         raise ValueError("model and tokenizer EOS token IDs do not match")
-    if base_model.get_input_embeddings().num_embeddings != len(tokenizer):
+    vocab_size = base_model.get_input_embeddings().num_embeddings
+    if vocab_size < len(tokenizer) or (model_type == "llama" and vocab_size != len(tokenizer)):
         raise ValueError("model vocabulary and tokenizer size do not match")
 
     base_model.to(device=device)
@@ -344,7 +350,7 @@ def load_backbone(
         )
     backbone = LatentMemoryBackbone(
         base_model=base_model,
-        bos_token_id=tokenizer.bos_token_id,
+        bos_token_id=bos_token_id,
         eos_token_id=tokenizer.eos_token_id,
         d_mem=config.d_mem,
         lora_rank=config.reader_lora_rank,
