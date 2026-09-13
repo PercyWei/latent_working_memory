@@ -29,8 +29,8 @@ def prepare(spec, config, tokenizer, output):
         counts, source_preparations, statistics = {}, {}, {}
         for split, source_path in splits.items():
             source_path = Path(source_path)
-            source_preparations[split] = json.loads(
-                (source_path.parent / 'preparation.json').read_text())['preparation_id']
+            parent_metadata = json.loads((source_path.parent / 'preparation.json').read_text())
+            source_preparations[split] = parent_metadata['preparation_id']
             kept, rejected, cells = 0, Counter(), Counter()
             with source_path.open() as inp, (directory / f'{split}.jsonl').open('w') as out:
                 for line in inp:
@@ -72,7 +72,8 @@ def prepare(spec, config, tokenizer, output):
             statistics[split] = {'retained': kept, 'rejected': dict(rejected), 'task_source_length': dict(cells)}
             print(name, split, kept, dict(rejected), flush=True)
         metadata = {'preparation_id': str(uuid.uuid4()), 'contract': data_contract(config),
-                    'source_preparations': source_preparations, 'counts': counts}
+                    'source_preparations': source_preparations, 'counts': counts,
+                    'source_weights': parent_metadata['source_weights']}
         (directory / 'preparation.json').write_text(json.dumps(metadata, indent=2) + '\n')
         report['datasets'][name] = statistics
     report['evaluation_dirs'] = {n: str((output / n).resolve()) for n in spec['datasets'] if n != 'mixed'}
