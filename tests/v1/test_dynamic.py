@@ -23,6 +23,7 @@ from latent_working_memory.v1.dynamic_training import DynamicTrainer, read_sched
 from latent_working_memory.v1.dynamic_evaluation import answer_scores, evaluate_qa, aggregate_qa
 from latent_working_memory.v1.dynamic_reporting import (
     qa_media,
+    log_qa,
     main as publish_qa,
     training_curves,
     publish_training_history,
@@ -623,7 +624,11 @@ def test_evaluation_without_generation_matches_nll_and_caches_controls(
         row["target_ratio"] = 8
     report = aggregate_qa(generated)
     media = qa_media(report, generated)
-    assert "charts/f1" in media and "tables/paired" in media and media["examples/qa"]
+    assert (
+        "evaluation/test/f1" in media
+        and "tables/test/paired" in media
+        and media["examples/test/qa"]
+    )
     assert report["paired/memory-minus-no_memory"]["reads"] == len(generated) // 5
     records = tmp_path / "test.jsonl"
     records.write_text("".join(json.dumps(row) + "\n" for row in generated))
@@ -672,15 +677,43 @@ def test_training_curves_keep_real_steps_and_generation_schedule(tmp_path):
             if em is not None:
                 values.update(em=em, f1=em + 0.1, hit_limit_rate=0.0)
             report[f"overall/{condition}/all"] = values
+            if condition == "memory":
+                for capacity in (64, 1024):
+                    report[f"k{capacity}/memory/all"] = values
+            else:
+                paired = {"nll_difference": -0.5}
+                if em is not None:
+                    paired.update(em_difference=0.1, f1_difference=0.2)
+                report[f"paired/memory-minus-{condition}"] = paired
         (history / f"dev-step-{step:06d}.json").write_text(json.dumps(report))
     curves = training_curves(history, 250)
-    assert len(curves) == 4
-    nll = curves["charts/nll"].options
+    assert len(curves) == 11
+    assert all(key.startswith("evaluation/dev/") for key in curves)
+    capacity = curves["evaluation/dev/by-capacity/nll"].options["series"]
+    assert [series["name"] for series in capacity] == ["k64", "k1024"]
+    paired = curves["evaluation/dev/paired/em_difference"].options["series"]
+    assert len(paired) == 4 and paired[0]["data"] == [[0, 0.1], [250, 0.1]]
+
+    class Recorder:
+        def log(self, values, step):
+            self.values, self.step = values, step
+
+    run = Recorder()
+    log_qa(run, report, [], 250, "dev", media=True, history_dir=history)
+    assert run.step == 250
+    assert set(run.values) == set(curves) | {
+        "tables/dev/capacity-and-ratio",
+        "tables/dev/paired",
+        "examples/dev/qa",
+    }
+    nll = curves["evaluation/dev/nll"].options
     assert nll["xAxis"][0]["type"] == "value"
     assert nll["series"][0]["data"] == [[0, 4.0], [100, 3.0], [250, 2.0]]
     assert len(nll["series"]) == 5 and all(s["type"] == "line" for s in nll["series"])
-    assert curves["charts/em"].options["series"][0]["data"] == [[0, 0.1], [250, 0.4]]
-    assert training_curves(history, 100)["charts/em"].options["series"][0]["data"] == [[0, 0.1]]
+    assert curves["evaluation/dev/em"].options["series"][0]["data"] == [[0, 0.1], [250, 0.4]]
+    assert training_curves(history, 100)["evaluation/dev/em"].options["series"][0]["data"] == [
+        [0, 0.1]
+    ]
     (tmp_path / "config.json").write_text(
         json.dumps({"eval_every": 100, "eval_generation_every": 250})
     )
@@ -694,5 +727,5 @@ def test_training_curves_keep_real_steps_and_generation_schedule(tmp_path):
     with pytest.raises(ValueError, match="media step"):
         publish_training_history(tmp_path, 250, "disabled")
     publish_training_history(tmp_path, 251, "disabled")
-    record = json.loads((tmp_path / "charts-history-000251.json").read_text())
+    record = json.loads((tmp_path / "evaluation-history-000251.json").read_text())
     assert record["checkpoint_step"] == 250 and record["media_step"] == 251

@@ -32,7 +32,7 @@ def bar(labels, series):
     return chart
 
 
-def qa_media(metrics, rows):
+def qa_media(metrics, rows, prefix="test"):
     media = {}
     for metric in ("nll", "em", "f1", "hit_limit_rate"):
         series = {
@@ -40,7 +40,7 @@ def qa_media(metrics, rows):
             for kind in ("all", "arrival", "delayed")
         }
         if any(v is not None for values in series.values() for v in values):
-            media[f"charts/{metric}"] = bar(list(CONDITIONS), series)
+            media[f"evaluation/{prefix}/{metric}"] = bar(list(CONDITIONS), series)
     for axis in ("delay-tokens-le", "delay-updates-le"):
         labels = sorted(
             {key.split("/")[0] for key in metrics if key.startswith(axis)},
@@ -48,21 +48,21 @@ def qa_media(metrics, rows):
         )
         for metric in ("nll", "f1"):
             if labels:
-                media[f"charts/{axis}/{metric}"] = bar(
+                media[f"evaluation/{prefix}/{axis}/{metric}"] = bar(
                     labels,
                     {
                         c: [metrics.get(f"{label}/{c}/all", {}).get(metric) for label in labels]
                         for c in CONDITIONS
                     },
                 )
-    media["tables/capacity-and-ratio"] = table(
+    media[f"tables/{prefix}/capacity-and-ratio"] = table(
         [
             {"group": key, **value}
             for key, value in metrics.items()
             if key.startswith("k") and key.endswith("/memory/all")
         ]
     )
-    media["tables/paired"] = table(
+    media[f"tables/{prefix}/paired"] = table(
         [
             {"comparison": key, **value}
             for key, value in metrics.items()
@@ -76,7 +76,7 @@ def qa_media(metrics, rows):
             if key not in examples and len(examples) >= 10:
                 continue
             examples.setdefault(key, []).append(row)
-    media["examples/qa"] = [
+    media[f"examples/{prefix}/qa"] = [
         swanlab.Text(
             sample[0]["question"]
             + "\n\nReferences: "
@@ -96,54 +96,65 @@ def training_curves(history_dir, through_step):
         for path in history_dir.glob("dev-step-*.json")
         if int(path.stem.removeprefix("dev-step-")) <= through_step
     )
+    groups = {
+        "": {c: f"overall/{c}/all" for c in CONDITIONS},
+        "by-capacity/": {
+            key.split("/")[0]: key
+            for _, report in history
+            for key in report
+            if key.startswith("k") and key.count("/") == 2 and key.endswith("/memory/all")
+        },
+        "paired/": {c: f"paired/memory-minus-{c}" for c in CONDITIONS if c != "memory"},
+    }
     charts = {}
-    for metric in ("nll", "em", "f1", "hit_limit_rate"):
-        observed = [
-            (step, report)
-            for step, report in history
-            if any(metric in report.get(f"overall/{condition}/all", {}) for condition in CONDITIONS)
-        ]
-        if not observed:
-            continue
-        chart = swanlab.echarts.Line().add_xaxis([step for step, _ in observed])
-        for condition in CONDITIONS:
-            chart.add_yaxis(
-                condition,
-                [report.get(f"overall/{condition}/all", {}).get(metric) for _, report in observed],
-                is_smooth=False,
-                is_connect_nones=False,
-                label_opts={"show": False},
+    for group, series in groups.items():
+        metrics = (
+            ("nll_difference", "em_difference", "f1_difference")
+            if group == "paired/"
+            else (
+                "nll",
+                "em",
+                "f1",
+                "hit_limit_rate",
             )
-        chart.set_global_opts(
-            xaxis_opts={"type": "value", "name": "optimizer step", "min": 0},
-            yaxis_opts={"name": metric},
-            tooltip_opts={"trigger": "axis"},
-            legend_opts={"type": "scroll"},
         )
-        charts[f"charts/{metric}"] = chart
+        for metric in metrics:
+            observed = [
+                (step, report)
+                for step, report in history
+                if any(metric in report.get(key, {}) for key in series.values())
+            ]
+            if not observed:
+                continue
+            chart = swanlab.echarts.Line().add_xaxis([step for step, _ in observed])
+            for label, key in series.items():
+                chart.add_yaxis(
+                    label,
+                    [report.get(key, {}).get(metric) for _, report in observed],
+                    is_smooth=False,
+                    is_connect_nones=False,
+                    label_opts={"show": False},
+                )
+            chart.set_global_opts(
+                xaxis_opts={"type": "value", "name": "optimizer step", "min": 0},
+                yaxis_opts={"name": metric},
+                tooltip_opts={"trigger": "axis"},
+                legend_opts={"type": "scroll"},
+            )
+            charts[f"evaluation/dev/{group}{metric}"] = chart
     return charts
 
 
 def log_qa(run, metrics, rows, step, prefix, media=False, history_dir=None):
     if run is None:
         return
-    values = {
-        f"evaluation/{prefix}/{group}/{key}": value
-        for group, scores in metrics.items()
-        if group.startswith(("overall/", "paired/"))
-        or (group.startswith("k") and group.count("/") == 2 and "/memory/" in group)
-        for key, value in scores.items()
-    }
-    if history_dir is not None:
-        values.update(
-            {f"{key}/{prefix}": val for key, val in training_curves(history_dir, step).items()}
-        )
+    values = training_curves(history_dir, step) if history_dir is not None else {}
     if media:
         values.update(
             {
-                f"{key}/{prefix}": val
-                for key, val in qa_media(metrics, rows).items()
-                if history_dir is None or not key.startswith("charts/")
+                key: value
+                for key, value in qa_media(metrics, rows, prefix).items()
+                if history_dir is None or not key.startswith("evaluation/")
             }
         )
     run.log(values, step=step)
@@ -174,8 +185,8 @@ def publish_training_history(directory, media_step, mode):
         fixed_tags=(),
     ) as run:
         if run is not None:
-            run.log({f"{key}/dev": value for key, value in charts.items()}, step=media_step)
-    (directory / f"charts-history-{media_step:06d}.json").write_text(
+            run.log(charts, step=media_step)
+    (directory / f"evaluation-history-{media_step:06d}.json").write_text(
         json.dumps(
             {
                 "checkpoint_step": total_steps,
@@ -239,14 +250,14 @@ def main():
         reports[entry["name"]] = aggregate_qa(rows)
     media = {}
     for metric in ("nll", "em", "f1", "hit_limit_rate"):
-        media[f"charts/{metric}"] = bar(
+        media[f"evaluation/compare/{metric}"] = bar(
             list(CONDITIONS),
             {
                 name: [report[f"overall/{c}/all"].get(metric) for c in CONDITIONS]
                 for name, report in reports.items()
             },
         )
-    media["tables/overall"] = table(
+    media["tables/compare/overall"] = table(
         [
             {"run": name, "group": key, **values}
             for name, report in reports.items()
