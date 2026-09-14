@@ -105,7 +105,25 @@ def evaluate_empty_memory(
     return added
 
 
-def supplement_report(report, output_dir, dataset, device):
+def reuse_empty_rows(rows, cached):
+    requests = {read_identity(r): r for r in original_requests(rows)}
+    added = [r for r in cached if r["condition"] in EMPTY_CONDITIONS]
+    keys = [(read_identity(r), r["condition"]) for r in added]
+    if len(keys) != len(set(keys)) or set(keys) != {
+        (key, condition) for key in requests for condition in EMPTY_CONDITIONS
+    }:
+        raise ValueError("cached baselines have different read identities")
+    scores = {"condition", "nll_sum", "prediction", "em", "f1", "hit_limit"}
+    for row in added:
+        source = requests[read_identity(row)]
+        if {k: v for k, v in row.items() if k not in scores} != {
+            k: v for k, v in source.items() if k not in scores
+        }:
+            raise ValueError("cached baseline request metadata differs")
+    return added
+
+
+def supplement_report(report, output_dir, dataset, device, reuse_from=None):
     if output_dir.exists():
         raise FileExistsError("use a new supplemental evaluation directory")
     info = json.loads((report.parent / "evaluation.json").read_text())
@@ -128,20 +146,34 @@ def supplement_report(report, output_dir, dataset, device):
         raise ValueError("pretraining initialization differs from the dynamic model contract")
     config = checkpoint.config
     del checkpoint
-    tokenizer, backbone = load_backbone(
-        config, device, torch.bfloat16 if device.type == "cuda" else torch.float32
-    )
-    backbone.load_trainable_state_dict(initial.model_state["backbone"])
-    del initial
     begin = time.perf_counter()
-    added = evaluate_empty_memory(
-        backbone,
-        tokenizer,
-        rows,
-        info["config"]["generation_tokens"],
-        config.read_context_tokens,
-        device,
-    )
+    if reuse_from is not None:
+        cached_info = json.loads((reuse_from.parent / "evaluation.json").read_text())
+        if (
+            Path(cached_info["supplemental_baselines"]["pretrain_checkpoint"]).resolve()
+            != initial_path.resolve()
+            or cached_info["dataset"] != dataset
+            or cached_info["config"]["generation_tokens"] != info["config"]["generation_tokens"]
+        ):
+            raise ValueError("cached baseline initialization or generation budget differs")
+        cached_rows = [
+            json.loads(line) for line in reuse_from.with_suffix(".jsonl").read_text().splitlines()
+        ]
+        added = reuse_empty_rows(rows, cached_rows)
+    else:
+        tokenizer, backbone = load_backbone(
+            config, device, torch.bfloat16 if device.type == "cuda" else torch.float32
+        )
+        backbone.load_trainable_state_dict(initial.model_state["backbone"])
+        del initial
+        added = evaluate_empty_memory(
+            backbone,
+            tokenizer,
+            rows,
+            info["config"]["generation_tokens"],
+            config.read_context_tokens,
+            device,
+        )
     combined = sorted(rows + added, key=lambda row: (*read_identity(row), row["condition"]))
     output_dir.mkdir(parents=True)
     write_evaluation(output_dir, report.stem, aggregate_qa(combined), combined)
@@ -156,6 +188,8 @@ def supplement_report(report, output_dir, dataset, device):
             "seconds": time.perf_counter() - begin,
         },
     )
+    if reuse_from is not None:
+        metadata["supplemental_baselines"]["reuse_from"] = str(reuse_from.resolve())
     (output_dir / "evaluation.json").write_text(json.dumps(metadata, indent=2) + "\n")
 
 
@@ -165,10 +199,15 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--dataset", choices=("squad", "personamem"), required=True)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--reuse-from",
+        type=Path,
+        help="Validated baselines on the same requests and initialization",
+    )
     args = parser.parse_args()
     device = torch.device(args.device)
     validate_device(device)
-    supplement_report(args.report, args.output_dir, args.dataset, device)
+    supplement_report(args.report, args.output_dir, args.dataset, device, args.reuse_from)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from latent_working_memory.v1.dynamic.empty_memory import (
     ORIGINAL_CONDITIONS,
     evaluate_empty_memory,
     original_requests,
+    reuse_empty_rows,
 )
 from latent_working_memory.v1.dynamic.evaluation import aggregate_qa
 from latent_working_memory.v1.dynamic.reporting import qa_media
@@ -93,3 +94,17 @@ def test_final_charts_group_seven_conditions_by_dataset():
     assert chart["xAxis"][0]["data"] == ["personamem", "squad"]
     assert len(chart["series"]) == 7
     assert all(len(s["data"]) == 2 for s in chart["series"])
+
+
+def test_reuse_requires_identical_requests():
+    rows = source_rows()
+    cached = rows + [
+        dict(r, condition=c)
+        for r in rows
+        if r["condition"] == "no_memory"
+        for c in EMPTY_CONDITIONS
+    ]
+    assert len(reuse_empty_rows(rows, cached)) == 4
+    cached[-1]["question"] = "A different question"
+    with pytest.raises(ValueError, match="metadata differs"):
+        reuse_empty_rows(rows, cached)
