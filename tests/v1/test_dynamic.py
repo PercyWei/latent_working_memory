@@ -328,9 +328,9 @@ def training_data(tmp_path, tokenizer):
             rows.append({"title": str(i), "paragraphs": paragraphs})
         paths[split] = tmp_path / f"{split}.json"
         paths[split].write_text(json.dumps({"version": "1.1", "data": rows}))
-    index = tmp_path / "tokenizer_index.json"
+    index = tmp_path / "squad"
     prepare_squad(paths["train"], paths["dev"], tokenizer, index)
-    return index, SquadDataset(index)
+    return index, SquadDataset(index, tokenizer)
 
 
 def test_text_construction_no_overlap_offsets_quotas_drop_last(training_data):
@@ -516,7 +516,7 @@ def test_run_resume_across_micro_epochs_and_final_test(
             "evaluate",
             "--checkpoint",
             str(full),
-            "--index",
+            "--dataset-dir",
             str(index),
             "--config",
             str(recipe_path),

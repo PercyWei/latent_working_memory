@@ -76,7 +76,7 @@ def runtime_info():
 
 def run_dynamic(
     checkpoint_path,
-    index_path,
+    dataset_dir,
     output_dir,
     recipe,
     device,
@@ -112,15 +112,12 @@ def run_dynamic(
         raise ValueError("capacity exceeds model slot limit")
     if dataset not in {"squad", "personamem"}:
         raise ValueError("unsupported dynamic dataset")
-    if dataset == "personamem":
-        tokenizer = AutoTokenizer.from_pretrained(
-            checkpoint.config.model_name_or_path,
-            revision=checkpoint.config.model_revision,
-            local_files_only=True,
-        )
-        data = PersonaMemDataset(index_path, tokenizer)
-    else:
-        data = SquadDataset(index_path)
+    tokenizer = AutoTokenizer.from_pretrained(
+        checkpoint.config.model_name_or_path,
+        revision=checkpoint.config.model_revision,
+        local_files_only=True,
+    )
+    data = (PersonaMemDataset if dataset == "personamem" else SquadDataset)(dataset_dir, tokenizer)
     sampler = DynamicTextSampler(data, recipe, checkpoint.config.write_context_tokens)
     shared_plan, panels = load_evaluation_plan(evaluation_plan, data, recipe)
     identity = {
@@ -157,7 +154,7 @@ def run_dynamic(
     run_info = {
         "config": asdict(recipe),
         "initial_checkpoint": origin,
-        "data_index": str(index_path.resolve()),
+        "data_index": str(dataset_dir.resolve()),
         "evaluation_plan": str(evaluation_plan.resolve()),
         "target_steps": total_steps,
         "global_batch_size": recipe.global_batch_size,
@@ -394,11 +391,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("train", "evaluate"))
     parser.add_argument("--checkpoint", type=Path, required=True)
-    inputs = parser.add_mutually_exclusive_group(required=True)
-    inputs.add_argument("--index", type=Path, help="SQuAD data index")
-    inputs.add_argument(
-        "--dataset-dir", type=Path, help="Shared PersonaMem original-text/QA directory"
-    )
+    parser.add_argument("--dataset-dir", type=Path, required=True, help="Shared dataset directory")
     parser.add_argument("--dataset", choices=("squad", "personamem"), default="squad")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--evaluation-plan", type=Path, required=True)
@@ -413,9 +406,7 @@ def main():
     parser.add_argument("--swanlab-group")
     parser.add_argument("--swanlab-tag", action="append", default=[])
     args = parser.parse_args()
-    if (args.dataset == "personamem") != (args.dataset_dir is not None):
-        parser.error("personamem requires --dataset-dir; squad requires --index")
-    data_path = args.dataset_dir if args.dataset == "personamem" else args.index
+    data_path = args.dataset_dir
     if int(os.environ.get("WORLD_SIZE", "1")) > 1:
         local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(local_rank)
@@ -447,15 +438,14 @@ def main():
         checkpoint = replace(
             checkpoint, config=replace(checkpoint.config, gradient_checkpointing=False)
         )
-        if args.dataset == "personamem":
-            data_tokenizer = AutoTokenizer.from_pretrained(
-                checkpoint.config.model_name_or_path,
-                revision=checkpoint.config.model_revision,
-                local_files_only=True,
-            )
-            data = PersonaMemDataset(data_path, data_tokenizer)
-        else:
-            data = SquadDataset(data_path)
+        data_tokenizer = AutoTokenizer.from_pretrained(
+            checkpoint.config.model_name_or_path,
+            revision=checkpoint.config.model_revision,
+            local_files_only=True,
+        )
+        data = (PersonaMemDataset if args.dataset == "personamem" else SquadDataset)(
+            data_path, data_tokenizer
+        )
         shared_plan, panels = load_evaluation_plan(args.evaluation_plan, data, recipe)
         tokenizer, backbone, writer, _ = load_components(checkpoint, device)
         if tokenizer.get_vocab() != data.tokenizer.get_vocab() or (

@@ -23,7 +23,7 @@ from latent_working_memory.v1.dynamic.data import DynamicTextSampler
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--index", type=Path, required=True)
+    parser.add_argument("--dataset-dir", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--capacity", type=int, required=True)
@@ -49,7 +49,7 @@ def main():
         ),
     )
     tokenizer, backbone, writer, _ = load_components(checkpoint, device)
-    data = SquadDataset(args.index)
+    data = SquadDataset(args.dataset_dir, tokenizer)
     if args.capacity not in recipe.capacities:
         raise ValueError("profile capacity must be in the recipe")
     sampler = DynamicTextSampler(data, recipe, checkpoint.config.write_context_tokens)

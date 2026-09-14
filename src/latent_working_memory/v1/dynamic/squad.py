@@ -5,9 +5,18 @@ import json
 from pathlib import Path
 import random
 
-from transformers import AutoTokenizer
-
-from latent_working_memory.data_preparation.squad import load_articles
+from latent_working_memory.data_preparation.squad import (
+    EXCLUSION_REASON,
+    RECORD_FIELDS,
+    SERIALIZATION,
+    SPLITS,
+    assign_sources,
+    can_reuse_reference_lengths,
+    load_articles,
+    paragraph_lengths,
+    split_statistics,
+    tokenizer_identity,
+)
 from latent_working_memory.v1.data import Episode, Read, Reference, Source
 
 
@@ -24,15 +33,110 @@ class SquadDataset:
     not a mandatory execution schedule.
     """
 
-    def __init__(self, index_path: Path) -> None:
-        self.index = json.loads(index_path.read_text(encoding="utf-8"))
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.index["tokenizer"], local_files_only=True
+    def __init__(self, dataset_dir: Path, tokenizer) -> None:
+        self.dataset_dir = Path(dataset_dir)
+        self.tokenizer = tokenizer
+        expected_files = {"preparation.json", *(f"{s}.jsonl" for s in SPLITS)}
+        if {p.name for p in self.dataset_dir.iterdir()} != expected_files:
+            raise ValueError(
+                "SQuAD dataset requires preparation.json and train/dev/test.jsonl only"
+            )
+        self.preparation = json.loads((self.dataset_dir / "preparation.json").read_text())
+        meta = self.preparation
+        if meta["format"] != "squad-article-references-v1" or meta["source_version"] != "1.1":
+            raise ValueError("unsupported SQuAD preparation format")
+        if not isinstance(meta["preparation_id"], str) or not meta["preparation_id"]:
+            raise ValueError("SQuAD preparation_id required")
+        if type(meta["seed"]) is not int or meta["seed"] < 0:
+            raise ValueError("invalid SQuAD split seed")
+        if set(meta["source_files"]) != {"train", "dev"}:
+            raise ValueError("SQuAD requires official train and dev sources")
+        articles = [
+            article
+            for split in ("train", "dev")
+            for article in load_articles(self.dataset_dir / meta["source_files"][split], split)
+        ]
+        sources = {a["document_id"]: a for a in articles}
+        assignments = assign_sources(articles, meta["seed"])
+        current = tokenizer_identity(tokenizer)
+        self.reference_lengths = can_reuse_reference_lengths(
+            meta["reference_tokenizer"], current, meta["serialization"]
         )
-        self.records = {r["document_id"]: r for r in self.index["articles"]}
-        self.articles = {}
-        for split, path in self.index["source_files"].items():
-            self.articles.update({a["document_id"]: a for a in load_articles(Path(path), split)})
+        rows = {
+            s: [
+                json.loads(line)
+                for line in (self.dataset_dir / f"{s}.jsonl").read_text().splitlines()
+            ]
+            for s in SPLITS
+        }
+        rows["excluded"] = meta["excluded"]
+        self.records, self.articles = {}, {}
+        seen = set()
+        for split, records in rows.items():
+            for record in records:
+                expected = RECORD_FIELDS | ({"reason"} if split == "excluded" else set())
+                if set(record) != expected:
+                    raise ValueError("invalid SQuAD article reference fields")
+                doc = record["document_id"]
+                if doc in seen or doc not in sources:
+                    raise ValueError("duplicate or unknown SQuAD document_id")
+                seen.add(doc)
+                article = sources[doc]
+                assignment = assignments[doc]
+                if (
+                    record["official_split"] != article["official_split"]
+                    or type(record["article_index"]) is not int
+                    or doc != f"squad:{record['official_split']}:{record['article_index']}"
+                    or record["title"] != article["title"]
+                    or record["group_id"] != assignment["group"]
+                    or split != assignment["split"]
+                ):
+                    raise ValueError("SQuAD source location, group or split differs")
+                lengths = record["reference_paragraph_tokens"]
+                if (
+                    type(record["paragraph_count"]) is not int
+                    or record["paragraph_count"] != len(article["paragraphs"])
+                    or type(record["question_count"]) is not int
+                    or record["question_count"] != sum(len(p["qas"]) for p in article["paragraphs"])
+                    or not isinstance(lengths, list)
+                    or len(lengths) != record["paragraph_count"]
+                    or any(type(n) is not int or n <= 0 for n in lengths)
+                    or type(record["reference_input_tokens"]) is not int
+                    or record["reference_input_tokens"] != sum(lengths)
+                ):
+                    raise ValueError("SQuAD article attributes or reference lengths differ")
+                if split == "excluded":
+                    if record["reason"] != EXCLUSION_REASON:
+                        raise ValueError("invalid SQuAD exclusion reason")
+                    continue
+                actual_lengths = (
+                    list(lengths)
+                    if self.reference_lengths
+                    else paragraph_lengths(article, tokenizer)
+                )
+                self.records[doc] = dict(
+                    record,
+                    split=split,
+                    input_tokens=sum(actual_lengths),
+                    paragraph_tokens=actual_lengths,
+                    questions=record["question_count"],
+                )
+                self.articles[doc] = article
+            if meta["splits"][split] != split_statistics(records):
+                raise ValueError("SQuAD split statistics differ")
+        if seen != sources.keys():
+            raise ValueError("SQuAD source articles missing from splits or exclusions")
+        self.index = {
+            "format": "squad-runtime-v1",
+            "preparation_id": meta["preparation_id"],
+            "tokenizer": {
+                k: v for k, v in current.items() if k not in {"name_or_path", "revision"}
+            },
+            "serialization": SERIALIZATION,
+            "articles": list(self.records.values()),
+        }
+        if current["backend_fingerprint"] is None:
+            self.index["tokenizer"]["name_or_path"] = current["name_or_path"]
 
     def select(self, split: str, min_tokens: int, max_tokens: int) -> list[str]:
         """Select complete articles in an inclusive length interval."""
@@ -66,7 +170,11 @@ class SquadDataset:
         for i, paragraph in enumerate(paragraphs):
             start = len(ids)
             ids.extend(
-                self.tokenizer.encode(paragraph["context"] + "\n\n", add_special_tokens=False)
+                self.tokenizer.encode(
+                    paragraph["context"] + SERIALIZATION["paragraph_suffix"],
+                    add_special_tokens=False,
+                    truncation=False,
+                )
             )
             end = len(ids)
             ends.append(end)
@@ -102,7 +210,9 @@ class SquadDataset:
         if [b - a for a, b in zip((0, *ends[:-1]), ends)] != self.records[document_id][
             "paragraph_tokens"
         ][paragraph_start:paragraph_end]:
-            raise ValueError("source/tokenizer lengths differ from index; rebuild the index")
+            raise ValueError(
+                "source/tokenizer lengths differ; rebuild reference lengths or reload runtime data"
+            )
         return Episode(episode_id, tuple(ids), tuple(ends), tuple(sources), tuple(reads))
 
 
