@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from collections import Counter
 
 import pytest
 import torch
@@ -147,8 +148,10 @@ def test_evaluation_controls_share_targets_budgets_and_write_test_split(
 
     def traced(memories, tokens, text_contexts=None, use_reader_lora=True):
         if text_contexts is not None:
-            raw_calls.append((tokens[0], text_contexts[0], use_reader_lora))
-            assert all(len(memory) == 0 for memory in memories)
+            for memory, task, context in zip(memories, tokens, text_contexts, strict=True):
+                if context:
+                    raw_calls.append((task, context, use_reader_lora))
+                    assert len(memory) == 0
         return original(memories, tokens, text_contexts, use_reader_lora)
 
     monkeypatch.setattr(backbone, "read_batch", traced)
@@ -181,18 +184,18 @@ def test_evaluation_controls_share_targets_budgets_and_write_test_split(
             for condition in ("full_context", "base_full_context"):
                 assert paired[condition]["text_context_tokens"] == paired[condition]["input_tokens"]
             assert paired["base_full_context"]["reader_lora"] is False
-    cursor = 0
+    expected_raw_calls = []
     panel_episodes = {}
     for i in index.evaluation_panel(
         tiny_config.eval_examples, tiny_config.data_seed + 1, tiny_config.input_length_bounds
     ):
         episode = index[i]
         panel_episodes[episode.episode_id] = episode
-        task, context, lora = raw_calls[cursor]
-        assert context == episode.input_ids and lora
-        assert raw_calls[cursor + 1] == (task, episode.input_ids, False)
-        cursor += 2
-    assert cursor == len(raw_calls)
+        ae, lm = read_tokens(episode, tokenizer)
+        expected_raw_calls.extend(
+            ((ae or lm, episode.input_ids, True), (ae or lm, episode.input_ids, False))
+        )
+    assert Counter(raw_calls) == Counter(expected_raw_calls)
     assert all(r["condition"] != "recent_context" for r in records)
     assert all(r["condition"] != "no_memory" for r in records if r["task"] == "ae")
     removed = {"sequence_match", "normalized_token_edit_distance", "correct_tokens"}
@@ -221,21 +224,31 @@ def test_evaluation_controls_share_targets_budgets_and_write_test_split(
         r["memory_tokens"] > 0 for r in records if "prediction" in r
     ) + 2 * len({r["episode_id"] for r in records if "prediction" in r})
 
-
     diagnostic = evaluate_pretraining(
-        tiny_config, tokenizer, backbone, writer, index, tmp_path / "prefix", 2, 1234,
-        "test", prefix_tokens=(1,),
+        tiny_config,
+        tokenizer,
+        backbone,
+        writer,
+        index,
+        tmp_path / "prefix",
+        2,
+        1234,
+        "test",
+        prefix_tokens=(1,),
     )
     assert set(diagnostic["prefix_diagnostics"]) == {"memory/prefix-1", "wrong_memory/prefix-1"}
     assert diagnostic["groups"]["all/ae/memory"]["nll"] == metrics["groups"]["all/ae/memory"]["nll"]
-    suffix_rows = [json.loads(line) for line in
-                   (tmp_path / "prefix/test-step-000002-prefix.jsonl").read_text().splitlines()]
+    suffix_rows = [
+        json.loads(line)
+        for line in (tmp_path / "prefix/test-step-000002-prefix.jsonl").read_text().splitlines()
+    ]
     for row in suffix_rows:
         episode = panel_episodes[row["episode_id"]]
         target, _ = read_tokens(episode, tokenizer)
-        assert row["reference"] == tokenizer.decode(target.target_ids[1:-1], skip_special_tokens=True)
+        assert row["reference"] == tokenizer.decode(
+            target.target_ids[1:-1], skip_special_tokens=True
+        )
         assert row["target_tokens"] == len(target.target_ids) - 2
-
 
 
 def test_memory_bytes_and_byte_token_area() -> None:

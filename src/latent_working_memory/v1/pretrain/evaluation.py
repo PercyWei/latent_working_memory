@@ -18,6 +18,13 @@ from latent_working_memory.v1.model import JointMemoryWriter
 from latent_working_memory.v1.objectives import ReaderOutput
 from latent_working_memory.v1.pretrain.sampling import capacity_weights, read_tokens
 from latent_working_memory.v1.state import MemoryState
+from latent_working_memory.v1.pretrain.evaluation_batching import (
+    EvaluationBatching,
+    ReadJob,
+    GenerationJob,
+    read_batches,
+    generation_batches,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +127,7 @@ def evaluate_pretraining(
     training_input_tokens: int,
     split: str = "dev",
     prefix_tokens: tuple[int, ...] = (),
+    batching: EvaluationBatching | None = None,
 ) -> dict[str, Any]:
     if split not in {"dev", "test"}:
         raise ValueError("evaluation split must be dev or test")
@@ -135,14 +143,15 @@ def evaluate_pretraining(
         )
     if any(type(n) is not int or n <= 0 for n in prefix_tokens):
         raise ValueError("diagnostic prefix lengths must be positive integers")
+    batching = EvaluationBatching() if batching is None else batching
     prefix_records = []
     was_training = backbone.training, writer.training
     backbone.eval()
     writer.eval()
-    records, generation_jobs = [], []
+    records, read_jobs, generation_jobs = [], [], []
     generated_ae_views = 0
     try:
-        for episode in panel:
+        for episode_number, episode in enumerate(panel):
             source = episode.sources[0]
             ae, lm = read_tokens(episode, tokenizer)
             if ae is not None:
@@ -157,8 +166,7 @@ def evaluate_pretraining(
             )
             # Raw-context controls are independent of K and are evaluated once per task.
             empty = writer.initialize_state().values
-            raw_statistics = {}
-            raw_generation_records = {"full_context": [], "base_full_context": []}
+            raw_records = {"full_context": [], "base_full_context": []}
             generate_ae = (
                 ae is not None
                 and generated_ae_views <= config.eval_generation_examples
@@ -166,20 +174,17 @@ def evaluate_pretraining(
                     step % config.eval_generation_every == 0 or step in config.eval_generation_steps
                 )
             )
-            for task_name, task in (("ae", ae), ("continuation", lm)):
+            for task in (ae, lm):
                 if task is not None:
-                    raw_statistics[task_name] = {
-                        condition: _read_statistics(
-                            backbone.read_batch(
-                                [empty], [task], [episode.input_ids], use_reader_lora=use_lora
-                            )[0],
-                            task,
+                    for condition, use_lora in (
+                        ("full_context", True),
+                        ("base_full_context", False),
+                    ):
+                        read_jobs.append(
+                            ReadJob(
+                                raw_records[condition], empty, task, episode.input_ids, use_lora
+                            )
                         )
-                        for condition, use_lora in (
-                            ("full_context", True),
-                            ("base_full_context", False),
-                        )
-                    }
             features = backbone.text_features([episode.input_ids, donor.input_ids], [0, 0])
             for capacity in sorted(capacities):
                 common = {
@@ -206,31 +211,23 @@ def evaluate_pretraining(
                     task_conditions = dict(conditions)
                     if task_name == "continuation":
                         task_conditions["no_memory"] = memories[0].values[:0]
-                    outputs = backbone.read_batch(
-                        list(task_conditions.values()), [task] * len(task_conditions)
-                    )
-                    for (condition, memory), output in zip(
-                        task_conditions.items(), outputs, strict=True
-                    ):
-                        record = (
-                            common
-                            | _read_statistics(output, task)
-                            | {
-                                "condition": condition,
-                                "task": task_name,
-                                "memory_bytes": memory.numel() * memory.element_size(),
-                                "memory_tokens": len(memory),
-                                "text_context_tokens": 0,
-                                "reader_lora": True,
-                                "wrong_memory_episode_id": donor.episode_id
-                                if condition == "wrong_memory"
-                                else None,
-                            }
-                        )
+                    for condition, memory in task_conditions.items():
+                        record = common | {
+                            "condition": condition,
+                            "task": task_name,
+                            "memory_bytes": memory.numel() * memory.element_size(),
+                            "memory_tokens": len(memory),
+                            "text_context_tokens": 0,
+                            "reader_lora": True,
+                            "wrong_memory_episode_id": donor.episode_id
+                            if condition == "wrong_memory"
+                            else None,
+                        }
+                        read_jobs.append(ReadJob([record], memory, task))
                         if task_name == "ae" and generate_ae:
                             record["reference"] = episode.reads[0].references[0].text
                             generation_jobs.append(
-                                ([record], memory.clone(), task.prompt_ids, task, True)
+                                GenerationJob([record], memory.clone(), task.prompt_ids, task, True)
                             )
                             for prefix_length in prefix_tokens:
                                 if prefix_length >= len(task.target_ids) - 1:
@@ -249,7 +246,7 @@ def evaluate_pretraining(
                                 }
                                 prefix_records.append(diagnostic)
                                 generation_jobs.append(
-                                    (
+                                    GenerationJob(
                                         [diagnostic],
                                         memory.clone(),
                                         prompt,
@@ -262,61 +259,53 @@ def evaluate_pretraining(
                         ("full_context", True),
                         ("base_full_context", False),
                     ):
-                        record = (
-                            common
-                            | raw_statistics[task_name][condition]
-                            | {
-                                "condition": condition,
-                                "task": task_name,
-                                "memory_bytes": 0,
-                                "memory_tokens": 0,
-                                "text_context_tokens": len(episode.input_ids),
-                                "reader_lora": use_lora,
-                                "wrong_memory_episode_id": None,
-                            }
-                        )
+                        record = common | {
+                            "condition": condition,
+                            "task": task_name,
+                            "memory_bytes": 0,
+                            "memory_tokens": 0,
+                            "text_context_tokens": len(episode.input_ids),
+                            "reader_lora": use_lora,
+                            "wrong_memory_episode_id": None,
+                        }
                         records.append(record)
+                        raw_records[condition].append(record)
                         if task_name == "ae" and generate_ae:
                             record["reference"] = episode.reads[0].references[0].text
-                            raw_generation_records[condition].append(record)
             if generate_ae:
                 for condition, use_lora in (("full_context", True), ("base_full_context", False)):
                     generation_jobs.append(
-                        (
-                            raw_generation_records[condition],
+                        GenerationJob(
+                            raw_records[condition],
                             empty,
                             (*episode.input_ids, *ae.prompt_ids),
                             ae,
                             use_lora,
                         )
                     )
-        for use_lora in (True, False):
-            jobs = sorted(
-                (job for job in generation_jobs if job[4] == use_lora),
-                key=lambda job: len(job[1]) + len(job[2]) + len(job[3].target_ids),
+            # Keep GPU memories bounded while still packing requests across examples.
+            if (episode_number + 1) % 16 == 0 or episode_number + 1 == len(panel):
+                _score_read_jobs(backbone, read_jobs, batching)
+                read_jobs.clear()
+        for batch in generation_batches(generation_jobs, batching):
+            predictions = backbone.greedy_students(
+                [job.memory for job in batch],
+                [job.prompt for job in batch],
+                [job.target_length for job in batch],
+                use_reader_lora=batch[0].use_lora,
             )
-            for start in range(0, len(jobs), 8):
-                batch = jobs[start : start + 8]
-                predictions = backbone.greedy_students(
-                    [job[1] for job in batch],
-                    [job[2] for job in batch],
-                    [len(job[3].target_ids) for job in batch],
-                    use_reader_lora=use_lora,
+            for job, prediction in zip(batch, predictions, strict=True):
+                content = (
+                    prediction[:-1]
+                    if prediction and prediction[-1] == tokenizer.eos_token_id
+                    else prediction
                 )
-                for (paired_records, _, _, task, _), prediction in zip(
-                    batch, predictions, strict=True
-                ):
-                    content = (
-                        prediction[:-1]
-                        if prediction and prediction[-1] == tokenizer.eos_token_id
-                        else prediction
-                    )
-                    prefix_ratio = correct_prefix_ratio(content, task.target_ids[:-1])
-                    text = tokenizer.decode(prediction, skip_special_tokens=True)
-                    for record in paired_records:
-                        record["correct_prefix_ratio"] = prefix_ratio
-                        record["prediction"] = text
-                        record["exact_match"] = content == task.target_ids[:-1]
+                prefix_ratio = correct_prefix_ratio(content, job.task.target_ids[:-1])
+                text = tokenizer.decode(prediction, skip_special_tokens=True)
+                for record in job.records:
+                    record["correct_prefix_ratio"] = prefix_ratio
+                    record["prediction"] = text
+                    record["exact_match"] = content == job.task.target_ids[:-1]
     finally:
         backbone.train(was_training[0])
         writer.train(was_training[1])
@@ -365,6 +354,21 @@ def evaluate_pretraining(
         json.dumps(metrics, ensure_ascii=False, indent=2) + "\n"
     )
     return metrics
+
+
+def _score_read_jobs(backbone, jobs, batching):
+    for batch in read_batches(jobs, batching):
+        contexts = [job.text_context for job in batch]
+        outputs = backbone.read_batch(
+            [job.memory for job in batch],
+            [job.task for job in batch],
+            contexts if any(contexts) else None,
+            batch[0].use_lora,
+        )
+        for job, output in zip(batch, outputs, strict=True):
+            stats = _read_statistics(output, job.task)
+            for record in job.records:
+                record.update(stats)
 
 
 def _read_statistics(output: ReaderOutput, task: ReadTokens) -> dict[str, Any]:
