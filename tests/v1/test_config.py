@@ -7,7 +7,7 @@ from latent_working_memory.v1.config import ExperimentConfig, load_config, write
 
 
 def test_pilot_round_trip(tmp_path):
-    config = load_config(Path(__file__).resolve().parents[2] / "configs/v1/pilot.json")
+    config = load_config(Path(__file__).resolve().parents[2] / "configs/archive/pilot.json")
     assert config.pretrain_compression_ratios == (2, 4, 8)
     output = tmp_path / "resolved.json"
     write_resolved_config(config, output)

@@ -1,12 +1,14 @@
 # 20260912_latent_working_memory
 
-最后修订时间：20260914 10:16:54 UTC+08:00
+最后修订时间：20260914 11:48:20 UTC+08:00
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理；ICAE v1 和 C-DIC 分别位于 `reproductions/icae/` 与 `reproductions/cdic/`，各自使用独立的 `uv` 环境。
 
 ## 主环境与开发
 
 数据构造、主实验训练与评估统一使用项目根目录 `.venv/`，依赖由根目录 `pyproject.toml` 与 `uv.lock` 管理。通用数据构造入口位于 `src/latent_working_memory/data_preparation/`，训练与实验代码按阶段放在 `src/latent_working_memory/v1/` 的对应子目录，正式配置位于 `configs/`；执行记录与日志写入 `artifacts/`。
+
+创建和整理配置遵守 [配置组织规则](configs/README.md)：基础数据准备与实验选样分开，每个配置目录只描述一个具体实验，实验组通过运行记录关联；文末注明现有配置的迁移状态。
 
 数据构造按流程分包：[pretrain/](src/latent_working_memory/data_preparation/pretrain/) 负责 FineWeb 预训练文本构造、质量审查与恢复，[personamem/](src/latent_working_memory/data_preparation/personamem/) 负责事实 QA 构造。预训练的来源、句界、截断、文本格式、审查和恢复模块均位于 `pretrain/`；训练时的数据读取与实验选样继续使用 `v1/pretrain/prepared_data.py` 和 `v1/pretrain/data_selection.py`。
 
@@ -58,7 +60,7 @@ v1 测试覆盖损失与梯度、原文边界、规则句界、任务配额与�
 ```bash
 CUDA_VISIBLE_DEVICES=0 uv run python -m latent_working_memory.v1.pretrain.train \
   --phase pretrain \
-  --config configs/v1/pretrain_a800.json \
+  --config configs/archive/pretrain_a800.json \
   --data-dir data/fineweb-independent/semantic \
   --output-dir artifacts/v1/pretrain-pilot/train/pretrain-pilot \
   --max-steps 1000
@@ -157,4 +159,6 @@ uv sync --project reproductions/cdic --frozen
   --output-dir artifacts/v1/<新的目标对比实验目录>
 ```
 
-两者均串行执行双卡训练，按来源单卡并行测试，将最终 test 追加到训练 run，并单独发布跨组比较。正式配置显式指定 GPU、保存间隔与测试数量；目标对比另行指定 warm-up 继承步数和 prefix 诊断。旧 `artifacts/` 下的调度脚本仅为历史记录，不作为启动入口。
+两者均串行执行双卡训练，按来源单卡并行测试，将最终 test 追加到训练 run，并单独发布跨组比较。正式配置显式指定 GPU、保存间隔与测试数量；目标对比的 AE-only、joint、AE warm-up 从相同初始化各自训练，AE warm-up 自行完成前 5,000 步 AE 后切换联合目标，不继承 AE-only checkpoint。prefix 诊断由评估配置指定。旧 `artifacts/` 下的调度脚本仅为历史记录，不作为启动入口。
+
+早期 pilot、冒烟验证、学习率探索等旧配置统一存放在 [configs/archive/](configs/archive/README.md)，保留原参数供历史记录定位；当前正式实验不引用这些配置。动态训练使用预训练 checkpoint 的阶段依赖保留。

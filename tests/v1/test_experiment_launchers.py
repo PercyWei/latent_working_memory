@@ -47,8 +47,9 @@ def test_execution_rejects_gpu_overlap(tmp_path, monkeypatch):
         execution.stage([("a", ["unused"], [4, 5]), ("b", ["unused"], [4, 5])])
 
 
-def test_objective_launcher_keeps_warmup_dependency(tmp_path, monkeypatch):
+def test_objective_launcher_can_start_with_independent_warmup(tmp_path, monkeypatch):
     spec = json.loads(open("configs/experiments/pretrain-objective-comparison-128.json").read())
+    spec["runs"] = [spec["runs"][2], *spec["runs"][:2]]
     selection = tmp_path / "selection.json"
     selection.write_text(json.dumps({"sources": {"semantic": "unused", "random": "unused"}}))
     note = tmp_path / "note.md"
@@ -68,9 +69,8 @@ def test_objective_launcher_keeps_warmup_dependency(tmp_path, monkeypatch):
     training = [c for c in commands if "latent_working_memory.v1.pretrain.train" in c]
     assert len(training) == 3
     assert all(c[c.index("--data-run") + 1] == "mixed" for c in training)
-    assert "--fork-from" not in training[0] and "--fork-from" not in training[1]
-    parent = training[2][training[2].index("--fork-from") + 1]
-    assert parent == str(output / "train" / spec["runs"][0]["name"] / "checkpoints/pretrain-step-005000.pt")
+    assert training[0][training[0].index("--config") + 1] == spec["runs"][0]["config"]
+    assert all("--fork-from" not in command and "--resume" not in command for command in training)
     evaluations = [c for c in commands if "latent_working_memory.v1.pretrain.evaluate" in c]
     assert len(evaluations) == 6
     assert all(c[c.index("--prefix-tokens") + 1:c.index("--prefix-tokens") + 4] == ["1", "8", "32"] for c in evaluations)

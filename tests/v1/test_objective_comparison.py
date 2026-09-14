@@ -55,7 +55,7 @@ def test_warmup_configuration_requires_enabled_joint_objective(tiny_config):
         replace(tiny_config, pretrain_ae_warmup_steps=5)
 
 
-def test_fork_inherits_optimizer_and_continues_with_joint_batch(
+def test_warmup_trains_independently_from_first_step_and_switches_to_joint(
     parquet_source,
     tmp_path, tiny_config, tokenizer, preparation_records, preparation_recipe
 ):
@@ -85,19 +85,17 @@ def test_fork_inherits_optimizer_and_continues_with_joint_batch(
         'source_weights': {'semantic': .5, 'random': .5},
     }))
     evaluation_dirs = {name: root / name for name in ('semantic', 'random')}
-    first = run_pretraining(config, mixed, tmp_path / 'ae', torch.device('cpu'),
-                            max_steps=1, save_every=1, evaluation_dirs=evaluation_dirs)
     joint_config = replace(config, ae_weight=.5, lm_weight=.5, pretrain_ae_warmup_steps=1)
-    second = run_pretraining(joint_config, mixed, tmp_path / 'warmup', torch.device('cpu'),
-                             max_steps=2, save_every=1, evaluation_dirs=evaluation_dirs,
-                             fork_from=first.final_checkpoint)
-    checkpoint = load_model_checkpoint(second.final_checkpoint)
+    result = run_pretraining(joint_config, mixed, tmp_path / 'warmup', torch.device('cpu'),
+                             max_steps=2, save_every=1, evaluation_dirs=evaluation_dirs)
+    checkpoint = load_model_checkpoint(result.final_checkpoint)
     assert checkpoint.progress['next_step'] == 2
     assert checkpoint.progress['sampler']['visits'] == 8
     assert all(state['step'].item() == 2 for state in checkpoint.optimizer_state['state'].values())
     log = next((tmp_path / 'warmup').glob('train-from-*.jsonl'))
-    record = json.loads(log.read_text())
-    assert record['step'] == 2 and record['task_weights'] == {'ae': .5, 'continuation': .5}
-    assert sum(s['ae_nll'] is not None for s in record['samples']) == 2
-    provenance = json.loads((tmp_path / 'warmup/provenance.json').read_text())
-    assert provenance['inherited_steps'] == 1
+    first, second = [json.loads(line) for line in log.read_text().splitlines()]
+    assert first['step'] == 1 and first['task_weights'] == {'ae': 1., 'continuation': 0.}
+    assert all(s['ae_nll'] is not None and s['lm_nll'] is None for s in first['samples'])
+    assert second['step'] == 2 and second['task_weights'] == {'ae': .5, 'continuation': .5}
+    assert sum(s['ae_nll'] is not None for s in second['samples']) == 2
+    assert sum(s['lm_nll'] is not None for s in second['samples']) == 2

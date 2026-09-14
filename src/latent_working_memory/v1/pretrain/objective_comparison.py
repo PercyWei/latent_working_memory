@@ -33,11 +33,8 @@ def run_series(spec, output):
                     "--data-run", "mixed",
                     "--output-dir", str(directory), "--max-steps", str(spec["max_steps"]),
                     "--save-every", str(spec["save_every"]), "--swanlab-mode", "online", *groups]
-            if "fork_from_run" in run:
-                argv += ["--fork-from", str(output / "train" / run["fork_from_run"] /
-                                          f"checkpoints/pretrain-step-{run['fork_step']:06d}.pt")]
             training_jobs.append((run["label"] + "-train", argv, spec["gpus"]))
-        # Each training job occupies both GPUs; the parent finishes before warm-up forks.
+        # Each independent training job occupies both GPUs.
         for job in training_jobs:
             stage([job])
         for run in spec["runs"]:
@@ -87,7 +84,7 @@ def summarize(spec, output, reports):
         lines.append(f"| {entry['training_source']} | {entry['evaluation_source']} | {ae['nll']:.4f} | "
                      f"{lm['nll']:.4f} | {ae['bleu_4']:.3f} | {ae['correct_prefix_ratio']:.3%} | {ae['exact_match']:.3%} |")
     lines += ["", f"以上为 step {spec['max_steps']} 的独立 test，NLL 不含 EOS。结果来自单模型 seed；"
-              "warm-up 与直接联合的目标暴露量不同。继承的 checkpoint 见 plan/series.json。", "",
+              "三项实验各自从相同初始化训练，warm-up 与直接联合的目标暴露量不同。", "",
               "| 训练组 | 训练 | 评估 |", "|---|---|---|"]
     for run in spec["runs"]:
         train = json.loads((output / "train" / run["name"] / "swanlab.json").read_text())

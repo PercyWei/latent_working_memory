@@ -218,7 +218,6 @@ def run_pretraining(
     swanlab_group: str | None = None,
     swanlab_tags: tuple[str, ...] = (),
     evaluation_dirs: dict[str, Path] | None = None,
-    fork_from: Path | None = None,
     data_selection: Path | None = None,
     data_run: str | None = None,
 ) -> PretrainRunResult:
@@ -231,8 +230,6 @@ def run_pretraining(
         or (train_example_limit is not None and train_example_limit <= 0)
     ):
         raise ValueError("step counts and optional example limit must be positive")
-    if resume is not None and fork_from is not None:
-        raise ValueError("resume and fork_from are mutually exclusive")
     if output_dir.exists() and resume is None:
         raise FileExistsError("use a new output directory or resume an existing run")
     if (data_dir is None) == (data_selection is None):
@@ -306,21 +303,9 @@ def run_pretraining(
     next_step, input_tokens, target_tokens = 0, 0, 0
     seen_documents: set[str] = set()
     checkpoint = None
-    if resume or fork_from:
-        checkpoint = load_model_checkpoint(resume or fork_from)
-        if fork_from:
-            changed = {
-                k for k, v in config.to_dict().items() if checkpoint.config.to_dict()[k] != v
-            }
-            if (
-                not config.pretrain_balanced_batches
-                or changed - {"ae_weight", "lm_weight", "pretrain_ae_warmup_steps"}
-                or config.pretrain_ae_warmup_steps != checkpoint.progress["next_step"]
-                or checkpoint.config.lm_weight != 0
-                or checkpoint.config.ae_weight != 1
-            ):
-                raise ValueError("fork must inherit the complete identical AE warm-up prefix")
-        if checkpoint.phase != "pretrain" or (not fork_from and checkpoint.config != config):
+    if resume:
+        checkpoint = load_model_checkpoint(resume)
+        if checkpoint.phase != "pretrain" or checkpoint.config != config:
             raise ValueError("checkpoint phase/config differs from this pretraining run")
         if checkpoint.progress["run_identity"] != run_identity:
             raise ValueError("checkpoint data preparation or sampling limit differs")
@@ -349,8 +334,6 @@ def run_pretraining(
                     "device": str(device),
                     "model_dtype": str(dtype),
                     "run_identity": run_identity,
-                    "fork_from": str(fork_from.resolve()) if fork_from else None,
-                    "inherited_steps": next_step if fork_from else 0,
                 },
                 ensure_ascii=False,
                 indent=2,
