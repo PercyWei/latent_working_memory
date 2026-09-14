@@ -10,7 +10,7 @@ import swanlab
 
 from latent_working_memory.v1.reporting import configure_line_panels
 from latent_working_memory.v1.dynamic.evaluation import aggregate_qa
-from latent_working_memory.v1.reporting import CONDITION_COLORS, _bar
+from latent_working_memory.v1.reporting import CONDITION_COLORS, _bar, _shade
 from latent_working_memory.v1.tracking import swanlab_run, swanlab_training_run
 
 
@@ -22,6 +22,9 @@ COLORS = {
     "gold_paragraph_base": CONDITION_COLORS["base_full_context"],
 }
 CONDITIONS = tuple(COLORS)
+COLORS.update(no_memory_base="#BBC1C6", no_memory_pretrain="#9099A1")
+DISPLAY_CONDITIONS = ("memory", "wrong_memory", "no_memory_base", "no_memory_pretrain",
+                      "no_memory", "gold_paragraph", "gold_paragraph_base")
 CORE_METRICS = ("nll", "em", "f1")
 
 
@@ -40,48 +43,60 @@ def bar(labels, series):
     return _bar(labels, series, labels, COLORS, "condition")
 
 
-def qa_media(metrics, rows, prefix="evaluation/test/overview", charts=True):
+def qa_media(reports, prefix="evaluation/test/overview", charts=True):
+    """Group final conditions by evaluation dataset; keep tables and examples paired."""
     values = {}
+    datasets = list(reports)
     if charts:
         for metric in CORE_METRICS:
-            conditions = [c for c in CONDITIONS if metric in metrics.get(f"overall/{c}/all", {})]
-            if conditions:
-                values[f"{prefix}/{metric}"] = bar(
-                    conditions,
-                    {"squad": [metrics[f"overall/{c}/all"][metric] for c in conditions]},
-                )
-    # Counts, arrival/delayed, capacity/ratio, delays and paired differences stay inspectable.
-    for name, selected in (
-        ("summary", [key for key in metrics if key.startswith("overall/")]),
-        ("details", [key for key in metrics if not key.startswith("overall/")]),
-    ):
-        if selected:
-            values[f"{prefix}/{name}"] = table([{"group": key, **metrics[key]} for key in selected])
-    examples = {}
-    for row in rows:
-        if "prediction" not in row:
-            continue
-        key = row["capacity"], row["episode_id"], row["read_id"], row["prefix_end"]
-        if key not in examples and len(examples) >= 10:
-            continue
-        examples.setdefault(key, {})[row["condition"]] = row
+            conditions = [c for c in DISPLAY_CONDITIONS
+                          if any(metric in metrics.get(f"overall/{c}/all", {})
+                                 for metrics, _ in reports.values())]
+            if not conditions:
+                continue
+            chart = swanlab.echarts.Bar().add_xaxis(datasets)
+            for condition in conditions:
+                points = []
+                for index, (metrics, _) in enumerate(reports.values()):
+                    value = metrics.get(f"overall/{condition}/all", {}).get(metric)
+                    points.append(None if value is None else {"value": round(value, 4),
+                        "itemStyle": {"color": _shade(COLORS[condition], index, len(datasets))}})
+                chart.add_yaxis(condition, points, label_opts={"show": False},
+                                itemstyle_opts={"color": COLORS[condition]})
+            chart.set_global_opts(tooltip_opts={"trigger": "axis"},
+                                  legend_opts={"type": "scroll", "top": 0},
+                                  xaxis_opts={"axisLabel": {"interval": 0}},
+                                  yaxis_opts={"minInterval": .001})
+            chart.options["grid"] = {"left": "12%", "right": "4%", "top": "20%",
+                                     "bottom": "12%", "containLabel": True}
+            values[f"{prefix}/{metric}"] = chart
+    for name, overall in (("summary", True), ("details", False)):
+        records = [{"dataset": dataset, "group": key, **metrics[key]}
+                   for dataset, (metrics, _) in reports.items()
+                   for key in metrics if key.startswith("overall/") == overall]
+        if records:
+            values[f"{prefix}/{name}"] = table(records)
+    examples = []
+    for dataset, (_, rows) in reports.items():
+        selected = {}
+        for row in rows:
+            if "prediction" not in row:
+                continue
+            key = row["capacity"], row["episode_id"], row["read_id"], row["prefix_end"]
+            if key not in selected and len(selected) >= 10:
+                continue
+            selected.setdefault(key, {})[row["condition"]] = row
+        for key, sample in selected.items():
+            reference = next(iter(sample.values()))
+            examples.append(swanlab.Text(
+                reference["question"] + "\n\nReferences: "
+                + json.dumps(reference["references"], ensure_ascii=False) + "\n\n"
+                + "\n".join(f"{c}: {sample[c]['prediction']}"
+                              for c in DISPLAY_CONDITIONS if c in sample),
+                caption=f"dataset={dataset}, K={key[0]}, {reference['kind']}, "
+                        f"delay={reference['delay_tokens']} tokens"))
     if examples:
-        values[f"{prefix}/examples"] = [
-            swanlab.Text(
-                next(iter(sample.values()))["question"]
-                + "\n\nReferences: "
-                + json.dumps(next(iter(sample.values()))["references"], ensure_ascii=False)
-                + "\n\n"
-                + "\n".join(
-                    f"{condition}: {sample[condition]['prediction']}"
-                    for condition in CONDITIONS
-                    if condition in sample
-                ),
-                caption=f"K={key[0]}, {next(iter(sample.values()))['kind']}, "
-                f"delay={next(iter(sample.values()))['delay_tokens']} tokens",
-            )
-            for key, sample in examples.items()
-        ]
+        values[f"{prefix}/examples"] = examples
     return values
 
 
@@ -149,17 +164,17 @@ def training_metrics(record):
     return values
 
 
-def log_qa(run, metrics, rows, step, split, media=False, final=False):
+def log_qa(run, metrics, rows, step, split, dataset, media=False, final=False):
     if run is None:
         return
     if final:
-        values = qa_media(metrics, rows, f"evaluation/{split}/overview")
+        values = qa_media({dataset: (metrics, rows)}, f"evaluation/{split}/overview")
     else:
         if split != "dev":
             raise ValueError("incremental validation requires the dev split")
         values = dev_scalars(metrics)
         if media:
-            values.update(qa_media(metrics, rows, "dev/overview", charts=False))
+            values.update(qa_media({dataset: (metrics, rows)}, "dev/overview", charts=False))
     run.log(values, step=step)
 
 
@@ -217,7 +232,8 @@ def append_qa_report(directory, report, mode):
         )
     )
     with context as run:
-        log_qa(run, metrics, rows, step, "test", media=True, final=True)
+        dataset, = [t.removeprefix("data:") for t in identity["tags"] if t.startswith("data:")]
+        log_qa(run, metrics, rows, step, "test", dataset, media=True, final=True)
     receipt.parent.mkdir(exist_ok=True)
     receipt.write_text(
         json.dumps(
@@ -261,7 +277,8 @@ def rebuild_training_run(directory, output_dir, mode, test_report, previous_run_
         raise ValueError("rebuilding requires initial and final dev reports within training steps")
     test_metrics, test_rows = read_report(test_report)
     # Render and validate the full publication before any cloud writes.
-    media = qa_media(test_metrics, test_rows)
+    dataset, = [t.removeprefix("data:") for t in identity["tags"] if t.startswith("data:")]
+    media = qa_media({dataset: (test_metrics, test_rows)})
     rendered = {
         key: json.loads(chart.dump_options())
         for key, chart in media.items()
@@ -291,9 +308,9 @@ def rebuild_training_run(directory, output_dir, mode, test_report, previous_run_
             if step in reports:
                 metrics, rows = reports[step]
                 log_qa(
-                    run, metrics, rows, step, "dev", media=any("prediction" in row for row in rows)
+                    run, metrics, rows, step, "dev", dataset, media=any("prediction" in row for row in rows)
                 )
-        log_qa(run, test_metrics, test_rows, total_steps, "test", media=True, final=True)
+        log_qa(run, test_metrics, test_rows, total_steps, "test", dataset, media=True, final=True)
     (output_dir / "scalar-records.jsonl").write_text(
         "".join(json.dumps(record) + "\n" for record in scalar_records)
     )

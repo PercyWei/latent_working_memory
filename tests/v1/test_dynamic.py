@@ -625,7 +625,7 @@ def test_evaluation_without_generation_matches_nll_and_caches_controls(
     for row in generated:
         row["target_ratio"] = 8
     report = aggregate_qa(generated)
-    media = qa_media(report, generated)
+    media = qa_media({"squad": (report, generated)})
     assert (
         "evaluation/test/overview/f1" in media
         and "evaluation/test/overview/details" in media
@@ -678,7 +678,7 @@ def test_dev_curves_are_sparse_native_series_and_share_final_colors():
             if em is not None:
                 values.update(em=em, f1=em + 0.1)
             report[f"overall/{condition}/all"] = values
-        log_qa(run, report, [], step, "dev")
+        log_qa(run, report, [], step, "dev", "squad")
     assert [step for step, _ in calls] == [0, 100, 250]
     assert len(calls[1][1]) == 5
     assert all("/nll/" in key for key in calls[1][1])
@@ -693,13 +693,13 @@ def test_dev_curves_are_sparse_native_series_and_share_final_colors():
     assert all(panel["config"]["xAxis"]["key"] == "step" for panel in panels.values())
     assert all(len(panel["config"]["yAxis"]) == 5 for panel in panels.values())
     styles = dynamic_reporting.dev_panel_style(panels["dev/overview/nll"], "run")
-    media = qa_media(report, [])
+    media = qa_media({"squad": (report, [])})
     assert set(media) == {
         f"evaluation/test/overview/{key}" for key in ("nll", "em", "f1", "summary")
     }
     series = json.loads(media["evaluation/test/overview/nll"].dump_options())["series"]
     for condition, item in zip(dynamic_reporting.CONDITIONS, series, strict=True):
-        assert item["name"] == f"condition={condition} / test=squad"
+        assert item["name"] == condition
         assert (
             styles[f"run-dev/overview/nll/{condition}"]["colors"][0].lower()
             == item["itemStyle"]["color"].lower()
@@ -716,7 +716,7 @@ def saved_dynamic_run(tmp_path):
         "id": "original",
         "project": "test",
         "group": "series",
-        "tags": [],
+        "tags": ["data:squad"],
         "mode": "online",
     }
     provenance = {

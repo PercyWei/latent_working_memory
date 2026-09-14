@@ -337,10 +337,11 @@ def aggregate_qa(records):
         paired[row["capacity"], row["episode_id"], row["read_id"], row["prefix_end"]][
             row["condition"]
         ] = row
-    for condition in ("no_memory", "wrong_memory", "gold_paragraph", "gold_paragraph_base"):
-        pairs = [
-            (v["memory"], v[condition]) for v in paired.values() if "memory" in v and condition in v
-        ]
+    contrasts = [("memory", c) for c in ("no_memory", "wrong_memory", "gold_paragraph",
+                 "gold_paragraph_base", "no_memory_base", "no_memory_pretrain")]
+    contrasts += [("no_memory_pretrain", "no_memory_base"), ("no_memory", "no_memory_pretrain")]
+    for left, right in contrasts:
+        pairs = [(v[left], v[right]) for v in paired.values() if left in v and right in v]
         if pairs:
             values = {
                 "reads": len(pairs),
@@ -356,7 +357,7 @@ def aggregate_qa(records):
                     values[f"{key}_difference"] = sum(a[key] - b[key] for a, b in generated) / len(
                         generated
                     )
-            result[f"paired/memory-minus-{condition}"] = values
+            result[f"paired/{left}-minus-{right}"] = values
     return result
 
 

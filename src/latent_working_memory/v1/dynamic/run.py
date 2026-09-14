@@ -222,6 +222,7 @@ def run_dynamic(
                     rows,
                     step,
                     "dev",
+                    dataset,
                     media=generate,
                 )
 
@@ -501,7 +502,7 @@ def main():
                 fixed_tags=("scope:main", "method:latent-working-memory", f"data:{args.dataset}"),
             ) as tracking:
                 configure_dynamic_panels(tracking, args.swanlab_mode)
-                log_qa(tracking, metrics, rows, step, "dev", media=True)
+                log_qa(tracking, metrics, rows, step, "dev", args.dataset, media=True)
     if dist.is_initialized():
         dist.destroy_process_group()
 
