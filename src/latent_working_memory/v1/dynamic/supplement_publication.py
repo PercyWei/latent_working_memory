@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import time
 from pathlib import Path
 from urllib.request import urlopen
 
@@ -96,12 +97,26 @@ def media_contents(remote, keys, step):
         points = data["metrics"]
         if len(points) != 1 or points[0]["index"] != step:
             raise ValueError(f"unexpected media steps: {key}")
-        bodies = [urlopen(item["url"], timeout=30).read().decode("utf-8") for item in points[0]["items"]]
+        bodies = [
+            urlopen(item["url"], timeout=30).read().decode("utf-8") for item in points[0]["items"]
+        ]
         result[key] = bodies if key.endswith("/examples") else [json.loads(b) for b in bodies]
     return result
 
 
-def publish_supplement(run_dir, manifest, output_dir, mode):
+def wait_for_media(api, path, keys, attempts=16):
+    for attempt in range(attempts):
+        remote = api.run(path)
+        if set(keys) <= set(remote.series(metric_type="MEDIA").json()["keys"]):
+            return remote
+        if attempt + 1 < attempts:
+            time.sleep(2)
+    raise RuntimeError(
+        "cloud media indexing is not ready; resume publication after it becomes visible"
+    )
+
+
+def publish_supplement(run_dir, manifest, output_dir, mode, resume=False):
     binding = json.loads((run_dir / "republication.json").read_text())
     identity = json.loads((run_dir / "swanlab.json").read_text())
     if binding["new_run"]["id"] != identity["id"]:
@@ -115,68 +130,104 @@ def publish_supplement(run_dir, manifest, output_dir, mode):
         else [json.loads(value.dump_options())]
         for key, value in media.items()
     }
-    output_dir.mkdir(parents=True, exist_ok=False)
-    (output_dir / "media.json").write_text(
-        json.dumps(expected, ensure_ascii=False, indent=2) + "\n"
-    )
-    publication = {
-        "run": identity,
-        "source_training_run": str(source),
-        "step": step,
-        "datasets": origins,
-        "media_keys": list(expected),
-        "status": "prepared",
-    }
     receipt = output_dir / "publication.json"
-    receipt.write_text(json.dumps(publication, indent=2) + "\n")
+    if resume:
+        publication = json.loads(receipt.read_text())
+        if (
+            publication["run"] != identity
+            or publication["datasets"] != origins
+            or publication["step"] != step
+            or json.loads((output_dir / "media.json").read_text()) != expected
+        ):
+            raise ValueError("publication inputs changed on resume")
+        if publication["status"] == "complete":
+            raise ValueError("publication is already complete")
+    else:
+        output_dir.mkdir(parents=True, exist_ok=False)
+        (output_dir / "media.json").write_text(
+            json.dumps(expected, ensure_ascii=False, indent=2) + "\n"
+        )
+        publication = {
+            "run": identity,
+            "source_training_run": str(source),
+            "step": step,
+            "datasets": origins,
+            "media_keys": list(expected),
+            "status": "prepared",
+        }
+        receipt.write_text(json.dumps(publication, indent=2) + "\n")
     if mode == "disabled":
         return
     api = swanlab.Api()
     project = identity["url"].split("/@", 1)[1].split("/runs/", 1)[0]
-    remote = api.run(f"{project}/{identity['id']}")
+    run_path = f"{project}/{identity['id']}"
+    remote = api.run(run_path)
     if remote.state != "FINISHED":
         raise ValueError("supplement requires a finished cloud run")
-    existing_media = remote.series(metric_type="MEDIA").json()["keys"]
-    if set(expected) & set(existing_media):
-        raise ValueError("baseline supplement already exists; do not duplicate the same steps")
-    before = snapshot_run(remote)
+    existing_media = set(remote.series(metric_type="MEDIA").json()["keys"])
+    if not resume and set(expected) & existing_media:
+        raise ValueError("baseline supplement already exists; resume its publication instead")
     base = f"/experiment/{remote.run_id}"
-    sections = checked(api._get(f"{base}/sections", params={"size": 100}))
     old_keys = [key.replace(PREFIX, OLD_PREFIX, 1) for key in expected]
-    old_media = media_contents(remote, old_keys, step)
-    old_charts = []
-    for section in sections:
-        if section["name"] != "evaluation":
-            continue
-        for index in section["chartIndex"]:
-            chart = checked(api._get(f"{base}/chart/{index}/info"))
-            if chart["title"] in old_keys:
-                old_charts.append(chart)
-    if {c["title"] for c in old_charts} != set(old_keys):
-        raise ValueError("original final evaluation panels are missing or ambiguous")
-    (output_dir / "before.json").write_text(
-        json.dumps(
-            {"run": before, "charts": old_charts, "old_media": old_media},
-            ensure_ascii=False,
-            indent=2,
+    if resume:
+        saved = json.loads((output_dir / "before.json").read_text())
+        before, old_charts, old_media = saved["run"], saved["charts"], saved["old_media"]
+        present = set(expected) & existing_media
+        if present and media_contents(remote, present, step) != {
+            key: expected[key] for key in present
+        }:
+            raise ValueError("existing supplemental media differ from this publication")
+    else:
+        before = snapshot_run(remote)
+        old_media = media_contents(remote, old_keys, step)
+        sections = checked(api._get(f"{base}/sections", params={"size": 100}))
+        old_charts = []
+        for section in sections:
+            if section["name"] != "evaluation":
+                continue
+            for index in section["chartIndex"]:
+                chart = checked(api._get(f"{base}/chart/{index}/info"))
+                if chart["title"] in old_keys:
+                    old_charts.append(chart)
+        if {c["title"] for c in old_charts} != set(old_keys):
+            raise ValueError("original final evaluation panels are missing or ambiguous")
+        (output_dir / "before.json").write_text(
+            json.dumps(
+                {"run": before, "charts": old_charts, "old_media": old_media},
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n"
         )
-        + "\n"
-    )
-    print("Publishing new final-evaluation media to existing run", flush=True)
-    with swanlab_training_run(run_dir) as run:
-        run.log(media, step=step)
-    remote = api.run(f"{project}/{identity['id']}")
+    if snapshot_run(remote) != before:
+        raise ValueError("cloud run identity, configuration or scalar history changed")
+    pending = {key: value for key, value in media.items() if key not in existing_media}
+    if pending:
+        publication["status"] = "uploading"
+        receipt.write_text(json.dumps(publication, indent=2) + "\n")
+        print("Publishing new final-evaluation media to existing run", flush=True)
+        with swanlab_training_run(run_dir) as run:
+            run.log(pending, step=step)
+    remote = wait_for_media(api, run_path, expected)
     if media_contents(remote, expected, step) != expected:
         raise ValueError(
             "uploaded baseline charts or examples differ from the prepared publication"
         )
     if snapshot_run(remote) != before:
         raise ValueError("cloud run identity, configuration or scalar history changed")
-    # SwanLab v0 media definitions are immutable. Replace only the old chart definitions,
-    # after verifying their replacements; the metric data remain queryable in House.
+    publication["status"] = "verified"
+    receipt.write_text(json.dumps(publication, indent=2) + "\n")
+    # v0 media charts cannot be edited. Replace their definitions only after verification;
+    # keep the old House metric data and assert preservation after the change.
+    sections = checked(api._get(f"{base}/sections", params={"size": 100}))
+    remaining = {index for section in sections for index in section["chartIndex"]}
     for chart in old_charts:
-        checked(api._delete(f"{base}/chart/{chart['index']}/hard"))
-    remote = api.run(f"{project}/{identity['id']}")
+        if chart["index"] in remaining:
+            current = checked(api._get(f"{base}/chart/{chart['index']}/info"))
+            if current != chart:
+                raise ValueError("original panel was edited during publication")
+            checked(api._delete(f"{base}/chart/{chart['index']}/hard"))
+    remote = api.run(run_path)
     if media_contents(remote, old_keys, step) != old_media:
         raise ValueError("original media data changed while replacing panel definitions")
     if snapshot_run(remote) != before or remote.state != "FINISHED":
@@ -204,8 +255,13 @@ def main():
     parser.add_argument("--reports", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--swanlab-mode", choices=("disabled", "online"), default="disabled")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Continue a verified publication without resending existing media",
+    )
     args = parser.parse_args()
-    publish_supplement(args.run_dir, args.reports, args.output_dir, args.swanlab_mode)
+    publish_supplement(args.run_dir, args.reports, args.output_dir, args.swanlab_mode, args.resume)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -148,7 +149,42 @@ def test_failed_upload_verification_never_removes_old_panels(package, tmp_path, 
     monkeypatch.setattr(publication.swanlab, "Api", Api)
     monkeypatch.setattr(publication, "snapshot_run", lambda remote: {"unchanged": True})
     monkeypatch.setattr(publication, "media_contents", lambda remote, keys, step: {})
+    monkeypatch.setattr(publication, "wait_for_media", lambda *args: remote)
     monkeypatch.setattr(publication, "swanlab_training_run", session)
     with pytest.raises(ValueError, match="differ from the prepared"):
         publication.publish_supplement(display, manifest, tmp_path / "failed", "online")
     assert deleted == []
+
+
+def test_wait_for_index_visibility_does_not_reupload(monkeypatch):
+    responses = iter([[], ["new-key"]])
+    sleeps = []
+    api = SimpleNamespace(
+        run=lambda path: SimpleNamespace(
+            series=lambda **kw: SimpleNamespace(json=lambda: {"keys": next(responses)})
+        )
+    )
+    monkeypatch.setattr(publication.time, "sleep", sleeps.append)
+    publication.wait_for_media(api, "owner/project/run", ["new-key"], attempts=2)
+    assert sleeps == [2]
+
+
+def test_cli_forwards_resume(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "supplement",
+            "--run-dir",
+            "display",
+            "--reports",
+            "reports.json",
+            "--output-dir",
+            "publication",
+            "--resume",
+        ],
+    )
+    monkeypatch.setattr(publication, "publish_supplement", lambda *args: calls.append(args))
+    publication.main()
+    assert calls[0][-1] is True
