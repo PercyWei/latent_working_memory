@@ -1,0 +1,62 @@
+{
+  "model_name_or_path": "/data/bywei/models/Qwen/Qwen2.5-3B-Instruct",
+  "model_revision": null,
+  "reader_lora_rank": 16,
+  "reader_lora_alpha": 32,
+  "reader_lora_target_modules": [
+    "q_proj",
+    "v_proj"
+  ],
+  "reader_lora_dropout": 0.0,
+  "d_mem": 512,
+  "num_layers": 3,
+  "num_heads": 8,
+  "ffn_dim": 2048,
+  "k_limit": 4096,
+  "pretrain_compression_ratios": [
+    2,
+    4,
+    8
+  ],
+  "pretrain_k_min": 1,
+  "ratio_weights_start": [
+    0.3333333333333333,
+    0.3333333333333333,
+    0.3333333333333333
+  ],
+  "ratio_weights_end": [
+    0.3333333333333333,
+    0.3333333333333333,
+    0.3333333333333333
+  ],
+  "max_input_tokens": 2048,
+  "max_continuation_tokens": 2048,
+  "write_context_tokens": 4096,
+  "read_context_tokens": 4096,
+  "ae_prompt": "Reconstruct the text stored in memory:\n",
+  "lm_prompt": "Continue the text stored in memory:\n",
+  "batch_size": 4,
+  "gradient_accumulation_steps": 1,
+  "learning_rate": 3e-05,
+  "weight_decay": 0.01,
+  "gradient_clip": 1.0,
+  "gradient_checkpointing": false,
+  "data_seed": 20260907,
+  "model_seed": 42,
+  "eval_every": 1000,
+  "eval_examples": 120,
+  "eval_generation_examples": 12,
+  "eval_generation_every": 1,
+  "input_length_bounds": [
+    64,
+    128,
+    256,
+    512,
+    1024,
+    2048
+  ],
+  "warmup_steps": 600,
+  "min_lr_fraction": 0.1,
+  "compression_mode": "sample",
+  "ratio_curriculum_epochs": 1
+}

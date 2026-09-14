@@ -13,10 +13,10 @@ PRETRAIN = Path("configs/v1/pretrain")
 DYNAMIC = Path("configs/v1/dynamic")
 
 
-def test_all_ten_experiments_have_independent_valid_configs():
+def test_pretrain_and_squad_experiments_have_independent_valid_configs():
     pretraining = sorted(PRETRAIN.glob("*/experiment.json"))
     dynamics = sorted(DYNAMIC.glob("*_squad/experiment.json"))
-    assert len(pretraining) == 7 and len(dynamics) == 3
+    assert len(pretraining) == 8 and len(dynamics) == 3
     for path, loader in [(p, pretrain.load_pretrain_experiment) for p in pretraining] + [
         (p, dynamic.load_dynamic_experiment) for p in dynamics
     ]:
@@ -24,7 +24,8 @@ def test_all_ten_experiments_have_independent_valid_configs():
         assert "group" not in spec and "runs" not in spec
         assert Path(spec["model"]).parent == path.parent.resolve()
         assert Path(spec["selection"]).parent == path.parent.resolve()
-        assert spec["gpus"] == [4, 5]
+        expected_gpus = [6, 7] if path.parent.name.endswith("_epoch64k") else [4, 5]
+        assert spec["gpus"] == expected_gpus
     qwen = json.loads((PRETRAIN / "qwen2.5-3b-instruct_mixed-2048/selection.json").read_text())
     assert qwen["evaluation"]["samples_per_source"] == {"dev": None, "test": None}
     assert qwen["training"]["source_schedule"][0]["weights"] == {"semantic": 0.5, "random": 0.5}
@@ -150,12 +151,19 @@ def test_execution_rejects_gpu_overlap(tmp_path):
         execution.stage([("a", ["unused"], [4, 5]), ("b", ["unused"], [4, 5])])
 
 
-def test_qwen_plan_passes_epoch_sample_cap(tmp_path):
+@pytest.mark.parametrize(
+    "name,limit,gpus",
+    [
+        ("qwen2.5-3b-instruct_mixed-2048", 32000, [4, 5]),
+        ("qwen2.5-3b-instruct_mixed-2048_epoch64k", 64000, [6, 7]),
+    ],
+)
+def test_qwen_plan_passes_epoch_sample_cap(tmp_path, name, limit, gpus):
     output = tmp_path / "qwen"
     pretrain.main(
         [
             "--experiments",
-            str(PRETRAIN / "qwen2.5-3b-instruct_mixed-2048/experiment.json"),
+            str(PRETRAIN / name / "experiment.json"),
             "--output-dir",
             str(output),
             "--plan-only",
@@ -163,7 +171,9 @@ def test_qwen_plan_passes_epoch_sample_cap(tmp_path):
     )
     commands = json.loads((output / "plan/commands.json").read_text())
     training = commands[0]["argv"]
-    assert training[training.index("--max-samples-per-epoch") + 1] == "32000"
+    assert training[training.index("--max-samples-per-epoch") + 1] == str(limit)
+    assert commands[0]["CUDA_VISIBLE_DEVICES"] == gpus
+    assert commands[1]["CUDA_VISIBLE_DEVICES"] == gpus[:1]
     assert training[training.index("--tokenizer-workers") + 1] == "4"
     assert training[training.index("--tokenization-batch-size") + 1] == "256"
     assert training[training.index("--prefetch-batches") + 1] == "2"

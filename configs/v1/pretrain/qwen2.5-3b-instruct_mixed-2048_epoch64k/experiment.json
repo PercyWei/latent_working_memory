@@ -1,0 +1,18 @@
+{
+  "name": "qwen2.5-3b-instruct_mixed-2048_epoch64k",
+  "model": "model.json",
+  "selection": "selection.json",
+  "gpus": [
+    6,
+    7
+  ],
+  "save_every": 1000,
+  "evaluation": {
+    "examples": 120,
+    "generation_examples": 12,
+    "prefix_tokens": []
+  },
+  "swanlab_project": "latent-working-memory-v1",
+  "epochs": 3,
+  "max_samples_per_epoch": 64000
+}

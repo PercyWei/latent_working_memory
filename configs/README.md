@@ -1,7 +1,7 @@
 # 20260914_配置组织规则
 
 创建时间：20260914 11:48:20 UTC+08:00
-最后修订时间：20260914 21:03:14 UTC+08:00
+最后修订时间：20260914 22:29:22 UTC+08:00
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
 
@@ -39,7 +39,7 @@ configs/
 
 同一配置可参与不同实验组；同一配置重复执行会产生不同的运行实例。启动命令、实际 group、配置快照和结果清单保存在 `artifacts/`，不作为新的源配置放回 `configs/`。产物组织遵守 [实验产物组织](../docs/artifacts.md)；当前 v1 入口的具体布局见下文。
 
-当前主实验整理范围为 10 项：数据类型对比的 semantic/random/mixed，目标对比的 AE-only/joint/AE-warmup，动态 BPTT 对比的 full/tokens1024/updates4，以及单独的 Qwen mixed-2048。前三组是比较关系，不是目录层级。
+当前包含数据类型对比的 semantic/random/mixed、目标对比的 AE-only/joint/AE-warmup、动态 BPTT 对比的 full/tokens1024/updates4，以及 Qwen mixed-2048 的每轮 32k／64k 两种预算。比较关系不作为配置目录层级。
 
 ## 独立性、数据与参数
 
@@ -62,7 +62,7 @@ configs/
 |---|---|
 | pretrain | `llama-semantic-2048`、`llama-random-2048`、`llama-mixed-2048` |
 | pretrain | `llama-ae-only_mixed-128`、`llama-joint_mixed-128`、`llama-ae-warmup_mixed-128` |
-| pretrain | `qwen2.5-3b-instruct_mixed-2048` |
+| pretrain | `qwen2.5-3b-instruct_mixed-2048`、`qwen2.5-3b-instruct_mixed-2048_epoch64k` |
 | dynamic | `bptt-full_squad`、`bptt-tokens1024_squad`、`bptt-updates4_squad` |
 
 每个目录包含 `model.json`、`selection.json`、`experiment.json`。动态实验的 `model.json` 保存动态训练与评估课程，语言模型结构由 `experiment.json` 指定的预训练 checkpoint 提供。外部预训练配置不含动态／容量阶段及基础数据构造字段；内部 checkpoint 配置契约保持原结构。
@@ -102,7 +102,7 @@ configs/
 
 评估数量是每个来源各自的配额：整数必须严格满足，`null` 尽量使用有效样本。开启均衡时按 AE/LM × 长度档等量选择；关闭时直接按总数选样。评估不随训练 epoch 改变；Qwen 的 dev/test 为 `null`，Llama 保留已有评估配额。
 
-`model.json` 使用 `compression_mode: "sample"`（默认）或 `"mean"`，容量权重课程由 `ratio_curriculum_epochs` 控制。旧的 batch 均衡、任务损失权重、step 长度课程和预训练 `lr_decay_steps` 不再放入正式模型配置。`experiment.json` 使用 `epochs`，总步数由启动时的各轮计划确定。当前默认训练 3 轮，Qwen 每轮上限为 32,000 条，其他配置暂不设上限；文献依据、损失与精确配额公式见 [预训练与评估](../notes/v1/20260910_pretraining_and_evaluation.md#3-按-epoch-选样与容量分配)。
+`model.json` 使用 `compression_mode: "sample"`（默认）或 `"mean"`，容量权重课程由 `ratio_curriculum_epochs` 控制。旧的 batch 均衡、任务损失权重、step 长度课程和预训练 `lr_decay_steps` 不再放入正式模型配置。`experiment.json` 使用 `epochs`，总步数由启动时的各轮计划确定。当前默认训练 3 轮，Qwen 默认每轮上限为 32,000 条，`epoch64k` 配置为 64,000 条并使用物理 GPU 6、7；其他配置暂不设上限；文献依据、损失与精确配额公式见 [预训练与评估](../notes/v1/20260910_pretraining_and_evaluation.md#3-按-epoch-选样与容量分配)。
 
 训练目录保存 `epoch-plan.json` 与 `training-result.json`。最终评估通过 `--training-result` 读取实际最终 checkpoint，仅接受完整训练；显式 `--checkpoint` 仍可用于独立诊断。`--stop-after-steps` 只截短本次执行，不改变计划预算；恢复保持原 epoch 数与样本上限。直接训练入口使用 `--max-samples-per-epoch <每轮上限>`。
 
