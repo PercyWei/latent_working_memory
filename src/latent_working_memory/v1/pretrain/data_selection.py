@@ -11,12 +11,11 @@ from transformers import AutoTokenizer
 
 from latent_working_memory.data_preparation.pretrain.text_samples import (
     TextSample,
-    input_text_key,
     tokenizer_identity,
 )
 from latent_working_memory.v1.config import load_config
 from latent_working_memory.v1.data import EpisodeIndex
-from latent_working_memory.v1.pretrain.prepared_data import eligible_input_length
+from latent_working_memory.v1.pretrain.tokenization import TokenizationPool, text_blocks
 from latent_working_memory.v1.pretrain.curriculum import validate_curriculum
 
 
@@ -45,6 +44,16 @@ class SelectedIndex(EpisodeIndex):
             sample = TextSample(**json.loads(handle.readline()))
         return sample.to_episode(self.tokenizer, self.config, variant)
 
+    def batch_entries(self, indices):
+        return [
+            (
+                self.sources[self.entries[i][0]][0],
+                self.entries[i][1],
+                self.sources[self.entries[i][0]][1],
+            )
+            for i in indices
+        ]
+
 
 def validate_selection(spec):
     if set(spec) != {"sources", "seed", "training", "evaluation"}:
@@ -68,7 +77,14 @@ def validate_selection(spec):
         raise ValueError("evaluation sample counts must be positive or null")
 
 
-def select_experiment(spec, config, tokenizer, splits=("train", "dev", "test")):
+def select_experiment(
+    spec,
+    config,
+    tokenizer,
+    splits=("train", "dev", "test"),
+    tokenization=None,
+    tokenization_batch_size=256,
+):
     validate_selection(spec)
     sources = {name: Path(path) for name, path in spec["sources"].items()}
     validate_curriculum(spec["training"], sources, config.input_length_bounds)
@@ -87,48 +103,41 @@ def select_experiment(spec, config, tokenizer, splits=("train", "dev", "test")):
         name: json.loads((directory / "preparation.json").read_text())
         for name, directory in sources.items()
     }
-    prompt_lengths = {
-        t: len(tokenizer.encode(prompt, add_special_tokens=False))
-        for t, prompt in [("ae", config.ae_prompt), ("continuation", config.lm_prompt)]
-    }
+    tokenization = tokenization or TokenizationPool(tokenizer, config)
     cells, registry, seen_content = {}, {}, {}
     rejected = Counter()
     for name, directory in sources.items():
         meta = metadata[name]
-        reuse_lengths = meta["tokenizer"] == tokenizer_identity(config)
         method = "pysbd_conservative" if meta["boundary_variant"] == "semantic" else "random_token"
         for split in splits:
             groups = defaultdict(list)
             seen_ids = set()
-            with (directory / f"{split}.jsonl").open("rb") as handle:
-                while True:
-                    offset = handle.tell()
-                    line = handle.readline()
-                    if not line:
-                        break
-                    sample = TextSample(**json.loads(line))
-                    if sample.sample_id in seen_ids or sample.boundary_method != method:
+            blocks = text_blocks(directory / f"{split}.jsonl", tokenization_batch_size)
+            for rows in tokenization.inspect_blocks(blocks):
+                for (
+                    offset,
+                    sample_id,
+                    document_id,
+                    source_id,
+                    cluster,
+                    task,
+                    boundary,
+                    size,
+                    content,
+                ) in rows:
+                    if sample_id in seen_ids or boundary != method:
                         raise ValueError("duplicate sample ID or inconsistent boundary source")
-                    seen_ids.add(sample.sample_id)
+                    seen_ids.add(sample_id)
                     for kind, key in [
-                        ("document", sample.document_id),
-                        ("source", sample.source_id),
-                        ("cluster", sample.dedup_cluster),
+                        ("document", document_id),
+                        ("source", source_id),
+                        ("cluster", cluster),
                     ]:
                         if registry.setdefault((kind, key), split) != split:
                             raise ValueError("source crosses splits")
-                    size = eligible_input_length(
-                        sample, tokenizer, config, reuse_lengths, prompt_lengths
-                    )
                     if size is None:
                         rejected[f"{name}/{split}/length_or_window"] += 1
                         continue
-                    target = sample.text if sample.task == "ae" else sample.continuation
-                    content = hashlib.blake2b(
-                        json.dumps(
-                            (sample.task, input_text_key(sample.text), " ".join(target.split()))
-                        ).encode()
-                    ).hexdigest()
                     if content in seen_content:
                         if seen_content[content] != split:
                             raise ValueError("duplicate content crosses splits")
@@ -136,21 +145,12 @@ def select_experiment(spec, config, tokenizer, splits=("train", "dev", "test")):
                         continue
                     seen_content[content] = split
                     key = (
-                        (sample.task, next(b for b in bounds if size <= b))
+                        (task, next(b for b in bounds if size <= b))
                         if split != "train" and balanced
                         else ("all", 0)
                     )
                     groups[key].append(
-                        (
-                            name,
-                            offset,
-                            sample.sample_id,
-                            sample.document_id,
-                            sample.source_id,
-                            sample.dedup_cluster,
-                            sample.task,
-                            size,
-                        )
+                        (name, offset, sample_id, document_id, source_id, cluster, task, size)
                     )
             cells[name, split] = groups
     indices, summaries, resolved_quotas = {}, {}, {}
@@ -234,12 +234,21 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--spec", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--tokenizer-workers", type=int, default=4)
+    parser.add_argument("--tokenization-batch-size", type=int, default=256)
     args = parser.parse_args()
     config = load_config(args.config)
     tokenizer = AutoTokenizer.from_pretrained(
         config.model_name_or_path, revision=config.model_revision, local_files_only=True
     )
-    _, report = select_experiment(json.loads(args.spec.read_text()), config, tokenizer)
+    with TokenizationPool(tokenizer, config, args.tokenizer_workers) as tokenization:
+        _, report = select_experiment(
+            json.loads(args.spec.read_text()),
+            config,
+            tokenizer,
+            tokenization=tokenization,
+            tokenization_batch_size=args.tokenization_batch_size,
+        )
     print(json.dumps(report, indent=2, ensure_ascii=False))
 
 

@@ -15,7 +15,7 @@ DYNAMIC = Path("configs/v1/dynamic")
 
 def test_all_ten_experiments_have_independent_valid_configs():
     pretraining = sorted(PRETRAIN.glob("*/experiment.json"))
-    dynamics = sorted(DYNAMIC.glob("*/experiment.json"))
+    dynamics = sorted(DYNAMIC.glob("*_squad/experiment.json"))
     assert len(pretraining) == 7 and len(dynamics) == 3
     for path, loader in [(p, pretrain.load_pretrain_experiment) for p in pretraining] + [
         (p, dynamic.load_dynamic_experiment) for p in dynamics
@@ -105,7 +105,7 @@ def test_dynamic_plan_has_explicit_pretrain_dependency_and_separate_evaluation(
     )
     monkeypatch.setattr(experiment_execution.subprocess, "run", no_execution)
     output = tmp_path / "plan"
-    paths = sorted(DYNAMIC.glob("*/experiment.json"))
+    paths = sorted(DYNAMIC.glob("*_squad/experiment.json"))
     dynamic.main(
         [
             "--experiments",
@@ -164,3 +164,8 @@ def test_qwen_plan_passes_epoch_sample_cap(tmp_path):
     commands = json.loads((output / "plan/commands.json").read_text())
     training = commands[0]["argv"]
     assert training[training.index("--max-samples-per-epoch") + 1] == "32000"
+    assert training[training.index("--tokenizer-workers") + 1] == "4"
+    assert training[training.index("--tokenization-batch-size") + 1] == "256"
+    assert training[training.index("--prefetch-batches") + 1] == "2"
+    evaluation = commands[1]["argv"]
+    assert evaluation[evaluation.index("--tokenizer-workers") + 1] == "4"

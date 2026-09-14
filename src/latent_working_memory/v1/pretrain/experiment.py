@@ -89,6 +89,12 @@ def build_stages(spec, original, output, args):
         str(train),
         "--epochs",
         str(spec["epochs"]),
+        "--tokenizer-workers",
+        str(args.tokenizer_workers),
+        "--tokenization-batch-size",
+        str(args.tokenization_batch_size),
+        "--prefetch-batches",
+        str(args.prefetch_batches),
         "--save-every",
         str(spec["save_every"]),
         *tracking,
@@ -108,6 +114,10 @@ def build_stages(spec, original, output, args):
         str(evaluate),
         "--split",
         "test",
+        "--tokenizer-workers",
+        str(args.tokenizer_workers),
+        "--tokenization-batch-size",
+        str(args.tokenization_batch_size),
         "--examples",
         str(spec["evaluation"]["examples"]),
         "--generation-examples",
@@ -137,7 +147,13 @@ def build_stages(spec, original, output, args):
 
 
 def main(argv=None):
-    args = experiment_parser(__doc__).parse_args(argv)
+    parser = experiment_parser(__doc__)
+    parser.add_argument("--tokenizer-workers", type=int, default=4)
+    parser.add_argument("--tokenization-batch-size", type=int, default=256)
+    parser.add_argument("--prefetch-batches", type=int, default=2)
+    args = parser.parse_args(argv)
+    if args.tokenizer_workers < 0 or args.tokenization_batch_size <= 0 or args.prefetch_batches < 0:
+        raise ValueError("invalid CPU tokenization settings")
     specs = run_experiments(args, load_pretrain_experiment, build_stages)
     if not args.plan_only:
         reports = []

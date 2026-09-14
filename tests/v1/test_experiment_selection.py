@@ -69,6 +69,8 @@ def test_selection_train_resume_and_evaluate(
     out = tmp_path / "evaluation"
     evaluate_main(
         [
+            "--tokenizer-workers",
+            "0",
             "--checkpoint",
             str(result.final_checkpoint),
             "--data-selection",
@@ -89,6 +91,8 @@ def test_selection_train_resume_and_evaluate(
     single = tmp_path / "single-evaluation"
     evaluate_main(
         [
+            "--tokenizer-workers",
+            "0",
             "--checkpoint",
             str(result.final_checkpoint),
             "--data-selection",

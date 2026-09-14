@@ -3,12 +3,14 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
+from collections import deque
 
 from transformers import PreTrainedTokenizerBase
 
 from latent_working_memory.v1.backbone import ReadTokens
 from latent_working_memory.v1.config import ExperimentConfig
 from latent_working_memory.v1.data import Episode
+from latent_working_memory.v1.pretrain.tokenization import TokenizationPool
 from latent_working_memory.v1.pretrain.curriculum import (
     epoch_distribution,
     maximal_quotas,
@@ -97,9 +99,17 @@ class EpochSampler:
         batch_size,
         epochs,
         max_samples_per_epoch=None,
+        tokenization=None,
+        prefetch_batches=2,
     ):
         if type(epochs) is not int or epochs <= 0 or type(batch_size) is not int or batch_size <= 0:
             raise ValueError("epochs and batch_size must be positive integers")
+        if type(prefetch_batches) is not int or prefetch_batches < 0:
+            raise ValueError("prefetch_batches must be a non-negative integer")
+        self.tokenization = tokenization or TokenizationPool(tokenizer, config)
+        self.prefetch_batches = prefetch_batches
+        self.pending = deque()
+        self.submitted_cursor = 0
         self.index, self.tokenizer, self.config = index, tokenizer, config
         self.training, self.batch_size, self.epochs = training, batch_size, epochs
         self.max_samples_per_epoch = max_samples_per_epoch
@@ -131,15 +141,19 @@ class EpochSampler:
         self.order = [i for key, n in quotas.items() for i in self.rng.sample(self.pools[key], n)]
         self.rng.shuffle(self.order)
         self.cursor = 0
+        self.submitted_cursor = 0
 
     def sample_batch(self):
         if self.cursor == len(self.order):
             self.start_epoch()
-        selected = self.order[self.cursor : self.cursor + self.batch_size]
+        if not self.pending:
+            self._submit_next()
+        batch = self.pending.popleft().result()
         examples = []
-        for i in selected:
-            episode = self.index[i]
-            ae, lm = read_tokens(episode, self.tokenizer)
+        for sample in batch:
+            episode = sample.episode
+            target = ReadTokens(sample.prompt_ids, sample.target_ids)
+            ae, lm = (target, None) if episode.reads[0].task == "ae" else (None, target)
             candidates = capacity_weights(self.config, len(episode.input_ids), ae, lm, self.epoch)
             candidates = {k: w for k, w in candidates.items() if w > 0}
             if not candidates:
@@ -152,9 +166,29 @@ class EpochSampler:
                 examples.extend(
                     PretrainExample(episode, ae, lm, k, w / total) for k, w in candidates.items()
                 )
-        self.cursor += len(selected)
-        self.visits += len(selected)
+        self.cursor += len(batch)
+        self.visits += len(batch)
+        # Only future text is prepared. Neither epoch RNG nor capacity RNG advances here.
+        while len(self.pending) < self.prefetch_batches and self.submitted_cursor < len(self.order):
+            self._submit_next()
         return examples
+
+    def _submit_next(self):
+        selected = self.order[self.submitted_cursor : self.submitted_cursor + self.batch_size]
+        self.pending.append(self.tokenization.submit_batch(self.index.batch_entries(selected)))
+        self.submitted_cursor += len(selected)
+
+    def close(self):
+        for future in self.pending:
+            future.cancel()
+        self.pending.clear()
+        self.submitted_cursor = self.cursor
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.close()
 
     def epoch_report(self, epoch):
         probabilities, quotas, limiting, unit = self.plans[epoch - 1]
@@ -194,6 +228,7 @@ class EpochSampler:
         }
 
     def load_state_dict(self, state):
+        self.close()
         epoch, order, cursor = state["epoch"], state["order"], state["cursor"]
         if (
             not 1 <= epoch <= self.epochs
@@ -222,5 +257,6 @@ class EpochSampler:
         ):
             raise ValueError("epoch data differ from configured quotas")
         self.epoch, self.order, self.cursor, self.visits = epoch, order, cursor, state["visits"]
+        self.submitted_cursor = cursor
         self.rng.setstate(state["rng"])
         self.capacity_rng.setstate(state["capacity_rng"])

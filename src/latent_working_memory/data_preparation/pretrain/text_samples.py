@@ -88,6 +88,9 @@ class TextSample:
 
     def to_episode(self, tokenizer, config, variant):
         ids = tuple(tokenizer.encode(self.text, add_special_tokens=False))
+        return self.to_episode_tokens(ids, config, variant)
+
+    def to_episode_tokens(self, ids, config, variant):
         provenance = {
             "boundary_variant": variant,
             "boundary_method": self.boundary_method,

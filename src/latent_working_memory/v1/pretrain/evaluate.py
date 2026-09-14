@@ -16,6 +16,7 @@ from latent_working_memory.v1.pretrain.evaluation import evaluate_pretraining
 from latent_working_memory.v1.model import GrowthValueNetwork, JointMemoryWriter
 from latent_working_memory.devices import validate_device
 from latent_working_memory.v1.training import load_trainable_model_state, precision_context
+from latent_working_memory.v1.pretrain.tokenization import TokenizationPool
 from latent_working_memory.v1.pretrain.tracking import pretraining_run
 from latent_working_memory.v1.pretrain.tracking import append_evaluation_reports
 from latent_working_memory.v1.tracking import DEFAULT_SWANLAB_PROJECT
@@ -34,7 +35,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     datasets.add_argument("--data-dir", type=Path)
     datasets.add_argument("--evaluation-dirs", type=Path)
     datasets.add_argument("--data-selection", type=Path)
-    parser.add_argument("--evaluation-source", help="Evaluate one source from the selection configuration")
+    parser.add_argument(
+        "--evaluation-source", help="Evaluate one source from the selection configuration"
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -49,10 +52,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--swanlab-project", default=DEFAULT_SWANLAB_PROJECT)
     parser.add_argument("--swanlab-group")
     parser.add_argument("--swanlab-tag", action="append", default=[])
-    parser.add_argument("--training-run", type=Path, help="Append to this training directory’s SwanLab run")
+    parser.add_argument(
+        "--training-run", type=Path, help="Append to this training directory’s SwanLab run"
+    )
     parser.add_argument("--examples", type=int)
     parser.add_argument("--generation-examples", type=int)
     parser.add_argument("--prefix-tokens", type=int, nargs="+", default=())
+    parser.add_argument("--tokenizer-workers", type=int, default=4)
+    parser.add_argument("--tokenization-batch-size", type=int, default=256)
     args = parser.parse_args(argv)
     if args.training_result:
         result = json.loads(args.training_result.read_text())
@@ -69,13 +76,23 @@ def main(argv: Sequence[str] | None = None) -> None:
             raise ValueError("evaluation append requires an online training run")
         if args.checkpoint.resolve().parent.parent != args.training_run.resolve():
             raise ValueError("checkpoint must belong to the target training directory")
-    if not args.training_run and args.swanlab_mode != "disabled" and (args.output_dir / "swanlab.json").exists():
+    if (
+        not args.training_run
+        and args.swanlab_mode != "disabled"
+        and (args.output_dir / "swanlab.json").exists()
+    ):
         raise ValueError("static report already published; use a new output directory")
     device = torch.device(args.device)
     validate_device(device)
     checkpoint = load_model_checkpoint(args.checkpoint)
-    if args.training_run and (args.training_run / "evaluation-publications" /
-                              f"{args.split}-step-{checkpoint.progress['next_step']:06d}.json").exists():
+    if (
+        args.training_run
+        and (
+            args.training_run
+            / "evaluation-publications"
+            / f"{args.split}-step-{checkpoint.progress['next_step']:06d}.json"
+        ).exists()
+    ):
         raise ValueError("evaluation already appended")
     config = checkpoint.config
     evaluation_options = {"eval_generation_every": 1}
@@ -88,10 +105,20 @@ def main(argv: Sequence[str] | None = None) -> None:
         config, device, torch.bfloat16 if device.type == "cuda" else torch.float32
     )
     indices, metadata = {}, {}
-    multiple = args.evaluation_dirs is not None or (args.data_selection is not None and args.evaluation_source is None)
+    multiple = args.evaluation_dirs is not None or (
+        args.data_selection is not None and args.evaluation_source is None
+    )
     if args.data_selection:
         spec = json.loads(args.data_selection.read_text())
-        selected, report = select_experiment(spec, config, tokenizer, splits=(args.split,))
+        with TokenizationPool(tokenizer, config, args.tokenizer_workers) as tokenization:
+            selected, report = select_experiment(
+                spec,
+                config,
+                tokenizer,
+                splits=(args.split,),
+                tokenization=tokenization,
+                tokenization_batch_size=args.tokenization_batch_size,
+            )
         names = [args.evaluation_source] if args.evaluation_source else list(spec["sources"])
         if any(name not in spec["sources"] for name in names):
             raise ValueError("unknown evaluation source")
@@ -101,8 +128,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.output_dir.mkdir(parents=True, exist_ok=True)
         (args.output_dir / "data-selection.json").write_text(json.dumps(spec, indent=2) + "\n")
     else:
-        directories = ({k: Path(v) for k, v in json.loads(args.evaluation_dirs.read_text()).items()}
-                       if args.evaluation_dirs else {args.split: args.data_dir})
+        directories = (
+            {k: Path(v) for k, v in json.loads(args.evaluation_dirs.read_text()).items()}
+            if args.evaluation_dirs
+            else {args.split: args.data_dir}
+        )
         for name, directory in directories.items():
             if not name or Path(name).name != name or name in {".", ".."}:
                 raise ValueError("evaluation names must be simple directory names")
@@ -134,9 +164,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.training_run:
         step = checkpoint.progress["next_step"]
         entries = [
-            {"evaluation_source": name,
-             "report": str(((args.output_dir / name if multiple else args.output_dir)
-                            / f"{args.split}-step-{step:06d}.json").resolve())}
+            {
+                "evaluation_source": name,
+                "report": str(
+                    (
+                        (args.output_dir / name if multiple else args.output_dir)
+                        / f"{args.split}-step-{step:06d}.json"
+                    ).resolve()
+                ),
+            }
             for name in indices
         ]
         append_evaluation_reports(args.training_run, entries)

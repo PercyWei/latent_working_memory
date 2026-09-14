@@ -4,7 +4,10 @@ import json
 from pathlib import Path
 
 from latent_working_memory.data_preparation.pretrain.fineweb import data_contract
-from latent_working_memory.data_preparation.pretrain.text_samples import TextSample, tokenizer_identity
+from latent_working_memory.data_preparation.pretrain.text_samples import (
+    TextSample,
+    tokenizer_identity,
+)
 from latent_working_memory.v1.data import EpisodeIndex
 
 
@@ -84,8 +87,6 @@ def eligible_input_length(sample, tokenizer, config, reference_lengths, prompt_l
         if reference_lengths
         else len(tokenizer.encode(sample.text, add_special_tokens=False))
     )
-    if size <= 0 or size > config.max_input_tokens or size + 1 > config.write_context_tokens:
-        return None
     target_length = (
         sample.reference_target_tokens
         if reference_lengths
@@ -95,11 +96,17 @@ def eligible_input_length(sample, tokenizer, config, reference_lengths, prompt_l
             else len(tokenizer.encode(sample.continuation, add_special_tokens=False))
         )
     )
-    if sample.task == "continuation" and target_length > config.max_continuation_tokens:
+    return eligible_lengths(size, target_length, sample.task, config, prompt_lengths)
+
+
+def eligible_lengths(size, target_length, task, config, prompt_lengths):
+    if size <= 0 or size > config.max_input_tokens or size + 1 > config.write_context_tokens:
+        return None
+    if task == "continuation" and target_length > config.max_continuation_tokens:
         return None
     # The full-context control must fit as well as compressed-memory reads.
     if (
-        2 + max(size, config.pretrain_k_min) + prompt_lengths[sample.task] + target_length
+        2 + max(size, config.pretrain_k_min) + prompt_lengths[task] + target_length
         > config.read_context_tokens
     ):
         return None

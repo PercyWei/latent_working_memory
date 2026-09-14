@@ -177,6 +177,8 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
         epochs=2,
         stop_after_steps=2,
         resume=first.final_checkpoint,
+        tokenizer_workers=2,
+        tokenization_batch_size=5,
         swanlab_mode="offline",
         swanlab_group="lwm-pretrain-test",
     )
@@ -199,6 +201,8 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
     assert json.loads(identity_path.read_text())["id"] == first_swanlab_id
     evaluate_main(
         [
+            "--tokenizer-workers",
+            "0",
             "--checkpoint",
             str(resumed.final_checkpoint),
             "--data-dir",
@@ -284,6 +288,8 @@ def _distributed_train_worker(rank, rendezvous, config, data, output, steps, res
         epochs=2,
         stop_after_steps=steps,
         save_every=1,
+        tokenizer_workers=1 if resume_step else 0,
+        tokenization_batch_size=5,
         resume=output / f"checkpoints/pretrain-step-{resume_step:06d}.pt" if resume_step else None,
     )
     dist.destroy_process_group()

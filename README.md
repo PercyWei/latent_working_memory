@@ -41,7 +41,7 @@ uv run pytest
 
 FineWeb 基础语料的 `semantic/`、`random/` 各只保存 `train.jsonl`、`dev.jsonl`、`test.jsonl` 和 `preparation.json`。样本保存原始 X、LM 后续 Y、来源与字符跨度，以及构造 tokenizer 的参考长度；AE 不重复保存目标，不落盘 token IDs、训练提示词或读写位置。父目录的 `source-pool.json` 只记录原始 Parquet 文件路径、随机种子、构造规则和统计，不保存来源正文副本。构造、恢复构造及原文边界检查按该记录重新读取原始文件，在内存中重建候选来源与划分；训练和评估不需要原始文件。迁移原始文件位置后需相应更新 `source_files` 路径。
 
-训练与评估通过 `--data-selection <具体实验的 selection.json>` 引用共享数据，在内存中筛选与混合。同 tokenizer 复用参考长度，不同 tokenizer 重新分词；不保存派生文本或 token 副本。每个 epoch 根据来源、任务和长度分布，选择满足精确比例与全局 batch 整除的最大无放回样本量，打乱后组织 batch。dev/test 由独立选择规则固定。配置格式见 [配置组织规则](configs/README.md)，完整协议见 [预训练与评估](notes/v1/20260910_pretraining_and_evaluation.md)。
+训练与评估通过 `--data-selection <具体实验的 selection.json>` 引用共享数据，在内存中筛选与混合。预训练选样每次用当前 tokenizer 批量计算长度；训练按 batch 即时分词并有限预取，不保存派生文本或 token 副本。每个 epoch 根据来源、任务和长度分布，选择满足精确比例与全局 batch 整除的最大无放回样本量，打乱后组织 batch。dev/test 由独立选择规则固定。配置格式见 [配置组织规则](configs/README.md)，完整协议见 [预训练与评估](notes/v1/20260910_pretraining_and_evaluation.md)。
 
 SQuAD 的 `data/squad/` 只保存 `train.jsonl`、`dev.jsonl`、`test.jsonl` 和 `preparation.json`。划分文件每行对应一篇文章，保存来源位置、来源组、段落／问题数量与 `reference_*` 长度，不复制原文和问答。准备信息集中记录来源、划分规则、排除文章和参考 tokenizer。构造配置为 `configs/data_preparation/squad.json`。动态准备、训练和评估统一使用 `--dataset squad --dataset-dir data/squad`，tokenizer 由实验 checkpoint 提供；匹配参考分词行为时复用长度，否则在内存中重新计算。
 

@@ -9,22 +9,15 @@ from torch import Tensor
 
 @dataclass(frozen=True, slots=True)
 class ReaderOutput:
-    target_logits: Tensor
     token_nll: Tensor
 
     def __post_init__(self) -> None:
-        if self.target_logits.ndim != 2:
-            raise ValueError("target_logits must have shape [target_length, vocab_size]")
-        if self.token_nll.ndim != 1:
-            raise ValueError("token_nll must have shape [target_length]")
-        if self.target_logits.shape[0] != self.token_nll.shape[0]:
-            raise ValueError("target_logits and token_nll must have the same target length")
-        if self.target_logits.shape[0] <= 0 or self.target_logits.shape[1] <= 0:
-            raise ValueError("reader output dimensions must be non-zero")
+        if self.token_nll.ndim != 1 or self.token_nll.numel() == 0:
+            raise ValueError("token_nll must have non-empty shape [target_length]")
 
     @property
     def target_length(self) -> int:
-        return self.target_logits.shape[0]
+        return self.token_nll.shape[0]
 
     @property
     def mean_nll(self) -> Tensor:
@@ -34,12 +27,6 @@ class ReaderOutput:
 def gold_token_nll(target_logits: Tensor, target_ids: Tensor) -> Tensor:
     _validate_target_pair(target_logits, target_ids)
     return functional.cross_entropy(target_logits.float(), target_ids, reduction="none")
-
-
-def build_reader_output(target_logits: Tensor, target_ids: Tensor) -> ReaderOutput:
-    return ReaderOutput(
-        target_logits=target_logits, token_nll=gold_token_nll(target_logits, target_ids)
-    )
 
 
 def teacher_student_kl(

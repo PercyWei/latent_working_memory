@@ -25,7 +25,7 @@ from transformers import (
 
 from latent_working_memory.v1.config import ExperimentConfig
 from latent_working_memory.v1.model import sinusoidal_positions
-from latent_working_memory.v1.objectives import ReaderOutput, build_reader_output
+from latent_working_memory.v1.objectives import ReaderOutput, gold_token_nll
 
 
 BACKBONE_TRAINABLE_STATE_FIELDS = frozenset(
@@ -174,21 +174,31 @@ class LatentMemoryBackbone(nn.Module):
         positions = torch.arange(inputs_embeds.shape[1], device=device)[None, :]
         mask = positions < torch.tensor([len(row) for row in rows], device=device)[:, None]
         position_ids = positions.expand_as(mask).masked_fill(~mask, 0)
+        target_lengths = [len(task.target_ids) for task in tokens]
         with nullcontext() if use_reader_lora else self._frozen_base():
-            output = self.language_model(
+            # Keep the full causal context, but project only positions predicting targets.
+            # LoRA modules are attached to the decoder even when calling it directly.
+            model = self.language_model.get_base_model()
+            hidden = model.model(
                 inputs_embeds=inputs_embeds,
                 attention_mask=mask,
                 position_ids=position_ids,
                 use_cache=False,
                 return_dict=True,
+            ).last_hidden_state
+            target_hidden = torch.cat(
+                [
+                    row[context - 1 : context - 1 + length]
+                    for row, context, length in zip(hidden, contexts, target_lengths, strict=True)
+                ]
             )
-        return [
-            build_reader_output(
-                row[context - 1 : context - 1 + len(task.target_ids)],
-                torch.tensor(task.target_ids, device=device),
+            target_logits = model.get_output_embeddings()(target_hidden)
+            target_ids = torch.tensor(
+                [token for task in tokens for token in task.target_ids], device=device
             )
-            for row, context, task in zip(output.logits, contexts, tokens, strict=True)
-        ]
+            # One unreduced CE for all valid targets; callers retain per-sample weighting.
+            token_nll = gold_token_nll(target_logits, target_ids)
+        return [ReaderOutput(values) for values in token_nll.split(target_lengths)]
 
     def greedy_students(
         self,

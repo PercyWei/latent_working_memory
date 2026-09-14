@@ -1,7 +1,7 @@
 # 20260914_配置组织规则
 
 创建时间：20260914 11:48:20 UTC+08:00
-最后修订时间：20260914 17:29:59 UTC+08:00
+最后修订时间：20260914 18:14:24 UTC+08:00
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
 
@@ -107,3 +107,17 @@ configs/
 训练目录保存 `epoch-plan.json` 与 `training-result.json`。最终评估通过 `--training-result` 读取实际最终 checkpoint，仅接受完整训练；显式 `--checkpoint` 仍可用于独立诊断。`--stop-after-steps` 只截短本次执行，不改变计划预算；恢复保持原 epoch 数与样本上限。直接训练入口使用 `--max-samples-per-epoch <每轮上限>`。
 
 历史数据、checkpoint 与执行产物不迁移，也不按新协议改写历史结果。新选样与 epoch 进度契约不能替代旧协议做精确续训；不添加自动格式转换。
+
+## 预训练 CPU 分词
+
+`v1.pretrain.experiment` 与 `v1.pretrain.train` 接收以下运行参数，完整实验入口将实际值写入计划命令：
+
+| 参数 | 命令行默认值 | 用途 |
+|---|---:|---|
+| `--tokenizer-workers` | 4 | 每个训练进程的 CPU worker 数；0 表示同步执行 |
+| `--tokenization-batch-size` | 256 | 启动筛选时每次分词的文本样本数 |
+| `--prefetch-batches` | 2 | 预取的后续全局 batch 数；0 表示按需读取 |
+
+`v1.pretrain.data_selection` 和 `v1.pretrain.evaluate` 的 `--data-selection` 路径使用前两项参数。worker 采用 `spawn`，进程内关闭 tokenizer 的线程并行；两个训练进程使用 4 workers 时共占用 8 个 CPU workers。参数描述 CPU 执行方式，独立于 GPU microbatch 和实验采样比例。
+
+选样重新分词计算长度，丢弃 token IDs，仅在内存保留文件位置及选样元数据；训练 batch 到达时重新分词，用完释放。并行结果按原始顺序合并，预取不推进选样或容量随机状态。checkpoint 只保存已取用 batch 的游标，恢复时重建未消费的预取任务。运行参数另存训练 `provenance.json`，无需改变 checkpoint 格式。
