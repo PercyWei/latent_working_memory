@@ -147,7 +147,8 @@ def evaluate_pretraining(
             ae, lm = read_tokens(episode, tokenizer)
             if ae is not None:
                 generated_ae_views += 1
-            capacities = capacity_weights(config, len(episode.input_ids), ae, lm, step)
+            # Evaluation enumerates every legal capacity, independently of training weights.
+            capacities = capacity_weights(config, len(episode.input_ids), ae, lm, 1)
             if not capacities:
                 raise ValueError(f"no legal evaluation capacity for {episode.episode_id}")
             donor = min(
@@ -161,7 +162,9 @@ def evaluate_pretraining(
             generate_ae = (
                 ae is not None
                 and generated_ae_views <= config.eval_generation_examples
-                and (step % config.eval_generation_every == 0 or step in config.eval_generation_steps)
+                and (
+                    step % config.eval_generation_every == 0 or step in config.eval_generation_steps
+                )
             )
             for task_name, task in (("ae", ae), ("continuation", lm)):
                 if task is not None:
@@ -231,18 +234,28 @@ def evaluate_pretraining(
                             )
                             for prefix_length in prefix_tokens:
                                 if prefix_length >= len(task.target_ids) - 1:
-                                    raise ValueError("diagnostic prefix must leave a nonempty suffix")
+                                    raise ValueError(
+                                        "diagnostic prefix must leave a nonempty suffix"
+                                    )
                                 suffix = task.target_ids[prefix_length:]
                                 prompt = task.prompt_ids + task.target_ids[:prefix_length]
                                 diagnostic = common | {
-                                    "condition": condition, "prefix_tokens": prefix_length,
-                                    "reference": tokenizer.decode(suffix[:-1], skip_special_tokens=True),
+                                    "condition": condition,
+                                    "prefix_tokens": prefix_length,
+                                    "reference": tokenizer.decode(
+                                        suffix[:-1], skip_special_tokens=True
+                                    ),
                                     "target_tokens": len(suffix) - 1,
                                 }
                                 prefix_records.append(diagnostic)
                                 generation_jobs.append(
-                                    ([diagnostic], memory.clone(), prompt,
-                                     ReadTokens(prompt, suffix), True)
+                                    (
+                                        [diagnostic],
+                                        memory.clone(),
+                                        prompt,
+                                        ReadTokens(prompt, suffix),
+                                        True,
+                                    )
                                 )
                         records.append(record)
                     for condition, use_lora in (
@@ -330,11 +343,14 @@ def evaluate_pretraining(
             diagnostic_groups[f"{row['condition']}/prefix-{row['prefix_tokens']}"].append(row)
         bleu = BLEU(tokenize="13a", lowercase=False, smooth_method="exp", effective_order=True)
         metrics["prefix_diagnostics"] = {
-            key: {"generated_reads": len(rows),
-                  "correct_prefix_ratio": sum(r["correct_prefix_ratio"] for r in rows) / len(rows),
-                  "exact_match": sum(r["exact_match"] for r in rows) / len(rows),
-                  "bleu_4": bleu.corpus_score([r["prediction"] for r in rows],
-                                              [[r["reference"] for r in rows]]).score}
+            key: {
+                "generated_reads": len(rows),
+                "correct_prefix_ratio": sum(r["correct_prefix_ratio"] for r in rows) / len(rows),
+                "exact_match": sum(r["exact_match"] for r in rows) / len(rows),
+                "bleu_4": bleu.corpus_score(
+                    [r["prediction"] for r in rows], [[r["reference"] for r in rows]]
+                ).score,
+            }
             for key, rows in diagnostic_groups.items()
         }
     output_dir.mkdir(parents=True, exist_ok=True)

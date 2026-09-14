@@ -3,13 +3,17 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
-from typing import Any
 
 from transformers import PreTrainedTokenizerBase
 
 from latent_working_memory.v1.backbone import ReadTokens
 from latent_working_memory.v1.config import ExperimentConfig
-from latent_working_memory.v1.data import Episode, EpisodeIndex
+from latent_working_memory.v1.data import Episode
+from latent_working_memory.v1.pretrain.curriculum import (
+    epoch_distribution,
+    maximal_quotas,
+    validate_curriculum,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +22,7 @@ class PretrainExample:
     ae: ReadTokens | None
     lm: ReadTokens | None
     capacity: int
+    loss_weight: float = 1.0
 
     @property
     def input_length(self) -> int:
@@ -45,7 +50,7 @@ def capacity_weights(
     input_length: int,
     ae: ReadTokens | None,
     lm: ReadTokens | None,
-    step: int,
+    epoch: int,
 ) -> dict[int, float]:
     if (
         (ae is None and lm is None)
@@ -54,7 +59,11 @@ def capacity_weights(
         or (lm is not None and len(lm.target_ids) - 1 > config.max_continuation_tokens)
     ):
         return {}
-    progress = min(max(step / config.ratio_curriculum_steps, 0.0), 1.0)
+    progress = (
+        1.0
+        if config.ratio_curriculum_epochs == 1
+        else min(max((epoch - 1) / (config.ratio_curriculum_epochs - 1), 0.0), 1.0)
+    )
     candidates: dict[int, float] = {}
     for ratio, early, late in zip(
         config.pretrain_compression_ratios,
@@ -75,194 +84,129 @@ def capacity_weights(
     return candidates
 
 
-class PretrainSampler:
-    """Choose a length pool, cycle through its samples, then choose capacity."""
+class EpochSampler:
+    """One maximum-size, exactly stratified, non-repeating sample plan per epoch."""
 
-    def __init__(
-        self,
-        index: EpisodeIndex,
-        tokenizer: PreTrainedTokenizerBase,
-        config: ExperimentConfig,
-        example_limit: int | None = None,
-    ) -> None:
+    def __init__(self, index, tokenizer, config, training, seed, batch_size, epochs):
+        if type(epochs) is not int or epochs <= 0 or type(batch_size) is not int or batch_size <= 0:
+            raise ValueError("epochs and batch_size must be positive integers")
         self.index, self.tokenizer, self.config = index, tokenizer, config
-        self.rng = random.Random(config.data_seed)
-        allowed = set(index.panel(example_limit, config.data_seed)) if example_limit else None
-        self.groups = {}
-        for document, indices in index.groups.items():
-            selected = [
-                i
-                for i in indices
-                if (allowed is None or i in allowed)
-                and (config.ae_weight if index.tasks[i] == "ae" else config.lm_weight) > 0
-            ]
-            if selected:
-                self.groups[document] = selected
-        if not self.groups:
-            raise ValueError("no training views have a positive task weight")
-        self.documents = sorted(self.groups)
+        self.training, self.batch_size, self.epochs = training, batch_size, epochs
+        self.rng = random.Random(seed)
+        self.capacity_rng = random.Random(f"{seed}:capacity")
         self.pools = {}
-        if config.input_length_weights is None:
-            self.pools["all"] = [i for indices in self.groups.values() for i in indices]
-            self.pool_weights = {"all": 1.0}
-        else:
-            self.pool_weights = {}
-            lower = 0
-            for upper, weight in zip(
-                config.input_length_bounds, config.input_length_weights, strict=True
-            ):
-                pool = {}
-                for document, indices in self.groups.items():
-                    selected = [i for i in indices if lower < index.input_lengths[i] <= upper]
-                    if selected:
-                        pool[document] = selected
-                end_weight = (
-                    config.input_length_weights_end[config.input_length_bounds.index(upper)]
-                    if config.input_length_weights_end is not None
-                    else weight
-                )
-                if max(weight, end_weight) > 0 and lower < config.max_input_tokens:
-                    if not pool:
-                        raise ValueError(
-                            f"positive length weight has no views in ({lower}, {upper}]"
-                        )
-                    self.pools[str(upper)] = [i for indices in pool.values() for i in indices]
-                    self.pool_weights[str(upper)] = weight
-                lower = upper
-        if not self.pools:
-            raise ValueError("no input lengths have a positive sampling weight")
-        self.orders = {key: list(pool) for key, pool in self.pools.items()}
-        for order in self.orders.values():
-            self.rng.shuffle(order)
-        self.cursors = dict.fromkeys(self.orders, 0)
-        self.visits = 0
+        for i, entry in enumerate(index.entries):
+            source, task, size = entry[0], entry[6], entry[7]
+            bound = next(b for b in config.input_length_bounds if size <= b)
+            self.pools.setdefault((source, task, bound), []).append(i)
+        validate_curriculum(training, index.sources, config.input_length_bounds)
+        self.available = {k: len(v) for k, v in self.pools.items()}
+        self.plans = []
+        for epoch in range(1, epochs + 1):
+            probabilities = epoch_distribution(training, epoch)
+            quotas, limiting, unit = maximal_quotas(self.available, probabilities, batch_size)
+            self.plans.append((probabilities, quotas, limiting, unit))
+        self.total_steps = sum(sum(q.values()) // batch_size for _, q, _, _ in self.plans)
+        self.epoch, self.cursor, self.visits = 0, 0, 0
+        self.order = []
 
-    def length_weights(self, step: int) -> dict[str, float]:
-        if self.config.input_length_weights_end is None:
-            return self.pool_weights.copy()
-        progress = min(max(step / self.config.input_length_curriculum_steps, 0), 1)
-        return {
-            str(bound): early * (1 - progress) + late * progress
-            for bound, early, late in zip(
-                self.config.input_length_bounds,
-                self.config.input_length_weights,
-                self.config.input_length_weights_end,
-                strict=True,
-            )
-            if str(bound) in self.pools
-        }
+    def start_epoch(self):
+        self.epoch += 1
+        if self.epoch > self.epochs:
+            raise StopIteration
+        _, quotas, _, _ = self.plans[self.epoch - 1]
+        self.order = [i for key, n in quotas.items() for i in self.rng.sample(self.pools[key], n)]
+        self.rng.shuffle(self.order)
+        self.cursor = 0
 
-    def sample(self, step: int) -> PretrainExample:
-        weights = self.length_weights(step)
-        key = self.rng.choices(list(weights), list(weights.values()))[0]
-        order = self.orders[key]
-        if self.cursors[key] == len(order):
-            self.rng.shuffle(order)
-            self.cursors[key] = 0
-        index = order[self.cursors[key]]
-        self.cursors[key] += 1
-        self.visits += 1
-        episode = self.index[index]
-        ae, lm = read_tokens(episode, self.tokenizer)
-        candidates = capacity_weights(self.config, len(episode.input_ids), ae, lm, step)
-        if not candidates or sum(candidates.values()) <= 0:
-            raise ValueError(f"no legal weighted capacities for {episode.episode_id}")
-        capacity = self.rng.choices(list(candidates), list(candidates.values()))[0]
-        return PretrainExample(episode, ae, lm, capacity)
-
-    def state_dict(self) -> dict[str, Any]:
-        return {
-            "orders": {key: order.copy() for key, order in self.orders.items()},
-            "cursors": self.cursors.copy(),
-            "visits": self.visits,
-            "rng": self.rng.getstate(),
-        }
-
-    def load_state_dict(self, state: dict[str, Any]) -> None:
-        if (
-            state["orders"].keys() != self.pools.keys()
-            or state["cursors"].keys() != self.pools.keys()
-        ):
-            raise ValueError("sampler checkpoint length pools differ from the training data")
-        for key, order in state["orders"].items():
-            if sorted(order) != sorted(self.pools[key]):
-                raise ValueError("sampler checkpoint samples differ from the training data")
-            if not 0 <= state["cursors"][key] <= len(order):
-                raise ValueError("invalid sampler cursor")
-        self.orders = {key: order.copy() for key, order in state["orders"].items()}
-        self.cursors, self.visits = state["cursors"].copy(), state["visits"]
-        self.rng.setstate(state["rng"])
-
-
-def task_weights_at(config: ExperimentConfig, step: int) -> tuple[float, float]:
-    if step < config.pretrain_ae_warmup_steps:
-        return 1.0, 0.0
-    return config.ae_weight, config.lm_weight
-
-
-class BalancedPretrainSampler:
-    """Exact task/source quotas per update, with independent shuffled pool streams."""
-
-    def __init__(self, index, tokenizer, config):
-        self.index, self.tokenizer, self.config = index, tokenizer, config
-        self.pools = {}
-        for i in range(len(index.offsets)):
-            episode = index[i]
-            source = episode.sources[0].provenance["boundary_variant"]
-            key = f"{episode.reads[0].task}/{source}"
-            self.pools.setdefault(key, []).append(i)
-        expected = {f"{task}/{source}" for task in ("ae", "continuation")
-                    for source in ("semantic", "random")}
-        if self.pools.keys() != expected:
-            raise ValueError("balanced pretraining requires both tasks and both boundary sources")
-        self.orders = {key: self.pools[key].copy() for key in sorted(self.pools)}
-        self.rngs = {key: random.Random(f"{config.data_seed}:{key}") for key in self.orders}
-        for key, order in self.orders.items():
-            self.rngs[key].shuffle(order)
-        self.cursors = dict.fromkeys(self.orders, 0)
-        self.visits = 0
-
-    def sample_batch(self, step, size):
-        weights = task_weights_at(self.config, step)
-        tasks = [t for t, w in zip(("ae", "continuation"), weights, strict=True) if w > 0]
-        keys = [f"{task}/{source}" for task in tasks for source in ("semantic", "random")]
-        if size % len(keys):
-            raise ValueError("global batch must divide evenly across enabled task/source cells")
+    def sample_batch(self):
+        if self.cursor == len(self.order):
+            self.start_epoch()
+        selected = self.order[self.cursor : self.cursor + self.batch_size]
         examples = []
-        for key in keys:
-            order, rng = self.orders[key], self.rngs[key]
-            for _ in range(size // len(keys)):
-                if self.cursors[key] == len(order):
-                    rng.shuffle(order)
-                    self.cursors[key] = 0
-                episode = self.index[order[self.cursors[key]]]
-                self.cursors[key] += 1
-                self.visits += 1
-                ae, lm = read_tokens(episode, self.tokenizer)
-                capacities = capacity_weights(self.config, len(episode.input_ids), ae, lm, step)
-                if not capacities or sum(capacities.values()) <= 0:
-                    raise ValueError(f"no legal capacity for {episode.episode_id}")
-                capacity = rng.choices(list(capacities), list(capacities.values()))[0]
+        for i in selected:
+            episode = self.index[i]
+            ae, lm = read_tokens(episode, self.tokenizer)
+            candidates = capacity_weights(self.config, len(episode.input_ids), ae, lm, self.epoch)
+            candidates = {k: w for k, w in candidates.items() if w > 0}
+            if not candidates:
+                raise ValueError(f"no legal weighted capacity for {episode.episode_id}")
+            if self.config.compression_mode == "sample":
+                capacity = self.capacity_rng.choices(list(candidates), list(candidates.values()))[0]
                 examples.append(PretrainExample(episode, ae, lm, capacity))
+            else:
+                total = sum(candidates.values())
+                examples.extend(
+                    PretrainExample(episode, ae, lm, k, w / total) for k, w in candidates.items()
+                )
+        self.cursor += len(selected)
+        self.visits += len(selected)
         return examples
 
-    def length_weights(self, step):
-        return {str(self.config.max_input_tokens): 1.0}
+    def epoch_report(self, epoch):
+        probabilities, quotas, limiting, unit = self.plans[epoch - 1]
+
+        def label(key):
+            return "/".join(map(str, key))
+
+        return {
+            "epoch": epoch,
+            "samples": sum(quotas.values()),
+            "steps": sum(quotas.values()) // self.batch_size,
+            "quota_unit": unit,
+            "active_available": sum(self.available.get(k, 0) for k in probabilities),
+            "unselected": sum(self.available.get(k, 0) for k in probabilities)
+            - sum(quotas.values()),
+            "cells": [
+                {
+                    "cell": label(k),
+                    "available": self.available.get(k, 0),
+                    "probability": float(p),
+                    "selected": quotas[k],
+                }
+                for k, p in probabilities.items()
+            ],
+            "bottlenecks": [label(k) for k in limiting],
+        }
 
     def state_dict(self):
-        return {"orders": {k: v.copy() for k, v in self.orders.items()},
-                "cursors": self.cursors.copy(), "visits": self.visits,
-                "rngs": {k: r.getstate() for k, r in self.rngs.items()}}
+        return {
+            "epoch": self.epoch,
+            "cursor": self.cursor,
+            "visits": self.visits,
+            "order": self.order,
+            "rng": self.rng.getstate(),
+            "capacity_rng": self.capacity_rng.getstate(),
+        }
 
     def load_state_dict(self, state):
-        if state["orders"].keys() != self.pools.keys():
-            raise ValueError("balanced sampler pools differ")
-        for key, order in state["orders"].items():
-            if sorted(order) != sorted(self.pools[key]):
-                raise ValueError("balanced sampler data differ")
-            if not 0 <= state["cursors"][key] <= len(order):
-                raise ValueError("invalid balanced sampler cursor")
-        self.orders = {k: v.copy() for k, v in state["orders"].items()}
-        self.cursors, self.visits = state["cursors"].copy(), state["visits"]
-        for key, rng in self.rngs.items():
-            rng.setstate(state["rngs"][key])
+        epoch, order, cursor = state["epoch"], state["order"], state["cursor"]
+        if (
+            not 1 <= epoch <= self.epochs
+            or not 0 <= cursor <= len(order)
+            or cursor % self.batch_size
+        ):
+            raise ValueError("invalid epoch progress")
+        if len(order) != sum(self.plans[epoch - 1][1].values()) or len(set(order)) != len(order):
+            raise ValueError("epoch plan differs from configured quotas")
+        expected = self.plans[epoch - 1][1]
+        actual = {}
+        for i in order:
+            if type(i) is not int or not 0 <= i < len(self.index.entries):
+                raise ValueError("epoch plan contains an invalid sample index")
+            entry = self.index.entries[i]
+            key = (
+                entry[0],
+                entry[6],
+                next(b for b in self.config.input_length_bounds if entry[7] <= b),
+            )
+            actual[key] = actual.get(key, 0) + 1
+        if (
+            actual != expected
+            or state["visits"]
+            != sum(sum(q.values()) for _, q, _, _ in self.plans[: epoch - 1]) + cursor
+        ):
+            raise ValueError("epoch data differ from configured quotas")
+        self.epoch, self.order, self.cursor, self.visits = epoch, order, cursor, state["visits"]
+        self.rng.setstate(state["rng"])
+        self.capacity_rng.setstate(state["capacity_rng"])

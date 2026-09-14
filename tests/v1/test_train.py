@@ -14,7 +14,9 @@ def test_train_entry_exposes_only_the_implemented_pretrain_phase() -> None:
             "pretrain",
             "--config",
             "config.json",
-            "--data-dir",
+            "--epochs",
+            "3",
+            "--data-selection",
             "data",
             "--output-dir",
             "output",
@@ -29,7 +31,9 @@ def test_train_entry_exposes_only_the_implemented_pretrain_phase() -> None:
                 "p1",
                 "--config",
                 "config.json",
-                "--data-dir",
+                "--epochs",
+                "3",
+                "--data-selection",
                 "data",
                 "--output-dir",
                 "output",
@@ -73,8 +77,20 @@ def test_explicit_physical_gpu_allocation(monkeypatch) -> None:
 
 
 def test_train_project_can_be_explicitly_selected():
-    args = parse_args([
-        "--phase", "pretrain", "--config", "config.json", "--data-dir", "data",
-        "--output-dir", "output", "--swanlab-project", "existing-project",
-    ])
+    args = parse_args(
+        [
+            "--phase",
+            "pretrain",
+            "--config",
+            "config.json",
+            "--epochs",
+            "3",
+            "--data-selection",
+            "data",
+            "--output-dir",
+            "output",
+            "--swanlab-project",
+            "existing-project",
+        ]
+    )
     assert args.swanlab_project == "existing-project"

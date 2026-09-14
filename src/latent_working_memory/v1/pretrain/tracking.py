@@ -36,7 +36,9 @@ def pretraining_run(
     fixed_tags = {"scope:main", "method:latent-working-memory", "data:fineweb"}
     if mode != "disabled" and "data_preparation" in config:
         metadata = config["data_preparation"]
-        if "source_weights" in metadata:
+        if "sources" in metadata:
+            fixed_tags.update(f"data:{name}" for name in metadata["sources"])
+        elif "source_weights" in metadata:
             fixed_tags.update(f"data:{name}" for name in metadata["source_weights"])
         else:
             fixed_tags.add(f"data:{metadata['boundary_variant']}")
@@ -91,32 +93,48 @@ def log_training(
     }
     if "learning_rate" in record:
         metrics["train/learning_rate"] = record["learning_rate"]
-        metrics.update(
-            {
-                f"sampling/length_up_to_{bound}": weight
-                for bound, weight in record["length_sampling_weights"].items()
-            }
-        )
+    if "epoch" in record:
+        for key in (
+            "epoch",
+            "epoch_progress",
+            "epoch_samples",
+            "completed_epochs",
+            "distinct_samples",
+            "sample_visits",
+        ):
+            metrics[f"progress/{key}"] = record[key]
+        metrics["resources/capacity_reads"] = record["capacity_reads"]
     ae_samples = [s for s in samples if s["ae_nll"] is not None]
-    metrics["batch/ae_fraction"] = len(ae_samples) / len(samples)
+    metrics["batch/ae_fraction"] = sum(s.get("loss_weight", 1) for s in ae_samples) / sum(
+        s.get("loss_weight", 1) for s in samples
+    )
     if ae_samples:
-        metrics["train/ae_nll"] = sum(s["ae_nll"] for s in ae_samples) / len(ae_samples)
+        metrics["train/ae_nll"] = sum(
+            s["ae_nll"] * s.get("loss_weight", 1) for s in ae_samples
+        ) / sum(s.get("loss_weight", 1) for s in ae_samples)
     lm_samples = [s for s in samples if s["lm_nll"] is not None]
-    metrics["batch/lm_fraction"] = len(lm_samples) / len(samples)
+    metrics["batch/lm_fraction"] = sum(s.get("loss_weight", 1) for s in lm_samples) / sum(
+        s.get("loss_weight", 1) for s in samples
+    )
     if lm_samples:
-        metrics["train/lm_nll"] = sum(s["lm_nll"] for s in lm_samples) / len(lm_samples)
+        metrics["train/lm_nll"] = sum(
+            s["lm_nll"] * s.get("loss_weight", 1) for s in lm_samples
+        ) / sum(s.get("loss_weight", 1) for s in lm_samples)
     for field in ("input_tokens", "continuation_tokens", "capacity", "effective_ratio"):
         values = [s[field] for s in samples]
         metrics.update(
             {
-                f"batch/{field}_mean": sum(values) / len(values),
+                f"batch/{field}_mean": sum(s[field] * s.get("loss_weight", 1) for s in samples)
+                / sum(s.get("loss_weight", 1) for s in samples),
                 f"batch/{field}_min": min(values),
                 f"batch/{field}_max": max(values),
             }
         )
     for upper in record["input_length_bounds"]:
         selected = [s for s in samples if s["length_bucket"] == upper]
-        metrics[f"batch_by_length/{upper}/samples"] = len(selected)
+        metrics[f"batch_by_length/{upper}/samples"] = round(
+            sum(s.get("loss_weight", 1) for s in selected)
+        )
         metrics[f"batch_by_length/{upper}/input_tokens"] = sum(s["input_tokens"] for s in selected)
         metrics[f"batch_by_length/{upper}/target_tokens"] = sum(
             (s["input_tokens"] + 1 if s["ae_nll"] is not None else 0)

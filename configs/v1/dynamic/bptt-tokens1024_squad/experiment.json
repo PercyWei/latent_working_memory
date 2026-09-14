@@ -1,0 +1,11 @@
+{
+  "name": "bptt-tokens1024_squad",
+  "model": "model.json",
+  "selection": "selection.json",
+  "gpus": [
+    4,
+    5
+  ],
+  "checkpoint": "artifacts/v1/pretrain-data-comparison-2048_20260911/train/pretrain-mixed-157k-20260911/checkpoints/pretrain-step-020000.pt",
+  "swanlab_project": "latent-working-memory-v1"
+}

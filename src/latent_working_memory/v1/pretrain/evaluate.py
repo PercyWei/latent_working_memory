@@ -27,7 +27,9 @@ from latent_working_memory.v1.pretrain.reporting import (
 
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Evaluate FineWeb memory across capacities")
-    parser.add_argument("--checkpoint", type=Path, required=True)
+    checkpoints = parser.add_mutually_exclusive_group(required=True)
+    checkpoints.add_argument("--checkpoint", type=Path)
+    checkpoints.add_argument("--training-result", type=Path)
     datasets = parser.add_mutually_exclusive_group(required=True)
     datasets.add_argument("--data-dir", type=Path)
     datasets.add_argument("--evaluation-dirs", type=Path)
@@ -52,6 +54,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--generation-examples", type=int)
     parser.add_argument("--prefix-tokens", type=int, nargs="+", default=())
     args = parser.parse_args(argv)
+    if args.training_result:
+        result = json.loads(args.training_result.read_text())
+        if not result["complete"]:
+            raise ValueError("final evaluation requires completed epoch training")
+        args.checkpoint = Path(result["final_checkpoint"])
     if args.evaluation_source and not args.data_selection:
         raise ValueError("evaluation-source requires data-selection")
     if args.training_run:

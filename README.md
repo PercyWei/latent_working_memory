@@ -1,16 +1,16 @@
 # 20260912_latent_working_memory
 
-最后修订时间：20260914 12:02:21 UTC+08:00
+最后修订时间：20260914 14:53:43 UTC+08:00
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理；ICAE v1 和 C-DIC 分别位于 `reproductions/icae/` 与 `reproductions/cdic/`，各自使用独立的 `uv` 环境。
 
 ## 主环境与开发
 
-研究笔记的写作与维护遵守 [notes/README.md](notes/README.md)。通用执行约定见项目 `AGENTS.md`。
+通用执行约定见项目 `AGENTS.md`；命名、SwanLab、实验产物及研究笔记规则见 [项目规范索引](docs/README.md)。
 
 数据构造、主实验训练与评估统一使用项目根目录 `.venv/`，依赖由根目录 `pyproject.toml` 与 `uv.lock` 管理。通用数据构造入口位于 `src/latent_working_memory/data_preparation/`，训练与实验代码按阶段放在 `src/latent_working_memory/v1/` 的对应子目录，正式配置位于 `configs/`；执行记录与日志写入 `artifacts/`。
 
-创建和整理配置遵守 [配置组织规则](configs/README.md)：基础数据准备与实验选样分开，每个配置目录只描述一个具体实验，实验组通过运行记录关联；文末注明现有配置的迁移状态。
+创建和整理配置遵守 [配置组织规则](configs/README.md)：基础数据准备与实验选样分开，每个配置目录只描述一个具体实验，实验组通过运行记录关联。
 
 数据构造按流程分包：[pretrain/](src/latent_working_memory/data_preparation/pretrain/) 负责 FineWeb 预训练文本构造、质量审查与恢复，[personamem/](src/latent_working_memory/data_preparation/personamem/) 负责事实 QA 构造。预训练的来源、句界、截断、文本格式、审查和恢复模块均位于 `pretrain/`；训练时的数据读取与实验选样继续使用 `v1/pretrain/prepared_data.py` 和 `v1/pretrain/data_selection.py`。
 
@@ -37,17 +37,17 @@ uv run pytest
 
 动态阶段使用 `python -m latent_working_memory.v1.dynamic.prepare` 准备实验，`python -m latent_working_memory.v1.dynamic.run train` 和 `evaluate` 执行训练与评估；QA 报告入口为 `latent_working_memory.v1.dynamic.reporting`。SQuAD 与 PersonaMem 的运行时读取器同属 `v1/dynamic/`。阶段重构仅改变源码与入口路径，既有配置字段、checkpoint、训练日志和数据格式保持一致；旧入口不保留转发层。
 
-配置位于 `configs/v1/`，测试位于 `tests/v1/`，数据与运行产物分别使用 Git-ignored 的 `data/` 和 `artifacts/v1/`。实验产物按系列组织为 `artifacts/v1/<实验系列>/`，其中 `train/` 保存训练及 checkpoint，`eval/` 保存独立评估，`compare/` 保存跨运行比较，`plan/` 保存调度与清单。当前预训练数据类型对比系列位于 `artifacts/v1/pretrain-data-comparison-2048_20260911/`，完整记录及路径见 [预训练数据类型对比实验](notes/v1/20260911_pretraining_data_comparison.md)。数据准备与工程验证产物仍分别位于 `artifacts/v1/data-preparation/` 和 `artifacts/v1/validation/`。
+正式配置位于 `configs/v1/<阶段>/<具体实验名>/`，测试位于 `tests/v1/`，数据与运行产物分别使用 Git-ignored 的 `data/` 和 `artifacts/v1/`。当前 v1 训练实验入口的产物按系列组织为 `artifacts/v1/<实验系列>/`，其中 `train/` 保存训练及 checkpoint，`eval/` 保存独立评估，`compare/` 保存跨运行比较，`plan/` 保存调度与清单。当前预训练数据类型对比系列位于 `artifacts/v1/pretrain-data-comparison-2048_20260911/`，完整记录及路径见 [预训练数据类型对比实验](notes/v1/20260911_pretraining_data_comparison.md)。数据准备与工程验证产物仍分别位于 `artifacts/v1/data-preparation/` 和 `artifacts/v1/validation/`。
 
 FineWeb 基础语料的 `semantic/`、`random/` 各只保存 `train.jsonl`、`dev.jsonl`、`test.jsonl` 和 `preparation.json`。样本保存原始 X、LM 后续 Y、来源与字符跨度，以及构造 tokenizer 的参考长度；AE 不重复保存目标，不落盘 token IDs、训练提示词或读写位置。父目录的 `source-pool.json` 只记录原始 Parquet 文件路径、随机种子、构造规则和统计，不保存来源正文副本。构造、恢复构造及原文边界检查按该记录重新读取原始文件，在内存中重建候选来源与划分；训练和评估不需要原始文件。迁移原始文件位置后需相应更新 `source_files` 路径。
 
-训练和评估可直接读取基础目录：同 tokenizer 复用参考长度筛选，不同 tokenizer 重新分词计算长度，采样时按当前提示词构造 Episode，不生成分词副本。构造未完成时用 `progress.json` 和临时接收记录支持恢复，完成后自动清理。已有独立构造实验仍可读取原 Episode 数据。仅筛选与混合时使用 `--data-selection <配置> --data-run <训练集名>`，评估使用相同的 `--data-selection`；来源、seed、配额及比例由配置指定，混合仅组合内存索引。`balance_task_lengths` 决定是否均衡任务与长度档，`samples_per_split` 指定各划分数量，非均衡模式可用 null 表示全部取用（混合训练须指定数量以保证比例）。run 中的 `data-selection.json` 保存可直接复用的选择配置，实际数量与来源身份保存在 provenance 中，不生成样本清单或 token 副本。
+训练与评估通过 `--data-selection <具体实验的 selection.json>` 引用共享数据，在内存中筛选与混合。同 tokenizer 复用参考长度，不同 tokenizer 重新分词；不保存派生文本或 token 副本。每个 epoch 根据来源、任务和长度分布，选择满足精确比例与全局 batch 整除的最大无放回样本量，打乱后组织 batch。dev/test 由独立选择规则固定。配置格式见 [配置组织规则](configs/README.md)，完整协议见 [预训练与评估](notes/v1/20260910_pretraining_and_evaluation.md)。
 
 SQuAD 的 `data/squad/` 只保存 `train.jsonl`、`dev.jsonl`、`test.jsonl` 和 `preparation.json`。划分文件每行对应一篇文章，保存来源位置、来源组、段落／问题数量与 `reference_*` 长度，不复制原文和问答。准备信息集中记录来源、划分规则、排除文章和参考 tokenizer。构造配置为 `configs/data_preparation/squad.json`。动态准备、训练和评估统一使用 `--dataset squad --dataset-dir data/squad`，tokenizer 由实验 checkpoint 提供；匹配参考分词行为时复用长度，否则在内存中重新计算。
 
-短文本目标对比使用独立构造的 `data/fineweb-128-doc100k_20260912/{semantic,random}/` 文本基础数据，复用原 FineWeb 来源池。构造配置为 `configs/data_preparation/fineweb-128-doc100k.json`，选择配置为 `configs/data_preparation/fineweb-128-doc100k_pretrain-objective-comparison.json`；不再保存该实验的派生目录和 mixed 副本。
+短文本目标对比使用独立构造的 `data/fineweb-128-doc100k_20260912/{semantic,random}/` 文本基础数据，复用原 FineWeb 来源池。构造配置为 `configs/data_preparation/fineweb-128-doc100k.json`，选择配置位于各 `configs/v1/pretrain/llama-<目标>_mixed-128/selection.json`；不再保存该实验的派生目录和 mixed 副本。
 
-当前已实现 FineWeb 完整句界／随机截断双版本数据与多容量 AE/LM 预训练链路：空记忆首次分配、完整自然单元前向、变长 batch 与 mask、独立 AE/LM 样本的重建和续写、按长度与文档采样、容量课程、checkpoint/resume，以及独立文档的多容量 memory/no-memory/wrong-memory 评估。语言模型基座冻结，联合训练写入投影、记忆更新器、读取投影与读取 LoRA。
+当前已实现 FineWeb 完整句界／随机截断双版本数据与多容量 AE/LM 预训练链路：空记忆首次分配、完整自然单元前向、变长 batch 与 mask、独立 AE/LM 样本的重建和续写、epoch 最大配额选样、容量抽样或加权平均、checkpoint/resume，以及独立文档的多容量 memory/no-memory/wrong-memory 评估。语言模型基座冻结，联合训练写入投影、记忆更新器、读取投影与读取 LoRA。
 
 v1 测试覆盖损失与梯度、原文边界、规则句界、任务配额与长度区间、来源隔离、独立抽查、分层评估、自由生成、原文对照的因果位置、BLEU 聚合、精确恢复和 SwanLab 记录。FineWeb `sample-10BT` 已下载到服务器；512 篇真实文档的多粒度准备、Llama-2-7B-Chat 单卡训练、保存恢复和多容量评估已跑通。后续实现顺序见 [框架设计与后续阶段](notes/20260907_growing_latent_working_memory_framework_v1.md)。
 
@@ -60,23 +60,25 @@ v1 测试覆盖损失与梯度、原文边界、规则句界、任务配额与�
 数据准备仅检查数据长度与来源契约；训练时检查实际基座窗口、输入/目标预算和合法 memory 容量。当前默认 memory 上限为 4096，压缩率为 2、4、8。4k 数据的训练需要配置可覆盖 4096-token 写入及 `memory + target + prompt + special tokens` 读取预算的基座；下面的训练入口用于已完成相应预算适配的数据和训练配置。
 
 ```bash
-CUDA_VISIBLE_DEVICES=4 uv run python -m latent_working_memory.v1.pretrain.train \
+CUDA_VISIBLE_DEVICES=4 uv run --frozen python -m latent_working_memory.v1.pretrain.train \
   --phase pretrain \
-  --config configs/archive/pretrain_a800.json \
-  --data-dir data/fineweb-independent/semantic \
+  --config configs/v1/pretrain/llama-semantic-2048/model.json \
+  --data-selection configs/v1/pretrain/llama-semantic-2048/selection.json \
   --output-dir artifacts/v1/pretrain-pilot/train/pretrain-pilot \
-  --max-steps 1000
+  --epochs 3
 ```
 
-`--train-example-limit 16` 固定一个优先覆盖不同文档的小样本池，供过拟合检查使用；常规训练使用全部已准备样本。恢复时增加 `--resume artifacts/v1/pretrain-pilot/train/pretrain-pilot/checkpoints/pretrain-step-000100.pt`，并把 `--max-steps` 设为新的总 step 上限。checkpoint 保存完整可训练模块、优化器、文档采样与容量课程进度及随机状态。运行产物包含逐样本容量和损失、文档覆盖、token 监督量、吞吐、显存及分层验证指标。
+每轮样本量、实际配额与步数保存在 `epoch-plan.json`。临时限制执行可用 `--stop-after-steps <累计步数>`，恢复时保持原 `--epochs`、配置、输出目录与进程数，增加 `--resume <该运行 checkpoint>`，并删除或提高临时步数上限。checkpoint 保存模型、optimizer、epoch 顺序与游标、选样及容量随机状态。旧 step 协议 checkpoint 不用于新协议精确续训。
 
 ```bash
-CUDA_VISIBLE_DEVICES=4 uv run python -m latent_working_memory.v1.pretrain.evaluate \
-  --checkpoint artifacts/v1/pretrain-pilot/train/pretrain-pilot/checkpoints/pretrain-step-001000.pt \
-  --data-dir data/fineweb-independent/semantic \
+CUDA_VISIBLE_DEVICES=4 uv run --frozen python -m latent_working_memory.v1.pretrain.evaluate \
+  --training-result artifacts/v1/pretrain-pilot/train/pretrain-pilot/training-result.json \
+  --data-selection configs/v1/pretrain/llama-semantic-2048/selection.json \
   --output-dir artifacts/v1/pretrain-pilot/eval/pretrain-pilot-test \
   --split test
 ```
+
+`training-result.json` 记录实际最终 checkpoint；该入口仅对完整训练执行最终 test。阶段性诊断可直接传入 `--checkpoint <路径>`。
 
 评估使用固定的独立文档面板，每篇选一个自然片段，遍历各压缩率对应的唯一合法容量。结果按实际划分写入 `{dev|test}-step-XXXXXX.json` 与 `.jsonl`，分别保存聚合指标和逐次读取记录；摘要包含 step、累计训练输入 tokens、评估口径和 SacreBLEU 签名。
 
@@ -93,6 +95,8 @@ LM 的全部条件预测相同的 Y，并使用同一任务提示。最近文本
 补齐后的评估已使用上轮 3e-5 第 2000 步 checkpoint 在物理 GPU 0 验证：16 篇 dev 文档、每篇三个容量，共完成 432 次条件读取与 24 次自由重建，退出码为 0。SwanLab 离线记录完成；本次结果位于 `artifacts/v1/validation/evaluation-smoke-20260909/`。
 
 ### SwanLab 可视化
+
+项目选择、运行组织和展示细则见 [SwanLab 使用规范](docs/swanlab.md)。
 
 训练或独立评估命令增加 `--swanlab-mode online`，使用服务器已有登录。`--swanlab-mode offline` 将记录保存在运行目录；默认值为 `disabled`。项目名由 `--swanlab-project` 指定，默认 `latent-working-memory-v1`，新建项目为私有；创建新项目遵循项目约定。
 
@@ -144,23 +148,20 @@ PYTHONPATH=reproductions/cdic/src uv run pytest -q reproductions/cdic/tests
 uv sync --project reproductions/cdic --frozen
 ```
 
-### 预训练实验入口
+### 独立实验入口
 
-不同实验的入口文件直接放在 `v1/pretrain/`，共用该阶段的 `train.py`、`evaluate.py`、`publish_reports.py` 和 `data_selection.py`。根层的 `v1/experiment_execution.py` 只负责命令执行、日志、状态和 GPU 分配检查，不决定实验步骤。
-
-- 数据类型对比：`v1/pretrain/data_comparison.py`，分别训练 semantic、random、mixed。
-- 目标对比：`v1/pretrain/objective_comparison.py`，分别训练 AE-only、联合训练和 AE warm-up；专用短文本构造入口为同目录的 `prepare_objective_data.py`。
+配置规则与完整目录清单见 [configs/README.md](configs/README.md)。预训练与动态阶段分别使用 `v1.pretrain.experiment` 和 `v1.dynamic.experiment`，每个实验读取自身 `experiment.json`，独立完成训练及最终 test。预训练目标对比的短文本构造入口仍为 `v1.pretrain.prepare_objective_data`，只读取数据准备配置。
 
 ```bash
-.venv/bin/python -m latent_working_memory.v1.pretrain.data_comparison \
-  --spec configs/experiments/pretrain-data-comparison-2048.json \
-  --output-dir artifacts/v1/<新的数据对比实验目录>
-
-.venv/bin/python -m latent_working_memory.v1.pretrain.objective_comparison \
-  --spec configs/experiments/pretrain-objective-comparison-128.json \
-  --output-dir artifacts/v1/<新的目标对比实验目录>
+.venv/bin/python -m latent_working_memory.v1.pretrain.experiment \
+  --experiments configs/v1/pretrain/llama-semantic-2048/experiment.json \
+                configs/v1/pretrain/llama-random-2048/experiment.json \
+                configs/v1/pretrain/llama-mixed-2048/experiment.json \
+  --output-dir artifacts/v1/<新系列> \
+  --swanlab-group <本次分组> --swanlab-mode online \
+  --swanlab-tag study:boundary-comparison
 ```
 
-两者均串行执行双卡训练，按来源单卡并行测试，将最终 test 追加到训练 run，并单独发布跨组比较。正式配置显式指定 GPU、保存间隔与测试数量；目标对比的 AE-only、joint、AE warm-up 从相同初始化各自训练，AE warm-up 自行完成前 5,000 步 AE 后切换联合目标，不继承 AE-only checkpoint。prefix 诊断由评估配置指定。旧 `artifacts/` 下的调度脚本仅为历史记录，不作为启动入口。
+只选一个配置即可单独运行；AE-only、joint、AE warm-up 各自训练，warm-up 不依赖 AE-only。动态实验的预训练 checkpoint 依赖在自身配置中声明。增加 `--plan-only` 可先生成命令与配置快照，不执行训练或连接 SwanLab。计划检查不代表真实数据、显存与训练行为已在服务器验证。
 
-早期 pilot、冒烟验证、学习率探索等旧配置统一存放在 [configs/archive/](configs/archive/README.md)，保留原参数供历史记录定位；当前正式实验不引用这些配置。动态训练使用预训练 checkpoint 的阶段依赖保留。
+最终 test 在 online 模式追加到对应训练 run。跨实验比较由报告入口读取 `<系列>/plan/reports.json` 显式发布；分组和比较不需要额外组配置目录。旧试跑配置统一放在 [configs/archive/](configs/archive/README.md)。

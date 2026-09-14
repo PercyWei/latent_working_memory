@@ -1,101 +1,258 @@
 import json
-import torch
-from transformers import LlamaConfig, LlamaForCausalLM
-from latent_working_memory.data_preparation.pretrain.pipeline import prepare_fineweb
-from latent_working_memory.data_preparation.pretrain.fineweb import data_contract
-from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
-from latent_working_memory.v1.checkpoint import load_model_checkpoint
-from latent_working_memory.v1.pretrain.training import run_pretraining
-
 from collections import Counter
 from dataclasses import replace
+from fractions import Fraction
 
 import pytest
+import torch
+from transformers import LlamaConfig, LlamaForCausalLM
 
-from latent_working_memory.v1.data import EpisodeIndex, write_episodes
-from latent_working_memory.v1.pretrain.sampling import BalancedPretrainSampler, task_weights_at
-
-
-def test_balanced_task_source_batches_and_warmup_boundary(
-    tmp_path, tiny_config, tokenizer, source_records, semantic_examples
-):
-    rows = []
-    for source in ('semantic', 'random'):
-        for number, record in enumerate(source_records[:4]):
-            examples = semantic_examples(record, tokenizer, tiny_config)
-            for task in ('ae', 'continuation'):
-                episode = next(e for e in examples if e.reads[0].task == task)
-                episode = replace(episode, episode_id=f'{source}:{number}:{task}')
-                episode.sources[0].provenance.update(
-                    boundary_variant=source, dedup_cluster=record['id'],
-                )
-                rows.append(episode)
-    path = tmp_path / 'train.jsonl'
-    write_episodes(rows, path)
-    index = EpisodeIndex(path)
-    config = replace(tiny_config, pretrain_balanced_batches=True,
-                     ae_weight=.5, lm_weight=.5, pretrain_ae_warmup_steps=2)
-    sampler = BalancedPretrainSampler(index, tokenizer, config)
-    assert task_weights_at(config, 1) == (1., 0.)
-    assert task_weights_at(config, 2) == (.5, .5)
-    for step in range(4):
-        batch = sampler.sample_batch(step, 8)
-        counts = Counter((e.episode.reads[0].task,
-                          e.episode.sources[0].provenance['boundary_variant']) for e in batch)
-        tasks = ('ae',) if step < 2 else ('ae', 'continuation')
-        assert counts == {(task, source): 8 // (2 * len(tasks))
-                          for task in tasks for source in ('semantic', 'random')}
-    assert sampler.visits == 32
-    with pytest.raises(ValueError, match='divide evenly'):
-        sampler.sample_batch(3, 6)
+from latent_working_memory.data_preparation.pretrain.pipeline import prepare_fineweb
+from latent_working_memory.v1.checkpoint import load_model_checkpoint
+from latent_working_memory.v1.pretrain.curriculum import (
+    distribution_at,
+    epoch_distribution,
+    maximal_quotas,
+    validate_curriculum,
+)
+from latent_working_memory.v1.pretrain.data_selection import select_experiment
+from latent_working_memory.v1.pretrain.sampling import EpochSampler
+from latent_working_memory.v1.pretrain.training import run_pretraining
 
 
-def test_warmup_configuration_requires_enabled_joint_objective(tiny_config):
-    with pytest.raises(ValueError, match='AE warm-up'):
-        replace(tiny_config, pretrain_ae_warmup_steps=5)
+def test_maximal_integer_quotas_and_independent_schedules():
+    training = {
+        "source_schedule": [
+            {"epoch": 1, "weights": {"semantic": 1, "random": 1}},
+            {"epoch": 3, "weights": {"semantic": 0, "random": 1}},
+        ],
+        "task_schedule": [
+            {"epoch": 1, "weights": {"ae": 1, "continuation": 0}},
+            {"epoch": 2, "weights": {"ae": 1, "continuation": 1}},
+        ],
+        "length_schedule": [
+            {"epoch": 1, "weights": {"32": 3, "64": 1}},
+            {"epoch": 3, "weights": {"32": 1, "64": 1}},
+        ],
+    }
+    validate_curriculum(training, ("semantic", "random"), (32, 64))
+    assert distribution_at(training["length_schedule"], 2, True) == {
+        "32": Fraction(5, 8),
+        "64": Fraction(3, 8),
+    }
+    for epoch in (1, 2, 3, 4):
+        probabilities = epoch_distribution(training, epoch)
+        assert sum(probabilities.values()) == 1
+        available = {k: 70 + i * 13 for i, k in enumerate(probabilities)}
+        quotas, bottlenecks, unit = maximal_quotas(available, probabilities, 8)
+        n = sum(quotas.values())
+        feasible = [
+            total
+            for total in range(8, sum(available.values()) + 1, 8)
+            if all(
+                (total * p).denominator == 1 and total * p <= available[k]
+                for k, p in probabilities.items()
+            )
+        ]
+        assert n == max(feasible) and n % unit == 0 and bottlenecks
+        assert all(quotas[k] == n * p for k, p in probabilities.items())
+        assert {k[1] for k in probabilities} == ({"ae"} if epoch == 1 else {"ae", "continuation"})
+        if epoch >= 3:
+            assert {k[0] for k in probabilities} == {"random"}
+    with pytest.raises(ValueError, match="no complete epoch"):
+        maximal_quotas({}, epoch_distribution(training, 1), 8)
+    training["task_schedule"][1]["weights"]["ae"] = -1
+    with pytest.raises(ValueError, match="nonnegative"):
+        validate_curriculum(training, ("semantic", "random"), (32, 64))
 
 
-def test_warmup_trains_independently_from_first_step_and_switches_to_joint(
+@pytest.mark.parametrize("mode", ["sample", "mean"])
+def test_epoch_nonreplacement_resume_and_fixed_evaluation(
     parquet_source,
-    tmp_path, tiny_config, tokenizer, preparation_records, preparation_recipe
+    tmp_path,
+    tiny_config,
+    tokenizer,
+    preparation_records,
+    preparation_recipe,
+    epoch_selection,
+    mode,
 ):
-    model_dir = tmp_path / 'model'
-    LlamaForCausalLM(LlamaConfig(
-        vocab_size=len(tokenizer), hidden_size=16, intermediate_size=32,
-        num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=4,
-        max_position_embeddings=256, bos_token_id=1, eos_token_id=2, pad_token_id=0,
-    )).save_pretrained(model_dir)
+    root = tmp_path / "data"
+    config = replace(tiny_config, compression_mode=mode)
+    prepare_fineweb(
+        parquet_source(preparation_records), tokenizer, config, root, preparation_recipe
+    )
+    spec = json.loads(
+        epoch_selection(root, config, {v: v for v in ("semantic", "random")}).read_text()
+    )
+    indices, report = select_experiment(spec, config, tokenizer)
+    index = indices["train", "train"]
+    # Training retains the full eligible pool; epoch quotas are applied only by the sampler.
+    assert len(index.ids) == sum(report["task_source_counts"]["train/train"].values())
+    sampler = EpochSampler(index, tokenizer, config, spec["training"], 5, 4, 3)
+    first = sampler.sample_batch()
+    state = sampler.state_dict()
+    expected = [sampler.sample_batch() for _ in range(sampler.total_steps - 1)]
+    restored = EpochSampler(index, tokenizer, config, spec["training"], 99, 4, 3)
+    restored.load_state_dict(state)
+    assert [restored.sample_batch() for _ in expected] == expected
+    with pytest.raises(StopIteration):
+        restored.sample_batch()
+    batches = [first, *expected]
+    offset = 0
+    orders = []
+    for epoch in range(1, 4):
+        nsteps = sampler.epoch_report(epoch)["steps"]
+        chosen = []
+        counts = Counter()
+        for batch in batches[offset : offset + nsteps]:
+            ids = list(dict.fromkeys(e.episode.episode_id for e in batch))
+            assert len(ids) == 4
+            assert sum(e.loss_weight for e in batch) == pytest.approx(4)
+            for sample_id in ids:
+                example = next(e for e in batch if e.episode.episode_id == sample_id)
+                chosen.append(sample_id)
+                counts[
+                    (
+                        example.episode.sources[0].provenance["boundary_variant"],
+                        example.episode.reads[0].task,
+                        64,
+                    )
+                ] += 1
+            if mode == "sample":
+                assert len(batch) == 4
+            else:
+                assert all(
+                    sum(e.loss_weight for e in batch if e.episode.episode_id == i)
+                    == pytest.approx(1)
+                    for i in ids
+                )
+                assert len({(e.episode.episode_id, e.capacity) for e in batch}) == len(batch)
+        assert len(chosen) == len(set(chosen))
+        assert counts == sampler.plans[epoch - 1][1]
+        orders.append(chosen)
+        offset += nsteps
+    assert orders[0] != orders[1]
+    alternate = EpochSampler(
+        index,
+        tokenizer,
+        replace(config, compression_mode=("mean" if mode == "sample" else "sample")),
+        spec["training"],
+        5,
+        4,
+        3,
+    )
+    for batch in batches:
+        other = alternate.sample_batch()
+        assert list(dict.fromkeys(e.episode.episode_id for e in other)) == list(
+            dict.fromkeys(e.episode.episode_id for e in batch)
+        )
+    # Evaluation balancing affects only dev/test, with strict per-source task quotas.
+    spec["evaluation"]["balance_task_lengths"] = True
+    balanced, balanced_report = select_experiment(spec, config, tokenizer)
+    assert balanced["train", "train"].ids == indices["train", "train"].ids
+    for source in spec["sources"]:
+        for split in ("dev", "test"):
+            assert balanced[source, split].tasks.count("ae") == balanced[source, split].tasks.count(
+                "continuation"
+            )
+            assert balanced_report["samples_per_cell"][f"{source}/{split}"] > 0
+    spec["evaluation"]["balance_task_lengths"] = False
+    # Training schedules must not change dev/test panel membership.
+    spec["training"]["source_schedule"][0]["weights"] = {"semantic": 0, "random": 1}
+    repeated, _ = select_experiment(spec, config, tokenizer)
+    for source in spec["sources"]:
+        for split in ("dev", "test"):
+            assert repeated[source, split].ids == indices[source, split].ids
+    # Fixed evaluation quotas remain strict.
+    spec["evaluation"]["samples_per_source"]["dev"] = 100000
+    with pytest.raises(ValueError, match="insufficient data"):
+        select_experiment(spec, config, tokenizer)
+
+
+def test_warmup_complete_training_keeps_optimizer_and_resolves_final_checkpoint(
+    parquet_source,
+    tmp_path,
+    tiny_config,
+    tokenizer,
+    preparation_records,
+    preparation_recipe,
+    epoch_selection,
+):
+    model_dir = tmp_path / "model"
+    LlamaForCausalLM(
+        LlamaConfig(
+            vocab_size=len(tokenizer),
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=256,
+            bos_token_id=1,
+            eos_token_id=2,
+            pad_token_id=0,
+        )
+    ).save_pretrained(model_dir)
     tokenizer.save_pretrained(model_dir)
-    config = replace(tiny_config, model_name_or_path=str(model_dir),
-                     pretrain_balanced_batches=True, ae_weight=1, lm_weight=0,
-                     cache_text_features=True, eval_generation_examples=0, split_fractions=(.6, .2, .2))
-    preparation_recipe = replace(preparation_recipe, samples_per_task=(16, 16, 16),
-                                 candidates_per_document=16)
-    root = tmp_path / 'data'
-    prepare_fineweb(parquet_source(preparation_records), tokenizer, config, root, preparation_recipe)
-    mixed = root / 'mixed'
-    mixed.mkdir()
-    # Historical objective-comparison datasets remain tokenized Episode files.
-    rows = [TextSample(**json.loads(line)).to_episode(tokenizer, config, variant)
-            for variant in ('semantic', 'random')
-            for line in (root / variant / 'train.jsonl').read_text().splitlines()]
-    write_episodes(rows, mixed / 'train.jsonl')
-    (mixed / 'preparation.json').write_text(json.dumps({
-        'preparation_id': 'mixed-fixture', 'contract': data_contract(config),
-        'source_weights': {'semantic': .5, 'random': .5},
-    }))
-    evaluation_dirs = {name: root / name for name in ('semantic', 'random')}
-    joint_config = replace(config, ae_weight=.5, lm_weight=.5, pretrain_ae_warmup_steps=1)
-    result = run_pretraining(joint_config, mixed, tmp_path / 'warmup', torch.device('cpu'),
-                             max_steps=2, save_every=1, evaluation_dirs=evaluation_dirs)
+    config = replace(
+        tiny_config,
+        model_name_or_path=str(model_dir),
+        eval_generation_examples=0,
+        split_fractions=(0.6, 0.2, 0.2),
+    )
+    recipe = replace(preparation_recipe, samples_per_task=(16, 16, 16), candidates_per_document=16)
+    root = tmp_path / "data"
+    prepare_fineweb(parquet_source(preparation_records), tokenizer, config, root, recipe)
+    path = epoch_selection(root, config)
+    spec = json.loads(path.read_text())
+    spec["training"]["task_schedule"] = [
+        {"epoch": 1, "weights": {"ae": 1, "continuation": 0}},
+        {"epoch": 2, "weights": {"ae": 1, "continuation": 1}},
+    ]
+    path.write_text(json.dumps(spec))
+    out = tmp_path / "warmup"
+    result = run_pretraining(config, path, out, torch.device("cpu"), epochs=2)
     checkpoint = load_model_checkpoint(result.final_checkpoint)
-    assert checkpoint.progress['next_step'] == 2
-    assert checkpoint.progress['sampler']['visits'] == 8
-    assert all(state['step'].item() == 2 for state in checkpoint.optimizer_state['state'].values())
-    log = next((tmp_path / 'warmup').glob('train-from-*.jsonl'))
-    first, second = [json.loads(line) for line in log.read_text().splitlines()]
-    assert first['step'] == 1 and first['task_weights'] == {'ae': 1., 'continuation': 0.}
-    assert all(s['ae_nll'] is not None and s['lm_nll'] is None for s in first['samples'])
-    assert second['step'] == 2 and second['task_weights'] == {'ae': .5, 'continuation': .5}
-    assert sum(s['ae_nll'] is not None for s in second['samples']) == 2
-    assert sum(s['lm_nll'] is not None for s in second['samples']) == 2
+    logs = [
+        json.loads(line)
+        for p in out.glob("train-from-*.jsonl")
+        for line in p.read_text().splitlines()
+    ]
+    first = [r for r in logs if r["epoch"] == 1]
+    second = [r for r in logs if r["epoch"] == 2]
+    assert first and second
+    assert all(s["ae_nll"] is not None for r in first for s in r["samples"])
+    assert sum(s["ae_nll"] is not None for r in second for s in r["samples"]) == sum(
+        s["lm_nll"] is not None for r in second for s in r["samples"]
+    )
+    assert all(
+        s["step"].item() == result.completed_steps
+        for s in checkpoint.optimizer_state["state"].values()
+    )
+    summary = json.loads((out / "training-result.json").read_text())
+    assert summary["complete"] and summary["completed_epochs"] == 2
+    assert summary["final_checkpoint"] == str(result.final_checkpoint.resolve())
+    assert (
+        sum(e["steps"] for e in json.loads((out / "epoch-plan.json").read_text()))
+        == result.completed_steps
+    )
+
+    resumed_out = tmp_path / "warmup-resumed"
+    boundary = json.loads((out / "epoch-plan.json").read_text())[0]["steps"]
+    first_segment = run_pretraining(
+        config, path, resumed_out, torch.device("cpu"), epochs=2, stop_after_steps=boundary
+    )
+    assert not json.loads((resumed_out / "training-result.json").read_text())["complete"]
+    resumed_run = run_pretraining(
+        config,
+        path,
+        resumed_out,
+        torch.device("cpu"),
+        epochs=2,
+        resume=first_segment.final_checkpoint,
+    )
+    resumed = load_model_checkpoint(resumed_run.final_checkpoint)
+    torch.testing.assert_close(checkpoint.model_state, resumed.model_state, rtol=0, atol=0)
+    torch.testing.assert_close(checkpoint.optimizer_state, resumed.optimizer_state, rtol=0, atol=0)
+    assert checkpoint.progress["sampler"] == resumed.progress["sampler"]

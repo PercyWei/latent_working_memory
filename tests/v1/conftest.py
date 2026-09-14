@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 import random
 
@@ -31,6 +32,7 @@ def tiny_config():
         k_limit=32,
         reader_lora_rank=2,
         reader_lora_alpha=4,
+        input_length_bounds=(64,),
         max_input_tokens=64,
         max_continuation_tokens=64,
         write_context_tokens=256,
@@ -192,5 +194,31 @@ def parquet_source(tmp_path):
         path = tmp_path / "original.parquet"
         pq.write_table(pa.Table.from_pylist(list(records)), path)
         return [path]
+
+    return write
+
+
+@pytest.fixture
+def epoch_selection(tmp_path):
+    def write(root, config, sources=None):
+        names = sources or {"semantic": "semantic"}
+        spec = {
+            "sources": {name: str(root / variant) for name, variant in names.items()},
+            "seed": 7,
+            "training": {
+                "source_schedule": [{"epoch": 1, "weights": {n: 1 for n in names}}],
+                "task_schedule": [{"epoch": 1, "weights": {"ae": 1, "continuation": 1}}],
+                "length_schedule": [
+                    {"epoch": 1, "weights": {str(b): 1 for b in config.input_length_bounds}}
+                ],
+            },
+            "evaluation": {
+                "balance_task_lengths": False,
+                "samples_per_source": {"dev": None, "test": None},
+            },
+        }
+        path = tmp_path / ("selection-" + "-".join(names) + ".json")
+        path.write_text(json.dumps(spec))
+        return path
 
     return write

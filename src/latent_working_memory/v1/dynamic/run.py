@@ -87,6 +87,7 @@ def run_dynamic(
     swanlab_group=None,
     swanlab_tags=(),
     dataset="squad",
+    swanlab_project="latent-working-memory-v1",
 ):
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     rank = dist.get_rank() if dist.is_initialized() else 0
@@ -188,7 +189,7 @@ def run_dynamic(
             output_dir,
             run_info,
             mode=swanlab_mode if primary else "disabled",
-            project="latent-working-memory-v1",
+            project=swanlab_project,
             job_type="train",
             group=swanlab_group,
             tags=swanlab_tags,
@@ -404,6 +405,7 @@ def main():
         "--swanlab-mode", choices=("disabled", "offline", "online"), default="disabled"
     )
     parser.add_argument("--swanlab-group")
+    parser.add_argument("--swanlab-project", default="latent-working-memory-v1")
     parser.add_argument("--swanlab-tag", action="append", default=[])
     args = parser.parse_args()
     data_path = args.dataset_dir
@@ -428,6 +430,7 @@ def main():
             resume=args.resume,
             swanlab_mode=args.swanlab_mode,
             swanlab_group=args.swanlab_group,
+            swanlab_project=args.swanlab_project,
             swanlab_tags=tuple(args.swanlab_tag),
             dataset=args.dataset,
         )
@@ -491,7 +494,7 @@ def main():
                 args.output_dir,
                 evaluation_info,
                 mode=args.swanlab_mode,
-                project="latent-working-memory-v1",
+                project=args.swanlab_project,
                 job_type="evaluate",
                 group=args.swanlab_group,
                 tags=tuple(args.swanlab_tag),

@@ -1,5 +1,5 @@
 {
-  "source_root": "data/v1/fineweb-4096-doc100k_20260910",
+  "source_root": "data/fineweb-4096-doc100k_20260910",
   "seed": 20260912,
   "train_per_source_task": 8000,
   "evaluation_per_source_task": 120,
@@ -24,5 +24,19 @@
       0.7
     ],
     "candidates_per_document": 64
+  },
+  "data": {
+    "model_name_or_path": "/data/bywei/models/meta-llama/Llama-2-7b-chat-hf",
+    "model_revision": null,
+    "pretrain_dataset": "HuggingFaceFW/fineweb",
+    "pretrain_subset": "sample-10BT",
+    "split_fractions": [
+      0.9,
+      0.05,
+      0.05
+    ],
+    "data_seed": 20260907,
+    "ae_prompt": "Reconstruct the text stored in memory:\n",
+    "lm_prompt": "Continue the text stored in memory:\n"
   }
 }

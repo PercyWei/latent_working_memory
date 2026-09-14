@@ -38,6 +38,8 @@ class ExperimentConfig:
     ratio_weights_start: tuple[float, ...] = (0.45, 0.45, 0.10)
     ratio_weights_end: tuple[float, ...] = (0.20, 0.30, 0.50)
     ratio_curriculum_steps: int = 1000
+    ratio_curriculum_epochs: int = 1
+    compression_mode: str = "sample"
     max_input_tokens: int = 1024
     max_continuation_tokens: int = 256
     write_context_tokens: int = 4096
@@ -185,6 +187,8 @@ class ExperimentConfig:
             raise ValueError("reader_lora_dropout must be less than 1")
         if any(type(s) is not int or s < 0 for s in self.eval_generation_steps):
             raise ValueError("eval_generation_steps must contain non-negative steps")
+        if self.compression_mode not in {"sample", "mean"}:
+            raise ValueError("compression_mode must be sample or mean")
         if type(self.cache_text_features) is not bool:
             raise ValueError("cache_text_features must be boolean")
         if type(self.pretrain_balanced_batches) is not bool:

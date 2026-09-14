@@ -1,0 +1,21 @@
+{
+  "name": "llama-joint_mixed-128",
+  "model": "model.json",
+  "selection": "selection.json",
+  "gpus": [
+    4,
+    5
+  ],
+  "save_every": 1000,
+  "evaluation": {
+    "examples": 240,
+    "generation_examples": 60,
+    "prefix_tokens": [
+      1,
+      8,
+      32
+    ]
+  },
+  "swanlab_project": "latent-working-memory-v1",
+  "epochs": 3
+}

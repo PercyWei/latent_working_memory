@@ -3,7 +3,6 @@
 import argparse
 import hashlib
 import json
-import math
 import random
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -18,6 +17,7 @@ from latent_working_memory.data_preparation.pretrain.text_samples import (
 from latent_working_memory.v1.config import load_config
 from latent_working_memory.v1.data import EpisodeIndex
 from latent_working_memory.v1.pretrain.prepared_data import eligible_input_length
+from latent_working_memory.v1.pretrain.curriculum import validate_curriculum
 
 
 class SelectedIndex(EpisodeIndex):
@@ -46,40 +46,36 @@ class SelectedIndex(EpisodeIndex):
         return sample.to_episode(self.tokenizer, self.config, variant)
 
 
-def select_experiment(spec, config, tokenizer, splits=("train", "dev", "test")):
-    sources = {name: Path(path) for name, path in spec["sources"].items()}
-    runs = spec["runs"]
-    if (
-        not sources
-        or not runs
-        or any(
-            not name or Path(name).name != name or name in {".", ".."}
-            for name in sources.keys() | runs.keys()
-        )
+def validate_selection(spec):
+    if set(spec) != {"sources", "seed", "training", "evaluation"}:
+        raise ValueError("selection requires sources, seed, training and evaluation")
+    if not spec["sources"] or any(
+        not n or Path(n).name != n or n in {".", "..", "train"} for n in spec["sources"]
     ):
-        raise ValueError("sources and runs require simple non-empty dataset names")
-    balanced = spec["balance_task_lengths"]
-    requested = spec["samples_per_split"]
+        raise ValueError("sources require simple names other than train")
     if type(spec["seed"]) is not int or spec["seed"] < 0:
         raise ValueError("selection seed must be a non-negative integer")
-    if type(balanced) is not bool or set(requested) != {"train", "dev", "test"}:
-        raise ValueError("specify balance_task_lengths and train/dev/test sample counts")
-    if any(n is not None and (type(n) is not int or n <= 0) for n in requested.values()):
-        raise ValueError("sample counts must be positive integers or null for all")
-    if balanced and any(n is None for n in requested.values()):
-        raise ValueError("balanced selection requires explicit sample counts")
-    for name, weights in runs.items():
-        if (
-            not weights
-            or set(weights) - sources.keys()
-            or any(w <= 0 for w in weights.values())
-            or not math.isclose(sum(weights.values()), 1)
-        ):
-            raise ValueError("run source weights must be positive and sum to one")
-        if name in sources and weights != {name: 1}:
-            raise ValueError("a dataset named after a source must use only that source")
-        if requested["train"] is None and len(weights) > 1:
-            raise ValueError("mixed training requires a sample count to enforce source proportions")
+    evaluation = spec["evaluation"]
+    if (
+        set(evaluation) != {"balance_task_lengths", "samples_per_source"}
+        or type(evaluation["balance_task_lengths"]) is not bool
+    ):
+        raise ValueError("evaluation requires balance_task_lengths and samples_per_source")
+    counts = evaluation["samples_per_source"]
+    if set(counts) != {"dev", "test"} or any(
+        n is not None and (type(n) is not int or n <= 0) for n in counts.values()
+    ):
+        raise ValueError("evaluation sample counts must be positive or null")
+
+
+def select_experiment(spec, config, tokenizer, splits=("train", "dev", "test")):
+    validate_selection(spec)
+    sources = {name: Path(path) for name, path in spec["sources"].items()}
+    validate_curriculum(spec["training"], sources, config.input_length_bounds)
+    if config.input_length_bounds[-1] < config.max_input_tokens:
+        raise ValueError("length bounds must cover max_input_tokens")
+    balanced = spec["evaluation"]["balance_task_lengths"]
+    requested = spec["evaluation"]["samples_per_source"]
     bounds = config.input_length_bounds
     keys = [(t, b) for t in ("ae", "continuation") for b in bounds] if balanced else [("all", 0)]
     cell_counts = {}
@@ -140,7 +136,9 @@ def select_experiment(spec, config, tokenizer, splits=("train", "dev", "test")):
                         continue
                     seen_content[content] = split
                     key = (
-                        (sample.task, next(b for b in bounds if size <= b)) if balanced else keys[0]
+                        (sample.task, next(b for b in bounds if size <= b))
+                        if split != "train" and balanced
+                        else ("all", 0)
                     )
                     groups[key].append(
                         (
@@ -155,39 +153,45 @@ def select_experiment(spec, config, tokenizer, splits=("train", "dev", "test")):
                         )
                     )
             cells[name, split] = groups
-    indices, summaries = {}, {}
-    weights_by_name = {name: {name: 1} for name in sources} | runs
-    for name, weights in weights_by_name.items():
-        for split in (("train",) if name in runs else ()) + (
-            ("dev", "test") if name in sources else ()
-        ):
+    indices, summaries, resolved_quotas = {}, {}, {}
+    if "train" in splits:
+        entries = [
+            entry for name in sources for pool in cells[name, "train"].values() for entry in pool
+        ]
+        paths = {
+            name: (directory / "train.jsonl", metadata[name]["boundary_variant"])
+            for name, directory in sources.items()
+        }
+        indices["train", "train"] = SelectedIndex(paths, entries, tokenizer, config)
+        summaries["train/train"] = dict(Counter(f"{e[0]}/{e[6]}" for e in entries))
+    for name, directory in sources.items():
+        for split in ("dev", "test"):
             if split not in splits:
                 continue
+            quota = cell_counts[split]
+            if quota is None and balanced:
+                quota = min(len(cells[name, split][key]) for key in keys)
+            if quota == 0:
+                raise ValueError(f"insufficient data for {name}/{split}")
             entries = []
-            for source, weight in weights.items():
-                for key in keys:
-                    pool = list(cells[source, split][key])
-                    # Keep the historical per-cell shuffle and final shuffle exactly.
-                    random.Random(f"{spec['seed']}:{source}:{split}:{key}").shuffle(pool)
-                    quota = cell_counts[split]
-                    n = len(pool) if quota is None else quota * weight
-                    if not math.isclose(n, round(n)):
-                        raise ValueError("sample counts must allow exact source proportions")
-                    n = round(n)
-                    if len(pool) < n:
-                        raise ValueError(
-                            f"insufficient data: {source}/{split}/{key} needs {n}, has {len(pool)}"
-                        )
-                    entries.extend(pool[:n])
+            for key in keys:
+                pool = list(cells[name, split][key])
+                random.Random(f"{spec['seed']}:{name}:{split}:{key}").shuffle(pool)
+                n = len(pool) if quota is None else quota
+                if len(pool) < n:
+                    raise ValueError(
+                        f"insufficient data: {name}/{split}/{key} needs {n}, has {len(pool)}"
+                    )
+                entries.extend(pool[:n])
             random.Random(spec["seed"]).shuffle(entries)
-            paths = {
-                source: (sources[source] / f"{split}.jsonl", metadata[source]["boundary_variant"])
-                for source in weights
-            }
-            indices[name, split] = SelectedIndex(paths, entries, tokenizer, config)
-            summaries[f"{name}/{split}"] = dict(
-                Counter(f"{source}/{task}" for source, _, _, _, _, _, task, _ in entries)
+            indices[name, split] = SelectedIndex(
+                {name: (directory / f"{split}.jsonl", metadata[name]["boundary_variant"])},
+                entries,
+                tokenizer,
+                config,
             )
+            summaries[f"{name}/{split}"] = dict(Counter(f"{e[0]}/{e[6]}" for e in entries))
+            resolved_quotas[f"{name}/{split}"] = quota
     report = {
         "selection": spec,
         "tokenizer": tokenizer_identity(config),
@@ -197,6 +201,7 @@ def select_experiment(spec, config, tokenizer, splits=("train", "dev", "test")):
         },
         "task_source_counts": summaries,
         "rejected": dict(rejected),
+        "samples_per_cell": resolved_quotas,
     }
     return indices, report
 
@@ -211,7 +216,16 @@ def selection_metadata(report, name):
         "preparation_id": hashlib.blake2b(
             json.dumps(identity, sort_keys=True).encode(), digest_size=16
         ).hexdigest(),
-        "source_weights": report["selection"]["runs"].get(name, {name: 1}),
+        "sources": sorted(
+            {
+                source
+                for point in report["selection"]["training"]["source_schedule"]
+                for source, weight in point["weights"].items()
+                if weight > 0
+            }
+        )
+        if name == "train"
+        else [name],
         "selection": report,
     }
 

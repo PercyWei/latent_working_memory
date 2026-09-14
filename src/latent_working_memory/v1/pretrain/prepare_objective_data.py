@@ -19,14 +19,14 @@ from latent_working_memory.data_preparation.pretrain.sources import load_sources
 from latent_working_memory.data_preparation.pretrain.config import PreparationConfig
 from latent_working_memory.data_preparation.pretrain.fineweb import SemanticSpans
 from latent_working_memory.data_preparation.pretrain.truncation import RandomSpans
-from latent_working_memory.v1.config import load_config
+from latent_working_memory.data_preparation.pretrain.config import DataConfig
 from latent_working_memory.data_preparation.pretrain.text_samples import TextSample, tokenizer_identity
 from latent_working_memory.data_preparation.pretrain.audit import length_statistics
 
 
-def initialize_worker(config_path, recipe_mapping):
+def initialize_worker(data_mapping, recipe_mapping):
     global tokenizer, config, recipe
-    config = load_config(config_path)
+    config = DataConfig(**data_mapping)
     tokenizer = AutoTokenizer.from_pretrained(
         config.model_name_or_path, revision=config.model_revision, local_files_only=True
     )
@@ -59,10 +59,10 @@ def candidates_for_document(source):
     return source["split"], result
 
 
-def prepare(spec, config_path, output):
+def prepare(spec, output):
     if output.exists():
         raise FileExistsError(output)
-    cfg = load_config(config_path)
+    cfg = DataConfig(**spec["data"])
     root = Path(spec["source_root"])
     source_metadata = json.loads((root / "source-pool.json").read_text())
     if source_metadata["data_seed"] != cfg.data_seed or source_metadata["split_fractions"] != list(
@@ -94,7 +94,7 @@ def prepare(spec, config_path, output):
     with ProcessPoolExecutor(
         max_workers=spec["workers"],
         initializer=initialize_worker,
-        initargs=(str(config_path), recipe_config.to_dict()),
+        initargs=(spec["data"], recipe_config.to_dict()),
     ) as pool:
         # Bound submitted work; stop once all data quotas are met.
         for offset in range(0, len(rows), 64):
@@ -206,10 +206,9 @@ def prepare(spec, config_path, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--spec", type=Path, required=True)
-    parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
-    report = prepare(json.loads(args.spec.read_text()), args.config, args.output_dir)
+    report = prepare(json.loads(args.spec.read_text()), args.output_dir)
     print(json.dumps(report, indent=2), flush=True)
 
 

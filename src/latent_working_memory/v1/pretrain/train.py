@@ -20,19 +20,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train latent working-memory v1")
     parser.add_argument("--phase", choices=("pretrain",), required=True)
     parser.add_argument("--config", type=Path, required=True)
-    datasets = parser.add_mutually_exclusive_group(required=True)
-    datasets.add_argument("--data-dir", type=Path)
-    datasets.add_argument("--data-selection", type=Path)
-    parser.add_argument("--data-run", help="Training dataset name in the selection configuration")
-    parser.add_argument(
-        "--evaluation-dirs",
-        type=Path,
-        help="JSON mapping of names to prepared evaluation directories",
-    )
+    parser.add_argument("--data-selection", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--max-steps", type=int, default=2000)
-    parser.add_argument("--train-example-limit", type=int)
+    parser.add_argument("--epochs", type=int, required=True)
+    parser.add_argument("--stop-after-steps", type=int)
     parser.add_argument("--save-every", type=int, default=100)
     parser.add_argument("--resume", type=Path)
     parser.add_argument(
@@ -49,7 +41,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     if int(os.environ.get("WORLD_SIZE", 1)) > 1:
         local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(local_rank)
-        dist.init_process_group("nccl", timeout=timedelta(hours=2), device_id=torch.device("cuda", local_rank))
+        dist.init_process_group(
+            "nccl", timeout=timedelta(hours=2), device_id=torch.device("cuda", local_rank)
+        )
         device = torch.device("cuda", local_rank)
     else:
         device = torch.device(args.device)
@@ -57,24 +51,17 @@ def main(argv: Sequence[str] | None = None) -> None:
     config = load_config(args.config)
     result = run_pretraining(
         config=config,
-        data_dir=args.data_dir,
         data_selection=args.data_selection,
-        data_run=args.data_run,
         output_dir=args.output_dir,
         device=device,
-        max_steps=args.max_steps,
-        train_example_limit=args.train_example_limit,
+        epochs=args.epochs,
+        stop_after_steps=args.stop_after_steps,
         save_every=args.save_every,
         resume=args.resume,
         swanlab_mode=args.swanlab_mode,
         swanlab_project=args.swanlab_project,
         swanlab_group=args.swanlab_group,
         swanlab_tags=tuple(args.swanlab_tag),
-        evaluation_dirs={
-            k: Path(v) for k, v in json.loads(args.evaluation_dirs.read_text()).items()
-        }
-        if args.evaluation_dirs
-        else None,
     )
     if dist.is_initialized() and dist.get_rank() != 0:
         dist.destroy_process_group()

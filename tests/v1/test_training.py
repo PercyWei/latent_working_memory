@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import re
+import pytest
 
 import torch
 import torch.distributed as dist
@@ -9,10 +11,10 @@ import torch.multiprocessing as mp
 from transformers import LlamaConfig, LlamaForCausalLM
 
 from latent_working_memory.v1.checkpoint import load_model_checkpoint
-from latent_working_memory.v1.pretrain.prepared_data import pretraining_index
 from latent_working_memory.v1.pretrain.evaluate import main as evaluate_main
 from latent_working_memory.data_preparation.pretrain.pipeline import prepare_fineweb
-from latent_working_memory.v1.pretrain.sampling import PretrainSampler
+from latent_working_memory.v1.pretrain.sampling import EpochSampler
+from latent_working_memory.v1.pretrain.data_selection import select_experiment
 from latent_working_memory.v1.pretrain.training import (
     PretrainTrainer,
     pretrain_forward,
@@ -29,7 +31,12 @@ def test_joint_objective_uses_one_write_and_updates_all_four_modules(
     preparation_recipe,
     components,
     monkeypatch,
+    epoch_selection,
 ):
+    preparation_records = [
+        dict(row, text=re.sub(r"\b\w+\b", lambda m: m[0] + str(i), row["text"]))
+        for i, row in enumerate(preparation_records)
+    ]
     data = tmp_path / "data"
     prepare_fineweb(
         parquet_source(preparation_records),
@@ -38,9 +45,12 @@ def test_joint_objective_uses_one_write_and_updates_all_four_modules(
         data,
         preparation_recipe,
     )
-    data = data / "semantic"
-    sampler = PretrainSampler(pretraining_index(data / "train.jsonl", tokenizer, tiny_config), tokenizer, tiny_config)
-    examples = [sampler.sample(0), sampler.sample(0)]
+    spec = json.loads(epoch_selection(data, tiny_config).read_text())
+    indices, _ = select_experiment(spec, tiny_config, tokenizer)
+    sampler = EpochSampler(
+        indices["train", "train"], tokenizer, tiny_config, spec["training"], 3, 2, 1
+    )
+    examples = sampler.sample_batch()
     backbone, writer = components
     calls = []
     original = backbone.text_features
@@ -81,6 +91,7 @@ def _assert_equal_nested(first, second):
         assert first == second
 
 
+@pytest.mark.parametrize("compression_mode", ["sample", "mean"])
 def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
     parquet_source,
     tmp_path,
@@ -88,6 +99,8 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
     tokenizer,
     preparation_records,
     preparation_recipe,
+    epoch_selection,
+    compression_mode,
 ):
     model_dir = tmp_path / "tiny-llama"
     torch.manual_seed(3)
@@ -111,18 +124,19 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
     config = replace(
         tiny_config,
         model_name_or_path=str(model_dir),
+        compression_mode=compression_mode,
         gradient_checkpointing=True,
         split_fractions=(0.6, 0.2, 0.2),
         warmup_steps=1,
         lr_decay_steps=4,
-        input_length_bounds=(32, 64),
-        input_length_weights=(0.8, 0.2),
-        input_length_weights_end=(0.5, 0.5),
-        input_length_curriculum_steps=2,
     )
     preparation_recipe = replace(
         preparation_recipe, samples_per_task=(16, 16, 16), candidates_per_document=16
     )
+    preparation_records = [
+        dict(row, text=re.sub(r"\b\w+\b", lambda m: m[0] + str(i), row["text"]))
+        for i, row in enumerate(preparation_records)
+    ]
     data = tmp_path / "data"
     prepare_fineweb(
         parquet_source(preparation_records),
@@ -131,16 +145,24 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
         data,
         preparation_recipe,
     )
+    selection = epoch_selection(data, config, {"dev": "semantic"})
     data = data / "semantic"
     full = run_pretraining(
-        config, data, tmp_path / "full", torch.device("cpu"), max_steps=2, save_every=1
+        config,
+        selection,
+        tmp_path / "full",
+        torch.device("cpu"),
+        epochs=2,
+        stop_after_steps=2,
+        save_every=1,
     )
     first = run_pretraining(
         config,
-        data,
+        selection,
         tmp_path / "resumed",
         torch.device("cpu"),
-        max_steps=1,
+        epochs=2,
+        stop_after_steps=1,
         swanlab_mode="offline",
         swanlab_group="lwm-pretrain-test",
     )
@@ -149,10 +171,11 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
     assert json.loads(identity_path.read_text())["project"] == "latent-working-memory-v1"
     resumed = run_pretraining(
         config,
-        data,
+        selection,
         tmp_path / "resumed",
         torch.device("cpu"),
-        max_steps=2,
+        epochs=2,
+        stop_after_steps=2,
         resume=first.final_checkpoint,
         swanlab_mode="offline",
         swanlab_group="lwm-pretrain-test",
@@ -204,27 +227,45 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
     assert test_metrics["training_input_tokens"] == actual.progress["input_tokens"]
     assert "nll_gap_to_full_context" in test_metrics["comparisons"]["all/continuation"]
 
+    multi_selection = epoch_selection(
+        data.parent, config, {"first": "semantic", "second": "random"}
+    )
     multi = run_pretraining(
         config,
-        data,
+        multi_selection,
         tmp_path / "multi",
         torch.device("cpu"),
-        max_steps=1,
-        evaluation_dirs={"first": data, "second": data.parent / "random"},
+        epochs=2,
+        stop_after_steps=1,
     )
     assert set(multi.dev_metrics) == {"first", "second"}
     assert (tmp_path / "multi/first/dev-step-000001.json").exists()
     assert (tmp_path / "multi/second/dev-step-000001.json").exists()
 
-    for name, steps, resume_step in (("distributed-full", 2, None), ("distributed-resumed", 1, None), ("distributed-resumed", 2, 1)):
+    for name, steps, resume_step in (
+        ("distributed-full", 2, None),
+        ("distributed-resumed", 1, None),
+        ("distributed-resumed", 2, 1),
+    ):
         mp.spawn(
             _distributed_train_worker,
-            args=(str(tmp_path / f"rendezvous-{name}-{steps}"), config, data, tmp_path / name, steps, resume_step),
+            args=(
+                str(tmp_path / f"rendezvous-{name}-{steps}"),
+                config,
+                multi_selection,
+                tmp_path / name,
+                steps,
+                resume_step,
+            ),
             nprocs=2,
             join=True,
         )
-    expected = load_model_checkpoint(tmp_path / "distributed-full/checkpoints/pretrain-step-000002.pt")
-    actual = load_model_checkpoint(tmp_path / "distributed-resumed/checkpoints/pretrain-step-000002.pt")
+    expected = load_model_checkpoint(
+        tmp_path / "distributed-full/checkpoints/pretrain-step-000002.pt"
+    )
+    actual = load_model_checkpoint(
+        tmp_path / "distributed-resumed/checkpoints/pretrain-step-000002.pt"
+    )
     _assert_equal_nested(expected.model_state, actual.model_state)
     _assert_equal_nested(expected.optimizer_state, actual.optimizer_state)
     _assert_equal_nested(expected.progress, actual.progress)
@@ -236,8 +277,13 @@ def _distributed_train_worker(rank, rendezvous, config, data, output, steps, res
     torch.set_num_threads(1)
     dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=2)
     run_pretraining(
-        config, data, output, torch.device("cpu"), max_steps=steps, save_every=1,
+        config,
+        data,
+        output,
+        torch.device("cpu"),
+        epochs=2,
+        stop_after_steps=steps,
+        save_every=1,
         resume=output / f"checkpoints/pretrain-step-{resume_step:06d}.pt" if resume_step else None,
-        evaluation_dirs={"first": data, "second": data.parent / "random"},
     )
     dist.destroy_process_group()

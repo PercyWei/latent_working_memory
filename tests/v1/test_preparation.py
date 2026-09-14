@@ -19,9 +19,7 @@ from latent_working_memory.data_preparation.pretrain.pipeline import (
 )
 from latent_working_memory.data_preparation.pretrain.sources import load_sources
 from latent_working_memory.data_preparation.pretrain.quality import document_rejection_reason
-from latent_working_memory.v1.pretrain.prepared_data import pretraining_index
 from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
-from latent_working_memory.v1.pretrain.sampling import PretrainSampler
 
 
 def test_independent_variants_balance_tasks_and_intervals(
@@ -82,19 +80,6 @@ def test_independent_variants_balance_tasks_and_intervals(
             "checks"
         ].values()
     )
-    for variant in ("semantic", "random"):
-        index = pretraining_index(root / variant / "train.jsonl", tokenizer, tiny_config)
-        for task, weights in (("ae", {"lm_weight": 0}), ("continuation", {"ae_weight": 0})):
-            only_task = PretrainSampler(index, tokenizer, replace(tiny_config, **weights))
-            assert all(only_task.sample(0).episode.reads[0].task == task for _ in range(20))
-        sampler = PretrainSampler(index, tokenizer, tiny_config)
-        for i in range(7):
-            sampler.sample(i)
-        state = sampler.state_dict()
-        expected = [sampler.sample(i) for i in range(10)]
-        resumed = PretrainSampler(index, tokenizer, tiny_config)
-        resumed.load_state_dict(state)
-        assert [resumed.sample(i) for i in range(10)] == expected
 
 
 def test_source_pool_budget_and_near_duplicates_are_shared(

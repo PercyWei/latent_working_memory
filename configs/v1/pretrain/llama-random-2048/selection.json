@@ -1,0 +1,58 @@
+{
+  "sources": {
+    "semantic": "data/fineweb-4096-doc100k_20260910/semantic",
+    "random": "data/fineweb-4096-doc100k_20260910/random"
+  },
+  "seed": 20260910,
+  "training": {
+    "source_schedule": [
+      {
+        "epoch": 1,
+        "weights": {
+          "semantic": 0,
+          "random": 1
+        }
+      }
+    ],
+    "task_schedule": [
+      {
+        "epoch": 1,
+        "weights": {
+          "ae": 1,
+          "continuation": 1
+        }
+      }
+    ],
+    "length_schedule": [
+      {
+        "epoch": 1,
+        "weights": {
+          "64": 25,
+          "128": 25,
+          "256": 20,
+          "512": 15,
+          "1024": 10,
+          "2048": 5
+        }
+      },
+      {
+        "epoch": 3,
+        "weights": {
+          "64": 1,
+          "128": 1,
+          "256": 1,
+          "512": 1,
+          "1024": 1,
+          "2048": 1
+        }
+      }
+    ]
+  },
+  "evaluation": {
+    "balance_task_lengths": true,
+    "samples_per_source": {
+      "dev": 3468,
+      "test": 3108
+    }
+  }
+}

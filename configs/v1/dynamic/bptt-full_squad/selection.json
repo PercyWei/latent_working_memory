@@ -1,0 +1,4 @@
+{
+  "dataset": "squad",
+  "dataset_dir": "data/squad"
+}

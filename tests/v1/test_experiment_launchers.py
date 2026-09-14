@@ -1,81 +1,150 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
-from latent_working_memory.v1.pretrain import objective_comparison as objective
 import pytest
 
 from latent_working_memory.v1 import experiment_execution
-from latent_working_memory.v1.pretrain.data_comparison import run_series
+from latent_working_memory.v1.pretrain import experiment as pretrain
+from latent_working_memory.v1.dynamic import experiment as dynamic
 
 
-def test_data_comparison_commands_and_plan_files(tmp_path, monkeypatch):
-    selection = tmp_path / "selection.json"
-    selection.write_text(json.dumps({"sources": {"semantic": "unused", "random": "unused"}}))
-    spec = json.loads(open("configs/experiments/pretrain-data-comparison-2048.json").read())
-    spec["data_selection"] = str(selection)
+PRETRAIN = Path("configs/v1/pretrain")
+DYNAMIC = Path("configs/v1/dynamic")
+
+
+def test_all_ten_experiments_have_independent_valid_configs():
+    pretraining = sorted(PRETRAIN.glob("*/experiment.json"))
+    dynamics = sorted(DYNAMIC.glob("*/experiment.json"))
+    assert len(pretraining) == 7 and len(dynamics) == 3
+    for path, loader in [(p, pretrain.load_pretrain_experiment) for p in pretraining] + [
+        (p, dynamic.load_dynamic_experiment) for p in dynamics
+    ]:
+        spec = loader(path)
+        assert "group" not in spec and "runs" not in spec
+        assert Path(spec["model"]).parent == path.parent.resolve()
+        assert Path(spec["selection"]).parent == path.parent.resolve()
+        assert spec["gpus"] == [4, 5]
+    qwen = json.loads((PRETRAIN / "qwen2.5-3b-instruct_mixed-2048/selection.json").read_text())
+    assert qwen["evaluation"]["samples_per_source"] == {"dev": None, "test": None}
+    assert qwen["training"]["source_schedule"][0]["weights"] == {"semantic": 0.5, "random": 0.5}
+
+
+def test_pretrain_runs_warmup_first_and_appends_test_to_each_training_run(tmp_path, monkeypatch):
     commands = []
+    monkeypatch.delenv("LWM_ALLOWED_PHYSICAL_GPUS", raising=False)
 
     def execute(argv, **kwargs):
-        commands.append((argv, kwargs["env"]["CUDA_VISIBLE_DEVICES"]))
+        commands.append((argv, kwargs["env"]))
+        if "latent_working_memory.v1.pretrain.train" in argv:
+            output = Path(argv[argv.index("--output-dir") + 1])
+            output.mkdir(parents=True)
+            (output / "training-result.json").write_text(
+                json.dumps(
+                    {
+                        "completed_steps": 120,
+                        "complete": True,
+                        "final_checkpoint": str(output / "checkpoints/pretrain-step-000120.pt"),
+                    }
+                )
+            )
         return SimpleNamespace(returncode=0)
 
+    monkeypatch.setattr(
+        experiment_execution.subprocess, "check_output", lambda *a, **k: "test-commit"
+    )
     monkeypatch.setattr(experiment_execution.subprocess, "run", execute)
-    monkeypatch.setattr(experiment_execution.subprocess, "check_output", lambda *a, **k: "test")
-    output = tmp_path / "experiment"
-    run_series(spec, output)
+    paths = [
+        PRETRAIN / f"llama-{name}_mixed-128/experiment.json"
+        for name in ("ae-warmup", "ae-only", "joint")
+    ]
+    output = tmp_path / "series"
+    pretrain.main(
+        [
+            "--experiments",
+            *map(str, paths),
+            "--output-dir",
+            str(output),
+            "--swanlab-mode",
+            "online",
+            "--swanlab-group",
+            "objectives",
+            "--swanlab-tag",
+            "study:pretrain-objective-comparison",
+        ]
+    )
     training = [c for c, _ in commands if "latent_working_memory.v1.pretrain.train" in c]
-    assert [c[c.index("--data-run") + 1] for c in training] == ["semantic", "random", "mixed"]
-    evaluations = [(c, gpu) for c, gpu in commands if "latent_working_memory.v1.pretrain.evaluate" in c]
-    assert len(evaluations) == 6
-    assert {gpu for _, gpu in evaluations} == {"4", "5"}
-    assert all(c[c.index("--swanlab-mode") + 1] == "disabled" for c, _ in evaluations)
-    publication = commands[-1][0]
-    assert publication.count("--training-run") == 3
-    assert "--evaluation-output" not in publication
+    evaluations = [c for c, _ in commands if "latent_working_memory.v1.pretrain.evaluate" in c]
+    assert len(training) == len(evaluations) == 3
+    assert "ae-warmup" in training[0][training[0].index("--config") + 1]
+    assert all(
+        "--resume" not in c and "--fork-from" not in c and "--data-run" not in c for c in training
+    )
+    for train, evaluation in zip(training, evaluations, strict=True):
+        directory = train[train.index("--output-dir") + 1]
+        assert evaluation[evaluation.index("--training-run") + 1] == directory
+        assert (
+            evaluation[evaluation.index("--training-result") + 1]
+            == directory + "/training-result.json"
+        )
+        assert train[train.index("--swanlab-group") + 1] == "objectives"
+        assert Path(train[train.index("--config") + 1]).is_file()
+    assert all("LWM_ALLOWED_PHYSICAL_GPUS" not in env for _, env in commands)
+    assert {env["CUDA_VISIBLE_DEVICES"] for _, env in commands} == {"4", "4,5"}
     assert json.loads((output / "plan/status.json").read_text())["status"] == "complete"
-    expected = {"series.json", "data-selection.json", "status.json", "commands.json", "reports.json"}
-    expected |= {f"{r['data_run']}-train.log" for r in spec["runs"]}
-    expected |= {f"{r['data_run']}-test-{s}.log" for r in spec["runs"] for s in ("semantic", "random")}
-    expected.add("publish-comparison.log")
-    assert {p.name for p in (output / "plan").iterdir()} == expected
 
 
-def test_execution_rejects_gpu_overlap(tmp_path, monkeypatch):
-    monkeypatch.setattr(experiment_execution.subprocess, "check_output", lambda *a, **k: "test")
+def test_dynamic_plan_has_explicit_pretrain_dependency_and_separate_evaluation(
+    tmp_path, monkeypatch
+):
+    def no_execution(*a, **k):
+        raise AssertionError("plan-only must not execute commands")
+
+    monkeypatch.setattr(
+        experiment_execution.subprocess, "check_output", lambda *a, **k: "test-commit"
+    )
+    monkeypatch.setattr(experiment_execution.subprocess, "run", no_execution)
+    output = tmp_path / "plan"
+    paths = sorted(DYNAMIC.glob("*/experiment.json"))
+    dynamic.main(
+        [
+            "--experiments",
+            *map(str, paths),
+            "--output-dir",
+            str(output),
+            "--swanlab-group",
+            "bptt",
+            "--plan-only",
+        ]
+    )
+    commands = json.loads((output / "plan/commands.json").read_text())
+    assert len(commands) == 9
+    for i in range(0, 9, 3):
+        prepare, train, test = [c["argv"] for c in commands[i : i + 3]]
+        assert "latent_working_memory.v1.dynamic.prepare" in prepare
+        assert train[train.index("--checkpoint") + 1].endswith("pretrain-step-020000.pt")
+        assert test[test.index("--checkpoint") + 1].endswith("dynamic-step-000750.pt")
+        assert (
+            prepare[prepare.index("--output-dir") + 1] + "/evaluation-plan.json"
+            == train[train.index("--evaluation-plan") + 1]
+        )
+    assert json.loads((output / "plan/status.json").read_text())["status"] == "planned"
+
+
+def test_experiment_rejects_invalid_gpu_or_duplicate_names_before_writes(tmp_path, monkeypatch):
+    path = PRETRAIN / "llama-mixed-2048/experiment.json"
+    monkeypatch.setenv("LWM_ALLOWED_PHYSICAL_GPUS", "6,7")
+    with pytest.raises(ValueError, match="allowed physical"):
+        pretrain.load_pretrain_experiment(path)
+    monkeypatch.delenv("LWM_ALLOWED_PHYSICAL_GPUS")
+    with pytest.raises(ValueError, match="distinct names"):
+        pretrain.main(
+            ["--experiments", str(path), str(path), "--output-dir", str(tmp_path / "out")]
+        )
+    assert not (tmp_path / "out").exists()
+
+
+def test_execution_rejects_gpu_overlap(tmp_path):
     execution = experiment_execution.ExperimentExecution(tmp_path, [4, 5])
     with pytest.raises(ValueError, match="disjoint"):
         execution.stage([("a", ["unused"], [4, 5]), ("b", ["unused"], [4, 5])])
-
-
-def test_objective_launcher_can_start_with_independent_warmup(tmp_path, monkeypatch):
-    spec = json.loads(open("configs/experiments/pretrain-objective-comparison-128.json").read())
-    spec["runs"] = [spec["runs"][2], *spec["runs"][:2]]
-    selection = tmp_path / "selection.json"
-    selection.write_text(json.dumps({"sources": {"semantic": "unused", "random": "unused"}}))
-    note = tmp_path / "note.md"
-    note.write_text("实验记录\n")
-    spec.update(data_selection=str(selection), note=str(note))
-    commands = []
-
-    def execute(argv, **kwargs):
-        commands.append(argv)
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr(experiment_execution.subprocess, "run", execute)
-    monkeypatch.setattr(experiment_execution.subprocess, "check_output", lambda *a, **k: "test")
-    monkeypatch.setattr(objective, "summarize", lambda *a: "结果\n")
-    output = tmp_path / "experiment"
-    objective.run_series(spec, output)
-    training = [c for c in commands if "latent_working_memory.v1.pretrain.train" in c]
-    assert len(training) == 3
-    assert all(c[c.index("--data-run") + 1] == "mixed" for c in training)
-    assert training[0][training[0].index("--config") + 1] == spec["runs"][0]["config"]
-    assert all("--fork-from" not in command and "--resume" not in command for command in training)
-    evaluations = [c for c in commands if "latent_working_memory.v1.pretrain.evaluate" in c]
-    assert len(evaluations) == 6
-    assert all(c[c.index("--prefix-tokens") + 1:c.index("--prefix-tokens") + 4] == ["1", "8", "32"] for c in evaluations)
-    assert commands[-1].count("--training-run") == 3
-    expected = {"series.json", "data-selection.json", "status.json", "commands.json", "reports.json", "results.md", "publish-comparison.log"}
-    expected |= {f"{r['label']}-train.log" for r in spec["runs"]}
-    expected |= {f"{r['label']}-test-{s}.log" for r in spec["runs"] for s in ("semantic", "random")}
-    assert {p.name for p in (output / "plan").iterdir()} == expected
