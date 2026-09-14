@@ -6,7 +6,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 import swanlab
-from latent_working_memory.v1.tracking import swanlab_run, swanlab_training_run
+from latent_working_memory.v1.tracking import (
+    DEFAULT_SWANLAB_PROJECT,
+    swanlab_run,
+    swanlab_training_run,
+)
 from latent_working_memory.v1.pretrain.dev_scalars import (
     configure_development_panels,
     development_scalars,
@@ -23,7 +27,7 @@ def pretraining_run(
     output_dir,
     config,
     mode="disabled",
-    project="latent-working-memory",
+    project=DEFAULT_SWANLAB_PROJECT,
     job_type="train",
     group=None,
     tags=(),

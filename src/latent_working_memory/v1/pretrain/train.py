@@ -13,6 +13,7 @@ import torch.distributed as dist
 from latent_working_memory.devices import validate_device
 from latent_working_memory.v1.config import load_config
 from latent_working_memory.v1.pretrain.training import run_pretraining
+from latent_working_memory.v1.tracking import DEFAULT_SWANLAB_PROJECT
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -37,7 +38,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--swanlab-mode", choices=("disabled", "offline", "online"), default="disabled"
     )
-    parser.add_argument("--swanlab-project", default="latent-working-memory")
+    parser.add_argument("--swanlab-project", default=DEFAULT_SWANLAB_PROJECT)
     parser.add_argument("--swanlab-group")
     parser.add_argument("--swanlab-tag", action="append", default=[])
     return parser.parse_args(argv)

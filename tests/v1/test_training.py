@@ -146,6 +146,7 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
     )
     identity_path = tmp_path / "resumed/swanlab.json"
     first_swanlab_id = json.loads(identity_path.read_text())["id"]
+    assert json.loads(identity_path.read_text())["project"] == "latent-working-memory-v1"
     resumed = run_pretraining(
         config,
         data,
@@ -196,6 +197,9 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
         ]
     )
     test_metrics = json.loads((tmp_path / "test-evaluation/test-step-000002.json").read_text())
+    assert json.loads((tmp_path / "test-evaluation/swanlab.json").read_text())["project"] == (
+        "latent-working-memory-v1"
+    )
     assert test_metrics["split"] == "test"
     assert test_metrics["training_input_tokens"] == actual.progress["input_tokens"]
     assert "nll_gap_to_full_context" in test_metrics["comparisons"]["all/continuation"]

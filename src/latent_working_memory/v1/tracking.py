@@ -9,12 +9,15 @@ import swanlab
 from latent_working_memory.v1.checkpoint import capture_rng_state, restore_rng_state
 
 
+DEFAULT_SWANLAB_PROJECT = "latent-working-memory-v1"
+
+
 @contextmanager
 def swanlab_run(
     output_dir: Path,
     config: dict[str, Any],
     mode: str = "disabled",
-    project: str = "latent-working-memory",
+    project: str = DEFAULT_SWANLAB_PROJECT,
     run_id: str | None = None,
     job_type: str = "train",
     group: str | None = None,

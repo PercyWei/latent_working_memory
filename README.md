@@ -1,10 +1,12 @@
 # 20260912_latent_working_memory
 
-最后修订时间：20260914 11:48:20 UTC+08:00
+最后修订时间：20260914 12:02:21 UTC+08:00
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理；ICAE v1 和 C-DIC 分别位于 `reproductions/icae/` 与 `reproductions/cdic/`，各自使用独立的 `uv` 环境。
 
 ## 主环境与开发
+
+研究笔记的写作与维护遵守 [notes/README.md](notes/README.md)。通用执行约定见项目 `AGENTS.md`。
 
 数据构造、主实验训练与评估统一使用项目根目录 `.venv/`，依赖由根目录 `pyproject.toml` 与 `uv.lock` 管理。通用数据构造入口位于 `src/latent_working_memory/data_preparation/`，训练与实验代码按阶段放在 `src/latent_working_memory/v1/` 的对应子目录，正式配置位于 `configs/`；执行记录与日志写入 `artifacts/`。
 
@@ -58,7 +60,7 @@ v1 测试覆盖损失与梯度、原文边界、规则句界、任务配额与�
 数据准备仅检查数据长度与来源契约；训练时检查实际基座窗口、输入/目标预算和合法 memory 容量。当前默认 memory 上限为 4096，压缩率为 2、4、8。4k 数据的训练需要配置可覆盖 4096-token 写入及 `memory + target + prompt + special tokens` 读取预算的基座；下面的训练入口用于已完成相应预算适配的数据和训练配置。
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 uv run python -m latent_working_memory.v1.pretrain.train \
+CUDA_VISIBLE_DEVICES=4 uv run python -m latent_working_memory.v1.pretrain.train \
   --phase pretrain \
   --config configs/archive/pretrain_a800.json \
   --data-dir data/fineweb-independent/semantic \
@@ -69,7 +71,7 @@ CUDA_VISIBLE_DEVICES=0 uv run python -m latent_working_memory.v1.pretrain.train 
 `--train-example-limit 16` 固定一个优先覆盖不同文档的小样本池，供过拟合检查使用；常规训练使用全部已准备样本。恢复时增加 `--resume artifacts/v1/pretrain-pilot/train/pretrain-pilot/checkpoints/pretrain-step-000100.pt`，并把 `--max-steps` 设为新的总 step 上限。checkpoint 保存完整可训练模块、优化器、文档采样与容量课程进度及随机状态。运行产物包含逐样本容量和损失、文档覆盖、token 监督量、吞吐、显存及分层验证指标。
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 uv run python -m latent_working_memory.v1.pretrain.evaluate \
+CUDA_VISIBLE_DEVICES=4 uv run python -m latent_working_memory.v1.pretrain.evaluate \
   --checkpoint artifacts/v1/pretrain-pilot/train/pretrain-pilot/checkpoints/pretrain-step-001000.pt \
   --data-dir data/fineweb-independent/semantic \
   --output-dir artifacts/v1/pretrain-pilot/eval/pretrain-pilot-test \
@@ -92,13 +94,13 @@ LM 的全部条件预测相同的 Y，并使用同一任务提示。最近文本
 
 ### SwanLab 可视化
 
-训练或独立评估命令增加 `--swanlab-mode online`，使用服务器已有登录。`--swanlab-mode offline` 将记录保存在运行目录；默认值为 `disabled`。项目名由 `--swanlab-project` 指定，默认 `latent-working-memory`，新建项目为私有。
+训练或独立评估命令增加 `--swanlab-mode online`，使用服务器已有登录。`--swanlab-mode offline` 将记录保存在运行目录；默认值为 `disabled`。项目名由 `--swanlab-project` 指定，默认 `latent-working-memory-v1`，新建项目为私有；创建新项目遵循项目约定。
 
 看板记录 AE/LM 损失、梯度范数、吞吐和显存、输入长度与记忆容量、文档覆盖，以及各评估条件的 NLL、PPL、准确率和对照差值。长度、粒度、容量与压缩率分别提供分层 NLL、自由重建指标及读取数量。`progress/input_tokens` 与评估 step 同步记录，支持按训练曝光量分析学习曲线。
 
 自由生成记录 BLEU-4、连续正确前缀比例、完整匹配和归一化 token 编辑距离；文本样例按每页 100 条记录。`eval_generation_every` 控制生成评估频率；独立评估可用 `--examples 512 --generation-examples 128` 扩大面板。SwanLab 配置包含本次数据准备与质量筛选记录，独立评估额外记录 checkpoint 路径与实际划分。
 
-`swanlab.json` 保存实验 ID 和链接；在同一输出目录恢复训练时沿用该实验。独立评估可通过 `--swanlab-run-id` 写入对应训练实验，并使用 checkpoint 的 step 作为横轴。可视化参数由命令行管理，与模型配置分开保存。[SwanLab 初始化与续接接口](https://docs.swanlab.cn/api/py-init.html)
+`swanlab.json` 保存实验 ID 和链接；在同一输出目录恢复训练时沿用该实验。恢复已有 run 时显式使用其原项目和 group；独立评估可通过 `--training-run` 指定原训练目录并追加结果，使用 checkpoint 的 step 作为横轴。可视化参数由命令行管理，与模型配置分开保存。[SwanLab 初始化与续接接口](https://docs.swanlab.cn/api/py-init.html)
 
 已有 100 步小样本试验可在 [SwanLab 看板](https://swanlab.cn/@percyWeeeeei/latent-working-memory/runs/hzg2z87k/chart) 查看。历史日志按 optimizer step 导入，时间轴显示本次导入时间。
 

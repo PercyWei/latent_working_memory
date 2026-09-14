@@ -45,6 +45,7 @@ from latent_working_memory.v1.pretrain.tracking import (
     log_training,
 )
 from latent_working_memory.v1.pretrain.tracking import pretraining_run
+from latent_working_memory.v1.tracking import DEFAULT_SWANLAB_PROJECT
 
 
 def learning_rate_at(config: ExperimentConfig, step: int) -> float:
@@ -214,7 +215,7 @@ def run_pretraining(
     resume: Path | None = None,
     train_example_limit: int | None = None,
     swanlab_mode: str = "disabled",
-    swanlab_project: str = "latent-working-memory",
+    swanlab_project: str = DEFAULT_SWANLAB_PROJECT,
     swanlab_group: str | None = None,
     swanlab_tags: tuple[str, ...] = (),
     evaluation_dirs: dict[str, Path] | None = None,

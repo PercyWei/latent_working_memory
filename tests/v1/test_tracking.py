@@ -118,6 +118,7 @@ def test_offline_metrics_match_local_reports_and_close_run(tmp_path, monkeypatch
     assert not run.alive
     assert json.loads((tmp_path / "swanlab.json").read_text())["mode"] == "offline"
     identity = json.loads((tmp_path / "swanlab.json").read_text())
+    assert identity["project"] == "latent-working-memory-v1"
     assert identity["group"] == "lwm-pretrain-test"
     assert identity["job_type"] == "train"
     assert identity["tags"] == [
@@ -153,6 +154,7 @@ def test_common_run_does_not_interpret_stage_configuration(tmp_path, monkeypatch
     ) as run:
         assert run.id == "run-id"
     assert calls[0]["config"] == config
+    assert calls[0]["project"] == "latent-working-memory-v1"
     assert calls[0]["tags"] == ["data:custom", "method:latent-working-memory", "scope:main"]
 
 

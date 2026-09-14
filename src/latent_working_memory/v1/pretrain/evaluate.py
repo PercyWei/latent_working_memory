@@ -18,6 +18,7 @@ from latent_working_memory.devices import validate_device
 from latent_working_memory.v1.training import load_trainable_model_state, precision_context
 from latent_working_memory.v1.pretrain.tracking import pretraining_run
 from latent_working_memory.v1.pretrain.tracking import append_evaluation_reports
+from latent_working_memory.v1.tracking import DEFAULT_SWANLAB_PROJECT
 from latent_working_memory.v1.pretrain.reporting import (
     build_evaluation_charts,
     reconstruction_media,
@@ -43,7 +44,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument(
         "--swanlab-mode", choices=("disabled", "offline", "online"), default="disabled"
     )
-    parser.add_argument("--swanlab-project", default="latent-working-memory")
+    parser.add_argument("--swanlab-project", default=DEFAULT_SWANLAB_PROJECT)
     parser.add_argument("--swanlab-group")
     parser.add_argument("--swanlab-tag", action="append", default=[])
     parser.add_argument("--training-run", type=Path, help="Append to this training directory’s SwanLab run")
