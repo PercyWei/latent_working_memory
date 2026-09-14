@@ -1,11 +1,11 @@
 import json
 from types import SimpleNamespace
 
-from latent_working_memory.v1.pretrain_objective_comparison import run as objective
+from latent_working_memory.v1.pretrain import objective_comparison as objective
 import pytest
 
 from latent_working_memory.v1 import experiment_execution
-from latent_working_memory.v1.pretrain_data_comparison.run import run_series
+from latent_working_memory.v1.pretrain.data_comparison import run_series
 
 
 def test_data_comparison_commands_and_plan_files(tmp_path, monkeypatch):
@@ -23,9 +23,9 @@ def test_data_comparison_commands_and_plan_files(tmp_path, monkeypatch):
     monkeypatch.setattr(experiment_execution.subprocess, "check_output", lambda *a, **k: "test")
     output = tmp_path / "experiment"
     run_series(spec, output)
-    training = [c for c, _ in commands if "latent_working_memory.v1.train" in c]
+    training = [c for c, _ in commands if "latent_working_memory.v1.pretrain.train" in c]
     assert [c[c.index("--data-run") + 1] for c in training] == ["semantic", "random", "mixed"]
-    evaluations = [(c, gpu) for c, gpu in commands if "latent_working_memory.v1.evaluate" in c]
+    evaluations = [(c, gpu) for c, gpu in commands if "latent_working_memory.v1.pretrain.evaluate" in c]
     assert len(evaluations) == 6
     assert {gpu for _, gpu in evaluations} == {"4", "5"}
     assert all(c[c.index("--swanlab-mode") + 1] == "disabled" for c, _ in evaluations)
@@ -65,13 +65,13 @@ def test_objective_launcher_keeps_warmup_dependency(tmp_path, monkeypatch):
     monkeypatch.setattr(objective, "summarize", lambda *a: "结果\n")
     output = tmp_path / "experiment"
     objective.run_series(spec, output)
-    training = [c for c in commands if "latent_working_memory.v1.train" in c]
+    training = [c for c in commands if "latent_working_memory.v1.pretrain.train" in c]
     assert len(training) == 3
     assert all(c[c.index("--data-run") + 1] == "mixed" for c in training)
     assert "--fork-from" not in training[0] and "--fork-from" not in training[1]
     parent = training[2][training[2].index("--fork-from") + 1]
     assert parent == str(output / "train" / spec["runs"][0]["name"] / "checkpoints/pretrain-step-005000.pt")
-    evaluations = [c for c in commands if "latent_working_memory.v1.evaluate" in c]
+    evaluations = [c for c in commands if "latent_working_memory.v1.pretrain.evaluate" in c]
     assert len(evaluations) == 6
     assert all(c[c.index("--prefix-tokens") + 1:c.index("--prefix-tokens") + 4] == ["1", "8", "32"] for c in evaluations)
     assert commands[-1].count("--training-run") == 3

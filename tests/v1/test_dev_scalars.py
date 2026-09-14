@@ -1,7 +1,13 @@
+
+from latent_working_memory.v1.pretrain.dev_scalars import remove_individual_dev_panels
+import colorsys
+from latent_working_memory.v1.pretrain.dev_scalars import development_panel_style
 from types import SimpleNamespace
 
-from latent_working_memory.v1.dev_scalars import (
-    configure_development_panels, development_panels, development_scalars,
+from latent_working_memory.v1.pretrain.dev_scalars import (
+    configure_development_panels,
+    development_panels,
+    development_scalars,
 )
 
 
@@ -52,7 +58,7 @@ def test_native_panels_created_once_before_scalar_upload(monkeypatch):
             charts[index].update(data)
             return SimpleNamespace(ok=True, data=None)
 
-    monkeypatch.setattr('latent_working_memory.v1.dev_scalars.swanlab.Api', Api)
+    monkeypatch.setattr('latent_working_memory.v1.pretrain.dev_scalars.swanlab.Api', Api)
     run = SimpleNamespace(id='slug', url='https://swanlab.cn/@user/project/runs/slug')
     configure_development_panels(run, ['semantic', 'random'], 'online')
     assert len(posts) == 1 and len(posts[0]) == 42
@@ -63,7 +69,6 @@ def test_native_panels_created_once_before_scalar_upload(monkeypatch):
 
 
 def test_delete_only_redundant_panels_and_empty_sections(monkeypatch):
-    from latent_working_memory.v1.dev_scalars import remove_individual_dev_panels
     key = 'dev/overview/ae/nll/semantic/memory'
     deleted = []
     sections = [{'name': 'dev', 'index': 'main', 'chartIndex': ['grouped']},
@@ -90,7 +95,7 @@ def test_delete_only_redundant_panels_and_empty_sections(monkeypatch):
                     section['chartIndex'] = [i for i in section['chartIndex'] if i != index]
             return SimpleNamespace(ok=True, data=None)
 
-    monkeypatch.setattr('latent_working_memory.v1.dev_scalars.swanlab.Api', Api)
+    monkeypatch.setattr('latent_working_memory.v1.pretrain.dev_scalars.swanlab.Api', Api)
     run = SimpleNamespace(id='slug', url='https://swanlab.cn/@user/project/runs/slug')
     assert remove_individual_dev_panels(run, ['semantic']) == ['single', 'old']
     assert deleted == ['/experiment/cloud/chart/single/hard', '/experiment/cloud/chart/old/hard',
@@ -98,8 +103,6 @@ def test_delete_only_redundant_panels_and_empty_sections(monkeypatch):
 
 
 def test_condition_colors_and_adjacent_source_legends():
-    import colorsys
-    from latent_working_memory.v1.dev_scalars import development_panel_style
     sources = ['semantic', 'random']
     panels = development_panels(sources)
     panel = panels['dev/overview/ae/nll']

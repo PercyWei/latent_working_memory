@@ -1,9 +1,12 @@
+
+from types import SimpleNamespace
+from latent_working_memory.v1.pretrain.tracking import append_evaluation_reports
 import json
 
 import pytest
 import swanlab
 
-from latent_working_memory.v1.publish_reports import main
+from latent_working_memory.v1.pretrain.publish_reports import main
 
 
 def test_static_publication_records_checkpoint_and_blocks_partial_republish(tmp_path, monkeypatch):
@@ -71,8 +74,6 @@ def test_static_publication_records_checkpoint_and_blocks_partial_republish(tmp_
 
 
 def test_append_uses_training_identity_config_and_checkpoint_step(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-    from latent_working_memory.v1.tracking import append_evaluation_reports
 
     training = tmp_path / "train"
     training.mkdir()

@@ -7,7 +7,7 @@ from latent_working_memory.v1.model import (
     JointMemoryWriter,
     sinusoidal_positions,
 )
-from latent_working_memory.v1.rollout import policy_update, rollout_with_policy
+from latent_working_memory.v1.capacity.rollout import policy_update, rollout_with_policy
 from latent_working_memory.v1.state import MemoryState
 
 

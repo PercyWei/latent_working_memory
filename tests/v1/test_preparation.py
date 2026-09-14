@@ -19,9 +19,9 @@ from latent_working_memory.data_preparation.pretrain.pipeline import (
 )
 from latent_working_memory.data_preparation.pretrain.sources import load_sources
 from latent_working_memory.data_preparation.pretrain.quality import document_rejection_reason
-from latent_working_memory.v1.prepared_data import pretraining_index
+from latent_working_memory.v1.pretrain.prepared_data import pretraining_index
 from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
-from latent_working_memory.v1.sampling import PretrainSampler
+from latent_working_memory.v1.pretrain.sampling import PretrainSampler
 
 
 def test_independent_variants_balance_tasks_and_intervals(

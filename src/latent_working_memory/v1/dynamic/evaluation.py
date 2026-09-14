@@ -12,8 +12,8 @@ import torch
 import torch.distributed as dist
 
 from latent_working_memory.v1.backbone import ReadTokens
-from latent_working_memory.v1.dynamic_data import write_boundaries
-from latent_working_memory.v1.dynamic_training import read_schedule
+from latent_working_memory.v1.dynamic.data import write_boundaries
+from latent_working_memory.v1.dynamic.training import read_schedule
 from latent_working_memory.v1.training import precision_context
 
 

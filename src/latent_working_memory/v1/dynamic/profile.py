@@ -13,11 +13,11 @@ import torch.distributed as dist
 
 from latent_working_memory.devices import validate_device
 from latent_working_memory.v1.checkpoint import load_model_checkpoint
-from latent_working_memory.v1.dynamic import runtime_info
-from latent_working_memory.v1.dynamic_config import load_dynamic_config
-from latent_working_memory.v1.dynamic_training import DynamicTrainer, load_components
-from latent_working_memory.v1.squad import SquadDataset
-from latent_working_memory.v1.dynamic_data import DynamicTextSampler
+from latent_working_memory.v1.dynamic.run import runtime_info
+from latent_working_memory.v1.dynamic.config import load_dynamic_config
+from latent_working_memory.v1.dynamic.training import DynamicTrainer, load_components
+from latent_working_memory.v1.dynamic.squad import SquadDataset
+from latent_working_memory.v1.dynamic.data import DynamicTextSampler
 
 
 def main():

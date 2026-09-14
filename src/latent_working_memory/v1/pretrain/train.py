@@ -12,7 +12,7 @@ import torch.distributed as dist
 
 from latent_working_memory.devices import validate_device
 from latent_working_memory.v1.config import load_config
-from latent_working_memory.v1.training import run_pretraining
+from latent_working_memory.v1.pretrain.training import run_pretraining
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

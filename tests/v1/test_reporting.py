@@ -1,7 +1,10 @@
+
+from latent_working_memory.v1.pretrain.reporting import evaluation_overview, paired_reconstructions
+from latent_working_memory.v1.pretrain.reporting import development_overview
 import json
 import colorsys
-from latent_working_memory.v1.reporting import build_evaluation_charts, comparison_charts
-from latent_working_memory.v1.tracking import swanlab_run
+from latent_working_memory.v1.pretrain.reporting import build_evaluation_charts, comparison_charts
+from latent_working_memory.v1.pretrain.tracking import pretraining_run
 
 
 def report():
@@ -63,7 +66,7 @@ def test_comparison_labels_and_separate_metrics():
 
 
 def test_offline_chart_serialization(tmp_path):
-    with swanlab_run(tmp_path, {}, mode="offline", group="report-test", job_type="evaluate") as run:
+    with pretraining_run(tmp_path, {}, mode="offline", group="report-test", job_type="evaluate") as run:
         run.log(build_evaluation_charts([("semantic", report()), ("random", report())]))
     assert not run.alive
 
@@ -134,7 +137,6 @@ def test_serialized_labels_and_metric_coverage():
 
 
 def test_compact_reports_keep_details_and_pair_all_controls(tmp_path):
-    from latent_working_memory.v1.reporting import evaluation_overview, paired_reconstructions
     data = report()
     data["prefix_diagnostics"] = {"memory/prefix-8": {"bleu_4": 20}}
     charts = evaluation_overview([("semantic", data)], "evaluation/test/overview")
@@ -152,7 +154,6 @@ def test_compact_reports_keep_details_and_pair_all_controls(tmp_path):
 
 
 def test_dev_overview_uses_real_steps_and_sparse_generation(tmp_path):
-    from latent_working_memory.v1.reporting import development_overview
     path = tmp_path / "dev-step-000003.jsonl"
     path.write_text("")
     for step in (0, 1, 3, 9):

@@ -1,14 +1,14 @@
 from types import SimpleNamespace
-import latent_working_memory.v1.pretrain_objective_comparison.run as series
+import latent_working_memory.v1.pretrain.objective_comparison as series
 import latent_working_memory.v1.experiment_execution as execution
 import json
 from dataclasses import replace
 
 from latent_working_memory.data_preparation.pretrain.config import PreparationConfig
 from latent_working_memory.data_preparation.pretrain.pipeline import prepare_sources
-from latent_working_memory.v1.pretrain_objective_comparison.prepare_data import prepare
+from latent_working_memory.v1.pretrain.prepare_objective_data import prepare
 from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
-from latent_working_memory.v1.data_selection import select_experiment
+from latent_working_memory.v1.pretrain.data_selection import select_experiment
 from latent_working_memory.v1.config import write_resolved_config
 
 
@@ -104,8 +104,8 @@ def test_series_uses_selection_and_parallel_source_evaluation(tmp_path, monkeypa
         ],
     }
     series.run_series(spec, tmp_path / "artifacts")
-    train = next(c for c in commands if "latent_working_memory.v1.train" in c)
+    train = next(c for c in commands if "latent_working_memory.v1.pretrain.train" in c)
     assert "--data-selection" in train and "--data-run" in train and "--data-dir" not in train
-    evaluations = [c for c in commands if "latent_working_memory.v1.evaluate" in c]
+    evaluations = [c for c in commands if "latent_working_memory.v1.pretrain.evaluate" in c]
     assert {c[c.index("--evaluation-source") + 1] for c in evaluations} == {"semantic", "random"}
     assert all("--data-selection" in c and "--data-dir" not in c for c in evaluations)

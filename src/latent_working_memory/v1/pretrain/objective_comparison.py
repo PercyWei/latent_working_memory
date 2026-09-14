@@ -28,7 +28,7 @@ def run_series(spec, output):
         for run in spec["runs"]:
             directory = output / "train" / run["name"]
             argv = [python, "-m", "torch.distributed.run", "--standalone", "--nproc_per_node=2",
-                    "-m", "latent_working_memory.v1.train", "--phase", "pretrain",
+                    "-m", "latent_working_memory.v1.pretrain.train", "--phase", "pretrain",
                     "--config", run["config"], "--data-selection", str(plan / "data-selection.json"),
                     "--data-run", "mixed",
                     "--output-dir", str(directory), "--max-steps", str(spec["max_steps"]),
@@ -46,7 +46,7 @@ def run_series(spec, output):
             eval_output = output / "eval" / run["evaluation_name"]
             jobs = []
             for source, gpu in zip(evaluation_sources, spec["gpus"], strict=True):
-                argv = [python, "-m", "latent_working_memory.v1.evaluate", "--checkpoint", str(checkpoint),
+                argv = [python, "-m", "latent_working_memory.v1.pretrain.evaluate", "--checkpoint", str(checkpoint),
                         "--data-selection", str(plan / "data-selection.json"), "--evaluation-source", source,
                         "--output-dir", str(eval_output / source),
                         "--split", "test", "--examples", str(spec["evaluation"]["examples"]),
@@ -60,7 +60,7 @@ def run_series(spec, output):
             stage(jobs)
             evaluation_outputs += ["--training-run", run["label"], str(directory)]
         (plan / "reports.json").write_text(json.dumps(reports, indent=2) + "\n")
-        argv = [python, "-m", "latent_working_memory.v1.publish_reports", "--reports", str(plan / "reports.json"),
+        argv = [python, "-m", "latent_working_memory.v1.pretrain.publish_reports", "--reports", str(plan / "reports.json"),
                 "--output-dir", str(output / "compare" / spec["comparison_name"]),
                 "--swanlab-mode", "online", *groups, *evaluation_outputs]
         stage([("publish-comparison", argv, spec["gpus"])])

@@ -16,7 +16,7 @@ from latent_working_memory.v1.config import ExperimentConfig
 from latent_working_memory.v1.data import EpisodeIndex
 from latent_working_memory.v1.model import JointMemoryWriter
 from latent_working_memory.v1.objectives import ReaderOutput
-from latent_working_memory.v1.sampling import capacity_weights, read_tokens
+from latent_working_memory.v1.pretrain.sampling import capacity_weights, read_tokens
 from latent_working_memory.v1.state import MemoryState
 
 

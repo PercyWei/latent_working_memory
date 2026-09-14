@@ -14,7 +14,7 @@ from latent_working_memory.data_preparation.pretrain.fineweb import (
 )
 from latent_working_memory.data_preparation.pretrain.truncation import RandomSpans
 from latent_working_memory.v1.config import ExperimentConfig
-from latent_working_memory.v1.sampling import capacity_weights, read_tokens
+from latent_working_memory.v1.pretrain.sampling import capacity_weights, read_tokens
 
 
 def test_default_length_and_fraction_boundaries():

@@ -8,7 +8,7 @@ from latent_working_memory.data_preparation.squad import (
     load_articles,
     prepare_squad,
 )
-from latent_working_memory.v1.squad import SquadDataset, sample_reads
+from latent_working_memory.v1.dynamic.squad import SquadDataset, sample_reads
 
 
 def article(index, split="train", title=None, text=None):

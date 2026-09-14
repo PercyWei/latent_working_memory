@@ -5,7 +5,7 @@ from latent_working_memory.data_preparation.pretrain.pipeline import prepare_fin
 from latent_working_memory.data_preparation.pretrain.fineweb import data_contract
 from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
 from latent_working_memory.v1.checkpoint import load_model_checkpoint
-from latent_working_memory.v1.training import run_pretraining
+from latent_working_memory.v1.pretrain.training import run_pretraining
 
 from collections import Counter
 from dataclasses import replace
@@ -13,7 +13,7 @@ from dataclasses import replace
 import pytest
 
 from latent_working_memory.v1.data import EpisodeIndex, write_episodes
-from latent_working_memory.v1.sampling import BalancedPretrainSampler, task_weights_at
+from latent_working_memory.v1.pretrain.sampling import BalancedPretrainSampler, task_weights_at
 
 
 def test_balanced_task_source_batches_and_warmup_boundary(

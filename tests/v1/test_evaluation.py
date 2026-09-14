@@ -6,7 +6,7 @@ import pytest
 import torch
 import json
 
-from latent_working_memory.v1.evaluation import (
+from latent_working_memory.v1.pretrain.evaluation import (
     MemoryFootprintPoint,
     NllSummary,
     aggregate_nll,
@@ -17,10 +17,10 @@ from latent_working_memory.v1.evaluation import (
     exact_match,
     persistent_memory_bytes,
 )
-from latent_working_memory.v1.prepared_data import pretraining_index
+from latent_working_memory.v1.pretrain.prepared_data import pretraining_index
 from latent_working_memory.data_preparation.pretrain.pipeline import prepare_fineweb
 from latent_working_memory.v1.state import MemoryState
-from latent_working_memory.v1.sampling import read_tokens
+from latent_working_memory.v1.pretrain.sampling import read_tokens
 
 
 def test_exact_match_only_normalizes_whitespace() -> None:

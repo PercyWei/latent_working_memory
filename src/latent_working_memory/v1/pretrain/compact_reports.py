@@ -6,8 +6,10 @@ from pathlib import Path
 
 import swanlab
 
-from latent_working_memory.v1.reporting import (
-    development_overview, evaluation_overview, paired_reconstructions,
+from latent_working_memory.v1.pretrain.reporting import (
+    development_overview,
+    evaluation_overview,
+    paired_reconstructions,
 )
 from latent_working_memory.v1.tracking import swanlab_training_run
 

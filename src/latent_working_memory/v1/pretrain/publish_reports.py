@@ -4,13 +4,14 @@ import argparse
 import json
 from pathlib import Path
 
-from latent_working_memory.v1.evaluation import aggregate_pretrain_metrics
-from latent_working_memory.v1.reporting import (
+from latent_working_memory.v1.pretrain.evaluation import aggregate_pretrain_metrics
+from latent_working_memory.v1.pretrain.reporting import (
     comparison_charts,
     build_evaluation_charts,
     reconstruction_media,
 )
-from latent_working_memory.v1.tracking import swanlab_run, append_evaluation_reports
+from latent_working_memory.v1.pretrain.tracking import pretraining_run
+from latent_working_memory.v1.pretrain.tracking import append_evaluation_reports
 
 
 def main(argv=None) -> None:
@@ -124,7 +125,7 @@ def main(argv=None) -> None:
     for directory, selected_entries, rendered in bundles:
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "reports.json").write_text(json.dumps(selected_entries, indent=2) + "\n")
-        with swanlab_run(
+        with pretraining_run(
             directory,
             {"reports": selected_entries},
             args.swanlab_mode,
@@ -136,7 +137,7 @@ def main(argv=None) -> None:
             run.log(rendered, step=0)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "reports.json").write_text(json.dumps(entries, indent=2) + "\n")
-    with swanlab_run(
+    with pretraining_run(
         args.output_dir,
         {"reports": entries},
         args.swanlab_mode,

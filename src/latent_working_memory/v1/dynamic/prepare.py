@@ -8,12 +8,12 @@ from pathlib import Path
 from transformers import AutoTokenizer
 
 from latent_working_memory.v1.checkpoint import load_model_checkpoint
-from latent_working_memory.v1.dynamic_config import load_dynamic_config
-from latent_working_memory.v1.dynamic_data import DynamicTextSampler, TrainingText
-from latent_working_memory.v1.dynamic_evaluation import evaluation_schedule
-from latent_working_memory.v1.dynamic_training import read_schedule
-from latent_working_memory.v1.squad import SquadDataset
-from latent_working_memory.v1.personamem import PersonaMemDataset
+from latent_working_memory.v1.dynamic.config import load_dynamic_config
+from latent_working_memory.v1.dynamic.data import DynamicTextSampler, TrainingText
+from latent_working_memory.v1.dynamic.evaluation import evaluation_schedule
+from latent_working_memory.v1.dynamic.training import read_schedule
+from latent_working_memory.v1.dynamic.squad import SquadDataset
+from latent_working_memory.v1.dynamic.personamem import PersonaMemDataset
 
 
 def evaluation_identity(recipe):

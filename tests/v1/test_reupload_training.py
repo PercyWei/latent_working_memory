@@ -6,8 +6,8 @@ import swanlab
 import torch
 
 from latent_working_memory.data_preparation.pretrain.pipeline import prepare_fineweb
-from latent_working_memory.v1 import training
-from latent_working_memory.v1.reupload_training import prepare_replay, replay_training
+from latent_working_memory.v1.pretrain import training
+from latent_working_memory.v1.pretrain.reupload_training import prepare_replay, replay_training
 
 
 def normalize(value):
@@ -47,7 +47,7 @@ def test_live_training_and_saved_replay_emit_identical_records(
         configs.append(config)
         yield live
 
-    monkeypatch.setattr(training, "swanlab_run", tracking)
+    monkeypatch.setattr(training, "pretraining_run", tracking)
     monkeypatch.setattr(training, "load_backbone", lambda *args: (tokenizer, components[0]))
     output = tmp_path / "train"
     training.run_pretraining(config, data / "semantic", output, torch.device("cpu"),

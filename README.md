@@ -1,14 +1,14 @@
 # 20260912_latent_working_memory
 
-最后修订时间：20260913 22:57:48 UTC+08:00
+最后修订时间：20260913 23:15:58 UTC+08:00
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理；ICAE v1 和 C-DIC 分别位于 `reproductions/icae/` 与 `reproductions/cdic/`，各自使用独立的 `uv` 环境。
 
 ## 主环境与开发
 
-数据构造、主实验训练与评估统一使用项目根目录 `.venv/`，依赖由根目录 `pyproject.toml` 与 `uv.lock` 管理。通用数据构造入口位于 `src/latent_working_memory/data_preparation/`，实验专用代码放在 `src/latent_working_memory/v1/` 的对应子目录，正式配置位于 `configs/`；执行记录与日志写入 `artifacts/`。
+数据构造、主实验训练与评估统一使用项目根目录 `.venv/`，依赖由根目录 `pyproject.toml` 与 `uv.lock` 管理。通用数据构造入口位于 `src/latent_working_memory/data_preparation/`，训练与实验代码按阶段放在 `src/latent_working_memory/v1/` 的对应子目录，正式配置位于 `configs/`；执行记录与日志写入 `artifacts/`。
 
-数据构造按流程分包：[pretrain/](src/latent_working_memory/data_preparation/pretrain/) 负责 FineWeb 预训练文本构造、质量审查与恢复，[personamem/](src/latent_working_memory/data_preparation/personamem/) 负责事实 QA 构造。预训练的来源、句界、截断、文本格式、审查和恢复模块均位于 `pretrain/`；训练时的数据读取与实验选样继续使用 `v1/prepared_data.py` 和 `v1/data_selection.py`。
+数据构造按流程分包：[pretrain/](src/latent_working_memory/data_preparation/pretrain/) 负责 FineWeb 预训练文本构造、质量审查与恢复，[personamem/](src/latent_working_memory/data_preparation/personamem/) 负责事实 QA 构造。预训练的来源、句界、截断、文本格式、审查和恢复模块均位于 `pretrain/`；训练时的数据读取与实验选样继续使用 `v1/pretrain/prepared_data.py` 和 `v1/pretrain/data_selection.py`。
 
 ```bash
 uv sync --frozen
@@ -29,7 +29,11 @@ uv run pytest
 
 ## 可增长记忆 v1
 
-第一版新方法直接位于 `src/latent_working_memory/v1/`；未来版本使用同级目录，不增加额外的方法族目录。配置位于 `configs/v1/`，测试位于 `tests/v1/`，数据与运行产物分别使用 Git-ignored 的 `data/v1/` 和 `artifacts/v1/`。实验产物按系列组织为 `artifacts/v1/<实验系列>/`，其中 `train/` 保存训练及 checkpoint，`eval/` 保存独立评估，`compare/` 保存跨运行比较，`plan/` 保存调度与清单。当前预训练数据类型对比系列位于 `artifacts/v1/pretrain-data-comparison-2048_20260911/`，完整记录及路径见 [预训练数据类型对比实验](notes/v1/20260911_pretraining_data_comparison.md)。数据准备与工程验证产物仍分别位于 `artifacts/v1/data-preparation/` 和 `artifacts/v1/validation/`。
+第一版新方法位于 `src/latent_working_memory/v1/`，按阶段分为 [pretrain/](src/latent_working_memory/v1/pretrain/)、[dynamic/](src/latent_working_memory/v1/dynamic/) 和 [capacity/](src/latent_working_memory/v1/capacity/)。根层保存模型、状态、checkpoint、通用数据与损失、训练辅助函数、SwanLab 会话、图表和命令执行等跨阶段能力，不导入阶段模块。阶段内部直接保存训练、评估与各实验入口文件，实验形成多份专用模块后再考虑子目录。容量阶段目前包含资源代价和策略运行基础实现，尚无完整训练入口。
+
+动态阶段使用 `python -m latent_working_memory.v1.dynamic.prepare` 准备实验，`python -m latent_working_memory.v1.dynamic.run train` 和 `evaluate` 执行训练与评估；QA 报告入口为 `latent_working_memory.v1.dynamic.reporting`。SQuAD 与 PersonaMem 的运行时读取器同属 `v1/dynamic/`。阶段重构仅改变源码与入口路径，既有配置字段、checkpoint、训练日志和数据格式保持一致；旧入口不保留转发层。
+
+配置位于 `configs/v1/`，测试位于 `tests/v1/`，数据与运行产物分别使用 Git-ignored 的 `data/v1/` 和 `artifacts/v1/`。实验产物按系列组织为 `artifacts/v1/<实验系列>/`，其中 `train/` 保存训练及 checkpoint，`eval/` 保存独立评估，`compare/` 保存跨运行比较，`plan/` 保存调度与清单。当前预训练数据类型对比系列位于 `artifacts/v1/pretrain-data-comparison-2048_20260911/`，完整记录及路径见 [预训练数据类型对比实验](notes/v1/20260911_pretraining_data_comparison.md)。数据准备与工程验证产物仍分别位于 `artifacts/v1/data-preparation/` 和 `artifacts/v1/validation/`。
 
 FineWeb 基础语料的 `semantic/`、`random/` 各只保存 `train.jsonl`、`dev.jsonl`、`test.jsonl` 和 `preparation.json`。样本保存原始 X、LM 后续 Y、来源与字符跨度，以及构造 tokenizer 的参考长度；AE 不重复保存目标，不落盘 token IDs、训练提示词或读写位置。父目录的 `source-pool.json` 只记录原始 Parquet 文件路径、随机种子、构造规则和统计，不保存来源正文副本。构造、恢复构造及原文边界检查按该记录重新读取原始文件，在内存中重建候选来源与划分；训练和评估不需要原始文件。迁移原始文件位置后需相应更新 `source_files` 路径。
 
@@ -50,7 +54,7 @@ v1 测试覆盖损失与梯度、原文边界、规则句界、任务配额与�
 数据准备仅检查数据长度与来源契约；训练时检查实际基座窗口、输入/目标预算和合法 memory 容量。当前默认 memory 上限为 4096，压缩率为 2、4、8。4k 数据的训练需要配置可覆盖 4096-token 写入及 `memory + target + prompt + special tokens` 读取预算的基座；下面的训练入口用于已完成相应预算适配的数据和训练配置。
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 uv run python -m latent_working_memory.v1.train \
+CUDA_VISIBLE_DEVICES=0 uv run python -m latent_working_memory.v1.pretrain.train \
   --phase pretrain \
   --config configs/v1/pretrain_a800.json \
   --data-dir data/v1/fineweb-independent/semantic \
@@ -61,7 +65,7 @@ CUDA_VISIBLE_DEVICES=0 uv run python -m latent_working_memory.v1.train \
 `--train-example-limit 16` 固定一个优先覆盖不同文档的小样本池，供过拟合检查使用；常规训练使用全部已准备样本。恢复时增加 `--resume artifacts/v1/pretrain-pilot/train/pretrain-pilot/checkpoints/pretrain-step-000100.pt`，并把 `--max-steps` 设为新的总 step 上限。checkpoint 保存完整可训练模块、优化器、文档采样与容量课程进度及随机状态。运行产物包含逐样本容量和损失、文档覆盖、token 监督量、吞吐、显存及分层验证指标。
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 uv run python -m latent_working_memory.v1.evaluate \
+CUDA_VISIBLE_DEVICES=0 uv run python -m latent_working_memory.v1.pretrain.evaluate \
   --checkpoint artifacts/v1/pretrain-pilot/train/pretrain-pilot/checkpoints/pretrain-step-001000.pt \
   --data-dir data/v1/fineweb-independent/semantic \
   --output-dir artifacts/v1/pretrain-pilot/eval/pretrain-pilot-test \
@@ -136,17 +140,17 @@ uv sync --project reproductions/cdic --frozen
 
 ### 预训练实验入口
 
-不同实验使用独立启动脚本，共用 `v1/train.py`、`evaluate.py`、`publish_reports.py`、`data_selection.py` 和 `experiment_execution.py`。最后一个模块只负责命令执行、日志、状态和 GPU 分配检查，不决定实验步骤。
+不同实验的入口文件直接放在 `v1/pretrain/`，共用该阶段的 `train.py`、`evaluate.py`、`publish_reports.py` 和 `data_selection.py`。根层的 `v1/experiment_execution.py` 只负责命令执行、日志、状态和 GPU 分配检查，不决定实验步骤。
 
-- 数据类型对比：`v1/pretrain_data_comparison/run.py`，分别训练 semantic、random、mixed。
-- 目标对比：`v1/pretrain_objective_comparison/run.py`，分别训练 AE-only、联合训练和 AE warm-up；专用短文本构造入口为同目录的 `prepare_data.py`。
+- 数据类型对比：`v1/pretrain/data_comparison.py`，分别训练 semantic、random、mixed。
+- 目标对比：`v1/pretrain/objective_comparison.py`，分别训练 AE-only、联合训练和 AE warm-up；专用短文本构造入口为同目录的 `prepare_objective_data.py`。
 
 ```bash
-.venv/bin/python -m latent_working_memory.v1.pretrain_data_comparison.run \
+.venv/bin/python -m latent_working_memory.v1.pretrain.data_comparison \
   --spec configs/experiments/pretrain-data-comparison-2048.json \
   --output-dir artifacts/v1/<新的数据对比实验目录>
 
-.venv/bin/python -m latent_working_memory.v1.pretrain_objective_comparison.run \
+.venv/bin/python -m latent_working_memory.v1.pretrain.objective_comparison \
   --spec configs/experiments/pretrain-objective-comparison-128.json \
   --output-dir artifacts/v1/<新的目标对比实验目录>
 ```

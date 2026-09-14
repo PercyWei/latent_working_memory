@@ -8,7 +8,7 @@ from urllib.error import HTTPError
 import pytest
 from tokenizers.pre_tokenizers import WhitespaceSplit
 
-from latent_working_memory.data_preparation.dynamic import (
+from latent_working_memory.v1.dynamic.prepare import (
     evaluation_identity,
     load_evaluation_plan,
     prepare_dynamic,
@@ -18,8 +18,8 @@ from latent_working_memory.data_preparation.personamem import sources
 from latent_working_memory.data_preparation.personamem.construction import AnnotationClient, locate
 from latent_working_memory.data_preparation.personamem.audit import scores
 from latent_working_memory.data_preparation.personamem.blocks import evidence_blocks
-from latent_working_memory.v1.dynamic_config import DynamicConfig
-from latent_working_memory.v1.personamem import PersonaMemDataset
+from latent_working_memory.v1.dynamic.config import DynamicConfig
+from latent_working_memory.v1.dynamic.personamem import PersonaMemDataset
 
 
 @pytest.fixture

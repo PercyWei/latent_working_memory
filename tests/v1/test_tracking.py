@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import json
 import socket
+from contextlib import contextmanager
 
-from latent_working_memory.v1.tracking import log_evaluation, log_training, swanlab_run
+from latent_working_memory.v1 import tracking as common_tracking
+from latent_working_memory.v1.pretrain import tracking as pretrain_tracking
+
+from latent_working_memory.v1.pretrain.tracking import log_evaluation, log_training
+from latent_working_memory.v1.pretrain.tracking import pretraining_run
 
 
 def test_offline_metrics_match_local_reports_and_close_run(tmp_path, monkeypatch):
@@ -12,7 +17,7 @@ def test_offline_metrics_match_local_reports_and_close_run(tmp_path, monkeypatch
 
     monkeypatch.setattr(socket.socket, "connect", reject_network)
     calls = []
-    with swanlab_run(
+    with pretraining_run(
         tmp_path, {}, mode="offline", group="lwm-pretrain-test", tags=("study:pretraining",)
     ) as run:
         original_log = run.log
@@ -121,3 +126,65 @@ def test_offline_metrics_match_local_reports_and_close_run(tmp_path, monkeypatch
         "scope:main",
         "study:pretraining",
     ]
+
+
+def test_common_run_does_not_interpret_stage_configuration(tmp_path, monkeypatch):
+    calls = []
+
+    class Session:
+        id = "run-id"
+        url = "https://swanlab.example/@workspace/project/runs/run-id"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    def initialize(**kwargs):
+        calls.append(kwargs)
+        return Session()
+
+    monkeypatch.setattr(common_tracking.swanlab, "init", initialize)
+    # These field names used to implicitly activate pretraining tags and panels.
+    config = {"data_preparation": {}, "evaluation_preparations": {"custom": {}}}
+    with common_tracking.swanlab_run(
+        tmp_path, config, mode="online", group="common-test", tags=("data:custom",)
+    ) as run:
+        assert run.id == "run-id"
+    assert calls[0]["config"] == config
+    assert calls[0]["tags"] == ["data:custom", "method:latent-working-memory", "scope:main"]
+
+
+def test_pretraining_session_owns_source_tags_and_training_panels(tmp_path, monkeypatch):
+    sessions, panels = [], []
+    active_run = object()
+
+    @contextmanager
+    def session(output_dir, config, mode, project, **kwargs):
+        sessions.append(kwargs)
+        yield active_run if mode != "disabled" else None
+
+    monkeypatch.setattr(pretrain_tracking, "swanlab_run", session)
+    monkeypatch.setattr(
+        pretrain_tracking,
+        "configure_development_panels",
+        lambda run, sources, mode: panels.append((run, sources, mode)),
+    )
+    config = {
+        "data_preparation": {"source_weights": {"semantic": 0.5, "random": 0.5}},
+        "evaluation_preparations": {"semantic": "first", "random": "second"},
+    }
+    for job_type in ("train", "evaluate"):
+        with pretrain_tracking.pretraining_run(
+            tmp_path, config, mode="online", group="pretrain-test", job_type=job_type
+        ) as run:
+            assert run is active_run
+        assert set(sessions[-1]["fixed_tags"]) == {
+            "scope:main", "method:latent-working-memory", "data:fineweb",
+            "data:semantic", "data:random",
+        }
+    assert panels == [(active_run, ["semantic", "random"], "online")]
+    with pretrain_tracking.pretraining_run(tmp_path, {"data_preparation": {}}) as run:
+        assert run is None
+    assert len(panels) == 1

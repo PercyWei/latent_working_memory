@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from latent_working_memory.v1.capacity import (
+from latent_working_memory.v1.capacity.costs import (
     ResourceCosts,
     action_objective,
     read_cost,

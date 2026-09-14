@@ -7,10 +7,13 @@ from pathlib import Path
 
 import swanlab
 
-from latent_working_memory.v1.tracking import (
-    append_evaluation_reports, log_evaluation, log_training,
-    pretraining_tracking_config, swanlab_run,
+from latent_working_memory.v1.pretrain.tracking import (
+    append_evaluation_reports,
+    log_evaluation,
+    log_training,
+    pretraining_tracking_config,
 )
+from latent_working_memory.v1.pretrain.tracking import pretraining_run
 
 
 def prepare_replay(training_dir):
@@ -102,7 +105,7 @@ def reupload_training(training_dir):
             shutil.copy2(state_path, archive / "reupload.json")
         state = {"old_id": identity["id"], "new_id": None,
                  "archive": str(archive.resolve()), "status": "uploading"}
-    with swanlab_run(
+    with pretraining_run(
         training_dir, prepared["config"], "online", identity["project"],
         job_type="train", group=identity["group"], tags=tuple(identity["tags"]),
         new_run=not continuing,

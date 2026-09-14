@@ -8,8 +8,8 @@ from pathlib import Path
 
 import swanlab
 
-from latent_working_memory.v1.dev_scalars import configure_line_panels
-from latent_working_memory.v1.dynamic_evaluation import aggregate_qa
+from latent_working_memory.v1.reporting import configure_line_panels
+from latent_working_memory.v1.dynamic.evaluation import aggregate_qa
 from latent_working_memory.v1.reporting import CONDITION_COLORS, _bar
 from latent_working_memory.v1.tracking import swanlab_run, swanlab_training_run
 

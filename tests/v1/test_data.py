@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from latent_working_memory.v1.data import Episode
 from latent_working_memory.data_preparation.pretrain.segmentation import sentence_spans
-from latent_working_memory.v1.sampling import capacity_weights, read_tokens
+from latent_working_memory.v1.pretrain.sampling import capacity_weights, read_tokens
 
 
 def test_natural_views_preserve_exact_original_text(

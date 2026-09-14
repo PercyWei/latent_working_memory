@@ -8,9 +8,9 @@ from torch.utils.checkpoint import checkpoint as activation_checkpoint
 
 from latent_working_memory.v1.backbone import ReadTokens, load_backbone
 from latent_working_memory.v1.distributed import synchronize_gradients
-from latent_working_memory.v1.dynamic_data import write_boundaries
+from latent_working_memory.v1.dynamic.data import write_boundaries
 from latent_working_memory.v1.model import GrowthValueNetwork, JointMemoryWriter
-from latent_working_memory.v1.squad import sample_reads
+from latent_working_memory.v1.dynamic.squad import sample_reads
 from latent_working_memory.v1.training import load_trainable_model_state, precision_context
 
 

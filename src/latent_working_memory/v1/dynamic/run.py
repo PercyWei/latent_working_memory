@@ -26,19 +26,19 @@ from latent_working_memory.v1.checkpoint import (
     restore_rng_state,
     save_model_checkpoint,
 )
-from latent_working_memory.v1.dynamic_config import load_dynamic_config
-from latent_working_memory.v1.dynamic_data import DynamicTextSampler
-from latent_working_memory.data_preparation.dynamic import load_evaluation_plan
-from latent_working_memory.v1.dynamic_training import DynamicTrainer, load_components
-from latent_working_memory.v1.dynamic_evaluation import evaluate_panel, write_evaluation
-from latent_working_memory.v1.dynamic_reporting import (
+from latent_working_memory.v1.dynamic.config import load_dynamic_config
+from latent_working_memory.v1.dynamic.data import DynamicTextSampler
+from latent_working_memory.v1.dynamic.prepare import load_evaluation_plan
+from latent_working_memory.v1.dynamic.training import DynamicTrainer, load_components
+from latent_working_memory.v1.dynamic.evaluation import evaluate_panel, write_evaluation
+from latent_working_memory.v1.dynamic.reporting import (
     log_qa,
     training_metrics,
     configure_dynamic_panels,
     append_qa_report,
 )
-from latent_working_memory.v1.squad import SquadDataset
-from latent_working_memory.v1.personamem import PersonaMemDataset
+from latent_working_memory.v1.dynamic.squad import SquadDataset
+from latent_working_memory.v1.dynamic.personamem import PersonaMemDataset
 from latent_working_memory.v1.tracking import swanlab_run
 from latent_working_memory.v1.training import trainable_model_state
 

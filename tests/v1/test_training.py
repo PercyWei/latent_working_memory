@@ -9,11 +9,15 @@ import torch.multiprocessing as mp
 from transformers import LlamaConfig, LlamaForCausalLM
 
 from latent_working_memory.v1.checkpoint import load_model_checkpoint
-from latent_working_memory.v1.prepared_data import pretraining_index
-from latent_working_memory.v1.evaluate import main as evaluate_main
+from latent_working_memory.v1.pretrain.prepared_data import pretraining_index
+from latent_working_memory.v1.pretrain.evaluate import main as evaluate_main
 from latent_working_memory.data_preparation.pretrain.pipeline import prepare_fineweb
-from latent_working_memory.v1.sampling import PretrainSampler
-from latent_working_memory.v1.training import PretrainTrainer, pretrain_forward, run_pretraining
+from latent_working_memory.v1.pretrain.sampling import PretrainSampler
+from latent_working_memory.v1.pretrain.training import (
+    PretrainTrainer,
+    pretrain_forward,
+    run_pretraining,
+)
 
 
 def test_joint_objective_uses_one_write_and_updates_all_four_modules(

@@ -1,7 +1,7 @@
 import torch
 from transformers import LlamaConfig, LlamaForCausalLM
-from latent_working_memory.v1.training import run_pretraining
-from latent_working_memory.v1.evaluate import main as evaluate_main
+from latent_working_memory.v1.pretrain.training import run_pretraining
+from latent_working_memory.v1.pretrain.evaluate import main as evaluate_main
 from latent_working_memory.v1.checkpoint import load_model_checkpoint
 from dataclasses import replace
 import json
@@ -9,10 +9,10 @@ import re
 
 import pytest
 
-from latent_working_memory.v1.data_selection import select_experiment
+from latent_working_memory.v1.pretrain.data_selection import select_experiment
 from latent_working_memory.data_preparation.pretrain.pipeline import prepare_fineweb
-from latent_working_memory.v1.sampling import PretrainSampler
-from latent_working_memory.v1.training import learning_rate_at
+from latent_working_memory.v1.pretrain.sampling import PretrainSampler
+from latent_working_memory.v1.pretrain.training import learning_rate_at
 
 
 @pytest.mark.parametrize("shared_names", [True, False])

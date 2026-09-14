@@ -6,11 +6,13 @@ from pathlib import Path
 
 import swanlab
 
-from latent_working_memory.v1.dev_scalars import (
-    configure_development_panels, development_scalars, remove_individual_dev_panels,
+from latent_working_memory.v1.pretrain.dev_scalars import (
+    configure_development_panels,
+    development_scalars,
+    remove_individual_dev_panels,
 )
-from latent_working_memory.v1.reporting import OVERVIEW_METRICS
-from latent_working_memory.v1.reupload_training import prepare_replay
+from latent_working_memory.v1.pretrain.reporting import OVERVIEW_METRICS
+from latent_working_memory.v1.pretrain.reupload_training import prepare_replay
 from latent_working_memory.v1.tracking import swanlab_training_run
 
 

@@ -23,7 +23,7 @@ def run_series(spec, output):
             directory = output / "train" / run["name"]
             execution.stage([(run["data_run"] + "-train", [
                 python, "-m", "torch.distributed.run", "--standalone", "--nproc_per_node=2",
-                "-m", "latent_working_memory.v1.train", "--phase", "pretrain",
+                "-m", "latent_working_memory.v1.pretrain.train", "--phase", "pretrain",
                 "--config", spec["config"], "--data-selection", str(plan / "data-selection.json"),
                 "--data-run", run["data_run"], "--output-dir", str(directory),
                 "--max-steps", str(spec["max_steps"]), "--save-every", str(spec["save_every"]),
@@ -34,7 +34,7 @@ def run_series(spec, output):
                 destination = output / "eval" / run["evaluation_name"] / source
                 checkpoint = directory / f"checkpoints/pretrain-step-{spec['max_steps']:06d}.pt"
                 jobs.append((run["data_run"] + "-test-" + source, [
-                    python, "-m", "latent_working_memory.v1.evaluate", "--checkpoint", str(checkpoint),
+                    python, "-m", "latent_working_memory.v1.pretrain.evaluate", "--checkpoint", str(checkpoint),
                     "--data-selection", str(plan / "data-selection.json"),
                     "--evaluation-source", source, "--output-dir", str(destination),
                     "--split", "test", "--examples", str(spec["evaluation"]["examples"]),
@@ -47,7 +47,7 @@ def run_series(spec, output):
             training_runs += ["--training-run", run["data_run"], str(directory)]
         (plan / "reports.json").write_text(json.dumps(reports, indent=2) + "\n")
         execution.stage([("publish-comparison", [
-            python, "-m", "latent_working_memory.v1.publish_reports",
+            python, "-m", "latent_working_memory.v1.pretrain.publish_reports",
             "--reports", str(plan / "reports.json"),
             "--output-dir", str(output / "compare" / spec["comparison_name"]),
             "--swanlab-mode", "online", *groups, *training_runs,

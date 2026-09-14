@@ -8,8 +8,8 @@ from latent_working_memory.data_preparation.pretrain.fineweb import data_contrac
 from latent_working_memory.data_preparation.pretrain.migrate_text_samples import migrate
 from latent_working_memory.data_preparation.pretrain.pipeline import prepare_fineweb
 from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
-from latent_working_memory.v1.prepared_data import pretraining_index
-from latent_working_memory.v1.sampling import read_tokens
+from latent_working_memory.v1.pretrain.prepared_data import pretraining_index
+from latent_working_memory.v1.pretrain.sampling import read_tokens
 
 
 def test_text_index_reuses_lengths_and_retokenizes_other_models(

@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from latent_working_memory.devices import validate_device
-from latent_working_memory.v1.train import parse_args
+from latent_working_memory.v1.pretrain.train import parse_args
 
 
 def test_train_entry_exposes_only_the_implemented_pretrain_phase() -> None:

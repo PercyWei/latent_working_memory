@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import torch
-from latent_working_memory.v1.sampling import PretrainExample, read_tokens
-from latent_working_memory.v1.training import PretrainTrainer, pretrain_forward
+from latent_working_memory.v1.pretrain.sampling import PretrainExample, read_tokens
+from latent_working_memory.v1.pretrain.training import PretrainTrainer, pretrain_forward
 
 
 def test_mixed_ae_only_objective_and_microbatch_gradients(

@@ -10,8 +10,8 @@ import torch.distributed as dist
 from transformers import LlamaConfig, LlamaForCausalLM
 
 from latent_working_memory.data_preparation.squad import prepare_squad
-from latent_working_memory.data_preparation.dynamic import prepare_dynamic
-from latent_working_memory.v1 import dynamic_reporting
+from latent_working_memory.v1.dynamic.prepare import prepare_dynamic
+from latent_working_memory.v1.dynamic import reporting as dynamic_reporting
 from latent_working_memory.v1.backbone import load_backbone
 from latent_working_memory.v1.checkpoint import (
     capture_rng_state,
@@ -19,23 +19,19 @@ from latent_working_memory.v1.checkpoint import (
     save_model_checkpoint,
 )
 from latent_working_memory.v1.data import Episode, Read, Reference, Source
-from latent_working_memory.v1.dynamic import run_dynamic, main
-from latent_working_memory.v1.dynamic_config import DynamicConfig
-from latent_working_memory.v1.dynamic_training import DynamicTrainer, read_schedule
-from latent_working_memory.v1.dynamic_evaluation import answer_scores, evaluate_qa, aggregate_qa
-from latent_working_memory.v1.dynamic_reporting import (
-    qa_media,
-    log_qa,
-    main as publish_qa,
-)
-from latent_working_memory.v1.dynamic_data import (
+from latent_working_memory.v1.dynamic.run import run_dynamic, main
+from latent_working_memory.v1.dynamic.config import DynamicConfig
+from latent_working_memory.v1.dynamic.training import DynamicTrainer, read_schedule
+from latent_working_memory.v1.dynamic.evaluation import answer_scores, evaluate_qa, aggregate_qa
+from latent_working_memory.v1.dynamic.reporting import qa_media, log_qa, main as publish_qa
+from latent_working_memory.v1.dynamic.data import (
     DynamicTextSampler,
     allocate_counts,
     text_bounds,
     write_boundaries,
 )
 from latent_working_memory.v1.model import GrowthValueNetwork, JointMemoryWriter
-from latent_working_memory.v1.squad import QA_PROMPT, SquadDataset
+from latent_working_memory.v1.dynamic.squad import QA_PROMPT, SquadDataset
 from latent_working_memory.v1.training import trainable_model_state
 
 
@@ -448,7 +444,7 @@ def test_run_resume_across_micro_epochs_and_final_test(
     opts = dict(evaluation_plan=tmp_path / "plan/evaluation-plan.json")
     published_steps = []
     monkeypatch.setattr(
-        "latent_working_memory.v1.dynamic.log_qa",
+        "latent_working_memory.v1.dynamic.run.log_qa",
         lambda run, metrics, rows, step, *args, **kwargs: published_steps.append(step),
     )
     full = run_dynamic(initial, index, tmp_path / "full", recipe, torch.device("cpu"), **opts)
@@ -464,7 +460,7 @@ def test_run_resume_across_micro_epochs_and_final_test(
     ]
     assert runtime["python_executable"] == sys.executable
     assert runtime["environment"] == sys.prefix
-    assert runtime["source_file"].endswith("src/latent_working_memory/v1/dynamic.py")
+    assert runtime["source_file"].endswith("src/latent_working_memory/v1/dynamic/run.py")
     assert len(runtime["git_commit"]) == 40
     a, b = load_model_checkpoint(full), load_model_checkpoint(resumed)
     assert_equal(a.model_state, b.model_state)

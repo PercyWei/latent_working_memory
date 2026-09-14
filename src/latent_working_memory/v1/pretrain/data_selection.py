@@ -17,7 +17,7 @@ from latent_working_memory.data_preparation.pretrain.text_samples import (
 )
 from latent_working_memory.v1.config import load_config
 from latent_working_memory.v1.data import EpisodeIndex
-from latent_working_memory.v1.prepared_data import eligible_input_length
+from latent_working_memory.v1.pretrain.prepared_data import eligible_input_length
 
 
 class SelectedIndex(EpisodeIndex):
