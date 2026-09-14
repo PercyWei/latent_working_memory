@@ -208,12 +208,17 @@ def run_pretraining(
     swanlab_project: str = DEFAULT_SWANLAB_PROJECT,
     swanlab_group: str | None = None,
     swanlab_tags: tuple[str, ...] = (),
+    max_samples_per_epoch: int | None = None,
 ) -> PretrainRunResult:
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     rank = dist.get_rank() if dist.is_initialized() else 0
     primary = rank == 0
     if type(epochs) is not int or epochs <= 0 or save_every <= 0:
         raise ValueError("epochs and save_every must be positive")
+    if max_samples_per_epoch is not None and (
+        type(max_samples_per_epoch) is not int or max_samples_per_epoch <= 0
+    ):
+        raise ValueError("max_samples_per_epoch must be a positive integer or null")
     if stop_after_steps is not None and stop_after_steps <= 0:
         raise ValueError("stop_after_steps must be positive")
     if output_dir.exists() and resume is None:
@@ -250,7 +255,14 @@ def run_pretraining(
     trainer = PretrainTrainer(config, backbone, writer, device)
     batch_size = config.batch_size * config.gradient_accumulation_steps * world_size
     sampler = EpochSampler(
-        train_index, tokenizer, config, spec["training"], spec["seed"], batch_size, epochs
+        train_index,
+        tokenizer,
+        config,
+        spec["training"],
+        spec["seed"],
+        batch_size,
+        epochs,
+        max_samples_per_epoch,
     )
     max_steps = (
         min(sampler.total_steps, stop_after_steps) if stop_after_steps else sampler.total_steps
@@ -259,6 +271,7 @@ def run_pretraining(
         "world_size": world_size,
         "preparation_id": metadata["preparation_id"],
         "epochs": epochs,
+        "max_samples_per_epoch": max_samples_per_epoch,
         "total_steps": sampler.total_steps,
         "evaluation_preparations": evaluation_ids,
     }

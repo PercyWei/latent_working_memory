@@ -68,10 +68,16 @@ def epoch_distribution(training, epoch):
     }
 
 
-def maximal_quotas(available, probabilities, batch_size):
+def maximal_quotas(available, probabilities, batch_size, max_samples_per_epoch=None):
+    if max_samples_per_epoch is not None and (
+        type(max_samples_per_epoch) is not int or max_samples_per_epoch <= 0
+    ):
+        raise ValueError("max_samples_per_epoch must be a positive integer or null")
     unit = math.lcm(batch_size, *(p.denominator for p in probabilities.values()))
     bounds = {k: Fraction(available.get(k, 0)) / p for k, p in probabilities.items()}
     maximum = min(bounds.values())
+    if max_samples_per_epoch is not None:
+        maximum = min(maximum, max_samples_per_epoch)
     total = int(maximum) // unit * unit
     if total == 0:
         raise ValueError(

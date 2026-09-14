@@ -24,6 +24,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--epochs", type=int, required=True)
+    parser.add_argument("--max-samples-per-epoch", type=int)
     parser.add_argument("--stop-after-steps", type=int)
     parser.add_argument("--save-every", type=int, default=100)
     parser.add_argument("--resume", type=Path)
@@ -55,6 +56,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         output_dir=args.output_dir,
         device=device,
         epochs=args.epochs,
+        max_samples_per_epoch=args.max_samples_per_epoch,
         stop_after_steps=args.stop_after_steps,
         save_every=args.save_every,
         resume=args.resume,

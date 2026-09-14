@@ -2,6 +2,7 @@ import json
 from collections import Counter
 from dataclasses import replace
 from fractions import Fraction
+from pathlib import Path
 
 import pytest
 import torch
@@ -212,7 +213,9 @@ def test_warmup_complete_training_keeps_optimizer_and_resolves_final_checkpoint(
     ]
     path.write_text(json.dumps(spec))
     out = tmp_path / "warmup"
-    result = run_pretraining(config, path, out, torch.device("cpu"), epochs=2)
+    result = run_pretraining(
+        config, path, out, torch.device("cpu"), epochs=2, max_samples_per_epoch=8
+    )
     checkpoint = load_model_checkpoint(result.final_checkpoint)
     logs = [
         json.loads(line)
@@ -241,7 +244,13 @@ def test_warmup_complete_training_keeps_optimizer_and_resolves_final_checkpoint(
     resumed_out = tmp_path / "warmup-resumed"
     boundary = json.loads((out / "epoch-plan.json").read_text())[0]["steps"]
     first_segment = run_pretraining(
-        config, path, resumed_out, torch.device("cpu"), epochs=2, stop_after_steps=boundary
+        config,
+        path,
+        resumed_out,
+        torch.device("cpu"),
+        epochs=2,
+        max_samples_per_epoch=8,
+        stop_after_steps=boundary,
     )
     assert not json.loads((resumed_out / "training-result.json").read_text())["complete"]
     resumed_run = run_pretraining(
@@ -250,9 +259,35 @@ def test_warmup_complete_training_keeps_optimizer_and_resolves_final_checkpoint(
         resumed_out,
         torch.device("cpu"),
         epochs=2,
+        max_samples_per_epoch=8,
         resume=first_segment.final_checkpoint,
     )
     resumed = load_model_checkpoint(resumed_run.final_checkpoint)
     torch.testing.assert_close(checkpoint.model_state, resumed.model_state, rtol=0, atol=0)
     torch.testing.assert_close(checkpoint.optimizer_state, resumed.optimizer_state, rtol=0, atol=0)
     assert checkpoint.progress["sampler"] == resumed.progress["sampler"]
+
+
+def test_epoch_sample_cap_keeps_exact_quotas_and_batch_divisibility():
+    spec = json.loads(
+        Path("configs/v1/pretrain/qwen2.5-3b-instruct_mixed-2048/selection.json").read_text()
+    )
+    sizes = []
+    for epoch in range(1, 4):
+        probabilities = epoch_distribution(spec["training"], epoch)
+        available = {key: 100000 for key in probabilities}
+        quotas, bottlenecks, unit = maximal_quotas(available, probabilities, 8, 32000)
+        total = sum(quotas.values())
+        assert total <= 32000 < total + unit
+        assert total % 8 == 0 and not bottlenecks
+        assert all(n == total * probabilities[key] for key, n in quotas.items())
+        sizes.append(total)
+    assert sizes == [32000, 31680, 31992]
+    assert sum(sizes) // 8 == 11959
+    probabilities = {"a": Fraction(1, 3), "b": Fraction(2, 3)}
+    assert maximal_quotas({"a": 8, "b": 16}, probabilities, 8, 32000)[0] == {"a": 8, "b": 16}
+    with pytest.raises(ValueError, match="no complete epoch"):
+        maximal_quotas({"a": 8, "b": 16}, probabilities, 8, 23)
+    for limit in (0, -1, True, 1.5):
+        with pytest.raises(ValueError, match="positive integer or null"):
+            maximal_quotas({"a": 8, "b": 16}, probabilities, 8, limit)

@@ -87,11 +87,22 @@ def capacity_weights(
 class EpochSampler:
     """One maximum-size, exactly stratified, non-repeating sample plan per epoch."""
 
-    def __init__(self, index, tokenizer, config, training, seed, batch_size, epochs):
+    def __init__(
+        self,
+        index,
+        tokenizer,
+        config,
+        training,
+        seed,
+        batch_size,
+        epochs,
+        max_samples_per_epoch=None,
+    ):
         if type(epochs) is not int or epochs <= 0 or type(batch_size) is not int or batch_size <= 0:
             raise ValueError("epochs and batch_size must be positive integers")
         self.index, self.tokenizer, self.config = index, tokenizer, config
         self.training, self.batch_size, self.epochs = training, batch_size, epochs
+        self.max_samples_per_epoch = max_samples_per_epoch
         self.rng = random.Random(seed)
         self.capacity_rng = random.Random(f"{seed}:capacity")
         self.pools = {}
@@ -104,7 +115,9 @@ class EpochSampler:
         self.plans = []
         for epoch in range(1, epochs + 1):
             probabilities = epoch_distribution(training, epoch)
-            quotas, limiting, unit = maximal_quotas(self.available, probabilities, batch_size)
+            quotas, limiting, unit = maximal_quotas(
+                self.available, probabilities, batch_size, max_samples_per_epoch
+            )
             self.plans.append((probabilities, quotas, limiting, unit))
         self.total_steps = sum(sum(q.values()) // batch_size for _, q, _, _ in self.plans)
         self.epoch, self.cursor, self.visits = 0, 0, 0
@@ -151,6 +164,7 @@ class EpochSampler:
 
         return {
             "epoch": epoch,
+            "max_samples_per_epoch": self.max_samples_per_epoch,
             "samples": sum(quotas.values()),
             "steps": sum(quotas.values()) // self.batch_size,
             "quota_unit": unit,

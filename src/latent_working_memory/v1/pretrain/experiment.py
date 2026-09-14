@@ -15,7 +15,7 @@ from latent_working_memory.v1.pretrain.curriculum import validate_curriculum
 
 
 def load_pretrain_experiment(path):
-    spec = load_experiment(path, {"epochs", "save_every", "evaluation"})
+    spec = load_experiment(path, {"epochs", "max_samples_per_epoch", "save_every", "evaluation"})
     raw = json.loads(Path(spec["model"]).read_text())
     unrelated = {
         "dynamic_k_first",
@@ -44,6 +44,9 @@ def load_pretrain_experiment(path):
     for key in ("epochs", "save_every"):
         if type(spec[key]) is not int or spec[key] <= 0:
             raise ValueError(f"{key} must be a positive integer")
+    limit = spec["max_samples_per_epoch"]
+    if limit is not None and (type(limit) is not int or limit <= 0):
+        raise ValueError("max_samples_per_epoch must be a positive integer or null")
     evaluation = spec["evaluation"]
     if set(evaluation) != {"examples", "generation_examples", "prefix_tokens"}:
         raise ValueError("evaluation requires examples, generation_examples and prefix_tokens")
@@ -90,6 +93,8 @@ def build_stages(spec, original, output, args):
         str(spec["save_every"]),
         *tracking,
     ]
+    if spec["max_samples_per_epoch"] is not None:
+        training += ["--max-samples-per-epoch", str(spec["max_samples_per_epoch"])]
     result_path = train / "training-result.json"
     evaluation = [
         python,

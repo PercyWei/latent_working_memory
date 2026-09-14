@@ -148,3 +148,19 @@ def test_execution_rejects_gpu_overlap(tmp_path):
     execution = experiment_execution.ExperimentExecution(tmp_path, [4, 5])
     with pytest.raises(ValueError, match="disjoint"):
         execution.stage([("a", ["unused"], [4, 5]), ("b", ["unused"], [4, 5])])
+
+
+def test_qwen_plan_passes_epoch_sample_cap(tmp_path):
+    output = tmp_path / "qwen"
+    pretrain.main(
+        [
+            "--experiments",
+            str(PRETRAIN / "qwen2.5-3b-instruct_mixed-2048/experiment.json"),
+            "--output-dir",
+            str(output),
+            "--plan-only",
+        ]
+    )
+    commands = json.loads((output / "plan/commands.json").read_text())
+    training = commands[0]["argv"]
+    assert training[training.index("--max-samples-per-epoch") + 1] == "32000"

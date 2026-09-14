@@ -17,5 +17,6 @@
     ]
   },
   "swanlab_project": "latent-working-memory-v1",
-  "epochs": 3
+  "epochs": 3,
+  "max_samples_per_epoch": null
 }

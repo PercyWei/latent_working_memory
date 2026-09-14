@@ -1,7 +1,7 @@
 # 20260914_配置组织规则
 
 创建时间：20260914 11:48:20 UTC+08:00
-最后修订时间：20260914 16:29:22 UTC+08:00
+最后修订时间：20260914 17:29:59 UTC+08:00
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
 
@@ -98,12 +98,12 @@ configs/
 
 三种 schedule 均从 `epoch: 1` 开始，节点格式为 `{"epoch": 1, "weights": {...}}`；epoch 递增。来源和任务按节点分段固定，长度在相邻节点的归一化分布间线性插值。权重使用非负数，不要求和为 1；等概率写全 1，避免用循环小数表达精确比例。
 
-训练保留完整有效 train 池，每轮在来源 × 任务 × 长度的乘积分布下求最大无放回整数配额，同时满足全局 batch 整除。不设置固定 train 数量，不约束 batch 内比例；空池或无法满足约束时明确报错。Qwen 与 Llama 均由当前 tokenizer 和本轮分布确定训练规模。
+训练保留完整有效 train 池，每轮在来源 × 任务 × 长度的乘积分布下求最大无放回整数配额，同时满足全局 batch 整除。`experiment.json` 的 `max_samples_per_epoch` 设置每轮样本上限，`null` 表示不限；实际配额在上限内向下取满足比例及 batch 整除的最大值。不约束 batch 内比例；空池或无法满足约束时明确报错。Qwen 与 Llama 均由当前 tokenizer 和本轮分布确定训练规模。
 
 评估数量是每个来源各自的配额：整数必须严格满足，`null` 尽量使用有效样本。开启均衡时按 AE/LM × 长度档等量选择；关闭时直接按总数选样。评估不随训练 epoch 改变；Qwen 的 dev/test 为 `null`，Llama 保留已有评估配额。
 
-`model.json` 使用 `compression_mode: "sample"`（默认）或 `"mean"`，容量权重课程由 `ratio_curriculum_epochs` 控制。旧的 batch 均衡、任务损失权重、step 长度课程和预训练 `lr_decay_steps` 不再放入正式模型配置。`experiment.json` 使用 `epochs`，总步数由启动时的各轮计划确定。当前初始预算为 3 轮；文献依据、损失与精确配额公式见 [预训练与评估](../notes/v1/20260910_pretraining_and_evaluation.md#3-按-epoch-选样与容量分配)。
+`model.json` 使用 `compression_mode: "sample"`（默认）或 `"mean"`，容量权重课程由 `ratio_curriculum_epochs` 控制。旧的 batch 均衡、任务损失权重、step 长度课程和预训练 `lr_decay_steps` 不再放入正式模型配置。`experiment.json` 使用 `epochs`，总步数由启动时的各轮计划确定。当前默认训练 3 轮，Qwen 每轮上限为 32,000 条，其他配置暂不设上限；文献依据、损失与精确配额公式见 [预训练与评估](../notes/v1/20260910_pretraining_and_evaluation.md#3-按-epoch-选样与容量分配)。
 
-训练目录保存 `epoch-plan.json` 与 `training-result.json`。最终评估通过 `--training-result` 读取实际最终 checkpoint，仅接受完整训练；显式 `--checkpoint` 仍可用于独立诊断。`--stop-after-steps` 只截短本次执行，不改变计划预算；恢复保持原 epoch 数。
+训练目录保存 `epoch-plan.json` 与 `training-result.json`。最终评估通过 `--training-result` 读取实际最终 checkpoint，仅接受完整训练；显式 `--checkpoint` 仍可用于独立诊断。`--stop-after-steps` 只截短本次执行，不改变计划预算；恢复保持原 epoch 数与样本上限。直接训练入口使用 `--max-samples-per-epoch <每轮上限>`。
 
 历史数据、checkpoint 与执行产物不迁移，也不按新协议改写历史结果。新选样与 epoch 进度契约不能替代旧协议做精确续训；不添加自动格式转换。
