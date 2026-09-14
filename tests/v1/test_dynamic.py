@@ -10,7 +10,8 @@ import torch.distributed as dist
 from transformers import LlamaConfig, LlamaForCausalLM
 
 from latent_working_memory.data_preparation.squad import prepare_squad
-from latent_working_memory.v1.dynamic.prepare import prepare_dynamic
+from latent_working_memory.v1.dynamic.prepare import prepare_dynamic, prepare_selection
+from latent_working_memory.v1.dynamic.selection import load_selection
 from latent_working_memory.v1.dynamic import reporting as dynamic_reporting
 from latent_working_memory.v1.backbone import load_backbone
 from latent_working_memory.v1.checkpoint import (
@@ -392,8 +393,12 @@ def assert_equal(a, b):
         assert a == b
 
 
+@pytest.mark.parametrize("dev_names,test_names", [
+    (["squad"], ["squad"]),
+    (["held-out-a", "held-out-b"], ["held-out-b"]),
+])
 def test_run_resume_across_micro_epochs_and_final_test(
-    tmp_path, tiny_config, tokenizer, training_data, monkeypatch
+    tmp_path, tiny_config, tokenizer, training_data, monkeypatch, dev_names, test_names
 ):
     index, data = training_data
     model_dir = tmp_path / "model"
@@ -441,20 +446,26 @@ def test_run_resume_across_micro_epochs_and_final_test(
     )
     recipe = replace(recipe, epochs=2, save_every=1, eval_every=100, eval_texts_per_ratio=1)
     prepare_dynamic(index, recipe, config, tmp_path / "plan")
-    opts = dict(evaluation_plan=tmp_path / "plan/evaluation-plan.json")
+    spec = {"sources": {name: {"dataset": "squad", "dataset_dir": str(index),
+            "evaluation_plan": str(tmp_path / "plan/evaluation-plan.json")}
+            for name in dict.fromkeys(["squad", *dev_names, *test_names])},
+            "training": "squad", "evaluation": {"dev": dev_names, "test": test_names}}
+    sets = tmp_path / "evaluation-sets.json"
+    sets.write_text(json.dumps(spec))
+    opts = dict(evaluation_sets=sets)
     published_steps = []
     monkeypatch.setattr(
         "latent_working_memory.v1.dynamic.run.log_qa",
         lambda run, metrics, rows, step, *args, **kwargs: published_steps.append(step),
     )
-    full = run_dynamic(initial, index, tmp_path / "full", recipe, torch.device("cpu"), **opts)
+    full = run_dynamic(initial, tmp_path / "full", recipe, torch.device("cpu"), **opts)
     first = run_dynamic(
-        initial, index, tmp_path / "resume", recipe, torch.device("cpu"), steps=3, **opts
+        initial, tmp_path / "resume", recipe, torch.device("cpu"), steps=3, **opts
     )
     resumed = run_dynamic(
-        first, index, tmp_path / "resume", recipe, torch.device("cpu"), resume=True, **opts
+        first, tmp_path / "resume", recipe, torch.device("cpu"), resume=True, **opts
     )
-    assert published_steps == [0, 8, 0, 3, 8]
+    assert published_steps == [step for step in [0, 8, 0, 3, 8] for _ in dev_names]
     runtime = json.loads(next((tmp_path / "full").glob("runtime-from-*.json")).read_text())[
         "runtime"
     ]
@@ -472,10 +483,10 @@ def test_run_resume_across_micro_epochs_and_final_test(
         0,
         0,
     )
-    for split in ("dev",):
-        assert json.loads(
-            (tmp_path / f"full/dev/{split}-step-000008.json").read_text()
-        ) == json.loads((tmp_path / f"resume/dev/{split}-step-000008.json").read_text())
+    for name in dev_names:
+        assert json.loads((tmp_path / f"full/dev/{name}/dev-step-000008.json").read_text()) == json.loads(
+            (tmp_path / f"resume/dev/{name}/dev-step-000008.json").read_text())
+    assert {p.name for p in (tmp_path / "full/dev").iterdir()} == set(dev_names)
     rows = []
     for path in (tmp_path / "full").glob("train-*.jsonl"):
         rows.extend(json.loads(line) for line in path.read_text().splitlines())
@@ -500,7 +511,6 @@ def test_run_resume_across_micro_epochs_and_final_test(
     with pytest.raises(ValueError, match="configuration differs"):
         run_dynamic(
             first,
-            index,
             tmp_path / "resume",
             replace(recipe, seed=43),
             torch.device("cpu"),
@@ -516,14 +526,12 @@ def test_run_resume_across_micro_epochs_and_final_test(
             "evaluate",
             "--checkpoint",
             str(full),
-            "--dataset-dir",
-            str(index),
             "--config",
             str(recipe_path),
             "--output-dir",
             str(tmp_path / "evaluation"),
-            "--evaluation-plan",
-            str(tmp_path / "plan/evaluation-plan.json"),
+            "--evaluation-sets",
+            str(sets),
             "--device",
             "cpu",
             "--split",
@@ -531,7 +539,18 @@ def test_run_resume_across_micro_epochs_and_final_test(
         ],
     )
     main()
-    assert (tmp_path / "evaluation/test-step-000008.json").is_file()
+    assert {p.name for p in (tmp_path / "evaluation").iterdir()} == {*test_names, "reports.json"}
+    for name in test_names:
+        assert (tmp_path / f"evaluation/{name}/test-step-000008.json").is_file()
+        info = json.loads((tmp_path / f"evaluation/{name}/evaluation.json").read_text())
+        assert info["name"] == name and info["split"] == "test"
+    changed = json.loads(sets.read_text())
+    changed["evaluation"]["dev"] = []
+    # Keep sources referenced to test so the schema remains valid; resume must still reject it.
+    changed["evaluation"]["test"] = list(changed["sources"])
+    sets.write_text(json.dumps(changed))
+    with pytest.raises(ValueError, match="resume data"):
+        run_dynamic(first, tmp_path / "resume", recipe, torch.device("cpu"), resume=True, **opts)
 
 
 def distributed_worker(rank, rendezvous, output, components, config, tokenizer):
@@ -638,8 +657,8 @@ def test_evaluation_without_generation_matches_nll_and_caches_controls(
     reports.write_text(
         json.dumps(
             [
-                {"name": "full", "report": "test.json"},
-                {"name": "tokens", "report": "test.json"},
+                {"name": "full", "dataset": "squad", "report": "test.json"},
+                {"name": "tokens", "dataset": "squad", "report": "test.json"},
             ]
         )
     )
@@ -659,7 +678,7 @@ def test_evaluation_without_generation_matches_nll_and_caches_controls(
     )
     publish_qa()
     comparison = json.loads((tmp_path / "comparison/comparison.json").read_text())
-    assert comparison["full"] == comparison["tokens"] == report
+    assert comparison["squad"]["full"] == comparison["squad"]["tokens"] == report
     assert not list(tmp_path.rglob("swanlab.json"))
 
 
@@ -684,15 +703,15 @@ def test_dev_curves_are_sparse_native_series_and_share_final_colors():
     assert all("/nll/" in key for key in calls[1][1])
     assert all(isinstance(value, float) for _, values in calls for value in values.values())
     assert [
-        values["dev/overview/em/memory"]
+        values["dev/squad/em/memory"]
         for _, values in calls
-        if "dev/overview/em/memory" in values
+        if "dev/squad/em/memory" in values
     ] == [0.1, 0.4]
-    panels = dynamic_reporting.dev_panels()
+    panels = dynamic_reporting.dev_panels(["squad"])
     assert len(panels) == 3
     assert all(panel["config"]["xAxis"]["key"] == "step" for panel in panels.values())
     assert all(len(panel["config"]["yAxis"]) == 5 for panel in panels.values())
-    styles = dynamic_reporting.dev_panel_style(panels["dev/overview/nll"], "run")
+    styles = dynamic_reporting.dev_panel_style(panels["dev/squad/nll"], "run")
     media = qa_media({"squad": (report, [])})
     assert set(media) == {
         f"evaluation/test/overview/{key}" for key in ("nll", "em", "f1", "summary")
@@ -701,7 +720,7 @@ def test_dev_curves_are_sparse_native_series_and_share_final_colors():
     for condition, item in zip(dynamic_reporting.CONDITIONS, series, strict=True):
         assert item["name"] == condition
         assert (
-            styles[f"run-dev/overview/nll/{condition}"]["colors"][0].lower()
+            styles[f"run-dev/squad/nll/{condition}"]["colors"][0].lower()
             == item["itemStyle"]["color"].lower()
         )
 
@@ -710,8 +729,8 @@ def test_dev_curves_are_sparse_native_series_and_share_final_colors():
 def saved_dynamic_run(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
-    dev = source / "dev"
-    dev.mkdir()
+    dev = source / "dev" / "squad"
+    dev.mkdir(parents=True)
     identity = {
         "id": "original",
         "project": "test",
@@ -721,6 +740,7 @@ def saved_dynamic_run(tmp_path):
     }
     provenance = {
         "target_steps": 2,
+        "selection": {"evaluation": {"dev": ["squad"]}},
         "config": {"epochs": 1},
         "evaluation_plan": str(tmp_path / "evaluation-plan.json"),
     }
@@ -755,6 +775,7 @@ def saved_dynamic_run(tmp_path):
             {
                 "checkpoint": str(source / "checkpoints/dynamic-step-000002.pt"),
                 "checkpoint_step": 2,
+                "name": "squad", "dataset": "squad",
                 "split": "test",
                 "config": provenance["config"],
                 "evaluation_plan": provenance["evaluation_plan"],
@@ -784,15 +805,15 @@ def test_rebuild_training_run_replays_all_dev_then_final_test(
 
     monkeypatch.setattr(dynamic_reporting, "swanlab_run", fake_run)
     output = tmp_path / "rebuilt"
-    dynamic_reporting.rebuild_training_run(source, output, "disabled", report)
+    dynamic_reporting.rebuild_training_run(source, output, "disabled", {"squad": report})
     assert [step for step, _ in calls] == [0, 1, 2, 2, 2]
-    assert calls[0][1] == {"dev/overview/nll/memory": 4.0}
+    assert calls[0][1] == {"dev/squad/nll/memory": 4.0}
     assert calls[1][1] == {
         "train/loss": 3.0,
         "resources/step_seconds": 12.0,
         "progress/input_tokens": 200,
     }
-    assert calls[-2][1] == {"dev/overview/nll/memory": 2.0}
+    assert calls[-2][1] == {"dev/squad/nll/memory": 2.0}
     assert set(calls[-1][1]) == {
         f"evaluation/test/overview/{key}" for key in ("nll", "em", "f1", "summary")
     }
@@ -806,10 +827,10 @@ def test_rebuild_training_run_replays_all_dev_then_final_test(
     manifest = json.loads((output / "republication.json").read_text())
     assert manifest["training_steps"] == manifest["test_step"] == 2
     assert manifest["previous_run"] == identity
-    assert manifest["dev_steps"] == [0, 2]
+    assert manifest["dev_steps"] == {"squad": [0, 2]}
     assert manifest["original_training_seconds"] == 24.0
     repeated = tmp_path / "repeated"
-    dynamic_reporting.rebuild_training_run(source, repeated, "disabled", report)
+    dynamic_reporting.rebuild_training_run(source, repeated, "disabled", {"squad": report})
     for name in (
         "evaluation-charts.json",
         "scalar-records.jsonl",
@@ -818,11 +839,11 @@ def test_rebuild_training_run_replays_all_dev_then_final_test(
     ):
         assert (repeated / name).read_text() == (output / name).read_text()
     with pytest.raises(FileExistsError):
-        dynamic_reporting.rebuild_training_run(source, output, "disabled", report)
+        dynamic_reporting.rebuild_training_run(source, output, "disabled", {"squad": report})
     with (source / "train-from-000000.jsonl").open("a") as stream:
         stream.write(json.dumps({"step": 2}) + "\n")
     with pytest.raises(ValueError, match="exactly one training record"):
-        dynamic_reporting.rebuild_training_run(source, tmp_path / "invalid", "disabled", report)
+        dynamic_reporting.rebuild_training_run(source, tmp_path / "invalid", "disabled", {"squad": report})
     assert not (tmp_path / "invalid").exists()
 
 
@@ -833,13 +854,12 @@ def test_final_test_must_match_training_checkpoint_and_plan(saved_dynamic_run, t
     for changes in (
         {"checkpoint_step": 1},
         {"checkpoint": "/other/dynamic-step-000002.pt"},
-        {"evaluation_plan": "/other/plan.json"},
         {"config": {"epochs": 3}},
         {"split": "dev"},
     ):
         info_path.write_text(json.dumps(info | changes))
-        with pytest.raises(ValueError, match="final checkpoint and evaluation plan"):
-            dynamic_reporting.rebuild_training_run(source, tmp_path / "invalid", "disabled", report)
+        with pytest.raises(ValueError, match="final checkpoint and configuration"):
+            dynamic_reporting.rebuild_training_run(source, tmp_path / "invalid", "disabled", {"squad": report})
         assert not (tmp_path / "invalid").exists()
 
 
@@ -857,13 +877,13 @@ def test_final_test_appends_to_original_training_run_once(saved_dynamic_run, mon
         yield Recorder()
 
     monkeypatch.setattr(dynamic_reporting, "swanlab_training_run", resume)
-    dynamic_reporting.append_qa_report(source, report, "online")
+    dynamic_reporting.append_qa_reports(source, {"squad": report}, "online")
     assert len(calls) == 1 and calls[0][0] == 2
     assert all(key.startswith("evaluation/test/overview/") for key in calls[0][1])
     receipt = json.loads((source / "evaluation-publications/test-step-000002.json").read_text())
     assert receipt["training_run_id"] == "original" and receipt["checkpoint_step"] == 2
     with pytest.raises(ValueError, match="already published"):
-        dynamic_reporting.append_qa_report(source, report, "online")
+        dynamic_reporting.append_qa_reports(source, {"squad": report}, "online")
     assert len(calls) == 1
 
 
@@ -871,6 +891,47 @@ def test_offline_append_cannot_overwrite_online_identity(saved_dynamic_run):
     source, report = saved_dynamic_run
     identity = (source / "swanlab.json").read_text()
     with pytest.raises(ValueError, match="offline training run"):
-        dynamic_reporting.append_qa_report(source, report, "offline")
+        dynamic_reporting.append_qa_reports(source, {"squad": report}, "offline")
     assert (source / "swanlab.json").read_text() == identity
     assert not (source / "evaluation-publications").exists()
+
+
+def test_dev_sources_have_distinct_sparse_series_and_matching_condition_colors():
+    metrics = {"overall/memory/all": {"nll": 2.0}}
+    names = ["squad", "personamem-factqa"]
+    scalars = [dynamic_reporting.dev_scalars(metrics, name) for name in names]
+    assert set(scalars[0]).isdisjoint(scalars[1])
+    panels = dynamic_reporting.dev_panels(names)
+    assert len(panels) == 6
+    for name in names:
+        panel = panels[f"dev/{name}/nll"]
+        assert all(a["key"].startswith(f"dev/{name}/nll/") for a in panel["config"]["yAxis"])
+        styles = dynamic_reporting.dev_panel_style(panel, "run")
+        assert styles[f"run-dev/{name}/nll/memory"]["colors"][0] == dynamic_reporting.COLORS["memory"]
+
+
+def test_preparation_checks_curriculum_only_for_training_source(tmp_path, monkeypatch):
+    from_module = "latent_working_memory.v1.dynamic.prepare"
+    # Real manifest validation; intercept expensive tokenization/model preparation only.
+    selection = tmp_path / "selection.json"
+    selection.write_text(json.dumps({
+        "sources": {name: {"dataset": "squad", "dataset_dir": str(tmp_path / name)}
+                    for name in ["train-source", "dev-source", "test-source"]},
+        "training": "train-source",
+        "evaluation": {"dev": ["dev-source"], "test": ["test-source"]},
+    }))
+    calls = []
+    def prepare(data, recipe, config, output, dataset, splits, validate_training):
+        output.mkdir(parents=True)
+        calls.append((output.name, splits, validate_training))
+    monkeypatch.setattr(from_module + ".prepare_dynamic", prepare)
+    result = prepare_selection(selection, DynamicConfig(), None, tmp_path / "prepared")
+    assert calls == [("train-source", (), True), ("dev-source", ("dev",), False),
+                     ("test-source", ("test",), False)]
+    assert result["evaluation"] == {"dev": ["dev-source"], "test": ["test-source"]}
+    assert load_selection(tmp_path / "prepared/evaluation-sets.json", prepared=True) == result
+    spec = json.loads(selection.read_text())
+    spec["evaluation"]["dev"] = ["missing"]
+    selection.write_text(json.dumps(spec))
+    with pytest.raises(ValueError, match="unique defined"):
+        load_selection(selection)

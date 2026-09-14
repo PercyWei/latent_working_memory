@@ -100,25 +100,25 @@ def qa_media(reports, prefix="evaluation/test/overview", charts=True):
     return values
 
 
-def dev_scalars(metrics):
+def dev_scalars(metrics, dataset):
     return {
-        f"dev/overview/{metric}/{condition}": metrics[f"overall/{condition}/all"][metric]
+        f"dev/{dataset}/{metric}/{condition}": metrics[f"overall/{condition}/all"][metric]
         for metric in CORE_METRICS
         for condition in CONDITIONS
         if metric in metrics.get(f"overall/{condition}/all", {})
     }
 
 
-def dev_panels():
+def dev_panels(datasets):
     return {
-        f"dev/overview/{metric}": {
-            "title": f"dev/overview/{metric}",
+        f"dev/{dataset}/{metric}": {
+            "title": f"dev/{dataset}/{metric}",
             "config": {
                 "xAxis": {"key": "step", "name": "step", "type": "FLOAT", "class": "SYSTEM"},
                 "yAxis": [
                     {
-                        "key": f"dev/overview/{metric}/{condition}",
-                        "name": f"dev/overview/{metric}/{condition}",
+                        "key": f"dev/{dataset}/{metric}/{condition}",
+                        "name": f"dev/{dataset}/{metric}/{condition}",
                         "type": "FLOAT",
                         "class": "CUSTOM",
                     }
@@ -128,6 +128,7 @@ def dev_panels():
                 "yName": metric,
             },
         }
+        for dataset in datasets
         for metric in CORE_METRICS
     }
 
@@ -142,9 +143,9 @@ def dev_panel_style(panel, run_id):
     }
 
 
-def configure_dynamic_panels(run, mode):
+def configure_dynamic_panels(run, mode, datasets):
     if run is not None:
-        configure_line_panels(run, dev_panels(), mode, dev_panel_style)
+        configure_line_panels(run, dev_panels(datasets), mode, dev_panel_style)
 
 
 def training_metrics(record):
@@ -172,9 +173,9 @@ def log_qa(run, metrics, rows, step, split, dataset, media=False, final=False):
     else:
         if split != "dev":
             raise ValueError("incremental validation requires the dev split")
-        values = dev_scalars(metrics)
+        values = dev_scalars(metrics, dataset)
         if media:
-            values.update(qa_media({dataset: (metrics, rows)}, "dev/overview", charts=False))
+            values.update(qa_media({dataset: (metrics, rows)}, f"dev/{dataset}", charts=False))
     run.log(values, step=step)
 
 
@@ -194,22 +195,25 @@ def validate_final_report(directory, report):
         info["split"] != "test"
         or info["checkpoint_step"] != step
         or Path(info["checkpoint"]).resolve() != expected.resolve()
-        or Path(info["evaluation_plan"]).resolve() != Path(provenance["evaluation_plan"]).resolve()
         or info["config"] != provenance["config"]
         or report.name != f"test-step-{step:06d}.json"
     ):
         raise ValueError(
-            "test report must use this training run's final checkpoint and evaluation plan"
+            "test report must use this training run's final checkpoint and configuration"
         )
     return step, info
 
 
-def append_qa_report(directory, report, mode):
+def append_qa_reports(directory, reports, mode):
     """Append final test to its training run, preserving the cloud training config."""
     if mode == "disabled":
         return
-    step, info = validate_final_report(directory, report)
-    metrics, rows = read_report(report)
+    validated = {name: validate_final_report(directory, report) for name, report in reports.items()}
+    if not validated or any(json.loads((report.parent / "evaluation.json").read_text())["name"] != name
+                            for name, report in reports.items()):
+        raise ValueError("test reports must be keyed by their recorded evaluation source names")
+    step, _ = next(iter(validated.values()))
+    media = qa_media({name: read_report(path) for name, path in reports.items()})
     identity = json.loads((directory / "swanlab.json").read_text())
     if mode == "offline" and identity["mode"] != "offline":
         raise ValueError("offline evaluation requires an offline training run")
@@ -232,18 +236,19 @@ def append_qa_report(directory, report, mode):
         )
     )
     with context as run:
-        dataset, = [t.removeprefix("data:") for t in identity["tags"] if t.startswith("data:")]
-        log_qa(run, metrics, rows, step, "test", dataset, media=True, final=True)
+        run.log(media, step=step)
     receipt.parent.mkdir(exist_ok=True)
     receipt.write_text(
         json.dumps(
-            {"training_run_id": identity["id"], "report": str(report.resolve()), **info}, indent=2
+            {"training_run_id": identity["id"], "checkpoint_step": step,
+             "reports": {name: {"report": str(path.resolve()), **validated[name][1]}
+                         for name, path in reports.items()}}, indent=2
         )
         + "\n"
     )
 
 
-def rebuild_training_run(directory, output_dir, mode, test_report, previous_run_dir=None):
+def rebuild_training_run(directory, output_dir, mode, test_reports, previous_run_dir=None):
     """Replay saved observations in step order, then publish the final checkpoint's test."""
     provenance = json.loads((directory / "provenance.json").read_text())
     identity = json.loads((directory / "swanlab.json").read_text())
@@ -252,7 +257,10 @@ def rebuild_training_run(directory, output_dir, mode, test_report, previous_run_
         if previous_run_dir is None
         else json.loads((previous_run_dir / "swanlab.json").read_text())
     )
-    total_steps, test_info = validate_final_report(directory, test_report)
+    tests = {name: validate_final_report(directory, path) for name, path in test_reports.items()}
+    if not tests or any(info["name"] != name for name, (_, info) in tests.items()):
+        raise ValueError("test reports must use recorded evaluation source names")
+    total_steps = next(iter(tests.values()))[0]
     completed = [
         json.loads(p.read_text())["completed_steps"]
         for p in directory.glob("resources-from-*.json")
@@ -269,16 +277,15 @@ def rebuild_training_run(directory, output_dir, mode, test_report, previous_run_
     )
     if [r["step"] for r in records] != list(range(1, total_steps + 1)):
         raise ValueError("rebuilding requires exactly one training record per step")
-    reports = {
+    datasets = provenance["selection"]["evaluation"]["dev"]
+    reports = {name: {
         int(path.stem.removeprefix("dev-step-")): read_report(path)
-        for path in sorted((directory / "dev").glob("dev-step-*.json"))
-    }
-    if 0 not in reports or total_steps not in reports or max(reports) > total_steps:
+        for path in sorted((directory / "dev" / name).glob("dev-step-*.json"))
+    } for name in datasets}
+    if any(0 not in values or total_steps not in values or max(values) > total_steps
+           for values in reports.values()):
         raise ValueError("rebuilding requires initial and final dev reports within training steps")
-    test_metrics, test_rows = read_report(test_report)
-    # Render and validate the full publication before any cloud writes.
-    dataset, = [t.removeprefix("data:") for t in identity["tags"] if t.startswith("data:")]
-    media = qa_media({dataset: (test_metrics, test_rows)})
+    media = qa_media({name: read_report(path) for name, path in test_reports.items()})
     rendered = {
         key: json.loads(chart.dump_options())
         for key, chart in media.items()
@@ -287,8 +294,9 @@ def rebuild_training_run(directory, output_dir, mode, test_report, previous_run_
     scalar_records = []
     for step in range(total_steps + 1):
         values = {} if step == 0 else training_metrics(records[step - 1])
-        if step in reports:
-            values.update(dev_scalars(reports[step][0]))
+        for name in datasets:
+            if step in reports[name]:
+                values.update(dev_scalars(reports[name][step][0], name))
         scalar_records.append({"step": step, "values": values})
     output_dir.mkdir(parents=True, exist_ok=False)
     with swanlab_run(
@@ -301,16 +309,17 @@ def rebuild_training_run(directory, output_dir, mode, test_report, previous_run_
         tags=tuple(identity["tags"]),
         fixed_tags=(),
     ) as run:
-        configure_dynamic_panels(run, mode)
+        configure_dynamic_panels(run, mode, datasets)
         for step in range(total_steps + 1):
             if step and run is not None:
                 run.log(training_metrics(records[step - 1]), step=step)
-            if step in reports:
-                metrics, rows = reports[step]
-                log_qa(
-                    run, metrics, rows, step, "dev", dataset, media=any("prediction" in row for row in rows)
-                )
-        log_qa(run, test_metrics, test_rows, total_steps, "test", dataset, media=True, final=True)
+            for name in datasets:
+                if step in reports[name]:
+                    metrics, rows = reports[name][step]
+                    log_qa(run, metrics, rows, step, "dev", name,
+                           media=any("prediction" in row for row in rows))
+        if run is not None:
+            run.log(media, step=total_steps)
     (output_dir / "scalar-records.jsonl").write_text(
         "".join(json.dumps(record) + "\n" for record in scalar_records)
     )
@@ -319,7 +328,7 @@ def rebuild_training_run(directory, output_dir, mode, test_report, previous_run_
         json.dumps(
             {
                 key: {**panel, "styles": dev_panel_style(panel, "RUN")}
-                for key, panel in dev_panels().items()
+                for key, panel in dev_panels(datasets).items()
             },
             indent=2,
         )
@@ -332,12 +341,12 @@ def rebuild_training_run(directory, output_dir, mode, test_report, previous_run_
         if mode != "disabled"
         else None,
         "training_steps": total_steps,
-        "dev_steps": sorted(reports),
-        "test_report": str(test_report.resolve()),
-        "test_checkpoint": test_info["checkpoint"],
+        "dev_steps": {name: sorted(values) for name, values in reports.items()},
+        "test_reports": {name: str(path.resolve()) for name, path in test_reports.items()},
+        "test_checkpoint": next(iter(tests.values()))[1]["checkpoint"],
         "test_step": total_steps,
         "evaluation_charts": sorted(rendered),
-        "dev_panels": list(dev_panels()),
+        "dev_panels": list(dev_panels(datasets)),
         "original_training_seconds": sum(r["seconds"] for r in records),
         "publication_git_commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
@@ -352,9 +361,9 @@ def rebuild_training_run(directory, output_dir, mode, test_report, previous_run_
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     inputs = parser.add_mutually_exclusive_group(required=True)
-    inputs.add_argument("--reports", type=Path, help="JSON list of {name, report}")
+    inputs.add_argument("--reports", type=Path, help="JSON list of {name, dataset, report}")
     inputs.add_argument("--training-run", type=Path, help="Completed source training directory")
-    parser.add_argument("--test-report", type=Path, help="Final test JSON for training-run replay")
+    parser.add_argument("--test-reports", type=Path, help="JSON map of evaluation source to test report")
     parser.add_argument(
         "--previous-run-dir", type=Path, help="Previous display run identity directory"
     )
@@ -366,24 +375,25 @@ def main():
     )
     args = parser.parse_args()
     if args.training_run:
-        if args.test_report is None:
-            parser.error("--training-run requires --test-report")
+        if args.test_reports is None:
+            parser.error("--training-run requires --test-reports")
         rebuild_training_run(
             args.training_run,
             args.output_dir,
             args.swanlab_mode,
-            args.test_report,
+            {name: (args.test_reports.parent / path).resolve()
+             for name, path in json.loads(args.test_reports.read_text()).items()},
             args.previous_run_dir,
         )
         return
     if not args.swanlab_group:
         parser.error("--reports requires --swanlab-group")
     entries = json.loads(args.reports.read_text())
-    if not entries or len({e["name"] for e in entries}) != len(entries):
-        raise ValueError("reports require unique run names")
+    if not entries or len({(e["name"], e["dataset"]) for e in entries}) != len(entries):
+        raise ValueError("reports require unique run and evaluation-source pairs")
     if args.output_dir.exists():
         raise FileExistsError(args.output_dir)
-    reports, reference = {}, None
+    reports, references = {}, {}
     for entry in entries:
         path = (args.reports.parent / entry["report"]).resolve()
         rows = [json.loads(line) for line in path.with_suffix(".jsonl").read_text().splitlines()]
@@ -399,26 +409,26 @@ def main():
             )
             for r in rows
         )
-        if reference is not None and identity != reference:
+        dataset = entry["dataset"]
+        if dataset in references and identity != references[dataset]:
             raise ValueError("comparison requires the same evaluation texts and reads")
-        reference = identity
-        reports[entry["name"]] = aggregate_qa(rows)
+        references[dataset] = identity
+        reports.setdefault(dataset, {})[entry["name"]] = aggregate_qa(rows)
     media = {}
-    for metric in ("nll", "em", "f1", "hit_limit_rate"):
-        media[f"evaluation/compare/{metric}"] = bar(
-            list(CONDITIONS),
-            {
-                name: [report[f"overall/{c}/all"].get(metric) for c in CONDITIONS]
-                for name, report in reports.items()
-            },
-        )
+    for dataset, results in reports.items():
+        for metric in ("nll", "em", "f1", "hit_limit_rate"):
+            conditions = [c for c in DISPLAY_CONDITIONS
+                          if any(f"overall/{c}/all" in result for result in results.values())]
+            media[f"evaluation/compare/{dataset}/{metric}"] = bar(
+                conditions,
+                {name: [report.get(f"overall/{c}/all", {}).get(metric) for c in conditions]
+                 for name, report in results.items()},
+            )
     media["tables/compare/overall"] = table(
-        [
-            {"run": name, "group": key, **values}
-            for name, report in reports.items()
-            for key, values in report.items()
-            if key.startswith(("overall/", "paired/"))
-        ]
+        [{"dataset": dataset, "run": name, "group": key, **values}
+         for dataset, results in reports.items()
+         for name, report in results.items()
+         for key, values in report.items() if key.startswith(("overall/", "paired/"))]
     )
     args.output_dir.mkdir(parents=True)
     (args.output_dir / "reports.json").write_text(json.dumps(entries, indent=2) + "\n")
@@ -431,7 +441,7 @@ def main():
         job_type="compare" if len(entries) > 1 else "evaluate",
         group=args.swanlab_group,
         tags=tuple(args.swanlab_tag),
-        fixed_tags=("scope:main", "method:latent-working-memory", "data:squad"),
+        fixed_tags=("scope:main", "method:latent-working-memory"),
     ) as run:
         if run is not None:
             run.log(media, step=0)

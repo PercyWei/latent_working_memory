@@ -9,6 +9,7 @@ from transformers import AutoTokenizer
 
 from latent_working_memory.v1.checkpoint import load_model_checkpoint
 from latent_working_memory.v1.dynamic.config import load_dynamic_config
+from latent_working_memory.v1.dynamic.selection import load_selection
 from latent_working_memory.v1.dynamic.data import DynamicTextSampler, TrainingText
 from latent_working_memory.v1.dynamic.evaluation import evaluation_schedule
 from latent_working_memory.v1.dynamic.training import read_schedule
@@ -33,7 +34,10 @@ def evaluation_identity(recipe):
     }
 
 
-def prepare_dynamic(dataset_dir, recipe, model_config, output_dir, dataset="squad"):
+def prepare_dynamic(
+    dataset_dir, recipe, model_config, output_dir, dataset="squad",
+    splits=("dev", "test"), validate_training=True,
+):
     if dataset not in {"squad", "personamem"}:
         raise ValueError("unsupported dynamic dataset")
     if output_dir.resolve().is_relative_to(dataset_dir.resolve()):
@@ -48,7 +52,7 @@ def prepare_dynamic(dataset_dir, recipe, model_config, output_dir, dataset="squa
         raise ValueError("capacity exceeds checkpoint slot limit")
     sampler = DynamicTextSampler(data, recipe, model_config.write_context_tokens)
     report = []
-    for epoch in range(recipe.epochs):
+    for epoch in range(recipe.epochs if validate_training else 0):
         for micro in range(recipe.micro_epochs_per_epoch):
             capacity, texts, info = sampler.micro_epoch(epoch, micro, recipe.epochs)
             reads = 0
@@ -76,7 +80,7 @@ def prepare_dynamic(dataset_dir, recipe, model_config, output_dir, dataset="squa
         "panels": {},
         "reads": {},
     }
-    for split in ("dev", "test"):
+    for split in splits:
         panel = sampler.evaluation_texts(split, recipe.eval_texts_per_ratio)
         plan["panels"][split] = {k: [asdict(t) for t in texts] for k, texts in panel.items()}
         plan["reads"][split] = {}
@@ -112,7 +116,10 @@ def prepare_dynamic(dataset_dir, recipe, model_config, output_dir, dataset="squa
                         ):
                             raise ValueError(f"gold paragraph exceeds read context: {read.read_id}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    for name, value in (("evaluation-plan", plan), ("data-validation", report)):
+    outputs = [("evaluation-plan", plan)]
+    if validate_training:
+        outputs.append(("data-validation", report))
+    for name, value in outputs:
         path = output_dir / f"{name}.json"
         with path.open("x") as f:
             json.dump(value, f, indent=2)
@@ -132,30 +139,34 @@ def load_evaluation_plan(path, data, recipe):
     return plan, panels
 
 
+def prepare_selection(selection, recipe, model_config, output_dir):
+    spec = load_selection(selection)
+    if output_dir.exists() and (output_dir / "evaluation-sets.json").exists():
+        raise FileExistsError("evaluation sets already prepared")
+    for name, source in spec["sources"].items():
+        source["dataset_dir"] = str(Path(source["dataset_dir"]).resolve())
+        destination = output_dir / name
+        splits = tuple(s for s, names in spec["evaluation"].items() if name in names)
+        prepare_dynamic(Path(source["dataset_dir"]), recipe, model_config, destination,
+                        source["dataset"], splits, name == spec["training"])
+        source["evaluation_plan"] = str((destination / "evaluation-plan.json").resolve())
+    with (output_dir / "evaluation-sets.json").open("x") as handle:
+        json.dump(spec, handle, indent=2)
+        handle.write("\n")
+    return spec
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset-dir", type=Path, required=True, help="Shared dataset directory")
-    parser.add_argument("--dataset", choices=("squad", "personamem"), default="squad")
+    parser.add_argument("--selection", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     checkpoint = load_model_checkpoint(args.checkpoint)
-    rows = prepare_dynamic(
-        args.dataset_dir,
-        load_dynamic_config(args.config),
-        checkpoint.config,
-        args.output_dir,
-        dataset=args.dataset,
-    )
-    print(
-        json.dumps(
-            {
-                key: sum(r[key] for r in rows)
-                for key in ("used_samples", "input_tokens", "updates", "reads")
-            }
-        )
-    )
+    prepare_selection(args.selection, load_dynamic_config(args.config), checkpoint.config,
+                      args.output_dir)
+
 
 
 if __name__ == "__main__":

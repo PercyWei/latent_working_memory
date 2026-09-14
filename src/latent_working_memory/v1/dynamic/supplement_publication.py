@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 import time
 from pathlib import Path
 from urllib.request import urlopen
@@ -25,7 +26,7 @@ OLD_PREFIX = "evaluation/test/overview"
 
 def load_reports(manifest, source_dir):
     entries = json.loads(manifest.read_text())
-    if not entries or set(entries) - {"squad", "personamem"}:
+    if not entries or any(not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name) for name in entries):
         raise ValueError("reports must map evaluation dataset names to supplemented JSON reports")
     provenance = json.loads((source_dir / "provenance.json").read_text())
     step = provenance["target_steps"]
@@ -36,8 +37,7 @@ def load_reports(manifest, source_dir):
         info = json.loads((path.parent / "evaluation.json").read_text())
         details = info["supplemental_baselines"]
         if (
-            info["dataset"] != dataset
-            or info["split"] != "test"
+            info["split"] != "test"
             or info["checkpoint_step"] != step
             or info["config"] != provenance["config"]
             or Path(info["checkpoint"]).resolve() != expected_checkpoint.resolve()
@@ -132,14 +132,24 @@ def wait_for_media(api, path, keys, attempts=16):
     )
 
 
-def publish_supplement(run_dir, manifest, output_dir, mode, resume=False):
+def publish_supplement(run_dir, manifest, output_dir, mode, resume=False,
+                       previous_publication=None, media_prefix=PREFIX):
     binding = json.loads((run_dir / "republication.json").read_text())
     identity = json.loads((run_dir / "swanlab.json").read_text())
     if binding["new_run"]["id"] != identity["id"]:
         raise ValueError("display run identity differs from its source binding")
     source = Path(binding["source"]["training_run"])
     reports, origins, step = load_reports(manifest, source)
-    media = qa_media(reports, prefix=PREFIX)
+    if not re.fullmatch(r"evaluation/test/[a-z0-9][a-z0-9_-]*", media_prefix):
+        raise ValueError("media prefix must be evaluation/test/<publication-name>")
+    previous = None
+    if previous_publication is not None:
+        previous = json.loads(previous_publication.read_text())
+        if previous["status"] != "complete" or previous["run"] != identity or previous["step"] != step:
+            raise ValueError("replacement must extend a completed publication of the same run and step")
+        if not {v["report"] for v in previous["datasets"].values()} <= {v["report"] for v in origins.values()}:
+            raise ValueError("replacement must retain every previously published report")
+    media = qa_media(reports, prefix=media_prefix)
     expected = {
         key: [item.content for item in value]
         if key.endswith("/examples")
@@ -153,6 +163,7 @@ def publish_supplement(run_dir, manifest, output_dir, mode, resume=False):
             publication["run"] != identity
             or publication["datasets"] != origins
             or publication["step"] != step
+            or publication["previous_publication"] != (str(previous_publication.resolve()) if previous_publication else None)
             or json.loads((output_dir / "media.json").read_text()) != expected
         ):
             raise ValueError("publication inputs changed on resume")
@@ -169,6 +180,7 @@ def publish_supplement(run_dir, manifest, output_dir, mode, resume=False):
             "step": step,
             "datasets": origins,
             "media_keys": list(expected),
+            "previous_publication": str(previous_publication.resolve()) if previous_publication else None,
             "status": "prepared",
         }
         receipt.write_text(json.dumps(publication, indent=2) + "\n")
@@ -184,7 +196,8 @@ def publish_supplement(run_dir, manifest, output_dir, mode, resume=False):
     if not resume and set(expected) & existing_media:
         raise ValueError("baseline supplement already exists; resume its publication instead")
     base = f"/experiment/{remote.run_id}"
-    old_keys = [key.replace(PREFIX, OLD_PREFIX, 1) for key in expected]
+    old_keys = previous["media_keys"] if previous else [
+        key.replace(media_prefix, OLD_PREFIX, 1) for key in expected]
     if resume:
         saved = json.loads((output_dir / "before.json").read_text())
         before, old_charts, old_media = saved["run"], saved["charts"], saved["old_media"]
@@ -271,13 +284,18 @@ def main():
     parser.add_argument("--reports", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--swanlab-mode", choices=("disabled", "online"), default="disabled")
+    parser.add_argument("--previous-publication", type=Path,
+                        help="Completed publication to extend, retaining all prior reports")
+    parser.add_argument("--media-prefix", default=PREFIX,
+                        help="Unused evaluation/test/<publication-name> media namespace")
     parser.add_argument(
         "--resume",
         action="store_true",
         help="Continue a verified publication without resending existing media",
     )
     args = parser.parse_args()
-    publish_supplement(args.run_dir, args.reports, args.output_dir, args.swanlab_mode, args.resume)
+    publish_supplement(args.run_dir, args.reports, args.output_dir, args.swanlab_mode,
+                       args.resume, args.previous_publication, args.media_prefix)
 
 
 if __name__ == "__main__":

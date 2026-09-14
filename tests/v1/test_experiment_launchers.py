@@ -125,8 +125,8 @@ def test_dynamic_plan_has_explicit_pretrain_dependency_and_separate_evaluation(
         assert train[train.index("--checkpoint") + 1].endswith("pretrain-step-020000.pt")
         assert test[test.index("--checkpoint") + 1].endswith("dynamic-step-000750.pt")
         assert (
-            prepare[prepare.index("--output-dir") + 1] + "/evaluation-plan.json"
-            == train[train.index("--evaluation-plan") + 1]
+            prepare[prepare.index("--output-dir") + 1] + "/evaluation-sets.json"
+            == train[train.index("--evaluation-sets") + 1]
         )
     assert json.loads((output / "plan/status.json").read_text())["status"] == "planned"
 

@@ -1,7 +1,7 @@
 # 20260914_配置组织规则
 
 创建时间：20260914 11:48:20 UTC+08:00
-最后修订时间：20260914 18:14:24 UTC+08:00
+最后修订时间：20260914 21:03:14 UTC+08:00
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
 
@@ -121,3 +121,28 @@ configs/
 `v1.pretrain.data_selection` 和 `v1.pretrain.evaluate` 的 `--data-selection` 路径使用前两项参数。worker 采用 `spawn`，进程内关闭 tokenizer 的线程并行；两个训练进程使用 4 workers 时共占用 8 个 CPU workers。参数描述 CPU 执行方式，独立于 GPU microbatch 和实验采样比例。
 
 选样重新分词计算长度，丢弃 token IDs，仅在内存保留文件位置及选样元数据；训练 batch 到达时重新分词，用完释放。并行结果按原始顺序合并，预取不推进选样或容量随机状态。checkpoint 只保存已取用 batch 的游标，恢复时重建未消费的预取任务。运行参数另存训练 `provenance.json`，无需改变 checkpoint 格式。
+
+## 动态训练与评估来源
+
+动态 `selection.json` 将训练来源与 dev/test 来源独立配置，来源名称用于结果目录和图表；名称不从实验名或 tags 推断。例如：
+
+```json
+{
+  "sources": {
+    "squad": {"dataset": "squad", "dataset_dir": "data/squad"},
+    "personamem-factqa": {
+      "dataset": "personamem",
+      "dataset_dir": "data/personamem-v2-factqa-32k-doc100_20260913"
+    }
+  },
+  "training": "squad",
+  "evaluation": {
+    "dev": ["squad", "personamem-factqa"],
+    "test": ["squad", "personamem-factqa"]
+  }
+}
+```
+
+`dataset` 选择适配器；同一适配器可用于多个独立命名的来源。dev/test 列表可以不同，只读取相应划分，不混合计分；空 dev 列表关闭训练中验证。评估来源只检查评估预算，不要求满足训练课程配额。
+
+准备入口接收 `--selection`，生成 `evaluation-sets.json` 和各来源的固定评估计划。训练与独立评估统一接收 `--evaluation-sets`，训练报告位于 `dev/<来源>/`，独立评估位于 `<输出目录>/<来源>/`；dev 按来源分图，test 按指标合并展示。来源定义和固定请求纳入续训一致性校验。

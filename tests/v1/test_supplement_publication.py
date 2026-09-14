@@ -189,7 +189,7 @@ def test_cli_forwards_resume(monkeypatch):
     )
     monkeypatch.setattr(publication, "publish_supplement", lambda *args: calls.append(args))
     publication.main()
-    assert calls[0][-1] is True
+    assert calls[0][4] is True
 
 
 def test_scalar_preservation_compares_points_not_derived_summaries():
@@ -205,3 +205,26 @@ def test_scalar_preservation_compares_points_not_derived_summaries():
     after = deepcopy(before)
     after["scalars"]["list"][0]["metrics"] *= 2
     assert not publication.same_run(before, after)
+
+
+def test_replacement_retains_prior_reports_and_uses_new_namespace(package, tmp_path):
+    display, manifest, _, report = package
+    old = tmp_path / "previous.json"
+    old.write_text(json.dumps({
+        "status": "complete", "run": json.loads((display / "swanlab.json").read_text()),
+        "step": 2, "datasets": {"squad": {"report": str(report)}},
+        "media_keys": [publication.PREFIX + "/f1"],
+    }))
+    output = tmp_path / "replacement"
+    publication.publish_supplement(display, manifest, output, "disabled",
+                                   previous_publication=old, media_prefix="evaluation/test/datasets")
+    receipt = json.loads((output / "publication.json").read_text())
+    assert receipt["previous_publication"] == str(old)
+    assert all(k.startswith("evaluation/test/datasets/") for k in receipt["media_keys"])
+    previous = json.loads(old.read_text())
+    previous["datasets"]["another"] = {"report": "/not/in/the/new/manifest.json"}
+    old.write_text(json.dumps(previous))
+    with pytest.raises(ValueError, match="retain every"):
+        publication.publish_supplement(display, manifest, tmp_path / "invalid", "disabled",
+                                       previous_publication=old)
+    assert not (tmp_path / "invalid").exists()

@@ -35,10 +35,9 @@ from latent_working_memory.v1.dynamic.reporting import (
     log_qa,
     training_metrics,
     configure_dynamic_panels,
-    append_qa_report,
+    append_qa_reports,
 )
-from latent_working_memory.v1.dynamic.squad import SquadDataset
-from latent_working_memory.v1.dynamic.personamem import PersonaMemDataset
+from latent_working_memory.v1.dynamic.selection import load_selection, load_source
 from latent_working_memory.v1.tracking import swanlab_run
 from latent_working_memory.v1.training import trainable_model_state
 
@@ -74,19 +73,30 @@ def runtime_info():
     }
 
 
+def load_evaluation_sources(spec, tokenizer, recipe, names):
+    sources = {}
+    for name in names:
+        source = spec["sources"][name]
+        data = load_source(source, tokenizer)
+        plan, panels = load_evaluation_plan(Path(source["evaluation_plan"]), data, recipe)
+        required = {split for split, selected in spec["evaluation"].items() if name in selected}
+        if not required <= panels.keys():
+            raise ValueError(f"evaluation plan is missing required splits for {name}")
+        sources[name] = data, plan, panels
+    return sources
+
+
 def run_dynamic(
     checkpoint_path,
-    dataset_dir,
     output_dir,
     recipe,
     device,
-    evaluation_plan,
+    evaluation_sets,
     steps=None,
     resume=False,
     swanlab_mode="disabled",
     swanlab_group=None,
     swanlab_tags=(),
-    dataset="squad",
     swanlab_project="latent-working-memory-v1",
 ):
     world_size = dist.get_world_size() if dist.is_initialized() else 1
@@ -111,19 +121,20 @@ def run_dynamic(
     )
     if max(recipe.capacities) > checkpoint.config.k_limit:
         raise ValueError("capacity exceeds model slot limit")
-    if dataset not in {"squad", "personamem"}:
-        raise ValueError("unsupported dynamic dataset")
     tokenizer = AutoTokenizer.from_pretrained(
         checkpoint.config.model_name_or_path,
         revision=checkpoint.config.model_revision,
         local_files_only=True,
     )
-    data = (PersonaMemDataset if dataset == "personamem" else SquadDataset)(dataset_dir, tokenizer)
+    spec = load_selection(evaluation_sets, prepared=True)
+    sources = load_evaluation_sources(spec, tokenizer, recipe, list(spec["sources"]))
+    dataset = spec["training"]
+    data = sources[dataset][0]
     sampler = DynamicTextSampler(data, recipe, checkpoint.config.write_context_tokens)
-    shared_plan, panels = load_evaluation_plan(evaluation_plan, data, recipe)
     identity = {
         "recipe": asdict(recipe),
-        "evaluation_plan": shared_plan,
+        "selection": spec,
+        "evaluation_plans": {name: source[1] for name, source in sources.items()},
         "world_size": world_size,
     }
     if resume and checkpoint.progress["identity"] != identity:
@@ -155,8 +166,9 @@ def run_dynamic(
     run_info = {
         "config": asdict(recipe),
         "initial_checkpoint": origin,
-        "data_index": str(dataset_dir.resolve()),
-        "evaluation_plan": str(evaluation_plan.resolve()),
+        "data_index": spec["sources"][dataset]["dataset_dir"],
+        "selection": spec,
+        "evaluation_sets": str(evaluation_sets.resolve()),
         "target_steps": total_steps,
         "global_batch_size": recipe.global_batch_size,
         "world_size": world_size,
@@ -199,32 +211,25 @@ def run_dynamic(
             (output_dir / f"train-from-{segment_id}.jsonl").open("x") if primary else nullcontext()
         ) as log,
     ):
-        configure_dynamic_panels(tracking, swanlab_mode if primary else "disabled")
+        configure_dynamic_panels(tracking, swanlab_mode if primary else "disabled",
+                                 spec["evaluation"]["dev"])
 
         def evaluate(step, generate):
-            metrics, rows = evaluate_panel(
-                backbone,
-                writer,
-                tokenizer,
-                checkpoint.config,
-                recipe,
-                data,
-                panels["dev"],
-                device,
-                generate=generate,
-                read_plans=shared_plan["reads"]["dev"],
-            )
-            if primary:
-                write_evaluation(output_dir / "dev", f"dev-step-{step:06d}", metrics, rows)
-                log_qa(
-                    tracking,
-                    metrics,
-                    rows,
-                    step,
-                    "dev",
-                    dataset,
-                    media=generate,
+            for name in spec["evaluation"]["dev"]:
+                eval_data, shared_plan, panels = sources[name]
+                metrics, rows = evaluate_panel(
+                    backbone, writer, tokenizer, checkpoint.config, recipe, eval_data,
+                    panels["dev"], device, generate=generate,
+                    read_plans=shared_plan["reads"]["dev"],
                 )
+                if primary:
+                    destination = output_dir / "dev" / name
+                    write_evaluation(destination, f"dev-step-{step:06d}", metrics, rows)
+                    (destination / "evaluation.json").write_text(json.dumps({
+                        "name": name, "dataset": spec["sources"][name]["dataset"],
+                        "split": "dev", "source": spec["sources"][name],
+                    }, indent=2) + "\n")
+                    log_qa(tracking, metrics, rows, step, "dev", name, media=generate)
 
         if next_step == 0:
             evaluate(0, True)
@@ -393,10 +398,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("train", "evaluate"))
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--dataset-dir", type=Path, required=True, help="Shared dataset directory")
-    parser.add_argument("--dataset", choices=("squad", "personamem"), default="squad")
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--evaluation-plan", type=Path, required=True)
+    parser.add_argument("--evaluation-sets", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--steps", type=int, help="Stop within the configured epoch schedule")
@@ -409,7 +412,6 @@ def main():
     parser.add_argument("--swanlab-project", default="latent-working-memory-v1")
     parser.add_argument("--swanlab-tag", action="append", default=[])
     args = parser.parse_args()
-    data_path = args.dataset_dir
     if int(os.environ.get("WORLD_SIZE", "1")) > 1:
         local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(local_rank)
@@ -422,18 +424,16 @@ def main():
     if args.mode == "train":
         run_dynamic(
             args.checkpoint,
-            data_path,
             args.output_dir,
             recipe,
             device,
-            args.evaluation_plan,
+            args.evaluation_sets,
             steps=args.steps,
             resume=args.resume,
             swanlab_mode=args.swanlab_mode,
             swanlab_group=args.swanlab_group,
             swanlab_project=args.swanlab_project,
             swanlab_tags=tuple(args.swanlab_tag),
-            dataset=args.dataset,
         )
     else:
         if args.resume or args.steps or args.output_dir.exists():
@@ -447,62 +447,57 @@ def main():
             revision=checkpoint.config.model_revision,
             local_files_only=True,
         )
-        data = (PersonaMemDataset if args.dataset == "personamem" else SquadDataset)(
-            data_path, data_tokenizer
-        )
-        shared_plan, panels = load_evaluation_plan(args.evaluation_plan, data, recipe)
+        spec = load_selection(args.evaluation_sets, prepared=True)
+        names = spec["evaluation"][args.split]
+        if not names:
+            raise ValueError(f"no {args.split} sources configured")
+        sources = load_evaluation_sources(spec, data_tokenizer, recipe, names)
         tokenizer, backbone, writer, _ = load_components(checkpoint, device)
-        if tokenizer.get_vocab() != data.tokenizer.get_vocab() or (
-            tokenizer.bos_token_id,
-            tokenizer.eos_token_id,
-        ) != (data.tokenizer.bos_token_id, data.tokenizer.eos_token_id):
-            raise ValueError("dataset tokenizer differs from checkpoint tokenizer")
-        metrics, rows = evaluate_panel(
-            backbone,
-            writer,
-            tokenizer,
-            checkpoint.config,
-            recipe,
-            data,
-            panels[args.split],
-            device,
-            read_plans=shared_plan["reads"][args.split],
-        )
         primary = not dist.is_initialized() or dist.get_rank() == 0
         step = checkpoint.progress["next_step"]
-        evaluation_info = {
-            "checkpoint": str(args.checkpoint.resolve()),
-            "checkpoint_step": step,
-            "index": str(data_path.resolve()),
-            "split": args.split,
-            "config": asdict(recipe),
-            "evaluation_plan": str(args.evaluation_plan.resolve()),
-        }
+        reports = {}
+        for name in names:
+            data, shared_plan, panels = sources[name]
+            if tokenizer.get_vocab() != data.tokenizer.get_vocab() or (
+                tokenizer.bos_token_id, tokenizer.eos_token_id,
+            ) != (data.tokenizer.bos_token_id, data.tokenizer.eos_token_id):
+                raise ValueError("dataset tokenizer differs from checkpoint tokenizer")
+            metrics, rows = evaluate_panel(
+                backbone, writer, tokenizer, checkpoint.config, recipe, data,
+                panels[args.split], device, read_plans=shared_plan["reads"][args.split],
+            )
+            destination = args.output_dir / name
+            report = destination / f"{args.split}-step-{step:06d}.json"
+            evaluation_info = {
+                "name": name, "dataset": spec["sources"][name]["dataset"],
+                "checkpoint": str(args.checkpoint.resolve()), "checkpoint_step": step,
+                "index": spec["sources"][name]["dataset_dir"], "split": args.split,
+                "config": asdict(recipe),
+                "evaluation_plan": spec["sources"][name]["evaluation_plan"],
+            }
+            if primary:
+                write_evaluation(destination, report.stem, metrics, rows)
+                (destination / "evaluation.json").write_text(
+                    json.dumps(evaluation_info | {"runtime": runtime_info()}, indent=2) + "\n")
+                reports[name] = report
         if primary:
-            args.output_dir.mkdir(parents=True)
-            write_evaluation(args.output_dir, f"{args.split}-step-{step:06d}", metrics, rows)
-            (args.output_dir / "evaluation.json").write_text(
-                json.dumps(evaluation_info | {"runtime": runtime_info()}, indent=2) + "\n"
-            )
-        if primary and args.split == "test":
-            append_qa_report(
-                args.checkpoint.parent.parent,
-                args.output_dir / f"test-step-{step:06d}.json",
-                args.swanlab_mode,
-            )
-        elif primary:
-            with swanlab_run(
-                args.output_dir,
-                evaluation_info,
-                mode=args.swanlab_mode,
-                project=args.swanlab_project,
-                job_type="evaluate",
-                group=args.swanlab_group,
-                tags=tuple(args.swanlab_tag),
-                fixed_tags=("scope:main", "method:latent-working-memory", f"data:{args.dataset}"),
-            ) as tracking:
-                configure_dynamic_panels(tracking, args.swanlab_mode)
-                log_qa(tracking, metrics, rows, step, "dev", args.dataset, media=True)
+            (args.output_dir / "reports.json").write_text(json.dumps(
+                {name: str(path.resolve()) for name, path in reports.items()}, indent=2) + "\n")
+            if args.split == "test":
+                append_qa_reports(args.checkpoint.parent.parent, reports, args.swanlab_mode)
+            else:
+                with swanlab_run(
+                    args.output_dir,
+                    {"checkpoint": str(args.checkpoint.resolve()), "selection": spec},
+                    mode=args.swanlab_mode, project=args.swanlab_project, job_type="evaluate",
+                    group=args.swanlab_group, tags=tuple(args.swanlab_tag),
+                    fixed_tags=("scope:main", "method:latent-working-memory"),
+                ) as tracking:
+                    configure_dynamic_panels(tracking, args.swanlab_mode, names)
+                    for name, path in reports.items():
+                        metrics = json.loads(path.read_text())
+                        rows = [json.loads(line) for line in path.with_suffix(".jsonl").read_text().splitlines()]
+                        log_qa(tracking, metrics, rows, step, "dev", name, media=True)
     if dist.is_initialized():
         dist.destroy_process_group()
 

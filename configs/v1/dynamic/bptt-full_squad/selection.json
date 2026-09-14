@@ -1,4 +1,23 @@
 {
-  "dataset": "squad",
-  "dataset_dir": "data/squad"
+  "sources": {
+    "squad": {
+      "dataset": "squad",
+      "dataset_dir": "data/squad"
+    },
+    "personamem-factqa": {
+      "dataset": "personamem",
+      "dataset_dir": "data/personamem-v2-factqa-32k-doc100_20260913"
+    }
+  },
+  "training": "squad",
+  "evaluation": {
+    "dev": [
+      "squad",
+      "personamem-factqa"
+    ],
+    "test": [
+      "squad",
+      "personamem-factqa"
+    ]
+  }
 }
