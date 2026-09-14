@@ -89,6 +89,22 @@ def snapshot_run(remote):
     }
 
 
+def same_run(before, after):
+    # House may return slightly different derived min/max/average summaries for
+    # unchanged data. Compare the complete actual step/value sequences instead.
+    fields = ("name", "group", "job_type", "labels", "config")
+    if any(before[k] != after[k] for k in fields):
+        return False
+
+    def points(snapshot):
+        return {
+            row["key"]: sorted((point["step"], point["value"]) for point in row["metrics"])
+            for row in snapshot["scalars"]["list"]
+        }
+
+    return points(before) == points(after)
+
+
 def media_contents(remote, keys, step):
     series = {item.key: item for item in remote.series(metric_type="MEDIA")}
     result = {}
@@ -199,7 +215,7 @@ def publish_supplement(run_dir, manifest, output_dir, mode, resume=False):
             )
             + "\n"
         )
-    if snapshot_run(remote) != before:
+    if not same_run(before, snapshot_run(remote)):
         raise ValueError("cloud run identity, configuration or scalar history changed")
     pending = {key: value for key, value in media.items() if key not in existing_media}
     if pending:
@@ -213,7 +229,7 @@ def publish_supplement(run_dir, manifest, output_dir, mode, resume=False):
         raise ValueError(
             "uploaded baseline charts or examples differ from the prepared publication"
         )
-    if snapshot_run(remote) != before:
+    if not same_run(before, snapshot_run(remote)):
         raise ValueError("cloud run identity, configuration or scalar history changed")
     publication["status"] = "verified"
     receipt.write_text(json.dumps(publication, indent=2) + "\n")
@@ -230,7 +246,7 @@ def publish_supplement(run_dir, manifest, output_dir, mode, resume=False):
     remote = api.run(run_path)
     if media_contents(remote, old_keys, step) != old_media:
         raise ValueError("original media data changed while replacing panel definitions")
-    if snapshot_run(remote) != before or remote.state != "FINISHED":
+    if not same_run(before, snapshot_run(remote)) or remote.state != "FINISHED":
         raise ValueError("cloud run changed unexpectedly during panel replacement")
     after_sections = checked(api._get(f"{base}/sections", params={"size": 100}))
     evaluation = next(s for s in after_sections if s["name"] == "evaluation")

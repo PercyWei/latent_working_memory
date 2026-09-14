@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from copy import deepcopy
 import json
 import sys
 from types import SimpleNamespace
@@ -148,6 +149,7 @@ def test_failed_upload_verification_never_removes_old_panels(package, tmp_path, 
 
     monkeypatch.setattr(publication.swanlab, "Api", Api)
     monkeypatch.setattr(publication, "snapshot_run", lambda remote: {"unchanged": True})
+    monkeypatch.setattr(publication, "same_run", lambda left, right: left == right)
     monkeypatch.setattr(publication, "media_contents", lambda remote, keys, step: {})
     monkeypatch.setattr(publication, "wait_for_media", lambda *args: remote)
     monkeypatch.setattr(publication, "swanlab_training_run", session)
@@ -188,3 +190,18 @@ def test_cli_forwards_resume(monkeypatch):
     monkeypatch.setattr(publication, "publish_supplement", lambda *args: calls.append(args))
     publication.main()
     assert calls[0][-1] is True
+
+
+def test_scalar_preservation_compares_points_not_derived_summaries():
+    before = {key: None for key in ("name", "group", "job_type", "labels", "config")}
+    before["scalars"] = {
+        "list": [{"key": "train/lr", "metrics": [{"step": 1, "value": 3e-5}], "avg": 3e-5}]
+    }
+    after = deepcopy(before)
+    after["scalars"]["list"][0]["avg"] += 1e-20
+    assert publication.same_run(before, after)
+    after["scalars"]["list"][0]["metrics"][0]["value"] = 2e-5
+    assert not publication.same_run(before, after)
+    after = deepcopy(before)
+    after["scalars"]["list"][0]["metrics"] *= 2
+    assert not publication.same_run(before, after)
