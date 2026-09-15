@@ -12,6 +12,7 @@ import time
 import torch
 import torch.distributed as dist
 
+from latent_working_memory.v1 import objectives
 from latent_working_memory.v1.backbone import load_backbone
 from latent_working_memory.v1.config import load_config
 from latent_working_memory.v1.dynamic.config import DynamicConfig
@@ -22,6 +23,12 @@ from latent_working_memory.v1.model import JointMemoryWriter
 from latent_working_memory.v1.pretrain.training import PretrainTrainer
 from validate_verl_dynamic_gpu import episode
 from validate_verl_gpu import make_examples
+
+
+def native_ce_chunk(hidden, weight, target, bias):
+    return torch.nn.functional.cross_entropy(
+        torch.nn.functional.linear(hidden, weight, bias).float(), target, reduction="none"
+    )
 
 
 def compare_metrics(expected, actual):
@@ -69,9 +76,12 @@ def main():
     parser.add_argument("--task", choices=("sample", "mean", "full", "tokens", "updates"), required=True)
     parser.add_argument("--variant", choices=("baseline", "adam", "ce", "both"), required=True)
     parser.add_argument("--verify", action="store_true")
+    parser.add_argument("--native-ce-control", action="store_true")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--steps", type=int, default=20)
     args = parser.parse_args()
+    if args.native_ce_control:
+        objectives._linear_loss_chunk = native_ce_chunk
     torch.set_num_threads(1)
     torch.use_deterministic_algorithms(args.verify)
     device = initialize_device(torch.device("cuda", int(os.environ["LOCAL_RANK"])))
@@ -107,7 +117,8 @@ def main():
     (output / "settings.json").write_text(json.dumps({
         "task": args.task, "variant": args.variant, "verify": args.verify,
         "warmup": args.warmup, "steps": args.steps,
-        "deterministic": args.verify, "input_model_config": config.to_dict(),
+        "deterministic": args.verify, "native_ce_control": args.native_ce_control,
+        "input_model_config": config.to_dict(),
         "reader_loss_backend": backbone.reader_loss_backend,
         "optimizer_fused": bool(actual.optimizer.param_groups[0].get("fused", False)),
     }, indent=2) + "\n")
