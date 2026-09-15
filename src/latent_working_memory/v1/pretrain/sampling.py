@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
-from collections import deque
+from collections import Counter, deque
 
 from transformers import PreTrainedTokenizerBase
 
@@ -14,6 +14,7 @@ from latent_working_memory.v1.pretrain.tokenization import TokenizationPool
 from latent_working_memory.v1.pretrain.curriculum import (
     epoch_distribution,
     maximal_quotas,
+    tasks_at,
     validate_curriculum,
 )
 
@@ -87,7 +88,7 @@ def capacity_weights(
 
 
 class EpochSampler:
-    """One maximum-size, exactly stratified, non-repeating sample plan per epoch."""
+    """Without-replacement epoch plans with optional source/task/length quotas."""
 
     def __init__(
         self,
@@ -115,19 +116,34 @@ class EpochSampler:
         self.max_samples_per_epoch = max_samples_per_epoch
         self.rng = random.Random(seed)
         self.capacity_rng = random.Random(f"{seed}:capacity")
-        self.pools = {}
-        for i, entry in enumerate(index.entries):
+        validate_curriculum(
+            training, index.sources, config.input_length_bounds, config.max_input_tokens
+        )
+        limits = training.get("input_tokens", {"min": 1, "max": config.max_input_tokens})
+        self.entry_cells = []
+        for entry in index.entries:
             source, task, size = entry[0], entry[6], entry[7]
-            bound = next(b for b in config.input_length_bounds if size <= b)
-            self.pools.setdefault((source, task, bound), []).append(i)
-        validate_curriculum(training, index.sources, config.input_length_bounds)
-        self.available = {k: len(v) for k, v in self.pools.items()}
-        self.plans = []
+            if limits["min"] <= size <= limits["max"]:
+                bound = next(b for b in config.input_length_bounds if size <= b)
+                self.entry_cells.append((source, task, bound))
+            else:
+                self.entry_cells.append(None)
+        self.plans, self.epoch_pools = [], []
         for epoch in range(1, epochs + 1):
             probabilities = epoch_distribution(training, epoch)
+            template = next(iter(probabilities))
+            tasks = tasks_at(training, epoch)
+            pools = {}
+            for i, cell in enumerate(self.entry_cells):
+                if cell is None or cell[1] not in tasks:
+                    continue
+                key = tuple(v if axis is not None else None for v, axis in zip(cell, template))
+                if key in probabilities:
+                    pools.setdefault(key, []).append(i)
             quotas, limiting, unit = maximal_quotas(
-                self.available, probabilities, batch_size, max_samples_per_epoch
+                {k: len(v) for k, v in pools.items()}, probabilities, batch_size, max_samples_per_epoch
             )
+            self.epoch_pools.append(pools)
             self.plans.append((probabilities, quotas, limiting, unit))
         self.total_steps = sum(sum(q.values()) // batch_size for _, q, _, _ in self.plans)
         self.epoch, self.cursor, self.visits = 0, 0, 0
@@ -138,7 +154,8 @@ class EpochSampler:
         if self.epoch > self.epochs:
             raise StopIteration
         _, quotas, _, _ = self.plans[self.epoch - 1]
-        self.order = [i for key, n in quotas.items() for i in self.rng.sample(self.pools[key], n)]
+        pools = self.epoch_pools[self.epoch - 1]
+        self.order = [i for key, n in quotas.items() for i in self.rng.sample(pools[key], n)]
         self.rng.shuffle(self.order)
         self.cursor = 0
         self.submitted_cursor = 0
@@ -192,23 +209,24 @@ class EpochSampler:
 
     def epoch_report(self, epoch):
         probabilities, quotas, limiting, unit = self.plans[epoch - 1]
+        available = {k: len(v) for k, v in self.epoch_pools[epoch - 1].items()}
 
         def label(key):
-            return "/".join(map(str, key))
+            return "/".join("*" if v is None else str(v) for v in key)
 
-        return {
+        report = {
             "epoch": epoch,
             "max_samples_per_epoch": self.max_samples_per_epoch,
             "samples": sum(quotas.values()),
             "steps": sum(quotas.values()) // self.batch_size,
             "quota_unit": unit,
-            "active_available": sum(self.available.get(k, 0) for k in probabilities),
-            "unselected": sum(self.available.get(k, 0) for k in probabilities)
+            "active_available": sum(available.get(k, 0) for k in probabilities),
+            "unselected": sum(available.get(k, 0) for k in probabilities)
             - sum(quotas.values()),
             "cells": [
                 {
                     "cell": label(k),
-                    "available": self.available.get(k, 0),
+                    "available": available.get(k, 0),
                     "probability": float(p),
                     "selected": quotas[k],
                 }
@@ -216,6 +234,10 @@ class EpochSampler:
             ],
             "bottlenecks": [label(k) for k in limiting],
         }
+        if epoch == self.epoch:
+            actual = Counter(self.entry_cells[i] for i in self.order)
+            report["actual_cells"] = {label(k): n for k, n in sorted(actual.items())}
+        return report
 
     def state_dict(self):
         return {
@@ -239,16 +261,16 @@ class EpochSampler:
         if len(order) != sum(self.plans[epoch - 1][1].values()) or len(set(order)) != len(order):
             raise ValueError("epoch plan differs from configured quotas")
         expected = self.plans[epoch - 1][1]
+        template = next(iter(expected))
+        allowed_tasks = tasks_at(self.training, epoch)
         actual = {}
         for i in order:
             if type(i) is not int or not 0 <= i < len(self.index.entries):
                 raise ValueError("epoch plan contains an invalid sample index")
-            entry = self.index.entries[i]
-            key = (
-                entry[0],
-                entry[6],
-                next(b for b in self.config.input_length_bounds if entry[7] <= b),
-            )
+            cell = self.entry_cells[i]
+            if cell is None or cell[1] not in allowed_tasks:
+                raise ValueError("epoch plan contains an ineligible sample")
+            key = tuple(v if axis is not None else None for v, axis in zip(cell, template))
             actual[key] = actual.get(key, 0) + 1
         if (
             actual != expected

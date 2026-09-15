@@ -67,6 +67,7 @@ def test_maximal_integer_quotas_and_independent_schedules():
         validate_curriculum(training, ("semantic", "random"), (32, 64))
 
 
+@pytest.mark.parametrize("natural", [False, True])
 @pytest.mark.parametrize("mode", ["sample", "mean"])
 def test_epoch_nonreplacement_resume_and_fixed_evaluation(
     parquet_source,
@@ -77,6 +78,7 @@ def test_epoch_nonreplacement_resume_and_fixed_evaluation(
     preparation_recipe,
     epoch_selection,
     mode,
+    natural,
 ):
     root = tmp_path / "data"
     config = replace(tiny_config, compression_mode=mode)
@@ -86,6 +88,13 @@ def test_epoch_nonreplacement_resume_and_fixed_evaluation(
     spec = json.loads(
         epoch_selection(root, config, {v: v for v in ("semantic", "random")}).read_text()
     )
+    if natural:
+        spec["training"] = {
+            "input_tokens": {"min": 1, "max": config.max_input_tokens},
+            "source_schedule": None,
+            "task_schedule": None,
+            "length_schedule": None,
+        }
     indices, report = select_experiment(spec, config, tokenizer)
     index = indices["train", "train"]
     # Training retains the full eligible pool; epoch quotas are applied only by the sampler.
@@ -130,7 +139,8 @@ def test_epoch_nonreplacement_resume_and_fixed_evaluation(
                 )
                 assert len({(e.episode.episode_id, e.capacity) for e in batch}) == len(batch)
         assert len(chosen) == len(set(chosen))
-        assert counts == sampler.plans[epoch - 1][1]
+        observed = {(None, None, None): sum(counts.values())} if natural else counts
+        assert observed == sampler.plans[epoch - 1][1]
         orders.append(chosen)
         offset += nsteps
     assert orders[0] != orders[1]
@@ -160,7 +170,11 @@ def test_epoch_nonreplacement_resume_and_fixed_evaluation(
             assert balanced_report["samples_per_cell"][f"{source}/{split}"] > 0
     spec["evaluation"]["balance_task_lengths"] = False
     # Training schedules must not change dev/test panel membership.
-    spec["training"]["source_schedule"][0]["weights"] = {"semantic": 0, "random": 1}
+    spec["training"]["source_schedule"] = [
+        {"epoch": 1, "weights": {"semantic": 0, "random": 1}}
+    ]
+    spec["training"]["input_tokens"] = {"min": 16, "max": 32}
+    spec["training"]["task_schedule"] = [{"epoch": 1, "tasks": ["ae"], "weights": None}]
     repeated, _ = select_experiment(spec, config, tokenizer)
     for source in spec["sources"]:
         for split in ("dev", "test"):
@@ -171,6 +185,7 @@ def test_epoch_nonreplacement_resume_and_fixed_evaluation(
         select_experiment(spec, config, tokenizer)
 
 
+@pytest.mark.parametrize("natural", [False, True])
 def test_warmup_complete_training_keeps_optimizer_and_resolves_final_checkpoint(
     parquet_source,
     tmp_path,
@@ -179,6 +194,7 @@ def test_warmup_complete_training_keeps_optimizer_and_resolves_final_checkpoint(
     preparation_records,
     preparation_recipe,
     epoch_selection,
+    natural,
 ):
     model_dir = tmp_path / "model"
     LlamaForCausalLM(
@@ -211,6 +227,15 @@ def test_warmup_complete_training_keeps_optimizer_and_resolves_final_checkpoint(
         {"epoch": 1, "weights": {"ae": 1, "continuation": 0}},
         {"epoch": 2, "weights": {"ae": 1, "continuation": 1}},
     ]
+    if natural:
+        spec["training"] = {
+            "source_schedule": None,
+            "task_schedule": [
+                {"epoch": 1, "tasks": ["ae"], "weights": None},
+                {"epoch": 2, "tasks": ["ae", "continuation"], "weights": None},
+            ],
+            "length_schedule": None,
+        }
     path.write_text(json.dumps(spec))
     out = tmp_path / "warmup"
     result = run_pretraining(
@@ -226,9 +251,13 @@ def test_warmup_complete_training_keeps_optimizer_and_resolves_final_checkpoint(
     second = [r for r in logs if r["epoch"] == 2]
     assert first and second
     assert all(s["ae_nll"] is not None for r in first for s in r["samples"])
-    assert sum(s["ae_nll"] is not None for r in second for s in r["samples"]) == sum(
-        s["lm_nll"] is not None for r in second for s in r["samples"]
-    )
+    if not natural:
+        assert sum(s["ae_nll"] is not None for r in second for s in r["samples"]) == sum(
+            s["lm_nll"] is not None for r in second for s in r["samples"]
+        )
+    for epoch_rows in (first, second):
+        report = epoch_rows[0]["epoch_selection"]
+        assert sum(report["actual_cells"].values()) == report["samples"]
     assert all(
         s["step"].item() == result.completed_steps
         for s in checkpoint.optimizer_state["state"].values()

@@ -1,7 +1,7 @@
 # 20260914_配置组织规则
 
 创建时间：20260914 11:48:20 UTC+08:00
-最后修订时间：20260914 22:29:22 UTC+08:00
+最后修订时间：20260915 16:41:23 UTC+08:00
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
 
@@ -91,14 +91,17 @@ configs/
 | 字段 | 内容 |
 |---|---|
 | `sources` | 共享数据来源及路径，同时定义可用训练来源与评估来源 |
-| `training.source_schedule` | 来源权重的 epoch 节点；未启用来源显式设为 0 |
-| `training.task_schedule` | `ae`、`continuation` 权重的 epoch 节点 |
-| `training.length_schedule` | 按 `model.json` 长度档上限命名的权重节点 |
+| `training.input_tokens` | 可选的输入 X 长度闭区间 `{min, max}`；省略时使用 1 到模型的 `max_input_tokens`，显式上限不能超过模型上限 |
+| `training.source_schedule` | 来源权重节点，或 `null`（全程不约束来源比例） |
+| `training.task_schedule` | 允许任务集合及权重节点，或 `null`（全程允许两种任务且不约束比例） |
+| `training.length_schedule` | 长度档权重节点，或 `null`（不约束长度比例，仍按长度范围筛选） |
 | `evaluation` | `balance_task_lengths` 与 `samples_per_source: {dev, test}`，固定评估面板 |
 
-三种 schedule 均从 `epoch: 1` 开始，节点格式为 `{"epoch": 1, "weights": {...}}`；epoch 递增。来源和任务按节点分段固定，长度在相邻节点的归一化分布间线性插值。权重使用非负数，不要求和为 1；等概率写全 1，避免用循环小数表达精确比例。
+非空 schedule 从 `epoch: 1` 开始，节点格式为 `{"epoch": 1, "weights": {...}}`，也可用 `weights: null` 在该节点取消比例约束。任务节点额外接受 `tasks: ["ae"]` 或 `["ae", "continuation"]` 等非空任务集合；省略时允许两种任务，显式权重必须覆盖允许集合。来源和任务按节点分段固定，长度只在两个非空权重节点间对归一化分布作线性插值；与 `null` 之间按节点切换。权重非负且至少一项为正，等概率写全 1。
 
-训练保留完整有效 train 池，每轮在来源 × 任务 × 长度的乘积分布下求最大无放回整数配额，同时满足全局 batch 整除。`experiment.json` 的 `max_samples_per_epoch` 设置每轮样本上限，`null` 表示不限；实际配额在上限内向下取满足比例及 batch 整除的最大值。不约束 batch 内比例；空池或无法满足约束时明确报错。Qwen 与 Llama 均由当前 tokenizer 和本轮分布确定训练规模。
+训练保留完整有效 train 池，epoch 采样器先应用训练长度范围及允许任务，再仅对受比例约束的维度建立组合池、计算最大无放回整数配额。三个 schedule 都为 `null` 时，直接对整个有效池等概率抽样；AE warm-up 可先允许 AE，再允许两种任务，不要求二者等量。完整配置示例见 [预训练与评估 3.1](../notes/v1/20260910_pretraining_and_evaluation.md#31-三种独立分布)。
+
+`experiment.json` 的 `max_samples_per_epoch` 设置每轮样本上限，`null` 表示不限；实际数量向下取满足现有比例约束和全局 batch 整除的最大值。无比例约束时只受有效池规模、样本上限和 batch 整除约束。不要求 batch 内比例；无法组成完整 batch 时明确报错。训练长度范围不截断原文、不改变 LM 目标长度和读写窗口检查，也不改变 dev/test 选样。
 
 评估数量是每个来源各自的配额：整数必须严格满足，`null` 尽量使用有效样本。开启均衡时按 AE/LM × 长度档等量选择；关闭时直接按总数选样。评估不随训练 epoch 改变；Qwen 的 dev/test 为 `null`，Llama 保留已有评估配额。
 

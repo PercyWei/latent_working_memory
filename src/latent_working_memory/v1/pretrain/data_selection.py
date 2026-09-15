@@ -87,7 +87,7 @@ def select_experiment(
 ):
     validate_selection(spec)
     sources = {name: Path(path) for name, path in spec["sources"].items()}
-    validate_curriculum(spec["training"], sources, config.input_length_bounds)
+    validate_curriculum(spec["training"], sources, config.input_length_bounds, config.max_input_tokens)
     if config.input_length_bounds[-1] < config.max_input_tokens:
         raise ValueError("length bounds must cover max_input_tokens")
     balanced = spec["evaluation"]["balance_task_lengths"]
@@ -207,25 +207,29 @@ def select_experiment(
 
 
 def selection_metadata(report, name):
+    spec = report["selection"]
     identity = {
         "source_preparations": report["source_preparations"],
-        "selection": report["selection"],
+        "selection": spec,
         "dataset": name,
     }
+    schedule = spec["training"]["source_schedule"]
+    if name != "train":
+        sources = [name]
+    elif schedule is None or any(point["weights"] is None for point in schedule):
+        sources = sorted(spec["sources"])
+    else:
+        sources = sorted({
+            source
+            for point in schedule
+            for source, weight in point["weights"].items()
+            if weight > 0
+        })
     return {
         "preparation_id": hashlib.blake2b(
             json.dumps(identity, sort_keys=True).encode(), digest_size=16
         ).hexdigest(),
-        "sources": sorted(
-            {
-                source
-                for point in report["selection"]["training"]["source_schedule"]
-                for source, weight in point["weights"].items()
-                if weight > 0
-            }
-        )
-        if name == "train"
-        else [name],
+        "sources": sources,
         "selection": report,
     }
 

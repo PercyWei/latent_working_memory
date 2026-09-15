@@ -40,7 +40,9 @@ def load_pretrain_experiment(path):
     config = ExperimentConfig.from_mapping(raw)
     selection = json.loads(Path(spec["selection"]).read_text())
     validate_selection(selection)
-    validate_curriculum(selection["training"], selection["sources"], config.input_length_bounds)
+    validate_curriculum(
+        selection["training"], selection["sources"], config.input_length_bounds, config.max_input_tokens
+    )
     for key in ("epochs", "save_every"):
         if type(spec[key]) is not int or spec[key] <= 0:
             raise ValueError(f"{key} must be a positive integer")

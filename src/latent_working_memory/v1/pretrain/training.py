@@ -403,10 +403,13 @@ def run_pretraining(
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
                 step_begin = time.perf_counter()
+                previous_epoch = sampler.epoch
                 examples = sampler.sample_batch()
                 for group in trainer.optimizer.param_groups:
                     group["lr"] = learning_rate_at(config, step, sampler.total_steps)
                 result = trainer.step(examples)
+                if sampler.epoch != previous_epoch or step == next_step:
+                    result["epoch_selection"] = sampler.epoch_report(sampler.epoch)
                 result["learning_rate"] = learning_rate_at(config, step, sampler.total_steps)
                 result["epoch"] = sampler.epoch
                 result["epoch_progress"] = sampler.cursor / len(sampler.order)
