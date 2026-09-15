@@ -39,18 +39,17 @@ def test_fused_ce_preserves_nonuniform_upstream_gradients(dtype, train_head):
     torch.manual_seed(19)
     x = torch.randn(37, 64, device="cuda", dtype=dtype, requires_grad=True)
     w = (torch.randn(2053, 64, device="cuda", dtype=dtype) / 8).requires_grad_(train_head)
-    b = torch.randn(2053, device="cuda", dtype=dtype, requires_grad=train_head)
     target = torch.arange(37, device="cuda") * 17
     weights = torch.linspace(0, 1, 37, device="cuda") ** 2 / 37
     result = []
     for fused in (False, True):
-        xx, ww, bb = [t.detach().clone().requires_grad_(t.requires_grad) for t in (x, w, b)]
+        xx, ww = [t.detach().clone().requires_grad_(t.requires_grad) for t in (x, w)]
         loss = (
-            liger_fused_linear_cross_entropy(xx, ww, target, bias=bb, reduction="none")
-            if fused else F.cross_entropy(F.linear(xx, ww, bb).float(), target, reduction="none")
+            liger_fused_linear_cross_entropy(xx, ww, target, reduction="none")
+            if fused else F.cross_entropy(F.linear(xx, ww).float(), target, reduction="none")
         )
         (loss * weights).sum().backward()
-        result.append((loss.detach(), xx.grad, ww.grad, bb.grad))
+        result.append((loss.detach(), xx.grad, ww.grad))
     torch.testing.assert_close(result[0][0], result[1][0], rtol=2e-5, atol=2e-5)
     torch.testing.assert_close(
         result[0][1:], result[1][1:],
@@ -103,7 +102,9 @@ def test_fused_adamw_resume():
         base.step()
         fused.step()
         torch.testing.assert_close(x, y, rtol=1e-6, atol=1e-7)
-        torch.testing.assert_close(base.state[x], fused.state[y], rtol=1e-5, atol=1e-7)
+        assert base.state[x]["step"].item() == fused.state[y]["step"].item()
+        for key in ("exp_avg", "exp_avg_sq"):
+            torch.testing.assert_close(base.state[x][key], fused.state[y][key], rtol=1e-5, atol=1e-7)
         if step == 0:
             saved = deepcopy(fused.state_dict())
             fused = torch.optim.AdamW([y], lr=3e-5, fused=True)

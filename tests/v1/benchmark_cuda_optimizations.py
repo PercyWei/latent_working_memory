@@ -89,7 +89,7 @@ def main():
     episodes = [episode(tokenizer, "short", 5), episode(tokenizer, "long", 8)]
     def trainer(bb, ww, fused):
         return (PretrainTrainer(replace(config, optimizer_fused=fused), bb, ww, device)
-                if pretrain else DynamicTrainer(bb, ww, config, replace(recipe, optimizer_fused=fused), device))
+                if pretrain else DynamicTrainer(bb, ww, config, replace(recipe, optimizer_fused=fused, reader_loss_backend=bb.reader_loss_backend), device))
     reference = trainer(deepcopy(backbone), deepcopy(writer), False) if args.verify else None
     backbone.reader_loss_backend = "liger" if args.variant in {"ce", "both"} else "torch"
     actual = trainer(backbone, writer, args.variant in {"adam", "both"})
