@@ -125,7 +125,8 @@ class DynamicEngine(MemoryEngine):
     def __init__(self, model, device):
         recipe = model.recipe
         super().__init__(
-            model, device, recipe.learning_rate, recipe.weight_decay, recipe.gradient_clip
+            model, device, recipe.learning_rate, recipe.weight_decay, recipe.gradient_clip,
+            recipe.optimizer_fused
         )
         self.recipe = recipe
         self.model_config = model.model_config

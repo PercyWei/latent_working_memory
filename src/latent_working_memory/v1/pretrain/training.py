@@ -115,7 +115,8 @@ class PretrainEngine(MemoryEngine):
     def __init__(self, model, device):
         config = model.config
         super().__init__(
-            model, device, config.learning_rate, config.weight_decay, config.gradient_clip
+            model, device, config.learning_rate, config.weight_decay, config.gradient_clip,
+            config.optimizer_fused
         )
         self.config = config
 
