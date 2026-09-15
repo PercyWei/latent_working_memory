@@ -1,6 +1,7 @@
 """Qwen optimization parity and isolated, warmed-up CUDA training benchmarks."""
 
 import argparse
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import replace
 import json
@@ -19,10 +20,12 @@ from latent_working_memory.v1.pretrain.sampling import PretrainExample, read_tok
 from latent_working_memory.v1 import objectives
 from latent_working_memory.v1.backbone import load_backbone
 from latent_working_memory.v1.config import load_config
+from latent_working_memory.v1.dynamic import training as dynamic_training
+from latent_working_memory.v1.dynamic import evaluation as dynamic_evaluation
 from latent_working_memory.v1.dynamic.config import DynamicConfig
 from latent_working_memory.v1.dynamic.evaluation import evaluate_qa
 from latent_working_memory.v1.dynamic.training import DynamicTrainer
-from latent_working_memory.v1.engine import initialize_device
+from latent_working_memory.v1.engine import MemoryEngine, initialize_device
 from latent_working_memory.v1.model import JointMemoryWriter
 from latent_working_memory.v1.pretrain.training import PretrainTrainer
 from validate_verl_dynamic_gpu import episode
@@ -81,7 +84,7 @@ def compare_metrics(expected, actual):
         assert expected == actual, (expected, actual)
 
 
-def compare_gradients(reference, actual, output, step):
+def compare_gradients(reference, actual, output, step, gradient_rtol=0.03):
     norms, errors, maximum, diagnostics, failures = [], [], 0.0, [], []
     for index, (a, b) in enumerate(zip(reference.parameters, actual.parameters, strict=True)):
         assert (a.grad is None) == (b.grad is None)
@@ -91,7 +94,7 @@ def compare_gradients(reference, actual, output, step):
             error, norm = delta.norm().item(), a.grad.float().norm().item()
             row.update(gradient_error=error, gradient_norm=norm,
                        relative_gradient_error=error / max(norm, 1e-30))
-            if error > 0.03 * norm + 1e-6:
+            if error > gradient_rtol * norm + 1e-6:
                 failures.append((index, "gradient"))
             norms.append(norm ** 2)
             errors.append(error ** 2)
@@ -123,10 +126,16 @@ def main():
     parser.add_argument("--task", choices=("sample", "mean", "full", "tokens", "updates"), required=True)
     parser.add_argument("--variant", choices=("baseline", "adam", "ce", "both"), required=True)
     parser.add_argument("--verify", action="store_true")
+    parser.add_argument("--fp32", action="store_true")
     parser.add_argument("--native-ce-control", action="store_true")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--steps", type=int, default=20)
     args = parser.parse_args()
+    if args.fp32:
+        torch.set_float32_matmul_precision("highest")
+        MemoryEngine.autocast = lambda self: nullcontext()
+        dynamic_training.precision_context = lambda device: nullcontext()
+        dynamic_evaluation.precision_context = lambda device: nullcontext()
     if args.native_ce_control:
         objectives._linear_loss_chunk = native_ce_chunk
     torch.set_num_threads(1)
@@ -134,7 +143,7 @@ def main():
     device = initialize_device(torch.device("cuda", int(os.environ["LOCAL_RANK"])))
     config = replace(load_config(args.config), optimizer_fused=False, reader_loss_backend="torch")
     torch.manual_seed(config.model_seed)
-    tokenizer, backbone = load_backbone(config, device, torch.bfloat16)
+    tokenizer, backbone = load_backbone(config, device, torch.float32 if args.fp32 else torch.bfloat16)
     writer = JointMemoryWriter(config.d_mem, config.num_layers, config.num_heads, config.ffn_dim, config.k_limit).to(device)
     recipe = DynamicConfig(
         capacities=(64,), global_batch_size=2, new_count=1, history_count=1,
@@ -169,7 +178,8 @@ def main():
         "data": str(args.data) if args.data else None,
         "sample_ids": [e.episode.episode_id for e in natural] if natural else None,
         "warmup": args.warmup, "steps": args.steps,
-        "deterministic": args.verify, "native_ce_control": args.native_ce_control,
+        "deterministic": args.verify, "fp32": args.fp32,
+        "native_ce_control": args.native_ce_control,
         "input_model_config": config.to_dict(),
         "reader_loss_backend": backbone.reader_loss_backend,
         "optimizer_fused": bool(actual.optimizer.param_groups[0].get("fused", False)),
@@ -179,7 +189,7 @@ def main():
         for step in range(2):
             expected, observed = update(reference, step), update(actual, step)
             (output / f"metrics-{step}.json").write_text(json.dumps({"reference": expected, "actual": observed}, indent=2) + "\n")
-            gradients = compare_gradients(reference, actual, output, step)
+            gradients = compare_gradients(reference, actual, output, step, 1e-4 if args.fp32 else .03)
             compare_metrics(expected, observed)
             records.append({"step": step + 1, **gradients})
             (output / "steps.json").write_text(json.dumps(records, indent=2) + "\n")
