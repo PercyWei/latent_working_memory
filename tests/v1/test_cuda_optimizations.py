@@ -92,6 +92,17 @@ def test_fused_reader_preserves_memory_and_lora_gradients(architecture, checkpoi
         atol=2e-4 if dtype == torch.bfloat16 else 2e-7,
     )
 
+    baseline.eval()
+    actual.eval()
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=dtype == torch.bfloat16):
+        for adapters in (False, True):
+            expected = baseline.read_batch(memories, tasks, use_reader_lora=adapters)
+            observed = actual.read_batch(memories, tasks, use_reader_lora=adapters)
+            torch.testing.assert_close(
+                [o.token_nll for o in expected], [o.token_nll for o in observed],
+                rtol=2e-5, atol=2e-5,
+            )
+
 
 @cuda
 def test_fused_adamw_resume(tmp_path):
