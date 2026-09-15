@@ -167,7 +167,7 @@ def main():
                 tie_word_embeddings=False,
             )
         ).to(device=device, dtype=dtype)
-        backbone = LatentMemoryBackbone(model, 1, 2, 8, 2, 4, ("q_proj", "v_proj"), 0.0)
+        backbone = LatentMemoryBackbone(model, 1, 2, 8, 2, 4, ("q_proj", "v_proj"), 0.0).to(device)
     writer = JointMemoryWriter(
         config.d_mem, config.num_layers, config.num_heads, config.ffn_dim, config.k_limit
     ).to(device)
