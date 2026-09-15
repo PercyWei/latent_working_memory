@@ -11,10 +11,13 @@ import time
 
 import torch
 import torch.distributed as dist
+from torch.utils._pytree import tree_map_only
+from tensordict import TensorDict
 from transformers import Qwen2Config, Qwen2ForCausalLM
 from verl.workers.config import HFModelConfig, FSDPEngineConfig
 from verl.workers.engine import BaseEngine
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngine
+from verl.utils.tensordict_utils import assign_non_tensor
 
 from latent_working_memory.v1.backbone import LatentMemoryBackbone, ReadTokens, load_backbone
 from latent_working_memory.v1.checkpoint import (
@@ -232,7 +235,9 @@ def main():
         if rank == 0:
             # Framework schedulers add initial_lr; compare optimizer state and
             # effective hyperparameters, not that scheduler bookkeeping key.
-            ref_optimizer = reference.optimizer.state_dict()
+            ref_optimizer = tree_map_only(
+                torch.Tensor, lambda t: t.cpu(), reference.optimizer.state_dict()
+            )
             torch.testing.assert_close(
                 state[1]["state"], ref_optimizer["state"], rtol=1e-3, atol=1e-6
             )
@@ -262,9 +267,34 @@ def main():
     torch.testing.assert_close(resumed_snapshot, snapshot, rtol=0, atol=0)
     for field in ("loss", "gradient_norm"):
         assert resumed_metrics[field] == actual[field]
+    resumed_state = resumed.canonical_state(value)
+    if rank == 0:
+        torch.testing.assert_close(resumed_state, state, rtol=0, atol=0)
+    eval_results = []
+    for mode in ("sample", "mean"):
+        batch = examples(mode, backbone.eos_token_id)
+        data = pretrain_batch(batch, config.batch_size, rank, dist.get_world_size())
+        with resumed.eval_mode():
+            outputs = resumed.infer_batch(data, pretrain_loss)
+        actual_nll = torch.tensor(sum(outputs["loss"]), device=device, dtype=torch.float64)
+        dist.all_reduce(actual_nll)
+        reference_data = TensorDict({}, batch_size=[])
+        assign_non_tensor(reference_data, examples=tuple(batch))
+        with reference.engine.eval_mode():
+            expected_nll = reference.engine.infer_batch(reference_data)["metrics"]["loss"]
+        torch.testing.assert_close(
+            actual_nll.cpu().float(), torch.tensor(expected_nll), rtol=1e-3, atol=1e-6
+        )
+        eval_results.append({"mode": mode, "native": actual_nll.item(), "reference": expected_nll})
     (output / "result.json").write_text(
         json.dumps(
-            {"passed": True, "precision": args.precision, "steps": rows, "resume_exact": True},
+            {
+                "passed": True,
+                "precision": args.precision,
+                "steps": rows,
+                "resume_exact": True,
+                "evaluation_nll": eval_results,
+            },
             indent=2,
         )
         + "\n"
