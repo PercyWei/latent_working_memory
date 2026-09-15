@@ -59,10 +59,11 @@ def test_fused_ce_preserves_nonuniform_upstream_gradients(dtype, train_head):
 @cuda
 @pytest.mark.parametrize("architecture", ["llama", "qwen2"])
 @pytest.mark.parametrize("checkpointing", [False, True])
-def test_fused_reader_preserves_memory_and_lora_gradients(architecture, checkpointing):
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_fused_reader_preserves_memory_and_lora_gradients(architecture, checkpointing, dtype):
     torch.manual_seed(82)
     baseline = make_backbone(architecture).to("cuda")
-    baseline.language_model.to(dtype=torch.bfloat16)
+    baseline.language_model.to(dtype=dtype)
     if checkpointing:
         baseline.language_model.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={"use_reentrant": False}
@@ -74,7 +75,7 @@ def test_fused_reader_preserves_memory_and_lora_gradients(architecture, checkpoi
     rows = []
     for model in (baseline, actual):
         mm = [m.clone().requires_grad_() for m in memories]
-        with torch.autocast("cuda", dtype=torch.bfloat16):
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=dtype == torch.bfloat16):
             outputs = model.read_batch(mm, tasks)
             loss = sum(w * o.mean_nll for w, o in zip((.2, .3, .5), outputs))
         loss.backward()
@@ -84,7 +85,11 @@ def test_fused_reader_preserves_memory_and_lora_gradients(architecture, checkpoi
         assert all(p.grad is None for p in model.parameters() if not p.requires_grad)
         assert any("lora_B" in n and p.grad is not None for n, p in model.named_parameters())
     torch.testing.assert_close(rows[0][0], rows[1][0], rtol=2e-5, atol=2e-5)
-    torch.testing.assert_close(rows[0][1:], rows[1][1:], rtol=.03, atol=2e-4)
+    torch.testing.assert_close(
+        rows[0][1:], rows[1][1:],
+        rtol=.03 if dtype == torch.bfloat16 else 1e-4,
+        atol=2e-4 if dtype == torch.bfloat16 else 2e-7,
+    )
 
 
 @cuda

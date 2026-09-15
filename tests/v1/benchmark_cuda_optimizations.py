@@ -4,6 +4,7 @@ import argparse
 from copy import deepcopy
 from dataclasses import replace
 import json
+import math
 import os
 from pathlib import Path
 import statistics
@@ -12,6 +13,9 @@ import time
 import torch
 import torch.distributed as dist
 
+from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
+from latent_working_memory.v1.pretrain.prepared_data import eligible_lengths
+from latent_working_memory.v1.pretrain.sampling import PretrainExample, read_tokens
 from latent_working_memory.v1 import objectives
 from latent_working_memory.v1.backbone import load_backbone
 from latent_working_memory.v1.config import load_config
@@ -23,6 +27,37 @@ from latent_working_memory.v1.model import JointMemoryWriter
 from latent_working_memory.v1.pretrain.training import PretrainTrainer
 from validate_verl_dynamic_gpu import episode
 from validate_verl_gpu import make_examples
+
+
+def natural_examples(path, tokenizer, config, mode):
+    selected = {}
+    prompts = {"ae": len(tokenizer.encode(config.ae_prompt, add_special_tokens=False)),
+               "continuation": len(tokenizer.encode(config.lm_prompt, add_special_tokens=False))}
+    with path.open() as handle:
+        for line in handle:
+            sample = TextSample(**json.loads(line))
+            ids = tuple(tokenizer.encode(sample.text, add_special_tokens=False))
+            if not 64 <= len(ids) <= 2048:
+                continue
+            bucket = next(i for i, n in enumerate((128, 512, 1024, 2048)) if len(ids) <= n)
+            key = sample.task, bucket
+            if key in selected:
+                continue
+            ep = sample.to_episode_tokens(ids, config, "semantic")
+            ae, lm = read_tokens(ep, tokenizer)
+            target = ae if ae is not None else lm
+            if eligible_lengths(len(ids), len(target.target_ids) - 1, sample.task, config, prompts) is None:
+                continue
+            selected[key] = ep, ae, lm
+            if len(selected) == 8:
+                break
+    assert len(selected) == 8, "benchmark needs AE/continuation in four length buckets"
+    examples = []
+    ratios = (2, 4, 8) if mode == "mean" else (4,)
+    for ep, ae, lm in selected.values():
+        for ratio in ratios:
+            examples.append(PretrainExample(ep, ae, lm, math.ceil(len(ep.input_ids) / ratio), 1 / len(ratios)))
+    return examples
 
 
 def native_ce_chunk(hidden, weight, target, bias):
@@ -83,6 +118,7 @@ def compare_gradients(reference, actual, output, step):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--data", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--task", choices=("sample", "mean", "full", "tokens", "updates"), required=True)
     parser.add_argument("--variant", choices=("baseline", "adam", "ce", "both"), required=True)
@@ -108,6 +144,7 @@ def main():
     )
     pretrain = args.task in {"sample", "mean"}
     episodes = [episode(tokenizer, "short", 5), episode(tokenizer, "long", 8)]
+    natural = natural_examples(args.data, tokenizer, config, args.task) if args.data and pretrain else None
     def trainer(bb, ww, fused):
         return (PretrainTrainer(replace(config, optimizer_fused=fused), bb, ww, device)
                 if pretrain else DynamicTrainer(bb, ww, config, replace(recipe, optimizer_fused=fused, reader_loss_backend=bb.reader_loss_backend), device))
@@ -117,6 +154,8 @@ def main():
     def update(engine, step):
         if not pretrain:
             return engine.step(episodes, tokenizer, [42, 43], 64)
+        if natural is not None:
+            return engine.step(natural)
         examples = []
         for e in make_examples(step % 2, args.task):
             task = e.ae if e.ae is not None else e.lm
@@ -127,6 +166,8 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     (output / "settings.json").write_text(json.dumps({
         "task": args.task, "variant": args.variant, "verify": args.verify,
+        "data": str(args.data) if args.data else None,
+        "sample_ids": [e.episode.episode_id for e in natural] if natural else None,
         "warmup": args.warmup, "steps": args.steps,
         "deterministic": args.verify, "native_ce_control": args.native_ce_control,
         "input_model_config": config.to_dict(),
