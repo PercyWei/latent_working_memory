@@ -165,6 +165,7 @@ def main():
                 bos_token_id=1,
                 eos_token_id=2,
                 tie_word_embeddings=False,
+                architectures=["Qwen2ForCausalLM"],
             )
         ).to(device=device, dtype=dtype)
         backbone = LatentMemoryBackbone(model, 1, 2, 8, 2, 4, ("q_proj", "v_proj"), 0.0).to(device)
