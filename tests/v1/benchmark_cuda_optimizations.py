@@ -198,6 +198,10 @@ def main():
         compare_metrics(expected, observed)
         result = {"passed": True, "steps": records, "dev_rows": len(observed[1])}
     else:
+        optimizer_start = torch.cuda.Event(enable_timing=True)
+        optimizer_end = torch.cuda.Event(enable_timing=True)
+        pre_hook = actual.optimizer.register_step_pre_hook(lambda *unused: optimizer_start.record())
+        post_hook = actual.optimizer.register_step_post_hook(lambda *unused: optimizer_end.record())
         for step in range(args.warmup):
             update(actual, step)
         for step in range(args.steps):
@@ -210,12 +214,16 @@ def main():
             elapsed = torch.tensor(time.perf_counter() - start, device=device)
             dist.all_reduce(elapsed, op=dist.ReduceOp.MAX)
             records.append({"step": step + 1, "seconds": elapsed.item(),
+                "optimizer_ms": optimizer_start.elapsed_time(optimizer_end),
                 "peak_allocated_bytes": torch.cuda.max_memory_allocated(device),
                 "peak_reserved_bytes": torch.cuda.max_memory_reserved(device),
                 "input_tokens": metrics["input_tokens"], "target_tokens": metrics["target_tokens"]})
             (output / "steps.json").write_text(json.dumps(records, indent=2) + "\n")
+        pre_hook.remove()
+        post_hook.remove()
         seconds = [r["seconds"] for r in records]
         result = {"passed": True, "mean_seconds": statistics.mean(seconds),
+            "optimizer_mean_ms": statistics.mean(r["optimizer_ms"] for r in records),
             "median_seconds": statistics.median(seconds), "stdev_seconds": statistics.stdev(seconds),
             "target_tokens_per_second": sum(r["target_tokens"] for r in records) / sum(seconds),
             "peak_allocated_bytes": max(r["peak_allocated_bytes"] for r in records)}
