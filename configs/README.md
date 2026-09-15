@@ -1,7 +1,7 @@
 # 20260914_配置组织规则
 
 创建时间：20260914 11:48:20 UTC+08:00
-最后修订时间：20260915 17:13:26 UTC+08:00
+最后修订时间：20260915 20:21:38 UTC+08:00
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
 
@@ -111,15 +111,19 @@ configs/
 
 历史数据、checkpoint 与执行产物不迁移，也不按新协议改写历史结果。新选样与 epoch 进度契约不能替代旧协议做精确续训；不添加自动格式转换。
 
-## 预训练执行框架
+## v1 训练执行框架
 
-预训练使用 Accelerate 管理单设备或 DDP 执行、混合精度、反向、梯度同步和裁剪。现有实验入口与 `torch.distributed.run` 启动命令保持可用；进程组由 Accelerate 根据启动环境初始化。CUDA 使用 BF16，CPU 验证使用 FP32。FSDP2 和 DeepSpeed 后端尚未接入。
+v1 的预训练与动态训练使用 verl 0.8.0 的自定义 engine。`EngineRegistry` 分别注册 `lwm_pretrain` 与 `lwm_dynamic`，共用 `MemoryEngine` 的复制参数后端；optimizer 由 verl 配置构造，zero-grad → forward/backward → optimizer-step 的外层生命周期使用 `BaseEngine.train_batch`。两阶段直接以 SPMD 方式调用 engine，未接入 Ray TrainingWorker；不叠加 Accelerate 或其他 trainer。
 
-backbone、Writer 和投影注册在一个训练模型中。完整全局 batch 仍由 epoch 采样器提供，按现有长度排序与 rank 分配规则形成 microbatch，不再进行额外的 DataLoader 分片。一个 optimizer step 可以包含多个 microbatch；非末批暂停 DDP 同步，末批统一同步。容量 `mean` 展开后，各 rank 的 microbatch 次数可以不同，但每步都同步一次。损失仍按全局样本数归一化，不改为 token 平均。
+现有命令通过 `torch.distributed.run` 启动，CUDA 进程组使用 verl 的初始化入口；CPU 单卡和 Gloo 多进程用于验证。当前 backend 为 `replicated`，多卡使用 PyTorch DDP，CUDA 运算为 BF16、可训练参数保持 FP32。FSDP2、sequence packing、Ray rollout 和参数 offload 尚未启用。
 
-保存继续使用现有单文件 checkpoint：可训练模型参数、optimizer、sampler 的 order/cursor/随机状态及各 rank RNG。Accelerate 包装后的 optimizer 通过原 `state_dict` 接口保存恢复；冻结基座继续从配置引用加载。单设备、双卡以及旧执行实现到 Accelerate 的恢复均需保持相同模型、选样和 world size。`provenance.json.execution` 记录实际框架、分布式类型和精度。
+预训练保持全局 epoch 计划、长度排序、rank 分配和 sample/mean 容量权重；非末 microbatch 使用 no_sync，末批同步。动态训练将一个 episode 划分为反传区间：完整 BPTT 为一个区间，TBPTT 按 token 数或写入次数分段。每个区间内部连续传递 memory，边界处 backward 和 detach；最后一个有 loss 的本地区间执行唯一一次同步，尾部无 QA 的写入仍然执行。每个全局 batch 只裁剪和更新一次 optimizer。
 
-训练中的 dev 保持同步执行。DDP 的每张卡持有完整模型，评估直接使用底层模型按来源分工，避免对不同来源的生成调用进行训练梯度同步。SwanLab 与最终 test 的行为保持现有协议。
+损失保留全局样本平均及 episode 内读取平均。backward 保持原损失尺度，DDP 平均后再恢复参数梯度尺度；动态阶段保留逐次写入的 autocast 边界，避免改变 BF16 权重转换缓存和梯度累加。非有限梯度直接中止，不采用跳过更新的默认 SFT 策略。
+
+checkpoint 继续使用项目的单文件契约，保存 Writer、投影、Reader LoRA、optimizer、epoch/order/cursor 与各 rank RNG，冻结基座继续从配置引用加载。独立评估和动态初始化使用同一导出。固定 dev/test、同步评估及 SwanLab global step 的语义保持原样。
+
+依赖固定为 `verl==0.8.0`，因为 0.9.0 要求 Transformers 5.x，而本项目保留 4.x。该版本要求 NumPy <2，锁文件使用 1.26.4；PyTorch 和 Transformers 的锁定版本保持不变。开发与验证应使用当前 Git worktree 根目录 `.venv/`，由本分支的 `uv.lock` 创建，不修改其他 worktree 的环境。
 
 ## 预训练 CPU 分词
 
