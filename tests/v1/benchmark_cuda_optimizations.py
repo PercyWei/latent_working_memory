@@ -132,6 +132,8 @@ def main():
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--steps", type=int, default=20)
     args = parser.parse_args()
+    if args.native_ce_control and args.loss_backend != "liger_chunked":
+        parser.error("--native-ce-control requires --loss-backend liger_chunked")
     if args.fp32:
         torch.set_float32_matmul_precision("highest")
         MemoryEngine.autocast = lambda self: nullcontext()
