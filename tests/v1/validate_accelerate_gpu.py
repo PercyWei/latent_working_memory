@@ -101,6 +101,22 @@ def main():
                 "peak_allocated_bytes": torch.cuda.max_memory_allocated(device),
                 "peak_reserved_bytes": torch.cuda.max_memory_reserved(device),
             }
+        (output / f"comparison-step-{step + 1:03d}.json").write_text(
+            json.dumps(results, indent=2) + "\n"
+        )
+        for field in ("loss", "gradient_norm"):
+            print(
+                json.dumps(
+                    {
+                        "rank": rank,
+                        "step": step + 1,
+                        "field": field,
+                        "legacy": results["legacy"]["metrics"][field],
+                        "accelerate": results["accelerate"]["metrics"][field],
+                    }
+                ),
+                flush=True,
+            )
         assert_results_equal(results["legacy"]["metrics"], results["accelerate"]["metrics"])
         maximum_gradient_error = maximum_parameter_error = 0.0
         for reference, observed in zip(legacy.parameters, actual.parameters, strict=True):
