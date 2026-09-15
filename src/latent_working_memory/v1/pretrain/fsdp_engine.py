@@ -109,9 +109,9 @@ class PretrainFSDPEngine(FSDPEngine):
         return build_optimizer(self.parameters, self.optimizer_config)
 
     def forward_step(self, micro_batch, loss_function, forward_only):
-        examples = get_non_tensor_data(micro_batch, "examples")
+        examples = get_non_tensor_data(micro_batch, "examples", None)
         selected = [examples[i] for i in micro_batch["sample_index"].tolist()]
-        sample_count = get_non_tensor_data(micro_batch, "sample_count")
+        sample_count = get_non_tensor_data(micro_batch, "sample_count", None)
         context = (
             nullcontext()
             if self._autocast_dtype == torch.float32
