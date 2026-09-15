@@ -4,10 +4,8 @@ import argparse
 from collections import Counter
 from contextlib import nullcontext
 from dataclasses import asdict, replace
-from datetime import timedelta
 from importlib.metadata import version
 import json
-import os
 from pathlib import Path
 import random
 import subprocess
@@ -19,7 +17,7 @@ import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer
 
-from latent_working_memory.devices import validate_device
+from latent_working_memory.v1.engine import initialize_device
 from latent_working_memory.v1.checkpoint import (
     capture_rng_state,
     load_model_checkpoint,
@@ -68,7 +66,7 @@ def runtime_info():
             ).stdout.strip()
         ),
         "packages": {
-            name: version(name) for name in ("torch", "transformers", "peft", "swanlab", "pyarrow")
+            name: version(name) for name in ("torch", "transformers", "peft", "swanlab", "pyarrow", "verl")
         },
     }
 
@@ -99,6 +97,7 @@ def run_dynamic(
     swanlab_tags=(),
     swanlab_project="latent-working-memory-v1",
 ):
+    device = initialize_device(device)
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     rank = dist.get_rank() if dist.is_initialized() else 0
     primary = rank == 0
@@ -412,14 +411,7 @@ def main():
     parser.add_argument("--swanlab-project", default="latent-working-memory-v1")
     parser.add_argument("--swanlab-tag", action="append", default=[])
     args = parser.parse_args()
-    if int(os.environ.get("WORLD_SIZE", "1")) > 1:
-        local_rank = int(os.environ["LOCAL_RANK"])
-        torch.cuda.set_device(local_rank)
-        device = torch.device("cuda", local_rank)
-        dist.init_process_group("nccl", timeout=timedelta(hours=2), device_id=device)
-    else:
-        device = torch.device(args.device)
-    validate_device(device)
+    device = initialize_device(args.device)
     recipe = load_dynamic_config(args.config)
     if args.mode == "train":
         run_dynamic(

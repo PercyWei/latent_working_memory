@@ -53,7 +53,7 @@ def compare_trainers(config, architecture, mode, device):
     legacy = LegacyPretrainTrainer(config, reference_backbone, reference_writer, device)
     actual = PretrainTrainer(config, actual_backbone, actual_writer, device)
     if dist.is_initialized():
-        assert actual.accelerator.num_processes == 2
+        assert actual.engine.world_size == 2
         assert isinstance(actual.model, torch.nn.parallel.DistributedDataParallel)
     # Different tasks on successive updates exercise DDP unused-parameter bookkeeping.
     for task in ("mixed", "ae", "continuation"):

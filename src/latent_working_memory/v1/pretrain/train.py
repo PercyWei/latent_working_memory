@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Sequence
 
 import torch
-from accelerate.state import PartialState
+import torch.distributed as dist
 
 from latent_working_memory.v1.config import load_config
 from latent_working_memory.v1.pretrain.training import run_pretraining
@@ -59,8 +59,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         swanlab_group=args.swanlab_group,
         swanlab_tags=tuple(args.swanlab_tag),
     )
-    if not PartialState().is_main_process:
-        PartialState().destroy_process_group()
+    if dist.is_initialized() and dist.get_rank() != 0:
+        dist.destroy_process_group()
         return
     print(
         json.dumps(
@@ -74,7 +74,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
     )
 
-    PartialState().destroy_process_group()
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ from pathlib import Path
 import time
 
 import torch
-from accelerate.state import PartialState
+import torch.distributed as dist
 
 from latent_working_memory.v1.backbone import ReadTokens, load_backbone
 from latent_working_memory.v1.config import load_config
@@ -25,7 +25,8 @@ from latent_working_memory.v1.model import JointMemoryWriter
 from latent_working_memory.v1.pretrain.evaluation import evaluate_pretraining
 from latent_working_memory.v1.pretrain.sampling import PretrainExample
 from latent_working_memory.v1.pretrain.training import PretrainTrainer
-from latent_working_memory.v1.pretrain.runtime import pretraining_accelerator
+from latent_working_memory.v1.engine import initialize_device
+from latent_working_memory.v1.training import precision_context
 from pretrain_reference import LegacyPretrainTrainer
 from test_evaluation_batching import assert_results_equal
 
@@ -71,7 +72,7 @@ def main():
         torch.use_deterministic_algorithms(True)
     torch.set_num_threads(1)
     device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
-    torch.cuda.set_device(device)
+    device = initialize_device(device)
     config = load_config(args.config)
     torch.manual_seed(config.model_seed)
     tokenizer, reference_backbone = load_backbone(config, device, torch.bfloat16)
@@ -79,14 +80,13 @@ def main():
         config.d_mem, config.num_layers, config.num_heads, config.ffn_dim, config.k_limit
     ).to(device)
     actual_backbone, actual_writer = deepcopy(reference_backbone), deepcopy(reference_writer)
-    accelerator = pretraining_accelerator(device)
     actual = (
         LegacyPretrainTrainer(config, actual_backbone, actual_writer, device)
         if args.reference_control
-        else PretrainTrainer(config, actual_backbone, actual_writer, device, accelerator)
+        else PretrainTrainer(config, actual_backbone, actual_writer, device)
     )
     legacy = LegacyPretrainTrainer(config, reference_backbone, reference_writer, device)
-    rank = accelerator.process_index
+    rank = dist.get_rank()
     output = args.output_dir / f"rank-{rank}"
     output.mkdir(parents=True, exist_ok=False)
     observations = []
@@ -99,7 +99,7 @@ def main():
             examples.append(replace(e, ae=task if e.ae else None, lm=task if e.lm else None))
         results = {}
         # Alternate execution order to reduce systematic cache/order effects.
-        order = [("legacy", legacy), ("accelerate", actual)]
+        order = [("legacy", legacy), ("verl", actual)]
         if step % 2:
             order.reverse()
         for name, trainer in order:
@@ -125,7 +125,7 @@ def main():
                         "step": step + 1,
                         "field": field,
                         "legacy": results["legacy"]["metrics"][field],
-                        "accelerate": results["accelerate"]["metrics"][field],
+                        "verl": results["verl"]["metrics"][field],
                     }
                 ),
                 flush=True,
@@ -149,7 +149,7 @@ def main():
         (output / f"gradient-differences-{step + 1:03d}.json").write_text(
             json.dumps(differences, indent=2) + "\n"
         )
-        assert_results_equal(results["legacy"]["metrics"], results["accelerate"]["metrics"])
+        assert_results_equal(results["legacy"]["metrics"], results["verl"]["metrics"])
         maximum_gradient_error = maximum_parameter_error = 0.0
         for reference, observed in zip(legacy.parameters, actual.parameters, strict=True):
             assert (reference.grad is None) == (observed.grad is None)
@@ -214,9 +214,9 @@ def main():
     reports = []
     for name, backbone, writer in [
         ("legacy", reference_backbone, reference_writer),
-        ("accelerate", actual_backbone, actual_writer),
+        ("verl", actual_backbone, actual_writer),
     ]:
-        with accelerator.autocast():
+        with precision_context(device):
             report = evaluate_pretraining(
                 eval_config, tokenizer, backbone, writer, index, output / name, args.steps, 0
             )
@@ -230,9 +230,7 @@ def main():
     ]
     right = [
         json.loads(line)
-        for line in (output / "accelerate" / f"dev-step-{args.steps:06d}.jsonl")
-        .read_text()
-        .splitlines()
+        for line in (output / "verl" / f"dev-step-{args.steps:06d}.jsonl").read_text().splitlines()
     ]
     assert_results_equal(left, right)
     (output / "result.json").write_text(
@@ -240,8 +238,8 @@ def main():
             {
                 "passed": True,
                 "steps": args.steps,
-                "world_size": accelerator.num_processes,
-                "mixed_precision": accelerator.mixed_precision,
+                "world_size": dist.get_world_size(),
+                "mixed_precision": "bf16",
                 "dev_records": len(left),
                 "note": "Two frozen model copies coexist for paired validation; peak memory is not production footprint.",
             },
@@ -249,7 +247,7 @@ def main():
         )
         + "\n"
     )
-    PartialState().destroy_process_group()
+    dist.destroy_process_group()
 
 
 if __name__ == "__main__":
