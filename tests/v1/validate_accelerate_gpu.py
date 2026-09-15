@@ -192,7 +192,11 @@ def main():
             str(i),
             0,
             len(ids),
-            {"boundary_method": "random_token", "boundary_variant": "random"},
+            {
+                "boundary_method": "random_token",
+                "boundary_variant": "random",
+                "dedup_cluster": str(i),
+            },
         )
         read = Read(
             str(i),
