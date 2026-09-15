@@ -46,27 +46,38 @@ def compare_metrics(expected, actual):
         assert expected == actual, (expected, actual)
 
 
-def compare_gradients(reference, actual):
-    norms, errors, maximum = [], [], 0.0
-    for a, b in zip(reference.parameters, actual.parameters, strict=True):
+def compare_gradients(reference, actual, output, step):
+    norms, errors, maximum, diagnostics, failures = [], [], 0.0, [], []
+    for index, (a, b) in enumerate(zip(reference.parameters, actual.parameters, strict=True)):
         assert (a.grad is None) == (b.grad is None)
+        row = {"parameter": index, "shape": list(a.shape)}
         if a.grad is not None:
             delta = (a.grad - b.grad).float()
             error, norm = delta.norm().item(), a.grad.float().norm().item()
-            assert error <= 0.03 * norm + 1e-6, (a.shape, error, norm)
+            row.update(gradient_error=error, gradient_norm=norm,
+                       relative_gradient_error=error / max(norm, 1e-30))
+            if error > 0.03 * norm + 1e-6:
+                failures.append((index, "gradient"))
             norms.append(norm ** 2)
             errors.append(error ** 2)
             maximum = max(maximum, delta.abs().max().item())
-        torch.testing.assert_close(a, b, rtol=1e-4, atol=2e-6)
+        row["parameter_max_error"] = (a - b).abs().max().item()
+        if not torch.isclose(a, b, rtol=1e-4, atol=2e-6).all().item():
+            failures.append((index, "parameter"))
         for key, value in reference.optimizer.state[a].items():
             observed = actual.optimizer.state[b][key]
             if key == "step":
                 assert value.item() == observed.item()
             else:
                 delta = (value - observed).float().norm().item()
-                assert delta <= 0.04 * value.float().norm().item() + 1e-6
-    return {"gradient_relative_l2": (sum(errors) / max(sum(norms), 1e-30)) ** .5,
-            "gradient_max_absolute_error": maximum}
+                if delta > 0.04 * value.float().norm().item() + 1e-6:
+                    failures.append((index, key))
+        diagnostics.append(row)
+    result = {"gradient_relative_l2": (sum(errors) / max(sum(norms), 1e-30)) ** .5,
+              "gradient_max_absolute_error": maximum, "parameters": diagnostics, "failures": failures}
+    (output / f"gradient-diagnostics-{step}.json").write_text(json.dumps(result, indent=2) + "\n")
+    assert not failures, failures
+    return {k: v for k, v in result.items() if k not in {"parameters", "failures"}}
 
 
 def main():
@@ -127,8 +138,9 @@ def main():
         for step in range(2):
             expected, observed = update(reference, step), update(actual, step)
             (output / f"metrics-{step}.json").write_text(json.dumps({"reference": expected, "actual": observed}, indent=2) + "\n")
+            gradients = compare_gradients(reference, actual, output, step)
             compare_metrics(expected, observed)
-            records.append({"step": step + 1, **compare_gradients(reference, actual)})
+            records.append({"step": step + 1, **gradients})
             (output / "steps.json").write_text(json.dumps(records, indent=2) + "\n")
         expected = evaluate_qa(reference.backbone, reference.writer, tokenizer, config, recipe, episodes, device, 64)
         observed = evaluate_qa(backbone, writer, tokenizer, config, recipe, episodes, device, 64)
