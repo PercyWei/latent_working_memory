@@ -105,4 +105,3 @@ class LegacyPretrainTrainer:
                 len(e.ae.target_ids if e.ae else e.lm.target_ids) for e in examples
             ),
         }
-
