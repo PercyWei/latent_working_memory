@@ -5,6 +5,7 @@ description = "Research infrastructure for streaming mutable latent memory"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
+    "accelerate>=1.14,<2",
     "peft>=0.17,<1",
     "pyarrow>=21,<26",
     "pysbd>=0.3.4,<0.4",

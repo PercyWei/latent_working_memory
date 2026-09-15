@@ -2,15 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-from datetime import timedelta
 from pathlib import Path
 from typing import Sequence
 
 import torch
-import torch.distributed as dist
+from accelerate.state import PartialState
 
-from latent_working_memory.devices import validate_device
 from latent_working_memory.v1.config import load_config
 from latent_working_memory.v1.pretrain.training import run_pretraining
 from latent_working_memory.v1.tracking import DEFAULT_SWANLAB_PROJECT
@@ -42,16 +39,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
-    if int(os.environ.get("WORLD_SIZE", 1)) > 1:
-        local_rank = int(os.environ["LOCAL_RANK"])
-        torch.cuda.set_device(local_rank)
-        dist.init_process_group(
-            "nccl", timeout=timedelta(hours=2), device_id=torch.device("cuda", local_rank)
-        )
-        device = torch.device("cuda", local_rank)
-    else:
-        device = torch.device(args.device)
-    validate_device(device)
+    device = torch.device(args.device)
     config = load_config(args.config)
     result = run_pretraining(
         config=config,
@@ -71,8 +59,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         swanlab_group=args.swanlab_group,
         swanlab_tags=tuple(args.swanlab_tag),
     )
-    if dist.is_initialized() and dist.get_rank() != 0:
-        dist.destroy_process_group()
+    if not PartialState().is_main_process:
+        PartialState().destroy_process_group()
         return
     print(
         json.dumps(
@@ -86,8 +74,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
     )
 
-    if dist.is_initialized():
-        dist.destroy_process_group()
+    PartialState().destroy_process_group()
 
 
 if __name__ == "__main__":

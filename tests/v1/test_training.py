@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import os
 import re
 import pytest
 
@@ -279,6 +280,10 @@ def test_real_tiny_llama_train_evaluate_resume_matches_uninterrupted_run(
 
 def _distributed_train_worker(rank, rendezvous, config, data, output, steps, resume_step):
     torch.set_num_threads(1)
+    os.environ.update(
+        RANK=str(rank), LOCAL_RANK=str(rank), WORLD_SIZE="2", LOCAL_WORLD_SIZE="2",
+        MASTER_ADDR="127.0.0.1", MASTER_PORT="29500",
+    )
     dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=2)
     run_pretraining(
         config,
