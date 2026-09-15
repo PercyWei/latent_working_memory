@@ -148,12 +148,12 @@ class PretrainTrainer:
             final_microbatch = start + self.config.batch_size >= len(ordered)
             sync_context = nullcontext() if final_microbatch else self.accelerator.no_sync(self.model)
             # Every rank synchronizes once, even when capacity expansion produces
-            # different microbatch counts. DDP averages; undo that average because
-            # pretrain_forward already divides by the global sample count.
+            # different microbatch counts. Keep the original backward loss scale;
+            # undo DDP's averaging on parameter gradients before clipping.
             with sync_context:
                 with self.accelerator.autocast():
                     output = self.model(batch, sample_count)
-                self.accelerator.backward(output.loss * world_size)
+                self.accelerator.backward(output.loss)
             loss_value += float(output.loss.detach())
             for example, ae, lm in zip(batch, output.ae, output.lm, strict=True):
                 source = example.episode.sources[0]
@@ -181,6 +181,9 @@ class PretrainTrainer:
                 )
             del output, ae, lm
         if world_size > 1:
+            for parameter in self.parameters:
+                if parameter.grad is not None:
+                    parameter.grad.mul_(world_size)
             loss_value = self.accelerator.reduce(
                 torch.tensor(loss_value, device=self.device), reduction="sum"
             ).item()
