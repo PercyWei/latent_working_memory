@@ -25,6 +25,7 @@ from latent_working_memory.v1.model import JointMemoryWriter
 from latent_working_memory.v1.pretrain.evaluation import evaluate_pretraining
 from latent_working_memory.v1.pretrain.sampling import PretrainExample
 from latent_working_memory.v1.pretrain.training import PretrainTrainer
+from latent_working_memory.v1.pretrain.runtime import pretraining_accelerator
 from pretrain_reference import LegacyPretrainTrainer
 from test_evaluation_batching import assert_results_equal
 
@@ -59,7 +60,15 @@ def main():
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--steps", type=int, default=8)
+    parser.add_argument(
+        "--reference-control",
+        action="store_true",
+        help="Compare two legacy executions to measure baseline numerical variation",
+    )
+    parser.add_argument("--deterministic", action="store_true")
     args = parser.parse_args()
+    if args.deterministic:
+        torch.use_deterministic_algorithms(True)
     torch.set_num_threads(1)
     device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
     torch.cuda.set_device(device)
@@ -70,9 +79,13 @@ def main():
         config.d_mem, config.num_layers, config.num_heads, config.ffn_dim, config.k_limit
     ).to(device)
     actual_backbone, actual_writer = deepcopy(reference_backbone), deepcopy(reference_writer)
-    actual = PretrainTrainer(config, actual_backbone, actual_writer, device)
+    accelerator = pretraining_accelerator(device)
+    actual = (
+        LegacyPretrainTrainer(config, actual_backbone, actual_writer, device)
+        if args.reference_control
+        else PretrainTrainer(config, actual_backbone, actual_writer, device, accelerator)
+    )
     legacy = LegacyPretrainTrainer(config, reference_backbone, reference_writer, device)
-    accelerator = actual.accelerator
     rank = accelerator.process_index
     output = args.output_dir / f"rank-{rank}"
     output.mkdir(parents=True, exist_ok=False)
@@ -117,6 +130,25 @@ def main():
                 ),
                 flush=True,
             )
+        differences = []
+        for j, (reference, observed) in enumerate(
+            zip(legacy.parameters, actual.parameters, strict=True)
+        ):
+            if reference.grad is not None and observed.grad is not None:
+                ref_norm = reference.grad.float().norm().item()
+                diff = (observed.grad.float() - reference.grad.float()).norm().item()
+                differences.append(
+                    {
+                        "parameter": j,
+                        "shape": list(reference.shape),
+                        "reference_grad_norm": ref_norm,
+                        "gradient_difference_norm": diff,
+                        "relative_gradient_difference": diff / max(ref_norm, 1e-30),
+                    }
+                )
+        (output / f"gradient-differences-{step + 1:03d}.json").write_text(
+            json.dumps(differences, indent=2) + "\n"
+        )
         assert_results_equal(results["legacy"]["metrics"], results["accelerate"]["metrics"])
         maximum_gradient_error = maximum_parameter_error = 0.0
         for reference, observed in zip(legacy.parameters, actual.parameters, strict=True):
