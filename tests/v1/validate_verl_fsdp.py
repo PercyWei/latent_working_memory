@@ -229,11 +229,11 @@ def main():
         if step == 1 and args.align_second_step:
             state = tree_map_only(
                 torch.Tensor,
-                lambda t: t.detach().cpu(),
+                lambda t: t.detach().cpu().clone(),
                 trainable_model_state(backbone, writer, value),
             )
             optimizer = tree_map_only(
-                torch.Tensor, lambda t: t.detach().cpu(), reference.optimizer.state_dict()
+                torch.Tensor, lambda t: t.detach().cpu().clone(), reference.optimizer.state_dict()
             )
             engine.load_canonical_state(state, optimizer)
         expected = reference.step(batch)
@@ -290,7 +290,13 @@ def main():
             for left, right in zip(
                 state[1]["param_groups"], ref_optimizer["param_groups"], strict=True
             ):
-                assert {k: left[k] for k in right} == right
+                check(
+                    f"step-{step + 1}/optimizer-group",
+                    {k: left[k] for k in right},
+                    right,
+                    rtol=0,
+                    atol=0,
+                )
         if step == 1:
             rng = capture_rng_state()
             if rank == 0:
