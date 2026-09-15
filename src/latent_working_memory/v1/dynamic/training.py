@@ -218,7 +218,7 @@ class DynamicTrainer:
         self.backbone, self.writer = backbone, writer
         self.model_config, self.recipe = model_config, recipe
         self.device = initialize_device(device)
-        if recipe.reader_loss_backend == "liger" and self.device.type != "cuda":
+        if recipe.reader_loss_backend != "torch" and self.device.type != "cuda":
             raise ValueError("liger reader loss requires CUDA")
         self.backbone.reader_loss_backend = recipe.reader_loss_backend
         self.engine = EngineRegistry.new(

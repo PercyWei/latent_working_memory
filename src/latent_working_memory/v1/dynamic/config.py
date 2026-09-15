@@ -41,8 +41,8 @@ class DynamicConfig:
     eval_reads_per_kind: int = 2
 
     def __post_init__(self):
-        if self.reader_loss_backend not in {"torch", "liger"}:
-            raise ValueError("reader_loss_backend must be torch or liger")
+        if self.reader_loss_backend not in {"torch", "liger_ce", "liger_chunked"}:
+            raise ValueError("reader_loss_backend must be torch, liger_ce or liger_chunked")
         if type(self.optimizer_fused) is not bool:
             raise ValueError("optimizer_fused must be boolean")
         # JSON arrays have one canonical in-memory representation.

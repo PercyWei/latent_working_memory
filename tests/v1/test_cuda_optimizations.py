@@ -60,7 +60,8 @@ def test_fused_ce_preserves_nonuniform_upstream_gradients(dtype, train_head):
 @pytest.mark.parametrize("architecture", ["llama", "qwen2"])
 @pytest.mark.parametrize("checkpointing", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_fused_reader_preserves_memory_and_lora_gradients(architecture, checkpointing, dtype):
+@pytest.mark.parametrize("backend", ["liger_ce", "liger_chunked"])
+def test_fused_reader_preserves_memory_and_lora_gradients(architecture, checkpointing, dtype, backend):
     torch.manual_seed(82)
     baseline = make_backbone(architecture).to("cuda")
     baseline.language_model.to(dtype=dtype)
@@ -69,7 +70,7 @@ def test_fused_reader_preserves_memory_and_lora_gradients(architecture, checkpoi
             gradient_checkpointing_kwargs={"use_reentrant": False}
         )
     actual = deepcopy(baseline)
-    actual.reader_loss_backend = "liger"
+    actual.reader_loss_backend = backend
     memories = [torch.randn(n, 8, device="cuda") for n in (2, 5, 3)]
     tasks = [ReadTokens((11,), tuple(range(4, 4 + n)) + (2,)) for n in (2, 4, 7)]
     rows = []
@@ -93,23 +94,26 @@ def test_fused_reader_preserves_memory_and_lora_gradients(architecture, checkpoi
 
 
 @cuda
-def test_fused_adamw_resume():
+def test_fused_adamw_resume(tmp_path):
     torch.manual_seed(2)
-    x = torch.nn.Parameter(torch.randn(31, 17, device="cuda"))
+    x = torch.nn.Parameter(torch.zeros(31, 17, device="cuda"))
+    scales = torch.logspace(-12, 0, 31, device="cuda")[:, None]
     y = torch.nn.Parameter(x.detach().clone())
     base = torch.optim.AdamW([x], lr=3e-5)
     fused = torch.optim.AdamW([y], lr=3e-5, fused=True)
     for step in range(3):
-        gradient = torch.randn_like(x)
+        gradient = torch.randn_like(x) * scales
         x.grad, y.grad = gradient.clone(), gradient.clone()
         base.step()
         fused.step()
-        torch.testing.assert_close(x, y, rtol=1e-6, atol=1e-7)
+        torch.testing.assert_close(x, y, rtol=1e-5, atol=1e-11)
         assert base.state[x]["step"].item() == fused.state[y]["step"].item()
         for key in ("exp_avg", "exp_avg_sq"):
-            torch.testing.assert_close(base.state[x][key], fused.state[y][key], rtol=1e-5, atol=1e-7)
+            torch.testing.assert_close(base.state[x][key], fused.state[y][key], rtol=1e-5, atol=1e-20)
         if step == 0:
-            saved = deepcopy(fused.state_dict())
+            path = tmp_path / "optimizer.pt"
+            torch.save(fused.state_dict(), path)
+            saved = torch.load(path, map_location="cpu", weights_only=True)
             fused = torch.optim.AdamW([y], lr=3e-5, fused=True)
             fused.load_state_dict(saved)
             assert fused.param_groups[0]["fused"] is True

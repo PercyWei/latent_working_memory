@@ -29,16 +29,18 @@ class ReaderOutput:
         return self.token_nll.mean()
 
 
-def gold_token_nll(target_logits: Tensor, target_ids: Tensor) -> Tensor:
+def gold_token_nll(target_logits: Tensor, target_ids: Tensor, backend="torch") -> Tensor:
     _validate_target_pair(target_logits, target_ids)
-    return functional.cross_entropy(target_logits.float(), target_ids, reduction="none")
+    if backend == "torch":
+        return functional.cross_entropy(target_logits.float(), target_ids, reduction="none")
+    return liger_cross_entropy(target_logits.float(), target_ids, reduction="none")
 
 
 def _linear_loss_chunk(hidden, weight, target, bias):
     # Keep CE and its upstream sample/read weights in FP32 before casting the
     # logits gradient back to the projection dtype, as in gold_token_nll.
     logits = functional.linear(hidden, weight, bias)
-    return liger_cross_entropy(logits.float(), target, reduction="none")
+    return gold_token_nll(logits, target, "liger_ce")
 
 
 def chunked_linear_token_nll(hidden, weight, targets, bias=None, chunk_size=128):

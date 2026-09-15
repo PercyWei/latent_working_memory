@@ -127,6 +127,7 @@ def main():
     parser.add_argument("--variant", choices=("baseline", "adam", "ce", "both"), required=True)
     parser.add_argument("--verify", action="store_true")
     parser.add_argument("--fp32", action="store_true")
+    parser.add_argument("--loss-backend", choices=("liger_ce", "liger_chunked"), default="liger_chunked")
     parser.add_argument("--native-ce-control", action="store_true")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--steps", type=int, default=20)
@@ -158,7 +159,7 @@ def main():
         return (PretrainTrainer(replace(config, optimizer_fused=fused), bb, ww, device)
                 if pretrain else DynamicTrainer(bb, ww, config, replace(recipe, optimizer_fused=fused, reader_loss_backend=bb.reader_loss_backend), device))
     reference = trainer(deepcopy(backbone), deepcopy(writer), False) if args.verify else None
-    backbone.reader_loss_backend = "liger" if args.variant in {"ce", "both"} else "torch"
+    backbone.reader_loss_backend = args.loss_backend if args.variant in {"ce", "both"} else "torch"
     actual = trainer(backbone, writer, args.variant in {"adam", "both"})
     def update(engine, step):
         if not pretrain:
@@ -217,7 +218,8 @@ def main():
                 "optimizer_ms": optimizer_start.elapsed_time(optimizer_end),
                 "peak_allocated_bytes": torch.cuda.max_memory_allocated(device),
                 "peak_reserved_bytes": torch.cuda.max_memory_reserved(device),
-                "input_tokens": metrics["input_tokens"], "target_tokens": metrics["target_tokens"]})
+                "input_tokens": metrics["input_tokens"], "target_tokens": metrics["target_tokens"],
+                "loss": metrics["loss"], "gradient_norm": metrics["gradient_norm"]})
             (output / "steps.json").write_text(json.dumps(records, indent=2) + "\n")
         pre_hook.remove()
         post_hook.remove()

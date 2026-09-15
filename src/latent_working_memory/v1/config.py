@@ -73,8 +73,8 @@ class ExperimentConfig:
     def __post_init__(self) -> None:
         if type(self.optimizer_fused) is not bool:
             raise ValueError("optimizer_fused must be boolean")
-        if self.reader_loss_backend not in {"torch", "liger"}:
-            raise ValueError("reader_loss_backend must be torch or liger")
+        if self.reader_loss_backend not in {"torch", "liger_ce", "liger_chunked"}:
+            raise ValueError("reader_loss_backend must be torch, liger_ce or liger_chunked")
         non_negative_ints = {
             "data_seed",
             "model_seed",

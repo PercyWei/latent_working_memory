@@ -68,9 +68,9 @@ class LatentMemoryBackbone(nn.Module):
         if type(d_mem) is not int or d_mem <= 0:
             raise ValueError("d_mem must be a positive integer")
 
-        if reader_loss_backend not in {"torch", "liger"}:
-            raise ValueError("reader_loss_backend must be torch or liger")
-        if reader_loss_backend == "liger" and next(base_model.parameters()).device.type != "cuda":
+        if reader_loss_backend not in {"torch", "liger_ce", "liger_chunked"}:
+            raise ValueError("reader_loss_backend must be torch, liger_ce or liger_chunked")
+        if reader_loss_backend != "torch" and next(base_model.parameters()).device.type != "cuda":
             raise ValueError("liger reader loss requires CUDA")
         self.reader_loss_backend = reader_loss_backend
 
@@ -206,12 +206,12 @@ class LatentMemoryBackbone(nn.Module):
             )
             # One unreduced CE for all valid targets; callers retain per-sample weighting.
             head = model.get_output_embeddings()
-            if self.reader_loss_backend == "liger":
+            if self.reader_loss_backend == "liger_chunked":
                 token_nll = chunked_linear_token_nll(
                     target_hidden, head.weight, target_ids, bias=head.bias
                 )
             else:
-                token_nll = gold_token_nll(head(target_hidden), target_ids)
+                token_nll = gold_token_nll(head(target_hidden), target_ids, self.reader_loss_backend)
         return [ReaderOutput(values) for values in token_nll.split(target_lengths)]
 
     def greedy_students(
