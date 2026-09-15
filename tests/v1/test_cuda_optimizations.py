@@ -1,7 +1,6 @@
 """CUDA kernel contracts: nonuniform token weights, frozen heads, and optimizer resume."""
 
 from copy import deepcopy
-import sys
 
 import pytest
 import torch
@@ -13,8 +12,7 @@ from latent_working_memory.v1.engine import MemoryEngine
 from test_reader_projection import make_backbone
 from latent_working_memory.v1.backbone import ReadTokens
 
-if sys.platform == "linux":
-    from liger_kernel.transformers.functional import liger_fused_linear_cross_entropy
+from latent_working_memory.v1.objectives import chunked_linear_token_nll
 
 cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA kernels require a GPU")
 
@@ -45,7 +43,7 @@ def test_fused_ce_preserves_nonuniform_upstream_gradients(dtype, train_head):
     for fused in (False, True):
         xx, ww = [t.detach().clone().requires_grad_(t.requires_grad) for t in (x, w)]
         loss = (
-            liger_fused_linear_cross_entropy(xx, ww, target, reduction="none")
+            chunked_linear_token_nll(xx, ww, target, chunk_size=7)
             if fused else F.cross_entropy(F.linear(xx, ww).float(), target, reduction="none")
         )
         (loss * weights).sum().backward()

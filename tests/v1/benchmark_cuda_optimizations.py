@@ -107,7 +107,9 @@ def main():
     (output / "settings.json").write_text(json.dumps({
         "task": args.task, "variant": args.variant, "verify": args.verify,
         "warmup": args.warmup, "steps": args.steps,
-        "deterministic": args.verify, "model_config": config.to_dict(),
+        "deterministic": args.verify, "input_model_config": config.to_dict(),
+        "reader_loss_backend": backbone.reader_loss_backend,
+        "optimizer_fused": bool(actual.optimizer.param_groups[0].get("fused", False)),
     }, indent=2) + "\n")
     records = []
     if args.verify:

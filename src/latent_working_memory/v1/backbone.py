@@ -4,7 +4,6 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any
-import sys
 
 import torch
 from peft import (
@@ -24,12 +23,11 @@ from transformers import (
     PreTrainedTokenizerBase,
 )
 
-if sys.platform == "linux":
-    from liger_kernel.transformers.functional import liger_fused_linear_cross_entropy
-
 from latent_working_memory.v1.config import ExperimentConfig
 from latent_working_memory.v1.model import sinusoidal_positions
-from latent_working_memory.v1.objectives import ReaderOutput, gold_token_nll
+from latent_working_memory.v1.objectives import (
+    ReaderOutput, gold_token_nll, chunked_linear_token_nll,
+)
 
 
 BACKBONE_TRAINABLE_STATE_FIELDS = frozenset(
@@ -209,8 +207,8 @@ class LatentMemoryBackbone(nn.Module):
             # One unreduced CE for all valid targets; callers retain per-sample weighting.
             head = model.get_output_embeddings()
             if self.reader_loss_backend == "liger":
-                token_nll = liger_fused_linear_cross_entropy(
-                    target_hidden, head.weight, target_ids, bias=head.bias, reduction="none"
+                token_nll = chunked_linear_token_nll(
+                    target_hidden, head.weight, target_ids, bias=head.bias
                 )
             else:
                 token_nll = gold_token_nll(head(target_hidden), target_ids)
