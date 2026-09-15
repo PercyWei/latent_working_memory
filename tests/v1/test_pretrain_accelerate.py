@@ -103,3 +103,20 @@ def _compare_worker(rank, rendezvous, config):
         for mode in ("sample", "mean"):
             compare_trainers(config, architecture, mode, torch.device("cpu"))
     dist.destroy_process_group()
+
+
+def test_nonfinite_gradients_stop_before_optimizer_update(tiny_config):
+    torch.manual_seed(42)
+    backbone = make_backbone("qwen2")
+    writer = JointMemoryWriter(8, 1, 2, 16, 32)
+    trainer = PretrainTrainer(tiny_config, backbone, writer, torch.device("cpu"))
+    before = [p.detach().clone() for p in trainer.parameters]
+    hook = writer.output_projection.weight.register_hook(lambda gradient: gradient * float("nan"))
+    try:
+        with pytest.raises(RuntimeError, match="non-finite"):
+            trainer.step(comparison_examples("sample"))
+    finally:
+        hook.remove()
+    for old, current in zip(before, trainer.parameters, strict=True):
+        torch.testing.assert_close(old, current, rtol=0, atol=0)
+    assert not trainer.optimizer.state_dict()["state"]

@@ -1,7 +1,7 @@
 # 20260914_配置组织规则
 
 创建时间：20260914 11:48:20 UTC+08:00
-最后修订时间：20260915 16:41:23 UTC+08:00
+最后修订时间：20260915 17:13:26 UTC+08:00
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
 
@@ -110,6 +110,16 @@ configs/
 训练目录保存 `epoch-plan.json` 与 `training-result.json`。最终评估通过 `--training-result` 读取实际最终 checkpoint，仅接受完整训练；显式 `--checkpoint` 仍可用于独立诊断。`--stop-after-steps` 只截短本次执行，不改变计划预算；恢复保持原 epoch 数与样本上限。直接训练入口使用 `--max-samples-per-epoch <每轮上限>`。
 
 历史数据、checkpoint 与执行产物不迁移，也不按新协议改写历史结果。新选样与 epoch 进度契约不能替代旧协议做精确续训；不添加自动格式转换。
+
+## 预训练执行框架
+
+预训练使用 Accelerate 管理单设备或 DDP 执行、混合精度、反向、梯度同步和裁剪。现有实验入口与 `torch.distributed.run` 启动命令保持可用；进程组由 Accelerate 根据启动环境初始化。CUDA 使用 BF16，CPU 验证使用 FP32。FSDP2 和 DeepSpeed 后端尚未接入。
+
+backbone、Writer 和投影注册在一个训练模型中。完整全局 batch 仍由 epoch 采样器提供，按现有长度排序与 rank 分配规则形成 microbatch，不再进行额外的 DataLoader 分片。一个 optimizer step 可以包含多个 microbatch；非末批暂停 DDP 同步，末批统一同步。容量 `mean` 展开后，各 rank 的 microbatch 次数可以不同，但每步都同步一次。损失仍按全局样本数归一化，不改为 token 平均。
+
+保存继续使用现有单文件 checkpoint：可训练模型参数、optimizer、sampler 的 order/cursor/随机状态及各 rank RNG。Accelerate 包装后的 optimizer 通过原 `state_dict` 接口保存恢复；冻结基座继续从配置引用加载。单设备、双卡以及旧执行实现到 Accelerate 的恢复均需保持相同模型、选样和 world size。`provenance.json.execution` 记录实际框架、分布式类型和精度。
+
+训练中的 dev 保持同步执行。DDP 的每张卡持有完整模型，评估直接使用底层模型按来源分工，避免对不同来源的生成调用进行训练梯度同步。SwanLab 与最终 test 的行为保持现有协议。
 
 ## 预训练 CPU 分词
 
