@@ -176,7 +176,8 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     (output / "settings.json").write_text(json.dumps({
         "task": args.task, "variant": args.variant, "verify": args.verify,
-        "data": str(args.data) if args.data else None,
+        "data": str(args.data) if args.data and pretrain else None,
+        "fixture": "fineweb" if natural is not None else ("synthetic_tokens" if pretrain else "synthetic_qa"),
         "sample_ids": [e.episode.episode_id for e in natural] if natural else None,
         "warmup": args.warmup, "steps": args.steps,
         "deterministic": args.verify, "fp32": args.fp32,
