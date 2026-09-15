@@ -37,6 +37,7 @@ from latent_working_memory.v1.pretrain.fsdp_engine import (
 )
 from latent_working_memory.v1.pretrain.sampling import PretrainExample
 from latent_working_memory.v1.pretrain.training import PretrainTrainer, PretrainModel
+from latent_working_memory.v1.training import trainable_model_state
 
 
 def examples(mode, eos_id):
@@ -124,6 +125,11 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--config", type=Path)
     parser.add_argument("--precision", choices=("fp32", "bf16"), default="fp32")
+    parser.add_argument(
+        "--align-second-step",
+        action="store_true",
+        help="Diagnostic: start the second native step from the exact DDP model/optimizer state",
+    )
     args = parser.parse_args()
     torch.set_num_threads(1)
     device = initialize_device(torch.device("cuda", int(os.environ["LOCAL_RANK"])))
@@ -220,6 +226,16 @@ def main():
     rows = []
     for step, mode in enumerate(("sample", "mean", "sample")):
         batch = examples(mode, backbone.eos_token_id)
+        if step == 1 and args.align_second_step:
+            state = tree_map_only(
+                torch.Tensor,
+                lambda t: t.detach().cpu(),
+                trainable_model_state(backbone, writer, value),
+            )
+            optimizer = tree_map_only(
+                torch.Tensor, lambda t: t.detach().cpu(), reference.optimizer.state_dict()
+            )
+            engine.load_canonical_state(state, optimizer)
         expected = reference.step(batch)
         actual, snapshot = native_step(engine, batch, args.precision)
         row = {
@@ -326,6 +342,7 @@ def main():
                 "passed": not errors,
                 "errors": errors,
                 "precision": args.precision,
+                "second_step_aligned": args.align_second_step,
                 "steps": rows,
                 "resume_exact": not any(e["check"].startswith("resume/") for e in errors),
                 "evaluation_nll": eval_results,
