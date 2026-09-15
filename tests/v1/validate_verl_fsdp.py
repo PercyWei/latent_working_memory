@@ -94,12 +94,8 @@ def native_step(engine, batch, precision):
     }, snapshot
 
 
-def compare(reference, metrics, snapshot, observed):
+def compare(reference, snapshot):
     differences = []
-    for field in ("loss", "gradient_norm"):
-        torch.testing.assert_close(
-            torch.tensor(observed[field]), torch.tensor(metrics[field]), rtol=1e-3, atol=1e-6
-        )
     for name, parameter in reference.engine.model.named_parameters():
         if not parameter.requires_grad:
             assert parameter.grad is None
@@ -114,7 +110,11 @@ def compare(reference, metrics, snapshot, observed):
             .item(),
         }
         if parameter.grad is not None:
-            row["gradient_max_abs"] = (actual["gradient"] - parameter.grad.cpu()).abs().max().item()
+            reference_grad = parameter.grad.detach().cpu().float()
+            difference = actual["gradient"].float() - reference_grad
+            row["gradient_max_abs"] = difference.abs().max().item()
+            row["gradient_difference_l2"] = difference.norm().item()
+            row["reference_gradient_l2"] = reference_grad.norm().item()
         differences.append(row)
     return differences
 
@@ -207,6 +207,16 @@ def main():
     assert type(engine).train_batch is BaseEngine.train_batch
     assert type(engine).forward_backward_batch is FSDPEngine.forward_backward_batch
     assert type(engine).initialize is FSDPEngine.initialize
+    errors = []
+
+    def check(label, actual, expected, **tolerances):
+        # Keep the original thresholds. Continue numeric comparisons so restore
+        # and inference are exercised even when strict parity fails.
+        try:
+            torch.testing.assert_close(actual, expected, **tolerances)
+        except AssertionError as error:
+            errors.append({"check": label, "message": str(error)})
+
     rows = []
     for step, mode in enumerate(("sample", "mean", "sample")):
         batch = examples(mode, backbone.eos_token_id)
@@ -219,17 +229,33 @@ def main():
             "native": actual,
         }
         (output / f"step-{step + 1}.json").write_text(json.dumps(row, indent=2) + "\n")
-        row["differences"] = compare(reference, expected, snapshot, actual)
+        row["differences"] = compare(reference, snapshot)
+        for field in ("loss", "gradient_norm"):
+            check(
+                f"step-{step + 1}/{field}",
+                torch.tensor(actual[field]),
+                torch.tensor(expected[field]),
+                rtol=1e-3,
+                atol=1e-6,
+            )
         (output / f"step-{step + 1}.json").write_text(json.dumps(row, indent=2) + "\n")
         for name, parameter in reference.engine.model.named_parameters():
             if not parameter.requires_grad:
                 continue
-            torch.testing.assert_close(
-                snapshot[name]["parameter"], parameter.detach().cpu(), rtol=1e-4, atol=1e-6
+            check(
+                f"step-{step + 1}/{name}/parameter",
+                snapshot[name]["parameter"],
+                parameter.detach().cpu(),
+                rtol=1e-4,
+                atol=1e-6,
             )
             if parameter.grad is not None:
-                torch.testing.assert_close(
-                    snapshot[name]["gradient"], parameter.grad.cpu(), rtol=1e-3, atol=1e-6
+                check(
+                    f"step-{step + 1}/{name}/gradient",
+                    snapshot[name]["gradient"],
+                    parameter.grad.cpu(),
+                    rtol=1e-3,
+                    atol=1e-6,
                 )
         state = engine.canonical_state(value)
         if rank == 0:
@@ -238,8 +264,12 @@ def main():
             ref_optimizer = tree_map_only(
                 torch.Tensor, lambda t: t.cpu(), reference.optimizer.state_dict()
             )
-            torch.testing.assert_close(
-                state[1]["state"], ref_optimizer["state"], rtol=1e-3, atol=1e-6
+            check(
+                f"step-{step + 1}/optimizer",
+                state[1]["state"],
+                ref_optimizer["state"],
+                rtol=1e-3,
+                atol=1e-6,
             )
             for left, right in zip(
                 state[1]["param_groups"], ref_optimizer["param_groups"], strict=True
@@ -264,12 +294,12 @@ def main():
     resumed.load_canonical_state(checkpoint.model_state, checkpoint.optimizer_state)
     restore_rng_state(rng)
     resumed_metrics, resumed_snapshot = native_step(resumed, batch, args.precision)
-    torch.testing.assert_close(resumed_snapshot, snapshot, rtol=0, atol=0)
+    check("resume/parameters-and-gradients", resumed_snapshot, snapshot, rtol=0, atol=0)
     for field in ("loss", "gradient_norm"):
-        assert resumed_metrics[field] == actual[field]
+        check(f"resume/{field}", resumed_metrics[field], actual[field], rtol=0, atol=0)
     resumed_state = resumed.canonical_state(value)
     if rank == 0:
-        torch.testing.assert_close(resumed_state, state, rtol=0, atol=0)
+        check("resume/model-and-optimizer-state", resumed_state, state, rtol=0, atol=0)
     eval_results = []
     for mode in ("sample", "mean"):
         batch = examples(mode, backbone.eos_token_id)
@@ -282,25 +312,36 @@ def main():
         assign_non_tensor(reference_data, examples=tuple(batch))
         with reference.engine.eval_mode():
             expected_nll = reference.engine.infer_batch(reference_data)["metrics"]["loss"]
-        torch.testing.assert_close(
-            actual_nll.cpu().float(), torch.tensor(expected_nll), rtol=1e-3, atol=1e-6
+        check(
+            f"evaluation/{mode}/nll",
+            actual_nll.cpu().float(),
+            torch.tensor(expected_nll),
+            rtol=1e-3,
+            atol=1e-6,
         )
         eval_results.append({"mode": mode, "native": actual_nll.item(), "reference": expected_nll})
     (output / "result.json").write_text(
         json.dumps(
             {
-                "passed": True,
+                "passed": not errors,
+                "errors": errors,
                 "precision": args.precision,
                 "steps": rows,
-                "resume_exact": True,
+                "resume_exact": not any(e["check"].startswith("resume/") for e in errors),
                 "evaluation_nll": eval_results,
             },
             indent=2,
         )
         + "\n"
     )
-    print(json.dumps({"rank": rank, "passed": True, "resume_exact": True}), flush=True)
+    print(
+        json.dumps({"rank": rank, "passed": not errors, "failed_checks": len(errors)}), flush=True
+    )
+    failed = torch.tensor(int(bool(errors)), device=device)
+    dist.all_reduce(failed, op=dist.ReduceOp.MAX)
     dist.destroy_process_group()
+    if failed.item():
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
