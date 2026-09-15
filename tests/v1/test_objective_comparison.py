@@ -19,6 +19,8 @@ from latent_working_memory.v1.pretrain.curriculum import (
 from latent_working_memory.v1.pretrain.data_selection import select_experiment
 from latent_working_memory.v1.pretrain.sampling import EpochSampler
 from latent_working_memory.v1.pretrain.training import run_pretraining
+from latent_working_memory.v1.pretrain import training as training_module
+from pretrain_reference import LegacyPretrainTrainer
 
 
 def test_maximal_integer_quotas_and_independent_schedules():
@@ -195,6 +197,7 @@ def test_warmup_complete_training_keeps_optimizer_and_resolves_final_checkpoint(
     preparation_recipe,
     epoch_selection,
     natural,
+    monkeypatch,
 ):
     model_dir = tmp_path / "model"
     LlamaForCausalLM(
@@ -272,15 +275,21 @@ def test_warmup_complete_training_keeps_optimizer_and_resolves_final_checkpoint(
 
     resumed_out = tmp_path / "warmup-resumed"
     boundary = json.loads((out / "epoch-plan.json").read_text())[0]["steps"]
-    first_segment = run_pretraining(
-        config,
-        path,
-        resumed_out,
-        torch.device("cpu"),
-        epochs=2,
-        max_samples_per_epoch=8,
-        stop_after_steps=boundary,
-    )
+    # A pre-Accelerate checkpoint can continue with the unchanged canonical state.
+    def legacy_trainer(config, backbone, writer, device, accelerator):
+        return LegacyPretrainTrainer(config, backbone, writer, device)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(training_module, "PretrainTrainer", legacy_trainer)
+        first_segment = run_pretraining(
+            config,
+            path,
+            resumed_out,
+            torch.device("cpu"),
+            epochs=2,
+            max_samples_per_epoch=8,
+            stop_after_steps=boundary,
+        )
     assert not json.loads((resumed_out / "training-result.json").read_text())["complete"]
     resumed_run = run_pretraining(
         config,
