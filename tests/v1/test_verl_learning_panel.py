@@ -1,5 +1,8 @@
 from dataclasses import replace
 import json
+from tensordict import TensorDict
+from verl.utils.tensordict_utils import assign_non_tensor
+from verl.workers.engine.utils import postprocess_batch_func
 
 from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
 from benchmark_verl_learning import panel, panel_description, grouped_nll
@@ -56,3 +59,11 @@ def test_real_data_panel_is_replayable(tmp_path, tokenizer, tiny_config):
     scores = grouped_nll(rows)
     assert scores["all"] == {"nll": 2.0, "samples": 16}
     assert scores["ae"] == {"nll": 1.0, "samples": 8}
+    data = TensorDict({}, batch_size=[])
+    assign_non_tensor(data, use_dynamic_bsz=False)
+    outputs = [
+        {"model_output": {}, "loss": 0.5, "metrics": {"records": rows[:8]}},
+        {"model_output": {}, "loss": 0.5, "metrics": {"records": rows[8:]}},
+    ]
+    merged = postprocess_batch_func(outputs, None, data)
+    assert grouped_nll(merged["metrics"]["records"]) == scores

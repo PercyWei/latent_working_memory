@@ -145,7 +145,7 @@ def execute(engine, backend, samples, batch_size, training):
         )
     loss = torch.tensor(sum(output["loss"]), device="cuda", dtype=torch.float64)
     dist.all_reduce(loss)
-    rows = [row for batch in output["metrics"]["records"] for row in batch]
+    rows = output["metrics"]["records"]
     gathered = [None] * dist.get_world_size()
     dist.all_gather_object(gathered, rows)
     return loss.item(), output["metrics"].get("grad_norm"), [r for rows in gathered for r in rows]
@@ -201,6 +201,9 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--eval-every", type=int, default=50)
+    parser.add_argument(
+        "--reshard-after-forward", action=argparse.BooleanOptionalAction, default=True
+    )
     args = parser.parse_args()
     device = initialize_device(torch.device("cuda", int(os.environ["LOCAL_RANK"])))
     rank, world = dist.get_rank(), dist.get_world_size()
@@ -263,7 +266,7 @@ def main():
             use_dynamic_bsz=False,
             use_remove_padding=False,
             use_torch_compile=False,
-            reshard_after_forward=True,
+            reshard_after_forward=args.reshard_after_forward,
             mixed_precision={"param_dtype": "bf16", "reduce_dtype": "fp32"},
             wrap_policy={
                 "transformer_layer_cls_to_wrap": backbone.language_model.get_base_model()._no_split_modules
@@ -302,6 +305,9 @@ def main():
                     "eval_every": args.eval_every,
                     "data_root": str(args.data_root),
                     "precision": "bf16",
+                    "reshard_after_forward": args.reshard_after_forward
+                    if args.backend == "fsdp2"
+                    else None,
                     "software": {n: version(n) for n in ("torch", "transformers", "verl")},
                 },
                 indent=2,
