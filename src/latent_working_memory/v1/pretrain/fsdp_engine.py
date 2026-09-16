@@ -135,10 +135,10 @@ class PretrainFSDPEngine(FSDPEngine):
         # determines what must be saved, not those transient flags.
         options = StateDictOptions(full_state_dict=True, cpu_offload=True)
         state = get_fsdp_full_state_dict(self.module)
-        state = {name: state[name] for name in self.parameter_names}
         optimizer = get_optimizer_state_dict(self.module, self.optimizer, options=options)
         if dist.get_rank() != 0:
             return None
+        state = {name: state[name] for name in self.parameter_names}
 
         def subtree(prefix):
             return {
