@@ -282,6 +282,14 @@ def main():
                 full_state_dict=True, cpu_offload=True, ignore_frozen_params=True
             ),
         )
+        if rank == 0:
+            # State export may retain a second name for a frozen tied weight.
+            # Compare the actual trainable parameter set, as in the DDP branch.
+            initial = {
+                name: initial[name]
+                for name, p in engine.model.named_parameters()
+                if p.requires_grad
+            }
     if rank == 0:
         if args.reference_dir:
             torch.testing.assert_close(
