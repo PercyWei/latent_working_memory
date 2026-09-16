@@ -15,6 +15,7 @@
     "eval_every": 1000,
     "generation_samples": 8,
     "ae_prompt": "Reconstruct the text stored in memory:\n",
-    "lm_prompt": "Continue the text stored in memory:\n"
+    "lm_prompt": "Continue the text stored in memory:\n",
+    "checkpoint_limit": 2
   }
 }

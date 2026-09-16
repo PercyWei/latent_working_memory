@@ -48,6 +48,7 @@ class TrainingConfig:
     lm_weight: float = 1.0
     seed: int = 42
     save_every: int = 1000
+    checkpoint_limit: int = 2
     eval_every: int = 1000
     generation_samples: int = 8
     ae_prompt: str = "Reconstruct the text stored in memory:\n"
@@ -61,7 +62,7 @@ class TrainingConfig:
                 raise ValueError(f"{name} must be a nonnegative integer")
         if self.warmup_epochs + self.multiround_epochs == 0:
             raise ValueError("at least one training epoch is required")
-        for name in ("global_batch_size", "save_every", "eval_every"):
+        for name in ("global_batch_size", "save_every", "eval_every", "checkpoint_limit"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(f"{name} must be positive")
         for name in ("learning_rate", "gradient_clip", "lm_weight"):

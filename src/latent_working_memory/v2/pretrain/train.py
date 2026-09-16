@@ -20,6 +20,7 @@ from latent_working_memory.v2.pretrain.checkpoint import (
     restore_codec,
     restore_rng,
     save_checkpoint,
+    prune_checkpoints,
 )
 from latent_working_memory.v2.pretrain.config import SelectionConfig, TrainingConfig
 from latent_working_memory.v2.pretrain.data import (
@@ -101,6 +102,12 @@ def run_training(args):
     total_steps = sum(
         math.ceil(len(datasets[stage]["train"]) / config.global_batch_size) for stage, _ in schedule
     )
+    stage_endpoints = {total_steps}
+    if config.warmup_epochs:
+        stage_endpoints.add(
+            math.ceil(len(datasets["warmup"]["train"]) / config.global_batch_size)
+            * config.warmup_epochs
+        )
     run = json.loads(
         json.dumps(
             {
@@ -288,6 +295,10 @@ def run_training(args):
                 ):
                     final_checkpoint = output / "checkpoints" / f"step-{step:06d}.pt"
                     save_checkpoint(final_checkpoint, engine, run, dict(cursor))
+                    if primary:
+                        prune_checkpoints(
+                            final_checkpoint.parent, config.checkpoint_limit, stage_endpoints
+                        )
             if stop is not None and cursor["step"] >= stop:
                 break
         complete = cursor["epoch_index"] == len(schedule)

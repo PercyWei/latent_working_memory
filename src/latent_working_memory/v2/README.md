@@ -42,7 +42,7 @@ warm-up 结束后复制已训练的读取对齐初始化写入对齐，重建 Ad
 
 中断续训使用相同配置、输出目录和 world size，添加 `--resume <output-dir>/checkpoints/step-XXXXXX.pt`。`--stop-after-steps N` 仅截短本次执行，不改变总预算。启动时按固定 seed 重建数据，随后恢复权重、optimizer、epoch／batch 游标及 RNG；阶段数据随机数与顺序打乱相互独立。
 
-产物包含 `run.json`、`provenance.json`、`data-summary.json`、`epoch-plan.json`、训练日志、checkpoint、dev／test 结果和 `training-result.json`。只有完成全部 epochs 才生成最终 test。AE 与 LM 分别记录各次压缩后的 NLL，包含最后一次压缩，不另列最终 NLL；同时保留 AE／LM 各自的轨迹平均 NLL、一次压缩 NLL 和配对差值。AE 最后一次压缩后的自由重构使用完整 token 序列 EM（`generation/final_round_exact_match`），另记录生成触顶比例与样本数。
+产物包含 `run.json`、`provenance.json`、`data-summary.json`、`epoch-plan.json`、训练日志、checkpoint、dev／test 结果和 `training-result.json`。`checkpoint_limit=2` 保留最近两份 checkpoint，并额外保留单次压缩训练结束和完整训练结束的 checkpoint。只有完成全部 epochs 才生成最终 test。AE 与 LM 分别记录各次压缩后的 NLL，包含最后一次压缩，不另列最终 NLL；同时保留 AE／LM 各自的轨迹平均 NLL、一次压缩 NLL 和配对差值。AE 最后一次压缩后的自由重构使用完整 token 序列 EM（`generation/final_round_exact_match`），另记录生成触顶比例与样本数。
 
 本地小模型验证与当前实验设置见[实验记录](../../../notes/v2/20260916_fixed_capacity_reconstruction_experiment.md)。尚未执行真实 FineWeb＋Qwen3 GPU 训练或复现论文指标。容量增长与 QA 适配仍属后续工作。
 
@@ -155,3 +155,7 @@ AE 模式的指标同样是重建文本匹配，不等于论文全部重建指�
 
 这些检查验证实现契约，不证明随机小模型具备压缩效果，也不代表 CUDA／真实 Qwen3-4B 显存验证。
 当前实验采用上面的统一 codec 与重构入口；后续进行真实基座上的训练验证。
+
+## 实际运行准备
+
+`pretrain.profile` 使用真实基座检查最长单次压缩、3 次／5 次压缩和 AE＋LM 的峰值显存、吞吐与梯度。`pretrain.experiment` 按显式实验列表调度 GPU 4–7，每卡一个独立进程，记录命令、PID、退出码和完成状态；任一实验失败后暂停新的排队任务。数据与模型配置保持各实验自身的契约。

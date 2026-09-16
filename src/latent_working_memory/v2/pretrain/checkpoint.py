@@ -66,3 +66,12 @@ def save_checkpoint(path, engine, run, cursor):
             temporary,
         )
         temporary.replace(path)
+
+
+def prune_checkpoints(directory, limit, preserve_steps):
+    """Keep the newest checkpoints and explicit stage endpoints in this run only."""
+    paths = sorted(Path(directory).glob("step-*.pt"), key=lambda p: int(p.stem.split("-")[1]))
+    keep = set(paths[-limit:])
+    for path in paths:
+        if path not in keep and int(path.stem.split("-")[1]) not in preserve_steps:
+            path.unlink()

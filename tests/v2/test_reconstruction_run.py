@@ -14,6 +14,7 @@ import torch.multiprocessing as mp
 from latent_working_memory.v2.memory_codec import CodecConfig
 from latent_working_memory.v2.pretrain.config import SelectionConfig, TrainingConfig
 from latent_working_memory.v2.pretrain.train import run_training
+from latent_working_memory.v2.pretrain.checkpoint import prune_checkpoints
 
 
 def make_experiment(tmp_path, tiny_base):
@@ -78,6 +79,19 @@ def arguments(experiment, output, stop=None, resume=None):
         swanlab_group=None,
         swanlab_tag=[],
     )
+
+
+def test_checkpoint_retention_preserves_stage_endpoints_and_other_artifacts(tmp_path):
+    for step in (1000, 2000, 3000, 4000, 5000):
+        (tmp_path / f"step-{step:06d}.pt").write_text("checkpoint")
+    (tmp_path / "notes.json").write_text("{}")
+    prune_checkpoints(tmp_path, 2, {2000})
+    assert {p.name for p in tmp_path.iterdir()} == {
+        "step-002000.pt",
+        "step-004000.pt",
+        "step-005000.pt",
+        "notes.json",
+    }
 
 
 def test_raw_data_epochs_and_resume_match_uninterrupted(tiny_base, tmp_path):
