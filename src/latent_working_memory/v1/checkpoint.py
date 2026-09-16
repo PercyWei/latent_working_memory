@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.distributed as dist
 
 from latent_working_memory.v1.config import ExperimentConfig
 from latent_working_memory.v1.state import MemoryState
@@ -44,6 +45,16 @@ def capture_rng_state() -> dict[str, Any]:
         "torch": torch.get_rng_state(),
         "cuda": cuda_state,
     }
+
+
+def capture_rank_rng_states() -> list[dict[str, Any]]:
+    """Collect checkpoint RNG states in rank order without advancing any generator."""
+    local = capture_rng_state()
+    if not dist.is_initialized() or dist.get_world_size() == 1:
+        return [local]
+    states = [None] * dist.get_world_size()
+    dist.all_gather_object(states, local)
+    return states
 
 
 def restore_rng_state(rng_state: Mapping[str, Any]) -> None:

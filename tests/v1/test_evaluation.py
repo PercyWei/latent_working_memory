@@ -8,31 +8,19 @@ import torch
 import json
 
 from latent_working_memory.v1.pretrain.evaluation import (
-    MemoryFootprintPoint,
-    NllSummary,
-    aggregate_nll,
     aggregate_pretrain_metrics,
-    byte_token_area,
     correct_prefix_ratio,
     evaluate_pretraining,
-    exact_match,
-    persistent_memory_bytes,
+    normalize_exact_match_text,
 )
 from latent_working_memory.v1.pretrain.prepared_data import pretraining_index
 from latent_working_memory.data_preparation.pretrain.pipeline import prepare_fineweb
-from latent_working_memory.v1.state import MemoryState
 from latent_working_memory.v1.pretrain.sampling import read_tokens
 
 
-def test_exact_match_only_normalizes_whitespace() -> None:
-    assert exact_match("  Alpha   Beta\n", "Alpha Beta")
-    assert not exact_match("alpha beta", "Alpha Beta")
-
-
-def test_nll_aggregation_is_token_weighted() -> None:
-    summary = aggregate_nll((NllSummary(2.0, 1), NllSummary(2.0, 3)))
-    assert summary.mean_nll == 1.0
-    assert summary.perplexity == pytest.approx(2.718281828459045)
+def test_exact_match_normalization_preserves_case() -> None:
+    assert normalize_exact_match_text("  Alpha   Beta\n") == "Alpha Beta"
+    assert normalize_exact_match_text("alpha beta") != "Alpha Beta"
 
 
 def test_correct_prefix_stops_at_first_error_and_uses_reference_content_length():
@@ -249,13 +237,3 @@ def test_evaluation_controls_share_targets_budgets_and_write_test_split(
             target.target_ids[1:-1], skip_special_tokens=True
         )
         assert row["target_tokens"] == len(target.target_ids) - 2
-
-
-def test_memory_bytes_and_byte_token_area() -> None:
-    state = MemoryState(torch.zeros(4, 8, dtype=torch.bfloat16), seen_tokens=10)
-    assert persistent_memory_bytes(state, metadata_bytes=8) == 72
-    points = (
-        MemoryFootprintPoint(0, 32),
-        MemoryFootprintPoint(10, 64),
-    )
-    assert byte_token_area(points, stream_end=20) == 32 * 10 + 64 * 10

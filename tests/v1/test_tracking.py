@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import socket
 from contextlib import contextmanager
+from copy import deepcopy
+from types import SimpleNamespace
 
 from latent_working_memory.v1 import tracking as common_tracking
 from latent_working_memory.v1.pretrain import tracking as pretrain_tracking
@@ -65,6 +67,25 @@ def test_offline_metrics_match_local_reports_and_close_run(tmp_path, monkeypatch
         assert logged["batch/capacity_mean"] == 2.0
         assert logged["resources/peak_memory_gib"] == 2.0
         assert logged["progress/input_tokens"] == 36
+        weighted = deepcopy(record)
+        for sample, weight in zip(weighted["samples"], (0.25, 0.75), strict=True):
+            sample["loss_weight"] = weight
+        weighted_metrics = {}
+        collector = SimpleNamespace(log=lambda values, step: weighted_metrics.update(values))
+        log_training(collector, weighted, 36, 48)
+        assert weighted_metrics["train/ae_nll"] == 2.5
+        assert weighted_metrics["train/lm_nll"] == 3.5
+        assert weighted_metrics["batch/input_tokens_mean"] == 7.0
+        weighted["samples"][1]["lm_nll"] = None
+        weighted_metrics.clear()
+        log_training(collector, weighted, 36, 48)
+        assert weighted_metrics["batch/lm_fraction"] == 0.25
+        assert weighted_metrics["train/lm_nll"] == 2.0
+        weighted["samples"][0]["lm_nll"] = None
+        weighted_metrics.clear()
+        log_training(collector, weighted, 36, 48)
+        assert weighted_metrics["batch/lm_fraction"] == 0
+        assert "train/lm_nll" not in weighted_metrics
         groups = {
             f"all/{task}/{condition}": {"nll": nll, "ppl": 10.0, "token_accuracy": 0.5}
             for task in ("ae", "continuation")

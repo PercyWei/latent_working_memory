@@ -16,12 +16,14 @@ from torch import Tensor
 
 from latent_working_memory.v1.training import (
     precision_context,
+    training_resources,
     trainable_model_state,
     load_trainable_model_state,
 )
 from latent_working_memory.v1.backbone import LatentMemoryBackbone, load_backbone
 from latent_working_memory.v1.checkpoint import (
     capture_rng_state,
+    capture_rank_rng_states,
     load_model_checkpoint,
     restore_rng_state,
     save_model_checkpoint,
@@ -317,7 +319,6 @@ def run_pretraining(
         next_step, input_tokens, target_tokens = 0, 0, 0
         seen_documents: set[str] = set()
         seen_samples: set[str] = set()
-        checkpoint = None
         if resume:
             checkpoint = load_model_checkpoint(resume)
             if checkpoint.phase != "pretrain" or checkpoint.config != config:
@@ -343,8 +344,7 @@ def run_pretraining(
                 json.dumps([sampler.epoch_report(e) for e in range(1, epochs + 1)], indent=2) + "\n"
             )
             write_resolved_config(config, output_dir / "config.json")
-            if data_selection is not None:
-                (output_dir / "data-selection.json").write_text(json.dumps(spec, indent=2) + "\n")
+            (output_dir / "data-selection.json").write_text(json.dumps(spec, indent=2) + "\n")
             (output_dir / "provenance.json").write_text(
                 json.dumps(
                     {
@@ -432,12 +432,13 @@ def run_pretraining(
                 step_begin = time.perf_counter()
                 previous_epoch = sampler.epoch
                 examples = sampler.sample_batch()
+                learning_rate = learning_rate_at(config, step, sampler.total_steps)
                 for group in trainer.optimizer.param_groups:
-                    group["lr"] = learning_rate_at(config, step, sampler.total_steps)
+                    group["lr"] = learning_rate
                 result = trainer.step(examples)
                 if sampler.epoch != previous_epoch or step == next_step:
                     result["epoch_selection"] = sampler.epoch_report(sampler.epoch)
-                result["learning_rate"] = learning_rate_at(config, step, sampler.total_steps)
+                result["learning_rate"] = learning_rate
                 result["epoch"] = sampler.epoch
                 result["epoch_progress"] = sampler.cursor / len(sampler.order)
                 result["epoch_samples"] = len(sampler.order)
@@ -452,21 +453,10 @@ def run_pretraining(
                 result["document_visits"] = sampler.visits
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
-                elapsed = time.perf_counter() - step_begin
-                peak_memory = (
-                    torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
-                )
-                if world_size > 1:
-                    resources = torch.tensor(
-                        [elapsed, peak_memory], dtype=torch.float64, device=device
-                    )
-                    dist.all_reduce(resources, op=dist.ReduceOp.MAX)
-                    elapsed, peak_memory = resources.tolist()
+                result.update(training_resources(device, time.perf_counter() - step_begin))
                 result.update(
                     step=step + 1,
-                    seconds=elapsed,
-                    input_tokens_per_second=result["input_tokens"] / elapsed,
-                    peak_memory_bytes=int(peak_memory),
+                    input_tokens_per_second=result["input_tokens"] / result["seconds"],
                 )
                 if primary:
                     log.write(json.dumps(result, ensure_ascii=False) + "\n")
@@ -481,10 +471,7 @@ def run_pretraining(
                     or sampler.cursor == len(sampler.order)
                 ):
                     path = checkpoint_dir / f"pretrain-step-{step + 1:06d}.pt"
-                    rank_rng_states = [capture_rng_state()]
-                    if world_size > 1:
-                        rank_rng_states = [None] * world_size
-                        dist.all_gather_object(rank_rng_states, capture_rng_state())
+                    rank_rng_states = capture_rank_rng_states()
                     if primary:
                         save_model_checkpoint(
                             path,

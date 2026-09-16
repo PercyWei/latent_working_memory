@@ -7,7 +7,7 @@ from typing import Any
 
 import swanlab
 
-from latent_working_memory.v1.reporting import CONDITION_COLORS, _table, _shade, _bar
+from latent_working_memory.v1.reporting import CONDITION_COLORS, _table, _bar, _shade, configure_line_panels
 
 
 CHART_METRICS = (
@@ -84,18 +84,6 @@ def build_evaluation_charts(
             "condition",
         )
     return values
-
-
-def build_test_report_charts(metrics: dict[str, Any], prefix: str = "report") -> dict[str, Any]:
-    return build_evaluation_charts([("", metrics)], prefix)
-
-
-def log_test_report(run, metrics, records_path: Path, prefix: str = "report") -> None:
-    if run is not None:
-        run.log(
-            build_test_report_charts(metrics, prefix)
-            | reconstruction_media(records_path, f"examples/{prefix}")
-        )
 
 
 def comparison_charts(reports: list[tuple[str, str, dict[str, Any]]]) -> dict[str, Any]:
@@ -222,58 +210,61 @@ def paired_reconstructions(paths, prefix):
     }
 
 
-def development_overview(paths, step):
-    """Reconstruct cumulative dev curves from saved reports, including sparse generation steps."""
-    histories = {
-        source: [
-            (int(path.stem.removeprefix("dev-step-")), json.loads(path.read_text()))
-            for path in sorted(records.parent.glob("dev-step-*.json"))
-            if int(path.stem.removeprefix("dev-step-")) <= step
-        ]
-        for source, records in paths
+def development_scalars(reports):
+    return {
+        f"dev/overview/{task}/{metric}/{source}/{condition}": group[metric]
+        for source, report in reports.items()
+        for task, metric in OVERVIEW_METRICS
+        for condition in CONDITION_COLORS
+        if metric in (group := report["groups"].get(f"all/{task}/{condition}", {}))
     }
-    values = {}
+
+
+def development_panels(sources):
+    panels = {}
     for task, metric in OVERVIEW_METRICS:
-        observed = sorted(
-            {
-                n
-                for history in histories.values()
-                for n, report in history
-                if any(
-                    metric in report["groups"].get(f"all/{task}/{c}", {}) for c in CONDITION_COLORS
-                )
+        conditions = [c for c in CONDITION_COLORS if task != "ae" or c != "no_memory"]
+        # The cloud native LINE API permits at most eight Y metrics per panel.
+        groups = (
+            [("", sources)]
+            if len(sources) * len(conditions) <= 8
+            else [(f"/{source}", [source]) for source in sources]
+        )
+        for suffix, selected in groups:
+            title = f"dev/overview/{task}/{metric}{suffix}"
+            panels[title] = {
+                "title": title,
+                "config": {
+                    "xAxis": {"key": "step", "name": "step", "type": "FLOAT", "class": "SYSTEM"},
+                    "yAxis": [
+                        {"key": key, "name": key, "type": "FLOAT", "class": "CUSTOM"}
+                        for condition in conditions
+                        for source in selected
+                        for key in [f"dev/overview/{task}/{metric}/{source}/{condition}"]
+                    ],
+                    "xName": "optimizer step",
+                    "yName": metric,
+                },
             }
-        )
-        if not observed:
-            continue
-        chart = swanlab.echarts.Line().add_xaxis(observed)
-        for source_index, (source, history) in enumerate(histories.items()):
-            lookup = dict(history)
-            for condition, color in CONDITION_COLORS.items():
-                points = [
-                    lookup.get(n, {})
-                    .get("groups", {})
-                    .get(f"all/{task}/{condition}", {})
-                    .get(metric)
-                    for n in observed
-                ]
-                if any(value is not None for value in points):
-                    chart.add_yaxis(
-                        f"{source}/{condition}",
-                        points,
-                        is_smooth=False,
-                        is_connect_nones=False,
-                        label_opts={"show": False},
-                        itemstyle_opts={"color": _shade(color, source_index, len(histories))},
-                    )
-        chart.set_global_opts(
-            xaxis_opts={"type": "value", "name": "optimizer step"},
-            yaxis_opts={"name": metric},
-            tooltip_opts={"trigger": "axis"},
-            legend_opts={"type": "scroll"},
-        )
-        values[f"dev/overview/{task}/{metric}"] = chart
-    latest = [(source, history[-1][1]) for source, history in histories.items() if history]
-    values.update(evaluation_tables(latest, "dev/overview"))
-    values.update(paired_reconstructions(paths, "dev/overview"))
-    return values
+    return panels
+
+
+def development_panel_style(panel, sources, run_id):
+    custom = {}
+    for axis in panel["config"]["yAxis"]:
+        source, condition = axis["key"].split("/")[-2:]
+        color = _shade(CONDITION_COLORS[condition], sources.index(source), len(sources))
+        custom[f"{run_id}-{axis['key']}"] = {
+            "name": f"{source}/{condition}",
+            "colors": [color, color],
+        }
+    return custom
+
+
+def configure_development_panels(run, sources, mode):
+    configure_line_panels(
+        run,
+        development_panels(list(sources)),
+        mode,
+        lambda panel, run_id: development_panel_style(panel, list(sources), run_id),
+    )

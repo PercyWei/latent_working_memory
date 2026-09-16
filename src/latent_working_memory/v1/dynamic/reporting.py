@@ -10,7 +10,7 @@ import swanlab
 
 from latent_working_memory.v1.reporting import configure_line_panels
 from latent_working_memory.v1.dynamic.evaluation import aggregate_qa
-from latent_working_memory.v1.reporting import CONDITION_COLORS, _bar, _shade
+from latent_working_memory.v1.reporting import CONDITION_COLORS, _bar, _shade, _table
 from latent_working_memory.v1.tracking import swanlab_run, swanlab_training_run
 
 
@@ -26,17 +26,6 @@ COLORS.update(no_memory_base="#BBC1C6", no_memory_pretrain="#9099A1")
 DISPLAY_CONDITIONS = ("memory", "wrong_memory", "no_memory_base", "no_memory_pretrain",
                       "no_memory", "gold_paragraph", "gold_paragraph_base")
 CORE_METRICS = ("nll", "em", "f1")
-
-
-def table(rows):
-    columns = list(dict.fromkeys(k for row in rows for k in row))
-    return swanlab.echarts.Table().add(
-        columns,
-        [
-            [round(row[k], 4) if isinstance(row.get(k), float) else row.get(k) for k in columns]
-            for row in rows
-        ],
-    )
 
 
 def bar(labels, series):
@@ -75,7 +64,7 @@ def qa_media(reports, prefix="evaluation/test/overview", charts=True):
                    for dataset, (metrics, _) in reports.items()
                    for key in metrics if key.startswith("overall/") == overall]
         if records:
-            values[f"{prefix}/{name}"] = table(records)
+            values[f"{prefix}/{name}"] = _table(records)
     examples = []
     for dataset, (_, rows) in reports.items():
         selected = {}
@@ -424,7 +413,7 @@ def main():
                 {name: [report.get(f"overall/{c}/all", {}).get(metric) for c in conditions]
                  for name, report in results.items()},
             )
-    media["tables/compare/overall"] = table(
+    media["tables/compare/overall"] = _table(
         [{"dataset": dataset, "run": name, "group": key, **values}
          for dataset, results in reports.items()
          for name, report in results.items()

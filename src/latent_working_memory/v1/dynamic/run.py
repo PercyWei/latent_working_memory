@@ -20,6 +20,7 @@ from transformers import AutoTokenizer
 from latent_working_memory.v1.engine import initialize_device
 from latent_working_memory.v1.checkpoint import (
     capture_rng_state,
+    capture_rank_rng_states,
     load_model_checkpoint,
     restore_rng_state,
     save_model_checkpoint,
@@ -37,7 +38,7 @@ from latent_working_memory.v1.dynamic.reporting import (
 )
 from latent_working_memory.v1.dynamic.selection import load_selection, load_source
 from latent_working_memory.v1.tracking import swanlab_run
-from latent_working_memory.v1.training import trainable_model_state
+from latent_working_memory.v1.training import trainable_model_state, training_resources
 
 
 def runtime_info():
@@ -260,19 +261,8 @@ def run_dynamic(
                 row["actual_ratio"] = text.input_tokens / capacity
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
-            resources = torch.tensor(
-                [
-                    time.perf_counter() - begin,
-                    torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0,
-                ],
-                dtype=torch.float64,
-                device=device,
-            )
-            if world_size > 1:
-                dist.all_reduce(resources, op=dist.ReduceOp.MAX)
-            result["seconds"], peak_memory = resources.tolist()
+            result.update(training_resources(device, time.perf_counter() - begin))
             result.update(
-                peak_memory_bytes=int(peak_memory),
                 step=step + 1,
                 epoch=epoch,
                 micro_epoch=micro,
@@ -345,10 +335,7 @@ def run_dynamic(
                     )
             if (step + 1) % recipe.save_every == 0 or step + 1 == stop_step:
                 final = checkpoint_dir / f"dynamic-step-{step + 1:06d}.pt"
-                rank_rng_states = [capture_rng_state()]
-                if world_size > 1:
-                    rank_rng_states = [None] * world_size
-                    dist.all_gather_object(rank_rng_states, capture_rng_state())
+                rank_rng_states = capture_rank_rng_states()
                 next_micro, next_batch = divmod(step + 1, recipe.steps_per_micro_epoch)
                 next_epoch, next_micro = divmod(next_micro, recipe.micro_epochs_per_epoch)
                 if primary:

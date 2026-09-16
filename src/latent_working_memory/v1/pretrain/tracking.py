@@ -11,11 +11,9 @@ from latent_working_memory.v1.tracking import (
     swanlab_run,
     swanlab_training_run,
 )
-from latent_working_memory.v1.pretrain.dev_scalars import (
+from latent_working_memory.v1.pretrain.reporting import (
     configure_development_panels,
     development_scalars,
-)
-from latent_working_memory.v1.pretrain.reporting import (
     evaluation_overview,
     paired_reconstructions,
     evaluation_tables,
@@ -104,28 +102,22 @@ def log_training(
         ):
             metrics[f"progress/{key}"] = record[key]
         metrics["resources/capacity_reads"] = record["capacity_reads"]
-    ae_samples = [s for s in samples if s["ae_nll"] is not None]
-    metrics["batch/ae_fraction"] = sum(s.get("loss_weight", 1) for s in ae_samples) / sum(
-        s.get("loss_weight", 1) for s in samples
-    )
-    if ae_samples:
-        metrics["train/ae_nll"] = sum(
-            s["ae_nll"] * s.get("loss_weight", 1) for s in ae_samples
-        ) / sum(s.get("loss_weight", 1) for s in ae_samples)
-    lm_samples = [s for s in samples if s["lm_nll"] is not None]
-    metrics["batch/lm_fraction"] = sum(s.get("loss_weight", 1) for s in lm_samples) / sum(
-        s.get("loss_weight", 1) for s in samples
-    )
-    if lm_samples:
-        metrics["train/lm_nll"] = sum(
-            s["lm_nll"] * s.get("loss_weight", 1) for s in lm_samples
-        ) / sum(s.get("loss_weight", 1) for s in lm_samples)
+    total_weight = sum(sample.get("loss_weight", 1) for sample in samples)
+    for task in ("ae", "lm"):
+        field = f"{task}_nll"
+        selected = [sample for sample in samples if sample[field] is not None]
+        weight = sum(sample.get("loss_weight", 1) for sample in selected)
+        metrics[f"batch/{task}_fraction"] = weight / total_weight
+        if selected:
+            metrics[f"train/{task}_nll"] = sum(
+                sample[field] * sample.get("loss_weight", 1) for sample in selected
+            ) / weight
     for field in ("input_tokens", "continuation_tokens", "capacity", "effective_ratio"):
         values = [s[field] for s in samples]
         metrics.update(
             {
                 f"batch/{field}_mean": sum(s[field] * s.get("loss_weight", 1) for s in samples)
-                / sum(s.get("loss_weight", 1) for s in samples),
+                / total_weight,
                 f"batch/{field}_min": min(values),
                 f"batch/{field}_max": max(values),
             }

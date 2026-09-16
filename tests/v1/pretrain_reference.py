@@ -6,7 +6,7 @@ import torch.distributed as dist
 
 from latent_working_memory.v1.backbone import LatentMemoryBackbone
 from latent_working_memory.v1.config import ExperimentConfig
-from latent_working_memory.v1.distributed import synchronize_gradients
+from distributed_reference import synchronize_gradients
 from latent_working_memory.v1.model import JointMemoryWriter
 from latent_working_memory.v1.pretrain.sampling import PretrainExample
 from latent_working_memory.v1.pretrain.training import pretrain_forward
