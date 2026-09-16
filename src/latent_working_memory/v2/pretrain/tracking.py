@@ -1,10 +1,12 @@
 """SwanLab 运行关联、原生 dev 曲线与最终评估汇总。"""
 
 from contextlib import contextmanager
+import fcntl
+import secrets
 
 import swanlab
 
-from latent_working_memory.v1.reporting import _bar, _shade, _table, configure_line_panels
+from latent_working_memory.v1.reporting import _bar, _shade, _table
 from latent_working_memory.v1.tracking import swanlab_run
 
 
@@ -74,6 +76,68 @@ def panel_style(panel, run_id, run_name, base_color):
     return result
 
 
+def configure_development_panels(run, output, color):
+    """Update the shared view through SwanLab's current chart API.
+
+    Serialize updates from this series' concurrent runs so their colors accumulate.
+    Metric registration is owned by the SDK; this function only manages the three panels.
+    """
+    with (output.parent / ".swanlab-panels.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        api = swanlab.Api()
+        project_path = run.url.split("/@", 1)[1].split("/runs/", 1)[0]
+        remote = api.run(f"{project_path}/{run.id}")
+
+        def checked(response):
+            if not response.ok:
+                raise RuntimeError(response.errmsg)
+            return response.data
+
+        project = checked(api._get(f"/project/{project_path}"))
+        view = project["viewIndex"][0]
+        sections_path = f"/sections/{project_path}/{view}"
+        sections = checked(api._get(sections_path, params={"size": 100}))
+        section = next((s for s in sections if s["name"] == "dev"), None)
+        if section is None:
+            section = checked(
+                api._post(
+                    sections_path,
+                    data={
+                        "name": "dev",
+                        "index": secrets.token_hex(3),
+                        "position": "above",
+                    },
+                )
+            )
+            section["chartIndex"] = []
+        charts_path = f"/charts/{project_path}/{view}"
+        charts = [
+            checked(api._get(f"{charts_path}/xxxxxx/{index}")) for index in section["chartIndex"]
+        ]
+        for title, panel in development_panels().items():
+            existing = next(
+                (c for c in charts if c["title"] == title and c["type"] == "LINE"), None
+            )
+            custom = dict((existing or {}).get("custom") or {})
+            custom.update(panel_style(panel, remote.run_id, output.name, color))
+            body = {
+                "type": "LINE",
+                "title": title,
+                "custom": custom,
+                "config": {
+                    "xAxis": {"key": "step", "type": "SYSTEM", "class": "SCALAR"},
+                    "yAxis": [
+                        {"key": a["key"], "type": "FLOAT", "class": "SCALAR"}
+                        for a in panel["config"]["yAxis"]
+                    ],
+                },
+            }
+            if existing:
+                checked(api._put(f"{charts_path}/xxxxxx/{existing['index']}", data=body))
+            else:
+                checked(api._post(f"{charts_path}/{section['index']}", data=body))
+
+
 @contextmanager
 def reconstruction_run(output, config, mode, project, group, tags):
     compression = config["model"]["compression"]
@@ -88,14 +152,8 @@ def reconstruction_run(output, config, mode, project, group, tags):
         job_type="train",
         fixed_tags=("scope:main", f"method:v2-{method}", "data:fineweb"),
     ) as run:
-        if run is not None:
-            color = setting_color(config)
-            configure_line_panels(
-                run,
-                development_panels(),
-                mode,
-                lambda panel, run_id: panel_style(panel, run_id, output.name, color),
-            )
+        if run is not None and mode == "online":
+            configure_development_panels(run, output, setting_color(config))
         yield run
 
 

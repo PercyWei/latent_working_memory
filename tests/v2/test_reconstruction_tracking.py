@@ -2,6 +2,7 @@
 
 import json
 import socket
+from types import SimpleNamespace
 
 from latent_working_memory.v2.pretrain.tracking import (
     development_panels,
@@ -11,7 +12,52 @@ from latent_working_memory.v2.pretrain.tracking import (
     log_training,
     log_development,
     log_final_evaluation,
+    configure_development_panels,
 )
+
+
+def test_current_view_api_preserves_other_runs_and_reuses_panels(tmp_path, monkeypatch):
+    panels = development_panels()
+    charts = {
+        str(i): {
+            "index": str(i),
+            "type": "LINE",
+            "title": title,
+            "custom": {"prior-run-key": {"name": "prior"}},
+        }
+        for i, title in enumerate(panels)
+    }
+    writes = []
+
+    class Api:
+        def run(self, path):
+            return SimpleNamespace(run_id="new-run")
+
+        def _get(self, path, params=None):
+            if path.startswith("/project/"):
+                data = {"viewIndex": ["view"]}
+            elif path.startswith("/sections/"):
+                data = [{"name": "dev", "index": "dev", "chartIndex": list(charts)}]
+            else:
+                data = charts[path.rsplit("/", 1)[-1]]
+            return SimpleNamespace(ok=True, data=data)
+
+        def _put(self, path, data):
+            writes.append((path, data))
+            return SimpleNamespace(ok=True, data={})
+
+    monkeypatch.setattr("latent_working_memory.v2.pretrain.tracking.swanlab.Api", Api)
+    output = tmp_path / "run"
+    output.mkdir()
+    run = SimpleNamespace(url="https://swanlab.cn/@owner/project/runs/new", id="new")
+    configure_development_panels(run, output, "#2459A6")
+    assert len(writes) == 3
+    for path, body in writes:
+        assert path.startswith("/charts/owner/project/view/xxxxxx/")
+        assert body["custom"]["prior-run-key"] == {"name": "prior"}
+        assert any(key.startswith("new-run-") for key in body["custom"])
+        assert body["config"]["xAxis"] == {"key": "step", "type": "SYSTEM", "class": "SCALAR"}
+        assert all(a["type"] == "FLOAT" and a["class"] == "SCALAR" for a in body["config"]["yAxis"])
 
 
 def metrics():
