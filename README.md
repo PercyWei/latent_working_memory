@@ -1,6 +1,6 @@
 # 20260912_latent_working_memory
 
-最后修订时间：20260914 14:53:43 UTC+08:00
+最后修订时间：20260916 21:38:59 UTC+08:00
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理；ICAE v1 和 C-DIC 分别位于 `reproductions/icae/` 与 `reproductions/cdic/`，各自使用独立的 `uv` 环境。
 
@@ -30,6 +30,12 @@ uv run pytest
 ```
 
 `--stage` 支持 `sources`、`semantic`、`random` 和默认的 `all`；恢复未完成的 `semantic` 或 `random` 时使用原配置、原输出目录并追加 `--resume`。独立抽查入口为 `latent_working_memory.data_preparation.pretrain.inspection`，既有 Episode 语料的显式迁移工具为 `latent_working_memory.data_preparation.pretrain.migrate_text_samples`。原 `python -m latent_working_memory.data_preparation` 入口和根层预训练模块已迁入 `pretrain/`，调用方应更新模块路径；配置字段、文本格式、构造产物与恢复协议保持一致。
+
+## GMSA 底座与 v2
+
+v2 位于 [src/latent_working_memory/v2/](src/latent_working_memory/v2/)。当前统一读写框架为 `memory_codec.py`：旧记忆与完整新文本联合编码，首次压缩和后续更新共享参数，支持均值、加权和谱域三种压缩模块。`pretrain/` 使用 verl replicated/DDP 执行固定容量 AE／AE＋LM 与 warm-up／直接多次压缩四组训练，数据在启动时构造一次，各 epoch 完整复用。初始 GMSA 静态迁移及 `working_memory.py` 更新原型保留用于对照；容量策略尚未实现。
+
+当前完成小型随机 Llama／Qwen3 工程验证与上游数值比较，尚未复现真实 GMSA 指标。训练命令、配置、数据契约和开发范围见 [v2 开发记录](src/latent_working_memory/v2/README.md)，上游版本及适配区别见 [迁移说明](src/latent_working_memory/v2/UPSTREAM.md)。v2 使用根目录环境；现有 v1 和 C-DIC 路径保持独立。
 
 ## 可增长记忆 v1
 

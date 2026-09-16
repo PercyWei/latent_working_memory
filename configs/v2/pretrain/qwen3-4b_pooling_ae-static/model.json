@@ -1,0 +1,14 @@
+{
+  "model_name_or_path": "Qwen/Qwen3-4B-Instruct-2507",
+  "revision": null,
+  "encoder_layers": null,
+  "alignment_layers": 1,
+  "lora_rank": 128,
+  "lora_alpha": 32,
+  "lora_dropout": 0.0,
+  "attention_implementation": "sdpa",
+  "compression": "mean",
+  "feature_layer": "last",
+  "spectral_bottleneck": 256,
+  "gradient_checkpointing": true
+}
