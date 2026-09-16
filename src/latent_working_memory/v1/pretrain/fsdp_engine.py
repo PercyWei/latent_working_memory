@@ -1,6 +1,6 @@
 """Pretraining model/loss adapter for verl's native FSDP2 engine.
 
-Used by the validation entry point until CUDA parity and checkpoint tests pass.
+Validation separately checks learning quality, checkpoint recovery and throughput.
 Batch execution, backward, sharding and optimizer stepping belong to verl.
 """
 
