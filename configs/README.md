@@ -1,7 +1,7 @@
 # 20260914_配置组织规则
 
 创建时间：20260914 11:48:20 UTC+08:00
-最后修订时间：20260915 17:13:26 UTC+08:00
+最后修订时间：20260916 22:44:06 UTC+08:00
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
 
@@ -32,6 +32,23 @@ configs/
 - `experiment.json` 引用本实验需要的配置，并明确训练预算（预训练为 epoch 数）、保存安排、设备、最终评估和运行记录参数。动态阶段从预训练 checkpoint 取得的模型结构无需在本地再复制一份；文件按实际职责设置，不为凑齐固定文件数创建空配置。
 
 ## 实验与实验组
+
+### v2 固定容量重构配置
+
+`v2/pretrain/qwen3-4b_pooling_*` 提供 AE／AE＋LM × warm-up／直接多次压缩四个主实验，以及 `ae-static`、`ae-lm-static` 两个全程单次压缩 baseline。每个目录包含 `model.json`（codec）、`selection.json`（原始来源与分阶段选样）和 `experiment.json`（配置引用与执行参数）。入口为 `latent_working_memory.v2.pretrain.train --experiment <配置> --output-dir <产物目录>`，支持单设备与 verl replicated/DDP。
+
+warm-up 与多次压缩数据均在启动时构造，整个运行只使用内存数据，各 epoch 完整复用。预算由 `warmup_epochs`、`multiround_epochs` 与各阶段样本数计算，尾批保留；`global_batch_size` 不随 world size 改变。静态 baseline 设置 `warmup_epochs=3`、`multiround_epochs=0`；六组均训练 3 epochs，使用相同的多次压缩 dev/test 与评估指标。`compression` 可选 `mean`、`weighted`、`spectral`。六份默认配置均使用完整 causal Encoder（`encoder_layers: null`）与基础 pooling。正式入口默认 SwanLab online，project 为 `latent-working-memory-v2`，要求显式指定同组 runs 共用的 `--swanlab-group`；具体参数进入 config，运行名称取输出目录名。配置是开发起点，未执行真实 GPU 训练；运行、恢复与产物说明见 [v2 开发记录](../src/latent_working_memory/v2/README.md)。
+
+### v2 初始静态训练配置
+
+`v2/pretrain/gmsa-qwen3-4b/model.json` 保存跨 AE／QA 阶段的 GMSA 模型结构；
+`v2/pretrain/gmsa-qwen3-4b/experiment.json` 和 `v2/finetune/gmsa-qwen3-4b/experiment.json`
+分别保存阶段、token 预算和 HF Trainer 参数。当前静态入口通过 `--model-config`、`--training-config`
+显式传入两份配置，数据直接通过 `--train-file`／`--eval-file` 引用共享 JSONL，不创建空的 selection 配置。
+这些是 4K 输入的开发起点，尚未完成真实模型显存和论文效果验证；不是已执行实验记录。
+具体命令及跨阶段初始化、同 run 恢复规则见 [v2 开发记录](../src/latent_working_memory/v2/README.md)。
+
+### 通用关联规则
 
 每个实验能单独选择和执行。实验组是若干实验及运行结果的关联，不在配置目录中增加组目录，不把多个实验的关键参数只保存在组配置中。
 
