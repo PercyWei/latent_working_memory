@@ -8,6 +8,7 @@ import torch
 
 from latent_working_memory.v1.checkpoint import (
     capture_rng_state,
+    capture_rank_rng_states,
     load_model_checkpoint,
     load_runtime_memory,
     restore_rng_state,
@@ -25,6 +26,7 @@ def test_model_checkpoint_round_trip_and_rng_restore(tmp_path: Path) -> None:
     random.seed(3)
     torch.manual_seed(4)
     rng_state = capture_rng_state()
+    torch.testing.assert_close(capture_rank_rng_states(), [rng_state], rtol=0, atol=0)
     expected_python = random.random()
     expected_torch = torch.rand(2)
 

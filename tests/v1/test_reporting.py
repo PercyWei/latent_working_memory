@@ -1,8 +1,10 @@
-
-from latent_working_memory.v1.pretrain.reporting import evaluation_overview, paired_reconstructions
-from latent_working_memory.v1.pretrain.reporting import development_overview
+from latent_working_memory.v1.pretrain.reporting import (
+    evaluation_overview, paired_reconstructions, development_panel_style,
+    configure_development_panels, development_panels, development_scalars,
+)
 import json
 import colorsys
+from types import SimpleNamespace
 from latent_working_memory.v1.pretrain.reporting import build_evaluation_charts, comparison_charts
 from latent_working_memory.v1.pretrain.tracking import pretraining_run
 
@@ -153,17 +155,82 @@ def test_compact_reports_keep_details_and_pair_all_controls(tmp_path):
     assert len(media["dev/overview/examples"]) == 2
 
 
-def test_dev_overview_uses_real_steps_and_sparse_generation(tmp_path):
-    path = tmp_path / "dev-step-000003.jsonl"
-    path.write_text("")
-    for step in (0, 1, 3, 9):
-        data = report()
-        if step in (0, 3):
-            data["groups"]["all/ae/memory"]["bleu_4"] = step
-        (tmp_path / f"dev-step-{step:06d}.json").write_text(json.dumps(data))
-    charts = development_overview([("semantic", path)], 3)
-    nll = charts["dev/overview/ae/nll"].options
-    bleu = charts["dev/overview/ae/bleu_4"].options
-    assert nll["xAxis"][0]["data"] == [0, 1, 3]
-    assert bleu["xAxis"][0]["data"] == [0, 3]
-    assert nll["series"][0]["data"][0] == [0, 1.23456789]
+def test_sparse_generation_points_and_eight_curve_limit():
+    reports = {'semantic': {'groups': {'all/ae/memory': {'nll': 2.0}}},
+               'random': {'groups': {'all/ae/memory': {'nll': 3.0, 'correct_prefix_ratio': 0.0}}}}
+    points = development_scalars(reports)
+    assert points == {'dev/overview/ae/nll/semantic/memory': 2.0,
+                      'dev/overview/ae/nll/random/memory': 3.0,
+                      'dev/overview/ae/correct_prefix_ratio/random/memory': 0.0}
+    panels = development_panels(list(reports))
+    assert len(panels) == 6
+    assert len(panels['dev/overview/ae/correct_prefix_ratio']['config']['yAxis']) == 8
+    assert all(len(p['config']['yAxis']) <= 8 for p in panels.values())
+    keys = [y['key'] for p in panels.values() for y in p['config']['yAxis']]
+    assert len(keys) == len(set(keys)) == 42
+    assert set(points) <= set(keys)
+    assert all(p['config']['xAxis']['key'] == 'step' for p in panels.values())
+
+
+def test_native_panels_created_once_before_scalar_upload(monkeypatch):
+    posts = []
+    section = {'index': 'dev-section', 'name': 'dev', 'chartIndex': []}
+    charts = {}
+
+    class Api:
+        def run(self, path):
+            return SimpleNamespace(run_id='cloud-id')
+
+        def _get(self, path, params=None):
+            data = ([section] if posts else []) if path.endswith('/sections') else charts[path.split('/')[-2]]
+            return SimpleNamespace(ok=True, data=data)
+
+        def _post(self, path, data):
+            assert path.endswith('/columns')
+            posts.append(data)
+            for column in data:
+                index = column['chartIndex']
+                if index not in charts:
+                    charts[index] = {'title': column['chartName'], 'index': index, 'type': 'LINE',
+                                     'config': {'yAxis': []}}
+                    section['chartIndex'].append(index)
+                charts[index]['config']['yAxis'].append(column['key'])
+            return SimpleNamespace(ok=True, data=[])
+
+        def _put(self, path, data):
+            index = path.split('/')[-3]
+            charts[index].update(data)
+            return SimpleNamespace(ok=True, data=None)
+
+    monkeypatch.setattr('latent_working_memory.v1.reporting.swanlab.Api', Api)
+    run = SimpleNamespace(id='slug', url='https://swanlab.cn/@user/project/runs/slug')
+    configure_development_panels(run, ['semantic', 'random'], 'online')
+    assert len(posts) == 1 and len(posts[0]) == 42
+    assert len(charts) == 6
+    assert all('hidden' not in column and column['sectionName'] == 'dev' for column in posts[0])
+    configure_development_panels(run, ['semantic', 'random'], 'online')
+    assert len(posts) == 1
+
+
+def test_condition_colors_and_adjacent_source_legends():
+    sources = ['semantic', 'random']
+    panels = development_panels(sources)
+    panel = panels['dev/overview/ae/nll']
+    style = development_panel_style(panel, sources, 'run')
+    labels = [value['name'] for value in style.values()]
+    assert labels == [f'{source}/{condition}' for condition in
+                      ['memory', 'wrong_memory', 'full_context', 'base_full_context']
+                      for source in sources]
+    hues = []
+    for i in range(0, len(labels), 2):
+        pair = list(style.values())[i:i + 2]
+        hls = [colorsys.rgb_to_hls(*(int(v['colors'][0][j:j + 2], 16) / 255
+                                    for j in (1, 3, 5))) for v in pair]
+        assert abs(hls[0][0] - hls[1][0]) < 0.005
+        assert hls[1][1] - hls[0][1] > 0.2
+        hues.append(round(hls[0][0], 1))
+    assert len(set(hues)) == 4
+    # A source keeps its shade even when LM panels split the sources.
+    lm = panels['dev/overview/continuation/nll/random']
+    lm_style = development_panel_style(lm, sources, 'run')
+    assert next(iter(lm_style.values()))['colors'] == list(style.values())[1]['colors']

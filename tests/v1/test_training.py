@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 import os
+import random
 import re
 import pytest
 
@@ -11,7 +12,8 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from transformers import LlamaConfig, LlamaForCausalLM
 
-from latent_working_memory.v1.checkpoint import load_model_checkpoint
+from latent_working_memory.v1.checkpoint import load_model_checkpoint, capture_rank_rng_states
+from latent_working_memory.v1.training import training_resources
 from latent_working_memory.v1.pretrain.evaluate import main as evaluate_main
 from latent_working_memory.data_preparation.pretrain.pipeline import prepare_fineweb
 from latent_working_memory.v1.pretrain.sampling import EpochSampler
@@ -285,6 +287,17 @@ def _distributed_train_worker(rank, rendezvous, config, data, output, steps, res
         MASTER_ADDR="127.0.0.1", MASTER_PORT="29500",
     )
     dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=2)
+    random.seed(100 + rank)
+    torch.manual_seed(100 + rank)
+    states = capture_rank_rng_states()
+    for number, state in enumerate(states):
+        assert state["python"] == random.Random(100 + number).getstate()
+        assert torch.equal(state["torch"], torch.Generator().manual_seed(100 + number).get_state())
+    assert random.getstate() == states[rank]["python"]
+    assert torch.equal(torch.get_rng_state(), states[rank]["torch"])
+    assert training_resources(torch.device("cpu"), rank + 0.25) == {
+        "seconds": 1.25, "peak_memory_bytes": 0,
+    }
     run_pretraining(
         config,
         data,

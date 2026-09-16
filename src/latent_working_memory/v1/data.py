@@ -141,14 +141,6 @@ class Episode:
         )
 
 
-def read_episodes(path: str | Path) -> list[Episode]:
-    with Path(path).open(encoding="utf-8") as handle:
-        episodes = [Episode.from_record(json.loads(line)) for line in handle]
-    if len({e.episode_id for e in episodes}) != len(episodes):
-        raise ValueError("duplicate episode_id")
-    return episodes
-
-
 def write_episodes(episodes: Iterable[Episode], path: str | Path) -> None:
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
