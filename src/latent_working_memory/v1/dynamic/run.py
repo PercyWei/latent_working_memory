@@ -24,7 +24,7 @@ from latent_working_memory.v1.checkpoint import (
     restore_rng_state,
     save_model_checkpoint,
 )
-from latent_working_memory.v1.dynamic.config import DynamicConfig, load_dynamic_config
+from latent_working_memory.v1.dynamic.config import load_dynamic_config
 from latent_working_memory.v1.dynamic.data import DynamicTextSampler
 from latent_working_memory.v1.dynamic.prepare import load_evaluation_plan
 from latent_working_memory.v1.dynamic.training import DynamicTrainer, load_components
@@ -136,17 +136,14 @@ def run_dynamic(
         "evaluation_plans": {name: source[1] for name, source in sources.items()},
         "world_size": world_size,
     }
-    if resume:
-        saved_identity = dict(checkpoint.progress["identity"])
-        saved_identity["recipe"] = asdict(DynamicConfig(**saved_identity["recipe"]))
-        if saved_identity != identity:
-            raise ValueError("resume data, schedule or dynamic configuration differs")
+    if resume and checkpoint.progress["identity"] != identity:
+        raise ValueError("resume data, schedule or dynamic configuration differs")
     next_step = checkpoint.progress["next_step"] if resume else 0
     if stop_step <= next_step:
         raise ValueError("steps must exceed completed steps")
     random.seed(recipe.seed)
     torch.manual_seed(recipe.seed)
-    tokenizer, backbone, writer, value = load_components(checkpoint, device, recipe.reader_loss_backend)
+    tokenizer, backbone, writer, value = load_components(checkpoint, device)
     if tokenizer.get_vocab() != data.tokenizer.get_vocab() or (
         tokenizer.bos_token_id,
         tokenizer.eos_token_id,
@@ -447,7 +444,7 @@ def main():
         if not names:
             raise ValueError(f"no {args.split} sources configured")
         sources = load_evaluation_sources(spec, data_tokenizer, recipe, names)
-        tokenizer, backbone, writer, _ = load_components(checkpoint, device, recipe.reader_loss_backend)
+        tokenizer, backbone, writer, _ = load_components(checkpoint, device)
         primary = not dist.is_initialized() or dist.get_rank() == 0
         step = checkpoint.progress["next_step"]
         reports = {}

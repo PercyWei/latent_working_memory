@@ -100,26 +100,22 @@ def pretrain_forward(
 class PretrainModel(torch.nn.Module):
     def __init__(self, config, backbone, writer):
         super().__init__()
-        self.experiment_config, self.backbone, self.writer = config, backbone, writer
-        self.config = backbone.language_model.config
+        self.config, self.backbone, self.writer = config, backbone, writer
 
     def trainable_parameters(self):
         yield from self.backbone.trainable_parameters()
         yield from self.writer.parameters()
 
     def forward(self, examples, sample_count):
-        return pretrain_forward(
-            self.experiment_config, self.backbone, self.writer, examples, sample_count
-        )
+        return pretrain_forward(self.config, self.backbone, self.writer, examples, sample_count)
 
 
 @EngineRegistry.register(model_type="lwm_pretrain", backend="replicated", device=["cpu", "cuda"])
 class PretrainEngine(MemoryEngine):
     def __init__(self, model, device):
-        config = model.experiment_config
+        config = model.config
         super().__init__(
-            model, device, config.learning_rate, config.weight_decay, config.gradient_clip,
-            config.optimizer_fused
+            model, device, config.learning_rate, config.weight_decay, config.gradient_clip
         )
         self.config = config
 

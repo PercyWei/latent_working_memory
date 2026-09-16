@@ -466,12 +466,6 @@ def test_run_resume_across_micro_epochs_and_final_test(
         first = run_dynamic(
             initial, tmp_path / "resume", recipe, torch.device("cpu"), steps=3, **opts
         )
-    # Older runs omit execution options; their default torch/non-fused path resumes.
-    payload = torch.load(first, weights_only=False)
-    for name in ("optimizer_fused", "reader_loss_backend"):
-        payload["config"].pop(name)
-        payload["progress"]["identity"]["recipe"].pop(name)
-    torch.save(payload, first)
     resumed = run_dynamic(
         first, tmp_path / "resume", recipe, torch.device("cpu"), resume=True, **opts
     )

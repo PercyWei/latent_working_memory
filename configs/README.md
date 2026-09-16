@@ -1,7 +1,7 @@
 # 20260914_配置组织规则
 
 创建时间：20260914 11:48:20 UTC+08:00
-最后修订时间：20260915 22:14:02 UTC+08:00
+最后修订时间：20260916 14:52:43 UTC+08:00
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
 
@@ -115,7 +115,7 @@ configs/
 
 v1 的预训练与动态训练使用 verl 0.8.0 的自定义 engine。`EngineRegistry` 分别注册 `lwm_pretrain` 与 `lwm_dynamic`，共用 `MemoryEngine` 的复制参数后端；optimizer 由 verl 配置构造，zero-grad → forward/backward → optimizer-step 的外层生命周期使用 `BaseEngine.train_batch`。两阶段直接以 SPMD 方式调用 engine，未接入 Ray TrainingWorker；不叠加 Accelerate 或其他 trainer。
 
-现有命令通过 `torch.distributed.run` 启动，CUDA 进程组使用 verl 的初始化入口；CPU 单卡和 Gloo 多进程用于验证。当前 backend 为 `replicated`，多卡使用 PyTorch DDP，CUDA 运算为 BF16、可训练参数保持 FP32。FSDP2、sequence packing、Ray rollout 和参数 offload 尚未启用。
+现有命令通过 `torch.distributed.run` 启动，CUDA 进程组使用 verl 的初始化入口；CPU 单卡和 Gloo 多进程用于验证。当前 backend 为 `replicated`，多卡使用 PyTorch DDP，CUDA 运算为 BF16、可训练参数保持 FP32。当前仅提供复制参数后端。
 
 预训练保持全局 epoch 计划、长度排序、rank 分配和 sample/mean 容量权重；非末 microbatch 使用 no_sync，末批同步。动态训练将一个 episode 划分为反传区间：完整 BPTT 为一个区间，TBPTT 按 token 数或写入次数分段。每个区间内部连续传递 memory，边界处 backward 和 detach；最后一个有 loss 的本地区间执行唯一一次同步，尾部无 QA 的写入仍然执行。每个全局 batch 只裁剪和更新一次 optimizer。
 
@@ -124,19 +124,6 @@ v1 的预训练与动态训练使用 verl 0.8.0 的自定义 engine。`EngineReg
 checkpoint 继续使用项目的单文件契约，保存 Writer、投影、Reader LoRA、optimizer、epoch/order/cursor 与各 rank RNG，冻结基座继续从配置引用加载。独立评估和动态初始化使用同一导出。固定 dev/test、同步评估及 SwanLab global step 的语义保持原样。
 
 依赖固定为 `verl==0.8.0`，因为 0.9.0 要求 Transformers 5.x，而本项目保留 4.x。该版本要求 NumPy <2，锁文件使用 1.26.4；PyTorch 和 Transformers 的锁定版本保持不变。开发与验证应使用当前 Git worktree 根目录 `.venv/`，由本分支的 `uv.lock` 创建，不修改其他 worktree 的环境。
-
-## CUDA 执行优化
-
-预训练在 `model.json` 设置以下字段；动态训练在自己的训练配置中设置同名字段。动态阶段的 `reader_loss_backend` 控制本阶段读出计算，覆盖初始化 checkpoint 中的同名设置。
-
-| 字段 | 默认值 | 行为 |
-|---|---|---|
-| `optimizer_fused` | `false` | `true` 使用 PyTorch Fused AdamW，要求 CUDA |
-| `reader_loss_backend` | `"torch"` | `"liger_ce"` 仅融合 FP32 CE；`"liger_chunked"` 额外分块输出投影并重计算，均要求 Linux CUDA |
-
-`liger_chunked` 路径按 128 个目标 token 分块，不改变解码上下文、目标位置、EOS 和逐样本/逐读取 loss 权重；返回的仍是完整逐 token NLL。冻结的解码 backbone 仍保留到 memory 输入的梯度路径。当前采用 Liger 的 CrossEntropy 内核，未采用其原始 FusedLinearCrossEntropy 路径。Linux 依赖固定 `liger-kernel==0.8.2`，macOS 使用原生 CPU 验证路径。
-
-优化参数随原有配置和 checkpoint 保存。旧配置缺少新增字段时使用表中默认值；同一运行恢复时仍校验配置一致性。当前两个选项保持关闭，CUDA 对照结果见 [优化验证记录](../notes/v1/20260915_v1_cuda_optimizations.md)。
 
 ## 预训练 CPU 分词
 

@@ -42,13 +42,10 @@ class MemoryEngine(BaseEngine):
     every forward: episode/BPTT segment counts may differ between ranks.
     """
 
-    def __init__(self, model, device, learning_rate, weight_decay, gradient_clip, optimizer_fused=False):
+    def __init__(self, model, device, learning_rate, weight_decay, gradient_clip):
         self.model, self.device = model, torch.device(device)
-        if optimizer_fused and self.device.type != "cuda":
-            raise ValueError("optimizer_fused requires CUDA")
         self.optimizer_config = FSDPOptimizerConfig(
-            lr=learning_rate, weight_decay=weight_decay, clip_grad=gradient_clip,
-            override_optimizer_config={"fused": True} if optimizer_fused else None
+            lr=learning_rate, weight_decay=weight_decay, clip_grad=gradient_clip
         )
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
         self.rank = dist.get_rank() if dist.is_initialized() else 0

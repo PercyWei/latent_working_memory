@@ -26,8 +26,6 @@ class DynamicConfig:
     bptt_span: int = 0
     global_batch_size: int = 2
     qa_activation_checkpointing: bool = True
-    reader_loss_backend: str = "torch"
-    optimizer_fused: bool = False
     learning_rate: float = 0.00003
     weight_decay: float = 0.01
     gradient_clip: float = 1.0
@@ -41,10 +39,6 @@ class DynamicConfig:
     eval_reads_per_kind: int = 2
 
     def __post_init__(self):
-        if self.reader_loss_backend not in {"torch", "liger_ce", "liger_chunked"}:
-            raise ValueError("reader_loss_backend must be torch, liger_ce or liger_chunked")
-        if type(self.optimizer_fused) is not bool:
-            raise ValueError("optimizer_fused must be boolean")
         # JSON arrays have one canonical in-memory representation.
         for name in ("capacities", "ratios", "stage_ends"):
             object.__setattr__(self, name, tuple(getattr(self, name)))

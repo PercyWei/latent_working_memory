@@ -53,8 +53,6 @@ class ExperimentConfig:
     lm_weight: float = 1.0
     batch_size: int = 2
     gradient_accumulation_steps: int = 4
-    optimizer_fused: bool = False
-    reader_loss_backend: str = "torch"
     learning_rate: float = 0.0001
     warmup_steps: int = 0
     lr_decay_steps: int = 0
@@ -71,10 +69,6 @@ class ExperimentConfig:
     eval_generation_steps: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
-        if type(self.optimizer_fused) is not bool:
-            raise ValueError("optimizer_fused must be boolean")
-        if self.reader_loss_backend not in {"torch", "liger_ce", "liger_chunked"}:
-            raise ValueError("reader_loss_backend must be torch, liger_ce or liger_chunked")
         non_negative_ints = {
             "data_seed",
             "model_seed",

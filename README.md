@@ -35,7 +35,7 @@ uv run pytest
 
 第一版新方法位于 `src/latent_working_memory/v1/`，按阶段分为 [pretrain/](src/latent_working_memory/v1/pretrain/)、[dynamic/](src/latent_working_memory/v1/dynamic/) 和 [capacity/](src/latent_working_memory/v1/capacity/)。根层保存模型、状态、checkpoint、通用数据与损失、训练辅助函数、SwanLab 会话、图表和命令执行等跨阶段能力，不导入阶段模块。阶段内部直接保存训练、评估与各实验入口文件，实验形成多份专用模块后再考虑子目录。容量阶段目前包含资源代价和策略运行基础实现，尚无完整训练入口。
 
-v1 预训练、完整 BPTT 与 TBPTT 统一使用 verl 0.8.0 自定义 engine，当前多卡后端为 DDP。循环 memory 的计算图、截断边界和样本归一化由阶段实现管理，optimizer 生命周期由 verl engine 统一执行。配置、精度与恢复规则见 [v1 训练执行框架](configs/README.md#v1-训练执行框架)。
+v1 预训练、完整 BPTT 与 TBPTT 统一使用 verl 0.8.0 自定义 engine，当前多卡后端为 DDP。循环 memory 的计算图、截断边界和样本归一化由阶段实现管理，optimizer 生命周期由 verl engine 统一执行。配置、精度与恢复规则见 [v1 训练执行框架](configs/README.md#v1-训练执行框架)。重构验证结论见 [重构记录](notes/v1/20260915_verl_v1_refactor.md)。
 
 动态阶段使用 `python -m latent_working_memory.v1.dynamic.prepare` 准备实验，`python -m latent_working_memory.v1.dynamic.run train` 和 `evaluate` 执行训练与评估；QA 报告入口为 `latent_working_memory.v1.dynamic.reporting`。SQuAD 与 PersonaMem 的运行时读取器同属 `v1/dynamic/`。阶段重构仅改变源码与入口路径，既有配置字段、checkpoint、训练日志和数据格式保持一致；旧入口不保留转发层。
 

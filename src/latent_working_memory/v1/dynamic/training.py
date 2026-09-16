@@ -1,6 +1,5 @@
 """Memory trajectories and full/truncated backpropagation."""
 
-from dataclasses import replace
 import random
 
 import torch
@@ -126,8 +125,7 @@ class DynamicEngine(MemoryEngine):
     def __init__(self, model, device):
         recipe = model.recipe
         super().__init__(
-            model, device, recipe.learning_rate, recipe.weight_decay, recipe.gradient_clip,
-            recipe.optimizer_fused
+            model, device, recipe.learning_rate, recipe.weight_decay, recipe.gradient_clip
         )
         self.recipe = recipe
         self.model_config = model.model_config
@@ -218,9 +216,6 @@ class DynamicTrainer:
         self.backbone, self.writer = backbone, writer
         self.model_config, self.recipe = model_config, recipe
         self.device = initialize_device(device)
-        if recipe.reader_loss_backend != "torch" and self.device.type != "cuda":
-            raise ValueError("liger reader loss requires CUDA")
-        self.backbone.reader_loss_backend = recipe.reader_loss_backend
         self.engine = EngineRegistry.new(
             model_type="lwm_dynamic",
             backend="replicated",
@@ -252,8 +247,8 @@ class DynamicTrainer:
         return metrics
 
 
-def load_components(checkpoint, device, reader_loss_backend):
-    config = replace(checkpoint.config, reader_loss_backend=reader_loss_backend)
+def load_components(checkpoint, device):
+    config = checkpoint.config
     tokenizer, backbone = load_backbone(
         config, device, torch.bfloat16 if device.type == "cuda" else torch.float32
     )

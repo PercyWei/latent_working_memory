@@ -25,9 +25,7 @@ from transformers import (
 
 from latent_working_memory.v1.config import ExperimentConfig
 from latent_working_memory.v1.model import sinusoidal_positions
-from latent_working_memory.v1.objectives import (
-    ReaderOutput, gold_token_nll, chunked_linear_token_nll,
-)
+from latent_working_memory.v1.objectives import ReaderOutput, gold_token_nll
 
 
 BACKBONE_TRAINABLE_STATE_FIELDS = frozenset(
@@ -58,7 +56,6 @@ class LatentMemoryBackbone(nn.Module):
         lora_alpha: int,
         lora_target_modules: tuple[str, ...],
         lora_dropout: float,
-        reader_loss_backend: str = "torch",
     ) -> None:
         super().__init__()
         if type(bos_token_id) is not int or bos_token_id < 0:
@@ -67,12 +64,6 @@ class LatentMemoryBackbone(nn.Module):
             raise ValueError("eos_token_id must be a non-negative integer")
         if type(d_mem) is not int or d_mem <= 0:
             raise ValueError("d_mem must be a positive integer")
-
-        if reader_loss_backend not in {"torch", "liger_ce", "liger_chunked"}:
-            raise ValueError("reader_loss_backend must be torch, liger_ce or liger_chunked")
-        if reader_loss_backend != "torch" and next(base_model.parameters()).device.type != "cuda":
-            raise ValueError("liger reader loss requires CUDA")
-        self.reader_loss_backend = reader_loss_backend
 
         hidden_size = getattr(base_model.config, "hidden_size", None)
         max_positions = getattr(base_model.config, "max_position_embeddings", None)
@@ -201,17 +192,12 @@ class LatentMemoryBackbone(nn.Module):
                     for row, context, length in zip(hidden, contexts, target_lengths, strict=True)
                 ]
             )
+            target_logits = model.get_output_embeddings()(target_hidden)
             target_ids = torch.tensor(
                 [token for task in tokens for token in task.target_ids], device=device
             )
             # One unreduced CE for all valid targets; callers retain per-sample weighting.
-            head = model.get_output_embeddings()
-            if self.reader_loss_backend == "liger_chunked":
-                token_nll = chunked_linear_token_nll(
-                    target_hidden, head.weight, target_ids, bias=head.bias
-                )
-            else:
-                token_nll = gold_token_nll(head(target_hidden), target_ids, self.reader_loss_backend)
+            token_nll = gold_token_nll(target_logits, target_ids)
         return [ReaderOutput(values) for values in token_nll.split(target_lengths)]
 
     def greedy_students(
@@ -382,7 +368,6 @@ def load_backbone(
         lora_alpha=config.reader_lora_alpha,
         lora_target_modules=config.reader_lora_target_modules,
         lora_dropout=config.reader_lora_dropout,
-        reader_loss_backend=config.reader_loss_backend,
     )
     if config.cache_text_features:
         backbone.text_feature_cache = {}

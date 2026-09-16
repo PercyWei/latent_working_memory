@@ -48,7 +48,7 @@ def main():
             gradient_checkpointing=False,
         ),
     )
-    tokenizer, backbone, writer, _ = load_components(checkpoint, device, recipe.reader_loss_backend)
+    tokenizer, backbone, writer, _ = load_components(checkpoint, device)
     data = SquadDataset(args.dataset_dir, tokenizer)
     if args.capacity not in recipe.capacities:
         raise ValueError("profile capacity must be in the recipe")

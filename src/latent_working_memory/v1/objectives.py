@@ -1,15 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import sys
 
 import torch
 import torch.nn.functional as functional
 from torch import Tensor
-from torch.utils.checkpoint import checkpoint
-
-if sys.platform == "linux":
-    from liger_kernel.transformers.functional import liger_cross_entropy
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,31 +24,9 @@ class ReaderOutput:
         return self.token_nll.mean()
 
 
-def gold_token_nll(target_logits: Tensor, target_ids: Tensor, backend="torch") -> Tensor:
+def gold_token_nll(target_logits: Tensor, target_ids: Tensor) -> Tensor:
     _validate_target_pair(target_logits, target_ids)
-    if backend == "torch":
-        return functional.cross_entropy(target_logits.float(), target_ids, reduction="none")
-    return liger_cross_entropy(target_logits.float(), target_ids, reduction="none")
-
-
-def _linear_loss_chunk(hidden, weight, target, bias):
-    # Keep CE and its upstream sample/read weights in FP32 before casting the
-    # logits gradient back to the projection dtype, as in gold_token_nll.
-    logits = functional.linear(hidden, weight, bias)
-    return gold_token_nll(logits, target, "liger_ce")
-
-
-def chunked_linear_token_nll(hidden, weight, targets, bias=None, chunk_size=128):
-    """Bound vocabulary activations with recomputed chunks and fused FP32 CE."""
-    if hidden.device.type != "cuda":
-        raise ValueError("liger reader loss requires CUDA")
-    losses = []
-    for start in range(0, len(targets), chunk_size):
-        args = (hidden[start:start + chunk_size], weight, targets[start:start + chunk_size], bias)
-        loss = (checkpoint(_linear_loss_chunk, *args, use_reentrant=False)
-                if torch.is_grad_enabled() else _linear_loss_chunk(*args))
-        losses.append(loss)
-    return torch.cat(losses)
+    return functional.cross_entropy(target_logits.float(), target_ids, reduction="none")
 
 
 def teacher_student_kl(
