@@ -23,6 +23,7 @@ from latent_working_memory.v1.data import Episode, Read, Reference, Source
 from latent_working_memory.v1.dynamic.run import run_dynamic, main
 from latent_working_memory.v1.dynamic.config import DynamicConfig
 from latent_working_memory.v1.dynamic.training import DynamicTrainer, read_schedule
+from dynamic_reference import ReferenceDynamicTrainer
 from latent_working_memory.v1.dynamic.evaluation import answer_scores, evaluate_qa, aggregate_qa
 from latent_working_memory.v1.dynamic.reporting import qa_media, log_qa, main as publish_qa
 from latent_working_memory.v1.dynamic.data import (
@@ -459,9 +460,12 @@ def test_run_resume_across_micro_epochs_and_final_test(
         lambda run, metrics, rows, step, *args, **kwargs: published_steps.append(step),
     )
     full = run_dynamic(initial, tmp_path / "full", recipe, torch.device("cpu"), **opts)
-    first = run_dynamic(
-        initial, tmp_path / "resume", recipe, torch.device("cpu"), steps=3, **opts
-    )
+    # Continue a checkpoint produced by the original recurrent optimizer loop.
+    with monkeypatch.context() as patch:
+        patch.setattr("latent_working_memory.v1.dynamic.run.DynamicTrainer", ReferenceDynamicTrainer)
+        first = run_dynamic(
+            initial, tmp_path / "resume", recipe, torch.device("cpu"), steps=3, **opts
+        )
     resumed = run_dynamic(
         first, tmp_path / "resume", recipe, torch.device("cpu"), resume=True, **opts
     )

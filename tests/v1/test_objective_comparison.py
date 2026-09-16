@@ -276,7 +276,7 @@ def test_warmup_complete_training_keeps_optimizer_and_resolves_final_checkpoint(
     resumed_out = tmp_path / "warmup-resumed"
     boundary = json.loads((out / "epoch-plan.json").read_text())[0]["steps"]
     # A pre-Accelerate checkpoint can continue with the unchanged canonical state.
-    def legacy_trainer(config, backbone, writer, device, accelerator):
+    def legacy_trainer(config, backbone, writer, device):
         return LegacyPretrainTrainer(config, backbone, writer, device)
 
     with monkeypatch.context() as patch:

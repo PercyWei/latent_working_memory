@@ -11,11 +11,11 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from accelerate import Accelerator
-from accelerate.utils import gather_object
+import torch.distributed as dist
 from torch import Tensor
 
 from latent_working_memory.v1.training import (
+    precision_context,
     trainable_model_state,
     load_trainable_model_state,
 )
@@ -28,7 +28,9 @@ from latent_working_memory.v1.checkpoint import (
 )
 from latent_working_memory.v1.config import ExperimentConfig, write_resolved_config
 from latent_working_memory.v1.pretrain.data_selection import select_experiment, selection_metadata
-from latent_working_memory.v1.pretrain.runtime import pretraining_accelerator
+from latent_working_memory.v1.engine import MemoryEngine, EngineRegistry, initialize_device
+from tensordict import TensorDict
+from verl.utils.tensordict_utils import assign_non_tensor, get_non_tensor_data
 from latent_working_memory.v1.pretrain.evaluation import evaluate_pretraining
 from latent_working_memory.v1.model import GrowthValueNetwork, JointMemoryWriter
 from latent_working_memory.v1.objectives import ReaderOutput
@@ -96,64 +98,49 @@ def pretrain_forward(
 
 
 class PretrainModel(torch.nn.Module):
-    """Own the complete differentiable write/read path for Accelerate wrapping."""
-
     def __init__(self, config, backbone, writer):
         super().__init__()
         self.config, self.backbone, self.writer = config, backbone, writer
+
+    def trainable_parameters(self):
+        yield from self.backbone.trainable_parameters()
+        yield from self.writer.parameters()
 
     def forward(self, examples, sample_count):
         return pretrain_forward(self.config, self.backbone, self.writer, examples, sample_count)
 
 
-class PretrainTrainer:
-    def __init__(
-        self,
-        config: ExperimentConfig,
-        backbone: LatentMemoryBackbone,
-        writer: JointMemoryWriter,
-        device: torch.device,
-        accelerator: Accelerator | None = None,
-    ) -> None:
-        self.accelerator = accelerator if accelerator is not None else pretraining_accelerator(device)
-        self.config, self.backbone, self.writer = config, backbone, writer
-        self.device = self.accelerator.device
-        self.parameters = list(backbone.trainable_parameters()) + list(writer.parameters())
-        self.optimizer = torch.optim.AdamW(
-            self.parameters, lr=config.learning_rate, weight_decay=config.weight_decay
+@EngineRegistry.register(model_type="lwm_pretrain", backend="replicated", device=["cpu", "cuda"])
+class PretrainEngine(MemoryEngine):
+    def __init__(self, model, device):
+        config = model.config
+        super().__init__(
+            model, device, config.learning_rate, config.weight_decay, config.gradient_clip
         )
-        self.model, self.optimizer = self.accelerator.prepare(
-            PretrainModel(config, backbone, writer), self.optimizer
-        )
+        self.config = config
 
-    def step(self, examples: list[PretrainExample]) -> dict[str, Any]:
+    def forward_backward_batch(self, data, loss_function, forward_only=False):
+        examples = get_non_tensor_data(data, "examples", None)
         if not examples:
             raise ValueError("a training step requires examples")
-        self.backbone.train()
-        self.writer.train()
-        self.optimizer.zero_grad(set_to_none=True)
         # Sorting changes only microbatch grouping, preserving the sampled document weights.
         ordered = sorted(
             examples,
             key=lambda e: max(e.input_length, len(e.lm.target_ids) if e.lm else 0) + e.capacity,
         )
         sample_count = round(sum(e.loss_weight for e in examples))
-        world_size = self.accelerator.num_processes
-        if len(ordered) < world_size:
-            raise ValueError("a global training batch must supply at least one read per rank")
-        ordered = ordered[self.accelerator.process_index :: world_size]
+        if len(ordered) < self.world_size:
+            raise ValueError("a global batch must supply at least one read per rank")
+        ordered = ordered[self.rank :: self.world_size]
         records, loss_value = [], 0.0
         for start in range(0, len(ordered), self.config.batch_size):
             batch = ordered[start : start + self.config.batch_size]
-            final_microbatch = start + self.config.batch_size >= len(ordered)
-            sync_context = nullcontext() if final_microbatch else self.accelerator.no_sync(self.model)
-            # Every rank synchronizes once, even when capacity expansion produces
-            # different microbatch counts. Keep the original backward loss scale;
-            # undo DDP's averaging on parameter gradients before clipping.
-            with sync_context:
-                with self.accelerator.autocast():
-                    output = self.model(batch, sample_count)
-                self.accelerator.backward(output.loss)
+            final = start + self.config.batch_size >= len(ordered)
+            with self.gradient_context(synchronize=final):
+                with self.autocast():
+                    output = self.module(batch, sample_count)
+                if not forward_only:
+                    output.loss.backward()
             loss_value += float(output.loss.detach())
             for example, ae, lm in zip(batch, output.ae, output.lm, strict=True):
                 source = example.episode.sources[0]
@@ -180,35 +167,51 @@ class PretrainTrainer:
                     }
                 )
             del output, ae, lm
-        if world_size > 1:
-            for parameter in self.parameters:
-                if parameter.grad is not None:
-                    parameter.grad.mul_(world_size)
-            loss_value = self.accelerator.reduce(
-                torch.tensor(loss_value, device=self.device), reduction="sum"
-            ).item()
-        records = gather_object(records)
-        grad_norm = self.accelerator.clip_grad_norm_(
-            self.parameters,
-            self.config.gradient_clip,
-        )
-        if not torch.isfinite(grad_norm):
-            raise RuntimeError("the total gradient norm is non-finite")
-        self.optimizer.step()
+        if self.world_size > 1:
+            loss_tensor = torch.tensor(loss_value, device=self.device)
+            dist.all_reduce(loss_tensor)
+            loss_value = loss_tensor.item()
+            rank_records = [None] * dist.get_world_size()
+            dist.all_gather_object(rank_records, records)
+            records = [row for rows in rank_records for row in rows]
         return {
-            "loss": loss_value,
-            "gradient_norm": float(grad_norm),
-            "samples": records,
-            "input_length_bounds": sorted(
-                {*self.config.input_length_bounds, self.config.max_input_tokens}
-            ),
-            "input_tokens": sum(e.input_length for e in examples),
-            "sample_visits": sample_count,
-            "capacity_reads": len(examples),
-            "target_tokens": sum(
-                len(e.ae.target_ids if e.ae else e.lm.target_ids) for e in examples
-            ),
+            "metrics": {
+                "loss": loss_value,
+                "samples": records,
+                "input_length_bounds": sorted(
+                    {*self.config.input_length_bounds, self.config.max_input_tokens}
+                ),
+                "input_tokens": sum(e.input_length for e in examples),
+                "sample_visits": sample_count,
+                "capacity_reads": len(examples),
+                "target_tokens": sum(
+                    len(e.ae.target_ids if e.ae else e.lm.target_ids) for e in examples
+                ),
+            }
         }
+
+
+class PretrainTrainer:
+    def __init__(self, config, backbone, writer, device):
+        self.config, self.backbone, self.writer = config, backbone, writer
+        self.device = initialize_device(device)
+        self.engine = EngineRegistry.new(
+            model_type="lwm_pretrain",
+            backend="replicated",
+            model=PretrainModel(config, backbone, writer),
+            device=self.device,
+        )
+        self.engine.initialize()
+        self.parameters, self.optimizer = self.engine.parameters, self.engine.optimizer
+        self.model = self.engine.module
+
+    def step(self, examples):
+        data = TensorDict({}, batch_size=[])
+        assign_non_tensor(data, examples=tuple(examples))
+        with self.engine.train_mode():
+            metrics = self.engine.train_batch(data, loss_function=None)["metrics"]
+        metrics["gradient_norm"] = metrics.pop("grad_norm")
+        return metrics
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +239,10 @@ def run_pretraining(
     tokenization_batch_size: int = 256,
     prefetch_batches: int = 2,
 ) -> PretrainRunResult:
+    device = initialize_device(device)
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    primary = rank == 0
     if type(epochs) is not int or epochs <= 0 or save_every <= 0:
         raise ValueError("epochs and save_every must be positive")
     if max_samples_per_epoch is not None and (
@@ -246,11 +253,6 @@ def run_pretraining(
         raise ValueError("stop_after_steps must be positive")
     if output_dir.exists() and resume is None:
         raise FileExistsError("use a new output directory or resume an existing run")
-    accelerator = pretraining_accelerator(device)
-    device = accelerator.device
-    world_size, rank, primary = (
-        accelerator.num_processes, accelerator.process_index, accelerator.is_main_process
-    )
     random.seed(config.model_seed)
     torch.manual_seed(config.model_seed)
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
@@ -287,7 +289,7 @@ def run_pretraining(
         ).to(device)
         value = GrowthValueNetwork(config.d_mem).to(device)
         value.requires_grad_(False)
-        trainer = PretrainTrainer(config, backbone, writer, device, accelerator)
+        trainer = PretrainTrainer(config, backbone, writer, device)
         batch_size = config.batch_size * config.gradient_accumulation_steps * world_size
         sampler = EpochSampler(
             train_index,
@@ -333,9 +335,8 @@ def run_pretraining(
             if max_steps <= next_step:
                 raise ValueError("max_steps must exceed the resumed completed step count")
             restore_rng_state(checkpoint.progress["rank_rng_states"][rank])
-        # Bind synchronization to the actual device. Numeric barrier device IDs
-        # otherwise dispatch CPU/Gloo validation to MPS on macOS with PyTorch 2.14.
-        accelerator.reduce(torch.zeros((), device=device), reduction="sum")
+        if world_size > 1:
+            dist.barrier()
         output_dir.mkdir(parents=True, exist_ok=True)
         if primary:
             (output_dir / "epoch-plan.json").write_text(
@@ -349,11 +350,7 @@ def run_pretraining(
                     {
                         "preparation": metadata,
                         "torch": torch.__version__,
-                        "execution": {
-                            "framework": "accelerate",
-                            "distributed_type": accelerator.distributed_type.value,
-                            "mixed_precision": accelerator.mixed_precision,
-                        },
+                        "execution": {"framework": "verl", "backend": "replicated"},
                         "device": str(device),
                         "model_dtype": str(dtype),
                         "run_identity": run_identity,
@@ -395,12 +392,13 @@ def run_pretraining(
             def evaluate_sets(step):
                 # Each GPU evaluates one source; rank zero publishes the combined reports.
                 results = {}
-                accelerator.reduce(torch.zeros((), device=device), reduction="sum")
+                if world_size > 1:
+                    dist.barrier()
                 for number, (name, index) in enumerate(dev_indices.items()):
                     if number % world_size != rank:
                         continue
                     destination = output_dir if name == "dev" else output_dir / name
-                    with accelerator.autocast():
+                    with precision_context(device):
                         results[name] = evaluate_pretraining(
                             config,
                             tokenizer,
@@ -411,7 +409,10 @@ def run_pretraining(
                             step,
                             input_tokens,
                         )
-                results = {k: v for item in gather_object([results]) for k, v in item.items()}
+                if world_size > 1:
+                    gathered = [None] * world_size
+                    dist.all_gather_object(gathered, results)
+                    results = {k: v for item in gathered for k, v in item.items()}
                 if primary:
                     records_paths = {
                         name: (output_dir if name == "dev" else output_dir / name)
@@ -419,7 +420,8 @@ def run_pretraining(
                         for name in dev_indices
                     }
                     log_evaluation(tracking, results, records_paths, step)
-                accelerator.reduce(torch.zeros((), device=device), reduction="sum")
+                if world_size > 1:
+                    dist.barrier()
                 return results["dev"] if list(results) == ["dev"] else results
 
             if next_step == 0:
@@ -458,7 +460,8 @@ def run_pretraining(
                     resources = torch.tensor(
                         [elapsed, peak_memory], dtype=torch.float64, device=device
                     )
-                    elapsed, peak_memory = accelerator.reduce(resources, reduction="max").tolist()
+                    dist.all_reduce(resources, op=dist.ReduceOp.MAX)
+                    elapsed, peak_memory = resources.tolist()
                 result.update(
                     step=step + 1,
                     seconds=elapsed,
@@ -478,7 +481,10 @@ def run_pretraining(
                     or sampler.cursor == len(sampler.order)
                 ):
                     path = checkpoint_dir / f"pretrain-step-{step + 1:06d}.pt"
-                    rank_rng_states = gather_object([capture_rng_state()])
+                    rank_rng_states = [capture_rng_state()]
+                    if world_size > 1:
+                        rank_rng_states = [None] * world_size
+                        dist.all_gather_object(rank_rng_states, capture_rng_state())
                     if primary:
                         save_model_checkpoint(
                             path,
