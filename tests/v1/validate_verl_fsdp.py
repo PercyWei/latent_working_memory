@@ -126,6 +126,9 @@ def main():
     parser.add_argument("--config", type=Path)
     parser.add_argument("--precision", choices=("fp32", "bf16"), default="fp32")
     parser.add_argument(
+        "--reshard-after-forward", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument(
         "--align-second-step",
         action="store_true",
         help="Diagnostic: start the second native step from the exact DDP model/optimizer state",
@@ -202,7 +205,7 @@ def main():
         use_dynamic_bsz=False,
         use_remove_padding=False,
         use_torch_compile=False,
-        reshard_after_forward=True,
+        reshard_after_forward=args.reshard_after_forward,
         mixed_precision={"param_dtype": args.precision, "reduce_dtype": "fp32"},
         wrap_policy={
             "transformer_layer_cls_to_wrap": initial.backbone.language_model.get_base_model()._no_split_modules
@@ -349,6 +352,7 @@ def main():
                 "errors": errors,
                 "precision": args.precision,
                 "second_step_aligned": args.align_second_step,
+                "reshard_after_forward": args.reshard_after_forward,
                 "steps": rows,
                 "resume_exact": not any(e["check"].startswith("resume/") for e in errors),
                 "evaluation_nll": eval_results,

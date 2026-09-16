@@ -12,7 +12,6 @@ import torch
 import torch.distributed as dist
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
-    get_model_state_dict,
     get_optimizer_state_dict,
     set_model_state_dict,
     set_optimizer_state_dict,
@@ -21,6 +20,7 @@ from torch.utils._pytree import register_dataclass
 from tensordict import TensorDict
 from verl.trainer.config import CheckpointConfig
 from verl.utils.tensordict_utils import assign_non_tensor, get_non_tensor_data
+from verl.utils.fsdp_utils import get_fsdp_full_state_dict
 from verl.workers.config import FSDPOptimizerConfig
 from verl.workers.config.optimizer import build_optimizer
 from verl.workers.engine import EngineRegistry
@@ -130,10 +130,12 @@ class PretrainFSDPEngine(FSDPEngine):
         return norm
 
     def canonical_state(self, value_network):
-        options = StateDictOptions(
-            full_state_dict=True, cpu_offload=True, ignore_frozen_params=True
-        )
-        state = get_model_state_dict(self.module, options=options)
+        # PEFT can toggle the visible FSDP parameter's requires_grad separately
+        # from its sharded counterpart. The optimizer's initialization contract
+        # determines what must be saved, not those transient flags.
+        options = StateDictOptions(full_state_dict=True, cpu_offload=True)
+        state = get_fsdp_full_state_dict(self.module)
+        state = {name: state[name] for name in self.parameter_names}
         optimizer = get_optimizer_state_dict(self.module, self.optimizer, options=options)
         if dist.get_rank() != 0:
             return None
