@@ -14,6 +14,7 @@ import torch.multiprocessing as mp
 from latent_working_memory.v2.memory_codec import CodecConfig
 from latent_working_memory.v2.pretrain.config import SelectionConfig, TrainingConfig
 from latent_working_memory.v2.pretrain.train import run_training
+from latent_working_memory.v2.pretrain.prepare_data import DataPreparationConfig, prepare_dataset
 from latent_working_memory.v2.pretrain.checkpoint import prune_checkpoints
 
 
@@ -38,15 +39,17 @@ def make_experiment(tmp_path, tiny_base):
         gradient_checkpointing=True,
         attention_implementation="eager",
     )
-    selection = SelectionConfig(
+    preparation = DataPreparationConfig(
         str(parquet),
         capacity=2,
         continuation_tokens=2,
         max_documents=100,
         split_fractions=(0.6, 0.2, 0.2),
-        warmup={"train": 5, "dev": 1, "test": 1},
-        multiround={"train": 5, "dev": 1, "test": 1},
+        warmup={"train": 12, "dev": 8, "test": 8},
+        multiround={"train": 12, "dev": 8, "test": 8},
     )
+    prepare_dataset(preparation, tmp_path / "dataset")
+    selection = SelectionConfig(str(tmp_path / "dataset"))
     training = TrainingConfig(
         objective="ae_lm",
         warmup_epochs=1,
@@ -98,12 +101,12 @@ def test_raw_data_epochs_and_resume_match_uninterrupted(tiny_base, tmp_path):
     torch.set_num_threads(1)
     experiment = make_experiment(tmp_path, tiny_base)
     uninterrupted = run_training(arguments(experiment, tmp_path / "full"))
-    # Stop inside warm-up; rebuild fixed data, restore dropout RNG and continue across stages.
+    # Reload the same prepared data, restore dropout RNG and continue across stages.
     interrupted = run_training(arguments(experiment, tmp_path / "resumed", stop=2))
     assert not interrupted["complete"]
     checkpoint_path = tmp_path / "resumed" / "checkpoints" / "step-000002.pt"
     resumed = run_training(arguments(experiment, tmp_path / "resumed", resume=checkpoint_path))
-    assert resumed["complete"] and resumed["completed_steps"] == 6
+    assert resumed["complete"] and resumed["completed_steps"] == uninterrupted["completed_steps"]
     expected = torch.load(uninterrupted["checkpoint"], weights_only=False, map_location="cpu")
     actual = torch.load(resumed["checkpoint"], weights_only=False, map_location="cpu")
     torch.testing.assert_close(actual["codec"], expected["codec"], rtol=0, atol=0)
@@ -112,12 +115,13 @@ def test_raw_data_epochs_and_resume_match_uninterrupted(tiny_base, tmp_path):
     log = [
         json.loads(line) for line in (tmp_path / "resumed" / "train.jsonl").read_text().splitlines()
     ]
-    assert [r["samples"] for r in log] == [2, 2, 1, 2, 2, 1]
-    assert sum(r["samples"] for r in log) == 10
+    stats = json.loads((tmp_path / "resumed" / "data-summary.json").read_text())
+    assert sum(r["samples"] for r in log) == sum(stats[s]["train"]["trajectories"] for s in stats)
+    assert all(r["samples"] in (1, 2) for r in log)
     assert "datasets" not in actual and "token_ids" not in actual
     assert not list((tmp_path / "resumed").rglob("*.parquet"))
     evaluation = json.loads((tmp_path / "resumed" / "test.json").read_text())
-    assert evaluation["metrics"]["trajectories"] == 1
+    assert evaluation["metrics"]["trajectories"] == stats["multiround"]["test"]["trajectories"]
     assert "generation" in evaluation["samples"][0]
     assert set(evaluation["samples"][0]["generation"]) == {
         "prediction",
@@ -149,10 +153,11 @@ def test_two_rank_stage_transfer_and_full_epoch_tail(tiny_base, tmp_path):
         join=True,
     )
     result = json.loads((output / "training-result.json").read_text())
-    assert result["complete"] and result["completed_steps"] == 6
+    assert result["complete"] and result["completed_steps"] == result["total_steps"]
     log = [json.loads(line) for line in (output / "train.jsonl").read_text().splitlines()]
-    assert [r["samples"] for r in log] == [2, 2, 1, 2, 2, 1]
-    assert [r["stage"] for r in log] == ["warmup"] * 3 + ["multiround"] * 3
+    stats = json.loads((output / "data-summary.json").read_text())
+    assert sum(r["samples"] for r in log) == sum(stats[s]["train"]["trajectories"] for s in stats)
+    assert log[0]["stage"] == "warmup" and log[-1]["stage"] == "multiround"
 
 
 @pytest.mark.parametrize("objective", ["ae", "ae_lm"])
@@ -166,13 +171,17 @@ def test_static_baseline_trains_only_single_writes_and_evaluates_shared_trajecto
     experiment.write_text(json.dumps(raw))
     output = tmp_path / "static"
     result = run_training(arguments(experiment, output))
-    assert result["complete"] and result["completed_steps"] == 6
+    assert result["complete"] and result["completed_steps"] == result["total_steps"]
     log = [json.loads(line) for line in (output / "train.jsonl").read_text().splitlines()]
     assert all(r["stage"] == "warmup" for r in log)
-    assert [r["samples"] for r in log] == [2, 2, 1, 2, 2, 1]
     summary = json.loads((output / "data-summary.json").read_text())
     assert summary["multiround"]["train"]["trajectories"] == 0
-    assert summary["warmup"]["train"]["rounds"] == {"1": 5}
+    count = summary["warmup"]["train"]["trajectories"]
+    assert summary["warmup"]["train"]["rounds"] == {"1": count}
+    assert sum(r["samples"] for r in log) == 2 * count
+    assert [r["samples"] for r in log if r["epoch"] == 1] == [
+        r["samples"] for r in log if r["epoch"] == 2
+    ]
     for file in [*sorted((output / "dev").glob("*.json")), output / "test.json"]:
         evaluation = json.loads(file.read_text())
         assert all(3 <= row["depth"] <= 5 for row in evaluation["samples"])

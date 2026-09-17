@@ -12,7 +12,8 @@
 
 | 文件 | 职责 |
 |---|---|
-| `pretrain/data.py` | 从原始 FineWeb Parquet 选样，一次构造各阶段的内存数据集 |
+| `pretrain/prepare_data.py` | 无 tokenizer 的独立构造，保存一份共享正文及两套字符索引 |
+| `pretrain/data.py` | 读取已保存数据，启动时分词和按真实长度筛选，epoch 复用 |
 | `pretrain/objective.py` | 每次写入后的累计历史 AE 与紧邻续文 LM，完整跨压缩步骤反向传播 |
 | `pretrain/engine.py` | verl BaseEngine＋PyTorch DDP，沿用 v1 replicated engine 的执行方式 |
 | `pretrain/train.py` | 固定 epoch、阶段切换、保存与恢复 |
@@ -20,11 +21,18 @@
 | `pretrain/evaluation.py` | 各次压缩后的损失、一次压缩对照、最终自由重构 |
 | `pretrain/checkpoint.py` | 可变权重、optimizer、游标与各 rank RNG，不保存数据集 |
 
-数据仅在启动时构造；每个 epoch 完整遍历当前阶段的全部样本，只打乱顺序。六组共用相同的多次压缩 dev/test；静态 baseline 不构造多次压缩训练数据。warm-up 的原文长度为 `[2K,8K]`，多次压缩轨迹为 3～5 次写入、每段 `[K,3K]`、总长不超过 8K。AE 与 LM 分别读取当前记忆；每项先对目标 tokens 平均，再按压缩次数和轨迹平均。
+数据先独立构造并保存：`documents.jsonl` 中每篇原文只写一次，`single/` 与 `multi/` 各自保存 train/dev/test 字符索引。构造沿用 v1 质量过滤、去重和来源划分，长度按字符数除以 4 估算，无需 tokenizer。训练启动后按当前 tokenizer 分词并筛选一次，各 epoch 完整复用保留样本。六组共用 multi dev/test；静态 baseline 不加载 multi 训练数据。真实单次输入为 `[2K,8K]`；多次为 3～5 段、每段 `[K,3K]`、总长不超过 8K；续文不足 Q 或超出模型窗口的样本也排除，AE／AE＋LM 使用相同筛选。候选数与排除原因写入 `data-filtering.json`，训练步数按保留数量计算。
+
+```bash
+uv run --frozen python -m latent_working_memory.v2.pretrain.prepare_data \
+  --config configs/data_preparation/fineweb-reconstruction-k512-doc100k.json \
+  --output-dir data/fineweb-reconstruction-k512-doc100k_20260917
+```
+
 
 训练后端依赖 `verl==0.8.0`，复用 `codex/verl-v1@e0bfa37` 中经过收敛的 replicated 方案。它是项目对 verl 的 DDP engine 扩展，不使用旧 FSDP2 实验实现。尾批保留全部真实样本；空 rank 执行零权重占位计算参与同步，不增加样本计数。CUDA 采用 BF16 autocast、FP32 可训练权重，CPU 验证采用 FP32。
 
-六份可执行起点配置位于 `configs/v2/pretrain/qwen3-4b_pooling_*`，包含 AE／AE＋LM × warm-up／直接多次压缩四组主实验，以及 `ae-static`、`ae-lm-static` 两组全程单次压缩 baseline。本次六组均使用基础 pooling。默认完整 Encoder（`encoder_layers: null`）、K=512、Q=512、全局 batch=8、学习率 1e-4；两阶段各 32000 条训练轨迹，warm-up 组为 1＋2 epochs，直接多次压缩组为 3 epochs，静态 baseline 为单次压缩 3 epochs，因此预算均为 12000 steps。模型名沿用已有 Qwen3 配置；真实数据路径、基座 revision 与超参数需按实际实验确定。
+六份可执行起点配置位于 `configs/v2/pretrain/qwen3-4b_pooling_*`，包含 AE／AE＋LM × warm-up／直接多次压缩四组主实验，以及 `ae-static`、`ae-lm-static` 两组全程单次压缩 baseline。本次六组均使用基础 pooling。默认完整 Encoder（`encoder_layers: null`）、K=512、Q=512、全局 batch=8、学习率 1e-4；两阶段各 32000 条候选训练轨迹，warm-up 组为 1＋2 epochs，直接多次压缩组为 3 epochs，静态 baseline 为单次压缩 3 epochs，实际 optimizer steps 按筛选后的样本数计算。模型名沿用已有 Qwen3 配置；真实数据路径、基座 revision 与超参数需按实际实验确定。
 
 ```bash
 uv sync --frozen
@@ -36,11 +44,11 @@ CUDA_VISIBLE_DEVICES=4,5 uv run --frozen python -m torch.distributed.run \
   --swanlab-tag study:reconstruction
 ```
 
-`experiment.json` 引用同目录的 `model.json`、`selection.json`；数据 glob 相对于项目根目录。修改 `compression` 可运行其他压缩版本。SwanLab 默认 online，要求显式传入 `--swanlab-group <实验组>`，使用用户指定的 `latent-working-memory-v2` project；工程测试可选择 offline／disabled。Run 名称取输出目录名，同一训练的 dev／test 追加到同一 run，恢复沿用 run ID。模型、超参数与解析后的真实层数进入 config，固定 tags 标记 scope、method、data，study 标签由启动参数指定。
+`experiment.json` 引用同目录的 `model.json`、`selection.json`；`selection.json` 只引用已构造的 `dataset_dir`，相对于主仓库根目录。来源与候选配额单独配置在 `configs/data_preparation/`。修改 `compression` 可运行其他压缩版本。SwanLab 默认 online，要求显式传入 `--swanlab-group <实验组>`，使用用户指定的 `latent-working-memory-v2` project；工程测试可选择 offline／disabled。Run 名称取输出目录名，同一训练的 dev／test 追加到同一 run，恢复沿用 run ID。模型、超参数与解析后的真实层数进入 config，固定 tags 标记 scope、method、data，study 标签由启动参数指定。
 
 warm-up 结束后复制已训练的读取对齐初始化写入对齐，重建 AdamW；直接多次压缩时两端从同一预训练 LSA 独立初始化。单次压缩 checkpoint 进行多次压缩评估时，临时以已训练 Ar 参数作为 Aw，评估后恢复；多次压缩 checkpoint 使用训练后的 Aw。各阶段使用固定学习率，训练预算以完整 epochs 配置。Ar、Aw 各自是预训练 block 0＋最终 norm 的独立副本，与共享基座不共享权重。只加载一次完整基座，然后直接复制对齐所需层；对齐骨架在 meta device 上构造，不分配真实词表层或 LM head。只训练对齐 blocks，最终 norm 冻结。编码／读取使用完整调用 checkpoint，适配器选择在重计算时重新执行。单设备可直接运行该模块；CPU 验证添加 `--device cpu`。
 
-中断续训使用相同配置、输出目录和 world size，添加 `--resume <output-dir>/checkpoints/step-XXXXXX.pt`。`--stop-after-steps N` 仅截短本次执行，不改变总预算。启动时按固定 seed 重建数据，随后恢复权重、optimizer、epoch／batch 游标及 RNG；阶段数据随机数与顺序打乱相互独立。
+中断续训使用相同配置、输出目录和 world size，添加 `--resume <output-dir>/checkpoints/step-XXXXXX.pt`。`--stop-after-steps N` 仅截短本次执行，不改变总预算。启动时读取同一构造身份并重新进行确定性的分词、筛选，随后恢复权重、optimizer、epoch／batch 游标及 RNG；阶段数据随机数与顺序打乱相互独立。
 
 产物包含 `run.json`、`provenance.json`、`data-summary.json`、`epoch-plan.json`、训练日志、checkpoint、dev／test 结果和 `training-result.json`。`checkpoint_limit=2` 保留最近两份 checkpoint，并额外保留单次压缩训练结束和完整训练结束的 checkpoint。只有完成全部 epochs 才生成最终 test。AE 与 LM 分别记录各次压缩后的 NLL，包含最后一次压缩，不另列最终 NLL；同时保留 AE／LM 各自的轨迹平均 NLL、一次压缩 NLL 和配对差值。AE 最后一次压缩后的自由重构使用完整 token 序列 EM（`generation/final_round_exact_match`），另记录生成触顶比例与样本数。
 

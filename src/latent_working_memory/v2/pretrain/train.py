@@ -13,7 +13,7 @@ import time
 
 import torch
 import torch.distributed as dist
-from transformers import AutoTokenizer, set_seed
+from transformers import AutoConfig, AutoTokenizer, set_seed
 
 from latent_working_memory.v2.memory_codec import CodecConfig, MemoryCodec
 from latent_working_memory.v2.pretrain.checkpoint import (
@@ -24,10 +24,9 @@ from latent_working_memory.v2.pretrain.checkpoint import (
 )
 from latent_working_memory.v2.pretrain.config import SelectionConfig, TrainingConfig
 from latent_working_memory.v2.pretrain.data import (
-    build_datasets,
+    load_datasets,
     dataset_statistics,
     epoch_batches,
-    load_documents,
 )
 from latent_working_memory.v2.pretrain.engine import EngineRegistry, initialize_device
 from latent_working_memory.v2.pretrain.evaluation import evaluate
@@ -85,12 +84,13 @@ def run_training(args):
     )
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
-    print(f"rank {rank}: building fixed in-memory datasets", flush=True)
-    documents = load_documents(selection, tokenizer)
-    datasets = build_datasets(
-        documents, selection, config.warmup_epochs > 0, config.multiround_epochs > 0
+    print(f"rank {rank}: loading and filtering prepared datasets", flush=True)
+    base_config = AutoConfig.from_pretrained(
+        model_config.model_name_or_path, revision=model_config.revision
     )
-    del documents
+    datasets, preparation, filtering = load_datasets(
+        selection, tokenizer, base_config.max_position_embeddings, config
+    )
     task = ReconstructionTask(
         MemoryCodec(model_config, torch.bfloat16 if device.type == "cuda" else torch.float32),
         tokenizer,
@@ -113,6 +113,7 @@ def run_training(args):
             {
                 "model": asdict(model_config),
                 "selection": asdict(selection),
+                "data_preparation": preparation,
                 "training": asdict(config),
                 "world_size": world,
                 "precision": "bf16" if device.type == "cuda" else "fp32",
@@ -158,6 +159,7 @@ def run_training(args):
         output.mkdir(parents=True, exist_ok=True)
         write_json(output / "run.json", run)
         write_json(output / "data-summary.json", dataset_statistics(datasets))
+        write_json(output / "data-filtering.json", filtering)
         write_json(
             output / "epoch-plan.json",
             {

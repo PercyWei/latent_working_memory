@@ -1,7 +1,7 @@
 # 20260914_配置组织规则
 
 创建时间：20260914 11:48:20 UTC+08:00
-最后修订时间：20260916 22:54:46 UTC+08:00
+最后修订时间：20260917 10:16:01 UTC+08:00
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
 
@@ -25,7 +25,7 @@ configs/
   archive/                         # 旧试跑、冒烟验证及已退役配置
 ```
 
-- `data_preparation/` 只保存原始来源、文本构造、去重、基础划分及参考 tokenizer 等基础数据准备参数。当前四项基础数据为 FineWeb-4096、FineWeb-128、SQuAD、PersonaMem-v2 FactQA。
+- `data_preparation/` 只保存原始来源、文本构造、去重、基础划分及参考 tokenizer 等基础数据准备参数。当前基础数据包括 FineWeb-4096、FineWeb-128、FineWeb 重构数据、SQuAD 和 PersonaMem-v2 FactQA。
 - 每个具体实验占一个目录，目录名能区分模型、任务或实验条件。名称遵守 [命名规范](../docs/naming.md)，日期只在需要区分实际实验时添加。
 - `model.json` 保存本实验使用的模型、训练目标、优化器与课程参数；不加入其他阶段不使用的字段。
 - `selection.json` 保存已有数据路径、epoch 来源／任务／长度分布、固定评估选样规则和选择 seed。它属于训练／评估协议，不放入 `data_preparation/`；只描述本实验的选择，不枚举整个实验组的训练条件。
@@ -35,9 +35,9 @@ configs/
 
 ### v2 固定容量重构配置
 
-`v2/pretrain/qwen3-4b_pooling_*` 提供 AE／AE＋LM × warm-up／直接多次压缩四个主实验，以及 `ae-static`、`ae-lm-static` 两个全程单次压缩 baseline。每个目录包含 `model.json`（codec）、`selection.json`（原始来源与分阶段选样）和 `experiment.json`（配置引用与执行参数）。入口为 `latent_working_memory.v2.pretrain.train --experiment <配置> --output-dir <产物目录>`，支持单设备与 verl replicated/DDP。
+`v2/pretrain/qwen3-4b_pooling_*` 提供 AE／AE＋LM × warm-up／直接多次压缩四个主实验，以及 `ae-static`、`ae-lm-static` 两个全程单次压缩 baseline。每个目录包含 `model.json`（codec）、`selection.json`（已构造数据目录）和 `experiment.json`（配置引用与执行参数）。入口为 `latent_working_memory.v2.pretrain.train --experiment <配置> --output-dir <产物目录>`，支持单设备与 verl replicated/DDP。
 
-warm-up 与多次压缩数据均在启动时构造，整个运行只使用内存数据，各 epoch 完整复用。预算由 `warmup_epochs`、`multiround_epochs` 与各阶段样本数计算，尾批保留；`global_batch_size` 不随 world size 改变。静态 baseline 设置 `warmup_epochs=3`、`multiround_epochs=0`；六组均训练 3 epochs，使用相同的多次压缩 dev/test 与评估指标。`compression` 可选 `mean`、`weighted`、`spectral`。六份默认配置均使用完整 causal Encoder（`encoder_layers: null`）与基础 pooling。正式入口默认 SwanLab online，project 为 `latent-working-memory-v2`，要求显式指定同组 runs 共用的 `--swanlab-group`；具体参数进入 config，运行名称取输出目录名。配置是开发起点，未执行真实 GPU 训练；运行、恢复与产物说明见 [v2 开发记录](../src/latent_working_memory/v2/README.md)。
+先通过 `v2.pretrain.prepare_data` 和 `data_preparation/fineweb-reconstruction-k512-doc100k.json` 独立构造数据：沿用 v1 质量过滤、去重与来源划分，按字符数÷4 估算长度，保存一份共享 `documents.jsonl` 和 `single/`、`multi/` 两套字符索引。此步骤不加载 tokenizer。六份 `selection.json` 只包含 `dataset_dir`。训练启动时读取、分词并按真实长度筛选一次，各 epoch 完整复用；AE／AE＋LM 的过滤一致，记录候选数、保留数和原因。预算由 `warmup_epochs`、`multiround_epochs` 与各阶段筛选后的样本数计算，尾批保留；`global_batch_size` 不随 world size 改变。静态 baseline 设置 `warmup_epochs=3`、`multiround_epochs=0`；六组均训练 3 epochs，使用相同的多次压缩 dev/test 与评估指标。`compression` 可选 `mean`、`weighted`、`spectral`。六份默认配置均使用完整 causal Encoder（`encoder_layers: null`）与基础 pooling。正式入口默认 SwanLab online，project 为 `latent-working-memory-v2`，要求显式指定同组 runs 共用的 `--swanlab-group`；具体参数进入 config，运行名称取输出目录名。已完成真实模型资源短测，完整训练仍保持停止；运行、恢复与产物说明见 [v2 开发记录](../src/latent_working_memory/v2/README.md)。
 
 ### v2 初始静态训练配置
 
@@ -62,7 +62,7 @@ warm-up 与多次压缩数据均在启动时构造，整个运行只使用内存
 
 - 同阶段对照实验从约定初始化各自训练。AE warm-up 自己完成 AE 阶段并切换联合目标，不继承 AE-only 的 checkpoint 或 optimizer；相同初始化 seed 不等于共享一次训练过程。
 - 跨阶段初始化是显式依赖：dynamic 可以使用 mixed 预训练 checkpoint。记录具体 checkpoint；同一实验的 `resume` 与新实验的阶段初始化分别处理。
-- 共享数据直接引用 `data/<数据集名>/`。仅筛选、抽样、混合或更换 tokenizer 时不创建派生数据副本；实际重构文本时才增加基础数据及构造配置。
+- 共享数据直接引用 `data/<数据集名>/`。基础语料独立构造并跨实验复用，正文只保存一份；各实验、更换 tokenizer 或 epoch 不另存正文或 token 数据副本。重构候选索引采用字符范围，真实长度在训练启动时筛选。
 - 更换模型或 tokenizer 时，为新实验确定适用的选择规则和配额，验证长度／窗口约束与选样可行性。不要直接把 Llama 的样本配额作为 Qwen 的要求；需要严格配对比较时显式定义共同面板。
 - 每个参数只保留一个权威来源，避免在模型、选择、执行配置及命令行中重复维护。同类配置采用一种规范格式，不添加未经需要的继承、合并、别名、fallback 或版本兼容层。
 - 创建后核对配置引用、入口可用性与实际选样；涉及训练行为的修改验证相应行为。配置快照记录实际运行值，原始结果及历史执行配置不按新协议改写。
@@ -73,7 +73,7 @@ warm-up 与多次压缩数据均在启动时构造，整个运行只使用内存
 
 ## 当前配置与运行入口
 
-`data_preparation/` 保留 FineWeb-4096、FineWeb-128、SQuAD、PersonaMem FactQA 四份准备配置。FineWeb-128 的 `data` 字段独立定义构造所用参考 tokenizer 与来源协议，不再借用训练配置。
+`data_preparation/` 保留 FineWeb-4096、FineWeb-128、FineWeb 重构数据、SQuAD 和 PersonaMem FactQA 的准备配置。FineWeb-128 的 `data` 字段独立定义构造所用参考 tokenizer 与来源协议，不再借用训练配置。
 
 | 阶段 | 具体实验目录 |
 |---|---|

@@ -68,7 +68,9 @@ def evaluate(task, rows, tokenizer, generation_samples=0):
                 control = task(row, include_lm=True, one_shot=True)
                 record = {
                     "index": i,
+                    "sample_id": row.sample_id,
                     "document_id": row.document_id,
+                    "source_char_start": row.source_char_start,
                     "depth": len(row.write_ends),
                     "ratio_bin": math.ceil(row.write_ends[-1] / row.capacity),
                     "rounds": output["rounds"],

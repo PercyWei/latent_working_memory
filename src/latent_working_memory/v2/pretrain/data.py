@@ -1,126 +1,144 @@
-"""启动时从原始文章构造固定轨迹；epoch 只改变索引顺序。"""
+"""读取已保存的原文／字符索引；启动时分词、筛选一次，各 epoch 复用。"""
 
-from bisect import bisect_left
+from bisect import bisect_right
 from collections import Counter
 from dataclasses import dataclass
-from glob import glob
-from itertools import accumulate
+import json
 from pathlib import Path
 import random
 
 import torch
 
-from latent_working_memory.data_preparation.pretrain.config import PreparationConfig
-from latent_working_memory.data_preparation.pretrain.sources import collect_sources
-from latent_working_memory.v2.pretrain.config import SelectionConfig
-
-
-@dataclass(frozen=True)
-class Document:
-    document_id: str
-    token_ids: torch.Tensor
-    split: str
+from latent_working_memory.v2.pretrain.prepare_data import STAGE_DIRECTORIES
 
 
 @dataclass(frozen=True)
 class Trajectory:
     document_id: str
-    source_start: int
+    source_char_start: int
     token_ids: torch.Tensor
     write_ends: tuple[int, ...]
     capacity: int
+    sample_id: str = ""
 
 
-def segment_lengths(length, rounds, capacity, rng):
-    if not rounds * capacity <= length <= 3 * rounds * capacity:
-        raise ValueError("total length is not feasible for this number of segments")
-    remaining, parts = length, []
-    for count in range(rounds, 0, -1):
-        low = max(capacity, remaining - 3 * capacity * (count - 1))
-        high = min(3 * capacity, remaining - capacity * (count - 1))
-        part = rng.randint(low, high)
-        parts.append(part)
-        remaining -= part
-    rng.shuffle(parts)
-    return parts
-
-
-def load_documents(config: SelectionConfig, tokenizer):
-    paths = [Path(p) for p in sorted(glob(config.source_glob, recursive=True))]
-    if not paths:
-        raise ValueError(f"no FineWeb Parquet files match {config.source_glob}")
-    sources = collect_sources(
-        paths,
-        config.source_seed,
-        config.split_fractions,
-        PreparationConfig(max_documents=config.max_documents),
-    )
-    eligible = [row for row in sources if row["status"] == "eligible"]
-    documents = []
-    for start in range(0, len(eligible), 64):
-        batch = eligible[start : start + 64]
-        ids = tokenizer([row["record"]["text"] for row in batch], add_special_tokens=False)[
-            "input_ids"
-        ]
-        for row, tokens in zip(batch, ids, strict=True):
-            documents.append(
-                Document(row["record"]["id"], torch.tensor(tokens, dtype=torch.long), row["split"])
-            )
-    return documents
-
-
-def build_trajectories(documents, config: SelectionConfig, stage, split):
-    if stage not in {"warmup", "multiround"}:
-        raise ValueError("unknown stage")
-    count = getattr(config, stage)[split]
-    if not count:
-        return ()
-    rng = random.Random(f"{config.seed}:{stage}:{split}")
-    pool = sorted((d for d in documents if d.split == split), key=lambda d: len(d.token_ids))
-    lengths = [len(d.token_ids) for d in pool]
-    k, q = config.capacity, config.continuation_tokens
-    required = (8 if stage == "warmup" else 5) * k + q
-    if not lengths or lengths[-1] < required:
-        raise ValueError(f"{stage}/{split} needs source documents with at least {required} tokens")
-    result = []
-    for _ in range(count):
-        if stage == "warmup":
-            length = rng.randint(2 * k, 8 * k)
-            rounds, minimum = 1, length + q
-        else:
-            rounds = rng.choice((3, 4, 5))
-            minimum = rounds * k + q
-        first = bisect_left(lengths, minimum)
-        document = pool[rng.randrange(first, len(pool))]
-        if stage == "multiround":
-            length = rng.randint(rounds * k, min(8 * k, len(document.token_ids) - q))
-        parts = [length] if stage == "warmup" else segment_lengths(length, rounds, k, rng)
-        start = rng.randint(0, len(document.token_ids) - length - q)
-        result.append(
-            Trajectory(
-                document.document_id,
-                start,
-                document.token_ids[start : start + length + q].clone(),
-                tuple(accumulate(parts)),
-                k,
-            )
+def rejection_reason(
+    ends, token_count, capacity, continuation_tokens, stage, max_positions, prompts
+):
+    if stage == "warmup":
+        if len(ends) != 1 or not 2 * capacity <= ends[-1] <= 8 * capacity:
+            return "single_length"
+    else:
+        parts = [end - start for start, end in zip((0,) + ends[:-1], ends, strict=True)]
+        if (
+            not 3 <= len(parts) <= 5
+            or any(not capacity <= n <= 3 * capacity for n in parts)
+            or ends[-1] > 8 * capacity
+        ):
+            return "multi_lengths"
+    if token_count - ends[-1] < continuation_tokens:
+        return "continuation_length"
+    writer_lengths = [ends[-1]] + [
+        end - start + (capacity if i else 0)
+        for i, (start, end) in enumerate(zip((0,) + ends[:-1], ends, strict=True))
+    ]
+    if (
+        max(
+            *writer_lengths,
+            capacity + prompts["ae"] + ends[-1] + 1,
+            capacity + prompts["lm"] + continuation_tokens + 1,
         )
-    return tuple(result)
+        > max_positions
+    ):
+        return "model_window"
+    return None
 
 
-def build_datasets(documents, config, include_warmup, include_multiround_training=True):
-    stages = ("warmup", "multiround") if include_warmup else ("multiround",)
-    return {
-        stage: {
-            split: (
-                ()
-                if stage == "multiround" and split == "train" and not include_multiround_training
-                else build_trajectories(documents, config, stage, split)
-            )
-            for split in ("train", "dev", "test")
-        }
-        for stage in stages
+def load_datasets(config, tokenizer, max_positions, training):
+    if not tokenizer.is_fast:
+        raise ValueError("character indices require a fast tokenizer with offset mappings")
+    root = Path(config.dataset_dir)
+    metadata = json.loads((root / "preparation.json").read_text())
+    documents = {
+        row["document_id"]: row
+        for row in (
+            json.loads(line) for line in (root / "documents.jsonl").read_text().splitlines()
+        )
     }
+    prompts = {
+        task: len(tokenizer.encode(getattr(training, task + "_prompt"), add_special_tokens=False))
+        for task in ("ae", "lm")
+    }
+    q = metadata["config"]["continuation_tokens"]
+    stages = ("warmup", "multiround") if training.warmup_epochs else ("multiround",)
+    datasets, filtering = {}, {}
+    for stage in stages:
+        datasets[stage], filtering[stage] = {}, {}
+        for split in ("train", "dev", "test"):
+            if stage == "multiround" and split == "train" and not training.multiround_epochs:
+                datasets[stage][split] = ()
+                filtering[stage][split] = {"candidates": 0, "retained": 0, "rejected": {}}
+                continue
+            path = root / STAGE_DIRECTORIES[stage] / f"{split}.jsonl"
+            indices = [json.loads(line) for line in path.read_text().splitlines()]
+            rows, rejected = [], Counter()
+            for start in range(0, len(indices), 64):
+                batch = indices[start : start + 64]
+                texts = []
+                for row in batch:
+                    document = documents[row["document_id"]]
+                    if document["split"] != split:
+                        raise ValueError(
+                            f"{row['sample_id']}: source split differs from sample split"
+                        )
+                    text = document["text"][row["char_start"] : row["char_end"]]
+                    cuts = row["write_char_ends"]
+                    if (
+                        row["char_start"] < 0
+                        or len(text) != row["char_end"] - row["char_start"]
+                        or not cuts
+                        or cuts != sorted(set(cuts))
+                        or not 0 < cuts[0] <= cuts[-1] < len(text)
+                    ):
+                        raise ValueError(f"{row['sample_id']}: invalid character indices")
+                    texts.append(text)
+                encoded = tokenizer(texts, add_special_tokens=False, return_offsets_mapping=True)
+                for row, ids, offsets in zip(
+                    batch, encoded["input_ids"], encoded["offset_mapping"], strict=True
+                ):
+                    # A token crossing a character cut belongs to the next write. All paths
+                    # use this same full-window tokenization, including the one-shot control.
+                    token_ends = [end for _, end in offsets]
+                    ends = tuple(bisect_right(token_ends, cut) for cut in row["write_char_ends"])
+                    reason = rejection_reason(
+                        ends, len(ids), row["capacity"], q, stage, max_positions, prompts
+                    )
+                    if reason:
+                        rejected[reason] += 1
+                        continue
+                    rows.append(
+                        Trajectory(
+                            row["document_id"],
+                            row["char_start"],
+                            torch.tensor(ids[: ends[-1] + q], dtype=torch.long),
+                            ends,
+                            row["capacity"],
+                            row["sample_id"],
+                        )
+                    )
+            filtering[stage][split] = {
+                "candidates": len(indices),
+                "retained": len(rows),
+                "rejected": dict(rejected),
+            }
+            if indices and not rows:
+                raise ValueError(f"no valid trajectories in {path}: {dict(rejected)}")
+            datasets[stage][split] = tuple(rows)
+            print(
+                f"{stage}/{split}: retained {len(rows)}/{len(indices)}, rejected {dict(rejected)}",
+                flush=True,
+            )
+    return datasets, metadata, filtering
 
 
 def dataset_statistics(datasets):

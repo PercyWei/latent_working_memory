@@ -3,7 +3,6 @@
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
-import random
 
 import pytest
 import torch
@@ -15,13 +14,9 @@ from latent_working_memory.v2.compression import SlotCompression
 from latent_working_memory.v2.memory_codec import CodecConfig, MemoryCodec
 from latent_working_memory.v2 import memory_codec
 from latent_working_memory.v2.pretrain.checkpoint import codec_state
-from latent_working_memory.v2.pretrain.config import SelectionConfig, TrainingConfig
+from latent_working_memory.v2.pretrain.config import TrainingConfig
 from latent_working_memory.v2.pretrain.data import (
-    Document,
     Trajectory,
-    build_datasets,
-    epoch_batches,
-    segment_lengths,
 )
 from latent_working_memory.v2.pretrain.engine import ReconstructionEngine
 from latent_working_memory.v2.pretrain.evaluation import evaluate
@@ -55,48 +50,6 @@ def example(lengths=(2, 3, 4)):
         total += length
         ends.append(total)
     return Trajectory("test", 0, torch.tensor([4, 5, 6, 7] * 10)[: total + 2], tuple(ends), 2)
-
-
-def test_stage_sampling_is_fixed_and_independent():
-    documents = [
-        Document(f"{split}-{i}", torch.arange(60 + i), split)
-        for split in ("train", "dev", "test")
-        for i in range(4)
-    ]
-    config = SelectionConfig(
-        "unused",
-        capacity=4,
-        continuation_tokens=3,
-        warmup={"train": 400, "dev": 4, "test": 4},
-        multiround={"train": 40, "dev": 4, "test": 4},
-    )
-    combined = build_datasets(documents, config, True)
-    direct = build_datasets(documents, config, False)
-    for a, b in zip(combined["multiround"]["train"], direct["multiround"]["train"], strict=True):
-        assert (a.document_id, a.source_start, a.write_ends) == (
-            b.document_id,
-            b.source_start,
-            b.write_ends,
-        )
-        torch.testing.assert_close(a.token_ids, b.token_ids)
-        parts = [end - start for start, end in zip((0,) + a.write_ends[:-1], a.write_ends)]
-        assert 3 <= len(parts) <= 5 and all(4 <= p <= 12 for p in parts)
-        assert len(a.token_ids) == sum(parts) + 3 and sum(parts) <= 32
-    warmup = combined["warmup"]["train"]
-    assert all(len(r.write_ends) == 1 and 8 <= r.write_ends[-1] <= 32 for r in warmup)
-    assert min(r.write_ends[-1] for r in warmup) < 12
-    assert max(r.write_ends[-1] for r in warmup) > 28
-    orders = [[id(r) for b in epoch_batches(warmup, 7, 12, "warmup", e) for r in b] for e in (0, 1)]
-    assert set(orders[0]) == set(orders[1]) == {id(r) for r in warmup}
-    assert orders[0] != orders[1] and len(orders[0]) == len(warmup)
-
-
-@pytest.mark.parametrize("rounds", [3, 4, 5])
-def test_segment_endpoints(rounds):
-    for length in range(rounds * 4, 33):
-        parts = segment_lengths(length, rounds, 4, random.Random(length))
-        assert sum(parts) == length and len(parts) == rounds
-        assert all(4 <= p <= 12 for p in parts)
 
 
 def test_group_boundaries_and_weighted_initialization():

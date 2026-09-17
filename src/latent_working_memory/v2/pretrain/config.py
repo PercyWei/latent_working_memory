@@ -1,39 +1,16 @@
 """一次实验的模型、数据选择和执行配置。"""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import math
 
 
 @dataclass(frozen=True)
 class SelectionConfig:
-    source_glob: str
-    capacity: int = 512
-    continuation_tokens: int = 512
-    max_documents: int = 100000
-    source_seed: int = 20260907
-    seed: int = 20260916
-    split_fractions: tuple = (0.9, 0.05, 0.05)
-    warmup: dict = field(default_factory=lambda: {"train": 32000, "dev": 128, "test": 128})
-    multiround: dict = field(default_factory=lambda: {"train": 32000, "dev": 128, "test": 128})
+    dataset_dir: str
 
     def __post_init__(self):
-        object.__setattr__(self, "split_fractions", tuple(self.split_fractions))
-        for name in ("capacity", "continuation_tokens", "max_documents"):
-            if type(getattr(self, name)) is not int or getattr(self, name) < 1:
-                raise ValueError(f"{name} must be positive")
-        if (
-            len(self.split_fractions) != 3
-            or any(x <= 0 for x in self.split_fractions)
-            or not math.isclose(sum(self.split_fractions), 1)
-        ):
-            raise ValueError("split_fractions must be three positive fractions summing to one")
-        for counts in (self.warmup, self.multiround):
-            if (
-                set(counts) != {"train", "dev", "test"}
-                or any(type(n) is not int or n < 0 for n in counts.values())
-                or counts["train"] == 0
-            ):
-                raise ValueError("stage counts require positive train and nonnegative dev/test")
+        if not isinstance(self.dataset_dir, str) or not self.dataset_dir.strip():
+            raise ValueError("dataset_dir must name a prepared reconstruction dataset")
 
 
 @dataclass(frozen=True)
