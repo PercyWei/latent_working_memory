@@ -94,14 +94,15 @@ def main():
             metrics["seconds"] = time.perf_counter() - start
             assert any(
                 p.grad is not None and p.grad.abs().max().item() > 0
-                for name, p in codec.backbone.named_parameters()
+                for name, p in codec.encoder.named_parameters()
                 if "lora_" in name and ".encoder." in name
             )
             assert all(
                 p.grad is None
-                for name, p in codec.backbone.named_parameters()
-                if "lora_" not in name or ".decoder." in name
+                for name, p in codec.encoder.named_parameters()
+                if "lora_" not in name
             )
+            assert all(p.grad is None for p in codec.decoder.parameters())
             steps.append(metrics)
         result = {
             "stage": stage,

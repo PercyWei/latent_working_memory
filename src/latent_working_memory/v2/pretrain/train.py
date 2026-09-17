@@ -117,14 +117,14 @@ def run_training(args):
                 "training": asdict(config),
                 "world_size": world,
                 "precision": "bf16" if device.type == "cuda" else "fp32",
-                "resolved_model_revision": task.codec.backbone.config._commit_hash,
+                "resolved_model_revision": task.codec.encoder.config._commit_hash,
                 "resolved_architecture": {
-                    "encoder_layers": len(task.codec.backbone.get_base_model().model.layers),
-                    "decoder_layers": len(task.codec.backbone.get_base_model().model.layers),
+                    "encoder_layers": len(task.codec.encoder.get_base_model().model.layers),
+                    "decoder_layers": len(task.codec.decoder.model.layers),
                     "alignment_layers": len(task.codec.read_alignment.layers),
                     "hidden_size": task.codec.width,
                     "encoder_attention": "causal",
-                    "shared_backbone": True,
+                    "shared_backbone": False,
                     "reader_adapter": None,
                 },
             }

@@ -12,7 +12,7 @@ def codec_state(codec):
         name: p.detach().cpu().clone()
         for name, p in codec.named_parameters()
         if name.startswith(("read_alignment.", "write_alignment.", "compression."))
-        or name.startswith("backbone.")
+        or name.startswith("encoder.")
         and "lora_" in name
     }
 
@@ -22,7 +22,7 @@ def restore_codec(codec, state):
         name
         for name, _ in codec.named_parameters()
         if name.startswith(("read_alignment.", "write_alignment.", "compression."))
-        or name.startswith("backbone.")
+        or name.startswith("encoder.")
         and "lora_" in name
     }
     if set(state) != set(expected):

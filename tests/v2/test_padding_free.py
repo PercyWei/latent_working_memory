@@ -63,7 +63,7 @@ def test_padding_free_matches_dense_and_isolates_sequences(tiny_base, tmp_path, 
         Trajectory("b", 0, torch.tensor([7, 6, 5, 4] * 5), (3, 5, 8, 12), 3),
     ]
     shapes = []
-    handle = packed.codec.backbone.get_base_model().model.register_forward_pre_hook(
+    handle = packed.codec.encoder.get_base_model().model.register_forward_pre_hook(
         lambda module, args, kwargs: shapes.append(tuple(kwargs["inputs_embeds"].shape)),
         with_kwargs=True,
     )

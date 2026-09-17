@@ -115,6 +115,9 @@ def test_raw_data_epochs_and_resume_match_uninterrupted(tiny_base, tmp_path):
     torch.testing.assert_close(actual["codec"], expected["codec"], rtol=0, atol=0)
     torch.testing.assert_close(actual["optimizer"], expected["optimizer"], rtol=0, atol=0)
     assert actual["cursor"] == expected["cursor"]
+    architecture = actual["run"]["resolved_architecture"]
+    assert architecture["shared_backbone"] is False and architecture["reader_adapter"] is None
+    assert architecture["encoder_layers"] == architecture["decoder_layers"] == 2
     log = [
         json.loads(line) for line in (tmp_path / "resumed" / "train.jsonl").read_text().splitlines()
     ]

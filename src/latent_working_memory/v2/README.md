@@ -2,11 +2,11 @@
 
 创建时间：20260915 19:10:20 UTC+08:00
 
-最后修订时间：20260917 19:46:47 UTC+08:00
+最后修订时间：20260917 21:15:15 UTC+08:00
 
 ## 当前入口：固定容量重构预训练
 
-`memory_codec.py` 的 `MemoryCodec` 是当前共用读写框架：旧记忆经写入对齐后，与完整新文本联合编码，再生成 K 个 slots。首次写入和后续更新共享参数。Encoder 与 Decoder 复用一个完整冻结基座，保持原生 causal attention；写入启用 `encoder` LoRA，重构读取禁用全部 LoRA。独立 `decoder` LoRA 已注册但不激活。
+`memory_codec.py` 的 `MemoryCodec` 是当前共用读写框架：旧记忆经写入对齐后，与完整新文本联合编码，再生成 K 个 slots。首次写入和后续更新共享参数。Encoder 与 Decoder 是从同一预训练 checkpoint 加载的两个独立对象，均使用完整 causal backbone。Encoder 固定使用可训练的 `encoder` LoRA；当前重构 Decoder 全部冻结，不分配 Decoder LoRA，QA 适配留待后续实现。
 
 `compression.py` 提供三种压缩模块：`mean` 对应 v2.1 的连续分组均值，`weighted` 对应 v2.2 的零初始化组内打分，`spectral` 对应 v2.3 的可训练特征变换、Fourier 长度变换与输出残差。`feature_layer` 选择 `last` 或 `mean`。
 
@@ -32,7 +32,7 @@ uv run --frozen python -m latent_working_memory.v2.pretrain.prepare_data \
 
 训练后端依赖 `verl==0.8.0`，复用 `codex/verl-v1@e0bfa37` 中经过收敛的 replicated 方案。它是项目对 verl 的 DDP engine 扩展，不使用旧 FSDP2 实验实现。尾批保留全部真实样本；空 rank 执行零权重占位计算参与同步，不增加样本计数。CUDA 采用 BF16 autocast、FP32 可训练权重，CPU 验证采用 FP32。
 
-变长输入只在末尾补齐，补齐状态不进入 pooling 或损失；causal attention 保证有效 token 不会读取末尾补齐位置。模型接收全有效二维 mask，避免 packed-position 检测生成阻止 FlashAttention 的四维 mask。对齐输出转回基座 dtype；基础 pooling 在 FP32 中使用连续分段归约，保持原分组边界并避免原子累加的顺序波动。共享基座的 adapter 上下文缓存模块列表，使用 PEFT 的层级开关，并恢复 requires_grad 与各模块的 train/eval 状态；checkpoint 重算仍在对应上下文内执行。
+变长输入只在末尾补齐，补齐状态不进入 pooling 或损失；causal attention 保证有效 token 不会读取末尾补齐位置。模型接收全有效二维 mask，避免 packed-position 检测生成阻止 FlashAttention 的四维 mask。对齐输出转回基座 dtype；基础 pooling 在 FP32 中使用连续分段归约，保持原分组边界并避免原子累加的顺序波动。两个模型各自使用 Transformers 原生逐层 checkpoint（`use_reentrant=False`），不在前向或重算期间切换 adapter。Decoder 的 attention dropout 固定为 0，训练模式用于启用逐层重算，参数仍全部冻结；读取不使用 `no_grad()`，保留到 memory 的梯度。生成时临时切换 Decoder 到 eval 以使用 KV cache，结束后恢复。
 
 `micro_batch_size` 是单卡一次并行的轨迹上限，六组配置设为 4；`global_batch_size=8` 控制一次参数更新的总样本数。同一 rank 的候选按预计读取长度排序，在相同容量下合批；AE／LM 任务和压缩次数可以不同。encoder／decoder 的位置预算分别为 `micro_batch_encoder_tokens=6144`、`micro_batch_decoder_tokens=10240`，按每次压缩的实际活跃样本检查，超过预算时拆批。
 
@@ -60,7 +60,9 @@ AE＋LM 使用 `training.lm_ratio` 指定每条轨迹本次选择 LM 的概率�
 
 训练日志分项 NLL 只统计选中该任务的样本，没有选中时为 null，SwanLab 不上传该项；`ae_samples`、`lm_samples` 和各自的 `*_tokens` 在本地日志记录实际样本数及监督量。旧的 AE＋LM 双损失短测使用不同训练协议，其 loss 与吞吐不代表本设置；新配置不能直接续训旧配置的 checkpoint。
 
-warm-up 结束后复制已训练的读取对齐初始化写入对齐，重建 AdamW；直接多次压缩时两端从同一预训练 LSA 独立初始化。单次压缩 checkpoint 进行多次压缩评估时，临时以已训练 Ar 参数作为 Aw，评估后恢复；多次压缩 checkpoint 使用训练后的 Aw。各阶段使用固定学习率，训练预算以完整 epochs 配置。Ar、Aw 各自是预训练 block 0＋最终 norm 的独立副本，与共享基座不共享权重。只加载一次完整基座，然后直接复制对齐所需层；对齐骨架在 meta device 上构造，不分配真实词表层或 LM head。只训练对齐 blocks，最终 norm 冻结。Encoder 与 decoder 隐状态计算各自使用 checkpoint，适配器选择在重计算时重新执行。词表投影与 CE 按 `lm_head_chunk_size=256` 分块并分别 checkpoint，只计算有效目标位置，保留 EOS 和每条样本的 token 平均。单设备可直接运行该模块；CPU 验证添加 `--device cpu`。
+warm-up 结束后复制已训练的读取对齐初始化写入对齐，重建 AdamW；直接多次压缩时两端从同一预训练 LSA 独立初始化。单次压缩 checkpoint 进行多次压缩评估时，临时以已训练 Ar 参数作为 Aw，评估后恢复；多次压缩 checkpoint 使用训练后的 Aw。各阶段使用固定学习率，训练预算以完整 epochs 配置。Ar、Aw 各自是预训练 block 0＋最终 norm 的独立副本，不与 encoder／decoder 共享权重。Encoder、Decoder 分别加载一次完整基座；对齐模块直接复制已加载的层，对齐骨架在 meta device 上构造，不分配真实词表层或 LM head。只训练对齐 blocks，最终 norm 冻结。Encoder、Decoder 分别逐层重算；词表投影前不再设置整段 backbone 的 checkpoint。词表投影与 CE 按 `lm_head_chunk_size=256` 分块并分别 checkpoint，只计算有效目标位置，保留 EOS 和每条样本的 token 平均。单设备可直接运行该模块；CPU 验证添加 `--device cpu`。
+
+checkpoint 仅保存 `encoder.*` 下的 LoRA、压缩模块及读写对齐，不保存两份冻结基座。旧共享对象的 `backbone.*` checkpoint 不做自动转换，新实现需新建 run。
 
 中断续训使用相同配置、输出目录和 world size，添加 `--resume <output-dir>/checkpoints/step-XXXXXX.pt`。`--stop-after-steps N` 仅截短本次执行，不改变总预算。启动时读取同一构造身份并重新进行确定性的分词、筛选，随后恢复权重、optimizer、epoch／batch 游标及 RNG；阶段数据随机数与顺序打乱相互独立。
 

@@ -1,6 +1,5 @@
 """固定采样、累计监督、递归梯度与 verl DDP 的真实小模型验证。"""
 
-from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 import random
@@ -15,7 +14,7 @@ from verl.utils.tensordict_utils import get_non_tensor_data
 from latent_working_memory.v2.compression import SlotCompression
 from latent_working_memory.v2.memory_codec import CodecConfig, MemoryCodec
 from latent_working_memory.v2 import memory_codec
-from latent_working_memory.v2.pretrain.checkpoint import codec_state
+from latent_working_memory.v2.pretrain.checkpoint import codec_state, restore_codec
 from latent_working_memory.v2.pretrain.config import TrainingConfig
 from latent_working_memory.v2.pretrain.data import (
     Trajectory,
@@ -82,8 +81,9 @@ def test_cuda_mean_pooling_is_repeatable_through_backward():
 
 
 @pytest.mark.parametrize("method", ["mean", "weighted", "spectral"])
-def test_full_bptt_frozen_decoder_and_raw_update(tiny_base, method):
-    task = make_task(tiny_base, method)
+@pytest.mark.parametrize("checkpointing", [False, True])
+def test_full_bptt_frozen_decoder_and_raw_update(tiny_base, method, checkpointing):
+    task = make_task(tiny_base, method, checkpointing=checkpointing)
     task.codec.set_stage("multiround")
     row = example()
     memories, input_lengths = [], []
@@ -103,13 +103,14 @@ def test_full_bptt_frozen_decoder_and_raw_update(tiny_base, method):
     # Use only a final read: first memory must still receive a gradient through later writes.
     task.codec.read_loss(memories[-1], task.ae_prompt, torch.tensor([4, 5, 2])).backward()
     assert memories[0].grad.abs().sum() > 0
+    assert all(p.grad is None for p in task.codec.decoder.parameters())
     assert any(
         p.grad is not None and p.grad.abs().sum() > 0
         for p in task.codec.write_alignment.layers.parameters()
     )
     assert all(
         p.grad is None
-        for name, p in task.codec.backbone.named_parameters()
+        for name, p in task.codec.encoder.named_parameters()
         if "lora_" not in name or ".encoder." not in name
     )
 
@@ -137,17 +138,16 @@ def test_chunked_head_matches_native_causal_loss_and_gradients(tiny_base):
 
     def native_loss(memory, prompt, targets):
         codec = reference.codec
-        embed = codec.backbone.get_input_embeddings()
+        embed = codec.decoder.get_input_embeddings()
         prefix = torch.cat((codec.align(memory), embed(prompt)))
         inputs = torch.cat((prefix, embed(targets)))[None]
         labels = torch.cat((targets.new_full((len(prefix),), -100), targets))[None]
-        with codec.use_adapter(None) as backbone:
-            return backbone(
-                inputs_embeds=inputs,
-                labels=labels,
-                attention_mask=torch.ones(inputs.shape[:2], dtype=torch.bool),
-                use_cache=False,
-            ).loss
+        return codec.decoder(
+            inputs_embeds=inputs,
+            labels=labels,
+            attention_mask=torch.ones(inputs.shape[:2], dtype=torch.bool),
+            use_cache=False,
+        ).loss
 
     reference.codec.read_loss = native_loss
     expected, observed = (
@@ -244,7 +244,7 @@ def test_joint_encoder_is_causal_and_objective_averages_rounds(tiny_base):
     task = make_task(tiny_base)
     task.eval()
     encoded = []
-    hook = task.codec.backbone.get_base_model().model.register_forward_hook(
+    hook = task.codec.encoder.get_base_model().model.register_forward_hook(
         lambda module, args, output: encoded.append(output.last_hidden_state.detach().clone())
     )
     task.codec.write(None, torch.tensor([4, 5, 6]), 2)
@@ -269,24 +269,23 @@ def test_full_encoder_and_physically_independent_alignment(tiny_base):
             gradient_checkpointing=False,
         )
     )
-    decoder = codec.backbone.get_base_model().model
-    assert len(decoder.layers) == 2
-    assert "encoder" not in dict(codec.named_children())
-    assert "decoder" not in dict(codec.named_children())
-    assert not codec.backbone.is_gradient_checkpointing
-    components = [codec.backbone, codec.read_alignment, codec.write_alignment]
+    decoder = codec.decoder.model
+    assert len(decoder.layers) == len(codec.encoder.get_base_model().model.layers) == 2
+    assert not codec.encoder.is_gradient_checkpointing
+    assert not codec.decoder.is_gradient_checkpointing
+    components = [codec.encoder, codec.decoder, codec.read_alignment, codec.write_alignment]
     addresses = [{p.data_ptr() for p in module.parameters()} for module in components]
     for i, current in enumerate(addresses):
         assert all(not current.intersection(other) for other in addresses[i + 1 :])
     torch.testing.assert_close(
         codec.read_alignment.layers[0].self_attn.q_proj.weight,
-        decoder.layers[0].self_attn.q_proj.base_layer.weight,
+        decoder.layers[0].self_attn.q_proj.weight,
     )
     assert codec.read_alignment.embed_tokens is None
     assert not codec.read_alignment.norm.weight.requires_grad
 
 
-def test_only_one_pretrained_load_and_no_meta_alignment_weights(tiny_base, monkeypatch):
+def test_two_pretrained_loads_and_no_meta_alignment_weights(tiny_base, monkeypatch):
     original = memory_codec.AutoModelForCausalLM.from_pretrained
     calls = []
 
@@ -296,8 +295,9 @@ def test_only_one_pretrained_load_and_no_meta_alignment_weights(tiny_base, monke
 
     monkeypatch.setattr(memory_codec.AutoModelForCausalLM, "from_pretrained", load)
     codec = make_task(tiny_base).codec
-    assert calls == [str(tiny_base)]
-    assert set(codec.backbone.peft_config) == {"encoder", "decoder"}
+    assert calls == [str(tiny_base), str(tiny_base)]
+    assert set(codec.encoder.peft_config) == {"encoder"}
+    assert not any("lora_" in name for name, _ in codec.decoder.named_parameters())
     for module in (codec.read_alignment, codec.write_alignment):
         assert len(module.layers) == 1 and module.embed_tokens is None
         assert all(not p.is_meta for p in module.parameters())
@@ -305,7 +305,7 @@ def test_only_one_pretrained_load_and_no_meta_alignment_weights(tiny_base, monke
         assert not any("lora_" in name for name, _ in module.named_parameters())
 
 
-def test_adapter_selection_and_disabled_reader_are_isolated(tiny_base):
+def test_encoder_lora_does_not_change_reader_or_parameter_contract(tiny_base):
     task = make_task(tiny_base)
     task.eval()
     codec = task.codec
@@ -314,40 +314,29 @@ def test_adapter_selection_and_disabled_reader_are_isolated(tiny_base):
     target = torch.tensor([5, 6, 2])
     initial_write = codec.write(None, ids, 2)
     initial_read = codec.read_loss(memory, task.ae_prompt, target)
+    flags = {name: p.requires_grad for name, p in codec.named_parameters()}
     with torch.no_grad():
-        for name, p in codec.backbone.named_parameters():
+        for name, p in codec.encoder.named_parameters():
             if "lora_B" in name:
-                p.fill_(0.1)
+                p.normal_(std=0.1)
     assert not torch.allclose(codec.write(None, ids, 2), initial_write)
     torch.testing.assert_close(codec.read_loss(memory, task.ae_prompt, target), initial_read)
-    flags = {name: p.requires_grad for name, p in codec.backbone.named_parameters()}
-    with codec.use_adapter("decoder") as backbone:
-        decoder_logits = backbone(input_ids=ids[None], use_cache=False).logits
-    with codec.use_adapter(None) as backbone:
-        base_logits = backbone(input_ids=ids[None], use_cache=False).logits
-    assert not torch.allclose(decoder_logits, base_logits)
-    assert codec.backbone.active_adapter == "encoder"
-    assert flags == {name: p.requires_grad for name, p in codec.backbone.named_parameters()}
+    assert codec.encoder.active_adapter == "encoder"
+    assert flags == {name: p.requires_grad for name, p in codec.named_parameters()}
+    assert all(not p.requires_grad for p in codec.decoder.parameters())
 
 
-def test_nested_adapter_context_restores_state_after_exception(tiny_base):
-    codec = make_task(tiny_base, dropout=0.1).codec
-    # Preserve heterogeneous submodule modes, as well as the stage's trainable parameters.
-    codec._lora_layers[0].lora_dropout["encoder"].eval()
-    modes = [m.training for m in codec.backbone.modules()]
-    flags = [p.requires_grad for p in codec.backbone.parameters()]
-    with pytest.raises(RuntimeError, match="test interruption"):
-        with codec.use_adapter(None):
-            assert all(layer.disable_adapters for layer in codec._lora_layers)
-            with codec.use_adapter("decoder", training=True):
-                assert all(not layer.disable_adapters for layer in codec._lora_layers)
-                assert codec.backbone.active_adapter == "decoder"
-            assert all(layer.disable_adapters for layer in codec._lora_layers)
-            raise RuntimeError("test interruption")
-    assert codec.backbone.active_adapter == "encoder"
-    assert all(not layer.disable_adapters for layer in codec._lora_layers)
-    assert modes == [m.training for m in codec.backbone.modules()]
-    assert flags == [p.requires_grad for p in codec.backbone.parameters()]
+def test_codec_checkpoint_contains_only_adapters_and_interfaces(tiny_base):
+    codec = make_task(tiny_base).codec
+    state = codec_state(codec)
+    assert any(name.startswith("encoder.") and "lora_" in name for name in state)
+    assert not any(name.startswith(("backbone.", "decoder.")) for name in state)
+    restored = make_task(tiny_base).codec
+    restore_codec(restored, state)
+    torch.testing.assert_close(codec_state(restored), state, rtol=0, atol=0)
+    old_state = {name.replace("encoder.", "backbone.", 1): p for name, p in state.items()}
+    with pytest.raises(ValueError, match="differ from this architecture"):
+        restore_codec(restored, old_state)
 
 
 def test_bf16_alignment_preserves_backbone_dtype_and_memory_gradient(tiny_base):
@@ -356,7 +345,7 @@ def test_bf16_alignment_preserves_backbone_dtype_and_memory_gradient(tiny_base):
         torch.bfloat16,
     )
     observed = []
-    hook = codec.backbone.get_base_model().model.register_forward_pre_hook(
+    hook = codec.encoder.get_base_model().model.register_forward_pre_hook(
         lambda module, args, kwargs: observed.append(kwargs["inputs_embeds"].dtype),
         with_kwargs=True,
     )
@@ -373,30 +362,49 @@ def test_bf16_alignment_preserves_backbone_dtype_and_memory_gradient(tiny_base):
     assert memory.grad.abs().sum() > 0
 
 
-def test_shared_checkpointed_backbone_matches_independent_encoder_and_decoder(tiny_base):
-    actual = make_task(tiny_base, "weighted", checkpointing=True, dropout=0.1)
-    reference = deepcopy(actual)
-    reference.codec.config = replace(reference.codec.config, gradient_checkpointing=False)
-    independent_decoder = deepcopy(reference.codec.backbone)
-    independent_decoder.requires_grad_(False)
-    independent_decoder.base_model.disable_adapter_layers()
-    independent_decoder.eval()
+@pytest.mark.parametrize("stage", ["warmup", "multiround"])
+@pytest.mark.parametrize("feature_layer", ["last", "mean"])
+def test_layer_checkpoint_matches_full_graph_with_nonzero_lora_and_dropout(
+    tiny_base, stage, feature_layer
+):
+    actual = make_task(
+        tiny_base, "weighted", checkpointing=True, feature_layer=feature_layer, dropout=0.1
+    )
+    actual.codec.set_stage(stage)
+    with torch.no_grad():
+        for name, p in actual.codec.encoder.named_parameters():
+            if "lora_B" in name:
+                p.normal_(std=0.05)
+    reference = make_task(
+        tiny_base, "weighted", checkpointing=False, feature_layer=feature_layer, dropout=0.1
+    )
+    reference.codec.set_stage(stage)
+    reference.load_state_dict(actual.state_dict())
+    counts = {"encoder": 0, "decoder": 0}
 
-    @contextmanager
-    def independent_path(adapter, training=False):
-        if adapter == "encoder":
-            reference.codec.backbone.train(training)
-            yield reference.codec.backbone
-        else:
-            yield independent_decoder
+    def count(name):
+        def capture(module, args):
+            counts[name] += 1
 
-    reference.codec.use_adapter = independent_path
+        return capture
+
+    handles = [
+        actual.codec.encoder.get_base_model()
+        .model.layers[0]
+        .register_forward_pre_hook(count("encoder")),
+        actual.codec.decoder.model.layers[0].register_forward_pre_hook(count("decoder")),
+    ]
+    rows = [example((9,))] if stage == "warmup" else [example(), example((3, 2, 2, 2))]
     torch.manual_seed(123)
-    expected = reference(example(), read_task="both")["loss"]
+    expected = reference(rows, read_task="both")["loss"]
     expected.backward()
     torch.manual_seed(123)
-    observed = actual(example(), read_task="both")["loss"]
+    observed = actual(rows, read_task="both")["loss"]
+    forward_counts = counts.copy()
     observed.backward()
+    for handle in handles:
+        handle.remove()
+    assert all(counts[name] > forward_counts[name] > 0 for name in counts)
     torch.testing.assert_close(observed, expected)
     for (name, a), (_, b) in zip(
         actual.named_parameters(), reference.named_parameters(), strict=True
@@ -404,7 +412,30 @@ def test_shared_checkpointed_backbone_matches_independent_encoder_and_decoder(ti
         assert (a.grad is None) == (b.grad is None), name
         if a.grad is not None:
             torch.testing.assert_close(a.grad, b.grad, rtol=2e-4, atol=2e-6, msg=name)
-    assert all(p.grad is None for p in independent_decoder.parameters())
+    assert all(p.grad is None for p in actual.codec.decoder.parameters())
+    for task in (actual, reference):
+        torch.optim.AdamW([p for p in task.parameters() if p.requires_grad], lr=1e-4).step()
+    torch.testing.assert_close(
+        codec_state(actual.codec), codec_state(reference.codec), rtol=2e-4, atol=2e-6
+    )
+
+
+def test_generation_uses_cache_and_restores_training_without_unfreezing_decoder(tiny_base):
+    task = make_task(tiny_base, checkpointing=True)
+    codec = task.codec
+    ids = torch.tensor([4, 5, 6, 7])
+    memory = codec.write(None, ids, 2)
+    caches = []
+    handle = codec.decoder.model.register_forward_pre_hook(
+        lambda module, args, kwargs: caches.append(kwargs.get("use_cache")), with_kwargs=True
+    )
+    generated = codec.generate(memory, task.ae_prompt, 3, None, 0)
+    handle.remove()
+    assert len(generated) == 3 and len(caches) == 3 and all(caches)
+    assert codec.training and codec.encoder.training and codec.decoder.training
+    codec.read_loss(memory, task.ae_prompt, torch.tensor([4, 5, 2])).backward()
+    assert all(p.grad is None and not p.requires_grad for p in codec.decoder.parameters())
+    assert any(p.grad is not None for p in codec.encoder.parameters())
 
 
 def test_static_evaluation_uses_learned_alignment_without_mutating_checkpoint(tiny_base):
@@ -464,13 +495,16 @@ def test_qwen3_sdpa_recurrent_checkpointing(tiny_base, tmp_path, method, mixed, 
     task = ReconstructionTask(codec, tokenizer, TrainingConfig(objective="ae_lm", lm_ratio=0.5))
     reference = deepcopy(task)
     reference.codec.config = replace(reference.codec.config, gradient_checkpointing=False)
+    reference.codec.encoder.gradient_checkpointing_disable()
+    reference.codec.decoder.gradient_checkpointing_disable()
 
     def legacy_mask(module, args, kwargs):
         kwargs.pop("attention_mask", None)
         return args, kwargs
 
     for module in (
-        reference.codec.backbone.get_base_model().model,
+        reference.codec.encoder.get_base_model().model,
+        reference.codec.decoder.model,
         reference.codec.read_alignment,
         reference.codec.write_alignment,
     ):
@@ -508,7 +542,7 @@ def _ddp_worker(rank, rendezvous, base, destination):
     torch.set_num_threads(1)
     dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=2)
     torch.manual_seed(100)
-    task = make_task(base, "weighted")
+    task = make_task(base, "weighted", checkpointing=True)
     task.config = replace(task.config, gradient_clip=100, micro_batch_size=2)
     engine = ReconstructionEngine(task, torch.device("cpu"))
     engine.initialize()
@@ -535,7 +569,7 @@ def _ddp_worker(rank, rendezvous, base, destination):
 def test_verl_ddp_matches_global_mean_with_uneven_and_empty_ranks(tiny_base, tmp_path):
     torch.set_num_threads(1)
     torch.manual_seed(100)
-    task = make_task(tiny_base, "weighted")
+    task = make_task(tiny_base, "weighted", checkpointing=True)
     task.config = replace(task.config, gradient_clip=100)
     engine = ReconstructionEngine(task, torch.device("cpu"))
     engine.initialize()
