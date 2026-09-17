@@ -12,7 +12,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `pretrain/prepare_data.py` | 无 tokenizer 的独立构造，保存一份共享正文及两套字符索引 |
+| `pretrain/prepare_data.py` | 无 tokenizer 的独立构造，仅保存 Parquet 位置和字符索引 |
 | `pretrain/data.py` | 读取已保存数据，启动时分词和按真实长度筛选，epoch 复用 |
 | `pretrain/objective.py` | 每次写入后的累计历史 AE 与紧邻续文 LM，完整跨压缩步骤反向传播 |
 | `pretrain/engine.py` | verl BaseEngine＋PyTorch DDP，沿用 v1 replicated engine 的执行方式 |
@@ -21,7 +21,7 @@
 | `pretrain/evaluation.py` | 各次压缩后的损失、一次压缩对照、最终自由重构 |
 | `pretrain/checkpoint.py` | 可变权重、optimizer、游标与各 rank RNG，不保存数据集 |
 
-数据先独立构造并保存：`documents.jsonl` 中每篇原文只写一次，`single/` 与 `multi/` 各自保存 train/dev/test 字符索引。构造沿用 v1 质量过滤、去重和来源划分，长度按字符数除以 4 估算，无需 tokenizer。训练启动后按当前 tokenizer 分词并筛选一次，各 epoch 完整复用保留样本。六组共用 multi dev/test；静态 baseline 不加载 multi 训练数据。真实单次输入为 `[2K,8K]`；多次为 3～5 段、每段 `[K,3K]`、总长不超过 8K；续文不足 Q 或超出模型窗口的样本也排除，AE／AE＋LM 使用相同筛选。候选数与排除原因写入 `data-filtering.json`，训练步数按保留数量计算。
+数据先独立构造并保存：`single/` 与 `multi/` 各自保存 train/dev/test 索引，直接引用原始 Parquet 的文件路径、row group、组内行号和字符区间，不另存正文。文件路径相对于数据集目录。构造沿用 v1 质量过滤、去重和来源划分，长度按字符数除以 4 估算，无需 tokenizer。训练启动后按文件和 row group 合并读取请求，每个 row group 只读一次、每篇文章在内存中复用，再按当前 tokenizer 分词并筛选一次，各 epoch 完整复用保留样本。六组共用 multi dev/test；静态 baseline 不加载 multi 训练数据。真实单次输入为 `[2K,8K]`；多次为 3～5 段、每段 `[K,3K]`、总长不超过 8K；续文不足 Q 或超出模型窗口的样本也排除，AE／AE＋LM 使用相同筛选。候选数与排除原因写入 `data-filtering.json`，训练步数按保留数量计算。
 
 ```bash
 uv run --frozen python -m latent_working_memory.v2.pretrain.prepare_data \

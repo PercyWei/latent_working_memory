@@ -1,12 +1,13 @@
-"""读取已保存的原文／字符索引；启动时分词、筛选一次，各 epoch 复用。"""
+"""按已保存的位置读取原始 Parquet／字符索引；启动时分词、筛选一次，各 epoch 复用。"""
 
 from bisect import bisect_right
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 import json
 from pathlib import Path
 import random
 
+import pyarrow.parquet as pq
 import torch
 
 from latent_working_memory.v2.pretrain.prepare_data import STAGE_DIRECTORIES
@@ -54,23 +55,51 @@ def rejection_reason(
     return None
 
 
+def load_referenced_documents(root, indices):
+    """Read each referenced row group once, decode only selected articles, and reuse them."""
+    requests = defaultdict(lambda: defaultdict(set))
+    for row in indices:
+        if Path(row["source_file"]).is_absolute() or min(row["row_group"], row["row_index"]) < 0:
+            raise ValueError(
+                f"{row['sample_id']}: expected relative source path and nonnegative row location"
+            )
+        requests[row["source_file"]][row["row_group"]].add(row["row_index"])
+    documents = {}
+    for source_file, groups in requests.items():
+        with pq.ParquetFile(root / source_file) as source:
+            for group, selected in groups.items():
+                positions = sorted(selected)
+                table = source.read_row_group(group, columns=["id", "text"])
+                records = table.take(positions).to_pylist()
+                for position, record in zip(positions, records, strict=True):
+                    documents[source_file, group, position] = record
+    return documents
+
+
 def load_datasets(config, tokenizer, max_positions, training):
     if not tokenizer.is_fast:
         raise ValueError("character indices require a fast tokenizer with offset mappings")
     root = Path(config.dataset_dir)
     metadata = json.loads((root / "preparation.json").read_text())
-    documents = {
-        row["document_id"]: row
-        for row in (
-            json.loads(line) for line in (root / "documents.jsonl").read_text().splitlines()
-        )
-    }
     prompts = {
         task: len(tokenizer.encode(getattr(training, task + "_prompt"), add_special_tokens=False))
         for task in ("ae", "lm")
     }
     q = metadata["config"]["continuation_tokens"]
     stages = ("warmup", "multiround") if training.warmup_epochs else ("multiround",)
+    indices_by_split = {}
+    for stage in stages:
+        for split in ("train", "dev", "test"):
+            if stage == "multiround" and split == "train" and not training.multiround_epochs:
+                indices_by_split[stage, split] = []
+            else:
+                path = root / STAGE_DIRECTORIES[stage] / f"{split}.jsonl"
+                indices_by_split[stage, split] = [
+                    json.loads(line) for line in path.read_text().splitlines()
+                ]
+    documents = load_referenced_documents(
+        root, (row for indices in indices_by_split.values() for row in indices)
+    )
     datasets, filtering = {}, {}
     for stage in stages:
         datasets[stage], filtering[stage] = {}, {}
@@ -80,16 +109,16 @@ def load_datasets(config, tokenizer, max_positions, training):
                 filtering[stage][split] = {"candidates": 0, "retained": 0, "rejected": {}}
                 continue
             path = root / STAGE_DIRECTORIES[stage] / f"{split}.jsonl"
-            indices = [json.loads(line) for line in path.read_text().splitlines()]
+            indices = indices_by_split[stage, split]
             rows, rejected = [], Counter()
             for start in range(0, len(indices), 64):
                 batch = indices[start : start + 64]
                 texts = []
                 for row in batch:
-                    document = documents[row["document_id"]]
-                    if document["split"] != split:
+                    document = documents[row["source_file"], row["row_group"], row["row_index"]]
+                    if document["id"] != row["document_id"]:
                         raise ValueError(
-                            f"{row['sample_id']}: source split differs from sample split"
+                            f"{row['sample_id']}: Parquet location does not match document_id"
                         )
                     text = document["text"][row["char_start"] : row["char_end"]]
                     cuts = row["write_char_ends"]

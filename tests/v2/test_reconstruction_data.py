@@ -1,6 +1,8 @@
-"""无 tokenizer 构造、共享正文、真实长度筛选与跨实验配对。"""
+"""原始 Parquet 定位、无正文副本、真实长度筛选与跨实验配对。"""
 
-from dataclasses import asdict, replace
+from contextlib import ExitStack
+from dataclasses import replace
+import os
 import json
 import random
 
@@ -10,7 +12,14 @@ import pytest
 from transformers import AutoTokenizer
 
 from latent_working_memory.v2.pretrain.config import SelectionConfig, TrainingConfig
-from latent_working_memory.v2.pretrain.data import epoch_batches, load_datasets, rejection_reason
+from latent_working_memory.v2.pretrain.data import (
+    epoch_batches,
+    load_datasets,
+    rejection_reason,
+    load_referenced_documents,
+)
+from latent_working_memory.data_preparation.pretrain.fineweb import document_split
+from latent_working_memory.data_preparation.pretrain.sources import parquet_records
 from latent_working_memory.v2.pretrain.prepare_data import (
     DataPreparationConfig,
     Document,
@@ -31,7 +40,7 @@ def test_estimated_segment_constraints(rounds):
 
 def test_stage_sampling_uses_characters_and_independent_rng():
     documents = [
-        Document(f"{split}-{i}", "abcdefgh" * (60 + i), split, "https://example.org/", str(i))
+        Document(f"{split}-{i}", "abcdefgh" * (60 + i), split, "source.parquet", 0, i, str(i))
         for split in ("train", "dev", "test")
         for i in range(4)
     ]
@@ -54,7 +63,7 @@ def test_stage_sampling_uses_characters_and_independent_rng():
     assert max(r["write_char_ends"][-1] for r in single) == 128
 
 
-def test_prepare_saves_each_source_once_without_tokenizer(tmp_path, monkeypatch):
+def test_prepare_saves_only_references_without_tokenizer(tmp_path, monkeypatch):
     source = tmp_path / "source.parquet"
     records = [
         {
@@ -64,7 +73,7 @@ def test_prepare_saves_each_source_once_without_tokenizer(tmp_path, monkeypatch)
         }
         for i in range(100)
     ]
-    pq.write_table(pa.Table.from_pylist(records), source)
+    pq.write_table(pa.Table.from_pylist(records), source, row_group_size=17)
 
     def reject(*args, **kwargs):
         raise AssertionError("preparation must not load a tokenizer")
@@ -82,12 +91,9 @@ def test_prepare_saves_each_source_once_without_tokenizer(tmp_path, monkeypatch)
     first, second = tmp_path / "first", tmp_path / "second"
     metadata = prepare_dataset(config, first)
     prepare_dataset(config, second)
-    documents = [json.loads(s) for s in (first / "documents.jsonl").read_text().splitlines()]
-    ids = [d["document_id"] for d in documents]
-    assert len(ids) == len(set(ids)) == metadata["stored_documents"]
+    assert not (first / "documents.jsonl").exists()
     original = {r["id"]: r["text"] for r in records}
-    assert all(d["text"] == original[d["document_id"]] for d in documents)
-    document_map = {d["document_id"]: d for d in documents}
+    referenced = set()
     for stage, directory in STAGE_DIRECTORIES.items():
         for split in ("train", "dev", "test"):
             name = f"{directory}/{split}.jsonl"
@@ -95,18 +101,38 @@ def test_prepare_saves_each_source_once_without_tokenizer(tmp_path, monkeypatch)
             rows = [json.loads(s) for s in (first / name).read_text().splitlines()]
             assert len(rows) == getattr(config, stage)[split]
             assert all("text" not in r and "token_ids" not in r for r in rows)
-            assert all(document_map[r["document_id"]]["split"] == split for r in rows)
+            loaded = load_referenced_documents(first, rows)
+            for r in rows:
+                document = loaded[r["source_file"], r["row_group"], r["row_index"]]
+                assert document["id"] == r["document_id"]
+                assert document["text"] == original[r["document_id"]]
+                assert (
+                    document_split(r["dedup_cluster"], config.source_seed, config.split_fractions)
+                    == split
+                )
+                referenced.add(r["document_id"])
+    assert len(referenced) == metadata["referenced_documents"]
     assert "tokenizer" not in metadata
     with pytest.raises(FileExistsError):
         prepare_dataset(config, first)
 
 
-def test_tokenized_filter_is_shared_and_epochs_reuse_rows(tmp_path, tiny_base):
-    documents = [
-        asdict(Document(split, "red " * 12, split, "https://example.org/", split))
-        for split in ("train", "dev", "test")
-    ]
-    (tmp_path / "documents.jsonl").write_text("".join(json.dumps(d) + "\n" for d in documents))
+def test_tokenized_filter_is_shared_and_epochs_reuse_rows(tmp_path, tiny_base, monkeypatch):
+    splits = ("train", "dev", "test")
+    source = tmp_path / "raw.parquet"
+    pq.write_table(
+        pa.Table.from_pylist([{"id": split, "text": "red " * 12} for split in splits]),
+        source,
+        row_group_size=1,
+    )
+    reads = []
+    original_read = pq.ParquetFile.read_row_group
+
+    def counted_read(self, index, *args, **kwargs):
+        reads.append(index)
+        return original_read(self, index, *args, **kwargs)
+
+    monkeypatch.setattr(pq.ParquetFile, "read_row_group", counted_read)
     (tmp_path / "preparation.json").write_text(
         json.dumps({"preparation_id": "test", "config": {"continuation_tokens": 2}})
     )
@@ -117,6 +143,10 @@ def test_tokenized_filter_is_shared_and_epochs_reuse_rows(tmp_path, tiny_base):
             good = {
                 "sample_id": stage + split,
                 "document_id": split,
+                "source_file": "raw.parquet",
+                "row_group": splits.index(split),
+                "row_index": 0,
+                "dedup_cluster": split,
                 "char_start": 0,
                 "char_end": 40,
                 "write_char_ends": cuts,
@@ -133,9 +163,12 @@ def test_tokenized_filter_is_shared_and_epochs_reuse_rows(tmp_path, tiny_base):
     tokenizer = AutoTokenizer.from_pretrained(tiny_base)
     config, training = SelectionConfig(str(tmp_path)), TrainingConfig()
     ae, _, filtering = load_datasets(config, tokenizer, 128, training)
+    assert sorted(reads) == [0, 1, 2]  # All splits/stages share each row-group read.
+    reads.clear()
     joint, _, same_filtering = load_datasets(
         config, tokenizer, 128, replace(training, objective="ae_lm")
     )
+    assert sorted(reads) == [0, 1, 2]
     direct, _, _ = load_datasets(config, tokenizer, 128, replace(training, warmup_epochs=0))
     assert filtering == same_filtering
     for stage in ae:
@@ -151,3 +184,57 @@ def test_tokenized_filter_is_shared_and_epochs_reuse_rows(tmp_path, tiny_base):
     assert (
         rejection_reason((4,), 5, 2, 2, "warmup", 128, {"ae": 1, "lm": 1}) == "continuation_length"
     )
+
+
+def test_locators_preserve_legacy_interleaved_sampling(tmp_path):
+    files = []
+    for f in range(2):
+        path = tmp_path / f"source-{f}.parquet"
+        pq.write_table(
+            pa.Table.from_pylist([{"id": f"{f}-{i}", "text": str(i)} for i in range(700)]),
+            path,
+            row_group_size=173,
+        )
+        files.append(path)
+    # Reference ordering used before location tracking was added.
+    rng = random.Random(73)
+    paths = files.copy()
+    rng.shuffle(paths)
+    expected = []
+    with ExitStack() as stack:
+        streams = []
+        for path in paths:
+            source = stack.enter_context(pq.ParquetFile(path))
+            groups = list(range(source.num_row_groups))
+            rng.shuffle(groups)
+            streams.append(
+                source.iter_batches(batch_size=256, row_groups=groups, use_threads=False)
+            )
+        while streams:
+            active = []
+            for stream in streams:
+                batch = next(stream, None)
+                if batch is None:
+                    continue
+                rows = batch.to_pylist()
+                rng.shuffle(rows)
+                expected.extend(rows)
+                active.append(stream)
+            streams = active
+    located = list(parquet_records(files, 73))
+    assert [r for r, _ in located] == expected
+    indices = [
+        dict(
+            location,
+            source_file=os.path.relpath(location["source_file"], tmp_path),
+            sample_id=str(i),
+            document_id=row["id"],
+        )
+        for i, (row, location) in enumerate(located)
+    ]
+    loaded = load_referenced_documents(tmp_path, indices)
+    for row in indices:
+        assert (
+            loaded[row["source_file"], row["row_group"], row["row_index"]]["id"]
+            == row["document_id"]
+        )

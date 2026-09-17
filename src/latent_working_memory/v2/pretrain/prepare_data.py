@@ -1,4 +1,4 @@
-"""独立构造共享原文及两套字符索引；长度按 len(text) / 4 估算。"""
+"""独立构造指向原始 Parquet 的两套字符索引；长度按 len(text) / 4 估算。"""
 
 import argparse
 from bisect import bisect_left
@@ -9,6 +9,7 @@ from glob import glob
 from itertools import accumulate
 import json
 import math
+import os
 from pathlib import Path
 import random
 import uuid
@@ -62,7 +63,9 @@ class Document:
     document_id: str
     text: str
     split: str
-    source_url: str
+    source_file: str
+    row_group: int
+    row_index: int
     dedup_cluster: str
 
 
@@ -111,6 +114,10 @@ def build_indices(documents, config, stage, split):
             {
                 "sample_id": f"{stage}/{split}/{i:06d}",
                 "document_id": document.document_id,
+                "source_file": document.source_file,
+                "row_group": document.row_group,
+                "row_index": document.row_index,
+                "dedup_cluster": document.dedup_cluster,
                 "char_start": start,
                 "char_end": start + 4 * (length + q),
                 "write_char_ends": [4 * end for end in accumulate(parts)],
@@ -156,7 +163,9 @@ def prepare_dataset(config, output_dir):
             row["record"]["id"],
             row["record"]["text"],
             row["split"],
-            row["record"]["url"],
+            os.path.relpath(Path(row["location"]["source_file"]).absolute(), output_dir.absolute()),
+            row["location"]["row_group"],
+            row["location"]["row_index"],
             row["cluster"],
         )
         for row in sources
@@ -173,10 +182,6 @@ def prepare_dataset(config, output_dir):
         r["document_id"] for splits in datasets.values() for rows in splits.values() for r in rows
     }
     output_dir.mkdir(parents=True)
-    with (output_dir / "documents.jsonl").open("w") as stream:
-        for document in documents:
-            if document.document_id in used:
-                stream.write(json.dumps(asdict(document), ensure_ascii=False) + "\n")
     for stage, splits in datasets.items():
         directory = output_dir / STAGE_DIRECTORIES[stage]
         directory.mkdir()
@@ -197,9 +202,9 @@ def prepare_dataset(config, output_dir):
                 "near_duplicate_min_words",
             )
         },
-        "source_files": [str(p.resolve()) for p in paths],
+        "source_files": [os.path.relpath(p.absolute(), output_dir.absolute()) for p in paths],
         "source_statistics": dict(Counter(row["status"] for row in sources)),
-        "stored_documents": len(used),
+        "referenced_documents": len(used),
         "statistics": {
             stage: {split: index_statistics(rows) for split, rows in splits.items()}
             for stage, splits in datasets.items()
@@ -208,13 +213,16 @@ def prepare_dataset(config, output_dir):
     (output_dir / "preparation.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2) + "\n"
     )
-    print(f"Saved {len(used)} shared articles and single/multi indices to {output_dir}", flush=True)
+    print(
+        f"Saved single/multi indices referencing {len(used)} source articles to {output_dir}",
+        flush=True,
+    )
     return metadata
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Prepare shared reconstruction text and character indices without a tokenizer"
+        description="Prepare reconstruction Parquet references and character indices without a tokenizer"
     )
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
