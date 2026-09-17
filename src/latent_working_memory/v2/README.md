@@ -2,7 +2,7 @@
 
 创建时间：20260915 19:10:20 UTC+08:00
 
-最后修订时间：20260917 21:15:15 UTC+08:00
+最后修订时间：20260917 22:40:49 UTC+08:00
 
 ## 当前入口：固定容量重构预训练
 
@@ -34,7 +34,7 @@ uv run --frozen python -m latent_working_memory.v2.pretrain.prepare_data \
 
 变长输入只在末尾补齐，补齐状态不进入 pooling 或损失；causal attention 保证有效 token 不会读取末尾补齐位置。模型接收全有效二维 mask，避免 packed-position 检测生成阻止 FlashAttention 的四维 mask。对齐输出转回基座 dtype；基础 pooling 在 FP32 中使用连续分段归约，保持原分组边界并避免原子累加的顺序波动。两个模型各自使用 Transformers 原生逐层 checkpoint（`use_reentrant=False`），不在前向或重算期间切换 adapter。Decoder 的 attention dropout 固定为 0，训练模式用于启用逐层重算，参数仍全部冻结；读取不使用 `no_grad()`，保留到 memory 的梯度。生成时临时切换 Decoder 到 eval 以使用 KV cache，结束后恢复。
 
-`micro_batch_size` 是单卡一次并行的轨迹上限，六组配置设为 4；`global_batch_size=8` 控制一次参数更新的总样本数。同一 rank 的候选按预计读取长度排序，在相同容量下合批；AE／LM 任务和压缩次数可以不同。encoder／decoder 的位置预算分别为 `micro_batch_encoder_tokens=6144`、`micro_batch_decoder_tokens=10240`，按每次压缩的实际活跃样本检查，超过预算时拆批。
+`micro_batch_size` 是单卡一次并行的轨迹上限：A～D 固定为 8，E／F 为 16；六组 `global_batch_size=32`。每个实验使用两卡，对应正常满批梯度累积 2／1 次，尾批按实际样本数归一化。A／B 切换训练阶段时不改变 microbatch。同一 rank 的候选按预计读取长度排序，在相同容量下合批；AE／LM 任务和压缩次数可以不同。encoder／decoder 的有效位置预算为：A／B 32768／36928、C／D 16384／36928、E／F 65536／73856。A／B 的 encoder 预算覆盖单压缩最长输入，避免 warm-up 被额外拆批。
 
 每条样本分别拼接 prompt 与目标前缀，再统一右侧补齐，按各自目标位置计算损失。同一压缩步骤只调用一次批量读取；已结束轨迹从后续写入与读取中移除，记忆通过可微索引保留跨压缩步骤的梯度。损失先按各自目标 tokens、各自压缩次数平均，再按全局轨迹数平均。`resources/mean_microbatch_size` 记录轨迹组初始平均大小，`resources/mean_active_microbatch_size` 记录各次压缩时实际活跃的平均批大小。
 
@@ -42,7 +42,7 @@ uv run --frozen python -m latent_working_memory.v2.pretrain.prepare_data \
 
 该模式需要 CUDA、BF16/FP16、完整 causal attention 和零 attention dropout，`attention_implementation` 保持 `sdpa`。`padding_free=false` 保留矩形补齐路径用于对照。位置预算在 padding-free 模式下按有效位置之和计算，在矩形模式下按补齐后位置数计算。每条样本仍独立检查模型窗口，展平总长不视为单条上下文长度。
 
-六份可执行起点配置位于 `configs/v2/pretrain/qwen3-4b_pooling_*`，包含 AE／AE＋LM × warm-up／直接多次压缩四组主实验，以及 `ae-static`、`ae-lm-static` 两组全程单次压缩 baseline。本次六组均使用基础 pooling。默认完整 Encoder（`encoder_layers: null`）、K=512、Q=512、全局 batch=8、学习率 1e-4；两阶段各 32000 条候选训练轨迹，warm-up 组为 1＋2 epochs，直接多次压缩组为 3 epochs，静态 baseline 为单次压缩 3 epochs，实际 optimizer steps 按筛选后的样本数计算。模型名沿用已有 Qwen3 配置；真实数据路径、基座 revision 与超参数需按实际实验确定。
+六份可执行起点配置位于 `configs/v2/pretrain/qwen3-4b_pooling_*`，包含 AE／AE＋LM × warm-up／直接多次压缩四组主实验，以及 `ae-static`、`ae-lm-static` 两组全程单次压缩 baseline。本次六组均使用基础 pooling。默认完整 Encoder（`encoder_layers: null`）、K=512、Q=512、全局 batch=32、学习率 1e-4；两阶段各 32000 条候选训练轨迹，warm-up 组为 1＋2 epochs，直接多次压缩组为 3 epochs，静态 baseline 为单次压缩 3 epochs，实际 optimizer steps 按筛选后的样本数计算。模型名沿用已有 Qwen3 配置；真实数据路径、基座 revision 与超参数需按实际实验确定。
 
 ```bash
 uv sync --frozen
@@ -68,7 +68,7 @@ checkpoint 仅保存 `encoder.*` 下的 LoRA、压缩模块及读写对齐，不
 
 产物包含 `run.json`、`provenance.json`、`data-summary.json`、`epoch-plan.json`、训练日志、checkpoint、dev／test 结果和 `training-result.json`。`checkpoint_limit=2` 保留最近两份 checkpoint，并额外保留单次压缩训练结束和完整训练结束的 checkpoint。只有完成全部 epochs 才生成最终 test。AE 与 LM 分别记录各次压缩后的 NLL，包含最后一次压缩，不另列最终 NLL；同时保留 AE／LM 各自的轨迹平均 NLL、一次压缩 NLL 和配对差值。AE 最后一次压缩后的自由重构使用完整 token 序列 EM（`generation/final_round_exact_match`），另记录生成触顶比例与样本数。
 
-本地小模型验证与当前实验设置见[实验记录](../../../notes/v2/20260916_fixed_capacity_reconstruction_experiment.md)。已完成真实 FineWeb＋Qwen3 GPU 短测，完整训练和论文指标复现尚未完成；执行与性能结果见[性能优化记录](../../../notes/v2/20260917_reconstruction_performance_optimization.md)。容量增长与 QA 适配仍属后续工作。
+本地小模型验证与当前实验设置见[实验记录](../../../notes/v2/20260916_fixed_capacity_reconstruction_experiment.md)。已完成真实 FineWeb＋Qwen3 GPU 短测，完整训练和论文指标复现尚未完成；执行与性能结果见[性能优化记录](../../../notes/v2/20260917_engineering_optimization_summary.md)。容量增长与 QA 适配仍属后续工作。
 
 训练与 dev 使用按 optimizer step 增量记录的原生曲线；dev 的 AE／LM、一次压缩对照和配对差值合并到三个面板，分母与细分统计进入表格。资源与累计进度单独分区。最终评估只上传最后 checkpoint 的汇总图和生成样例，不逐步上传累计曲线图片。
 
@@ -170,16 +170,27 @@ AE 模式的指标同样是重建文本匹配，不等于论文全部重建指�
 - 上游单样本数值比较：3 种长度 × 2 个压缩率的 logits／loss 一致。
 - AE→QA→生成评估端到端入口，以及同 run 中断恢复；恢复后权重与不中断训练逐参数一致。
 - 动态首次写入、固定容量内容修改、扩展、容量边界、跨更新梯度及显式 detach。
-- 本地双进程 Gloo 静态训练、保存与全部压缩率 dev 评估；记录位于 `artifacts/v2/validation/gmsa-migration_20260915/`。
+- 本地双进程 Gloo 静态训练、保存与全部压缩率 dev 评估。
 
 初始迁移时 v2 共 14 项测试通过（含显式指定上游源码的数值比较）。全仓测试 288 项通过、1 项失败：
 `tests/test_cdic_reproduction.py::test_required_cdic_sources_are_present` 仍要求已不存在的
 `src/cdic_repro/checkpoint.py` 和 `src/cdic_repro/icae_adapter.py` 旧路径；原分支 HEAD 已不存在这两项，本轮没有修改 C-DIC。
-测试输出保存为上述验证目录中的 `v2-tests.log` 和 `pytest.log`。
+历史临时测试产物已清理。
 
 这些检查验证实现契约，不证明随机小模型具备压缩效果，也不代表 CUDA／真实 Qwen3-4B 显存验证。
 当前实验采用上面的统一 codec 与重构入口；后续进行真实基座上的训练验证。
 
-## 实际运行准备
+## 完整实验调度
 
-`pretrain.profile` 使用真实基座检查最长单次压缩、3 次／5 次压缩和 AE＋LM 的峰值显存、吞吐与梯度。`pretrain.experiment` 按显式实验列表调度 GPU 4–7，每卡一个独立进程，记录命令、PID、退出码和完成状态；任一实验失败后暂停新的排队任务。数据与模型配置保持各实验自身的契约。
+`pretrain.experiment` 默认使用 GPU 4、5 和 6、7 两组，每个实验通过 `torch.distributed.run --nproc_per_node=2` 执行。仅在两张卡均满足空闲显存要求时启动；一个实验失败后停止派发新任务，已在运行的实验继续完成。中断调度器时只停止它自己创建的 torchrun 进程组。
+
+```bash
+.venv/bin/python -m latent_working_memory.v2.pretrain.experiment \
+  --experiments configs/v2/pretrain/qwen3-4b_pooling_*/experiment.json \
+  --output-dir artifacts/v2/reconstruction_20260917 \
+  --model-path /data/bywei/models/Qwen/Qwen3-4B-Instruct-2507 \
+  --group qwen3-4b_pooling_reconstruction_20260917 \
+  --run-date 20260917 --plan-only
+```
+
+`--model-path` 将本地模型路径写入 `plan/<run_name>/` 的配置快照，避免离线启动时解析 Hub ID。`--plan-only` 只生成计划，不查询或占用 GPU；正式执行时去掉它并加 `--resume`。后续续训沿用同一实验列表、日期和 group，自动选择各未完成 run 的最新 checkpoint；完整完成的 run 跳过。运行时沿用配置快照，不覆盖为后来修改的源配置。GPU 分组、命令、PID、完成状态保存在 `status.json`。

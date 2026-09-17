@@ -5,7 +5,7 @@
     "objective": "ae_lm",
     "warmup_epochs": 3,
     "multiround_epochs": 0,
-    "global_batch_size": 8,
+    "global_batch_size": 32,
     "learning_rate": 0.0001,
     "weight_decay": 0.01,
     "gradient_clip": 1.0,
@@ -17,8 +17,8 @@
     "ae_prompt": "Reconstruct the text stored in memory:\n",
     "lm_prompt": "Continue the text stored in memory:\n",
     "checkpoint_limit": 2,
-    "micro_batch_size": 4,
-    "micro_batch_encoder_tokens": 6144,
-    "micro_batch_decoder_tokens": 10240
+    "micro_batch_size": 16,
+    "micro_batch_encoder_tokens": 65536,
+    "micro_batch_decoder_tokens": 73856
   }
 }

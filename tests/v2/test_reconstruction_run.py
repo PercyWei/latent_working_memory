@@ -2,6 +2,7 @@
 
 import argparse
 from dataclasses import asdict
+from pathlib import Path
 import json
 
 import pyarrow as pa
@@ -18,7 +19,7 @@ from latent_working_memory.v2.pretrain.prepare_data import DataPreparationConfig
 from latent_working_memory.v2.pretrain.checkpoint import prune_checkpoints
 
 
-def make_experiment(tmp_path, tiny_base):
+def make_experiment(tmp_path, tiny_base, train_samples=12):
     parquet = tmp_path / "fineweb.parquet"
     records = [
         {
@@ -46,8 +47,8 @@ def make_experiment(tmp_path, tiny_base):
         continuation_reserve_tokens=3,
         max_documents=100,
         split_fractions=(0.6, 0.2, 0.2),
-        warmup={"train": 12, "dev": 8, "test": 8},
-        multiround={"train": 12, "dev": 8, "test": 8},
+        warmup={"train": train_samples, "dev": 8, "test": 8},
+        multiround={"train": train_samples, "dev": 8, "test": 8},
     )
     prepare_dataset(preparation, tmp_path / "dataset")
     selection = SelectionConfig(str(tmp_path / "dataset"))
@@ -150,28 +151,52 @@ def test_raw_data_epochs_and_resume_match_uninterrupted(tiny_base, tmp_path):
         assert f"round/{last_round}/{objective}_nll" in evaluation["metrics"]
 
 
-def _distributed_run(rank, rendezvous, experiment, output):
+def _distributed_run(rank, rendezvous, experiment, output, stop=None, resume=None):
     torch.set_num_threads(1)
     dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=2)
-    run_training(arguments(experiment, output))
+    run_training(arguments(experiment, output, stop, resume))
     dist.destroy_process_group()
 
 
-def test_two_rank_stage_transfer_and_full_epoch_tail(tiny_base, tmp_path):
-    experiment = make_experiment(tmp_path, tiny_base)
+def test_two_rank_fixed_batch_stage_transfer_and_resume(tiny_base, tmp_path):
+    experiment = make_experiment(tmp_path, tiny_base, train_samples=40)
+    raw = json.loads(experiment.read_text())
+    raw["training"].update(global_batch_size=32, micro_batch_size=8, multiround_epochs=2)
+    experiment.write_text(json.dumps(raw))
     output = tmp_path / "distributed"
-    mp.spawn(
-        _distributed_run,
-        args=(str(tmp_path / "rendezvous"), experiment, output),
-        nprocs=2,
-        join=True,
-    )
+    resumed_output = tmp_path / "resumed-distributed"
+    for label, destination, stop, resume in (
+        ("full", output, None, None),
+        ("stop", resumed_output, 2, None),
+        ("resume", resumed_output, None, resumed_output / "checkpoints/step-000002.pt"),
+    ):
+        mp.spawn(
+            _distributed_run,
+            args=(str(tmp_path / label), experiment, destination, stop, resume),
+            nprocs=2,
+            join=True,
+        )
     result = json.loads((output / "training-result.json").read_text())
-    assert result["complete"] and result["completed_steps"] == result["total_steps"]
+    resumed = json.loads((resumed_output / "training-result.json").read_text())
+    assert result["complete"] and resumed["complete"]
     log = [json.loads(line) for line in (output / "train.jsonl").read_text().splitlines()]
-    stats = json.loads((output / "data-summary.json").read_text())
-    assert sum(r["samples"] for r in log) == sum(stats[s]["train"]["trajectories"] for s in stats)
+    resumed_log = [
+        json.loads(line) for line in (resumed_output / "train.jsonl").read_text().splitlines()
+    ]
+    assert len(log) == len(resumed_log) == result["total_steps"]
     assert log[0]["stage"] == "warmup" and log[-1]["stage"] == "multiround"
+    assert {r["global_epoch"] for r in log} == {1, 2, 3}
+    assert all(
+        r["max_microbatch_size"] == 8 and r["microbatches"] == 4 for r in log if r["samples"] == 32
+    )
+    for a, b in zip(log, resumed_log, strict=True):
+        for key in ("step", "stage", "samples", "microbatches", "loss", "ae", "lm"):
+            assert a[key] == b[key]
+    full_checkpoint = torch.load(result["checkpoint"], weights_only=False)
+    resumed_checkpoint = torch.load(resumed["checkpoint"], weights_only=False)
+    for key in ("codec", "optimizer"):
+        torch.testing.assert_close(full_checkpoint[key], resumed_checkpoint[key], rtol=0, atol=0)
+    assert full_checkpoint["cursor"] == resumed_checkpoint["cursor"]
 
 
 @pytest.mark.parametrize("objective", ["ae", "ae_lm"])
@@ -208,3 +233,50 @@ def test_static_baseline_trains_only_single_writes_and_evaluates_shared_trajecto
         assert "trajectory_lm" in evaluation["metrics"]
         assert not any("ppl" in key for key in evaluation["metrics"])
     assert "generation/final_round_exact_match" in evaluation["metrics"]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "ae-warmup",
+        "ae-lm-warmup",
+        "ae_dynamic",
+        "ae-lm_dynamic",
+        "ae-static",
+        "ae-lm-static",
+    ],
+)
+def test_all_six_formal_training_policies_complete(tiny_base, tmp_path, name):
+    torch.set_num_threads(1)
+    experiment = make_experiment(tmp_path, tiny_base, train_samples=40)
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "configs/v2/pretrain"
+        / f"qwen3-4b_pooling_{name}"
+        / "experiment.json"
+    )
+    raw = json.loads(experiment.read_text())
+    raw["training"] = json.loads(source.read_text())["training"]
+    experiment.write_text(json.dumps(raw))
+    output = tmp_path / "full-policy"
+    result = run_training(arguments(experiment, output))
+    assert result["complete"] and result["completed_epochs"] == 3
+    assert (output / "test.json").exists()
+    rows = [json.loads(x) for x in (output / "train.jsonl").read_text().splitlines()]
+    cfg = raw["training"]
+    assert all(r["max_microbatch_size"] <= cfg["micro_batch_size"] for r in rows)
+    assert any(r["samples"] == 32 for r in rows)
+    assert all(
+        r["max_microbatch_size"] == cfg["micro_batch_size"] for r in rows if r["samples"] == 32
+    )
+    assert {r["global_epoch"] for r in rows} == {1, 2, 3}
+    stats = json.loads((output / "data-summary.json").read_text())
+    for stage, epochs in [
+        ("warmup", cfg["warmup_epochs"]),
+        ("multiround", cfg["multiround_epochs"]),
+    ]:
+        if epochs:
+            assert (
+                sum(r["samples"] for r in rows if r["stage"] == stage)
+                == epochs * stats[stage]["train"]["trajectories"]
+            )
