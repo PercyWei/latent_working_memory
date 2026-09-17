@@ -2,7 +2,7 @@
 
 创建时间：20260915 19:10:20 UTC+08:00
 
-最后修订时间：20260917 16:07:51 UTC+08:00
+最后修订时间：20260917 16:49:13 UTC+08:00
 
 ## 当前入口：固定容量重构预训练
 
@@ -34,7 +34,7 @@ uv run --frozen python -m latent_working_memory.v2.pretrain.prepare_data \
 
 变长输入只在末尾补齐，补齐状态不进入 pooling 或损失；causal attention 保证有效 token 不会读取末尾补齐位置。模型接收全有效二维 mask，避免 packed-position 检测生成阻止 FlashAttention 的四维 mask。对齐输出转回基座 dtype；基础 pooling 在 FP32 中使用连续分段归约，保持原分组边界并避免原子累加的顺序波动。共享基座的 adapter 上下文缓存模块列表，使用 PEFT 的层级开关，并恢复 requires_grad 与各模块的 train/eval 状态；checkpoint 重算仍在对应上下文内执行。
 
-`micro_batch_size` 是单卡一次并行的样本上限，六组配置设为 2；`global_batch_size=8` 仍控制一次参数更新的总样本数。同一 rank 在全局 batch 内按容量和压缩次数配组，encoder 的补齐后总位置预算为 `micro_batch_encoder_tokens=4096`，decoder 为 `micro_batch_decoder_tokens=8192`（含 memory/prompt）。组合超过预算时提前拆开，不依赖 OOM 重试；单条轨迹仍按数据的长度／窗口契约处理。不同长度、深度与尾批可能使实际 microbatch 为 1，SwanLab 的 `resources/mean_microbatch_size` 记录有效平均值。
+`micro_batch_size` 是单卡一次并行的样本上限，六组配置设为 2；`global_batch_size=8` 仍控制一次参数更新的总样本数。同一 rank 在全局 batch 内按任务、容量和压缩次数配组，encoder 的补齐后总位置预算为 `micro_batch_encoder_tokens=4096`，decoder 为 `micro_batch_decoder_tokens=8192`（含 memory/prompt）。组合超过预算时提前拆开，不依赖 OOM 重试；单条轨迹仍按数据的长度／窗口契约处理。不同长度、深度与尾批可能使实际 microbatch 为 1，SwanLab 的 `resources/mean_microbatch_size` 记录有效平均值。
 
 六份可执行起点配置位于 `configs/v2/pretrain/qwen3-4b_pooling_*`，包含 AE／AE＋LM × warm-up／直接多次压缩四组主实验，以及 `ae-static`、`ae-lm-static` 两组全程单次压缩 baseline。本次六组均使用基础 pooling。默认完整 Encoder（`encoder_layers: null`）、K=512、Q=512、全局 batch=8、学习率 1e-4；两阶段各 32000 条候选训练轨迹，warm-up 组为 1＋2 epochs，直接多次压缩组为 3 epochs，静态 baseline 为单次压缩 3 epochs，实际 optimizer steps 按筛选后的样本数计算。模型名沿用已有 Qwen3 配置；真实数据路径、基座 revision 与超参数需按实际实验确定。
 
@@ -49,6 +49,10 @@ CUDA_VISIBLE_DEVICES=4,5 uv run --frozen python -m torch.distributed.run \
 ```
 
 `experiment.json` 引用同目录的 `model.json`、`selection.json`；`selection.json` 只引用已构造的 `dataset_dir`，相对于主仓库根目录。来源与候选配额单独配置在 `configs/data_preparation/`。修改 `compression` 可运行其他压缩版本。SwanLab 默认 online，要求显式传入 `--swanlab-group <实验组>`，使用用户指定的 `latent-working-memory-v2` project；工程测试可选择 offline／disabled。Run 名称取输出目录名，同一训练的 dev／test 追加到同一 run，恢复沿用 run ID。模型、超参数与解析后的真实层数进入 config，固定 tags 标记 scope、method、data，study 标签由启动参数指定。
+
+AE＋LM 使用 `training.lm_ratio` 指定每条轨迹本次选择 LM 的概率，否则选择 AE；六组中 AE-only 为 0，AE＋LM 为 0.5。任务贯穿轨迹内全部压缩步骤，每次只执行一次读取；训练损失是选中任务的 token 平均、压缩次数平均与全局样本平均，不再使用 `lm_weight`。任务分配由 seed 和全局 step 确定，在 rank 划分前完成，独立于 dropout RNG；各 epoch 复用文本和切点，但可以选择不同任务。dev/test 始终同时计算 AE 和 LM，保持完整配对评估。
+
+训练日志分项 NLL 只统计选中该任务的样本，没有选中时为 null，SwanLab 不上传该项；`ae_samples`、`lm_samples` 和各自的 `*_tokens` 在本地日志记录实际样本数及监督量。旧的 AE＋LM 双损失短测使用不同训练协议，其 loss 与吞吐不代表本设置；新配置不能直接续训旧配置的 checkpoint。
 
 warm-up 结束后复制已训练的读取对齐初始化写入对齐，重建 AdamW；直接多次压缩时两端从同一预训练 LSA 独立初始化。单次压缩 checkpoint 进行多次压缩评估时，临时以已训练 Ar 参数作为 Aw，评估后恢复；多次压缩 checkpoint 使用训练后的 Aw。各阶段使用固定学习率，训练预算以完整 epochs 配置。Ar、Aw 各自是预训练 block 0＋最终 norm 的独立副本，与共享基座不共享权重。只加载一次完整基座，然后直接复制对齐所需层；对齐骨架在 meta device 上构造，不分配真实词表层或 LM head。只训练对齐 blocks，最终 norm 冻结。Encoder 与 decoder 隐状态计算各自使用 checkpoint，适配器选择在重计算时重新执行。词表投影与 CE 按 `lm_head_chunk_size=256` 分块并分别 checkpoint，只计算有效目标位置，保留 EOS 和每条样本的 token 平均。单设备可直接运行该模块；CPU 验证添加 `--device cpu`。
 

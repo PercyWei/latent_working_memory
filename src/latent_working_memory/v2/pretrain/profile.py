@@ -52,10 +52,18 @@ def main():
         cases.append(("multiround", "ae_lm", (reader_limit - 4 * k, k, k, k, k)))
     results = []
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    for stage, objective, lengths in cases:
+    # Resource bounds must cover both tasks, even when a small random batch
+    # happens to contain only LM. Probe each task separately at the ratio endpoints.
+    cases = [
+        (stage, objective, lengths, ratio)
+        for stage, objective, lengths in cases
+        for ratio in ((0.0, 1.0) if objective == "ae_lm" else (0.0,))
+    ]
+    for stage, objective, lengths, lm_ratio in cases:
         codec.set_stage(stage)
         config = TrainingConfig(
             objective=objective,
+            lm_ratio=lm_ratio,
             global_batch_size=args.batch_size,
             micro_batch_size=args.micro_batch_size,
         )
@@ -78,10 +86,10 @@ def main():
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
         steps = []
-        for _ in range(args.iterations):
+        for step in range(args.iterations):
             torch.cuda.synchronize(device)
             start = time.perf_counter()
-            metrics = engine.step(rows)
+            metrics = engine.step(rows, step)
             torch.cuda.synchronize(device)
             metrics["seconds"] = time.perf_counter() - start
             assert any(
@@ -98,6 +106,7 @@ def main():
         result = {
             "stage": stage,
             "objective": objective,
+            "lm_ratio": lm_ratio,
             "lengths": lengths,
             "batch_size": args.batch_size,
             "micro_batch_size": args.micro_batch_size,

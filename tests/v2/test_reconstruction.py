@@ -3,12 +3,14 @@
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
+import random
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from transformers import AutoTokenizer, Qwen3Config, Qwen3ForCausalLM
+from verl.utils.tensordict_utils import get_non_tensor_data
 
 from latent_working_memory.v2.compression import SlotCompression
 from latent_working_memory.v2.memory_codec import CodecConfig, MemoryCodec
@@ -40,7 +42,7 @@ def make_task(path, method="mean", checkpointing=False, feature_layer="last", dr
     return ReconstructionTask(
         MemoryCodec(config),
         AutoTokenizer.from_pretrained(path),
-        TrainingConfig(objective="ae_lm", global_batch_size=2),
+        TrainingConfig(objective="ae_lm", lm_ratio=0.5, global_batch_size=2),
     )
 
 
@@ -95,7 +97,7 @@ def test_full_bptt_frozen_decoder_and_raw_update(tiny_base, method):
         return result
 
     task.codec.write = capture
-    result = task(row)
+    result = task(row, read_task="both")
     assert input_lengths == [2, 3, 4]
     assert [r["ae_tokens"] for r in result["rounds"]] == [3, 6, 10]
     # Use only a final read: first memory must still receive a gradient through later writes.
@@ -117,8 +119,8 @@ def test_checkpointed_read_matches_full_graph(tiny_base, feature_layer):
     reference = make_task(tiny_base, "weighted", False, feature_layer)
     actual = make_task(tiny_base, "weighted", True, feature_layer)
     actual.load_state_dict(reference.state_dict())
-    reference(example())["loss"].backward()
-    actual(example())["loss"].backward()
+    reference(example(), read_task="both")["loss"].backward()
+    actual(example(), read_task="both")["loss"].backward()
     for (name, a), (_, b) in zip(
         reference.named_parameters(), actual.named_parameters(), strict=True
     ):
@@ -148,7 +150,10 @@ def test_chunked_head_matches_native_causal_loss_and_gradients(tiny_base):
             ).loss
 
     reference.codec.read_loss = native_loss
-    expected, observed = reference(example())["loss"], actual(example())["loss"]
+    expected, observed = (
+        reference(example(), read_task="both")["loss"],
+        actual(example(), read_task="both")["loss"],
+    )
     expected.backward()
     observed.backward()
     torch.testing.assert_close(observed, expected)
@@ -162,7 +167,9 @@ def test_chunked_head_matches_native_causal_loss_and_gradients(tiny_base):
 @pytest.mark.parametrize("method", ["mean", "weighted"])
 def test_microbatch_matches_serial_with_unequal_lengths_and_depths(tiny_base, objective, method):
     reference = make_task(tiny_base, method, checkpointing=True)
-    reference.config = replace(reference.config, objective=objective, lm_weight=0.3)
+    reference.config = replace(
+        reference.config, objective=objective, lm_ratio=0.5 if objective == "ae_lm" else 0
+    )
     actual = deepcopy(reference)
     actual.config = replace(actual.config, micro_batch_size=2)
     actual.codec.config = replace(actual.codec.config, lm_head_chunk_size=2)
@@ -170,7 +177,7 @@ def test_microbatch_matches_serial_with_unequal_lengths_and_depths(tiny_base, ob
     engines = [ReconstructionEngine(task, "cpu") for task in (reference, actual)]
     for engine in engines:
         engine.initialize()
-    expected, observed = [engine.step(rows) for engine in engines]
+    expected, observed = [engine.step(rows, step=4) for engine in engines]
     assert observed["max_microbatch_size"] == 2
     assert observed["microbatches"] == 2 and observed["batched_samples"] == 2
     for key in ("loss", "ae", "lm"):
@@ -189,29 +196,35 @@ def test_microbatch_encoder_budget_splits_before_allocating(tiny_base):
     task.config = replace(task.config, micro_batch_size=2, micro_batch_encoder_tokens=10)
     engine = ReconstructionEngine(task, "cpu")
     engine.initialize()
-    metrics = engine.step([example((9,)), example((8,))])
+    metrics = engine.step([example((9,)), example((8,))], step=0)
     assert metrics["samples"] == metrics["microbatches"] == 2
     assert metrics["max_microbatch_size"] == 1 and metrics["batched_samples"] == 0
 
 
-def test_microbatch_decoder_budget_splits_long_histories(tiny_base):
+@pytest.mark.parametrize("lm_ratio,expected_groups", [(0.0, 2), (1.0, 1)])
+def test_microbatch_decoder_budget_splits_long_histories(tiny_base, lm_ratio, expected_groups):
     task = make_task(tiny_base)
-    task.config = replace(task.config, micro_batch_size=2, micro_batch_decoder_tokens=20)
+    task.config = replace(
+        task.config, micro_batch_size=2, micro_batch_decoder_tokens=26, lm_ratio=lm_ratio
+    )
     engine = ReconstructionEngine(task, "cpu")
     engine.initialize()
-    metrics = engine.step([example(), example((4, 2, 5))])
-    assert metrics["microbatches"] == 2 and metrics["max_microbatch_size"] == 1
+    metrics = engine.step([example(), example((4, 2, 5))], step=0)
+    assert metrics["microbatches"] == expected_groups
+    assert metrics["max_microbatch_size"] == 3 - expected_groups
 
 
 @pytest.mark.parametrize("objective", ["ae", "ae_lm"])
 def test_warmup_freezes_write_alignment_and_updates_read_alignment(tiny_base, objective):
     task = make_task(tiny_base)
-    task.config = replace(task.config, objective=objective)
+    task.config = replace(
+        task.config, objective=objective, lm_ratio=0.5 if objective == "ae_lm" else 0
+    )
     task.codec.set_stage("warmup")
     engine = ReconstructionEngine(task, torch.device("cpu"))
     engine.initialize()
     before = deepcopy(codec_state(task.codec))
-    metrics = engine.step([example((12,))])
+    metrics = engine.step([example((12,))], step=0)
     assert (metrics["lm"] is None) == (objective == "ae")
     assert all(p.grad is None for p in task.codec.write_alignment.parameters())
     assert any(
@@ -239,9 +252,9 @@ def test_joint_encoder_is_causal_and_objective_averages_rounds(tiny_base):
     hook.remove()
     torch.testing.assert_close(encoded[0][:, :2], encoded[1][:, :2], rtol=0, atol=0)
     assert not torch.equal(encoded[0][:, 2], encoded[1][:, 2])
-    task.config = replace(task.config, lm_weight=0.3)
-    result = task(example())
-    expected = sum(r["ae"] + 0.3 * r["lm"] for r in result["rounds"]) / 3
+    task.config = replace(task.config, lm_ratio=0.3)
+    result = task(example(), read_task="both")
+    expected = sum(0.7 * r["ae"] + 0.3 * r["lm"] for r in result["rounds"]) / 3
     assert result["loss"].item() == pytest.approx(expected)
 
 
@@ -379,10 +392,10 @@ def test_shared_checkpointed_backbone_matches_independent_encoder_and_decoder(ti
 
     reference.codec.use_adapter = independent_path
     torch.manual_seed(123)
-    expected = reference(example())["loss"]
+    expected = reference(example(), read_task="both")["loss"]
     expected.backward()
     torch.manual_seed(123)
-    observed = actual(example())["loss"]
+    observed = actual(example(), read_task="both")["loss"]
     observed.backward()
     torch.testing.assert_close(observed, expected)
     for (name, a), (_, b) in zip(
@@ -447,7 +460,7 @@ def test_qwen3_sdpa_recurrent_checkpointing(tiny_base, tmp_path, method, monkeyp
             gradient_checkpointing=True,
         )
     )
-    task = ReconstructionTask(codec, tokenizer, TrainingConfig(objective="ae_lm"))
+    task = ReconstructionTask(codec, tokenizer, TrainingConfig(objective="ae_lm", lm_ratio=0.5))
     reference = deepcopy(task)
     reference.codec.config = replace(reference.codec.config, gradient_checkpointing=False)
 
@@ -461,7 +474,7 @@ def test_qwen3_sdpa_recurrent_checkpointing(tiny_base, tmp_path, method, monkeyp
         reference.codec.write_alignment,
     ):
         module.register_forward_pre_hook(legacy_mask, with_kwargs=True)
-    expected = reference(example())["loss"]
+    expected = reference(example(), read_task="both")["loss"]
     expected.backward()
     sdpa = torch.nn.functional.scaled_dot_product_attention
     calls = []
@@ -471,7 +484,7 @@ def test_qwen3_sdpa_recurrent_checkpointing(tiny_base, tmp_path, method, monkeyp
         return sdpa(*args, **kwargs)
 
     monkeypatch.setattr(torch.nn.functional, "scaled_dot_product_attention", capture)
-    output = task(example())
+    output = task(example(), read_task="both")
     output["loss"].backward()
     assert calls and all(mask is None and causal for mask, causal in calls)
     torch.testing.assert_close(output["loss"], expected)
@@ -497,17 +510,20 @@ def _ddp_worker(rank, rendezvous, base, destination):
     engine = ReconstructionEngine(task, torch.device("cpu"))
     engine.initialize()
     # Unequal local trajectory counts, then a one-sample final batch with an empty rank.
-    for rows in (
-        [
-            example(),
-            example((3, 3, 3, 3)),
-            example((4, 3, 2)),
-            example((2, 2, 3, 3)),
-            example((2, 2, 2, 2, 2)),
-        ],
-        [example()],
+    for step, rows in enumerate(
+        (
+            [
+                example(),
+                example((3, 3, 3, 3)),
+                example((4, 3, 2)),
+                example((2, 2, 3, 3)),
+                example((2, 2, 2, 2, 2)),
+            ],
+            [example()],
+        ),
+        start=1,
     ):
-        engine.step(rows)
+        engine.step(rows, step)
     if rank == 0:
         torch.save(codec_state(task.codec), destination)
     dist.destroy_process_group()
@@ -520,17 +536,20 @@ def test_verl_ddp_matches_global_mean_with_uneven_and_empty_ranks(tiny_base, tmp
     task.config = replace(task.config, gradient_clip=100)
     engine = ReconstructionEngine(task, torch.device("cpu"))
     engine.initialize()
-    for rows in (
-        [
-            example(),
-            example((3, 3, 3, 3)),
-            example((4, 3, 2)),
-            example((2, 2, 3, 3)),
-            example((2, 2, 2, 2, 2)),
-        ],
-        [example()],
+    for step, rows in enumerate(
+        (
+            [
+                example(),
+                example((3, 3, 3, 3)),
+                example((4, 3, 2)),
+                example((2, 2, 3, 3)),
+                example((2, 2, 2, 2, 2)),
+            ],
+            [example()],
+        ),
+        start=1,
     ):
-        engine.step(rows)
+        engine.step(rows, step)
     destination = tmp_path / "ddp.pt"
     mp.spawn(
         _ddp_worker,
@@ -541,3 +560,90 @@ def test_verl_ddp_matches_global_mean_with_uneven_and_empty_ranks(tiny_base, tmp
     observed = torch.load(destination, weights_only=True)
     for name, value in codec_state(task.codec).items():
         torch.testing.assert_close(observed[name], value, rtol=5e-4, atol=3e-7, msg=name)
+
+
+@pytest.mark.parametrize(
+    "lm_ratio,tasks",
+    [
+        (0.0, ["ae", "ae", "ae"]),
+        (0.5, ["ae", "lm", "ae"]),
+        (1.0, ["lm", "lm", "lm"]),
+    ],
+)
+def test_sampled_reads_match_manual_losses_gradients_and_counts(
+    tiny_base, monkeypatch, lm_ratio, tasks
+):
+    actual = make_task(tiny_base, "weighted", checkpointing=True)
+    actual.config = replace(actual.config, lm_ratio=lm_ratio, gradient_clip=100)
+    reference = deepcopy(actual)
+    rows = [example(), example((2, 2, 3, 3)), example((4, 3, 2))]
+    expected = [reference(row, read_task=name) for row, name in zip(rows, tasks)]
+    expected_loss = torch.stack([result["loss"] for result in expected]).mean()
+    expected_loss.backward()
+    calls = []
+    original = actual.codec.read_loss
+
+    def capture(memory, prompt, targets):
+        calls.append("ae" if prompt is actual.ae_prompt else "lm")
+        return original(memory, prompt, targets)
+
+    monkeypatch.setattr(actual.codec, "read_loss", capture)
+    engine = ReconstructionEngine(actual, "cpu")
+    engine.initialize()
+    observed = engine.step(rows, step=4)
+    assert calls == [name for row, name in zip(rows, tasks) for _ in row.write_ends]
+    assert observed["loss"] == pytest.approx(expected_loss.item())
+    assert observed["samples"] == observed["ae_samples"] + observed["lm_samples"] == 3
+    for name in ("ae", "lm"):
+        selected = [r for r, task_name in zip(expected, tasks) if task_name == name]
+        assert observed[f"{name}_samples"] == len(selected)
+        if selected:
+            assert observed[name] == pytest.approx(
+                sum(r["loss"].item() for r in selected) / len(selected)
+            )
+        else:
+            assert observed[name] is None
+        assert observed[f"{name}_tokens"] == sum(
+            t[f"{name}_tokens"] for r in expected for t in r["rounds"]
+        )
+    assert observed["target_tokens"] == observed["ae_tokens"] + observed["lm_tokens"]
+    for (name, a), (_, b) in zip(
+        actual.named_parameters(), reference.named_parameters(), strict=True
+    ):
+        assert (a.grad is None) == (b.grad is None), name
+        if a.grad is not None:
+            torch.testing.assert_close(a.grad, b.grad, rtol=5e-4, atol=3e-7, msg=name)
+
+
+def test_task_sampling_is_independent_of_dropout_rng_and_repeatable(tiny_base, monkeypatch):
+    engine = ReconstructionEngine(make_task(tiny_base), "cpu")
+    engine.initialize()
+    captured = []
+
+    def capture(data, loss_function):
+        captured.append(get_non_tensor_data(data, "read_tasks", None))
+        return {"metrics": {}}
+
+    monkeypatch.setattr(engine, "train_batch", capture)
+    rows = [example()] * 24
+    before_python, before_torch = random.getstate(), torch.get_rng_state()
+    engine.step(rows, step=8)
+    assert random.getstate() == before_python
+    torch.testing.assert_close(torch.get_rng_state(), before_torch, rtol=0, atol=0)
+    random.random()
+    torch.rand(10)
+    engine.step(rows, step=8)
+    engine.step(rows, step=9)
+    assert captured[0] == captured[1] and captured[1] != captured[2]
+    assert set(captured[0]) == {"ae", "lm"}
+
+
+@pytest.mark.parametrize("ratio", [-0.1, 1.1, float("nan"), float("inf")])
+def test_invalid_lm_ratio_is_rejected(ratio):
+    with pytest.raises(ValueError, match="lm_ratio"):
+        TrainingConfig(objective="ae_lm", lm_ratio=ratio)
+
+
+def test_ae_only_requires_zero_lm_ratio():
+    with pytest.raises(ValueError, match="AE-only"):
+        TrainingConfig(objective="ae", lm_ratio=0.5)

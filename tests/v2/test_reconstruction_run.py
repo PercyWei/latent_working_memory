@@ -53,6 +53,7 @@ def make_experiment(tmp_path, tiny_base):
     selection = SelectionConfig(str(tmp_path / "dataset"))
     training = TrainingConfig(
         objective="ae_lm",
+        lm_ratio=0.5,
         warmup_epochs=1,
         multiround_epochs=1,
         global_batch_size=2,
@@ -116,6 +117,14 @@ def test_raw_data_epochs_and_resume_match_uninterrupted(tiny_base, tmp_path):
     log = [
         json.loads(line) for line in (tmp_path / "resumed" / "train.jsonl").read_text().splitlines()
     ]
+    full_log = [
+        json.loads(line) for line in (tmp_path / "full" / "train.jsonl").read_text().splitlines()
+    ]
+    for expected_record, actual_record in zip(full_log, log, strict=True):
+        for key in ("loss", "ae", "lm", "ae_samples", "lm_samples", "ae_tokens", "lm_tokens"):
+            assert actual_record[key] == expected_record[key]
+    assert sum(r["ae_samples"] for r in log) > 0
+    assert sum(r["lm_samples"] for r in log) > 0
     stats = json.loads((tmp_path / "resumed" / "data-summary.json").read_text())
     assert sum(r["samples"] for r in log) == sum(stats[s]["train"]["trajectories"] for s in stats)
     assert all(r["samples"] in (1, 2) for r in log)
@@ -168,7 +177,12 @@ def test_static_baseline_trains_only_single_writes_and_evaluates_shared_trajecto
     torch.set_num_threads(1)
     experiment = make_experiment(tmp_path, tiny_base)
     raw = json.loads(experiment.read_text())
-    raw["training"].update(objective=objective, warmup_epochs=2, multiround_epochs=0)
+    raw["training"].update(
+        objective=objective,
+        lm_ratio=0.5 if objective == "ae_lm" else 0,
+        warmup_epochs=2,
+        multiround_epochs=0,
+    )
     experiment.write_text(json.dumps(raw))
     output = tmp_path / "static"
     result = run_training(arguments(experiment, output))

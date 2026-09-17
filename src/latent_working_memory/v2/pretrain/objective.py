@@ -47,8 +47,11 @@ class ReconstructionTask(nn.Module):
                             f"trajectory {row.document_id} needs {max(costs)} positions; model supports {limit}"
                         )
 
-    def forward(self, trajectory, include_lm=None, one_shot=False):
-        include_lm = self.config.objective == "ae_lm" if include_lm is None else include_lm
+    def forward(self, trajectory, read_task, one_shot=False):
+        # Training chooses one task for the entire trajectory; evaluation requests both.
+        if read_task not in {"ae", "lm", "both"}:
+            raise ValueError("read_task must be ae, lm or both")
+        objectives = ("ae", "lm") if read_task == "both" else (read_task,)
         single = not isinstance(trajectory, (tuple, list))
         rows = [trajectory] if single else trajectory
         ids = [row.token_ids.to(self.ae_prompt.device) for row in rows]
@@ -67,29 +70,26 @@ class ReconstructionTask(nn.Module):
                 if single
                 else self.codec.write_batch(memory, segments, capacity)
             )
-            ae_targets = [torch.cat((tokens[:end], eos)) for tokens, end in zip(ids, current)]
-            ae = (
-                self.codec.read_loss(memory, self.ae_prompt, ae_targets[0])[None]
-                if single
-                else self.codec.read_loss_batch(memory, self.ae_prompt, ae_targets)
-            )
-            lm = None
-            if include_lm:
-                lm_targets = [
-                    torch.cat((tokens[end : end + length], eos))
+            reads = {}
+            for objective in objectives:
+                targets = [
+                    torch.cat(
+                        (tokens[:end] if objective == "ae" else tokens[end : end + length], eos)
+                    )
                     for tokens, end, length in zip(ids, current, q)
                 ]
-                lm = (
-                    self.codec.read_loss(memory, self.lm_prompt, lm_targets[0])[None]
+                prompt = getattr(self, f"{objective}_prompt")
+                reads[objective] = (
+                    self.codec.read_loss(memory, prompt, targets[0])[None]
                     if single
-                    else self.codec.read_loss_batch(memory, self.lm_prompt, lm_targets)
+                    else self.codec.read_loss_batch(memory, prompt, targets)
                 )
             losses.append(
-                ae + self.config.lm_weight * lm
-                if lm is not None and self.config.objective == "ae_lm"
-                else ae
+                (1 - self.config.lm_ratio) * reads["ae"] + self.config.lm_ratio * reads["lm"]
+                if read_task == "both"
+                else reads[read_task]
             )
-            values.append(torch.stack((ae, lm if lm is not None else torch.zeros_like(ae)), dim=1))
+            values.append(torch.stack([reads[name] for name in objectives], dim=1))
             previous = current
         # One device-to-host transfer per microbatch; reporting never synchronizes each read.
         values = torch.stack(values).detach().cpu().tolist()
@@ -98,10 +98,10 @@ class ReconstructionTask(nn.Module):
                 {
                     "round": step + 1,
                     "seen_tokens": end,
-                    "ae": values[step][i][0],
-                    "lm": values[step][i][1] if include_lm else None,
-                    "ae_tokens": end + 1,
-                    "lm_tokens": q[i] + 1 if include_lm else 0,
+                    "ae": values[step][i][objectives.index("ae")] if "ae" in objectives else None,
+                    "lm": values[step][i][objectives.index("lm")] if "lm" in objectives else None,
+                    "ae_tokens": end + 1 if "ae" in objectives else 0,
+                    "lm_tokens": q[i] + 1 if "lm" in objectives else 0,
                 }
                 for step, end in enumerate(cuts)
             ]

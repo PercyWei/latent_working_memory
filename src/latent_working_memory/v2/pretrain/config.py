@@ -25,7 +25,7 @@ class TrainingConfig:
     learning_rate: float = 1e-4
     weight_decay: float = 0.01
     gradient_clip: float = 1.0
-    lm_weight: float = 1.0
+    lm_ratio: float = 0.0
     seed: int = 42
     save_every: int = 1000
     checkpoint_limit: int = 2
@@ -53,9 +53,13 @@ class TrainingConfig:
         ):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(f"{name} must be positive")
-        for name in ("learning_rate", "gradient_clip", "lm_weight"):
+        for name in ("learning_rate", "gradient_clip"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
+        if not math.isfinite(self.lm_ratio) or not 0 <= self.lm_ratio <= 1:
+            raise ValueError("lm_ratio must be finite and between 0 and 1")
+        if self.objective == "ae" and self.lm_ratio != 0:
+            raise ValueError("AE-only training requires lm_ratio=0")
         if not math.isfinite(self.weight_decay) or self.weight_decay < 0:
             raise ValueError("weight_decay must be finite and nonnegative")
         if not self.ae_prompt or not self.lm_prompt:

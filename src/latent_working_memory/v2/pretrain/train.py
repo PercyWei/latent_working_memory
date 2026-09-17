@@ -237,7 +237,7 @@ def run_training(args):
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
                 begin = time.perf_counter()
-                metrics = engine.step(batch)
+                metrics = engine.step(batch, cursor["step"])
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
                 seconds = time.perf_counter() - begin

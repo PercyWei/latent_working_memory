@@ -150,6 +150,15 @@ def test_offline_run_records_namespaces_resources_tables_and_identity(tmp_path, 
         assert values["progress/sample_visits"] == 16
         assert values["train/learning_rate"] == 1e-4
         assert "train/lm/nll" not in values
+        log_training(
+            run,
+            {**record, "ae": None, "lm": 2.0},
+            {"source_tokens": 2000, "target_tokens": 6000, "sample_visits": 16},
+            1e-4,
+            0.25,
+        )
+        values, _ = captured[-1]
+        assert "train/ae/nll" not in values and values["train/lm/nll"] == 2.0
         log_development(run, metrics(), 2)
         values, step = captured[-1]
         assert step == 2 and "dev/details" in values

@@ -3,6 +3,7 @@
 from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 import os
+import random
 
 import torch
 import torch.distributed as dist
@@ -125,12 +126,13 @@ class ReconstructionEngine(BaseEngine):
 
     def forward_backward_batch(self, data, loss_function, forward_only=False):
         rows = get_non_tensor_data(data, "trajectories", None)
+        read_tasks = get_non_tensor_data(data, "read_tasks", None)
         local = list(range(self.rank, len(rows), self.world_size))
         # A short final batch still participates on every rank. Dummy work has zero weight.
         work = local or [0]
         pending, microbatches, encoder_lengths, decoder_lengths = {}, [], {}, {}
         for i in work:
-            key = (rows[i].capacity, len(rows[i].write_ends))
+            key = (rows[i].capacity, len(rows[i].write_ends), read_tasks[i])
             encoder_lengths[i] = max(
                 end - start + (rows[i].capacity if step else 0)
                 for step, (start, end) in enumerate(
@@ -138,9 +140,10 @@ class ReconstructionEngine(BaseEngine):
                 )
             )
             group = pending.setdefault(key, [])
-            decoder_lengths[i] = rows[i].capacity + max(
-                len(self.model.ae_prompt) + rows[i].write_ends[-1],
-                len(self.model.lm_prompt) + len(rows[i].token_ids) - rows[i].write_ends[-1],
+            decoder_lengths[i] = rows[i].capacity + (
+                len(self.model.ae_prompt) + rows[i].write_ends[-1]
+                if read_tasks[i] == "ae"
+                else len(self.model.lm_prompt) + len(rows[i].token_ids) - rows[i].write_ends[-1]
             )
             padded_tokens = max(encoder_lengths[j] for j in [*group, i]) * (len(group) + 1)
             reader_tokens = max(decoder_lengths[j] for j in [*group, i]) * (len(group) + 1)
@@ -161,7 +164,10 @@ class ReconstructionEngine(BaseEngine):
             sync = nullcontext() if final or self.world_size == 1 else self.module.no_sync()
             with sync, precision_context(self.device):
                 single = len(group) == 1
-                output = self.module(rows[group[0]] if single else [rows[i] for i in group])
+                output = self.module(
+                    rows[group[0]] if single else [rows[i] for i in group],
+                    read_task=read_tasks[group[0]],
+                )
                 loss = output["loss"] * (len(group) if local else 0) / len(rows)
                 if not forward_only:
                     loss.backward()
@@ -190,17 +196,23 @@ class ReconstructionEngine(BaseEngine):
             dist.all_gather_object(gathered, records)
             records = [row for rank_rows in gathered for row in rank_rows]
         records.sort(key=lambda row: row["index"])
+        task_metrics = {}
+        for name in ("ae", "lm"):
+            selected = [r for r in records if read_tasks[r["index"]] == name]
+            task_metrics[name] = (
+                sum(sum(t[name] for t in r["rounds"]) / len(r["rounds"]) for r in selected)
+                / len(selected)
+                if selected
+                else None
+            )
+            task_metrics[f"{name}_samples"] = len(selected)
+            task_metrics[f"{name}_tokens"] = sum(
+                t[f"{name}_tokens"] for r in selected for t in r["rounds"]
+            )
         return {
             "metrics": {
                 "loss": sum(r["loss"] for r in records) / len(rows),
-                "ae": sum(sum(t["ae"] for t in r["rounds"]) / len(r["rounds"]) for r in records)
-                / len(rows),
-                "lm": (
-                    sum(sum(t["lm"] for t in r["rounds"]) / len(r["rounds"]) for r in records)
-                    / len(rows)
-                    if self.model.config.objective == "ae_lm"
-                    else None
-                ),
+                **task_metrics,
                 "samples": len(rows),
                 "microbatches": sum(r["microbatch_first"] for r in records),
                 "max_microbatch_size": max(r["microbatch_size"] for r in records),
@@ -212,10 +224,16 @@ class ReconstructionEngine(BaseEngine):
             }
         }
 
-    def step(self, trajectories):
+    def step(self, trajectories, step):
         if not trajectories:
             raise ValueError("a training batch cannot be empty")
         data = TensorDict({}, batch_size=[])
-        assign_non_tensor(data, trajectories=tuple(trajectories))
+        # Sample before rank sharding or microbatch grouping. The checkpoint's next
+        # optimizer-step cursor reproduces assignments without consuming dropout RNG.
+        rng = random.Random(f"{self.model.config.seed}:read-task:{step}")
+        read_tasks = tuple(
+            "lm" if rng.random() < self.model.config.lm_ratio else "ae" for _ in trajectories
+        )
+        assign_non_tensor(data, trajectories=tuple(trajectories), read_tasks=read_tasks)
         with self.train_mode():
             return self.train_batch(data, loss_function=None)["metrics"]

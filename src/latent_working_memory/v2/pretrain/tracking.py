@@ -162,7 +162,6 @@ def log_training(run, record, cursor, learning_rate, epoch_progress):
         return
     values = {
         "train/loss": record["loss"],
-        "train/ae/nll": record["ae"],
         "train/gradient_norm": record["grad_norm"],
         "train/learning_rate": learning_rate,
         "resources/step_seconds": record["seconds"],
@@ -175,8 +174,9 @@ def log_training(run, record, cursor, learning_rate, epoch_progress):
         "progress/target_tokens": cursor["target_tokens"],
         "progress/sample_visits": cursor["sample_visits"],
     }
-    if record["lm"] is not None:
-        values["train/lm/nll"] = record["lm"]
+    for task in ("ae", "lm"):
+        if record[task] is not None:
+            values[f"train/{task}/nll"] = record[task]
     run.log(values, step=record["step"])
 
 

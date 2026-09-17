@@ -64,8 +64,8 @@ def evaluate(task, rows, tokenizer, generation_samples=0):
         for i in range(rank, len(rows), world):
             row = rows[i]
             with precision_context(device):
-                output = task(row, include_lm=True)
-                control = task(row, include_lm=True, one_shot=True)
+                output = task(row, read_task="both")
+                control = task(row, read_task="both", one_shot=True)
                 record = {
                     "index": i,
                     "sample_id": row.sample_id,
