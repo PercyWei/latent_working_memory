@@ -168,6 +168,7 @@ def log_training(run, record, cursor, learning_rate, epoch_progress):
         "resources/source_tokens_per_second": record["source_tokens"] / record["seconds"],
         "resources/peak_memory_gib": record["peak_memory_bytes"] / 1024**3,
         "resources/mean_microbatch_size": record["samples"] / record["microbatches"],
+        "resources/mean_active_microbatch_size": record["mean_active_microbatch_size"],
         "progress/epoch": record["global_epoch"],
         "progress/epoch_fraction": epoch_progress,
         "progress/source_tokens": cursor["source_tokens"],

@@ -134,6 +134,7 @@ def test_offline_run_records_namespaces_resources_tables_and_identity(tmp_path, 
             "source_tokens": 1000,
             "samples": 8,
             "microbatches": 5,
+            "mean_active_microbatch_size": 1.4,
             "peak_memory_bytes": 2 * 1024**3,
         }
         log_training(
@@ -147,6 +148,7 @@ def test_offline_run_records_namespaces_resources_tables_and_identity(tmp_path, 
         assert step == 2 and values["resources/source_tokens_per_second"] == 500
         assert values["resources/peak_memory_gib"] == 2
         assert values["resources/mean_microbatch_size"] == 1.6
+        assert values["resources/mean_active_microbatch_size"] == 1.4
         assert values["progress/sample_visits"] == 16
         assert values["train/learning_rate"] == 1e-4
         assert "train/lm/nll" not in values

@@ -242,12 +242,12 @@ class MemoryCodec(nn.Module):
             ]
         )
 
-    def _read_hidden(self, memory, prompt_ids, target_ids):
+    def _read_hidden(self, memory, input_ids):
         aligned = self.align(memory)
         embed = self.backbone.get_input_embeddings()
-        prompt = embed(prompt_ids)[None].expand(len(memory), -1, -1)
-        prefix = torch.cat((aligned, prompt), dim=1)
-        inputs = torch.cat((prefix, embed(target_ids)), dim=1)
+        # Each row already contains its own contiguous prompt and teacher-forcing input.
+        # Padding is only at the right edge, so causal attention isolates valid positions.
+        inputs = torch.cat((aligned, embed(input_ids)), dim=1)
         if inputs.shape[1] > self.max_positions:
             raise ValueError("memory + prompt + target exceeds reader window")
         with self.use_adapter(None) as backbone:
@@ -263,26 +263,34 @@ class MemoryCodec(nn.Module):
                 )
                 .last_hidden_state
             )
-        # The last prefix state predicts target[0]. The final target needs no input position.
-        return hidden[:, prefix.shape[1] - 1 :]
+        return hidden
 
     def _token_loss(self, hidden, targets):
         logits = self.backbone.get_output_embeddings()(hidden)
         return nn.functional.cross_entropy(logits.float(), targets, reduction="sum")
 
     def read_loss(self, memory, prompt_ids, target_ids):
-        return self.read_loss_batch(memory[None], prompt_ids, [target_ids])[0]
+        return self.read_loss_batch(memory[None], [prompt_ids], [target_ids])[0]
 
     def read_loss_batch(self, memory, prompt_ids, target_ids):
-        inputs = pad_sequence([ids[:-1] for ids in target_ids], batch_first=True)
+        inputs = pad_sequence(
+            [
+                torch.cat((prompt, ids[:-1]))
+                for prompt, ids in zip(prompt_ids, target_ids, strict=True)
+            ],
+            batch_first=True,
+        )
         checkpointing = self.config.gradient_checkpointing and self.training
         if checkpointing:
-            hidden = checkpoint(self._read_hidden, memory, prompt_ids, inputs, use_reentrant=False)
+            hidden = checkpoint(self._read_hidden, memory, inputs, use_reentrant=False)
         else:
-            hidden = self._read_hidden(memory, prompt_ids, inputs)
+            hidden = self._read_hidden(memory, inputs)
         losses = []
         chunk = self.config.lm_head_chunk_size
-        for row, targets in zip(hidden, target_ids, strict=True):
+        for row, prompt, targets in zip(hidden, prompt_ids, target_ids, strict=True):
+            # Last prompt state predicts target[0]; score no memory, prompt or padding.
+            offset = memory.shape[1] + len(prompt) - 1
+            row = row[offset : offset + len(targets)]
             pieces = []
             for start in range(0, len(targets), chunk):
                 h, y = row[start : start + chunk], targets[start : start + chunk]

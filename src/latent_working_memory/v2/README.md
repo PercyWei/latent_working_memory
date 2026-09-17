@@ -2,7 +2,7 @@
 
 创建时间：20260915 19:10:20 UTC+08:00
 
-最后修订时间：20260917 16:49:13 UTC+08:00
+最后修订时间：20260917 17:46:49 UTC+08:00
 
 ## 当前入口：固定容量重构预训练
 
@@ -34,7 +34,9 @@ uv run --frozen python -m latent_working_memory.v2.pretrain.prepare_data \
 
 变长输入只在末尾补齐，补齐状态不进入 pooling 或损失；causal attention 保证有效 token 不会读取末尾补齐位置。模型接收全有效二维 mask，避免 packed-position 检测生成阻止 FlashAttention 的四维 mask。对齐输出转回基座 dtype；基础 pooling 在 FP32 中使用连续分段归约，保持原分组边界并避免原子累加的顺序波动。共享基座的 adapter 上下文缓存模块列表，使用 PEFT 的层级开关，并恢复 requires_grad 与各模块的 train/eval 状态；checkpoint 重算仍在对应上下文内执行。
 
-`micro_batch_size` 是单卡一次并行的样本上限，六组配置设为 2；`global_batch_size=8` 仍控制一次参数更新的总样本数。同一 rank 在全局 batch 内按任务、容量和压缩次数配组，encoder 的补齐后总位置预算为 `micro_batch_encoder_tokens=4096`，decoder 为 `micro_batch_decoder_tokens=8192`（含 memory/prompt）。组合超过预算时提前拆开，不依赖 OOM 重试；单条轨迹仍按数据的长度／窗口契约处理。不同长度、深度与尾批可能使实际 microbatch 为 1，SwanLab 的 `resources/mean_microbatch_size` 记录有效平均值。
+`micro_batch_size` 是单卡一次并行的轨迹上限，六组配置设为 2；`global_batch_size=8` 控制一次参数更新的总样本数。同一 rank 的候选按预计读取长度排序，在相同容量下合批；AE／LM 任务和压缩次数可以不同。encoder／decoder 的补齐后位置预算分别为 `micro_batch_encoder_tokens=4096`、`micro_batch_decoder_tokens=8192`，按每次压缩的实际活跃样本检查，超过预算时拆批。
+
+每条样本分别拼接 prompt 与目标前缀，再统一右侧补齐，按各自目标位置计算损失。同一压缩步骤只调用一次批量读取；已结束轨迹从后续写入与读取中移除，记忆通过可微索引保留跨压缩步骤的梯度。损失先按各自目标 tokens、各自压缩次数平均，再按全局轨迹数平均。`resources/mean_microbatch_size` 记录轨迹组初始平均大小，`resources/mean_active_microbatch_size` 记录各次压缩时实际活跃的平均批大小。
 
 六份可执行起点配置位于 `configs/v2/pretrain/qwen3-4b_pooling_*`，包含 AE／AE＋LM × warm-up／直接多次压缩四组主实验，以及 `ae-static`、`ae-lm-static` 两组全程单次压缩 baseline。本次六组均使用基础 pooling。默认完整 Encoder（`encoder_layers: null`）、K=512、Q=512、全局 batch=8、学习率 1e-4；两阶段各 32000 条候选训练轨迹，warm-up 组为 1＋2 epochs，直接多次压缩组为 3 epochs，静态 baseline 为单次压缩 3 epochs，实际 optimizer steps 按筛选后的样本数计算。模型名沿用已有 Qwen3 配置；真实数据路径、基座 revision 与超参数需按实际实验确定。
 

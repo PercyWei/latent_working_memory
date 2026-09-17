@@ -57,6 +57,7 @@ def make_experiment(tmp_path, tiny_base):
         warmup_epochs=1,
         multiround_epochs=1,
         global_batch_size=2,
+        micro_batch_size=2,
         generation_samples=1,
         save_every=2,
         eval_every=2,

@@ -427,7 +427,8 @@ def test_static_evaluation_uses_learned_alignment_without_mutating_checkpoint(ti
 
 
 @pytest.mark.parametrize("method", ["mean", "weighted", "spectral"])
-def test_qwen3_sdpa_recurrent_checkpointing(tiny_base, tmp_path, method, monkeypatch):
+@pytest.mark.parametrize("mixed", [False, True])
+def test_qwen3_sdpa_recurrent_checkpointing(tiny_base, tmp_path, method, mixed, monkeypatch):
     path = tmp_path / "qwen3"
     base = Qwen3ForCausalLM(
         Qwen3Config(
@@ -474,7 +475,9 @@ def test_qwen3_sdpa_recurrent_checkpointing(tiny_base, tmp_path, method, monkeyp
         reference.codec.write_alignment,
     ):
         module.register_forward_pre_hook(legacy_mask, with_kwargs=True)
-    expected = reference(example(), read_task="both")["loss"]
+    rows = [example(), example((3, 2, 2, 2, 3))] if mixed else example()
+    tasks = ["ae", "lm"] if mixed else "both"
+    expected = reference(rows, read_task=tasks)["loss"]
     expected.backward()
     sdpa = torch.nn.functional.scaled_dot_product_attention
     calls = []
@@ -484,7 +487,7 @@ def test_qwen3_sdpa_recurrent_checkpointing(tiny_base, tmp_path, method, monkeyp
         return sdpa(*args, **kwargs)
 
     monkeypatch.setattr(torch.nn.functional, "scaled_dot_product_attention", capture)
-    output = task(example(), read_task="both")
+    output = task(rows, read_task=tasks)
     output["loss"].backward()
     assert calls and all(mask is None and causal for mask, causal in calls)
     torch.testing.assert_close(output["loss"], expected)
@@ -647,3 +650,66 @@ def test_invalid_lm_ratio_is_rejected(ratio):
 def test_ae_only_requires_zero_lm_ratio():
     with pytest.raises(ValueError, match="AE-only"):
         TrainingConfig(objective="ae", lm_ratio=0.5)
+
+
+@pytest.mark.parametrize("checkpointing", [False, True])
+def test_mixed_tasks_and_depths_compact_without_dummy_writes(tiny_base, monkeypatch, checkpointing):
+    actual = make_task(tiny_base, "weighted", checkpointing=checkpointing)
+    # Unequal prompt lengths expose padding inserted between prompt and target.
+    actual.ae_prompt = torch.tensor([4, 5])
+    actual.lm_prompt = torch.tensor([4, 5, 6, 7, 4])
+    reference = deepcopy(actual)
+    rows = [example(), example((2, 2, 2, 2, 3)), example((7,))]
+    tasks = ["ae", "lm", "ae"]
+    expected = [reference(row, read_task=name) for row, name in zip(rows, tasks)]
+    expected_loss = torch.stack([x["loss"] for x in expected]).mean()
+    expected_loss.backward()
+    calls = []
+    original_write, original_read = actual.codec.write_batch, actual.codec.read_loss_batch
+
+    def write(previous, tokens, capacity):
+        calls.append(("write", len(tokens), [len(x) for x in tokens]))
+        return original_write(previous, tokens, capacity)
+
+    def read(memory, prompts, targets):
+        calls.append(("read", len(prompts), [len(x) for x in prompts]))
+        return original_read(memory, prompts, targets)
+
+    monkeypatch.setattr(actual.codec, "write_batch", write)
+    monkeypatch.setattr(actual.codec, "read_loss_batch", read)
+    observed = actual(rows, read_task=tasks)
+    observed["loss"].backward()
+    assert observed["batch_sizes"] == [3, 2, 2, 1, 1]
+    assert [c[:2] for c in calls] == [
+        (name, size) for size in [3, 2, 2, 1, 1] for name in ("write", "read")
+    ]
+    assert calls[1][2] == [2, 5, 2]
+    assert calls[0][2] == [2, 2, 7] and calls[-2][2] == [3]
+    torch.testing.assert_close(observed["loss"], expected_loss)
+    for records, expected_row in zip(observed["rounds"], expected, strict=True):
+        assert len(records) == len(expected_row["rounds"])
+        for record, expected_record in zip(records, expected_row["rounds"], strict=True):
+            for key in record:
+                if key in ("ae", "lm") and record[key] is not None:
+                    assert record[key] == pytest.approx(expected_record[key], rel=2e-5)
+                else:
+                    assert record[key] == expected_record[key]
+    for (name, a), (_, b) in zip(
+        actual.named_parameters(), reference.named_parameters(), strict=True
+    ):
+        assert (a.grad is None) == (b.grad is None), name
+        if a.grad is not None:
+            torch.testing.assert_close(a.grad, b.grad, rtol=5e-4, atol=3e-7, msg=name)
+
+
+def test_four_mixed_trajectories_share_one_group_and_budget_only_active_rows(tiny_base):
+    task = make_task(tiny_base)
+    task.config = replace(task.config, micro_batch_size=4, micro_batch_decoder_tokens=53)
+    rows = [example((2, 2, 2, 2, 2)), example((2,)), example((2,)), example((2,))]
+    # Step 4 samples AE, LM, AE, LM. Late steps keep only the first trajectory.
+    engine = ReconstructionEngine(task, "cpu")
+    engine.initialize()
+    metrics = engine.step(rows, step=4)
+    assert metrics["max_microbatch_size"] == 4 and metrics["microbatches"] == 1
+    assert metrics["mean_active_microbatch_size"] == pytest.approx(8 / 5)
+    assert metrics["ae_samples"] == metrics["lm_samples"] == 2

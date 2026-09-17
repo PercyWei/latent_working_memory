@@ -132,32 +132,46 @@ class ReconstructionEngine(BaseEngine):
         work = local or [0]
         pending, microbatches, encoder_lengths, decoder_lengths = {}, [], {}, {}
         for i in work:
-            key = (rows[i].capacity, len(rows[i].write_ends), read_tasks[i])
-            encoder_lengths[i] = max(
+            encoder_lengths[i] = tuple(
                 end - start + (rows[i].capacity if step else 0)
                 for step, (start, end) in enumerate(
                     zip((0,) + rows[i].write_ends[:-1], rows[i].write_ends, strict=True)
                 )
             )
-            group = pending.setdefault(key, [])
-            decoder_lengths[i] = rows[i].capacity + (
-                len(self.model.ae_prompt) + rows[i].write_ends[-1]
-                if read_tasks[i] == "ae"
-                else len(self.model.lm_prompt) + len(rows[i].token_ids) - rows[i].write_ends[-1]
+            decoder_lengths[i] = tuple(
+                rows[i].capacity
+                + (
+                    len(self.model.ae_prompt) + end
+                    if read_tasks[i] == "ae"
+                    else len(self.model.lm_prompt) + len(rows[i].token_ids) - rows[i].write_ends[-1]
+                )
+                for end in rows[i].write_ends
             )
-            padded_tokens = max(encoder_lengths[j] for j in [*group, i]) * (len(group) + 1)
-            reader_tokens = max(decoder_lengths[j] for j in [*group, i]) * (len(group) + 1)
-            if group and (
-                padded_tokens > self.micro_batch_encoder_tokens
-                or reader_tokens > self.micro_batch_decoder_tokens
-            ):
+        # Length ordering reduces padding without requiring matching tasks or depths.
+        work.sort(key=lambda i: (max(decoder_lengths[i]), max(encoder_lengths[i])), reverse=True)
+        for i in work:
+            key = rows[i].capacity
+            group = pending.setdefault(key, [])
+            candidate = [*group, i]
+            fits = True
+            for step in range(max(len(rows[j].write_ends) for j in candidate)):
+                active = [j for j in candidate if step < len(rows[j].write_ends)]
+                if (
+                    len(active) * max(encoder_lengths[j][step] for j in active)
+                    > self.micro_batch_encoder_tokens
+                    or len(active) * max(decoder_lengths[j][step] for j in active)
+                    > self.micro_batch_decoder_tokens
+                ):
+                    fits = False
+                    break
+            if group and not fits:
                 microbatches.append(group)
                 group = pending[key] = []
             group.append(i)
             if len(group) == self.micro_batch_size:
                 microbatches.append(pending.pop(key))
         microbatches.extend(pending.values())
-        microbatches.sort(key=lambda group: group[0])
+        microbatches.sort(key=min)
         records = []
         for position, group in enumerate(microbatches):
             final = position == len(microbatches) - 1
@@ -166,7 +180,7 @@ class ReconstructionEngine(BaseEngine):
                 single = len(group) == 1
                 output = self.module(
                     rows[group[0]] if single else [rows[i] for i in group],
-                    read_task=read_tasks[group[0]],
+                    read_task=read_tasks[group[0]] if single else [read_tasks[i] for i in group],
                 )
                 loss = output["loss"] * (len(group) if local else 0) / len(rows)
                 if not forward_only:
@@ -185,6 +199,7 @@ class ReconstructionEngine(BaseEngine):
                         "rounds": reads,
                         "microbatch_size": len(group),
                         "microbatch_first": position == 0,
+                        "batch_sizes": output["batch_sizes"] if position == 0 else [],
                     }
                     for position, (i, value, reads) in enumerate(
                         zip(group, values, rounds, strict=True)
@@ -216,6 +231,8 @@ class ReconstructionEngine(BaseEngine):
                 "samples": len(rows),
                 "microbatches": sum(r["microbatch_first"] for r in records),
                 "max_microbatch_size": max(r["microbatch_size"] for r in records),
+                "mean_active_microbatch_size": sum(sum(r["batch_sizes"]) for r in records)
+                / sum(len(r["batch_sizes"]) for r in records),
                 "batched_samples": sum(r["microbatch_size"] > 1 for r in records),
                 "source_tokens": sum(r.write_ends[-1] for r in rows),
                 "target_tokens": sum(

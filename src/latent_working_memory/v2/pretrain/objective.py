@@ -48,66 +48,90 @@ class ReconstructionTask(nn.Module):
                         )
 
     def forward(self, trajectory, read_task, one_shot=False):
-        # Training chooses one task for the entire trajectory; evaluation requests both.
-        if read_task not in {"ae", "lm", "both"}:
-            raise ValueError("read_task must be ae, lm or both")
-        objectives = ("ae", "lm") if read_task == "both" else (read_task,)
         single = not isinstance(trajectory, (tuple, list))
         rows = [trajectory] if single else trajectory
+        both = isinstance(read_task, str) and read_task == "both"
+        tasks = [read_task] * len(rows) if isinstance(read_task, str) else list(read_task)
+        if len(tasks) != len(rows) or (not both and any(t not in {"ae", "lm"} for t in tasks)):
+            raise ValueError("read_task must be ae/lm per trajectory, or both for evaluation")
         ids = [row.token_ids.to(self.ae_prompt.device) for row in rows]
         eos = ids[0].new_tensor([self.eos_id])
         ends = [(row.write_ends[-1],) if one_shot else row.write_ends for row in rows]
-        capacity, depth = rows[0].capacity, len(ends[0])
-        if any(row.capacity != capacity or len(cuts) != depth for row, cuts in zip(rows, ends)):
-            raise ValueError("a microbatch requires equal capacities and compression counts")
+        capacity = rows[0].capacity
+        if any(row.capacity != capacity for row in rows):
+            raise ValueError("a microbatch requires equal memory capacities")
         q = [len(tokens) - row.write_ends[-1] for tokens, row in zip(ids, rows)]
-        memory, previous, losses, values = None, [0] * len(rows), [], []
-        for step in range(depth):
-            current = [cuts[step] for cuts in ends]
-            segments = [tokens[start:end] for tokens, start, end in zip(ids, previous, current)]
+        losses, records = [[] for _ in rows], [[] for _ in rows]
+        memory, active = None, list(range(len(rows)))
+        values, locations, batch_sizes = [], [], []
+        for step in range(max(map(len, ends))):
+            keep = [position for position, i in enumerate(active) if step < len(ends[i])]
+            if len(keep) != len(active):
+                # Differentiable compaction: finished trajectories receive no dummy writes.
+                memory = memory.index_select(0, torch.tensor(keep, device=memory.device))
+                active = [active[position] for position in keep]
+            batch_sizes.append(len(active))
+            segments = [ids[i][ends[i][step - 1] if step else 0 : ends[i][step]] for i in active]
             memory = (
                 self.codec.write(memory, segments[0], capacity)
                 if single
                 else self.codec.write_batch(memory, segments, capacity)
             )
-            reads = {}
-            for objective in objectives:
+            for i in active:
+                records[i].append(
+                    {
+                        "round": step + 1,
+                        "seen_tokens": ends[i][step],
+                        "ae": None,
+                        "lm": None,
+                        "ae_tokens": 0,
+                        "lm_tokens": 0,
+                    }
+                )
+            for objective in ("ae", "lm") if both else (None,):
+                names = [objective if both else tasks[i] for i in active]
                 targets = [
                     torch.cat(
-                        (tokens[:end] if objective == "ae" else tokens[end : end + length], eos)
+                        (
+                            ids[i][: ends[i][step]]
+                            if name == "ae"
+                            else ids[i][ends[i][step] : ends[i][step] + q[i]],
+                            eos,
+                        )
                     )
-                    for tokens, end, length in zip(ids, current, q)
+                    for i, name in zip(active, names, strict=True)
                 ]
-                prompt = getattr(self, f"{objective}_prompt")
-                reads[objective] = (
-                    self.codec.read_loss(memory, prompt, targets[0])[None]
+                prompts = [getattr(self, f"{name}_prompt") for name in names]
+                reads = (
+                    self.codec.read_loss(memory, prompts[0], targets[0])[None]
                     if single
-                    else self.codec.read_loss_batch(memory, prompt, targets)
+                    else self.codec.read_loss_batch(memory, prompts, targets)
                 )
-            losses.append(
-                (1 - self.config.lm_ratio) * reads["ae"] + self.config.lm_ratio * reads["lm"]
-                if read_task == "both"
-                else reads[read_task]
-            )
-            values.append(torch.stack([reads[name] for name in objectives], dim=1))
-            previous = current
-        # One device-to-host transfer per microbatch; reporting never synchronizes each read.
-        values = torch.stack(values).detach().cpu().tolist()
-        records = [
-            [
-                {
-                    "round": step + 1,
-                    "seen_tokens": end,
-                    "ae": values[step][i][objectives.index("ae")] if "ae" in objectives else None,
-                    "lm": values[step][i][objectives.index("lm")] if "lm" in objectives else None,
-                    "ae_tokens": end + 1 if "ae" in objectives else 0,
-                    "lm_tokens": q[i] + 1 if "lm" in objectives else 0,
-                }
-                for step, end in enumerate(cuts)
-            ]
-            for i, cuts in enumerate(ends)
-        ]
-        sample_losses = torch.stack(losses).mean(0)
+                values.append(reads)
+                for position, (i, name, target) in enumerate(
+                    zip(active, names, targets, strict=True)
+                ):
+                    weight = (
+                        ((1 - self.config.lm_ratio) if name == "ae" else self.config.lm_ratio)
+                        if both
+                        else 1
+                    )
+                    losses[i].append(reads[position] * weight)
+                    records[i][-1][f"{name}_tokens"] = len(target)
+                    locations.append((records[i][-1], name))
+        # One host transfer per microbatch, even as the active batch shrinks.
+        for (record, name), value in zip(
+            locations, torch.cat(values).detach().cpu().tolist(), strict=True
+        ):
+            record[name] = value
+        sample_losses = torch.stack(
+            [torch.stack(reads).sum() / len(cuts) for reads, cuts in zip(losses, ends, strict=True)]
+        )
         if single:
-            return {"loss": sample_losses[0], "rounds": records[0]}
-        return {"loss": sample_losses.mean(), "sample_losses": sample_losses, "rounds": records}
+            return {"loss": sample_losses[0], "rounds": records[0], "batch_sizes": batch_sizes}
+        return {
+            "loss": sample_losses.mean(),
+            "sample_losses": sample_losses,
+            "rounds": records,
+            "batch_sizes": batch_sizes,
+        }
