@@ -21,6 +21,7 @@ class TrainingConfig:
     global_batch_size: int = 8
     micro_batch_size: int = 1
     micro_batch_encoder_tokens: int = 4096
+    micro_batch_decoder_tokens: int = 8192
     learning_rate: float = 1e-4
     weight_decay: float = 0.01
     gradient_clip: float = 1.0
@@ -45,6 +46,7 @@ class TrainingConfig:
             "global_batch_size",
             "micro_batch_size",
             "micro_batch_encoder_tokens",
+            "micro_batch_decoder_tokens",
             "save_every",
             "eval_every",
             "checkpoint_limit",

@@ -194,6 +194,15 @@ def test_microbatch_encoder_budget_splits_before_allocating(tiny_base):
     assert metrics["max_microbatch_size"] == 1 and metrics["batched_samples"] == 0
 
 
+def test_microbatch_decoder_budget_splits_long_histories(tiny_base):
+    task = make_task(tiny_base)
+    task.config = replace(task.config, micro_batch_size=2, micro_batch_decoder_tokens=20)
+    engine = ReconstructionEngine(task, "cpu")
+    engine.initialize()
+    metrics = engine.step([example(), example((4, 2, 5))])
+    assert metrics["microbatches"] == 2 and metrics["max_microbatch_size"] == 1
+
+
 @pytest.mark.parametrize("objective", ["ae", "ae_lm"])
 def test_warmup_freezes_write_alignment_and_updates_read_alignment(tiny_base, objective):
     task = make_task(tiny_base)

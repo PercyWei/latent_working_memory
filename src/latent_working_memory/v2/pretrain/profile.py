@@ -42,6 +42,14 @@ def main():
         ("multiround", "ae_lm", (2 * k, 3 * k, 3 * k)),
         ("multiround", "ae_lm", (3 * k, 2 * k, k, k, k)),
     ]
+    training_defaults = TrainingConfig()
+    reader_limit = (
+        training_defaults.micro_batch_decoder_tokens // 2
+        - k
+        - len(tokenizer.encode(training_defaults.ae_prompt, add_special_tokens=False))
+    )
+    if 5 * k <= reader_limit <= 7 * k:
+        cases.append(("multiround", "ae_lm", (reader_limit - 4 * k, k, k, k, k)))
     results = []
     args.output.parent.mkdir(parents=True, exist_ok=True)
     for stage, objective, lengths in cases:

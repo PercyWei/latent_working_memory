@@ -53,6 +53,7 @@ class ReconstructionEngine(BaseEngine):
         self.rank = dist.get_rank() if dist.is_initialized() else 0
         self.micro_batch_size = config.micro_batch_size
         self.micro_batch_encoder_tokens = config.micro_batch_encoder_tokens
+        self.micro_batch_decoder_tokens = config.micro_batch_decoder_tokens
         self.mode = None
 
     def initialize(self):
@@ -127,7 +128,7 @@ class ReconstructionEngine(BaseEngine):
         local = list(range(self.rank, len(rows), self.world_size))
         # A short final batch still participates on every rank. Dummy work has zero weight.
         work = local or [0]
-        pending, microbatches, encoder_lengths = {}, [], {}
+        pending, microbatches, encoder_lengths, decoder_lengths = {}, [], {}, {}
         for i in work:
             key = (rows[i].capacity, len(rows[i].write_ends))
             encoder_lengths[i] = max(
@@ -137,8 +138,16 @@ class ReconstructionEngine(BaseEngine):
                 )
             )
             group = pending.setdefault(key, [])
+            decoder_lengths[i] = rows[i].capacity + max(
+                len(self.model.ae_prompt) + rows[i].write_ends[-1],
+                len(self.model.lm_prompt) + len(rows[i].token_ids) - rows[i].write_ends[-1],
+            )
             padded_tokens = max(encoder_lengths[j] for j in [*group, i]) * (len(group) + 1)
-            if group and padded_tokens > self.micro_batch_encoder_tokens:
+            reader_tokens = max(decoder_lengths[j] for j in [*group, i]) * (len(group) + 1)
+            if group and (
+                padded_tokens > self.micro_batch_encoder_tokens
+                or reader_tokens > self.micro_batch_decoder_tokens
+            ):
                 microbatches.append(group)
                 group = pending[key] = []
             group.append(i)

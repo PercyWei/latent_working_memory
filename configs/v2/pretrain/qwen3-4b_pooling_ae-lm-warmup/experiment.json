@@ -16,6 +16,9 @@
     "generation_samples": 8,
     "ae_prompt": "Reconstruct the text stored in memory:\n",
     "lm_prompt": "Continue the text stored in memory:\n",
-    "checkpoint_limit": 2
+    "checkpoint_limit": 2,
+    "micro_batch_size": 2,
+    "micro_batch_encoder_tokens": 4096,
+    "micro_batch_decoder_tokens": 8192
   }
 }
