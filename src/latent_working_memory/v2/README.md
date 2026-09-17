@@ -2,7 +2,7 @@
 
 创建时间：20260915 19:10:20 UTC+08:00
 
-最后修订时间：20260916 22:45:47 UTC+08:00
+最后修订时间：20260917 15:18:11 UTC+08:00
 
 ## 当前入口：固定容量重构预训练
 
@@ -31,6 +31,8 @@ uv run --frozen python -m latent_working_memory.v2.pretrain.prepare_data \
 
 
 训练后端依赖 `verl==0.8.0`，复用 `codex/verl-v1@e0bfa37` 中经过收敛的 replicated 方案。它是项目对 verl 的 DDP engine 扩展，不使用旧 FSDP2 实验实现。尾批保留全部真实样本；空 rank 执行零权重占位计算参与同步，不增加样本计数。CUDA 采用 BF16 autocast、FP32 可训练权重，CPU 验证采用 FP32。
+
+无 padding 的编码与读取输入显式传入全有效的二维 attention mask，避免 Transformers 将其视为 packed sequence 后生成阻止 FlashAttention 的四维 mask。对齐输出转回基座 dtype；基础 pooling 在 FP32 中使用连续分段归约，保持原分组边界并避免原子累加的顺序波动。共享基座的 adapter 上下文缓存模块列表，使用 PEFT 的层级开关，并恢复 requires_grad 与各模块的 train/eval 状态；checkpoint 重算仍在对应上下文内执行。
 
 六份可执行起点配置位于 `configs/v2/pretrain/qwen3-4b_pooling_*`，包含 AE／AE＋LM × warm-up／直接多次压缩四组主实验，以及 `ae-static`、`ae-lm-static` 两组全程单次压缩 baseline。本次六组均使用基础 pooling。默认完整 Encoder（`encoder_layers: null`）、K=512、Q=512、全局 batch=8、学习率 1e-4；两阶段各 32000 条候选训练轨迹，warm-up 组为 1＋2 epochs，直接多次压缩组为 3 epochs，静态 baseline 为单次压缩 3 epochs，实际 optimizer steps 按筛选后的样本数计算。模型名沿用已有 Qwen3 配置；真实数据路径、基座 revision 与超参数需按实际实验确定。
 

@@ -18,7 +18,7 @@ from latent_working_memory.v2.pretrain.config import TrainingConfig
 from latent_working_memory.v2.pretrain.data import (
     Trajectory,
 )
-from latent_working_memory.v2.pretrain.engine import ReconstructionEngine
+from latent_working_memory.v2.pretrain.engine import ReconstructionEngine, initialize_device
 from latent_working_memory.v2.pretrain.evaluation import evaluate
 from latent_working_memory.v2.pretrain.objective import ReconstructionTask
 
@@ -65,7 +65,8 @@ def test_group_boundaries_and_weighted_initialization():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA pooling repeatability")
 def test_cuda_mean_pooling_is_repeatable_through_backward():
-    hidden = torch.randn(1298, 2560, device="cuda", requires_grad=True)
+    device = initialize_device("cuda")
+    hidden = torch.randn(1298, 2560, device=device, requires_grad=True)
     module = SlotCompression(2560, "mean")
     expected = module(hidden, 512)
     expected.square().sum().backward()
