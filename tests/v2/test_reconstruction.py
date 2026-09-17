@@ -224,6 +224,49 @@ def test_adapter_selection_and_disabled_reader_are_isolated(tiny_base):
     assert flags == {name: p.requires_grad for name, p in codec.backbone.named_parameters()}
 
 
+def test_nested_adapter_context_restores_state_after_exception(tiny_base):
+    codec = make_task(tiny_base, dropout=0.1).codec
+    # Preserve heterogeneous submodule modes, as well as the stage's trainable parameters.
+    codec._lora_layers[0].lora_dropout["encoder"].eval()
+    modes = [m.training for m in codec.backbone.modules()]
+    flags = [p.requires_grad for p in codec.backbone.parameters()]
+    with pytest.raises(RuntimeError, match="test interruption"):
+        with codec.use_adapter(None):
+            assert all(layer.disable_adapters for layer in codec._lora_layers)
+            with codec.use_adapter("decoder", training=True):
+                assert all(not layer.disable_adapters for layer in codec._lora_layers)
+                assert codec.backbone.active_adapter == "decoder"
+            assert all(layer.disable_adapters for layer in codec._lora_layers)
+            raise RuntimeError("test interruption")
+    assert codec.backbone.active_adapter == "encoder"
+    assert all(not layer.disable_adapters for layer in codec._lora_layers)
+    assert modes == [m.training for m in codec.backbone.modules()]
+    assert flags == [p.requires_grad for p in codec.backbone.parameters()]
+
+
+def test_bf16_alignment_preserves_backbone_dtype_and_memory_gradient(tiny_base):
+    codec = MemoryCodec(
+        CodecConfig(str(tiny_base), lora_rank=2, lora_alpha=4, gradient_checkpointing=True),
+        torch.bfloat16,
+    )
+    observed = []
+    hook = codec.backbone.get_base_model().model.register_forward_pre_hook(
+        lambda module, args, kwargs: observed.append(kwargs["inputs_embeds"].dtype),
+        with_kwargs=True,
+    )
+    ids = torch.tensor([4, 5, 6, 7])
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        memory = codec.write(None, ids, 2)
+        memory.retain_grad()
+        updated = codec.write(memory, ids, 2)
+        loss = codec.read_loss(updated, ids[:1], ids)
+    loss.backward()
+    hook.remove()
+    assert observed and set(observed) == {torch.bfloat16}
+    assert memory.grad is not None and torch.isfinite(memory.grad).all()
+    assert memory.grad.abs().sum() > 0
+
+
 def test_shared_checkpointed_backbone_matches_independent_encoder_and_decoder(tiny_base):
     actual = make_task(tiny_base, "weighted", checkpointing=True, dropout=0.1)
     reference = deepcopy(actual)
@@ -278,7 +321,7 @@ def test_static_evaluation_uses_learned_alignment_without_mutating_checkpoint(ti
 
 
 @pytest.mark.parametrize("method", ["mean", "weighted", "spectral"])
-def test_qwen3_sdpa_recurrent_checkpointing(tiny_base, tmp_path, method):
+def test_qwen3_sdpa_recurrent_checkpointing(tiny_base, tmp_path, method, monkeypatch):
     path = tmp_path / "qwen3"
     base = Qwen3ForCausalLM(
         Qwen3Config(
@@ -312,8 +355,39 @@ def test_qwen3_sdpa_recurrent_checkpointing(tiny_base, tmp_path, method):
         )
     )
     task = ReconstructionTask(codec, tokenizer, TrainingConfig(objective="ae_lm"))
+    reference = deepcopy(task)
+    reference.codec.config = replace(reference.codec.config, gradient_checkpointing=False)
+
+    def legacy_mask(module, args, kwargs):
+        kwargs.pop("attention_mask", None)
+        return args, kwargs
+
+    for module in (
+        reference.codec.backbone.get_base_model().model,
+        reference.codec.read_alignment,
+        reference.codec.write_alignment,
+    ):
+        module.register_forward_pre_hook(legacy_mask, with_kwargs=True)
+    expected = reference(example())["loss"]
+    expected.backward()
+    sdpa = torch.nn.functional.scaled_dot_product_attention
+    calls = []
+
+    def capture(*args, **kwargs):
+        calls.append((kwargs.get("attn_mask"), kwargs.get("is_causal")))
+        return sdpa(*args, **kwargs)
+
+    monkeypatch.setattr(torch.nn.functional, "scaled_dot_product_attention", capture)
     output = task(example())
     output["loss"].backward()
+    assert calls and all(mask is None and causal for mask, causal in calls)
+    torch.testing.assert_close(output["loss"], expected)
+    for (name, actual), (_, previous) in zip(
+        task.named_parameters(), reference.named_parameters(), strict=True
+    ):
+        assert (actual.grad is None) == (previous.grad is None), name
+        if actual.grad is not None:
+            torch.testing.assert_close(actual.grad, previous.grad, rtol=2e-4, atol=2e-6, msg=name)
     assert torch.isfinite(output["loss"])
     assert any(
         p.grad is not None and p.grad.abs().sum() > 0

@@ -1,11 +1,12 @@
 """单一共享基座：Encoder LoRA 写入，禁用 LoRA 读取，独立读写对齐。"""
 
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 
 import torch
 from peft import LoraConfig, get_peft_model
+from peft.tuners.tuners_utils import BaseTunerLayer
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 from transformers import AutoConfig, AutoModelForCausalLM
@@ -102,6 +103,13 @@ class MemoryCodec(nn.Module):
             ),
         )
         self.backbone.set_adapter("encoder")
+        self._backbone_modules = tuple(self.backbone.modules())
+        self._lora_layers = tuple(
+            module for module in self._backbone_modules if isinstance(module, BaseTunerLayer)
+        )
+        self._adapter_parameters = tuple(
+            p for name, p in self.backbone.named_parameters() if "lora_" in name
+        )
         self.width = base_config.hidden_size
         self.max_positions = base_config.max_position_embeddings
         self.compression = SlotCompression(
@@ -142,39 +150,57 @@ class MemoryCodec(nn.Module):
     def use_adapter(self, adapter, training=False):
         """Select a named LoRA (or None) without changing the training parameter contract."""
         previous = self.backbone.active_adapter
-        was_training = self.backbone.training
-        flags = [
-            (p, p.requires_grad) for name, p in self.backbone.named_parameters() if "lora_" in name
-        ]
+        modes = tuple(module.training for module in self._backbone_modules)
+        disabled = tuple(layer.disable_adapters for layer in self._lora_layers)
+        flags = tuple(p.requires_grad for p in self._adapter_parameters)
         try:
-            if adapter is not None:
+            if adapter is not None and adapter != previous:
                 self.backbone.set_adapter(adapter)
-                # PEFT set_adapter changes requires_grad; retain this stage's optimizer contract.
-                for parameter, flag in flags:
-                    parameter.requires_grad_(flag)
-            self.backbone.train(training)
-            context = self.backbone.disable_adapter() if adapter is None else nullcontext()
-            with context:
-                yield self.backbone
-        finally:
-            self.backbone.set_adapter(previous)
-            for parameter, flag in flags:
+            for layer in self._lora_layers:
+                if layer.disable_adapters != (adapter is None):
+                    layer.enable_adapters(adapter is not None)
+            # PEFT's public toggles also change requires_grad. Restore the optimizer contract
+            # before forward, including while the reader bypasses the encoder adapter.
+            for parameter, flag in zip(self._adapter_parameters, flags, strict=True):
                 parameter.requires_grad_(flag)
-            self.backbone.train(was_training)
+            # Qwen/Llama and their LoRA/dropout modules use Module's training flag. A flat
+            # traversal avoids recursively visiting the same descendants on every read/replay.
+            for module in self._backbone_modules:
+                module.training = training
+            yield self.backbone
+        finally:
+            if self.backbone.active_adapter != previous:
+                self.backbone.set_adapter(previous)
+            for layer, was_disabled in zip(self._lora_layers, disabled, strict=True):
+                if layer.disable_adapters != was_disabled:
+                    layer.enable_adapters(not was_disabled)
+            for parameter, flag in zip(self._adapter_parameters, flags, strict=True):
+                parameter.requires_grad_(flag)
+            for module, mode in zip(self._backbone_modules, modes, strict=True):
+                module.training = mode
 
     def initialize_write_alignment(self):
         self.write_alignment.load_state_dict(self.read_alignment.state_dict())
 
     def align(self, memory, writing=False):
         module = self.write_alignment if writing else self.read_alignment
-        return module(
-            inputs_embeds=memory[None], use_cache=False, return_dict=True
+        aligned = module(
+            inputs_embeds=memory[None],
+            attention_mask=torch.ones(1, len(memory), dtype=torch.bool, device=memory.device),
+            use_cache=False,
+            return_dict=True,
         ).last_hidden_state[0]
+        return aligned.to(self.backbone.get_input_embeddings().weight.dtype)
 
     def _encode(self, embeddings, training):
         with self.use_adapter("encoder", training=training) as backbone:
             output = backbone.get_base_model().model(
                 inputs_embeds=embeddings[None],
+                # These are unpadded, unpacked causal sequences. An explicit 2D mask avoids
+                # Transformers' packed-position detection and permits SDPA's Flash kernel.
+                attention_mask=torch.ones(
+                    1, len(embeddings), dtype=torch.bool, device=embeddings.device
+                ),
                 use_cache=False,
                 output_hidden_states=self.config.feature_layer == "mean",
                 return_dict=True,
@@ -206,7 +232,11 @@ class MemoryCodec(nn.Module):
         # The reconstruction experiment uses the frozen base reader, with both LoRAs disabled.
         with self.use_adapter(None) as backbone:
             return backbone(
-                inputs_embeds=inputs[None], labels=labels[None], use_cache=False, return_dict=True
+                inputs_embeds=inputs[None],
+                attention_mask=torch.ones(1, len(inputs), dtype=torch.bool, device=inputs.device),
+                labels=labels[None],
+                use_cache=False,
+                return_dict=True,
             ).loss
 
     def read_loss(self, memory, prompt_ids, target_ids):
