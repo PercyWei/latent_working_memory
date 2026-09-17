@@ -1,7 +1,7 @@
 # 20260914_配置组织规则
 
 创建时间：20260914 11:48:20 UTC+08:00
-最后修订时间：20260917 19:23:25 UTC+08:00
+最后修订时间：20260917 19:46:47 UTC+08:00
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
 
@@ -39,9 +39,9 @@ configs/
 
 `training.lm_ratio` 为轨迹级 LM 任务概率，范围 `[0,1]`，默认 0；`objective: "ae"` 要求其为 0，六份配置中 `objective: "ae_lm"` 显式设为 0.5。同一轨迹每次参与训练仅选 AE 或 LM，并用于所有压缩步骤；各 epoch 可以重新分配，数据及切点不变。训练按选中任务的样本损失平均，不再接受 `lm_weight`。评估始终计算两个任务。任务分配由 seed 和全局 step 重现，配置变化需新建 run，不用旧双损失 checkpoint 直接续训。
 
-模型配置 `padding_free` 默认 false；开启后 Encoder／Decoder 复用 PyTorch 2.14 原生变长 FlashAttention，使用 `attention_implementation: "sdpa"`，预算改按有效位置总数计算。无需安装独立 flash-attn 包；CUDA 接口通过 Transformers `AttentionInterface` 接入，详见 [v2 开发记录](../src/latent_working_memory/v2/README.md)。
+`CodecConfig.padding_free` 默认 false，六份 pooling 配置显式设为 true；开启后 Encoder／Decoder 复用 PyTorch 2.14 原生变长 FlashAttention，使用 `attention_implementation: "sdpa"`，预算改按有效位置总数计算。无需安装独立 flash-attn 包；CUDA 接口通过 Transformers `AttentionInterface` 接入，详见 [v2 开发记录](../src/latent_working_memory/v2/README.md)。
 
-先通过 `v2.pretrain.prepare_data` 和 `data_preparation/fineweb-reconstruction-k512-doc100k.json` 独立构造数据：沿用 v1 质量过滤、去重与来源划分，按字符数÷4 估算长度，只保存 `single/`、`multi/` 两套索引，记录原始 Parquet 的相对路径、row group、组内行号、候选字符范围和目标 `write_token_ends`。`content_reserve_ratio=1.5` 为主内容留余量，`continuation_reserve_tokens=768` 为真实 `continuation_tokens=512` 的续文预留字符预算；候选字符长度为 `ceil(4 × L × 1.5) + 4 × 768`。构造不加载 tokenizer；训练分词后按目标 token 计划截取连续正文及 512-token 续文，额外缓冲不进入训练。六份 `selection.json` 只包含 `dataset_dir`。训练启动时按文件和 row group 批量读取原文、分词并按真实长度筛选一次，各 epoch 完整复用；AE／AE＋LM 的过滤一致，记录候选数、保留数和原因。预算由 `warmup_epochs`、`multiround_epochs` 与各阶段筛选后的样本数计算，尾批保留；`global_batch_size` 不随 world size 改变。 `micro_batch_size=2` 表示每卡最大并行样本数；按预计读取长度排序后，在相同容量下合批，允许 AE／LM 和压缩次数不同。`micro_batch_encoder_tokens=4096`、`micro_batch_decoder_tokens=8192` 约束每次压缩中实际活跃样本的补齐后位置数；已结束轨迹退出后续计算。超预算时拆批，不强制凑满样本上限。词表损失分块大小由模型配置的 `lm_head_chunk_size` 控制，默认 256。静态 baseline 设置 `warmup_epochs=3`、`multiround_epochs=0`；六组均训练 3 epochs，使用相同的多次压缩 dev/test 与评估指标。`compression` 可选 `mean`、`weighted`、`spectral`。六份默认配置均使用完整 causal Encoder（`encoder_layers: null`）与基础 pooling。正式入口默认 SwanLab online，project 为 `latent-working-memory-v2`，要求显式指定同组 runs 共用的 `--swanlab-group`；具体参数进入 config，运行名称取输出目录名。已完成真实模型资源短测，完整训练仍保持停止；运行、恢复与产物说明见 [v2 开发记录](../src/latent_working_memory/v2/README.md)。
+先通过 `v2.pretrain.prepare_data` 和 `data_preparation/fineweb-reconstruction-k512-doc100k.json` 独立构造数据：沿用 v1 质量过滤、去重与来源划分，按字符数÷4 估算长度，只保存 `single/`、`multi/` 两套索引，记录原始 Parquet 的相对路径、row group、组内行号、候选字符范围和目标 `write_token_ends`。`content_reserve_ratio=1.5` 为主内容留余量，`continuation_reserve_tokens=768` 为真实 `continuation_tokens=512` 的续文预留字符预算；候选字符长度为 `ceil(4 × L × 1.5) + 4 × 768`。构造不加载 tokenizer；训练分词后按目标 token 计划截取连续正文及 512-token 续文，额外缓冲不进入训练。六份 `selection.json` 只包含 `dataset_dir`。训练启动时按文件和 row group 批量读取原文、分词并按真实长度筛选一次，各 epoch 完整复用；AE／AE＋LM 的过滤一致，记录候选数、保留数和原因。预算由 `warmup_epochs`、`multiround_epochs` 与各阶段筛选后的样本数计算，尾批保留；`global_batch_size` 不随 world size 改变。 `micro_batch_size=4` 表示每卡最大并行样本数；按预计读取长度排序后，在相同容量下合批，允许 AE／LM 和压缩次数不同。`micro_batch_encoder_tokens=6144`、`micro_batch_decoder_tokens=10240` 约束每次压缩中实际活跃样本的位置数；padding-free 按有效位置之和计算，矩形路径按补齐后位置数计算；已结束轨迹退出后续计算。超预算时拆批，不强制凑满样本上限。词表损失分块大小由模型配置的 `lm_head_chunk_size` 控制，默认 256。静态 baseline 设置 `warmup_epochs=3`、`multiround_epochs=0`；六组均训练 3 epochs，使用相同的多次压缩 dev/test 与评估指标。`compression` 可选 `mean`、`weighted`、`spectral`。六份默认配置均使用完整 causal Encoder（`encoder_layers: null`）与基础 pooling。正式入口默认 SwanLab online，project 为 `latent-working-memory-v2`，要求显式指定同组 runs 共用的 `--swanlab-group`；具体参数进入 config，运行名称取输出目录名。已完成真实模型资源短测，完整训练仍保持停止；运行、恢复与产物说明见 [v2 开发记录](../src/latent_working_memory/v2/README.md)。
 
 ### v2 初始静态训练配置
 

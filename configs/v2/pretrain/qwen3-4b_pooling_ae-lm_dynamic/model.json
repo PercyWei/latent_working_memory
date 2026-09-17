@@ -10,5 +10,6 @@
   "compression": "mean",
   "feature_layer": "last",
   "spectral_bottleneck": 256,
-  "gradient_checkpointing": true
+  "gradient_checkpointing": true,
+  "padding_free": true
 }
