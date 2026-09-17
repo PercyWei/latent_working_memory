@@ -48,6 +48,7 @@ def test_stage_sampling_uses_characters_and_independent_rng():
         "unused",
         capacity=4,
         continuation_tokens=3,
+        continuation_reserve_tokens=5,
         warmup={"train": 400, "dev": 4, "test": 4},
         multiround={"train": 40, "dev": 4, "test": 4},
     )
@@ -55,12 +56,12 @@ def test_stage_sampling_uses_characters_and_independent_rng():
     single = build_indices(documents, config, "warmup", "train")
     assert multi == build_indices(documents, config, "multiround", "train")
     for row in multi:
-        ends = row["write_char_ends"]
+        ends = row["write_token_ends"]
         parts = [b - a for a, b in zip([0] + ends[:-1], ends)]
-        assert 3 <= len(parts) <= 5 and all(16 <= n <= 48 for n in parts)
-        assert ends[-1] <= 128 and row["char_end"] - row["char_start"] == ends[-1] + 12
-    assert min(r["write_char_ends"][-1] for r in single) == 32
-    assert max(r["write_char_ends"][-1] for r in single) == 128
+        assert 3 <= len(parts) <= 5 and all(4 <= n <= 12 for n in parts)
+        assert ends[-1] <= 32 and row["char_end"] - row["char_start"] == 6 * ends[-1] + 20
+    assert min(r["write_token_ends"][-1] for r in single) == 8
+    assert max(r["write_token_ends"][-1] for r in single) == 32
 
 
 def test_prepare_saves_only_references_without_tokenizer(tmp_path, monkeypatch):
@@ -83,6 +84,7 @@ def test_prepare_saves_only_references_without_tokenizer(tmp_path, monkeypatch):
         str(source),
         capacity=2,
         continuation_tokens=2,
+        continuation_reserve_tokens=3,
         max_documents=100,
         split_fractions=(0.6, 0.2, 0.2),
         warmup={"train": 20, "dev": 4, "test": 4},
@@ -101,6 +103,10 @@ def test_prepare_saves_only_references_without_tokenizer(tmp_path, monkeypatch):
             rows = [json.loads(s) for s in (first / name).read_text().splitlines()]
             assert len(rows) == getattr(config, stage)[split]
             assert all("text" not in r and "token_ids" not in r for r in rows)
+            assert all(
+                r["char_end"] - r["char_start"] == config.candidate_chars(r["write_token_ends"][-1])
+                for r in rows
+            )
             loaded = load_referenced_documents(first, rows)
             for r in rows:
                 document = loaded[r["source_file"], r["row_group"], r["row_index"]]
@@ -121,7 +127,7 @@ def test_tokenized_filter_is_shared_and_epochs_reuse_rows(tmp_path, tiny_base, m
     splits = ("train", "dev", "test")
     source = tmp_path / "raw.parquet"
     pq.write_table(
-        pa.Table.from_pylist([{"id": split, "text": "red " * 12} for split in splits]),
+        pa.Table.from_pylist([{"id": split, "text": "water " * 12} for split in splits]),
         source,
         row_group_size=1,
     )
@@ -134,12 +140,17 @@ def test_tokenized_filter_is_shared_and_epochs_reuse_rows(tmp_path, tiny_base, m
 
     monkeypatch.setattr(pq.ParquetFile, "read_row_group", counted_read)
     (tmp_path / "preparation.json").write_text(
-        json.dumps({"preparation_id": "test", "config": {"continuation_tokens": 2}})
+        json.dumps(
+            {
+                "preparation_id": "test",
+                "config": {"continuation_tokens": 2, "continuation_reserve_tokens": 3},
+            }
+        )
     )
     for stage, directory in STAGE_DIRECTORIES.items():
         (tmp_path / directory).mkdir()
         for split in ("train", "dev", "test"):
-            cuts = [16] if stage == "warmup" else [8, 16, 24]
+            cuts = [4] if stage == "warmup" else [2, 4, 6]
             good = {
                 "sample_id": stage + split,
                 "document_id": split,
@@ -148,14 +159,14 @@ def test_tokenized_filter_is_shared_and_epochs_reuse_rows(tmp_path, tiny_base, m
                 "row_index": 0,
                 "dedup_cluster": split,
                 "char_start": 0,
-                "char_end": 40,
-                "write_char_ends": cuts,
+                "char_end": 60,
+                "write_token_ends": cuts,
                 "capacity": 2,
             }
             bad = dict(
                 good,
                 sample_id=stage + split + "bad",
-                write_char_ends=[4] if stage == "warmup" else [4, 16, 24],
+                write_token_ends=[1] if stage == "warmup" else [1, 4, 6],
             )
             (tmp_path / directory / f"{split}.jsonl").write_text(
                 json.dumps(good) + "\n" + json.dumps(bad) + "\n"
@@ -176,7 +187,10 @@ def test_tokenized_filter_is_shared_and_epochs_reuse_rows(tmp_path, tiny_base, m
         assert filtering[stage]["train"]["retained"] == 1
         a, b = ae[stage]["train"][0], joint[stage]["train"][0]
         assert a.sample_id == b.sample_id and a.token_ids.tolist() == b.token_ids.tolist()
+        assert a.write_ends == ((4,) if stage == "warmup" else (2, 4, 6))
         assert len(a.token_ids) - a.write_ends[-1] == 2
+        expected = tokenizer.encode("water " * 12, add_special_tokens=False)
+        assert a.token_ids.tolist() == expected[: a.write_ends[-1] + 2]
         for epoch in (0, 1):
             assert next(epoch_batches(ae[stage]["train"], 8, 42, stage, epoch))[0] is a
     assert ae["multiround"]["dev"][0].sample_id == direct["multiround"]["dev"][0].sample_id
@@ -238,3 +252,21 @@ def test_locators_preserve_legacy_interleaved_sampling(tmp_path):
             loaded[row["source_file"], row["row_group"], row["row_index"]]["id"]
             == row["document_id"]
         )
+
+
+def test_continuation_reserve_is_separate_from_target():
+    config = DataPreparationConfig("unused")
+    assert config.content_reserve_ratio == 1.5
+    assert config.candidate_chars(1024) == 6 * 1024 + 3072
+    assert config.continuation_tokens == 512
+    assert config.continuation_reserve_tokens == 768
+    with pytest.raises(ValueError, match="continuation_reserve_tokens"):
+        replace(config, continuation_reserve_tokens=511)
+
+
+def test_buffer_does_not_expand_actual_target_plan():
+    assert rejection_reason((4,), 3, 2, 2, "warmup", 128, {"ae": 1, "lm": 1}) == "content_length"
+    config = DataPreparationConfig("unused")
+    for ratio in (0.9, float("inf"), float("nan")):
+        with pytest.raises(ValueError, match="content_reserve_ratio"):
+            replace(config, content_reserve_ratio=ratio)

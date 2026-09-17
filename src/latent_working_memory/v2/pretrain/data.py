@@ -1,6 +1,5 @@
 """按已保存的位置读取原始 Parquet／字符索引；启动时分词、筛选一次，各 epoch 复用。"""
 
-from bisect import bisect_right
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 import json
@@ -37,6 +36,8 @@ def rejection_reason(
             or ends[-1] > 8 * capacity
         ):
             return "multi_lengths"
+    if token_count < ends[-1]:
+        return "content_length"
     if token_count - ends[-1] < continuation_tokens:
         return "continuation_length"
     writer_lengths = [ends[-1]] + [
@@ -77,8 +78,6 @@ def load_referenced_documents(root, indices):
 
 
 def load_datasets(config, tokenizer, max_positions, training):
-    if not tokenizer.is_fast:
-        raise ValueError("character indices require a fast tokenizer with offset mappings")
     root = Path(config.dataset_dir)
     metadata = json.loads((root / "preparation.json").read_text())
     prompts = {
@@ -121,24 +120,23 @@ def load_datasets(config, tokenizer, max_positions, training):
                             f"{row['sample_id']}: Parquet location does not match document_id"
                         )
                     text = document["text"][row["char_start"] : row["char_end"]]
-                    cuts = row["write_char_ends"]
+                    cuts = row["write_token_ends"]
                     if (
                         row["char_start"] < 0
                         or len(text) != row["char_end"] - row["char_start"]
                         or not cuts
                         or cuts != sorted(set(cuts))
-                        or not 0 < cuts[0] <= cuts[-1] < len(text)
+                        or not 0 < cuts[0] <= cuts[-1]
                     ):
-                        raise ValueError(f"{row['sample_id']}: invalid character indices")
+                        raise ValueError(
+                            f"{row['sample_id']}: invalid source interval or target token cuts"
+                        )
                     texts.append(text)
-                encoded = tokenizer(texts, add_special_tokens=False, return_offsets_mapping=True)
-                for row, ids, offsets in zip(
-                    batch, encoded["input_ids"], encoded["offset_mapping"], strict=True
-                ):
-                    # A token crossing a character cut belongs to the next write. All paths
-                    # use this same full-window tokenization, including the one-shot control.
-                    token_ends = [end for _, end in offsets]
-                    ends = tuple(bisect_right(token_ends, cut) for cut in row["write_char_ends"])
+                encoded = tokenizer(texts, add_special_tokens=False)
+                for row, ids in zip(batch, encoded["input_ids"], strict=True):
+                    # Reserve characters only enlarge the candidate window. The written prefix
+                    # and all AE/LM targets use the same contiguous, tokenized sequence.
+                    ends = tuple(row["write_token_ends"])
                     reason = rejection_reason(
                         ends, len(ids), row["capacity"], q, stage, max_positions, prompts
                     )

@@ -43,6 +43,7 @@ def make_experiment(tmp_path, tiny_base):
         str(parquet),
         capacity=2,
         continuation_tokens=2,
+        continuation_reserve_tokens=3,
         max_documents=100,
         split_fractions=(0.6, 0.2, 0.2),
         warmup={"train": 12, "dev": 8, "test": 8},

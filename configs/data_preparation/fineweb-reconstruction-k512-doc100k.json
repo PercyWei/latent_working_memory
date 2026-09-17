@@ -19,5 +19,7 @@
     "train": 32000,
     "dev": 128,
     "test": 128
-  }
+  },
+  "continuation_reserve_tokens": 768,
+  "content_reserve_ratio": 1.5
 }

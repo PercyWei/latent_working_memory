@@ -1,4 +1,4 @@
-"""独立构造指向原始 Parquet 的两套字符索引；长度按 len(text) / 4 估算。"""
+"""独立构造 Parquet 位置与目标 token 切分计划，按字符估算为候选窗口留余量。"""
 
 import argparse
 from bisect import bisect_left
@@ -26,6 +26,8 @@ class DataPreparationConfig:
     source_glob: str
     capacity: int = 512
     continuation_tokens: int = 512
+    content_reserve_ratio: float = 1.5
+    continuation_reserve_tokens: int = 768
     max_documents: int = 100000
     source_seed: int = 20260907
     seed: int = 20260916
@@ -37,9 +39,22 @@ class DataPreparationConfig:
         object.__setattr__(self, "split_fractions", tuple(self.split_fractions))
         if not self.source_glob:
             raise ValueError("source_glob is required")
-        for name in ("capacity", "continuation_tokens", "max_documents"):
+        for name in (
+            "capacity",
+            "continuation_tokens",
+            "continuation_reserve_tokens",
+            "max_documents",
+        ):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(f"{name} must be positive")
+        if (
+            type(self.content_reserve_ratio) not in (int, float)
+            or not math.isfinite(self.content_reserve_ratio)
+            or self.content_reserve_ratio < 1
+        ):
+            raise ValueError("content_reserve_ratio must be finite and at least one")
+        if self.continuation_reserve_tokens < self.continuation_tokens:
+            raise ValueError("continuation_reserve_tokens must be at least continuation_tokens")
         for name in ("source_seed", "seed"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 0:
                 raise ValueError(f"{name} must be a nonnegative integer")
@@ -56,6 +71,12 @@ class DataPreparationConfig:
                 or counts["train"] == 0
             ):
                 raise ValueError("stage counts require positive train and nonnegative dev/test")
+
+    def candidate_chars(self, content_tokens):
+        return (
+            math.ceil(4 * content_tokens * self.content_reserve_ratio)
+            + 4 * self.continuation_reserve_tokens
+        )
 
 
 @dataclass(frozen=True)
@@ -89,27 +110,31 @@ def build_indices(documents, config, stage, split):
         return []
     rng = random.Random(f"{config.seed}:{stage}:{split}")
     pool = sorted((d for d in documents if d.split == split), key=lambda d: len(d.text))
-    lengths = [len(d.text) // 4 for d in pool]
-    k, q = config.capacity, config.continuation_tokens
-    required = (8 if stage == "warmup" else 5) * k + q
+    lengths = [len(d.text) for d in pool]
+    k, reserve = config.capacity, config.continuation_reserve_tokens
+    required = config.candidate_chars((8 if stage == "warmup" else 5) * k)
     if not lengths or lengths[-1] < required:
         raise ValueError(
-            f"{stage}/{split} needs source documents with at least {4 * required} characters"
+            f"{stage}/{split} needs source documents with at least {required} characters"
         )
     result = []
     for i in range(count):
         if stage == "warmup":
             length = rng.randint(2 * k, 8 * k)
-            rounds, minimum = 1, length + q
+            rounds, minimum = 1, config.candidate_chars(length)
         else:
             rounds = rng.choice((3, 4, 5))
-            minimum = rounds * k + q
+            minimum = config.candidate_chars(rounds * k)
         first = bisect_left(lengths, minimum)
         document = pool[rng.randrange(first, len(pool))]
         if stage == "multiround":
-            length = rng.randint(rounds * k, min(8 * k, len(document.text) // 4 - q))
+            available = int(
+                (len(document.text) - 4 * reserve) // (4 * config.content_reserve_ratio)
+            )
+            length = rng.randint(rounds * k, min(8 * k, available))
         parts = [length] if stage == "warmup" else segment_lengths(length, rounds, k, rng)
-        start = rng.randint(0, len(document.text) - 4 * (length + q))
+        chars = config.candidate_chars(length)
+        start = rng.randint(0, len(document.text) - chars)
         result.append(
             {
                 "sample_id": f"{stage}/{split}/{i:06d}",
@@ -119,8 +144,8 @@ def build_indices(documents, config, stage, split):
                 "row_index": document.row_index,
                 "dedup_cluster": document.dedup_cluster,
                 "char_start": start,
-                "char_end": start + 4 * (length + q),
-                "write_char_ends": [4 * end for end in accumulate(parts)],
+                "char_end": start + chars,
+                "write_token_ends": list(accumulate(parts)),
                 "capacity": k,
             }
         )
@@ -132,19 +157,19 @@ def index_statistics(rows):
         end - start
         for row in rows
         for start, end in zip(
-            [0] + row["write_char_ends"][:-1], row["write_char_ends"], strict=True
+            [0] + row["write_token_ends"][:-1], row["write_token_ends"], strict=True
         )
     ]
     return {
         "trajectories": len(rows),
         "documents": len({r["document_id"] for r in rows}),
-        "compressions": dict(Counter(len(r["write_char_ends"]) for r in rows)),
-        "estimated_ratio_bins": dict(
-            Counter(math.ceil(r["write_char_ends"][-1] / (4 * r["capacity"])) for r in rows)
+        "compressions": dict(Counter(len(r["write_token_ends"]) for r in rows)),
+        "planned_ratio_bins": dict(
+            Counter(math.ceil(r["write_token_ends"][-1] / r["capacity"]) for r in rows)
         ),
-        "segment_chars_min": min(parts, default=0),
-        "segment_chars_max": max(parts, default=0),
-        "estimated_source_tokens": sum(r["write_char_ends"][-1] // 4 for r in rows),
+        "segment_tokens_min": min(parts, default=0),
+        "segment_tokens_max": max(parts, default=0),
+        "planned_source_tokens": sum(r["write_token_ends"][-1] for r in rows),
     }
 
 
@@ -192,7 +217,7 @@ def prepare_dataset(config, output_dir):
     metadata = {
         "preparation_id": str(uuid.uuid4()),
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "length_estimation": "len(text) / 4; Python character offsets, not byte or token offsets",
+        "length_estimation": "candidate characters = ceil(4 * planned content tokens * content_reserve_ratio) + 4 * continuation_reserve_tokens; write_token_ends are target token positions",
         "config": asdict(config),
         "source_recipe": {
             name: getattr(recipe, name)
@@ -222,7 +247,7 @@ def prepare_dataset(config, output_dir):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Prepare reconstruction Parquet references and character indices without a tokenizer"
+        description="Prepare reconstruction Parquet references and token plans without a tokenizer"
     )
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
