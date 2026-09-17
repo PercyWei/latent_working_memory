@@ -171,6 +171,8 @@ def test_microbatch_matches_serial_with_unequal_lengths_and_depths(tiny_base, ob
     for engine in engines:
         engine.initialize()
     expected, observed = [engine.step(rows) for engine in engines]
+    assert observed["max_microbatch_size"] == 2
+    assert observed["microbatches"] == 2 and observed["batched_samples"] == 2
     for key in ("loss", "ae", "lm"):
         if expected[key] is not None:
             assert observed[key] == pytest.approx(expected[key], rel=2e-5)
@@ -180,6 +182,16 @@ def test_microbatch_matches_serial_with_unequal_lengths_and_depths(tiny_base, ob
         assert (a.grad is None) == (b.grad is None), name
         if a.grad is not None:
             torch.testing.assert_close(a.grad, b.grad, rtol=5e-4, atol=3e-7, msg=name)
+
+
+def test_microbatch_encoder_budget_splits_before_allocating(tiny_base):
+    task = make_task(tiny_base)
+    task.config = replace(task.config, micro_batch_size=2, micro_batch_encoder_tokens=10)
+    engine = ReconstructionEngine(task, "cpu")
+    engine.initialize()
+    metrics = engine.step([example((9,)), example((8,))])
+    assert metrics["samples"] == metrics["microbatches"] == 2
+    assert metrics["max_microbatch_size"] == 1 and metrics["batched_samples"] == 0
 
 
 @pytest.mark.parametrize("objective", ["ae", "ae_lm"])

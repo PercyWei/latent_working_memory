@@ -20,6 +20,7 @@ class TrainingConfig:
     multiround_epochs: int = 2
     global_batch_size: int = 8
     micro_batch_size: int = 1
+    micro_batch_encoder_tokens: int = 4096
     learning_rate: float = 1e-4
     weight_decay: float = 0.01
     gradient_clip: float = 1.0
@@ -43,6 +44,7 @@ class TrainingConfig:
         for name in (
             "global_batch_size",
             "micro_batch_size",
+            "micro_batch_encoder_tokens",
             "save_every",
             "eval_every",
             "checkpoint_limit",

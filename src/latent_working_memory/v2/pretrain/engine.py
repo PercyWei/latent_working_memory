@@ -52,6 +52,7 @@ class ReconstructionEngine(BaseEngine):
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
         self.rank = dist.get_rank() if dist.is_initialized() else 0
         self.micro_batch_size = config.micro_batch_size
+        self.micro_batch_encoder_tokens = config.micro_batch_encoder_tokens
         self.mode = None
 
     def initialize(self):
@@ -126,10 +127,20 @@ class ReconstructionEngine(BaseEngine):
         local = list(range(self.rank, len(rows), self.world_size))
         # A short final batch still participates on every rank. Dummy work has zero weight.
         work = local or [0]
-        pending, microbatches = {}, []
+        pending, microbatches, encoder_lengths = {}, [], {}
         for i in work:
             key = (rows[i].capacity, len(rows[i].write_ends))
+            encoder_lengths[i] = max(
+                end - start + (rows[i].capacity if step else 0)
+                for step, (start, end) in enumerate(
+                    zip((0,) + rows[i].write_ends[:-1], rows[i].write_ends, strict=True)
+                )
+            )
             group = pending.setdefault(key, [])
+            padded_tokens = max(encoder_lengths[j] for j in [*group, i]) * (len(group) + 1)
+            if group and padded_tokens > self.micro_batch_encoder_tokens:
+                microbatches.append(group)
+                group = pending[key] = []
             group.append(i)
             if len(group) == self.micro_batch_size:
                 microbatches.append(pending.pop(key))
@@ -153,8 +164,16 @@ class ReconstructionEngine(BaseEngine):
                 )
                 rounds = [output["rounds"]] if single else output["rounds"]
                 records.extend(
-                    {"index": i, "loss": value, "rounds": reads}
-                    for i, value, reads in zip(group, values, rounds, strict=True)
+                    {
+                        "index": i,
+                        "loss": value,
+                        "rounds": reads,
+                        "microbatch_size": len(group),
+                        "microbatch_first": position == 0,
+                    }
+                    for position, (i, value, reads) in enumerate(
+                        zip(group, values, rounds, strict=True)
+                    )
                 )
             del output, loss
         if self.world_size > 1:
@@ -174,6 +193,9 @@ class ReconstructionEngine(BaseEngine):
                     else None
                 ),
                 "samples": len(rows),
+                "microbatches": sum(r["microbatch_first"] for r in records),
+                "max_microbatch_size": max(r["microbatch_size"] for r in records),
+                "batched_samples": sum(r["microbatch_size"] > 1 for r in records),
                 "source_tokens": sum(r.write_ends[-1] for r in rows),
                 "target_tokens": sum(
                     t["ae_tokens"] + t["lm_tokens"] for r in records for t in r["rounds"]
