@@ -156,11 +156,17 @@ class ReconstructionEngine(BaseEngine):
             fits = True
             for step in range(max(len(rows[j].write_ends) for j in candidate)):
                 active = [j for j in candidate if step < len(rows[j].write_ends)]
+                enc = [encoder_lengths[j][step] for j in active]
+                dec = [decoder_lengths[j][step] for j in active]
+                encoder_cost = (
+                    sum(enc) if self.model.codec.config.padding_free else len(active) * max(enc)
+                )
+                decoder_cost = (
+                    sum(dec) if self.model.codec.config.padding_free else len(active) * max(dec)
+                )
                 if (
-                    len(active) * max(encoder_lengths[j][step] for j in active)
-                    > self.micro_batch_encoder_tokens
-                    or len(active) * max(decoder_lengths[j][step] for j in active)
-                    > self.micro_batch_decoder_tokens
+                    encoder_cost > self.micro_batch_encoder_tokens
+                    or decoder_cost > self.micro_batch_decoder_tokens
                 ):
                     fits = False
                     break

@@ -8,9 +8,11 @@ import torch
 from peft import LoraConfig, get_peft_model
 from peft.tuners.tuners_utils import BaseTunerLayer
 from torch import nn
+from torch.nn.attention.varlen import varlen_attn
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.checkpoint import checkpoint
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AttentionInterface, AutoConfig, AutoModelForCausalLM
+from transformers.integrations.sdpa_attention import sdpa_attention_forward
 
 from latent_working_memory.v2.compression import SlotCompression
 
@@ -30,8 +32,11 @@ class CodecConfig:
     spectral_bottleneck: int = 256
     gradient_checkpointing: bool = True
     lm_head_chunk_size: int = 256
+    padding_free: bool = False
 
     def __post_init__(self):
+        if self.padding_free and self.attention_implementation != "sdpa":
+            raise ValueError("padding_free uses PyTorch varlen attention with the sdpa dense path")
         if self.feature_layer not in {"last", "mean"}:
             raise ValueError("feature_layer must be last or mean")
         if self.compression not in {"mean", "weighted", "spectral"}:
@@ -49,6 +54,46 @@ class CodecConfig:
                 raise ValueError(f"{name} must be a positive integer")
         if not 0 <= self.lora_dropout < 1:
             raise ValueError("lora_dropout must lie in [0, 1)")
+
+
+def varlen_attention_forward(
+    module,
+    query,
+    key,
+    value,
+    attention_mask,
+    dropout=0.0,
+    scaling=None,
+    cu_seq_lens=None,
+    max_length=None,
+    **kwargs,
+):
+    # Generation uses a dense KV cache; training passes explicit packed boundaries.
+    if cu_seq_lens is None:
+        return sdpa_attention_forward(
+            module, query, key, value, attention_mask, dropout=dropout, scaling=scaling, **kwargs
+        )
+    if dropout or getattr(module, "sliding_window", None) is not None:
+        raise ValueError(
+            "packed reconstruction requires zero attention dropout and full causal attention"
+        )
+    q, k, v = [x.squeeze(0).transpose(0, 1) for x in (query, key, value)]
+    output = varlen_attn(
+        q,
+        k,
+        v,
+        cu_seq_lens,
+        cu_seq_lens,
+        max_length,
+        max_length,
+        scale=scaling,
+        window_size=(-1, 0),
+        enable_gqa=True,
+    )
+    return output.unsqueeze(0), None
+
+
+AttentionInterface.register("lwm_varlen", varlen_attention_forward)
 
 
 def alignment_from_backbone(transformer, layers):
@@ -87,6 +132,8 @@ class MemoryCodec(nn.Module):
         # Copy before injecting LoRA: alignment blocks have their own dense weights only.
         self.read_alignment = alignment_from_backbone(base.model, config.alignment_layers)
         self.write_alignment = deepcopy(self.read_alignment)
+        if config.padding_free:
+            base.set_attn_implementation("lwm_varlen")
         self.backbone = get_peft_model(
             base,
             LoraConfig(
@@ -202,22 +249,42 @@ class MemoryCodec(nn.Module):
         ).last_hidden_state.to(self.backbone.get_input_embeddings().weight.dtype)
         return aligned[0] if single else aligned
 
-    def _encode(self, embeddings, training):
-        with self.use_adapter("encoder", training=training) as backbone:
-            output = backbone.get_base_model().model(
-                inputs_embeds=embeddings,
-                # Right padding is strictly after valid tokens; causal attention prevents it
-                # affecting valid outputs. Padded states never enter pooling or the loss.
-                attention_mask=torch.ones(
-                    embeddings.shape[:2], dtype=torch.bool, device=embeddings.device
-                ),
-                use_cache=False,
-                output_hidden_states=self.config.feature_layer == "mean",
-                return_dict=True,
+    def _backbone_hidden(self, backbone, rows, output_hidden_states=False):
+        lengths = [len(row) for row in rows]
+        if max(lengths) > self.max_positions:
+            raise ValueError("a sequence exceeds the backbone window")
+        if self.config.padding_free:
+            inputs = torch.cat(rows)[None]
+            positions = torch.cat([torch.arange(n, device=inputs.device) for n in lengths])[None]
+            cu_seq = torch.tensor([0, *lengths], device=inputs.device, dtype=torch.int32).cumsum(
+                0, dtype=torch.int32
             )
-            if self.config.feature_layer == "mean":
-                return torch.stack(output.hidden_states[1:]).mean(0)
-            return output.last_hidden_state
+            kwargs = dict(position_ids=positions, cu_seq_lens=cu_seq, max_length=max(lengths))
+            mask = None
+        else:
+            inputs = pad_sequence(rows, batch_first=True)
+            mask = torch.ones(inputs.shape[:2], dtype=torch.bool, device=inputs.device)
+            kwargs = {}
+        output = backbone.get_base_model().model(
+            inputs_embeds=inputs,
+            attention_mask=mask,
+            use_cache=False,
+            output_hidden_states=output_hidden_states,
+            return_dict=True,
+            **kwargs,
+        )
+        hidden = (
+            torch.stack(output.hidden_states[1:]).mean(0)
+            if output_hidden_states
+            else output.last_hidden_state
+        )
+        if self.config.padding_free:
+            return hidden[0].split(lengths)
+        return tuple(row[:length] for row, length in zip(hidden, lengths, strict=True))
+
+    def _encode(self, rows, training):
+        with self.use_adapter("encoder", training=training) as backbone:
+            return self._backbone_hidden(backbone, rows, self.config.feature_layer == "mean")
 
     def write(self, previous, token_ids, capacity):
         return self.write_batch(
@@ -225,45 +292,23 @@ class MemoryCodec(nn.Module):
         )[0]
 
     def write_batch(self, previous, token_ids, capacity):
-        lengths = [len(ids) + (capacity if previous is not None else 0) for ids in token_ids]
-        embeddings = self.backbone.get_input_embeddings()(pad_sequence(token_ids, batch_first=True))
+        embed = self.backbone.get_input_embeddings()
+        rows = [embed(ids) for ids in token_ids]
         if previous is not None:
-            embeddings = torch.cat((self.align(previous, writing=True), embeddings), dim=1)
-        if embeddings.shape[1] > self.max_positions:
-            raise ValueError("joint writer input exceeds model window")
+            aligned = self.align(previous, writing=True)
+            rows = [torch.cat((memory, row)) for memory, row in zip(aligned, rows, strict=True)]
         if self.config.gradient_checkpointing and self.training:
-            hidden = checkpoint(self._encode, embeddings, self.training, use_reentrant=False)
+            hidden = checkpoint(self._encode, rows, self.training, use_reentrant=False)
         else:
-            hidden = self._encode(embeddings, self.training)
-        return torch.stack(
-            [
-                self.compression(row[:length], capacity)
-                for row, length in zip(hidden, lengths, strict=True)
-            ]
-        )
+            hidden = self._encode(rows, self.training)
+        return torch.stack([self.compression(row, capacity) for row in hidden])
 
     def _read_hidden(self, memory, input_ids):
         aligned = self.align(memory)
         embed = self.backbone.get_input_embeddings()
-        # Each row already contains its own contiguous prompt and teacher-forcing input.
-        # Padding is only at the right edge, so causal attention isolates valid positions.
-        inputs = torch.cat((aligned, embed(input_ids)), dim=1)
-        if inputs.shape[1] > self.max_positions:
-            raise ValueError("memory + prompt + target exceeds reader window")
+        rows = [torch.cat((m, embed(ids))) for m, ids in zip(aligned, input_ids, strict=True)]
         with self.use_adapter(None) as backbone:
-            hidden = (
-                backbone.get_base_model()
-                .model(
-                    inputs_embeds=inputs,
-                    attention_mask=torch.ones(
-                        inputs.shape[:2], dtype=torch.bool, device=inputs.device
-                    ),
-                    use_cache=False,
-                    return_dict=True,
-                )
-                .last_hidden_state
-            )
-        return hidden
+            return self._backbone_hidden(backbone, rows)
 
     def _token_loss(self, hidden, targets):
         logits = self.backbone.get_output_embeddings()(hidden)
@@ -273,13 +318,10 @@ class MemoryCodec(nn.Module):
         return self.read_loss_batch(memory[None], [prompt_ids], [target_ids])[0]
 
     def read_loss_batch(self, memory, prompt_ids, target_ids):
-        inputs = pad_sequence(
-            [
-                torch.cat((prompt, ids[:-1]))
-                for prompt, ids in zip(prompt_ids, target_ids, strict=True)
-            ],
-            batch_first=True,
-        )
+        inputs = [
+            torch.cat((prompt, ids[:-1]))
+            for prompt, ids in zip(prompt_ids, target_ids, strict=True)
+        ]
         checkpointing = self.config.gradient_checkpointing and self.training
         if checkpointing:
             hidden = checkpoint(self._read_hidden, memory, inputs, use_reentrant=False)

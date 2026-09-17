@@ -2,7 +2,7 @@
 
 创建时间：20260915 19:10:20 UTC+08:00
 
-最后修订时间：20260917 17:46:49 UTC+08:00
+最后修订时间：20260917 19:23:25 UTC+08:00
 
 ## 当前入口：固定容量重构预训练
 
@@ -37,6 +37,10 @@ uv run --frozen python -m latent_working_memory.v2.pretrain.prepare_data \
 `micro_batch_size` 是单卡一次并行的轨迹上限，六组配置设为 2；`global_batch_size=8` 控制一次参数更新的总样本数。同一 rank 的候选按预计读取长度排序，在相同容量下合批；AE／LM 任务和压缩次数可以不同。encoder／decoder 的补齐后位置预算分别为 `micro_batch_encoder_tokens=4096`、`micro_batch_decoder_tokens=8192`，按每次压缩的实际活跃样本检查，超过预算时拆批。
 
 每条样本分别拼接 prompt 与目标前缀，再统一右侧补齐，按各自目标位置计算损失。同一压缩步骤只调用一次批量读取；已结束轨迹从后续写入与读取中移除，记忆通过可微索引保留跨压缩步骤的梯度。损失先按各自目标 tokens、各自压缩次数平均，再按全局轨迹数平均。`resources/mean_microbatch_size` 记录轨迹组初始平均大小，`resources/mean_active_microbatch_size` 记录各次压缩时实际活跃的平均批大小。
+
+`model.padding_free=true` 使用 PyTorch 2.14 的公开 `torch.nn.attention.varlen.varlen_attn`。Encoder 和 Decoder 的有效 embeddings 展平成一条张量，传入各样本独立的 position IDs 与累计长度；Transformer 的 attention、MLP 和投影都只处理有效位置。输出按长度拆回原样本，连续记忆保留梯度。通过 Transformers `AttentionInterface` 注册薄适配函数，内部计算、反向与 GQA 均由 PyTorch 提供，无独立 `flash-attn` 依赖。对齐模块和带 KV cache 的生成继续使用原生 SDPA。
+
+该模式需要 CUDA、BF16/FP16、完整 causal attention 和零 attention dropout，`attention_implementation` 保持 `sdpa`。`padding_free=false` 保留矩形补齐路径用于对照。位置预算在 padding-free 模式下按有效位置之和计算，在矩形模式下按补齐后位置数计算。每条样本仍独立检查模型窗口，展平总长不视为单条上下文长度。
 
 六份可执行起点配置位于 `configs/v2/pretrain/qwen3-4b_pooling_*`，包含 AE／AE＋LM × warm-up／直接多次压缩四组主实验，以及 `ae-static`、`ae-lm-static` 两组全程单次压缩 baseline。本次六组均使用基础 pooling。默认完整 Encoder（`encoder_layers: null`）、K=512、Q=512、全局 batch=8、学习率 1e-4；两阶段各 32000 条候选训练轨迹，warm-up 组为 1＋2 epochs，直接多次压缩组为 3 epochs，静态 baseline 为单次压缩 3 epochs，实际 optimizer steps 按筛选后的样本数计算。模型名沿用已有 Qwen3 配置；真实数据路径、基座 revision 与超参数需按实际实验确定。
 

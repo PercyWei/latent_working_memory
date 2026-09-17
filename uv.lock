@@ -719,7 +719,7 @@ requires-dist = [
     { name = "safetensors", specifier = ">=0.6,<1" },
     { name = "swanlab", specifier = ">=0.10,<1" },
     { name = "tensordict", specifier = ">=0.8,<0.11" },
-    { name = "torch", specifier = ">=2.7,<3" },
+    { name = "torch", specifier = ">=2.14,<3" },
     { name = "transformers", specifier = ">=4.55,<5" },
     { name = "verl", specifier = "==0.8.0" },
 ]
