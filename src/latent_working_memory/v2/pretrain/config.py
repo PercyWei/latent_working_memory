@@ -19,6 +19,7 @@ class TrainingConfig:
     warmup_epochs: int = 1
     multiround_epochs: int = 2
     global_batch_size: int = 8
+    micro_batch_size: int = 1
     learning_rate: float = 1e-4
     weight_decay: float = 0.01
     gradient_clip: float = 1.0
@@ -39,7 +40,13 @@ class TrainingConfig:
                 raise ValueError(f"{name} must be a nonnegative integer")
         if self.warmup_epochs + self.multiround_epochs == 0:
             raise ValueError("at least one training epoch is required")
-        for name in ("global_batch_size", "save_every", "eval_every", "checkpoint_limit"):
+        for name in (
+            "global_batch_size",
+            "micro_batch_size",
+            "save_every",
+            "eval_every",
+            "checkpoint_limit",
+        ):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(f"{name} must be positive")
         for name in ("learning_rate", "gradient_clip", "lm_weight"):

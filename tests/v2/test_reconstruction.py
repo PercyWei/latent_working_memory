@@ -126,6 +126,62 @@ def test_checkpointed_read_matches_full_graph(tiny_base, feature_layer):
             torch.testing.assert_close(a.grad, b.grad, rtol=2e-4, atol=2e-6, msg=name)
 
 
+def test_chunked_head_matches_native_causal_loss_and_gradients(tiny_base):
+    reference = make_task(tiny_base, "weighted")
+    actual = deepcopy(reference)
+    actual.codec.config = replace(
+        actual.codec.config, gradient_checkpointing=True, lm_head_chunk_size=2
+    )
+
+    def native_loss(memory, prompt, targets):
+        codec = reference.codec
+        embed = codec.backbone.get_input_embeddings()
+        prefix = torch.cat((codec.align(memory), embed(prompt)))
+        inputs = torch.cat((prefix, embed(targets)))[None]
+        labels = torch.cat((targets.new_full((len(prefix),), -100), targets))[None]
+        with codec.use_adapter(None) as backbone:
+            return backbone(
+                inputs_embeds=inputs,
+                labels=labels,
+                attention_mask=torch.ones(inputs.shape[:2], dtype=torch.bool),
+                use_cache=False,
+            ).loss
+
+    reference.codec.read_loss = native_loss
+    expected, observed = reference(example())["loss"], actual(example())["loss"]
+    expected.backward()
+    observed.backward()
+    torch.testing.assert_close(observed, expected)
+    for (name, a), (_, b) in zip(actual.named_parameters(), reference.named_parameters()):
+        assert (a.grad is None) == (b.grad is None), name
+        if a.grad is not None:
+            torch.testing.assert_close(a.grad, b.grad, rtol=2e-4, atol=2e-6, msg=name)
+
+
+@pytest.mark.parametrize("objective", ["ae", "ae_lm"])
+@pytest.mark.parametrize("method", ["mean", "weighted"])
+def test_microbatch_matches_serial_with_unequal_lengths_and_depths(tiny_base, objective, method):
+    reference = make_task(tiny_base, method, checkpointing=True)
+    reference.config = replace(reference.config, objective=objective, lm_weight=0.3)
+    actual = deepcopy(reference)
+    actual.config = replace(actual.config, micro_batch_size=2)
+    actual.codec.config = replace(actual.codec.config, lm_head_chunk_size=2)
+    rows = [example((2, 3, 4)), example((2, 3, 3, 4)), example((4, 2, 5))]
+    engines = [ReconstructionEngine(task, "cpu") for task in (reference, actual)]
+    for engine in engines:
+        engine.initialize()
+    expected, observed = [engine.step(rows) for engine in engines]
+    for key in ("loss", "ae", "lm"):
+        if expected[key] is not None:
+            assert observed[key] == pytest.approx(expected[key], rel=2e-5)
+    for key in ("samples", "source_tokens", "target_tokens"):
+        assert observed[key] == expected[key]
+    for (name, a), (_, b) in zip(actual.named_parameters(), reference.named_parameters()):
+        assert (a.grad is None) == (b.grad is None), name
+        if a.grad is not None:
+            torch.testing.assert_close(a.grad, b.grad, rtol=5e-4, atol=3e-7, msg=name)
+
+
 @pytest.mark.parametrize("objective", ["ae", "ae_lm"])
 def test_warmup_freezes_write_alignment_and_updates_read_alignment(tiny_base, objective):
     task = make_task(tiny_base)
@@ -416,11 +472,20 @@ def _ddp_worker(rank, rendezvous, base, destination):
     dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=2)
     torch.manual_seed(100)
     task = make_task(base, "weighted")
-    task.config = replace(task.config, gradient_clip=100)
+    task.config = replace(task.config, gradient_clip=100, micro_batch_size=2)
     engine = ReconstructionEngine(task, torch.device("cpu"))
     engine.initialize()
     # Unequal local trajectory counts, then a one-sample final batch with an empty rank.
-    for rows in ([example(), example((3, 3, 3, 3)), example((2, 2, 2, 2, 2))], [example()]):
+    for rows in (
+        [
+            example(),
+            example((3, 3, 3, 3)),
+            example((4, 3, 2)),
+            example((2, 2, 3, 3)),
+            example((2, 2, 2, 2, 2)),
+        ],
+        [example()],
+    ):
         engine.step(rows)
     if rank == 0:
         torch.save(codec_state(task.codec), destination)
@@ -434,7 +499,16 @@ def test_verl_ddp_matches_global_mean_with_uneven_and_empty_ranks(tiny_base, tmp
     task.config = replace(task.config, gradient_clip=100)
     engine = ReconstructionEngine(task, torch.device("cpu"))
     engine.initialize()
-    for rows in ([example(), example((3, 3, 3, 3)), example((2, 2, 2, 2, 2))], [example()]):
+    for rows in (
+        [
+            example(),
+            example((3, 3, 3, 3)),
+            example((4, 3, 2)),
+            example((2, 2, 3, 3)),
+            example((2, 2, 2, 2, 2)),
+        ],
+        [example()],
+    ):
         engine.step(rows)
     destination = tmp_path / "ddp.pt"
     mp.spawn(

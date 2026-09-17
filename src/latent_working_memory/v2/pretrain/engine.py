@@ -51,6 +51,7 @@ class ReconstructionEngine(BaseEngine):
         )
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
         self.rank = dist.get_rank() if dist.is_initialized() else 0
+        self.micro_batch_size = config.micro_batch_size
         self.mode = None
 
     def initialize(self):
@@ -125,18 +126,35 @@ class ReconstructionEngine(BaseEngine):
         local = list(range(self.rank, len(rows), self.world_size))
         # A short final batch still participates on every rank. Dummy work has zero weight.
         work = local or [0]
+        pending, microbatches = {}, []
+        for i in work:
+            key = (rows[i].capacity, len(rows[i].write_ends))
+            group = pending.setdefault(key, [])
+            group.append(i)
+            if len(group) == self.micro_batch_size:
+                microbatches.append(pending.pop(key))
+        microbatches.extend(pending.values())
+        microbatches.sort(key=lambda group: group[0])
         records = []
-        for position, i in enumerate(work):
-            final = position == len(work) - 1
+        for position, group in enumerate(microbatches):
+            final = position == len(microbatches) - 1
             sync = nullcontext() if final or self.world_size == 1 else self.module.no_sync()
             with sync, precision_context(self.device):
-                output = self.module(rows[i])
-                loss = output["loss"] * (1 if local else 0) / len(rows)
+                single = len(group) == 1
+                output = self.module(rows[group[0]] if single else [rows[i] for i in group])
+                loss = output["loss"] * (len(group) if local else 0) / len(rows)
                 if not forward_only:
                     loss.backward()
             if local:
-                records.append(
-                    {"index": i, "loss": float(output["loss"].detach()), "rounds": output["rounds"]}
+                values = (
+                    [float(output["loss"].detach())]
+                    if single
+                    else output["sample_losses"].detach().cpu().tolist()
+                )
+                rounds = [output["rounds"]] if single else output["rounds"]
+                records.extend(
+                    {"index": i, "loss": value, "rounds": reads}
+                    for i, value, reads in zip(group, values, rounds, strict=True)
                 )
             del output, loss
         if self.world_size > 1:

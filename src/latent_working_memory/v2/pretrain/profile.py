@@ -23,6 +23,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--capacity", type=int, default=512)
     parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--micro-batch-size", type=int, default=1)
     parser.add_argument("--iterations", type=int, default=2)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
@@ -45,7 +46,11 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     for stage, objective, lengths in cases:
         codec.set_stage(stage)
-        config = TrainingConfig(objective=objective, global_batch_size=args.batch_size)
+        config = TrainingConfig(
+            objective=objective,
+            global_batch_size=args.batch_size,
+            micro_batch_size=args.micro_batch_size,
+        )
         task = ReconstructionTask(codec, tokenizer, config).to(device)
         engine = ReconstructionEngine(task, device)
         engine.initialize()
@@ -87,9 +92,11 @@ def main():
             "objective": objective,
             "lengths": lengths,
             "batch_size": args.batch_size,
+            "micro_batch_size": args.micro_batch_size,
             "steps": steps,
             "peak_allocated_gib": torch.cuda.max_memory_allocated(device) / 1024**3,
             "peak_reserved_gib": torch.cuda.max_memory_reserved(device) / 1024**3,
+            "end_allocated_gib": torch.cuda.memory_allocated(device) / 1024**3,
             "total_gib": torch.cuda.get_device_properties(device).total_memory / 1024**3,
         }
         results.append(result)
