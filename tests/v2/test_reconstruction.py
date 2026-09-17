@@ -63,6 +63,21 @@ def test_group_boundaries_and_weighted_initialization():
     assert (hidden.grad.abs().sum(1) > 0).all()
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA pooling repeatability")
+def test_cuda_mean_pooling_is_repeatable_through_backward():
+    hidden = torch.randn(1298, 2560, device="cuda", requires_grad=True)
+    module = SlotCompression(2560, "mean")
+    expected = module(hidden, 512)
+    expected.square().sum().backward()
+    gradient = hidden.grad.clone()
+    for _ in range(5):
+        hidden.grad = None
+        actual = module(hidden, 512)
+        actual.square().sum().backward()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(hidden.grad, gradient, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("method", ["mean", "weighted", "spectral"])
 def test_full_bptt_frozen_decoder_and_raw_update(tiny_base, method):
     task = make_task(tiny_base, method)

@@ -41,16 +41,18 @@ class SlotCompression(nn.Module):
                 spectrum[-1] = 2 * spectrum[-1].real
             reduced = torch.fft.irfft(spectrum, n=capacity, dim=0, norm="forward")
             return reduced + self.after(reduced)
+        if self.method == "mean":
+            # Reduce each contiguous group directly. Atomic index_add can vary its summation
+            # order between forward and checkpoint replay, perturbing recurrent memories.
+            boundaries = torch.arange(capacity + 1, device=hidden.device) * n // capacity
+            return torch.segment_reduce(hidden.float(), "mean", lengths=boundaries.diff())
         # Inverse of b_j=floor(j*N/K): disjoint groups, including all valid positions.
         groups = ((torch.arange(n, device=hidden.device) + 1) * capacity - 1) // n
         values = hidden.float()
-        if self.method == "weighted":
-            scores = self.score(hidden).flatten().float()
-            maxima = scores.new_full((capacity,), -torch.inf)
-            maxima.scatter_reduce_(0, groups, scores.detach(), reduce="amax")
-            weights = (scores - maxima[groups]).exp()
-        else:
-            weights = values.new_ones(n)
+        scores = self.score(hidden).flatten().float()
+        maxima = scores.new_full((capacity,), -torch.inf)
+        maxima.scatter_reduce_(0, groups, scores.detach(), reduce="amax")
+        weights = (scores - maxima[groups]).exp()
         denominator = values.new_zeros(capacity).index_add(0, groups, weights)
         numerator = values.new_zeros(capacity, hidden.shape[-1]).index_add(
             0, groups, values * weights[:, None]
