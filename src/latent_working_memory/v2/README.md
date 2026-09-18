@@ -2,7 +2,7 @@
 
 创建时间：20260915 19:10:20 UTC+08:00
 
-最后修订时间：20260917 22:40:49 UTC+08:00
+最后修订时间：20260918 11:04:48 UTC+08:00
 
 ## 当前入口：固定容量重构预训练
 
@@ -65,6 +65,8 @@ warm-up 结束后复制已训练的读取对齐初始化写入对齐，重建 Ad
 checkpoint 仅保存 `encoder.*` 下的 LoRA、压缩模块及读写对齐，不保存两份冻结基座。旧共享对象的 `backbone.*` checkpoint 不做自动转换，新实现需新建 run。
 
 中断续训使用相同配置、输出目录和 world size，添加 `--resume <output-dir>/checkpoints/step-XXXXXX.pt`。`--stop-after-steps N` 仅截短本次执行，不改变总预算。启动时读取同一构造身份并重新进行确定性的分词、筛选，随后恢复权重、optimizer、epoch／batch 游标及 RNG；阶段数据随机数与顺序打乱相互独立。
+
+Dev 评估支持互斥的两种设置：`eval_every=1000`（全局间隔＋epoch 结束），或 `eval_every=null, evals_per_epoch=4`（每个 epoch 均匀四次，向上取整并去重）。评估点随实际 epoch 步数生成并记录到 `epoch-plan.json`，恢复训练沿用同一组全局点。A／B 当前运行保留旧间隔；C～F 在启动前切换为四次评估。保存频率及最终 test 独立于 dev 频率。
 
 产物包含 `run.json`、`provenance.json`、`data-summary.json`、`epoch-plan.json`、训练日志、checkpoint、dev／test 结果和 `training-result.json`。`checkpoint_limit=2` 保留最近两份 checkpoint，并额外保留单次压缩训练结束和完整训练结束的 checkpoint。只有完成全部 epochs 才生成最终 test。AE 与 LM 分别记录各次压缩后的 NLL，包含最后一次压缩，不另列最终 NLL；同时保留 AE／LM 各自的轨迹平均 NLL、一次压缩 NLL 和配对差值。AE 最后一次压缩后的自由重构使用完整 token 序列 EM（`generation/final_round_exact_match`），另记录生成触顶比例与样本数。
 

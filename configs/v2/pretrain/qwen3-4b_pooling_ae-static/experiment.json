@@ -12,13 +12,14 @@
     "lm_ratio": 0.0,
     "seed": 42,
     "save_every": 1000,
-    "eval_every": 1000,
+    "eval_every": null,
     "generation_samples": 8,
     "ae_prompt": "Reconstruct the text stored in memory:\n",
     "lm_prompt": "Continue the text stored in memory:\n",
     "checkpoint_limit": 2,
     "micro_batch_size": 16,
     "micro_batch_encoder_tokens": 65536,
-    "micro_batch_decoder_tokens": 73856
+    "micro_batch_decoder_tokens": 73856,
+    "evals_per_epoch": 4
   }
 }

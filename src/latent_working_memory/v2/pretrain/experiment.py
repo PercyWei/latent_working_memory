@@ -64,7 +64,7 @@ def prepare_runs(args):
                 {
                     "model": "model.json",
                     "selection": "selection.json",
-                    "training": asdict(training),
+                    "training": training.to_dict(),
                 },
             ),
         ):

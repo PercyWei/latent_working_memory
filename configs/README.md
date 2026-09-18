@@ -1,7 +1,7 @@
 # 20260914_配置组织规则
 
 创建时间：20260914 11:48:20 UTC+08:00
-最后修订时间：20260917 22:40:49 UTC+08:00
+最后修订时间：20260918 11:04:48 UTC+08:00
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
 
@@ -38,6 +38,8 @@ configs/
 `v2/pretrain/qwen3-4b_pooling_*` 提供 AE／AE＋LM × warm-up／直接多次压缩四个主实验，以及 `ae-static`、`ae-lm-static` 两个全程单次压缩 baseline。每个目录包含 `model.json`（codec）、`selection.json`（已构造数据目录）和 `experiment.json`（配置引用与执行参数）。入口为 `latent_working_memory.v2.pretrain.train --experiment <配置> --output-dir <产物目录>`，支持单设备与 verl replicated/DDP。
 
 `training.lm_ratio` 为轨迹级 LM 任务概率，范围 `[0,1]`，默认 0；`objective: "ae"` 要求其为 0，六份配置中 `objective: "ae_lm"` 显式设为 0.5。同一轨迹每次参与训练仅选 AE 或 LM，并用于所有压缩步骤；各 epoch 可以重新分配，数据及切点不变。训练按选中任务的样本损失平均，不再接受 `lm_weight`。评估始终计算两个任务。任务分配由 seed 和全局 step 重现，配置变化需新建 run，不用旧双损失 checkpoint 直接续训。
+
+评估策略二选一：`eval_every` 为正整数时按全局间隔及 epoch 结束评估；使用 `evals_per_epoch=4` 时将 `eval_every` 设为 `null`，按每个 epoch 的 25%／50%／75%／100% 位置向上取整并去重。实际全局评估点写入 `epoch-plan.json`。当前 warm-up 两组保留原间隔，其余四组采用每 epoch 4 次；`save_every` 独立控制 checkpoint 保存，最终 test 仍只执行一次。
 
 `CodecConfig.padding_free` 默认 false，六份 pooling 配置显式设为 true；开启后 Encoder／Decoder 复用 PyTorch 2.14 原生变长 FlashAttention，使用 `attention_implementation: "sdpa"`，预算改按有效位置总数计算。无需安装独立 flash-attn 包；CUDA 接口通过 Transformers `AttentionInterface` 接入，详见 [v2 开发记录](../src/latent_working_memory/v2/README.md)。
 

@@ -1,6 +1,6 @@
 """一次实验的模型、数据选择和执行配置。"""
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import math
 
 
@@ -29,7 +29,8 @@ class TrainingConfig:
     seed: int = 42
     save_every: int = 1000
     checkpoint_limit: int = 2
-    eval_every: int = 1000
+    eval_every: int | None = 1000
+    evals_per_epoch: int | None = None
     generation_samples: int = 8
     ae_prompt: str = "Reconstruct the text stored in memory:\n"
     lm_prompt: str = "Continue the text stored in memory:\n"
@@ -48,11 +49,16 @@ class TrainingConfig:
             "micro_batch_encoder_tokens",
             "micro_batch_decoder_tokens",
             "save_every",
-            "eval_every",
             "checkpoint_limit",
         ):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(f"{name} must be positive")
+        if (self.eval_every is None) == (self.evals_per_epoch is None):
+            raise ValueError("set exactly one of eval_every and evals_per_epoch")
+        for name in ("eval_every", "evals_per_epoch"):
+            value = getattr(self, name)
+            if value is not None and (type(value) is not int or value < 1):
+                raise ValueError(f"{name} must be a positive integer or null")
         for name in ("learning_rate", "gradient_clip"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
@@ -64,3 +70,22 @@ class TrainingConfig:
             raise ValueError("weight_decay must be finite and nonnegative")
         if not self.ae_prompt or not self.lm_prompt:
             raise ValueError("read prompts must not be empty")
+
+    def to_dict(self):
+        values = asdict(self)
+        # Keep the serialized contract of already-running interval-based experiments.
+        if self.evals_per_epoch is None:
+            values.pop("evals_per_epoch")
+        return values
+
+    def evaluation_steps(self, epoch_steps, previous_steps):
+        if self.evals_per_epoch is not None:
+            count = self.evals_per_epoch
+            return {
+                previous_steps + (epoch_steps * i + count - 1) // count for i in range(1, count + 1)
+            }
+        return {
+            step
+            for step in range(previous_steps + 1, previous_steps + epoch_steps + 1)
+            if step % self.eval_every == 0 or step == previous_steps + epoch_steps
+        }

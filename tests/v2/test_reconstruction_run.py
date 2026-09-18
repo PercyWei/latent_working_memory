@@ -280,3 +280,73 @@ def test_all_six_formal_training_policies_complete(tiny_base, tmp_path, name):
                 sum(r["samples"] for r in rows if r["stage"] == stage)
                 == epochs * stats[stage]["train"]["trajectories"]
             )
+
+
+@pytest.mark.parametrize(
+    "steps,offset,expected",
+    [
+        (999, 0, {250, 500, 750, 999}),
+        (1000, 999, {1249, 1499, 1749, 1999}),
+        (1000, 1000, {1250, 1500, 1750, 2000}),
+        (999, 1998, {2248, 2498, 2748, 2997}),
+        (2, 0, {1, 2}),
+    ],
+)
+def test_epoch_evaluation_points_are_even_and_deduplicated(steps, offset, expected):
+    config = TrainingConfig(eval_every=None, evals_per_epoch=4)
+    assert config.evaluation_steps(steps, offset) == expected
+
+
+def test_legacy_evaluation_and_checkpoint_config_are_preserved():
+    config = TrainingConfig()
+    legacy = asdict(config)
+    legacy.pop("evals_per_epoch")
+    assert config.to_dict() == legacy
+    assert TrainingConfig(**legacy).to_dict() == legacy
+    assert config.evaluation_steps(999, 0) == {999}
+    assert config.evaluation_steps(1000, 999) == {1000, 1999}
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"eval_every": None, "evals_per_epoch": None},
+        {"eval_every": 1000, "evals_per_epoch": 4},
+        {"eval_every": None, "evals_per_epoch": 0},
+        {"eval_every": None, "evals_per_epoch": True},
+        {"eval_every": None, "evals_per_epoch": 1.5},
+    ],
+)
+def test_evaluation_configuration_has_one_positive_policy(settings):
+    with pytest.raises(ValueError):
+        TrainingConfig(**settings)
+
+
+def test_epoch_evaluation_resume_keeps_same_points_and_checkpoint_policy(tiny_base, tmp_path):
+    torch.set_num_threads(1)
+    experiment = make_experiment(tmp_path, tiny_base)
+    raw = json.loads(experiment.read_text())
+    raw["training"].update(eval_every=None, evals_per_epoch=4, save_every=1000)
+    experiment.write_text(json.dumps(raw))
+    full_dir, resumed_dir = tmp_path / "full-epoch-eval", tmp_path / "resumed-epoch-eval"
+    full = run_training(arguments(experiment, full_dir))
+    run_training(arguments(experiment, resumed_dir, stop=2))
+    resumed = run_training(
+        arguments(experiment, resumed_dir, resume=resumed_dir / "checkpoints/step-000002.pt")
+    )
+    plan = json.loads((full_dir / "epoch-plan.json").read_text())
+    expected = sorted(step for epoch in plan["epochs"] for step in epoch["evaluation_steps"])
+    for directory in [full_dir, resumed_dir]:
+        observed = sorted(int(p.stem.split("-")[1]) for p in (directory / "dev").glob("*.json"))
+        assert observed == expected
+    for filename in (full_dir / "dev").glob("*.json"):
+        assert json.loads(filename.read_text()) == json.loads(
+            (resumed_dir / "dev" / filename.name).read_text()
+        )
+    full_state = torch.load(full["checkpoint"], weights_only=False)
+    resumed_state = torch.load(resumed["checkpoint"], weights_only=False)
+    torch.testing.assert_close(full_state["codec"], resumed_state["codec"], rtol=0, atol=0)
+    torch.testing.assert_close(full_state["optimizer"], resumed_state["optimizer"], rtol=0, atol=0)
+    assert full_state["cursor"] == resumed_state["cursor"]
+    # More dev points do not cause extra scheduled checkpoints.
+    assert len(list((full_dir / "checkpoints").glob("*.pt"))) == 2

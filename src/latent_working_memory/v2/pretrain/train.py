@@ -99,9 +99,20 @@ def run_training(args):
     task.validate_data(datasets)
     schedule = [("warmup", e) for e in range(config.warmup_epochs)]
     schedule += [("multiround", e) for e in range(config.multiround_epochs)]
-    total_steps = sum(
-        math.ceil(len(datasets[stage]["train"]) / config.global_batch_size) for stage, _ in schedule
-    )
+    epoch_plan, total_steps = [], 0
+    for stage, epoch in schedule:
+        samples = len(datasets[stage]["train"])
+        steps = math.ceil(samples / config.global_batch_size)
+        epoch_plan.append(
+            {
+                "stage": stage,
+                "epoch": epoch + 1,
+                "samples": samples,
+                "steps": steps,
+                "evaluation_steps": sorted(config.evaluation_steps(steps, total_steps)),
+            }
+        )
+        total_steps += steps
     stage_endpoints = {total_steps}
     if config.warmup_epochs:
         stage_endpoints.add(
@@ -114,7 +125,7 @@ def run_training(args):
                 "model": asdict(model_config),
                 "selection": asdict(selection),
                 "data_preparation": preparation,
-                "training": asdict(config),
+                "training": config.to_dict(),
                 "world_size": world,
                 "precision": "bf16" if device.type == "cuda" else "fp32",
                 "resolved_model_revision": task.codec.encoder.config._commit_hash,
@@ -160,23 +171,7 @@ def run_training(args):
         write_json(output / "run.json", run)
         write_json(output / "data-summary.json", dataset_statistics(datasets))
         write_json(output / "data-filtering.json", filtering)
-        write_json(
-            output / "epoch-plan.json",
-            {
-                "epochs": [
-                    {
-                        "stage": stage,
-                        "epoch": epoch + 1,
-                        "samples": len(datasets[stage]["train"]),
-                        "steps": math.ceil(
-                            len(datasets[stage]["train"]) / config.global_batch_size
-                        ),
-                    }
-                    for stage, epoch in schedule
-                ],
-                "total_steps": total_steps,
-            },
-        )
+        write_json(output / "epoch-plan.json", {"epochs": epoch_plan, "total_steps": total_steps})
         if not args.resume:
             tokenizer.save_pretrained(output / "tokenizer")
             write_json(
@@ -227,6 +222,7 @@ def run_training(args):
             rows = datasets[stage]["train"]
             batches = math.ceil(len(rows) / config.global_batch_size)
             start_batch = cursor["batch_index"] if epoch_index == cursor["epoch_index"] else 0
+            evaluation_steps = set(epoch_plan[epoch_index]["evaluation_steps"])
             for batch_index, batch in enumerate(
                 epoch_batches(rows, config.global_batch_size, config.seed, stage, epoch)
             ):
@@ -279,7 +275,7 @@ def run_training(args):
                         engine.optimizer.param_groups[0]["lr"],
                         min((batch_index + 1) * config.global_batch_size, len(rows)) / len(rows),
                     )
-                if step % config.eval_every == 0 or epoch_end:
+                if step in evaluation_steps:
                     # All training conditions use the same fixed multi-write evaluation panel.
                     metrics, records = evaluate(task, datasets["multiround"]["dev"], tokenizer)
                     if primary:
