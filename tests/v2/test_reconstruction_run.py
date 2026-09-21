@@ -200,7 +200,7 @@ def test_two_rank_fixed_batch_stage_transfer_and_resume(tiny_base, tmp_path):
 
 
 @pytest.mark.parametrize("objective", ["ae", "ae_lm"])
-def test_static_baseline_trains_only_single_writes_and_evaluates_shared_trajectories(
+def test_static_baseline_trains_independent_prefixes_and_evaluates_both_paths(
     tiny_base, tmp_path, objective
 ):
     torch.set_num_threads(1)
@@ -209,19 +209,20 @@ def test_static_baseline_trains_only_single_writes_and_evaluates_shared_trajecto
     raw["training"].update(
         objective=objective,
         lm_ratio=0.5 if objective == "ae_lm" else 0,
-        warmup_epochs=2,
+        warmup_epochs=0,
         multiround_epochs=0,
+        independent_prefix_epochs=2,
     )
     experiment.write_text(json.dumps(raw))
     output = tmp_path / "static"
     result = run_training(arguments(experiment, output))
     assert result["complete"] and result["completed_steps"] == result["total_steps"]
     log = [json.loads(line) for line in (output / "train.jsonl").read_text().splitlines()]
-    assert all(r["stage"] == "warmup" for r in log)
+    assert all(r["stage"] == "independent_prefix" for r in log)
     summary = json.loads((output / "data-summary.json").read_text())
-    assert summary["multiround"]["train"]["trajectories"] == 0
-    count = summary["warmup"]["train"]["trajectories"]
-    assert summary["warmup"]["train"]["rounds"] == {"1": count}
+    assert "warmup" not in summary
+    count = summary["multiround"]["train"]["trajectories"]
+    assert set(summary["multiround"]["train"]["rounds"]).issubset({"3", "4", "5"})
     assert sum(r["samples"] for r in log) == 2 * count
     assert [r["samples"] for r in log if r["epoch"] == 1] == [
         r["samples"] for r in log if r["epoch"] == 2
@@ -231,6 +232,8 @@ def test_static_baseline_trains_only_single_writes_and_evaluates_shared_trajecto
         assert all(3 <= row["depth"] <= 5 for row in evaluation["samples"])
         assert "trajectory_ae" in evaluation["metrics"]
         assert "trajectory_lm" in evaluation["metrics"]
+        assert "independent_prefix/trajectory_ae" in evaluation["metrics"]
+        assert all(len(r["independent_prefix"]) == r["depth"] for r in evaluation["samples"])
         assert not any("ppl" in key for key in evaluation["metrics"])
     assert "generation/final_round_exact_match" in evaluation["metrics"]
 
@@ -274,11 +277,15 @@ def test_all_six_formal_training_policies_complete(tiny_base, tmp_path, name):
     for stage, epochs in [
         ("warmup", cfg["warmup_epochs"]),
         ("multiround", cfg["multiround_epochs"]),
+        ("independent_prefix", cfg.get("independent_prefix_epochs", 0)),
     ]:
         if epochs:
             assert (
                 sum(r["samples"] for r in rows if r["stage"] == stage)
-                == epochs * stats[stage]["train"]["trajectories"]
+                == epochs
+                * stats["multiround" if stage == "independent_prefix" else stage]["train"][
+                    "trajectories"
+                ]
             )
 
 
@@ -322,11 +329,16 @@ def test_evaluation_configuration_has_one_positive_policy(settings):
         TrainingConfig(**settings)
 
 
-def test_epoch_evaluation_resume_keeps_same_points_and_checkpoint_policy(tiny_base, tmp_path):
+@pytest.mark.parametrize("independent", [False, True])
+def test_epoch_evaluation_resume_keeps_same_points_and_checkpoint_policy(
+    tiny_base, tmp_path, independent
+):
     torch.set_num_threads(1)
     experiment = make_experiment(tmp_path, tiny_base)
     raw = json.loads(experiment.read_text())
     raw["training"].update(eval_every=None, evals_per_epoch=4, save_every=1000)
+    if independent:
+        raw["training"].update(warmup_epochs=0, multiround_epochs=0, independent_prefix_epochs=2)
     experiment.write_text(json.dumps(raw))
     full_dir, resumed_dir = tmp_path / "full-epoch-eval", tmp_path / "resumed-epoch-eval"
     full = run_training(arguments(experiment, full_dir))

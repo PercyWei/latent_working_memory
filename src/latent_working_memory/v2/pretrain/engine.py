@@ -131,9 +131,10 @@ class ReconstructionEngine(BaseEngine):
         # A short final batch still participates on every rank. Dummy work has zero weight.
         work = local or [0]
         pending, microbatches, encoder_lengths, decoder_lengths = {}, [], {}, {}
+        independent = self.model.codec.stage == "independent_prefix"
         for i in work:
             encoder_lengths[i] = tuple(
-                end - start + (rows[i].capacity if step else 0)
+                end if independent else end - start + (rows[i].capacity if step else 0)
                 for step, (start, end) in enumerate(
                     zip((0,) + rows[i].write_ends[:-1], rows[i].write_ends, strict=True)
                 )
@@ -187,6 +188,7 @@ class ReconstructionEngine(BaseEngine):
                 output = self.module(
                     rows[group[0]] if single else [rows[i] for i in group],
                     read_task=read_tasks[group[0]] if single else [read_tasks[i] for i in group],
+                    write_mode="independent_prefix" if independent else "recurrent",
                 )
                 loss = output["loss"] * (len(group) if local else 0) / len(rows)
                 if not forward_only:

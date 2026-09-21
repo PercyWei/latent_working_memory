@@ -230,7 +230,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run v2 experiments on exclusive pairs of GPUs")
     parser.add_argument("--experiments", type=Path, nargs="+", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--gpus", default="4,5,6,7")
+    parser.add_argument("--gpus", default="0,1")
     parser.add_argument("--group", required=True)
     parser.add_argument("--run-date", required=True)
     parser.add_argument("--model-path", type=Path, help="本地模型目录，写入运行配置快照")
@@ -239,8 +239,8 @@ def main():
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
     gpus = [int(x) for x in args.gpus.split(",")]
-    if not gpus or len(gpus) % 2 or len(gpus) != len(set(gpus)) or set(gpus) - {4, 5, 6, 7}:
-        parser.error("use pairs of distinct physical GPUs from 4,5,6,7")
+    if not gpus or len(gpus) % 2 or len(gpus) != len(set(gpus)) or min(gpus) < 0:
+        parser.error("use pairs of distinct nonnegative physical GPU indices")
     gpu_pairs = [gpus[i : i + 2] for i in range(0, len(gpus), 2)]
     args.output_dir = args.output_dir.resolve()
     args.output_dir.mkdir(parents=True, exist_ok=True)

@@ -99,9 +99,11 @@ def run_training(args):
     task.validate_data(datasets)
     schedule = [("warmup", e) for e in range(config.warmup_epochs)]
     schedule += [("multiround", e) for e in range(config.multiround_epochs)]
+    schedule += [("independent_prefix", e) for e in range(config.independent_prefix_epochs)]
     epoch_plan, total_steps = [], 0
     for stage, epoch in schedule:
-        samples = len(datasets[stage]["train"])
+        data_stage = "multiround" if stage == "independent_prefix" else stage
+        samples = len(datasets[data_stage]["train"])
         steps = math.ceil(samples / config.global_batch_size)
         epoch_plan.append(
             {
@@ -219,12 +221,13 @@ def run_training(args):
                 task.codec.initialize_write_alignment()
                 task.codec.set_stage(stage)
                 engine = make_engine(task, device)
-            rows = datasets[stage]["train"]
+            data_stage = "multiround" if stage == "independent_prefix" else stage
+            rows = datasets[data_stage]["train"]
             batches = math.ceil(len(rows) / config.global_batch_size)
             start_batch = cursor["batch_index"] if epoch_index == cursor["epoch_index"] else 0
             evaluation_steps = set(epoch_plan[epoch_index]["evaluation_steps"])
             for batch_index, batch in enumerate(
-                epoch_batches(rows, config.global_batch_size, config.seed, stage, epoch)
+                epoch_batches(rows, config.global_batch_size, config.seed, data_stage, epoch)
             ):
                 if batch_index < start_batch:
                     continue

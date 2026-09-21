@@ -47,7 +47,9 @@ class ReconstructionTask(nn.Module):
                             f"trajectory {row.document_id} needs {max(costs)} positions; model supports {limit}"
                         )
 
-    def forward(self, trajectory, read_task, one_shot=False):
+    def forward(self, trajectory, read_task, write_mode="recurrent"):
+        if write_mode not in {"recurrent", "independent_prefix"}:
+            raise ValueError("unknown write mode")
         single = not isinstance(trajectory, (tuple, list))
         rows = [trajectory] if single else trajectory
         both = isinstance(read_task, str) and read_task == "both"
@@ -56,7 +58,7 @@ class ReconstructionTask(nn.Module):
             raise ValueError("read_task must be ae/lm per trajectory, or both for evaluation")
         ids = [row.token_ids.to(self.ae_prompt.device) for row in rows]
         eos = ids[0].new_tensor([self.eos_id])
-        ends = [(row.write_ends[-1],) if one_shot else row.write_ends for row in rows]
+        ends = [row.write_ends for row in rows]
         capacity = rows[0].capacity
         if any(row.capacity != capacity for row in rows):
             raise ValueError("a microbatch requires equal memory capacities")
@@ -68,10 +70,18 @@ class ReconstructionTask(nn.Module):
             keep = [position for position, i in enumerate(active) if step < len(ends[i])]
             if len(keep) != len(active):
                 # Differentiable compaction: finished trajectories receive no dummy writes.
-                memory = memory.index_select(0, torch.tensor(keep, device=memory.device))
+                if write_mode == "recurrent":
+                    memory = memory.index_select(0, torch.tensor(keep, device=memory.device))
                 active = [active[position] for position in keep]
             batch_sizes.append(len(active))
-            segments = [ids[i][ends[i][step - 1] if step else 0 : ends[i][step]] for i in active]
+            segments = [
+                ids[i][
+                    ends[i][step - 1] if step and write_mode == "recurrent" else 0 : ends[i][step]
+                ]
+                for i in active
+            ]
+            if write_mode != "recurrent":
+                memory = None
             memory = (
                 self.codec.write(memory, segments[0], capacity)
                 if single

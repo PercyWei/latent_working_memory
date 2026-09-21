@@ -747,3 +747,91 @@ def test_four_mixed_trajectories_share_one_group_and_budget_only_active_rows(tin
     assert metrics["max_microbatch_size"] == 4 and metrics["microbatches"] == 1
     assert metrics["mean_active_microbatch_size"] == pytest.approx(8 / 5)
     assert metrics["ae_samples"] == metrics["lm_samples"] == 2
+
+
+@pytest.mark.parametrize("tasks", [["ae", "ae"], ["ae", "lm"]])
+def test_independent_prefix_matches_separate_losses_and_gradients(tiny_base, monkeypatch, tasks):
+    actual = make_task(tiny_base, "weighted", checkpointing=True)
+    actual.codec.set_stage("independent_prefix")
+    reference = deepcopy(actual)
+    rows = [example(), example((3, 2, 2, 2))]
+    expected = []
+    for row, name in zip(rows, tasks, strict=True):
+        q = len(row.token_ids) - row.write_ends[-1]
+        reads = []
+        for end in row.write_ends:
+            memory = reference.codec.write(None, row.token_ids[:end], row.capacity)
+            target = row.token_ids[:end] if name == "ae" else row.token_ids[end : end + q]
+            target = torch.cat((target, target.new_tensor([reference.eos_id])))
+            reads.append(
+                reference.codec.read_loss(memory, getattr(reference, f"{name}_prompt"), target)
+            )
+        expected.append(torch.stack(reads).mean())
+    expected_loss = torch.stack(expected).mean()
+    expected_loss.backward()
+    calls = []
+    original = actual.codec.write_batch
+
+    def capture(previous, tokens, capacity):
+        assert previous is None
+        calls.append([t.tolist() for t in tokens])
+        return original(previous, tokens, capacity)
+
+    monkeypatch.setattr(actual.codec, "write_batch", capture)
+    result = actual(rows, read_task=tasks, write_mode="independent_prefix")
+    result["loss"].backward()
+    assert [[len(t) for t in batch] for batch in calls] == [[2, 3], [5, 5], [9, 7], [9]]
+    for step, batch in enumerate(calls):
+        active = [row for row in rows if step < len(row.write_ends)]
+        assert batch == [row.token_ids[: row.write_ends[step]].tolist() for row in active]
+    torch.testing.assert_close(result["loss"], expected_loss)
+    for (name, a), (_, b) in zip(
+        actual.named_parameters(), reference.named_parameters(), strict=True
+    ):
+        assert (a.grad is None) == (b.grad is None), name
+        if a.grad is not None:
+            torch.testing.assert_close(a.grad, b.grad, rtol=5e-4, atol=3e-7, msg=name)
+    assert all(
+        p.grad is None and not p.requires_grad for p in actual.codec.write_alignment.parameters()
+    )
+
+
+def test_independent_engine_budgets_complete_prefixes(tiny_base):
+    task = make_task(tiny_base)
+    task.codec.set_stage("independent_prefix")
+    # Final prefixes need 9+9 positions, while recurrent inputs need only 6+6.
+    task.config = replace(task.config, micro_batch_size=2, micro_batch_encoder_tokens=12)
+    engine = ReconstructionEngine(task, "cpu")
+    engine.initialize()
+    result = engine.step([example(), example()], 4)
+    assert result["microbatches"] == 2
+    assert result["max_microbatch_size"] == 1
+    assert result["ae_tokens"] == 3 + 6 + 10
+    assert result["lm_tokens"] == 3 * 3
+
+
+def test_evaluation_pairs_each_independent_prefix_and_restores_codec(tiny_base):
+    task = make_task(tiny_base)
+    task.codec.set_stage("independent_prefix")
+    task.eval()
+    original = task.codec.write_alignment
+    before = deepcopy(codec_state(task.codec))
+    row = example()
+    metrics, records = evaluate(task, [row], AutoTokenizer.from_pretrained(tiny_base), 1)
+    record = records[0]
+    q = len(row.token_ids) - row.write_ends[-1]
+    for step, end in enumerate(row.write_ends):
+        prefix = replace(row, token_ids=row.token_ids[: end + q], write_ends=(end,))
+        expected = task(prefix, read_task="both")["rounds"][0]
+        observed = record["independent_prefix"][step]
+        for key in ["ae", "lm", "seen_tokens", "ae_tokens", "lm_tokens"]:
+            assert observed[key] == pytest.approx(expected[key])
+    assert record["one_shot"] == record["independent_prefix"][-1]
+    assert record["rounds"][0] == record["independent_prefix"][0]
+    assert metrics["independent_prefix/trajectory_ae"] == pytest.approx(
+        sum(r["ae"] for r in record["independent_prefix"]) / len(row.write_ends)
+    )
+    assert metrics["independent_prefix/generation/samples"] == 1
+    assert "independent_generation" in record
+    assert task.codec.write_alignment is original and not task.training
+    torch.testing.assert_close(codec_state(task.codec), before, rtol=0, atol=0)

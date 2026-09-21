@@ -89,7 +89,11 @@ def load_datasets(config, tokenizer, max_positions, training):
     indices_by_split = {}
     for stage in stages:
         for split in ("train", "dev", "test"):
-            if stage == "multiround" and split == "train" and not training.multiround_epochs:
+            if (
+                stage == "multiround"
+                and split == "train"
+                and not (training.multiround_epochs or training.independent_prefix_epochs)
+            ):
                 indices_by_split[stage, split] = []
             else:
                 path = root / STAGE_DIRECTORIES[stage] / f"{split}.jsonl"
@@ -103,7 +107,11 @@ def load_datasets(config, tokenizer, max_positions, training):
     for stage in stages:
         datasets[stage], filtering[stage] = {}, {}
         for split in ("train", "dev", "test"):
-            if stage == "multiround" and split == "train" and not training.multiround_epochs:
+            if (
+                stage == "multiround"
+                and split == "train"
+                and not (training.multiround_epochs or training.independent_prefix_epochs)
+            ):
                 datasets[stage][split] = ()
                 filtering[stage][split] = {"candidates": 0, "retained": 0, "rejected": {}}
                 continue

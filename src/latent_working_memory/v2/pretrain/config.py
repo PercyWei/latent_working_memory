@@ -18,6 +18,7 @@ class TrainingConfig:
     objective: str = "ae"
     warmup_epochs: int = 1
     multiround_epochs: int = 2
+    independent_prefix_epochs: int = 0
     global_batch_size: int = 8
     micro_batch_size: int = 1
     micro_batch_encoder_tokens: int = 4096
@@ -38,10 +39,17 @@ class TrainingConfig:
     def __post_init__(self):
         if self.objective not in {"ae", "ae_lm"}:
             raise ValueError("objective must be ae or ae_lm")
-        for name in ("warmup_epochs", "multiround_epochs", "generation_samples"):
+        for name in (
+            "warmup_epochs",
+            "multiround_epochs",
+            "independent_prefix_epochs",
+            "generation_samples",
+        ):
             if type(getattr(self, name)) is not int or getattr(self, name) < 0:
                 raise ValueError(f"{name} must be a nonnegative integer")
-        if self.warmup_epochs + self.multiround_epochs == 0:
+        if self.independent_prefix_epochs and (self.warmup_epochs or self.multiround_epochs):
+            raise ValueError("independent prefix training cannot be combined with other stages")
+        if self.warmup_epochs + self.multiround_epochs + self.independent_prefix_epochs == 0:
             raise ValueError("at least one training epoch is required")
         for name in (
             "global_batch_size",

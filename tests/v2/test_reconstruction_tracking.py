@@ -51,7 +51,7 @@ def test_current_view_api_preserves_other_runs_and_reuses_panels(tmp_path, monke
     output.mkdir()
     run = SimpleNamespace(url="https://swanlab.cn/@owner/project/runs/new", id="new")
     configure_development_panels(run, output, "#2459A6")
-    assert len(writes) == 3
+    assert len(writes) == 5
     for path, body in writes:
         assert path.startswith("/charts/owner/project/view/xxxxxx/")
         assert body["custom"]["prior-run-key"] == {"name": "prior"}
@@ -71,7 +71,9 @@ def metrics():
     for task in ("ae", "lm"):
         for step in (1, 2, 3):
             values[f"round/{step}/{task}_nll"] = float(step)
+            values[f"independent_prefix/round/{step}/{task}_nll"] = float(step) / 2
         values[f"trajectory_{task}"] = 2.0
+        values[f"independent_prefix/trajectory_{task}"] = 1.0
         values[f"one_shot_{task}"] = 2.5
         values[f"final_minus_one_shot_{task}"] = 0.5
     return values
@@ -84,7 +86,7 @@ def test_native_panels_register_only_intended_metrics():
     assert set(scalars).issubset(keys)
     assert "dev/ae/nll/compression-4" not in scalars
     assert not any("tokens" in key or "ppl" in key for key in scalars)
-    assert len(panels) == 3
+    assert len(panels) == 5
     for panel in panels.values():
         assert panel["config"]["xAxis"]["key"] == "step"
         assert len(panel["config"]["yAxis"]) <= 8

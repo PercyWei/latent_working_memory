@@ -175,8 +175,8 @@ class MemoryCodec(nn.Module):
         self.set_stage(self.stage)
 
     def set_stage(self, stage):
-        if stage not in {"warmup", "multiround"}:
-            raise ValueError("stage must be warmup or multiround")
+        if stage not in {"warmup", "multiround", "independent_prefix"}:
+            raise ValueError("stage must be warmup, multiround or independent_prefix")
         self.stage = stage
         self.requires_grad_(False)
         for name, parameter in self.encoder.named_parameters():
@@ -188,7 +188,7 @@ class MemoryCodec(nn.Module):
 
     def train(self, mode=True):
         super().train(mode)
-        if self.stage == "warmup":
+        if self.stage != "multiround":
             self.write_alignment.eval()
         return self
 

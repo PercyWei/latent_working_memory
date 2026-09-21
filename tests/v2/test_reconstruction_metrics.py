@@ -25,6 +25,8 @@ def test_lm_weighting_and_matched_control():
             "one_shot": {"ae": 4.0, "lm": 1.0},
         },
     ]
+    for row in records:
+        row["independent_prefix"] = [dict(r, ae=r["ae"] / 2, lm=r["lm"] / 2) for r in row["rounds"]]
     metrics = summarize(records)
     assert metrics["all/lm_tokens"] == 12
     assert metrics["all/lm_nll"] == pytest.approx(26 / 12)
@@ -36,4 +38,6 @@ def test_lm_weighting_and_matched_control():
     assert metrics["trajectory_ae"] == 4.0
     assert metrics["one_shot_ae"] == 3.5
     assert metrics["final_minus_one_shot_ae"] == 1.0
+    assert metrics["independent_prefix/trajectory_ae"] == 2.0
+    assert metrics["independent_prefix/all/lm_nll"] == pytest.approx(13 / 12)
     assert "final_ae" not in metrics and "final_lm" not in metrics

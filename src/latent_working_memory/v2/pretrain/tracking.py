@@ -12,21 +12,25 @@ from latent_working_memory.v1.tracking import swanlab_run
 
 def development_panels():
     panels = {}
-    for objective in ("ae", "lm"):
-        title = f"dev/{objective}/nll"
-        keys = [f"{title}/compression-{i}" for i in range(1, 6)]
-        keys += [f"{title}/trajectory", f"{title}/one-shot"]
-        panels[title] = {
-            "title": title,
-            "config": {
-                "xAxis": {"key": "step", "name": "step", "type": "FLOAT", "class": "SYSTEM"},
-                "yAxis": [
-                    {"key": key, "name": key, "type": "FLOAT", "class": "CUSTOM"} for key in keys
-                ],
-                "xName": "optimizer step",
-                "yName": "NLL",
-            },
-        }
+    for mode in ("", "independent_prefix/"):
+        for objective in ("ae", "lm"):
+            title = f"dev/{mode}{objective}/nll"
+            keys = [f"{title}/compression-{i}" for i in range(1, 6)]
+            keys += [f"{title}/trajectory"]
+            if not mode:
+                keys += [f"{title}/one-shot"]
+            panels[title] = {
+                "title": title,
+                "config": {
+                    "xAxis": {"key": "step", "name": "step", "type": "FLOAT", "class": "SYSTEM"},
+                    "yAxis": [
+                        {"key": key, "name": key, "type": "FLOAT", "class": "CUSTOM"}
+                        for key in keys
+                    ],
+                    "xName": "optimizer step",
+                    "yName": "NLL",
+                },
+            }
     title = "dev/paired_gap"
     panels[title] = {
         "title": title,
@@ -80,7 +84,7 @@ def configure_development_panels(run, output, color):
     """Update the shared view through SwanLab's current chart API.
 
     Serialize updates from this series' concurrent runs so their colors accumulate.
-    Metric registration is owned by the SDK; this function only manages the three panels.
+    Metric registration is owned by the SDK; this function manages recurrent, independent-prefix and paired-gap panels.
     """
     with (output.parent / ".swanlab-panels.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -194,6 +198,13 @@ def development_scalars(metrics):
         ):
             if source in metrics:
                 values[f"dev/{task}/nll/{label}"] = metrics[source]
+        for i in range(1, 6):
+            key = f"independent_prefix/round/{i}/{task}_nll"
+            if key in metrics:
+                values[f"dev/independent_prefix/{task}/nll/compression-{i}"] = metrics[key]
+        key = f"independent_prefix/trajectory_{task}"
+        if key in metrics:
+            values[f"dev/independent_prefix/{task}/nll/trajectory"] = metrics[key]
         key = f"final_minus_one_shot_{task}"
         if key in metrics:
             values[f"dev/paired_gap/{task}"] = metrics[key]
@@ -224,28 +235,61 @@ def final_evaluation_values(metrics, records):
         ):
             if source in metrics:
                 points[label] = metrics[source]
+        for i in range(1, 6):
+            key = f"independent_prefix/round/{i}/{task}_nll"
+            if key in metrics:
+                points[f"independent-prefix-{i}"] = metrics[key]
+        key = f"independent_prefix/trajectory_{task}"
+        if key in metrics:
+            points["independent-trajectory"] = metrics[key]
         if points:
             values[f"evaluation/{task}/nll"] = _bar(
                 list(points),
                 {"FineWeb": list(points.values())},
-                ["one-shot" if label == "one-shot" else "compressed" for label in points],
+                [
+                    "one-shot"
+                    if label == "one-shot" or label.startswith("independent-")
+                    else "compressed"
+                    for label in points
+                ],
                 colors,
                 "write",
             )
-    em = "generation/final_round_exact_match"
-    if em in metrics:
+    em_points = {}
+    for prefix, label in (
+        ("generation", "recurrent"),
+        ("independent_prefix/generation", "independent"),
+    ):
+        key = f"{prefix}/final_round_exact_match"
+        if key in metrics:
+            em_points[label] = metrics[key]
+    if em_points:
         values["evaluation/ae/final_compression_em"] = _bar(
-            ["last-compression"], {"FineWeb": [metrics[em]]}, ["compressed"], colors, "write"
+            list(em_points),
+            {"FineWeb": list(em_points.values())},
+            ["compressed" if label == "recurrent" else "one-shot" for label in em_points],
+            colors,
+            "write",
         )
-    examples = [
-        swanlab.Text(
-            f"Reference:\n{row['generation']['reference']}\n\nPrediction:\n{row['generation']['prediction']}",
-            caption=f"document={row['document_id']}, compressions={row['depth']}, "
-            f"EM={row['generation']['final_round_exact_match']}",
+    examples = []
+    for row in records:
+        if "generation" not in row:
+            continue
+        sections = [f"Reference:\n{row['generation']['reference']}"]
+        for field, label in (
+            ("generation", "Recurrent"),
+            ("independent_generation", "Independent prefix"),
+        ):
+            if field in row:
+                sections.append(
+                    f"{label} (EM={row[field]['final_round_exact_match']}):\n{row[field]['prediction']}"
+                )
+        examples.append(
+            swanlab.Text(
+                "\n\n".join(sections),
+                caption=f"document={row['document_id']}, compressions={row['depth']}",
+            )
         )
-        for row in records
-        if "generation" in row
-    ]
     for start in range(0, len(examples), 100):
         values[f"evaluation/examples/page-{start // 100 + 1}"] = examples[start : start + 100]
     return values

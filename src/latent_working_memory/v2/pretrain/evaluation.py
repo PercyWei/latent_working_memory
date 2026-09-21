@@ -9,10 +9,10 @@ import torch.distributed as dist
 from latent_working_memory.v2.pretrain.engine import precision_context
 
 
-def summarize(records):
+def summarize_reads(records, rounds_key):
     groups = defaultdict(list)
     for row in records:
-        for read in row["rounds"]:
+        for read in row[rounds_key]:
             for name in (
                 "all",
                 f"round/{read['round']}",
@@ -35,16 +35,49 @@ def summarize(records):
         # evaluate() always measures both objectives, including AE-only training runs.
         for objective in ("ae", "lm"):
             result[f"trajectory_{objective}"] = sum(
-                sum(r[objective] for r in row["rounds"]) / len(row["rounds"]) for row in records
+                sum(r[objective] for r in row[rounds_key]) / len(row[rounds_key]) for row in records
             ) / len(records)
+
+    result["trajectories"] = len(records)
+    return result
+
+
+def summarize(records):
+    result = summarize_reads(records, "rounds")
+    result.update(
+        {
+            f"independent_prefix/{key}": value
+            for key, value in summarize_reads(records, "independent_prefix").items()
+        }
+    )
+    if records:
+        for objective in ("ae", "lm"):
             result[f"one_shot_{objective}"] = sum(
                 row["one_shot"][objective] for row in records
             ) / len(records)
             result[f"final_minus_one_shot_{objective}"] = sum(
                 row["rounds"][-1][objective] - row["one_shot"][objective] for row in records
             ) / len(records)
-    result["trajectories"] = len(records)
     return result
+
+
+def generate_record(task, memory, reference, tokenizer):
+    generated = task.codec.generate(
+        memory,
+        task.ae_prompt,
+        len(reference) + 1,
+        tokenizer.eos_token_id,
+        tokenizer.pad_token_id,
+    ).tolist()
+    reached_eos = tokenizer.eos_token_id in generated
+    if reached_eos:
+        generated = generated[: generated.index(tokenizer.eos_token_id)]
+    return {
+        "prediction": tokenizer.decode(generated, skip_special_tokens=True),
+        "reference": tokenizer.decode(reference, skip_special_tokens=True),
+        "final_round_exact_match": generated == reference,
+        "hit_limit": not reached_eos and len(generated) >= len(reference) + 1,
+    }
 
 
 @torch.no_grad()
@@ -55,7 +88,7 @@ def evaluate(task, rows, tokenizer, generation_samples=0):
     was_training = task.training
     task.eval()
     original_write_alignment = task.codec.write_alignment
-    if task.codec.stage == "warmup":
+    if task.codec.stage != "multiround":
         # Static training never optimizes Aw. Use the learned Ar weights for this read-only
         # evaluation, equivalent to copying Ar at the single-write -> multi-write transition.
         task.codec.write_alignment = task.codec.read_alignment
@@ -65,7 +98,7 @@ def evaluate(task, rows, tokenizer, generation_samples=0):
             row = rows[i]
             with precision_context(device):
                 output = task(row, read_task="both")
-                control = task(row, read_task="both", one_shot=True)
+                control = task(row, read_task="both", write_mode="independent_prefix")
                 record = {
                     "index": i,
                     "sample_id": row.sample_id,
@@ -75,6 +108,7 @@ def evaluate(task, rows, tokenizer, generation_samples=0):
                     "ratio_bin": math.ceil(row.write_ends[-1] / row.capacity),
                     "rounds": output["rounds"],
                     "one_shot": control["rounds"][-1],
+                    "independent_prefix": control["rounds"],
                 }
                 if i < generation_samples:
                     ids = row.token_ids.to(device)
@@ -82,23 +116,12 @@ def evaluate(task, rows, tokenizer, generation_samples=0):
                     for end in row.write_ends:
                         memory = task.codec.write(memory, ids[previous:end], row.capacity)
                         previous = end
-                    generated = task.codec.generate(
-                        memory,
-                        task.ae_prompt,
-                        previous + 1,
-                        tokenizer.eos_token_id,
-                        tokenizer.pad_token_id,
-                    ).tolist()
-                    reached_eos = tokenizer.eos_token_id in generated
-                    if reached_eos:
-                        generated = generated[: generated.index(tokenizer.eos_token_id)]
                     reference = ids[:previous].tolist()
-                    record["generation"] = {
-                        "prediction": tokenizer.decode(generated, skip_special_tokens=True),
-                        "reference": tokenizer.decode(reference, skip_special_tokens=True),
-                        "final_round_exact_match": generated == reference,
-                        "hit_limit": not reached_eos and len(generated) >= previous + 1,
-                    }
+                    record["generation"] = generate_record(task, memory, reference, tokenizer)
+                    independent_memory = task.codec.write(None, ids[:previous], row.capacity)
+                    record["independent_generation"] = generate_record(
+                        task, independent_memory, reference, tokenizer
+                    )
                 records.append(record)
         if world > 1:
             gathered = [None] * world
@@ -106,12 +129,16 @@ def evaluate(task, rows, tokenizer, generation_samples=0):
             records = [row for rank_rows in gathered for row in rank_rows]
         records.sort(key=lambda row: row["index"])
         metrics = summarize(records)
-        generated = [r["generation"] for r in records if "generation" in r]
-        for name in ("final_round_exact_match", "hit_limit"):
-            values = [r[name] for r in generated if r[name] is not None]
-            if values:
-                metrics[f"generation/{name}"] = sum(values) / len(values)
-        metrics["generation/samples"] = len(generated)
+        for field, prefix in (
+            ("generation", "generation"),
+            ("independent_generation", "independent_prefix/generation"),
+        ):
+            generated = [r[field] for r in records if field in r]
+            for name in ("final_round_exact_match", "hit_limit"):
+                values = [r[name] for r in generated]
+                if values:
+                    metrics[f"{prefix}/{name}"] = sum(values) / len(values)
+            metrics[f"{prefix}/samples"] = len(generated)
         return metrics, records
     finally:
         task.codec.write_alignment = original_write_alignment
