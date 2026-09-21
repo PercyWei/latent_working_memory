@@ -39,7 +39,7 @@ def test_six_configs_keep_fixed_batch_and_cover_both_stage_lengths(tmp_path, mon
     records = experiment.prepare_runs(args)
     monkeypatch.setattr(experiment, "free_memory", lambda: pytest.fail("plan-only queried GPUs"))
     experiment.run_queue(args, [[4, 5], [6, 7]], records)
-    expected_stages = [(1, 2), (1, 2), (0, 3), (0, 3), (3, 0), (3, 0)]
+    expected_stages = [(1, 2, 0), (1, 2, 0), (0, 3, 0), (0, 3, 0), (0, 0, 3), (0, 0, 3)]
     for i, (record, stages) in enumerate(zip(records, expected_stages, strict=True)):
         command = record["command"]
         assert "torch.distributed.run" in command and "--nproc_per_node=2" in command
@@ -47,11 +47,11 @@ def test_six_configs_keep_fixed_batch_and_cover_both_stage_lengths(tmp_path, mon
         model, selection, cfg = read_experiment(Path(command[command.index("--experiment") + 1]))
         assert model.model_name_or_path == str(args.model_path)
         assert Path(selection.dataset_dir).is_absolute()
-        assert (cfg.warmup_epochs, cfg.multiround_epochs) == stages
-        assert cfg.global_batch_size == 32 and cfg.micro_batch_size == (16 if i >= 4 else 8)
-        assert 32 // (2 * cfg.micro_batch_size) == (1 if i >= 4 else 2)
+        assert (cfg.warmup_epochs, cfg.multiround_epochs, cfg.independent_prefix_epochs) == stages
+        assert cfg.global_batch_size == 32 and cfg.micro_batch_size == 8
+        assert 32 // (2 * cfg.micro_batch_size) == 2
         assert cfg.lm_ratio == (0.5 if i % 2 else 0)
-        maximum_encoder = 4096 if cfg.warmup_epochs else 2048
+        maximum_encoder = 4096 if cfg.warmup_epochs or cfg.independent_prefix_epochs else 2048
         assert cfg.micro_batch_encoder_tokens >= cfg.micro_batch_size * maximum_encoder
         assert cfg.micro_batch_decoder_tokens >= cfg.micro_batch_size * 4616
     args.resume = True
@@ -105,6 +105,7 @@ def test_queue_uses_pairs_and_stops_dispatch_after_failure(tmp_path, monkeypatch
         experiment.run_queue(args, [[4, 5], [6, 7]], records)
     assert error.value.code == 1
     assert [x["env"]["CUDA_VISIBLE_DEVICES"] for x in launches] == ["4,5", "6,7"]
+    assert [x["env"]["LWM_ALLOWED_PHYSICAL_GPUS"] for x in launches] == ["4,5", "6,7"]
     assert all(x["start_new_session"] for x in launches)
     status = json.loads((tmp_path / "status.json").read_text())
     assert [r["state"] for r in status["runs"]] == ["failed", "complete", "queued"]
