@@ -172,6 +172,7 @@ def run_queue(args, gpu_pairs, records):
                     env = dict(
                         os.environ,
                         CUDA_VISIBLE_DEVICES=",".join(map(str, pair)),
+                        LWM_ALLOWED_PHYSICAL_GPUS=",".join(map(str, pair)),
                         OMP_NUM_THREADS="4",
                         TOKENIZERS_PARALLELISM="true",
                         RAYON_NUM_THREADS="4",

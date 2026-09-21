@@ -538,11 +538,13 @@ def test_qwen3_sdpa_recurrent_checkpointing(tiny_base, tmp_path, method, mixed, 
     )
 
 
-def _ddp_worker(rank, rendezvous, base, destination):
+def _ddp_worker(rank, rendezvous, base, destination, independent):
     torch.set_num_threads(1)
     dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=2)
     torch.manual_seed(100)
     task = make_task(base, "weighted", checkpointing=True)
+    if independent:
+        task.codec.set_stage("independent_prefix")
     task.config = replace(task.config, gradient_clip=100, micro_batch_size=2)
     engine = ReconstructionEngine(task, torch.device("cpu"))
     engine.initialize()
@@ -566,10 +568,13 @@ def _ddp_worker(rank, rendezvous, base, destination):
     dist.destroy_process_group()
 
 
-def test_verl_ddp_matches_global_mean_with_uneven_and_empty_ranks(tiny_base, tmp_path):
+@pytest.mark.parametrize("independent", [False, True])
+def test_verl_ddp_matches_global_mean_with_uneven_and_empty_ranks(tiny_base, tmp_path, independent):
     torch.set_num_threads(1)
     torch.manual_seed(100)
     task = make_task(tiny_base, "weighted", checkpointing=True)
+    if independent:
+        task.codec.set_stage("independent_prefix")
     task.config = replace(task.config, gradient_clip=100)
     engine = ReconstructionEngine(task, torch.device("cpu"))
     engine.initialize()
@@ -590,7 +595,7 @@ def test_verl_ddp_matches_global_mean_with_uneven_and_empty_ranks(tiny_base, tmp
     destination = tmp_path / "ddp.pt"
     mp.spawn(
         _ddp_worker,
-        args=(str(tmp_path / "rendezvous"), str(tiny_base), str(destination)),
+        args=(str(tmp_path / "rendezvous"), str(tiny_base), str(destination), independent),
         nprocs=2,
         join=True,
     )
