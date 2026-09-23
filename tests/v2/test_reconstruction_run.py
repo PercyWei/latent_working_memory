@@ -239,25 +239,33 @@ def test_static_baseline_trains_independent_prefixes_and_evaluates_both_paths(
 
 
 @pytest.mark.parametrize(
-    "name",
+    "method,name",
     [
-        "ae-warmup",
-        "ae-lm-warmup",
-        "ae_dynamic",
-        "ae-lm_dynamic",
-        "ae-static",
-        "ae-lm-static",
+        ("pooling", "ae-warmup"),
+        ("pooling", "ae-lm-warmup"),
+        ("pooling", "ae_dynamic"),
+        ("pooling", "ae-lm_dynamic"),
+        ("pooling", "ae-static"),
+        ("pooling", "ae-lm-static"),
+        ("weighted", "ae-lm-warmup"),
+        ("weighted", "ae-lm-static"),
+        ("spectral", "ae-lm-warmup"),
+        ("spectral", "ae-lm-static"),
     ],
 )
-def test_all_six_formal_training_policies_complete(tiny_base, tmp_path, name):
+def test_all_formal_training_policies_complete(tiny_base, tmp_path, method, name):
     torch.set_num_threads(1)
     experiment = make_experiment(tmp_path, tiny_base, train_samples=40)
     source = (
         Path(__file__).resolve().parents[2]
         / "configs/v2/pretrain"
-        / f"qwen3-4b_pooling_{name}"
+        / f"qwen3-4b_{method}_{name}"
         / "experiment.json"
     )
+    model_path = experiment.parent / "model.json"
+    model = json.loads(model_path.read_text())
+    model["compression"] = json.loads((source.parent / "model.json").read_text())["compression"]
+    model_path.write_text(json.dumps(model))
     raw = json.loads(experiment.read_text())
     raw["training"] = json.loads(source.read_text())["training"]
     experiment.write_text(json.dumps(raw))
