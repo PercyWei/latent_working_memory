@@ -15,7 +15,10 @@ from latent_working_memory.v2.pretrain.objective import ReconstructionTask
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="native CUDA varlen attention")
 @pytest.mark.parametrize("architecture", ["llama", "qwen3"])
-def test_padding_free_matches_dense_and_isolates_sequences(tiny_base, tmp_path, architecture):
+@pytest.mark.parametrize("compression", ["weighted", "spectral"])
+def test_padding_free_matches_dense_and_isolates_sequences(
+    tiny_base, tmp_path, architecture, compression
+):
     device = initialize_device("cuda")
     tokenizer = AutoTokenizer.from_pretrained(tiny_base)
     path = tiny_base
@@ -41,7 +44,7 @@ def test_padding_free_matches_dense_and_isolates_sequences(tiny_base, tmp_path, 
         str(path),
         lora_rank=2,
         lora_alpha=4,
-        compression="weighted",
+        compression=compression,
         attention_implementation="sdpa",
         gradient_checkpointing=True,
     )

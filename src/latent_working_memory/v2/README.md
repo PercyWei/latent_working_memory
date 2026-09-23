@@ -8,7 +8,7 @@
 
 `memory_codec.py` 的 `MemoryCodec` 是当前共用读写框架：旧记忆经写入对齐后，与完整新文本联合编码，再生成 K 个 slots。首次写入和后续更新共享参数。Encoder 与 Decoder 是从同一预训练 checkpoint 加载的两个独立对象，均使用完整 causal backbone。Encoder 固定使用可训练的 `encoder` LoRA；当前重构 Decoder 全部冻结，不分配 Decoder LoRA，QA 适配留待后续实现。
 
-`compression.py` 提供三种压缩模块：`mean` 对应 v2.1 的连续分组均值，`weighted` 对应 v2.2 的零初始化组内打分，`spectral` 对应 v2.3 的可训练特征变换、Fourier 长度变换与输出残差。`feature_layer` 选择 `last` 或 `mean`。
+`compression.py` 提供三种压缩模块：`mean` 对应 v2.1 的连续分组均值，`weighted` 使用共享的 `d → 64 → 1` GELU MLP 进行组内打分，最后一层无 bias 且权重零初始化，初始等价于 mean pooling，`spectral` 对应 v2.3 的可训练特征变换、Fourier 长度变换与输出残差。`feature_layer` 选择 `last` 或 `mean`。
 
 | 文件 | 职责 |
 |---|---|
@@ -200,3 +200,5 @@ AE 模式的指标同样是重建文本匹配，不等于论文全部重建指�
 ```
 
 `--model-path` 将本地模型路径写入 `plan/<run_name>/` 的配置快照，避免离线启动时解析 Hub ID。`--plan-only` 只生成计划，不查询或占用 GPU；正式执行时去掉它并加 `--resume`。后续续训沿用同一实验列表、日期和 group，自动选择各未完成 run 的最新 checkpoint；完整完成的 run 跳过。运行时沿用配置快照，不覆盖为后来修改的源配置。GPU 分组、命令、PID、完成状态保存在 `status.json`。
+
+压缩器结构对照配置位于 `configs/v2/pretrain/qwen3-4b_{weighted,spectral}_{ae-lm-warmup,ae-lm-static}/`。每种结构沿用 pooling 对应 B／F 组的完整训练与评估设置，仅改变压缩器；B 为单次 warm-up 1 epoch＋递归训练 2 epochs，F 为独立前缀训练 3 epochs。两种压缩器在所有阶段均参与优化，spectral 的 Fourier 重采样规则固定。

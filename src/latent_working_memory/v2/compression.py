@@ -11,8 +11,14 @@ class SlotCompression(nn.Module):
             raise ValueError("compression must be mean, weighted, or spectral")
         self.method = method
         if method == "weighted":
-            self.score = nn.Linear(width, 1, bias=False)
-            nn.init.zeros_(self.score.weight)
+            self.score = nn.Sequential(
+                nn.Linear(width, 64),
+                nn.GELU(),
+                nn.Linear(64, 1, bias=False),
+            )
+            # Begin with mean pooling; the first update trains the output layer,
+            # after which gradients also reach the randomly initialized hidden layer.
+            nn.init.zeros_(self.score[-1].weight)
         elif method == "spectral":
             self.before = nn.Sequential(
                 nn.LayerNorm(width),

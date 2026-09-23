@@ -64,6 +64,52 @@ def test_group_boundaries_and_weighted_initialization():
     assert (hidden.grad.abs().sum(1) > 0).all()
 
 
+def test_weighted_mlp_learns_beyond_uniform_pooling():
+    torch.manual_seed(42)
+    hidden = torch.randn(11, 5)
+    module = SlotCompression(5, "weighted")
+    optimizer = torch.optim.SGD(module.parameters(), lr=0.1)
+    reference = SlotCompression(5, "mean")(hidden, 3)
+    torch.testing.assert_close(module(hidden, 3), reference)
+    initial_hidden = module.score[0].weight.detach().clone()
+    for step in range(2):
+        optimizer.zero_grad()
+        module(hidden, 3).square().sum().backward()
+        assert all(torch.isfinite(p.grad).all() for p in module.parameters())
+        assert module.score[-1].weight.grad.abs().sum() > 0
+        if step == 0:
+            assert module.score[0].weight.grad.count_nonzero() == 0
+        else:
+            assert module.score[0].weight.grad.abs().sum() > 0
+        optimizer.step()
+    assert not torch.equal(module.score[0].weight, initial_hidden)
+    assert not torch.allclose(module(hidden, 3), reference)
+
+
+@pytest.mark.parametrize("method", ["weighted", "spectral"])
+@pytest.mark.parametrize("stage", ["warmup", "multiround", "independent_prefix"])
+def test_compressor_is_optimized_and_checkpointed_in_every_stage(tiny_base, method, stage):
+    task = make_task(tiny_base, method, checkpointing=True)
+    task.codec.set_stage(stage)
+    engine = ReconstructionEngine(task, "cpu")
+    engine.initialize()
+    parameters = dict(task.codec.compression.named_parameters())
+    before = {name: p.detach().clone() for name, p in parameters.items()}
+    optimized = {id(p) for group in engine.optimizer.param_groups for p in group["params"]}
+    assert all(p.requires_grad and id(p) in optimized for p in parameters.values())
+    row = example((9,)) if stage == "warmup" else example()
+    for step in range(2):
+        engine.step([row, row], step=step)
+    assert all(torch.isfinite(p).all() for p in parameters.values())
+    assert all(not torch.equal(p, before[name]) for name, p in parameters.items())
+    state = deepcopy(codec_state(task.codec))
+    restored = make_task(tiny_base, method)
+    restore_codec(restored.codec, state)
+    torch.testing.assert_close(
+        restored.codec.compression.state_dict(), task.codec.compression.state_dict()
+    )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA pooling repeatability")
 def test_cuda_mean_pooling_is_repeatable_through_backward():
     device = initialize_device("cuda")
