@@ -28,6 +28,20 @@ def free_memory():
     return {int(line.split(",")[0]): int(line.split(",")[1]) / 1024 for line in output.splitlines()}
 
 
+def existing_run_alive(record):
+    """Check Linux process identity before adopting a detached torchrun."""
+    path = Path(f"/proc/{record['pid']}/cmdline")
+    try:
+        command = path.read_bytes().decode().rstrip("\0").split("\0")
+    except FileNotFoundError:
+        return False
+    if command == [""]:  # Exited process awaiting reaping.
+        return False
+    if command != record["command"]:
+        raise ValueError(f"PID {record['pid']} no longer matches {record['name']}")
+    return True
+
+
 def prepare_runs(args):
     records = []
     names = [f"{config.parent.name}_{args.run_date}" for config in args.experiments]
@@ -45,7 +59,9 @@ def prepare_runs(args):
                 except ProcessLookupError:
                     pass
                 else:
-                    raise ValueError(f"{record['name']} still has an active process")
+                    if not args.adopt_running:
+                        raise ValueError(f"{record['name']} still has an active process")
+                    existing_run_alive(record)
         return previous["runs"]
     if status_path.exists():
         raise ValueError("existing series requires --resume")
@@ -123,7 +139,16 @@ def resume_command(record):
 
 
 def run_queue(args, gpu_pairs, records):
-    commands = {r["name"]: resume_command(r) for r in records}
+    commands, active = {}, {}
+    for record in records:
+        if args.adopt_running and record["state"] == "running" and existing_run_alive(record):
+            pair = tuple(record["gpus"])
+            if list(pair) not in gpu_pairs or pair in active:
+                raise ValueError("adopted runs require distinct pairs included in --gpus")
+            active[pair] = (None, record, None)
+            commands[record["name"]] = None
+        else:
+            commands[record["name"]] = resume_command(record)
     for record in records:
         if commands[record["name"]] is not None:
             record["state"] = "queued"
@@ -138,16 +163,23 @@ def run_queue(args, gpu_pairs, records):
     write_status(status_path, status)
     if args.plan_only:
         return
-    active = {}
     failed = False
     try:
         while True:
             for pair, (process, record, stream) in list(active.items()):
-                code = process.poll()
+                result = Path(record["output"]) / "training-result.json"
+                if process is None:
+                    if existing_run_alive(record):
+                        continue
+                    code = (
+                        0 if result.exists() and json.loads(result.read_text())["complete"] else 1
+                    )
+                else:
+                    code = process.poll()
                 if code is None:
                     continue
-                stream.close()
-                result = Path(record["output"]) / "training-result.json"
+                if stream is not None:
+                    stream.close()
                 complete = (
                     code == 0 and result.exists() and json.loads(result.read_text())["complete"]
                 )
@@ -212,6 +244,9 @@ def run_queue(args, gpu_pairs, records):
         # Each torchrun has its own process group. Never signal unrelated GPU tasks.
         if active:
             for process, record, stream in active.values():
+                if process is None:
+                    # Adopted processes are not our children; preserve them on interruption.
+                    continue
                 if process.poll() is None:
                     os.killpg(process.pid, signal.SIGTERM)
                     try:
@@ -238,7 +273,12 @@ def main():
     parser.add_argument("--min-free-gib", type=float, default=75)
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--adopt-running", action="store_true", help="接管仍在运行的 torchrun，不重启训练"
+    )
     args = parser.parse_args()
+    if args.adopt_running and (not args.resume or args.plan_only):
+        parser.error("--adopt-running requires --resume and cannot be used with --plan-only")
     gpus = [int(x) for x in args.gpus.split(",")]
     if not gpus or len(gpus) % 2 or len(gpus) != len(set(gpus)) or min(gpus) < 0:
         parser.error("use pairs of distinct nonnegative physical GPU indices")

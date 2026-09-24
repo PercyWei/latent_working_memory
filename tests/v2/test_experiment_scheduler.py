@@ -29,6 +29,7 @@ def arguments(tmp_path):
         group="test-reconstruction",
         model_path=tmp_path / "model",
         resume=False,
+        adopt_running=False,
         plan_only=True,
         min_free_gib=75,
     )
@@ -141,3 +142,41 @@ def test_interrupt_signals_only_owned_torchrun_groups(tmp_path, monkeypatch):
         experiment.run_queue(args, [[4, 5], [6, 7]], records)
     assert [pid for pid, _ in signals] == [200, 201]
     assert all(r["state"] == "interrupted" for r in records)
+
+
+def test_adoption_preserves_running_process_and_dispatches_only_queued(tmp_path, monkeypatch):
+    args = arguments(tmp_path)
+    records = experiment.prepare_runs(args)[:2]
+    records[0].update(state="running", pid=123, gpus=[6, 7])
+    args.plan_only = False
+    args.adopt_running = True
+    launches, signals = [], []
+
+    class Process:
+        pid = 456
+        returncode = None
+
+        def __init__(self, command, **kwargs):
+            launches.append((command, kwargs))
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.returncode = -15
+            return self.returncode
+
+    def interrupt(_):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(experiment, "existing_run_alive", lambda r: r["pid"] == 123)
+    monkeypatch.setattr(experiment, "free_memory", lambda: {0: 79, 1: 79, 6: 10, 7: 10})
+    monkeypatch.setattr(experiment.subprocess, "Popen", Process)
+    monkeypatch.setattr(experiment.time, "sleep", interrupt)
+    monkeypatch.setattr(experiment.os, "killpg", lambda pid, sig: signals.append(pid))
+    with pytest.raises(KeyboardInterrupt):
+        experiment.run_queue(args, [[0, 1], [6, 7]], records)
+    assert len(launches) == 1 and launches[0][0] == records[1]["command"]
+    assert launches[0][1]["env"]["CUDA_VISIBLE_DEVICES"] == "0,1"
+    assert signals == [456]
+    assert records[0]["state"] == "running" and records[0]["pid"] == 123
