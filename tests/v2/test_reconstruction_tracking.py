@@ -210,29 +210,42 @@ def test_offline_run_records_namespaces_resources_tables_and_identity(tmp_path, 
                 },
             }
         ]
-        log_final_evaluation(run, metrics(), records, 2)
+        log_final_evaluation(
+            run,
+            metrics() | {"single_compression/generation/final_round_exact_match": 0.6},
+            records,
+            2,
+        )
         values, step = captured[-1]
         assert step == 2
         assert set(values) == {
-            "evaluation/ae/compression_nll",
-            "evaluation/lm/compression_nll",
-            "evaluation/ae/final_reconstruction_em",
+            "evaluation/ae/multi_single_nll",
+            "evaluation/lm/multi_single_nll",
+            "evaluation/ae/final_generation_em",
             "evaluation/metrics_table",
             "evaluation/examples/compression/page-1",
         }
         for task in ("ae", "lm"):
-            labels = values[f"evaluation/{task}/compression_nll"].options["xAxis"][0]["data"]
+            labels = values[f"evaluation/{task}/multi_single_nll"].options["xAxis"][0]["data"]
             assert labels == [
                 *(
                     label
                     for step in range(1, 4)
-                    for label in (f"compression-{step}", f"single-{step}")
+                    for label in (f"multi-{step}", f"single-{step}")
                 ),
-                "compression-trajectory",
+                "multi-trajectory",
                 "single-trajectory",
             ]
+            legend = values[f"evaluation/{task}/multi_single_nll"].options["legend"][0]["data"]
+            assert legend == ["write=multi / test=FineWeb", "write=single / test=FineWeb"]
             assert "one-shot" not in labels
             assert "single-final" not in labels
+        em = values["evaluation/ae/final_generation_em"]
+        assert em.options["xAxis"][0]["data"] == ["multi", "single"]
+        assert em.options["legend"][0]["data"] == [
+            "write=multi / test=FineWeb",
+            "write=single / test=FineWeb",
+        ]
     identity = json.loads((output / "swanlab.json").read_text())
     assert identity["project"] == "latent-working-memory-v2"
     assert identity["group"] == "qwen3-4b_pooling_reconstruction_20260916"
@@ -246,7 +259,7 @@ def test_offline_run_records_namespaces_resources_tables_and_identity(tmp_path, 
     assert not run.alive
 
 
-def test_final_chart_labels_all_five_compression_and_single_positions():
+def test_final_chart_labels_all_five_multi_and_single_positions():
     values = metrics()
     for task in ("ae", "lm"):
         for step in (4, 5):
@@ -254,31 +267,11 @@ def test_final_chart_labels_all_five_compression_and_single_positions():
             values[f"single_compression/round/{step}/{task}_nll"] = float(step) / 2
     charts = final_evaluation_values(values, [])
     for task in ("ae", "lm"):
-        labels = charts[f"evaluation/{task}/compression_nll"].options["xAxis"][0]["data"]
+        labels = charts[f"evaluation/{task}/multi_single_nll"].options["xAxis"][0]["data"]
         assert labels == [
-            *(label for step in range(1, 6) for label in (f"compression-{step}", f"single-{step}")),
-            "compression-trajectory",
+            *(label for step in range(1, 6) for label in (f"multi-{step}", f"single-{step}")),
+            "multi-trajectory",
             "single-trajectory",
         ]
         assert "one-shot" not in labels
         assert "single-final" not in labels
-
-
-def test_historical_final_chart_pairs_only_available_final_nll():
-    values = metrics()
-    for task in ("ae", "lm"):
-        for step in range(1, 4):
-            del values[f"single_compression/round/{step}/{task}_nll"]
-        del values[f"single_compression/trajectory_{task}"]
-    charts = final_evaluation_values(values, [])
-    for task in ("ae", "lm"):
-        labels = charts[f"evaluation/{task}/compression_nll"].options["xAxis"][0]["data"]
-        assert labels == [
-            "compression-1",
-            "compression-2",
-            "compression-3",
-            "compression-trajectory",
-            "compression-final",
-            "single-final",
-        ]
-    assert not any("single_compression/round/" in key for key in values)

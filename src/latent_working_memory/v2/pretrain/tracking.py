@@ -229,34 +229,27 @@ def log_development(run, metrics, step):
 
 def final_evaluation_values(metrics, records):
     values = {"evaluation/metrics_table": metric_table(metrics)}
-    colors = {"compression": "#2459A6", "single": "#28764A"}
+    colors = {"multi": "#2459A6", "single": "#28764A"}
     for task in ("ae", "lm"):
         points = {}
         series = []
         for i in range(1, 6):
             for key, label, group in (
-                (f"multi_compression/round/{i}/{task}_nll", f"compression-{i}", "compression"),
+                (f"multi_compression/round/{i}/{task}_nll", f"multi-{i}", "multi"),
                 (f"single_compression/round/{i}/{task}_nll", f"single-{i}", "single"),
             ):
                 if key in metrics:
                     points[label] = metrics[key]
                     series.append(group)
         for key, label, group in (
-            (f"multi_compression/trajectory_{task}", "compression-trajectory", "compression"),
+            (f"multi_compression/trajectory_{task}", "multi-trajectory", "multi"),
             (f"single_compression/trajectory_{task}", "single-trajectory", "single"),
         ):
             if key in metrics:
                 points[label] = metrics[key]
                 series.append(group)
-        if not any(f"single_compression/round/{i}/{task}_nll" in metrics for i in range(1, 6)):
-            multi_final = f"final_round_multi_compression_{task}"
-            single_final = f"final_round_single_compression_{task}"
-            if multi_final in metrics and single_final in metrics:
-                points["compression-final"] = metrics[multi_final]
-                points["single-final"] = metrics[single_final]
-                series.extend(("compression", "single"))
         if points:
-            values[f"evaluation/{task}/compression_nll"] = _bar(
+            values[f"evaluation/{task}/multi_single_nll"] = _bar(
                 list(points),
                 {"FineWeb": list(points.values())},
                 series,
@@ -265,14 +258,14 @@ def final_evaluation_values(metrics, records):
             )
     em_points = {}
     for prefix, label in (
-        ("multi_compression/generation", "compression"),
+        ("multi_compression/generation", "multi"),
         ("single_compression/generation", "single"),
     ):
         key = f"{prefix}/final_round_exact_match"
         if key in metrics:
             em_points[label] = metrics[key]
     if em_points:
-        values["evaluation/ae/final_reconstruction_em"] = _bar(
+        values["evaluation/ae/final_generation_em"] = _bar(
             list(em_points),
             {"FineWeb": list(em_points.values())},
             list(em_points),
