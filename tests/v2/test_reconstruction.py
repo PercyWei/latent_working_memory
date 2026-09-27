@@ -874,15 +874,38 @@ def test_evaluation_pairs_each_independent_prefix_and_restores_codec(tiny_base):
     for step, end in enumerate(row.write_ends):
         prefix = replace(row, token_ids=row.token_ids[: end + q], write_ends=(end,))
         expected = task(prefix, read_task="both")["rounds"][0]
-        observed = record["independent_prefix"][step]
+        observed = record["single_compression"][step]
         for key in ["ae", "lm", "seen_tokens", "ae_tokens", "lm_tokens"]:
             assert observed[key] == pytest.approx(expected[key])
-    assert record["one_shot"] == record["independent_prefix"][-1]
-    assert record["rounds"][0] == record["independent_prefix"][0]
-    assert metrics["independent_prefix/trajectory_ae"] == pytest.approx(
-        sum(r["ae"] for r in record["independent_prefix"]) / len(row.write_ends)
+    assert record["multi_compression"][0] == record["single_compression"][0]
+    assert metrics["single_compression/trajectory_ae"] == pytest.approx(
+        sum(r["ae"] for r in record["single_compression"]) / len(row.write_ends)
     )
-    assert metrics["independent_prefix/generation/samples"] == 1
-    assert "independent_generation" in record
+    for objective in ("ae", "lm"):
+        single = record["single_compression"][-1][objective]
+        multi = record["multi_compression"][-1][objective]
+        assert metrics[f"final_round_single_compression_{objective}"] == pytest.approx(single)
+        assert metrics[f"final_round_multi_compression_{objective}"] == pytest.approx(multi)
+        assert metrics[f"final_round_compression_gap_{objective}"] == pytest.approx(multi - single)
+    assert metrics["single_compression/generation/samples"] == 1
+    assert "multi_compression_generation" in record
+    assert "single_compression_generation" in record
+
+    final_metrics, final_records = evaluate(
+        task,
+        [row],
+        AutoTokenizer.from_pretrained(tiny_base),
+        include_final_comparison=False,
+    )
+    final_record = final_records[0]
+    assert "one_shot" not in final_record
+    assert final_record["single_compression"] == record["single_compression"]
+    for objective in ("ae", "lm"):
+        assert f"final_round_single_compression_{objective}" not in final_metrics
+        assert f"final_round_multi_compression_{objective}" not in final_metrics
+        assert f"final_round_compression_gap_{objective}" not in final_metrics
+        assert final_metrics[f"single_compression/trajectory_{objective}"] == pytest.approx(
+            metrics[f"single_compression/trajectory_{objective}"]
+        )
     assert task.codec.write_alignment is original and not task.training
     torch.testing.assert_close(codec_state(task.codec), before, rtol=0, atol=0)

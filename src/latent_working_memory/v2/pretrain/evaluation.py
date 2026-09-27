@@ -1,4 +1,4 @@
-"""固定轨迹的各次压缩后的损失、一次压缩对照和自由重构。"""
+"""固定轨迹的递归与单次压缩损失及自由重构。"""
 
 from collections import defaultdict
 import math
@@ -42,21 +42,23 @@ def summarize_reads(records, rounds_key):
     return result
 
 
-def summarize(records):
-    result = summarize_reads(records, "rounds")
-    result.update(
-        {
-            f"independent_prefix/{key}": value
-            for key, value in summarize_reads(records, "independent_prefix").items()
-        }
-    )
-    if records:
+def summarize(records, include_final_comparison=True):
+    result = {
+        f"{mode}/{key}": value
+        for mode in ("multi_compression", "single_compression")
+        for key, value in summarize_reads(records, mode).items()
+    }
+    if records and include_final_comparison:
         for objective in ("ae", "lm"):
-            result[f"one_shot_{objective}"] = sum(
-                row["one_shot"][objective] for row in records
+            result[f"final_round_single_compression_{objective}"] = sum(
+                row["single_compression"][-1][objective] for row in records
             ) / len(records)
-            result[f"final_minus_one_shot_{objective}"] = sum(
-                row["rounds"][-1][objective] - row["one_shot"][objective] for row in records
+            result[f"final_round_multi_compression_{objective}"] = sum(
+                row["multi_compression"][-1][objective] for row in records
+            ) / len(records)
+            result[f"final_round_compression_gap_{objective}"] = sum(
+                row["multi_compression"][-1][objective] - row["single_compression"][-1][objective]
+                for row in records
             ) / len(records)
     return result
 
@@ -81,7 +83,7 @@ def generate_record(task, memory, reference, tokenizer):
 
 
 @torch.no_grad()
-def evaluate(task, rows, tokenizer, generation_samples=0):
+def evaluate(task, rows, tokenizer, generation_samples=0, include_final_comparison=True):
     device = task.ae_prompt.device
     rank = dist.get_rank() if dist.is_initialized() else 0
     world = dist.get_world_size() if dist.is_initialized() else 1
@@ -106,9 +108,8 @@ def evaluate(task, rows, tokenizer, generation_samples=0):
                     "source_char_start": row.source_char_start,
                     "depth": len(row.write_ends),
                     "ratio_bin": math.ceil(row.write_ends[-1] / row.capacity),
-                    "rounds": output["rounds"],
-                    "one_shot": control["rounds"][-1],
-                    "independent_prefix": control["rounds"],
+                    "multi_compression": output["rounds"],
+                    "single_compression": control["rounds"],
                 }
                 if i < generation_samples:
                     ids = row.token_ids.to(device)
@@ -117,9 +118,11 @@ def evaluate(task, rows, tokenizer, generation_samples=0):
                         memory = task.codec.write(memory, ids[previous:end], row.capacity)
                         previous = end
                     reference = ids[:previous].tolist()
-                    record["generation"] = generate_record(task, memory, reference, tokenizer)
+                    record["multi_compression_generation"] = generate_record(
+                        task, memory, reference, tokenizer
+                    )
                     independent_memory = task.codec.write(None, ids[:previous], row.capacity)
-                    record["independent_generation"] = generate_record(
+                    record["single_compression_generation"] = generate_record(
                         task, independent_memory, reference, tokenizer
                     )
                 records.append(record)
@@ -128,10 +131,10 @@ def evaluate(task, rows, tokenizer, generation_samples=0):
             dist.all_gather_object(gathered, records)
             records = [row for rank_rows in gathered for row in rank_rows]
         records.sort(key=lambda row: row["index"])
-        metrics = summarize(records)
+        metrics = summarize(records, include_final_comparison)
         for field, prefix in (
-            ("generation", "generation"),
-            ("independent_generation", "independent_prefix/generation"),
+            ("multi_compression_generation", "multi_compression/generation"),
+            ("single_compression_generation", "single_compression/generation"),
         ):
             generated = [r[field] for r in records if field in r]
             for name in ("final_round_exact_match", "hit_limit"):

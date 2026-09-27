@@ -12,13 +12,13 @@ from latent_working_memory.v1.tracking import swanlab_run
 
 def development_panels():
     panels = {}
-    for mode in ("", "independent_prefix/"):
+    for mode, label in (("", "compression"), ("single/", "single")):
         for objective in ("ae", "lm"):
             title = f"dev/{mode}{objective}/nll"
-            keys = [f"{title}/compression-{i}" for i in range(1, 6)]
-            keys += [f"{title}/trajectory"]
-            if not mode:
-                keys += [f"{title}/one-shot"]
+            keys = [f"{title}/{label}-{i}" for i in range(1, 6)]
+            keys.append(f"{title}/{label}-trajectory")
+            if mode:
+                keys.append(f"{title}/single-final")
             panels[title] = {
                 "title": title,
                 "config": {
@@ -41,7 +41,7 @@ def development_panels():
                 for task in ("ae", "lm")
             ],
             "xName": "optimizer step",
-            "yName": "multi-compression minus one-shot NLL",
+            "yName": "final compression minus final single compression NLL",
         },
     }
     return panels
@@ -69,10 +69,15 @@ def panel_style(panel, run_id, run_name, base_color):
     result = {}
     for axis in panel["config"]["yAxis"]:
         label = axis["key"].rsplit("/", 1)[-1]
-        if label.startswith("compression-"):
-            color = _shade(base_color, int(label.rsplit("-", 1)[-1]) - 1, 5)
+        if label.startswith(("compression-", "single-")):
+            suffix = label.rsplit("-", 1)[-1]
+            if suffix.isdigit():
+                index = int(suffix) - 1
+            else:
+                index = 5 if suffix == "trajectory" else 6
+            color = _shade(base_color, index, 7)
         else:
-            color = _shade(base_color, int(label in {"one-shot", "lm"}), 2)
+            color = _shade(base_color, int(label == "lm"), 2)
         result[f"{run_id}-{axis['key']}"] = {
             "name": f"{run_name}/{label}",
             "colors": [color, color],
@@ -84,7 +89,7 @@ def configure_development_panels(run, output, color):
     """Update the shared view through SwanLab's current chart API.
 
     Serialize updates from this series' concurrent runs so their colors accumulate.
-    Metric registration is owned by the SDK; this function manages recurrent, independent-prefix and paired-gap panels.
+    Metric registration is owned by the SDK; this function manages compression, single and paired-gap panels.
     """
     with (output.parent / ".swanlab-panels.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -189,23 +194,23 @@ def development_scalars(metrics):
     values = {}
     for task in ("ae", "lm"):
         for i in range(1, 6):
-            key = f"round/{i}/{task}_nll"
+            key = f"multi_compression/round/{i}/{task}_nll"
             if key in metrics:
                 values[f"dev/{task}/nll/compression-{i}"] = metrics[key]
-        for source, label in (
-            (f"trajectory_{task}", "trajectory"),
-            (f"one_shot_{task}", "one-shot"),
-        ):
-            if source in metrics:
-                values[f"dev/{task}/nll/{label}"] = metrics[source]
-        for i in range(1, 6):
-            key = f"independent_prefix/round/{i}/{task}_nll"
-            if key in metrics:
-                values[f"dev/independent_prefix/{task}/nll/compression-{i}"] = metrics[key]
-        key = f"independent_prefix/trajectory_{task}"
+        key = f"multi_compression/trajectory_{task}"
         if key in metrics:
-            values[f"dev/independent_prefix/{task}/nll/trajectory"] = metrics[key]
-        key = f"final_minus_one_shot_{task}"
+            values[f"dev/{task}/nll/compression-trajectory"] = metrics[key]
+        for i in range(1, 6):
+            key = f"single_compression/round/{i}/{task}_nll"
+            if key in metrics:
+                values[f"dev/single/{task}/nll/single-{i}"] = metrics[key]
+        key = f"single_compression/trajectory_{task}"
+        if key in metrics:
+            values[f"dev/single/{task}/nll/single-trajectory"] = metrics[key]
+        key = f"final_round_single_compression_{task}"
+        if key in metrics:
+            values[f"dev/single/{task}/nll/single-final"] = metrics[key]
+        key = f"final_round_compression_gap_{task}"
         if key in metrics:
             values[f"dev/paired_gap/{task}"] = metrics[key]
     return values
@@ -222,43 +227,37 @@ def log_development(run, metrics, step):
 
 def final_evaluation_values(metrics, records):
     values = {"evaluation/details": metric_table(metrics)}
-    colors = {"compressed": "#2459A6", "one-shot": "#28764A"}
+    colors = {"compression": "#2459A6", "single": "#28764A"}
     for task in ("ae", "lm"):
-        points = {
-            f"compression-{i}": metrics[f"round/{i}/{task}_nll"]
-            for i in range(1, 6)
-            if f"round/{i}/{task}_nll" in metrics
-        }
-        for source, label in (
-            (f"trajectory_{task}", "trajectory"),
-            (f"one_shot_{task}", "one-shot"),
-        ):
-            if source in metrics:
-                points[label] = metrics[source]
+        points = {}
+        series = []
         for i in range(1, 6):
-            key = f"independent_prefix/round/{i}/{task}_nll"
+            for key, label, group in (
+                (f"multi_compression/round/{i}/{task}_nll", f"compression-{i}", "compression"),
+                (f"single_compression/round/{i}/{task}_nll", f"single-{i}", "single"),
+            ):
+                if key in metrics:
+                    points[label] = metrics[key]
+                    series.append(group)
+        for key, label, group in (
+            (f"multi_compression/trajectory_{task}", "compression-trajectory", "compression"),
+            (f"single_compression/trajectory_{task}", "single-trajectory", "single"),
+        ):
             if key in metrics:
-                points[f"independent-prefix-{i}"] = metrics[key]
-        key = f"independent_prefix/trajectory_{task}"
-        if key in metrics:
-            points["independent-trajectory"] = metrics[key]
+                points[label] = metrics[key]
+                series.append(group)
         if points:
             values[f"evaluation/{task}/nll"] = _bar(
                 list(points),
                 {"FineWeb": list(points.values())},
-                [
-                    "one-shot"
-                    if label == "one-shot" or label.startswith("independent-")
-                    else "compressed"
-                    for label in points
-                ],
+                series,
                 colors,
                 "write",
             )
     em_points = {}
     for prefix, label in (
-        ("generation", "recurrent"),
-        ("independent_prefix/generation", "independent"),
+        ("multi_compression/generation", "compression"),
+        ("single_compression/generation", "single"),
     ):
         key = f"{prefix}/final_round_exact_match"
         if key in metrics:
@@ -267,18 +266,18 @@ def final_evaluation_values(metrics, records):
         values["evaluation/ae/final_compression_em"] = _bar(
             list(em_points),
             {"FineWeb": list(em_points.values())},
-            ["compressed" if label == "recurrent" else "one-shot" for label in em_points],
+            list(em_points),
             colors,
             "write",
         )
     examples = []
     for row in records:
-        if "generation" not in row:
+        if "multi_compression_generation" not in row:
             continue
-        sections = [f"Reference:\n{row['generation']['reference']}"]
+        sections = [f"Reference:\n{row['multi_compression_generation']['reference']}"]
         for field, label in (
-            ("generation", "Recurrent"),
-            ("independent_generation", "Independent prefix"),
+            ("multi_compression_generation", "Compression"),
+            ("single_compression_generation", "Single compression"),
         ):
             if field in row:
                 sections.append(

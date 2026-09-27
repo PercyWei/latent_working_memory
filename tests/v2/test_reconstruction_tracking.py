@@ -12,6 +12,7 @@ from latent_working_memory.v2.pretrain.tracking import (
     log_training,
     log_development,
     log_final_evaluation,
+    final_evaluation_values,
     configure_development_panels,
 )
 
@@ -62,20 +63,21 @@ def test_current_view_api_preserves_other_runs_and_reuses_panels(tmp_path, monke
 
 def metrics():
     values = {
-        "trajectories": 2,
-        "all/ae_tokens": 64,
-        "all/lm_tokens": 32,
-        "generation/final_round_exact_match": 0.5,
-        "generation/samples": 2,
+        "multi_compression/trajectories": 2,
+        "multi_compression/all/ae_tokens": 64,
+        "multi_compression/all/lm_tokens": 32,
+        "multi_compression/generation/final_round_exact_match": 0.5,
+        "multi_compression/generation/samples": 2,
     }
     for task in ("ae", "lm"):
         for step in (1, 2, 3):
-            values[f"round/{step}/{task}_nll"] = float(step)
-            values[f"independent_prefix/round/{step}/{task}_nll"] = float(step) / 2
-        values[f"trajectory_{task}"] = 2.0
-        values[f"independent_prefix/trajectory_{task}"] = 1.0
-        values[f"one_shot_{task}"] = 2.5
-        values[f"final_minus_one_shot_{task}"] = 0.5
+            values[f"multi_compression/round/{step}/{task}_nll"] = float(step)
+            values[f"single_compression/round/{step}/{task}_nll"] = float(step) / 2
+        values[f"multi_compression/trajectory_{task}"] = 2.0
+        values[f"single_compression/trajectory_{task}"] = 1.0
+        values[f"final_round_single_compression_{task}"] = 2.5
+        values[f"final_round_multi_compression_{task}"] = 3.0
+        values[f"final_round_compression_gap_{task}"] = 0.5
     return values
 
 
@@ -83,8 +85,33 @@ def test_native_panels_register_only_intended_metrics():
     panels = development_panels()
     keys = {axis["key"] for panel in panels.values() for axis in panel["config"]["yAxis"]}
     scalars = development_scalars(metrics())
+    assert set(panels) == {
+        "dev/ae/nll",
+        "dev/lm/nll",
+        "dev/single/ae/nll",
+        "dev/single/lm/nll",
+        "dev/paired_gap",
+    }
+    for task in ("ae", "lm"):
+        compression = f"dev/{task}/nll"
+        single = f"dev/single/{task}/nll"
+        assert [axis["key"] for axis in panels[compression]["config"]["yAxis"]] == [
+            *(f"{compression}/compression-{step}" for step in range(1, 6)),
+            f"{compression}/compression-trajectory",
+        ]
+        assert [axis["key"] for axis in panels[single]["config"]["yAxis"]] == [
+            *(f"{single}/single-{step}" for step in range(1, 6)),
+            f"{single}/single-trajectory",
+            f"{single}/single-final",
+        ]
+        assert scalars[f"{compression}/compression-trajectory"] == 2.0
+        assert scalars[f"{single}/single-trajectory"] == 1.0
+        assert scalars[f"{single}/single-final"] == 2.5
+        assert scalars[f"dev/paired_gap/{task}"] == 0.5
     assert set(scalars).issubset(keys)
     assert "dev/ae/nll/compression-4" not in scalars
+    assert "dev/single/ae/nll/single-4" not in scalars
+    assert not any("one-shot" in key for key in scalars)
     assert not any("tokens" in key or "ppl" in key for key in scalars)
     assert len(panels) == 5
     for panel in panels.values():
@@ -167,12 +194,16 @@ def test_offline_run_records_namespaces_resources_tables_and_identity(tmp_path, 
         values, step = captured[-1]
         assert step == 2 and "dev/details" in values
         assert "dev/ae/nll/compression-1" in values
+        assert "dev/ae/nll/compression-trajectory" in values
+        assert "dev/single/ae/nll/single-1" in values
+        assert "dev/single/ae/nll/single-trajectory" in values
+        assert values["dev/single/ae/nll/single-final"] == 2.5
         assert "dev/ae/nll/compression-4" not in values
         records = [
             {
                 "document_id": "x",
                 "depth": 3,
-                "generation": {
+                "multi_compression_generation": {
                     "prediction": "red",
                     "reference": "red",
                     "final_round_exact_match": True,
@@ -189,6 +220,19 @@ def test_offline_run_records_namespaces_resources_tables_and_identity(tmp_path, 
             "evaluation/details",
             "evaluation/examples/page-1",
         }
+        for task in ("ae", "lm"):
+            labels = values[f"evaluation/{task}/nll"].options["xAxis"][0]["data"]
+            assert labels == [
+                *(
+                    label
+                    for step in range(1, 4)
+                    for label in (f"compression-{step}", f"single-{step}")
+                ),
+                "compression-trajectory",
+                "single-trajectory",
+            ]
+            assert "one-shot" not in labels
+            assert "single-final" not in labels
     identity = json.loads((output / "swanlab.json").read_text())
     assert identity["project"] == "latent-working-memory-v2"
     assert identity["group"] == "qwen3-4b_pooling_reconstruction_20260916"
@@ -200,3 +244,21 @@ def test_offline_run_records_namespaces_resources_tables_and_identity(tmp_path, 
         "study:reconstruction",
     ]
     assert not run.alive
+
+
+def test_final_chart_labels_all_five_compression_and_single_positions():
+    values = metrics()
+    for task in ("ae", "lm"):
+        for step in (4, 5):
+            values[f"multi_compression/round/{step}/{task}_nll"] = float(step)
+            values[f"single_compression/round/{step}/{task}_nll"] = float(step) / 2
+    charts = final_evaluation_values(values, [])
+    for task in ("ae", "lm"):
+        labels = charts[f"evaluation/{task}/nll"].options["xAxis"][0]["data"]
+        assert labels == [
+            *(label for step in range(1, 6) for label in (f"compression-{step}", f"single-{step}")),
+            "compression-trajectory",
+            "single-trajectory",
+        ]
+        assert "one-shot" not in labels
+        assert "single-final" not in labels

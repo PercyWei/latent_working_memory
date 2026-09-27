@@ -30,7 +30,7 @@ class ReconstructionTask(nn.Module):
                     q = len(row.token_ids) - length
                     if q < 1 or row.token_ids.ndim != 1:
                         raise ValueError("trajectory requires tokens and a final continuation")
-                    # Also reserve the one-shot evaluation input window.
+                    # Also reserve the full-prefix input window used by single-compression evaluation.
                     costs = [
                         length,
                         k + len(self.ae_prompt) + length + 1,

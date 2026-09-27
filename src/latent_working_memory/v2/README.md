@@ -2,7 +2,7 @@
 
 创建时间：20260915 19:10:20 UTC+08:00
 
-最后修订时间：20260921 16:33:52 UTC+08:00
+最后修订时间：20260927 13:34:03 UTC+08:00
 
 ## 当前入口：固定容量重构预训练
 
@@ -60,7 +60,7 @@ AE＋LM 使用 `training.lm_ratio` 指定每条轨迹本次选择 LM 的概率�
 
 E／F 与 C／D 使用相同的 multi 轨迹、切点、epoch 顺序和任务抽样。对每个终点 `e_t`，从空记忆压缩 `S[:e_t]`，各位置计算相同的累计 AE 或紧邻 LM，先按目标 tokens 平均，再按位置和轨迹平均。位置之间不传递 memory，不训练 Aw；每卡 microbatch=8、全局 batch=32，encoder 预算按完整前缀计。独立前缀阶段不能与其他训练阶段混用。
 
-Dev/test 同时执行递归写入和各位置独立前缀写入。原有 `round/*`、`trajectory_*` 与 `final_minus_one_shot_*` 保持递归含义；新增 `independent_prefix/round/<t>/*_nll` 和 `independent_prefix/trajectory_<ae|lm>`。`one_shot_*` 复用最后一个独立前缀读取。两条路径的最终自由重构分别保存到 `generation`、`independent_generation`；独立生成汇总以 `independent_prefix/generation/*` 命名。E／F 以独立前缀为主评估，递归路径只是迁移诊断，临时以 Ar 代替未训练的 Aw。旧 E／F checkpoint 不可按新训练协议续训，需重新初始化并使用新输出目录。
+Dev/test 同时执行递归写入和各位置独立前缀写入。结果 JSON 的两条路径分别使用 `multi_compression/` 和 `single_compression/` 命名空间，逐样本切点记录分别保存为 `multi_compression` 和 `single_compression`。每条路径都报告 `round/<t>/*_nll`、`trajectory_<ae|lm>`、`all/*_nll`、`depth/<T>/*_nll`、`ratio/<b>/*_nll` 及 token 分母。SwanLab dev 的 AE／LM NLL 图用 `compression-1`～`compression-5`、`compression-trajectory` 标记递归结果，用 `single-1`～`single-5`、`single-trajectory` 标记单次结果。dev JSON 另保存 `final_round_multi_compression_<ae|lm>`、`final_round_single_compression_<ae|lm>`：每条轨迹取最后切点，两种 NLL 分别按轨迹等权平均；其差值 `final_round_compression_gap_<ae|lm>` 用于 `dev/paired_gap`，正值表示递归压缩较差。单次路径的最终 NLL 在 dev 图中标为 `single-final`；轨迹深度不一，因此它不等于 `single-5` 或 `single-trajectory`。test JSON 省略这三个可由逐样本切点重算的最终汇总。两条路径的最终自由重构分别保存为逐样本的 `multi_compression_generation`、`single_compression_generation`，汇总指标分别使用 `multi_compression/generation/*` 和 `single_compression/generation/*`。E／F 以独立前缀为主评估，递归路径只是迁移诊断，临时以 Ar 代替未训练的 Aw。旧 E／F checkpoint 不可按新训练协议续训，需重新初始化并使用新输出目录。
 
 训练日志分项 NLL 只统计选中该任务的样本，没有选中时为 null，SwanLab 不上传该项；`ae_samples`、`lm_samples` 和各自的 `*_tokens` 在本地日志记录实际样本数及监督量。旧的 AE＋LM 双损失短测使用不同训练协议，其 loss 与吞吐不代表本设置；新配置不能直接续训旧配置的 checkpoint。
 
@@ -72,11 +72,11 @@ checkpoint 仅保存 `encoder.*` 下的 LoRA、压缩模块及读写对齐，不
 
 Dev 评估支持互斥的两种设置：`eval_every=1000`（全局间隔＋epoch 结束），或 `eval_every=null, evals_per_epoch=4`（每个 epoch 均匀四次，向上取整并去重）。评估点随实际 epoch 步数生成并记录到 `epoch-plan.json`，恢复训练沿用同一组全局点。A／B 当前运行保留旧间隔；C～F 在启动前切换为四次评估。保存频率及最终 test 独立于 dev 频率。
 
-产物包含 `run.json`、`provenance.json`、`data-summary.json`、`epoch-plan.json`、训练日志、checkpoint、dev／test 结果和 `training-result.json`。`checkpoint_limit=2` 保留最近两份 checkpoint，并额外保留单次压缩训练结束和完整训练结束的 checkpoint。只有完成全部 epochs 才生成最终 test。AE 与 LM 分别记录各次压缩后的 NLL，包含最后一次压缩，不另列最终 NLL；同时保留 AE／LM 各自的轨迹平均 NLL、一次压缩 NLL 和配对差值。AE 最后一次压缩后的自由重构使用完整 token 序列 EM（`generation/final_round_exact_match`），另记录生成触顶比例与样本数。
+产物包含 `run.json`、`provenance.json`、`data-summary.json`、`epoch-plan.json`、训练日志、checkpoint、dev／test 结果和 `training-result.json`。`checkpoint_limit=2` 保留最近两份 checkpoint，并额外保留单次压缩训练结束和完整训练结束的 checkpoint。只有完成全部 epochs 才生成最终 test。AE 与 LM 分别记录两条路径各切点的 NLL，包含最后一次压缩；dev JSON 另保留两条路径的最终 NLL 和配对差值，test JSON 省略这些可由逐样本切点重算的字段。AE 最后一次压缩后的自由重构使用完整 token 序列 EM（`multi_compression/generation/final_round_exact_match`、`single_compression/generation/final_round_exact_match`），另记录生成触顶比例与样本数。
 
 本地小模型验证与当前实验设置见[实验记录](../../../notes/v2/20260916_fixed_capacity_reconstruction_experiment.md)。已完成真实 FineWeb＋Qwen3 GPU 短测，完整训练和论文指标复现尚未完成；执行与性能结果见[性能优化记录](../../../notes/v2/20260917_engineering_optimization_summary.md)。容量增长与 QA 适配仍属后续工作。
 
-训练与 dev 使用按 optimizer step 增量记录的原生曲线；dev 保留递归 AE／LM 和配对差值三个面板，新增独立前缀 AE／LM 两个面板，分母与细分统计进入表格。资源与累计进度单独分区。最终评估只上传最后 checkpoint 的汇总图和生成样例，不逐步上传累计曲线图片。
+训练与 dev 使用按 optimizer step 增量记录的原生曲线；dev 的 AE／LM 面板以 `compression-*` 与 `single-*` 区分递归和每切点单次结果，单次面板另有 `single-final`，配对差值单独展示，分母与细分统计进入表格。资源与累计进度单独分区。最终评估只针对最后 checkpoint；AE／LM NLL 柱图展示逐切点和两条 trajectory，不绘制 `single-final`，非冗余汇总保留在 `test.json`。生成指标与样例仍单独记录。
 
 ## 初始 GMSA 迁移与更新原型
 

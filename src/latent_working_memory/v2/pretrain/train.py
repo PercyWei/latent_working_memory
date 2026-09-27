@@ -305,7 +305,11 @@ def run_training(args):
         complete = cursor["epoch_index"] == len(schedule)
         if complete:
             metrics, records = evaluate(
-                task, datasets["multiround"]["test"], tokenizer, config.generation_samples
+                task,
+                datasets["multiround"]["test"],
+                tokenizer,
+                config.generation_samples,
+                include_final_comparison=False,
             )
             if primary:
                 write_json(output / "test.json", {"metrics": metrics, "samples": records})

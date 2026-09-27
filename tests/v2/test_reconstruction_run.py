@@ -136,9 +136,12 @@ def test_raw_data_epochs_and_resume_match_uninterrupted(tiny_base, tmp_path):
     assert "datasets" not in actual and "token_ids" not in actual
     assert not list((tmp_path / "resumed").rglob("*.parquet"))
     evaluation = json.loads((tmp_path / "resumed" / "test.json").read_text())
-    assert evaluation["metrics"]["trajectories"] == stats["multiround"]["test"]["trajectories"]
-    assert "generation" in evaluation["samples"][0]
-    assert set(evaluation["samples"][0]["generation"]) == {
+    assert (
+        evaluation["metrics"]["multi_compression/trajectories"]
+        == stats["multiround"]["test"]["trajectories"]
+    )
+    assert "multi_compression_generation" in evaluation["samples"][0]
+    assert set(evaluation["samples"][0]["multi_compression_generation"]) == {
         "prediction",
         "reference",
         "final_round_exact_match",
@@ -148,7 +151,7 @@ def test_raw_data_epochs_and_resume_match_uninterrupted(tiny_base, tmp_path):
     assert "final_lm" not in evaluation["metrics"]
     last_round = evaluation["samples"][0]["depth"]
     for objective in ("ae", "lm"):
-        assert f"round/{last_round}/{objective}_nll" in evaluation["metrics"]
+        assert f"multi_compression/round/{last_round}/{objective}_nll" in evaluation["metrics"]
 
 
 def _distributed_run(rank, rendezvous, experiment, output, stop=None, resume=None):
@@ -227,15 +230,32 @@ def test_static_baseline_trains_independent_prefixes_and_evaluates_both_paths(
     assert [r["samples"] for r in log if r["epoch"] == 1] == [
         r["samples"] for r in log if r["epoch"] == 2
     ]
-    for file in [*sorted((output / "dev").glob("*.json")), output / "test.json"]:
+    development_files = sorted((output / "dev").glob("*.json"))
+    assert development_files
+    for file in [*development_files, output / "test.json"]:
         evaluation = json.loads(file.read_text())
         assert all(3 <= row["depth"] <= 5 for row in evaluation["samples"])
-        assert "trajectory_ae" in evaluation["metrics"]
-        assert "trajectory_lm" in evaluation["metrics"]
-        assert "independent_prefix/trajectory_ae" in evaluation["metrics"]
-        assert all(len(r["independent_prefix"]) == r["depth"] for r in evaluation["samples"])
+        assert "multi_compression/trajectory_ae" in evaluation["metrics"]
+        assert "multi_compression/trajectory_lm" in evaluation["metrics"]
+        assert "single_compression/trajectory_ae" in evaluation["metrics"]
+        assert all(len(r["multi_compression"]) == r["depth"] for r in evaluation["samples"])
+        assert all(len(r["single_compression"]) == r["depth"] for r in evaluation["samples"])
         assert not any("ppl" in key for key in evaluation["metrics"])
-    assert "generation/final_round_exact_match" in evaluation["metrics"]
+        for task in ("ae", "lm"):
+            single = f"final_round_single_compression_{task}"
+            multi = f"final_round_multi_compression_{task}"
+            paired_gap = f"final_round_compression_gap_{task}"
+            if file in development_files:
+                assert evaluation["metrics"][paired_gap] == pytest.approx(
+                    evaluation["metrics"][multi] - evaluation["metrics"][single]
+                )
+            else:
+                assert single not in evaluation["metrics"]
+                assert multi not in evaluation["metrics"]
+                assert paired_gap not in evaluation["metrics"]
+        assert all("one_shot" not in r for r in evaluation["samples"])
+    assert "multi_compression/generation/final_round_exact_match" in evaluation["metrics"]
+    assert "single_compression/generation/final_round_exact_match" in evaluation["metrics"]
 
 
 @pytest.mark.parametrize(
