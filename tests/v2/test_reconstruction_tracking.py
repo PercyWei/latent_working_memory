@@ -192,7 +192,7 @@ def test_offline_run_records_namespaces_resources_tables_and_identity(tmp_path, 
         assert "train/ae/nll" not in values and values["train/lm/nll"] == 2.0
         log_development(run, metrics(), 2)
         values, step = captured[-1]
-        assert step == 2 and "dev/details" in values
+        assert step == 2 and "dev/metrics_table" in values
         assert "dev/ae/nll/compression-1" in values
         assert "dev/ae/nll/compression-trajectory" in values
         assert "dev/single/ae/nll/single-1" in values
@@ -214,14 +214,14 @@ def test_offline_run_records_namespaces_resources_tables_and_identity(tmp_path, 
         values, step = captured[-1]
         assert step == 2
         assert set(values) == {
-            "evaluation/ae/nll",
-            "evaluation/lm/nll",
-            "evaluation/ae/final_compression_em",
-            "evaluation/details",
-            "evaluation/examples/page-1",
+            "evaluation/ae/compression_nll",
+            "evaluation/lm/compression_nll",
+            "evaluation/ae/final_reconstruction_em",
+            "evaluation/metrics_table",
+            "evaluation/examples/compression/page-1",
         }
         for task in ("ae", "lm"):
-            labels = values[f"evaluation/{task}/nll"].options["xAxis"][0]["data"]
+            labels = values[f"evaluation/{task}/compression_nll"].options["xAxis"][0]["data"]
             assert labels == [
                 *(
                     label
@@ -254,7 +254,7 @@ def test_final_chart_labels_all_five_compression_and_single_positions():
             values[f"single_compression/round/{step}/{task}_nll"] = float(step) / 2
     charts = final_evaluation_values(values, [])
     for task in ("ae", "lm"):
-        labels = charts[f"evaluation/{task}/nll"].options["xAxis"][0]["data"]
+        labels = charts[f"evaluation/{task}/compression_nll"].options["xAxis"][0]["data"]
         assert labels == [
             *(label for step in range(1, 6) for label in (f"compression-{step}", f"single-{step}")),
             "compression-trajectory",
@@ -262,3 +262,23 @@ def test_final_chart_labels_all_five_compression_and_single_positions():
         ]
         assert "one-shot" not in labels
         assert "single-final" not in labels
+
+
+def test_historical_final_chart_pairs_only_available_final_nll():
+    values = metrics()
+    for task in ("ae", "lm"):
+        for step in range(1, 4):
+            del values[f"single_compression/round/{step}/{task}_nll"]
+        del values[f"single_compression/trajectory_{task}"]
+    charts = final_evaluation_values(values, [])
+    for task in ("ae", "lm"):
+        labels = charts[f"evaluation/{task}/compression_nll"].options["xAxis"][0]["data"]
+        assert labels == [
+            "compression-1",
+            "compression-2",
+            "compression-3",
+            "compression-trajectory",
+            "compression-final",
+            "single-final",
+        ]
+    assert not any("single_compression/round/" in key for key in values)

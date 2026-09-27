@@ -222,11 +222,13 @@ def metric_table(metrics):
 
 def log_development(run, metrics, step):
     if run is not None:
-        run.log(development_scalars(metrics) | {"dev/details": metric_table(metrics)}, step=step)
+        run.log(
+            development_scalars(metrics) | {"dev/metrics_table": metric_table(metrics)}, step=step
+        )
 
 
 def final_evaluation_values(metrics, records):
-    values = {"evaluation/details": metric_table(metrics)}
+    values = {"evaluation/metrics_table": metric_table(metrics)}
     colors = {"compression": "#2459A6", "single": "#28764A"}
     for task in ("ae", "lm"):
         points = {}
@@ -246,8 +248,15 @@ def final_evaluation_values(metrics, records):
             if key in metrics:
                 points[label] = metrics[key]
                 series.append(group)
+        if not any(f"single_compression/round/{i}/{task}_nll" in metrics for i in range(1, 6)):
+            multi_final = f"final_round_multi_compression_{task}"
+            single_final = f"final_round_single_compression_{task}"
+            if multi_final in metrics and single_final in metrics:
+                points["compression-final"] = metrics[multi_final]
+                points["single-final"] = metrics[single_final]
+                series.extend(("compression", "single"))
         if points:
-            values[f"evaluation/{task}/nll"] = _bar(
+            values[f"evaluation/{task}/compression_nll"] = _bar(
                 list(points),
                 {"FineWeb": list(points.values())},
                 series,
@@ -263,7 +272,7 @@ def final_evaluation_values(metrics, records):
         if key in metrics:
             em_points[label] = metrics[key]
     if em_points:
-        values["evaluation/ae/final_compression_em"] = _bar(
+        values["evaluation/ae/final_reconstruction_em"] = _bar(
             list(em_points),
             {"FineWeb": list(em_points.values())},
             list(em_points),
@@ -290,7 +299,9 @@ def final_evaluation_values(metrics, records):
             )
         )
     for start in range(0, len(examples), 100):
-        values[f"evaluation/examples/page-{start // 100 + 1}"] = examples[start : start + 100]
+        values[f"evaluation/examples/compression/page-{start // 100 + 1}"] = examples[
+            start : start + 100
+        ]
     return values
 
 

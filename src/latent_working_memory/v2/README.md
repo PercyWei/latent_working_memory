@@ -2,7 +2,7 @@
 
 创建时间：20260915 19:10:20 UTC+08:00
 
-最后修订时间：20260927 13:34:03 UTC+08:00
+最后修订时间：20260927 14:33:40 UTC+08:00
 
 ## 当前入口：固定容量重构预训练
 
@@ -76,7 +76,7 @@ Dev 评估支持互斥的两种设置：`eval_every=1000`（全局间隔＋epoch
 
 本地小模型验证与当前实验设置见[实验记录](../../../notes/v2/20260916_fixed_capacity_reconstruction_experiment.md)。已完成真实 FineWeb＋Qwen3 GPU 短测，完整训练和论文指标复现尚未完成；执行与性能结果见[性能优化记录](../../../notes/v2/20260917_engineering_optimization_summary.md)。容量增长与 QA 适配仍属后续工作。
 
-训练与 dev 使用按 optimizer step 增量记录的原生曲线；dev 的 AE／LM 面板以 `compression-*` 与 `single-*` 区分递归和每切点单次结果，单次面板另有 `single-final`，配对差值单独展示，分母与细分统计进入表格。资源与累计进度单独分区。最终评估只针对最后 checkpoint；AE／LM NLL 柱图展示逐切点和两条 trajectory，不绘制 `single-final`，非冗余汇总保留在 `test.json`。生成指标与样例仍单独记录。
+训练与 dev 使用按 optimizer step 增量记录的原生曲线；dev 的 AE／LM 面板以 `compression-*` 与 `single-*` 区分递归和每切点单次结果，单次面板另有 `single-final`，配对差值单独展示，分母与细分统计进入 `dev/metrics_table`。资源与累计进度单独分区。最终评估只针对最后 checkpoint；AE／LM NLL 柱图分别记为 `evaluation/ae/compression_nll`、`evaluation/lm/compression_nll`，展示逐切点和两条 trajectory；完整指标进入 `evaluation/metrics_table`，生成 EM 进入 `evaluation/ae/final_reconstruction_em`，生成样例进入 `evaluation/examples/compression/page-*`。新评估不重复绘制最终切点汇总；迁移后的旧 A～D 产物若仅有单次压缩的最终切点指标，则补充成对的 `compression-final`／`single-final` 柱，不补造缺失的逐切点数据。
 
 ## 初始 GMSA 迁移与更新原型
 
