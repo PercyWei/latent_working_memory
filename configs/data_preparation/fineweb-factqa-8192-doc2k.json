@@ -1,0 +1,86 @@
+{
+  "source": {
+    "source_report": "configs/data_preparation/fineweb-pretraining-source-pool.json",
+    "raw_dir": "data/raw/HuggingFaceFW-fineweb/sample-10BT",
+    "seed": 20260928,
+    "split": "train",
+    "scan_document_limit": 3000,
+    "candidate_document_limit": 2000,
+    "trajectory_limit": 24,
+    "dedup_batch_documents": 4096
+  },
+  "text": {
+    "chars_per_estimated_token": 4,
+    "segments": 8,
+    "min_segment_chars": 3072,
+    "target_segment_chars": 3584,
+    "max_segment_chars": 4096,
+    "min_trajectory_chars": 24576,
+    "max_trajectory_chars": 32768
+  },
+  "annotation": {
+    "endpoint": "http://127.0.0.1:4141/v1/responses",
+    "model": "gpt-6-sol",
+    "reasoning_effort": "medium",
+    "concurrency": 4,
+    "max_attempts": 3,
+    "timeout_seconds": 300,
+    "max_answer_chars": 128,
+    "candidate_counts": [
+      15,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      5
+    ],
+    "final_counts": [
+      12,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      4
+    ],
+    "gate_counts": [
+      8,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      0
+    ],
+    "max_output_tokens": {
+      "generate": 8192,
+      "verify": 4096,
+      "document_review": 8192,
+      "answer": 2048
+    },
+    "prompts": {
+      "generate": "configs/data_preparation/prompts/fineweb_factqa/generate.txt",
+      "verify": "configs/data_preparation/prompts/fineweb_factqa/verify.txt",
+      "document_review": "configs/data_preparation/prompts/fineweb_factqa/document_review.txt",
+      "answer": "configs/data_preparation/prompts/fineweb_factqa/answer.txt",
+      "subagent_review": "configs/data_preparation/prompts/fineweb_factqa/subagent_review.txt"
+    }
+  },
+  "review": {
+    "question_limit": 96,
+    "subagents": 2,
+    "conditions": [
+      "evidence",
+      "question_only"
+    ]
+  },
+  "output": {
+    "dataset_dir": "data/fineweb-factqa-8192-doc2k_20260928",
+    "artifacts_dir": "artifacts/v3/fineweb-qa-pilot_20260928",
+    "request_cache_dir": "artifacts/data_preparation/fineweb-qa-requests"
+  }
+}
