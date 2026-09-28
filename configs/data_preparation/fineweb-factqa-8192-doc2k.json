@@ -1,0 +1,89 @@
+{
+  "source": {
+    "dataset": "HuggingFaceFW/fineweb",
+    "subset": "sample-10BT",
+    "revision": "9bb295ddab0e05d785b879661af7260fed5140fc",
+    "raw_dir": "data/raw/HuggingFaceFW-fineweb/sample-10BT",
+    "file_count": 15,
+    "data_seed": 20260907,
+    "split_fractions": [
+      0.9,
+      0.05,
+      0.05
+    ],
+    "old_pool_documents": 100000,
+    "scan_documents": 3000,
+    "max_train_inspections": 2000,
+    "near_duplicate_threshold": 0.9,
+    "near_duplicate_min_words": 64,
+    "selection_seed": 20260928
+  },
+  "window": {
+    "count": 24,
+    "segments": 8,
+    "min_segment_chars": 3072,
+    "max_segment_chars": 4096
+  },
+  "qa": {
+    "candidate_per_segment": [
+      15,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      5
+    ],
+    "train_per_segment": [
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4
+    ],
+    "gate_per_segment": [
+      8,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      0
+    ],
+    "max_answer_chars": 128,
+    "role_seed": 20260928,
+    "review_sample": 96,
+    "review_seed": 20260928,
+    "max_supplement_rounds": 3,
+    "supplement_surplus": 2
+  },
+  "annotation": {
+    "endpoint": "http://127.0.0.1:4141/v1/responses",
+    "model": "gpt-6-sol",
+    "reasoning_effort": "medium",
+    "concurrency": 4,
+    "max_attempts": 3,
+    "timeout_seconds": 300,
+    "max_output_tokens": {
+      "generate": 8192,
+      "verify": 4096,
+      "document_review": 32768,
+      "answer": 2048
+    }
+  },
+  "prompts": {
+    "generate": "configs/data_preparation/prompts/fineweb_factqa/generate.txt",
+    "verify": "configs/data_preparation/prompts/fineweb_factqa/verify.txt",
+    "document_review": "configs/data_preparation/prompts/fineweb_factqa/document_review.txt",
+    "answer": "configs/data_preparation/prompts/fineweb_factqa/answer.txt",
+    "subagent_review": "configs/data_preparation/prompts/fineweb_factqa/subagent_review.txt"
+  },
+  "artifacts_dir": "artifacts/v3/fineweb-qa-random-topup_20260928",
+  "cache_dir": "artifacts/data_preparation/fineweb-qa-requests",
+  "dataset_dir": "data/fineweb-factqa-random-topup-8192-doc2k_20260928"
+}
