@@ -27,16 +27,15 @@ def client_config():
             "verify": 4096,
             "document_review": 8192,
             "answer": 2048,
+            "review": 8192,
+            "adjudicate": 8192,
         },
     }
 
 
 @pytest.fixture
 def prompts():
-    return {
-        **{stage: f"Instructions for {stage}" for stage in annotation.STAGES},
-        "subagent_review": "Separate reviewer instructions",
-    }
+    return {stage: f"Instructions for {stage}" for stage in annotation.STAGES}
 
 
 def response_bytes(parsed):

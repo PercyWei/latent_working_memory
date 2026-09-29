@@ -1,4 +1,4 @@
-"""Freeze FineWeb source documents and contiguous eight-segment QA windows."""
+"""Freeze source clusters, splits and variable-length windows before allocating batches."""
 
 from __future__ import annotations
 
@@ -7,11 +7,16 @@ import itertools
 import math
 import re
 import random
+import uuid
+from datetime import datetime
+
+import pyarrow.parquet as pq
 from collections import Counter, defaultdict
 from contextlib import closing
 from pathlib import Path
 from typing import Any, Mapping
 
+from latent_working_memory.data_preparation.fineweb_qa.storage import save_json, load_json
 from latent_working_memory.data_preparation.pretrain.config import PreparationConfig
 from latent_working_memory.data_preparation.pretrain.dedup import cluster_documents, source_key
 from latent_working_memory.data_preparation.pretrain.fineweb import document_split
@@ -120,9 +125,12 @@ def _window_cuts(text: str, document_id: str, seed: int, config: dict) -> list[i
     """Sample bounded character lengths and an arbitrary start without rejection."""
     rng = random.Random(_rank(seed, document_id))
     minimum, maximum = config["min_segment_chars"], config["max_segment_chars"]
-    remaining = min(len(text), config["segments"] * maximum)
+    segment_count = rng.randint(
+        config["min_segments"], min(config["max_segments"], len(text) // minimum)
+    )
+    remaining = min(len(text), segment_count * maximum)
     lengths = []
-    for count in range(config["segments"], 0, -1):
+    for count in range(segment_count, 0, -1):
         length = rng.randint(minimum, min(maximum, remaining - (count - 1) * minimum))
         lengths.append(length)
         remaining -= length
@@ -134,138 +142,160 @@ def _window_cuts(text: str, document_id: str, seed: int, config: dict) -> list[i
     return cuts
 
 
-def _validate_config(source: dict, window: dict) -> None:
-    for key in (
-        "file_count",
-        "old_pool_documents",
-        "scan_documents",
-        "max_train_inspections",
-    ):
+def _validate_pool_config(config: dict) -> None:
+    source, window = config["source"], config["window"]
+    for key in ("file_count", "old_pool_documents", "scan_documents"):
         if type(source[key]) is not int or source[key] <= 0:
             raise ValueError(f"source.{key} must be a positive integer")
-    for key in (
-        "count",
-        "segments",
-        "min_segment_chars",
-        "max_segment_chars",
-    ):
-        if type(window[key]) is not int or window[key] <= 0:
-            raise ValueError(f"window.{key} must be a positive integer")
-    if set(window) != {"count", "segments", "min_segment_chars", "max_segment_chars"}:
-        raise ValueError("window requires count, segments and minimum/maximum segment characters")
-    if window["segments"] != 8 or window["min_segment_chars"] > window["max_segment_chars"]:
-        raise ValueError("window requires eight segments and ordered character bounds")
+    if set(window) != {"min_segments", "max_segments", "min_segment_chars", "max_segment_chars"}:
+        raise ValueError("window requires segment-count and character bounds")
+    if any(type(v) is not int or v <= 0 for v in window.values()):
+        raise ValueError("window bounds must be positive integers")
+    if not 2 <= window["min_segments"] <= window["max_segments"]:
+        raise ValueError("segment counts must be ordered and at least two")
+    if window["min_segment_chars"] > window["max_segment_chars"]:
+        raise ValueError("segment character bounds must be ordered")
     fractions = source["split_fractions"]
     if (
         len(fractions) != 3
-        or any(type(value) not in (int, float) or value <= 0 for value in fractions)
+        or any(type(v) not in (int, float) or v <= 0 for v in fractions)
         or not math.isclose(sum(fractions), 1.0)
     ):
         raise ValueError(
             "source.split_fractions must contain three positive fractions summing to one"
         )
+    if set(config["batch_counts"]) != {"train", "dev", "test"} or any(
+        type(v) is not int or v <= 0 for v in config["batch_counts"].values()
+    ):
+        raise ValueError("batch_counts requires positive train/dev/test counts")
 
 
-def prepare_selection(config: dict) -> dict:
-    """Freeze text-only train windows without a tokenizer or annotation requests."""
+def prepare_pool(config: dict) -> dict:
+    """Build one immutable source pool; a different scan requires a different pool."""
+    _validate_pool_config(config)
+    path = Path(config["pool_dir"]) / "source-pool.json"
+    contract = {key: config[key] for key in ("source", "window", "batch_counts")}
+    if path.exists():
+        pool = load_json(path)
+        if pool["config"] != contract:
+            raise ValueError("source pool configuration changed; create a new pool")
+        return pool
     source, window = config["source"], config["window"]
-    _validate_config(source, window)
     recipe = PreparationConfig(
         near_duplicate_threshold=source["near_duplicate_threshold"],
         near_duplicate_min_words=source["near_duplicate_min_words"],
     )
-    raw_dir = Path(source["raw_dir"])
-    files = [raw_dir / f"{index:03d}_00000.parquet" for index in range(source["file_count"])]
-    missing = [path for path in files if not path.is_file()]
-    if missing:
-        raise FileNotFoundError(f"FineWeb source file is missing: {missing[0]}")
-
+    files = [
+        Path(source["raw_dir"]) / f"{i:03d}_00000.parquet" for i in range(source["file_count"])
+    ]
     with closing(parquet_records(files, source["data_seed"])) as records:
         for _ in range(source["old_pool_documents"]):
             if next(records, None) is None:
-                raise ValueError("FineWeb ended before the old source pool was reconstructed")
+                raise ValueError("source ended before the old pool")
         scanned = list(itertools.islice(records, source["scan_documents"]))
-
-    new_records = [record for record, _ in scanned]
-    reasons = [document_rejection_reason(record, 64) for record in new_records]
-    clusters = cluster_documents(new_records, recipe)
-    excluded_clusters = _old_pool_matches(
-        files,
-        source["data_seed"],
-        source["old_pool_documents"],
-        new_records,
-        clusters,
-        recipe,
+    raw = [record for record, _ in scanned]
+    clusters = cluster_documents(raw, recipe)
+    excluded = _old_pool_matches(
+        files, source["data_seed"], source["old_pool_documents"], raw, clusters, recipe
     )
-    statistics = {
-        "old_pool_documents": source["old_pool_documents"],
-        "scanned_documents": len(scanned),
-        "old_pool_duplicate_documents": 0,
-        "basic_rejected_documents": 0,
-        "within_scan_duplicate_documents": 0,
-        "non_train_documents": 0,
-        "train_candidates": 0,
-        "train_inspected": 0,
-        "length_failed": 0,
-        "frozen_documents": 0,
-    }
-    seen: set[str] = set()
-    train_candidates = []
-    for (record, location), cluster, reason in zip(scanned, clusters, reasons, strict=True):
-        if reason is not None:
-            statistics["basic_rejected_documents"] += 1
-        elif cluster in excluded_clusters:
-            statistics["old_pool_duplicate_documents"] += 1
+    counts = Counter(
+        scanned_documents=len(scanned), old_pool_documents=source["old_pool_documents"]
+    )
+    candidates, seen = [], set()
+    for (record, location), cluster in zip(scanned, clusters, strict=True):
+        if document_rejection_reason(record, 64) is not None:
+            counts["basic_rejected_documents"] += 1
+        elif cluster in excluded:
+            counts["old_pool_duplicate_documents"] += 1
         elif cluster in seen:
-            statistics["within_scan_duplicate_documents"] += 1
+            counts["within_scan_duplicate_documents"] += 1
         else:
             seen.add(cluster)
-            if (
-                document_split(cluster, source["data_seed"], tuple(source["split_fractions"]))
-                != "train"
-            ):
-                statistics["non_train_documents"] += 1
-                continue
-            train_candidates.append((record, location, cluster))
-    train_candidates.sort(
+            candidates.append((record, location, cluster))
+    candidates.sort(
         key=lambda item: (_rank(source["selection_seed"], item[0]["id"]), item[0]["id"])
     )
-    statistics["train_candidates"] = len(train_candidates)
-
     documents = []
-    for record, location, cluster in train_candidates[: source["max_train_inspections"]]:
-        if len(documents) == window["count"]:
-            break
-        statistics["train_inspected"] += 1
+    by_split = Counter({split: 0 for split in ("train", "dev", "test")})
+    for record, location, cluster in candidates:
         text = record["text"]
-        if len(text) < window["segments"] * window["min_segment_chars"]:
-            statistics["length_failed"] += 1
+        if len(text) < window["min_segments"] * window["min_segment_chars"]:
+            counts["length_failed"] += 1
             continue
+        split = document_split(cluster, source["data_seed"], tuple(source["split_fractions"]))
         cuts = _window_cuts(text, record["id"], source["selection_seed"], window)
         start, end = cuts[0], cuts[-1]
-        trajectory_id = f"{record['id']}:{start}:{end}"
         documents.append(
             {
-                "trajectory_id": trajectory_id,
+                "pool_index": len(documents),
+                "trajectory_id": f"{record['id']}:{start}:{end}",
                 "document_id": record["id"],
                 "dedup_cluster": cluster,
-                "split": "train",
+                "split": split,
                 "source": {
                     "file": location["source_file"],
                     "row_group": location["row_group"],
                     "row_index": location["row_index"],
                 },
                 "window_char_span": [start, end],
-                "text": text[start:end],
                 "segments": [
-                    {
-                        "segment_id": f"seg{index}",
-                        "char_span": [cuts[index] - start, cuts[index + 1] - start],
-                    }
-                    for index in range(window["segments"])
+                    {"segment_id": f"seg{i}", "char_span": [left - start, right - start]}
+                    for i, (left, right) in enumerate(zip(cuts, cuts[1:]))
                 ],
             }
         )
-    statistics["train_uninspected"] = len(train_candidates) - statistics["train_inspected"]
-    statistics["frozen_documents"] = len(documents)
-    return {"documents": documents, "statistics": statistics}
+        by_split[split] += 1
+    counts["frozen_documents"] = len(documents)
+    pool = {
+        "pool_id": str(uuid.uuid4()),
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "config": contract,
+        "statistics": dict(counts),
+        "split_counts": dict(by_split),
+        "segment_counts": dict(Counter(str(len(d["segments"])) for d in documents)),
+        "documents": documents,
+    }
+    save_json(path, pool)
+    return pool
+
+
+def prepare_selection(config: dict) -> dict:
+    """Allocate disjoint split slices by batch index; never recluster during annotation."""
+    pool = load_json(Path(config["source_pool_dir"]) / "source-pool.json")
+    index = config["batch_index"]
+    if type(index) is not int or index < 0:
+        raise ValueError("batch_index must be a nonnegative integer")
+    selected, ranges = [], {}
+    for split in ("train", "dev", "test"):
+        candidates = [d for d in pool["documents"] if d["split"] == split]
+        count = pool["config"]["batch_counts"][split]
+        start, stop = min(index * count, len(candidates)), min((index + 1) * count, len(candidates))
+        ranges[split] = {"start": start, "stop": stop, "requested": count, "selected": stop - start}
+        selected.extend(dict(d) for d in candidates[start:stop])
+    if not selected:
+        raise ValueError(f"source pool exhausted in batch {index}")
+    grouped = defaultdict(list)
+    for doc in selected:
+        grouped[(doc["source"]["file"], doc["source"]["row_group"])].append(doc)
+    for (filename, group), docs in grouped.items():
+        with pq.ParquetFile(filename) as parquet:
+            table = parquet.read_row_group(group, columns=["id", "text"])
+        for doc in docs:
+            row = table.slice(doc["source"]["row_index"], 1).to_pylist()[0]
+            if row["id"] != doc["document_id"]:
+                raise ValueError("source document differs from frozen pool")
+            doc["text"] = row["text"][slice(*doc["window_char_span"])]
+            if len(doc["text"]) != doc["window_char_span"][1] - doc["window_char_span"][0]:
+                raise ValueError("source text is shorter than its frozen window")
+    return {
+        "source_pool_id": pool["pool_id"],
+        "source_pool_config": pool["config"],
+        "batch_index": index,
+        "ranges": ranges,
+        "documents": selected,
+        "statistics": {
+            "frozen_documents": len(selected),
+            "selected_by_split": {key: value["selected"] for key, value in ranges.items()},
+            "available_by_split": pool["split_counts"],
+        },
+    }

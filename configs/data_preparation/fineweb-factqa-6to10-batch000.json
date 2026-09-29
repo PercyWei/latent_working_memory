@@ -1,0 +1,41 @@
+{
+  "qa": {
+    "max_answer_chars": 128,
+    "role_seed": 20260928,
+    "max_supplement_rounds": 3,
+    "supplement_surplus": 2
+  },
+  "annotation": {
+    "endpoint": "http://127.0.0.1:4141/v1/responses",
+    "model": "gpt-6-sol",
+    "reasoning_effort": "medium",
+    "concurrency": 4,
+    "max_attempts": 3,
+    "timeout_seconds": 300,
+    "max_output_tokens": {
+      "generate": 8192,
+      "verify": 4096,
+      "document_review": 32768,
+      "answer": 2048,
+      "review": 32768,
+      "adjudicate": 32768
+    }
+  },
+  "prompts": {
+    "generate": "configs/data_preparation/prompts/fineweb_factqa/generate.txt",
+    "verify": "configs/data_preparation/prompts/fineweb_factqa/verify.txt",
+    "document_review": "configs/data_preparation/prompts/fineweb_factqa/document_review.txt",
+    "answer": "configs/data_preparation/prompts/fineweb_factqa/answer.txt",
+    "review": "configs/data_preparation/prompts/fineweb_factqa/review.txt",
+    "adjudicate": "configs/data_preparation/prompts/fineweb_factqa/adjudicate.txt"
+  },
+  "artifacts_dir": "artifacts/v3/fineweb-qa-6to10_20260929/batch-000",
+  "cache_dir": "artifacts/data_preparation/fineweb-qa-requests",
+  "dataset_dir": "data/fineweb-factqa-6to10_20260929/batch-000",
+  "source_pool_dir": "data/fineweb-factqa-source-pool_20260929",
+  "batch_index": 0,
+  "review": {
+    "qas_per_segment": 1,
+    "seed": 20260929
+  }
+}

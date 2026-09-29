@@ -68,7 +68,23 @@ DOCUMENT_REVIEW_SCHEMA = _object_schema(
     }
 )
 ANSWER_SCHEMA = _object_schema({"answer": _STRING})
-STAGES = ("generate", "verify", "document_review", "answer")
+REVIEW_SCHEMA = _object_schema(
+    {
+        "decisions": {
+            "type": "array",
+            "items": _object_schema(
+                {
+                    "qa_id": _STRING,
+                    "accepted": _BOOLEAN,
+                    "reason": _STRING,
+                    "same_fact_with": {"type": "array", "items": _STRING},
+                    "evidence_prediction_correct": _BOOLEAN,
+                }
+            ),
+        }
+    }
+)
+STAGES = ("generate", "verify", "document_review", "answer", "review", "adjudicate")
 
 _LOCAL_LOCKS: dict[str, threading.Lock] = {}
 _LOCAL_LOCKS_GUARD = threading.Lock()
@@ -108,7 +124,7 @@ def _payload_bytes(payload: dict) -> bytes:
 
 
 def _validate_schema(value: Any, schema: dict, path: str = "$") -> None:
-    """Check the small JSON Schema subset used by the four request stages."""
+    """Check the small JSON Schema subset used by the annotation and review request stages."""
     kind = schema["type"]
     if kind == "object":
         if not isinstance(value, dict):

@@ -1,4 +1,4 @@
-"""Offline checks for the frozen FineWeb QA pilot stages."""
+"""Offline checks for the frozen FineWeb QA batch stages."""
 
 import copy
 import json
@@ -11,14 +11,13 @@ from latent_working_memory.data_preparation.fineweb_qa import pipeline
 from latent_working_memory.data_preparation.fineweb_qa.assembly import validate_trajectory
 
 
-SEGMENT_QA_COUNTS = [12, 8, 8, 8, 8, 8, 8, 4]
-PROMPT_STAGES = ("generate", "verify", "document_review", "answer", "subagent_review")
+PROMPT_STAGES = ("generate", "verify", "document_review", "answer", "review", "adjudicate")
 
 
-def _selection():
+def _selection(segment_count=8, split="train", document_index=0):
     parts, segments = [], []
     offset = 0
-    for segment_index, count in enumerate(SEGMENT_QA_COUNTS):
+    for segment_index, count in enumerate([12] + [8] * (segment_count - 2) + [4]):
         segment_text = "".join(
             f"Fact-{segment_index}-{qa_index} has answer-{segment_index}-{qa_index}.\n"
             for qa_index in range(count)
@@ -33,12 +32,16 @@ def _selection():
         offset += len(segment_text)
     text = "".join(parts)
     return {
+        "source_pool_id": "pool-test",
+        "batch_index": 0,
+        "source_pool_config": {},
+        "ranges": {},
         "documents": [
             {
-                "trajectory_id": "trajectory-0",
-                "document_id": "document-0",
-                "dedup_cluster": "example.org/article",
-                "split": "train",
+                "trajectory_id": f"trajectory-{document_index}",
+                "document_id": f"document-{document_index}",
+                "dedup_cluster": f"example.org/article-{document_index}",
+                "split": split,
                 "source": {"file": "sample/000_00000.parquet", "row_group": 3, "row_index": 5},
                 "window_char_span": [100, 100 + len(text)],
                 "text": text,
@@ -56,16 +59,12 @@ def _config(tmp_path):
         path.write_text(f"Pilot {stage} instructions.\n", encoding="utf-8")
         prompt_paths[stage] = str(path)
     return {
-        "source": {"dataset": "sample-10BT", "source_seed": 17},
-        "window": {"segment_count": 8},
+        "source_pool_dir": str(tmp_path / "pool"),
+        "batch_index": 0,
+        "review": {"qas_per_segment": 1, "seed": 31},
         "qa": {
-            "candidate_per_segment": [15, 10, 10, 10, 10, 10, 10, 5],
             "max_answer_chars": 128,
-            "train_per_segment": [4] * 8,
-            "gate_per_segment": [8, 4, 4, 4, 4, 4, 4, 0],
             "role_seed": 29,
-            "review_sample": 8,
-            "review_seed": 31,
             "max_supplement_rounds": 3,
             "supplement_surplus": 2,
         },
@@ -81,6 +80,8 @@ def _config(tmp_path):
                 "verify": 4096,
                 "document_review": 8192,
                 "answer": 2048,
+                "review": 8192,
+                "adjudicate": 8192,
             },
         },
         "prompts": prompt_paths,
@@ -134,6 +135,19 @@ class FakeAnnotationClient:
                         "fact_group_id": qa["qa_id"],
                     }
                     for qa in content["qas"]
+                ]
+            }
+        if stage in ("review", "adjudicate"):
+            return {
+                "decisions": [
+                    {
+                        "qa_id": q["qa_id"],
+                        "accepted": True,
+                        "reason": "",
+                        "same_fact_with": [],
+                        "evidence_prediction_correct": True,
+                    }
+                    for q in content["qas"]
                 ]
             }
         if stage == "answer":
@@ -206,8 +220,7 @@ def test_offline_pipeline_resumes_and_finalizes_with_fixed_evidence_schedule(tmp
 
     panel = json.loads((root / "diagnostic-panel.json").read_text())
     assert {row["segment_id"] for row in panel} == {f"seg{i}" for i in range(8)}
-    assert len(json.loads((root / "review-panel-1.json").read_text())["qas"]) == 4
-    assert len(json.loads((root / "review-panel-2.json").read_text())["qas"]) == 4
+    assert len(json.loads((root / "review-inputs/doc-000.json").read_text())["qas"]) == 8
     _write_resolved_review(root, panel)
     unresolved = json.loads((root / "resolved-review.json").read_text())
     unresolved["decisions"][0]["evidence_prediction_correct"] = None
@@ -475,3 +488,203 @@ def test_invalid_supplement_settings_fail_before_freezing(tmp_path, field, value
     with pytest.raises(ValueError, match=field):
         pipeline.prepare(config)
     assert not (tmp_path / "artifacts/config.json").exists()
+
+
+class FlaggedReviewClient(FakeAnnotationClient):
+    def call(self, stage, content, schema):
+        output = super().call(stage, content, schema)
+        if stage == "review":
+            output["decisions"][0].update(
+                accepted=False,
+                reason="Check scope and duplicate target",
+                same_fact_with=["old-rejected-candidate"],
+            )
+        return output
+
+
+def test_review_adjudicates_flags_and_completed_documents_resume(tmp_path, monkeypatch):
+    config, root = _prepare_fake(tmp_path, monkeypatch, FlaggedReviewClient)
+    pipeline.annotate(config)
+    pipeline.diagnose(config)
+    summary = pipeline.review(config)
+    assert summary["reviewed_qas"] == 8 and summary["rejected_qas"] == 0
+    raw = json.loads((root / "reviews/doc-000/raw-review.json").read_text())
+    resolved = json.loads((root / "resolved-review.json").read_text())
+    assert not raw["decisions"][0]["accepted"]
+    assert raw["decisions"][0]["same_fact_with"]
+    assert resolved["decisions"][0]["accepted"]
+    assert not resolved["decisions"][0]["same_fact_with"]
+    adjudication = next(c for stage, c in FlaggedReviewClient.calls if stage == "adjudicate")
+    assert len(adjudication["qas"]) == 1
+    reviewer = next(c for stage, c in FlaggedReviewClient.calls if stage == "review")
+    assert "candidate_decisions" not in reviewer
+    assert "candidate_decisions" in adjudication
+    calls = len(FlaggedReviewClient.calls)
+    pipeline.review(config)
+    assert len(FlaggedReviewClient.calls) == calls
+    assert pipeline.finalize(config)["summary"]["final_qas"] == 64
+
+
+class InvalidAdjudicationClient(FlaggedReviewClient):
+    def call(self, stage, content, schema):
+        result = super().call(stage, content, schema)
+        if stage == "adjudicate":
+            result["decisions"][0]["same_fact_with"] = ["nonexistent"]
+        return result
+
+
+def test_invalid_adjudication_is_preserved_and_prevents_publication(tmp_path, monkeypatch):
+    config, root = _prepare_fake(tmp_path, monkeypatch, InvalidAdjudicationClient)
+    pipeline.annotate(config)
+    pipeline.diagnose(config)
+    with pytest.raises(ValueError, match="unknown or rejected"):
+        pipeline.review(config)
+    assert (root / "reviews/doc-000/adjudication.json").exists()
+    assert (root / "reviews/doc-000/error.json").exists()
+    assert not (root / "resolved-review.json").exists()
+    with pytest.raises(FileNotFoundError):
+        pipeline.finalize(config)
+    assert not (tmp_path / "dataset/train.jsonl").exists()
+
+
+class InterruptedReviewClient(FakeAnnotationClient):
+    fail = True
+
+    def call(self, stage, content, schema):
+        if stage == "review" and content["trajectory_id"] == "trajectory-1" and self.fail:
+            raise RuntimeError("injected review interruption")
+        return super().call(stage, content, schema)
+
+
+def test_review_resumes_per_document_without_repeating_completed_work(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    config["annotation"]["concurrency"] = 1
+    selection = _selection()
+    selection["documents"] += _selection(document_index=1)["documents"]
+    monkeypatch.setattr(pipeline, "prepare_selection", lambda _: selection)
+    monkeypatch.setattr(pipeline, "AnnotationClient", InterruptedReviewClient)
+    InterruptedReviewClient.fail = True
+    InterruptedReviewClient.calls = []
+    pipeline.prepare(config)
+    pipeline.annotate(config)
+    pipeline.diagnose(config)
+    with pytest.raises(RuntimeError, match="review interruption"):
+        pipeline.review(config)
+    root = tmp_path / "artifacts"
+    assert (root / "reviews/doc-000/resolved.json").exists()
+    assert not (root / "resolved-review.json").exists()
+    InterruptedReviewClient.fail = False
+    assert pipeline.review(config)["reviewed_qas"] == 16
+    calls = [c["trajectory_id"] for stage, c in InterruptedReviewClient.calls if stage == "review"]
+    assert calls == ["trajectory-0", "trajectory-1"]
+    assert not (root / "reviews/doc-001/error.json").exists()
+
+
+class InterruptedSupplementReviewClient(DelayedFactsClient):
+    fail = True
+
+    def call(self, stage, content, schema):
+        if stage == "review" and content["phase"] == "finalize_review" and self.fail:
+            raise RuntimeError("injected supplement review interruption")
+        return super().call(stage, content, schema)
+
+
+def test_final_supplement_review_resume_preserves_round_budget_and_fixed_panel(
+    tmp_path, monkeypatch
+):
+    InterruptedSupplementReviewClient.fail = True
+    config, root = _prepare_fake(tmp_path, monkeypatch, InterruptedSupplementReviewClient)
+    pipeline.annotate(config)
+    pipeline.diagnose(config)
+    panel_bytes = (root / "diagnostic-panel.json").read_bytes()
+    panel = json.loads(panel_bytes)
+    rejected = next(q["qa_id"] for q in panel if q["segment_id"] == "seg0")
+    _write_resolved_review(root, panel, rejected_id=rejected)
+    with pytest.raises(RuntimeError, match="supplement review interruption"):
+        pipeline.finalize(config)
+    state = json.loads((root / "reviewed-documents/doc-000.json").read_text())
+    assert len(state["rounds"]) == 4 and state["pending_review"] and not state["finished"]
+    generated = sum(stage == "generate" for stage, _ in InterruptedSupplementReviewClient.calls)
+    InterruptedSupplementReviewClient.fail = False
+    final = pipeline.finalize(config)
+    assert final["summary"]["final_qas"] == 64
+    assert final["summary"]["supplement_reviewed_qas"] == 1
+    assert (
+        sum(stage == "generate" for stage, _ in InterruptedSupplementReviewClient.calls)
+        == generated
+    )
+    state = json.loads((root / "reviewed-documents/doc-000.json").read_text())
+    assert not state["pending_review"] and state["finished"]
+    assert len(state["rounds"]) == 4
+    assert (root / "diagnostic-panel.json").read_bytes() == panel_bytes
+
+
+class RejectSupplementClient(DelayedFactsClient):
+    def call(self, stage, content, schema):
+        result = super().call(stage, content, schema)
+        if stage in ("review", "adjudicate") and content["phase"] == "finalize_review":
+            for d in result["decisions"]:
+                d.update(accepted=False, reason="Unsupported repaired candidate")
+        return result
+
+
+def test_supplement_review_rejections_cannot_escape_the_shared_budget(tmp_path, monkeypatch):
+    config, root = _prepare_fake(tmp_path, monkeypatch, RejectSupplementClient)
+    pipeline.annotate(config)
+    pipeline.diagnose(config)
+    panel = json.loads((root / "diagnostic-panel.json").read_text())
+    _write_resolved_review(root, panel, rejected_id=panel[0]["qa_id"])
+    final = pipeline.finalize(config)
+    assert final["summary"]["final_qas"] == 0
+    doc = json.loads((root / "final-documents/doc-000.json").read_text())
+    assert doc["supplement_rounds_used"] == 3 and doc["supplement_reviewed_qas"] == 1
+    assert (tmp_path / "dataset/train.jsonl").read_text() == ""
+
+
+def test_complete_variable_length_batch_writes_all_three_splits(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    selection = _selection(6, "train", 0)
+    selection["documents"] += (
+        _selection(8, "dev", 1)["documents"] + _selection(10, "test", 2)["documents"]
+    )
+    monkeypatch.setattr(pipeline, "prepare_selection", lambda _: selection)
+    monkeypatch.setattr(pipeline, "AnnotationClient", FakeAnnotationClient)
+    FakeAnnotationClient.calls = []
+    pipeline.prepare(config)
+    pipeline.annotate(config)
+    assert pipeline.diagnose(config)["panel_count"] == 24
+    assert pipeline.review(config)["reviewed_qas"] == 24
+    result = pipeline.finalize(config)
+    assert result["summary"]["final_qas"] == 192
+    for split, n in [("train", 6), ("dev", 8), ("test", 10)]:
+        records = [
+            json.loads(x) for x in (tmp_path / f"dataset/{split}.jsonl").read_text().splitlines()
+        ]
+        assert len(records) == 1 and records[0]["split"] == split
+        assert len(records[0]["qas"]) == n * 8
+        expected_role = "train" if split == "train" else "evaluation"
+        assert {q["role"] for q in records[0]["qas"]} == {expected_role, "gate"}
+        assert result["summary"]["by_split"][split]["qas"] == n * 8
+    assert set(result["summary"]["by_segment_count"]) == {"6", "8", "10"}
+
+
+def test_valid_manual_resolution_is_allowed_before_but_not_after_finalization(
+    tmp_path, monkeypatch
+):
+    config, root = _prepare_fake(tmp_path, monkeypatch, FakeAnnotationClient)
+    pipeline.annotate(config)
+    pipeline.diagnose(config)
+    pipeline.review(config)
+    path = root / "reviews/doc-000/resolved.json"
+    resolved = json.loads(path.read_text())
+    resolved["decisions"][0]["evidence_prediction_correct"] = False
+    resolved["decisions"][0]["reason"] = "Manual semantic correction before finalization"
+    path.write_text(json.dumps(resolved))
+    calls = len(FakeAnnotationClient.calls)
+    assert pipeline.review(config)["evidence_semantic_correct"] == 7
+    assert len(FakeAnnotationClient.calls) == calls
+    pipeline.finalize(config)
+    resolved["decisions"][0]["evidence_prediction_correct"] = True
+    path.write_text(json.dumps(resolved))
+    with pytest.raises(ValueError, match="after finalization started"):
+        pipeline.review(config)

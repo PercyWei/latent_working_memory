@@ -5,7 +5,7 @@ import json
 import pytest
 
 from latent_working_memory.data_preparation.fineweb_qa.diagnostics import (
-    review_shards,
+    review_material,
     score_answers,
     select_review_panel,
 )
@@ -47,6 +47,7 @@ def _documents_and_results(count: int) -> tuple[list[dict], list[dict]]:
         document = {
             "trajectory_id": f"trajectory-{document_index}",
             "document_id": f"document-{document_index}",
+            "split": "train",
             "text": "".join(text_parts),
             "segments": segments,
         }
@@ -81,19 +82,19 @@ def _documents_and_results(count: int) -> tuple[list[dict], list[dict]]:
 
 def test_review_panel_is_deterministic_and_spread_across_documents_and_segments():
     documents, results = _documents_and_results(4)
-    first = select_review_panel(documents, results, sample_size=16, seed=20260928)
+    first = select_review_panel(documents, results, qas_per_segment=1, seed=20260928)
     reordered = copy.deepcopy(results[::-1])
     for result in reordered:
         result["assembly"]["eligible_qas"].reverse()
-    second = select_review_panel(documents, reordered, sample_size=16, seed=20260928)
+    second = select_review_panel(documents, reordered, qas_per_segment=1, seed=20260928)
     assert first == second
 
     by_document = Counter(qa["document_index"] for qa in first)
     by_segment = Counter(qa["segment_id"] for qa in first)
-    assert by_document == {0: 4, 1: 4, 2: 4, 3: 4}
-    assert by_segment == {f"seg{index}": 2 for index in range(8)}
+    assert by_document == {0: 8, 1: 8, 2: 8, 3: 8}
+    assert by_segment == {f"seg{index}": 4 for index in range(8)}
     assert all(
-        len({qa["segment_id"] for qa in first if qa["document_index"] == index}) == 4
+        len({qa["segment_id"] for qa in first if qa["document_index"] == index}) == 8
         for index in range(4)
     )
     assert {qa["document_index"] for qa in first} == {0, 1, 2, 3}
@@ -132,38 +133,26 @@ def test_squad_normalized_scores_include_each_condition_and_item():
     }
 
 
-def test_review_shards_cover_fixed_panel_and_hide_prior_judgments():
-    documents, results = _documents_and_results(6)
-    panel = select_review_panel(documents, results, sample_size=96, seed=29)
+def test_review_material_covers_each_document_and_hides_prior_judgments():
+    documents, results = _documents_and_results(20)
+    panel = select_review_panel(documents, results, qas_per_segment=1, seed=29)
+    assert len(panel) == 160  # Coverage scales beyond the previous 96-question cap.
     panel[0]["prior_reason"] = "SECRET PRIOR VERIFIER REASON"
-    answers = {qa["qa_id"]: {"evidence": qa["answer"], "question_only": ""} for qa in panel}
-    first, second = review_shards(panel, documents, results, answers)
-    assert len(first["qas"]) == len(second["qas"]) == 48
-    assert {qa["qa_id"] for qa in first["qas"]}.isdisjoint(qa["qa_id"] for qa in second["qas"])
-    assert len({qa["qa_id"] for shard in (first, second) for qa in shard["qas"]}) == 96
-    panel_first = next(
-        qa for shard in (first, second) for qa in shard["qas"] if qa["qa_id"] == panel[0]["qa_id"]
-    )
-    assert panel_first["diagnostic_answers"] == {
-        "evidence": panel[0]["answer"],
-        "question_only": "",
-    }
-    assert {doc["document_index"] for doc in first["documents"]}.isdisjoint(
-        doc["document_index"] for doc in second["documents"]
-    )
-    assert len(first["documents"]) == len(second["documents"]) == 3
-    for shard in (first, second):
-        for document in shard["documents"]:
-            source = documents[document["document_index"]]
-            assert document["text"] == source["text"]
-            assert "".join(segment["text"] for segment in document["segments"]) == source["text"]
-            assert len(document["candidates"]) == 16
-    assert "SECRET PRIOR VERIFIER REASON" not in json.dumps((first, second))
+    answers = {q["qa_id"]: {"evidence": q["answer"], "question_only": ""} for q in panel}
+    materials = [
+        review_material(d, i, results[i], [q for q in panel if q["document_index"] == i], answers)
+        for i, d in enumerate(documents)
+    ]
+    assert all(len(m["qas"]) == 8 for m in materials)
+    assert len({q["qa_id"] for m in materials for q in m["qas"]}) == 160
+    assert "SECRET PRIOR VERIFIER REASON" not in json.dumps(materials)
+    assert materials[0]["text"] == documents[0]["text"]
+    assert materials[0]["qas"][0]["diagnostic_answers"]["evidence"] == panel[0]["answer"]
 
 
 def test_review_panel_rejects_qa_span_outside_its_source_segment():
     documents, results = _documents_and_results(1)
     qa = results[0]["assembly"]["eligible_qas"][0]
     qa["evidence_char_span"] = documents[0]["segments"][1]["char_span"]
-    with pytest.raises(ValueError, match="outside its segment"):
-        select_review_panel(documents, results, sample_size=1, seed=1)
+    with pytest.raises(ValueError, match="outside segment"):
+        select_review_panel(documents, results, qas_per_segment=1, seed=1)

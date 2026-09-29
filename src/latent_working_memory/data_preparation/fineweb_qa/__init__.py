@@ -1,1 +1,1 @@
-"""FineWeb factual QA pilot construction."""
+"""FineWeb factual QA construction from immutable source pools and batches."""

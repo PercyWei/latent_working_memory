@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import pyarrow.parquet as pq
 
-from latent_working_memory.data_preparation.fineweb_qa.pipeline import _save_json
+from latent_working_memory.data_preparation.fineweb_qa.storage import save_json as _save_json
 from latent_working_memory.data_preparation.pretrain.dedup import source_key
 from latent_working_memory.data_preparation.pretrain.sources import parquet_records
 

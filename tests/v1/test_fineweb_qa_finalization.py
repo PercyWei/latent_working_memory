@@ -14,8 +14,6 @@ from latent_working_memory.data_preparation.fineweb_qa.finalization import (
 
 QA_CONFIG = {
     "role_seed": 20260928,
-    "train_per_segment": [4] * 8,
-    "gate_per_segment": [8, 4, 4, 4, 4, 4, 4, 0],
 }
 
 

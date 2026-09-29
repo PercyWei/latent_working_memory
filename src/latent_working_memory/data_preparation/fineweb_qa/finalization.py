@@ -78,6 +78,25 @@ def validate_resolved_reviews(panel: list[dict], resolved: dict) -> dict[str, di
     return by_id
 
 
+def validate_document_reviews(panel: list[dict], resolved: dict, result: dict) -> dict[str, dict]:
+    """Validate a document's final decisions, including externally corrected decisions."""
+    by_id = validate_resolved_reviews(panel, resolved)
+    available = {d["qa_id"] for d in result["review_decisions"] if d["accepted"]}
+    for decision in by_id.values():
+        if decision["evidence_prediction_correct"] is None:
+            raise ValueError("every sampled evidence answer needs a semantic review decision")
+        if decision["qa_id"] not in available or any(
+            target not in available for target in decision["same_fact_with"]
+        ):
+            raise ValueError("adjudication links an unknown or rejected candidate")
+        if any(
+            target in by_id and not by_id[target]["accepted"]
+            for target in decision["same_fact_with"]
+        ):
+            raise ValueError("adjudication links a jointly rejected panel item")
+    return by_id
+
+
 def apply_resolved_reviews(
     document: dict, result: dict, resolved_by_id: dict[str, dict], qa_config: dict
 ) -> dict:

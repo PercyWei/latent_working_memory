@@ -1,4 +1,4 @@
-"""Explicit, resumable stages for the local FineWeb factual QA pilot."""
+"""Resumable batched construction, diagnostics and review of FineWeb factual QA."""
 
 from __future__ import annotations
 
@@ -13,48 +13,38 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any
 
 from latent_working_memory.data_preparation.fineweb_qa.annotation import (
     ANSWER_SCHEMA,
     DOCUMENT_REVIEW_SCHEMA,
     GENERATE_SCHEMA,
     VERIFY_SCHEMA,
+    REVIEW_SCHEMA,
+    STAGES,
     AnnotationClient,
     locate_candidates,
 )
 from latent_working_memory.data_preparation.fineweb_qa.diagnostics import (
-    review_shards,
+    review_material,
+    panel_items,
     score_answers,
     select_review_panel,
 )
 from latent_working_memory.data_preparation.fineweb_qa.finalization import (
     apply_resolved_reviews,
     validate_resolved_reviews,
+    validate_document_reviews,
 )
+from latent_working_memory.data_preparation.fineweb_qa.assembly import qa_quotas
 from latent_working_memory.data_preparation.fineweb_qa.sources import prepare_selection
+from latent_working_memory.data_preparation.fineweb_qa.storage import (
+    save_json as _save_json,
+    load_json as _load_json,
+)
 
 
 def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
-
-
-def _save_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    try:
-        with temporary.open("x", encoding="utf-8") as stream:
-            json.dump(value, stream, ensure_ascii=False, indent=2)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _load_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _root(config: dict) -> Path:
@@ -62,9 +52,9 @@ def _root(config: dict) -> Path:
 
 
 def _prompt_texts(config: dict) -> dict[str, str]:
-    required = {"generate", "verify", "document_review", "answer", "subagent_review"}
+    required = set(STAGES)
     if set(config["prompts"]) != required:
-        raise ValueError("FineWeb QA prompts must name the five pilot stages")
+        raise ValueError("FineWeb QA prompts must name all six request stages")
     texts = {
         name: Path(path).read_text(encoding="utf-8") for name, path in config["prompts"].items()
     }
@@ -83,6 +73,13 @@ def _batch(config: dict, create: bool = False) -> tuple[Path, dict[str, str]]:
     for key in ("max_supplement_rounds", "supplement_surplus"):
         if type(config["qa"][key]) is not int or config["qa"][key] < 0:
             raise ValueError(f"qa.{key} must be a nonnegative integer")
+    if (
+        type(config["review"]["qas_per_segment"]) is not int
+        or config["review"]["qas_per_segment"] <= 0
+    ):
+        raise ValueError("review.qas_per_segment must be positive")
+    if type(config["batch_index"]) is not int or config["batch_index"] < 0:
+        raise ValueError("batch_index must be a nonnegative integer")
     root = _root(config)
     config_path, prompts_path = root / "config.json", root / "prompts.json"
     prompts = _prompt_texts(config)
@@ -91,11 +88,11 @@ def _batch(config: dict, create: bool = False) -> tuple[Path, dict[str, str]]:
         _save_json(config_path, config)
         _save_json(prompts_path, prompts)
     if not config_path.exists() or not prompts_path.exists():
-        raise FileNotFoundError("run prepare to freeze the pilot configuration and prompts")
+        raise FileNotFoundError("run prepare to freeze the batch configuration and prompts")
     if _without_endpoint(_load_json(config_path)) != _without_endpoint(config):
-        raise ValueError("pilot configuration changed; start a new batch")
+        raise ValueError("batch configuration changed; start a new batch")
     if _load_json(prompts_path) != prompts:
-        raise ValueError("pilot prompts changed; start a new batch")
+        raise ValueError("batch prompts changed; start a new batch")
     return root, prompts
 
 
@@ -119,6 +116,9 @@ def prepare(config: dict) -> dict:
         "stage": "prepare",
         "selection": str(path),
         "frozen_documents": len(selection["documents"]),
+        "source_pool_id": selection["source_pool_id"],
+        "batch_index": selection["batch_index"],
+        "ranges": selection["ranges"],
         "statistics": selection["statistics"],
     }
 
@@ -162,7 +162,7 @@ def _run_round(
     previous_candidate_ids = {qa["qa_id"] for qa in result["candidates"]}
     before_ids = {qa["qa_id"] for qa in before["eligible_qas"]} if before else set()
     limits = (
-        {f"seg{i}": n for i, n in enumerate(config["qa"]["candidate_per_segment"])}
+        {f"seg{i}": n for i, n in enumerate(qa_quotas(len(document["segments"]))[0])}
         if before is None
         else {
             item["segment_id"]: item["missing_total"] + config["qa"]["supplement_surplus"]
@@ -334,29 +334,12 @@ def _annotate_one(
     config: dict,
     root: Path,
     client: AnnotationClient,
-    resolved_by_id: dict[str, dict] | None = None,
 ) -> dict:
-    phase = "annotate" if resolved_by_id is None else "finalize"
-    directory = root / ("documents" if phase == "annotate" else "reviewed-documents")
-    path = directory / f"doc-{index:03d}.json"
-    reviews = {} if resolved_by_id is None else resolved_by_id
+    path = _document_result_path(root, index)
     if path.exists():
         result = _load_json(path)
         if result["trajectory_id"] != document["trajectory_id"]:
             raise ValueError(f"document {index} changed after annotation")
-        if phase == "finalize" and result["resolved_review"] != reviews:
-            raise ValueError(
-                "resolved review changed after finalization started; start a new batch"
-            )
-    elif phase == "finalize":
-        result = _load_json(_document_result_path(root, index))
-        result["resolved_review"] = reviews
-        result["assembly"] = apply_resolved_reviews(document, result, reviews, config["qa"])
-        result["finished"] = (
-            result["assembly"]["ok"]
-            or len(result["rounds"]) > config["qa"]["max_supplement_rounds"]
-        )
-        _save_json(path, result)
     else:
         result = {
             "document_index": index,
@@ -372,20 +355,15 @@ def _annotate_one(
             not result["assembly"]["ok"]
             and len(result["rounds"]) <= config["qa"]["max_supplement_rounds"]
         ):
-            _run_round(document, result, config, client, phase, reviews)
+            _run_round(document, result, config, client, "annotate", {})
             _save_json(path, result)
-        (directory / f"doc-{index:03d}.error.json").unlink(missing_ok=True)
+        (path.parent / f"doc-{index:03d}.error.json").unlink(missing_ok=True)
         return result
     except Exception as error:
         client.stop.set()
         _save_json(
-            directory / f"doc-{index:03d}.error.json",
-            {
-                "document_index": index,
-                "trajectory_id": document["trajectory_id"],
-                "at": _now(),
-                "error": f"{type(error).__name__}: {error}",
-            },
+            path.parent / f"doc-{index:03d}.error.json",
+            {"document_index": index, "at": _now(), "error": f"{type(error).__name__}: {error}"},
         )
         raise
 
@@ -603,7 +581,7 @@ def diagnose(config: dict) -> dict:
     documents = _selection(root)["documents"]
     results = _document_results(root, documents, require_all=True)
     panel = select_review_panel(
-        documents, results, config["qa"]["review_sample"], config["qa"]["review_seed"]
+        documents, results, config["review"]["qas_per_segment"], config["review"]["seed"]
     )
     panel_path = root / "diagnostic-panel.json"
     if panel_path.exists():
@@ -664,17 +642,170 @@ def diagnose(config: dict) -> dict:
         "elapsed_this_run_seconds": time.perf_counter() - started,
     }
     _save_json(root / "diagnostics.json", diagnostics)
-    first, second = review_shards(panel, documents, results, answers)
-    _save_json(root / "review-panel-1.json", first)
-    _save_json(root / "review-panel-2.json", second)
+    materials = []
+    coverage = []
+    for index, (document, result) in enumerate(zip(documents, results, strict=True)):
+        assigned = [qa for qa in panel if qa["document_index"] == index]
+        path = root / "review-inputs" / f"doc-{index:03d}.json"
+        _save_json(path, review_material(document, index, result, assigned, answers))
+        materials.append(str(path))
+        sampled = {qa["segment_id"] for qa in assigned}
+        coverage.append(
+            {
+                "document_index": index,
+                "split": document["split"],
+                "segment_count": len(document["segments"]),
+                "sampled_qas": len(assigned),
+                "empty_segments": [
+                    seg["segment_id"]
+                    for seg in document["segments"]
+                    if seg["segment_id"] not in sampled
+                ],
+            }
+        )
+    _save_json(root / "review-coverage.json", coverage)
     return {
         "stage": "diagnose",
         "panel_count": len(panel),
         "evidence": scores["evidence"],
         "question_only": scores["question_only"],
-        "review_panels": [str(root / "review-panel-1.json"), str(root / "review-panel-2.json")],
+        "review_inputs": materials,
         "requests": _request_statistics(root),
     }
+
+
+def _review_document(
+    document: dict,
+    result: dict,
+    material: dict,
+    client: AnnotationClient,
+    folder: Path,
+    context: dict,
+) -> dict:
+    """Independent review, then independent adjudication of flagged items only."""
+    panel = material["qas"]
+    if (folder / "resolved.json").exists():
+        saved = _load_json(folder / "resolved.json")
+        validate_document_reviews(panel, saved, result)
+        (folder / "error.json").unlink(missing_ok=True)
+        return saved
+    if not panel:
+        resolved = {"decisions": []}
+        _save_json(folder / "resolved.json", resolved)
+        return resolved
+    try:
+        response = client.call("review", {**context, **material}, REVIEW_SCHEMA)
+        decisions = _check_decisions(response, [qa["qa_id"] for qa in panel], "review")
+        _save_json(folder / "raw-review.json", response)
+        flagged = [
+            d
+            for d in decisions
+            if not d["accepted"]
+            or d["same_fact_with"]
+            or not d["evidence_prediction_correct"]
+            or d["reason"].strip()
+        ]
+        if flagged:
+            ids = {d["qa_id"] for d in flagged}
+            adjudicated = client.call(
+                "adjudicate",
+                {
+                    **context,
+                    "text": document["text"],
+                    "segments": document["segments"],
+                    "qas": [qa for qa in panel if qa["qa_id"] in ids],
+                    "review_proposals": flagged,
+                    "candidates": material["candidates"],
+                    "candidate_decisions": result["review_decisions"],
+                },
+                REVIEW_SCHEMA,
+            )
+            checked = _check_decisions(adjudicated, list(ids), "adjudicate")
+            _save_json(folder / "adjudication.json", adjudicated)
+            by_id = {d["qa_id"]: d for d in checked}
+            decisions = [by_id.get(d["qa_id"], d) for d in decisions]
+        resolved = {"decisions": decisions}
+        validate_document_reviews(panel, resolved, result)
+        _save_json(folder / "resolved.json", resolved)
+        (folder / "error.json").unlink(missing_ok=True)
+        return resolved
+    except Exception as error:
+        client.stop.set()
+        _save_json(
+            folder / "error.json", {"at": _now(), "error": f"{type(error).__name__}: {error}"}
+        )
+        raise
+
+
+def review(config: dict) -> dict:
+    """Execute all frozen review inputs; completed document decisions resume unchanged."""
+    root, prompts = _batch(config)
+    documents = _selection(root)["documents"]
+    results = _document_results(root, documents, require_all=True)
+    panel = _load_json(root / "diagnostic-panel.json")
+    diagnostics = _load_json(root / "diagnostics.json")
+    if diagnostics["panel_qa_ids"] != [qa["qa_id"] for qa in panel]:
+        raise ValueError("diagnostics do not match the frozen panel")
+    client = AnnotationClient(config["annotation"], root, Path(config["cache_dir"]), prompts)
+    decisions = []
+    # Submit at most concurrency documents, so fatal errors stop future dispatch.
+    with ThreadPoolExecutor(max_workers=config["annotation"]["concurrency"]) as pool:
+        cursor, futures = 0, set()
+        while futures or (cursor < len(documents) and not client.stop.is_set()):
+            while (
+                cursor < len(documents)
+                and len(futures) < config["annotation"]["concurrency"]
+                and not client.stop.is_set()
+            ):
+                index = cursor
+                material = _load_json(root / "review-inputs" / f"doc-{index:03d}.json")
+                expected = [qa["qa_id"] for qa in panel if qa["document_index"] == index]
+                if [qa["qa_id"] for qa in material["qas"]] != expected:
+                    raise ValueError("review input differs from the fixed panel")
+                futures.add(
+                    pool.submit(
+                        _review_document,
+                        documents[index],
+                        results[index],
+                        material,
+                        client,
+                        root / "reviews" / f"doc-{index:03d}",
+                        {"phase": "review", "trajectory_id": documents[index]["trajectory_id"]},
+                    )
+                )
+                cursor += 1
+            completed, futures = wait(futures, return_when=FIRST_COMPLETED)
+            for future in completed:
+                decisions.extend(future.result()["decisions"])
+    by_id = validate_resolved_reviews(panel, {"decisions": decisions})
+    resolved = {"decisions": [by_id[qa["qa_id"]] for qa in panel]}
+    path = root / "resolved-review.json"
+    if (
+        path.exists()
+        and _load_json(path) != resolved
+        and any((root / "reviewed-documents").glob("doc-*.json"))
+    ):
+        raise ValueError("resolved review changed after finalization started")
+    _save_json(path, resolved)
+    summary = {
+        "stage": "review",
+        "reviewed_qas": len(decisions),
+        "rejected_qas": sum(not d["accepted"] for d in decisions),
+        "evidence_semantic_correct": sum(d["evidence_prediction_correct"] for d in decisions),
+        "requests": _request_statistics(root),
+    }
+    for name in ("split", "segment_count"):
+        summary[f"by_{name}"] = {}
+        for value in sorted({qa[name] for qa in panel}):
+            ids = {qa["qa_id"] for qa in panel if qa[name] == value}
+            entries = [d for d in decisions if d["qa_id"] in ids]
+            summary[f"by_{name}"][str(value)] = {
+                "reviewed_qas": len(entries),
+                "rejected_qas": sum(not d["accepted"] for d in entries),
+                "evidence_semantic_correct": sum(d["evidence_prediction_correct"] for d in entries),
+            }
+    _save_json(root / "review-summary.json", summary)
+    return summary
 
 
 def _save_jsonl(path: Path, values: list[dict]) -> None:
@@ -693,7 +824,10 @@ def _save_jsonl(path: Path, values: list[dict]) -> None:
 
 def _stage_counts(results: list[dict]) -> dict:
     counts = {}
-    for segment_index in range(8):
+    max_segments = max(
+        (len(r["assembly"]["statistics"]["eligible_by_segment"]) for r in results), default=0
+    )
+    for segment_index in range(max_segments):
         segment_id = f"seg{segment_index}"
         stage = {
             "generated": 0,
@@ -720,15 +854,108 @@ def _stage_counts(results: list[dict]) -> dict:
                 qa["segment_id"] == segment_id and decision_by_id[qa["qa_id"]]["accepted"]
                 for qa in result["local_candidates"]
             )
-            stage["distinct_facts"] += result["assembly"]["statistics"]["eligible_by_segment"][
-                segment_id
-            ]
+            stage["distinct_facts"] += result["assembly"]["statistics"]["eligible_by_segment"].get(
+                segment_id, 0
+            )
         counts[segment_id] = stage
     return counts
 
 
+def _finalize_one(
+    index: int,
+    document: dict,
+    initial: dict,
+    reviews: dict,
+    config: dict,
+    root: Path,
+    client: AnnotationClient,
+) -> dict:
+    path = root / "reviewed-documents" / f"doc-{index:03d}.json"
+    if path.exists():
+        result = _load_json(path)
+        if result["initial_review"] != reviews:
+            raise ValueError(
+                "resolved review changed after finalization started; start a new batch"
+            )
+    else:
+        result = copy.deepcopy(initial)
+        result.update(
+            initial_review=reviews,
+            resolved_review=reviews.copy(),
+            pending_review=[],
+            supplement_reviews=[],
+        )
+        result["assembly"] = apply_resolved_reviews(document, result, reviews, config["qa"])
+        _save_json(path, result)
+    try:
+        while True:
+            if result["pending_review"]:
+                panel = result["pending_review"]
+                number = len(result["rounds"]) - 1
+                folder = root / "supplement-reviews" / f"doc-{index:03d}" / f"round-{number}"
+                answer_path = folder / "answers.json"
+                answers = _load_json(answer_path) if answer_path.exists() else {}
+                for qa in panel:
+                    for condition in ("evidence", "question_only"):
+                        if condition not in answers.get(qa["qa_id"], {}):
+                            qa_id, _, answer = _answer_one(client, qa, condition)
+                            answers.setdefault(qa_id, {})[condition] = answer
+                            _save_json(answer_path, answers)
+                material = review_material(document, index, result, panel, answers)
+                _save_json(folder / "input.json", material)
+                resolved = _review_document(
+                    document,
+                    result,
+                    material,
+                    client,
+                    folder,
+                    {
+                        "phase": "finalize_review",
+                        "round_index": number,
+                        "trajectory_id": document["trajectory_id"],
+                    },
+                )
+                result["resolved_review"].update({d["qa_id"]: d for d in resolved["decisions"]})
+                result["assembly"] = apply_resolved_reviews(
+                    document, result, result["resolved_review"], config["qa"]
+                )
+                result["supplement_reviews"].append(
+                    {
+                        "round_index": number,
+                        "qa_ids": [qa["qa_id"] for qa in panel],
+                        "decisions": resolved["decisions"],
+                    }
+                )
+                result["pending_review"] = []
+                _save_json(path, result)
+            if (
+                result["assembly"]["ok"]
+                or len(result["rounds"]) > config["qa"]["max_supplement_rounds"]
+            ):
+                result["finished"] = True
+                _save_json(path, result)
+                (path.parent / f"doc-{index:03d}.error.json").unlink(missing_ok=True)
+                return result
+            previous_ids = {qa["qa_id"] for qa in result["candidates"]}
+            _run_round(document, result, config, client, "finalize", result["resolved_review"])
+            result["pending_review"] = [
+                qa
+                for qa in panel_items(document, index, result["assembly"])
+                if qa["qa_id"] not in previous_ids
+            ]
+            result["finished"] = False
+            _save_json(path, result)
+    except Exception as error:
+        client.stop.set()
+        _save_json(
+            path.parent / f"doc-{index:03d}.error.json",
+            {"document_index": index, "at": _now(), "error": f"{type(error).__name__}: {error}"},
+        )
+        raise
+
+
 def finalize(config: dict) -> dict:
-    """Apply the fixed semantic review, recheck quotas and write the local train data."""
+    """Apply reviews, verify final supplements and publish train/dev/test trajectories."""
     root, prompts = _batch(config)
     selection = _selection(root)
     documents = selection["documents"]
@@ -756,13 +983,14 @@ def finalize(config: dict) -> dict:
     trajectories = []
     for index, (document, result) in enumerate(zip(documents, results, strict=True)):
         local_ids = {qa["qa_id"] for qa in result["local_candidates"]}
-        reviewed = _annotate_one(
+        reviewed = _finalize_one(
             index,
             document,
+            result,
+            {key: value for key, value in resolved_by_id.items() if key in local_ids},
             config,
             root,
             client,
-            {key: value for key, value in resolved_by_id.items() if key in local_ids},
         )
         completed_results.append(reviewed)
         assembly = reviewed["assembly"]
@@ -770,6 +998,11 @@ def finalize(config: dict) -> dict:
             "document_index": index,
             "trajectory_id": document["trajectory_id"],
             "complete_quota": assembly["ok"],
+            "split": document["split"],
+            "segment_count": len(document["segments"]),
+            "supplement_reviewed_qas": sum(
+                len(r["qa_ids"]) for r in reviewed["supplement_reviews"]
+            ),
             "supplement_rounds_used": len(reviewed["rounds"]) - 1,
             "statistics": assembly["statistics"],
             "shortfalls": assembly["shortfalls"],
@@ -781,8 +1014,11 @@ def finalize(config: dict) -> dict:
             trajectories.append(assembly["trajectory"])
 
     dataset_dir = Path(config["dataset_dir"])
-    train_path = dataset_dir / "train.jsonl"
-    _save_jsonl(train_path, trajectories)
+    split_paths = {}
+    for split in ("train", "dev", "test"):
+        path = dataset_dir / f"{split}.jsonl"
+        _save_jsonl(path, [row for row in trajectories if row["split"] == split])
+        split_paths[split] = str(path)
     request_stats = _request_statistics(root)
     review_decisions = resolved["decisions"]
     semantically_checked = [
@@ -802,6 +1038,22 @@ def finalize(config: dict) -> dict:
         "complete_quota_documents_after_review": len(trajectories),
         "trajectory_success_rate": len(trajectories) / len(documents) if documents else None,
         "final_qas": sum(len(trajectory["qas"]) for trajectory in trajectories),
+        "by_split": {
+            split: {
+                "frozen_documents": sum(d["split"] == split for d in documents),
+                "complete_documents": sum(d["split"] == split for d in trajectories),
+                "qas": sum(len(d["qas"]) for d in trajectories if d["split"] == split),
+            }
+            for split in ("train", "dev", "test")
+        },
+        "by_segment_count": {
+            str(n): {
+                "frozen_documents": sum(len(d["segments"]) == n for d in documents),
+                "complete_documents": sum(len(d["segments"]) == n for d in trajectories),
+            }
+            for n in sorted({len(d["segments"]) for d in documents})
+        },
+        "supplement_reviewed_qas": sum(d["supplement_reviewed_qas"] for d in final_results),
         "review_panel_qas": len(panel),
         "review_rejected_qas": sum(not decision["accepted"] for decision in review_decisions),
         "review_same_fact_links": sum(
@@ -820,9 +1072,13 @@ def finalize(config: dict) -> dict:
         "created_at": _now(),
         "dataset": Path(config["dataset_dir"]).name,
         "token_estimation_rule": "len(text) / 4",
-        "source": config["source"],
-        "window": config["window"],
+        "source_pool_id": selection["source_pool_id"],
+        "source_pool_dir": config["source_pool_dir"],
+        "source_pool_config": selection["source_pool_config"],
+        "batch_index": config["batch_index"],
+        "batch_ranges": selection["ranges"],
         "qa": config["qa"],
+        "review": config["review"],
         "annotation": {
             key: value for key, value in config["annotation"].items() if key != "endpoint"
         },
@@ -849,7 +1105,7 @@ def finalize(config: dict) -> dict:
     _save_json(preparation_path, preparation)
     return {
         "stage": "finalize",
-        "train_path": str(train_path),
+        "split_paths": split_paths,
         "preparation_path": str(preparation_path),
         "summary": summary,
     }

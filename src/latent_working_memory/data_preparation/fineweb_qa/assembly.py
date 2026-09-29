@@ -1,4 +1,4 @@
-"""Apply document review and assemble one fixed FineWeb FactQA trajectory."""
+"""Apply document review and assemble variable-length FineWeb FactQA trajectories."""
 
 from __future__ import annotations
 
@@ -6,9 +6,6 @@ import hashlib
 import json
 
 
-SEGMENT_IDS = tuple(f"seg{i}" for i in range(8))
-TRAIN_PER_SEGMENT = (4,) * 8
-GATE_PER_SEGMENT = (8, 4, 4, 4, 4, 4, 4, 0)
 QA_FIELDS = (
     "qa_id",
     "segment_id",
@@ -44,31 +41,23 @@ def _span(value: object, name: str, length: int) -> tuple[int, int]:
     return start, end
 
 
-def _qa_config(qa_config: dict) -> int:
-    if not isinstance(qa_config, dict):
-        raise ValueError("QA configuration must be a mapping")
-    seed = _nonnegative_integer(qa_config["role_seed"], "role_seed")
-    for key, expected in (
-        ("train_per_segment", TRAIN_PER_SEGMENT),
-        ("gate_per_segment", GATE_PER_SEGMENT),
-    ):
-        actual = qa_config[key]
-        if (
-            not isinstance(actual, (list, tuple))
-            or len(actual) != len(expected)
-            or any(isinstance(n, bool) or not isinstance(n, int) for n in actual)
-            or tuple(actual) != expected
-        ):
-            raise ValueError(f"{key} must be {list(expected)} for this pilot")
-    return seed
+def qa_quotas(segment_count: int) -> tuple[list[int], list[int], list[int]]:
+    """Candidate, task and gate counts: 10N, 4N and 4N in total."""
+    if type(segment_count) is not int or segment_count < 2:
+        raise ValueError("a trajectory requires at least two segments")
+    return (
+        [15] + [10] * (segment_count - 2) + [5],
+        [4] * segment_count,
+        [8] + [4] * (segment_count - 2) + [0],
+    )
 
 
 def _document_layout(document: dict) -> tuple[str, dict[str, tuple[int, int]]]:
     _nonempty(document["trajectory_id"], "trajectory_id")
     document_id = _nonempty(document["document_id"], "document_id")
     _nonempty(document["dedup_cluster"], "dedup_cluster")
-    if document["split"] != "train":
-        raise ValueError("this pilot assembles train trajectories only")
+    if document["split"] not in ("train", "dev", "test"):
+        raise ValueError("split must be train, dev or test")
     source = document["source"]
     _nonempty(source["file"], "source.file")
     _nonnegative_integer(source["row_group"], "source.row_group")
@@ -80,11 +69,12 @@ def _document_layout(document: dict) -> tuple[str, dict[str, tuple[int, int]]]:
     if window_end - window_start != len(text):
         raise ValueError("window_char_span does not match trajectory text length")
     segments = document["segments"]
-    if not isinstance(segments, list) or len(segments) != 8:
-        raise ValueError("trajectory must have eight segments")
+    if not isinstance(segments, list) or len(segments) < 2:
+        raise ValueError("trajectory must have at least two segments")
     layout = {}
     next_start = 0
-    for expected_id, segment in zip(SEGMENT_IDS, segments, strict=True):
+    for index, segment in enumerate(segments):
+        expected_id = f"seg{index}"
         if segment["segment_id"] != expected_id:
             raise ValueError(f"expected segment {expected_id}")
         start, end = _span(segment["char_span"], f"{expected_id}.char_span", len(text))
@@ -159,11 +149,12 @@ def _older_ids(pools: list[list[str]], step: int, count: int, state: dict) -> li
     return selected
 
 
-def _usage(train_ids: list[list[str]], gate_ids: list[list[str]]) -> list[dict]:
-    train_state = {"source_cursor": 0, "item_cursors": [0] * 8}
-    gate_state = {"source_cursor": 0, "item_cursors": [0] * 8}
+def _usage(train_ids: list[list[str]], gate_ids: list[list[str]], split: str) -> list[dict]:
+    train_state = {"source_cursor": 0, "item_cursors": [0] * len(train_ids)}
+    gate_state = {"source_cursor": 0, "item_cursors": [0] * len(train_ids)}
     usage = []
-    for step, segment_id in enumerate(SEGMENT_IDS):
+    for step in range(len(train_ids)):
+        segment_id = f"seg{step}"
         if step == 0:
             old, gates = [], []
         elif step == 1:
@@ -171,11 +162,13 @@ def _usage(train_ids: list[list[str]], gate_ids: list[list[str]]) -> list[dict]:
         else:
             old = train_ids[step - 1][:2] + _older_ids(train_ids, step, 2, train_state)
             gates = gate_ids[step - 1].copy() + _older_ids(gate_ids, step, 4, gate_state)
+        if split != "train":
+            old = [qa_id for pool in train_ids[:step] for qa_id in pool]
         usage.append(
             {
                 "segment_id": segment_id,
-                "train_new_qa_ids": train_ids[step].copy(),
-                "train_old_qa_ids": old,
+                "task_new_qa_ids": train_ids[step].copy(),
+                "task_old_qa_ids": old,
                 "gate_qa_ids": gates,
             }
         )
@@ -185,13 +178,16 @@ def _usage(train_ids: list[list[str]], gate_ids: list[list[str]]) -> list[dict]:
 def assemble_document(
     document: dict, candidates: list[dict], review_decisions: list[dict], qa_config: dict
 ) -> dict:
-    """Choose one QA per reviewed fact and freeze a complete train trajectory.
+    """Choose one QA per reviewed fact and freeze a complete trajectory.
 
     A segment shortfall returns all eligible distinct facts for analysis, but no
     partial trajectory can enter the final JSONL dataset.
     """
-    seed = _qa_config(qa_config)
+    seed = _nonnegative_integer(qa_config["role_seed"], "role_seed")
     document_id, layout = _document_layout(document)
+    segment_ids = tuple(layout)
+    _, task_counts, gate_counts = qa_quotas(len(segment_ids))
+    task_role = "train" if document["split"] == "train" else "evaluation"
     text = document["text"]
     canonical = [_candidate_qa(qa, text, layout) for qa in candidates]
     qa_ids = [qa["qa_id"] for qa in canonical]
@@ -224,28 +220,28 @@ def assemble_document(
         if group_id not in representatives or key < representatives[group_id][0]:
             representatives[group_id] = (key, dict(qa, fact_group_id=group_id))
 
-    by_segment = {segment_id: [] for segment_id in SEGMENT_IDS}
+    by_segment = {segment_id: [] for segment_id in segment_ids}
     for _, qa in representatives.values():
         by_segment[qa["segment_id"]].append(qa)
-    for segment_id in SEGMENT_IDS:
+    for segment_id in segment_ids:
         by_segment[segment_id].sort(
             key=lambda qa: (_role_rank(seed, document_id, segment_id, qa["qa_id"]), qa["qa_id"])
         )
-    eligible_qas = [qa for segment_id in SEGMENT_IDS for qa in by_segment[segment_id]]
+    eligible_qas = [qa for segment_id in segment_ids for qa in by_segment[segment_id]]
     shortfalls = []
-    for index, segment_id in enumerate(SEGMENT_IDS):
+    for index, segment_id in enumerate(segment_ids):
         available = len(by_segment[segment_id])
-        train_needed = TRAIN_PER_SEGMENT[index]
-        gate_needed = GATE_PER_SEGMENT[index]
+        train_needed = task_counts[index]
+        gate_needed = gate_counts[index]
         missing = max(0, train_needed + gate_needed - available)
         if missing:
             shortfalls.append(
                 {
                     "segment_id": segment_id,
                     "available": available,
-                    "required_train": train_needed,
+                    "required_task": train_needed,
                     "required_gate": gate_needed,
-                    "train_missing": max(0, train_needed - available),
+                    "task_missing": max(0, train_needed - available),
                     "gate_missing": max(0, gate_needed - max(0, available - train_needed)),
                     "missing_total": missing,
                 }
@@ -257,7 +253,7 @@ def assemble_document(
         "duplicate_fact_count": accepted_count - len(representatives),
         "eligible_fact_count": len(representatives),
         "eligible_by_segment": {
-            segment_id: len(by_segment[segment_id]) for segment_id in SEGMENT_IDS
+            segment_id: len(by_segment[segment_id]) for segment_id in segment_ids
         },
     }
     if shortfalls:
@@ -270,21 +266,19 @@ def assemble_document(
         }
 
     train_ids, gate_ids, qas = [], [], []
-    for index, segment_id in enumerate(SEGMENT_IDS):
+    for index, segment_id in enumerate(segment_ids):
         ordered = by_segment[segment_id]
-        train = ordered[: TRAIN_PER_SEGMENT[index]]
-        gate = ordered[
-            TRAIN_PER_SEGMENT[index] : TRAIN_PER_SEGMENT[index] + GATE_PER_SEGMENT[index]
-        ]
+        train = ordered[: task_counts[index]]
+        gate = ordered[task_counts[index] : task_counts[index] + gate_counts[index]]
         train_ids.append([qa["qa_id"] for qa in train])
         gate_ids.append([qa["qa_id"] for qa in gate])
-        qas.extend(dict(qa, role="train") for qa in train)
+        qas.extend(dict(qa, role=task_role) for qa in train)
         qas.extend(dict(qa, role="gate") for qa in gate)
     trajectory = {
         "trajectory_id": document["trajectory_id"],
         "document_id": document_id,
         "dedup_cluster": document["dedup_cluster"],
-        "split": "train",
+        "split": document["split"],
         "source": {
             "file": document["source"]["file"],
             "row_group": document["source"]["row_group"],
@@ -297,7 +291,7 @@ def assemble_document(
             for segment in document["segments"]
         ],
         "qas": qas,
-        "usage": _usage(train_ids, gate_ids),
+        "usage": _usage(train_ids, gate_ids, document["split"]),
         "text_char_length": len(text),
         "estimated_tokens": len(text) / 4,
         "estimated_tokens_rule": TOKEN_ESTIMATION_RULE,
@@ -314,8 +308,11 @@ def assemble_document(
 
 def validate_trajectory(trajectory: dict, qa_config: dict) -> None:
     """Reject a trajectory that violates offsets, fact isolation or the fixed schedule."""
-    seed = _qa_config(qa_config)
+    seed = _nonnegative_integer(qa_config["role_seed"], "role_seed")
     document_id, layout = _document_layout(trajectory)
+    segment_ids = tuple(layout)
+    _, task_counts, gate_counts = qa_quotas(len(segment_ids))
+    task_role = "train" if trajectory["split"] == "train" else "evaluation"
     text = trajectory["text"]
     if trajectory["text_char_length"] != len(text):
         raise ValueError("text_char_length does not match text")
@@ -324,14 +321,14 @@ def validate_trajectory(trajectory: dict, qa_config: dict) -> None:
     if trajectory["estimated_tokens_rule"] != TOKEN_ESTIMATION_RULE:
         raise ValueError("estimated_tokens_rule is not the canonical rule")
     qas = trajectory["qas"]
-    if not isinstance(qas, list) or len(qas) != sum(TRAIN_PER_SEGMENT) + sum(GATE_PER_SEGMENT):
-        raise ValueError("trajectory must contain 64 QAs")
+    if not isinstance(qas, list) or len(qas) != sum(task_counts) + sum(gate_counts):
+        raise ValueError("trajectory must contain 8N QAs")
     seen_ids, seen_facts = set(), set()
     train_ids, gate_ids = [], []
     expected_order = []
-    for index, segment_id in enumerate(SEGMENT_IDS):
+    for index, segment_id in enumerate(segment_ids):
         segment_qas = [qa for qa in qas if qa["segment_id"] == segment_id]
-        if len(segment_qas) != TRAIN_PER_SEGMENT[index] + GATE_PER_SEGMENT[index]:
+        if len(segment_qas) != task_counts[index] + gate_counts[index]:
             raise ValueError(f"QA quota is wrong for {segment_id}")
         sorted_qas = sorted(
             segment_qas,
@@ -340,13 +337,13 @@ def validate_trajectory(trajectory: dict, qa_config: dict) -> None:
         if segment_qas != sorted_qas:
             raise ValueError(f"QA role order differs from the fixed seed for {segment_id}")
         expected_order.extend(qa["qa_id"] for qa in segment_qas)
-        train_ids.append([qa["qa_id"] for qa in segment_qas if qa["role"] == "train"])
+        train_ids.append([qa["qa_id"] for qa in segment_qas if qa["role"] == task_role])
         gate_ids.append([qa["qa_id"] for qa in segment_qas if qa["role"] == "gate"])
-        if len(train_ids[-1]) != TRAIN_PER_SEGMENT[index]:
-            raise ValueError(f"train QA quota is wrong for {segment_id}")
-        if len(gate_ids[-1]) != GATE_PER_SEGMENT[index]:
+        if len(train_ids[-1]) != task_counts[index]:
+            raise ValueError(f"task QA quota is wrong for {segment_id}")
+        if len(gate_ids[-1]) != gate_counts[index]:
             raise ValueError(f"gate QA quota is wrong for {segment_id}")
-        if [qa["role"] for qa in segment_qas] != ["train"] * len(train_ids[-1]) + ["gate"] * len(
+        if [qa["role"] for qa in segment_qas] != [task_role] * len(train_ids[-1]) + ["gate"] * len(
             gate_ids[-1]
         ):
             raise ValueError(f"QA roles are interleaved for {segment_id}")
@@ -365,5 +362,5 @@ def validate_trajectory(trajectory: dict, qa_config: dict) -> None:
             seen_facts.add(qa["fact_group_id"])
     if [qa["qa_id"] for qa in qas] != expected_order:
         raise ValueError("QAs are not ordered by source segment")
-    if trajectory["usage"] != _usage(train_ids, gate_ids):
+    if trajectory["usage"] != _usage(train_ids, gate_ids, trajectory["split"]):
         raise ValueError("usage schedule differs from the fixed update and gate schedule")
