@@ -1,9 +1,11 @@
 # 20260914_配置组织规则
 
 创建时间：20260914 11:48:20 UTC+08:00
-最后修订时间：20260918 11:04:48 UTC+08:00
+最后修订时间：20260929 10:31:04 UTC+08:00
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
+
+FineWeb FactQA 的可复用接口、配置约束与当前产物索引见[数据构造流程](../notes/v3/20260928_fineweb_qa_construction.md)。
 
 ## 目录与职责
 
@@ -25,7 +27,7 @@ configs/
   archive/                         # 旧试跑、冒烟验证及已退役配置
 ```
 
-- `data_preparation/` 只保存原始来源、文本构造、去重、基础划分及参考 tokenizer 等基础数据准备参数。当前基础数据包括 FineWeb-4096、FineWeb-128、FineWeb 重构数据、SQuAD 和 PersonaMem-v2 FactQA。
+- `data_preparation/` 只保存原始来源、文本构造、去重、基础划分及参考 tokenizer 等基础数据准备参数。当前基础数据包括 FineWeb-4096、FineWeb-128、FineWeb 重构数据、FineWeb FactQA、SQuAD 和 PersonaMem-v2 FactQA。
 - 每个具体实验占一个目录，目录名能区分模型、任务或实验条件。名称遵守 [命名规范](../docs/naming.md)，日期只在需要区分实际实验时添加。
 - `model.json` 保存本实验使用的模型、训练目标、优化器与课程参数；不加入其他阶段不使用的字段。
 - `selection.json` 保存已有数据路径、epoch 来源／任务／长度分布、固定评估选样规则和选择 seed。它属于训练／评估协议，不放入 `data_preparation/`；只描述本实验的选择，不枚举整个实验组的训练条件。
@@ -79,7 +81,7 @@ configs/
 
 ## 当前配置与运行入口
 
-`data_preparation/` 保留 FineWeb-4096、FineWeb-128、FineWeb 重构数据、SQuAD 和 PersonaMem FactQA 的准备配置。FineWeb-128 的 `data` 字段独立定义构造所用参考 tokenizer 与来源协议，不再借用训练配置。
+`data_preparation/` 保留 FineWeb-4096、FineWeb-128、FineWeb 重构数据、FineWeb FactQA、SQuAD 和 PersonaMem FactQA 的准备配置。FineWeb-128 的 `data` 字段独立定义构造所用参考 tokenizer 与来源协议，不再借用训练配置。
 
 | 阶段 | 具体实验目录 |
 |---|---|
