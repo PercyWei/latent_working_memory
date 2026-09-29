@@ -1,1 +1,1 @@
-"""FineWeb 长文本事实问答数据构造。"""
+"""FineWeb factual QA pilot construction."""

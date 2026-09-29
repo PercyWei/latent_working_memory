@@ -1,18 +1,22 @@
-"""FineWeb 事实 QA 的本地结构化标注、核验与共享请求缓存。"""
+"""Cached, resumable Responses requests and exact FineWeb QA evidence spans."""
 
-from contextlib import contextmanager
-from datetime import datetime
+from __future__ import annotations
+
 import fcntl
 import hashlib
 import json
-from pathlib import Path
+import os
 import threading
 import time
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
 
-def object_schema(properties):
+def _object_schema(properties: dict[str, dict]) -> dict:
     return {
         "type": "object",
         "properties": properties,
@@ -21,120 +25,227 @@ def object_schema(properties):
     }
 
 
-STRING = {"type": "string"}
-NONEMPTY_STRING = {"type": "string", "minLength": 1}
-QA_SCHEMA = object_schema(
-    {key: NONEMPTY_STRING for key in ("fact_statement", "question", "answer", "evidence_quote")}
-)
-DECISION_SCHEMA = object_schema(
-    {"qa_id": NONEMPTY_STRING, "accepted": {"type": "boolean"}, "reason": NONEMPTY_STRING}
-)
-VERIFY_SCHEMA = object_schema({"decisions": {"type": "array", "items": DECISION_SCHEMA}})
-DOCUMENT_REVIEW_SCHEMA = object_schema(
+_STRING = {"type": "string"}
+_BOOLEAN = {"type": "boolean"}
+GENERATE_SCHEMA = _object_schema(
     {
-        "decisions": {"type": "array", "items": DECISION_SCHEMA},
-        "same_fact_groups": {
+        "qas": {
             "type": "array",
-            "items": {"type": "array", "items": NONEMPTY_STRING, "minItems": 2},
+            "items": _object_schema(
+                {
+                    "fact_statement": _STRING,
+                    "question": _STRING,
+                    "answer": _STRING,
+                    "evidence_quote": _STRING,
+                }
+            ),
+            "maxItems": 15,
         },
+        "skip_reason": _STRING,
     }
 )
-ANSWER_SCHEMA = object_schema({"answer": NONEMPTY_STRING})
-
-
-def generation_schema(candidate_limit):
-    return object_schema(
-        {
-            "qas": {"type": "array", "items": QA_SCHEMA, "maxItems": candidate_limit},
-            "shortfall_reason": STRING,
+VERIFY_SCHEMA = _object_schema(
+    {
+        "decisions": {
+            "type": "array",
+            "items": _object_schema({"qa_id": _STRING, "accepted": _BOOLEAN, "reason": _STRING}),
         }
-    )
+    }
+)
+DOCUMENT_REVIEW_SCHEMA = _object_schema(
+    {
+        "decisions": {
+            "type": "array",
+            "items": _object_schema(
+                {
+                    "qa_id": _STRING,
+                    "accepted": _BOOLEAN,
+                    "reason": _STRING,
+                    "fact_group_id": _STRING,
+                }
+            ),
+        }
+    }
+)
+ANSWER_SCHEMA = _object_schema({"answer": _STRING})
+STAGES = ("generate", "verify", "document_review", "answer")
+
+_LOCAL_LOCKS: dict[str, threading.Lock] = {}
+_LOCAL_LOCKS_GUARD = threading.Lock()
 
 
-def _check_json(value, schema, path="response"):
-    """校验本模块实际使用的四种 JSON 类型；不依赖服务端一定遵守 schema。"""
-    kind = schema["type"]
-    expected = {"object": dict, "array": list, "string": str, "boolean": bool}[kind]
-    if type(value) is not expected:
-        raise ValueError(f"{path}: expected {kind}")
-    if kind == "object":
-        if set(value) != set(schema["properties"]):
-            raise ValueError(f"{path}: fields differ from schema")
-        for key, field_schema in schema["properties"].items():
-            _check_json(value[key], field_schema, f"{path}.{key}")
-    elif kind == "array":
-        if len(value) < schema.get("minItems", 0) or len(value) > schema.get("maxItems", len(value)):
-            raise ValueError(f"{path}: array length differs from schema")
-        for index, item in enumerate(value):
-            _check_json(item, schema["items"], f"{path}[{index}]")
-    elif kind == "string" and len(value) < schema.get("minLength", 0):
-        raise ValueError(f"{path}: empty string")
+def _local_lock(path: Path) -> threading.Lock:
+    key = str(path.resolve())
+    with _LOCAL_LOCKS_GUARD:
+        return _LOCAL_LOCKS.setdefault(key, threading.Lock())
 
 
-def _now():
+def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="milliseconds")
 
 
-def _save(path, value):
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(path)
-
-
-@contextmanager
-def _request_lock(folder):
-    folder.mkdir(parents=True, exist_ok=True)
-    with (folder / "request.lock").open("a") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        yield
-
-
-def _parse_response(data, schema):
-    if not isinstance(data, dict) or data.get("status") != "completed":
-        raise ValueError("Responses request did not complete")
+def _atomic_write(path: Path, contents: bytes) -> None:
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+    )
     try:
-        texts = [
-            part["text"]
-            for item in data["output"]
-            if item["type"] == "message" and item.get("phase") in {None, "final_answer"}
-            for part in item["content"]
-            if part["type"] == "output_text"
-        ]
-        parsed = json.loads("".join(texts))
-    except (AttributeError, KeyError, TypeError, json.JSONDecodeError) as error:
-        raise ValueError("invalid Responses JSON output") from error
-    _check_json(parsed, schema)
-    return parsed
+        with temporary.open("xb") as stream:
+            stream.write(contents)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _atomic_write_json(path: Path, value: Any) -> None:
+    contents = (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode()
+    _atomic_write(path, contents)
+
+
+def _payload_bytes(payload: dict) -> bytes:
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _validate_schema(value: Any, schema: dict, path: str = "$") -> None:
+    """Check the small JSON Schema subset used by the four request stages."""
+    kind = schema["type"]
+    if kind == "object":
+        if not isinstance(value, dict):
+            raise ValueError(f"{path} must be an object")
+        properties = schema.get("properties", {})
+        missing = set(schema.get("required", [])) - set(value)
+        if missing:
+            raise ValueError(f"{path} is missing {sorted(missing)}")
+        if schema.get("additionalProperties") is False and set(value) - set(properties):
+            raise ValueError(f"{path} has unexpected fields")
+        for key, child in properties.items():
+            if key in value:
+                _validate_schema(value[key], child, f"{path}.{key}")
+    elif kind == "array":
+        if not isinstance(value, list):
+            raise ValueError(f"{path} must be an array")
+        if len(value) > schema.get("maxItems", len(value)):
+            raise ValueError(f"{path} exceeds maxItems")
+        if len(value) < schema.get("minItems", 0):
+            raise ValueError(f"{path} is below minItems")
+        for index, item in enumerate(value):
+            _validate_schema(item, schema["items"], f"{path}[{index}]")
+    elif kind == "string":
+        if not isinstance(value, str):
+            raise ValueError(f"{path} must be a string")
+    elif kind == "boolean":
+        if type(value) is not bool:
+            raise ValueError(f"{path} must be a boolean")
+    else:
+        raise ValueError(f"unsupported schema type: {kind}")
+    if "enum" in schema and value not in schema["enum"]:
+        raise ValueError(f"{path} is outside enum")
 
 
 class AnnotationClient:
-    """一个批次共用一个实例；同请求可跨线程和构造批次复用已成功响应。"""
+    """Share completed requests across batches while logging each batch's actual use."""
 
-    def __init__(self, config):
-        self.config = config
-        self.settings = config["annotation"]
-        self.cache_dir = Path(config["output"]["request_cache_dir"])
-        self.artifacts_dir = Path(config["output"]["artifacts_dir"])
-        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
-        self._slots = threading.BoundedSemaphore(self.settings["concurrency"])
-        self._log_lock = threading.Lock()
-        self.stop_event = threading.Event()
-        self.calls = []
+    def __init__(
+        self,
+        annotation_config: dict,
+        batch_root: Path,
+        cache_root: Path,
+        prompts: dict[str, str],
+    ) -> None:
+        required = {
+            "endpoint",
+            "model",
+            "reasoning_effort",
+            "timeout_seconds",
+            "max_attempts",
+            "concurrency",
+            "max_output_tokens",
+        }
+        if set(annotation_config) != required:
+            raise ValueError(f"annotation_config requires exactly {sorted(required)}")
+        if not set(STAGES) <= set(prompts) or any(not prompts[s].strip() for s in STAGES):
+            raise ValueError("prompts require non-empty text for every annotation stage")
+        limits = annotation_config["max_output_tokens"]
+        if set(limits) != set(STAGES) or any(
+            type(limits[s]) is not int or limits[s] < 1 for s in STAGES
+        ):
+            raise ValueError("max_output_tokens requires a positive limit for every stage")
+        if not 1 <= annotation_config["max_attempts"] <= 3:
+            raise ValueError("max_attempts must be between 1 and 3")
+        if not 1 <= annotation_config["concurrency"] <= 4:
+            raise ValueError("concurrency must be between 1 and 4")
+        if annotation_config["timeout_seconds"] <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        self.config = annotation_config
+        self.prompts = prompts
+        self.batch_root = Path(batch_root)
+        self.cache_root = Path(cache_root)
+        self.batch_root.mkdir(parents=True, exist_ok=True)
+        self.cache_root.mkdir(parents=True, exist_ok=True)
+        self.stop = threading.Event()
+        self._slots = threading.BoundedSemaphore(annotation_config["concurrency"])
 
-    def _log(self, record):
-        with self._log_lock:
-            with (self.artifacts_dir / "requests.jsonl").open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-            self.calls.append(record)
+    def call(self, stage: str, content: dict, schema: dict) -> dict:
+        started = time.perf_counter()
+        record: dict[str, Any] = {
+            "stage": stage,
+            "trajectory_id": content.get("trajectory_id"),
+            "round_index": content.get("round_index"),
+            "phase": content.get("phase"),
+            "started_at": _now(),
+            "cache_hit": False,
+            "cache_source": None,
+            "network_attempts": 0,
+            "attempts_total": 0,
+            "network_seconds": 0.0,
+            "usage": None,
+            "ok": False,
+        }
+        result = None
+        error = None
+        try:
+            if self.stop.is_set():
+                raise InterruptedError("annotation stopped after a fatal error")
+            payload = self._payload(stage, content, schema)
+            request_id = hashlib.sha256(_payload_bytes(payload)).hexdigest()
+            record["request_id"] = request_id
+            result = self._cached_call(payload, schema, request_id, record)
+            record["ok"] = True
+        except Exception as exc:
+            self.stop.set()
+            record["error"] = f"{type(exc).__name__}: {exc}"
+            error = exc
+        record["finished_at"] = _now()
+        record["elapsed_seconds"] = time.perf_counter() - started
+        try:
+            self._append_log(record)
+        except Exception as log_error:
+            self.stop.set()
+            if error is None:
+                raise
+            error.add_note(f"request log write also failed: {log_error}")
+        if error is not None:
+            raise error
+        return result
 
-    def call(self, stage, instructions, content, schema):
-        if self.stop_event.is_set():
-            raise RuntimeError("Batch stopped after another request failed")
-        payload = {
-            "model": self.settings["model"],
-            "reasoning": {"effort": self.settings["reasoning_effort"]},
-            "instructions": instructions,
-            "input": [{"role": "user", "content": json.dumps(content, ensure_ascii=False, sort_keys=True)}],
+    def _payload(self, stage: str, content: dict, schema: dict) -> dict:
+        if stage not in STAGES:
+            raise ValueError(f"unknown annotation stage: {stage}")
+        if not isinstance(content, dict) or not isinstance(schema, dict):
+            raise TypeError("content and schema must be JSON objects")
+        return {
+            "model": self.config["model"],
+            "reasoning": {"effort": self.config["reasoning_effort"]},
+            "instructions": self.prompts[stage],
+            "input": [
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        content, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                    ),
+                }
+            ],
             "text": {
                 "format": {
                     "type": "json_schema",
@@ -143,233 +254,245 @@ class AnnotationClient:
                     "schema": schema,
                 }
             },
-            "max_output_tokens": self.settings["max_output_tokens"][stage],
+            "max_output_tokens": self.config["max_output_tokens"][stage],
             "store": False,
             "stream": False,
         }
-        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-        key = hashlib.sha256(encoded).hexdigest()
-        folder = self.cache_dir / key
-        started = time.perf_counter()
-        record = {
-            "stage": stage,
-            "cache_key": key,
-            "cache_hit": False,
-            "started_at": _now(),
-            "model": self.settings["model"],
-            "attempts": [],
-            "usage": None,
-        }
-        try:
-            with _request_lock(folder):
-                parsed_path = folder / "parsed.json"
-                if parsed_path.exists():
-                    record.update(cache_hit=True, ok=True)
-                    return json.loads(parsed_path.read_text(encoding="utf-8"))
-                raw_responses = sorted(folder.glob("attempt-*.response.json"))
-                if raw_responses:
-                    record["cache_hit"] = True
-                    try:
-                        data = json.loads(raw_responses[-1].read_text(encoding="utf-8"))
-                        parsed = _parse_response(data, schema)
-                    except (ValueError, KeyError, TypeError) as error:
-                        raise ValueError(f"cached request requires correction: {error}") from error
-                    _save(parsed_path, parsed)
-                    record.update(ok=True, recovered_response=raw_responses[-1].name)
+
+    def _cached_call(self, payload: dict, schema: dict, request_id: str, record: dict) -> dict:
+        folder = self.cache_root / request_id[:2] / request_id
+        folder.mkdir(parents=True, exist_ok=True)
+        with _local_lock(folder):
+            with (folder / "request.lock").open("a+b") as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX)
+                try:
+                    return self._locked_call(folder, payload, schema, record)
+                except Exception:
+                    self.stop.set()
+                    raise
+                finally:
+                    fcntl.flock(handle, fcntl.LOCK_UN)
+
+    def _locked_call(self, folder: Path, payload: dict, schema: dict, record: dict) -> dict:
+        if self.stop.is_set():
+            raise InterruptedError("annotation stopped after a fatal error")
+        request_file = folder / "request.json"
+        raw_file = folder / "response.raw.json"
+        parsed_file = folder / "parsed.json"
+        if request_file.exists():
+            if json.loads(request_file.read_text()) != payload:
+                raise ValueError("cached request payload differs from its identity")
+        else:
+            _atomic_write_json(request_file, payload)
+        if parsed_file.exists():
+            parsed = json.loads(parsed_file.read_text())
+            _validate_schema(parsed, schema)
+            record.update(cache_hit=True, cache_source="parsed")
+            return parsed
+        if raw_file.exists():
+            parsed, usage = self._parse_response(raw_file.read_bytes(), schema)
+            _atomic_write_json(parsed_file, parsed)
+            record.update(cache_hit=True, cache_source="raw", usage=usage)
+            return parsed
+
+        previous = self._previous_attempts(folder)
+        record["attempts_total"] = len(previous)
+        if previous:
+            last = previous[-1]
+            if last["status"] in {"in_flight", "response_received"}:
+                raise RuntimeError("request outcome is uncertain and its raw cache is missing")
+            if last["status"] == "failed" and not last["retryable"]:
+                raise RuntimeError("cached request has a non-retryable failure")
+            if last["status"] not in {"started", "failed"}:
+                raise ValueError("cached attempt has an unknown status")
+        if len(previous) >= self.config["max_attempts"]:
+            raise RuntimeError("request retry budget exhausted")
+
+        for attempt in range(len(previous) + 1, self.config["max_attempts"] + 1):
+            if self.stop.is_set():
+                raise InterruptedError("annotation stopped before a retry")
+            attempt_file = folder / f"attempt-{attempt}.json"
+            metadata = {"attempt": attempt, "started_at": _now(), "status": "started"}
+            _atomic_write_json(attempt_file, metadata)
+            record["attempts_total"] = attempt
+            while not self._slots.acquire(timeout=0.1):
+                if self.stop.is_set():
+                    raise InterruptedError("annotation stopped before a request")
+            try:
+                if self.stop.is_set():
+                    raise InterruptedError("annotation stopped before a request")
+                metadata["status"] = "in_flight"
+                _atomic_write_json(attempt_file, metadata)
+                record["network_attempts"] += 1
+                sent_at = time.perf_counter()
+                try:
+                    status, raw = self._send(payload)
+                except HTTPError as exc:
+                    elapsed = time.perf_counter() - sent_at
+                    record["network_seconds"] += elapsed
+                    retryable = exc.code in {408, 429} or 500 <= exc.code <= 599
+                    metadata.update(
+                        status="failed",
+                        http_status=exc.code,
+                        retryable=retryable,
+                        elapsed_seconds=elapsed,
+                        error=f"HTTPError: {exc}",
+                    )
+                    _atomic_write_json(attempt_file, metadata)
+                    if not retryable or attempt == self.config["max_attempts"]:
+                        raise RuntimeError(f"request failed with HTTP {exc.code}") from exc
+                    delay = self._retry_delay(attempt, exc.headers.get("Retry-After"))
+                except (URLError, TimeoutError, OSError) as exc:
+                    elapsed = time.perf_counter() - sent_at
+                    record["network_seconds"] += elapsed
+                    metadata.update(
+                        status="failed",
+                        retryable=True,
+                        elapsed_seconds=elapsed,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                    _atomic_write_json(attempt_file, metadata)
+                    if attempt == self.config["max_attempts"]:
+                        raise RuntimeError("request failed after temporary network errors") from exc
+                    delay = self._retry_delay(attempt, None)
+                else:
+                    elapsed = time.perf_counter() - sent_at
+                    record["network_seconds"] += elapsed
+                    metadata.update(
+                        status="response_received", http_status=status, elapsed_seconds=elapsed
+                    )
+                    _atomic_write_json(attempt_file, metadata)
+                    _atomic_write(raw_file, raw)
+                    parsed, usage = self._parse_response(raw, schema)
+                    _atomic_write_json(parsed_file, parsed)
+                    record["usage"] = usage
                     return parsed
-                _save(folder / "request.json", payload)
-                previous = sorted(folder.glob("attempt-*.meta.json"))
-                if previous:
-                    last = json.loads(previous[-1].read_text(encoding="utf-8"))
-                    if not last["retryable"]:
-                        raise ValueError(f"cached request requires correction: {last['error']}")
-                if len(previous) >= self.settings["max_attempts"]:
-                    raise RuntimeError(f"request retry budget exhausted: {key}")
-                for index in range(len(previous), self.settings["max_attempts"]):
-                    attempt = {
-                        "attempt": index + 1,
-                        "endpoint": self.settings["endpoint"],
-                        "started_at": _now(),
-                        "retryable": False,
-                    }
-                    request_started = time.perf_counter()
-                    request_attempted = False
-                    delay = min(5 * 2**index, 60)
-                    try:
-                        request = Request(
-                            self.settings["endpoint"],
-                            data=encoded,
-                            headers={"Content-Type": "application/json"},
-                        )
-                        try:
-                            with self._slots:
-                                if self.stop_event.is_set():
-                                    raise RuntimeError("Batch stopped after another request failed")
-                                request_attempted = True
-                                with build_opener(ProxyHandler({})).open(
-                                    request, timeout=self.settings["timeout_seconds"]
-                                ) as response:
-                                    attempt["http_status"] = response.status
-                                    response_bytes = response.read()
-                        except HTTPError as error:
-                            attempt.update(
-                                ok=False,
-                                http_status=error.code,
-                                error=error.read().decode("utf-8", errors="replace"),
-                                retryable=error.code in {408, 429, 500, 502, 503, 504},
-                            )
-                            retry_after = error.headers.get("Retry-After", "") if error.headers else ""
-                            if retry_after.isdigit():
-                                delay = min(max(delay, int(retry_after)), 60)
-                            if not attempt["retryable"] or index + 1 == self.settings["max_attempts"]:
-                                raise
-                        except (URLError, TimeoutError, OSError) as error:
-                            attempt.update(ok=False, error=f"{type(error).__name__}: {error}", retryable=True)
-                            if index + 1 == self.settings["max_attempts"]:
-                                raise
-                        else:
-                            # 本地写入、解析失败不能触发另一笔远端请求。
-                            raw = response_bytes.decode("utf-8")
-                            raw_path = folder / f"attempt-{index + 1:03d}.response.json"
-                            temporary = raw_path.with_suffix(".json.tmp")
-                            temporary.write_text(raw, encoding="utf-8")
-                            temporary.replace(raw_path)
-                            data = json.loads(raw)
-                            if isinstance(data, dict):
-                                attempt.update(
-                                    response_id=data.get("id"),
-                                    returned_model=data.get("model"),
-                                    reasoning=data.get("reasoning"),
-                                    response_status=data.get("status"),
-                                    usage=data.get("usage"),
-                                )
-                                record["usage"] = data.get("usage")
-                            parsed = _parse_response(data, schema)
-                            _save(parsed_path, parsed)
-                            attempt["ok"] = True
-                            record.update(ok=True, usage=attempt.get("usage"))
-                            return parsed
-                    except Exception as error:
-                        if "error" not in attempt:
-                            attempt.update(ok=False, error=f"{type(error).__name__}: {error}")
-                        raise
-                    finally:
-                        if request_attempted:
-                            attempt.update(finished_at=_now(), elapsed_seconds=time.perf_counter() - request_started)
-                            _save(folder / f"attempt-{index + 1:03d}.meta.json", attempt)
-                            record["attempts"].append(attempt)
-                    time.sleep(delay)
-        except Exception as error:
-            self.stop_event.set()
-            record.update(ok=False, error=f"{type(error).__name__}: {error}")
-            raise
-        finally:
-            record.update(finished_at=_now(), elapsed_seconds=time.perf_counter() - started)
-            self._log(record)
+            finally:
+                self._slots.release()
+            if self.stop.wait(delay):
+                raise InterruptedError("annotation stopped before a retry")
+        raise RuntimeError("request retry budget exhausted")
 
-
-def _decisions_by_id(output, qas):
-    decisions = output["decisions"]
-    ids = [decision["qa_id"] for decision in decisions]
-    if len(ids) != len(set(ids)) or set(ids) != {qa["qa_id"] for qa in qas}:
-        raise ValueError("verification decisions must cover each supplied QA exactly once")
-    if any(not decision["reason"].strip() for decision in decisions):
-        raise ValueError("verification reason must be non-empty")
-    return {decision["qa_id"]: decision for decision in decisions}
-
-
-def _review_qa(qa):
-    return {key: qa[key] for key in ("qa_id", "segment_id", "question", "answer", "evidence_quote")}
-
-
-def annotate_segment(client, trajectory, segment, prompts):
-    segment_id = segment["segment_id"]
-    start, end = segment["char_start"], segment["char_end"]
-    text = trajectory["text"][start:end]
-    limit = client.settings["candidate_counts"][segment_id - 1]
-    generated = client.call(
-        "generate",
-        prompts["generate"],
-        {"segment_id": segment_id, "text": text, "candidate_limit": limit},
-        generation_schema(limit),
-    )
-    if bool(generated["shortfall_reason"].strip()) != (len(generated["qas"]) < limit):
-        raise ValueError("shortfall_reason must explain exactly the below-limit generations")
-    located, rejected = [], []
-    for index, candidate in enumerate(generated["qas"], 1):
-        qa_id = f"{trajectory['trajectory_id']}:s{segment_id}:q{index}"
-        quote, answer = candidate["evidence_quote"], candidate["answer"]
-        reason = ""
-        if any(not value.strip() for value in candidate.values()):
-            reason = "empty QA field"
-        elif len(answer) > client.settings["max_answer_chars"]:
-            reason = "answer exceeds max_answer_chars"
-        elif text.count(quote) != 1:
-            reason = "evidence_quote must occur exactly once in its segment"
-        elif answer not in quote:
-            reason = "answer is not a contiguous substring of evidence_quote"
-        if reason:
-            rejected.append({"qa_id": qa_id, "reason": reason, "qa": candidate})
-            continue
-        evidence_start = start + text.index(quote)
-        answer_start = evidence_start + quote.index(answer)
-        located.append(
-            {
-                **candidate,
-                "qa_id": qa_id,
-                "segment_id": segment_id,
-                "evidence_span": [evidence_start, evidence_start + len(quote)],
-                "answer_span": [answer_start, answer_start + len(answer)],
-            }
+    def _send(self, payload: dict) -> tuple[int, bytes]:
+        request = Request(
+            self.config["endpoint"],
+            data=_payload_bytes(payload),
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
-    verification = {"decisions": []}
-    if located:
-        verification = client.call(
-            "verify",
-            prompts["verify"],
-            {"segment_id": segment_id, "text": text, "qas": [_review_qa(qa) for qa in located]},
-            VERIFY_SCHEMA,
-        )
-    decisions = _decisions_by_id(verification, located)
-    accepted = [qa for qa in located if decisions[qa["qa_id"]]["accepted"]]
-    return {
-        "trajectory_id": trajectory["trajectory_id"],
-        "segment_id": segment_id,
-        "candidate_limit": limit,
-        "generated": generated,
-        "program_rejections": rejected,
-        "verification": verification,
-        "accepted": accepted,
-        "counts": {"generated": len(generated["qas"]), "program_accepted": len(located), "accepted": len(accepted)},
-    }
+        with build_opener(ProxyHandler({})).open(
+            request, timeout=self.config["timeout_seconds"]
+        ) as response:
+            return response.status, response.read()
+
+    def _parse_response(self, raw: bytes, schema: dict) -> tuple[dict, dict | None]:
+        data = json.loads(raw.decode("utf-8"))
+        if not isinstance(data, dict) or data.get("status") != "completed":
+            raise ValueError("Responses result was not completed")
+        if data.get("model") != self.config["model"]:
+            raise ValueError("Responses model differs from selected model")
+        if (data.get("reasoning") or {}).get("effort") != self.config["reasoning_effort"]:
+            raise ValueError("Responses reasoning effort differs from selected effort")
+        output = data.get("output")
+        if not isinstance(output, list):
+            raise ValueError("Responses output is missing")
+        pieces = [
+            part["text"]
+            for item in output
+            if item["type"] == "message" and item.get("phase") in (None, "final_answer")
+            for part in item["content"]
+            if part["type"] == "output_text"
+        ]
+        if not pieces or any(not isinstance(piece, str) for piece in pieces):
+            raise ValueError("Responses final output_text is missing")
+        parsed = json.loads("".join(pieces))
+        _validate_schema(parsed, schema)
+        usage = data.get("usage")
+        if usage is not None and not isinstance(usage, dict):
+            raise ValueError("Responses usage must be an object when present")
+        return parsed, usage
+
+    def _previous_attempts(self, folder: Path) -> list[dict]:
+        paths = sorted(folder.glob("attempt-*.json"), key=lambda p: int(p.stem.split("-")[1]))
+        if [int(p.stem.split("-")[1]) for p in paths] != list(range(1, len(paths) + 1)):
+            raise ValueError("cached attempts are not contiguous")
+        return [json.loads(path.read_text()) for path in paths]
+
+    @staticmethod
+    def _retry_delay(attempt: int, retry_after: str | None) -> int:
+        header_seconds = int(retry_after) if retry_after and retry_after.isdigit() else 0
+        return min(60, max(5 * 2 ** (attempt - 1), header_seconds))
+
+    def _append_log(self, record: dict) -> None:
+        path = self.batch_root / "requests.jsonl"
+        line = (json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n").encode()
+        with _local_lock(path):
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                remaining = memoryview(line)
+                while remaining:
+                    remaining = remaining[os.write(fd, remaining) :]
+                os.fsync(fd)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
 
 
-def review_document(client, trajectory, accepted_qas, prompts):
-    reviewed = {"decisions": [], "same_fact_groups": []}
-    if accepted_qas:
-        reviewed = client.call(
-            "document_review",
-            prompts["document_review"],
-            {
-                "segments": [
-                    {
-                        "segment_id": segment["segment_id"],
-                        "text": trajectory["text"][segment["char_start"] : segment["char_end"]],
-                    }
-                    for segment in trajectory["segments"]
-                ],
-                "qas": [_review_qa(qa) for qa in accepted_qas],
-            },
-            DOCUMENT_REVIEW_SCHEMA,
-        )
-    decisions = _decisions_by_id(reviewed, accepted_qas)
-    grouped = set()
-    for group in reviewed["same_fact_groups"]:
-        if len(set(group)) != len(group) or not set(group) <= set(decisions) or grouped.intersection(group):
-            raise ValueError("same_fact_groups must contain disjoint groups of supplied QA IDs")
-        grouped.update(group)
-    return {
-        "trajectory_id": trajectory["trajectory_id"],
-        **reviewed,
-        "accepted": [qa for qa in accepted_qas if decisions[qa["qa_id"]]["accepted"]],
-    }
+def locate_candidates(
+    segment_text: str,
+    generated: dict,
+    trajectory_id: str,
+    segment_index: int,
+    segment_offset: int,
+    candidate_limit: int,
+    max_answer_chars: int,
+    round_index: int,
+) -> tuple[list[dict], list[dict]]:
+    """Locate generated quotes and answers in unchanged trajectory characters."""
+    if not isinstance(generated, dict) or set(generated) != {"qas", "skip_reason"}:
+        raise ValueError("generation object schema mismatch")
+    qas, skip_reason = generated["qas"], generated["skip_reason"]
+    if not isinstance(qas, list) or len(qas) > candidate_limit or not isinstance(skip_reason, str):
+        raise ValueError("invalid generated QA count or skip reason")
+    if bool(qas) == bool(skip_reason.strip()):
+        raise ValueError("skip reason must be present exactly when no QA was generated")
+    if segment_index < 0 or segment_offset < 0:
+        raise ValueError("segment index and offset must be nonnegative")
+    segment_id = f"seg{segment_index}"
+    valid, rejected = [], []
+    expected_fields = {"fact_statement", "question", "answer", "evidence_quote"}
+    for index, candidate in enumerate(qas):
+        qa_id = f"{trajectory_id}:{segment_id}:round{round_index}:qa{index}"
+        try:
+            if not isinstance(candidate, dict) or set(candidate) != expected_fields:
+                raise ValueError("QA fields mismatch")
+            if any(not isinstance(value, str) or not value.strip() for value in candidate.values()):
+                raise ValueError("QA fields must be non-empty strings")
+            answer, quote = candidate["answer"], candidate["evidence_quote"]
+            if len(answer) > max_answer_chars:
+                raise ValueError("answer exceeds character limit")
+            first_quote = segment_text.find(quote)
+            if first_quote < 0 or segment_text.find(quote, first_quote + 1) >= 0:
+                raise ValueError("evidence quote must occur exactly once in segment")
+            if answer not in quote:
+                raise ValueError("answer is absent from evidence quote")
+            quote_start = segment_offset + first_quote
+            answer_start = quote_start + quote.index(answer)
+            valid.append(
+                {
+                    "qa_id": qa_id,
+                    "segment_id": segment_id,
+                    "fact_statement": candidate["fact_statement"],
+                    "question": candidate["question"],
+                    "answer": answer,
+                    "evidence_quote": quote,
+                    "evidence_char_span": [quote_start, quote_start + len(quote)],
+                    "answer_char_span": [answer_start, answer_start + len(answer)],
+                }
+            )
+        except ValueError as exc:
+            rejected.append(
+                {"qa_id": qa_id, "candidate_index": index, "reason": str(exc), "qa": candidate}
+            )
+    return valid, rejected

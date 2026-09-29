@@ -1,274 +1,271 @@
+"""Freeze FineWeb source documents and contiguous eight-segment QA windows."""
+
 from __future__ import annotations
 
 import hashlib
 import itertools
-import json
+import math
 import re
-from bisect import bisect_left, bisect_right
-from collections import Counter
+import random
+from collections import Counter, defaultdict
 from contextlib import closing
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from latent_working_memory.data_preparation.pretrain.config import PreparationConfig
-from latent_working_memory.data_preparation.pretrain.dedup import cluster_documents
+from latent_working_memory.data_preparation.pretrain.dedup import cluster_documents, source_key
 from latent_working_memory.data_preparation.pretrain.fineweb import document_split
 from latent_working_memory.data_preparation.pretrain.quality import document_rejection_reason
-from latent_working_memory.data_preparation.pretrain.segmentation import sentence_spans
 from latent_working_memory.data_preparation.pretrain.sources import parquet_records
 
 
-def _order_key(seed: int, *parts: object) -> bytes:
-    value = json.dumps([seed, *parts], ensure_ascii=False, separators=(",", ":"))
-    return hashlib.blake2b(value.encode(), digest_size=16).digest()
+_WORDS = re.compile(r"\w+")
+_OLD_BATCH_SIZE = 512
 
 
-def _compact_record(record: dict[str, Any]) -> dict[str, str]:
-    return {name: record[name] for name in ("id", "url", "text")}
+def _rank(*parts: object) -> bytes:
+    return hashlib.blake2b("\0".join(map(str, parts)).encode(), digest_size=16).digest()
 
 
-def select_window(text: str, document_id: str, seed: int, settings: dict) -> dict | None:
-    """Choose one unchanged, contiguous window, using paragraph/sentence boundaries."""
-    minimum = settings["min_segment_chars"]
-    target = settings["target_segment_chars"]
-    maximum = settings["max_segment_chars"]
-    count = settings["segments"]
-    first = len(text) - len(text.lstrip())
-    final = len(text.rstrip())
-    if final - first < settings["min_trajectory_chars"]:
-        return None
+def _normalized_text(record: Mapping[str, Any]) -> str:
+    return " ".join(record["text"].split())
 
-    # FineWeb uses line breaks for paragraphs. Keep intervening whitespace in the slices.
-    starts = {first}
-    for match in re.finditer(r"\n[ \t\r\n]*", text):
-        if match.end() < final:
-            starts.add(match.end())
-    paragraph_ends = sorted((starts - {first}) | {final})
-    sentence_ends: list[int] | None = None
-    windows = []
-    for start in sorted(starts):
-        if final - start < settings["min_trajectory_chars"]:
-            break
-        boundaries = [start]
-        for _ in range(count):
-            position = boundaries[-1]
-            lower, upper = position + minimum, position + maximum
-            left = bisect_left(paragraph_ends, lower)
-            right = bisect_right(paragraph_ends, upper)
-            choices = paragraph_ends[left:right]
-            if not choices:
-                if sentence_ends is None:
-                    sentence_ends = []
-                    for sentence in sentence_spans(text):
-                        end = sentence.end
-                        while end < final and text[end].isspace():
-                            end += 1
-                        sentence_ends.append(end)
-                    sentence_ends = sorted(set(sentence_ends))
-                left = bisect_left(sentence_ends, lower)
-                right = bisect_right(sentence_ends, upper)
-                choices = sentence_ends[left:right]
-            if not choices:
-                break
-            boundaries.append(min(choices, key=lambda end: (abs(end - position - target), end)))
-        if len(boundaries) != count + 1:
-            continue
-        size = boundaries[-1] - start
-        if settings["min_trajectory_chars"] <= size <= settings["max_trajectory_chars"]:
-            windows.append(boundaries)
-    if not windows:
-        return None
-    boundaries = min(
-        windows,
-        key=lambda values: _order_key(seed, document_id, values[0], values[-1]),
-    )
-    start, end = boundaries[0], boundaries[-1]
+
+def _shingles(text: str, min_words: int) -> set[bytes]:
+    words = _WORDS.findall(text.casefold())
+    if len(words) < min_words:
+        return set()
     return {
-        "char_start": start,
-        "char_end": end,
-        "text": text[start:end],
-        "segments": [
-            {"segment_id": i + 1, "char_start": a - start, "char_end": b - start}
-            for i, (a, b) in enumerate(zip(boundaries[:-1], boundaries[1:], strict=True))
-        ],
+        hashlib.blake2b(" ".join(words[i : i + 5]).encode(), digest_size=8).digest()
+        for i in range(len(words) - 4)
     }
 
 
-def _validate_settings(source: dict, text: dict) -> None:
-    for name in (
-        "scan_document_limit",
-        "candidate_document_limit",
-        "trajectory_limit",
-        "dedup_batch_documents",
+def _prefix(values: set[bytes], frequency: Counter[bytes], threshold: float) -> list[bytes]:
+    ordered = sorted(values, key=lambda token: (frequency[token], token))
+    return ordered[: len(values) - math.ceil(threshold * len(values)) + 1]
+
+
+def _old_pool_matches(
+    files: list[Path],
+    data_seed: int,
+    old_pool_documents: int,
+    new_records: list[dict[str, Any]],
+    clusters: list[str],
+    recipe: PreparationConfig,
+) -> set[str]:
+    """Match old documents in bounded batches, then exclude entire new clusters.
+
+    The prefix index uses the same normalized word 5-grams and exact Jaccard
+    threshold as ``cluster_documents``. All new documents are clustered first,
+    so an old match also excludes new documents joined transitively to it.
+    """
+    if not new_records:
+        return set()
+
+    ids: dict[str, set[int]] = defaultdict(set)
+    urls: dict[str, set[int]] = defaultdict(set)
+    texts: dict[str, set[int]] = defaultdict(set)
+    shingle_sets = []
+    for index, record in enumerate(new_records):
+        normalized = _normalized_text(record)
+        ids[record["id"]].add(index)
+        urls[source_key(record["url"])].add(index)
+        texts[normalized].add(index)
+        shingle_sets.append(_shingles(normalized, recipe.near_duplicate_min_words))
+
+    frequency = Counter(token for values in shingle_sets for token in values)
+    postings: dict[bytes, list[int]] = defaultdict(list)
+    for index, values in enumerate(shingle_sets):
+        if values:
+            for token in _prefix(values, frequency, recipe.near_duplicate_threshold):
+                postings[token].append(index)
+
+    excluded: set[str] = set()
+    with closing(parquet_records(files, data_seed)) as old_records:
+        remaining = old_pool_documents
+        while remaining:
+            batch = list(itertools.islice(old_records, min(_OLD_BATCH_SIZE, remaining)))
+            if not batch:
+                raise ValueError("FineWeb ended before the old source pool was reconstructed")
+            remaining -= len(batch)
+            for old, _ in batch:
+                normalized = _normalized_text(old)
+                exact = set(ids.get(old["id"], ()))
+                exact.update(urls.get(source_key(old["url"]), ()))
+                exact.update(texts.get(normalized, ()))
+                excluded.update(clusters[index] for index in exact)
+
+                old_values = _shingles(normalized, recipe.near_duplicate_min_words)
+                if not old_values:
+                    continue
+                possible: set[int] = set()
+                for token in _prefix(old_values, frequency, recipe.near_duplicate_threshold):
+                    possible.update(postings.get(token, ()))
+                for index in possible:
+                    values = shingle_sets[index]
+                    if min(len(values), len(old_values)) < recipe.near_duplicate_threshold * max(
+                        len(values), len(old_values)
+                    ):
+                        continue
+                    overlap = len(values & old_values)
+                    if overlap >= recipe.near_duplicate_threshold * (
+                        len(values) + len(old_values) - overlap
+                    ):
+                        excluded.add(clusters[index])
+    return excluded
+
+
+def _window_cuts(text: str, document_id: str, seed: int, config: dict) -> list[int]:
+    """Sample bounded character lengths and an arbitrary start without rejection."""
+    rng = random.Random(_rank(seed, document_id))
+    minimum, maximum = config["min_segment_chars"], config["max_segment_chars"]
+    remaining = min(len(text), config["segments"] * maximum)
+    lengths = []
+    for count in range(config["segments"], 0, -1):
+        length = rng.randint(minimum, min(maximum, remaining - (count - 1) * minimum))
+        lengths.append(length)
+        remaining -= length
+    rng.shuffle(lengths)
+    start = rng.randint(0, len(text) - sum(lengths))
+    cuts = [start]
+    for length in lengths:
+        cuts.append(cuts[-1] + length)
+    return cuts
+
+
+def _validate_config(source: dict, window: dict) -> None:
+    for key in (
+        "file_count",
+        "old_pool_documents",
+        "scan_documents",
+        "max_train_inspections",
     ):
-        if type(source[name]) is not int or source[name] <= 0:
-            raise ValueError(f"source.{name} must be a positive integer")
-    if type(source["seed"]) is not int or source["seed"] < 0:
-        raise ValueError("source.seed must be a non-negative integer")
-    if source["split"] not in ("train", "dev", "test"):
-        raise ValueError("source.split must be train, dev or test")
-    for name in (
+        if type(source[key]) is not int or source[key] <= 0:
+            raise ValueError(f"source.{key} must be a positive integer")
+    for key in (
+        "count",
         "segments",
         "min_segment_chars",
-        "target_segment_chars",
         "max_segment_chars",
-        "min_trajectory_chars",
-        "max_trajectory_chars",
     ):
-        if type(text[name]) is not int or text[name] <= 0:
-            raise ValueError(f"text.{name} must be a positive integer")
-    if not text["min_segment_chars"] <= text["target_segment_chars"] <= text["max_segment_chars"]:
-        raise ValueError("segment character bounds must contain the target")
-    if not text["min_trajectory_chars"] <= text["max_trajectory_chars"]:
-        raise ValueError("invalid trajectory character bounds")
-
-
-def prepare_sources(config: dict) -> dict:
-    """Exclude the old candidate pool and freeze a bounded local QA document sample.
-
-    Two streaming reads avoid retaining the old pool in memory: first collect the
-    bounded continuation, then compare its clusters against batches of old records.
-    Every old record is excluded, so old-to-old cluster edges need not be materialized.
-    """
-    source, text_settings = config["source"], config["text"]
-    _validate_settings(source, text_settings)
-    report_path = Path(source["source_report"])
-    report = json.loads(report_path.read_text())
-    source_seed = report["source_seed"]
-    old_count = report["source_pool_candidates"]
-    files = [Path(source["raw_dir"]) / Path(path).name for path in report["source_files"]]
-    recipe = PreparationConfig()
-    split_fractions = (0.9, 0.05, 0.05)
-
-    located = []
-    with closing(parquet_records(files, source_seed)) as records:
-        skipped = sum(1 for _ in itertools.islice(records, old_count))
-        if skipped != old_count:
-            raise ValueError("source ends before the complete old candidate pool")
-        for record, location in itertools.islice(records, source["scan_document_limit"]):
-            located.append((_compact_record(record), location))
-    candidates = [record for record, _ in located]
-    print(
-        f"Collected {len(candidates)} new source documents after excluding the old {old_count}",
-        flush=True,
-    )
-    reasons = [
-        document_rejection_reason(record, recipe.min_document_chars) for record in candidates
-    ]
-    clusters = cluster_documents(candidates, recipe)
-
-    excluded_clusters = set()
-    if candidates:
-        with closing(parquet_records(files, source_seed)) as records:
-            remaining = old_count
-            while remaining:
-                batch = [
-                    _compact_record(record)
-                    for record, _ in itertools.islice(
-                        records, min(remaining, source["dedup_batch_documents"])
-                    )
-                ]
-                if not batch:
-                    raise ValueError("source ends before the complete old candidate pool")
-                combined = cluster_documents([*candidates, *batch], recipe)
-                old_clusters = set(combined[len(candidates) :])
-                excluded_clusters.update(
-                    cluster
-                    for cluster, joint in zip(clusters, combined[: len(candidates)], strict=True)
-                    if joint in old_clusters
-                )
-                remaining -= len(batch)
-                print(
-                    f"Compared old source pool: {old_count - remaining}/{old_count}; "
-                    f"excluded new clusters: {len(excluded_clusters)}",
-                    flush=True,
-                )
-
-    # Choose a representative after exclusions and basic checks, not by QA outcomes.
-    representatives = {}
-    for i in sorted(
-        range(len(candidates)),
-        key=lambda i: _order_key(source["seed"], candidates[i]["id"]),
+        if type(window[key]) is not int or window[key] <= 0:
+            raise ValueError(f"window.{key} must be a positive integer")
+    if set(window) != {"count", "segments", "min_segment_chars", "max_segment_chars"}:
+        raise ValueError("window requires count, segments and minimum/maximum segment characters")
+    if window["segments"] != 8 or window["min_segment_chars"] > window["max_segment_chars"]:
+        raise ValueError("window requires eight segments and ordered character bounds")
+    fractions = source["split_fractions"]
+    if (
+        len(fractions) != 3
+        or any(type(value) not in (int, float) or value <= 0 for value in fractions)
+        or not math.isclose(sum(fractions), 1.0)
     ):
-        if reasons[i] is None and clusters[i] not in excluded_clusters:
-            representatives.setdefault(clusters[i], i)
-    split_counts = Counter(
-        document_split(cluster, source_seed, split_fractions) for cluster in representatives
-    )
-    selected = [
-        i
-        for cluster, i in representatives.items()
-        if document_split(cluster, source_seed, split_fractions) == source["split"]
-    ][: source["candidate_document_limit"]]
+        raise ValueError(
+            "source.split_fractions must contain three positive fractions summing to one"
+        )
 
-    trajectories = []
-    window_failures: Counter[str] = Counter()
-    checked = 0
-    for i in selected:
-        checked += 1
-        record, location = located[i]
-        window = select_window(record["text"], record["id"], source["seed"], text_settings)
-        if window is None:
-            reason = (
-                "too_short"
-                if len(record["text"].strip()) < text_settings["min_trajectory_chars"]
-                else "no_legal_window"
-            )
-            window_failures[reason] += 1
+
+def prepare_selection(config: dict) -> dict:
+    """Freeze text-only train windows without a tokenizer or annotation requests."""
+    source, window = config["source"], config["window"]
+    _validate_config(source, window)
+    recipe = PreparationConfig(
+        near_duplicate_threshold=source["near_duplicate_threshold"],
+        near_duplicate_min_words=source["near_duplicate_min_words"],
+    )
+    raw_dir = Path(source["raw_dir"])
+    files = [raw_dir / f"{index:03d}_00000.parquet" for index in range(source["file_count"])]
+    missing = [path for path in files if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"FineWeb source file is missing: {missing[0]}")
+
+    with closing(parquet_records(files, source["data_seed"])) as records:
+        for _ in range(source["old_pool_documents"]):
+            if next(records, None) is None:
+                raise ValueError("FineWeb ended before the old source pool was reconstructed")
+        scanned = list(itertools.islice(records, source["scan_documents"]))
+
+    new_records = [record for record, _ in scanned]
+    reasons = [document_rejection_reason(record, 64) for record in new_records]
+    clusters = cluster_documents(new_records, recipe)
+    excluded_clusters = _old_pool_matches(
+        files,
+        source["data_seed"],
+        source["old_pool_documents"],
+        new_records,
+        clusters,
+        recipe,
+    )
+    statistics = {
+        "old_pool_documents": source["old_pool_documents"],
+        "scanned_documents": len(scanned),
+        "old_pool_duplicate_documents": 0,
+        "basic_rejected_documents": 0,
+        "within_scan_duplicate_documents": 0,
+        "non_train_documents": 0,
+        "train_candidates": 0,
+        "train_inspected": 0,
+        "length_failed": 0,
+        "frozen_documents": 0,
+    }
+    seen: set[str] = set()
+    train_candidates = []
+    for (record, location), cluster, reason in zip(scanned, clusters, reasons, strict=True):
+        if reason is not None:
+            statistics["basic_rejected_documents"] += 1
+        elif cluster in excluded_clusters:
+            statistics["old_pool_duplicate_documents"] += 1
+        elif cluster in seen:
+            statistics["within_scan_duplicate_documents"] += 1
+        else:
+            seen.add(cluster)
+            if (
+                document_split(cluster, source["data_seed"], tuple(source["split_fractions"]))
+                != "train"
+            ):
+                statistics["non_train_documents"] += 1
+                continue
+            train_candidates.append((record, location, cluster))
+    train_candidates.sort(
+        key=lambda item: (_rank(source["selection_seed"], item[0]["id"]), item[0]["id"])
+    )
+    statistics["train_candidates"] = len(train_candidates)
+
+    documents = []
+    for record, location, cluster in train_candidates[: source["max_train_inspections"]]:
+        if len(documents) == window["count"]:
+            break
+        statistics["train_inspected"] += 1
+        text = record["text"]
+        if len(text) < window["segments"] * window["min_segment_chars"]:
+            statistics["length_failed"] += 1
             continue
-        identity = _order_key(
-            source["seed"], record["id"], window["char_start"], window["char_end"]
-        ).hex()
-        trajectories.append(
+        cuts = _window_cuts(text, record["id"], source["selection_seed"], window)
+        start, end = cuts[0], cuts[-1]
+        trajectory_id = f"{record['id']}:{start}:{end}"
+        documents.append(
             {
-                "trajectory_id": f"fineweb-qa-{identity}",
+                "trajectory_id": trajectory_id,
                 "document_id": record["id"],
-                "dedup_cluster": clusters[i],
-                "split": source["split"],
+                "dedup_cluster": cluster,
+                "split": "train",
                 "source": {
-                    **location,
-                    "url": record["url"],
-                    "window_char_start": window["char_start"],
-                    "window_char_end": window["char_end"],
+                    "file": location["source_file"],
+                    "row_group": location["row_group"],
+                    "row_index": location["row_index"],
                 },
-                "text": window["text"],
-                "segments": window["segments"],
+                "window_char_span": [start, end],
+                "text": text[start:end],
+                "segments": [
+                    {
+                        "segment_id": f"seg{index}",
+                        "char_span": [cuts[index] - start, cuts[index + 1] - start],
+                    }
+                    for index in range(window["segments"])
+                ],
             }
         )
-        if len(trajectories) == source["trajectory_limit"]:
-            break
-
-    return {
-        "trajectories": trajectories,
-        "statistics": {
-            "old_pool_documents_excluded": old_count,
-            "new_documents_scanned": len(candidates),
-            "new_clusters": len(set(clusters)),
-            "new_clusters_matching_old_pool": len(excluded_clusters),
-            "new_documents_matching_old_pool": sum(c in excluded_clusters for c in clusters),
-            "basic_rejections": dict(Counter(reason for reason in reasons if reason is not None)),
-            "eligible_clusters_by_split": dict(split_counts),
-            "candidate_documents_selected": len(selected),
-            "window_documents_checked": checked,
-            "window_failures": dict(window_failures),
-            "frozen_trajectories": len(trajectories),
-            "trajectory_shortfall": source["trajectory_limit"] - len(trajectories),
-        },
-        "source_provenance": {
-            "source_report": str(report_path),
-            "source_files": [str(path) for path in files],
-            "source_seed": source_seed,
-            "split_fractions": list(split_fractions),
-            "selection_seed": source["seed"],
-            "old_candidate_pool_size": old_count,
-            "exclusion_scope": "entire_old_candidate_pool_and_matching_new_clusters",
-            "exclusion_reason": "actual_prepared_document_ids_unavailable_locally",
-            "scan_document_limit": source["scan_document_limit"],
-            "candidate_document_limit": source["candidate_document_limit"],
-            "dedup_batch_documents": source["dedup_batch_documents"],
-            "near_duplicate_threshold": recipe.near_duplicate_threshold,
-            "near_duplicate_min_words": recipe.near_duplicate_min_words,
-            "boundary_method": "paragraph_then_pysbd_conservative",
-            "length_unit": "python_characters",
-        },
-    }
+    statistics["train_uninspected"] = len(train_candidates) - statistics["train_inspected"]
+    statistics["frozen_documents"] = len(documents)
+    return {"documents": documents, "statistics": statistics}
