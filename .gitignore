@@ -11,6 +11,7 @@ models/
 checkpoints/
 artifacts/
 notes/
+docs/
 reports/generated/
 
 *.pt
