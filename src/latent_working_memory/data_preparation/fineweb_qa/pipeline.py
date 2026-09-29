@@ -22,6 +22,7 @@ from latent_working_memory.data_preparation.fineweb_qa.annotation import (
     REVIEW_SCHEMA,
     STAGES,
     AnnotationClient,
+    ContentFilteredError,
     locate_candidates,
 )
 from latent_working_memory.data_preparation.fineweb_qa.diagnostics import (
@@ -146,6 +147,37 @@ def _check_decisions(output: dict, qa_ids: list[str], stage: str) -> list[dict]:
 
 def _document_result_path(root: Path, index: int) -> Path:
     return root / "documents" / f"doc-{index:03d}.json"
+
+
+def _document_failures(root: Path, documents: list[dict]) -> dict[int, dict]:
+    failures = {}
+    for path in sorted((root / "failed-documents").glob("doc-*.json")):
+        failure = _load_json(path)
+        index = failure["document_index"]
+        if failure["trajectory_id"] != documents[index]["trajectory_id"]:
+            raise ValueError("failed document differs from frozen selection")
+        failures[index] = failure
+    return failures
+
+
+def _record_content_filter(
+    root: Path, index: int, document: dict, phase: str, error: ContentFilteredError
+) -> dict:
+    path = root / "failed-documents" / f"doc-{index:03d}.json"
+    if path.exists():
+        return _load_json(path)
+    failure = {
+        "document_index": index,
+        "trajectory_id": document["trajectory_id"],
+        "reason": "content_filtered",
+        "phase": phase,
+        "stage": error.stage,
+        "request_id": error.request_id,
+        "raw_response_path": error.raw_response_path,
+        "at": _now(),
+    }
+    _save_json(path, failure)
+    return failure
 
 
 def _run_round(
@@ -336,6 +368,9 @@ def _annotate_one(
     client: AnnotationClient,
 ) -> dict:
     path = _document_result_path(root, index)
+    failed_path = root / "failed-documents" / f"doc-{index:03d}.json"
+    if failed_path.exists():
+        return _load_json(failed_path)
     if path.exists():
         result = _load_json(path)
         if result["trajectory_id"] != document["trajectory_id"]:
@@ -359,6 +394,10 @@ def _annotate_one(
             _save_json(path, result)
         (path.parent / f"doc-{index:03d}.error.json").unlink(missing_ok=True)
         return result
+    except ContentFilteredError as error:
+        failure = _record_content_filter(root, index, document, "annotate", error)
+        (path.parent / f"doc-{index:03d}.error.json").unlink(missing_ok=True)
+        return failure
     except Exception as error:
         client.stop.set()
         _save_json(
@@ -370,10 +409,11 @@ def _annotate_one(
 
 def _document_results(root: Path, documents: list[dict], require_all: bool = False) -> list[dict]:
     results = []
+    failures = _document_failures(root, documents)
     for index, document in enumerate(documents):
         path = _document_result_path(root, index)
         if not path.exists():
-            if require_all:
+            if require_all and index not in failures:
                 raise FileNotFoundError(f"document {index} has not been annotated")
             continue
         result = _load_json(path)
@@ -382,7 +422,7 @@ def _document_results(root: Path, documents: list[dict], require_all: bool = Fal
             or result["trajectory_id"] != document["trajectory_id"]
         ):
             raise ValueError(f"annotated document {index} does not match frozen selection")
-        if require_all and not result["finished"]:
+        if require_all and not result["finished"] and index not in failures:
             raise ValueError(f"document {index} annotation is incomplete; resume annotate first")
         results.append(result)
     return results
@@ -399,6 +439,7 @@ def _request_statistics(
             "network_attempts": 0,
             "cache_hits": 0,
             "failed_calls": 0,
+            "content_filtered_calls": 0,
             "network_seconds": 0.0,
             "input_tokens": 0,
             "output_tokens": 0,
@@ -419,6 +460,7 @@ def _request_statistics(
         stage["network_attempts"] += record["network_attempts"]
         stage["cache_hits"] += bool(record["cache_hit"])
         stage["failed_calls"] += not record["ok"]
+        stage["content_filtered_calls"] += record.get("failure_reason") == "content_filtered"
         stage["network_seconds"] += record["network_seconds"]
         if "request_id" in record:
             key = (record["stage"], record["request_id"])
@@ -480,10 +522,15 @@ def _round_summary(results: list[dict]) -> dict:
 
 def _annotation_summary(root: Path, documents: list[dict]) -> dict:
     results = _document_results(root, documents)
+    failures = _document_failures(root, documents)
     return {
         "frozen_documents": len(documents),
         "annotated_documents": sum(result["finished"] for result in results),
-        "incomplete_documents": sum(not result["finished"] for result in results),
+        "content_filtered_documents": len(failures),
+        "incomplete_documents": sum(
+            not result["finished"] and result["document_index"] not in failures
+            for result in results
+        ),
         "complete_quota_documents": sum(result["assembly"]["ok"] for result in results),
         "generated_candidates": sum(
             segment["generated_count"]
@@ -537,6 +584,9 @@ def annotate(config: dict, limit: int | None = None) -> dict:
             for future in completed:
                 try:
                     result = future.result()
+                    if result.get("reason") == "content_filtered":
+                        print(json.dumps(result, ensure_ascii=False), flush=True)
+                        continue
                     print(
                         json.dumps(
                             {
@@ -580,8 +630,16 @@ def diagnose(config: dict) -> dict:
     root, prompts = _batch(config)
     documents = _selection(root)["documents"]
     results = _document_results(root, documents, require_all=True)
+    document_failures = _document_failures(root, documents)
     panel = select_review_panel(
-        documents, results, config["review"]["qas_per_segment"], config["review"]["seed"]
+        documents,
+        [
+            r
+            for r in results
+            if document_failures.get(r["document_index"], {}).get("phase") != "annotate"
+        ],
+        config["review"]["qas_per_segment"],
+        config["review"]["seed"],
     )
     panel_path = root / "diagnostic-panel.json"
     if panel_path.exists():
@@ -610,7 +668,7 @@ def diagnose(config: dict) -> dict:
     started = time.perf_counter()
     with ThreadPoolExecutor(max_workers=config["annotation"]["concurrency"]) as pool:
         cursor = 0
-        futures = set()
+        futures = {}
         while futures or (cursor < len(pending) and not client.stop.is_set()):
             while (
                 cursor < len(pending)
@@ -618,25 +676,39 @@ def diagnose(config: dict) -> dict:
                 and not client.stop.is_set()
             ):
                 qa, condition = pending[cursor]
-                futures.add(pool.submit(_answer_one, client, qa, condition))
                 cursor += 1
+                if qa["document_index"] in document_failures:
+                    continue
+                futures[pool.submit(_answer_one, client, qa, condition)] = qa["document_index"]
             if not futures:
                 break
-            completed, futures = wait(futures, return_when=FIRST_COMPLETED)
+            completed, _ = wait(futures, return_when=FIRST_COMPLETED)
             for future in completed:
+                index = futures.pop(future)
                 try:
                     qa_id, condition, answer = future.result()
                     answers.setdefault(qa_id, {})[condition] = answer
                     _save_json(answer_path, answers)
+                except ContentFilteredError as error:
+                    document_failures[index] = _record_content_filter(
+                        root, index, documents[index], "diagnose", error
+                    )
                 except Exception as error:
                     client.stop.set()
                     failures.append(error)
     if failures:
         raise RuntimeError(f"diagnosis stopped after a fatal error: {failures[0]}") from failures[0]
-    scores = score_answers(panel, answers)
+    excluded = {
+        index
+        for index, failure in document_failures.items()
+        if failure["phase"] in ("annotate", "diagnose")
+    }
+    scored_panel = [qa for qa in panel if qa["document_index"] not in excluded]
+    scores = score_answers(scored_panel, {qa["qa_id"]: answers[qa["qa_id"]] for qa in scored_panel})
     diagnostics = {
         "completed_at": _now(),
         "panel_qa_ids": [qa["qa_id"] for qa in panel],
+        "excluded_panel_qa_ids": [qa["qa_id"] for qa in panel if qa["document_index"] in excluded],
         "scores": scores,
         "requests": _request_statistics(root),
         "elapsed_this_run_seconds": time.perf_counter() - started,
@@ -644,11 +716,13 @@ def diagnose(config: dict) -> dict:
     _save_json(root / "diagnostics.json", diagnostics)
     materials = []
     coverage = []
-    for index, (document, result) in enumerate(zip(documents, results, strict=True)):
+    by_index = {r["document_index"]: r for r in results}
+    for index, document in enumerate(documents):
         assigned = [qa for qa in panel if qa["document_index"] == index]
-        path = root / "review-inputs" / f"doc-{index:03d}.json"
-        _save_json(path, review_material(document, index, result, assigned, answers))
-        materials.append(str(path))
+        if index not in document_failures:
+            path = root / "review-inputs" / f"doc-{index:03d}.json"
+            _save_json(path, review_material(document, index, by_index[index], assigned, answers))
+            materials.append(str(path))
         sampled = {qa["segment_id"] for qa in assigned}
         coverage.append(
             {
@@ -656,6 +730,7 @@ def diagnose(config: dict) -> dict:
                 "split": document["split"],
                 "segment_count": len(document["segments"]),
                 "sampled_qas": len(assigned),
+                "content_filtered": index in excluded,
                 "empty_segments": [
                     seg["segment_id"]
                     for seg in document["segments"]
@@ -667,6 +742,8 @@ def diagnose(config: dict) -> dict:
     return {
         "stage": "diagnose",
         "panel_count": len(panel),
+        "scored_panel_count": len(scored_panel),
+        "content_filtered_documents": len(excluded),
         "evidence": scores["evidence"],
         "question_only": scores["question_only"],
         "review_inputs": materials,
@@ -729,6 +806,9 @@ def _review_document(
         _save_json(folder / "resolved.json", resolved)
         (folder / "error.json").unlink(missing_ok=True)
         return resolved
+    except ContentFilteredError:
+        (folder / "error.json").unlink(missing_ok=True)
+        raise
     except Exception as error:
         client.stop.set()
         _save_json(
@@ -742,6 +822,8 @@ def review(config: dict) -> dict:
     root, prompts = _batch(config)
     documents = _selection(root)["documents"]
     results = _document_results(root, documents, require_all=True)
+    by_index = {r["document_index"]: r for r in results}
+    document_failures = _document_failures(root, documents)
     panel = _load_json(root / "diagnostic-panel.json")
     diagnostics = _load_json(root / "diagnostics.json")
     if diagnostics["panel_qa_ids"] != [qa["qa_id"] for qa in panel]:
@@ -750,7 +832,7 @@ def review(config: dict) -> dict:
     decisions = []
     # Submit at most concurrency documents, so fatal errors stop future dispatch.
     with ThreadPoolExecutor(max_workers=config["annotation"]["concurrency"]) as pool:
-        cursor, futures = 0, set()
+        cursor, futures = 0, {}
         while futures or (cursor < len(documents) and not client.stop.is_set()):
             while (
                 cursor < len(documents)
@@ -758,25 +840,38 @@ def review(config: dict) -> dict:
                 and not client.stop.is_set()
             ):
                 index = cursor
+                cursor += 1
+                if index in document_failures and document_failures[index]["phase"] != "finalize":
+                    continue
                 material = _load_json(root / "review-inputs" / f"doc-{index:03d}.json")
                 expected = [qa["qa_id"] for qa in panel if qa["document_index"] == index]
                 if [qa["qa_id"] for qa in material["qas"]] != expected:
                     raise ValueError("review input differs from the fixed panel")
-                futures.add(
+                futures[
                     pool.submit(
                         _review_document,
                         documents[index],
-                        results[index],
+                        by_index[index],
                         material,
                         client,
                         root / "reviews" / f"doc-{index:03d}",
                         {"phase": "review", "trajectory_id": documents[index]["trajectory_id"]},
                     )
-                )
-                cursor += 1
-            completed, futures = wait(futures, return_when=FIRST_COMPLETED)
+                ] = index
+            if not futures:
+                break
+            completed, _ = wait(futures, return_when=FIRST_COMPLETED)
             for future in completed:
-                decisions.extend(future.result()["decisions"])
+                index = futures.pop(future)
+                try:
+                    decisions.extend(future.result()["decisions"])
+                except ContentFilteredError as error:
+                    document_failures[index] = _record_content_filter(
+                        root, index, documents[index], "review", error
+                    )
+    frozen_panel_count = len(panel)
+    excluded = {i for i, f in document_failures.items() if f["phase"] != "finalize"}
+    panel = [qa for qa in panel if qa["document_index"] not in excluded]
     by_id = validate_resolved_reviews(panel, {"decisions": decisions})
     resolved = {"decisions": [by_id[qa["qa_id"]] for qa in panel]}
     path = root / "resolved-review.json"
@@ -790,6 +885,8 @@ def review(config: dict) -> dict:
     summary = {
         "stage": "review",
         "reviewed_qas": len(decisions),
+        "content_filtered_documents": len(excluded),
+        "excluded_panel_qas": frozen_panel_count - len(panel),
         "rejected_qas": sum(not d["accepted"] for d in decisions),
         "evidence_semantic_correct": sum(d["evidence_prediction_correct"] for d in decisions),
         "requests": _request_statistics(root),
@@ -945,6 +1042,9 @@ def _finalize_one(
             ]
             result["finished"] = False
             _save_json(path, result)
+    except ContentFilteredError:
+        (path.parent / f"doc-{index:03d}.error.json").unlink(missing_ok=True)
+        raise
     except Exception as error:
         client.stop.set()
         _save_json(
@@ -963,11 +1063,15 @@ def finalize(config: dict) -> dict:
     diagnostics = _load_json(root / "diagnostics.json")
     panel = _load_json(root / "diagnostic-panel.json")
     resolved = _load_json(root / "resolved-review.json")
+    if diagnostics["panel_qa_ids"] != [qa["qa_id"] for qa in panel]:
+        raise ValueError("diagnostics and resolved review refer to different panels")
+    document_failures = _document_failures(root, documents)
+    frozen_panel_count = len(panel)
+    excluded = {i for i, f in document_failures.items() if f["phase"] != "finalize"}
+    panel = [qa for qa in panel if qa["document_index"] not in excluded]
     resolved_by_id = validate_resolved_reviews(panel, resolved)
     if any(decision["evidence_prediction_correct"] is None for decision in resolved_by_id.values()):
         raise ValueError("every sampled evidence answer needs a semantic review decision")
-    if diagnostics["panel_qa_ids"] != [qa["qa_id"] for qa in panel]:
-        raise ValueError("diagnostics and resolved review refer to different panels")
 
     # Validate review membership against the original panel pool, before supplementation.
     original_decisions = {
@@ -981,23 +1085,54 @@ def finalize(config: dict) -> dict:
     final_results = []
     completed_results = []
     trajectories = []
-    for index, (document, result) in enumerate(zip(documents, results, strict=True)):
-        local_ids = {qa["qa_id"] for qa in result["local_candidates"]}
-        reviewed = _finalize_one(
-            index,
-            document,
-            result,
-            {key: value for key, value in resolved_by_id.items() if key in local_ids},
-            config,
-            root,
-            client,
-        )
+    by_index = {r["document_index"]: r for r in results}
+    for index, document in enumerate(documents):
+        if index not in document_failures:
+            result = by_index[index]
+            local_ids = {qa["qa_id"] for qa in result["local_candidates"]}
+            try:
+                reviewed = _finalize_one(
+                    index,
+                    document,
+                    result,
+                    {key: value for key, value in resolved_by_id.items() if key in local_ids},
+                    config,
+                    root,
+                    client,
+                )
+            except ContentFilteredError as error:
+                document_failures[index] = _record_content_filter(
+                    root, index, document, "finalize", error
+                )
+        if index in document_failures:
+            # Preserve completed rounds for accounting, but never publish a filtered document.
+            saved = root / "reviewed-documents" / f"doc-{index:03d}.json"
+            previous = _load_json(saved) if saved.exists() else by_index.get(index)
+            if previous is not None:
+                completed_results.append(previous)
+            final = {
+                "document_index": index,
+                "trajectory_id": document["trajectory_id"],
+                "split": document["split"],
+                "segment_count": len(document["segments"]),
+                "complete_quota": False,
+                "failure_reason": "content_filtered",
+                "supplement_reviewed_qas": sum(
+                    len(r["qa_ids"]) for r in previous.get("supplement_reviews", [])
+                )
+                if previous
+                else 0,
+            }
+            _save_json(root / "final-documents" / f"doc-{index:03d}.json", final)
+            final_results.append(final)
+            continue
         completed_results.append(reviewed)
         assembly = reviewed["assembly"]
         final = {
             "document_index": index,
             "trajectory_id": document["trajectory_id"],
             "complete_quota": assembly["ok"],
+            "failure_reason": None if assembly["ok"] else "quota_shortfall",
             "split": document["split"],
             "segment_count": len(document["segments"]),
             "supplement_reviewed_qas": sum(
@@ -1031,17 +1166,24 @@ def finalize(config: dict) -> dict:
     )
     summary = {
         "frozen_documents": len(documents),
-        "annotated_documents": len(results),
+        "annotated_documents": sum(result["finished"] for result in results),
         "complete_quota_documents_before_review": sum(
             result["assembly"]["ok"] for result in results
         ),
         "complete_quota_documents_after_review": len(trajectories),
+        "content_filtered_documents": len(document_failures),
+        "quota_failed_documents": sum(
+            d["failure_reason"] == "quota_shortfall" for d in final_results
+        ),
         "trajectory_success_rate": len(trajectories) / len(documents) if documents else None,
         "final_qas": sum(len(trajectory["qas"]) for trajectory in trajectories),
         "by_split": {
             split: {
                 "frozen_documents": sum(d["split"] == split for d in documents),
                 "complete_documents": sum(d["split"] == split for d in trajectories),
+                "content_filtered_documents": sum(
+                    documents[i]["split"] == split for i in document_failures
+                ),
                 "qas": sum(len(d["qas"]) for d in trajectories if d["split"] == split),
             }
             for split in ("train", "dev", "test")
@@ -1050,11 +1192,15 @@ def finalize(config: dict) -> dict:
             str(n): {
                 "frozen_documents": sum(len(d["segments"]) == n for d in documents),
                 "complete_documents": sum(len(d["segments"]) == n for d in trajectories),
+                "content_filtered_documents": sum(
+                    len(documents[i]["segments"]) == n for i in document_failures
+                ),
             }
             for n in sorted({len(d["segments"]) for d in documents})
         },
         "supplement_reviewed_qas": sum(d["supplement_reviewed_qas"] for d in final_results),
         "review_panel_qas": len(panel),
+        "frozen_panel_qas": frozen_panel_count,
         "review_rejected_qas": sum(not decision["accepted"] for decision in review_decisions),
         "review_same_fact_links": sum(
             len(decision["same_fact_with"]) for decision in review_decisions
@@ -1094,6 +1240,7 @@ def finalize(config: dict) -> dict:
         "request_statistics": request_stats,
         "summary": summary,
         "documents": final_results,
+        "document_failures": list(document_failures.values()),
         "artifacts_dir": str(root),
         "software": {
             "python": platform.python_version(),

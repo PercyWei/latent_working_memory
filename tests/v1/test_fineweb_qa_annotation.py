@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
+from pathlib import Path
 import hashlib
 import json
 import threading
@@ -382,3 +383,99 @@ def test_supplement_round_identity_and_usage_survive_cached_replays(
     assert usage["input_tokens"] == 31 and usage["output_tokens"] == 7
     all_usage = pipeline._request_statistics(root)["generate"]
     assert all_usage["input_tokens"] == 93 and all_usage["output_tokens"] == 21
+
+
+def test_content_filter_is_cached_document_failure_and_does_not_stop_other_requests(
+    tmp_path, monkeypatch, client_config, prompts
+):
+    sends = []
+    blocked = json.loads(response_bytes({"answer": "partial"}))
+    blocked.update(status="incomplete", incomplete_details={"reason": "content_filter"})
+    blocked["output"][0]["content"][0]["text"] = '{"answer":"unfinished'
+    raw = json.dumps(blocked).encode()
+
+    def send(self, payload):
+        sends.append(payload)
+        return 200, raw if len(sends) == 1 else response_bytes({"answer": "Oslo"})
+
+    monkeypatch.setattr(annotation.AnnotationClient, "_send", send)
+    cache, root = tmp_path / "cache", tmp_path / "batch"
+    for _ in range(2):
+        client = annotation.AnnotationClient(client_config, root, cache, prompts)
+        with pytest.raises(annotation.ContentFilteredError) as caught:
+            client.call("answer", {"question": "Filtered question"}, annotation.ANSWER_SCHEMA)
+        assert caught.value.stage == "answer"
+        assert Path(caught.value.raw_response_path).read_bytes() == raw
+        assert not client.stop.is_set()
+    assert len(sends) == 1
+    assert not list(cache.glob("*/*/parsed.json"))
+    assert client.call(
+        "answer", {"question": "A different document"}, annotation.ANSWER_SCHEMA
+    ) == {"answer": "Oslo"}
+    logs = [json.loads(line) for line in (root / "requests.jsonl").read_text().splitlines()]
+    assert logs[0]["failure_reason"] == logs[1]["failure_reason"] == "content_filtered"
+    assert logs[1]["cache_source"] == "raw" and logs[1]["network_attempts"] == 0
+    assert logs[0]["usage"] == logs[1]["usage"] == blocked["usage"]
+    usage = pipeline._request_statistics(root)["answer"]
+    assert usage["content_filtered_calls"] == 2
+    assert usage["input_tokens"] == 62 and usage["output_tokens"] == 14
+
+
+@pytest.mark.parametrize("reason", ["max_output_tokens", "unknown"])
+def test_other_incomplete_responses_remain_fatal(
+    tmp_path, monkeypatch, client_config, prompts, reason
+):
+    raw = json.loads(response_bytes({"answer": "partial"}))
+    raw.update(status="incomplete", incomplete_details={"reason": reason})
+    monkeypatch.setattr(
+        annotation.AnnotationClient, "_send", lambda *_: (200, json.dumps(raw).encode())
+    )
+    client = annotation.AnnotationClient(
+        client_config, tmp_path / "batch", tmp_path / "cache", prompts
+    )
+    with pytest.raises(ValueError, match="not completed"):
+        client.call("answer", {"question": "Question"}, annotation.ANSWER_SCHEMA)
+    assert client.stop.is_set()
+
+
+def test_filtered_response_log_write_error_remains_fatal(
+    tmp_path, monkeypatch, client_config, prompts
+):
+    raw = json.loads(response_bytes({"answer": "partial"}))
+    raw.update(status="incomplete", incomplete_details={"reason": "content_filter"})
+    monkeypatch.setattr(
+        annotation.AnnotationClient, "_send", lambda *_: (200, json.dumps(raw).encode())
+    )
+    client = annotation.AnnotationClient(
+        client_config, tmp_path / "batch", tmp_path / "cache", prompts
+    )
+
+    def fail_log(record):
+        raise OSError("request log write failed")
+
+    monkeypatch.setattr(client, "_append_log", fail_log)
+    with pytest.raises(OSError, match="request log write failed"):
+        client.call("answer", {"question": "Question"}, annotation.ANSWER_SCHEMA)
+    assert client.stop.is_set()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("model", "wrong-model"), ("reasoning", {"effort": "low"}), ("usage", "invalid")],
+)
+def test_filter_does_not_hide_invalid_response_contract(
+    tmp_path, monkeypatch, client_config, prompts, field, value
+):
+    raw = json.loads(response_bytes({"answer": "partial"}))
+    raw.update(status="incomplete", incomplete_details={"reason": "content_filter"})
+    raw[field] = value
+    monkeypatch.setattr(
+        annotation.AnnotationClient, "_send", lambda *_: (200, json.dumps(raw).encode())
+    )
+    client = annotation.AnnotationClient(
+        client_config, tmp_path / "batch", tmp_path / "cache", prompts
+    )
+    with pytest.raises(ValueError) as caught:
+        client.call("answer", {"question": "Question"}, annotation.ANSWER_SCHEMA)
+    assert not isinstance(caught.value, annotation.ContentFilteredError)
+    assert client.stop.is_set()

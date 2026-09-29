@@ -159,6 +159,16 @@ def _validate_schema(value: Any, schema: dict, path: str = "$") -> None:
         raise ValueError(f"{path} is outside enum")
 
 
+class ContentFilteredError(ValueError):
+    """An explicit provider filter excludes one document, without retrying its output."""
+
+    def __init__(self, stage: str, request_id: str, raw_response_path: str) -> None:
+        super().__init__("Responses output was blocked by content_filter")
+        self.stage = stage
+        self.request_id = request_id
+        self.raw_response_path = raw_response_path
+
+
 class AnnotationClient:
     """Share completed requests across batches while logging each batch's actual use."""
 
@@ -228,6 +238,10 @@ class AnnotationClient:
             record["request_id"] = request_id
             result = self._cached_call(payload, schema, request_id, record)
             record["ok"] = True
+        except ContentFilteredError as exc:
+            record["failure_reason"] = "content_filtered"
+            record["error"] = f"{type(exc).__name__}: {exc}"
+            error = exc
         except Exception as exc:
             self.stop.set()
             record["error"] = f"{type(exc).__name__}: {exc}"
@@ -238,7 +252,7 @@ class AnnotationClient:
             self._append_log(record)
         except Exception as log_error:
             self.stop.set()
-            if error is None:
+            if error is None or isinstance(error, ContentFilteredError):
                 raise
             error.add_note(f"request log write also failed: {log_error}")
         if error is not None:
@@ -283,6 +297,8 @@ class AnnotationClient:
                 fcntl.flock(handle, fcntl.LOCK_EX)
                 try:
                     return self._locked_call(folder, payload, schema, record)
+                except ContentFilteredError:
+                    raise
                 except Exception:
                     self.stop.set()
                     raise
@@ -306,7 +322,8 @@ class AnnotationClient:
             record.update(cache_hit=True, cache_source="parsed")
             return parsed
         if raw_file.exists():
-            parsed, usage = self._parse_response(raw_file.read_bytes(), schema)
+            record.update(cache_hit=True, cache_source="raw")
+            parsed, usage = self._parse_response(raw_file.read_bytes(), schema, record, raw_file)
             _atomic_write_json(parsed_file, parsed)
             record.update(cache_hit=True, cache_source="raw", usage=usage)
             return parsed
@@ -379,7 +396,7 @@ class AnnotationClient:
                     )
                     _atomic_write_json(attempt_file, metadata)
                     _atomic_write(raw_file, raw)
-                    parsed, usage = self._parse_response(raw, schema)
+                    parsed, usage = self._parse_response(raw, schema, record, raw_file)
                     _atomic_write_json(parsed_file, parsed)
                     record["usage"] = usage
                     return parsed
@@ -401,14 +418,27 @@ class AnnotationClient:
         ) as response:
             return response.status, response.read()
 
-    def _parse_response(self, raw: bytes, schema: dict) -> tuple[dict, dict | None]:
+    def _parse_response(
+        self, raw: bytes, schema: dict, record: dict, raw_path: Path
+    ) -> tuple[dict, dict | None]:
         data = json.loads(raw.decode("utf-8"))
-        if not isinstance(data, dict) or data.get("status") != "completed":
+        if not isinstance(data, dict):
             raise ValueError("Responses result was not completed")
+        usage = data.get("usage")
+        if usage is not None and not isinstance(usage, dict):
+            raise ValueError("Responses usage must be an object when present")
+        record["usage"] = usage
         if data.get("model") != self.config["model"]:
             raise ValueError("Responses model differs from selected model")
         if (data.get("reasoning") or {}).get("effort") != self.config["reasoning_effort"]:
             raise ValueError("Responses reasoning effort differs from selected effort")
+        if (
+            data.get("status") == "incomplete"
+            and (data.get("incomplete_details") or {}).get("reason") == "content_filter"
+        ):
+            raise ContentFilteredError(record["stage"], record["request_id"], str(raw_path))
+        if data.get("status") != "completed":
+            raise ValueError("Responses result was not completed")
         output = data.get("output")
         if not isinstance(output, list):
             raise ValueError("Responses output is missing")
@@ -423,9 +453,6 @@ class AnnotationClient:
             raise ValueError("Responses final output_text is missing")
         parsed = json.loads("".join(pieces))
         _validate_schema(parsed, schema)
-        usage = data.get("usage")
-        if usage is not None and not isinstance(usage, dict):
-            raise ValueError("Responses usage must be an object when present")
         return parsed, usage
 
     def _previous_attempts(self, folder: Path) -> list[dict]:

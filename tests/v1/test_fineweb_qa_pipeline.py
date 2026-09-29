@@ -688,3 +688,168 @@ def test_valid_manual_resolution_is_allowed_before_but_not_after_finalization(
     path.write_text(json.dumps(resolved))
     with pytest.raises(ValueError, match="after finalization started"):
         pipeline.review(config)
+
+
+@pytest.mark.parametrize("filtered_stage", PROMPT_STAGES)
+def test_filtered_document_is_excluded_across_stages_and_resume(
+    tmp_path, monkeypatch, filtered_stage
+):
+    config = _config(tmp_path)
+    config["annotation"]["concurrency"] = 1
+    selection = _selection(6)
+    selection["documents"] += [
+        _selection(6, split, i)["documents"][0] for i, split in [(1, "dev"), (2, "test")]
+    ]
+    original = FakeAnnotationClient.call
+    blocked = []
+
+    def call(self, stage, content, schema):
+        if stage == filtered_stage and not blocked:
+            blocked.append(stage)
+            raise pipeline.ContentFilteredError(
+                stage, "filtered-request", "cache/response.raw.json"
+            )
+        result = original(self, stage, content, schema)
+        if filtered_stage == "adjudicate" and stage == "review":
+            result["decisions"][0]["reason"] = "Check this proposal"
+        return result
+
+    FakeAnnotationClient.calls = []
+    monkeypatch.setattr(pipeline, "prepare_selection", lambda _: selection)
+    monkeypatch.setattr(pipeline, "AnnotationClient", FakeAnnotationClient)
+    monkeypatch.setattr(FakeAnnotationClient, "call", call)
+    pipeline.prepare(config)
+    pipeline.annotate(config)
+    diagnosis = pipeline.diagnose(config)
+    review = pipeline.review(config)
+    final = pipeline.finalize(config)
+    root = tmp_path / "artifacts"
+    failure = json.loads((root / "failed-documents/doc-000.json").read_text())
+    assert failure["reason"] == "content_filtered" and failure["stage"] == filtered_stage
+    assert failure["request_id"] == "filtered-request"
+    assert final["summary"]["frozen_documents"] == 3
+    assert final["summary"]["content_filtered_documents"] == 1
+    assert final["summary"]["complete_quota_documents_after_review"] == 2
+    assert final["summary"]["quota_failed_documents"] == 0
+    assert final["summary"]["trajectory_success_rate"] == 2 / 3
+    assert final["summary"]["by_split"]["train"]["content_filtered_documents"] == 1
+    assert (tmp_path / "dataset/train.jsonl").read_text() == ""
+    assert final["summary"]["final_qas"] == 96
+    assert (
+        len(json.loads((tmp_path / "dataset/preparation.json").read_text())["document_failures"])
+        == 1
+    )
+    if filtered_stage == "answer":
+        assert diagnosis["panel_count"] == 18 and diagnosis["scored_panel_count"] == 12
+        assert (
+            len(json.loads((root / "diagnostics.json").read_text())["excluded_panel_qa_ids"]) == 6
+        )
+    if filtered_stage in ("review", "adjudicate"):
+        assert review["excluded_panel_qas"] == 6 and review["reviewed_qas"] == 12
+    before = len(FakeAnnotationClient.calls)
+    for stage in (pipeline.annotate, pipeline.diagnose, pipeline.review, pipeline.finalize):
+        stage(config)
+    assert len(FakeAnnotationClient.calls) == before
+    assert json.loads((root / "failed-documents/doc-000.json").read_text()) == failure
+
+
+@pytest.mark.parametrize("filtered_stage", PROMPT_STAGES)
+def test_content_filter_during_final_supplement_excludes_whole_document(
+    tmp_path, monkeypatch, filtered_stage
+):
+    config = _config(tmp_path)
+    config["annotation"]["concurrency"] = 1
+    selection = _selection(6)
+    selection["documents"] += _selection(8, "test", 1)["documents"]
+    FakeAnnotationClient.calls = []
+    monkeypatch.setattr(pipeline, "prepare_selection", lambda _: selection)
+    monkeypatch.setattr(pipeline, "AnnotationClient", FakeAnnotationClient)
+    pipeline.prepare(config)
+    pipeline.annotate(config)
+    pipeline.diagnose(config)
+    root = tmp_path / "artifacts"
+    panel = json.loads((root / "diagnostic-panel.json").read_text())
+    _write_resolved_review(root, panel, panel[0]["qa_id"])
+    original = FakeAnnotationClient.call
+    blocked = []
+
+    def call(self, stage, content, schema):
+        if stage == filtered_stage and not blocked:
+            blocked.append(stage)
+            raise pipeline.ContentFilteredError(
+                stage, "supplement-filtered", "cache/response.raw.json"
+            )
+        result = original(self, stage, content, schema)
+        if filtered_stage == "adjudicate" and stage == "review":
+            result["decisions"][0]["reason"] = "Check this proposal"
+        return result
+
+    monkeypatch.setattr(FakeAnnotationClient, "call", call)
+    final = pipeline.finalize(config)
+    assert final["summary"]["content_filtered_documents"] == 1
+    assert final["summary"]["complete_quota_documents_after_review"] == 1
+    assert final["summary"]["final_qas"] == 64
+    failure = json.loads((root / "failed-documents/doc-000.json").read_text())
+    assert failure["phase"] == "finalize" and failure["stage"] == filtered_stage
+    assert (tmp_path / "dataset/train.jsonl").read_text() == ""
+    before = len(FakeAnnotationClient.calls)
+    assert pipeline.finalize(config)["summary"] == final["summary"]
+    assert len(FakeAnnotationClient.calls) == before
+
+
+def test_all_documents_filtered_produces_auditable_empty_dataset(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    monkeypatch.setattr(pipeline, "prepare_selection", lambda _: _selection())
+    monkeypatch.setattr(pipeline, "AnnotationClient", FakeAnnotationClient)
+
+    def filtered(self, stage, content, schema):
+        raise pipeline.ContentFilteredError(stage, "all-filtered", "cache/response.raw.json")
+
+    monkeypatch.setattr(FakeAnnotationClient, "call", filtered)
+    pipeline.prepare(config)
+    assert pipeline.annotate(config)["content_filtered_documents"] == 1
+    assert pipeline.diagnose(config)["scored_panel_count"] == 0
+    assert pipeline.review(config)["reviewed_qas"] == 0
+    final = pipeline.finalize(config)
+    assert final["summary"]["trajectory_success_rate"] == 0
+    assert final["summary"]["content_filtered_documents"] == 1
+    assert final["summary"]["quota_failed_documents"] == 0
+    assert all(
+        (tmp_path / "dataset" / f"{split}.jsonl").read_text() == ""
+        for split in ("train", "dev", "test")
+    )
+
+
+def test_annotation_filter_after_saved_round_preserves_history_but_excludes_qa(
+    tmp_path, monkeypatch
+):
+    config = _config(tmp_path)
+    config["annotation"]["concurrency"] = 1
+    selection = _selection()
+    original = FakeAnnotationClient.call
+
+    def call(self, stage, content, schema):
+        if stage == "generate" and content["round_index"] == 1:
+            raise pipeline.ContentFilteredError(
+                stage, "round-one-filter", "cache/response.raw.json"
+            )
+        result = original(self, stage, content, schema)
+        if stage == "generate" and content["segment_id"] == "seg0":
+            result["qas"] = result["qas"][:-1]
+        return result
+
+    monkeypatch.setattr(pipeline, "prepare_selection", lambda _: selection)
+    monkeypatch.setattr(pipeline, "AnnotationClient", FakeAnnotationClient)
+    monkeypatch.setattr(FakeAnnotationClient, "call", call)
+    pipeline.prepare(config)
+    summary = pipeline.annotate(config)
+    assert summary["content_filtered_documents"] == 1 and summary["incomplete_documents"] == 0
+    saved = json.loads((tmp_path / "artifacts/documents/doc-000.json").read_text())
+    assert len(saved["rounds"]) == 1 and not saved["finished"]
+    assert saved["candidates"]
+    assert pipeline.diagnose(config)["panel_count"] == 0
+    pipeline.review(config)
+    final = pipeline.finalize(config)
+    assert final["summary"]["annotated_documents"] == 0
+    assert final["summary"]["content_filtered_documents"] == 1
+    assert final["summary"]["final_qas"] == 0
