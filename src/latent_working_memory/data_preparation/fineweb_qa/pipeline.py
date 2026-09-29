@@ -22,7 +22,7 @@ from latent_working_memory.data_preparation.fineweb_qa.annotation import (
     REVIEW_SCHEMA,
     STAGES,
     AnnotationClient,
-    ContentFilteredError,
+    DocumentAnnotationError,
     locate_candidates,
 )
 from latent_working_memory.data_preparation.fineweb_qa.diagnostics import (
@@ -124,27 +124,6 @@ def prepare(config: dict) -> dict:
     }
 
 
-def _check_decisions(output: dict, qa_ids: list[str], stage: str) -> list[dict]:
-    decisions = output["decisions"]
-    if not isinstance(decisions, list) or len(decisions) != len(qa_ids):
-        raise ValueError(f"{stage} must decide on every QA once")
-    ids = [decision["qa_id"] for decision in decisions]
-    if len(set(ids)) != len(ids) or set(ids) != set(qa_ids):
-        raise ValueError(f"{stage} QA IDs do not match the candidate set")
-    for decision in decisions:
-        if type(decision["accepted"]) is not bool or not isinstance(decision["reason"], str):
-            raise ValueError(f"{stage} decision needs a boolean and a string reason")
-        if not decision["accepted"] and not decision["reason"].strip():
-            raise ValueError(f"rejected {stage} decision needs a reason")
-        if (
-            stage == "document_review"
-            and decision["accepted"]
-            and not decision["fact_group_id"].strip()
-        ):
-            raise ValueError("accepted document-review QA needs a fact group")
-    return decisions
-
-
 def _document_result_path(root: Path, index: int) -> Path:
     return root / "documents" / f"doc-{index:03d}.json"
 
@@ -160,8 +139,15 @@ def _document_failures(root: Path, documents: list[dict]) -> dict[int, dict]:
     return failures
 
 
-def _record_content_filter(
-    root: Path, index: int, document: dict, phase: str, error: ContentFilteredError
+def _failure_counts(failures: dict[int, dict]) -> dict[str, int]:
+    return {
+        f"{reason}_documents": sum(f["reason"] == reason for f in failures.values())
+        for reason in ("content_filtered", "annotation_contract_failed")
+    }
+
+
+def _record_document_failure(
+    root: Path, index: int, document: dict, phase: str, error: DocumentAnnotationError
 ) -> dict:
     path = root / "failed-documents" / f"doc-{index:03d}.json"
     if path.exists():
@@ -169,7 +155,8 @@ def _record_content_filter(
     failure = {
         "document_index": index,
         "trajectory_id": document["trajectory_id"],
-        "reason": "content_filtered",
+        "reason": error.reason,
+        "error": str(error),
         "phase": phase,
         "stage": error.stage,
         "request_id": error.request_id,
@@ -285,7 +272,7 @@ def _run_round(
                 },
                 VERIFY_SCHEMA,
             )
-            decisions = _check_decisions(verified, [qa["qa_id"] for qa in valid], "verify")
+            decisions = verified["decisions"]
         accepted_ids = {item["qa_id"] for item in decisions if item["accepted"]}
         result["candidates"].extend(valid)
         result["local_candidates"].extend(qa for qa in valid if qa["qa_id"] in accepted_ids)
@@ -325,9 +312,7 @@ def _run_round(
             },
             DOCUMENT_REVIEW_SCHEMA,
         )
-        decisions = _check_decisions(
-            reviewed, [qa["qa_id"] for qa in result["local_candidates"]], "document_review"
-        )
+        decisions = reviewed["decisions"]
     # Rejected attempts stay rejected. A repaired question receives a new round ID.
     result["review_decisions"] = [
         dict(item, accepted=False, reason=prior_rejections[item["qa_id"]], fact_group_id="")
@@ -394,8 +379,8 @@ def _annotate_one(
             _save_json(path, result)
         (path.parent / f"doc-{index:03d}.error.json").unlink(missing_ok=True)
         return result
-    except ContentFilteredError as error:
-        failure = _record_content_filter(root, index, document, "annotate", error)
+    except DocumentAnnotationError as error:
+        failure = _record_document_failure(root, index, document, "annotate", error)
         (path.parent / f"doc-{index:03d}.error.json").unlink(missing_ok=True)
         return failure
     except Exception as error:
@@ -440,6 +425,7 @@ def _request_statistics(
             "cache_hits": 0,
             "failed_calls": 0,
             "content_filtered_calls": 0,
+            "annotation_contract_failed_calls": 0,
             "network_seconds": 0.0,
             "input_tokens": 0,
             "output_tokens": 0,
@@ -461,26 +447,42 @@ def _request_statistics(
         stage["cache_hits"] += bool(record["cache_hit"])
         stage["failed_calls"] += not record["ok"]
         stage["content_filtered_calls"] += record.get("failure_reason") == "content_filtered"
+        stage["annotation_contract_failed_calls"] += (
+            record.get("failure_reason") == "annotation_contract_failed"
+        )
         stage["network_seconds"] += record["network_seconds"]
         if "request_id" in record:
             key = (record["stage"], record["request_id"])
-            request = actual_requests.setdefault(key, {"network_attempted": False, "usage": None})
-            request["network_attempted"] |= bool(record["network_attempts"])
-            if record.get("usage") is not None:
-                request["usage"] = record["usage"]
+            request = actual_requests.setdefault(key, {"network_attempts": set(), "usage": {}})
+            count, total = record["network_attempts"], record["attempts_total"]
+            request["network_attempts"].update(
+                record.get("network_attempt_numbers", range(total - count + 1, total + 1))
+            )
+            if "usage_by_attempt" in record:
+                for attempt, usage in record["usage_by_attempt"].items():
+                    if usage is not None:
+                        request["usage"][int(attempt)] = usage
+            elif record.get("usage") is not None:
+                # Before response retries, only the last returned attempt had usage.
+                # Old raw-cache replays recorded attempts_total=0.
+                attempt = total or max(request["network_attempts"], default=1)
+                request["usage"][attempt] = record["usage"]
     for (stage_name, _), request in actual_requests.items():
-        if not request["network_attempted"]:
+        if not request["network_attempts"]:
             continue
         stage = by_stage[stage_name]
         stage["new_logical_requests"] += 1
-        usage = request["usage"]
-        if usage is None or any(
-            type(usage.get(key)) is not int for key in ("input_tokens", "output_tokens")
-        ):
-            stage["usage_missing"] += 1
-        else:
-            stage["input_tokens"] += usage["input_tokens"]
-            stage["output_tokens"] += usage["output_tokens"]
+        missing = False
+        for attempt in request["network_attempts"]:
+            usage = request["usage"].get(attempt)
+            if usage is None or any(
+                type(usage.get(k)) is not int for k in ("input_tokens", "output_tokens")
+            ):
+                missing = True
+            else:
+                stage["input_tokens"] += usage["input_tokens"]
+                stage["output_tokens"] += usage["output_tokens"]
+        stage["usage_missing"] += missing
     return dict(by_stage)
 
 
@@ -526,7 +528,7 @@ def _annotation_summary(root: Path, documents: list[dict]) -> dict:
     return {
         "frozen_documents": len(documents),
         "annotated_documents": sum(result["finished"] for result in results),
-        "content_filtered_documents": len(failures),
+        **_failure_counts(failures),
         "incomplete_documents": sum(
             not result["finished"] and result["document_index"] not in failures
             for result in results
@@ -584,7 +586,7 @@ def annotate(config: dict, limit: int | None = None) -> dict:
             for future in completed:
                 try:
                     result = future.result()
-                    if result.get("reason") == "content_filtered":
+                    if "reason" in result:
                         print(json.dumps(result, ensure_ascii=False), flush=True)
                         continue
                     print(
@@ -689,8 +691,8 @@ def diagnose(config: dict) -> dict:
                     qa_id, condition, answer = future.result()
                     answers.setdefault(qa_id, {})[condition] = answer
                     _save_json(answer_path, answers)
-                except ContentFilteredError as error:
-                    document_failures[index] = _record_content_filter(
+                except DocumentAnnotationError as error:
+                    document_failures[index] = _record_document_failure(
                         root, index, documents[index], "diagnose", error
                     )
                 except Exception as error:
@@ -730,7 +732,7 @@ def diagnose(config: dict) -> dict:
                 "split": document["split"],
                 "segment_count": len(document["segments"]),
                 "sampled_qas": len(assigned),
-                "content_filtered": index in excluded,
+                "failure_reason": document_failures[index]["reason"] if index in excluded else None,
                 "empty_segments": [
                     seg["segment_id"]
                     for seg in document["segments"]
@@ -743,7 +745,7 @@ def diagnose(config: dict) -> dict:
         "stage": "diagnose",
         "panel_count": len(panel),
         "scored_panel_count": len(scored_panel),
-        "content_filtered_documents": len(excluded),
+        **_failure_counts({i: document_failures[i] for i in excluded}),
         "evidence": scores["evidence"],
         "question_only": scores["question_only"],
         "review_inputs": materials,
@@ -772,7 +774,7 @@ def _review_document(
         return resolved
     try:
         response = client.call("review", {**context, **material}, REVIEW_SCHEMA)
-        decisions = _check_decisions(response, [qa["qa_id"] for qa in panel], "review")
+        decisions = response["decisions"]
         _save_json(folder / "raw-review.json", response)
         flagged = [
             d
@@ -797,7 +799,7 @@ def _review_document(
                 },
                 REVIEW_SCHEMA,
             )
-            checked = _check_decisions(adjudicated, list(ids), "adjudicate")
+            checked = adjudicated["decisions"]
             _save_json(folder / "adjudication.json", adjudicated)
             by_id = {d["qa_id"]: d for d in checked}
             decisions = [by_id.get(d["qa_id"], d) for d in decisions]
@@ -806,7 +808,7 @@ def _review_document(
         _save_json(folder / "resolved.json", resolved)
         (folder / "error.json").unlink(missing_ok=True)
         return resolved
-    except ContentFilteredError:
+    except DocumentAnnotationError:
         (folder / "error.json").unlink(missing_ok=True)
         raise
     except Exception as error:
@@ -865,8 +867,8 @@ def review(config: dict) -> dict:
                 index = futures.pop(future)
                 try:
                     decisions.extend(future.result()["decisions"])
-                except ContentFilteredError as error:
-                    document_failures[index] = _record_content_filter(
+                except DocumentAnnotationError as error:
+                    document_failures[index] = _record_document_failure(
                         root, index, documents[index], "review", error
                     )
     frozen_panel_count = len(panel)
@@ -885,7 +887,7 @@ def review(config: dict) -> dict:
     summary = {
         "stage": "review",
         "reviewed_qas": len(decisions),
-        "content_filtered_documents": len(excluded),
+        **_failure_counts({i: document_failures[i] for i in excluded}),
         "excluded_panel_qas": frozen_panel_count - len(panel),
         "rejected_qas": sum(not d["accepted"] for d in decisions),
         "evidence_semantic_correct": sum(d["evidence_prediction_correct"] for d in decisions),
@@ -1042,7 +1044,7 @@ def _finalize_one(
             ]
             result["finished"] = False
             _save_json(path, result)
-    except ContentFilteredError:
+    except DocumentAnnotationError:
         (path.parent / f"doc-{index:03d}.error.json").unlink(missing_ok=True)
         raise
     except Exception as error:
@@ -1100,12 +1102,12 @@ def finalize(config: dict) -> dict:
                     root,
                     client,
                 )
-            except ContentFilteredError as error:
-                document_failures[index] = _record_content_filter(
+            except DocumentAnnotationError as error:
+                document_failures[index] = _record_document_failure(
                     root, index, document, "finalize", error
                 )
         if index in document_failures:
-            # Preserve completed rounds for accounting, but never publish a filtered document.
+            # Preserve completed rounds for accounting, but never publish a failed document.
             saved = root / "reviewed-documents" / f"doc-{index:03d}.json"
             previous = _load_json(saved) if saved.exists() else by_index.get(index)
             if previous is not None:
@@ -1116,7 +1118,7 @@ def finalize(config: dict) -> dict:
                 "split": document["split"],
                 "segment_count": len(document["segments"]),
                 "complete_quota": False,
-                "failure_reason": "content_filtered",
+                "failure_reason": document_failures[index]["reason"],
                 "supplement_reviewed_qas": sum(
                     len(r["qa_ids"]) for r in previous.get("supplement_reviews", [])
                 )
@@ -1171,7 +1173,7 @@ def finalize(config: dict) -> dict:
             result["assembly"]["ok"] for result in results
         ),
         "complete_quota_documents_after_review": len(trajectories),
-        "content_filtered_documents": len(document_failures),
+        **_failure_counts(document_failures),
         "quota_failed_documents": sum(
             d["failure_reason"] == "quota_shortfall" for d in final_results
         ),
@@ -1181,8 +1183,8 @@ def finalize(config: dict) -> dict:
             split: {
                 "frozen_documents": sum(d["split"] == split for d in documents),
                 "complete_documents": sum(d["split"] == split for d in trajectories),
-                "content_filtered_documents": sum(
-                    documents[i]["split"] == split for i in document_failures
+                **_failure_counts(
+                    {i: f for i, f in document_failures.items() if documents[i]["split"] == split}
                 ),
                 "qas": sum(len(d["qas"]) for d in trajectories if d["split"] == split),
             }
@@ -1192,8 +1194,12 @@ def finalize(config: dict) -> dict:
             str(n): {
                 "frozen_documents": sum(len(d["segments"]) == n for d in documents),
                 "complete_documents": sum(len(d["segments"]) == n for d in trajectories),
-                "content_filtered_documents": sum(
-                    len(documents[i]["segments"]) == n for i in document_failures
+                **_failure_counts(
+                    {
+                        i: f
+                        for i, f in document_failures.items()
+                        if len(documents[i]["segments"]) == n
+                    }
                 ),
             }
             for n in sorted({len(d["segments"]) for d in documents})

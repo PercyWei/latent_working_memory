@@ -223,7 +223,7 @@ def test_temporary_http_error_retries_but_fatal_http_error_stops(
     assert records[1]["network_attempts"] == 1 and not records[1]["ok"]
 
 
-def test_invalid_structured_response_is_fatal_and_kept_raw(
+def test_invalid_structured_response_exhausts_document_budget_and_keeps_raw(
     tmp_path, monkeypatch, client_config, prompts
 ):
     sends = []
@@ -236,14 +236,15 @@ def test_invalid_structured_response_is_fatal_and_kept_raw(
     monkeypatch.setattr(annotation, "build_opener", lambda *_args: Opener())
     cache = tmp_path / "cache"
     client = annotation.AnnotationClient(client_config, tmp_path / "batch-a", cache, prompts)
-    with pytest.raises(ValueError, match="must be a string"):
+    with pytest.raises(annotation.AnnotationContractError, match="must be a string"):
         client.call("answer", {"question": "Which city?"}, annotation.ANSWER_SCHEMA)
-    assert client.stop.is_set()
+    assert not client.stop.is_set()
     another = annotation.AnnotationClient(client_config, tmp_path / "batch-b", cache, prompts)
-    with pytest.raises(ValueError, match="must be a string"):
+    with pytest.raises(annotation.AnnotationContractError, match="must be a string"):
         another.call("answer", {"question": "Which city?"}, annotation.ANSWER_SCHEMA)
-    assert len(sends) == 1
-    assert len(list(cache.glob("*/*/response.raw.json"))) == 1
+    assert len(sends) == 3
+    assert len(list(cache.glob("*/*/response.attempt-*.raw.json"))) == 3
+    assert not list(cache.glob("*/*/parsed.json"))
 
 
 def test_parallel_clients_coalesce_identical_request_and_log_both_calls(
@@ -479,3 +480,183 @@ def test_filter_does_not_hide_invalid_response_contract(
         client.call("answer", {"question": "Question"}, annotation.ANSWER_SCHEMA)
     assert not isinstance(caught.value, annotation.ContentFilteredError)
     assert client.stop.is_set()
+
+
+def _verification_fixture():
+    content = {"qas": [{"qa_id": "q0"}, {"qa_id": "q1"}]}
+    output = {
+        "decisions": [{"qa_id": q["qa_id"], "accepted": True, "reason": ""} for q in content["qas"]]
+    }
+    return content, output
+
+
+@pytest.mark.parametrize(
+    "invalid_kind",
+    ["unknown_id", "duplicate_id", "missing_id", "extra_id", "empty_reason", "bad_json"],
+)
+def test_response_contract_retry_precedes_success_cache(
+    tmp_path, monkeypatch, client_config, prompts, invalid_kind
+):
+    content, output = _verification_fixture()
+    invalid = json.loads(json.dumps(output))
+    if invalid_kind == "unknown_id":
+        invalid["decisions"][1]["qa_id"] = "q1-wrong"
+    elif invalid_kind == "duplicate_id":
+        invalid["decisions"][1]["qa_id"] = "q0"
+    elif invalid_kind == "missing_id":
+        invalid["decisions"].pop()
+    elif invalid_kind == "extra_id":
+        invalid["decisions"].append(invalid["decisions"][0].copy())
+    elif invalid_kind == "empty_reason":
+        invalid["decisions"][1]["accepted"] = False
+    raw = response_bytes(invalid)
+    if invalid_kind == "bad_json":
+        envelope = json.loads(raw)
+        envelope["output"][0]["content"][0]["text"] = "{"
+        raw = json.dumps(envelope).encode()
+    sent = []
+    cache, root = tmp_path / "cache", tmp_path / "batch"
+
+    def send(self, payload):
+        sent.append(payload)
+        schema = payload["text"]["format"]["schema"]["properties"]["decisions"]
+        assert schema["minItems"] == schema["maxItems"] == 2
+        assert schema["items"]["properties"]["qa_id"]["enum"] == ["q0", "q1"]
+        if len(sent) == 2:
+            assert not list(cache.glob("*/*/parsed.json"))
+            assert len(list(cache.glob("*/*/response.attempt-1.raw.json"))) == 1
+        return 200, raw if len(sent) == 1 else response_bytes(output)
+
+    monkeypatch.setattr(annotation.AnnotationClient, "_send", send)
+    client = annotation.AnnotationClient(client_config, root, cache, prompts)
+    assert client.call("verify", content, annotation.VERIFY_SCHEMA) == output
+    assert not client.stop.is_set() and len(sent) == 2
+    assert client.call("verify", content, annotation.VERIFY_SCHEMA) == output
+    assert len(sent) == 2
+    stats = pipeline._request_statistics(root)["verify"]
+    assert stats["new_logical_requests"] == 1 and stats["network_attempts"] == 2
+    assert stats["input_tokens"] == 62 and stats["output_tokens"] == 14
+
+
+def test_old_invalid_success_cache_is_revalidated_and_retried_once(
+    tmp_path, monkeypatch, client_config, prompts
+):
+    content, output = _verification_fixture()
+    cache, root = tmp_path / "cache", tmp_path / "batch"
+    client = annotation.AnnotationClient(client_config, root, cache, prompts)
+    payload = client._payload("verify", content, annotation.VERIFY_SCHEMA)
+    request_id = hashlib.sha256(annotation._payload_bytes(payload)).hexdigest()
+    folder = cache / request_id[:2] / request_id
+    folder.mkdir(parents=True)
+    invalid = json.loads(json.dumps(output))
+    invalid["decisions"][0]["qa_id"] = "q0-wrong"
+    (folder / "request.json").write_text(json.dumps(payload))
+    (folder / "parsed.json").write_text(json.dumps(invalid))
+    (folder / "response.raw.json").write_bytes(response_bytes(invalid))
+    (folder / "attempt-1.json").write_text(
+        json.dumps({"attempt": 1, "status": "response_received"})
+    )
+    sent = []
+
+    def send(self, actual):
+        sent.append(actual)
+        return 200, response_bytes(output)
+
+    monkeypatch.setattr(annotation.AnnotationClient, "_send", send)
+    assert client.call("verify", content, annotation.VERIFY_SCHEMA) == output
+    assert len(sent) == 1
+    assert (folder / "response.attempt-1.raw.json").read_bytes() == response_bytes(invalid)
+    assert json.loads((folder / "attempt-1.json").read_text())["status"] == "invalid_response"
+    assert (
+        json.loads((folder / "attempt-2.json").read_text())["response_schema"]["properties"][
+            "decisions"
+        ]["maxItems"]
+        == 2
+    )
+    log = json.loads((root / "requests.jsonl").read_text().splitlines()[0])
+    assert log["request_id"] == request_id and log["attempts_total"] == 2
+    # Only attempt 2 was sent by this batch; attempt 1 may belong to another batch.
+    assert pipeline._request_statistics(root)["verify"]["input_tokens"] == 31
+
+
+def test_invalid_response_budget_survives_interruption_and_exhaustion(
+    tmp_path, monkeypatch, client_config, prompts
+):
+    content, output = _verification_fixture()
+    invalid = json.loads(json.dumps(output))
+    invalid["decisions"][1]["qa_id"] = "q0"
+    sent = []
+
+    def send(self, payload):
+        sent.append(payload)
+        return 200, response_bytes(invalid)
+
+    monkeypatch.setattr(annotation.AnnotationClient, "_send", send)
+    cache, root = tmp_path / "cache", tmp_path / "batch"
+    first = annotation.AnnotationClient(client_config, root, cache, prompts)
+    # Stop between attempts, after the invalid response has been durably archived.
+    monkeypatch.setattr(first.stop, "wait", lambda _: True)
+    with pytest.raises(InterruptedError):
+        first.call("verify", content, annotation.VERIFY_SCHEMA)
+    second = annotation.AnnotationClient(client_config, root, cache, prompts)
+    with pytest.raises(annotation.AnnotationContractError):
+        second.call("verify", content, annotation.VERIFY_SCHEMA)
+    assert len(sent) == 3 and not second.stop.is_set()
+    third = annotation.AnnotationClient(client_config, root, cache, prompts)
+    with pytest.raises(annotation.AnnotationContractError):
+        third.call("verify", content, annotation.VERIFY_SCHEMA)
+    assert len(sent) == 3 and not third.stop.is_set()
+    stats = pipeline._request_statistics(root)["verify"]
+    assert stats["network_attempts"] == 3 and stats["input_tokens"] == 93
+
+
+def test_network_and_contract_errors_share_one_attempt_budget(
+    tmp_path, monkeypatch, client_config, prompts
+):
+    content, output = _verification_fixture()
+    output["decisions"][1]["qa_id"] = "q0"
+    calls = []
+
+    def send(self, payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            raise HTTPError("http://local", 429, "limited", {"Retry-After": "0"}, BytesIO())
+        return 200, response_bytes(output)
+
+    monkeypatch.setattr(annotation.AnnotationClient, "_send", send)
+    client = annotation.AnnotationClient(
+        client_config, tmp_path / "batch", tmp_path / "cache", prompts
+    )
+    with pytest.raises(annotation.AnnotationContractError):
+        client.call("verify", content, annotation.VERIFY_SCHEMA)
+    assert len(calls) == 3 and not client.stop.is_set()
+    stats = pipeline._request_statistics(tmp_path / "batch")["verify"]
+    assert stats["network_attempts"] == 3 and stats["input_tokens"] == 62
+
+
+def test_invalid_response_archive_write_error_is_fatal(
+    tmp_path, monkeypatch, client_config, prompts
+):
+    content, output = _verification_fixture()
+    output["decisions"][0]["qa_id"] = "wrong"
+    calls = []
+
+    def send(self, payload):
+        calls.append(payload)
+        return 200, response_bytes(output)
+
+    monkeypatch.setattr(annotation.AnnotationClient, "_send", send)
+    original = annotation._atomic_write
+
+    def fail_archive(path, contents):
+        if path.name.startswith("response.attempt-"):
+            raise OSError("archive write failed")
+        return original(path, contents)
+
+    monkeypatch.setattr(annotation, "_atomic_write", fail_archive)
+    client = annotation.AnnotationClient(
+        client_config, tmp_path / "batch", tmp_path / "cache", prompts
+    )
+    with pytest.raises(OSError, match="archive write failed"):
+        client.call("verify", content, annotation.VERIFY_SCHEMA)
+    assert client.stop.is_set() and len(calls) == 1

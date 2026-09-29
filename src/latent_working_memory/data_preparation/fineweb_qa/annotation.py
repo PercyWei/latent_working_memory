@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import fcntl
 import hashlib
 import json
@@ -14,6 +15,8 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
+
+from latent_working_memory.data_preparation.fineweb_qa.finalization import validate_document_reviews
 
 
 def _object_schema(properties: dict[str, dict]) -> dict:
@@ -159,14 +162,74 @@ def _validate_schema(value: Any, schema: dict, path: str = "$") -> None:
         raise ValueError(f"{path} is outside enum")
 
 
-class ContentFilteredError(ValueError):
-    """An explicit provider filter excludes one document, without retrying its output."""
+class ResponseContractError(ValueError):
+    """A completed model output does not satisfy the current request's QA contract."""
 
-    def __init__(self, stage: str, request_id: str, raw_response_path: str) -> None:
-        super().__init__("Responses output was blocked by content_filter")
+
+class DocumentAnnotationError(ValueError):
+    """A known terminal annotation outcome excludes one document."""
+
+    reason: str
+
+    def __init__(
+        self, stage: str, request_id: str, raw_response_path: str, detail: str = ""
+    ) -> None:
+        super().__init__(f"{self.reason}: {detail}" if detail else self.reason)
         self.stage = stage
         self.request_id = request_id
         self.raw_response_path = raw_response_path
+
+
+class ContentFilteredError(DocumentAnnotationError):
+    reason = "content_filtered"
+
+
+class AnnotationContractError(DocumentAnnotationError):
+    reason = "annotation_contract_failed"
+
+
+def response_schema(stage: str, content: dict, schema: dict) -> dict:
+    """Bind decision IDs/counts to this request, without changing its logical identity."""
+    bound = copy.deepcopy(schema)
+    if stage == "generate":
+        bound["properties"]["qas"]["maxItems"] = min(
+            bound["properties"]["qas"]["maxItems"], content["candidate_limit"]
+        )
+    if stage in ("verify", "document_review", "review", "adjudicate"):
+        ids = [qa["qa_id"] for qa in content["qas"]]
+        if not ids or len(ids) != len(set(ids)):
+            raise ValueError("decision request needs distinct nonempty candidate IDs")
+        decisions = bound["properties"]["decisions"]
+        decisions.update(minItems=len(ids), maxItems=len(ids))
+        decisions["items"]["properties"]["qa_id"] = {"type": "string", "enum": ids}
+    return bound
+
+
+def validate_output(output: dict, stage: str, content: dict, schema: dict) -> None:
+    """Validate model JSON and request coverage before a successful cache is written."""
+    try:
+        _validate_schema(output, schema)
+        if stage in ("verify", "document_review", "review", "adjudicate"):
+            decisions = output["decisions"]
+            ids = [d["qa_id"] for d in decisions]
+            expected = [qa["qa_id"] for qa in content["qas"]]
+            if len(ids) != len(expected) or len(set(ids)) != len(ids) or set(ids) != set(expected):
+                raise ValueError(f"{stage} QA IDs do not match the candidate set")
+            for decision in decisions:
+                if not decision["accepted"] and not decision["reason"].strip():
+                    raise ValueError(f"rejected {stage} decision needs a reason")
+                if (
+                    stage == "document_review"
+                    and decision["accepted"]
+                    and not decision["fact_group_id"].strip()
+                ):
+                    raise ValueError("accepted document-review QA needs a fact group")
+            if stage == "adjudicate":
+                validate_document_reviews(
+                    content["qas"], output, {"review_decisions": content["candidate_decisions"]}
+                )
+    except ValueError as error:
+        raise ResponseContractError(str(error)) from error
 
 
 class AnnotationClient:
@@ -223,6 +286,7 @@ class AnnotationClient:
             "cache_hit": False,
             "cache_source": None,
             "network_attempts": 0,
+            "network_attempt_numbers": [],
             "attempts_total": 0,
             "network_seconds": 0.0,
             "usage": None,
@@ -236,10 +300,11 @@ class AnnotationClient:
             payload = self._payload(stage, content, schema)
             request_id = hashlib.sha256(_payload_bytes(payload)).hexdigest()
             record["request_id"] = request_id
-            result = self._cached_call(payload, schema, request_id, record)
+            bound_schema = response_schema(stage, content, schema)
+            result = self._cached_call(payload, bound_schema, request_id, record)
             record["ok"] = True
-        except ContentFilteredError as exc:
-            record["failure_reason"] = "content_filtered"
+        except DocumentAnnotationError as exc:
+            record["failure_reason"] = exc.reason
             record["error"] = f"{type(exc).__name__}: {exc}"
             error = exc
         except Exception as exc:
@@ -252,7 +317,7 @@ class AnnotationClient:
             self._append_log(record)
         except Exception as log_error:
             self.stop.set()
-            if error is None or isinstance(error, ContentFilteredError):
+            if error is None or isinstance(error, DocumentAnnotationError):
                 raise
             error.add_note(f"request log write also failed: {log_error}")
         if error is not None:
@@ -297,13 +362,26 @@ class AnnotationClient:
                 fcntl.flock(handle, fcntl.LOCK_EX)
                 try:
                     return self._locked_call(folder, payload, schema, record)
-                except ContentFilteredError:
+                except DocumentAnnotationError:
                     raise
                 except Exception:
                     self.stop.set()
                     raise
                 finally:
-                    fcntl.flock(handle, fcntl.LOCK_UN)
+                    try:
+                        attempts = self._previous_attempts(folder)
+                        record["attempts_total"] = len(attempts)
+                        record["usage_by_attempt"] = {
+                            str(a["attempt"]): a.get("usage") for a in attempts
+                        }
+                        usages = [a["usage"] for a in attempts if a.get("usage") is not None]
+                        if usages:
+                            record["usage"] = {
+                                key: sum(u[key] for u in usages if type(u.get(key)) is int)
+                                for key in ("input_tokens", "output_tokens")
+                            }
+                    finally:
+                        fcntl.flock(handle, fcntl.LOCK_UN)
 
     def _locked_call(self, folder: Path, payload: dict, schema: dict, record: dict) -> dict:
         if self.stop.is_set():
@@ -316,17 +394,23 @@ class AnnotationClient:
                 raise ValueError("cached request payload differs from its identity")
         else:
             _atomic_write_json(request_file, payload)
+        content = json.loads(payload["input"][0]["content"])
         if parsed_file.exists():
             parsed = json.loads(parsed_file.read_text())
-            _validate_schema(parsed, schema)
-            record.update(cache_hit=True, cache_source="parsed")
-            return parsed
+            try:
+                validate_output(parsed, record["stage"], content, schema)
+            except ResponseContractError:
+                # Old successful caches may predate request-level coverage checks.
+                if not raw_file.exists():
+                    raise RuntimeError("invalid parsed cache has no raw response for recovery")
+            else:
+                record.update(cache_hit=True, cache_source="parsed")
+                return parsed
         if raw_file.exists():
             record.update(cache_hit=True, cache_source="raw")
-            parsed, usage = self._parse_response(raw_file.read_bytes(), schema, record, raw_file)
-            _atomic_write_json(parsed_file, parsed)
-            record.update(cache_hit=True, cache_source="raw", usage=usage)
-            return parsed
+            parsed = self._consume_response(folder, schema, content, record)
+            if parsed is not None:
+                return parsed
 
         previous = self._previous_attempts(folder)
         record["attempts_total"] = len(previous)
@@ -336,16 +420,30 @@ class AnnotationClient:
                 raise RuntimeError("request outcome is uncertain and its raw cache is missing")
             if last["status"] == "failed" and not last["retryable"]:
                 raise RuntimeError("cached request has a non-retryable failure")
-            if last["status"] not in {"started", "failed"}:
+            if last["status"] not in {"started", "failed", "invalid_response"}:
                 raise ValueError("cached attempt has an unknown status")
         if len(previous) >= self.config["max_attempts"]:
+            if previous[-1]["status"] == "invalid_response":
+                raise AnnotationContractError(
+                    record["stage"],
+                    record["request_id"],
+                    str(folder / f"response.attempt-{len(previous)}.raw.json"),
+                    previous[-1]["error"],
+                )
             raise RuntimeError("request retry budget exhausted")
+        wire_payload = copy.deepcopy(payload)
+        wire_payload["text"]["format"]["schema"] = schema
 
         for attempt in range(len(previous) + 1, self.config["max_attempts"] + 1):
             if self.stop.is_set():
                 raise InterruptedError("annotation stopped before a retry")
             attempt_file = folder / f"attempt-{attempt}.json"
-            metadata = {"attempt": attempt, "started_at": _now(), "status": "started"}
+            metadata = {
+                "attempt": attempt,
+                "started_at": _now(),
+                "status": "started",
+                "response_schema": schema,
+            }
             _atomic_write_json(attempt_file, metadata)
             record["attempts_total"] = attempt
             while not self._slots.acquire(timeout=0.1):
@@ -357,9 +455,10 @@ class AnnotationClient:
                 metadata["status"] = "in_flight"
                 _atomic_write_json(attempt_file, metadata)
                 record["network_attempts"] += 1
+                record["network_attempt_numbers"].append(attempt)
                 sent_at = time.perf_counter()
                 try:
-                    status, raw = self._send(payload)
+                    status, raw = self._send(wire_payload)
                 except HTTPError as exc:
                     elapsed = time.perf_counter() - sent_at
                     record["network_seconds"] += elapsed
@@ -396,15 +495,53 @@ class AnnotationClient:
                     )
                     _atomic_write_json(attempt_file, metadata)
                     _atomic_write(raw_file, raw)
-                    parsed, usage = self._parse_response(raw, schema, record, raw_file)
-                    _atomic_write_json(parsed_file, parsed)
-                    record["usage"] = usage
-                    return parsed
+                    parsed = self._consume_response(folder, schema, content, record)
+                    if parsed is not None:
+                        return parsed
+                    if attempt == self.config["max_attempts"]:
+                        rejected = json.loads(attempt_file.read_text())
+                        raise AnnotationContractError(
+                            record["stage"],
+                            record["request_id"],
+                            str(folder / f"response.attempt-{attempt}.raw.json"),
+                            rejected["error"],
+                        )
+                    delay = 0
             finally:
                 self._slots.release()
             if self.stop.wait(delay):
                 raise InterruptedError("annotation stopped before a retry")
         raise RuntimeError("request retry budget exhausted")
+
+    def _consume_response(
+        self, folder: Path, schema: dict, content: dict, record: dict
+    ) -> dict | None:
+        """Archive rejected outputs before clearing their cache; preserve the attempt budget."""
+        raw_path = folder / "response.raw.json"
+        parsed_path = folder / "parsed.json"
+        previous = self._previous_attempts(folder)
+        metadata = previous[-1]
+        attempt = metadata["attempt"]
+        attempt_path = folder / f"attempt-{attempt}.json"
+        raw = raw_path.read_bytes()
+        record["usage"] = None
+        try:
+            parsed, usage = self._parse_response(raw, schema, record, raw_path, content)
+        except ResponseContractError as error:
+            _atomic_write(folder / f"response.attempt-{attempt}.raw.json", raw)
+            metadata.update(status="invalid_response", error=str(error), usage=record["usage"])
+            _atomic_write_json(attempt_path, metadata)
+            parsed_path.unlink(missing_ok=True)
+            raw_path.unlink()
+            return None
+        except Exception:
+            metadata["usage"] = record["usage"]
+            _atomic_write_json(attempt_path, metadata)
+            raise
+        metadata["usage"] = usage
+        _atomic_write_json(attempt_path, metadata)
+        _atomic_write_json(parsed_path, parsed)
+        return parsed
 
     def _send(self, payload: dict) -> tuple[int, bytes]:
         request = Request(
@@ -419,7 +556,7 @@ class AnnotationClient:
             return response.status, response.read()
 
     def _parse_response(
-        self, raw: bytes, schema: dict, record: dict, raw_path: Path
+        self, raw: bytes, schema: dict, record: dict, raw_path: Path, content: dict
     ) -> tuple[dict, dict | None]:
         data = json.loads(raw.decode("utf-8"))
         if not isinstance(data, dict):
@@ -451,8 +588,11 @@ class AnnotationClient:
         ]
         if not pieces or any(not isinstance(piece, str) for piece in pieces):
             raise ValueError("Responses final output_text is missing")
-        parsed = json.loads("".join(pieces))
-        _validate_schema(parsed, schema)
+        try:
+            parsed = json.loads("".join(pieces))
+        except json.JSONDecodeError as error:
+            raise ResponseContractError(f"model output is not valid JSON: {error}") from error
+        validate_output(parsed, record["stage"], content, schema)
         return parsed, usage
 
     def _previous_attempts(self, folder: Path) -> list[dict]:

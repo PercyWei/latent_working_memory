@@ -8,6 +8,10 @@ import threading
 import pytest
 
 from latent_working_memory.data_preparation.fineweb_qa import pipeline
+from latent_working_memory.data_preparation.fineweb_qa.annotation import (
+    ContentFilteredError,
+    AnnotationContractError,
+)
 from latent_working_memory.data_preparation.fineweb_qa.assembly import validate_trajectory
 
 
@@ -283,6 +287,7 @@ def test_request_usage_counts_raw_cache_recovery_once(tmp_path):
         {
             "stage": "generate",
             "request_id": "request-1",
+            "attempts_total": 1,
             "network_attempts": 1,
             "network_seconds": 2.0,
             "cache_hit": False,
@@ -292,6 +297,7 @@ def test_request_usage_counts_raw_cache_recovery_once(tmp_path):
         {
             "stage": "generate",
             "request_id": "request-1",
+            "attempts_total": 1,
             "network_attempts": 0,
             "network_seconds": 0.0,
             "cache_hit": True,
@@ -301,6 +307,7 @@ def test_request_usage_counts_raw_cache_recovery_once(tmp_path):
         {
             "stage": "generate",
             "request_id": "request-1",
+            "attempts_total": 1,
             "network_attempts": 0,
             "network_seconds": 0.0,
             "cache_hit": True,
@@ -690,9 +697,10 @@ def test_valid_manual_resolution_is_allowed_before_but_not_after_finalization(
         pipeline.review(config)
 
 
+@pytest.mark.parametrize("error_type", [ContentFilteredError, AnnotationContractError])
 @pytest.mark.parametrize("filtered_stage", PROMPT_STAGES)
 def test_filtered_document_is_excluded_across_stages_and_resume(
-    tmp_path, monkeypatch, filtered_stage
+    tmp_path, monkeypatch, filtered_stage, error_type
 ):
     config = _config(tmp_path)
     config["annotation"]["concurrency"] = 1
@@ -706,9 +714,7 @@ def test_filtered_document_is_excluded_across_stages_and_resume(
     def call(self, stage, content, schema):
         if stage == filtered_stage and not blocked:
             blocked.append(stage)
-            raise pipeline.ContentFilteredError(
-                stage, "filtered-request", "cache/response.raw.json"
-            )
+            raise error_type(stage, "filtered-request", "cache/response.raw.json")
         result = original(self, stage, content, schema)
         if filtered_stage == "adjudicate" and stage == "review":
             result["decisions"][0]["reason"] = "Check this proposal"
@@ -725,14 +731,14 @@ def test_filtered_document_is_excluded_across_stages_and_resume(
     final = pipeline.finalize(config)
     root = tmp_path / "artifacts"
     failure = json.loads((root / "failed-documents/doc-000.json").read_text())
-    assert failure["reason"] == "content_filtered" and failure["stage"] == filtered_stage
+    assert failure["reason"] == error_type.reason and failure["stage"] == filtered_stage
     assert failure["request_id"] == "filtered-request"
     assert final["summary"]["frozen_documents"] == 3
-    assert final["summary"]["content_filtered_documents"] == 1
+    assert final["summary"][f"{error_type.reason}_documents"] == 1
     assert final["summary"]["complete_quota_documents_after_review"] == 2
     assert final["summary"]["quota_failed_documents"] == 0
     assert final["summary"]["trajectory_success_rate"] == 2 / 3
-    assert final["summary"]["by_split"]["train"]["content_filtered_documents"] == 1
+    assert final["summary"]["by_split"]["train"][f"{error_type.reason}_documents"] == 1
     assert (tmp_path / "dataset/train.jsonl").read_text() == ""
     assert final["summary"]["final_qas"] == 96
     assert (
@@ -753,9 +759,10 @@ def test_filtered_document_is_excluded_across_stages_and_resume(
     assert json.loads((root / "failed-documents/doc-000.json").read_text()) == failure
 
 
+@pytest.mark.parametrize("error_type", [ContentFilteredError, AnnotationContractError])
 @pytest.mark.parametrize("filtered_stage", PROMPT_STAGES)
 def test_content_filter_during_final_supplement_excludes_whole_document(
-    tmp_path, monkeypatch, filtered_stage
+    tmp_path, monkeypatch, filtered_stage, error_type
 ):
     config = _config(tmp_path)
     config["annotation"]["concurrency"] = 1
@@ -776,9 +783,7 @@ def test_content_filter_during_final_supplement_excludes_whole_document(
     def call(self, stage, content, schema):
         if stage == filtered_stage and not blocked:
             blocked.append(stage)
-            raise pipeline.ContentFilteredError(
-                stage, "supplement-filtered", "cache/response.raw.json"
-            )
+            raise error_type(stage, "supplement-filtered", "cache/response.raw.json")
         result = original(self, stage, content, schema)
         if filtered_stage == "adjudicate" and stage == "review":
             result["decisions"][0]["reason"] = "Check this proposal"
@@ -786,7 +791,7 @@ def test_content_filter_during_final_supplement_excludes_whole_document(
 
     monkeypatch.setattr(FakeAnnotationClient, "call", call)
     final = pipeline.finalize(config)
-    assert final["summary"]["content_filtered_documents"] == 1
+    assert final["summary"][f"{error_type.reason}_documents"] == 1
     assert final["summary"]["complete_quota_documents_after_review"] == 1
     assert final["summary"]["final_qas"] == 64
     failure = json.loads((root / "failed-documents/doc-000.json").read_text())
@@ -803,7 +808,7 @@ def test_all_documents_filtered_produces_auditable_empty_dataset(tmp_path, monke
     monkeypatch.setattr(pipeline, "AnnotationClient", FakeAnnotationClient)
 
     def filtered(self, stage, content, schema):
-        raise pipeline.ContentFilteredError(stage, "all-filtered", "cache/response.raw.json")
+        raise ContentFilteredError(stage, "all-filtered", "cache/response.raw.json")
 
     monkeypatch.setattr(FakeAnnotationClient, "call", filtered)
     pipeline.prepare(config)
@@ -830,9 +835,7 @@ def test_annotation_filter_after_saved_round_preserves_history_but_excludes_qa(
 
     def call(self, stage, content, schema):
         if stage == "generate" and content["round_index"] == 1:
-            raise pipeline.ContentFilteredError(
-                stage, "round-one-filter", "cache/response.raw.json"
-            )
+            raise ContentFilteredError(stage, "round-one-filter", "cache/response.raw.json")
         result = original(self, stage, content, schema)
         if stage == "generate" and content["segment_id"] == "seg0":
             result["qas"] = result["qas"][:-1]
