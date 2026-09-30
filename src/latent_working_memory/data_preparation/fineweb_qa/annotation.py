@@ -163,7 +163,7 @@ def _validate_schema(value: Any, schema: dict, path: str = "$") -> None:
 
 
 class ResponseContractError(ValueError):
-    """A completed model output does not satisfy the current request's QA contract."""
+    """A known truncated or invalid model output cannot satisfy the QA contract."""
 
 
 class DocumentAnnotationError(ValueError):
@@ -569,11 +569,12 @@ class AnnotationClient:
             raise ValueError("Responses model differs from selected model")
         if (data.get("reasoning") or {}).get("effort") != self.config["reasoning_effort"]:
             raise ValueError("Responses reasoning effort differs from selected effort")
-        if (
-            data.get("status") == "incomplete"
-            and (data.get("incomplete_details") or {}).get("reason") == "content_filter"
-        ):
-            raise ContentFilteredError(record["stage"], record["request_id"], str(raw_path))
+        if data.get("status") == "incomplete":
+            reason = (data.get("incomplete_details") or {}).get("reason")
+            if reason == "content_filter":
+                raise ContentFilteredError(record["stage"], record["request_id"], str(raw_path))
+            if reason == "max_output_tokens":
+                raise ResponseContractError("Responses result was truncated: max_output_tokens")
         if data.get("status") != "completed":
             raise ValueError("Responses result was not completed")
         output = data.get("output")

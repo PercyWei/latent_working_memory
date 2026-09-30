@@ -422,7 +422,7 @@ def test_content_filter_is_cached_document_failure_and_does_not_stop_other_reque
     assert usage["input_tokens"] == 62 and usage["output_tokens"] == 14
 
 
-@pytest.mark.parametrize("reason", ["max_output_tokens", "unknown"])
+@pytest.mark.parametrize("reason", ["unknown", None])
 def test_other_incomplete_responses_remain_fatal(
     tmp_path, monkeypatch, client_config, prompts, reason
 ):
@@ -460,15 +460,16 @@ def test_filtered_response_log_write_error_remains_fatal(
     assert client.stop.is_set()
 
 
+@pytest.mark.parametrize("reason", ["content_filter", "max_output_tokens"])
 @pytest.mark.parametrize(
     "field,value",
     [("model", "wrong-model"), ("reasoning", {"effort": "low"}), ("usage", "invalid")],
 )
-def test_filter_does_not_hide_invalid_response_contract(
-    tmp_path, monkeypatch, client_config, prompts, field, value
+def test_incomplete_response_does_not_hide_invalid_response_contract(
+    tmp_path, monkeypatch, client_config, prompts, field, value, reason
 ):
     raw = json.loads(response_bytes({"answer": "partial"}))
-    raw.update(status="incomplete", incomplete_details={"reason": "content_filter"})
+    raw.update(status="incomplete", incomplete_details={"reason": reason})
     raw[field] = value
     monkeypatch.setattr(
         annotation.AnnotationClient, "_send", lambda *_: (200, json.dumps(raw).encode())
@@ -579,17 +580,23 @@ def test_old_invalid_success_cache_is_revalidated_and_retried_once(
     assert pipeline._request_statistics(root)["verify"]["input_tokens"] == 31
 
 
+@pytest.mark.parametrize("truncated", [False, True])
 def test_invalid_response_budget_survives_interruption_and_exhaustion(
-    tmp_path, monkeypatch, client_config, prompts
+    tmp_path, monkeypatch, client_config, prompts, truncated
 ):
     content, output = _verification_fixture()
     invalid = json.loads(json.dumps(output))
     invalid["decisions"][1]["qa_id"] = "q0"
+    raw = response_bytes(invalid)
+    if truncated:
+        envelope = json.loads(raw)
+        envelope.update(status="incomplete", incomplete_details={"reason": "max_output_tokens"})
+        raw = json.dumps(envelope).encode()
     sent = []
 
     def send(self, payload):
         sent.append(payload)
-        return 200, response_bytes(invalid)
+        return 200, raw
 
     monkeypatch.setattr(annotation.AnnotationClient, "_send", send)
     cache, root = tmp_path / "cache", tmp_path / "batch"
@@ -660,3 +667,43 @@ def test_invalid_response_archive_write_error_is_fatal(
     with pytest.raises(OSError, match="archive write failed"):
         client.call("verify", content, annotation.VERIFY_SCHEMA)
     assert client.stop.is_set() and len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "partial_text", ['{"qas":[', '{"qas":[],"skip_reason":"partial"}', '{"qas":[' + " " * 20000]
+)
+def test_max_output_tokens_retries_at_same_limit_without_salvaging_partial_output(
+    tmp_path, monkeypatch, client_config, prompts, partial_text
+):
+    output = {"qas": [], "skip_reason": "No supported facts"}
+    raw = json.loads(response_bytes(output))
+    raw.update(status="incomplete", incomplete_details={"reason": "max_output_tokens"})
+    raw["usage"]["output_tokens"] = 8192
+    raw["output"][0]["content"][0]["text"] = partial_text
+    truncated = json.dumps(raw).encode()
+    sent = []
+    cache, root = tmp_path / "cache", tmp_path / "batch"
+
+    def send(self, payload):
+        sent.append(payload)
+        if len(sent) == 2:
+            assert not list(cache.glob("*/*/parsed.json"))
+            archived = list(cache.glob("*/*/response.attempt-1.raw.json"))
+            assert len(archived) == 1 and archived[0].read_bytes() == truncated
+            attempt = json.loads((archived[0].parent / "attempt-1.json").read_text())
+            assert attempt["status"] == "invalid_response"
+            assert "max_output_tokens" in attempt["error"]
+        return 200, truncated if len(sent) == 1 else response_bytes(output)
+
+    monkeypatch.setattr(annotation.AnnotationClient, "_send", send)
+    client = annotation.AnnotationClient(client_config, root, cache, prompts)
+    content = {"candidate_limit": 15}
+    assert client.call("generate", content, annotation.GENERATE_SCHEMA) == output
+    assert len(sent) == 2 and sent[0] == sent[1]
+    assert all(p["max_output_tokens"] == 8192 for p in sent)
+    assert not client.stop.is_set()
+    assert client.call("generate", content, annotation.GENERATE_SCHEMA) == output
+    assert len(sent) == 2
+    usage = pipeline._request_statistics(root)["generate"]
+    assert usage["network_attempts"] == 2
+    assert usage["input_tokens"] == 62 and usage["output_tokens"] == 8199
