@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import fcntl
 import json
 import os
 import platform
@@ -435,7 +436,11 @@ def _request_statistics(
     if not path.exists():
         return {}
     actual_requests: dict[tuple[str, str], dict] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    with path.open(encoding="utf-8") as stream:
+        fcntl.flock(stream, fcntl.LOCK_SH)
+        lines = stream.read().splitlines()
+        fcntl.flock(stream, fcntl.LOCK_UN)
+    for line in lines:
         record = json.loads(line)
         if trajectory_id is not None and record.get("trajectory_id") != trajectory_id:
             continue

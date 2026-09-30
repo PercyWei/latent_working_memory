@@ -1,0 +1,6 @@
+{
+  "batch_template": "configs/data_preparation/fineweb-factqa-6to10-batch000.json",
+  "target_train_trajectories": 1000,
+  "artifacts_dir": "artifacts/v3/fineweb-qa-train1000_20260930",
+  "dataset_dir": "data/fineweb-factqa-train1000_20260930"
+}

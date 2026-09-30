@@ -1,7 +1,7 @@
 # 20260929_FineWeb 事实 QA 构造接口
 
 创建时间：20260929 16:03:54 UTC+08:00
-最后修订时间：20260930 11:25:19 UTC+08:00
+最后修订时间：20260930 16:49:55 UTC+08:00
 
 本目录实现来源池冻结、分批选样、6–10 段 QA 构造、诊断、复核及定稿。具体运行与结果保存于配置指定的 `artifacts_dir`，共享输出保存于 `dataset_dir`。
 
@@ -61,6 +61,23 @@
 恢复前确认同批旧进程已经停止，随后使用原配置和目录运行中断阶段，再执行后续阶段。修复代码后记录实际提交及恢复命令，保留此前日志。内容过滤记录无需人工改成 accepted，也无需删除缓存。若所有文档均失败，正式划分文件为空，准备信息仍记录零成功及完整失败分母。
 
 模型复核不是人工正确率，诊断答对也不证明训练后的记忆收益。
+
+## 按累计 train 目标连续构造
+
+[campaign.py](campaign.py) 根据[目标配置](../../../../configs/data_preparation/fineweb-factqa-train1000.json)串行执行后续批次。当前目标是累计至少 1,000 条完成定稿的 train 轨迹，计入同一来源池的 batch-000；批次模板、prompts、来源池身份及目标在启动时冻结。每批仍使用池中既定的 train／dev／test 份额，耗尽的划分按实际余量处理，不重划分或复用来源。
+
+```bash
+.venv/bin/python -m latent_working_memory.data_preparation.fineweb_qa.campaign run --config <目标配置.json>
+.venv/bin/python -m latent_working_memory.data_preparation.fineweb_qa.campaign report --config <目标配置.json>
+```
+
+仅正式 `preparation.json` 标记完成的批次计入累计目标。每批定稿后重新计数，达到目标即停止启动后续批次，因此最后一批可产生少量余量。达到目标后，在目标数据目录保存 `collection.json`，列出各批正式 JSONL 的位置与数量，不复制轨迹正文。当前批次完成前不把标注达标数计为正式 train 数。
+
+控制目录保存冻结的 `config.json`、实际批次配置 `batches/batch-NNN.json`、`status.json` 和阶段命令；各阶段日志保存在对应批次目录。文件锁避免同时运行两个控制器；单个阶段失败即停止后续派发并保留状态。使用同一目标配置恢复时复用已发布批次与阶段缓存；若旧阶段进程仍存在则拒绝重复启动。来源池耗尽仍未达标时明确报错，不自动换池。
+
+`report` 为只读统计，区分两种用量：`completed_batches_usage` 是已定稿批次的全部构造成本；`all_batches_usage` 还包含当前批次已返回的请求。两者都包括 train／dev／test、失败样本、诊断和复核；不能称为成功 train 样本独占的用量。`completed_batch_tokens_per_train_trajectory` 为前者除以已完成 train 数的整体成本摊销。tokens 指构造模型 API 返回的输入／输出用量，不包含交互助手和自动汇报自身的用量；缺失 usage 单列，不估补。
+
+用量按实际请求及尝试编号去重，跨批次缓存命中不重复计入；读取运行中的请求日志时使用共享锁，避免读到尚未写完的记录。每小时汇报由当前 Codex 会话的自动跟进执行，读取该报告并与上次快照比较新增数据和 tokens；自动跟进只报告运行状况，目标完成后暂停汇报。
 
 ## 代码与离线验证
 

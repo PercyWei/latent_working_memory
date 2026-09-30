@@ -1,11 +1,11 @@
 # 20260914_配置组织规则
 
 创建时间：20260914 11:48:20 UTC+08:00
-最后修订时间：20260929 16:03:54 UTC+08:00
+最后修订时间：20260930 16:49:55 UTC+08:00
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
 
-FineWeb FactQA 将冻结来源池（`fineweb-factqa-source-pool.json`）与批次（`fineweb-factqa-6to10-batch000.json`）分别配置；6–10 段与 train/dev/test 的配额由统一规则推导。可复用接口、配置约束与当前产物索引见[数据构造流程](../src/latent_working_memory/data_preparation/fineweb_qa/README.md)。
+FineWeb FactQA 将冻结来源池（`fineweb-factqa-source-pool.json`）与批次（`fineweb-factqa-6to10-batch000.json`）分别配置；6–10 段与 train/dev/test 的配额由统一规则推导。`fineweb-factqa-train1000.json` 定义跨批次累计 train 目标及控制／集合目录，引用批次模板，不改变冻结池和批次协议。可复用接口、配置约束与当前产物索引见[数据构造流程](../src/latent_working_memory/data_preparation/fineweb_qa/README.md)。
 
 ## 目录与职责
 
