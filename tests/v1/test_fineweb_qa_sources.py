@@ -69,7 +69,13 @@ def test_pool_freezes_all_splits_and_batches_do_not_recluster_or_overlap(tmp_pat
     monkeypatch.setattr(sources, "parquet_records", lambda *_: pytest.fail("pool must not rebuild"))
     assert sources.prepare_pool(config) == pool
     batches = [
-        sources.prepare_selection({"source_pool_dir": config["pool_dir"], "batch_index": i})
+        sources.prepare_selection(
+            {
+                "source_pool_dir": config["pool_dir"],
+                "source_offsets": dict.fromkeys(FRACTION_NAMES, 0),
+                "batch_index": i,
+            }
+        )
         for i in range(3)
     ]
     ids = [d["document_id"] for b in batches for d in b["documents"]]
@@ -92,7 +98,13 @@ def test_pool_freezes_all_splits_and_batches_do_not_recluster_or_overlap(tmp_pat
     with pytest.raises(ValueError, match="configuration changed"):
         sources.prepare_pool(changed)
     with pytest.raises(ValueError, match="exhausted"):
-        sources.prepare_selection({"source_pool_dir": config["pool_dir"], "batch_index": 3})
+        sources.prepare_selection(
+            {
+                "source_pool_dir": config["pool_dir"],
+                "source_offsets": dict.fromkeys(FRACTION_NAMES, 0),
+                "batch_index": 3,
+            }
+        )
 
 
 FRACTION_NAMES = ("train", "dev", "test")
@@ -135,8 +147,20 @@ def test_pool_reports_short_and_duplicate_documents_and_partial_final_batch(tmp_
     assert pool["statistics"]["within_scan_duplicate_documents"] == 1
     assert pool["statistics"]["basic_rejected_documents"] == 1
     assert pool["statistics"]["length_failed"] == 1
-    first = sources.prepare_selection({"source_pool_dir": config["pool_dir"], "batch_index": 0})
-    second = sources.prepare_selection({"source_pool_dir": config["pool_dir"], "batch_index": 1})
+    first = sources.prepare_selection(
+        {
+            "source_pool_dir": config["pool_dir"],
+            "source_offsets": dict.fromkeys(FRACTION_NAMES, 0),
+            "batch_index": 0,
+        }
+    )
+    second = sources.prepare_selection(
+        {
+            "source_pool_dir": config["pool_dir"],
+            "source_offsets": dict.fromkeys(FRACTION_NAMES, 0),
+            "batch_index": 1,
+        }
+    )
     assert first["statistics"]["selected_by_split"] == {"train": 1, "dev": 1, "test": 0}
     assert second["statistics"]["selected_by_split"] == {"train": 1, "dev": 0, "test": 0}
     assert all(row["stop"] >= row["start"] for row in second["ranges"].values())
@@ -180,4 +204,95 @@ def test_invalid_pool_bounds_and_batch_index_fail(tmp_path, monkeypatch):
     config["window"]["min_segments"] = 6
     sources.prepare_pool(config)
     with pytest.raises(ValueError, match="batch_index"):
-        sources.prepare_selection({"source_pool_dir": config["pool_dir"], "batch_index": -1})
+        sources.prepare_selection(
+            {
+                "source_pool_dir": config["pool_dir"],
+                "source_offsets": dict.fromkeys(FRACTION_NAMES, 0),
+                "batch_index": -1,
+            }
+        )
+
+
+def test_next_run_restarts_batch_zero_after_all_previously_selected_sources(tmp_path, monkeypatch):
+    records = [_record("old")] + [
+        _record(f"{split}-{i}", split) for split in FRACTION_NAMES for i in range(3)
+    ]
+    config = _pool_config(tmp_path, records, monkeypatch, {"train": 2, "dev": 3, "test": 3})
+    pool = sources.prepare_pool(config)
+    first = sources.prepare_selection(
+        {
+            "source_pool_dir": config["pool_dir"],
+            "source_offsets": dict.fromkeys(FRACTION_NAMES, 0),
+            "batch_index": 0,
+        }
+    )
+    second_config = {
+        "source_pool_dir": config["pool_dir"],
+        "source_offsets": {s: r["stop"] for s, r in first["ranges"].items()},
+        "batch_index": 0,
+    }
+    second = sources.prepare_selection(second_config)
+    assert first["batch_index"] == second["batch_index"] == 0
+    assert {d["document_id"] for d in first["documents"]}.isdisjoint(
+        d["document_id"] for d in second["documents"]
+    )
+    assert second["statistics"]["selected_by_split"] == {"train": 1, "dev": 0, "test": 0}
+    assert second["ranges"]["train"] == {"start": 2, "stop": 3, "requested": 2, "selected": 1}
+    assert second == sources.prepare_selection(second_config)
+    assert sources.prepare_pool(config) == pool
+
+
+@pytest.mark.parametrize("offset", [-1, 4, True, 0.5])
+def test_source_offsets_must_be_valid_pool_positions(offset):
+    pool = {
+        "split_counts": {s: 3 for s in FRACTION_NAMES},
+        "config": {"batch_counts": {s: 1 for s in FRACTION_NAMES}},
+    }
+    with pytest.raises(ValueError, match="source_offsets.train"):
+        sources.batch_ranges(pool, {"train": offset, "dev": 0, "test": 0}, 0)
+
+
+def test_used_raw_text_is_excluded_with_new_ids_urls_and_near_copies(tmp_path, monkeypatch):
+    words = [f"word{i:03d}" for i in range(120)]
+    used = _record("used", text=" ".join(words))
+    near = words.copy()
+    near[20] = "changed"
+    records = [
+        _record("old"),
+        used,
+        _record("new-id-same-text", text=used["text"]),
+        dict(_record("same-url", text="unrelated text " * 100), url=used["url"]),
+        _record("near", text=" ".join(near)),
+        _record("unused", text=" ".join(f"novel{i}" for i in range(120))),
+    ]
+    config = _pool_config(tmp_path, records, monkeypatch)
+    config["source"]["near_duplicate_min_words"] = 64
+    excluded = [
+        {
+            "document_id": used["id"],
+            "dedup_cluster": source_key(used["url"]),
+            "source": {"file": str(tmp_path / "000_00000.parquet"), "row_group": 0, "row_index": 1},
+        }
+    ]
+    pool = sources.prepare_pool(config, excluded, ["previous-dataset"])
+    assert [d["document_id"] for d in pool["documents"]] == ["unused"]
+    assert pool["statistics"]["previously_used_documents"] == 4
+    assert pool["excluded_sources"] == excluded
+    assert sources.prepare_pool(config, excluded, ["previous-dataset"]) == pool
+    with pytest.raises(ValueError, match="configuration changed"):
+        sources.prepare_pool(config)
+
+
+def test_unchanged_pool_snapshot_filters_whole_documents_without_reading_raw(tmp_path, monkeypatch):
+    records = [_record("old"), _record("a"), _record("b")]
+    config = _pool_config(tmp_path, records, monkeypatch)
+    pool = sources.prepare_pool(config)
+    used = {key: pool["documents"][0][key] for key in ("document_id", "dedup_cluster", "source")}
+    monkeypatch.setattr(
+        sources, "parquet_records", lambda *_: pytest.fail("snapshot must not rescan raw text")
+    )
+    new = sources.pool_after_exclusions(pool, [used], ["previous-dataset"])
+    assert new["pool_id"] != pool["pool_id"]
+    assert len(new["documents"]) == 1 and new["documents"][0]["document_id"] != used["document_id"]
+    assert new["documents"][0]["pool_index"] == 0
+    assert len(pool["documents"]) == 2

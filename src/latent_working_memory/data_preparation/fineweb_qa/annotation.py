@@ -16,8 +16,6 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
-from latent_working_memory.data_preparation.fineweb_qa.finalization import validate_document_reviews
-
 
 def _object_schema(properties: dict[str, dict]) -> dict:
     return {
@@ -70,24 +68,7 @@ DOCUMENT_REVIEW_SCHEMA = _object_schema(
         }
     }
 )
-ANSWER_SCHEMA = _object_schema({"answer": _STRING})
-REVIEW_SCHEMA = _object_schema(
-    {
-        "decisions": {
-            "type": "array",
-            "items": _object_schema(
-                {
-                    "qa_id": _STRING,
-                    "accepted": _BOOLEAN,
-                    "reason": _STRING,
-                    "same_fact_with": {"type": "array", "items": _STRING},
-                    "evidence_prediction_correct": _BOOLEAN,
-                }
-            ),
-        }
-    }
-)
-STAGES = ("generate", "verify", "document_review", "answer", "review", "adjudicate")
+STAGES = ("generate", "verify", "document_review")
 
 _LOCAL_LOCKS: dict[str, threading.Lock] = {}
 _LOCAL_LOCKS_GUARD = threading.Lock()
@@ -195,7 +176,7 @@ def response_schema(stage: str, content: dict, schema: dict) -> dict:
         bound["properties"]["qas"]["maxItems"] = min(
             bound["properties"]["qas"]["maxItems"], content["candidate_limit"]
         )
-    if stage in ("verify", "document_review", "review", "adjudicate"):
+    if stage in ("verify", "document_review"):
         ids = [qa["qa_id"] for qa in content["qas"]]
         if not ids or len(ids) != len(set(ids)):
             raise ValueError("decision request needs distinct nonempty candidate IDs")
@@ -209,7 +190,7 @@ def validate_output(output: dict, stage: str, content: dict, schema: dict) -> No
     """Validate model JSON and request coverage before a successful cache is written."""
     try:
         _validate_schema(output, schema)
-        if stage in ("verify", "document_review", "review", "adjudicate"):
+        if stage in ("verify", "document_review"):
             decisions = output["decisions"]
             ids = [d["qa_id"] for d in decisions]
             expected = [qa["qa_id"] for qa in content["qas"]]
@@ -224,10 +205,6 @@ def validate_output(output: dict, stage: str, content: dict, schema: dict) -> No
                     and not decision["fact_group_id"].strip()
                 ):
                     raise ValueError("accepted document-review QA needs a fact group")
-            if stage == "adjudicate":
-                validate_document_reviews(
-                    content["qas"], output, {"review_decisions": content["candidate_decisions"]}
-                )
     except ValueError as error:
         raise ResponseContractError(str(error)) from error
 

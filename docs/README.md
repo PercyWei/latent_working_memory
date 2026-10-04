@@ -1,7 +1,7 @@
 # 项目规范索引
 
 创建时间：20260914 14:47:56 UTC+08:00
-最后修订时间：20260929 10:31:04 UTC+08:00
+最后修订时间：20261004 16:26:44 UTC+08:00
 
 本目录集中维护跨主题规范和研究笔记规则；配置专属细则保留在 `configs/`。各文件维护自身职责内的规则，通过链接引用共同要求。
 
@@ -14,6 +14,6 @@
 | 记录或汇总数据构造过程与结果 | [数据构造记录规范](data_construction_reporting.md) |
 | 创建、修改或整理配置 | [配置组织规则](../configs/README.md) |
 
-数据流程入口：[FineWeb 事实 QA 数据构造流程](../notes/v3/20260928_fineweb_qa_construction.md)。
+数据流程入口：[FineWeb 事实 QA 数据构造流程](../src/latent_working_memory/data_preparation/fineweb_qa/README.md)。
 
 通用执行约束见 [AGENTS.md](../AGENTS.md)。

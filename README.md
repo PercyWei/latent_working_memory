@@ -1,6 +1,6 @@
 # 20260912_latent_working_memory
 
-最后修订时间：20260929 16:03:54 UTC+08:00
+最后修订时间：20261004 20:46:56 UTC+08:00
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理；ICAE v1 和 C-DIC 分别位于 `reproductions/icae/` 与 `reproductions/cdic/`，各自使用独立的 `uv` 环境。
 
@@ -12,7 +12,7 @@
 
 创建和整理配置遵守 [配置组织规则](configs/README.md)：基础数据准备与实验选样分开，每个配置目录只描述一个具体实验，实验组通过运行记录关联。
 
-数据构造按流程分包：[pretrain/](src/latent_working_memory/data_preparation/pretrain/) 负责 FineWeb 预训练文本构造、质量审查与恢复，[personamem/](src/latent_working_memory/data_preparation/personamem/) 负责 PersonaMem 事实 QA 构造，[fineweb_qa/](src/latent_working_memory/data_preparation/fineweb_qa/) 负责 FineWeb 事实 QA 的冻结来源池、6–10 段随机切分、三划分批次、核验、补题、独立复核与裁决定稿；完整接口及产物索引见 [FineWeb QA 数据构造流程](src/latent_working_memory/data_preparation/fineweb_qa/README.md)。预训练的来源、句界、截断、文本格式、审查和恢复模块均位于 `pretrain/`；训练时的数据读取与实验选样继续使用 `v1/pretrain/prepared_data.py` 和 `v1/pretrain/data_selection.py`。
+数据构造按流程分包：[pretrain/](src/latent_working_memory/data_preparation/pretrain/) 负责 FineWeb 预训练文本构造、质量审查与恢复，[personamem/](src/latent_working_memory/data_preparation/personamem/) 负责 PersonaMem 事实 QA 构造，[fineweb_qa/](src/latent_working_memory/data_preparation/fineweb_qa/) 负责 FineWeb 事实 QA 的冻结来源池、6–10 段随机切分、三划分批次、生成、全量局部核验、全文审查、补题与定稿；完整接口及产物索引见 [FineWeb QA 数据构造流程](src/latent_working_memory/data_preparation/fineweb_qa/README.md)。预训练的来源、句界、截断、文本格式、审查和恢复模块均位于 `pretrain/`；训练时的数据读取与实验选样继续使用 `v1/pretrain/prepared_data.py` 和 `v1/pretrain/data_selection.py`。
 
 ```bash
 uv sync --frozen

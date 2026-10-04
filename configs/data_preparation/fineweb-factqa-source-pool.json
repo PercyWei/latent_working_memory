@@ -28,5 +28,5 @@
     "dev": 25,
     "test": 25
   },
-  "pool_dir": "data/fineweb-factqa-source-pool_20260929"
+  "pool_dir": "data/fineweb-factqa-train1000_20260930"
 }

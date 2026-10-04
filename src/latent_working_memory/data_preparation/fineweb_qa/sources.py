@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import itertools
 import math
@@ -25,7 +26,6 @@ from latent_working_memory.data_preparation.pretrain.sources import parquet_reco
 
 
 _WORDS = re.compile(r"\w+")
-_OLD_BATCH_SIZE = 512
 
 
 def _rank(*parts: object) -> bytes:
@@ -51,20 +51,10 @@ def _prefix(values: set[bytes], frequency: Counter[bytes], threshold: float) -> 
     return ordered[: len(values) - math.ceil(threshold * len(values)) + 1]
 
 
-def _old_pool_matches(
-    files: list[Path],
-    data_seed: int,
-    old_pool_documents: int,
-    new_records: list[dict[str, Any]],
-    clusters: list[str],
-    recipe: PreparationConfig,
+def _matching_clusters(
+    reference_records, new_records: list[dict], clusters: list[str], recipe: PreparationConfig
 ) -> set[str]:
-    """Match old documents in bounded batches, then exclude entire new clusters.
-
-    The prefix index uses the same normalized word 5-grams and exact Jaccard
-    threshold as ``cluster_documents``. All new documents are clustered first,
-    so an old match also excludes new documents joined transitively to it.
-    """
+    """Exclude exact and near-duplicate clusters matched by any reference document."""
     if not new_records:
         return set()
 
@@ -87,38 +77,98 @@ def _old_pool_matches(
                 postings[token].append(index)
 
     excluded: set[str] = set()
-    with closing(parquet_records(files, data_seed)) as old_records:
-        remaining = old_pool_documents
-        while remaining:
-            batch = list(itertools.islice(old_records, min(_OLD_BATCH_SIZE, remaining)))
-            if not batch:
-                raise ValueError("FineWeb ended before the old source pool was reconstructed")
-            remaining -= len(batch)
-            for old, _ in batch:
-                normalized = _normalized_text(old)
-                exact = set(ids.get(old["id"], ()))
-                exact.update(urls.get(source_key(old["url"]), ()))
-                exact.update(texts.get(normalized, ()))
-                excluded.update(clusters[index] for index in exact)
+    for old in reference_records:
+        normalized = _normalized_text(old)
+        exact = set(ids.get(old["id"], ()))
+        exact.update(urls.get(source_key(old["url"]), ()))
+        exact.update(texts.get(normalized, ()))
+        excluded.update(clusters[index] for index in exact)
 
-                old_values = _shingles(normalized, recipe.near_duplicate_min_words)
-                if not old_values:
-                    continue
-                possible: set[int] = set()
-                for token in _prefix(old_values, frequency, recipe.near_duplicate_threshold):
-                    possible.update(postings.get(token, ()))
-                for index in possible:
-                    values = shingle_sets[index]
-                    if min(len(values), len(old_values)) < recipe.near_duplicate_threshold * max(
-                        len(values), len(old_values)
-                    ):
-                        continue
-                    overlap = len(values & old_values)
-                    if overlap >= recipe.near_duplicate_threshold * (
-                        len(values) + len(old_values) - overlap
-                    ):
-                        excluded.add(clusters[index])
+        old_values = _shingles(normalized, recipe.near_duplicate_min_words)
+        if not old_values:
+            continue
+        possible: set[int] = set()
+        for token in _prefix(old_values, frequency, recipe.near_duplicate_threshold):
+            possible.update(postings.get(token, ()))
+        for index in possible:
+            values = shingle_sets[index]
+            if min(len(values), len(old_values)) < recipe.near_duplicate_threshold * max(
+                len(values), len(old_values)
+            ):
+                continue
+            overlap = len(values & old_values)
+            if overlap >= recipe.near_duplicate_threshold * (
+                len(values) + len(old_values) - overlap
+            ):
+                excluded.add(clusters[index])
     return excluded
+
+
+def _old_pool_matches(
+    files: list[Path],
+    data_seed: int,
+    old_pool_documents: int,
+    new_records: list[dict],
+    clusters: list[str],
+    recipe: PreparationConfig,
+) -> set[str]:
+    with closing(parquet_records(files, data_seed)) as stream:
+
+        def references():
+            for _ in range(old_pool_documents):
+                pair = next(stream, None)
+                if pair is None:
+                    raise ValueError("FineWeb ended before the old source pool was reconstructed")
+                yield pair[0]
+
+        return _matching_clusters(references(), new_records, clusters, recipe)
+
+
+def _referenced_records(references):
+    grouped = defaultdict(list)
+    for reference in references:
+        location = reference["source"]
+        grouped[(location["file"], location["row_group"])].append(reference)
+    for (filename, group), entries in grouped.items():
+        with pq.ParquetFile(filename) as parquet:
+            table = parquet.read_row_group(group, columns=["id", "url", "text"])
+        for reference in entries:
+            record = table.slice(reference["source"]["row_index"], 1).to_pylist()[0]
+            if record["id"] != reference["document_id"]:
+                raise ValueError("previous source document differs from its recorded location")
+            yield record
+
+
+def pool_after_exclusions(
+    pool: dict, excluded_sources: list[dict], previous_datasets: list[str]
+) -> dict:
+    """Freeze a new run's unused candidates without rescanning an unchanged source recipe."""
+    ids = {d["document_id"] for d in excluded_sources}
+    clusters = {d["dedup_cluster"] for d in excluded_sources}
+    result = copy.deepcopy(pool)
+    documents = [
+        d
+        for d in result["documents"]
+        if d["document_id"] not in ids and d["dedup_cluster"] not in clusters
+    ]
+    for index, document in enumerate(documents):
+        document["pool_index"] = index
+    counts = Counter(result["statistics"])
+    counts["previously_used_documents"] += len(pool["documents"]) - len(documents)
+    counts["frozen_documents"] = len(documents)
+    result.update(
+        pool_id=str(uuid.uuid4()),
+        created_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+        documents=documents,
+        excluded_sources=copy.deepcopy(excluded_sources),
+        previous_datasets=list(previous_datasets),
+        statistics=dict(counts),
+        split_counts={
+            split: sum(d["split"] == split for d in documents) for split in ("train", "dev", "test")
+        },
+        segment_counts=dict(Counter(str(len(d["segments"])) for d in documents)),
+    )
+    return result
 
 
 def _window_cuts(text: str, document_id: str, seed: int, config: dict) -> list[int]:
@@ -170,14 +220,18 @@ def _validate_pool_config(config: dict) -> None:
         raise ValueError("batch_counts requires positive train/dev/test counts")
 
 
-def prepare_pool(config: dict) -> dict:
+def prepare_pool(config: dict, excluded_sources=(), previous_datasets=()) -> dict:
     """Build one immutable source pool; a different scan requires a different pool."""
     _validate_pool_config(config)
     path = Path(config["pool_dir"]) / "source-pool.json"
     contract = {key: config[key] for key in ("source", "window", "batch_counts")}
     if path.exists():
         pool = load_json(path)
-        if pool["config"] != contract:
+        if (
+            pool["config"] != contract
+            or pool["excluded_sources"] != list(excluded_sources)
+            or pool["previous_datasets"] != list(previous_datasets)
+        ):
             raise ValueError("source pool configuration changed; create a new pool")
         return pool
     source, window = config["source"], config["window"]
@@ -198,6 +252,11 @@ def prepare_pool(config: dict) -> dict:
     excluded = _old_pool_matches(
         files, source["data_seed"], source["old_pool_documents"], raw, clusters, recipe
     )
+    used_clusters = (
+        _matching_clusters(_referenced_records(excluded_sources), raw, clusters, recipe)
+        if excluded_sources
+        else set()
+    )
     counts = Counter(
         scanned_documents=len(scanned), old_pool_documents=source["old_pool_documents"]
     )
@@ -207,6 +266,8 @@ def prepare_pool(config: dict) -> dict:
             counts["basic_rejected_documents"] += 1
         elif cluster in excluded:
             counts["old_pool_duplicate_documents"] += 1
+        elif cluster in used_clusters:
+            counts["previously_used_documents"] += 1
         elif cluster in seen:
             counts["within_scan_duplicate_documents"] += 1
         else:
@@ -250,6 +311,8 @@ def prepare_pool(config: dict) -> dict:
         "pool_id": str(uuid.uuid4()),
         "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "config": contract,
+        "excluded_sources": list(excluded_sources),
+        "previous_datasets": list(previous_datasets),
         "statistics": dict(counts),
         "split_counts": dict(by_split),
         "segment_counts": dict(Counter(str(len(d["segments"])) for d in documents)),
@@ -259,19 +322,33 @@ def prepare_pool(config: dict) -> dict:
     return pool
 
 
+def batch_ranges(pool: dict, offsets: dict, index: int) -> dict:
+    """Locate a run-local batch in the immutable per-split source lists."""
+    if type(index) is not int or index < 0:
+        raise ValueError("batch_index must be a nonnegative integer")
+    if set(offsets) != {"train", "dev", "test"}:
+        raise ValueError("source_offsets must contain train, dev and test")
+    ranges = {}
+    for split in ("train", "dev", "test"):
+        offset, available = offsets[split], pool["split_counts"][split]
+        if type(offset) is not int or not 0 <= offset <= available:
+            raise ValueError(f"source_offsets.{split} must be within the frozen source pool")
+        count = pool["config"]["batch_counts"][split]
+        start = min(offset + index * count, available)
+        stop = min(offset + (index + 1) * count, available)
+        ranges[split] = {"start": start, "stop": stop, "requested": count, "selected": stop - start}
+    return ranges
+
+
 def prepare_selection(config: dict) -> dict:
     """Allocate disjoint split slices by batch index; never recluster during annotation."""
     pool = load_json(Path(config["source_pool_dir"]) / "source-pool.json")
     index = config["batch_index"]
-    if type(index) is not int or index < 0:
-        raise ValueError("batch_index must be a nonnegative integer")
-    selected, ranges = [], {}
-    for split in ("train", "dev", "test"):
+    ranges = batch_ranges(pool, config["source_offsets"], index)
+    selected = []
+    for split, bounds in ranges.items():
         candidates = [d for d in pool["documents"] if d["split"] == split]
-        count = pool["config"]["batch_counts"][split]
-        start, stop = min(index * count, len(candidates)), min((index + 1) * count, len(candidates))
-        ranges[split] = {"start": start, "stop": stop, "requested": count, "selected": stop - start}
-        selected.extend(dict(d) for d in candidates[start:stop])
+        selected.extend(dict(d) for d in candidates[bounds["start"] : bounds["stop"]])
     if not selected:
         raise ValueError(f"source pool exhausted in batch {index}")
     grouped = defaultdict(list)
@@ -296,6 +373,9 @@ def prepare_selection(config: dict) -> dict:
         "statistics": {
             "frozen_documents": len(selected),
             "selected_by_split": {key: value["selected"] for key, value in ranges.items()},
-            "available_by_split": pool["split_counts"],
+            "available_by_split": {
+                split: count - config["source_offsets"][split]
+                for split, count in pool["split_counts"].items()
+            },
         },
     }

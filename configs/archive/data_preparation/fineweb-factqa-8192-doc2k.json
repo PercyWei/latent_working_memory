@@ -84,6 +84,6 @@
     "subagent_review": "configs/data_preparation/prompts/fineweb_factqa/subagent_review.txt"
   },
   "artifacts_dir": "artifacts/v3/fineweb-qa-random-topup_20260928",
-  "cache_dir": "artifacts/data_preparation/fineweb-qa-requests",
+  "cache_dir": "artifacts/v3/fineweb-qa-random-topup_20260928/requests",
   "dataset_dir": "data/fineweb-factqa-random-topup-8192-doc2k_20260928"
 }

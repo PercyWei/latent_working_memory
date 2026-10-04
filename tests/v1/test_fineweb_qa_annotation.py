@@ -27,9 +27,6 @@ def client_config():
             "generate": 8192,
             "verify": 4096,
             "document_review": 8192,
-            "answer": 2048,
-            "review": 8192,
-            "adjudicate": 8192,
         },
     }
 
@@ -81,29 +78,37 @@ def test_payload_identity_and_shared_cache_exclude_endpoint(
     class Opener:
         def open(self, request, timeout):
             sent.append((request.full_url, json.loads(request.data), timeout, request.data))
-            return Response(response_bytes({"answer": "Oslo"}))
+            return Response(response_bytes({"qas": [], "skip_reason": "No supported facts"}))
 
     monkeypatch.setattr(annotation, "build_opener", lambda *_args: Opener())
     cache = tmp_path / "cache"
     first = annotation.AnnotationClient(client_config, tmp_path / "batch-a", cache, prompts)
-    assert first.call("answer", {"question": "Which city?"}, annotation.ANSWER_SCHEMA) == {
-        "answer": "Oslo"
-    }
+    assert first.call(
+        "generate",
+        {"candidate_limit": 15, "segment_text": "Which city?"},
+        annotation.GENERATE_SCHEMA,
+    ) == {"qas": [], "skip_reason": "No supported facts"}
     other_endpoint = dict(client_config, endpoint="http://another-host/v1/responses")
     second = annotation.AnnotationClient(other_endpoint, tmp_path / "batch-b", cache, prompts)
-    assert second.call("answer", {"question": "Which city?"}, annotation.ANSWER_SCHEMA) == {
-        "answer": "Oslo"
-    }
+    assert second.call(
+        "generate",
+        {"candidate_limit": 15, "segment_text": "Which city?"},
+        annotation.GENERATE_SCHEMA,
+    ) == {"qas": [], "skip_reason": "No supported facts"}
     assert len(sent) == 1
     assert sent[0][1]["model"] == "gpt-6-sol"
     assert sent[0][1]["reasoning"] == {"effort": "medium"}
-    assert sent[0][1]["text"]["format"]["schema"] == annotation.ANSWER_SCHEMA
+    assert sent[0][1]["text"]["format"]["schema"] == annotation.GENERATE_SCHEMA
     assert sent[0][1]["store"] is False
     assert sent[0][2] == 120
 
-    changed_prompts = dict(prompts, answer="Different answer instructions")
+    changed_prompts = dict(prompts, generate="Different generation instructions")
     third = annotation.AnnotationClient(client_config, tmp_path / "batch-c", cache, changed_prompts)
-    third.call("answer", {"question": "Which city?"}, annotation.ANSWER_SCHEMA)
+    third.call(
+        "generate",
+        {"candidate_limit": 15, "segment_text": "Which city?"},
+        annotation.GENERATE_SCHEMA,
+    )
     assert len(sent) == 2
     first_log = json.loads((tmp_path / "batch-a/requests.jsonl").read_text().splitlines()[0])
     second_log = json.loads((tmp_path / "batch-b/requests.jsonl").read_text().splitlines()[0])
@@ -123,7 +128,7 @@ def test_raw_response_recovers_after_local_parse_write_failure(
     class Opener:
         def open(self, request, timeout):
             sends.append(request)
-            return Response(response_bytes({"answer": "Oslo"}))
+            return Response(response_bytes({"qas": [], "skip_reason": "No supported facts"}))
 
     monkeypatch.setattr(annotation, "build_opener", lambda *_args: Opener())
     original = annotation._atomic_write_json
@@ -138,16 +143,22 @@ def test_raw_response_recovers_after_local_parse_write_failure(
         patch.setattr(annotation, "_atomic_write_json", fail_parsed)
         client = annotation.AnnotationClient(client_config, tmp_path / "batch", cache, prompts)
         with pytest.raises(OSError, match="disk write failed"):
-            client.call("answer", {"question": "Which city?"}, annotation.ANSWER_SCHEMA)
+            client.call(
+                "generate",
+                {"candidate_limit": 15, "segment_text": "Which city?"},
+                annotation.GENERATE_SCHEMA,
+            )
         assert client.stop.is_set()
     assert len(sends) == 1
     assert len(list(cache.glob("*/*/response.raw.json"))) == 1
     assert not list(cache.glob("*/*/parsed.json"))
 
     resumed = annotation.AnnotationClient(client_config, tmp_path / "batch", cache, prompts)
-    assert resumed.call("answer", {"question": "Which city?"}, annotation.ANSWER_SCHEMA) == {
-        "answer": "Oslo"
-    }
+    assert resumed.call(
+        "generate",
+        {"candidate_limit": 15, "segment_text": "Which city?"},
+        annotation.GENERATE_SCHEMA,
+    ) == {"qas": [], "skip_reason": "No supported facts"}
     assert len(sends) == 1
     records = [
         json.loads(line) for line in (tmp_path / "batch/requests.jsonl").read_text().splitlines()
@@ -165,7 +176,7 @@ def test_failed_raw_write_never_triggers_a_second_remote_request(
     class Opener:
         def open(self, request, timeout):
             sends.append(request)
-            return Response(response_bytes({"answer": "Oslo"}))
+            return Response(response_bytes({"qas": [], "skip_reason": "No supported facts"}))
 
     monkeypatch.setattr(annotation, "build_opener", lambda *_args: Opener())
     original = annotation._atomic_write
@@ -180,10 +191,18 @@ def test_failed_raw_write_never_triggers_a_second_remote_request(
         patch.setattr(annotation, "_atomic_write", fail_raw)
         client = annotation.AnnotationClient(client_config, tmp_path / "batch-a", cache, prompts)
         with pytest.raises(OSError, match="raw disk write failed"):
-            client.call("answer", {"question": "Which city?"}, annotation.ANSWER_SCHEMA)
+            client.call(
+                "generate",
+                {"candidate_limit": 15, "segment_text": "Which city?"},
+                annotation.GENERATE_SCHEMA,
+            )
     resumed = annotation.AnnotationClient(client_config, tmp_path / "batch-b", cache, prompts)
     with pytest.raises(RuntimeError, match="outcome is uncertain"):
-        resumed.call("answer", {"question": "Which city?"}, annotation.ANSWER_SCHEMA)
+        resumed.call(
+            "generate",
+            {"candidate_limit": 15, "segment_text": "Which city?"},
+            annotation.GENERATE_SCHEMA,
+        )
     assert len(sends) == 1
 
 
@@ -199,21 +218,31 @@ def test_temporary_http_error_retries_but_fatal_http_error_stops(
                 raise HTTPError(request.full_url, 429, "limited", {"Retry-After": "0"}, BytesIO())
             if len(calls) == 3:
                 raise HTTPError(request.full_url, 400, "bad request", {}, BytesIO())
-            return Response(response_bytes({"answer": "Oslo"}))
+            return Response(response_bytes({"qas": [], "skip_reason": "No supported facts"}))
 
     monkeypatch.setattr(annotation, "build_opener", lambda *_args: Opener())
     client = annotation.AnnotationClient(
         client_config, tmp_path / "batch", tmp_path / "cache", prompts
     )
     monkeypatch.setattr(client.stop, "wait", lambda _seconds: False)
-    assert client.call("answer", {"question": "Which city?"}, annotation.ANSWER_SCHEMA) == {
-        "answer": "Oslo"
-    }
+    assert client.call(
+        "generate",
+        {"candidate_limit": 15, "segment_text": "Which city?"},
+        annotation.GENERATE_SCHEMA,
+    ) == {"qas": [], "skip_reason": "No supported facts"}
     with pytest.raises(RuntimeError, match="HTTP 400"):
-        client.call("answer", {"question": "Which country?"}, annotation.ANSWER_SCHEMA)
+        client.call(
+            "generate",
+            {"candidate_limit": 15, "segment_text": "Which country?"},
+            annotation.GENERATE_SCHEMA,
+        )
     assert client.stop.is_set()
     with pytest.raises(InterruptedError):
-        client.call("answer", {"question": "Another?"}, annotation.ANSWER_SCHEMA)
+        client.call(
+            "generate",
+            {"candidate_limit": 15, "segment_text": "Another?"},
+            annotation.GENERATE_SCHEMA,
+        )
     assert len(calls) == 3
     records = [
         json.loads(line) for line in (tmp_path / "batch/requests.jsonl").read_text().splitlines()
@@ -231,17 +260,25 @@ def test_invalid_structured_response_exhausts_document_budget_and_keeps_raw(
     class Opener:
         def open(self, request, timeout):
             sends.append(request)
-            return Response(response_bytes({"answer": 17}))
+            return Response(response_bytes({"qas": [], "skip_reason": 17}))
 
     monkeypatch.setattr(annotation, "build_opener", lambda *_args: Opener())
     cache = tmp_path / "cache"
     client = annotation.AnnotationClient(client_config, tmp_path / "batch-a", cache, prompts)
     with pytest.raises(annotation.AnnotationContractError, match="must be a string"):
-        client.call("answer", {"question": "Which city?"}, annotation.ANSWER_SCHEMA)
+        client.call(
+            "generate",
+            {"candidate_limit": 15, "segment_text": "Which city?"},
+            annotation.GENERATE_SCHEMA,
+        )
     assert not client.stop.is_set()
     another = annotation.AnnotationClient(client_config, tmp_path / "batch-b", cache, prompts)
     with pytest.raises(annotation.AnnotationContractError, match="must be a string"):
-        another.call("answer", {"question": "Which city?"}, annotation.ANSWER_SCHEMA)
+        another.call(
+            "generate",
+            {"candidate_limit": 15, "segment_text": "Which city?"},
+            annotation.GENERATE_SCHEMA,
+        )
     assert len(sends) == 3
     assert len(list(cache.glob("*/*/response.attempt-*.raw.json"))) == 3
     assert not list(cache.glob("*/*/parsed.json"))
@@ -258,7 +295,7 @@ def test_parallel_clients_coalesce_identical_request_and_log_both_calls(
             with send_lock:
                 sends.append(request)
             time.sleep(0.05)
-            return Response(response_bytes({"answer": "Oslo"}))
+            return Response(response_bytes({"qas": [], "skip_reason": "No supported facts"}))
 
     monkeypatch.setattr(annotation, "build_opener", lambda *_args: Opener())
     cache, batch = tmp_path / "cache", tmp_path / "batch"
@@ -266,11 +303,16 @@ def test_parallel_clients_coalesce_identical_request_and_log_both_calls(
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [
             pool.submit(
-                client.call, "answer", {"question": "Which city?"}, annotation.ANSWER_SCHEMA
+                client.call,
+                "generate",
+                {"candidate_limit": 15, "segment_text": "Which city?"},
+                annotation.GENERATE_SCHEMA,
             )
             for client in clients
         ]
-        assert [future.result() for future in futures] == [{"answer": "Oslo"}] * 2
+        assert [future.result() for future in futures] == [
+            {"qas": [], "skip_reason": "No supported facts"}
+        ] * 2
     assert len(sends) == 1
     records = [json.loads(line) for line in (batch / "requests.jsonl").read_text().splitlines()]
     assert len(records) == 2 and all(row["ok"] for row in records)
@@ -390,34 +432,42 @@ def test_content_filter_is_cached_document_failure_and_does_not_stop_other_reque
     tmp_path, monkeypatch, client_config, prompts
 ):
     sends = []
-    blocked = json.loads(response_bytes({"answer": "partial"}))
+    blocked = json.loads(response_bytes({"qas": [], "skip_reason": "partial"}))
     blocked.update(status="incomplete", incomplete_details={"reason": "content_filter"})
     blocked["output"][0]["content"][0]["text"] = '{"answer":"unfinished'
     raw = json.dumps(blocked).encode()
 
     def send(self, payload):
         sends.append(payload)
-        return 200, raw if len(sends) == 1 else response_bytes({"answer": "Oslo"})
+        return 200, raw if len(sends) == 1 else response_bytes(
+            {"qas": [], "skip_reason": "No supported facts"}
+        )
 
     monkeypatch.setattr(annotation.AnnotationClient, "_send", send)
     cache, root = tmp_path / "cache", tmp_path / "batch"
     for _ in range(2):
         client = annotation.AnnotationClient(client_config, root, cache, prompts)
         with pytest.raises(annotation.ContentFilteredError) as caught:
-            client.call("answer", {"question": "Filtered question"}, annotation.ANSWER_SCHEMA)
-        assert caught.value.stage == "answer"
+            client.call(
+                "generate",
+                {"candidate_limit": 15, "segment_text": "Filtered question"},
+                annotation.GENERATE_SCHEMA,
+            )
+        assert caught.value.stage == "generate"
         assert Path(caught.value.raw_response_path).read_bytes() == raw
         assert not client.stop.is_set()
     assert len(sends) == 1
     assert not list(cache.glob("*/*/parsed.json"))
     assert client.call(
-        "answer", {"question": "A different document"}, annotation.ANSWER_SCHEMA
-    ) == {"answer": "Oslo"}
+        "generate",
+        {"candidate_limit": 15, "segment_text": "A different document"},
+        annotation.GENERATE_SCHEMA,
+    ) == {"qas": [], "skip_reason": "No supported facts"}
     logs = [json.loads(line) for line in (root / "requests.jsonl").read_text().splitlines()]
     assert logs[0]["failure_reason"] == logs[1]["failure_reason"] == "content_filtered"
     assert logs[1]["cache_source"] == "raw" and logs[1]["network_attempts"] == 0
     assert logs[0]["usage"] == logs[1]["usage"] == blocked["usage"]
-    usage = pipeline._request_statistics(root)["answer"]
+    usage = pipeline._request_statistics(root)["generate"]
     assert usage["content_filtered_calls"] == 2
     assert usage["input_tokens"] == 62 and usage["output_tokens"] == 14
 
@@ -426,7 +476,7 @@ def test_content_filter_is_cached_document_failure_and_does_not_stop_other_reque
 def test_other_incomplete_responses_remain_fatal(
     tmp_path, monkeypatch, client_config, prompts, reason
 ):
-    raw = json.loads(response_bytes({"answer": "partial"}))
+    raw = json.loads(response_bytes({"qas": [], "skip_reason": "partial"}))
     raw.update(status="incomplete", incomplete_details={"reason": reason})
     monkeypatch.setattr(
         annotation.AnnotationClient, "_send", lambda *_: (200, json.dumps(raw).encode())
@@ -435,14 +485,18 @@ def test_other_incomplete_responses_remain_fatal(
         client_config, tmp_path / "batch", tmp_path / "cache", prompts
     )
     with pytest.raises(ValueError, match="not completed"):
-        client.call("answer", {"question": "Question"}, annotation.ANSWER_SCHEMA)
+        client.call(
+            "generate",
+            {"candidate_limit": 15, "segment_text": "Question"},
+            annotation.GENERATE_SCHEMA,
+        )
     assert client.stop.is_set()
 
 
 def test_filtered_response_log_write_error_remains_fatal(
     tmp_path, monkeypatch, client_config, prompts
 ):
-    raw = json.loads(response_bytes({"answer": "partial"}))
+    raw = json.loads(response_bytes({"qas": [], "skip_reason": "partial"}))
     raw.update(status="incomplete", incomplete_details={"reason": "content_filter"})
     monkeypatch.setattr(
         annotation.AnnotationClient, "_send", lambda *_: (200, json.dumps(raw).encode())
@@ -456,7 +510,11 @@ def test_filtered_response_log_write_error_remains_fatal(
 
     monkeypatch.setattr(client, "_append_log", fail_log)
     with pytest.raises(OSError, match="request log write failed"):
-        client.call("answer", {"question": "Question"}, annotation.ANSWER_SCHEMA)
+        client.call(
+            "generate",
+            {"candidate_limit": 15, "segment_text": "Question"},
+            annotation.GENERATE_SCHEMA,
+        )
     assert client.stop.is_set()
 
 
@@ -468,7 +526,7 @@ def test_filtered_response_log_write_error_remains_fatal(
 def test_incomplete_response_does_not_hide_invalid_response_contract(
     tmp_path, monkeypatch, client_config, prompts, field, value, reason
 ):
-    raw = json.loads(response_bytes({"answer": "partial"}))
+    raw = json.loads(response_bytes({"qas": [], "skip_reason": "partial"}))
     raw.update(status="incomplete", incomplete_details={"reason": reason})
     raw[field] = value
     monkeypatch.setattr(
@@ -478,7 +536,11 @@ def test_incomplete_response_does_not_hide_invalid_response_contract(
         client_config, tmp_path / "batch", tmp_path / "cache", prompts
     )
     with pytest.raises(ValueError) as caught:
-        client.call("answer", {"question": "Question"}, annotation.ANSWER_SCHEMA)
+        client.call(
+            "generate",
+            {"candidate_limit": 15, "segment_text": "Question"},
+            annotation.GENERATE_SCHEMA,
+        )
     assert not isinstance(caught.value, annotation.ContentFilteredError)
     assert client.stop.is_set()
 

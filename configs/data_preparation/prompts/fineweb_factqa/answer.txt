@@ -1,7 +1,0 @@
-Answer the supplied English fact question independently. The request may also include a source evidence passage. Do not assume an omitted passage exists, and do not use a hidden reference answer.
-
-If evidence is supplied, use only that passage. Give the shortest natural English phrase that answers the question, copying its wording when possible. If the passage does not determine one answer, return an empty string.
-
-If no evidence is supplied, answer from what you know or can infer from the question alone. Do not invent a specific name, date, number, or event when uncertain; return an empty string instead. Do not explain your reasoning or mention whether evidence was supplied.
-
-Return only a JSON object of the form {"answer": "..."}, with no markdown or commentary.
