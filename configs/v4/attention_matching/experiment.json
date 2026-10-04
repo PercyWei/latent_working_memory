@@ -1,0 +1,35 @@
+{
+  "model": {
+    "model_name_or_path": "Qwen/Qwen3-0.6B",
+    "revision": null,
+    "backbone_dtype": "float32",
+    "pending_size": 256,
+    "recent_size": 128,
+    "num_slots": 32,
+    "memory_dim": 128,
+    "query_dim": 64,
+    "value_dim": 128,
+    "num_probes": 16,
+    "query_mode": "conditioned",
+    "query_normalization": "none",
+    "read_query_norm": null,
+    "compression_query_norm": null,
+    "inner_steps": 1,
+    "inner_lr": 0.1,
+    "correction_scale": 0.1
+  },
+  "training": {
+    "train_file": "../../../data/attention-matching/train.jsonl",
+    "dev_file": "../../../data/attention-matching/dev.jsonl",
+    "output_dir": "../../../artifacts/v4/attention-matching_20261003/train/qwen3-0.6b_conditioned_20261003",
+    "epochs": 1,
+    "global_batch_size": 8,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.01,
+    "gradient_clip": 1.0,
+    "seed": 42,
+    "max_seq_length": 4096,
+    "eval_every": 50,
+    "save_every": 50
+  }
+}
