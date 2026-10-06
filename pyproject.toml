@@ -9,6 +9,7 @@ dependencies = [
     "peft>=0.17,<1",
     "pyarrow>=21,<26",
     "pysbd>=0.3.4,<0.4",
+    "python-dotenv>=1.2,<2",
     "sacrebleu>=2.5,<3",
     "safetensors>=0.6,<1",
     "swanlab>=0.10,<1",

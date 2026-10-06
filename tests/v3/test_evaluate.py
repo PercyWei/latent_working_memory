@@ -414,10 +414,12 @@ def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_pat
             publications.append((values, step))
 
     @contextmanager
-    def resume(directory):
+    def resume(directory, api_key):
         assert directory == training_dir
+        assert api_key == "evaluation-test-key"
         yield Tracking()
 
+    monkeypatch.setattr(evaluation, "swanlab_api_key", lambda: "evaluation-test-key")
     monkeypatch.setattr(evaluation, "swanlab_training_run", resume)
     summary = evaluation.evaluate(Task(), [trajectory()], tmp_path / "evaluation", "test", 8)
     evaluation._append_evaluation(summary, training_dir, tmp_path / "evaluation", 37)

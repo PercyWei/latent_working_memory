@@ -24,6 +24,7 @@ def swanlab_run(
     tags: tuple[str, ...] = (),
     fixed_tags: tuple[str, ...] = ("scope:main", "method:latent-working-memory"),
     new_run: bool = False,
+    api_key: str | None = None,
 ) -> Iterator[swanlab.Run | None]:
     if mode == "disabled":
         yield None
@@ -63,6 +64,7 @@ def swanlab_run(
             id=run_id,
             resume="allow" if run_id is not None else "never",
             settings=swanlab.Settings(
+                **({"api_key": api_key} if api_key is not None else {}),
                 interactive=False,
                 terminal={"proxy_type": "none"},
                 probe={"git": False, "monitor": False},
@@ -90,7 +92,7 @@ def swanlab_run(
 
 
 @contextmanager
-def swanlab_training_run(training_dir):
+def swanlab_training_run(training_dir, api_key=None):
     """Resume a finished training run while preserving its identity and configuration."""
     identity = json.loads((training_dir / "swanlab.json").read_text())
     if identity["job_type"] != "train" or identity["mode"] != "online":
@@ -100,7 +102,7 @@ def swanlab_training_run(training_dir):
     workspace, project = project_path.split("/")
     if project != identity["project"]:
         raise ValueError("training run URL differs from its project")
-    remote = swanlab.Api().run(f"{project_path}/{identity['id']}")
+    remote = swanlab.Api(api_key=api_key).run(f"{project_path}/{identity['id']}")
     if remote.state != "FINISHED":
         raise ValueError("append requires a finished training run; do not resume active training")
     # SwanLab's canonical API config is {key: {value, desc, sort}}.
@@ -120,6 +122,7 @@ def swanlab_training_run(training_dir):
             mode="online",
             log_dir=str(training_dir / "swanlab"),
             settings=swanlab.Settings(
+                **({"api_key": api_key} if api_key is not None else {}),
                 interactive=False,
                 terminal={"proxy_type": "none"},
                 probe={"git": False, "monitor": False},

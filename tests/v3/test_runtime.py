@@ -430,6 +430,7 @@ def test_swanlab_upload_omits_source_ids_and_preserves_local_run(tmp_path, monke
         return nullcontext(None)
 
     monkeypatch.setattr(runtime, "swanlab_run", capture_upload)
+    monkeypatch.setattr(runtime, "swanlab_api_key", lambda: "training-test-key")
     with runtime._tracking_context(config, SimpleNamespace(rank=0), tmp_path, run):
         pass
     assert len(calls) == 1
@@ -443,6 +444,8 @@ def test_swanlab_upload_omits_source_ids_and_preserves_local_run(tmp_path, monke
     assert settings["project"] == "explicit-project"
     assert settings["group"] == "explicit-group"
     assert settings["job_type"] == "train"
+    assert settings["api_key"] == "training-test-key"
+    assert "training-test-key" not in json.dumps(uploaded)
     assert run == original
 
 

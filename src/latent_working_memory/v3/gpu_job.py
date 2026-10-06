@@ -18,6 +18,7 @@ from latent_working_memory.v3.config import (
     ExperimentConfig,
     load_experiment,
 )
+from latent_working_memory.v3.tracking_credentials import swanlab_api_key
 
 
 PRESETS = {
@@ -340,6 +341,14 @@ def run_job(args):
         return plan
     if directory.exists():
         raise ValueError(f"job directory already exists: {directory}; choose a new --run-id")
+    environment = dict(
+        os.environ,
+        CUDA_VISIBLE_DEVICES=args.gpus,
+        PYTHONUNBUFFERED="1",
+        TOKENIZERS_PARALLELISM="false",
+    )
+    if args.tracking == "online":
+        environment["SWANLAB_API_KEY"] = swanlab_api_key()
     # 只检查本任务使用的规范数据入口；不扫描下载分片或创建派生数据副本。
     datasets = {
         Path(job.config.training.dataset_dir): job.config.objective.stage not in {"pretrain", "lm"}
@@ -356,12 +365,6 @@ def run_job(args):
         raise FileNotFoundError(args.init_checkpoint)
     (directory / "plan").mkdir(parents=True)
     save_json(directory / "plan" / "job.json", plan)
-    environment = dict(
-        os.environ,
-        CUDA_VISIBLE_DEVICES=args.gpus,
-        PYTHONUNBUFFERED="1",
-        TOKENIZERS_PARALLELISM="false",
-    )
     evaluation_environment = dict(environment, CUDA_VISIBLE_DEVICES=args.gpus.split(",")[0])
     checkpoints, summaries = {}, []
     try:

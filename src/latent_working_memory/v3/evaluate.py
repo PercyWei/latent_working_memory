@@ -28,6 +28,7 @@ from latent_working_memory.v3.runtime import (
     select_examples,
 )
 from latent_working_memory.v3.tracking import evaluation_media
+from latent_working_memory.v3.tracking_credentials import swanlab_api_key
 
 
 def _quality(rows):
@@ -103,7 +104,7 @@ def _append_evaluation(summary, training_dir, output_dir, step):
                 break
     values = evaluation_media(summary, rows)
     # 既有 helper 保留云端训练 config/name，检查训练已结束并使用 resume="must"。
-    with swanlab_training_run(training_dir) as tracking:
+    with swanlab_training_run(training_dir, api_key=swanlab_api_key()) as tracking:
         tracking.log(values, step=step)
     identity = json.loads((training_dir / "swanlab.json").read_text(encoding="utf-8"))
     _save_json(

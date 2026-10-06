@@ -18,6 +18,7 @@ from latent_working_memory.v3.data import load_factqa
 from latent_working_memory.v3.model import GistMemoryModel
 from latent_working_memory.v3.pretrain_data import load_pretraining
 from latent_working_memory.v3.tracking import configure_training_metrics, training_metrics
+from latent_working_memory.v3.tracking_credentials import swanlab_api_key
 from latent_working_memory.v4.checkpoint import capture_rng, restore_rng
 
 
@@ -349,6 +350,7 @@ def _tracking_context(config, engine, output, run):
         output,
         tracking_config,
         mode="online",
+        api_key=swanlab_api_key(),
         project=config.training.swanlab_project,
         group=config.training.group,
         job_type="train",

@@ -8,8 +8,14 @@ import sys
 
 import pytest
 
-from latent_working_memory.v3 import gpu_job
+from latent_working_memory.v3 import gpu_job, tracking_credentials
 from latent_working_memory.v3.config import load_experiment
+
+
+@pytest.fixture(autouse=True)
+def explicit_test_credentials(monkeypatch):
+    # 编排测试不读取开发者的真实凭据；真实解析流程另行使用临时目录测试。
+    monkeypatch.setattr(gpu_job, "swanlab_api_key", lambda: "test-api-key")
 
 
 def arguments(tmp_path, *options):
@@ -271,6 +277,7 @@ def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
     result = gpu_job.run_job(args)
 
     assert result["status"] == "finished"
+    assert all(call["environment"]["SWANLAB_API_KEY"] == "test-api-key" for call in commands.calls)
     training = [call for call in commands.calls if "config" in call]
     evaluations = [
         call for call in commands.calls if "latent_working_memory.v3.evaluate" in call["command"]
@@ -369,6 +376,56 @@ def test_planning_imports_no_model_or_tracking_runtime(tmp_path):
     )
     subprocess.run([sys.executable, "-c", code], check=True, capture_output=True, text=True)
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("dotenv", [None, "SWANLAB_API_KEY=project-test-key\n"])
+def test_selected_key_reaches_all_stages_without_being_persisted(
+    tmp_path, monkeypatch, capsys, dotenv
+):
+    repository = Path.cwd()
+    monkeypatch.setattr(gpu_job, "load_experiment", lambda path: load_experiment(repository / path))
+    monkeypatch.setattr(gpu_job, "swanlab_api_key", tracking_credentials.swanlab_api_key)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SWANLAB_API_KEY", "terminal-test-key")
+    if dotenv is not None:
+        (tmp_path / ".env").write_text(dotenv)
+    args = arguments(tmp_path)
+    prepare_dataset_entries(args)
+    commands = Commands()
+    monkeypatch.setattr(gpu_job, "execute", commands)
+
+    gpu_job.run_job(args)
+
+    expected = "project-test-key" if dotenv is not None else "terminal-test-key"
+    assert all(call["environment"]["SWANLAB_API_KEY"] == expected for call in commands.calls)
+    assert os.environ["SWANLAB_API_KEY"] == "terminal-test-key"
+    output = capsys.readouterr().out
+    saved = "".join(path.read_text() for path in args.output_root.rglob("*.json"))
+    command_text = str([call["command"] for call in commands.calls])
+    for key in ("project-test-key", "terminal-test-key"):
+        assert key not in output + saved + command_text
+
+
+@pytest.mark.parametrize("tracking,dry_run", [("online", False), ("disabled", False), ("online", True)])
+def test_missing_key_stops_online_job_before_creating_artifacts(
+    tmp_path, monkeypatch, tracking, dry_run
+):
+    repository = Path.cwd()
+    monkeypatch.setattr(gpu_job, "load_experiment", lambda path: load_experiment(repository / path))
+    monkeypatch.setattr(gpu_job, "swanlab_api_key", tracking_credentials.swanlab_api_key)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SWANLAB_API_KEY", raising=False)
+    args = arguments(tmp_path, "--tracking", tracking, *(["--dry-run"] if dry_run else []))
+    prepare_dataset_entries(args)
+    commands = Commands()
+    monkeypatch.setattr(gpu_job, "execute", commands)
+    if tracking == "online" and not dry_run:
+        with pytest.raises(ValueError, match="nonempty SWANLAB_API_KEY"):
+            gpu_job.run_job(args)
+        assert not commands.calls and not args.output_root.exists()
+    else:
+        gpu_job.run_job(args)
+        assert bool(commands.calls) != dry_run
 
 
 @pytest.mark.parametrize("exit_code", [0, 7])

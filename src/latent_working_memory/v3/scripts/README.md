@@ -4,7 +4,7 @@
 
 ## 第一次运行
 
-环境需有 `uv`，脚本用 `uv run --frozen` 按仓库 `uv.lock` 准备根目录 `.venv`。通过终端环境变量或网站密钥设置提供 `SWANLAB_API_KEY`，不用写入脚本或提交到仓库。SwanLab project 已确定为 **`latent-working-memory-v3`**。
+环境需有 `uv`，脚本用 `uv run --frozen` 按仓库 `uv.lock` 准备根目录 `.venv`。SwanLab project 已确定为 **`latent-working-memory-v3`**。
 
 默认 `cuda124` 依赖组使用 Python 3.11、PyTorch 2.6.0。根目录 `pyproject.toml` 与 `uv.lock` 统一使用[清华 PyPI 镜像](https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/)；Linux x86-64 的 PyTorch 2.6.0 PyPI 构建使用 CUDA 12.4，适配当前 NVIDIA 550.144.03 驱动，macOS 安装对应平台构建。
 
@@ -18,6 +18,29 @@ uv sync
 ```
 
 已有 Python 3.11 时无需重复安装；首次准备且没有该解释器时，先执行 `uv python install 3.11`。`uv sync` 按统一镜像及锁定依赖准备 `.venv`，训练入口继续使用 `uv run --frozen`。
+
+在项目根目录创建 `.env`，填写自己的 SwanLab API Key。首次创建可复制模板；已有文件时直接编辑：
+
+```bash
+test -e .env || cp .env.example .env
+nano .env
+```
+
+文件内容：
+
+```dotenv
+SWANLAB_API_KEY=你的SwanLab_API_Key
+```
+
+v3 的凭据选择规则如下；训练、续训与评估均从项目根目录启动：
+
+| 条件 | 使用的凭据 |
+|---|---|
+| 项目根目录存在 `.env` | 仅使用文件中的 `SWANLAB_API_KEY`，优先于终端变量 |
+| 没有 `.env` | 使用终端或网站任务注入的 `SWANLAB_API_KEY` |
+| 所选来源未提供有效值 | 在线运行报错，不回退到共享账号保存的登录凭据 |
+
+`.env` 已被 Git 忽略，需在服务器本地填写；只读取其中的 `SWANLAB_API_KEY`，其他字段不自动加载。无需执行 `swanlab login`，不会改写共享账号的登录文件。key 仅用于认证及传入任务子进程，不写入任务配置、命令行或本地实验记录。`--dry-run` 和 `--tracking disabled` 不要求提供 key。
 
 脚本的默认仓库位置为 `/dfs/data/latent_working_memory`。当前终端服务器使用 `~/percyw/latent_working_memory` 时，先设置 `LWM_REPO_DIR`：
 
