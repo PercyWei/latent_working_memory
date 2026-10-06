@@ -13,7 +13,7 @@ dependencies = [
     "safetensors>=0.6,<1",
     "swanlab>=0.10,<1",
     "tensordict>=0.8,<0.11",
-    "torch>=2.14,<3",
+    "torch>=2.6,<3",
     "transformers>=4.55,<5",
     "verl==0.8.0",
 ]
@@ -27,6 +27,29 @@ dev = [
     "pytest>=8.4,<9",
     "ruff>=0.12,<0.14",
 ]
+cuda124 = ["torch==2.6.0"]
+torch214 = ["torch==2.14.0"]
+
+[tool.uv]
+default-groups = ["dev", "cuda124"]
+conflicts = [[{ group = "cuda124" }, { group = "torch214" }]]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu124", group = "cuda124", marker = "sys_platform == 'linux'" },
+    { index = "pypi", group = "cuda124", marker = "sys_platform != 'linux'" },
+    { index = "pypi", group = "torch214" },
+]
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/latent_working_memory"]

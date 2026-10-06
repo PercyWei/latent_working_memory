@@ -100,6 +100,7 @@ class Commands:
 )
 def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode, expected):
     args = arguments(tmp_path, "--mode", mode)
+    assert args.gpus == "0,1"
     directory, level, jobs = gpu_job.build_jobs(args)
     assert (
         tuple(
@@ -121,8 +122,9 @@ def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode,
         assert job.config.training.init_checkpoint is None
         assert job.config.training.swanlab_project == "latent-working-memory-v3"
         assert job.config.training.tags == (f"study:{'main' if mode == 'full' else mode}",)
-        command = gpu_job.training_command(job, 2, level["max_steps"])
-        assert "--nproc_per_node=2" in command
+        assert job.config.training.global_batch_size == 8
+        command = gpu_job.training_command(job, 4, level["max_steps"])
+        assert "--nproc_per_node=4" in command
         assert ("--stop-after-steps" in command) == (mode != "full")
     evaluation = gpu_job.evaluation_command(args, level, Path("final.pt"), Path("evaluation"))
     assert ("--max-trajectories" in evaluation) == (mode != "full")
@@ -237,8 +239,13 @@ def test_explicit_overrides_and_zero_remove_profile_limits(tmp_path):
 @pytest.mark.parametrize(
     "options",
     [
-        ["--gpus", "2"],
+        ["--gpus", "-1"],
         ["--gpus", "0,0"],
+        ["--gpus", "4,4"],
+        ["--gpus", "4,other"],
+        ["--gpus", "4,04"],
+        ["--gpus", "4,"],
+        ["--gpus", ""],
         ["--train-samples", "-1"],
         ["--epochs", "0"],
         ["--run-id", "../escape"],
@@ -252,7 +259,7 @@ def test_invalid_gpu_scope_or_stage_arguments_are_rejected(tmp_path, options):
         arguments(tmp_path, *options)
 
 
-@pytest.mark.parametrize("gpus", ["0,1", "1"])
+@pytest.mark.parametrize("gpus", ["0,1", "4,5,6,7", "2,4", "7,4", "6"])
 def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
     tmp_path, monkeypatch, gpus
 ):

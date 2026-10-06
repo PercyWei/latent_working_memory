@@ -1,7 +1,7 @@
 # 20260914_配置组织规则
 
 创建时间：20260914 11:48:20 UTC+08:00
-最后修订时间：20261004 20:46:56 UTC+08:00
+最后修订时间：20261006 15:19:07 UTC+08:00
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
 
@@ -148,7 +148,7 @@ v1 的预训练与动态训练使用 verl 0.8.0 的自定义 engine。`EngineReg
 
 checkpoint 继续使用项目的单文件契约，保存 Writer、投影、Reader LoRA、optimizer、epoch/order/cursor 与各 rank RNG，冻结基座继续从配置引用加载。独立评估和动态初始化使用同一导出。固定 dev/test、同步评估及 SwanLab global step 的语义保持原样。
 
-依赖固定为 `verl==0.8.0`，因为 0.9.0 要求 Transformers 5.x，而本项目保留 4.x。该版本要求 NumPy <2，锁文件使用 1.26.4；PyTorch 和 Transformers 的锁定版本保持不变。开发与验证应使用当前 Git worktree 根目录 `.venv/`，由本分支的 `uv.lock` 创建，不修改其他 worktree 的环境。
+依赖固定为 `verl==0.8.0`，因为 0.9.0 要求 Transformers 5.x，而本项目保留 4.x。该版本要求 NumPy <2，锁文件使用 1.26.4；PyTorch 和 Transformers 的具体版本由 `uv.lock` 管理；v3 默认使用 `cuda124` 依赖组，v1/v2 运行时显式使用 `--no-group cuda124 --group torch214`。开发与验证应使用当前 Git worktree 根目录 `.venv/`，由本分支的 `uv.lock` 创建，不修改其他 worktree 的环境。
 
 ## 预训练 CPU 分词
 

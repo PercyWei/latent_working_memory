@@ -1,10 +1,20 @@
-# GPU 网站任务启动
+# GPU 训练任务启动
 
-仓库放在 **`/dfs/data/latent_working_memory`**。网站选择单机、物理 GPU 0 和 1，启动一次脚本；脚本内部通过 `torchrun` 启动两个训练进程，最终评估使用第一张卡。
+终端与 GPU 网站共用同一脚本。通过 `--gpus` 指定物理卡号；当前服务器使用 `--gpus 4,5,6,7`，脚本内部通过 `torchrun` 启动四个训练进程，最终评估只使用列表中的第一张卡（GPU 4）。全局 batch 仍为 8，完整 batch 时每个进程累积两条轨迹。参数默认值保留 `0,1`，每次启动按实际分配显式指定。
 
-## 第一次创建任务
+## 第一次运行
 
-网站环境需有 `uv`，脚本用 `uv run --frozen` 按仓库 `uv.lock` 准备根目录 `.venv`。在网站的环境变量/密钥设置中配置 `SWANLAB_API_KEY`，不用写入脚本或提交到仓库。SwanLab project 已确定为 **`latent-working-memory-v3`**。
+环境需有 `uv`，脚本用 `uv run --frozen` 按仓库 `uv.lock` 准备根目录 `.venv`。通过终端环境变量或网站密钥设置提供 `SWANLAB_API_KEY`，不用写入脚本或提交到仓库。SwanLab project 已确定为 **`latent-working-memory-v3`**。
+
+默认 `cuda124` 依赖组使用 Python 3.11、PyTorch 2.6.0；Linux x86-64 安装官方 CUDA 12.4 构建，适配当前 NVIDIA 550.144.03 驱动。在仓库根目录执行 `uv python install 3.11` 和 `uv sync --frozen` 即可准备环境。
+
+脚本的默认仓库位置为 `/dfs/data/latent_working_memory`。当前终端服务器使用 `~/percyw/latent_working_memory` 时，先设置 `LWM_REPO_DIR`：
+
+```bash
+export LWM_REPO_DIR="$HOME/percyw/latent_working_memory"
+bash "$LWM_REPO_DIR/src/latent_working_memory/v3/scripts/run_gpu.sh" \
+  --mode smoke --method dynamic --gpus 4,5,6,7 --run-id view-check-01
+```
 
 默认数据位置：
 
@@ -15,11 +25,11 @@
 
 数据目录内需有 `train.jsonl`、`dev.jsonl`、`test.jsonl`，QA 还需 `preparation.json`。AE＋LM 使用之前构造的成品，**不把原始 Parquet 目录直接传给训练入口**。可用 `--pretrain-data`、`--qa-data` 指定实际存放位置。
 
-在网站的启动命令栏填写：
+仓库位于默认路径时，可在网站的启动命令栏填写：
 
 ```bash
 bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode smoke --method dynamic --run-id view-check-01
+  --mode smoke --method dynamic --gpus 4,5,6,7 --run-id view-check-01
 ```
 
 这条命令会依次执行：
@@ -55,14 +65,14 @@ bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gp
 
 ```bash
 bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode full --method dynamic --run-id main-01
+  --mode full --method dynamic --gpus 4,5,6,7 --run-id main-01
 ```
 
 也可精确覆盖档位中的预算：
 
 ```bash
 bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode pilot --method dynamic --run-id pilot-02 \
+  --mode pilot --method dynamic --gpus 4,5,6,7 --run-id pilot-02 \
   --max-steps 10 --train-samples 80 --dev-samples 8 --eval-trajectories 4
 ```
 
@@ -82,7 +92,7 @@ ICAE 与 AutoCompressors 使用已有长文本预设，运行它们时需提供 
 
 ```bash
 bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode smoke --method all --run-id all-check-01 \
+  --mode smoke --method all --gpus 4,5,6,7 --run-id all-check-01 \
   --long-pretrain-data /dfs/data/fineweb-long-text-samples
 ```
 
@@ -90,7 +100,7 @@ bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gp
 
 ```bash
 bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode pilot --method information_loss --stage policy --run-id loss-policy-01 \
+  --mode pilot --method information_loss --stage policy --gpus 4,5,6,7 --run-id loss-policy-01 \
   --init-checkpoint /absolute/path/to/warmup/checkpoints/step-000002.pt
 ```
 
@@ -124,7 +134,7 @@ compare/  同题池质量—容量点 points.json / points.csv
 | 参数 | 作用 |
 |---|---|
 | `--dry-run` | 打印预算、阶段依赖、解析配置和命令；不加载模型/数据，不连接 SwanLab，不创建实验目录 |
-| `--gpus 0` / `1` / `0,1` | 使用物理 GPU 0/1；默认 `0,1` |
+| `--gpus 4,5,6,7` | 逗号分隔的非重复物理卡号，训练进程数随卡数变化；默认 `0,1` |
 | `--model-path /absolute/model/path` | 使用共享盘上的 Qwen3-4B 模型，避免启动时从 Hub 获取 |
 | `--global-batch-size 8` | 全局 batch，可按显存/运行时间调整 |
 | `--qa-batch-size 8` | 单次读取的 QA 数 |
@@ -138,7 +148,8 @@ compare/  同题池质量—容量点 points.json / points.csv
 
 ```bash
 LWM_REPO_DIR=/another/repository \
-  bash /another/repository/src/latent_working_memory/v3/scripts/run_gpu.sh --mode smoke --dry-run
+  bash /another/repository/src/latent_working_memory/v3/scripts/run_gpu.sh \
+  --mode smoke --gpus 4,5,6,7 --dry-run
 ```
 
-本地测试验证了预算、阶段衔接、数据选择、原生指标和评估图表构造；公司 GPU 网站的实际显存、训练速度及云端展示需要通过第一轮 `smoke` 任务核验。
+本地测试验证预算、阶段衔接、数据选择、原生指标和评估图表构造；服务器上的实际显存、训练速度及云端展示需要通过第一轮 `smoke` 任务核验。

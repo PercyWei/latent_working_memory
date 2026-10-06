@@ -73,7 +73,9 @@ AutoCompressors 对 AE 样本使用输入全文，对 continuation 样本使用�
 
 ## 启动
 
-公司 GPU 网站使用 [run_gpu.sh](scripts/run_gpu.sh)，默认仓库为 `/dfs/data/latent_working_memory`，SwanLab project 为已确认的 `latent-working-memory-v3`。`--mode smoke/pilot/full` 控制试跑程度，自动衔接训练阶段、最终评估和对照结果；参数与网站启动命令见 [GPU 任务说明](scripts/README.md)。
+终端和公司 GPU 网站使用 [run_gpu.sh](scripts/run_gpu.sh)，默认仓库为 `/dfs/data/latent_working_memory`，SwanLab project 为已确认的 `latent-working-memory-v3`。`--mode smoke/pilot/full` 控制试跑程度，自动衔接训练阶段、最终评估和对照结果；参数与启动命令见 [GPU 任务说明](scripts/README.md)。
+
+当前服务器的仓库位于 `~/percyw/latent_working_memory` 时，设置 `LWM_REPO_DIR="$HOME/percyw/latent_working_memory"`。启动时显式传入 `--gpus 4,5,6,7`，训练使用四个进程，最终评估使用 GPU 4；全局 batch 保持 8。`--gpus` 接受非重复的非负物理卡号，默认仍为 `0,1`。
 
 以下是单独调用训练与评估模块的方式。
 
@@ -82,7 +84,7 @@ AutoCompressors 对 AE 样本使用输入全文，对 continuation 样本使用�
 **共享基础预训练：**
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 uv run --frozen torchrun --standalone --nproc_per_node=2 \
+CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --frozen torchrun --standalone --nproc_per_node=4 \
   -m latent_working_memory.v3.train \
   --config configs/v3/dynamic_pretrain.json \
   --dataset-dir /absolute/path/to/fineweb-text-samples \
@@ -92,7 +94,7 @@ CUDA_VISIBLE_DEVICES=0,1 uv run --frozen torchrun --standalone --nproc_per_node=
 输出 `training-result.json` 给出最后一个 checkpoint 的准确路径。分别加载它进行两组预热：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 uv run --frozen torchrun --standalone --nproc_per_node=2 \
+CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --frozen torchrun --standalone --nproc_per_node=4 \
   -m latent_working_memory.v3.train \
   --config configs/v3/memory_change_warmup.json \
   --dataset-dir /absolute/path/to/fineweb-factqa \
@@ -103,7 +105,7 @@ CUDA_VISIBLE_DEVICES=0,1 uv run --frozen torchrun --standalone --nproc_per_node=
 将预设替换为 `information_loss_warmup.json`，运行另一组。之后各自进入策略训练；每个阶段使用新的输出目录：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 uv run --frozen torchrun --standalone --nproc_per_node=2 \
+CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --frozen torchrun --standalone --nproc_per_node=4 \
   -m latent_working_memory.v3.train \
   --config configs/v3/memory_change_warmup.json --stage policy \
   --dataset-dir /absolute/path/to/fineweb-factqa \
@@ -117,7 +119,7 @@ ICAE 两组使用各自预设预训练，再通过 `--stage qa`、QA 数据目�
 续训沿用原配置、原输出目录和原全局 batch：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 uv run --frozen torchrun --standalone --nproc_per_node=2 \
+CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --frozen torchrun --standalone --nproc_per_node=4 \
   -m latent_working_memory.v3.train --config /absolute/path/to/run/config.json \
   --resume /absolute/path/to/run/checkpoints/step-NNNNNN.pt --device cuda
 ```
@@ -129,7 +131,7 @@ checkpoint 保存 LoRA、gist embeddings、optimizer、训练游标、各 rank R
 默认评估最后一个 checkpoint，不改写训练阈值。所有方法在同一批轨迹的最终记忆上回答评估题；按末段新事实、更早旧事实以及段距离分别统计。
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 uv run --frozen python -m latent_working_memory.v3.evaluate \
+CUDA_VISIBLE_DEVICES=4 uv run --frozen python -m latent_working_memory.v3.evaluate \
   --checkpoint /absolute/path/to/run/checkpoints/step-NNNNNN.pt \
   --dataset-dir /absolute/path/to/fineweb-factqa \
   --output-dir artifacts/v3/step1-token-memory/eval/memory-change-policy \

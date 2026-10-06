@@ -286,13 +286,13 @@ def test_backbone_position_limit_is_checked_before_training(tiny_base, tmp_path)
     assert not (tmp_path / "output").exists()
 
 
-@pytest.mark.parametrize("visible", [None, "", "4,5", "0,2", "all"])
-def test_cuda_requires_physical_gpu_zero_or_one(monkeypatch, visible):
+@pytest.mark.parametrize("visible", [None, "", "4,4", "-1", "all"])
+def test_cuda_requires_explicit_distinct_physical_gpu_indices(monkeypatch, visible):
     if visible is None:
         monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     else:
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
-    with pytest.raises(RuntimeError, match="physical GPUs 0/1"):
+    with pytest.raises(RuntimeError, match="distinct non-negative physical GPU indices"):
         initialize_device("cuda")
 
 

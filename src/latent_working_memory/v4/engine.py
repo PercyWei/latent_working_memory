@@ -3,6 +3,7 @@
 from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 import os
+import re
 
 import torch
 import torch.distributed as dist
@@ -18,11 +19,15 @@ from verl.workers.engine import BaseEngine, EngineRegistry
 def initialize_device(device):
     device = torch.device(device)
     if device.type not in {"cpu", "cuda"}:
-        raise ValueError("v4 meta-training supports CPU and CUDA")
+        raise ValueError("training supports CPU and CUDA")
     if device.type == "cuda":
-        visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
-        if not visible or any(value.strip() not in {"0", "1"} for value in visible):
-            raise RuntimeError("CUDA_VISIBLE_DEVICES must explicitly select physical GPUs 0/1")
+        visible = [value.strip() for value in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")]
+        if any(re.fullmatch(r"[0-9]+", value) is None for value in visible) or len(
+            {int(value) for value in visible}
+        ) != len(visible):
+            raise RuntimeError(
+                "CUDA_VISIBLE_DEVICES must explicitly select distinct non-negative physical GPU indices"
+            )
         index = int(os.environ.get("LOCAL_RANK", device.index or 0))
         if not 0 <= index < len(visible):
             raise ValueError("the requested logical CUDA device is not visible")

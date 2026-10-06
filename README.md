@@ -1,12 +1,14 @@
 # 20260912_latent_working_memory
 
-最后修订时间：20261004 20:46:56 UTC+08:00
+最后修订时间：20261006 15:19:07 UTC+08:00
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理；ICAE v1 和 C-DIC 分别位于 `reproductions/icae/` 与 `reproductions/cdic/`，各自使用独立的 `uv` 环境。
 
 ## 主环境与开发
 
 通用执行约定见项目 `AGENTS.md`；命名、SwanLab、实验产物及研究笔记规则见 [项目规范索引](docs/README.md)。
+
+主环境使用 **Python 3.11**，默认启用 `cuda124` 依赖组，安装 **PyTorch 2.6.0**。Linux x86-64 从 PyTorch 官方 `cu124` 源安装 CUDA 12.4 构建，macOS 使用 PyPI 构建；两者由同一份 `uv.lock` 管理。当前 GPU 服务器的 NVIDIA 550.144.03 驱动满足此运行环境，安装依赖不修改服务器系统、驱动或系统 CUDA。
 
 数据构造、主实验训练与评估统一使用项目根目录 `.venv/`，依赖由根目录 `pyproject.toml` 与 `uv.lock` 管理。通用数据构造入口位于 `src/latent_working_memory/data_preparation/`，训练与实验代码按阶段放在 `src/latent_working_memory/v1/` 的对应子目录，正式配置位于 `configs/`；执行记录与日志写入 `artifacts/`。
 
@@ -15,9 +17,13 @@
 数据构造按流程分包：[pretrain/](src/latent_working_memory/data_preparation/pretrain/) 负责 FineWeb 预训练文本构造、质量审查与恢复，[personamem/](src/latent_working_memory/data_preparation/personamem/) 负责 PersonaMem 事实 QA 构造，[fineweb_qa/](src/latent_working_memory/data_preparation/fineweb_qa/) 负责 FineWeb 事实 QA 的冻结来源池、6–10 段随机切分、三划分批次、生成、全量局部核验、全文审查、补题与定稿；完整接口及产物索引见 [FineWeb QA 数据构造流程](src/latent_working_memory/data_preparation/fineweb_qa/README.md)。预训练的来源、句界、截断、文本格式、审查和恢复模块均位于 `pretrain/`；训练时的数据读取与实验选样继续使用 `v1/pretrain/prepared_data.py` 和 `v1/pretrain/data_selection.py`。
 
 ```bash
+uv python install 3.11
 uv sync --frozen
-uv run pytest
+uv run --frozen --no-group cuda124 --group torch214 pytest tests/v1
+uv run --frozen pytest tests/v3 tests/v4
 ```
+
+v1 保留原有 BF16 数值行为，v2 使用原生变长 attention；两者使用 PyTorch 2.14，运行及测试时显式选择 `uv run --frozen --no-group cuda124 --group torch214 ...`；仅安装该环境使用 `uv sync --frozen --no-group cuda124 --group torch214`。两个依赖组互斥，共用根目录 `.venv`，切换时会同步相应版本，不应在同一 checkout 中同时启动不同依赖组的任务。Linux 的 `torch214` 环境使用 CUDA 13，当前 R550 服务器只运行默认的 v3 环境。
 
 通用预训练构造入口为：
 
@@ -68,7 +74,7 @@ v1 测试覆盖损失与梯度、原文边界、规则句界、任务配额与�
 数据准备仅检查数据长度与来源契约；训练时检查实际基座窗口、输入/目标预算和合法 memory 容量。当前默认 memory 上限为 4096，压缩率为 2、4、8。4k 数据的训练需要配置可覆盖 4096-token 写入及 `memory + target + prompt + special tokens` 读取预算的基座；下面的训练入口用于已完成相应预算适配的数据和训练配置。
 
 ```bash
-CUDA_VISIBLE_DEVICES=4 uv run --frozen python -m latent_working_memory.v1.pretrain.train \
+CUDA_VISIBLE_DEVICES=4 uv run --frozen --no-group cuda124 --group torch214 python -m latent_working_memory.v1.pretrain.train \
   --phase pretrain \
   --config configs/v1/pretrain/llama-semantic-2048/model.json \
   --data-selection configs/v1/pretrain/llama-semantic-2048/selection.json \
@@ -79,7 +85,7 @@ CUDA_VISIBLE_DEVICES=4 uv run --frozen python -m latent_working_memory.v1.pretra
 每轮样本量、实际配额与步数保存在 `epoch-plan.json`。临时限制执行可用 `--stop-after-steps <累计步数>`，恢复时保持原 `--epochs`、配置、输出目录与进程数，增加 `--resume <该运行 checkpoint>`，并删除或提高临时步数上限。checkpoint 保存模型、optimizer、epoch 顺序与游标、选样及容量随机状态。旧 step 协议 checkpoint 不用于新协议精确续训。
 
 ```bash
-CUDA_VISIBLE_DEVICES=4 uv run --frozen python -m latent_working_memory.v1.pretrain.evaluate \
+CUDA_VISIBLE_DEVICES=4 uv run --frozen --no-group cuda124 --group torch214 python -m latent_working_memory.v1.pretrain.evaluate \
   --training-result artifacts/v1/pretrain-pilot/train/pretrain-pilot/training-result.json \
   --data-selection configs/v1/pretrain/llama-semantic-2048/selection.json \
   --output-dir artifacts/v1/pretrain-pilot/eval/pretrain-pilot-test \
@@ -136,7 +142,7 @@ artifacts/             生成结果、测试报告和日志
 
 ## ICAE 环境
 
-ICAE lock 面向 Linux x86-64，使用与原始代码依赖栈兼容的 PyTorch CUDA 11.8 wheel。服务器驱动支持 CUDA 13.0，并可向后兼容该 runtime。环境安装不会自动下载模型或数据。
+ICAE lock 面向 Linux x86-64，使用与原始代码依赖栈兼容的 PyTorch CUDA 11.8 wheel。运行时需要与 CUDA 11.8 兼容的 NVIDIA 驱动。环境安装不会自动下载模型或数据。
 
 ```bash
 uv sync --project reproductions/icae --frozen

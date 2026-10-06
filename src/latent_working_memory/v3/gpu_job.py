@@ -1,4 +1,4 @@
-"""GPU 网站的分阶段任务编排：同一入口控制试跑规模和完整实验。"""
+"""GPU 分阶段任务编排：终端与网站共用入口控制试跑规模和完整实验。"""
 
 import argparse
 from dataclasses import dataclass, replace
@@ -81,6 +81,15 @@ def positive_count(value):
     return number
 
 
+def physical_gpus(value):
+    devices = [device.strip() for device in value.split(",")]
+    if any(re.fullmatch(r"[0-9]+", device) is None for device in devices) or len(
+        {int(device) for device in devices}
+    ) != len(devices):
+        raise argparse.ArgumentTypeError("select distinct non-negative physical GPU indices")
+    return ",".join(str(int(device)) for device in devices)
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=LEVELS, default="smoke")
@@ -103,7 +112,9 @@ def parse_args(argv=None):
         "--init-checkpoint", type=Path, help="单阶段 qa/warmup/policy 的初始化 checkpoint"
     )
     parser.add_argument("--model-path", help="默认 Qwen3-4B；可改为共享盘模型目录")
-    parser.add_argument("--gpus", choices=("0", "1", "0,1", "1,0"), default="0,1")
+    parser.add_argument(
+        "--gpus", type=physical_gpus, default="0,1", help="逗号分隔的物理 GPU 编号，不允许重复"
+    )
     parser.add_argument(
         "--epochs", type=positive_count, help="覆盖所选阶段的训练轮数，默认沿用预设"
     )

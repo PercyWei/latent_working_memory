@@ -2,7 +2,7 @@
 
 创建时间：20260915 19:10:20 UTC+08:00
 
-最后修订时间：20260927 14:55:46 UTC+08:00
+最后修订时间：20261006 15:19:07 UTC+08:00
 
 ## 当前入口：固定容量重构预训练
 
@@ -24,7 +24,7 @@
 数据先独立构造并保存：`single/` 与 `multi/` 各自保存 train/dev/test 索引，直接引用原始 Parquet 的文件路径、row group、组内行号、候选字符区间及目标 `write_token_ends`，不另存正文。文件路径相对于数据集目录。构造沿用 v1 质量过滤、去重和来源划分，构造无需 tokenizer，候选字符预算为 `ceil(4 × L × content_reserve_ratio) + 4 × continuation_reserve_tokens`；默认主内容系数 1.5、续文预算 768，实际 LM 目标仍为 512 tokens。训练启动后按文件和 row group 合并读取请求，每个 row group 只读一次、每篇文章在内存中复用，再按当前 tokenizer 分词、按目标 token 计划截取并筛选一次，各 epoch 完整复用保留样本。缓冲只扩大候选读取范围，实际写入和 LM 目标分别限定为 L 与 Q 个连续 tokens。六组共用 multi dev/test；E／F 静态 baseline 同样加载 multi 训练数据，在每个切点从空记忆独立压缩完整前缀。真实单次输入为 `[2K,8K]`；多次为 3～5 段、每段 `[K,3K]`、总长不超过 8K；续文不足 Q 或超出模型窗口的样本也排除，AE／AE＋LM 使用相同筛选。候选数与排除原因写入 `data-filtering.json`，训练步数按保留数量计算。
 
 ```bash
-uv run --frozen python -m latent_working_memory.v2.pretrain.prepare_data \
+uv run --frozen --no-group cuda124 --group torch214 python -m latent_working_memory.v2.pretrain.prepare_data \
   --config configs/data_preparation/fineweb-reconstruction-k512-doc100k.json \
   --output-dir data/fineweb-reconstruction-k512-doc100k_20260917
 ```
@@ -45,8 +45,8 @@ uv run --frozen python -m latent_working_memory.v2.pretrain.prepare_data \
 六份可执行起点配置位于 `configs/v2/pretrain/qwen3-4b_pooling_*`，包含 AE／AE＋LM × warm-up／直接多次压缩四组主实验，以及 `ae-static`、`ae-lm-static` 两组独立前缀压缩 baseline。本次六组均使用基础 pooling。默认完整 Encoder（`encoder_layers: null`）、K=512、Q=512、全局 batch=32、学习率 1e-4；两阶段各 32000 条候选训练轨迹，warm-up 组为 1＋2 epochs，直接多次压缩组为 3 epochs，静态 baseline 使用 `independent_prefix_epochs=3`、`warmup_epochs=0`、`multiround_epochs=0`，独立前缀压缩 3 epochs，实际 optimizer steps 按筛选后的样本数计算。模型名沿用已有 Qwen3 配置；真实数据路径、基座 revision 与超参数需按实际实验确定。
 
 ```bash
-uv sync --frozen
-CUDA_VISIBLE_DEVICES=4,5 uv run --frozen python -m torch.distributed.run \
+uv sync --frozen --no-group cuda124 --group torch214
+CUDA_VISIBLE_DEVICES=4,5 uv run --frozen --no-group cuda124 --group torch214 python -m torch.distributed.run \
   --standalone --nproc_per_node=2 -m latent_working_memory.v2.pretrain.train \
   --experiment configs/v2/pretrain/qwen3-4b_pooling_ae-warmup/experiment.json \
   --output-dir artifacts/v2/reconstruction/qwen3-4b_pooling_ae-warmup_20260916 \
@@ -113,7 +113,7 @@ $$
 
 ## 静态训练与数据
 
-根目录环境执行 `uv run --frozen` 或 `.venv/bin/python`。
+v2 使用根目录环境的 `torch214` 依赖组（PyTorch 2.14），与默认 `cuda124` 组互斥。执行 `uv run --frozen --no-group cuda124 --group torch214` 或 `.venv/bin/python`。
 配置位于 `configs/v2/pretrain/gmsa-qwen3-4b/` 和 `configs/v2/finetune/gmsa-qwen3-4b/`。
 共享数据路径直接由参数指定，不预填不存在的训练集。使用规范 JSONL：
 
