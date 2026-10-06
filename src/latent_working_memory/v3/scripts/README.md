@@ -6,7 +6,18 @@
 
 环境需有 `uv`，脚本用 `uv run --frozen` 按仓库 `uv.lock` 准备根目录 `.venv`。通过终端环境变量或网站密钥设置提供 `SWANLAB_API_KEY`，不用写入脚本或提交到仓库。SwanLab project 已确定为 **`latent-working-memory-v3`**。
 
-默认 `cuda124` 依赖组使用 Python 3.11、PyTorch 2.6.0；Linux x86-64 安装官方 CUDA 12.4 构建，适配当前 NVIDIA 550.144.03 驱动。在仓库根目录执行 `uv python install 3.11` 和 `uv sync --frozen` 即可准备环境。
+默认 `cuda124` 依赖组使用 Python 3.11、PyTorch 2.6.0。根目录 `pyproject.toml` 与 `uv.lock` 统一使用[清华 PyPI 镜像](https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/)；Linux x86-64 的 PyTorch 2.6.0 PyPI 构建使用 CUDA 12.4，适配当前 NVIDIA 550.144.03 驱动，macOS 安装对应平台构建。
+
+当前终端服务器先同步仓库并安装环境，下载不使用代理：
+
+```bash
+cd ~/percyw/latent_working_memory
+git pull --ff-only origin dev
+unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+uv sync
+```
+
+已有 Python 3.11 时无需重复安装；首次准备且没有该解释器时，先执行 `uv python install 3.11`。`uv sync` 按统一镜像及锁定依赖准备 `.venv`，训练入口继续使用 `uv run --frozen`。
 
 脚本的默认仓库位置为 `/dfs/data/latent_working_memory`。当前终端服务器使用 `~/percyw/latent_working_memory` 时，先设置 `LWM_REPO_DIR`：
 

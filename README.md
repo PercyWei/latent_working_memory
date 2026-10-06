@@ -1,6 +1,6 @@
 # 20260912_latent_working_memory
 
-最后修订时间：20261006 15:19:07 UTC+08:00
+最后修订时间：20261006 15:47:46 UTC+08:00
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理；ICAE v1 和 C-DIC 分别位于 `reproductions/icae/` 与 `reproductions/cdic/`，各自使用独立的 `uv` 环境。
 
@@ -8,7 +8,7 @@
 
 通用执行约定见项目 `AGENTS.md`；命名、SwanLab、实验产物及研究笔记规则见 [项目规范索引](docs/README.md)。
 
-主环境使用 **Python 3.11**，默认启用 `cuda124` 依赖组，安装 **PyTorch 2.6.0**。Linux x86-64 从 PyTorch 官方 `cu124` 源安装 CUDA 12.4 构建，macOS 使用 PyPI 构建；两者由同一份 `uv.lock` 管理。当前 GPU 服务器的 NVIDIA 550.144.03 驱动满足此运行环境，安装依赖不修改服务器系统、驱动或系统 CUDA。
+主环境使用 **Python 3.11**，默认启用 `cuda124` 依赖组，安装 **PyTorch 2.6.0**。根目录 `pyproject.toml` 与 `uv.lock` 统一使用[清华 PyPI 镜像](https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/)，所有 Python 包从这一镜像获取。PyTorch 2.6.0 的 Linux x86-64 PyPI 构建使用 CUDA 12.4，macOS 安装对应平台构建。当前 GPU 服务器的 NVIDIA 550.144.03 驱动满足默认运行环境，安装依赖不修改服务器系统、驱动或系统 CUDA。
 
 数据构造、主实验训练与评估统一使用项目根目录 `.venv/`，依赖由根目录 `pyproject.toml` 与 `uv.lock` 管理。通用数据构造入口位于 `src/latent_working_memory/data_preparation/`，训练与实验代码按阶段放在 `src/latent_working_memory/v1/` 的对应子目录，正式配置位于 `configs/`；执行记录与日志写入 `artifacts/`。
 
@@ -18,12 +18,14 @@
 
 ```bash
 uv python install 3.11
-uv sync --frozen
+uv sync
 uv run --frozen --no-group cuda124 --group torch214 pytest tests/v1
 uv run --frozen pytest tests/v3 tests/v4
 ```
 
-v1 保留原有 BF16 数值行为，v2 使用原生变长 attention；两者使用 PyTorch 2.14，运行及测试时显式选择 `uv run --frozen --no-group cuda124 --group torch214 ...`；仅安装该环境使用 `uv sync --frozen --no-group cuda124 --group torch214`。两个依赖组互斥，共用根目录 `.venv`，切换时会同步相应版本，不应在同一 checkout 中同时启动不同依赖组的任务。Linux 的 `torch214` 环境使用 CUDA 13，当前 R550 服务器只运行默认的 v3 环境。
+已有 Python 3.11 时可直接执行 `uv sync`。它按项目配置同步 `.venv`，配置未变时沿用锁定版本；训练和评估入口继续使用 `uv run --frozen`。
+
+v1 保留原有 BF16 数值行为，v2 使用原生变长 attention；两者使用 PyTorch 2.14，运行及测试时显式选择 `uv run --frozen --no-group cuda124 --group torch214 ...`；仅安装该环境使用 `uv sync --no-group cuda124 --group torch214`。两个依赖组互斥，共用根目录 `.venv`，切换时会同步相应版本，不应在同一 checkout 中同时启动不同依赖组的任务。Linux 的 `torch214` 环境使用 CUDA 13，当前 R550 服务器只运行默认的 v3 环境。
 
 通用预训练构造入口为：
 
