@@ -1,0 +1,476 @@
+"""v3 模型加载、阶段衔接、可恢复训练与本地运行记录。"""
+
+from contextlib import nullcontext
+from dataclasses import asdict
+import hashlib
+import json
+import math
+from pathlib import Path
+import random
+import time
+
+import torch
+import torch.distributed as dist
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from latent_working_memory.v1.tracking import swanlab_run
+from latent_working_memory.v3.data import load_factqa
+from latent_working_memory.v3.model import GistMemoryModel
+from latent_working_memory.v3.pretrain_data import load_pretraining
+from latent_working_memory.v3.tracking import configure_training_metrics, training_metrics
+from latent_working_memory.v4.checkpoint import capture_rng, restore_rng
+
+
+def write_json(path, value):
+    path = Path(path)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+    )
+    temporary.replace(path)
+
+
+def load_codec(model_config, device):
+    """一个冻结基座，编码启用 LoRA，读取关闭 LoRA；不启用梯度检查点。"""
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_config.model_name_or_path, revision=model_config.revision
+    )
+    if tokenizer.eos_token_id is None:
+        raise ValueError("v3 training and generation require tokenizer.eos_token_id")
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    base = AutoModelForCausalLM.from_pretrained(
+        model_config.model_name_or_path,
+        revision=model_config.revision,
+        torch_dtype=getattr(torch, model_config.dtype),
+        attn_implementation=model_config.attention_implementation,
+    ).to(device)
+    codec = GistMemoryModel(
+        base,
+        memory_slots=model_config.memory_slots,
+        lora_rank=model_config.lora_rank,
+        lora_alpha=model_config.lora_alpha,
+        lora_target_modules=model_config.lora_target_modules,
+    )
+    return codec, tokenizer
+
+
+def load_splits(config, tokenizer):
+    training = config.training
+    pretraining = config.objective.stage in {"pretrain", "lm"}
+    if pretraining:
+        splits, statistics = load_pretraining(
+            training.dataset_dir, tokenizer, training.min_input_tokens, training.max_input_tokens
+        )
+        if config.objective.stage == "pretrain":
+            for split in ("train", "dev"):
+                if {example.task for example in splits[split]} != {"ae", "continuation"}:
+                    raise ValueError(
+                        f"pretrain {split} requires both AE and continuation after length filtering"
+                    )
+    else:
+        splits = load_factqa(training.dataset_dir, tokenizer)
+        statistics = {
+            "kind": "factqa",
+            "splits": {
+                name: {
+                    "trajectories": len(rows),
+                    "source_tokens": sum(len(row.full_input_ids) for row in rows),
+                    "questions": sum(len(row.qas) for row in rows),
+                }
+                for name, rows in splits.items()
+            },
+        }
+    statistics["source_data"] = {name: dataset_identity(rows) for name, rows in splits.items()}
+    statistics["selection"] = {
+        "seed": training.seed,
+        "max_train_samples": training.max_train_samples,
+        "max_dev_samples": training.max_dev_samples,
+    }
+    limits = {"train": training.max_train_samples, "dev": training.max_dev_samples, "test": None}
+    for split, rows in splits.items():
+        selected = select_examples(rows, limits[split], training.seed, split, pretraining)
+        splits[split] = selected
+        counts = statistics["splits"][split]
+        counts["selected"] = len(selected)
+        if pretraining:
+            counts["selected_by_task"] = {
+                task: sum(row.task == task for row in selected) for task in ("ae", "continuation")
+            }
+            counts["selected_input_tokens"] = sum(len(row.input_ids) for row in selected)
+            counts["selected_target_tokens"] = sum(len(row.target_ids) for row in selected)
+        else:
+            counts["selected_source_tokens"] = sum(len(row.full_input_ids) for row in selected)
+            counts["selected_questions"] = sum(len(row.qas) for row in selected)
+    return splits, statistics
+
+
+def select_examples(rows, limit, seed, split, pretraining):
+    """在内存选择完整样本；AE/LM 按比例分层，QA 保留整条更新轨迹。"""
+    if limit is None or limit >= len(rows):
+        return rows
+
+    def priority(example):
+        identity = example.sample_id if pretraining else example.trajectory_id
+        return hashlib.blake2b(f"{seed}:{split}:{identity}".encode(), digest_size=16).digest()
+
+    if not pretraining:
+        return tuple(sorted(rows, key=priority)[:limit])
+    groups = {
+        task: sorted((row for row in rows if row.task == task), key=priority)
+        for task in sorted({row.task for row in rows})
+    }
+    if limit < len(groups):
+        raise ValueError(f"{split} sample limit must retain at least one example per AE/LM task")
+    quotas = {task: limit * len(group) / len(rows) for task, group in groups.items()}
+    counts = {task: max(1, math.floor(quota)) for task, quota in quotas.items()}
+    while sum(counts.values()) < limit:
+        task = max(
+            (task for task in groups if counts[task] < len(groups[task])),
+            key=lambda task: (quotas[task] - counts[task], task),
+        )
+        counts[task] += 1
+    while sum(counts.values()) > limit:
+        task = max(
+            (task for task in groups if counts[task] > 1),
+            key=lambda task: (counts[task] - quotas[task], task),
+        )
+        counts[task] -= 1
+    return tuple(
+        sorted(
+            (row for task, group in groups.items() for row in group[: counts[task]]), key=priority
+        )
+    )
+
+
+def dataset_identity(rows):
+    """绑定实际分词结果、问题与使用安排，防止续训时替换数据。"""
+    digest = hashlib.blake2b(digest_size=32)
+    for example in rows:
+        digest.update(
+            json.dumps(
+                asdict(example), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        )
+        digest.update(b"\n")
+    return {"examples": len(rows), "fingerprint": digest.hexdigest()}
+
+
+def make_run(
+    config,
+    splits,
+    statistics,
+    device,
+    world_size,
+    resolved_model_revision=None,
+    initialization=None,
+):
+    inherited = (
+        initialization["pretraining_sources"]
+        if initialization is not None
+        else {"document_ids": [], "dedup_clusters": []}
+    )
+    documents = {example.document_id for rows in splits.values() for example in rows}
+    clusters = {example.dedup_cluster for rows in splits.values() for example in rows}
+    if config.objective.stage in {"pretrain", "lm"}:
+        pretraining_sources = {
+            "document_ids": sorted(documents | set(inherited["document_ids"])),
+            "dedup_clusters": sorted(clusters | set(inherited["dedup_clusters"])),
+        }
+    else:
+        if documents.intersection(inherited["document_ids"]) or clusters.intersection(
+            inherited["dedup_clusters"]
+        ):
+            raise ValueError("QA sources overlap pretraining document IDs or dedup clusters")
+        pretraining_sources = inherited
+    return {
+        "config": config.to_dict(),
+        "resolved_model_revision": resolved_model_revision,
+        "data": {name: dataset_identity(rows) for name, rows in splits.items()},
+        "source_data": statistics["source_data"],
+        "data_statistics": {
+            key: value for key, value in statistics.items() if key != "source_data"
+        },
+        "world_size": world_size,
+        "device_type": torch.device(device).type,
+        "initialization": initialization,
+        "pretraining_sources": pretraining_sources,
+    }
+
+
+def read_checkpoint(path):
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(checkpoint, dict) or set(checkpoint) != {
+        "run",
+        "trainable",
+        "optimizer",
+        "cursor",
+        "rng",
+    }:
+        raise ValueError("checkpoint requires exactly run, trainable, optimizer, cursor and rng")
+    return checkpoint
+
+
+def load_initialization(path, model, config):
+    """阶段切换只载入新增权重，不继承优化器、训练游标或随机状态。"""
+    checkpoint = read_checkpoint(path)
+    previous = checkpoint["run"]["config"]
+    if previous["model"] != config.to_dict()["model"]:
+        raise ValueError("initialization model configuration differs from the current model")
+    required_stages = {
+        "warmup": {"pretrain"},
+        "qa": {"pretrain"},
+        "policy": {"pretrain", "warmup"},
+    }
+    stage = config.objective.stage
+    if stage in required_stages and previous["objective"]["stage"] not in required_stages[stage]:
+        raise ValueError(f"{stage} initialization requires {sorted(required_stages[stage])}")
+    model.load_trainable_state_dict(checkpoint["trainable"])
+    return {
+        "checkpoint": str(Path(path).resolve()),
+        "method": previous["objective"]["method"],
+        "stage": previous["objective"]["stage"],
+        "step": checkpoint["cursor"]["step"],
+        "resolved_model_revision": checkpoint["run"]["resolved_model_revision"],
+        "pretraining_sources": checkpoint["run"]["pretraining_sources"],
+    }
+
+
+def save_checkpoint(path, engine, run, cursor):
+    local_rng = capture_rng(engine.device)
+    rng = [local_rng]
+    if engine.world_size > 1:
+        rng = [None] * engine.world_size
+        dist.all_gather_object(rng, local_rng)
+    if engine.rank == 0:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        torch.save(
+            {
+                "run": run,
+                "trainable": engine.model.trainable_state_dict(),
+                "optimizer": engine.optimizer.state_dict(),
+                "cursor": dict(cursor),
+                "rng": rng,
+            },
+            temporary,
+        )
+        temporary.replace(path)
+    if engine.world_size > 1:
+        dist.barrier()
+
+
+def load_checkpoint(path, engine, run):
+    checkpoint = read_checkpoint(path)
+    if checkpoint["run"] != run:
+        raise ValueError("resume configuration, data, initialization, device or world size differs")
+    if len(checkpoint["rng"]) != engine.world_size:
+        raise ValueError("checkpoint RNG states do not match world size")
+    engine.model.load_trainable_state_dict(checkpoint["trainable"])
+    engine.optimizer.load_state_dict(checkpoint["optimizer"])
+    restore_rng(checkpoint["rng"][engine.rank], engine.device)
+    return checkpoint["cursor"]
+
+
+def validate_cursor(cursor, config, samples):
+    names = {"epoch", "sample_offset", "step", "sample_visits"}
+    if set(cursor) != names or any(
+        type(value) is not int or value < 0 for value in cursor.values()
+    ):
+        raise ValueError("checkpoint has an invalid training cursor")
+    epoch, offset = cursor["epoch"], cursor["sample_offset"]
+    if (
+        epoch > config.epochs
+        or offset >= samples
+        or offset % config.global_batch_size
+        or (epoch == config.epochs and offset != 0)
+        or cursor["step"]
+        != epoch * math.ceil(samples / config.global_batch_size)
+        + offset // config.global_batch_size
+        or cursor["sample_visits"] != epoch * samples + offset
+    ):
+        raise ValueError("checkpoint cursor does not match the epoch/batch schedule")
+
+
+def epoch_order(examples, seed, epoch):
+    indices = list(range(len(examples)))
+    random.Random(f"{seed}:v3:{epoch}").shuffle(indices)
+    return tuple(examples[index] for index in indices)
+
+
+def evaluate_split(engine, examples, epoch=0):
+    totals, samples = {}, 0
+    for start in range(0, len(examples), engine.config.global_batch_size):
+        metrics = engine.eval_batch(
+            examples[start : start + engine.config.global_batch_size], epoch=epoch
+        )
+        weight = metrics["samples"]
+        for name, value in metrics.items():
+            if name != "samples" and value is not None:
+                totals[name] = totals.get(name, 0.0) + value * weight
+        samples += weight
+    if not samples:
+        raise ValueError("evaluation split must contain at least one example")
+    return {"samples": samples, **{name: value / samples for name, value in totals.items()}}
+
+
+def _rewind_metrics(path, step):
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    retained = [record for record in records if record["step"] <= step]
+    if [record["step"] for record in retained] != list(range(1, step + 1)):
+        raise ValueError("training metrics do not match the checkpoint's completed steps")
+    if len(retained) != len(records):
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(
+            "".join(
+                json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n" for row in retained
+            ),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+
+
+def _tracking_context(config, engine, output, run):
+    if engine.rank != 0 or config.training.swanlab_project is None:
+        return nullcontext(None)
+    data = "fineweb" if config.objective.stage in {"pretrain", "lm"} else "fineweb-factqa"
+    tracking_config = {key: value for key, value in run.items() if key != "pretraining_sources"}
+    tracking_config["pretraining_source_counts"] = {
+        key: len(values) for key, values in run["pretraining_sources"].items()
+    }
+    if run["initialization"] is not None:
+        tracking_config["initialization"] = {
+            key: value
+            for key, value in run["initialization"].items()
+            if key != "pretraining_sources"
+        }
+    return swanlab_run(
+        output,
+        tracking_config,
+        mode="online",
+        project=config.training.swanlab_project,
+        group=config.training.group,
+        job_type="train",
+        tags=config.training.tags,
+        fixed_tags=(
+            "scope:main",
+            f"method:{config.objective.method}",
+            f"study:{config.objective.stage}",
+            f"data:{data}",
+        ),
+    )
+
+
+def train_loop(config, engine, splits, run, resume=None, stop_after_steps=None):
+    """执行确定的全局 batch 日程；optimizer step 是唯一持久化训练游标。"""
+    settings = config.training
+    train, dev = splits["train"], splits["dev"]
+    if not train or not dev:
+        raise ValueError("training requires nonempty train and dev splits")
+    if stop_after_steps is not None and (type(stop_after_steps) is not int or stop_after_steps < 1):
+        raise ValueError("stop_after_steps must be a positive optimizer-step limit")
+    if resume is None and config.objective.stage in {"warmup", "qa", "policy"}:
+        if settings.init_checkpoint is None or run["initialization"] is None:
+            raise ValueError(f"{config.objective.stage} requires an initialization checkpoint")
+    output = Path(settings.output_dir)
+    metrics_path = output / "metrics.jsonl"
+    cursor = {"epoch": 0, "sample_offset": 0, "step": 0, "sample_visits": 0}
+    checkpoint_path = Path(resume) if resume is not None else None
+    if resume is not None:
+        if Path(resume).resolve().parent != (output / "checkpoints").resolve():
+            raise ValueError("resume checkpoint must belong to output_dir/checkpoints")
+        if json.loads((output / "run.json").read_text(encoding="utf-8")) != run:
+            raise ValueError("saved run differs from the resume configuration or data")
+        cursor = load_checkpoint(resume, engine, run)
+        validate_cursor(cursor, settings, len(train))
+        if engine.rank == 0:
+            _rewind_metrics(metrics_path, cursor["step"])
+    else:
+        error = None
+        if engine.rank == 0 and output.exists() and any(output.iterdir()):
+            error = "new training requires an empty output directory"
+        if engine.world_size > 1:
+            status = [error]
+            dist.broadcast_object_list(status, src=0)
+            error = status[0]
+        if error is not None:
+            raise ValueError(error)
+        if engine.rank == 0:
+            output.mkdir(parents=True, exist_ok=True)
+            write_json(output / "config.json", config.to_dict())
+            write_json(output / "run.json", run)
+            metrics_path.touch()
+    if engine.world_size > 1:
+        dist.barrier()
+
+    total_steps = settings.epochs * math.ceil(len(train) / settings.global_batch_size)
+    with _tracking_context(config, engine, output, run) as tracking:
+        if tracking is not None:
+            configure_training_metrics(tracking)
+        for epoch in range(cursor["epoch"], settings.epochs):
+            ordered = epoch_order(train, settings.seed, epoch)
+            for start in range(cursor["sample_offset"], len(ordered), settings.global_batch_size):
+                if stop_after_steps is not None and cursor["step"] >= stop_after_steps:
+                    break
+                batch = ordered[start : start + settings.global_batch_size]
+                if engine.device.type == "cuda":
+                    torch.cuda.synchronize(engine.device)
+                    torch.cuda.reset_peak_memory_stats(engine.device)
+                started = time.perf_counter()
+                metrics = engine.step(batch, epoch=epoch)
+                if engine.device.type == "cuda":
+                    torch.cuda.synchronize(engine.device)
+                resources = {"optimizer_step_seconds": time.perf_counter() - started}
+                if engine.device.type == "cuda":
+                    resources["peak_memory_allocated_bytes"] = torch.cuda.max_memory_allocated(
+                        engine.device
+                    )
+                if engine.world_size > 1:
+                    maximum = torch.tensor(
+                        list(resources.values()), device=engine.device, dtype=torch.float64
+                    )
+                    dist.all_reduce(maximum, op=dist.ReduceOp.MAX)
+                    resources = dict(zip(resources, maximum.tolist(), strict=True))
+                cursor["step"] += 1
+                cursor["sample_visits"] += len(batch)
+                epoch_end = start + len(batch) == len(ordered)
+                cursor["epoch"] = epoch + int(epoch_end)
+                cursor["sample_offset"] = 0 if epoch_end else start + len(batch)
+                step = cursor["step"]
+                stopping = stop_after_steps is not None and step >= stop_after_steps
+                record = {
+                    "step": step,
+                    "epoch": epoch + 1,
+                    **{
+                        f"train/{key}": value for key, value in metrics.items() if value is not None
+                    },
+                    **{f"resources/{key}": value for key, value in resources.items()},
+                }
+                if step % settings.eval_every == 0 or epoch_end or stopping:
+                    development = evaluate_split(engine, dev, epoch=epoch)
+                    record.update({f"dev/{key}": value for key, value in development.items()})
+                if engine.rank == 0:
+                    with metrics_path.open("a", encoding="utf-8") as stream:
+                        text = json.dumps(record, ensure_ascii=False, allow_nan=False)
+                        stream.write(text + "\n")
+                        print(text, flush=True)
+                    if tracking is not None:
+                        tracking.log(training_metrics(record), step=step)
+                if step % settings.save_every == 0 or epoch_end or stopping:
+                    checkpoint_path = output / "checkpoints" / f"step-{step:06d}.pt"
+                    save_checkpoint(checkpoint_path, engine, run, cursor)
+            if stop_after_steps is not None and cursor["step"] >= stop_after_steps:
+                break
+    result = {
+        "complete": cursor["epoch"] == settings.epochs,
+        "completed_steps": cursor["step"],
+        "total_steps": total_steps,
+        "completed_epochs": cursor["epoch"],
+        "sample_visits": cursor["sample_visits"],
+        "stop_after_steps": stop_after_steps,
+        "checkpoint": str(checkpoint_path),
+    }
+    if engine.rank == 0:
+        write_json(output / "training-result.json", result)
+    return result
