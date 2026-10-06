@@ -1,0 +1,290 @@
+import copy
+import json
+import string
+
+import pytest
+from tokenizers import Tokenizer, models, processors
+from transformers import PreTrainedTokenizerFast
+
+from latent_working_memory.data_preparation.fineweb_qa.assembly import (
+    assemble_document,
+    qa_quotas,
+)
+from latent_working_memory.data_preparation.pretrain.fineweb import document_split
+from latent_working_memory.v3.data import load_factqa, tokenize_trajectory
+
+
+ROLE_SEED = 17
+SOURCE_SEED = 37
+SPLIT_FRACTIONS = (0.8, 0.1, 0.1)
+
+
+@pytest.fixture
+def tokenizer():
+    vocabulary = {token: index for index, token in enumerate(("<unk>", "<bos>", "<eos>", "<pad>"))}
+    for character in string.printable + "标题🌍":
+        if character not in vocabulary:
+            vocabulary[character] = len(vocabulary)
+    vocabulary["ab"] = len(vocabulary)
+    backend = Tokenizer(models.BPE(vocabulary, [("a", "b")], unk_token="<unk>"))
+    backend.post_processor = processors.TemplateProcessing(
+        single="<bos> $A <eos>",
+        special_tokens=[("<bos>", vocabulary["<bos>"]), ("<eos>", vocabulary["<eos>"])],
+    )
+    return PreTrainedTokenizerFast(
+        tokenizer_object=backend,
+        bos_token="<bos>",
+        eos_token="<eos>",
+        pad_token="<pad>",
+        unk_token="<unk>",
+        model_max_length=32,
+    )
+
+
+def source_cluster(split, index):
+    for candidate in range(10000):
+        name = f"cluster-{split}-{index}-{candidate}"
+        if document_split(name, SOURCE_SEED, SPLIT_FRACTIONS) == split:
+            return name
+    raise AssertionError("synthetic source split was not found")
+
+
+def make_record(segment_count=8, split="train", index=0, qa_namespace=None):
+    document_id = f"document-{split}-{index}"
+    parts, segments, candidates = [], [], []
+    offset = 0
+    _, tasks, gates = qa_quotas(segment_count)
+    for segment_index in range(segment_count):
+        segment_id = f"seg{segment_index}"
+        lines = [f"b\n标题 🌍 {document_id} {segment_id}\n"]
+        for item in range(tasks[segment_index] + gates[segment_index]):
+            name = f"{index}_{segment_index}_{item}"
+            answer = f"value_{name}"
+            evidence = f"Fact {name} has {answer}.\n"
+            start = offset + sum(map(len, lines))
+            answer_start = start + evidence.index(answer)
+            candidates.append(
+                {
+                    "qa_id": f"{qa_namespace or document_id}:{segment_id}:qa{item}",
+                    "segment_id": segment_id,
+                    "fact_statement": f"Fact {name} has {answer}",
+                    "question": f"What value belongs to fact {name}?",
+                    "answer": answer,
+                    "evidence_char_span": [start, start + len(evidence)],
+                    "answer_char_span": [answer_start, answer_start + len(answer)],
+                }
+            )
+            lines.append(evidence)
+        # Consecutive segments meet at 'ab', which merges only in full-prefix encoding.
+        lines.append("a")
+        text = "".join(lines)
+        parts.append(text)
+        segments.append({"segment_id": segment_id, "char_span": [offset, offset + len(text)]})
+        offset += len(text)
+    document = {
+        "trajectory_id": f"trajectory-{split}-{index}",
+        "document_id": document_id,
+        "dedup_cluster": source_cluster(split, index),
+        "split": split,
+        "source": {"file": f"sample/{split}.parquet", "row_group": 0, "row_index": index},
+        "window_char_span": [100, 100 + offset],
+        "text": "".join(parts),
+        "segments": segments,
+    }
+    decisions = [
+        {"qa_id": q["qa_id"], "accepted": True, "reason": "", "fact_group_id": q["qa_id"]}
+        for q in candidates
+    ]
+    return assemble_document(document, candidates, decisions, {"role_seed": ROLE_SEED})[
+        "trajectory"
+    ]
+
+
+def write_dataset(directory, records):
+    preparation = {
+        "qa": {"role_seed": ROLE_SEED},
+        "source_pool_config": {
+            "source": {"data_seed": SOURCE_SEED, "split_fractions": list(SPLIT_FRACTIONS)},
+            "window": {
+                "min_segments": 6,
+                "max_segments": 10,
+                "min_segment_chars": 1,
+                "max_segment_chars": 4096,
+            },
+        },
+    }
+    (directory / "preparation.json").write_text(json.dumps(preparation), encoding="utf-8")
+    for split in ("train", "dev", "test"):
+        (directory / f"{split}.jsonl").write_text(
+            "".join(
+                json.dumps(r, ensure_ascii=False) + "\n" for r in records if r["split"] == split
+            ),
+            encoding="utf-8",
+        )
+    return preparation
+
+
+@pytest.mark.parametrize("segment_count", range(6, 11))
+@pytest.mark.parametrize("split", ("train", "dev", "test"))
+def test_tokenization_preserves_variable_segments_roles_and_actual_usage(
+    tokenizer, segment_count, split
+):
+    record = make_record(segment_count, split)
+    trajectory = tokenize_trajectory(record, tokenizer, ROLE_SEED, split)
+    assert trajectory.text == record["text"]
+    assert trajectory.source == record["source"]
+    assert trajectory.window_char_span == tuple(record["window_char_span"])
+    assert len(trajectory.segments) == len(trajectory.usage) == segment_count
+    assert len(trajectory.qas) == 8 * segment_count
+    task_role = "train" if split == "train" else "evaluation"
+    assert sum(q.role == task_role for q in trajectory.qas.values()) == 4 * segment_count
+    assert sum(q.role == "gate" for q in trajectory.qas.values()) == 4 * segment_count
+    for index, (segment, step) in enumerate(
+        zip(trajectory.segments, trajectory.usage, strict=True)
+    ):
+        source = record["text"][slice(*segment.char_span)]
+        assert segment.input_ids == tuple(tokenizer.encode(source, add_special_tokens=False))
+        assert step.new_qa_ids == tuple(record["usage"][index]["task_new_qa_ids"])
+        assert step.old_qa_ids == tuple(record["usage"][index]["task_old_qa_ids"])
+        assert step.gate_qa_ids == tuple(record["usage"][index]["gate_qa_ids"])
+        assert len(step.old_qa_ids) == ((4 if index else 0) if split == "train" else 4 * index)
+        assert len(step.gate_qa_ids) == (8 if index else 0)
+        for qa_id in step.new_qa_ids + step.old_qa_ids:
+            assert trajectory.qas[qa_id].role == task_role
+        for qa_id in step.gate_qa_ids:
+            assert trajectory.qas[qa_id].role == "gate"
+        for qa_id in step.old_qa_ids + step.gate_qa_ids:
+            assert trajectory.qas[qa_id].evidence_char_span[1] <= segment.char_span[0]
+    for raw in record["qas"]:
+        qa = trajectory.qas[raw["qa_id"]]
+        assert (qa.question, qa.answer) == (raw["question"], raw["answer"])
+        assert qa.question_ids == tuple(tokenizer.encode(qa.question, add_special_tokens=False))
+        assert qa.answer_ids == tuple(tokenizer.encode(qa.answer, add_special_tokens=False))
+        assert trajectory.text[slice(*qa.answer_char_span)] == qa.answer
+
+
+def test_prefix_encoding_uses_original_text_without_special_tokens_or_truncation(tokenizer):
+    record = make_record(6)
+    trajectory = tokenize_trajectory(record, tokenizer, ROLE_SEED, "train")
+    flattened = sum((segment.input_ids for segment in trajectory.segments), ())
+    assert trajectory.full_input_ids != flattened
+    assert len(trajectory.full_input_ids) > tokenizer.model_max_length
+    assert not set(tokenizer.all_special_ids).intersection(trajectory.full_input_ids)
+    for step in range(6):
+        end = trajectory.segments[step].char_span[1]
+        assert trajectory.prefix_ids(step, tokenizer) == tuple(
+            tokenizer.encode(record["text"][:end], add_special_tokens=False)
+        )
+    assert trajectory.prefix_ids(1, tokenizer) != sum(
+        (s.input_ids for s in trajectory.segments[:2]), ()
+    )
+    assert trajectory.prefix_ids(5, tokenizer) is trajectory.full_input_ids
+    for step in (-1, 6, True):
+        with pytest.raises(IndexError, match="zero-based"):
+            trajectory.prefix_ids(step, tokenizer)
+
+
+def test_load_reads_all_splits_and_constructor_seed_from_preparation(tmp_path, tokenizer):
+    records = [make_record(6, "train"), make_record(9, "dev"), make_record(10, "test")]
+    write_dataset(tmp_path, records)
+    dataset = load_factqa(tmp_path, tokenizer)
+    assert set(dataset) == {"train", "dev", "test"}
+    assert all(isinstance(rows, tuple) for rows in dataset.values())
+    assert [len(dataset[s][0].segments) for s in dataset] == [6, 9, 10]
+    for split in ("dev", "test"):
+        trajectory = dataset[split][0]
+        final = trajectory.usage[-1]
+        assert len(final.new_qa_ids + final.old_qa_ids) == 4 * len(trajectory.segments)
+
+
+@pytest.mark.parametrize(
+    ("change", "error"),
+    [
+        ("future_task", "usage schedule"),
+        ("gate_as_task", "usage schedule"),
+        ("duplicate_usage", "usage schedule"),
+        ("duplicate_fact", "fact group appears"),
+        ("future_evidence", "evidence is outside"),
+        ("answer_span", "answer span does not match"),
+        ("quote_field", "QA fields are not canonical"),
+        ("legacy_usage", "usage schedule"),
+        ("extra_trajectory", "requires exactly"),
+    ],
+)
+def test_invalid_evidence_fact_pools_and_schedules_are_rejected(tokenizer, change, error):
+    record = make_record(6)
+    if change == "future_task":
+        record["usage"][1]["task_old_qa_ids"][0] = record["usage"][2]["task_new_qa_ids"][0]
+    elif change == "gate_as_task":
+        record["usage"][1]["task_old_qa_ids"][0] = record["usage"][1]["gate_qa_ids"][0]
+    elif change == "duplicate_usage":
+        record["usage"][1]["gate_qa_ids"][1] = record["usage"][1]["gate_qa_ids"][0]
+    elif change == "duplicate_fact":
+        record["qas"][4]["fact_group_id"] = record["qas"][0]["fact_group_id"]
+    elif change == "future_evidence":
+        record["qas"][0]["evidence_char_span"][1] = record["segments"][1]["char_span"][1]
+    elif change == "answer_span":
+        record["qas"][0]["answer_char_span"][0] -= 1
+    elif change == "quote_field":
+        record["qas"][0]["evidence_quote"] = "old schema"
+    elif change == "legacy_usage":
+        step = record["usage"][0]
+        step["train_new_qa_ids"] = step.pop("task_new_qa_ids")
+    else:
+        record["unexpected"] = True
+    with pytest.raises(ValueError, match=error):
+        tokenize_trajectory(record, tokenizer, ROLE_SEED, "train")
+
+
+@pytest.mark.parametrize("mismatch", ("file_split", "source_split", "cluster_split"))
+def test_loader_rejects_source_and_file_split_leakage(tmp_path, tokenizer, mismatch):
+    train = make_record(6)
+    dev = make_record(6, "dev")
+    if mismatch == "source_split":
+        train["dedup_cluster"] = source_cluster("dev", 999)
+    elif mismatch == "cluster_split":
+        dev["dedup_cluster"] = train["dedup_cluster"]
+    write_dataset(tmp_path, [train, dev])
+    if mismatch == "file_split":
+        (tmp_path / "train.jsonl").write_text(json.dumps(dev) + "\n")
+    message = {
+        "file_split": "requested dataset split",
+        "source_split": "frozen source-cluster split",
+        "cluster_split": "multiple dataset splits",
+    }[mismatch]
+    with pytest.raises(ValueError, match=message):
+        load_factqa(tmp_path, tokenizer)
+
+
+@pytest.mark.parametrize("duplicate", ("document", "trajectory", "source_row", "qa_id"))
+def test_loader_rejects_duplicate_samples_and_ids(tmp_path, tokenizer, duplicate):
+    first, second = make_record(6), make_record(6, index=1)
+    if duplicate == "document":
+        second = copy.deepcopy(first)
+        second["trajectory_id"] = "another-trajectory"
+        second["source"]["row_index"] = 1
+    elif duplicate == "trajectory":
+        second["trajectory_id"] = first["trajectory_id"]
+    elif duplicate == "source_row":
+        second["source"] = dict(first["source"])
+    else:
+        first = make_record(6, qa_namespace="shared")
+        second = make_record(6, index=1, qa_namespace="shared")
+    write_dataset(tmp_path, [first, second])
+    with pytest.raises(ValueError, match="duplicate"):
+        load_factqa(tmp_path, tokenizer)
+
+
+@pytest.mark.parametrize("setting", ("segment_count", "segment_length", "role_seed"))
+def test_loader_uses_frozen_construction_parameters(tmp_path, tokenizer, setting):
+    record = make_record(6)
+    preparation = write_dataset(tmp_path, [record])
+    if setting == "segment_count":
+        preparation["source_pool_config"]["window"]["min_segments"] = 7
+    elif setting == "segment_length":
+        preparation["source_pool_config"]["window"]["min_segment_chars"] = 3072
+    else:
+        preparation["qa"]["role_seed"] = 123
+    (tmp_path / "preparation.json").write_text(json.dumps(preparation))
+    with pytest.raises(ValueError, match="window specification|role order"):
+        load_factqa(tmp_path, tokenizer)

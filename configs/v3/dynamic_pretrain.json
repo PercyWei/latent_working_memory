@@ -1,0 +1,46 @@
+{
+  "model": {
+    "model_name_or_path": "Qwen/Qwen3-4B-Instruct-2507",
+    "revision": null,
+    "dtype": "bfloat16",
+    "attention_implementation": "sdpa",
+    "memory_slots": 64,
+    "lora_rank": 128,
+    "lora_alpha": 32,
+    "lora_target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj"
+    ]
+  },
+  "objective": {
+    "method": "memory_change",
+    "stage": "pretrain",
+    "qa_batch_size": 8,
+    "segment_tokens": 1024,
+    "ac_min_segment_tokens": 768,
+    "ac_max_segment_tokens": 1024,
+    "ac_bptt_steps": 2,
+    "append_probability": 0.5,
+    "seed": 20261004
+  },
+  "training": {
+    "dataset_dir": "data/REPLACE_WITH_FINEWEB_TEXT_SAMPLES",
+    "output_dir": "artifacts/v3/step1-token-memory/train/dynamic-pretrain",
+    "epochs": 1,
+    "global_batch_size": 8,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.01,
+    "gradient_clip": 1,
+    "seed": 20261004,
+    "eval_every": 25,
+    "save_every": 25,
+    "min_input_tokens": 768,
+    "max_input_tokens": 1024,
+    "init_checkpoint": null
+  }
+}
