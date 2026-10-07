@@ -2,6 +2,7 @@
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 import subprocess
 import sys
@@ -21,6 +22,8 @@ def explicit_test_credentials(monkeypatch):
 def arguments(tmp_path, *options, run_id="unit-job"):
     return gpu_job.parse_args(
         [
+            "--method",
+            "dynamic",
             *(["--run-id", run_id] if run_id is not None else []),
             "--output-root",
             str(tmp_path / "outputs"),
@@ -158,8 +161,8 @@ def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode,
         assert job.config.training.init_checkpoint is None
         assert job.config.training.swanlab_project == "latent-working-memory-v3"
         assert job.config.training.tags == (f"study:{'main' if mode == 'full' else mode}",)
-        assert job.config.training.micro_batch_size_per_gpu == 1
-        assert job.config.training.gradient_accumulation_steps == 4
+        assert job.config.training.micro_batch_size_per_gpu == 2
+        assert job.config.training.gradient_accumulation_steps == 2
         assert job.config.training.global_batch_size(2) == 8
         assert job.config.training.global_batch_size(4) == 16
         assert job.config.training.experiment_id == "unit-job"
@@ -206,6 +209,56 @@ def test_dynamic_methods_share_only_pretraining_and_have_independent_warmup_poli
 def test_default_pretraining_data_is_the_shared_reconstruction_root():
     args = gpu_job.parse_args([])
     assert args.pretrain_data == Path("data/fineweb-reconstruction-k512-doc100k_20260917")
+
+
+@pytest.mark.parametrize("mode", ["smoke", "full"])
+def test_minimal_command_builds_all_methods_with_shared_default_settings(mode):
+    args = gpu_job.parse_args(["--mode", mode, "--gpus", "4,5"])
+    assert args.method == "all"
+    assert args.run_id is None
+    _, _, jobs = gpu_job.build_jobs(args)
+    assert len(jobs) == 10
+    assert sum(job.key == "dynamic-pretrain" for job in jobs) == 1
+    assert len({job.config.training.experiment_id for job in jobs}) == 1
+    for job in jobs:
+        assert job.config.model.model_name_or_path == str(
+            Path.home() / "models/Qwen3-4B-Instruct-2507"
+        )
+        assert job.config.training.micro_batch_size_per_gpu == 2
+        assert job.config.training.gradient_accumulation_steps == 2
+        assert job.config.training.global_batch_size(2) == 8
+        assert job.config.objective.qa_batch_size == 8
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_cli_only_overrides_explicitly_supplied_preset_values(monkeypatch, override):
+    def preset(path):
+        config = load_experiment(path)
+        return replace(
+            config,
+            model=replace(config.model, model_name_or_path="local/preset-model"),
+            objective=replace(config.objective, qa_batch_size=5),
+            training=replace(
+                config.training, micro_batch_size_per_gpu=3, gradient_accumulation_steps=5
+            ),
+        )
+
+    monkeypatch.setattr(gpu_job, "load_experiment", preset)
+    options = (
+        ["--micro-batch-size-per-gpu", "4", "--model-path", "~/models/override-model"]
+        if override
+        else []
+    )
+    args = gpu_job.parse_args(options)
+    assert args.method == "all" and args.mode == "smoke"
+    _, _, jobs = gpu_job.build_jobs(args)
+    for job in jobs:
+        assert job.config.training.micro_batch_size_per_gpu == (4 if override else 3)
+        assert job.config.training.gradient_accumulation_steps == 5
+        assert job.config.objective.qa_batch_size == 5
+        assert job.config.model.model_name_or_path == (
+            str(Path.home() / "models/override-model") if override else "local/preset-model"
+        )
 
 
 @pytest.mark.parametrize("method", ["memory_change", "information_loss", "dynamic"])
@@ -413,6 +466,7 @@ def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
 
     assert result["status"] == "finished"
     assert all(call["environment"]["SWANLAB_API_KEY"] == "test-api-key" for call in commands.calls)
+    assert all(call["environment"]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID" for call in commands.calls)
     training = [call for call in commands.calls if "config" in call]
     evaluations = [
         call for call in commands.calls if "latent_working_memory.v3.evaluate" in call["command"]
@@ -446,8 +500,8 @@ def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
     for job in plan["jobs"]:
         assert job["batching"] == {
             "world_size": world_size,
-            "micro_batch_size_per_gpu": 1,
-            "gradient_accumulation_steps": 4,
+            "micro_batch_size_per_gpu": 2,
+            "gradient_accumulation_steps": 2,
             "global_batch_size": world_size * 4,
         }
         assert "global_batch_size" not in job["config"]["training"]
@@ -869,12 +923,18 @@ def test_missing_key_stops_online_job_before_creating_artifacts(
 
 
 @pytest.mark.parametrize("exit_code", [0, 7])
+@pytest.mark.parametrize("override_repository", [False, True])
 def test_shell_changes_to_spaced_repo_preserves_arguments_and_returns_process_status(
-    tmp_path, exit_code
+    tmp_path, exit_code, override_repository
 ):
     script = Path("src/latent_working_memory/v3/scripts/run_gpu.sh").resolve()
     repository = tmp_path / "repository with spaces"
     repository.mkdir()
+    if not override_repository:
+        source = script.read_text()
+        script = repository / "src/latent_working_memory/v3/scripts/run_gpu.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text(source)
     binaries = tmp_path / "fake bin"
     binaries.mkdir()
     fake_uv = binaries / "uv"
@@ -895,11 +955,16 @@ def test_shell_changes_to_spaced_repo_preserves_arguments_and_returns_process_st
         "--group",
         "literal $name; echo unchanged",
     ]
-    environment = dict(
-        os.environ, PATH=f"{binaries}:{os.environ['PATH']}", LWM_REPO_DIR=str(repository)
-    )
+    environment = dict(os.environ, PATH=f"{binaries}:{os.environ['PATH']}")
+    environment.pop("LWM_REPO_DIR", None)
+    if override_repository:
+        environment["LWM_REPO_DIR"] = str(repository)
     result = subprocess.run(
-        ["bash", str(script), *options], env=environment, capture_output=True, text=True
+        ["bash", str(script), *options],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
     )
     assert result.returncode == exit_code
     recorded = json.loads(result.stdout)
@@ -914,7 +979,10 @@ def test_shell_changes_to_spaced_repo_preserves_arguments_and_returns_process_st
     ]
     assert recorded["unbuffered"] == "1"
     assert recorded["tokenizers"] == "false"
-    assert list(repository.iterdir()) == []
+    if override_repository:
+        assert list(repository.iterdir()) == []
+    else:
+        assert script.read_text() == source
 
 
 def test_execute_propagates_real_child_failure_and_keeps_the_log(tmp_path):

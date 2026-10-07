@@ -71,7 +71,7 @@ d = Lrw - L0; g = Lrw - Lapp
 
 AutoCompressors 在索引数据上每条原始索引只生成一个 continuation 样本，拼接正文与 512-token 续文进行 LM 训练，避免同文被 AE/LM 两份重复使用；该长度也保证有足够的随机分段。对已有 `TextSample`，AE 样本使用输入全文，continuation 样本使用输入和续写的 token 流。子块内保留跨分段的下一 token 预测，子块首 token 不计损失；按目标 token 数平均。冻结读取端的损失通过当前子块内的记忆写入回传，不使用 QA 微调。当前随机分段范围为 768–1024 tokens，尾段可以更短；首组训练轨迹较短，评估时需留意更长累计记忆的泛化表现。
 
-每个 global batch 按实际样本数平均，包括不足一批的尾批。配置项 `micro_batch_size_per_gpu` 控制每卡一次并行处理的完整样本数，`gradient_accumulation_steps` 控制累积次数；全局 batch 根据两者与 GPU 数的乘积计算并记录。默认每卡 microbatch 为 1、累积 4 次，双卡全局 batch 为 8；双卡也可用 microbatch 2、累积 2 次保持全局 batch 为 8。
+每个 global batch 按实际样本数平均，包括不足一批的尾批。配置项 `micro_batch_size_per_gpu` 控制每卡一次并行处理的完整样本数，`gradient_accumulation_steps` 控制累积次数；全局 batch 根据两者与 GPU 数的乘积计算并记录。五方法默认每卡 microbatch 为 2、累积 2 次，双卡全局 batch 为 8；`qa_batch_size` 默认为 8。
 
 批量写入采用独立行的右侧 padding 与 attention mask，不跨样本读取信息；动态分支按轨迹独立决策。`qa_batch_size` 控制每条轨迹一次读取的题数，批量调用合并各活跃轨迹的题目，但保留原有每题、更新点和轨迹的损失权重。多个样本共享调用的计时按参与样本分摊，调用/题目数仍按每条样本的逻辑工作量记录。
 
@@ -79,9 +79,14 @@ AutoCompressors 在索引数据上每条原始索引只生成一个 continuation
 
 ## 启动
 
-终端和公司 GPU 网站使用 [run_gpu.sh](scripts/run_gpu.sh)，默认仓库为 `/dfs/data/latent_working_memory`，SwanLab project 为已确认的 `latent-working-memory-v3`。`--mode smoke/pilot/full` 控制试跑程度，自动衔接训练阶段、最终评估和对照结果；参数与启动命令见 [GPU 任务说明](scripts/README.md)。
+终端和公司 GPU 网站使用 [run_gpu.sh](scripts/run_gpu.sh)。脚本从自身位置定位仓库并切换到项目根目录，自动设置 `CUDA_DEVICE_ORDER=PCI_BUS_ID`；无需先配置路径环境变量。默认运行五方法的 `smoke` 流程，模型读取 `~/models/Qwen3-4B-Instruct-2507`，SwanLab project 为 `latent-working-memory-v3`，新运行标识按上海时间自动生成。
 
-当前服务器的仓库位于 `~/percyw/latent_working_memory` 时，设置 `LWM_REPO_DIR="$HOME/percyw/latent_working_memory"`。启动时显式传入 `--gpus 4,5`，训练使用两个进程，最终评估使用 GPU 4。`--gpus` 接受非重复的非负物理卡号，默认仍为 `0,1`。
+```bash
+bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh --mode smoke --gpus 4,5
+bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh --mode full --gpus 4,5
+```
+
+公司 GPU 网站填写脚本的实际绝对路径即可。`--gpus 4,5` 启动两个训练进程，最终评估使用 GPU 4；卡号默认仍为 `0,1`。只运行一个方法时增加 `--method`。命令行参数覆盖方法预设，`all` 下应用于所有方法的各个阶段；例如 `--micro-batch-size-per-gpu 4 --gradient-accumulation-steps 1` 保持双卡全局 batch 为 8。参数与数据准备见 [GPU 任务说明](scripts/README.md)。
 
 公开入口按完整方法运行：ICAE 自动执行 pretrain → QA，动态方法执行共享预训练 → warmup → policy，AutoCompressors 执行 LM；`smoke`、`pilot` 仅缩短各阶段预算，仍走完整流程。需要先单独准备两种动态方法的共同起点时，使用 `--method shared_pretrain`。
 
@@ -141,6 +146,6 @@ uv run --frozen pytest -q tests/v3
 uv run --frozen ruff check src/latent_working_memory/v3 tests/v3
 ```
 
-测试使用本地随机初始化 tiny Llama/Qwen3，覆盖可微冻结读取、分支梯度、历史输入范围、门控隔离、数据契约、BPTT 截断及 CPU DDP。它们验证实现行为，不代表真实 QA 质量或 4B GPU 性能；正式运行前仍需接入实际数据并测量完整轨迹显存。
+测试使用本地随机初始化 tiny Llama/Qwen3，覆盖可微冻结读取、分支梯度、历史输入范围、门控隔离、数据契约、BPTT 截断及 CPU DDP。它们验证实现行为，不代表真实 QA 质量或 4B GPU 性能；正式运行前需在 GPU 上测量完整轨迹显存。
 
 参考实现：[ICAE](https://github.com/getao/icae)、[AutoCompressors](https://github.com/princeton-nlp/AutoCompressors)、[verl Model Engine](https://verl.readthedocs.io/en/latest/workers/model_engine.html)。

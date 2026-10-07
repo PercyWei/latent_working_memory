@@ -95,7 +95,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=LEVELS, default="smoke")
     parser.add_argument(
-        "--method", choices=(*METHODS, "shared_pretrain", "dynamic", "all"), default="dynamic"
+        "--method", choices=(*METHODS, "shared_pretrain", "dynamic", "all"), default="all"
     )
     parser.add_argument(
         "--pretrain-data",
@@ -111,7 +111,9 @@ def parse_args(argv=None):
         type=Path,
         help="动态方法使用共享预训练 checkpoint，连续执行 warmup/policy 与最终评估",
     )
-    parser.add_argument("--model-path", help="默认 Qwen3-4B；可改为共享盘模型目录")
+    parser.add_argument(
+        "--model-path", help="覆盖预设模型位置，当前预设为 ~/models/Qwen3-4B-Instruct-2507"
+    )
     parser.add_argument(
         "--gpus", type=physical_gpus, default="0,1", help="逗号分隔的物理 GPU 编号，不允许重复"
     )
@@ -411,6 +413,7 @@ def run_job(args):
             raise ValueError(f"job output already exists: {path}; refusing to overwrite")
     environment = dict(
         os.environ,
+        CUDA_DEVICE_ORDER="PCI_BUS_ID",
         CUDA_VISIBLE_DEVICES=args.gpus,
         PYTHONUNBUFFERED="1",
         TOKENIZERS_PARALLELISM="false",

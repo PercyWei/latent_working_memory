@@ -1,13 +1,24 @@
 # GPU 训练任务启动
 
-终端与 GPU 网站共用同一脚本。当前服务器使用 `--gpus 4,5`，脚本通过 `torchrun` 启动两个训练进程，最终评估使用 GPU 4。参数默认卡号保留 `0,1`，每次启动按实际分配显式指定。
+终端与 GPU 网站共用同一脚本，默认运行五种方法的 `smoke` 完整流程。脚本从自身位置定位仓库、切换到项目根目录，并设置 `CUDA_DEVICE_ORDER=PCI_BUS_ID`。当前服务器使用 `--gpus 4,5`，通过 `torchrun` 启动两个训练进程，最终评估使用 GPU 4；参数默认卡号仍为 `0,1`。
+
+模型默认读取 `~/models/Qwen3-4B-Instruct-2507`，数据使用下文的仓库内路径，SwanLab project 为 `latent-working-memory-v3`。新运行的 `run-id` 自动按上海时间生成，无需预先设置路径环境变量或运行标识。
+
+```bash
+# 五方法试跑
+bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh --mode smoke --gpus 4,5
+
+# 五方法正式训练
+bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh --mode full --gpus 4,5
+```
+
+公司 GPU 网站直接填写脚本的实际绝对路径，例如 `bash /your/repository/src/latent_working_memory/v3/scripts/run_gpu.sh --mode smoke --gpus 4,5`；无需固定仓库目录。
 
 训练通过 `--micro-batch-size-per-gpu` 与 `--gradient-accumulation-steps` 控制批处理。全局 batch 根据 **GPU 数 × 每卡 microbatch × 累积步数** 计算，写入运行计划、本地 `run.json` 和 SwanLab config；不再单独传入 `--global-batch-size`。
 
 | 双卡配置 | 每卡一次并行样本数 | 每次更新累积次数 | 全局 batch |
 |---|---:|---:|---:|
-| 默认 | 1 | 4 | 8 |
-| `--micro-batch-size-per-gpu 2 --gradient-accumulation-steps 2` | 2 | 2 | 8 |
+| 默认 | 2 | 2 | 8 |
 | `--micro-batch-size-per-gpu 4 --gradient-accumulation-steps 1` | 4 | 1 | 8 |
 
 microbatch 内合并实际写入和读取调用，支持不同长度及不同更新动作。`qa_batch_size` 是每条轨迹一次并行读取的题数，因此训练时一次读取最多包含 `microbatch × qa_batch_size` 道题。尾批按真实样本数归一；增加卡数或改变这两个参数会改变全局 batch。第一组实验采用两张 H20、每卡 microbatch 2、累积 2，全局 batch 8；实际显存与吞吐先由 `smoke` 确认。
@@ -42,7 +53,7 @@ nano .env
 SWANLAB_API_KEY=你的SwanLab_API_Key
 ```
 
-v3 的凭据选择规则如下；训练、续训与评估均从项目根目录启动：
+v3 的凭据选择规则如下；脚本自动在项目根目录启动训练与评估：
 
 | 条件 | 使用的凭据 |
 |---|---|
@@ -51,16 +62,6 @@ v3 的凭据选择规则如下；训练、续训与评估均从项目根目录�
 | 所选来源未提供有效值 | 在线运行报错，不回退到共享账号保存的登录凭据 |
 
 `.env` 已被 Git 忽略，需在服务器本地填写；只读取其中的 `SWANLAB_API_KEY`，其他字段不自动加载。无需执行 `swanlab login`，不会改写共享账号的登录文件。key 仅用于认证及传入任务子进程，不写入任务配置、命令行或本地实验记录。`--dry-run` 和 `--tracking disabled` 不要求提供 key。
-
-脚本的默认仓库位置为 `/dfs/data/latent_working_memory`。当前终端服务器使用 `~/percyw/latent_working_memory` 时，先设置 `LWM_REPO_DIR`：
-
-```bash
-export LWM_REPO_DIR="$HOME/percyw/latent_working_memory"
-export CUDA_DEVICE_ORDER=PCI_BUS_ID
-bash "$LWM_REPO_DIR/src/latent_working_memory/v3/scripts/run_gpu.sh" \
-  --mode smoke --method all --gpus 4,5 --run-id 20261007-01 \
-  --micro-batch-size-per-gpu 2 --gradient-accumulation-steps 2 --qa-batch-size 8
-```
 
 默认数据位置：
 
@@ -85,15 +86,7 @@ bash "$LWM_REPO_DIR/src/latent_working_memory/v3/scripts/run_gpu.sh" \
 
 20261007 使用 Qwen3-4B tokenizer 读取发布数据：QA 为 1007／118／120 条 train／dev／test 轨迹，每条 6–10 段；训练轨迹实际为 3307–15448 tokens，字符估算的 6–8K 不是实际分词长度筛选条件。动态基础预训练保留 3532 条训练原文，派生 7064 个 AE／LM 样本；开发集为 12 条原文、24 个样本。基线保留 31957 条训练原文：每个 ICAE 使用 63914 个 AE／LM 样本，AutoCompressors 使用 31957 个 LM 样本。两种预训练视图均与 QA 来源文档和去重簇无交集。
 
-仓库位于默认路径时，可在网站的启动命令栏填写：
-
-```bash
-bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode smoke --method all --gpus 4,5 --run-id 20261007-01 \
-  --micro-batch-size-per-gpu 2 --gradient-accumulation-steps 2 --qa-batch-size 8
-```
-
-这条命令会依次执行：
+默认五方法试跑依次执行：
 
 ```text
 共享单段 AE＋LM 预训练
@@ -126,20 +119,20 @@ AutoCompressors：多段 LM → 开发集 QA 评估
 - 样本上限控制计算使用的内存索引，不创建数据副本；首次加载仍读取并分词来源数据。更换档位不会缩短模型加载时间。
 - `smoke`、`pilot` 用于检查实现、显存、耗时和展示；短跑质量不作为研究结论。
 
-检查通过后，可把 `--mode` 改为 `pilot` 或 `full`。同一个 `run-id` 的不同档位使用各自目录；重复同档独立运行时换用新的 `run-id`。未指定 `--init-checkpoint` 时，不会继承试跑权重。
+检查通过后，将 `--mode` 改为 `pilot` 或 `full` 即可。默认每次生成新的 `run-id`；也可显式指定，同一标识的不同档位使用各自目录。未指定 `--init-checkpoint` 时，不会继承试跑权重。
+
+命令行参数覆盖 `configs/v3/` 中各方法的预设；`all` 下的覆盖应用于所有方法、所有训练阶段。例如提高每卡并行量、保持双卡全局 batch 为 8：
 
 ```bash
-bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode full --method all --gpus 4,5 --run-id 20261007-01 \
-  --micro-batch-size-per-gpu 2 --gradient-accumulation-steps 2 --qa-batch-size 8
+bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
+  --mode smoke --gpus 4,5 --micro-batch-size-per-gpu 4 --gradient-accumulation-steps 1
 ```
 
-也可精确覆盖档位中的预算：
+也可覆盖档位中的预算：
 
 ```bash
-bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode pilot --method all --gpus 4,5 --run-id 20261007-02 \
-  --micro-batch-size-per-gpu 2 --gradient-accumulation-steps 2 --qa-batch-size 8 \
+bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
+  --mode pilot --gpus 4,5 \
   --max-steps 10 --train-samples 80 --dev-samples 8 --eval-trajectories 4
 ```
 
@@ -149,36 +142,35 @@ bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gp
 
 | 参数 | 流程 |
 |---|---|
-| `--method dynamic` | 共享预训练一次，再分别执行两个动态方法的 warmup → policy → 评估；默认 |
-| `--method all` | 三个 baseline 与两个动态方法的完整流程 |
+| `--method all` | 三个 baseline 与两个动态方法的完整流程；默认 |
+| `--method dynamic` | 共享预训练一次，再分别执行两个动态方法的 warmup → policy → 评估 |
 | `--method memory_change / information_loss` | 共享预训练 → 该方法 warmup → policy → 评估 |
 | `--method icae_single / icae_multi` | 该方法 pretrain → QA → 评估 |
 | `--method autocompressors` | LM → 评估 |
 | `--method shared_pretrain` | 仅生成两个动态方法共用的 AE＋LM 预训练 checkpoint，并执行预训练开发集验证 |
+
+只运行一个方法时增加 `--method`，例如：
+
+```bash
+bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
+  --mode smoke --gpus 4,5 --method icae_single
+```
 
 五方法统一使用 `--pretrain-data`，各预设决定读取哪个索引视图。动态方法提供 `--init-checkpoint` 时，从已有共享预训练开始，自动执行 warmup → policy → 最终评估。
 
 先单独准备共享预训练时：
 
 ```bash
-bash src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode smoke --method shared_pretrain --gpus 4,5 --run-id shared-01 \
-  --micro-batch-size-per-gpu 2 --gradient-accumulation-steps 2 --qa-batch-size 8
+bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
+  --mode smoke --method shared_pretrain --gpus 4,5 --run-id shared-01
 ```
 
 已有共享预训练 checkpoint 时，一条命令完成某个动态方法的完整 QA 训练流程：
 
 ```bash
-cd ~/percyw/latent_working_memory
-export LWM_REPO_DIR="$PWD"
-export CUDA_DEVICE_ORDER=PCI_BUS_ID
-
-bash src/latent_working_memory/v3/scripts/run_gpu.sh \
+bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
   --mode smoke --method memory_change --gpus 4,5 \
-  --init-checkpoint /absolute/path/to/shared-pretrain-k64_smoke_shared-01/pretrain/checkpoints/step-NNNNNN.pt \
-  --model-path "$HOME/models/Qwen3-4B-Instruct-2507" \
-  --qa-data "$LWM_REPO_DIR/data/fineweb-factqa-train1000_20260930" \
-  --micro-batch-size-per-gpu 2 --gradient-accumulation-steps 2 --qa-batch-size 8
+  --init-checkpoint /absolute/path/to/shared-pretrain-k64_smoke_shared-01/pretrain/checkpoints/step-NNNNNN.pt
 ```
 
 `--run-id` 自动继承 checkpoint 同阶段 `run.json` 中的 `config.training.experiment_id`；显式传入不同值会报错。将 `--method` 改为 `information_loss`，保持同一 checkpoint 和其余参数，即可在同一系列分别启动另一方法，无需改 `run-id`。也可使用 `--method dynamic` 顺序完成两组并导出比较表。
@@ -231,24 +223,18 @@ compare/<method>/               同题池质量—容量点 points.json / points
 |---|---|
 | `--dry-run` | 打印预算、阶段依赖、解析配置和命令；不加载模型/数据，不连接 SwanLab，不创建实验目录 |
 | `--gpus 4,5` | 逗号分隔的非重复物理卡号，训练进程数随卡数变化；默认 `0,1` |
-| `--model-path /absolute/model/path` | 使用共享盘上的 Qwen3-4B 模型，避免启动时从 Hub 获取 |
-| `--micro-batch-size-per-gpu 2` | 每卡一次并行处理的样本/轨迹数，默认 1 |
-| `--gradient-accumulation-steps 2` | 每次参数更新累积的 microbatch 数，默认 4；全局 batch 自动计算 |
-| `--qa-batch-size 8` | 每条轨迹单次读取的 QA 数 |
+| `--model-path /absolute/model/path` | 覆盖本地模型位置，默认 `~/models/Qwen3-4B-Instruct-2507` |
+| `--micro-batch-size-per-gpu 2` | 每卡一次并行处理的样本/轨迹数，默认 2 |
+| `--gradient-accumulation-steps 2` | 每次参数更新累积的 microbatch 数，默认 2；全局 batch 自动计算 |
+| `--qa-batch-size 8` | 每条轨迹单次读取的 QA 数，默认 8 |
 | `--init-checkpoint` | 指定动态方法的共享预训练 checkpoint，并从其 `run.json` 继承 `run-id` |
-| `--run-id` | 系列标识；外部初始化时可省略，显式值须与来源一致 |
+| `--run-id` | 系列标识；默认上海时间 `YYYYMMDD-HHMMSS`，外部初始化时继承来源 |
 | `--threshold-i / --threshold-d / --threshold-g / --eta` | 覆盖门控阈值，记录于训练配置 |
 | `--max-new-tokens 64` | 最终评估生成上限 |
 | `--tracking disabled` | 仅保存本地记录；默认 online |
 | `--swanlab-project` / `--group` | 项目与实验系列 |
 | `--output-root` | 产物父目录，默认 `artifacts/v3` |
 
-仓库位置不同，可通过环境变量覆盖，脚本会正确处理带空格的路径：
-
-```bash
-LWM_REPO_DIR=/another/repository \
-  bash /another/repository/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode smoke --gpus 4,5 --dry-run
-```
+脚本支持带空格的路径。已有环境显式设置 `LWM_REPO_DIR` 时仍使用该覆盖值；通常直接运行目标仓库中的脚本即可。
 
 本地测试验证预算、阶段衔接、数据选择、原生指标和评估图表构造；服务器上的实际显存、训练速度及云端展示需要通过第一轮 `smoke` 任务核验。

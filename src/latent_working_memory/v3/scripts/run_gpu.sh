@@ -2,7 +2,7 @@
 # GPU 网站任务入口；uv 使用仓库根目录 .venv 和冻结的 uv.lock。
 set -euo pipefail
 
-LWM_REPO_DIR="${LWM_REPO_DIR:-/dfs/data/latent_working_memory}"
+LWM_REPO_DIR="${LWM_REPO_DIR:-$(dirname -- "${BASH_SOURCE[0]}")/../../../..}"
 cd "$LWM_REPO_DIR"
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false

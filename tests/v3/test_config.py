@@ -14,8 +14,10 @@ from latent_working_memory.v3.config import (
 @pytest.mark.parametrize("filename", sorted(Path("configs/v3").glob("*.json")))
 def test_presets_use_requested_model_and_memory_size(filename):
     config = load_experiment(filename)
-    assert config.model.model_name_or_path == "Qwen/Qwen3-4B-Instruct-2507"
+    assert config.model.model_name_or_path == str(Path.home() / "models/Qwen3-4B-Instruct-2507")
     assert config.model.memory_slots == 64
+    assert config.training.micro_batch_size_per_gpu == 2
+    assert config.training.gradient_accumulation_steps == 2
     assert config.training.swanlab_project is None
 
 

@@ -3,6 +3,7 @@
 from dataclasses import asdict, dataclass
 import json
 import math
+import os
 from pathlib import Path
 import re
 
@@ -48,6 +49,7 @@ class ModelConfig:
     def __post_init__(self):
         if not self.model_name_or_path:
             raise ValueError("model_name_or_path is required")
+        object.__setattr__(self, "model_name_or_path", os.path.expanduser(self.model_name_or_path))
         if self.dtype not in {"float32", "bfloat16"}:
             raise ValueError("dtype must be float32 or bfloat16")
         if self.attention_implementation not in {"eager", "sdpa", "flash_attention_2"}:
