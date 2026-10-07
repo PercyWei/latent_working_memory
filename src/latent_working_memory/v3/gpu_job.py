@@ -94,9 +94,8 @@ def physical_gpus(value):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=LEVELS, default="smoke")
-    parser.add_argument("--method", choices=(*METHODS, "dynamic", "all"), default="dynamic")
     parser.add_argument(
-        "--stage", choices=("auto", "pretrain", "qa", "warmup", "policy", "lm"), default="auto"
+        "--method", choices=(*METHODS, "shared_pretrain", "dynamic", "all"), default="dynamic"
     )
     parser.add_argument(
         "--pretrain-data", type=Path, default=Path("data/fineweb-4096-doc100k_20260910/semantic")
@@ -112,7 +111,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--init-checkpoint",
         type=Path,
-        help="单阶段 qa/warmup/policy 的初始化权重；动态方法 auto 时从预训练权重连续执行 warmup/policy",
+        help="动态方法使用共享预训练 checkpoint，连续执行 warmup/policy 与最终评估",
     )
     parser.add_argument("--model-path", help="默认 Qwen3-4B；可改为共享盘模型目录")
     parser.add_argument(
@@ -141,24 +140,16 @@ def parse_args(argv=None):
     parser.add_argument("--tracking", choices=("online", "disabled"), default="online")
     parser.add_argument("--swanlab-project", default="latent-working-memory-v3")
     parser.add_argument("--group", help="显式实验系列 group；默认使用本次运行标识")
-    parser.add_argument(
-        "--run-id", default=datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M%S")
-    )
+    parser.add_argument("--run-id", help="实验标识；动态后训练自动继承共享预训练来源的标识")
     parser.add_argument("--output-root", type=Path, default=Path("artifacts/v3"))
     parser.add_argument(
         "--dry-run", action="store_true", help="只打印解析后的计划，不加载数据/模型，不连接 SwanLab"
     )
     args = parser.parse_args(argv)
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.run_id):
+    if args.run_id is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.run_id):
         parser.error("run-id must contain only letters, digits, '-' and '_'")
-    if args.stage != "auto" and args.method in {"all", "dynamic"}:
-        parser.error("single-stage jobs require one specific --method")
-    if args.init_checkpoint is not None:
-        dynamic_auto = args.stage == "auto" and args.method in (*DYNAMIC_METHODS, "dynamic")
-        if args.stage not in {"qa", "warmup", "policy"} and not dynamic_auto:
-            parser.error("--init-checkpoint requires qa/warmup/policy or auto with dynamic methods")
-    if args.stage in {"qa", "warmup", "policy"} and args.init_checkpoint is None:
-        parser.error("this stage requires --init-checkpoint")
+    if args.init_checkpoint is not None and args.method not in (*DYNAMIC_METHODS, "dynamic"):
+        parser.error("--init-checkpoint is only supported by dynamic methods")
     return args
 
 
@@ -171,10 +162,49 @@ def resolve_level(args):
     return level
 
 
+def resolve_experiment_id(args):
+    """只读来源 run.json 获取身份；预览不加载 checkpoint 权重。"""
+    if args.init_checkpoint is not None:
+        checkpoint = args.init_checkpoint.resolve()
+        if not args.dry_run and not checkpoint.is_file():
+            raise FileNotFoundError(checkpoint)
+        metadata = checkpoint.parent.parent / "run.json"
+        if metadata.exists():
+            source = json.loads(metadata.read_text(encoding="utf-8"))
+            objective = source["config"]["objective"]
+            if objective["stage"] != "pretrain" or objective["method"] not in DYNAMIC_METHODS:
+                raise ValueError(
+                    f"initialization requires a shared dynamic pretraining run: {metadata}"
+                )
+            identity = source["config"]["training"].get("experiment_id")
+            if not isinstance(identity, str) or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_-]*", identity
+            ):
+                raise ValueError(f"source run.json has no valid experiment_id: {metadata}")
+            if args.run_id is not None and args.run_id != identity:
+                raise ValueError(
+                    f"--run-id {args.run_id!r} differs from source experiment_id {identity!r}"
+                )
+            return identity
+        if not args.dry_run:
+            raise FileNotFoundError(
+                f"source run.json required for checkpoint {checkpoint}: {metadata}"
+            )
+        if args.run_id is None:
+            raise ValueError(
+                "preview requires explicit --run-id when source run.json is unavailable"
+            )
+    return args.run_id or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M%S")
+
+
 def build_jobs(args):
+    args.run_id = resolve_experiment_id(args)
     level = resolve_level(args)
-    series = f"capacity-{args.mode}_{args.run_id}"
+    series = (
+        f"capacity_{args.run_id}" if args.mode == "full" else f"capacity-{args.mode}_{args.run_id}"
+    )
     directory = args.output_root.resolve() / series
+    plan_directory = directory / "plan" / args.method.replace("_", "-")
     group = args.group or series
     methods = (
         METHODS
@@ -202,9 +232,20 @@ def build_jobs(args):
                 )
         else:
             dataset = args.qa_data
+        root_method = (
+            "shared-pretrain"
+            if method in DYNAMIC_METHODS and stage == "pretrain"
+            else method.replace("_", "-")
+        )
+        suffix = args.run_id if args.mode == "full" else f"{args.mode}_{args.run_id}"
+        experiment_dir = (
+            directory / "train" / f"{root_method}-k{config.model.memory_slots}_{suffix}"
+        )
         training = {
             "dataset_dir": str(dataset.resolve()),
-            "output_dir": str(directory / "train" / f"{key}-k64_{args.mode}_{args.run_id}"),
+            "experiment_dir": str(experiment_dir),
+            "experiment_id": args.run_id,
+            "output_dir": str(experiment_dir / stage),
             "init_checkpoint": str(args.init_checkpoint.resolve())
             if args.init_checkpoint is not None and initialize_from is None
             else None,
@@ -233,12 +274,12 @@ def build_jobs(args):
             training=replace(config.training, **training),
         )
         jobs.append(
-            TrainingJob(key, config, directory / "plan" / f"{key}.json", initialize_from, evaluate)
+            TrainingJob(key, config, plan_directory / f"{key}.json", initialize_from, evaluate)
         )
         return key
 
-    if args.stage != "auto":
-        append(methods[0], args.stage, evaluate=args.stage in {"qa", "warmup", "policy", "lm"})
+    if args.method == "shared_pretrain":
+        append("memory_change", "pretrain", key="dynamic-pretrain")
     else:
         shared = None
         if args.init_checkpoint is None and any(method in DYNAMIC_METHODS for method in methods):
@@ -328,11 +369,23 @@ def execute(command, environment, log_path):
 def run_job(args):
     directory, level, jobs = build_jobs(args)
     gpu_count = len(args.gpus.split(","))
+    invocation = args.method.replace("_", "-")
+    plan_directory = directory / "plan" / invocation
+    compare_directory = directory / "compare" / invocation
+    evaluation_directories = {
+        job.key: directory
+        / "eval"
+        / Path(job.config.training.experiment_dir).name
+        / job.config.objective.stage
+        for job in jobs
+        if job.evaluate
+    }
     plan = {
         "mode": args.mode,
         "method": args.method,
-        "stage": args.stage,
+        "experiment_id": args.run_id,
         "directory": str(directory),
+        "plan_directory": str(plan_directory),
         "gpus": args.gpus,
         "limits": level,
         "max_new_tokens": args.max_new_tokens,
@@ -356,8 +409,15 @@ def run_job(args):
     print(json.dumps(plan, ensure_ascii=False, indent=2), flush=True)
     if args.dry_run:
         return plan
-    if directory.exists():
-        raise ValueError(f"job directory already exists: {directory}; choose a new --run-id")
+    targets = [plan_directory]
+    targets.extend(Path(job.config.training.output_dir) for job in jobs)
+    targets.extend(job.config_path for job in jobs)
+    targets.extend(evaluation_directories.values())
+    if len(evaluation_directories) > 1:
+        targets.append(compare_directory)
+    for path in targets:
+        if path.exists():
+            raise ValueError(f"job output already exists: {path}; refusing to overwrite")
     environment = dict(
         os.environ,
         CUDA_VISIBLE_DEVICES=args.gpus,
@@ -378,10 +438,8 @@ def run_job(args):
         for name in names:
             if not (dataset / name).is_file():
                 raise FileNotFoundError(f"required dataset entry is missing: {dataset / name}")
-    if args.init_checkpoint is not None and not args.init_checkpoint.is_file():
-        raise FileNotFoundError(args.init_checkpoint)
-    (directory / "plan").mkdir(parents=True)
-    save_json(directory / "plan" / "job.json", plan)
+    plan_directory.mkdir(parents=True)
+    save_json(plan_directory / "job.json", plan)
     evaluation_environment = dict(environment, CUDA_VISIBLE_DEVICES=args.gpus.split(",")[0])
     checkpoints, summaries = {}, []
     try:
@@ -397,7 +455,7 @@ def run_job(args):
             execute(
                 training_command(job, gpu_count, level["max_steps"]),
                 environment,
-                directory / "plan" / f"{job.key}-train.log",
+                plan_directory / f"{job.key}-train.log",
             )
             result = json.loads(
                 (Path(job.config.training.output_dir) / "training-result.json").read_text()
@@ -409,11 +467,11 @@ def run_job(args):
                 )
             checkpoints[job.key] = checkpoint
             if job.evaluate:
-                output = directory / "eval" / job.key
+                output = evaluation_directories[job.key]
                 execute(
                     evaluation_command(args, level, checkpoint, output),
                     evaluation_environment,
-                    directory / "plan" / f"{job.key}-eval.log",
+                    plan_directory / f"{job.key}-eval.log",
                 )
                 summaries.append(output / "summary.json")
         if len(summaries) > 1:
@@ -424,14 +482,14 @@ def run_job(args):
                     "latent_working_memory.v3.compare",
                     *(str(path) for path in summaries),
                     "--output-dir",
-                    str(directory / "compare"),
+                    str(compare_directory),
                 ],
                 environment,
-                directory / "plan" / "compare.log",
+                plan_directory / "compare.log",
             )
     except Exception as error:
         save_json(
-            directory / "plan" / "result.json",
+            plan_directory / "result.json",
             {
                 "status": "failed",
                 "error": str(error),
@@ -443,10 +501,11 @@ def run_job(args):
     result = {
         "status": "finished",
         "mode": args.mode,
+        "experiment_id": args.run_id,
         "checkpoints": {key: str(value) for key, value in checkpoints.items()},
         "summaries": [str(value) for value in summaries],
     }
-    save_json(directory / "plan" / "result.json", result)
+    save_json(plan_directory / "result.json", result)
     print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
     return result
 

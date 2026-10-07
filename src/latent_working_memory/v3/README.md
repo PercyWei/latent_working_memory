@@ -81,85 +81,56 @@ AutoCompressors 对 AE 样本使用输入全文，对 continuation 样本使用�
 
 当前服务器的仓库位于 `~/percyw/latent_working_memory` 时，设置 `LWM_REPO_DIR="$HOME/percyw/latent_working_memory"`。启动时显式传入 `--gpus 4,5`，训练使用两个进程，最终评估使用 GPU 4。`--gpus` 接受非重复的非负物理卡号，默认仍为 `0,1`。
 
-已有预训练 checkpoint 时，动态方法可用 `--stage auto --init-checkpoint <预训练文件>` 连续完成 warmup → policy → 最终评估；省略 `--init-checkpoint` 则从预训练开始。批处理参数使用 `--micro-batch-size-per-gpu` 与 `--gradient-accumulation-steps`，同样支持下方直接调用训练模块的命令。
-
-以下是单独调用训练与评估模块的方式。
-
-所有命令在项目根目录运行；相对路径以该目录为基准。六份预设位于 `configs/v3/`，先填写实际数据路径。默认只保存本地记录；未指定 SwanLab project。
-
-**共享基础预训练：**
+公开入口按完整方法运行：ICAE 自动执行 pretrain → QA，动态方法执行共享预训练 → warmup → policy，AutoCompressors 执行 LM；`smoke`、`pilot` 仅缩短各阶段预算，仍走完整流程。需要先单独准备两种动态方法的共同起点时，使用 `--method shared_pretrain`。
 
 ```bash
-CUDA_VISIBLE_DEVICES=4,5 uv run --frozen torchrun --standalone --nproc_per_node=2 \
-  -m latent_working_memory.v3.train \
-  --config configs/v3/dynamic_pretrain.json \
-  --dataset-dir /absolute/path/to/fineweb-text-samples \
-  --device cuda
+bash src/latent_working_memory/v3/scripts/run_gpu.sh \
+  --mode full --method shared_pretrain --gpus 4,5 --run-id main-01
 ```
 
-输出 `training-result.json` 给出最后一个 checkpoint 的准确路径。分别加载它进行两组预热：
+已有共享预训练 checkpoint 时，动态方法通过 `--init-checkpoint` 接着执行 warmup → policy → 最终评估，不读取预训练数据：
 
 ```bash
-CUDA_VISIBLE_DEVICES=4,5 uv run --frozen torchrun --standalone --nproc_per_node=2 \
-  -m latent_working_memory.v3.train \
-  --config configs/v3/memory_change_warmup.json \
-  --dataset-dir /absolute/path/to/fineweb-factqa \
-  --init-checkpoint /absolute/path/to/pretrain/checkpoints/step-NNNNNN.pt \
-  --device cuda
+bash src/latent_working_memory/v3/scripts/run_gpu.sh \
+  --mode full --method memory_change --gpus 4,5 \
+  --init-checkpoint artifacts/v3/capacity_main-01/train/shared-pretrain-k64_main-01/pretrain/checkpoints/step-NNNNNN.pt
 ```
 
-将预设替换为 `information_loss_warmup.json`，运行另一组。之后各自进入策略训练；每个阶段使用新的输出目录：
+外部 checkpoint 的同阶段 `run.json` 提供 `run-id`，省略时自动继承，显式指定不同值会报错。将 `--method` 改为 `information_loss` 并保持同一 checkpoint，即可在同一系列中分别启动两个动态方法；它们与共享预训练使用相同名称后缀。`--method dynamic` 顺序运行这两种方法，`--method all` 运行全部五种方法。
 
-```bash
-CUDA_VISIBLE_DEVICES=4,5 uv run --frozen torchrun --standalone --nproc_per_node=2 \
-  -m latent_working_memory.v3.train \
-  --config configs/v3/memory_change_warmup.json --stage policy \
-  --dataset-dir /absolute/path/to/fineweb-factqa \
-  --init-checkpoint /absolute/path/to/warmup/checkpoints/step-NNNNNN.pt \
-  --output-dir artifacts/v3/step1-token-memory/train/memory-change-policy \
-  --device cuda
-```
+SwanLab 以一个完整方法为一个 run，阶段间累计 optimizer step。ICAE 的 pretrain 与 QA 共用 run；动态方法的 warmup 与 policy 共用 run，其步数从自身 warmup 开始，不包含共享预训练；AutoCompressors 使用一个 LM run。共享预训练单独记为 `shared-pretrain-k64_<run-id>`，因此一次 `all` 完整流程共六个 run。正式方法名为 `<method>-k64_<run-id>`，试跑名称与路径见 [GPU 任务说明](scripts/README.md)。
 
-ICAE 两组使用各自预设预训练，再通过 `--stage qa`、QA 数据目录及相应 `--init-checkpoint` 切换阶段。AutoCompressors 使用 `autocompressors_lm.json`，直接进行 LM 训练。
-
-续训沿用原配置、原输出目录、卡数和批处理设置：
-
-```bash
-CUDA_VISIBLE_DEVICES=4,5 uv run --frozen torchrun --standalone --nproc_per_node=2 \
-  -m latent_working_memory.v3.train --config /absolute/path/to/run/config.json \
-  --resume /absolute/path/to/run/checkpoints/step-NNNNNN.pt --device cuda
-```
-
-checkpoint 保存 LoRA、gist embeddings、optimizer、训练游标、各 rank RNG 与配置/数据身份。新阶段只继承可训练权重。预训练基座不重复保存在 checkpoint；加载时沿用已记录的模型 revision。
+阶段由不同训练进程执行，前一进程 finish 后，下一进程 resume 同一 SwanLab ID，页面仍显示一个 run。跨阶段只继承 LoRA 与 gist embeddings，optimizer 重新初始化；checkpoint 仍分阶段保存在 `train/<run-name>/<stage>/checkpoints/`。来源 checkpoint 的准确路径、step、SwanLab ID 和 URL 记录在 config 中；共享来源以这些记录为准。中断恢复使用内部训练模块的 `--resume` 与该阶段保存的配置，沿用原目录、卡数及批处理设置。
 
 ## 评估与产物
 
-默认评估最后一个 checkpoint，不改写训练阈值。所有方法在同一批轨迹的最终记忆上回答评估题；按末段新事实、更早旧事实以及段距离分别统计。
+默认评估最后一个 checkpoint，不改写训练阈值。最终评估追加到对应方法的 SwanLab run，使用该方法的累计 optimizer step。所有方法在同一批轨迹的最终记忆上回答评估题；按末段新事实、更早旧事实以及段距离分别统计。
 
 ```bash
 CUDA_VISIBLE_DEVICES=4 uv run --frozen python -m latent_working_memory.v3.evaluate \
-  --checkpoint /absolute/path/to/run/checkpoints/step-NNNNNN.pt \
+  --checkpoint artifacts/v3/capacity_main-01/train/memory-change-k64_main-01/policy/checkpoints/step-NNNNNN.pt \
   --dataset-dir /absolute/path/to/fineweb-factqa \
-  --output-dir artifacts/v3/step1-token-memory/eval/memory-change-policy \
-  --split test --device cuda --max-new-tokens 64
+  --output-dir artifacts/v3/capacity_main-01/eval/memory-change-k64_main-01/policy \
+  --split test --device cuda --max-new-tokens 64 --log-to-swanlab
 
 uv run --frozen python -m latent_working_memory.v3.compare \
   /absolute/path/to/eval-one/summary.json /absolute/path/to/eval-two/summary.json \
-  --output-dir artifacts/v3/step1-token-memory/compare/capacity
+  --output-dir artifacts/v3/capacity_main-01/compare/dynamic
 ```
 
 | 产物 | 内容 |
 |---|---|
-| `config.json` / `run.json` | 已解析配置、模型 revision、来源范围、真实数据统计与运行身份 |
-| `metrics.jsonl` | optimizer step 对应的训练、开发集损失、容量、整步耗时及 CUDA 峰值显存 |
-| `checkpoints/step-*.pt` | 可续训 checkpoint；跨阶段加载同一规范格式 |
+| `experiment.json` / `swanlab.json` | 方法的阶段配置与预训练来源，以及唯一的 SwanLab run 身份 |
+| `<stage>/config.json` / `<stage>/run.json` | 该阶段配置、模型 revision、来源范围、数据统计与跨阶段运行身份 |
+| `<stage>/metrics.jsonl` | 该阶段 optimizer step 对应的训练、开发集损失、容量、整步耗时及 CUDA 峰值显存 |
+| `<stage>/checkpoints/step-*.pt` | LoRA、gist embeddings、optimizer、训练游标与 RNG；不重复保存冻结基座 |
 | `trajectories.jsonl` | 动作轨迹、门控分数、容量、计时、逐题答案与 NLL/EM/F1 |
 | `summary.json` | 问答质量、按段距离分层、平均/最终容量与读写成本 |
 | `points.json` / `points.csv` | 同一题池的质量—容量比较点，保留阈值与 oracle 标记 |
 
 写入计时包含实际生成的所有候选；门控题实例数与任务读取分开。CUDA 计时显式同步。ICAE-single 的平均 slots 指唯一一次完整压缩状态；其他方法平均所有更新点的保存容量。生成采用 greedy decoding；提示及答案格式由配置固定。
 
-设置 `training.swanlab_project` 和显式 `group` 可启用训练/开发集增量记录；使用已有或已获确认的项目。最终评估默认本地，可通过 `--log-to-swanlab` 追加到原训练 run。未记录的评估指标不会补零。
+启动器默认在 `latent-working-memory-v3` 中记录 `train`、`dev` 和最终 `evaluation`，同一系列使用同一 group；`--tracking disabled` 仅保存本地。单独调用评估模块时，`--log-to-swanlab` 将结果追加到 checkpoint 对应的方法 run。未执行的评估指标不会补零。
 
 ## 验证与边界
 

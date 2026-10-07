@@ -105,7 +105,7 @@ bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gp
 - 样本上限控制计算使用的内存索引，不创建数据副本；首次加载仍读取并分词来源数据。更换档位不会缩短模型加载时间。
 - `smoke`、`pilot` 用于检查实现、显存、耗时和展示；短跑质量不作为研究结论。
 
-检查通过后，在新任务中把 `--mode` 改为 `pilot` 或 `full`。不同档位使用不同输出目录和 group，正式训练从头按该档位执行；不会自动继承试跑权重。
+检查通过后，可把 `--mode` 改为 `pilot` 或 `full`。每次独立运行使用新的 `--run-id`；正式运行与试跑采用不同命名。未指定 `--init-checkpoint` 时，不会继承试跑权重。
 
 ```bash
 bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
@@ -120,19 +120,20 @@ bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gp
   --max-steps 10 --train-samples 80 --dev-samples 8 --eval-trajectories 4
 ```
 
-`--max-steps`、`--train-samples`、`--dev-samples`、`--eval-trajectories` 传 `0` 表示不设该上限。`--epochs` 修改所选阶段的训练轮数；若希望各阶段轮数不同，分别用下述单阶段入口。实际样本不足时不会复制样本凑数。
+`--max-steps`、`--train-samples`、`--dev-samples`、`--eval-trajectories` 传 `0` 表示不设该上限。`--epochs` 修改流程中各阶段的训练轮数。`smoke`、`pilot` 仍完成全部训练阶段和最终评估，只截断各阶段预算；实际样本不足时不会复制样本凑数。
 
-## 方法与阶段
+## 完整方法入口
 
-| 参数 | 范围 |
+| 参数 | 流程 |
 |---|---|
-| `--method dynamic` | 两个动态方法，基础预训练仅执行一次；默认 |
-| `--method all` | 三个 baseline＋两个动态方法 |
-| `--method icae_single / icae_multi / autocompressors / memory_change / information_loss` | 指定一个方法 |
-| `--stage auto` | 默认执行全部训练阶段；动态方法提供 `--init-checkpoint` 时从已有预训练开始，连续执行 warmup → policy → 评估 |
-| `--stage pretrain / qa / warmup / policy / lm` | 只执行一个明确方法的指定阶段 |
+| `--method dynamic` | 共享预训练一次，再分别执行两个动态方法的 warmup → policy → 评估；默认 |
+| `--method all` | 三个 baseline 与两个动态方法的完整流程 |
+| `--method memory_change / information_loss` | 共享预训练 → 该方法 warmup → policy → 评估 |
+| `--method icae_single / icae_multi` | 该方法 pretrain → QA → 评估 |
+| `--method autocompressors` | LM → 评估 |
+| `--method shared_pretrain` | 仅生成两个动态方法共用的 AE＋LM 预训练 checkpoint，并执行预训练开发集验证 |
 
-ICAE 与 AutoCompressors 使用已有长文本预设，运行它们时需提供 `--long-pretrain-data`。该目录同样采用原有 `TextSample` 格式，输入长度筛选为 4096–12288 个当前模型 tokens。此前 4096 上限的短片段成品不能普遍覆盖此范围；脚本保留长历史比较要求，缺少目录时直接说明原因。
+动态方法提供 `--init-checkpoint` 时，从已有共享预训练开始，自动执行 warmup → policy → 最终评估。ICAE 和 AutoCompressors 使用已有长文本预设，需提供 `--long-pretrain-data`。该目录采用原有 `TextSample` 格式，输入长度筛选为 4096–12288 个当前模型 tokens；此前 4096 上限的短片段成品不能普遍覆盖此范围。
 
 ```bash
 bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
@@ -140,17 +141,14 @@ bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gp
   --long-pretrain-data /dfs/data/fineweb-long-text-samples
 ```
 
-只运行信息损失策略阶段时，显式传入已训练的相同模型配置 checkpoint：
+先单独准备共享预训练时：
 
 ```bash
-bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode pilot --method information_loss --stage policy --gpus 4,5 --run-id loss-policy-01 \
-  --init-checkpoint /absolute/path/to/warmup/checkpoints/step-000002.pt
+bash src/latent_working_memory/v3/scripts/run_gpu.sh \
+  --mode smoke --method shared_pretrain --gpus 4,5 --run-id shared-01
 ```
 
-单独 `pretrain` 阶段只运行 AE＋LM 训练/开发集验证；`qa`、`warmup`、`policy`、`lm` 结束后运行 QA 评估。`warmup` checkpoint 的最终 QA 评估按真实门控策略构建记忆，训练中开发集验证仍使用预热动作日程。
-
-已有共享预训练 checkpoint 时，一条命令连续完成某个动态方法的预热、策略训练及最终评估：
+已有共享预训练 checkpoint 时，一条命令完成某个动态方法的完整 QA 训练流程：
 
 ```bash
 cd ~/percyw/latent_working_memory
@@ -158,41 +156,56 @@ export LWM_REPO_DIR="$PWD"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 bash src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode smoke --method memory_change --stage auto --gpus 4,5 \
-  --init-checkpoint /absolute/path/to/pretrain/checkpoints/step-NNNNNN.pt \
+  --mode smoke --method memory_change --gpus 4,5 \
+  --init-checkpoint /absolute/path/to/shared-pretrain-k64_smoke_shared-01/pretrain/checkpoints/step-NNNNNN.pt \
   --model-path "$HOME/models/Qwen3-4B-Instruct-2507" \
   --qa-data "$LWM_REPO_DIR/data/fineweb-factqa-train1000_20260930" \
-  --micro-batch-size-per-gpu 2 --gradient-accumulation-steps 2 --qa-batch-size 8 \
-  --group dynamic-qa-smoke_shared-pretrain \
-  --run-id memory-change-smoke-01
+  --micro-batch-size-per-gpu 2 --gradient-accumulation-steps 2 --qa-batch-size 8
 ```
 
-将 `--method` 改为 `information_loss`、`--run-id` 改为 `information-loss-smoke-01`，并保持相同的预训练 checkpoint 与 group，即可单独运行另一方法。也可使用 `--method dynamic`，在同一任务中顺序完成两组并导出比较表。
+`--run-id` 自动继承 checkpoint 同阶段 `run.json` 中的 `config.training.experiment_id`；显式传入不同值会报错。将 `--method` 改为 `information_loss`，保持同一 checkpoint 和其余参数，即可在同一系列分别启动另一方法，无需改 `run-id`。也可使用 `--method dynamic` 顺序完成两组并导出比较表。
 
-此模式只需要 QA 数据，不读取 AE＋LM 数据；模型配置须与预训练 checkpoint 一致。warmup 的实际最终 checkpoint 自动传入 policy；阶段切换只继承可训练权重，优化器重新初始化。最终评估在 policy 后执行，warmup 的训练中验证照常进行。`--mode`、batch 参数和训练步数上限同时作用于 warmup 与 policy；需要分别调参时仍使用单阶段入口。
+这一路径只需要 QA 数据，不读取 AE＋LM 数据；模型配置须与共享预训练一致。warmup 的实际最终 checkpoint 自动传入 policy，阶段切换只继承可训练权重，optimizer 重新初始化。`--mode`、batch 参数、训练轮数与步数上限同时作用于两个阶段；warmup 的开发集验证保留预热动作日程，最终 QA 评估在 policy 结束后执行。
 
 ## SwanLab 与本地记录
 
-同一启动任务的全部 runs 使用同一 group；每个训练阶段一个 run，其最终评估追加到该 run。默认 group 为 `capacity-<mode>_<run-id>`，可用 `--group` 显式设置。
+一个完整方法对应一个 SwanLab run，内部阶段共用身份并累计 optimizer step。正式运行名称不含 `full` 或阶段名；`smoke`、`pilot` 分别保留对应档位标记，具体预算保存在 config 中。
+
+| 正式 run 名称 | 同一 run 内的阶段 |
+|---|---|
+| `shared-pretrain-k64_<run-id>` | 两个动态方法共用的 pretrain |
+| `memory-change-k64_<run-id>` | warmup → policy |
+| `information-loss-k64_<run-id>` | warmup → policy |
+| `icae-single-k64_<run-id>` | pretrain → QA |
+| `icae-multi-k64_<run-id>` | pretrain → QA |
+| `autocompressors-k64_<run-id>` | LM |
+
+因此 `--method all` 完整流程共六个 run。试跑名称为 `<method>-k64_<mode>_<run-id>`，例如 `memory-change-k64_smoke_shared-01`，对应共享预训练名为 `shared-pretrain-k64_smoke_shared-01`；pilot 同理使用 `pilot` 标记。两个动态方法与共享预训练保持相同 `run-id` 后缀，config 另记录来源 checkpoint 的准确路径、step、SwanLab ID 和 URL。
+
+阶段由独立训练进程执行：前一进程 finish，下一进程 resume 同一 SwanLab ID，云端仍显示一个 run。ICAE 从 pretrain 持续累计到 QA；动态方法仅累计自身 warmup 与 policy，不把共享预训练 step 加入子 run。最终评估追加到对应方法的最终累计 step。阶段内续训恢复 optimizer，跨阶段则重建 optimizer，训练语义不变。
+
+同一系列的 runs 使用同一 group。默认正式 group 与目录名为 `capacity_<run-id>`，试跑为 `capacity-<mode>_<run-id>`，即 `capacity-smoke_<run-id>` 或 `capacity-pilot_<run-id>`；可用 `--group` 显式指定比较系列。
 
 | 展示位置 | 内容 |
 |---|---|
-| `train` / `dev` | 真实 optimizer step 的增量 loss、slots 曲线；训练梯度范数 |
+| `train` / `dev` | 累计 optimizer step 的增量曲线；损失按 `ae_lm_loss`、`qa_loss`、`lm_loss` 区分目标，另记录 slots、梯度范数与阶段边界表 |
 | `resources` | 每步耗时、CUDA 峰值显存 |
-| `evaluation` | NLL、EM、F1 三张合并 all/old/new 的汇总图；容量、成本、距离分层与生成样例表 |
+| `evaluation` | 最后一个 checkpoint 的 NLL、EM、F1 汇总图；容量、成本、距离分层与生成样例表 |
 
-完整动作、门控分数和逐题结果保存在本地；SwanLab 中的信息损失结果也注明 `offline_oracle`。API key 不写入任务计划或配置快照。
+完整动作、门控分数和逐题结果保存在本地；SwanLab 中的信息损失结果注明 `offline_oracle`。API key 不写入任务计划或配置快照。
 
-产物根目录为 `artifacts/v3/capacity-<mode>_<run-id>/`：
+正式产物根目录为 `artifacts/v3/capacity_<run-id>/`，试跑为 `artifacts/v3/capacity-<mode>_<run-id>/`：
 
 ```text
-plan/     任务计划、各阶段解析配置、控制台日志、最终执行结果
-train/    每个阶段的运行配置、metrics.jsonl、SwanLab 身份与 checkpoints
-eval/     最终记忆 QA 评估的 trajectories.jsonl 与 summary.json
-compare/  同题池质量—容量点 points.json / points.csv
+plan/<method>/                   本次方法流程的计划、解析配置、日志及 result.json
+train/<run-name>/                experiment.json、唯一的 swanlab.json 及 SwanLab 本地日志
+train/<run-name>/<stage>/        阶段 config.json、run.json、metrics.jsonl
+  checkpoints/step-*.pt          该阶段可续训 checkpoint
+eval/<run-name>/<stage>/         最终评估 trajectories.jsonl 与 summary.json
+compare/<method>/               同题池质量—容量点 points.json / points.csv
 ```
 
-已有任务目录不会覆盖；重跑用新的 `--run-id`。阶段失败即停止后续阶段，`plan/result.json` 记录失败和已完成的 checkpoint。需要从中断位置续训时，使用原训练模块的 `--resume` 和保存的 `config.json`，具体命令见上级 [实现说明](../README.md)。
+这里的目录方法名用连字符，例如 `memory-change`、`shared-pretrain`；`dynamic`、`all` 各有自己的计划目录。同一系列可以分别启动两个动态方法，已有的方法任务和阶段产物不会覆盖。阶段失败后停止后续工作，在该方法的 `plan/<method>/result.json` 记录失败与已完成 checkpoint。中断恢复使用内部训练模块的 `--resume` 和原阶段配置；新独立实验使用新的 `--run-id`。
 
 ## 其他常用参数
 
@@ -204,7 +217,8 @@ compare/  同题池质量—容量点 points.json / points.csv
 | `--micro-batch-size-per-gpu 2` | 每卡一次并行处理的样本/轨迹数，默认 1 |
 | `--gradient-accumulation-steps 2` | 每次参数更新累积的 microbatch 数，默认 4；全局 batch 自动计算 |
 | `--qa-batch-size 8` | 每条轨迹单次读取的 QA 数 |
-| `--init-checkpoint` | 单阶段初始化权重；动态 auto 流程中指定共享预训练 checkpoint |
+| `--init-checkpoint` | 指定动态方法的共享预训练 checkpoint，并从其 `run.json` 继承 `run-id` |
+| `--run-id` | 系列标识；外部初始化时可省略，显式值须与来源一致 |
 | `--threshold-i / --threshold-d / --threshold-g / --eta` | 覆盖门控阈值，记录于训练配置 |
 | `--max-new-tokens 64` | 最终评估生成上限 |
 | `--tracking disabled` | 仅保存本地记录；默认 online |

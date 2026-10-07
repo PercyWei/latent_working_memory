@@ -13,11 +13,17 @@ import torch
 import torch.distributed as dist
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from latent_working_memory.v1.tracking import swanlab_run
+from latent_working_memory.v3.config import DYNAMIC_METHODS, TrainingConfig
 from latent_working_memory.v3.data import load_factqa
 from latent_working_memory.v3.model import GistMemoryModel
 from latent_working_memory.v3.pretrain_data import load_pretraining
-from latent_working_memory.v3.tracking import configure_training_metrics, training_metrics
+from latent_working_memory.v3.tracking import (
+    configure_training_metrics,
+    experiment_directory,
+    method_tracking_run,
+    stage_progress,
+    training_metrics,
+)
 from latent_working_memory.v3.tracking_credentials import swanlab_api_key
 from latent_working_memory.v4.checkpoint import capture_rng, restore_rng
 
@@ -157,6 +163,18 @@ def dataset_identity(rows):
     return {"examples": len(rows), "fingerprint": digest.hexdigest()}
 
 
+def _validate_pretraining_identity(config, pretraining):
+    if (
+        config.objective.method in DYNAMIC_METHODS
+        and config.objective.stage != "pretrain"
+        and config.training.experiment_id is not None
+    ):
+        if pretraining is None or pretraining["experiment_id"] is None:
+            raise ValueError("dynamic experiment requires an explicit pretraining experiment_id")
+        if pretraining["experiment_id"] != config.training.experiment_id:
+            raise ValueError("dynamic experiment_id differs from its original pretraining source")
+
+
 def make_run(
     config,
     splits,
@@ -184,6 +202,14 @@ def make_run(
         ):
             raise ValueError("QA sources overlap pretraining document IDs or dedup clusters")
         pretraining_sources = inherited
+    pretraining = initialization["pretraining"] if initialization is not None else None
+    _validate_pretraining_identity(config, pretraining)
+    step_offset = (
+        initialization["global_step"]
+        if initialization is not None
+        and initialization["experiment_dir"] == str(experiment_directory(config.training))
+        else 0
+    )
     return {
         "config": config.to_dict(),
         "resolved_model_revision": resolved_model_revision,
@@ -196,6 +222,8 @@ def make_run(
         "global_batch_size": config.training.global_batch_size(world_size),
         "device_type": torch.device(device).type,
         "initialization": initialization,
+        "step_offset": step_offset,
+        "pretraining": pretraining,
         "pretraining_sources": pretraining_sources,
     }
 
@@ -227,14 +255,41 @@ def load_initialization(path, model, config):
     stage = config.objective.stage
     if stage in required_stages and previous["objective"]["stage"] not in required_stages[stage]:
         raise ValueError(f"{stage} initialization requires {sorted(required_stages[stage])}")
+    previous_training = TrainingConfig(**previous["training"])
+    root = experiment_directory(previous_training)
+    if previous["objective"]["stage"] == "pretrain":
+        identity_path = root / "swanlab.json"
+        identity = (
+            json.loads(identity_path.read_text(encoding="utf-8"))
+            if identity_path.exists()
+            else None
+        )
+        if previous_training.swanlab_project is not None and identity is None:
+            raise ValueError("online pretraining checkpoint requires its original swanlab.json")
+        pretraining = {
+            "experiment_id": previous_training.experiment_id,
+            "run_name": root.name,
+            "run_dir": str(root),
+            "run_id": identity["id"] if identity is not None else None,
+            "run_url": identity["url"] if identity is not None else None,
+            "checkpoint": str(Path(path).resolve()),
+            "step": checkpoint["cursor"]["step"],
+        }
+    else:
+        pretraining = checkpoint["run"]["pretraining"]
+    _validate_pretraining_identity(config, pretraining)
     model.load_trainable_state_dict(checkpoint["trainable"])
     return {
         "checkpoint": str(Path(path).resolve()),
         "method": previous["objective"]["method"],
         "stage": previous["objective"]["stage"],
         "step": checkpoint["cursor"]["step"],
+        "global_step": checkpoint["run"]["step_offset"] + checkpoint["cursor"]["step"],
+        "experiment_dir": str(root),
+        "experiment_id": previous_training.experiment_id,
         "resolved_model_revision": checkpoint["run"]["resolved_model_revision"],
         "pretraining_sources": checkpoint["run"]["pretraining_sources"],
+        "pretraining": pretraining,
     }
 
 
@@ -330,35 +385,14 @@ def _rewind_metrics(path, step):
         temporary.replace(path)
 
 
-def _tracking_context(config, engine, output, run):
-    if engine.rank != 0 or config.training.swanlab_project is None:
+def _tracking_context(config, engine, run):
+    if engine.rank != 0:
         return nullcontext(None)
-    data = "fineweb" if config.objective.stage in {"pretrain", "lm"} else "fineweb-factqa"
-    tracking_config = {key: value for key, value in run.items() if key != "pretraining_sources"}
-    tracking_config["pretraining_source_counts"] = {
-        key: len(values) for key, values in run["pretraining_sources"].items()
-    }
-    if run["initialization"] is not None:
-        tracking_config["initialization"] = {
-            key: value
-            for key, value in run["initialization"].items()
-            if key != "pretraining_sources"
-        }
-    return swanlab_run(
-        output,
-        tracking_config,
-        mode="online",
-        api_key=swanlab_api_key(),
-        project=config.training.swanlab_project,
-        group=config.training.group,
-        job_type="train",
-        tags=config.training.tags,
-        fixed_tags=(
-            "scope:main",
-            f"method:{config.objective.method}",
-            f"study:{config.objective.stage}",
-            f"data:{data}",
-        ),
+    return method_tracking_run(
+        config,
+        run,
+        engine.device,
+        api_key=swanlab_api_key() if config.training.swanlab_project is not None else None,
     )
 
 
@@ -405,9 +439,9 @@ def train_loop(config, engine, splits, run, resume=None, stop_after_steps=None):
         dist.barrier()
 
     total_steps = settings.epochs * math.ceil(len(train) / engine.global_batch_size)
-    with _tracking_context(config, engine, output, run) as tracking:
+    with _tracking_context(config, engine, run) as tracking:
         if tracking is not None:
-            configure_training_metrics(tracking)
+            configure_training_metrics(tracking, config.objective.stage)
         for epoch in range(cursor["epoch"], settings.epochs):
             ordered = epoch_order(train, settings.seed, epoch)
             for start in range(cursor["sample_offset"], len(ordered), engine.global_batch_size):
@@ -441,6 +475,8 @@ def train_loop(config, engine, splits, run, resume=None, stop_after_steps=None):
                 stopping = stop_after_steps is not None and step >= stop_after_steps
                 record = {
                     "step": step,
+                    "global_step": run["step_offset"] + step,
+                    "stage": config.objective.stage,
                     "epoch": epoch + 1,
                     **{
                         f"train/{key}": value for key, value in metrics.items() if value is not None
@@ -456,21 +492,24 @@ def train_loop(config, engine, splits, run, resume=None, stop_after_steps=None):
                         stream.write(text + "\n")
                         print(text, flush=True)
                     if tracking is not None:
-                        tracking.log(training_metrics(record), step=step)
+                        tracking.log(training_metrics(record), step=record["global_step"])
                 if step % settings.save_every == 0 or epoch_end or stopping:
                     checkpoint_path = output / "checkpoints" / f"step-{step:06d}.pt"
                     save_checkpoint(checkpoint_path, engine, run, cursor)
             if stop_after_steps is not None and cursor["step"] >= stop_after_steps:
                 break
-    result = {
-        "complete": cursor["epoch"] == settings.epochs,
-        "completed_steps": cursor["step"],
-        "total_steps": total_steps,
-        "completed_epochs": cursor["epoch"],
-        "sample_visits": cursor["sample_visits"],
-        "stop_after_steps": stop_after_steps,
-        "checkpoint": str(checkpoint_path),
-    }
-    if engine.rank == 0:
-        write_json(output / "training-result.json", result)
+        result = {
+            "complete": cursor["epoch"] == settings.epochs,
+            "completed_steps": cursor["step"],
+            "global_step": run["step_offset"] + cursor["step"],
+            "total_steps": total_steps,
+            "completed_epochs": cursor["epoch"],
+            "sample_visits": cursor["sample_visits"],
+            "stop_after_steps": stop_after_steps,
+            "checkpoint": str(checkpoint_path),
+        }
+        if engine.rank == 0:
+            write_json(output / "training-result.json", result)
+            if tracking is not None:
+                tracking.log({"train/stages": stage_progress(config)}, step=result["global_step"])
     return result

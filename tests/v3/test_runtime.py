@@ -433,7 +433,7 @@ def test_pretraining_requires_both_objectives_after_actual_length_filtering(
     assert {row.task for row in splits[filtered_split]} == {"ae"}
 
 
-def test_swanlab_upload_omits_source_ids_and_preserves_local_run(tmp_path, monkeypatch):
+def test_tracking_context_uses_explicit_credentials_only_on_root_rank(tmp_path, monkeypatch):
     config = make_config(tmp_path / "output")
     config = replace(
         config,
@@ -441,39 +441,25 @@ def test_swanlab_upload_omits_source_ids_and_preserves_local_run(tmp_path, monke
             config.training, swanlab_project="explicit-project", group="explicit-group"
         ),
     )
-    inherited = {"document_ids": ["ancestor-document"], "dedup_clusters": ["ancestor-cluster"]}
-    run = make_run(
-        config,
-        make_splits(),
-        {"source_data": {name: dataset_identity(rows) for name, rows in make_splits().items()}},
-        "cpu",
-        1,
-        initialization={"checkpoint": "parent.pt", "pretraining_sources": inherited},
-    )
+    run = _run(config, make_engine(config), make_splits())
     original = deepcopy(run)
     calls = []
 
-    def capture_upload(output, uploaded_config, **settings):
-        calls.append((output, uploaded_config, settings))
+    def capture_upload(settings, record, device, api_key):
+        calls.append((settings, record, device, api_key))
         return nullcontext(None)
 
-    monkeypatch.setattr(runtime, "swanlab_run", capture_upload)
+    monkeypatch.setattr(runtime, "method_tracking_run", capture_upload)
     monkeypatch.setattr(runtime, "swanlab_api_key", lambda: "training-test-key")
-    with runtime._tracking_context(config, SimpleNamespace(rank=0), tmp_path, run):
+    with runtime._tracking_context(
+        config, SimpleNamespace(rank=0, device=torch.device("cpu")), run
+    ):
+        pass
+    assert calls == [(config, run, torch.device("cpu"), "training-test-key")]
+    with runtime._tracking_context(config, SimpleNamespace(rank=1), run):
         pass
     assert len(calls) == 1
-    _, uploaded, settings = calls[0]
-    assert uploaded["config"] == config.to_dict()
-    assert uploaded["data"] == run["data"]
-    assert uploaded["pretraining_source_counts"] == {"document_ids": 9, "dedup_clusters": 9}
-    assert "pretraining_sources" not in json.dumps(uploaded)
-    assert "ancestor-document" not in json.dumps(uploaded)
-    assert uploaded["initialization"] == {"checkpoint": "parent.pt"}
-    assert settings["project"] == "explicit-project"
-    assert settings["group"] == "explicit-group"
-    assert settings["job_type"] == "train"
-    assert settings["api_key"] == "training-test-key"
-    assert "training-test-key" not in json.dumps(uploaded)
+    assert "training-test-key" not in json.dumps(run)
     assert run == original
 
 
@@ -591,3 +577,118 @@ def test_qa_selection_keeps_complete_trajectories_and_original_test_split(tmp_pa
         assert statistics["source_data"][split] == dataset_identity(original[split])
     changed = replace(config, objective=replace(config.objective, method="information_loss"))
     assert load_splits(changed, None)[0] == splits
+
+
+def experiment_config(root, stage, identifier="trial", method="memory_change", init=None):
+    config = make_config(root / stage)
+    return replace(
+        config,
+        objective=replace(config.objective, method=method, stage=stage),
+        training=replace(
+            config.training,
+            experiment_dir=str(root),
+            experiment_id=identifier,
+            init_checkpoint=init,
+        ),
+    )
+
+
+def test_dynamic_stages_preserve_shared_source_and_accumulate_only_method_steps(tmp_path):
+    source_config = experiment_config(tmp_path / "shared-pretrain_trial", "pretrain")
+    source_engine = make_engine(source_config)
+    pretraining = make_splits()
+    source_result = train_loop(
+        source_config,
+        source_engine,
+        pretraining,
+        _run(source_config, source_engine, pretraining),
+        stop_after_steps=2,
+    )
+    assert source_result["global_step"] == 2
+    qa = make_splits("qa")
+    sources = []
+    for method in ("memory_change", "information_loss"):
+        root = tmp_path / f"{method}_trial"
+        config = experiment_config(root, "warmup", method=method, init=source_result["checkpoint"])
+        engine = make_engine(config)
+        initialization = load_initialization(source_result["checkpoint"], engine.model, config)
+        sources.append(initialization["pretraining"])
+        run = _run(config, engine, qa, initialization)
+        assert run["step_offset"] == 0
+        result = train_loop(config, engine, qa, run, stop_after_steps=2)
+        assert result["global_step"] == result["completed_steps"] == 2
+        config = experiment_config(root, "policy", method=method, init=result["checkpoint"])
+        engine = make_engine(config)
+        initialization = load_initialization(result["checkpoint"], engine.model, config)
+        assert initialization["stage"] == "warmup"
+        assert initialization["pretraining"] == sources[-1]
+        run = _run(config, engine, qa, initialization)
+        assert run["step_offset"] == 2
+        result = train_loop(config, engine, qa, run, stop_after_steps=1)
+        assert result["global_step"] == 3 and result["completed_steps"] == 1
+        checkpoint = read_checkpoint(result["checkpoint"])
+        assert checkpoint["run"]["pretraining"] == sources[-1]
+        assert checkpoint["run"]["step_offset"] == 2
+        restored = make_engine(config)
+        result = train_loop(
+            config,
+            restored,
+            qa,
+            _run(config, restored, qa, initialization),
+            resume=result["checkpoint"],
+            stop_after_steps=2,
+        )
+        assert result["global_step"] == 4 and result["completed_steps"] == 2
+        records = [
+            json.loads(line) for line in (root / "policy/metrics.jsonl").read_text().splitlines()
+        ]
+        assert [row["global_step"] for row in records] == [3, 4]
+        assert [row["step"] for row in records] == [1, 2]
+        assert all(row["stage"] == "policy" for row in records)
+        manifest = json.loads((root / "experiment.json").read_text())
+        assert list(manifest["stages"]) == ["warmup", "policy"]
+        assert manifest["pretraining"] == sources[-1]
+        assert "pretraining_sources" not in json.dumps(manifest)
+    assert sources[0] == sources[1]
+    assert sources[0]["experiment_id"] == "trial"
+    assert sources[0]["run_name"] == "shared-pretrain_trial"
+    assert sources[0]["step"] == 2
+    assert sources[0]["run_id"] is sources[0]["run_url"] is None
+
+
+def test_icae_qa_offset_includes_pretraining_in_same_method_run(tmp_path):
+    root = tmp_path / "icae-single_trial"
+    pretrain = experiment_config(root, "pretrain", method="icae_single")
+    engine = make_engine(pretrain)
+    data = make_splits()
+    result = train_loop(pretrain, engine, data, _run(pretrain, engine, data), stop_after_steps=2)
+    qa = experiment_config(root, "qa", method="icae_single", init=result["checkpoint"])
+    next_engine = make_engine(qa)
+    initialization = load_initialization(result["checkpoint"], next_engine.model, qa)
+    data = make_splits("qa")
+    run = _run(qa, next_engine, data, initialization)
+    assert run["step_offset"] == 2
+    result = train_loop(qa, next_engine, data, run, stop_after_steps=1)
+    assert result["global_step"] == 3
+    manifest = json.loads((root / "experiment.json").read_text())
+    assert list(manifest["stages"]) == ["pretrain", "qa"]
+    assert manifest["method"] == "icae_single"
+
+
+@pytest.mark.parametrize("source_id", [None, "other-trial"])
+def test_dynamic_source_experiment_identity_must_match_before_loading_weights(tmp_path, source_id):
+    source = (
+        make_config(tmp_path / "legacy-source")
+        if source_id is None
+        else experiment_config(tmp_path / "source", "pretrain", identifier=source_id)
+    )
+    engine = make_engine(source)
+    data = make_splits()
+    result = train_loop(source, engine, data, _run(source, engine, data), stop_after_steps=1)
+    target = experiment_config(tmp_path / "method_trial", "warmup", init=result["checkpoint"])
+    model = TinyTask()
+    before = model.weight.detach().clone()
+    with pytest.raises(ValueError, match="pretraining experiment_id|original pretraining source"):
+        load_initialization(result["checkpoint"], model, target)
+    torch.testing.assert_close(model.weight, before)
+    assert not (tmp_path / "method_trial").exists()

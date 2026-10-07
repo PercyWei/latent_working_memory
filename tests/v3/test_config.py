@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from latent_working_memory.v3.config import (
+    ExperimentConfig,
     ModelConfig,
     ObjectiveConfig,
     TrainingConfig,
@@ -44,6 +45,29 @@ def test_model_rejects_module_string_in_place_of_list():
 def test_tracking_requires_explicit_group():
     with pytest.raises(ValueError, match="group"):
         TrainingConfig("data", "output", swanlab_project="existing-project")
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"experiment_dir": "experiment"},
+        {"experiment_id": "20261007-01"},
+        {"experiment_dir": "experiment", "experiment_id": "../other"},
+    ],
+)
+def test_experiment_identity_requires_paired_valid_fields(options):
+    with pytest.raises(ValueError, match="experiment_"):
+        TrainingConfig("data", "output", **options)
+
+
+def test_stage_output_belongs_to_method_experiment(tmp_path):
+    root = tmp_path / "memory-change-k64_20261007-01"
+    training = TrainingConfig(
+        "data", str(root / "warmup"), experiment_dir=str(root), experiment_id="20261007-01"
+    )
+    ExperimentConfig(ModelConfig(), ObjectiveConfig(stage="warmup"), training)
+    with pytest.raises(ValueError, match="output_dir"):
+        ExperimentConfig(ModelConfig(), ObjectiveConfig(stage="policy"), training)
 
 
 @pytest.mark.parametrize(

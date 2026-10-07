@@ -27,7 +27,11 @@ from latent_working_memory.v3.runtime import (
     read_checkpoint,
     select_examples,
 )
-from latent_working_memory.v3.tracking import evaluation_media
+from latent_working_memory.v3.tracking import (
+    evaluation_media,
+    experiment_directory,
+    tracking_method,
+)
 from latent_working_memory.v3.tracking_credentials import swanlab_api_key
 
 
@@ -76,11 +80,21 @@ def _check_qa_sources(trajectories, pretraining_sources):
 def _training_run_directory(config, run):
     if config.training.swanlab_project is None:
         raise ValueError("--log-to-swanlab requires a checkpoint configured for SwanLab")
-    directory = Path(config.training.output_dir)
+    stage_directory = Path(config.training.output_dir)
+    directory = experiment_directory(config.training)
     if not (directory / "swanlab.json").is_file():
         raise ValueError("--log-to-swanlab requires the original training SwanLab identity")
-    if json.loads((directory / "run.json").read_text(encoding="utf-8")) != run:
+    if json.loads((stage_directory / "run.json").read_text(encoding="utf-8")) != run:
         raise ValueError("checkpoint run differs from the original training directory")
+    if config.training.experiment_dir is not None:
+        experiment = json.loads((directory / "experiment.json").read_text(encoding="utf-8"))
+        stage = experiment["stages"][config.objective.stage]
+        if (
+            experiment["experiment_id"] != config.training.experiment_id
+            or experiment["method"] != tracking_method(config)
+            or any(stage[name] != run[name] for name in ("config", "step_offset", "pretraining"))
+        ):
+            raise ValueError("checkpoint stage differs from the saved method experiment")
     identity = json.loads((directory / "swanlab.json").read_text(encoding="utf-8"))
     expected = {
         "project": config.training.swanlab_project,
@@ -325,6 +339,8 @@ def main(argv=None):
             "config": config.to_dict(),
             "resolved_model_revision": revision,
             "device": args.device,
+            "pretraining": checkpoint["run"]["pretraining"],
+            "global_step": checkpoint["run"]["step_offset"] + checkpoint["cursor"]["step"],
             "selection": {
                 "total": total_trajectories,
                 "selected": len(trajectories),
@@ -334,7 +350,12 @@ def main(argv=None):
         },
     )
     if training_dir is not None:
-        _append_evaluation(summary, training_dir, args.output_dir, checkpoint["cursor"]["step"])
+        _append_evaluation(
+            summary,
+            training_dir,
+            args.output_dir,
+            checkpoint["run"]["step_offset"] + checkpoint["cursor"]["step"],
+        )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 

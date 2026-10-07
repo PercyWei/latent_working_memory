@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 import json
 import math
 from pathlib import Path
+import re
 
 
 METHODS = ("icae_single", "icae_multi", "autocompressors", "memory_change", "information_loss")
@@ -147,6 +148,8 @@ class TrainingConfig:
     max_train_samples: int | None = None
     max_dev_samples: int | None = None
     init_checkpoint: str | None = None
+    experiment_dir: str | None = None
+    experiment_id: str | None = None
     swanlab_project: str | None = None
     group: str | None = None
     tags: tuple[str, ...] = ()
@@ -178,6 +181,12 @@ class TrainingConfig:
         object.__setattr__(self, "tags", tuple(self.tags))
         if self.swanlab_project is not None and not self.group:
             raise ValueError("SwanLab logging requires an explicit experiment group")
+        if (self.experiment_dir is None) != (self.experiment_id is None):
+            raise ValueError("experiment_dir and experiment_id must be specified together")
+        if self.experiment_id is not None and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_-]*", self.experiment_id
+        ):
+            raise ValueError("experiment_id must contain only letters, digits, '-' and '_'")
 
     def global_batch_size(self, world_size):
         return world_size * self.micro_batch_size_per_gpu * self.gradient_accumulation_steps
@@ -188,6 +197,12 @@ class ExperimentConfig:
     model: ModelConfig
     objective: ObjectiveConfig
     training: TrainingConfig
+
+    def __post_init__(self):
+        if self.training.experiment_dir is not None:
+            expected = Path(self.training.experiment_dir) / self.objective.stage
+            if Path(self.training.output_dir).resolve() != expected.resolve():
+                raise ValueError("output_dir must be experiment_dir / objective.stage")
 
     def to_dict(self):
         return json.loads(json.dumps(asdict(self)))

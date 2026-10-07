@@ -1,4 +1,4 @@
-"""python -m latent_working_memory.v3.train --config experiment.json --device cuda"""
+"""启动器使用的阶段训练 worker；实验入口为 v3.gpu_job。"""
 
 import argparse
 from dataclasses import replace
@@ -6,7 +6,7 @@ from pathlib import Path
 
 from transformers import set_seed
 
-from latent_working_memory.v3.config import METHODS, load_experiment
+from latent_working_memory.v3.config import load_experiment
 from latent_working_memory.v3.engine import TokenMemoryEngine, initialize_device
 from latent_working_memory.v3.objective import TokenMemoryTask
 from latent_working_memory.v3.runtime import (
@@ -21,11 +21,6 @@ from latent_working_memory.v3.runtime import (
 
 def run_training(args):
     config = load_experiment(args.config)
-    objective = {
-        key: value
-        for key, value in {"method": args.method, "stage": args.stage}.items()
-        if value is not None
-    }
     training = {
         key: str(value)
         for key, value in {
@@ -49,7 +44,6 @@ def run_training(args):
     )
     config = replace(
         config,
-        objective=replace(config.objective, **objective),
         training=replace(config.training, **training),
     )
     if args.resume is None and config.objective.stage in {"warmup", "qa", "policy"}:
@@ -93,16 +87,14 @@ def run_training(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="v3 token memory 基线与动态容量训练")
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--resume", type=Path)
-    parser.add_argument("--method", choices=METHODS)
-    parser.add_argument("--stage", choices=("pretrain", "lm", "qa", "warmup", "policy"))
     parser.add_argument("--dataset-dir", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--init-checkpoint", "--init", type=Path)
-    parser.add_argument("--stop-after-steps", type=int, help="停止于指定的全局 optimizer step")
+    parser.add_argument("--stop-after-steps", type=int, help="本阶段 optimizer step 上限")
     parser.add_argument("--max-train-samples", type=int, help="内存选取的训练样本上限")
     parser.add_argument("--max-dev-samples", type=int, help="内存选取的开发集样本上限")
     parser.add_argument(

@@ -252,8 +252,9 @@ def test_comparison_rejects_changed_evaluation_conditions(tmp_path, difference):
 
 
 @pytest.mark.parametrize("changed_split", [False, True])
+@pytest.mark.parametrize("log_to_swanlab", [False, True])
 def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
-    tmp_path, monkeypatch, capsys, changed_split
+    tmp_path, monkeypatch, capsys, changed_split, log_to_swanlab
 ):
     config = ExperimentConfig(
         ModelConfig(model_name_or_path="local-tiny"),
@@ -264,13 +265,15 @@ def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
         "run": {
             "config": config.to_dict(),
             "resolved_model_revision": "resolved-commit",
+            "step_offset": 20,
+            "pretraining": None,
             "pretraining_sources": {"document_ids": [], "dedup_clusters": []},
             "data": {"test": evaluation.dataset_identity([trajectory()])},
             "source_data": {"test": evaluation.dataset_identity([trajectory()])},
         },
         "trainable": {"memory_embeddings": torch.zeros(2, 3), "adapter": {}},
         "optimizer": {},
-        "cursor": {},
+        "cursor": {"step": 7},
         "rng": {},
     }
     if changed_split:
@@ -289,6 +292,9 @@ def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
     monkeypatch.setattr(
         evaluation, "load_factqa", lambda directory, tokenizer: {"test": [trajectory()]}
     )
+    published = []
+    monkeypatch.setattr(evaluation, "_training_run_directory", lambda *args: tmp_path)
+    monkeypatch.setattr(evaluation, "_append_evaluation", lambda *args: published.append(args))
     arguments = [
         "--checkpoint",
         str(path),
@@ -303,6 +309,8 @@ def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
         "--max-new-tokens",
         "8",
     ]
+    if log_to_swanlab:
+        arguments.append("--log-to-swanlab")
     if changed_split:
         with pytest.raises(ValueError, match="checkpoint's original split"):
             evaluation.main(arguments)
@@ -313,7 +321,9 @@ def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
     assert loaded[0][1] == torch.device("cpu")
     assert task.codec.loaded is not None
     assert summary["metadata"]["resolved_model_revision"] == "resolved-commit"
+    assert summary["metadata"]["global_step"] == 27
     assert summary["metadata"]["config"]["model"]["revision"] is None
+    assert [entry[-1] for entry in published] == ([27] if log_to_swanlab else [])
 
 
 @pytest.mark.parametrize(
@@ -398,6 +408,54 @@ def test_swanlab_append_requires_original_training_identity(tmp_path):
     assert evaluation._training_run_directory(config, {"config": config.to_dict()}) == tmp_path
 
 
+def test_evaluation_resolves_method_identity_but_verifies_stage_checkpoint(tmp_path):
+    directory = tmp_path / "memory-change-k64_20261007-01"
+    stage_directory = directory / "policy"
+    stage_directory.mkdir(parents=True)
+    config = ExperimentConfig(
+        ModelConfig(),
+        ObjectiveConfig(stage="policy"),
+        TrainingConfig(
+            dataset_dir="data",
+            output_dir=str(stage_directory),
+            experiment_dir=str(directory),
+            experiment_id="20261007-01",
+            swanlab_project="project",
+            group="series",
+        ),
+    )
+    run = {"config": config.to_dict(), "step_offset": 20, "pretraining": {"step": 100}}
+    (stage_directory / "run.json").write_text(json.dumps(run))
+    (directory / "experiment.json").write_text(
+        json.dumps(
+            {
+                "experiment_id": "20261007-01",
+                "method": "memory_change",
+                "stages": {"policy": run},
+            }
+        )
+    )
+    (directory / "swanlab.json").write_text(
+        json.dumps(
+            {
+                "id": "one-method-run",
+                "project": "project",
+                "group": "series",
+                "job_type": "train",
+                "mode": "online",
+            }
+        )
+    )
+    assert evaluation._training_run_directory(config, run) == directory
+    assert not (stage_directory / "swanlab.json").exists()
+    with pytest.raises(ValueError, match="checkpoint run differs"):
+        evaluation._training_run_directory(config, {**run, "step_offset": 0})
+    changed_run = {**run, "pretraining": {"step": 200}}
+    (stage_directory / "run.json").write_text(json.dumps(changed_run))
+    with pytest.raises(ValueError, match="saved method experiment"):
+        evaluation._training_run_directory(config, changed_run)
+
+
 def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_path, monkeypatch):
     training_dir = tmp_path / "training"
     training_dir.mkdir()
@@ -451,6 +509,8 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
         "run": {
             "config": config.to_dict(),
             "resolved_model_revision": None,
+            "step_offset": 0,
+            "pretraining": None,
             "pretraining_sources": {"document_ids": [], "dedup_clusters": []},
             # 小规模训练的 dev 子集与完整源分别记录，评估校验完整源。
             "data": {"dev": evaluation.dataset_identity(selected)},
@@ -458,7 +518,7 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
         },
         "trainable": {},
         "optimizer": {},
-        "cursor": {},
+        "cursor": {"step": 7},
         "rng": {},
     }
     if problem == "source_changed":
