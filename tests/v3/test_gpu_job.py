@@ -4,6 +4,7 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 
@@ -923,18 +924,20 @@ def test_missing_key_stops_online_job_before_creating_artifacts(
 
 
 @pytest.mark.parametrize("exit_code", [0, 7])
-@pytest.mark.parametrize("override_repository", [False, True])
-def test_shell_changes_to_spaced_repo_preserves_arguments_and_returns_process_status(
-    tmp_path, exit_code, override_repository
+def test_shell_uses_configured_repo_preserves_arguments_and_returns_process_status(
+    tmp_path, exit_code
 ):
-    script = Path("src/latent_working_memory/v3/scripts/run_gpu.sh").resolve()
+    source = Path("src/latent_working_memory/v3/scripts/run_gpu.sh").read_text()
     repository = tmp_path / "repository with spaces"
     repository.mkdir()
-    if not override_repository:
-        source = script.read_text()
-        script = repository / "src/latent_working_memory/v3/scripts/run_gpu.sh"
-        script.parent.mkdir(parents=True)
-        script.write_text(source)
+    script = tmp_path / "run_gpu.sh"
+    script.write_text(
+        source.replace(
+            'LWM_REPO_DIR="/data/zhangdw12/percyw/latent_working_memory"',
+            f"LWM_REPO_DIR={shlex.quote(str(repository))}",
+            1,
+        )
+    )
     binaries = tmp_path / "fake bin"
     binaries.mkdir()
     fake_uv = binaries / "uv"
@@ -956,9 +959,7 @@ def test_shell_changes_to_spaced_repo_preserves_arguments_and_returns_process_st
         "literal $name; echo unchanged",
     ]
     environment = dict(os.environ, PATH=f"{binaries}:{os.environ['PATH']}")
-    environment.pop("LWM_REPO_DIR", None)
-    if override_repository:
-        environment["LWM_REPO_DIR"] = str(repository)
+    environment["LWM_REPO_DIR"] = str(tmp_path / "ignored environment path")
     result = subprocess.run(
         ["bash", str(script), *options],
         cwd=tmp_path,
@@ -979,10 +980,7 @@ def test_shell_changes_to_spaced_repo_preserves_arguments_and_returns_process_st
     ]
     assert recorded["unbuffered"] == "1"
     assert recorded["tokenizers"] == "false"
-    if override_repository:
-        assert list(repository.iterdir()) == []
-    else:
-        assert script.read_text() == source
+    assert list(repository.iterdir()) == []
 
 
 def test_execute_propagates_real_child_failure_and_keeps_the_log(tmp_path):

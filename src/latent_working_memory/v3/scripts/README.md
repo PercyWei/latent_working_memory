@@ -1,18 +1,18 @@
 # GPU 训练任务启动
 
-终端与 GPU 网站共用同一脚本，默认运行五种方法的 `smoke` 完整流程。脚本从自身位置定位仓库、切换到项目根目录，并设置 `CUDA_DEVICE_ORDER=PCI_BUS_ID`。当前服务器使用 `--gpus 4,5`，通过 `torchrun` 启动两个训练进程，最终评估使用 GPU 4；参数默认卡号仍为 `0,1`。
+终端与 GPU 网站共用同一脚本，默认运行五种方法的 `smoke` 完整流程。脚本开头的 `LWM_REPO_DIR` 固定为当前服务器路径 `/data/zhangdw12/percyw/latent_working_memory`，启动时切换到该目录并设置 `CUDA_DEVICE_ORDER=PCI_BUS_ID`。当前服务器使用 `--gpus 4,5`，通过 `torchrun` 启动两个训练进程，最终评估使用 GPU 4；参数默认卡号仍为 `0,1`。
 
 模型默认读取 `~/models/Qwen3-4B-Instruct-2507`，数据使用下文的仓库内路径，SwanLab project 为 `latent-working-memory-v3`。新运行的 `run-id` 自动按上海时间生成，无需预先设置路径环境变量或运行标识。
 
 ```bash
 # 五方法试跑
-bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh --mode smoke --gpus 4,5
+bash /data/zhangdw12/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh --mode smoke --gpus 4,5
 
 # 五方法正式训练
-bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh --mode full --gpus 4,5
+bash /data/zhangdw12/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh --mode full --gpus 4,5
 ```
 
-公司 GPU 网站直接填写脚本的实际绝对路径，例如 `bash /your/repository/src/latent_working_memory/v3/scripts/run_gpu.sh --mode smoke --gpus 4,5`；无需固定仓库目录。
+公司 GPU 网站直接填写上述绝对路径启动命令。换机器时修改脚本开头的 `LWM_REPO_DIR` 常量和启动命令中的脚本路径；GPU、方法和 microbatch 等仍通过命令行参数指定。
 
 训练通过 `--micro-batch-size-per-gpu` 与 `--gradient-accumulation-steps` 控制批处理。全局 batch 根据 **GPU 数 × 每卡 microbatch × 累积步数** 计算，写入运行计划、本地 `run.json` 和 SwanLab config；不再单独传入 `--global-batch-size`。
 
@@ -34,7 +34,7 @@ microbatch 内合并实际写入和读取调用，支持不同长度及不同更
 当前终端服务器先同步仓库并安装环境，下载不使用代理：
 
 ```bash
-cd ~/percyw/latent_working_memory
+cd /data/zhangdw12/percyw/latent_working_memory
 git pull --ff-only origin dev
 unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
 uv sync
@@ -126,14 +126,14 @@ AutoCompressors：多段 LM → 开发集 QA 评估
 命令行参数覆盖 `configs/v3/` 中各方法的预设；`all` 下的覆盖应用于所有方法、所有训练阶段。例如提高每卡并行量、保持双卡全局 batch 为 8：
 
 ```bash
-bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
+bash /data/zhangdw12/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
   --mode smoke --gpus 4,5 --micro-batch-size-per-gpu 4 --gradient-accumulation-steps 1
 ```
 
 也可覆盖档位中的预算：
 
 ```bash
-bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
+bash /data/zhangdw12/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
   --mode pilot --gpus 4,5 \
   --max-steps 10 --train-samples 80 --dev-samples 8 --eval-trajectories 4
 ```
@@ -154,7 +154,7 @@ bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu
 只运行一个方法时增加 `--method`，例如：
 
 ```bash
-bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
+bash /data/zhangdw12/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
   --mode smoke --gpus 4,5 --method icae_single
 ```
 
@@ -163,14 +163,14 @@ bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu
 先单独准备共享预训练时：
 
 ```bash
-bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
+bash /data/zhangdw12/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
   --mode smoke --method shared_pretrain --gpus 4,5 --run-id shared-01
 ```
 
 已有共享预训练 checkpoint 时，一条命令完成某个动态方法的完整 QA 训练流程：
 
 ```bash
-bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
+bash /data/zhangdw12/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
   --mode smoke --method memory_change --gpus 4,5 \
   --init-checkpoint /absolute/path/to/shared-pretrain-k64_smoke_shared-01/pretrain/checkpoints/step-NNNNNN.pt
 ```
@@ -237,6 +237,6 @@ compare/<method>/               同题池质量—容量点 points.json / points
 | `--swanlab-project` / `--group` | 项目与实验系列 |
 | `--output-root` | 产物父目录，默认 `artifacts/v3` |
 
-脚本支持带空格的路径。已有环境显式设置 `LWM_REPO_DIR` 时仍使用该覆盖值；通常直接运行目标仓库中的脚本即可。
+仓库路径由脚本开头的 `LWM_REPO_DIR` 常量统一指定，不接受同名环境变量覆盖，也不根据脚本位置推导。
 
 本地测试验证预算、阶段衔接、数据选择、原生指标和评估图表构造；服务器上的实际显存、训练速度及云端展示需要通过第一轮 `smoke` 任务核验。

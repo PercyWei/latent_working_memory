@@ -84,11 +84,11 @@ checkpoint 继续只保存 gist embeddings 和编码 LoRA 等可训练状态，�
 
 ## 启动
 
-终端和公司 GPU 网站使用 [run_gpu.sh](scripts/run_gpu.sh)。脚本从自身位置定位仓库并切换到项目根目录，自动设置 `CUDA_DEVICE_ORDER=PCI_BUS_ID`；无需先配置路径环境变量。默认运行五方法的 `smoke` 流程，模型读取 `~/models/Qwen3-4B-Instruct-2507`，SwanLab project 为 `latent-working-memory-v3`，新运行标识按上海时间自动生成。
+终端和公司 GPU 网站使用 [run_gpu.sh](scripts/run_gpu.sh)。脚本开头的 `LWM_REPO_DIR` 固定为当前服务器路径 `/data/zhangdw12/percyw/latent_working_memory`，启动时切换到该目录并设置 `CUDA_DEVICE_ORDER=PCI_BUS_ID`。换机器时修改此常量；GPU、方法和 microbatch 等仍通过命令行参数指定。默认运行五方法的 `smoke` 流程，模型读取 `~/models/Qwen3-4B-Instruct-2507`，SwanLab project 为 `latent-working-memory-v3`，新运行标识按上海时间自动生成。
 
 ```bash
-bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh --mode smoke --gpus 4,5
-bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh --mode full --gpus 4,5
+bash /data/zhangdw12/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh --mode smoke --gpus 4,5
+bash /data/zhangdw12/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh --mode full --gpus 4,5
 ```
 
 公司 GPU 网站填写脚本的实际绝对路径即可。`--gpus 4,5` 启动两个训练进程，最终评估使用 GPU 4；卡号默认仍为 `0,1`。只运行一个方法时增加 `--method`。命令行参数覆盖方法预设，`all` 下应用于所有方法的各个阶段；例如 `--micro-batch-size-per-gpu 4 --gradient-accumulation-steps 1` 保持双卡全局 batch 为 8。参数与数据准备见 [GPU 任务说明](scripts/README.md)。
@@ -96,14 +96,14 @@ bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu
 公开入口按完整方法运行：ICAE 自动执行 pretrain → QA，动态方法执行共享预训练 → warmup → policy，AutoCompressors 执行 LM；`smoke`、`pilot` 仅缩短各阶段预算，仍走完整流程。需要先单独准备两种动态方法的共同起点时，使用 `--method shared_pretrain`。
 
 ```bash
-bash src/latent_working_memory/v3/scripts/run_gpu.sh \
+bash /data/zhangdw12/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
   --mode full --method shared_pretrain --gpus 4,5 --run-id main-01
 ```
 
 已有共享预训练 checkpoint 时，动态方法通过 `--init-checkpoint` 接着执行 warmup → policy → 最终评估，不读取预训练数据：
 
 ```bash
-bash src/latent_working_memory/v3/scripts/run_gpu.sh \
+bash /data/zhangdw12/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
   --mode full --method memory_change --gpus 4,5 \
   --init-checkpoint artifacts/v3/capacity_main-01/train/shared-pretrain-k64_main-01/pretrain/checkpoints/step-NNNNNN.pt
 ```
