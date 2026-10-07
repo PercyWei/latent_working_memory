@@ -427,8 +427,8 @@ def run_job(args):
             for stages in training_runs
         ],
     }
-    print(json.dumps(plan, ensure_ascii=False, indent=2), flush=True)
     if args.dry_run:
+        print(json.dumps(plan, ensure_ascii=False, indent=2), flush=True)
         return plan
     targets = [plan_directory]
     targets.extend(Path(job.config.training.output_dir) for job in jobs)
@@ -472,6 +472,11 @@ def run_job(args):
             raise FileNotFoundError(f"required dataset entry is missing: {path}")
     plan_directory.mkdir(parents=True)
     save_json(plan_directory / "job.json", plan)
+    print(
+        f"[start] method={args.method} mode={args.mode} runs={len(training_runs)} "
+        f"stages={len(jobs)} gpus={args.gpus} plan={plan_directory / 'job.json'}",
+        flush=True,
+    )
     evaluation_environment = dict(environment, CUDA_VISIBLE_DEVICES=args.gpus.split(",")[0])
     checkpoints, summaries = {}, []
     try:
@@ -557,7 +562,12 @@ def run_job(args):
         "summaries": [str(value) for value in summaries],
     }
     save_json(plan_directory / "result.json", result)
-    print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
+    print(
+        f"[finished] method={args.method} mode={args.mode} "
+        f"checkpoints={len(checkpoints)} evaluations={len(summaries)} "
+        f"result={plan_directory / 'result.json'}",
+        flush=True,
+    )
     return result
 
 

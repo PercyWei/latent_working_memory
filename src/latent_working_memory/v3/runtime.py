@@ -489,6 +489,9 @@ def train_loop(
     output = Path(settings.output_dir)
     metrics_path = output / "metrics.jsonl"
     total_steps = settings.epochs * math.ceil(len(train) / engine.global_batch_size)
+    planned_steps = (
+        min(total_steps, stop_after_steps) if stop_after_steps is not None else total_steps
+    )
     if tracking is not None:
         configure_training_metrics(tracking, config.objective.stage)
     for epoch in range(cursor["epoch"], settings.epochs):
@@ -537,7 +540,22 @@ def train_loop(
                 with metrics_path.open("a", encoding="utf-8") as stream:
                     text = json.dumps(record, ensure_ascii=False, allow_nan=False)
                     stream.write(text + "\n")
-                    print(text, flush=True)
+                progress = [
+                    f"{config.objective.method}/{config.objective.stage}",
+                    f"epoch={epoch + 1}",
+                    f"step={step}/{planned_steps}",
+                    f"loss={metrics['loss']:.4f}",
+                ]
+                if "train/slots_final" in record:
+                    progress.append(f"slots={record['train/slots_final']:.1f}")
+                if "dev/loss" in record:
+                    progress.append(f"dev_loss={record['dev/loss']:.4f}")
+                progress.append(f"{resources['optimizer_step_seconds']:.2f}s/step")
+                if "peak_memory_allocated_bytes" in resources:
+                    progress.append(
+                        f"peak={resources['peak_memory_allocated_bytes'] / 1024**3:.1f}GiB"
+                    )
+                print(" | ".join(progress), flush=True)
                 if tracking is not None:
                     tracking.log(training_metrics(record), step=record["global_step"])
             if step % settings.save_every == 0 or epoch_end or stopping:

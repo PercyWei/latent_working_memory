@@ -145,4 +145,6 @@ SwanLab 中，一个完整方法对应一个 run，训练、验证和最终评�
 
 阶段用 `train/stage` 曲线展示，最终质量和容量用合并柱状图展示；详细统计与样例保存在本地，不上传表格。指标含义见 [v3 说明](../README.md#评估与产物)。
 
+终端每个 optimizer step 打印一行摘要：方法／阶段、epoch、阶段内步数、损失、容量、耗时和峰值显存；执行验证时附带 dev loss。完整指标保存在阶段目录的 `metrics.jsonl`。
+
 相同 `run-id` 的不同档位共用 `plan/<method>/`；试跑与正式训练作为独立运行时，使用不同 `run-id` 或省略该参数自动生成。重复启动已有方法目录会报错；失败时查看 `plan/<method>/result.json` 和 `<run-name>-train.log`，同一方法的各阶段共用一个训练日志。

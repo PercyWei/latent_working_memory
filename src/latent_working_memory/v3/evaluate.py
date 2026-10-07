@@ -355,7 +355,14 @@ def main(argv=None):
             args.output_dir,
             checkpoint["run"]["step_offset"] + checkpoint["cursor"]["step"],
         )
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    quality = summary["quality"]["all"]
+    print(
+        f"[evaluation] method={summary['method']} split={args.split} "
+        f"trajectories={summary['trajectories']} nll={quality['nll']:.4f} "
+        f"em={quality['em']:.4f} f1={quality['f1']:.4f} "
+        f"summary={Path(args.output_dir) / 'summary.json'}",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

@@ -254,7 +254,7 @@ def test_comparison_rejects_changed_evaluation_conditions(tmp_path, difference):
 @pytest.mark.parametrize("changed_split", [False, True])
 @pytest.mark.parametrize("log_to_swanlab", [False, True])
 def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
-    tmp_path, monkeypatch, capsys, changed_split, log_to_swanlab
+    tmp_path, monkeypatch, changed_split, log_to_swanlab
 ):
     config = ExperimentConfig(
         ModelConfig(model_name_or_path="local-tiny"),
@@ -316,7 +316,7 @@ def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
             evaluation.main(arguments)
         return
     evaluation.main(arguments)
-    summary = json.loads(capsys.readouterr().out)
+    summary = json.loads((tmp_path / "evaluation" / "summary.json").read_text())
     assert loaded[0][0].revision == "resolved-commit"
     assert loaded[0][1] == torch.device("cpu")
     assert task.codec.loaded is not None
@@ -512,7 +512,7 @@ def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_pat
 
 @pytest.mark.parametrize("problem", [None, "source_changed", "pretraining_overlap"])
 def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
-    tmp_path, monkeypatch, capsys, problem
+    tmp_path, monkeypatch, problem
 ):
     examples = tuple(trajectory(f"doc{i}", split="dev") for i in range(6))
     config = ExperimentConfig(
@@ -571,7 +571,7 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
         assert not task.codec.generated
         return
     evaluation.main(arguments)
-    summary = json.loads(capsys.readouterr().out)
+    summary = json.loads((tmp_path / "summary.json").read_text())
     assert summary["dataset_signature"] == evaluation.dataset_identity(selected)["fingerprint"]
     assert summary["metadata"]["selection"] == {"total": 6, "selected": 2, "limit": 2, "seed": 42}
     assert summary["quality"]["all"]["questions"] == 4

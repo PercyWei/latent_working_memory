@@ -69,7 +69,10 @@ def main(argv=None):
     parser.add_argument("--output-dir", required=True)
     args = parser.parse_args(argv)
     points = compare(args.summaries, args.output_dir)
-    print(json.dumps(points, ensure_ascii=False, indent=2))
+    print(
+        f"[compare] runs={len(points)} output={Path(args.output_dir)} (points.json, points.csv)",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
