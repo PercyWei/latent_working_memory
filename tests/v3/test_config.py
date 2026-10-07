@@ -17,8 +17,10 @@ def test_presets_use_requested_model_and_memory_size(filename):
     assert config.model.model_name_or_path == str(Path.home() / "models/Qwen3-4B-Instruct-2507")
     assert config.model.memory_slots == 64
     assert config.model.gradient_checkpointing is True
-    assert config.training.micro_batch_size_per_gpu == 2
+    assert config.objective.append_slots == 8
+    assert config.training.micro_batch_size_per_gpu == 4
     assert config.training.gradient_accumulation_steps == 2
+    assert config.training.global_batch_size(2) == 16
     assert config.training.swanlab_project is None
 
 
@@ -33,6 +35,9 @@ def test_presets_use_requested_model_and_memory_size(filename):
         {"append_probability": 1.1},
         {"qa_prompt": "{question}: {answer}"},
         {"qa_batch_size": True},
+        {"append_slots": 0},
+        {"append_slots": True},
+        {"append_slots": 1.5},
     ],
 )
 def test_objective_rejects_invalid_experiment_contracts(options):
@@ -43,6 +48,21 @@ def test_objective_rejects_invalid_experiment_contracts(options):
 def test_model_rejects_module_string_in_place_of_list():
     with pytest.raises(ValueError, match="sequence"):
         ModelConfig(lora_target_modules="q_proj")
+
+
+def test_dynamic_append_size_is_bounded_by_available_gist_embeddings():
+    with pytest.raises(ValueError, match="append_slots"):
+        ExperimentConfig(
+            ModelConfig(memory_slots=4),
+            ObjectiveConfig(append_slots=8),
+            TrainingConfig("data", "output"),
+        )
+    config = ExperimentConfig(
+        ModelConfig(memory_slots=64),
+        ObjectiveConfig(append_slots=8),
+        TrainingConfig("data", "output"),
+    )
+    assert config.to_dict()["objective"]["append_slots"] == 8
 
 
 @pytest.mark.parametrize("value", [0, 1, "true", None])

@@ -130,6 +130,11 @@ def parse_args(argv=None):
         help="每次优化器更新前累积的 microbatch 数",
     )
     parser.add_argument("--qa-batch-size", type=positive_count)
+    parser.add_argument(
+        "--append-slots",
+        type=positive_count,
+        help="动态方法每次追加的 slots 数，默认沿用预设 8；首次写入仍为 64 slots",
+    )
     for name in ("train-samples", "dev-samples", "max-steps", "eval-trajectories"):
         parser.add_argument(f"--{name}", type=bounded_count, help="覆盖运行档位，0 表示不限")
     for name in ("eval-every", "save-every"):
@@ -154,6 +159,12 @@ def parse_args(argv=None):
         parser.error("run-id must contain only letters, digits, '-' and '_'")
     if args.init_checkpoint is not None and args.method not in (*DYNAMIC_METHODS, "dynamic"):
         parser.error("--init-checkpoint is only supported by dynamic methods")
+    if args.append_slots is not None and args.method in {
+        "icae_single",
+        "icae_multi",
+        "autocompressors",
+    }:
+        parser.error("--append-slots is only supported by dynamic methods")
     return args
 
 
@@ -224,6 +235,8 @@ def build_jobs(args):
             value = getattr(args, name)
             if value is not None:
                 objective[name] = value
+        if method in DYNAMIC_METHODS and args.append_slots is not None:
+            objective["append_slots"] = args.append_slots
         is_pretrain = stage in {"pretrain", "lm"}
         dataset = args.pretrain_data if is_pretrain else args.qa_data
         root_method = (

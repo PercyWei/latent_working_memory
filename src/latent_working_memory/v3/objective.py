@@ -91,10 +91,12 @@ class TokenMemoryTask(nn.Module):
                     events[index][timing_key] += timer[timing_key] / len(indices)
         return [torch.cat(values) for values in pieces]
 
-    def _write_batch(self, inputs, histories, events):
+    def _write_batch(self, inputs, histories, events, output_slots=None):
         timer = {"write_seconds": 0.0}
         with measured(self.device, timer, "write_seconds"):
-            results = self.codec.compress_batch([self.ids(ids) for ids in inputs], histories)
+            results = self.codec.compress_batch(
+                [self.ids(ids) for ids in inputs], histories, output_slots
+            )
         for event in events:
             event["write_calls"] += 1
             event["write_seconds"] += timer["write_seconds"] / len(events)
@@ -129,7 +131,7 @@ class TokenMemoryTask(nn.Module):
                 for i in active
             }
 
-            def write(indices, histories):
+            def write(indices, histories, output_slots=None):
                 return self._write_batch(
                     [
                         trajectories[i].full_input_ids
@@ -139,6 +141,7 @@ class TokenMemoryTask(nn.Module):
                     ],
                     histories,
                     [events[i] for i in indices],
+                    output_slots,
                 )
 
             if single or self.cfg.method in {"icae_multi", "autocompressors"} or step == 0:
@@ -154,14 +157,21 @@ class TokenMemoryTask(nn.Module):
                 del candidates, candidate
             elif self.cfg.stage == "warmup" and not force_policy:
                 choices = {i: rngs[i].random() < self.cfg.append_probability for i in active}
-                candidates = write(active, [[] if choices[i] else [blocks[i][-1]] for i in active])
+                candidates = write(
+                    active,
+                    [[] if choices[i] else [blocks[i][-1]] for i in active],
+                    [self.cfg.append_slots if choices[i] else len(blocks[i][-1]) for i in active],
+                )
                 for i, candidate in zip(active, candidates, strict=True):
                     append = choices[i]
                     blocks[i] = blocks[i] + [candidate] if append else blocks[i][:-1] + [candidate]
                     events[i]["action"] = "append" if append else "overwrite"
                 del candidates, candidate
             else:
-                rewritten = write(active, [[blocks[i][-1]] for i in active])
+                # 覆盖保留末块的原有大小，使新旧记忆始终可以逐 slot 比较。
+                rewritten = write(
+                    active, [[blocks[i][-1]] for i in active], [len(blocks[i][-1]) for i in active]
+                )
                 if self.cfg.method == "memory_change":
                     timer = {"gate_seconds": 0.0}
                     with torch.no_grad(), measured(self.device, timer, "gate_seconds"):
@@ -180,12 +190,30 @@ class TokenMemoryTask(nn.Module):
                         events[i]["gate_seconds"] += timer["gate_seconds"] / len(active)
                     indices = [i for i in active if choices[i]]
                     appended = (
-                        dict(zip(indices, write(indices, [[] for _ in indices]), strict=True))
+                        dict(
+                            zip(
+                                indices,
+                                write(
+                                    indices,
+                                    [[] for _ in indices],
+                                    [self.cfg.append_slots] * len(indices),
+                                ),
+                                strict=True,
+                            )
+                        )
                         if indices
                         else {}
                     )
                 else:
-                    appended = dict(zip(active, write(active, [[] for _ in active]), strict=True))
+                    appended = dict(
+                        zip(
+                            active,
+                            write(
+                                active, [[] for _ in active], [self.cfg.append_slots] * len(active)
+                            ),
+                            strict=True,
+                        )
+                    )
                     gate_ids = [trajectories[i].usage[step].gate_qa_ids for i in active]
                     if not all(gate_ids):
                         raise ValueError(

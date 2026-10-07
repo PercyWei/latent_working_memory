@@ -366,7 +366,9 @@ def test_real_tiny_model_evaluates_all_methods_without_training_or_gate_leakage(
 
     stage = {"icae_single": "qa", "icae_multi": "qa", "autocompressors": "lm"}.get(method, "policy")
     task = TokenMemoryTask(
-        build_model(), DecoderTokenizer(), ObjectiveConfig(method=method, stage=stage)
+        build_model(),
+        DecoderTokenizer(),
+        ObjectiveConfig(method=method, stage=stage, append_slots=1),
     )
     example = objective_trajectory(split="test")
     summary = evaluation.evaluate(task, [example], tmp_path / method, "test", 2)

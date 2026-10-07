@@ -180,10 +180,12 @@ def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode,
         assert job.config.training.init_checkpoint is None
         assert job.config.training.swanlab_project == "latent-working-memory-v3"
         assert job.config.training.tags == (f"study:{'main' if mode == 'full' else mode}",)
-        assert job.config.training.micro_batch_size_per_gpu == 2
+        assert job.config.training.micro_batch_size_per_gpu == 4
         assert job.config.training.gradient_accumulation_steps == 2
-        assert job.config.training.global_batch_size(2) == 8
-        assert job.config.training.global_batch_size(4) == 16
+        assert job.config.training.global_batch_size(2) == 16
+        assert job.config.training.global_batch_size(4) == 32
+        assert job.config.model.memory_slots == 64
+        assert job.config.objective.append_slots == 8
         assert job.config.training.experiment_id == "unit-job"
         assert job.config.training.group == "unit-job"
         root = Path(job.config.training.experiment_dir)
@@ -247,9 +249,9 @@ def test_minimal_command_builds_all_methods_with_shared_default_settings(mode):
         assert job.config.model.model_name_or_path == str(
             Path.home() / "models/Qwen3-4B-Instruct-2507"
         )
-        assert job.config.training.micro_batch_size_per_gpu == 2
+        assert job.config.training.micro_batch_size_per_gpu == 4
         assert job.config.training.gradient_accumulation_steps == 2
-        assert job.config.training.global_batch_size(2) == 8
+        assert job.config.training.global_batch_size(2) == 16
         assert job.config.objective.qa_batch_size == 8
 
 
@@ -260,7 +262,7 @@ def test_cli_only_overrides_explicitly_supplied_preset_values(monkeypatch, overr
         return replace(
             config,
             model=replace(config.model, model_name_or_path="local/preset-model"),
-            objective=replace(config.objective, qa_batch_size=5),
+            objective=replace(config.objective, qa_batch_size=5, append_slots=12),
             training=replace(
                 config.training, micro_batch_size_per_gpu=3, gradient_accumulation_steps=5
             ),
@@ -268,7 +270,14 @@ def test_cli_only_overrides_explicitly_supplied_preset_values(monkeypatch, overr
 
     monkeypatch.setattr(gpu_job, "load_experiment", preset)
     options = (
-        ["--micro-batch-size-per-gpu", "4", "--model-path", "~/models/override-model"]
+        [
+            "--micro-batch-size-per-gpu",
+            "4",
+            "--model-path",
+            "~/models/override-model",
+            "--append-slots",
+            "16",
+        ]
         if override
         else []
     )
@@ -279,6 +288,9 @@ def test_cli_only_overrides_explicitly_supplied_preset_values(monkeypatch, overr
         assert job.config.training.micro_batch_size_per_gpu == (4 if override else 3)
         assert job.config.training.gradient_accumulation_steps == 5
         assert job.config.objective.qa_batch_size == 5
+        dynamic = job.config.objective.method in {"memory_change", "information_loss"}
+        assert job.config.objective.append_slots == (16 if override and dynamic else 12)
+        assert job.config.model.memory_slots == 64
         assert job.config.model.model_name_or_path == (
             str(Path.home() / "models/override-model") if override else "local/preset-model"
         )
@@ -457,6 +469,11 @@ def test_plan_derives_each_global_batch_from_selected_gpus_microbatch_and_accumu
         ["--micro-batch-size-per-gpu", "-1"],
         ["--gradient-accumulation-steps", "0"],
         ["--gradient-accumulation-steps", "-1"],
+        ["--append-slots", "0"],
+        ["--append-slots", "-1"],
+        ["--method", "icae_single", "--append-slots", "8"],
+        ["--method", "icae_multi", "--append-slots", "8"],
+        ["--method", "autocompressors", "--append-slots", "8"],
         ["--global-batch-size", "8"],
         ["--long-pretrain-data", "old-data"],
         ["--run-id", "../escape"],
@@ -533,9 +550,9 @@ def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
     for job in plan["jobs"]:
         assert job["batching"] == {
             "world_size": world_size,
-            "micro_batch_size_per_gpu": 2,
+            "micro_batch_size_per_gpu": 4,
             "gradient_accumulation_steps": 2,
-            "global_batch_size": world_size * 4,
+            "global_batch_size": world_size * 8,
         }
         assert "global_batch_size" not in job["config"]["training"]
     with pytest.raises(ValueError, match="already exists"):

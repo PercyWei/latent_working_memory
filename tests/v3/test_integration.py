@@ -57,6 +57,7 @@ def tiny_task(model_type, method, stage, **options):
         ac_min_segment_tokens=3,
         ac_max_segment_tokens=3,
         ac_bptt_steps=2,
+        append_slots=1,
         **options,
     )
     return TokenMemoryTask(
@@ -201,7 +202,9 @@ def calibrated_dynamic_batch(method):
         with torch.no_grad():
             old = model.codec.compress(model.ids(first.segments[0].input_ids))
             rewritten = model.codec.compress(model.ids(first.segments[1].input_ids), [old])
-            appended = model.codec.compress(model.ids(first.segments[1].input_ids))
+            appended = model.codec.compress(
+                model.ids(first.segments[1].input_ids), output_slots=model.cfg.append_slots
+            )
             prompt = model.prompt_ids(first.qas["gate0"].question)
             answers = [model.ids((value,)) for value in range(41)]
             losses = [

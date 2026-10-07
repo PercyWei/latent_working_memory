@@ -27,13 +27,14 @@
     "ac_max_segment_tokens": 1024,
     "ac_bptt_steps": 2,
     "append_probability": 0.5,
-    "seed": 20261004
+    "seed": 20261004,
+    "append_slots": 8
   },
   "training": {
     "dataset_dir": "data/fineweb-reconstruction-k512-doc100k_20260917",
     "output_dir": "artifacts/v3/step1-token-memory/train/dynamic-pretrain",
     "epochs": 1,
-    "micro_batch_size_per_gpu": 2,
+    "micro_batch_size_per_gpu": 4,
     "gradient_accumulation_steps": 2,
     "learning_rate": 0.0001,
     "weight_decay": 0.01,

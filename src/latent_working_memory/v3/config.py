@@ -77,6 +77,7 @@ class ObjectiveConfig:
     ac_min_segment_tokens: int = 768
     ac_max_segment_tokens: int = 1024
     ac_bptt_steps: int = 2
+    append_slots: int = 8
     append_probability: float = 0.5
     threshold_i: float = 0.1
     threshold_d: float = 0.1
@@ -104,6 +105,7 @@ class ObjectiveConfig:
             "ac_min_segment_tokens",
             "ac_max_segment_tokens",
             "ac_bptt_steps",
+            "append_slots",
         ):
             positive_integer(getattr(self, name), name)
         if self.ac_min_segment_tokens > self.ac_max_segment_tokens:
@@ -211,6 +213,11 @@ class ExperimentConfig:
     training: TrainingConfig
 
     def __post_init__(self):
+        if (
+            self.objective.method in DYNAMIC_METHODS
+            and self.objective.append_slots > self.model.memory_slots
+        ):
+            raise ValueError("append_slots must not exceed model.memory_slots")
         if self.training.experiment_dir is not None:
             expected = Path(self.training.experiment_dir) / self.objective.stage
             if Path(self.training.output_dir).resolve() != expected.resolve():

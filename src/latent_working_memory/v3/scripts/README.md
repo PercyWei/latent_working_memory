@@ -1,6 +1,6 @@
 # 运行 v3 实验
 
-使用 [run_gpu.sh](run_gpu.sh) 完成训练、评估与方法比较。默认使用 Qwen3-4B、每块 64 slots；方法与训练细节见 [v3 说明](../README.md)，预设位于 [configs/v3](../../../../configs/v3/)。
+使用 [run_gpu.sh](run_gpu.sh) 完成训练、评估与方法比较。默认使用 Qwen3-4B；基线每块 64 slots，动态方法首次 64 slots、每次追加 8 slots。方法与训练细节见 [v3 说明](../README.md)，预设位于 [configs/v3](../../../../configs/v3/)。
 
 ## 1. 准备环境、模型与数据
 
@@ -60,7 +60,7 @@ GPU 任务平台使用同一命令，将脚本位置替换为绝对路径即可�
 | `pilot` | 256／32 | 20 | dev，最多 16 条轨迹 |
 | `full` | 全部 | 按预设训练，默认 1 epoch | 完整 test |
 
-各档均执行完整方法流程，QA 保留整条轨迹。先用 `smoke` 检查显存、日志和 SwanLab 展示，再切换 `full`；正式运行重新训练，不自动沿用试跑权重。
+各档均执行完整方法流程，QA 保留整条轨迹。先用 `smoke` 检查显存、日志和 SwanLab 展示，再切换 `full`；正式运行重新训练，不自动沿用试跑权重。提高 microbatch 后可先运行 `pilot`，检查更多长轨迹的显存峰值；少量 smoke 样本的显存不能代表完整数据。
 
 同一方法只加载一次模型：ICAE 的 AE＋LM → QA、动态方法的动作预热 → 策略训练在同一组训练进程中连续完成，阶段切换时保留模型权重、重置优化器。共享预训练和不同方法分别启动；最终评估独立运行。
 
@@ -110,22 +110,25 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 | 参数 | 用途／默认值 |
 |---|---|
 | `--gpus 0,1` | 使用的物理 GPU；默认 `0,1`，最终评估使用第一张卡 |
-| `--micro-batch-size-per-gpu 2` | 每卡一次并行处理的样本／轨迹数，默认 2 |
+| `--micro-batch-size-per-gpu 4` | 每卡一次并行处理的样本／轨迹数，默认 4 |
 | `--gradient-accumulation-steps 2` | 每次更新累积的 microbatch 数，默认 2 |
 | `--qa-batch-size 8` | 每条轨迹一次读取的题数，默认 8 |
+| `--append-slots 8` | 动态方法每次追加的 slots 数，默认 8；首次仍为 64，覆盖保持末块大小 |
 | `--epochs` | 各阶段训练轮数 |
 | `--train-samples`、`--dev-samples`、`--max-steps`、`--eval-trajectories` | 覆盖档位预算，`0` 表示不设该上限 |
 | `--threshold-i`、`--threshold-d`、`--threshold-g`、`--eta` | 动态策略阈值 |
 | `--run-id`、`--group` | 运行标识默认按上海时间生成；group 默认直接使用 `run-id`，可单独覆盖 |
 | `--output-root` | 产物父目录，默认 `artifacts/v3` |
 
-全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数，默认双卡为 8。例如，将每卡 microbatch 改为 4、累积改为 1，全局 batch 仍为 8：
+全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数，默认双卡为 **2 × 4 × 2 = 16**。以下命令显式使用当前设置：
 
 ```bash
 bash src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode smoke --gpus 0,1 \
-  --micro-batch-size-per-gpu 4 --gradient-accumulation-steps 1
+  --mode pilot --gpus 0,1 \
+  --micro-batch-size-per-gpu 4 --gradient-accumulation-steps 2 --append-slots 8
 ```
+
+动态容量按 `64 → 72 → 80` 逐次追加；覆盖只改写末块，不增加容量。共享预训练仍生成 64 slots，三个 baseline 的块大小不受 `--append-slots` 影响。
 
 ## 5. 查看结果
 
@@ -138,7 +141,7 @@ eval/<run-name>/<stage>/      评估汇总与逐题结果
 compare/<method>/             多方法质量—容量比较
 ```
 
-SwanLab 中，一个完整方法对应一个 run，训练、验证和最终评估共用；共享预训练单独记录，因此 `all` 共六个 runs。正式名称为 `<method>-k64_<run-id>`，试跑为 `<method>-k64_<mode>_<run-id>`，其中 `<mode>` 为 `smoke` 或 `pilot`。两个动态方法与共享预训练使用相同后缀关联来源；group 默认直接使用 `run-id`，`--group` 可覆盖。
+SwanLab 中，一个完整方法对应一个 run，训练、验证和最终评估共用；共享预训练单独记录，因此 `all` 共六个 runs。正式名称为 `<method>-k64_<run-id>`，试跑为 `<method>-k64_<mode>_<run-id>`，其中 `<mode>` 为 `smoke` 或 `pilot`。动态方法的 `k64` 表示首次容量，追加大小记录在 config 中。两个动态方法与共享预训练使用相同后缀关联来源；group 默认直接使用 `run-id`，`--group` 可覆盖。
 
 阶段用 `train/stage` 曲线展示，最终质量和容量用合并柱状图展示；详细统计与样例保存在本地，不上传表格。指标含义见 [v3 说明](../README.md#评估与产物)。
 

@@ -67,15 +67,17 @@ def trajectory(split="train", n=3):
 
 def task(method, stage, **options):
     return TokenMemoryTask(
-        build_model(), TinyTokenizer(), ObjectiveConfig(method=method, stage=stage, **options)
+        build_model(),
+        TinyTokenizer(),
+        ObjectiveConfig(method=method, stage=stage, **{"append_slots": 3, **options}),
     )
 
 
 def trace_writes(model):
     calls, original = [], model.codec.compress_batch
 
-    def traced(ids, memory_blocks=None):
-        outputs = original(ids, memory_blocks)
+    def traced(ids, memory_blocks=None, output_slots=None):
+        outputs = original(ids, memory_blocks, output_slots)
         histories = memory_blocks if memory_blocks is not None else [[] for _ in ids]
         for tokens, history, output in zip(ids, histories, outputs, strict=True):
             if output.requires_grad:
@@ -207,6 +209,62 @@ def test_warmup_actions_are_matched_between_methods_and_eval_uses_policy():
     assert all(e["write_calls"] == 1 and e["gate_qa_reads"] == 0 for e in a + b)
     policy = left.build_memory(record, force_policy=True)[1]
     assert all(e["action"] == "overwrite" for e in policy[1:])
+
+
+@pytest.mark.parametrize("method", ["memory_change", "information_loss"])
+@pytest.mark.parametrize("stage", ["warmup", "policy"])
+def test_dynamic_initial_64_append_8_and_overwrite_preserves_last_block_size(
+    monkeypatch, method, stage
+):
+    model = TokenMemoryTask(
+        build_model(memory_slots=64, max_positions=256),
+        TinyTokenizer(),
+        ObjectiveConfig(method=method, stage=stage, append_slots=8, threshold_i=0.5),
+    )
+    choices = iter([False, True, False, True])
+    compared_sizes = []
+    if stage == "warmup":
+
+        class FixedActions:
+            def random(self):
+                return 0.0 if next(choices) else 1.0
+
+        monkeypatch.setattr(objective, "example_rng", lambda *args: FixedActions())
+    elif method == "memory_change":
+
+        def controlled_score(old, rewritten, epsilon):
+            assert old.shape == rewritten.shape
+            compared_sizes.append(len(old))
+            return torch.tensor(float(next(choices)))
+
+        monkeypatch.setattr(objective, "memory_change_score", controlled_score)
+    else:
+        monkeypatch.setattr(objective, "damage_action", lambda *args: next(choices))
+    with torch.no_grad():
+        states = list(model._states(trajectory(n=5), force_policy=stage == "policy"))
+    assert [event["action"] for _, event in states] == [
+        "initial",
+        "overwrite",
+        "append",
+        "overwrite",
+        "append",
+    ]
+    assert [event["slots"] for _, event in states] == [64, 64, 72, 72, 80]
+    assert [list(map(len, blocks)) for blocks, _ in states] == [
+        [64],
+        [64],
+        [64, 8],
+        [64, 8],
+        [64, 8, 8],
+    ]
+    # 追加保留所有旧块；覆盖只替换末块。
+    assert states[2][0][0] is states[1][0][0]
+    assert states[3][0][0] is states[2][0][0]
+    assert states[3][0][-1] is not states[2][0][-1]
+    assert states[4][0][0] is states[3][0][0]
+    assert states[4][0][1] is states[3][0][1]
+    if compared_sizes:
+        assert compared_sizes == [64, 64, 8, 8]
 
 
 @pytest.mark.parametrize(
@@ -368,9 +426,9 @@ def test_batch_warmup_rng_and_actions_are_independent_of_batch_order():
     assert len({tuple(values) for values in expected}) > 1
     writes, original = [], model.codec.compress_batch
 
-    def traced(ids, histories=None):
+    def traced(ids, histories=None, output_slots=None):
         writes.append([len(history) for history in histories])
-        return original(ids, histories)
+        return original(ids, histories, output_slots)
 
     model.codec.compress_batch = traced
     assert actions(records) == expected

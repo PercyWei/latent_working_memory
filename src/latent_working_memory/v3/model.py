@@ -88,36 +88,40 @@ class GistMemoryModel(nn.Module):
         if length > self.max_positions:
             raise ValueError(f"sequence length {length} exceeds model window {self.max_positions}")
 
-    def compress(self, text_ids, memory_blocks=None):
+    def compress(self, text_ids, memory_blocks=None, output_slots=None):
         """压缩新文本及指定历史块；调用方决定传入末块还是累计历史。"""
         histories = None if memory_blocks is None else [memory_blocks]
-        return self.compress_batch([text_ids], histories)[0]
+        slots = None if output_slots is None else [output_slots]
+        return self.compress_batch([text_ids], histories, slots)[0]
 
-    def compress_batch(self, text_ids, memory_blocks=None):
-        """一次 transformer forward 写入多个独立样本，支持不同文本和历史长度。"""
+    def compress_batch(self, text_ids, memory_blocks=None, output_slots=None):
+        """一次 forward 写入独立样本，按各样本指定的 slots 数放置 gist tokens。"""
         if not text_ids:
             raise ValueError("writer text batch must be nonempty")
         histories = [[] for _ in text_ids] if memory_blocks is None else memory_blocks
         if len(histories) != len(text_ids):
             raise ValueError("writer texts and memory histories must align")
+        slots = [self.memory_slots] * len(text_ids) if output_slots is None else output_slots
+        if len(slots) != len(text_ids):
+            raise ValueError("writer texts and output_slots must align")
         embed = self.language_model.get_input_embeddings()
         rows = []
-        for tokens, blocks in zip(text_ids, histories, strict=True):
+        for tokens, blocks, count in zip(text_ids, histories, slots, strict=True):
+            if type(count) is not int or not 1 <= count <= self.memory_slots:
+                raise ValueError("output_slots must be integers between 1 and memory_slots")
             self._check_tokens(tokens)
             for memory in blocks:
                 self._check_memory(memory)
-                if len(memory) != self.memory_slots:
-                    raise ValueError("writer memory blocks must each contain memory_slots vectors")
-            self._check_length(
-                sum(len(memory) for memory in blocks) + len(tokens) + self.memory_slots
-            )
+                if not 1 <= len(memory) <= self.memory_slots:
+                    raise ValueError("writer memory blocks must contain 1 to memory_slots vectors")
+            self._check_length(sum(len(memory) for memory in blocks) + len(tokens) + count)
             text = embed(tokens)
             rows.append(
                 torch.cat(
                     [
                         *(memory.to(text.dtype) for memory in blocks),
                         text,
-                        self.memory_embeddings.to(text.dtype),
+                        self.memory_embeddings[:count].to(text.dtype),
                     ]
                 )
             )
@@ -137,7 +141,8 @@ class GistMemoryModel(nn.Module):
             .last_hidden_state
         )
         return [
-            hidden[index, len(row) - self.memory_slots : len(row)] for index, row in enumerate(rows)
+            hidden[index, len(row) - count : len(row)]
+            for index, (row, count) in enumerate(zip(rows, slots, strict=True))
         ]
 
     def answer_nll(self, memories, prompt_ids, answer_ids):

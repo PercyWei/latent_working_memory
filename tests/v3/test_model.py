@@ -346,13 +346,18 @@ def test_context_limits_fail_without_truncation():
     with pytest.raises(ValueError, match="exceeds model window"):
         model.generate(torch.zeros(8, 16), ids(3, 4), 3, 2, 0)
     assert model.compress(torch.arange(9)).shape == (3, 16)
+    assert model.compress(torch.arange(11), output_slots=1).shape == (1, 16)
+    assert model.compress(torch.arange(9), [torch.zeros(1, 16)], output_slots=2).shape == (2, 16)
+    with pytest.raises(ValueError, match="exceeds model window"):
+        model.compress(torch.arange(10), [torch.zeros(1, 16)], output_slots=2)
     assert model.answer_nll([torch.zeros(9, 16)], [ids(3, 4)], [ids(5, 6)]).shape == (1,)
 
 
 def test_invalid_writer_blocks_and_empty_answers_are_rejected():
     model = build_model()
-    with pytest.raises(ValueError, match="memory_slots"):
-        model.compress(ids(3, 4), [torch.zeros(2, 16)])
+    for count in (0, 4):
+        with pytest.raises(ValueError, match="memory_slots"):
+            model.compress(ids(3, 4), [torch.zeros(count, 16)])
     with pytest.raises(ValueError, match="nonempty"):
         model.answer_nll([torch.zeros(3, 16)], [ids(3, 4)], [ids()])
     with pytest.raises(ValueError, match="align"):
@@ -379,8 +384,9 @@ def test_native_gradient_checkpointing_configuration(enabled):
 
 @pytest.mark.parametrize("model_type", ["llama", "qwen3"])
 @pytest.mark.parametrize("attention_implementation", ["eager", "sdpa"])
+@pytest.mark.parametrize("output_slots", [None, [3, 1, 2]])
 def test_ragged_writer_batch_matches_single_writes_outputs_and_all_gradients(
-    model_type, attention_implementation
+    model_type, attention_implementation, output_slots
 ):
     batched = build_model(model_type, attention_implementation=attention_implementation)
     randomize_adapter(batched)
@@ -388,9 +394,10 @@ def test_ragged_writer_batch_matches_single_writes_outputs_and_all_gradients(
     texts = [ids(3, 4, 5, 6), ids(7), ids(8, 9)]
     histories = [
         [],
-        [torch.randn(3, batched.width, requires_grad=True)],
-        [torch.randn(3, batched.width, requires_grad=True) for _ in range(2)],
+        [torch.randn(1, batched.width, requires_grad=True)],
+        [torch.randn(length, batched.width, requires_grad=True) for length in (3, 2)],
     ]
+    counts = [batched.memory_slots] * len(texts) if output_slots is None else output_slots
     separate_histories = [
         [memory.detach().clone().requires_grad_() for memory in blocks] for blocks in histories
     ]
@@ -404,25 +411,35 @@ def test_ragged_writer_batch_matches_single_writes_outputs_and_all_gradients(
         lambda module, args, output: states.append(output.last_hidden_state)
     )
     try:
-        actual = batched.compress_batch(texts, histories)
+        actual = batched.compress_batch(texts, histories, output_slots)
     finally:
         before.remove()
         after.remove()
     expected = [
-        separate.compress(text, blocks)
-        for text, blocks in zip(texts, separate_histories, strict=True)
+        separate.compress(text, blocks, count)
+        for text, blocks, count in zip(texts, separate_histories, counts, strict=True)
     ]
     assert len(calls) == 1
-    assert calls[0]["inputs_embeds"].shape == (3, 11, batched.width)
-    lengths = [7, 7, 11]
+    lengths = [
+        len(text) + sum(len(memory) for memory in blocks) + count
+        for text, blocks, count in zip(texts, histories, counts, strict=True)
+    ]
+    assert calls[0]["inputs_embeds"].shape == (3, max(lengths), batched.width)
     assert calls[0]["attention_mask"] is None
-    for index, length in enumerate(lengths):
-        assert calls[0]["position_ids"][index].tolist() == list(range(11))
-        torch.testing.assert_close(actual[index], states[0][index, length - 3 : length])
+    for index, (length, count) in enumerate(zip(lengths, counts, strict=True)):
+        assert actual[index].shape == (count, batched.width)
+        assert calls[0]["position_ids"][index].tolist() == list(range(max(lengths)))
+        torch.testing.assert_close(actual[index], states[0][index, length - count : length])
+        torch.testing.assert_close(
+            calls[0]["inputs_embeds"][index, length - count : length],
+            batched.memory_embeddings[:count],
+        )
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
-    weights = torch.randn(len(actual), batched.memory_slots, batched.width)
-    (torch.stack(actual) * weights).sum().backward()
-    (torch.stack(expected) * weights).sum().backward()
+    weights = [torch.randn_like(memory) for memory in actual]
+    sum((memory * weight).sum() for memory, weight in zip(actual, weights, strict=True)).backward()
+    sum(
+        (memory * weight).sum() for memory, weight in zip(expected, weights, strict=True)
+    ).backward()
     for (name, parameter), (other_name, other) in zip(
         batched.named_parameters(), separate.named_parameters(), strict=True
     ):
@@ -437,6 +454,23 @@ def test_ragged_writer_batch_matches_single_writes_outputs_and_all_gradients(
             assert memory.grad.abs().sum() > 0
             torch.testing.assert_close(memory.grad, other.grad, rtol=1e-4, atol=1e-6)
     assert batched.memory_embeddings.grad.abs().sum() > 0
+
+
+@pytest.mark.parametrize("model_type", ["llama", "qwen3"])
+def test_short_writes_only_use_requested_embedding_prefix_and_retain_checkpoint_shape(model_type):
+    model = build_model(model_type)
+    randomize_adapter(model)
+    written = model.compress_batch([ids(3, 4), ids(5, 6, 7)], output_slots=[1, 2])
+    model.answer_nll(written, [ids(8), ids(9, 10)], [ids(11, 12), ids(13)]).mean().backward()
+    assert model.memory_embeddings.grad[:2].abs().sum() > 0
+    assert torch.count_nonzero(model.memory_embeddings.grad[2:]) == 0
+    state = model.trainable_state_dict()
+    assert state["memory_embeddings"].shape == (3, model.width)
+    restored = build_model(model_type)
+    restored.load_trainable_state_dict(state)
+    torch.testing.assert_close(
+        restored.compress_batch([ids(3, 4), ids(5, 6, 7)], output_slots=[1, 2]), written
+    )
 
 
 @pytest.mark.parametrize("model_type", ["llama", "qwen3"])
@@ -492,8 +526,16 @@ def test_writer_batch_rejects_invalid_contracts_before_transformer_forward():
             model.compress_batch([])
         with pytest.raises(ValueError, match="align"):
             model.compress_batch([ids(3), ids(4)], [[]])
-        with pytest.raises(ValueError, match="memory_slots"):
-            model.compress_batch([ids(3), ids(4)], [[], [torch.zeros(2, model.width)]])
+        for count in (0, model.memory_slots + 1):
+            with pytest.raises(ValueError, match="memory_slots"):
+                model.compress_batch([ids(3), ids(4)], [[], [torch.zeros(count, model.width)]])
+        with pytest.raises(ValueError, match="align"):
+            model.compress_batch([ids(3), ids(4)], output_slots=[1])
+        for invalid_count in (0, -1, 4, 1.0, True, None):
+            with pytest.raises(ValueError, match="output_slots"):
+                model.compress_batch([ids(3), ids(4)], output_slots=[1, invalid_count])
+        with pytest.raises(ValueError, match="output_slots"):
+            model.compress(ids(3), output_slots=False)
         with pytest.raises(ValueError, match="nonempty"):
             model.compress_batch([ids(3), ids()])
         with pytest.raises(ValueError, match="exceeds model window"):

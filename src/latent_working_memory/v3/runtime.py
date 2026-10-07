@@ -255,6 +255,16 @@ def read_checkpoint(path):
         "rng",
     }:
         raise ValueError("checkpoint requires exactly run, trainable, optimizer, cursor and rng")
+    objective = checkpoint["run"]["config"]["objective"]
+    if (
+        objective["method"] in DYNAMIC_METHODS
+        and objective["stage"] in {"warmup", "policy"}
+        and "append_slots" not in objective
+    ):
+        raise ValueError(
+            "dynamic QA checkpoint requires explicit objective.append_slots; "
+            "cannot infer the capacity policy from current defaults"
+        )
     return checkpoint
 
 

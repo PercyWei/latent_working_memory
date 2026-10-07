@@ -105,7 +105,7 @@ def make_config(output, stage="pretrain", init=None):
             lora_rank=2,
             lora_alpha=2,
         ),
-        ObjectiveConfig(method="memory_change", stage=stage),
+        ObjectiveConfig(method="memory_change", stage=stage, append_slots=1),
         TrainingConfig(
             dataset_dir="data/unit-fixture",
             output_dir=str(output),
@@ -143,6 +143,25 @@ def make_engine(config):
 def _run(config, engine, splits, initialization=None):
     statistics = {"source_data": {name: dataset_identity(rows) for name, rows in splits.items()}}
     return make_run(config, splits, statistics, "cpu", 1, initialization=initialization)
+
+
+@pytest.mark.parametrize("stage", ["pretrain", "warmup", "policy"])
+def test_checkpoint_requires_explicit_append_size_only_after_dynamic_pretraining(tmp_path, stage):
+    config = make_config(tmp_path / "source")
+    engine, splits = make_engine(config), make_splits()
+    result = train_loop(config, engine, splits, _run(config, engine, splits), stop_after_steps=1)
+    saved = read_checkpoint(result["checkpoint"])
+    saved["run"]["config"]["objective"]["stage"] = stage
+    del saved["run"]["config"]["objective"]["append_slots"]
+    torch.save(saved, result["checkpoint"])
+    if stage == "pretrain":
+        target = make_config(tmp_path / "target", "warmup", result["checkpoint"])
+        restored = make_engine(target)
+        load_initialization(result["checkpoint"], restored.model, target)
+        torch.testing.assert_close(restored.model.weight, engine.model.weight)
+    else:
+        with pytest.raises(ValueError, match="explicit objective.append_slots"):
+            read_checkpoint(result["checkpoint"])
 
 
 @pytest.mark.parametrize("micro_batch_size,accumulation", [(1, 2), (2, 1)])
