@@ -95,7 +95,7 @@ def _save_record(path, value):
 
 @contextmanager
 def method_tracking_run(config, run, device, api_key=None):
-    """阶段进程共享一个方法 run，继承身份及配置，已存在的 run 必须成功恢复。"""
+    """建立方法级会话，跨阶段复用；已存在的 run 必须成功恢复。"""
     root = experiment_directory(config.training)
     root.mkdir(parents=True, exist_ok=True)
     record_path = root / "experiment.json"
@@ -147,9 +147,8 @@ def method_tracking_run(config, run, device, api_key=None):
             if project != identity["project"]:
                 raise ValueError("training run URL differs from its project")
             remote = swanlab.Api(api_key=api_key).run(f"{project_path}/{identity['id']}")
-            resumed_stage = config.objective.stage in previous["stages"]
-            allowed_states = {"FINISHED", "CRASHED", "ABORTED"} if resumed_stage else {"FINISHED"}
-            if remote.state not in allowed_states:
+            # 同一会话可能在前驱阶段完成、后继阶段登记前失败；阶段衔接已由本地记录验证。
+            if remote.state not in {"FINISHED", "CRASHED", "ABORTED"}:
                 raise ValueError("SwanLab session state does not permit this stage continuation")
             remote_config = {
                 name: entry["value"] for name, entry in remote.profile["config"].items()
@@ -187,6 +186,16 @@ def method_tracking_run(config, run, device, api_key=None):
             )
         _save_record(record_path, combined)
         yield tracking
+
+
+def update_method_tracking(config, run, tracking):
+    """验证阶段衔接并更新同一活跃 run，不结束会话或重新访问云端身份。"""
+    record_path = experiment_directory(config.training) / "experiment.json"
+    previous = json.loads(record_path.read_text(encoding="utf-8"))
+    combined = _experiment_config(config, run, previous)
+    if tracking is not None:
+        tracking.config.update(combined)
+    _save_record(record_path, combined)
 
 
 def _loss_name(stage):

@@ -62,6 +62,8 @@ GPU 任务平台使用同一命令，将脚本位置替换为绝对路径即可�
 
 各档均执行完整方法流程，QA 保留整条轨迹。先用 `smoke` 检查显存、日志和 SwanLab 展示，再切换 `full`；正式运行重新训练，不自动沿用试跑权重。
 
+同一方法只加载一次模型：ICAE 的 AE＋LM → QA、动态方法的动作预热 → 策略训练在同一组训练进程中连续完成，阶段切换时保留模型权重、重置优化器。共享预训练和不同方法分别启动；最终评估独立运行。
+
 用 `--method` 选择运行对象：
 
 | 值 | 执行内容 |
@@ -130,7 +132,7 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 `full`、`smoke`、`pilot` 的产物统一位于 `artifacts/v3/<run-id>/`：
 
 ```text
-plan/<method>/                运行计划、日志、result.json
+plan/<method>/                运行计划、各方法的训练日志、result.json
 train/<run-name>/<stage>/     配置、训练指标、checkpoints/
 eval/<run-name>/<stage>/      评估汇总与逐题结果
 compare/<method>/             多方法质量—容量比较
@@ -138,4 +140,4 @@ compare/<method>/             多方法质量—容量比较
 
 SwanLab 中，一个完整方法对应一个 run，训练、验证和最终评估共用；共享预训练单独记录，因此 `all` 共六个 runs。正式名称为 `<method>-k64_<run-id>`，试跑为 `<method>-k64_<mode>_<run-id>`，其中 `<mode>` 为 `smoke` 或 `pilot`。两个动态方法与共享预训练使用相同后缀关联来源；group 默认直接使用 `run-id`，`--group` 可覆盖。
 
-相同 `run-id` 的不同档位共用 `plan/<method>/`；试跑与正式训练作为独立运行时，使用不同 `run-id` 或省略该参数自动生成。重复启动已有方法目录会报错；阶段失败时查看 `plan/<method>/result.json` 和对应日志。
+相同 `run-id` 的不同档位共用 `plan/<method>/`；试跑与正式训练作为独立运行时，使用不同 `run-id` 或省略该参数自动生成。重复启动已有方法目录会报错；失败时查看 `plan/<method>/result.json` 和 `<run-name>-train.log`，同一方法的各阶段共用一个训练日志。

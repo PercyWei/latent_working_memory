@@ -1,26 +1,36 @@
-"""启动器使用的阶段训练 worker；实验入口为 v3.gpu_job。"""
+"""同一方法的连续阶段训练 worker；实验入口为 v3.gpu_job。"""
 
 import argparse
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 
+import torch.distributed as dist
 from transformers import set_seed
 
 from latent_working_memory.v3.config import load_experiment
 from latent_working_memory.v3.engine import TokenMemoryEngine, initialize_device
 from latent_working_memory.v3.objective import TokenMemoryTask
 from latent_working_memory.v3.runtime import (
+    _tracking_context,
+    initialization_record,
     load_codec,
     load_initialization,
     load_splits,
     make_run,
+    prepare_training,
     read_checkpoint,
     train_loop,
 )
+from latent_working_memory.v3.tracking import experiment_directory, update_method_tracking
 
 
-def run_training(args):
-    config = load_experiment(args.config)
+def training_configs(args):
+    configs = [load_experiment(path) for path in args.config]
+    if len(configs) > 1 and any(
+        value is not None for value in (args.dataset_dir, args.output_dir, args.init_checkpoint)
+    ):
+        raise ValueError("multi-stage training takes data, outputs and initialization from configs")
     training = {
         key: str(value)
         for key, value in {
@@ -42,10 +52,36 @@ def run_training(args):
             if value is not None
         }
     )
-    config = replace(
-        config,
-        training=replace(config.training, **training),
-    )
+    configs = [replace(config, training=replace(config.training, **training)) for config in configs]
+    first = configs[0]
+    if len(configs) > 1:
+        stages = {
+            "icae_single": ["pretrain", "qa"],
+            "icae_multi": ["pretrain", "qa"],
+            "memory_change": ["warmup", "policy"],
+            "information_loss": ["warmup", "policy"],
+        }
+        if [config.objective.stage for config in configs] != stages.get(first.objective.method):
+            raise ValueError("configs must contain the ordered stages of one method")
+        for config in configs[1:]:
+            if (
+                config.model != first.model
+                or config.objective.method != first.objective.method
+                or experiment_directory(config.training) != experiment_directory(first.training)
+                or any(
+                    getattr(config.training, name) != getattr(first.training, name)
+                    for name in ("experiment_id", "swanlab_project", "group", "tags")
+                )
+            ):
+                raise ValueError("continuous stages must share their model and method identity")
+            if config.training.init_checkpoint is not None:
+                raise ValueError("later stages inherit the preceding stage automatically")
+    return configs
+
+
+def run_training(args):
+    configs = training_configs(args)
+    config = configs[0]
     if args.resume is None and config.objective.stage in {"warmup", "qa", "policy"}:
         if config.training.init_checkpoint is None:
             raise ValueError(
@@ -66,29 +102,71 @@ def run_training(args):
         initialization = previous["run"]["initialization"]
     elif config.training.init_checkpoint is not None:
         initialization = load_initialization(config.training.init_checkpoint, codec, config)
-    splits, statistics = load_splits(config, tokenizer)
+    del previous
     model = TokenMemoryTask(codec, tokenizer, config.objective)
     engine = TokenMemoryEngine(model, config.training, device)
     engine.initialize()
-    run = make_run(
-        config,
-        splits,
-        statistics,
-        device,
-        engine.world_size,
-        resolved_model_revision=getattr(
-            codec.language_model.get_base_model().config, "_commit_hash", None
-        ),
-        initialization=initialization,
-    )
-    return train_loop(
-        config, engine, splits, run, resume=args.resume, stop_after_steps=args.stop_after_steps
-    )
+    result, run = None, None
+    with ExitStack() as stack:
+        for index, config in enumerate(configs):
+            if index:
+                config = replace(
+                    config,
+                    training=replace(config.training, init_checkpoint=result["checkpoint"]),
+                )
+                initialization = initialization_record(
+                    result["checkpoint"], run, result["completed_steps"], config
+                )
+                # 各阶段使用自身 seed；不再通过重建模型间接消耗随机数。
+                set_seed(config.training.seed)
+                model.cfg = config.objective
+                engine.reset_optimizer(config.training)
+            splits, statistics = load_splits(config, tokenizer)
+            run = make_run(
+                config,
+                splits,
+                statistics,
+                device,
+                engine.world_size,
+                resolved_model_revision=getattr(
+                    codec.language_model.get_base_model().config, "_commit_hash", None
+                ),
+                initialization=initialization,
+            )
+            cursor, checkpoint_path = prepare_training(
+                config,
+                engine,
+                splits,
+                run,
+                resume=args.resume if index == 0 else None,
+                stop_after_steps=args.stop_after_steps,
+            )
+            if index == 0:
+                tracking = stack.enter_context(_tracking_context(config, engine, run))
+            elif engine.rank == 0:
+                update_method_tracking(config, run, tracking)
+            if engine.rank == 0:
+                print(f"Starting {config.objective.method}/{config.objective.stage}", flush=True)
+            result = train_loop(
+                config,
+                engine,
+                splits,
+                run,
+                cursor,
+                checkpoint_path,
+                stop_after_steps=args.stop_after_steps,
+                tracking=tracking,
+            )
+            # 下一阶段读取来源记录前，确保 rank 0 已写完结果与阶段指标。
+            if engine.world_size > 1:
+                dist.barrier()
+            del splits, statistics
+    return result
 
 
-def main():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--config", type=Path, nargs="+", required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--dataset-dir", type=Path)
@@ -103,7 +181,11 @@ def main():
     parser.add_argument(
         "--gradient-accumulation-steps", type=int, help="每次参数更新累积的 microbatch 数"
     )
-    run_training(parser.parse_args())
+    return parser.parse_args(argv)
+
+
+def main():
+    run_training(parse_args())
 
 
 if __name__ == "__main__":

@@ -113,7 +113,9 @@ bash /data/zhangdw12/percyw/latent_working_memory/src/latent_working_memory/v3/s
 
 SwanLab 以一个完整方法为一个 run，阶段间累计 optimizer step。ICAE 的 pretrain 与 QA 共用 run；动态方法的 warmup 与 policy 共用 run，其步数从自身 warmup 开始，不包含共享预训练；AutoCompressors 使用一个 LM run。共享预训练单独记为 `shared-pretrain-k64_<run-id>`，因此一次 `all` 完整流程共六个 run。正式方法名为 `<method>-k64_<run-id>`，试跑方法名为 `<method>-k64_<mode>_<run-id>`，其中 `<mode>` 为 `smoke` 或 `pilot`，共享预训练遵循同一命名规则。
 
-阶段由不同训练进程执行，前一进程 finish 后，下一进程 resume 同一 SwanLab ID，页面仍显示一个 run。跨阶段只继承 LoRA 与 gist embeddings，optimizer 重新初始化；checkpoint 仍分阶段保存在 `train/<run-name>/<stage>/checkpoints/`。来源 checkpoint 的准确路径、step、SwanLab ID 和 URL 记录在 config 中；共享来源以这些记录为准。中断恢复使用内部训练模块的 `--resume` 与该阶段保存的配置，沿用原目录、卡数及批处理设置。
+同一方法的训练阶段由同一组进程连续执行，复用模型、DDP 和 SwanLab 会话。切换时保留 LoRA 与 gist embeddings，重置 optimizer 和阶段内步数，按新阶段配置切换数据、目标及 seed；累计 optimizer step 连续。共享预训练与不同方法分别启动，最终评估独立执行。
+
+checkpoint 仍分阶段保存在 `train/<run-name>/<stage>/checkpoints/`，来源路径、step、SwanLab ID 和 URL 记录在 config 中。中断恢复使用内部训练模块的 `--resume` 与该阶段保存的 `config.json`，沿用原目录、卡数及批处理设置。
 
 ## 评估与产物
 

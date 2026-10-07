@@ -22,13 +22,7 @@ class TokenMemoryEngine(BaseEngine):
     def __init__(self, model, config, device):
         self.model, self.config, self.device = model, config, torch.device(device)
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
-        self.global_batch_size = config.global_batch_size(self.world_size)
         self.rank = dist.get_rank() if dist.is_initialized() else 0
-        self.optimizer_config = FSDPOptimizerConfig(
-            lr=config.learning_rate,
-            weight_decay=config.weight_decay,
-            clip_grad=config.gradient_clip,
-        )
 
     def initialize(self):
         self.parameters = [
@@ -43,6 +37,18 @@ class TokenMemoryEngine(BaseEngine):
                 find_unused_parameters=True,
                 gradient_as_bucket_view=True,
             )
+        self.reset_optimizer(self.config)
+
+    def reset_optimizer(self, config):
+        """阶段切换保留模型与 DDP，只重置梯度、优化器和阶段训练设置。"""
+        self.model.zero_grad(set_to_none=True)
+        self.config = config
+        self.global_batch_size = config.global_batch_size(self.world_size)
+        self.optimizer_config = FSDPOptimizerConfig(
+            lr=config.learning_rate,
+            weight_decay=config.weight_decay,
+            clip_grad=config.gradient_clip,
+        )
         self.optimizer = build_optimizer(self.parameters, self.optimizer_config)
 
     @property

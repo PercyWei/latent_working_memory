@@ -1,8 +1,9 @@
-"""GPU 分阶段任务编排：终端与网站共用入口控制试跑规模和完整实验。"""
+"""GPU 实验编排：同一方法连续训练，终端与网站共用运行入口。"""
 
 import argparse
 from dataclasses import dataclass, replace
 from datetime import datetime
+from itertools import groupby
 import json
 import os
 from pathlib import Path
@@ -289,7 +290,7 @@ def build_jobs(args):
     return directory, level, jobs
 
 
-def training_command(job, gpu_count, max_steps):
+def training_command(jobs, gpu_count, max_steps):
     command = [
         sys.executable,
         "-m",
@@ -299,7 +300,7 @@ def training_command(job, gpu_count, max_steps):
         "-m",
         "latent_working_memory.v3.train",
         "--config",
-        str(job.config_path),
+        *(str(job.config_path) for job in jobs),
         "--device",
         "cuda",
     ]
@@ -361,6 +362,10 @@ def execute(command, environment, log_path):
 
 def run_job(args):
     directory, level, jobs = build_jobs(args)
+    training_runs = [
+        list(stages)
+        for _, stages in groupby(jobs, key=lambda job: job.config.training.experiment_dir)
+    ]
     gpu_count = len(args.gpus.split(","))
     invocation = args.method.replace("_", "-")
     plan_directory = directory / "plan" / invocation
@@ -394,9 +399,19 @@ def run_job(args):
                     "global_batch_size": job.config.training.global_batch_size(gpu_count),
                 },
                 "config": job.config.to_dict(),
-                "command": training_command(job, gpu_count, level["max_steps"]),
             }
             for job in jobs
+        ],
+        "training_runs": [
+            {
+                "stages": [job.key for job in stages],
+                "command": training_command(stages, gpu_count, level["max_steps"]),
+                "log_path": str(
+                    plan_directory
+                    / f"{Path(stages[0].config.training.experiment_dir).name}-train.log"
+                ),
+            }
+            for stages in training_runs
         ],
     }
     print(json.dumps(plan, ensure_ascii=False, indent=2), flush=True)
@@ -447,37 +462,45 @@ def run_job(args):
     evaluation_environment = dict(environment, CUDA_VISIBLE_DEVICES=args.gpus.split(",")[0])
     checkpoints, summaries = {}, []
     try:
-        for job in jobs:
-            if job.initialize_from is not None:
-                job.config = replace(
-                    job.config,
+        for stages, training_run in zip(training_runs, plan["training_runs"], strict=True):
+            first = stages[0]
+            if first.initialize_from is not None:
+                first.config = replace(
+                    first.config,
                     training=replace(
-                        job.config.training, init_checkpoint=str(checkpoints[job.initialize_from])
+                        first.config.training,
+                        init_checkpoint=str(checkpoints[first.initialize_from]),
                     ),
                 )
-            save_json(job.config_path, job.config.to_dict())
+            for job in stages:
+                save_json(job.config_path, job.config.to_dict())
             execute(
-                training_command(job, gpu_count, level["max_steps"]),
+                training_run["command"],
                 environment,
-                plan_directory / f"{job.key}-train.log",
+                Path(training_run["log_path"]),
             )
-            result = json.loads(
-                (Path(job.config.training.output_dir) / "training-result.json").read_text()
-            )
-            checkpoint = Path(result["checkpoint"])
-            if not checkpoint.is_file():
-                raise FileNotFoundError(
-                    f"training did not save its reported checkpoint: {checkpoint}"
+            for job in stages:
+                result = json.loads(
+                    (Path(job.config.training.output_dir) / "training-result.json").read_text()
                 )
-            checkpoints[job.key] = checkpoint
-            if job.evaluate:
-                output = evaluation_directories[job.key]
-                execute(
-                    evaluation_command(args, level, checkpoint, output),
-                    evaluation_environment,
-                    plan_directory / f"{job.key}-eval.log",
+                checkpoint = Path(result["checkpoint"])
+                if not checkpoint.is_file():
+                    raise FileNotFoundError(
+                        f"training did not save its reported checkpoint: {checkpoint}"
+                    )
+                save_json(
+                    job.config_path,
+                    json.loads((Path(job.config.training.output_dir) / "config.json").read_text()),
                 )
-                summaries.append(output / "summary.json")
+                checkpoints[job.key] = checkpoint
+                if job.evaluate:
+                    output = evaluation_directories[job.key]
+                    execute(
+                        evaluation_command(args, level, checkpoint, output),
+                        evaluation_environment,
+                        plan_directory / f"{job.key}-eval.log",
+                    )
+                    summaries.append(output / "summary.json")
         if len(summaries) > 1:
             execute(
                 [
@@ -492,6 +515,17 @@ def run_job(args):
                 plan_directory / "compare.log",
             )
     except Exception as error:
+        # 同一训练进程可能在后续阶段失败，仍记录它已完成阶段的产物。
+        for job in jobs:
+            result_path = Path(job.config.training.output_dir) / "training-result.json"
+            if job.key not in checkpoints and result_path.is_file():
+                checkpoint = Path(json.loads(result_path.read_text())["checkpoint"])
+                if checkpoint.is_file():
+                    save_json(
+                        job.config_path,
+                        json.loads((result_path.parent / "config.json").read_text()),
+                    )
+                    checkpoints[job.key] = checkpoint
         save_json(
             plan_directory / "result.json",
             {

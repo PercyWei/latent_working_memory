@@ -7,8 +7,8 @@ import numpy as np
 import torch
 
 from latent_working_memory.v3 import runtime, tracking
-from latent_working_memory.v3.runtime import load_initialization, train_loop
-from latent_working_memory.v3.tracking import method_tracking_run
+from latent_working_memory.v3.runtime import load_initialization, prepare_training, train_loop
+from latent_working_memory.v3.tracking import method_tracking_run, update_method_tracking
 from latent_working_memory.v4.checkpoint import capture_rng
 from .test_runtime import experiment_config, make_engine, make_splits, _run
 import json
@@ -123,6 +123,7 @@ def recorded_swanlab(monkeypatch):
             self.record = record
             self.id = record["id"]
             self.url = record["url"]
+            self.config = record["config"]
 
         def __enter__(self):
             return self
@@ -206,7 +207,11 @@ def run_stage(config, steps, prefix="qa"):
         else None
     )
     run = _run(config, engine, data, initialization)
-    result = train_loop(config, engine, data, run, stop_after_steps=steps)
+    cursor, checkpoint = prepare_training(config, engine, data, run, stop_after_steps=steps)
+    with runtime._tracking_context(config, engine, run) as active:
+        result = train_loop(
+            config, engine, data, run, cursor, checkpoint, stop_after_steps=steps, tracking=active
+        )
     return result, run
 
 
@@ -259,6 +264,106 @@ def test_two_dynamic_methods_share_one_source_and_keep_one_run_per_method(
     assert sources[0]["step"] == 2
 
 
+@pytest.mark.parametrize("online", [False, True])
+def test_live_method_run_continues_two_stages_without_reinitializing(
+    tmp_path, recorded_swanlab, online
+):
+    root = tmp_path / "icae-single-k64_trial"
+    config = online_config(root, "pretrain", "icae_single")
+    if not online:
+        config = replace(config, training=replace(config.training, swanlab_project=None))
+    engine = make_engine(config)
+    pretrain_data = make_splits("pretrain")
+    run = _run(config, engine, pretrain_data)
+    cursor, checkpoint = prepare_training(config, engine, pretrain_data, run, stop_after_steps=2)
+    with runtime._tracking_context(config, engine, run) as active:
+        result = train_loop(
+            config,
+            engine,
+            pretrain_data,
+            run,
+            cursor,
+            checkpoint,
+            stop_after_steps=2,
+            tracking=active,
+        )
+        before = json.loads((root / "experiment.json").read_text())
+        target = online_config(root, "qa", "icae_single", result["checkpoint"])
+        if not online:
+            target = replace(target, training=replace(target.training, swanlab_project=None))
+        qa_data = make_splits("qa")
+        initialization = load_initialization(result["checkpoint"], engine.model, target)
+        qa_run = _run(target, engine, qa_data, initialization)
+        cursor, checkpoint = prepare_training(target, engine, qa_data, qa_run, stop_after_steps=2)
+        update_method_tracking(target, qa_run, active)
+        combined = json.loads((root / "experiment.json").read_text())
+        assert list(combined["stages"]) == ["pretrain", "qa"]
+        assert combined["stages"]["pretrain"] == before["stages"]["pretrain"]
+        assert recorded_swanlab.api_reads == []
+        assert len(recorded_swanlab.initializations) == int(online)
+        if online:
+            assert active.record["state"] == "RUNNING"
+            assert active.config == combined
+        result = train_loop(
+            target, engine, qa_data, qa_run, cursor, checkpoint, stop_after_steps=2, tracking=active
+        )
+        assert result["global_step"] == 4
+    if online:
+        identity = json.loads((root / "swanlab.json").read_text())
+        remote = recorded_swanlab.runs[identity["id"]]
+        assert remote["state"] == "FINISHED"
+        assert remote["config"] == combined
+        assert [step for step, values in remote["logs"] if "train/ae_lm_loss" in values] == [1, 2]
+        assert [step for step, values in remote["logs"] if "train/qa_loss" in values] == [3, 4]
+        definitions = {name for name, _ in remote["definitions"]}
+        assert {"train/ae_lm_loss", "train/qa_loss"} <= definitions
+        boundaries = [
+            values["train/stages"] for _, values in remote["logs"] if "train/stages" in values
+        ]
+        assert "pretrain" in boundaries[-1].html_content
+        assert "qa" in boundaries[-1].html_content
+    else:
+        assert not (root / "swanlab.json").exists()
+
+
+@pytest.mark.parametrize("invalid", ["method", "model", "checkpoint", "step_offset"])
+def test_live_stage_update_rejects_invalid_transition_before_mutation(
+    tmp_path, recorded_swanlab, invalid
+):
+    root = tmp_path / "icae-single-k64_trial"
+    config = online_config(root, "pretrain", "icae_single")
+    engine, data = make_engine(config), make_splits("pretrain")
+    run = _run(config, engine, data)
+    cursor, checkpoint = prepare_training(config, engine, data, run, stop_after_steps=1)
+    with runtime._tracking_context(config, engine, run) as active:
+        result = train_loop(
+            config, engine, data, run, cursor, checkpoint, stop_after_steps=1, tracking=active
+        )
+        target = online_config(root, "qa", "icae_single", result["checkpoint"])
+        initialization = load_initialization(result["checkpoint"], engine.model, target)
+        qa_run = _run(target, engine, make_splits("qa"), initialization)
+        before = (root / "experiment.json").read_bytes()
+        remote_before = deepcopy(active.config)
+        if invalid == "method":
+            target = replace(target, objective=replace(target.objective, method="icae_multi"))
+        elif invalid == "model":
+            qa_run["config"]["model"]["memory_slots"] += 1
+        elif invalid == "checkpoint":
+            qa_run["initialization"]["checkpoint"] = str(tmp_path / "unrelated.pt")
+        else:
+            qa_run["step_offset"] = 0
+        expected = (
+            "identity or model" if invalid in {"method", "model"} else "last completed checkpoint"
+        )
+        with pytest.raises(ValueError, match=expected):
+            update_method_tracking(target, qa_run, active)
+        assert (root / "experiment.json").read_bytes() == before
+        assert active.config == remote_before
+        assert active.record["state"] == "RUNNING"
+        assert recorded_swanlab.api_reads == []
+        assert len(recorded_swanlab.initializations) == 1
+
+
 @pytest.mark.parametrize(
     "state,allowed",
     [
@@ -278,23 +383,44 @@ def test_same_stage_checkpoint_resume_obeys_session_state(
     identity = json.loads((root / "swanlab.json").read_text())
     recorded_swanlab.runs[identity["id"]]["state"] = state
     engine = make_engine(config)
+    data = make_splits()
+    cursor, checkpoint = prepare_training(
+        config, engine, data, run, resume=result["checkpoint"], stop_after_steps=2
+    )
     if not allowed:
         with pytest.raises(ValueError, match="session state"):
-            train_loop(
-                config, engine, make_splits(), run, resume=result["checkpoint"], stop_after_steps=2
-            )
+            with runtime._tracking_context(config, engine, run) as active:
+                train_loop(
+                    config,
+                    engine,
+                    data,
+                    run,
+                    cursor,
+                    checkpoint,
+                    stop_after_steps=2,
+                    tracking=active,
+                )
         assert len(recorded_swanlab.initializations) == 1
         return
-    result = train_loop(
-        config, engine, make_splits(), run, resume=result["checkpoint"], stop_after_steps=2
-    )
+    with runtime._tracking_context(config, engine, run) as active:
+        result = train_loop(
+            config,
+            engine,
+            data,
+            run,
+            cursor,
+            checkpoint,
+            stop_after_steps=2,
+            tracking=active,
+        )
     assert result["global_step"] == 2
     assert recorded_swanlab.initializations[-1]["id"] == identity["id"]
     assert recorded_swanlab.initializations[-1]["resume"] == "must"
 
 
-def test_cross_stage_requires_finished_and_preserves_config_on_rejection(
-    tmp_path, recorded_swanlab
+@pytest.mark.parametrize("state", ["RUNNING", "OFFLINE"])
+def test_cross_stage_rejects_active_or_offline_session_without_changing_config(
+    tmp_path, recorded_swanlab, state
 ):
     root = tmp_path / "icae-single-k64_trial"
     config = online_config(root, "pretrain", "icae_single")
@@ -302,7 +428,7 @@ def test_cross_stage_requires_finished_and_preserves_config_on_rejection(
     before = (root / "experiment.json").read_bytes()
     identity = json.loads((root / "swanlab.json").read_text())
     remote = recorded_swanlab.runs[identity["id"]]
-    remote["state"] = "CRASHED"
+    remote["state"] = state
     target = online_config(root, "qa", "icae_single", result["checkpoint"])
     engine = make_engine(target)
     initialization = load_initialization(result["checkpoint"], engine.model, target)
@@ -316,6 +442,37 @@ def test_cross_stage_requires_finished_and_preserves_config_on_rejection(
     with method_tracking_run(target, run, engine.device, api_key="test-api-key"):
         pass
     assert list(remote["config"]["stages"]) == ["pretrain", "qa"]
+
+
+@pytest.mark.parametrize("state", ["CRASHED", "ABORTED"])
+def test_cross_stage_recovers_failure_before_successor_registration(
+    tmp_path, recorded_swanlab, state
+):
+    root = tmp_path / "icae-single-k64_trial"
+    config = online_config(root, "pretrain", "icae_single")
+    engine, data = make_engine(config), make_splits("pretrain")
+    run = _run(config, engine, data)
+    cursor, checkpoint = prepare_training(config, engine, data, run, stop_after_steps=1)
+    with pytest.raises(RuntimeError, match="QA data unavailable"):
+        with runtime._tracking_context(config, engine, run) as active:
+            result = train_loop(
+                config, engine, data, run, cursor, checkpoint, stop_after_steps=1, tracking=active
+            )
+            raise RuntimeError("QA data unavailable before stage registration")
+    identity = json.loads((root / "swanlab.json").read_text())
+    remote = recorded_swanlab.runs[identity["id"]]
+    assert remote["state"] == "CRASHED"
+    assert list(remote["config"]["stages"]) == ["pretrain"]
+    assert list(json.loads((root / "experiment.json").read_text())["stages"]) == ["pretrain"]
+    remote["state"] = state
+    target = online_config(root, "qa", "icae_single", result["checkpoint"])
+    resumed, _ = run_stage(target, 1)
+    assert resumed["global_step"] == 2
+    assert remote["state"] == "FINISHED"
+    assert list(remote["config"]["stages"]) == ["pretrain", "qa"]
+    assert len(recorded_swanlab.runs) == 1
+    assert recorded_swanlab.initializations[-1]["id"] == identity["id"]
+    assert recorded_swanlab.initializations[-1]["resume"] == "must"
 
 
 def test_method_manifest_rejects_source_replacement_and_step_rewind_without_cloud_changes(

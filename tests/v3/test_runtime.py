@@ -33,10 +33,27 @@ from latent_working_memory.v3.runtime import (
     make_run,
     read_checkpoint,
     save_checkpoint,
-    train_loop,
+    train_loop as stage_train_loop,
     validate_cursor,
 )
 from .test_objective import trajectory
+
+
+def train_loop(config, engine, splits, run, resume=None, stop_after_steps=None):
+    cursor, checkpoint_path = runtime.prepare_training(
+        config, engine, splits, run, resume=resume, stop_after_steps=stop_after_steps
+    )
+    with runtime._tracking_context(config, engine, run) as tracking:
+        return stage_train_loop(
+            config,
+            engine,
+            splits,
+            run,
+            cursor,
+            checkpoint_path,
+            tracking=tracking,
+            stop_after_steps=stop_after_steps,
+        )
 
 
 @dataclass(frozen=True)

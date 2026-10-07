@@ -262,12 +262,22 @@ def read_checkpoint(path):
 def load_initialization(path, model, config):
     """阶段切换只载入新增权重，不继承优化器、训练游标或随机状态。"""
     checkpoint = read_checkpoint(path)
-    previous = checkpoint["run"]["config"]
+    initialization = initialization_record(
+        path, checkpoint["run"], checkpoint["cursor"]["step"], config
+    )
+    model.load_trainable_state_dict(checkpoint["trainable"])
+    return initialization
+
+
+def initialization_record(path, previous_run, step, config):
+    """校验并记录阶段来源；连续训练直接使用内存记录，无须重读 checkpoint。"""
+    previous = previous_run["config"]
     previous_model = ModelConfig(**previous["model"])
     # 激活重算是执行设置，阶段初始化可复用启用该设置前的训练权重。
-    if replace(
-        previous_model, gradient_checkpointing=config.model.gradient_checkpointing
-    ) != config.model:
+    if (
+        replace(previous_model, gradient_checkpointing=config.model.gradient_checkpointing)
+        != config.model
+    ):
         raise ValueError("initialization model configuration differs from the current model")
     required_stages = {
         "warmup": {"pretrain"},
@@ -295,22 +305,21 @@ def load_initialization(path, model, config):
             "run_id": identity["id"] if identity is not None else None,
             "run_url": identity["url"] if identity is not None else None,
             "checkpoint": str(Path(path).resolve()),
-            "step": checkpoint["cursor"]["step"],
+            "step": step,
         }
     else:
-        pretraining = checkpoint["run"]["pretraining"]
+        pretraining = previous_run["pretraining"]
     _validate_pretraining_identity(config, pretraining)
-    model.load_trainable_state_dict(checkpoint["trainable"])
     return {
         "checkpoint": str(Path(path).resolve()),
         "method": previous["objective"]["method"],
         "stage": previous["objective"]["stage"],
-        "step": checkpoint["cursor"]["step"],
-        "global_step": checkpoint["run"]["step_offset"] + checkpoint["cursor"]["step"],
+        "step": step,
+        "global_step": previous_run["step_offset"] + step,
         "experiment_dir": str(root),
         "experiment_id": previous_training.experiment_id,
-        "resolved_model_revision": checkpoint["run"]["resolved_model_revision"],
-        "pretraining_sources": checkpoint["run"]["pretraining_sources"],
+        "resolved_model_revision": previous_run["resolved_model_revision"],
+        "pretraining_sources": previous_run["pretraining_sources"],
         "pretraining": pretraining,
     }
 
@@ -418,8 +427,8 @@ def _tracking_context(config, engine, run):
     )
 
 
-def train_loop(config, engine, splits, run, resume=None, stop_after_steps=None):
-    """执行确定的全局 batch 日程；optimizer step 是唯一持久化训练游标。"""
+def prepare_training(config, engine, splits, run, resume=None, stop_after_steps=None):
+    """先校验并准备阶段目录或恢复进度，再开启／更新方法级跟踪会话。"""
     settings = config.training
     train, dev = splits["train"], splits["dev"]
     if not train or not dev:
@@ -459,79 +468,86 @@ def train_loop(config, engine, splits, run, resume=None, stop_after_steps=None):
             metrics_path.touch()
     if engine.world_size > 1:
         dist.barrier()
+    return cursor, checkpoint_path
 
+
+def train_loop(
+    config, engine, splits, run, cursor, checkpoint_path=None, stop_after_steps=None, tracking=None
+):
+    """执行已准备阶段的全局 batch 日程，跟踪会话由方法训练入口管理。"""
+    settings = config.training
+    train, dev = splits["train"], splits["dev"]
+    output = Path(settings.output_dir)
+    metrics_path = output / "metrics.jsonl"
     total_steps = settings.epochs * math.ceil(len(train) / engine.global_batch_size)
-    with _tracking_context(config, engine, run) as tracking:
-        if tracking is not None:
-            configure_training_metrics(tracking, config.objective.stage)
-        for epoch in range(cursor["epoch"], settings.epochs):
-            ordered = epoch_order(train, settings.seed, epoch)
-            for start in range(cursor["sample_offset"], len(ordered), engine.global_batch_size):
-                if stop_after_steps is not None and cursor["step"] >= stop_after_steps:
-                    break
-                batch = ordered[start : start + engine.global_batch_size]
-                if engine.device.type == "cuda":
-                    torch.cuda.synchronize(engine.device)
-                    torch.cuda.reset_peak_memory_stats(engine.device)
-                started = time.perf_counter()
-                metrics = engine.step(batch, epoch=epoch)
-                if engine.device.type == "cuda":
-                    torch.cuda.synchronize(engine.device)
-                resources = {"optimizer_step_seconds": time.perf_counter() - started}
-                if engine.device.type == "cuda":
-                    resources["peak_memory_allocated_bytes"] = torch.cuda.max_memory_allocated(
-                        engine.device
-                    )
-                if engine.world_size > 1:
-                    maximum = torch.tensor(
-                        list(resources.values()), device=engine.device, dtype=torch.float64
-                    )
-                    dist.all_reduce(maximum, op=dist.ReduceOp.MAX)
-                    resources = dict(zip(resources, maximum.tolist(), strict=True))
-                cursor["step"] += 1
-                cursor["sample_visits"] += len(batch)
-                epoch_end = start + len(batch) == len(ordered)
-                cursor["epoch"] = epoch + int(epoch_end)
-                cursor["sample_offset"] = 0 if epoch_end else start + len(batch)
-                step = cursor["step"]
-                stopping = stop_after_steps is not None and step >= stop_after_steps
-                record = {
-                    "step": step,
-                    "global_step": run["step_offset"] + step,
-                    "stage": config.objective.stage,
-                    "epoch": epoch + 1,
-                    **{
-                        f"train/{key}": value for key, value in metrics.items() if value is not None
-                    },
-                    **{f"resources/{key}": value for key, value in resources.items()},
-                }
-                if step % settings.eval_every == 0 or epoch_end or stopping:
-                    development = evaluate_split(engine, dev, epoch=epoch)
-                    record.update({f"dev/{key}": value for key, value in development.items()})
-                if engine.rank == 0:
-                    with metrics_path.open("a", encoding="utf-8") as stream:
-                        text = json.dumps(record, ensure_ascii=False, allow_nan=False)
-                        stream.write(text + "\n")
-                        print(text, flush=True)
-                    if tracking is not None:
-                        tracking.log(training_metrics(record), step=record["global_step"])
-                if step % settings.save_every == 0 or epoch_end or stopping:
-                    checkpoint_path = output / "checkpoints" / f"step-{step:06d}.pt"
-                    save_checkpoint(checkpoint_path, engine, run, cursor)
+    if tracking is not None:
+        configure_training_metrics(tracking, config.objective.stage)
+    for epoch in range(cursor["epoch"], settings.epochs):
+        ordered = epoch_order(train, settings.seed, epoch)
+        for start in range(cursor["sample_offset"], len(ordered), engine.global_batch_size):
             if stop_after_steps is not None and cursor["step"] >= stop_after_steps:
                 break
-        result = {
-            "complete": cursor["epoch"] == settings.epochs,
-            "completed_steps": cursor["step"],
-            "global_step": run["step_offset"] + cursor["step"],
-            "total_steps": total_steps,
-            "completed_epochs": cursor["epoch"],
-            "sample_visits": cursor["sample_visits"],
-            "stop_after_steps": stop_after_steps,
-            "checkpoint": str(checkpoint_path),
-        }
-        if engine.rank == 0:
-            write_json(output / "training-result.json", result)
-            if tracking is not None:
-                tracking.log({"train/stages": stage_progress(config)}, step=result["global_step"])
+            batch = ordered[start : start + engine.global_batch_size]
+            if engine.device.type == "cuda":
+                torch.cuda.synchronize(engine.device)
+                torch.cuda.reset_peak_memory_stats(engine.device)
+            started = time.perf_counter()
+            metrics = engine.step(batch, epoch=epoch)
+            if engine.device.type == "cuda":
+                torch.cuda.synchronize(engine.device)
+            resources = {"optimizer_step_seconds": time.perf_counter() - started}
+            if engine.device.type == "cuda":
+                resources["peak_memory_allocated_bytes"] = torch.cuda.max_memory_allocated(
+                    engine.device
+                )
+            if engine.world_size > 1:
+                maximum = torch.tensor(
+                    list(resources.values()), device=engine.device, dtype=torch.float64
+                )
+                dist.all_reduce(maximum, op=dist.ReduceOp.MAX)
+                resources = dict(zip(resources, maximum.tolist(), strict=True))
+            cursor["step"] += 1
+            cursor["sample_visits"] += len(batch)
+            epoch_end = start + len(batch) == len(ordered)
+            cursor["epoch"] = epoch + int(epoch_end)
+            cursor["sample_offset"] = 0 if epoch_end else start + len(batch)
+            step = cursor["step"]
+            stopping = stop_after_steps is not None and step >= stop_after_steps
+            record = {
+                "step": step,
+                "global_step": run["step_offset"] + step,
+                "stage": config.objective.stage,
+                "epoch": epoch + 1,
+                **{f"train/{key}": value for key, value in metrics.items() if value is not None},
+                **{f"resources/{key}": value for key, value in resources.items()},
+            }
+            if step % settings.eval_every == 0 or epoch_end or stopping:
+                development = evaluate_split(engine, dev, epoch=epoch)
+                record.update({f"dev/{key}": value for key, value in development.items()})
+            if engine.rank == 0:
+                with metrics_path.open("a", encoding="utf-8") as stream:
+                    text = json.dumps(record, ensure_ascii=False, allow_nan=False)
+                    stream.write(text + "\n")
+                    print(text, flush=True)
+                if tracking is not None:
+                    tracking.log(training_metrics(record), step=record["global_step"])
+            if step % settings.save_every == 0 or epoch_end or stopping:
+                checkpoint_path = output / "checkpoints" / f"step-{step:06d}.pt"
+                save_checkpoint(checkpoint_path, engine, run, cursor)
+        if stop_after_steps is not None and cursor["step"] >= stop_after_steps:
+            break
+    result = {
+        "complete": cursor["epoch"] == settings.epochs,
+        "completed_steps": cursor["step"],
+        "global_step": run["step_offset"] + cursor["step"],
+        "total_steps": total_steps,
+        "completed_epochs": cursor["epoch"],
+        "sample_visits": cursor["sample_visits"],
+        "stop_after_steps": stop_after_steps,
+        "checkpoint": str(checkpoint_path),
+    }
+    if engine.rank == 0:
+        write_json(output / "training-result.json", result)
+        if tracking is not None:
+            tracking.log({"train/stages": stage_progress(config)}, step=result["global_step"])
     return result

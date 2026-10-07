@@ -52,6 +52,10 @@ def value(command, flag):
     return command[command.index(flag) + 1]
 
 
+def config_paths(command):
+    return command[command.index("--config") + 1 : command.index("--device")]
+
+
 def external_checkpoint(
     tmp_path, experiment_id="unit-job", method="memory_change", stage="pretrain"
 ):
@@ -78,10 +82,11 @@ def external_checkpoint(
 
 
 class Commands:
-    def __init__(self, fail_at=None, omit_checkpoint=False):
+    def __init__(self, fail_at=None, omit_checkpoint=False, fail_stage=None):
         self.calls = []
         self.fail_at = fail_at
         self.omit_checkpoint = omit_checkpoint
+        self.fail_stage = fail_stage
 
     def __call__(self, command, environment, log_path):
         call = {"command": command, "environment": dict(environment), "log_path": log_path}
@@ -89,35 +94,49 @@ class Commands:
         if self.fail_at == len(self.calls):
             raise subprocess.CalledProcessError(7, command)
         if "latent_working_memory.v3.train" in command:
-            config = load_experiment(value(command, "--config"))
-            call["config"] = config
-            output = Path(config.training.output_dir)
-            (output / "checkpoints").mkdir(parents=True)
-            (output / "run.json").write_text(json.dumps({"config": config.to_dict()}))
-            steps = (
-                int(value(command, "--stop-after-steps")) if "--stop-after-steps" in command else 80
-            )
-            checkpoint = output / "checkpoints" / f"step-{steps:06d}.pt"
-            if not self.omit_checkpoint:
-                # 编排器只传递此文件，不读取权重；这不是可加载的模型 checkpoint。
-                checkpoint.write_bytes(b"opaque orchestration checkpoint fixture")
-            (output / "training-result.json").write_text(
-                json.dumps(
-                    {
-                        "complete": "--stop-after-steps" not in command,
-                        "completed_steps": steps,
-                        "total_steps": 80,
-                        "completed_epochs": 1 if steps == 80 else 0,
-                        "sample_visits": steps
-                        * config.training.global_batch_size(
-                            len(environment["CUDA_VISIBLE_DEVICES"].split(","))
+            call["configs"], call["checkpoints"] = [], []
+            for config_path in config_paths(command):
+                config = load_experiment(config_path)
+                if config.objective.stage == self.fail_stage:
+                    raise subprocess.CalledProcessError(7, command)
+                if call["checkpoints"]:
+                    config = replace(
+                        config,
+                        training=replace(
+                            config.training, init_checkpoint=str(call["checkpoints"][-1])
                         ),
-                        "stop_after_steps": steps if steps != 80 else None,
-                        "checkpoint": str(checkpoint),
-                    }
+                    )
+                call["configs"].append(config)
+                output = Path(config.training.output_dir)
+                (output / "checkpoints").mkdir(parents=True)
+                (output / "config.json").write_text(json.dumps(config.to_dict()))
+                (output / "run.json").write_text(json.dumps({"config": config.to_dict()}))
+                steps = (
+                    int(value(command, "--stop-after-steps"))
+                    if "--stop-after-steps" in command
+                    else 80
                 )
-            )
-            call["checkpoint"] = checkpoint
+                checkpoint = output / "checkpoints" / f"step-{steps:06d}.pt"
+                if not self.omit_checkpoint:
+                    # 编排器只传递此文件，不读取权重；这不是可加载的模型 checkpoint。
+                    checkpoint.write_bytes(b"opaque orchestration checkpoint fixture")
+                (output / "training-result.json").write_text(
+                    json.dumps(
+                        {
+                            "complete": "--stop-after-steps" not in command,
+                            "completed_steps": steps,
+                            "total_steps": 80,
+                            "completed_epochs": 1 if steps == 80 else 0,
+                            "sample_visits": steps
+                            * config.training.global_batch_size(
+                                len(environment["CUDA_VISIBLE_DEVICES"].split(","))
+                            ),
+                            "stop_after_steps": steps if steps != 80 else None,
+                            "checkpoint": str(checkpoint),
+                        }
+                    )
+                )
+                call["checkpoints"].append(checkpoint)
         elif "latent_working_memory.v3.evaluate" in command:
             output = Path(value(command, "--output-dir"))
             output.mkdir(parents=True)
@@ -172,7 +191,7 @@ def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode,
         assert root.name.endswith("-k64_unit-job" if mode == "full" else f"-k64_{mode}_unit-job")
         assert job.config_path.parent == directory / "plan" / "dynamic"
         assert "global_batch_size" not in job.config.to_dict()["training"]
-        command = gpu_job.training_command(job, 4, level["max_steps"])
+        command = gpu_job.training_command([job], 4, level["max_steps"])
         assert "--nproc_per_node=4" in command
         assert ("--stop-after-steps" in command) == (mode != "full")
     evaluation = gpu_job.evaluation_command(args, level, Path("final.pt"), Path("evaluation"))
@@ -471,26 +490,28 @@ def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
     assert result["status"] == "finished"
     assert all(call["environment"]["SWANLAB_API_KEY"] == "test-api-key" for call in commands.calls)
     assert all(call["environment"]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID" for call in commands.calls)
-    training = [call for call in commands.calls if "config" in call]
+    training = [call for call in commands.calls if "configs" in call]
     evaluations = [
         call for call in commands.calls if "latent_working_memory.v3.evaluate" in call["command"]
     ]
-    assert len(training) == 5 and len(evaluations) == 2 and len(commands.calls) == 8
-    assert training[0]["config"].training.init_checkpoint is None
-    assert training[1]["config"].training.init_checkpoint == str(training[0]["checkpoint"])
-    assert training[2]["config"].training.init_checkpoint == str(training[1]["checkpoint"])
-    assert training[3]["config"].training.init_checkpoint == str(training[0]["checkpoint"])
-    assert training[4]["config"].training.init_checkpoint == str(training[3]["checkpoint"])
+    assert len(training) == 3 and len(evaluations) == 2 and len(commands.calls) == 6
+    assert training[0]["configs"][0].training.init_checkpoint is None
+    for call in training[1:]:
+        warmup, policy = call["configs"]
+        assert warmup.training.init_checkpoint == str(training[0]["checkpoints"][0])
+        assert policy.training.init_checkpoint == str(call["checkpoints"][0])
+        assert [config.objective.stage for config in call["configs"]] == ["warmup", "policy"]
     for call in training:
         assert call["environment"]["CUDA_VISIBLE_DEVICES"] == gpus
         assert f"--nproc_per_node={len(gpus.split(','))}" in call["command"]
         assert value(call["command"], "--stop-after-steps") == "2"
-        assert (
-            json.loads(Path(value(call["command"], "--config")).read_text())
-            == call["config"].to_dict()
+        for path, config in zip(config_paths(call["command"]), call["configs"], strict=True):
+            assert json.loads(Path(path).read_text()) == config.to_dict()
+        assert call["log_path"].name == (
+            f"{Path(call['configs'][0].training.experiment_dir).name}-train.log"
         )
-    for call, trained in zip(evaluations, (training[2], training[4]), strict=True):
-        assert value(call["command"], "--checkpoint") == str(trained["checkpoint"])
+    for call, trained in zip(evaluations, training[1:], strict=True):
+        assert value(call["command"], "--checkpoint") == str(trained["checkpoints"][-1])
         assert call["environment"]["CUDA_VISIBLE_DEVICES"] == gpus.split(",")[0]
         assert value(call["command"], "--split") == "dev"
         assert value(call["command"], "--max-trajectories") == "2"
@@ -500,6 +521,14 @@ def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
     directory, _, _ = gpu_job.build_jobs(args)
     assert json.loads((directory / "plan/dynamic/result.json").read_text()) == result
     plan = json.loads((directory / "plan/dynamic/job.json").read_text())
+    assert [run["command"] for run in plan["training_runs"]] == [
+        call["command"] for call in training
+    ]
+    assert [run["stages"] for run in plan["training_runs"]] == [
+        ["dynamic-pretrain"],
+        ["memory-change-warmup", "memory-change-policy"],
+        ["information-loss-warmup", "information-loss-policy"],
+    ]
     world_size = len(gpus.split(","))
     for job in plan["jobs"]:
         assert job["batching"] == {
@@ -530,21 +559,22 @@ def test_auto_from_external_checkpoint_needs_only_qa_and_chains_warmup_into_poli
     methods = ("memory_change", "information_loss") if method == "dynamic" else (method,)
     assert result["status"] == "finished"
     assert not args.pretrain_data.exists()
-    assert len(commands.calls) == 3 * len(methods) + int(len(methods) > 1)
+    assert len(commands.calls) == 2 * len(methods) + int(len(methods) > 1)
     for index, name in enumerate(methods):
-        warmup, policy, evaluation = commands.calls[index * 3 : index * 3 + 3]
-        assert warmup["config"].objective.method == policy["config"].objective.method == name
-        assert warmup["config"].objective.stage == "warmup"
-        assert policy["config"].objective.stage == "policy"
-        assert warmup["config"].training.init_checkpoint == str(checkpoint.resolve())
-        assert policy["config"].training.init_checkpoint == str(warmup["checkpoint"])
-        assert policy["config"].training.init_checkpoint != str(checkpoint.resolve())
+        training, evaluation = commands.calls[index * 2 : index * 2 + 2]
+        warmup, policy = training["configs"]
+        assert warmup.objective.method == policy.objective.method == name
+        assert warmup.objective.stage == "warmup"
+        assert policy.objective.stage == "policy"
+        assert warmup.training.init_checkpoint == str(checkpoint.resolve())
+        assert policy.training.init_checkpoint == str(training["checkpoints"][0])
+        assert policy.training.init_checkpoint != str(checkpoint.resolve())
         assert "latent_working_memory.v3.evaluate" in evaluation["command"]
-        assert value(evaluation["command"], "--checkpoint") == str(policy["checkpoint"])
+        assert value(evaluation["command"], "--checkpoint") == str(training["checkpoints"][1])
         assert "--log-to-swanlab" in evaluation["command"]
         prefix = name.replace("_", "-")
-        assert result["checkpoints"][f"{prefix}-warmup"] == str(warmup["checkpoint"])
-        assert result["checkpoints"][f"{prefix}-policy"] == str(policy["checkpoint"])
+        assert result["checkpoints"][f"{prefix}-warmup"] == str(training["checkpoints"][0])
+        assert result["checkpoints"][f"{prefix}-policy"] == str(training["checkpoints"][1])
     assert len(result["summaries"]) == len(methods)
     assert "dynamic-pretrain" not in result["checkpoints"]
     if len(methods) > 1:
@@ -580,7 +610,7 @@ def test_shared_pretraining_entry_requires_only_ae_lm_data(tmp_path, monkeypatch
 
     assert len(commands.calls) == 1
     assert result["summaries"] == []
-    config = commands.calls[0]["config"]
+    config = commands.calls[0]["configs"][0]
     assert config.objective.stage == "pretrain"
     assert config.training.experiment_id == "unit-job"
     assert Path(config.training.experiment_dir).name == "shared-pretrain-k64_unit-job"
@@ -602,7 +632,7 @@ def test_baselines_need_single_index_but_not_multi_index(tmp_path, monkeypatch, 
     result = gpu_job.run_job(args)
 
     assert result["status"] == "finished"
-    trained = [call["config"] for call in commands.calls if "config" in call]
+    trained = [config for call in commands.calls for config in call.get("configs", [])]
     assert trained[0].training.pretrain_data_view == "reconstruction_single"
     assert Path(trained[0].training.dataset_dir) == args.pretrain_data
 
@@ -634,7 +664,7 @@ def test_separate_methods_share_source_id_and_coexist_without_overwriting_series
     monkeypatch.setattr(gpu_job, "execute", commands)
     source_result = gpu_job.run_job(shared)
     source_checkpoint = source_result["checkpoints"]["dynamic-pretrain"]
-    source_run = commands.calls[0]["config"]
+    source_run = commands.calls[0]["configs"][0]
     source_metadata = Path(source_run.training.output_dir) / "run.json"
     original_source = source_metadata.read_bytes()
     descendants = []
@@ -672,11 +702,10 @@ def test_separate_methods_share_source_id_and_coexist_without_overwriting_series
     assert source_metadata.read_bytes() == original_source
     for method in ("memory_change", "information_loss"):
         stages = [
-            call["config"]
+            config
             for call in commands.calls
-            if "config" in call
-            and call["config"].objective.method == method
-            and call["config"].objective.stage != "pretrain"
+            for config in call.get("configs", [])
+            if config.objective.method == method and config.objective.stage != "pretrain"
         ]
         assert [config.objective.stage for config in stages] == ["warmup", "policy"]
         assert len({config.training.experiment_dir for config in stages}) == 1
@@ -772,12 +801,12 @@ def test_full_execution_starts_a_new_unbounded_run_without_smoke_checkpoint(tmp_
     assert set(short_result["checkpoints"].values()).isdisjoint(full_result["checkpoints"].values())
     full_call = commands.calls[-1]
     assert "--stop-after-steps" not in full_call["command"]
-    assert full_call["config"].training.init_checkpoint is None
-    assert full_call["config"].training.max_train_samples is None
-    assert full_call["config"].training.max_dev_samples is None
+    assert full_call["configs"][0].training.init_checkpoint is None
+    assert full_call["configs"][0].training.max_train_samples is None
+    assert full_call["configs"][0].training.max_dev_samples is None
 
 
-@pytest.mark.parametrize("fail_at", [1, 4])
+@pytest.mark.parametrize("fail_at", [1, 3])
 def test_failed_training_or_evaluation_stops_the_remaining_graph(tmp_path, monkeypatch, fail_at):
     args = arguments(tmp_path)
     prepare_dataset_entries(args)
@@ -791,6 +820,54 @@ def test_failed_training_or_evaluation_stops_the_remaining_graph(tmp_path, monke
     assert failure["status"] == "failed"
     assert len(failure["checkpoints"]) == (0 if fail_at == 1 else 3)
     assert not failure["summaries"]
+
+
+def test_second_stage_failure_preserves_first_stage_checkpoint_in_result(tmp_path, monkeypatch):
+    args = arguments(tmp_path)
+    prepare_dataset_entries(args)
+    commands = Commands(fail_stage="policy")
+    monkeypatch.setattr(gpu_job, "execute", commands)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        gpu_job.run_job(args)
+
+    assert len(commands.calls) == 2
+    directory, _, _ = gpu_job.build_jobs(args)
+    failure = json.loads((directory / "plan/dynamic/result.json").read_text())
+    assert failure["status"] == "failed"
+    assert set(failure["checkpoints"]) == {"dynamic-pretrain", "memory-change-warmup"}
+    assert failure["checkpoints"]["memory-change-warmup"] == str(
+        commands.calls[1]["checkpoints"][0]
+    )
+    assert not failure["summaries"]
+
+
+def test_all_methods_execute_six_training_processes_with_ordered_stages(tmp_path, monkeypatch):
+    args = arguments(tmp_path, "--method", "all")
+    prepare_dataset_entries(args)
+    commands = Commands()
+    monkeypatch.setattr(gpu_job, "execute", commands)
+
+    result = gpu_job.run_job(args)
+
+    training = [call for call in commands.calls if "configs" in call]
+    assert len(training) == 6
+    assert [
+        [(config.objective.method, config.objective.stage) for config in call["configs"]]
+        for call in training
+    ] == [
+        [("memory_change", "pretrain")],
+        [("icae_single", "pretrain"), ("icae_single", "qa")],
+        [("icae_multi", "pretrain"), ("icae_multi", "qa")],
+        [("autocompressors", "lm")],
+        [("memory_change", "warmup"), ("memory_change", "policy")],
+        [("information_loss", "warmup"), ("information_loss", "policy")],
+    ]
+    assert len(result["checkpoints"]) == 10
+    assert len(result["summaries"]) == 5
+    source = str(training[0]["checkpoints"][0])
+    assert training[4]["configs"][0].training.init_checkpoint == source
+    assert training[5]["configs"][0].training.init_checkpoint == source
 
 
 def test_training_must_save_the_reported_checkpoint_before_dependent_stage(tmp_path, monkeypatch):
@@ -815,6 +892,8 @@ def test_dry_run_does_not_access_datasets_or_execute_or_create_artifacts(
     monkeypatch.setattr(Path, "is_file", forbidden)
     plan = gpu_job.run_job(args)
     assert len(plan["jobs"]) == 10
+    assert len(plan["training_runs"]) == 6
+    assert all("command" not in job for job in plan["jobs"])
     assert json.loads(capsys.readouterr().out) == plan
     assert list(tmp_path.iterdir()) == []
 
