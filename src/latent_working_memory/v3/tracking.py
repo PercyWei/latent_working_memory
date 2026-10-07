@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import swanlab
+from swanlab.sdk.internal.run.components.config import Config as SwanLabConfig
 
 from latent_working_memory.v1.reporting import _shade, _table
 from latent_working_memory.v3.config import DYNAMIC_METHODS
@@ -135,6 +136,7 @@ def method_tracking_run(config, run, device, api_key=None):
         json.loads(identity_path.read_text(encoding="utf-8")) if identity_path.exists() else None
     )
     workspace = None
+    upload_config = combined
     rng = capture_rng(device)
     try:
         if identity is not None:
@@ -153,15 +155,26 @@ def method_tracking_run(config, run, device, api_key=None):
             remote_config = {
                 name: entry["value"] for name, entry in remote.profile["config"].items()
             }
-            if any(remote_config.get(name) != value for name, value in previous.items()):
-                raise ValueError("SwanLab configuration differs from the saved method experiment")
-            # 保留云端已有附加配置；只合入经过本地一致性校验的阶段记录。
-            combined = {**remote_config, **combined}
+            # SDK 对顶层 None 等值有转换；仅在云端比较边界使用相同序列化规则。
+            expected_config = SwanLabConfig()
+            expected_config.update({name: previous[name] for name in combined})
+            differences = [
+                name
+                for name, value in expected_config.items()
+                if name not in remote_config or remote_config[name] != value
+            ]
+            if differences:
+                raise ValueError(
+                    "SwanLab configuration differs from the saved method experiment: "
+                    + ", ".join(differences)
+                )
+            # 云端附加字段只保留在上传配置中，不写入本地方法的固定记录。
+            upload_config = {**remote_config, **combined}
         tracking = swanlab.init(
             project=config.training.swanlab_project,
             workspace=workspace,
             name=root.name,
-            config=combined,
+            config=upload_config,
             mode="online",
             public=False,
             job_type="train",

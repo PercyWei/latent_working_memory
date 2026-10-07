@@ -15,6 +15,7 @@ import json
 
 import pytest
 import swanlab
+from swanlab.sdk.internal.run.components.config import Config as SwanLabConfig
 
 from latent_working_memory.v3.tracking import (
     TRAINING_METRICS,
@@ -158,9 +159,9 @@ def recorded_swanlab(monkeypatch):
             else:
                 assert settings["resume"] == "must" and run_id in self.runs
             record = self.runs[run_id]
-            record.update(
-                state="RUNNING", config=deepcopy(settings["config"]), name=settings["name"]
-            )
+            sdk_config = SwanLabConfig()
+            sdk_config.update(settings["config"])
+            record.update(state="RUNNING", config=sdk_config, name=settings["name"])
             return Run(record)
 
         def api(self, api_key):
@@ -183,6 +184,12 @@ def recorded_swanlab(monkeypatch):
     monkeypatch.setattr(tracking.swanlab, "Settings", lambda **settings: settings)
     monkeypatch.setattr(runtime, "swanlab_api_key", lambda: "test-api-key")
     return service
+
+
+def serialized_config(values):
+    config = SwanLabConfig()
+    config.update(values)
+    return dict(config)
 
 
 def online_config(root, stage, method="memory_change", init=None):
@@ -240,7 +247,7 @@ def test_two_dynamic_methods_share_one_source_and_keep_one_run_per_method(
         assert not (root / "policy/swanlab.json").exists()
         assert policy_result["global_step"] == 4
         cloud = recorded_swanlab.runs[identity["id"]]
-        assert cloud["config"] == combined
+        assert cloud["config"] == serialized_config(combined)
         assert cloud["name"] == root.name
         assert [step for step, values in cloud["logs"] if "train/qa_loss" in values] == [1, 2, 3, 4]
         assert not any("train/ae_lm_loss" in values for _, values in cloud["logs"])
@@ -250,9 +257,9 @@ def test_two_dynamic_methods_share_one_source_and_keep_one_run_per_method(
             if "train/stages" in values
         ]
         assert "warmup" in boundaries[-1] and "policy" in boundaries[-1]
-        assert "pretraining_sources" not in json.dumps(cloud["config"])
-        assert "pretrain-train-0" not in json.dumps(cloud["config"])
-        assert "test-api-key" not in json.dumps(cloud["config"])
+        assert "pretraining_sources" not in json.dumps(dict(cloud["config"]))
+        assert "pretrain-train-0" not in json.dumps(dict(cloud["config"]))
+        assert "test-api-key" not in json.dumps(dict(cloud["config"]))
         assert all(not tag.endswith((":warmup", ":policy")) for tag in identity["tags"])
         assert warmup_run["pretraining"] == policy_run["pretraining"]
         sources.append(policy_run["pretraining"])
@@ -303,7 +310,7 @@ def test_live_method_run_continues_two_stages_without_reinitializing(
         assert len(recorded_swanlab.initializations) == int(online)
         if online:
             assert active.record["state"] == "RUNNING"
-            assert active.config == combined
+            assert active.config == serialized_config(combined)
         result = train_loop(
             target, engine, qa_data, qa_run, cursor, checkpoint, stop_after_steps=2, tracking=active
         )
@@ -312,7 +319,7 @@ def test_live_method_run_continues_two_stages_without_reinitializing(
         identity = json.loads((root / "swanlab.json").read_text())
         remote = recorded_swanlab.runs[identity["id"]]
         assert remote["state"] == "FINISHED"
-        assert remote["config"] == combined
+        assert remote["config"] == serialized_config(combined)
         assert [step for step, values in remote["logs"] if "train/ae_lm_loss" in values] == [1, 2]
         assert [step for step, values in remote["logs"] if "train/qa_loss" in values] == [3, 4]
         definitions = {name for name, _ in remote["definitions"]}
@@ -343,7 +350,7 @@ def test_live_stage_update_rejects_invalid_transition_before_mutation(
         initialization = load_initialization(result["checkpoint"], engine.model, target)
         qa_run = _run(target, engine, make_splits("qa"), initialization)
         before = (root / "experiment.json").read_bytes()
-        remote_before = deepcopy(active.config)
+        remote_before = deepcopy(dict(active.config))
         if invalid == "method":
             target = replace(target, objective=replace(target.objective, method="icae_multi"))
         elif invalid == "model":
@@ -535,3 +542,85 @@ def test_tracking_setup_preserves_random_state_in_api_and_sdk_calls(
         assert random.getstate() == before["python"]
         assert np.array_equal(np.random.get_state()[1], before["numpy"][1])
         assert torch.equal(torch.get_rng_state(), before["torch"])
+
+
+def test_sdk_serialized_empty_values_resume_without_changing_local_semantics(
+    tmp_path, recorded_swanlab
+):
+    root = tmp_path / "icae-single-k64_trial"
+    config = online_config(root, "pretrain", "icae_single")
+    _, record = run_stage(config, 1, "pretrain")
+    original = (root / "experiment.json").read_bytes()
+    local = json.loads(original)
+    identity = json.loads((root / "swanlab.json").read_text())
+    remote = recorded_swanlab.runs[identity["id"]]
+    assert local["pretraining"] is local["resolved_model_revision"] is None
+    assert remote["config"]["pretraining"] == remote["config"]["resolved_model_revision"] == {}
+    assert remote["config"]["model"]["revision"] is None
+    assert local["model"]["lora_target_modules"] == remote["config"]["model"]["lora_target_modules"]
+    with method_tracking_run(config, record, torch.device("cpu"), api_key="test-api-key"):
+        pass
+    assert (root / "experiment.json").read_bytes() == original
+    assert len(recorded_swanlab.runs) == 1
+    assert recorded_swanlab.initializations[-1]["id"] == identity["id"]
+
+
+@pytest.mark.parametrize(
+    "change,field",
+    [
+        ("missing", "pretraining"),
+        ("source", "pretraining"),
+        ("nested_null", "model"),
+        ("slots", "model"),
+        ("learning_rate", "stages"),
+    ],
+)
+def test_serialized_config_comparison_still_rejects_missing_or_changed_fields(
+    tmp_path, recorded_swanlab, change, field
+):
+    root = tmp_path / "icae-single-k64_trial"
+    config = online_config(root, "pretrain", "icae_single")
+    _, record = run_stage(config, 1, "pretrain")
+    original = (root / "experiment.json").read_bytes()
+    identity = json.loads((root / "swanlab.json").read_text())
+    remote = recorded_swanlab.runs[identity["id"]]["config"]
+    if change == "missing":
+        del remote["pretraining"]
+    elif change == "source":
+        remote["pretraining"] = {"checkpoint": "unexpected-source.pt"}
+    elif change == "nested_null":
+        remote["model"]["revision"] = {}
+    elif change == "slots":
+        remote["model"]["memory_slots"] += 1
+    else:
+        remote["stages"]["pretrain"]["config"]["training"]["learning_rate"] *= 2
+    with pytest.raises(ValueError, match=f"saved method experiment: {field}$"):
+        with method_tracking_run(config, record, torch.device("cpu"), api_key="test-api-key"):
+            pass
+    assert (root / "experiment.json").read_bytes() == original
+    assert len(recorded_swanlab.initializations) == 1
+
+
+@pytest.mark.parametrize("legacy_manifest", [False, True])
+def test_cloud_annotations_remain_outside_local_experiment_contract(
+    tmp_path, recorded_swanlab, legacy_manifest
+):
+    root = tmp_path / "icae-single-k64_trial"
+    config = online_config(root, "pretrain", "icae_single")
+    _, record = run_stage(config, 1, "pretrain")
+    original = (root / "experiment.json").read_bytes()
+    identity = json.loads((root / "swanlab.json").read_text())
+    cloud = recorded_swanlab.runs[identity["id"]]
+    if legacy_manifest:
+        # 旧恢复代码曾将云端附加字段混入本地记录；它们不属于方法配置。
+        (root / "experiment.json").write_text(json.dumps({**json.loads(original), "note": "old"}))
+    for note in ("first note", "revised note", None):
+        if note is None:
+            del cloud["config"]["note"]
+        else:
+            cloud["config"]["note"] = note
+        with method_tracking_run(config, record, torch.device("cpu"), api_key="test-api-key"):
+            pass
+        assert (root / "experiment.json").read_bytes() == original
+        assert cloud["config"].get("note") == note
+    assert len(recorded_swanlab.runs) == 1

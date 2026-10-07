@@ -6,6 +6,8 @@ from contextlib import contextmanager
 from copy import deepcopy
 from types import SimpleNamespace
 
+from swanlab.sdk.internal.run.components.config import Config as SwanLabConfig
+
 from latent_working_memory.v1 import tracking as common_tracking
 from latent_working_memory.v1.pretrain import tracking as pretrain_tracking
 
@@ -177,6 +179,96 @@ def test_common_run_does_not_interpret_stage_configuration(tmp_path, monkeypatch
     assert calls[0]["config"] == config
     assert calls[0]["project"] == "latent-working-memory-v1"
     assert calls[0]["tags"] == ["data:custom", "method:latent-working-memory", "scope:main"]
+
+
+def test_evaluation_resume_preserves_sdk_serialized_training_config(tmp_path, monkeypatch):
+    def reject_network(*args, **kwargs):
+        raise AssertionError("tracking regression must not access the network")
+
+    monkeypatch.setattr(socket.socket, "connect", reject_network)
+    identity = {
+        "id": "training-id",
+        "project": "latent-working-memory-v3",
+        "job_type": "train",
+        "mode": "online",
+        "group": "capacity-comparison",
+        "tags": ["method:icae-single", "scope:main"],
+        "url": "https://swanlab.cn/@owner/latent-working-memory-v3/runs/training-id",
+    }
+    identity_path = tmp_path / "swanlab.json"
+    identity_path.write_text(json.dumps(identity))
+    original_identity = identity_path.read_bytes()
+    raw_config = {
+        "pretraining": None,
+        "resolved_model_revision": None,
+        "model": {"revision": None, "lora_target_modules": ("q_proj", "v_proj")},
+        "stages": ("pretrain", "qa"),
+    }
+    config_path = tmp_path / "experiment.json"
+    config_path.write_text(json.dumps(raw_config))
+    original_config = config_path.read_bytes()
+    sdk_config = SwanLabConfig()
+    sdk_config.update(raw_config)
+    cloud_config = dict(sdk_config)
+    assert cloud_config["pretraining"] == {}
+    assert cloud_config["resolved_model_revision"] == {}
+    assert cloud_config["model"] == {
+        "revision": None,
+        "lora_target_modules": ["q_proj", "v_proj"],
+    }
+    assert cloud_config["stages"] == ["pretrain", "qa"]
+    remote = SimpleNamespace(
+        name="icae-single-k64_capacity-comparison",
+        state="FINISHED",
+        profile={
+            "config": {
+                key: {"value": value, "sort": order}
+                for order, (key, value) in enumerate(cloud_config.items())
+            }
+        },
+    )
+    lookups, calls, logs = [], [], []
+
+    def lookup(path):
+        lookups.append(path)
+        return remote
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def log(self, values, step):
+            logs.append((values, step))
+
+    def initialize(**kwargs):
+        calls.append(kwargs)
+        resumed_config = SwanLabConfig()
+        resumed_config.update(kwargs["config"])
+        assert dict(resumed_config) == cloud_config
+        return Session()
+
+    monkeypatch.setattr(
+        common_tracking.swanlab, "Api", lambda api_key: SimpleNamespace(run=lookup)
+    )
+    monkeypatch.setattr(common_tracking.swanlab, "init", initialize)
+    with common_tracking.swanlab_training_run(tmp_path) as run:
+        run.log({"evaluation/nll": 1.5}, step=37)
+
+    assert lookups == ["owner/latent-working-memory-v3/training-id"]
+    assert len(calls) == 1
+    assert calls[0]["id"] == identity["id"]
+    assert calls[0]["resume"] == "must"
+    assert calls[0]["project"] == identity["project"]
+    assert calls[0]["workspace"] == "owner"
+    assert calls[0]["name"] == remote.name
+    assert calls[0]["config"] == cloud_config
+    assert not {"job_type", "group", "tags"}.intersection(calls[0])
+    assert logs == [({"evaluation/nll": 1.5}, 37)]
+    assert identity_path.read_bytes() == original_identity
+    assert config_path.read_bytes() == original_config
 
 
 def test_pretraining_session_owns_source_tags_and_training_panels(tmp_path, monkeypatch):
