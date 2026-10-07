@@ -24,7 +24,6 @@ from latent_working_memory.v3.tracking import (
     configure_training_metrics,
     experiment_directory,
     method_tracking_run,
-    stage_progress,
     training_metrics,
 )
 from latent_working_memory.v3.tracking_credentials import swanlab_api_key
@@ -548,6 +547,4 @@ def train_loop(
     }
     if engine.rank == 0:
         write_json(output / "training-result.json", result)
-        if tracking is not None:
-            tracking.log({"train/stages": stage_progress(config)}, step=result["global_step"])
     return result

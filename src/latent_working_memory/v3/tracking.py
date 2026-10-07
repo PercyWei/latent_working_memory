@@ -8,7 +8,7 @@ from pathlib import Path
 import swanlab
 from swanlab.sdk.internal.run.components.config import Config as SwanLabConfig
 
-from latent_working_memory.v1.reporting import _shade, _table
+from latent_working_memory.v1.reporting import _shade
 from latent_working_memory.v3.config import DYNAMIC_METHODS
 from latent_working_memory.v4.checkpoint import capture_rng, restore_rng
 
@@ -28,6 +28,8 @@ METHOD_COLORS = {
     "information_loss": "#A53651",
 }
 QUALITY_GROUPS = ("all", "old", "new")
+STAGE_NUMBERS = {"pretrain": 1, "lm": 1, "qa": 2, "warmup": 2, "policy": 3}
+DEV_QA_METRICS = ("dev/qa_old_nll", "dev/qa_new_nll")
 
 
 def experiment_directory(training):
@@ -219,7 +221,13 @@ def configure_training_metrics(tracking, stage):
     """目标不同的损失分开展示，所有曲线沿用累计真实 optimizer step。"""
     if tracking is None:
         return
-    names = (*TRAINING_METRICS, f"train/{_loss_name(stage)}", f"dev/{_loss_name(stage)}")
+    names = (
+        *TRAINING_METRICS,
+        "train/stage",
+        f"train/{_loss_name(stage)}",
+        f"dev/{_loss_name(stage)}",
+        *(DEV_QA_METRICS if stage in {"qa", "warmup", "policy"} else ()),
+    )
     for name in names:
         tracking.define_metric(name, x_axis="_step", section_name=name.split("/", 1)[0])
 
@@ -227,6 +235,7 @@ def configure_training_metrics(tracking, stage):
 def training_metrics(record):
     """只上传当前实际计算的指标，warmup 与 policy 共享 QA 目标曲线。"""
     values = {name: record[name] for name in TRAINING_METRICS if record.get(name) is not None}
+    values["train/stage"] = STAGE_NUMBERS[record["stage"]]
     for section in ("train", "dev"):
         if record.get(f"{section}/loss") is not None:
             values[f"{section}/{_loss_name(record['stage'])}"] = record[f"{section}/loss"]
@@ -234,36 +243,15 @@ def training_metrics(record):
         values["resources/peak_memory_allocated_gib"] = (
             record["resources/peak_memory_allocated_bytes"] / 1024**3
         )
+    for age in ("old", "new"):
+        name = f"dev/qa_{age}_nll"
+        if record.get(name) is not None and record[f"dev/qa_{age}_count"] > 0:
+            values[name] = record[name]
     return values
 
 
-def stage_progress(config):
-    """从各阶段实际结果构建边界表，不把共享预训练步数计入下游 run。"""
-    root = experiment_directory(config.training)
-    manifest = json.loads((root / "experiment.json").read_text(encoding="utf-8"))
-    rows = []
-    for stage, record in manifest["stages"].items():
-        path = Path(record["config"]["training"]["output_dir"]) / "training-result.json"
-        if not path.exists():
-            continue
-        result = json.loads(path.read_text(encoding="utf-8"))
-        rows.append(
-            {
-                "stage": stage,
-                "objective": _loss_name(stage),
-                "start_global_step": record["step_offset"] + 1
-                if result["completed_steps"]
-                else None,
-                "end_global_step": result["global_step"],
-                "stage_steps": result["completed_steps"],
-                "complete": result["complete"],
-            }
-        )
-    return _table(rows)
-
-
-def evaluation_media(summary, rows):
-    """每项核心质量指标合并新旧问题；辅助统计与少量生成样例集中入表。"""
+def evaluation_media(summary):
+    """汇总质量、容量与每条轨迹的构建耗时；明细保留在本地产物中。"""
     method = summary["method"]
     color = METHOD_COLORS[method]
     groups = [name for name in QUALITY_GROUPS if summary["quality"][name]["questions"]]
@@ -288,46 +276,38 @@ def evaluation_media(summary, rows):
             yaxis_opts={"name": metric, **({"min": 0, "max": 1} if metric != "nll" else {})},
         )
         values[f"evaluation/{metric}"] = chart
-    values["evaluation/summary"] = _table(
-        [
-            {
-                "method": method,
-                "split": summary["split"],
-                "offline_oracle": summary["offline_oracle"],
-                "trajectories": summary["trajectories"],
-                "group": group,
-                **summary["quality"][group],
-                **summary["capacity"],
-            }
-            for group in groups
-        ]
+    summaries = (
+        (
+            "capacity",
+            ["final_slots", "mean_slots"],
+            [summary["capacity"][name] for name in ("final_slots", "mean_slots")],
+            "slots",
+        ),
+        (
+            "build_seconds_per_trajectory",
+            ["build"],
+            [summary["costs"]["build_seconds"] / summary["trajectories"]],
+            "seconds / trajectory",
+        ),
     )
-    details = [
-        {"category": "age", "name": age, **metrics}
-        for age, metrics in summary["quality"]["by_age"].items()
-    ]
-    details.extend(
-        {"category": "cost", "name": name, "value": value}
-        for name, value in summary["costs"].items()
-    )
-    details.extend(
-        {"category": "selection", "name": name, "value": value}
-        for name, value in summary["metadata"].get("selection", {}).items()
-    )
-    values["evaluation/details"] = _table(details)
-    examples = [
-        {
-            "trajectory_id": row["trajectory_id"],
-            "qa_id": question["qa_id"],
-            "age": question["age"],
-            "question": question["question"],
-            "answer": question["answer"],
-            "prediction": question["prediction"],
-            **{name: question[name] for name in ("nll", "em", "f1")},
-        }
-        for row in rows
-        for question in row["questions"]
-    ][:8]
-    if examples:
-        values["evaluation/examples"] = _table(examples)
+    for name, labels, measurements, unit in summaries:
+        chart = swanlab.echarts.Bar().add_xaxis(labels)
+        chart.add_yaxis(
+            method,
+            [
+                {
+                    "value": value,
+                    "itemStyle": {"color": _shade(color, index, len(labels))},
+                }
+                for index, value in enumerate(measurements)
+            ],
+            label_opts={"show": False},
+            itemstyle_opts={"color": color},
+        )
+        chart.set_global_opts(
+            tooltip_opts={"trigger": "axis"},
+            legend_opts={"type": "scroll", "top": 0},
+            yaxis_opts={"name": unit, "min": 0},
+        )
+        values[f"evaluation/{name}"] = chart
     return values

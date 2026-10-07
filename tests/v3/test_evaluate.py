@@ -480,11 +480,26 @@ def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_pat
     monkeypatch.setattr(evaluation, "swanlab_api_key", lambda: "evaluation-test-key")
     monkeypatch.setattr(evaluation, "swanlab_training_run", resume)
     summary = evaluation.evaluate(Task(), [trajectory()], tmp_path / "evaluation", "test", 8)
+    local_results = {
+        name: (tmp_path / "evaluation" / name).read_bytes()
+        for name in ("summary.json", "trajectories.jsonl")
+    }
     evaluation._append_evaluation(summary, training_dir, tmp_path / "evaluation", 37)
     assert len(publications) == 1 and publications[0][1] == 37
     assert publications[0][0]["evaluation/nll"].options["series"][0]["data"][0]["value"] == 2
-    assert "final_slots" in publications[0][0]["evaluation/summary"].html_content
+    assert publications[0][0]["evaluation/capacity"].options["xAxis"][0]["data"] == [
+        "final_slots",
+        "mean_slots",
+    ]
+    assert not any(
+        name in publications[0][0]
+        for name in ("evaluation/summary", "evaluation/details", "evaluation/examples")
+    )
     assert all(name.startswith("evaluation/") for name in publications[0][0])
+    assert all(
+        (tmp_path / "evaluation" / name).read_bytes() == original
+        for name, original in local_results.items()
+    )
     assert config_path.read_bytes() == original_config
     assert json.loads(identity_path.read_text()) == identity
     record = json.loads((tmp_path / "evaluation" / "swanlab-publication.json").read_text())

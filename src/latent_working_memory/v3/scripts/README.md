@@ -140,4 +140,6 @@ compare/<method>/             多方法质量—容量比较
 
 SwanLab 中，一个完整方法对应一个 run，训练、验证和最终评估共用；共享预训练单独记录，因此 `all` 共六个 runs。正式名称为 `<method>-k64_<run-id>`，试跑为 `<method>-k64_<mode>_<run-id>`，其中 `<mode>` 为 `smoke` 或 `pilot`。两个动态方法与共享预训练使用相同后缀关联来源；group 默认直接使用 `run-id`，`--group` 可覆盖。
 
+阶段用 `train/stage` 曲线展示，最终质量和容量用合并柱状图展示；详细统计与样例保存在本地，不上传表格。指标含义见 [v3 说明](../README.md#评估与产物)。
+
 相同 `run-id` 的不同档位共用 `plan/<method>/`；试跑与正式训练作为独立运行时，使用不同 `run-id` 或省略该参数自动生成。重复启动已有方法目录会报错；失败时查看 `plan/<method>/result.json` 和 `<run-name>-train.log`，同一方法的各阶段共用一个训练日志。

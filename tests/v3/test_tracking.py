@@ -14,17 +14,15 @@ from .test_runtime import experiment_config, make_engine, make_splits, _run
 import json
 
 import pytest
-import swanlab
 from swanlab.sdk.internal.run.components.config import Config as SwanLabConfig
 
 from latent_working_memory.v3.tracking import (
     TRAINING_METRICS,
+    DEV_QA_METRICS,
+    STAGE_NUMBERS,
     configure_training_metrics,
-    evaluation_media,
     training_metrics,
 )
-from .test_evaluate import Task, trajectory
-from latent_working_memory.v3.evaluate import evaluate
 
 
 def test_training_panels_are_registered_before_log_and_use_optimizer_steps():
@@ -39,12 +37,15 @@ def test_training_panels_are_registered_before_log_and_use_optimizer_steps():
     configure_training_metrics(run, "pretrain")
     assert tuple(name for name, _ in run.definitions) == (
         *TRAINING_METRICS,
+        "train/stage",
         "train/ae_lm_loss",
         "dev/ae_lm_loss",
     )
     assert all(options["x_axis"] == "_step" for _, options in run.definitions)
     assert all(options["section_name"] == name.split("/")[0] for name, options in run.definitions)
     assert not any("hidden" in options for _, options in run.definitions)
+    configure_training_metrics(run, "warmup")
+    assert tuple(name for name, _ in run.definitions[-2:]) == DEV_QA_METRICS
     configure_training_metrics(None, "pretrain")
 
 
@@ -63,6 +64,7 @@ def test_training_publishes_only_current_measured_core_values():
         "resources/optimizer_step_seconds": 4.2,
     }
     assert training_metrics(record) == {
+        "train/stage": 2,
         "train/qa_loss": 2.1,
         "train/grad_norm": 0.5,
         "train/slots_final": 128,
@@ -73,33 +75,22 @@ def test_training_publishes_only_current_measured_core_values():
     assert record["train/qa_old_count"] == 8
 
 
-def test_evaluation_merges_quality_groups_and_keeps_diagnostics_in_tables(tmp_path):
-    summary = evaluate(Task(), [trajectory()], tmp_path, "test", 8)
-    rows = [json.loads(line) for line in (tmp_path / "trajectories.jsonl").read_text().splitlines()]
-    media = evaluation_media(summary, rows)
-    assert set(media) == {
-        "evaluation/nll",
-        "evaluation/em",
-        "evaluation/f1",
-        "evaluation/summary",
-        "evaluation/details",
-        "evaluation/examples",
+def test_dev_qa_curves_skip_unmeasured_groups_and_keep_current_values():
+    record = {
+        "stage": "warmup",
+        "dev/qa_old_nll": 0.0,
+        "dev/qa_old_count": 0,
+        "dev/qa_new_nll": 1.5,
+        "dev/qa_new_count": 4,
     }
-    for metric in ("nll", "em", "f1"):
-        chart = media[f"evaluation/{metric}"]
-        assert isinstance(chart, swanlab.echarts.Bar)
-        assert chart.options["xAxis"][0]["data"] == ["all", "old", "new"]
-        assert len(chart.options["series"]) == 1
-        assert [point["value"] for point in chart.options["series"][0]["data"]] == pytest.approx(
-            [summary["quality"][group][metric] for group in ("all", "old", "new")]
-        )
-    assert all(
-        isinstance(media[f"evaluation/{name}"], swanlab.echarts.Table)
-        for name in ("summary", "details", "examples")
-    )
-    assert "gate_qa_reads" in media["evaluation/details"].html_content
-    assert "Hidden gate question" not in media["evaluation/examples"].html_content
-    assert "The blue whale." in media["evaluation/examples"].html_content
+    assert training_metrics(record) == {"train/stage": 2, "dev/qa_new_nll": 1.5}
+    record.update({"stage": "policy", "dev/qa_old_nll": 0.75, "dev/qa_old_count": 8})
+    assert training_metrics(record) == {
+        "train/stage": 3,
+        "dev/qa_old_nll": 0.75,
+        "dev/qa_new_nll": 1.5,
+    }
+    assert training_metrics({"stage": "policy"}) == {"train/stage": 3}
 
 
 @pytest.mark.parametrize(
@@ -114,7 +105,11 @@ def test_evaluation_merges_quality_groups_and_keeps_diagnostics_in_tables(tmp_pa
 )
 def test_training_losses_are_separated_by_objective_without_empty_metrics(stage, metric):
     values = training_metrics({"stage": stage, "train/loss": 2, "dev/loss": 3})
-    assert values == {f"train/{metric}": 2, f"dev/{metric}": 3}
+    assert values == {
+        "train/stage": STAGE_NUMBERS[stage],
+        f"train/{metric}": 2,
+        f"dev/{metric}": 3,
+    }
 
 
 @pytest.fixture
@@ -251,12 +246,13 @@ def test_two_dynamic_methods_share_one_source_and_keep_one_run_per_method(
         assert cloud["name"] == root.name
         assert [step for step, values in cloud["logs"] if "train/qa_loss" in values] == [1, 2, 3, 4]
         assert not any("train/ae_lm_loss" in values for _, values in cloud["logs"])
-        boundaries = [
-            values["train/stages"].html_content
-            for _, values in cloud["logs"]
-            if "train/stages" in values
+        assert [(step, values["train/stage"]) for step, values in cloud["logs"]] == [
+            (1, 2),
+            (2, 2),
+            (3, 3),
+            (4, 3),
         ]
-        assert "warmup" in boundaries[-1] and "policy" in boundaries[-1]
+        assert all("train/stages" not in values for _, values in cloud["logs"])
         assert "pretraining_sources" not in json.dumps(dict(cloud["config"]))
         assert "pretrain-train-0" not in json.dumps(dict(cloud["config"]))
         assert "test-api-key" not in json.dumps(dict(cloud["config"]))
@@ -324,11 +320,13 @@ def test_live_method_run_continues_two_stages_without_reinitializing(
         assert [step for step, values in remote["logs"] if "train/qa_loss" in values] == [3, 4]
         definitions = {name for name, _ in remote["definitions"]}
         assert {"train/ae_lm_loss", "train/qa_loss"} <= definitions
-        boundaries = [
-            values["train/stages"] for _, values in remote["logs"] if "train/stages" in values
+        assert [(step, values["train/stage"]) for step, values in remote["logs"]] == [
+            (1, 1),
+            (2, 1),
+            (3, 2),
+            (4, 2),
         ]
-        assert "pretrain" in boundaries[-1].html_content
-        assert "qa" in boundaries[-1].html_content
+        assert all("train/stages" not in values for _, values in remote["logs"])
     else:
         assert not (root / "swanlab.json").exists()
 

@@ -109,15 +109,7 @@ def _training_run_directory(config, run):
 
 
 def _append_evaluation(summary, training_dir, output_dir, step):
-    rows, questions = [], 0
-    with (Path(output_dir) / "trajectories.jsonl").open(encoding="utf-8") as stream:
-        for line in stream:
-            row = json.loads(line)
-            rows.append(row)
-            questions += len(row["questions"])
-            if questions >= 8:
-                break
-    values = evaluation_media(summary, rows)
+    values = evaluation_media(summary)
     # 既有 helper 保留云端训练 config/name，检查训练已结束并使用 resume="must"。
     with swanlab_training_run(training_dir, api_key=swanlab_api_key()) as tracking:
         tracking.log(values, step=step)

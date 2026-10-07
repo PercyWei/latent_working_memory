@@ -149,6 +149,18 @@ uv run --frozen python -m latent_working_memory.v3.compare \
 
 启动器默认在 `latent-working-memory-v3` 中记录 `train`、`dev` 和最终 `evaluation`，group 默认直接使用 `run-id`，可通过 `--group` 覆盖；`--tracking disabled` 仅保存本地。单独调用评估模块时，`--log-to-swanlab` 将结果追加到 checkpoint 对应的方法 run。未执行的评估指标不会补零。
 
+SwanLab 保留损失、容量、梯度范数、整步耗时和峰值显存曲线，以及最终 NLL／EM／F1 柱状图；新增以下 5 张图，不再上传表格：
+
+| 图表 | 含义 |
+|---|---|
+| `train/stage` | 随累计 optimizer step 记录阶段：1 = AE＋LM 或 AutoCompressors LM，2 = ICAE QA 或动态动作预热，3 = 动态策略训练 |
+| `dev/qa_old_nll` | 验证时读取旧信息的 QA NLL，越低越好 |
+| `dev/qa_new_nll` | 验证时读取新信息的 QA NLL，越低越好 |
+| `evaluation/capacity` | 合并最终 slots 与更新过程平均 slots，均按轨迹取均值 |
+| `evaluation/build_seconds_per_trajectory` | 每条轨迹平均构建记忆的秒数，包含候选写入和门控计算，不含最终 QA 读取及答案生成 |
+
+阶段曲线只记录当前 run 实际执行的步骤，动态方法从阶段 2 开始。两张 QA 曲线沿用任务的统计口径：动态方法读取各更新点，ICAE 读取最终记忆；未验证或没有对应题目时不补零。最终质量图仍将 all／old／new 合并展示。动作次数、门控分数、细分统计及生成样例保存在本地 JSON／JSONL；已有云端 run 的旧表格不自动删除。
+
 ## 验证与边界
 
 ```bash
