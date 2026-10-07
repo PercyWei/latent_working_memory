@@ -23,6 +23,8 @@ bash ~/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu
 
 microbatch 内合并实际写入和读取调用，支持不同长度及不同更新动作。`qa_batch_size` 是每条轨迹一次并行读取的题数，因此训练时一次读取最多包含 `microbatch × qa_batch_size` 道题。尾批按真实样本数归一；增加卡数或改变这两个参数会改变全局 batch。第一组实验采用两张 H20、每卡 microbatch 2、累积 2，全局 batch 8；实际显存与吞吐先由 `smoke` 确认。
 
+默认启用独立编码器／冻结解码器、逐层激活重计算、CUDA BF16 autocast 和纯 causal attention。预训练在每卡既定 batch 内按长度分组；运行命令无需增加优化参数。预设中的 `model.gradient_checkpointing` 可用于关闭逐层重算进行对照，实际值随配置保存。保持当前 PyTorch 2.6 环境，无需新增 attention 依赖。
+
 ## 第一次运行
 
 环境需有 `uv`，脚本用 `uv run --frozen` 按仓库 `uv.lock` 准备根目录 `.venv`。SwanLab project 已确定为 **`latent-working-memory-v3`**。

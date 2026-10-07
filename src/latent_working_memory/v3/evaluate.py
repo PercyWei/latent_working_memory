@@ -1,6 +1,7 @@
 """在最终记忆上统一评估 FactQA；门控题不计入质量指标。"""
 
 import argparse
+from contextlib import nullcontext
 from dataclasses import asdict, replace
 import json
 import os
@@ -155,7 +156,12 @@ def evaluate(task, trajectories, output_dir, split, max_new_tokens, metadata=Non
     was_training = task.training
     task.eval()
     try:
-        with temporary.open("w", encoding="utf-8") as stream:
+        precision = (
+            torch.autocast("cuda", dtype=torch.bfloat16)
+            if task.codec.memory_embeddings.device.type == "cuda"
+            else nullcontext()
+        )
+        with precision, temporary.open("w", encoding="utf-8") as stream:
             for trajectory in trajectories:
                 qa_ids = [qa.qa_id for qa in trajectory.qas.values() if qa.role == "evaluation"]
                 if not qa_ids:
@@ -339,6 +345,7 @@ def main(argv=None):
             "config": config.to_dict(),
             "resolved_model_revision": revision,
             "device": args.device,
+            "autocast_dtype": "bfloat16" if device.type == "cuda" else None,
             "pretraining": checkpoint["run"]["pretraining"],
             "global_step": checkpoint["run"]["step_offset"] + checkpoint["cursor"]["step"],
             "selection": {

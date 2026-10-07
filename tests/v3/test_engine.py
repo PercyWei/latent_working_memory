@@ -9,6 +9,7 @@ import torch.multiprocessing as mp
 
 from latent_working_memory.v3.engine import TokenMemoryEngine, initialize_device
 from latent_working_memory.v3.config import TrainingConfig
+from latent_working_memory.v3.pretrain_data import PretrainExample
 from latent_working_memory.v4 import engine as engine_module
 
 
@@ -90,6 +91,42 @@ class BranchModel(torch.nn.Module):
                 "epoch": float(epoch),
             },
         }
+
+
+class PretrainBranchModel(BranchModel):
+    def __init__(self):
+        super().__init__()
+        self.batch_ids = []
+
+    def forward(self, example, epoch=0, differentiable=True, batched=False):
+        examples = example if batched else [example]
+        self.batch_ids.append([row.sample_id for row in examples])
+        rows = [
+            {
+                "branch": row.input_ids[0] % 2,
+                "x": row.input_ids[0] / 10,
+                "y": row.target_ids[0] / 10,
+                "length": len(row.target_ids),
+            }
+            for row in examples
+        ]
+        return super().forward(rows, epoch, differentiable, batched=True)
+
+
+def pretrain_examples():
+    return [
+        PretrainExample(
+            sample_id=str(index),
+            document_id=str(index),
+            dedup_cluster=str(index),
+            task="ae" if input_length == target_length else "continuation",
+            input_ids=(index + 1,) * input_length,
+            target_ids=(index + 2,) * target_length,
+        )
+        for index, (input_length, target_length) in enumerate(
+            [(8, 8), (4, 1), (7, 7), (3, 1), (5, 5)]
+        )
+    ]
 
 
 def config(micro_batch_size=1):
@@ -188,7 +225,83 @@ def test_empty_batches_are_rejected():
             operation([])
 
 
-def _distributed_worker(rank, rendezvous, world_size, micro_batch_size):
+def test_pretraining_groups_read_lengths_without_changing_global_sample_mean():
+    model = PretrainBranchModel()
+    reference = deepcopy(model)
+    engine = TokenMemoryEngine(model, config(micro_batch_size=2), "cpu")
+    engine.initialize()
+    optimizer = torch.optim.AdamW(
+        [parameter for parameter in reference.parameters() if parameter.requires_grad],
+        lr=0.05,
+        weight_decay=0.0,
+    )
+    batch = pretrain_examples()
+
+    expected = reference_step(reference, optimizer, batch)
+    observed = engine.step(batch)
+
+    assert model.batch_ids == [["0", "2"], ["4", "1"], ["3"]]
+    assert observed["loss"] == pytest.approx(expected["loss"])
+    assert observed["grad_norm"] == pytest.approx(expected["grad_norm"])
+    assert observed["samples"] == len(batch)
+    assert observed["length"] == pytest.approx(sum(len(row.target_ids) for row in batch) / 5)
+    for actual, wanted in zip(model.parameters(), reference.parameters(), strict=True):
+        torch.testing.assert_close(actual, wanted)
+
+    model.batch_ids.clear()
+    expected_eval = sum(float(reference(row)["loss"].detach()) for row in batch) / len(batch)
+    observed_eval = engine.eval_batch(batch)
+    assert model.batch_ids == [["0", "2"], ["4", "1"], ["3"]]
+    assert observed_eval["loss"] == pytest.approx(expected_eval)
+    assert observed_eval["samples"] == len(batch)
+
+
+class AutocastModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(2, 1, device="cuda", dtype=torch.float32)
+        self.output_dtypes = []
+
+    def forward(self, examples, epoch=0, differentiable=True, batched=False):
+        values = self.linear.weight.new_tensor([[row["x"], row["y"]] for row in examples])
+        predictions = self.linear(values)
+        self.output_dtypes.append(predictions.dtype)
+        return {"loss": predictions.float().square().mean(), "metrics": {}}
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not torch.cuda.is_bf16_supported(),
+    reason="requires a CUDA device with BF16 support",
+)
+def test_cuda_train_and_eval_use_bf16_compute_with_fp32_trainable_parameters():
+    model = AutocastModel()
+    reference = deepcopy(model)
+    engine = TokenMemoryEngine(model, config(micro_batch_size=2), "cuda")
+    engine.initialize()
+    optimizer = torch.optim.AdamW(reference.parameters(), lr=0.05, weight_decay=0.0)
+    batch = examples()[:2]
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        expected_loss = reference(batch)["loss"]
+    expected_loss.backward()
+    expected_norm = torch.nn.utils.clip_grad_norm_(reference.parameters(), 100.0)
+    optimizer.step()
+
+    observed = engine.step(batch)
+    assert observed["loss"] == pytest.approx(float(expected_loss.detach()))
+    assert observed["grad_norm"] == pytest.approx(float(expected_norm))
+    for actual, wanted in zip(model.parameters(), reference.parameters(), strict=True):
+        assert actual.dtype == torch.float32
+        assert actual.grad.dtype == torch.float32
+        torch.testing.assert_close(actual, wanted)
+    assert all(state["exp_avg"].dtype == torch.float32 for state in engine.optimizer.state.values())
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        expected_eval = float(reference(batch)["loss"])
+    observed_eval = engine.eval_batch(batch)
+    assert observed_eval["loss"] == pytest.approx(expected_eval)
+    assert model.output_dtypes == [torch.bfloat16, torch.bfloat16]
+
+
+def _distributed_worker(rank, rendezvous, world_size, micro_batch_size, pretraining=False):
     torch.set_num_threads(1)
     dist.init_process_group(
         "gloo",
@@ -198,7 +311,7 @@ def _distributed_worker(rank, rendezvous, world_size, micro_batch_size):
         timeout=timedelta(seconds=60),
     )
     try:
-        model = BranchModel()
+        model = PretrainBranchModel() if pretraining else BranchModel()
         reference = deepcopy(model)
         engine = TokenMemoryEngine(model, config(micro_batch_size), "cpu")
         engine.initialize()
@@ -207,7 +320,8 @@ def _distributed_worker(rank, rendezvous, world_size, micro_batch_size):
             lr=0.05,
             weight_decay=0.0,
         )
-        batches = [(examples() * 3)[:8], examples(), examples()[:1], examples()[1:]]
+        rows = pretrain_examples() if pretraining else examples()
+        batches = [(rows * 3)[:8], rows, rows[:1], rows[1:]]
         for epoch, batch in enumerate(batches):
             expected = reference_step(reference, optimizer, batch, epoch=epoch)
             calls_before = len(model.calls)
@@ -216,10 +330,21 @@ def _distributed_worker(rank, rendezvous, world_size, micro_batch_size):
             assert observed["grad_norm"] == pytest.approx(expected["grad_norm"])
             assert observed["samples"] == len(batch)
             assert observed["length"] == pytest.approx(
-                sum(row["length"] for row in batch) / len(batch)
+                sum(len(row.target_ids) if pretraining else row["length"] for row in batch)
+                / len(batch)
             )
             expected_calls = max(1, math.ceil(len(batch[rank::world_size]) / micro_batch_size))
             assert len(model.calls) - calls_before == expected_calls
+            if pretraining:
+                assigned = batch[rank::world_size]
+                ordered = sorted(
+                    assigned, key=lambda row: (len(row.target_ids), len(row.input_ids)), reverse=True
+                )
+                expected_ids = [
+                    [row.sample_id for row in ordered[start : start + micro_batch_size]]
+                    for start in range(0, len(ordered), micro_batch_size)
+                ] or [[batch[0].sample_id]]
+                assert model.batch_ids[-expected_calls:] == expected_ids
             for actual, wanted in zip(model.parameters(), reference.parameters(), strict=True):
                 torch.testing.assert_close(actual, wanted, rtol=1e-12, atol=1e-12)
                 if wanted.grad is None:
@@ -246,5 +371,14 @@ def test_distributed_branch_updates_full_uneven_and_empty_tail_batches_match_ser
         _distributed_worker,
         args=(str(tmp_path / "rendezvous"), world_size, micro_batch_size),
         nprocs=world_size,
+        join=True,
+    )
+
+
+def test_distributed_pretraining_length_groups_preserve_rank_shards_and_tail_weights(tmp_path):
+    mp.spawn(
+        _distributed_worker,
+        args=(str(tmp_path / "rendezvous"), 2, 2, True),
+        nprocs=2,
         join=True,
     )

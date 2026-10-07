@@ -135,20 +135,21 @@ def test_actual_writer_reader_and_engine_train_every_method_stage(
     calls = {"writer": [], "reader": []}
 
     def observe(module, args, kwargs):
-        reading = any(
-            layer.disable_adapters
-            for layer in model.codec.language_model.modules()
-            if hasattr(layer, "lora_A")
-        )
+        reading = module is model.codec.decoder.model
         calls["reader" if reading else "writer"].append(kwargs["inputs_embeds"].shape[0])
 
-    hook = model.codec.language_model.get_base_model().model.register_forward_pre_hook(
-        observe, with_kwargs=True
-    )
+    hooks = [
+        backbone.register_forward_pre_hook(observe, with_kwargs=True)
+        for backbone in (
+            model.codec.language_model.get_base_model().model,
+            model.codec.decoder.model,
+        )
+    ]
     try:
         metrics = engine.step(batch, epoch=1)
     finally:
-        hook.remove()
+        for hook in hooks:
+            hook.remove()
 
     assert max(calls["writer"]) == micro_batch_size
     if micro_batch_size == 2:
@@ -164,7 +165,7 @@ def test_actual_writer_reader_and_engine_train_every_method_stage(
     evaluation = engine.eval_batch(batch, epoch=1)
     assert math.isfinite(evaluation["loss"])
     assert evaluation["grad_norm"] is None
-    assert model.training and not model.codec.language_model.training
+    assert model.training and model.codec.language_model.training and model.codec.decoder.training
     for name, value in parameter_snapshot(model, True).items():
         torch.testing.assert_close(value, after_training[name], rtol=0, atol=0)
     assert_frozen(model, frozen)

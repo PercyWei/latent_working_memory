@@ -4,6 +4,7 @@
     "revision": null,
     "dtype": "bfloat16",
     "attention_implementation": "sdpa",
+    "gradient_checkpointing": true,
     "memory_slots": 64,
     "lora_rank": 128,
     "lora_alpha": 32,

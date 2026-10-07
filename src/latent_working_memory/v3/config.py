@@ -33,6 +33,7 @@ class ModelConfig:
     revision: str | None = None
     dtype: str = "bfloat16"
     attention_implementation: str = "sdpa"
+    gradient_checkpointing: bool = True
     memory_slots: int = 64
     lora_rank: int = 128
     lora_alpha: int = 32
@@ -52,6 +53,8 @@ class ModelConfig:
         object.__setattr__(self, "model_name_or_path", os.path.expanduser(self.model_name_or_path))
         if self.dtype not in {"float32", "bfloat16"}:
             raise ValueError("dtype must be float32 or bfloat16")
+        if type(self.gradient_checkpointing) is not bool:
+            raise ValueError("gradient_checkpointing must be boolean")
         if self.attention_implementation not in {"eager", "sdpa", "flash_attention_2"}:
             raise ValueError("unsupported attention_implementation")
         for name in ("memory_slots", "lora_rank", "lora_alpha"):

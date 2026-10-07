@@ -11,8 +11,9 @@
 | 写入 | 新文本末尾添加可训练 gist embeddings，取其最终隐藏状态作为记忆 |
 | 可训练参数 | 编码 LoRA（rank 128、alpha 32，attention/MLP projections）与 gist embeddings |
 | 初始化 | gist embeddings 使用零均值高斯分布，标准差 0.02 |
-| 读取 | 同一冻结基座关闭 LoRA；训练时仍保留读取损失对记忆的梯度 |
-| 数值与位置 | 基座 bfloat16、LoRA/embeddings float32；普通因果位置编码，LoRA dropout 为 0 |
+| 读取 | 从相同基座复制独立冻结 Decoder，不安装 LoRA；训练时仍保留读取损失对记忆的梯度 |
+| 数值与位置 | 两端基座 bfloat16、LoRA/embeddings float32；CUDA 训练、验证和最终评估使用 BF16 autocast；普通因果位置编码，dropout 为 0 |
+| 激活重计算 | 编码器和解码器默认启用原生非重入逐层 checkpoint；`model.gradient_checkpointing` 控制开关 |
 | 训练框架 | 复用 verl `BaseEngine`、优化器和 replicated DDP；一个外层 forward 并行展开一个 microbatch 的完整轨迹 |
 
 | 方法标识 | 写入范围与容量 | 训练流程 |
@@ -73,9 +74,13 @@ AutoCompressors 在索引数据上每条原始索引只生成一个 continuation
 
 每个 global batch 按实际样本数平均，包括不足一批的尾批。配置项 `micro_batch_size_per_gpu` 控制每卡一次并行处理的完整样本数，`gradient_accumulation_steps` 控制累积次数；全局 batch 根据两者与 GPU 数的乘积计算并记录。五方法默认每卡 microbatch 为 2、累积 2 次，双卡全局 batch 为 8；`qa_batch_size` 默认为 8。
 
-批量写入采用独立行的右侧 padding 与 attention mask，不跨样本读取信息；动态分支按轨迹独立决策。`qa_batch_size` 控制每条轨迹一次读取的题数，批量调用合并各活跃轨迹的题目，但保留原有每题、更新点和轨迹的损失权重。多个样本共享调用的计时按参与样本分摊，调用/题目数仍按每条样本的逻辑工作量记录。
+批量读写采用独立行的右侧 padding，仅使用有效前缀输出；因果 attention 保证有效位置不会读取右侧 padding，因此不传 padding mask，保留 SDPA 的纯 causal 路径。预训练样本在既定 global batch 的每卡分片内按目标长度、输入长度分组，减少补齐计算；采样、各卡样本归属和损失权重保持不变。动态分支按轨迹独立决策。`qa_batch_size` 控制每条轨迹一次读取的题数，批量调用合并各活跃轨迹的题目，但保留原有每题、更新点和轨迹的损失权重。多个样本共享调用的计时按参与样本分摊，调用/题目数仍按每条样本的逻辑工作量记录。
 
-原生 Transformer 梯度检查点保持关闭；长目标的冻结输出层 CE 单独分块重算，以减少词表 logits 的显存占用。实际 4B 长轨迹的显存与吞吐需在 GPU 上测量。
+两端职责固定后，Transformer 逐层重算无需切换 adapter 状态；训练时保持 train 模式并关闭 dropout，生成时临时切换 Decoder 为 eval，使用 KV cache 后恢复原模式。独立 Decoder 每卡增加约 8 GB 的 BF16 权重，以换取逐层重算节省的激活；长目标的词表投影与 CE 继续按 256 个有效位置独立分块重算。当前保留 PyTorch 2.6 环境，不接入 v2 依赖其他接口的 padding-free 后端。实际 4B 长轨迹的显存与吞吐需在 GPU 上测量。
+
+`model.dtype` 指基座权重存储精度；CUDA 的计算使用 BF16 autocast，CPU 保留原精度。实际 `autocast_dtype` 记录于运行元数据和 SwanLab 阶段配置，损失与门控统计使用 FP32。
+
+checkpoint 继续只保存 gist embeddings 和编码 LoRA 等可训练状态，不保存冻结 Decoder。已有共享预训练产物可以通过 `--init-checkpoint` 初始化后续阶段；更改工程设置后的继续训练以新阶段记录为准，不保证与旧计算路径逐步数值一致。
 
 ## 启动
 

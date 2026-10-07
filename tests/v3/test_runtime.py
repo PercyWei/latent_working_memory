@@ -231,12 +231,21 @@ def test_early_stop_always_evaluates_and_saves_at_the_actual_last_step(tmp_path)
     assert result["checkpoint"].endswith("step-000002.pt")
 
 
-def test_stage_initialization_loads_only_trainable_weights_and_preserves_ancestry(tmp_path):
+@pytest.mark.parametrize("source_checkpointing", [True, False, None])
+def test_stage_initialization_loads_only_trainable_weights_and_preserves_ancestry(
+    tmp_path, source_checkpointing
+):
     pretrain, splits = make_config(tmp_path / "pretrain"), make_splits()
     engine = make_engine(pretrain)
     result = train_loop(
         pretrain, engine, splits, _run(pretrain, engine, splits), stop_after_steps=1
     )
+    source = read_checkpoint(result["checkpoint"])
+    if source_checkpointing is None:
+        del source["run"]["config"]["model"]["gradient_checkpointing"]
+    else:
+        source["run"]["config"]["model"]["gradient_checkpointing"] = source_checkpointing
+    torch.save(source, result["checkpoint"])
     warmup = make_config(tmp_path / "warmup", "warmup", result["checkpoint"])
     fresh = make_engine(warmup)
     torch_rng, python_rng, numpy_rng = (
@@ -333,10 +342,19 @@ def test_load_codec_uses_a_local_tiny_pretrained_base_without_network(tmp_path):
     assert codec.memory_embeddings.shape == (2, 16)
     assert codec.memory_embeddings.dtype == torch.float32
     assert loaded_tokenizer.eos_token_id == 2
-    assert not codec.language_model.get_base_model().is_gradient_checkpointing
+    assert codec.language_model.get_base_model().is_gradient_checkpointing
+    assert codec.decoder.is_gradient_checkpointing
+    assert all(not parameter.requires_grad for parameter in codec.decoder.parameters())
+    writer_embedding = codec.language_model.get_input_embeddings().weight
+    reader_embedding = codec.decoder.get_input_embeddings().weight
+    torch.testing.assert_close(writer_embedding, reader_embedding)
+    assert writer_embedding.data_ptr() != reader_embedding.data_ptr()
     assert any(
         "lora_" in name and parameter.requires_grad for name, parameter in codec.named_parameters()
     )
+    plain, _ = load_codec(replace(model_config, gradient_checkpointing=False), torch.device("cpu"))
+    assert not plain.language_model.get_base_model().is_gradient_checkpointing
+    assert not plain.decoder.is_gradient_checkpointing
     tokenizer.eos_token = None
     tokenizer.save_pretrained(model_dir)
     with pytest.raises(ValueError, match="eos_token_id"):

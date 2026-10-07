@@ -1,7 +1,7 @@
 """v3 模型加载、阶段衔接、可恢复训练与本地运行记录。"""
 
 from contextlib import nullcontext
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import hashlib
 import json
 import math
@@ -13,7 +13,7 @@ import torch
 import torch.distributed as dist
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from latent_working_memory.v3.config import DYNAMIC_METHODS, TrainingConfig
+from latent_working_memory.v3.config import DYNAMIC_METHODS, ModelConfig, TrainingConfig
 from latent_working_memory.v3.data import load_factqa
 from latent_working_memory.v3.model import GistMemoryModel
 from latent_working_memory.v3.pretrain_data import (
@@ -41,7 +41,7 @@ def write_json(path, value):
 
 
 def load_codec(model_config, device):
-    """一个冻结基座，编码启用 LoRA，读取关闭 LoRA；不启用梯度检查点。"""
+    """同源独立编码器／解码器；编码训练 LoRA，冻结读取保留记忆梯度。"""
     tokenizer = AutoTokenizer.from_pretrained(
         model_config.model_name_or_path, revision=model_config.revision
     )
@@ -61,6 +61,7 @@ def load_codec(model_config, device):
         lora_rank=model_config.lora_rank,
         lora_alpha=model_config.lora_alpha,
         lora_target_modules=model_config.lora_target_modules,
+        gradient_checkpointing=model_config.gradient_checkpointing,
     )
     return codec, tokenizer
 
@@ -237,6 +238,7 @@ def make_run(
         "world_size": world_size,
         "global_batch_size": config.training.global_batch_size(world_size),
         "device_type": torch.device(device).type,
+        "autocast_dtype": "bfloat16" if torch.device(device).type == "cuda" else None,
         "initialization": initialization,
         "step_offset": step_offset,
         "pretraining": pretraining,
@@ -261,7 +263,11 @@ def load_initialization(path, model, config):
     """阶段切换只载入新增权重，不继承优化器、训练游标或随机状态。"""
     checkpoint = read_checkpoint(path)
     previous = checkpoint["run"]["config"]
-    if previous["model"] != config.to_dict()["model"]:
+    previous_model = ModelConfig(**previous["model"])
+    # 激活重算是执行设置，阶段初始化可复用启用该设置前的训练权重。
+    if replace(
+        previous_model, gradient_checkpointing=config.model.gradient_checkpointing
+    ) != config.model:
         raise ValueError("initialization model configuration differs from the current model")
     required_stages = {
         "warmup": {"pretrain"},

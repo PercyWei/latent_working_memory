@@ -16,6 +16,7 @@ def build_model(
     dropout=0.0,
     dtype=torch.float32,
     attention_implementation="eager",
+    gradient_checkpointing=True,
 ):
     torch.manual_seed(93)
     config_type, model_class = {
@@ -38,7 +39,14 @@ def build_model(
     )
     config._attn_implementation = attention_implementation
     base = model_class(config).to(dtype=dtype)
-    return GistMemoryModel(base, memory_slots, 2, 4, ("q_proj", "v_proj"))
+    return GistMemoryModel(
+        base,
+        memory_slots,
+        2,
+        4,
+        ("q_proj", "v_proj"),
+        gradient_checkpointing=gradient_checkpointing,
+    )
 
 
 def ids(*values):
@@ -56,7 +64,7 @@ def randomize_adapter(model):
 def test_compression_reads_final_gist_states_and_supports_history_ranges(model_type):
     model = build_model(model_type)
     model.train()
-    assert not model.language_model.training
+    assert model.language_model.training and model.decoder.training
     assert model.training
     inputs, hidden = [], []
     base = model.language_model.get_base_model().model
@@ -88,7 +96,7 @@ def test_compression_reads_final_gist_states_and_supports_history_ranges(model_t
 
 
 @pytest.mark.parametrize("model_type", ["llama", "qwen3"])
-def test_reader_disables_adapter_without_detaching_memory(model_type):
+def test_independent_frozen_reader_ignores_adapter_without_detaching_memory(model_type):
     model = build_model(model_type)
     memory = torch.randn(4, model.width, requires_grad=True)
     prompts, answers = [ids(3, 4)], [ids(8, 9, 10)]
@@ -101,6 +109,10 @@ def test_reader_disables_adapter_without_detaching_memory(model_type):
     after.sum().backward()
     assert memory.grad is not None and memory.grad.abs().sum() > 0
     assert all(parameter.grad is None for parameter in model.language_model.parameters())
+    assert all(
+        not parameter.requires_grad and parameter.grad is None
+        for parameter in model.decoder.parameters()
+    )
     assert all(
         not module.disable_adapters
         for module in model.language_model.modules()
@@ -156,7 +168,7 @@ def test_ragged_question_batch_matches_individual_and_dense_answer_only_nll(mode
     prompts = [ids(4, 5, 6), ids(7), ids(8, 9)]
     answers = [ids(10), ids(11, 12, 13, 14), ids(15, 16)]
     projection_rows = []
-    head = model.language_model.get_output_embeddings()
+    head = model.decoder.get_output_embeddings()
     hook = head.register_forward_pre_hook(
         lambda module, args: projection_rows.append(args[0].shape)
     )
@@ -174,15 +186,12 @@ def test_ragged_question_batch_matches_individual_and_dense_answer_only_nll(mode
     separate_grad = torch.autograd.grad(separate.mean(), memories)
     torch.testing.assert_close(batched_grad, separate_grad, rtol=1e-4, atol=1e-7)
     dense = []
-    with model.language_model.disable_adapter():
-        base = model.language_model.get_base_model()
-        for memory, prompt, answer in zip(memories, prompts, answers, strict=True):
-            embeddings = torch.cat(
-                (memory, base.get_input_embeddings()(torch.cat((prompt, answer))))
-            )
-            logits = base(inputs_embeds=embeddings[None], use_cache=False).logits[0]
-            offset = len(memory) + len(prompt) - 1
-            dense.append(F.cross_entropy(logits[offset : offset + len(answer)], answer))
+    base = model.decoder
+    for memory, prompt, answer in zip(memories, prompts, answers, strict=True):
+        embeddings = torch.cat((memory, base.get_input_embeddings()(torch.cat((prompt, answer)))))
+        logits = base(inputs_embeds=embeddings[None], use_cache=False).logits[0]
+        offset = len(memory) + len(prompt) - 1
+        dense.append(F.cross_entropy(logits[offset : offset + len(answer)], answer))
     torch.testing.assert_close(batched, torch.stack(dense), rtol=1e-5, atol=1e-6)
 
 
@@ -202,19 +211,19 @@ def test_long_targets_chunk_checkpoint_head_matches_dense_loss_and_gradient(monk
         return original(function, hidden, targets, use_reentrant=False)
 
     monkeypatch.setattr(model_module, "checkpoint", observed_checkpoint)
-    projected, adapters_disabled = [], []
+    projected, adapters_enabled = [], []
 
     def observe_head(module, args):
         projected.append(len(args[0]))
-        adapters_disabled.append(
+        adapters_enabled.append(
             all(
-                module.disable_adapters
+                not module.disable_adapters
                 for module in model.language_model.modules()
                 if hasattr(module, "lora_A")
             )
         )
 
-    hook = model.language_model.get_output_embeddings().register_forward_pre_hook(observe_head)
+    hook = model.decoder.get_output_embeddings().register_forward_pre_hook(observe_head)
     actual = model.answer_nll(memories, prompts, answers)
     assert actual.dtype == torch.float32 and torch.isfinite(actual).all()
     assert calls == [256, 86]
@@ -222,19 +231,18 @@ def test_long_targets_chunk_checkpoint_head_matches_dense_loss_and_gradient(monk
     actual.mean().backward()
     hook.remove()
     assert sorted(projected) == [86, 86, 256, 256]
-    assert all(adapters_disabled)
+    assert all(adapters_enabled)
     chunked_gradients = [memory.grad.clone() for memory in memories]
     for memory in memories:
         memory.grad = None
     expected = []
-    with model.language_model.disable_adapter():
-        base = model.language_model.get_base_model()
-        for memory, prompt, answer in zip(memories, prompts, answers, strict=True):
-            text = base.get_input_embeddings()(torch.cat((prompt, answer)))
-            inputs = torch.cat((memory.to(text.dtype), text))
-            logits = base(inputs_embeds=inputs[None], use_cache=False).logits[0]
-            offset = len(memory) + len(prompt) - 1
-            expected.append(F.cross_entropy(logits[offset : offset + len(answer)].float(), answer))
+    base = model.decoder
+    for memory, prompt, answer in zip(memories, prompts, answers, strict=True):
+        text = base.get_input_embeddings()(torch.cat((prompt, answer)))
+        inputs = torch.cat((memory.to(text.dtype), text))
+        logits = base(inputs_embeds=inputs[None], use_cache=False).logits[0]
+        offset = len(memory) + len(prompt) - 1
+        expected.append(F.cross_entropy(logits[offset : offset + len(answer)].float(), answer))
     expected = torch.stack(expected)
     expected.mean().backward()
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
@@ -268,6 +276,12 @@ def test_backbone_dropout_is_disabled_while_training():
     first = model.compress(ids(3, 4, 5))
     second = model.compress(ids(3, 4, 5))
     torch.testing.assert_close(first, second, rtol=0, atol=0)
+    before = model.answer_nll([first], [ids(6)], [ids(7, 8)])
+    repeated = model.answer_nll([first], [ids(6)], [ids(7, 8)])
+    model.eval()
+    evaluated = model.answer_nll([first], [ids(6)], [ids(7, 8)])
+    torch.testing.assert_close(before, repeated, rtol=0, atol=0)
+    torch.testing.assert_close(before, evaluated, rtol=0, atol=0)
 
 
 def test_memory_initialization_uses_zero_mean_gaussian():
@@ -345,13 +359,22 @@ def test_invalid_writer_blocks_and_empty_answers_are_rejected():
         model.answer_nll([torch.zeros(3, 16)], [], [])
 
 
-def test_unsupported_dropout_and_native_gradient_checkpointing_are_explicit():
-    base = build_model().language_model.get_base_model()
+def test_unsupported_lora_dropout_is_explicit():
+    base = build_model().decoder
     with pytest.raises(ValueError, match="lora_dropout=0"):
         GistMemoryModel(base, 3, 2, 4, ("q_proj",), lora_dropout=0.1)
-    base.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-    with pytest.raises(ValueError, match="native gradient checkpointing"):
-        GistMemoryModel(base, 3, 2, 4, ("q_proj",))
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_native_gradient_checkpointing_configuration(enabled):
+    model = build_model(gradient_checkpointing=enabled)
+    assert model.language_model.is_gradient_checkpointing is enabled
+    assert model.decoder.is_gradient_checkpointing is enabled
+    assert model.language_model.training and model.decoder.training
+    model.eval()
+    assert not model.language_model.training and not model.decoder.training
+    model.train()
+    assert model.language_model.training and model.decoder.training
 
 
 @pytest.mark.parametrize("model_type", ["llama", "qwen3"])
@@ -392,11 +415,9 @@ def test_ragged_writer_batch_matches_single_writes_outputs_and_all_gradients(
     assert len(calls) == 1
     assert calls[0]["inputs_embeds"].shape == (3, 11, batched.width)
     lengths = [7, 7, 11]
+    assert calls[0]["attention_mask"] is None
     for index, length in enumerate(lengths):
-        assert calls[0]["attention_mask"][index].tolist() == [True] * length + [False] * (
-            11 - length
-        )
-        assert calls[0]["position_ids"][index].tolist() == list(range(length)) + [0] * (11 - length)
+        assert calls[0]["position_ids"][index].tolist() == list(range(11))
         torch.testing.assert_close(actual[index], states[0][index, length - 3 : length])
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
     weights = torch.randn(len(actual), batched.memory_slots, batched.width)

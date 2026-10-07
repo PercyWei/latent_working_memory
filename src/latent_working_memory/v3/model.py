@@ -1,4 +1,6 @@
-"""单基座 gist-token 写入器与无 LoRA 的可微读取器。"""
+"""同源独立编码器／解码器：gist 写入、冻结读取与逐层激活重计算。"""
+
+from copy import deepcopy
 
 from peft import (
     LoraConfig,
@@ -22,14 +24,13 @@ class GistMemoryModel(nn.Module):
         lora_alpha,
         lora_target_modules,
         lora_dropout=0.0,
+        gradient_checkpointing=True,
     ):
         super().__init__()
         if base_model.config.model_type not in {"llama", "qwen2", "qwen3"}:
             raise ValueError("gist memory supports Llama, Qwen2 and Qwen3 causal LMs")
-        if base_model.is_gradient_checkpointing:
-            raise ValueError(
-                "native gradient checkpointing is unsupported with shared reader/writer adapters"
-            )
+        if type(gradient_checkpointing) is not bool:
+            raise ValueError("gradient_checkpointing must be boolean")
         if type(memory_slots) is not int or memory_slots < 1:
             raise ValueError("memory_slots must be a positive integer")
         if lora_dropout != 0.0:
@@ -39,6 +40,15 @@ class GistMemoryModel(nn.Module):
         self.memory_slots = memory_slots
         base_model.requires_grad_(False)
         base_model.config.use_cache = False
+        # 保持原有 dropout 关闭的语义，同时允许 train 模式触发原生逐层重算。
+        base_model.config.attention_dropout = 0.0
+        for layer in base_model.model.layers:
+            layer.self_attn.attention_dropout = 0.0
+        for module in base_model.modules():
+            if isinstance(module, nn.Dropout):
+                module.p = 0.0
+        # 在安装 LoRA 前复制冻结基座；两个对象不共享 adapter 状态或权重存储。
+        self.decoder = deepcopy(base_model)
         self.language_model = get_peft_model(
             base_model,
             LoraConfig(
@@ -50,18 +60,17 @@ class GistMemoryModel(nn.Module):
                 task_type="CAUSAL_LM",
             ),
         )
+        for backbone in (self.language_model.get_base_model(), self.decoder):
+            if gradient_checkpointing:
+                backbone.gradient_checkpointing_enable({"use_reentrant": False})
+            else:
+                backbone.gradient_checkpointing_disable()
         embedding = self.language_model.get_input_embeddings().weight
         self.memory_embeddings = nn.Parameter(
             torch.empty(memory_slots, self.width, device=embedding.device, dtype=torch.float32)
         )
         nn.init.normal_(self.memory_embeddings, mean=0.0, std=0.02)
         self.train()
-
-    def train(self, mode=True):
-        super().train(mode)
-        # 冻结基座的 dropout 始终关闭；LoRA 的梯度不依赖模块 training 标记。
-        self.language_model.eval()
-        return self
 
     def _check_tokens(self, token_ids):
         if token_ids.ndim != 1 or token_ids.dtype != torch.long or len(token_ids) == 0:
@@ -114,13 +123,14 @@ class GistMemoryModel(nn.Module):
             )
         inputs = pad_sequence(rows, batch_first=True)
         positions = torch.arange(inputs.shape[1], device=inputs.device)[None]
-        mask = positions < torch.tensor([len(row) for row in rows], device=inputs.device)[:, None]
+        # 只有右侧 padding，因果 attention 下有效前缀不会读到 padding。
+        # 不传四维 mask，也不重置 padding 的位置，保留 SDPA 的纯 causal 路径。
         hidden = (
             self.language_model.get_base_model()
             .model(
                 inputs_embeds=inputs,
-                attention_mask=mask,
-                position_ids=positions.expand_as(mask).masked_fill(~mask, 0),
+                attention_mask=None,
+                position_ids=positions.expand(inputs.shape[:2]),
                 use_cache=False,
                 return_dict=True,
             )
@@ -134,7 +144,7 @@ class GistMemoryModel(nn.Module):
         """返回每题答案 token 的平均 NLL；不为输入自动添加 BOS/EOS。"""
         if not memories or not len(memories) == len(prompt_ids) == len(answer_ids):
             raise ValueError("memories, prompts and answers must align and be nonempty")
-        embed = self.language_model.get_input_embeddings()
+        embed = self.decoder.get_input_embeddings()
         rows, offsets, lengths = [], [], []
         for memory, prompt, answer in zip(memories, prompt_ids, answer_ids, strict=True):
             self._check_memory(memory)
@@ -148,32 +158,25 @@ class GistMemoryModel(nn.Module):
             lengths.append(len(answer))
         inputs = pad_sequence(rows, batch_first=True)
         positions = torch.arange(inputs.shape[1], device=inputs.device)[None]
-        mask = positions < torch.tensor([len(row) for row in rows], device=inputs.device)[:, None]
-        with self.language_model.disable_adapter():
-            # 只关闭 adapter；不能使用 no_grad，否则读取损失无法回传到记忆。
-            base = self.language_model.get_base_model()
-            hidden = base.model(
-                inputs_embeds=inputs,
-                attention_mask=mask,
-                position_ids=positions.expand_as(mask).masked_fill(~mask, 0),
-                use_cache=False,
-                return_dict=True,
-            ).last_hidden_state
-            selected = torch.cat(
-                [
-                    row[offset : offset + length]
-                    for row, offset, length in zip(hidden, offsets, lengths, strict=True)
-                ]
-            )
+        # 冻结参数仍向 memory 反传梯度；不能在此使用 no_grad。
+        hidden = self.decoder.model(
+            inputs_embeds=inputs,
+            attention_mask=None,
+            position_ids=positions.expand(inputs.shape[:2]),
+            use_cache=False,
+            return_dict=True,
+        ).last_hidden_state
+        selected = torch.cat(
+            [
+                row[offset : offset + length]
+                for row, offset, length in zip(hidden, offsets, lengths, strict=True)
+            ]
+        )
 
         def token_losses(hidden, targets):
-            # backward 的 checkpoint 重算同样关闭 adapter，不依赖外层上下文仍然存活。
-            with self.language_model.disable_adapter():
-                logits = self.language_model.get_output_embeddings()(hidden)
-                scores = (
-                    logits.float() if logits.dtype in {torch.float16, torch.bfloat16} else logits
-                )
-                return F.cross_entropy(scores, targets, reduction="none")
+            logits = self.decoder.get_output_embeddings()(hidden)
+            scores = logits.float() if logits.dtype in {torch.float16, torch.bfloat16} else logits
+            return F.cross_entropy(scores, targets, reduction="none")
 
         targets = torch.cat(answer_ids)
         chunk_size = 256
@@ -202,10 +205,12 @@ class GistMemoryModel(nn.Module):
         if type(max_new_tokens) is not int or max_new_tokens < 1:
             raise ValueError("max_new_tokens must be a positive integer")
         self._check_length(len(memory) + len(prompt_ids) + max_new_tokens)
-        text = self.language_model.get_input_embeddings()(prompt_ids)
+        text = self.decoder.get_input_embeddings()(prompt_ids)
         inputs = torch.cat((memory.to(text.dtype), text))[None]
-        with self.language_model.disable_adapter():
-            return self.language_model.generate(
+        was_training = self.decoder.training
+        self.decoder.eval()
+        try:
+            return self.decoder.generate(
                 inputs_embeds=inputs,
                 attention_mask=torch.ones(inputs.shape[:2], dtype=torch.long, device=inputs.device),
                 max_new_tokens=max_new_tokens,
@@ -214,6 +219,8 @@ class GistMemoryModel(nn.Module):
                 pad_token_id=pad_token_id,
                 use_cache=True,
             )[0]
+        finally:
+            self.decoder.train(was_training)
 
     def trainable_state_dict(self):
         return {

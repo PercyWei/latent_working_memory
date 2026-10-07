@@ -11,6 +11,7 @@ from verl.workers.config import FSDPOptimizerConfig
 from verl.workers.config.optimizer import build_optimizer
 from verl.workers.engine import BaseEngine, EngineRegistry
 
+from latent_working_memory.v3.pretrain_data import PretrainExample
 from latent_working_memory.v4.engine import initialize_device
 
 
@@ -99,6 +100,15 @@ class TokenMemoryEngine(BaseEngine):
         if not examples:
             raise ValueError("a batch must contain at least one trajectory")
         local = list(range(self.rank, len(examples), self.world_size))
+        if isinstance(examples[0], PretrainExample):
+            # 仅重排当前 rank 已分得的样本；优先接近读取长度，再接近写入长度。
+            local.sort(
+                key=lambda index: (
+                    len(examples[index].target_ids),
+                    len(examples[index].input_ids),
+                ),
+                reverse=True,
+            )
         # 尾批空 rank 也执行真实 DDP forward/backward，仅将其训练权重置零。
         size = self.config.micro_batch_size_per_gpu
         work = [local[start : start + size] for start in range(0, len(local), size)] or [[0]]
@@ -111,12 +121,18 @@ class TokenMemoryEngine(BaseEngine):
                 else nullcontext()
             )
             with sync:
-                output = self.module(
-                    [examples[index] for index in indices],
-                    epoch=epoch,
-                    differentiable=not forward_only,
-                    batched=True,
+                precision = (
+                    torch.autocast("cuda", dtype=torch.bfloat16)
+                    if self.device.type == "cuda"
+                    else nullcontext()
                 )
+                with precision:
+                    output = self.module(
+                        [examples[index] for index in indices],
+                        epoch=epoch,
+                        differentiable=not forward_only,
+                        batched=True,
+                    )
                 if not forward_only:
                     loss = output["loss"] * count / len(examples)
                     loss.backward()
