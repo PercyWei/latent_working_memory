@@ -4,6 +4,7 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -153,9 +154,7 @@ def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode,
         )
         == expected
     )
-    assert directory.name == (
-        "capacity_unit-job" if mode == "full" else f"capacity-{mode}_unit-job"
-    )
+    assert directory == args.output_root / "unit-job"
     for job in jobs:
         assert job.config.training.max_train_samples == expected[0]
         assert job.config.training.max_dev_samples == expected[1]
@@ -167,6 +166,7 @@ def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode,
         assert job.config.training.global_batch_size(2) == 8
         assert job.config.training.global_batch_size(4) == 16
         assert job.config.training.experiment_id == "unit-job"
+        assert job.config.training.group == "unit-job"
         root = Path(job.config.training.experiment_dir)
         assert Path(job.config.training.output_dir) == root / job.config.objective.stage
         assert root.name.endswith("-k64_unit-job" if mode == "full" else f"-k64_{mode}_unit-job")
@@ -217,7 +217,10 @@ def test_minimal_command_builds_all_methods_with_shared_default_settings(mode):
     args = gpu_job.parse_args(["--mode", mode, "--gpus", "4,5"])
     assert args.method == "all"
     assert args.run_id is None
-    _, _, jobs = gpu_job.build_jobs(args)
+    directory, _, jobs = gpu_job.build_jobs(args)
+    assert re.fullmatch(r"\d{8}-\d{6}", args.run_id)
+    assert directory == args.output_root.resolve() / args.run_id
+    assert all(job.config.training.group == args.run_id for job in jobs)
     assert len(jobs) == 10
     assert sum(job.key == "dynamic-pretrain" for job in jobs) == 1
     assert len({job.config.training.experiment_id for job in jobs}) == 1
@@ -653,7 +656,7 @@ def test_separate_methods_share_source_id_and_coexist_without_overwriting_series
     baseline = arguments(tmp_path, "--mode", "full", "--method", "icae_single")
     gpu_job.run_job(baseline)
 
-    directory = shared.output_root / "capacity_unit-job"
+    directory = shared.output_root / "unit-job"
     assert {path.name for path in (directory / "plan").iterdir()} == {
         "shared-pretrain",
         "memory-change",
@@ -761,6 +764,10 @@ def test_full_execution_starts_a_new_unbounded_run_without_smoke_checkpoint(tmp_
     monkeypatch.setattr(gpu_job, "execute", commands)
     short_result = gpu_job.run_job(smoke)
     full = arguments(tmp_path, "--mode", "full", "--method", "shared_pretrain")
+    with pytest.raises(ValueError, match="refusing to overwrite"):
+        gpu_job.run_job(full)
+    assert len(commands.calls) == 1
+    full.run_id = "full-unit-job"
     full_result = gpu_job.run_job(full)
     assert set(short_result["checkpoints"].values()).isdisjoint(full_result["checkpoints"].values())
     full_call = commands.calls[-1]

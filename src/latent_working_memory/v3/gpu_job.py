@@ -140,7 +140,10 @@ def parse_args(argv=None):
     parser.add_argument("--tracking", choices=("online", "disabled"), default="online")
     parser.add_argument("--swanlab-project", default="latent-working-memory-v3")
     parser.add_argument("--group", help="显式实验系列 group；默认使用本次运行标识")
-    parser.add_argument("--run-id", help="实验标识；动态后训练自动继承共享预训练来源的标识")
+    parser.add_argument(
+        "--run-id",
+        help="产物目录名和默认 group；默认上海时间 YYYYMMDD-HHMMSS，动态后训练继承预训练标识",
+    )
     parser.add_argument("--output-root", type=Path, default=Path("artifacts/v3"))
     parser.add_argument(
         "--dry-run", action="store_true", help="只打印解析后的计划，不加载数据/模型，不连接 SwanLab"
@@ -200,12 +203,9 @@ def resolve_experiment_id(args):
 def build_jobs(args):
     args.run_id = resolve_experiment_id(args)
     level = resolve_level(args)
-    series = (
-        f"capacity_{args.run_id}" if args.mode == "full" else f"capacity-{args.mode}_{args.run_id}"
-    )
-    directory = args.output_root.resolve() / series
+    directory = args.output_root.resolve() / args.run_id
     plan_directory = directory / "plan" / args.method.replace("_", "-")
-    group = args.group or series
+    group = args.group or args.run_id
     methods = (
         METHODS
         if args.method == "all"
