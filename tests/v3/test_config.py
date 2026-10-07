@@ -46,7 +46,15 @@ def test_tracking_requires_explicit_group():
         TrainingConfig("data", "output", swanlab_project="existing-project")
 
 
-@pytest.mark.parametrize("name", ["max_train_samples", "max_dev_samples"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "max_train_samples",
+        "max_dev_samples",
+        "micro_batch_size_per_gpu",
+        "gradient_accumulation_steps",
+    ],
+)
 @pytest.mark.parametrize("value", [0, -1, True, 1.5])
 def test_sample_limits_require_positive_integers(name, value):
     with pytest.raises(ValueError, match=name):
@@ -57,3 +65,18 @@ def test_sample_limits_default_to_full_splits():
     config = TrainingConfig("data", "output")
     assert config.max_train_samples is None
     assert config.max_dev_samples is None
+
+
+@pytest.mark.parametrize(
+    "world_size,microbatch,accumulation,expected", [(2, 1, 4, 8), (2, 2, 2, 8), (4, 2, 3, 24)]
+)
+def test_global_batch_is_derived_from_devices_and_microbatches(
+    world_size, microbatch, accumulation, expected
+):
+    config = TrainingConfig(
+        "data",
+        "output",
+        micro_batch_size_per_gpu=microbatch,
+        gradient_accumulation_steps=accumulation,
+    )
+    assert config.global_batch_size(world_size) == expected

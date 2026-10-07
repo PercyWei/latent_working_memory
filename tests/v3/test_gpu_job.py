@@ -79,7 +79,10 @@ class Commands:
                         "completed_steps": steps,
                         "total_steps": 80,
                         "completed_epochs": 1 if steps == 80 else 0,
-                        "sample_visits": steps * config.training.global_batch_size,
+                        "sample_visits": steps
+                        * config.training.global_batch_size(
+                            len(environment["CUDA_VISIBLE_DEVICES"].split(","))
+                        ),
                         "stop_after_steps": steps if steps != 80 else None,
                         "checkpoint": str(checkpoint),
                     }
@@ -128,7 +131,11 @@ def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode,
         assert job.config.training.init_checkpoint is None
         assert job.config.training.swanlab_project == "latent-working-memory-v3"
         assert job.config.training.tags == (f"study:{'main' if mode == 'full' else mode}",)
-        assert job.config.training.global_batch_size == 8
+        assert job.config.training.micro_batch_size_per_gpu == 1
+        assert job.config.training.gradient_accumulation_steps == 4
+        assert job.config.training.global_batch_size(2) == 8
+        assert job.config.training.global_batch_size(4) == 16
+        assert "global_batch_size" not in job.config.to_dict()["training"]
         command = gpu_job.training_command(job, 4, level["max_steps"])
         assert "--nproc_per_node=4" in command
         assert ("--stop-after-steps" in command) == (mode != "full")
@@ -158,6 +165,34 @@ def test_dynamic_methods_share_only_pretraining_and_have_independent_warmup_poli
     assert len({job.config.training.output_dir for job in jobs}) == 5
     assert len({job.config.training.seed for job in jobs}) == 1
     assert len({job.config.training.group for job in jobs}) == 1
+
+
+@pytest.mark.parametrize("method", ["memory_change", "information_loss", "dynamic"])
+def test_auto_from_external_pretraining_checkpoint_skips_pretraining_in_plan(tmp_path, method):
+    checkpoint = tmp_path / "shared pretraining.pt"
+    args = arguments(tmp_path, "--method", method, "--init-checkpoint", str(checkpoint))
+
+    _, _, jobs = gpu_job.build_jobs(args)
+
+    methods = ("memory_change", "information_loss") if method == "dynamic" else (method,)
+    assert len(jobs) == 2 * len(methods)
+    for index, name in enumerate(methods):
+        warmup, policy = jobs[index * 2 : index * 2 + 2]
+        prefix = name.replace("_", "-")
+        assert warmup.key == f"{prefix}-warmup"
+        assert policy.key == f"{prefix}-policy"
+        assert warmup.config.objective.method == policy.config.objective.method == name
+        assert warmup.config.objective.stage == "warmup"
+        assert policy.config.objective.stage == "policy"
+        assert warmup.config.training.init_checkpoint == str(checkpoint.resolve())
+        assert warmup.initialize_from is None
+        assert policy.config.training.init_checkpoint is None
+        assert policy.initialize_from == warmup.key
+        assert not warmup.evaluate and policy.evaluate
+        assert Path(warmup.config.training.dataset_dir) == args.qa_data
+        assert Path(policy.config.training.dataset_dir) == args.qa_data
+    assert not checkpoint.exists()
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_all_methods_build_a_complete_topologically_ordered_stage_graph(tmp_path):
@@ -206,8 +241,10 @@ def test_explicit_overrides_and_zero_remove_profile_limits(tmp_path):
         "test",
         "--epochs",
         "3",
-        "--global-batch-size",
-        "4",
+        "--micro-batch-size-per-gpu",
+        "2",
+        "--gradient-accumulation-steps",
+        "3",
         "--qa-batch-size",
         "2",
         "--threshold-i",
@@ -231,7 +268,9 @@ def test_explicit_overrides_and_zero_remove_profile_limits(tmp_path):
     assert job.config.training.max_train_samples is None
     assert job.config.training.max_dev_samples == 6
     assert job.config.training.epochs == 3
-    assert job.config.training.global_batch_size == 4
+    assert job.config.training.micro_batch_size_per_gpu == 2
+    assert job.config.training.gradient_accumulation_steps == 3
+    assert job.config.training.global_batch_size(2) == 12
     assert job.config.training.group == "chosen-group"
     assert job.config.training.swanlab_project is None
     assert job.config.objective.qa_batch_size == 2
@@ -240,6 +279,35 @@ def test_explicit_overrides_and_zero_remove_profile_limits(tmp_path):
     assert level["max_steps"] is None and level["eval_trajectories"] is None
     assert level["eval_every"] == 2 and level["save_every"] == 3
     assert "--log-to-swanlab" not in gpu_job.evaluation_command(args, level, Path("a"), Path("b"))
+
+
+def test_plan_derives_each_global_batch_from_selected_gpus_microbatch_and_accumulation(tmp_path):
+    args = arguments(
+        tmp_path,
+        "--dry-run",
+        "--gpus",
+        "4,5,6,7",
+        "--micro-batch-size-per-gpu",
+        "2",
+        "--gradient-accumulation-steps",
+        "3",
+    )
+
+    plan = gpu_job.run_job(args)
+
+    assert len(plan["jobs"]) == 5
+    assert all(
+        job["batching"]
+        == {
+            "world_size": 4,
+            "micro_batch_size_per_gpu": 2,
+            "gradient_accumulation_steps": 3,
+            "global_batch_size": 24,
+        }
+        for job in plan["jobs"]
+    )
+    assert all("global_batch_size" not in job["config"]["training"] for job in plan["jobs"])
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize(
@@ -254,10 +322,19 @@ def test_explicit_overrides_and_zero_remove_profile_limits(tmp_path):
         ["--gpus", ""],
         ["--train-samples", "-1"],
         ["--epochs", "0"],
+        ["--micro-batch-size-per-gpu", "0"],
+        ["--micro-batch-size-per-gpu", "-1"],
+        ["--gradient-accumulation-steps", "0"],
+        ["--gradient-accumulation-steps", "-1"],
+        ["--global-batch-size", "8"],
         ["--run-id", "../escape"],
         ["--stage", "warmup"],
         ["--method", "memory_change", "--stage", "policy"],
-        ["--init-checkpoint", "parent.pt"],
+        ["--method", "icae_single", "--init-checkpoint", "parent.pt"],
+        ["--method", "icae_multi", "--init-checkpoint", "parent.pt"],
+        ["--method", "autocompressors", "--init-checkpoint", "parent.pt"],
+        ["--method", "all", "--init-checkpoint", "parent.pt"],
+        ["--method", "memory_change", "--stage", "pretrain", "--init-checkpoint", "parent.pt"],
     ],
 )
 def test_invalid_gpu_scope_or_stage_arguments_are_rejected(tmp_path, options):
@@ -306,8 +383,74 @@ def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
     assert all(str(path) in commands.calls[-1]["command"] for path in result["summaries"])
     directory, _, _ = gpu_job.build_jobs(args)
     assert json.loads((directory / "plan/result.json").read_text()) == result
+    plan = json.loads((directory / "plan/job.json").read_text())
+    world_size = len(gpus.split(","))
+    for job in plan["jobs"]:
+        assert job["batching"] == {
+            "world_size": world_size,
+            "micro_batch_size_per_gpu": 1,
+            "gradient_accumulation_steps": 4,
+            "global_batch_size": world_size * 4,
+        }
+        assert "global_batch_size" not in job["config"]["training"]
     with pytest.raises(ValueError, match="already exists"):
         gpu_job.run_job(args)
+
+
+@pytest.mark.parametrize("method", ["memory_change", "information_loss", "dynamic"])
+def test_auto_from_external_checkpoint_needs_only_qa_and_chains_warmup_into_policy(
+    tmp_path, monkeypatch, method
+):
+    checkpoint = tmp_path / "shared pretraining.pt"
+    checkpoint.write_bytes(b"opaque external pretraining checkpoint fixture")
+    args = arguments(tmp_path, "--method", method, "--init-checkpoint", str(checkpoint))
+    args.qa_data.mkdir()
+    for filename in ("train.jsonl", "dev.jsonl", "test.jsonl", "preparation.json"):
+        (args.qa_data / filename).write_text("")
+    commands = Commands()
+    monkeypatch.setattr(gpu_job, "execute", commands)
+
+    result = gpu_job.run_job(args)
+
+    methods = ("memory_change", "information_loss") if method == "dynamic" else (method,)
+    assert result["status"] == "finished"
+    assert not args.pretrain_data.exists()
+    assert not args.long_pretrain_data.exists()
+    assert len(commands.calls) == 3 * len(methods) + int(len(methods) > 1)
+    for index, name in enumerate(methods):
+        warmup, policy, evaluation = commands.calls[index * 3 : index * 3 + 3]
+        assert warmup["config"].objective.method == policy["config"].objective.method == name
+        assert warmup["config"].objective.stage == "warmup"
+        assert policy["config"].objective.stage == "policy"
+        assert warmup["config"].training.init_checkpoint == str(checkpoint.resolve())
+        assert policy["config"].training.init_checkpoint == str(warmup["checkpoint"])
+        assert policy["config"].training.init_checkpoint != str(checkpoint.resolve())
+        assert "latent_working_memory.v3.evaluate" in evaluation["command"]
+        assert value(evaluation["command"], "--checkpoint") == str(policy["checkpoint"])
+        assert "--log-to-swanlab" in evaluation["command"]
+        prefix = name.replace("_", "-")
+        assert result["checkpoints"][f"{prefix}-warmup"] == str(warmup["checkpoint"])
+        assert result["checkpoints"][f"{prefix}-policy"] == str(policy["checkpoint"])
+    assert len(result["summaries"]) == len(methods)
+    assert "dynamic-pretrain" not in result["checkpoints"]
+    if len(methods) > 1:
+        assert "latent_working_memory.v3.compare" in commands.calls[-1]["command"]
+
+
+def test_auto_from_missing_checkpoint_fails_before_starting_training(tmp_path, monkeypatch):
+    args = arguments(tmp_path, "--init-checkpoint", str(tmp_path / "missing.pt"))
+    args.qa_data.mkdir()
+    for filename in ("train.jsonl", "dev.jsonl", "test.jsonl", "preparation.json"):
+        (args.qa_data / filename).write_text("")
+    commands = Commands()
+    monkeypatch.setattr(gpu_job, "execute", commands)
+
+    with pytest.raises(FileNotFoundError) as error:
+        gpu_job.run_job(args)
+
+    assert "missing.pt" in str(error.value)
+    assert not commands.calls
+    assert not args.output_root.exists()
 
 
 def test_full_execution_starts_a_new_unbounded_run_without_smoke_checkpoint(tmp_path, monkeypatch):
@@ -368,6 +511,27 @@ def test_dry_run_does_not_access_datasets_or_execute_or_create_artifacts(
     assert list(tmp_path.iterdir()) == []
 
 
+def test_external_checkpoint_dry_run_does_not_read_or_check_checkpoint(tmp_path, monkeypatch):
+    checkpoint = tmp_path / "unavailable shared pretraining.pt"
+    args = arguments(tmp_path, "--dry-run", "--init-checkpoint", str(checkpoint))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("dry-run must not inspect checkpoints, datasets or credentials")
+
+    monkeypatch.setattr(Path, "is_file", forbidden)
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    monkeypatch.setattr(gpu_job, "execute", forbidden)
+    monkeypatch.setattr(gpu_job, "swanlab_api_key", forbidden)
+
+    plan = gpu_job.run_job(args)
+
+    assert len(plan["jobs"]) == 4
+    assert all(job["config"]["objective"]["stage"] in {"warmup", "policy"} for job in plan["jobs"])
+    assert plan["jobs"][0]["config"]["training"]["init_checkpoint"] == str(checkpoint)
+    assert plan["jobs"][2]["config"]["training"]["init_checkpoint"] == str(checkpoint)
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_planning_imports_no_model_or_tracking_runtime(tmp_path):
     code = (
         "import sys; from latent_working_memory.v3.gpu_job import main; "
@@ -406,7 +570,9 @@ def test_selected_key_reaches_all_stages_without_being_persisted(
         assert key not in output + saved + command_text
 
 
-@pytest.mark.parametrize("tracking,dry_run", [("online", False), ("disabled", False), ("online", True)])
+@pytest.mark.parametrize(
+    "tracking,dry_run", [("online", False), ("disabled", False), ("online", True)]
+)
 def test_missing_key_stops_online_job_before_creating_artifacts(
     tmp_path, monkeypatch, tracking, dry_run
 ):

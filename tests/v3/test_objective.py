@@ -1,8 +1,10 @@
+from copy import deepcopy
 from dataclasses import replace
 
 import pytest
 import torch
 
+from latent_working_memory.v3 import objective
 from latent_working_memory.v3.config import ObjectiveConfig
 from latent_working_memory.v3.data import FactQATrajectory, QA, Segment, StepUsage
 from latent_working_memory.v3.objective import TokenMemoryTask, damage_action, memory_change_score
@@ -70,16 +72,18 @@ def task(method, stage, **options):
 
 
 def trace_writes(model):
-    calls, original = [], model.codec.compress
+    calls, original = [], model.codec.compress_batch
 
     def traced(ids, memory_blocks=None):
-        output = original(ids, memory_blocks)
-        if output.requires_grad:
-            output.retain_grad()
-        calls.append((ids.detach().clone(), list(memory_blocks or []), output))
-        return output
+        outputs = original(ids, memory_blocks)
+        histories = memory_blocks if memory_blocks is not None else [[] for _ in ids]
+        for tokens, history, output in zip(ids, histories, outputs, strict=True):
+            if output.requires_grad:
+                output.retain_grad()
+            calls.append((tokens.detach().clone(), list(history), output))
+        return outputs
 
-    model.codec.compress = traced
+    model.codec.compress_batch = traced
     return calls
 
 
@@ -153,19 +157,20 @@ def test_memory_change_selects_only_local_graph(append):
 def test_damage_gates_are_no_grad_and_excluded_from_task_loss(append):
     model = task("information_loss", "policy")
     calls = trace_writes(model)
-    original = model.qa_losses
+    original = model._qa_losses_batch
     gate_calls = []
 
-    def controlled(blocks, record, ids):
+    def controlled(requests, events=None, timing_key="read_seconds"):
+        blocks, record, ids = requests[0]
         if ids[0].startswith("gate"):
             assert not torch.is_grad_enabled()
             gate_calls.append(tuple(ids))
             triple = (1.0, 2.0, 1.0) if append else (1.0, 1.0, 2.0)
-            return torch.tensor([triple[(len(gate_calls) - 1) % 3]])
+            return [torch.tensor([triple[(len(gate_calls) - 1) % 3]])]
         assert all(not qid.startswith("gate") for qid in ids)
-        return original(blocks, record, ids)
+        return original(requests, events, timing_key)
 
-    model.qa_losses = controlled
+    model._qa_losses_batch = controlled
     result = model(trajectory())
     result["loss"].backward()
     assert len(gate_calls) == 6
@@ -181,9 +186,10 @@ def test_dynamic_qa_is_actual_question_mean_then_step_mean():
     model = task("memory_change", "warmup", append_probability=0.0)
     record = trajectory()
     per_id = {f"train{i}": float(i + 1) for i in range(3)}
-    model.qa_losses = lambda blocks, record, ids: torch.stack(
-        [blocks[-1].sum() * 0 + per_id[qid] for qid in ids]
-    )
+    model._qa_losses_batch = lambda requests, events=None, timing_key="read_seconds": [
+        torch.stack([blocks[-1].sum() * 0 + per_id[qid] for qid in ids])
+        for blocks, record, ids in requests
+    ]
     output = model(record)
     # step means 1, (2+1)/2, (3+1+2)/3; fixed half old/new would differ at step 3.
     torch.testing.assert_close(output["loss"], torch.tensor(1.5))
@@ -226,9 +232,20 @@ def test_ac_truncates_memory_at_two_segments_but_retains_writer_learning():
     calls = trace_writes(model)
     source = tuple(range(3, 15))
     example = PretrainExample("s", "d", "c", "ae", source, source)
+    reads, original = [], model.codec.answer_nll
+
+    def traced(memories, prompts, answers):
+        reads.extend(
+            (prompt.tolist(), answer.tolist())
+            for prompt, answer in zip(prompts, answers, strict=True)
+        )
+        return original(memories, prompts, answers)
+
+    model.codec.answer_nll = traced
     result = model(example)
     result["loss"].backward()
     assert result["metrics"]["segments"] == 4
+    assert reads == [([3], [4, 5, 6]), ([6], [7, 8]), ([9], [10, 11, 12]), ([12], [13, 14])]
     assert result["metrics"]["target_tokens"] == 10  # exclude one leading token per BPTT group
     assert [len(history) for _, history, _ in calls] == [0, 1, 2]
     assert not any(block.requires_grad for block in calls[2][1])
@@ -250,3 +267,177 @@ def test_ac_rejects_sample_without_any_trainable_cross_segment_target():
     example = PretrainExample("s", "d", "c", "ae", (3, 4, 5, 6), (3, 4, 5, 6))
     with pytest.raises(ValueError, match="no trainable next-token target"):
         model(example)
+
+
+@pytest.mark.parametrize(
+    "method,stage,options",
+    [
+        ("icae_single", "pretrain", {}),
+        ("icae_multi", "pretrain", {"segment_tokens": 3}),
+        ("memory_change", "pretrain", {}),
+        ("information_loss", "pretrain", {}),
+        ("icae_single", "qa", {}),
+        ("icae_multi", "qa", {}),
+        ("memory_change", "warmup", {"append_probability": 0.5}),
+        ("information_loss", "warmup", {"append_probability": 0.5}),
+        ("memory_change", "policy", {"threshold_i": 0.0}),
+        ("memory_change", "policy", {"threshold_i": 1e8}),
+        ("information_loss", "policy", {"threshold_g": 1e-8, "eta": 0.0}),
+        ("information_loss", "policy", {"threshold_d": 1e8, "threshold_g": 1e8}),
+        ("autocompressors", "lm", {"ac_min_segment_tokens": 3, "ac_max_segment_tokens": 4}),
+    ],
+)
+def test_batch_matches_individual_losses_gradients_and_metrics(method, stage, options):
+    model = task(method, stage, qa_batch_size=2, **options)
+    reference = deepcopy(model)
+    if stage in {"pretrain", "lm"}:
+        text = tuple(range(3, 14))
+        examples = [
+            PretrainExample("ae", "d", "c", "ae", text, text),
+            PretrainExample("lm", "d2", "c2", "continuation", text[:8], (17, 18, 19)),
+        ]
+    else:
+        examples = [trajectory(n=2), replace(trajectory(n=4), trajectory_id="other")]
+    expected = [reference(row, epoch=3) for row in examples]
+    expected_loss = torch.stack([result["loss"] for result in expected]).mean()
+    actual = model(examples, epoch=3, batched=True)
+    torch.testing.assert_close(actual["loss"], expected_loss, rtol=1e-5, atol=1e-6)
+    expected_loss.backward()
+    actual["loss"].backward()
+    for name, parameter in model.named_parameters():
+        other = dict(reference.named_parameters())[name]
+        if parameter.grad is None or other.grad is None:
+            assert parameter.grad is other.grad is None
+        else:
+            torch.testing.assert_close(parameter.grad, other.grad, rtol=3e-4, atol=1e-6)
+    for name, value in actual["metrics"].items():
+        if not name.endswith("_seconds"):
+            assert value == pytest.approx(
+                sum(result["metrics"][name] for result in expected) / len(expected),
+                rel=1e-5,
+                abs=1e-6,
+            )
+
+
+def test_batch_qa_preserves_question_then_update_then_trajectory_weights():
+    model = task("memory_change", "warmup", append_probability=0.0)
+    records = [trajectory(n=2), replace(trajectory(n=4), trajectory_id="other")]
+
+    def controlled(requests, events=None, timing_key="read_seconds"):
+        return [
+            torch.stack(
+                [blocks[-1].sum() * 0 + float(qid.removeprefix("train")) + 1 for qid in ids]
+            )
+            for blocks, _, ids in requests
+        ]
+
+    model._qa_losses_batch = controlled
+    result = model(records, batched=True)
+    # 两条轨迹分别为 mean(1, 1.5)=1.25 和 mean(1, 1.5, 2, 2.5)=1.75。
+    torch.testing.assert_close(result["loss"], torch.tensor(1.5))
+    assert result["metrics"]["task_qa_reads"] == 6.5
+    assert result["metrics"]["qa_new_count"] == 3
+    result["loss"].backward()
+
+
+def test_batch_shared_timing_is_charged_once_per_model_call(monkeypatch):
+    # 每次 measured 上下文固定耗时 1 秒，避开机器负载对测试的影响。
+    ticks = iter(range(1000))
+    monkeypatch.setattr(objective, "perf_counter", lambda: float(next(ticks)))
+    model = task("memory_change", "warmup", append_probability=0.0, qa_batch_size=2)
+    records = [trajectory(n=2), replace(trajectory(n=3), trajectory_id="other")]
+    result = model(records, batched=True)
+    # writer共3次；reader在更新点0/1/2分别1/1/2次。
+    assert result["metrics"]["write_seconds"] * len(records) == 3
+    assert result["metrics"]["read_seconds"] * len(records) == 4
+
+
+def test_batch_warmup_rng_and_actions_are_independent_of_batch_order():
+    model = task("memory_change", "warmup", append_probability=0.5)
+    records = [replace(trajectory(n=4), trajectory_id=f"row-{i}") for i in range(4)]
+
+    def actions(rows):
+        result = [[] for _ in rows]
+        with torch.no_grad():
+            for states in model._states_batch(rows, epoch=7):
+                for i, _, event in states:
+                    result[i].append(event["action"])
+        return result
+
+    expected = [actions([row])[0] for row in records]
+    assert len({tuple(values) for values in expected}) > 1
+    writes, original = [], model.codec.compress_batch
+
+    def traced(ids, histories=None):
+        writes.append([len(history) for history in histories])
+        return original(ids, histories)
+
+    model.codec.compress_batch = traced
+    assert actions(records) == expected
+    assert len(writes) == 4
+    assert all(len(histories) == len(records) for histories in writes)
+    assert any(set(histories) == {0, 1} for histories in writes)
+    assert actions(records[::-1]) == expected[::-1]
+
+
+def test_empty_microbatch_is_rejected():
+    with pytest.raises(ValueError, match="at least one"):
+        task("memory_change", "pretrain")([], batched=True)
+
+
+def test_batch_damage_gates_discard_each_unselected_candidate_without_gradient():
+    model = task("information_loss", "policy", qa_batch_size=1)
+    records = [trajectory(n=2), replace(trajectory(n=3), trajectory_id="overwrite")]
+    calls = trace_writes(model)
+    original = model._qa_losses_batch
+    gate_calls = []
+
+    def controlled(requests, events=None, timing_key="read_seconds"):
+        if requests[0][2][0].startswith("gate"):
+            assert not torch.is_grad_enabled()
+            variant = len(gate_calls) % 3
+            gate_calls.append([record.trajectory_id for _, record, _ in requests])
+            return [
+                torch.tensor(
+                    [
+                        (1.0, 1.0, 2.0)[variant]
+                        if record.trajectory_id == "overwrite"
+                        else (1.0, 2.0, 1.0)[variant]
+                    ]
+                )
+                for _, record, _ in requests
+            ]
+        assert all(not qid.startswith("gate") for _, _, ids in requests for qid in ids)
+        return original(requests, events, timing_key)
+
+    model._qa_losses_batch = controlled
+    result = model(records, batched=True)
+    result["loss"].backward()
+    assert gate_calls == [["t", "overwrite"]] * 3 + [["overwrite"]] * 3
+    assert result["metrics"]["appends"] == 0.5
+    assert result["metrics"]["overwrites"] == 1
+    assert result["metrics"]["slots_final"] == 4.5
+    assert result["metrics"]["task_qa_reads"] == result["metrics"]["gate_qa_reads"] == 4.5
+    assert len(calls) == 8
+    for index, (_, _, memory) in enumerate(calls):
+        if index in (2, 5, 7):
+            assert memory.grad is None
+        else:
+            assert memory.grad is not None and memory.grad.abs().sum() > 0
+
+
+def test_qa_reader_batches_active_trajectories_with_per_trajectory_chunk_limit():
+    model = task("information_loss", "policy", qa_batch_size=2)
+    records = [trajectory(n=3), replace(trajectory(n=4), trajectory_id="other")]
+    original = model.codec.answer_nll
+    batch_sizes = []
+
+    def traced(memories, prompts, answers):
+        batch_sizes.append((torch.is_grad_enabled(), len(memories)))
+        return original(memories, prompts, answers)
+
+    model.codec.answer_nll = traced
+    model(records, batched=True)
+    assert max(size for _, size in batch_sizes) == 4
+    assert all(size <= len(records) * model.cfg.qa_batch_size for _, size in batch_sizes)
+    assert any(not differentiable and size == 2 for differentiable, size in batch_sizes)

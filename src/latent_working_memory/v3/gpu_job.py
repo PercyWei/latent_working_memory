@@ -110,7 +110,9 @@ def parse_args(argv=None):
         "--qa-data", type=Path, default=Path("data/fineweb-factqa-train1000_20260930")
     )
     parser.add_argument(
-        "--init-checkpoint", type=Path, help="单阶段 qa/warmup/policy 的初始化 checkpoint"
+        "--init-checkpoint",
+        type=Path,
+        help="单阶段 qa/warmup/policy 的初始化权重；动态方法 auto 时从预训练权重连续执行 warmup/policy",
     )
     parser.add_argument("--model-path", help="默认 Qwen3-4B；可改为共享盘模型目录")
     parser.add_argument(
@@ -119,7 +121,14 @@ def parse_args(argv=None):
     parser.add_argument(
         "--epochs", type=positive_count, help="覆盖所选阶段的训练轮数，默认沿用预设"
     )
-    parser.add_argument("--global-batch-size", type=positive_count)
+    parser.add_argument(
+        "--micro-batch-size-per-gpu", type=positive_count, help="每张卡一次并行处理的样本/轨迹数"
+    )
+    parser.add_argument(
+        "--gradient-accumulation-steps",
+        type=positive_count,
+        help="每次优化器更新前累积的 microbatch 数",
+    )
     parser.add_argument("--qa-batch-size", type=positive_count)
     for name in ("train-samples", "dev-samples", "max-steps", "eval-trajectories"):
         parser.add_argument(f"--{name}", type=bounded_count, help="覆盖运行档位，0 表示不限")
@@ -144,8 +153,10 @@ def parse_args(argv=None):
         parser.error("run-id must contain only letters, digits, '-' and '_'")
     if args.stage != "auto" and args.method in {"all", "dynamic"}:
         parser.error("single-stage jobs require one specific --method")
-    if args.init_checkpoint is not None and args.stage not in {"qa", "warmup", "policy"}:
-        parser.error("--init-checkpoint is for a single qa/warmup/policy stage")
+    if args.init_checkpoint is not None:
+        dynamic_auto = args.stage == "auto" and args.method in (*DYNAMIC_METHODS, "dynamic")
+        if args.stage not in {"qa", "warmup", "policy"} and not dynamic_auto:
+            parser.error("--init-checkpoint requires qa/warmup/policy or auto with dynamic methods")
     if args.stage in {"qa", "warmup", "policy"} and args.init_checkpoint is None:
         parser.error("this stage requires --init-checkpoint")
     return args
@@ -195,7 +206,7 @@ def build_jobs(args):
             "dataset_dir": str(dataset.resolve()),
             "output_dir": str(directory / "train" / f"{key}-k64_{args.mode}_{args.run_id}"),
             "init_checkpoint": str(args.init_checkpoint.resolve())
-            if args.init_checkpoint
+            if args.init_checkpoint is not None and initialize_from is None
             else None,
             "max_train_samples": level["train_samples"],
             "max_dev_samples": level["dev_samples"],
@@ -206,7 +217,7 @@ def build_jobs(args):
             "tags": (f"study:{'main' if args.mode == 'full' else args.mode}",),
         }
         # QA 阶段不使用预训练输入长度筛选；真实段界与题池保持原样。
-        for name in ("epochs", "global_batch_size"):
+        for name in ("epochs", "micro_batch_size_per_gpu", "gradient_accumulation_steps"):
             value = getattr(args, name)
             if value is not None:
                 training[name] = value
@@ -230,7 +241,7 @@ def build_jobs(args):
         append(methods[0], args.stage, evaluate=args.stage in {"qa", "warmup", "policy", "lm"})
     else:
         shared = None
-        if any(method in DYNAMIC_METHODS for method in methods):
+        if args.init_checkpoint is None and any(method in DYNAMIC_METHODS for method in methods):
             shared = append("memory_change", "pretrain", key="dynamic-pretrain")
         for method in methods:
             if method in DYNAMIC_METHODS:
@@ -330,6 +341,12 @@ def run_job(args):
                 "key": job.key,
                 "initialize_from": job.initialize_from,
                 "evaluate": job.evaluate,
+                "batching": {
+                    "world_size": gpu_count,
+                    "micro_batch_size_per_gpu": job.config.training.micro_batch_size_per_gpu,
+                    "gradient_accumulation_steps": job.config.training.gradient_accumulation_steps,
+                    "global_batch_size": job.config.training.global_batch_size(gpu_count),
+                },
                 "config": job.config.to_dict(),
                 "command": training_command(job, gpu_count, level["max_steps"]),
             }

@@ -352,3 +352,131 @@ def test_unsupported_dropout_and_native_gradient_checkpointing_are_explicit():
     base.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     with pytest.raises(ValueError, match="native gradient checkpointing"):
         GistMemoryModel(base, 3, 2, 4, ("q_proj",))
+
+
+@pytest.mark.parametrize("model_type", ["llama", "qwen3"])
+@pytest.mark.parametrize("attention_implementation", ["eager", "sdpa"])
+def test_ragged_writer_batch_matches_single_writes_outputs_and_all_gradients(
+    model_type, attention_implementation
+):
+    batched = build_model(model_type, attention_implementation=attention_implementation)
+    randomize_adapter(batched)
+    separate = copy.deepcopy(batched)
+    texts = [ids(3, 4, 5, 6), ids(7), ids(8, 9)]
+    histories = [
+        [],
+        [torch.randn(3, batched.width, requires_grad=True)],
+        [torch.randn(3, batched.width, requires_grad=True) for _ in range(2)],
+    ]
+    separate_histories = [
+        [memory.detach().clone().requires_grad_() for memory in blocks] for blocks in histories
+    ]
+    calls = []
+    states = []
+    base = batched.language_model.get_base_model().model
+    before = base.register_forward_pre_hook(
+        lambda module, args, kwargs: calls.append(kwargs), with_kwargs=True
+    )
+    after = base.register_forward_hook(
+        lambda module, args, output: states.append(output.last_hidden_state)
+    )
+    try:
+        actual = batched.compress_batch(texts, histories)
+    finally:
+        before.remove()
+        after.remove()
+    expected = [
+        separate.compress(text, blocks)
+        for text, blocks in zip(texts, separate_histories, strict=True)
+    ]
+    assert len(calls) == 1
+    assert calls[0]["inputs_embeds"].shape == (3, 11, batched.width)
+    lengths = [7, 7, 11]
+    for index, length in enumerate(lengths):
+        assert calls[0]["attention_mask"][index].tolist() == [True] * length + [False] * (
+            11 - length
+        )
+        assert calls[0]["position_ids"][index].tolist() == list(range(length)) + [0] * (11 - length)
+        torch.testing.assert_close(actual[index], states[0][index, length - 3 : length])
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+    weights = torch.randn(len(actual), batched.memory_slots, batched.width)
+    (torch.stack(actual) * weights).sum().backward()
+    (torch.stack(expected) * weights).sum().backward()
+    for (name, parameter), (other_name, other) in zip(
+        batched.named_parameters(), separate.named_parameters(), strict=True
+    ):
+        assert name == other_name
+        if parameter.requires_grad:
+            assert parameter.grad is not None and other.grad is not None
+            torch.testing.assert_close(parameter.grad, other.grad, rtol=1e-4, atol=5e-5)
+        else:
+            assert parameter.grad is None and other.grad is None
+    for blocks, expected_blocks in zip(histories, separate_histories, strict=True):
+        for memory, other in zip(blocks, expected_blocks, strict=True):
+            assert memory.grad.abs().sum() > 0
+            torch.testing.assert_close(memory.grad, other.grad, rtol=1e-4, atol=1e-6)
+    assert batched.memory_embeddings.grad.abs().sum() > 0
+
+
+@pytest.mark.parametrize("model_type", ["llama", "qwen3"])
+def test_writer_batch_has_no_cross_sample_attention_or_history_gradient(model_type):
+    model = build_model(model_type, attention_implementation="sdpa")
+    randomize_adapter(model)
+    histories = [
+        [torch.randn(3, model.width, requires_grad=True)],
+        [torch.randn(3, model.width, requires_grad=True)],
+    ]
+    first = model.compress_batch([ids(3, 4), ids(5, 6, 7, 8)], histories)
+    weights = torch.randn_like(first[0])
+    gradients = torch.autograd.grad((first[0] * weights).sum(), [blocks[0] for blocks in histories])
+    assert gradients[0].abs().sum() > 0
+    assert torch.count_nonzero(gradients[1]) == 0
+    second = model.compress_batch(
+        [ids(3, 4), ids(9, 10, 11, 12, 13)],
+        [histories[0], [torch.randn(3, model.width), torch.randn(3, model.width)]],
+    )
+    torch.testing.assert_close(first[0], second[0], rtol=1e-5, atol=1e-6)
+    assert not torch.allclose(first[1], second[1])
+
+
+@pytest.mark.parametrize("model_type", ["llama", "qwen3"])
+def test_batched_recurrent_writes_and_reader_retain_gradients_in_bfloat16(model_type):
+    model = build_model(model_type, dtype=torch.bfloat16, attention_implementation="sdpa")
+    randomize_adapter(model)
+    first = model.compress_batch([ids(3, 4), ids(5, 6, 7)])
+    for memory in first:
+        memory.retain_grad()
+    updated = model.compress_batch([ids(8, 9, 10), ids(11)], [[first[0]], [first[1]]])
+    loss = model.answer_nll(updated, [ids(12), ids(13, 14)], [ids(15, 16), ids(17)]).mean()
+    loss.backward()
+    assert all(memory.dtype == torch.bfloat16 for memory in first + updated)
+    assert all(memory.grad is not None and memory.grad.abs().sum() > 0 for memory in first)
+    trainables = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    assert all(parameter.dtype == torch.float32 for parameter in trainables)
+    assert all(
+        parameter.grad is not None and torch.isfinite(parameter.grad).all()
+        for parameter in trainables
+    )
+    assert model.memory_embeddings.grad.abs().sum() > 0
+
+
+def test_writer_batch_rejects_invalid_contracts_before_transformer_forward():
+    model = build_model(max_positions=12)
+    calls = []
+    hook = model.language_model.get_base_model().model.register_forward_pre_hook(
+        lambda module, args: calls.append(args)
+    )
+    try:
+        with pytest.raises(ValueError, match="nonempty"):
+            model.compress_batch([])
+        with pytest.raises(ValueError, match="align"):
+            model.compress_batch([ids(3), ids(4)], [[]])
+        with pytest.raises(ValueError, match="memory_slots"):
+            model.compress_batch([ids(3), ids(4)], [[], [torch.zeros(2, model.width)]])
+        with pytest.raises(ValueError, match="nonempty"):
+            model.compress_batch([ids(3), ids()])
+        with pytest.raises(ValueError, match="exceeds model window"):
+            model.compress_batch([ids(3), torch.arange(10)])
+    finally:
+        hook.remove()
+    assert not calls

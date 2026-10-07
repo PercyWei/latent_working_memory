@@ -1,6 +1,6 @@
 from copy import deepcopy
 from datetime import timedelta
-from types import SimpleNamespace
+import math
 
 import pytest
 import torch
@@ -8,6 +8,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from latent_working_memory.v3.engine import TokenMemoryEngine, initialize_device
+from latent_working_memory.v3.config import TrainingConfig
 from latent_working_memory.v4 import engine as engine_module
 
 
@@ -73,19 +74,33 @@ class BranchModel(torch.nn.Module):
         )
         self.calls = []
 
-    def forward(self, example, epoch=0, differentiable=True):
+    def forward(self, example, epoch=0, differentiable=True, batched=False):
         self.calls.append((epoch, differentiable, torch.is_grad_enabled(), self.training))
-        parameter = self.first if example["branch"] == 0 else self.second
-        loss = (parameter * example["x"] + self.frozen - example["y"]).square()
+        rows = example if batched else [example]
+        parameters = torch.stack(
+            [self.first if row["branch"] == 0 else self.second for row in rows]
+        )
+        x = self.first.new_tensor([row["x"] for row in rows])
+        y = self.first.new_tensor([row["y"] for row in rows])
+        loss = (parameters * x + self.frozen - y).square().mean()
         return {
             "loss": loss,
-            "metrics": {"length": float(example["length"]), "epoch": float(epoch)},
+            "metrics": {
+                "length": sum(row["length"] for row in rows) / len(rows),
+                "epoch": float(epoch),
+            },
         }
 
 
-def config():
-    return SimpleNamespace(
-        global_batch_size=4, learning_rate=0.05, weight_decay=0.0, gradient_clip=100.0
+def config(micro_batch_size=1):
+    return TrainingConfig(
+        dataset_dir="unused",
+        output_dir="unused",
+        micro_batch_size_per_gpu=micro_batch_size,
+        gradient_accumulation_steps=4,
+        learning_rate=0.05,
+        weight_decay=0.0,
+        gradient_clip=100.0,
     )
 
 
@@ -108,10 +123,11 @@ def reference_step(model, optimizer, batch, epoch=0):
     return {"loss": float(loss.detach()), "grad_norm": float(norm)}
 
 
-def test_single_device_matches_global_trajectory_mean_and_one_optimizer_step():
+@pytest.mark.parametrize("micro_batch_size", [1, 2, 4])
+def test_single_device_matches_global_trajectory_mean_and_one_optimizer_step(micro_batch_size):
     model = BranchModel()
     reference = deepcopy(model)
-    engine = TokenMemoryEngine(model, config(), "cpu")
+    engine = TokenMemoryEngine(model, config(micro_batch_size), "cpu")
     engine.initialize()
     optimizer = torch.optim.AdamW(
         [parameter for parameter in reference.parameters() if parameter.requires_grad],
@@ -127,7 +143,7 @@ def test_single_device_matches_global_trajectory_mean_and_one_optimizer_step():
     assert observed["samples"] == 3
     assert observed["length"] == 7.0
     assert observed["epoch"] == 2.0
-    assert model.calls == [(2, True, True, True)] * 3
+    assert model.calls == [(2, True, True, True)] * math.ceil(3 / micro_batch_size)
     assert model.frozen.grad is None
     assert len(engine.parameters) == 2
     for actual, wanted in zip(model.parameters(), reference.parameters(), strict=True):
@@ -136,9 +152,10 @@ def test_single_device_matches_global_trajectory_mean_and_one_optimizer_step():
         assert state["step"].item() == 1
 
 
-def test_evaluation_preserves_parameters_optimizer_gradients_and_training_mode():
+@pytest.mark.parametrize("micro_batch_size", [1, 2, 4])
+def test_evaluation_preserves_parameters_optimizer_gradients_and_training_mode(micro_batch_size):
     model = BranchModel()
-    engine = TokenMemoryEngine(model, config(), "cpu")
+    engine = TokenMemoryEngine(model, config(micro_batch_size), "cpu")
     engine.initialize()
     engine.step(examples())
     before = [parameter.detach().clone() for parameter in model.parameters()]
@@ -152,7 +169,7 @@ def test_evaluation_preserves_parameters_optimizer_gradients_and_training_mode()
     assert observed["loss"] == pytest.approx(expected)
     assert observed["samples"] == 3
     assert observed["grad_norm"] is None
-    assert model.calls == [(4, False, False, False)] * 3
+    assert model.calls == [(4, False, False, False)] * math.ceil(3 / micro_batch_size)
     assert model.training
     for p, value, grad in zip(model.parameters(), before, gradients, strict=True):
         torch.testing.assert_close(p, value)
@@ -171,7 +188,7 @@ def test_empty_batches_are_rejected():
             operation([])
 
 
-def _distributed_worker(rank, rendezvous, world_size):
+def _distributed_worker(rank, rendezvous, world_size, micro_batch_size):
     torch.set_num_threads(1)
     dist.init_process_group(
         "gloo",
@@ -183,7 +200,7 @@ def _distributed_worker(rank, rendezvous, world_size):
     try:
         model = BranchModel()
         reference = deepcopy(model)
-        engine = TokenMemoryEngine(model, config(), "cpu")
+        engine = TokenMemoryEngine(model, config(micro_batch_size), "cpu")
         engine.initialize()
         optimizer = torch.optim.AdamW(
             [parameter for parameter in reference.parameters() if parameter.requires_grad],
@@ -201,7 +218,7 @@ def _distributed_worker(rank, rendezvous, world_size):
             assert observed["length"] == pytest.approx(
                 sum(row["length"] for row in batch) / len(batch)
             )
-            expected_calls = max(1, len(batch[rank::world_size]))
+            expected_calls = max(1, math.ceil(len(batch[rank::world_size]) / micro_batch_size))
             assert len(model.calls) - calls_before == expected_calls
             for actual, wanted in zip(model.parameters(), reference.parameters(), strict=True):
                 torch.testing.assert_close(actual, wanted, rtol=1e-12, atol=1e-12)
@@ -221,12 +238,13 @@ def _distributed_worker(rank, rendezvous, world_size):
 
 
 @pytest.mark.parametrize("world_size", [2, 4])
+@pytest.mark.parametrize("micro_batch_size", [1, 2, 4])
 def test_distributed_branch_updates_full_uneven_and_empty_tail_batches_match_serial(
-    tmp_path, world_size
+    tmp_path, world_size, micro_batch_size
 ):
     mp.spawn(
         _distributed_worker,
-        args=(str(tmp_path / "rendezvous"), world_size),
+        args=(str(tmp_path / "rendezvous"), world_size, micro_batch_size),
         nprocs=world_size,
         join=True,
     )

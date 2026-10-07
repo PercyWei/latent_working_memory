@@ -193,6 +193,7 @@ def make_run(
             key: value for key, value in statistics.items() if key != "source_data"
         },
         "world_size": world_size,
+        "global_batch_size": config.training.global_batch_size(world_size),
         "device_type": torch.device(device).type,
         "initialization": initialization,
         "pretraining_sources": pretraining_sources,
@@ -274,7 +275,8 @@ def load_checkpoint(path, engine, run):
     return checkpoint["cursor"]
 
 
-def validate_cursor(cursor, config, samples):
+def validate_cursor(cursor, config, samples, world_size):
+    batch_size = config.global_batch_size(world_size)
     names = {"epoch", "sample_offset", "step", "sample_visits"}
     if set(cursor) != names or any(
         type(value) is not int or value < 0 for value in cursor.values()
@@ -284,11 +286,9 @@ def validate_cursor(cursor, config, samples):
     if (
         epoch > config.epochs
         or offset >= samples
-        or offset % config.global_batch_size
+        or offset % batch_size
         or (epoch == config.epochs and offset != 0)
-        or cursor["step"]
-        != epoch * math.ceil(samples / config.global_batch_size)
-        + offset // config.global_batch_size
+        or cursor["step"] != epoch * math.ceil(samples / batch_size) + offset // batch_size
         or cursor["sample_visits"] != epoch * samples + offset
     ):
         raise ValueError("checkpoint cursor does not match the epoch/batch schedule")
@@ -302,10 +302,8 @@ def epoch_order(examples, seed, epoch):
 
 def evaluate_split(engine, examples, epoch=0):
     totals, samples = {}, 0
-    for start in range(0, len(examples), engine.config.global_batch_size):
-        metrics = engine.eval_batch(
-            examples[start : start + engine.config.global_batch_size], epoch=epoch
-        )
+    for start in range(0, len(examples), engine.global_batch_size):
+        metrics = engine.eval_batch(examples[start : start + engine.global_batch_size], epoch=epoch)
         weight = metrics["samples"]
         for name, value in metrics.items():
             if name != "samples" and value is not None:
@@ -385,7 +383,7 @@ def train_loop(config, engine, splits, run, resume=None, stop_after_steps=None):
         if json.loads((output / "run.json").read_text(encoding="utf-8")) != run:
             raise ValueError("saved run differs from the resume configuration or data")
         cursor = load_checkpoint(resume, engine, run)
-        validate_cursor(cursor, settings, len(train))
+        validate_cursor(cursor, settings, len(train), engine.world_size)
         if engine.rank == 0:
             _rewind_metrics(metrics_path, cursor["step"])
     else:
@@ -406,16 +404,16 @@ def train_loop(config, engine, splits, run, resume=None, stop_after_steps=None):
     if engine.world_size > 1:
         dist.barrier()
 
-    total_steps = settings.epochs * math.ceil(len(train) / settings.global_batch_size)
+    total_steps = settings.epochs * math.ceil(len(train) / engine.global_batch_size)
     with _tracking_context(config, engine, output, run) as tracking:
         if tracking is not None:
             configure_training_metrics(tracking)
         for epoch in range(cursor["epoch"], settings.epochs):
             ordered = epoch_order(train, settings.seed, epoch)
-            for start in range(cursor["sample_offset"], len(ordered), settings.global_batch_size):
+            for start in range(cursor["sample_offset"], len(ordered), engine.global_batch_size):
                 if stop_after_steps is not None and cursor["step"] >= stop_after_steps:
                     break
-                batch = ordered[start : start + settings.global_batch_size]
+                batch = ordered[start : start + engine.global_batch_size]
                 if engine.device.type == "cuda":
                     torch.cuda.synchronize(engine.device)
                     torch.cuda.reset_peak_memory_stats(engine.device)

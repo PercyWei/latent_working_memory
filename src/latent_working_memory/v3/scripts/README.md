@@ -1,6 +1,16 @@
 # GPU 训练任务启动
 
-终端与 GPU 网站共用同一脚本。通过 `--gpus` 指定物理卡号；当前服务器使用 `--gpus 4,5,6,7`，脚本内部通过 `torchrun` 启动四个训练进程，最终评估只使用列表中的第一张卡（GPU 4）。全局 batch 仍为 8，完整 batch 时每个进程累积两条轨迹。参数默认值保留 `0,1`，每次启动按实际分配显式指定。
+终端与 GPU 网站共用同一脚本。当前服务器使用 `--gpus 4,5`，脚本通过 `torchrun` 启动两个训练进程，最终评估使用 GPU 4。参数默认卡号保留 `0,1`，每次启动按实际分配显式指定。
+
+训练通过 `--micro-batch-size-per-gpu` 与 `--gradient-accumulation-steps` 控制批处理。全局 batch 根据 **GPU 数 × 每卡 microbatch × 累积步数** 计算，写入运行计划、本地 `run.json` 和 SwanLab config；不再单独传入 `--global-batch-size`。
+
+| 双卡配置 | 每卡一次并行样本数 | 每次更新累积次数 | 全局 batch |
+|---|---:|---:|---:|
+| 默认 | 1 | 4 | 8 |
+| `--micro-batch-size-per-gpu 2 --gradient-accumulation-steps 2` | 2 | 2 | 8 |
+| `--micro-batch-size-per-gpu 4 --gradient-accumulation-steps 1` | 4 | 1 | 8 |
+
+microbatch 内合并实际写入和读取调用，支持不同长度及不同更新动作。`qa_batch_size` 是每条轨迹一次并行读取的题数，因此训练时一次读取最多包含 `microbatch × qa_batch_size` 道题。尾批按真实样本数归一；增加卡数或改变这两个参数会改变全局 batch。H20 上可从第二行试跑，依据吞吐和显存峰值调整；预训练与 QA 可分别选择设置。
 
 ## 第一次运行
 
@@ -47,7 +57,7 @@ v3 的凭据选择规则如下；训练、续训与评估均从项目根目录�
 ```bash
 export LWM_REPO_DIR="$HOME/percyw/latent_working_memory"
 bash "$LWM_REPO_DIR/src/latent_working_memory/v3/scripts/run_gpu.sh" \
-  --mode smoke --method dynamic --gpus 4,5,6,7 --run-id view-check-01
+  --mode smoke --method dynamic --gpus 4,5 --run-id view-check-01
 ```
 
 默认数据位置：
@@ -63,7 +73,7 @@ bash "$LWM_REPO_DIR/src/latent_working_memory/v3/scripts/run_gpu.sh" \
 
 ```bash
 bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode smoke --method dynamic --gpus 4,5,6,7 --run-id view-check-01
+  --mode smoke --method dynamic --gpus 4,5 --run-id view-check-01
 ```
 
 这条命令会依次执行：
@@ -99,14 +109,14 @@ bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gp
 
 ```bash
 bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode full --method dynamic --gpus 4,5,6,7 --run-id main-01
+  --mode full --method dynamic --gpus 4,5 --run-id main-01
 ```
 
 也可精确覆盖档位中的预算：
 
 ```bash
 bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode pilot --method dynamic --gpus 4,5,6,7 --run-id pilot-02 \
+  --mode pilot --method dynamic --gpus 4,5 --run-id pilot-02 \
   --max-steps 10 --train-samples 80 --dev-samples 8 --eval-trajectories 4
 ```
 
@@ -119,14 +129,14 @@ bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gp
 | `--method dynamic` | 两个动态方法，基础预训练仅执行一次；默认 |
 | `--method all` | 三个 baseline＋两个动态方法 |
 | `--method icae_single / icae_multi / autocompressors / memory_change / information_loss` | 指定一个方法 |
-| `--stage auto` | 自动执行该方法全部训练阶段，再评估；默认 |
+| `--stage auto` | 默认执行全部训练阶段；动态方法提供 `--init-checkpoint` 时从已有预训练开始，连续执行 warmup → policy → 评估 |
 | `--stage pretrain / qa / warmup / policy / lm` | 只执行一个明确方法的指定阶段 |
 
 ICAE 与 AutoCompressors 使用已有长文本预设，运行它们时需提供 `--long-pretrain-data`。该目录同样采用原有 `TextSample` 格式，输入长度筛选为 4096–12288 个当前模型 tokens。此前 4096 上限的短片段成品不能普遍覆盖此范围；脚本保留长历史比较要求，缺少目录时直接说明原因。
 
 ```bash
 bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode smoke --method all --gpus 4,5,6,7 --run-id all-check-01 \
+  --mode smoke --method all --gpus 4,5 --run-id all-check-01 \
   --long-pretrain-data /dfs/data/fineweb-long-text-samples
 ```
 
@@ -134,11 +144,32 @@ bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gp
 
 ```bash
 bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode pilot --method information_loss --stage policy --gpus 4,5,6,7 --run-id loss-policy-01 \
+  --mode pilot --method information_loss --stage policy --gpus 4,5 --run-id loss-policy-01 \
   --init-checkpoint /absolute/path/to/warmup/checkpoints/step-000002.pt
 ```
 
 单独 `pretrain` 阶段只运行 AE＋LM 训练/开发集验证；`qa`、`warmup`、`policy`、`lm` 结束后运行 QA 评估。`warmup` checkpoint 的最终 QA 评估按真实门控策略构建记忆，训练中开发集验证仍使用预热动作日程。
+
+已有共享预训练 checkpoint 时，一条命令连续完成某个动态方法的预热、策略训练及最终评估：
+
+```bash
+cd ~/percyw/latent_working_memory
+export LWM_REPO_DIR="$PWD"
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+
+bash src/latent_working_memory/v3/scripts/run_gpu.sh \
+  --mode smoke --method memory_change --stage auto --gpus 4,5 \
+  --init-checkpoint /absolute/path/to/pretrain/checkpoints/step-NNNNNN.pt \
+  --model-path "$HOME/models/Qwen3-4B-Instruct-2507" \
+  --qa-data "$LWM_REPO_DIR/data/fineweb-factqa-train1000_20260930" \
+  --micro-batch-size-per-gpu 2 --gradient-accumulation-steps 2 --qa-batch-size 8 \
+  --group dynamic-qa-smoke_shared-pretrain \
+  --run-id memory-change-smoke-01
+```
+
+将 `--method` 改为 `information_loss`、`--run-id` 改为 `information-loss-smoke-01`，并保持相同的预训练 checkpoint 与 group，即可单独运行另一方法。也可使用 `--method dynamic`，在同一任务中顺序完成两组并导出比较表。
+
+此模式只需要 QA 数据，不读取 AE＋LM 数据；模型配置须与预训练 checkpoint 一致。warmup 的实际最终 checkpoint 自动传入 policy；阶段切换只继承可训练权重，优化器重新初始化。最终评估在 policy 后执行，warmup 的训练中验证照常进行。`--mode`、batch 参数和训练步数上限同时作用于 warmup 与 policy；需要分别调参时仍使用单阶段入口。
 
 ## SwanLab 与本地记录
 
@@ -168,10 +199,12 @@ compare/  同题池质量—容量点 points.json / points.csv
 | 参数 | 作用 |
 |---|---|
 | `--dry-run` | 打印预算、阶段依赖、解析配置和命令；不加载模型/数据，不连接 SwanLab，不创建实验目录 |
-| `--gpus 4,5,6,7` | 逗号分隔的非重复物理卡号，训练进程数随卡数变化；默认 `0,1` |
+| `--gpus 4,5` | 逗号分隔的非重复物理卡号，训练进程数随卡数变化；默认 `0,1` |
 | `--model-path /absolute/model/path` | 使用共享盘上的 Qwen3-4B 模型，避免启动时从 Hub 获取 |
-| `--global-batch-size 8` | 全局 batch，可按显存/运行时间调整 |
-| `--qa-batch-size 8` | 单次读取的 QA 数 |
+| `--micro-batch-size-per-gpu 2` | 每卡一次并行处理的样本/轨迹数，默认 1 |
+| `--gradient-accumulation-steps 2` | 每次参数更新累积的 microbatch 数，默认 4；全局 batch 自动计算 |
+| `--qa-batch-size 8` | 每条轨迹单次读取的 QA 数 |
+| `--init-checkpoint` | 单阶段初始化权重；动态 auto 流程中指定共享预训练 checkpoint |
 | `--threshold-i / --threshold-d / --threshold-g / --eta` | 覆盖门控阈值，记录于训练配置 |
 | `--max-new-tokens 64` | 最终评估生成上限 |
 | `--tracking disabled` | 仅保存本地记录；默认 online |
@@ -183,7 +216,7 @@ compare/  同题池质量—容量点 points.json / points.csv
 ```bash
 LWM_REPO_DIR=/another/repository \
   bash /another/repository/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode smoke --gpus 4,5,6,7 --dry-run
+  --mode smoke --gpus 4,5 --dry-run
 ```
 
 本地测试验证预算、阶段衔接、数据选择、原生指标和评估图表构造；服务器上的实际显存、训练速度及云端展示需要通过第一轮 `smoke` 任务核验。

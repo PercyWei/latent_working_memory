@@ -81,36 +81,54 @@ class GistMemoryModel(nn.Module):
 
     def compress(self, text_ids, memory_blocks=None):
         """压缩新文本及指定历史块；调用方决定传入末块还是累计历史。"""
-        self._check_tokens(text_ids)
-        blocks = [] if memory_blocks is None else memory_blocks
-        for memory in blocks:
-            self._check_memory(memory)
-            if len(memory) != self.memory_slots:
-                raise ValueError("writer memory blocks must each contain memory_slots vectors")
-        self._check_length(
-            sum(len(memory) for memory in blocks) + len(text_ids) + self.memory_slots
-        )
+        histories = None if memory_blocks is None else [memory_blocks]
+        return self.compress_batch([text_ids], histories)[0]
+
+    def compress_batch(self, text_ids, memory_blocks=None):
+        """一次 transformer forward 写入多个独立样本，支持不同文本和历史长度。"""
+        if not text_ids:
+            raise ValueError("writer text batch must be nonempty")
+        histories = [[] for _ in text_ids] if memory_blocks is None else memory_blocks
+        if len(histories) != len(text_ids):
+            raise ValueError("writer texts and memory histories must align")
         embed = self.language_model.get_input_embeddings()
-        text = embed(text_ids)
-        inputs = torch.cat(
-            [
-                *(memory.to(text.dtype) for memory in blocks),
-                text,
-                self.memory_embeddings.to(text.dtype),
-            ]
-        )[None]
+        rows = []
+        for tokens, blocks in zip(text_ids, histories, strict=True):
+            self._check_tokens(tokens)
+            for memory in blocks:
+                self._check_memory(memory)
+                if len(memory) != self.memory_slots:
+                    raise ValueError("writer memory blocks must each contain memory_slots vectors")
+            self._check_length(
+                sum(len(memory) for memory in blocks) + len(tokens) + self.memory_slots
+            )
+            text = embed(tokens)
+            rows.append(
+                torch.cat(
+                    [
+                        *(memory.to(text.dtype) for memory in blocks),
+                        text,
+                        self.memory_embeddings.to(text.dtype),
+                    ]
+                )
+            )
+        inputs = pad_sequence(rows, batch_first=True)
+        positions = torch.arange(inputs.shape[1], device=inputs.device)[None]
+        mask = positions < torch.tensor([len(row) for row in rows], device=inputs.device)[:, None]
         hidden = (
             self.language_model.get_base_model()
             .model(
                 inputs_embeds=inputs,
-                attention_mask=torch.ones(inputs.shape[:2], dtype=torch.long, device=inputs.device),
-                position_ids=torch.arange(inputs.shape[1], device=inputs.device)[None],
+                attention_mask=mask,
+                position_ids=positions.expand_as(mask).masked_fill(~mask, 0),
                 use_cache=False,
                 return_dict=True,
             )
             .last_hidden_state
         )
-        return hidden[0, -self.memory_slots :]
+        return [
+            hidden[index, len(row) - self.memory_slots : len(row)] for index, row in enumerate(rows)
+        ]
 
     def answer_nll(self, memories, prompt_ids, answer_ids):
         """返回每题答案 token 的平均 NLL；不为输入自动添加 BOS/EOS。"""

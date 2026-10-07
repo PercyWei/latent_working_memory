@@ -2,7 +2,6 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import timedelta
 import math
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -38,9 +37,15 @@ def one_cpu_thread():
     torch.set_num_threads(previous)
 
 
-def engine_config():
-    return SimpleNamespace(
-        global_batch_size=2, learning_rate=0.003, weight_decay=0.0, gradient_clip=100.0
+def engine_config(micro_batch_size=1):
+    return TrainingConfig(
+        dataset_dir="unused",
+        output_dir="unused",
+        micro_batch_size_per_gpu=micro_batch_size,
+        gradient_accumulation_steps=2,
+        learning_rate=0.003,
+        weight_decay=0.0,
+        gradient_clip=100.0,
     )
 
 
@@ -97,6 +102,7 @@ def assert_writer_updated(model, before):
 
 
 @pytest.mark.parametrize("model_type", ["llama", "qwen3"])
+@pytest.mark.parametrize("micro_batch_size", [1, 2])
 @pytest.mark.parametrize(
     "method,stage",
     [
@@ -113,9 +119,11 @@ def assert_writer_updated(model, before):
         ("information_loss", "policy"),
     ],
 )
-def test_actual_writer_reader_and_engine_train_every_method_stage(model_type, method, stage):
+def test_actual_writer_reader_and_engine_train_every_method_stage(
+    model_type, method, stage, micro_batch_size
+):
     model = tiny_task(model_type, method, stage)
-    engine = TokenMemoryEngine(model, engine_config(), "cpu")
+    engine = TokenMemoryEngine(model, engine_config(micro_batch_size), "cpu")
     engine.initialize()
     batch = (
         pretraining_examples()
@@ -124,8 +132,29 @@ def test_actual_writer_reader_and_engine_train_every_method_stage(model_type, me
     )
     frozen, writer = parameter_snapshot(model, False), parameter_snapshot(model, True)
 
-    metrics = engine.step(batch, epoch=1)
+    calls = {"writer": [], "reader": []}
 
+    def observe(module, args, kwargs):
+        reading = any(
+            layer.disable_adapters
+            for layer in model.codec.language_model.modules()
+            if hasattr(layer, "lora_A")
+        )
+        calls["reader" if reading else "writer"].append(kwargs["inputs_embeds"].shape[0])
+
+    hook = model.codec.language_model.get_base_model().model.register_forward_pre_hook(
+        observe, with_kwargs=True
+    )
+    try:
+        metrics = engine.step(batch, epoch=1)
+    finally:
+        hook.remove()
+
+    assert max(calls["writer"]) == micro_batch_size
+    if micro_batch_size == 2:
+        assert max(calls["reader"]) >= 2
+    if stage not in {"pretrain", "lm"}:
+        assert max(calls["reader"]) <= micro_batch_size * model.cfg.qa_batch_size
     assert metrics["samples"] == 2
     assert math.isfinite(metrics["loss"]) and metrics["loss"] > 0
     assert math.isfinite(metrics["grad_norm"]) and metrics["grad_norm"] > 0
@@ -266,7 +295,8 @@ def experiment_config(model, output, init_checkpoint=None):
         TrainingConfig(
             dataset_dir="synthetic-fixture",
             output_dir=str(output),
-            global_batch_size=2,
+            micro_batch_size_per_gpu=1,
+            gradient_accumulation_steps=2,
             learning_rate=0.003,
             weight_decay=0.0,
             gradient_clip=100.0,
@@ -336,3 +366,23 @@ def test_actual_writer_checkpoint_resume_and_pretrain_warmup_policy_chain(tmp_pa
         checkpoint = tmp_path / f"{stage}.pt"
         save_checkpoint(checkpoint, current_engine, run, cursor)
         model = current
+
+
+@pytest.mark.parametrize("method", ["memory_change", "information_loss"])
+def test_actual_microbatch_opposite_policy_actions_match_serial(method):
+    model, batch = calibrated_dynamic_batch(method)
+    reference = deepcopy(model)
+    engine = TokenMemoryEngine(model, engine_config(2), "cpu")
+    engine.initialize()
+    optimizer = torch.optim.AdamW(
+        [parameter for parameter in reference.parameters() if parameter.requires_grad],
+        lr=engine_config().learning_rate,
+        weight_decay=0.0,
+    )
+    expected_loss, expected_norm = serial_step(reference, optimizer, batch)
+    actual = engine.step(batch)
+    assert actual["appends"] == actual["overwrites"] == 0.5
+    assert actual["loss"] == pytest.approx(expected_loss, rel=1e-5, abs=1e-6)
+    assert actual["grad_norm"] == pytest.approx(expected_norm, rel=1e-4, abs=1e-6)
+    for observed, expected in zip(model.parameters(), reference.parameters(), strict=True):
+        torch.testing.assert_close(observed, expected, rtol=1e-4, atol=2e-6)

@@ -134,7 +134,8 @@ class TrainingConfig:
     dataset_dir: str
     output_dir: str
     epochs: int = 1
-    global_batch_size: int = 8
+    micro_batch_size_per_gpu: int = 1
+    gradient_accumulation_steps: int = 4
     learning_rate: float = 1e-4
     weight_decay: float = 0.01
     gradient_clip: float = 1.0
@@ -155,7 +156,8 @@ class TrainingConfig:
             raise ValueError("dataset_dir and output_dir are required")
         for name in (
             "epochs",
-            "global_batch_size",
+            "micro_batch_size_per_gpu",
+            "gradient_accumulation_steps",
             "eval_every",
             "save_every",
             "min_input_tokens",
@@ -176,6 +178,9 @@ class TrainingConfig:
         object.__setattr__(self, "tags", tuple(self.tags))
         if self.swanlab_project is not None and not self.group:
             raise ValueError("SwanLab logging requires an explicit experiment group")
+
+    def global_batch_size(self, world_size):
+        return world_size * self.micro_batch_size_per_gpu * self.gradient_accumulation_steps
 
 
 @dataclass(frozen=True)

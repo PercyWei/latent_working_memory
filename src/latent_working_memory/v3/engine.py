@@ -16,11 +16,12 @@ from latent_working_memory.v4.engine import initialize_device
 
 @EngineRegistry.register(model_type="lwm_v3_token", backend="replicated", device=["cpu", "cuda"])
 class TokenMemoryEngine(BaseEngine):
-    """每次 model.forward 展开一条完整轨迹，内部读写不触发分布式通信。"""
+    """每次 model.forward 并行展开一个 microbatch，内部读写不触发分布式通信。"""
 
     def __init__(self, model, config, device):
         self.model, self.config, self.device = model, config, torch.device(device)
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
+        self.global_batch_size = config.global_batch_size(self.world_size)
         self.rank = dist.get_rank() if dist.is_initialized() else 0
         self.optimizer_config = FSDPOptimizerConfig(
             lr=config.learning_rate,
@@ -99,18 +100,25 @@ class TokenMemoryEngine(BaseEngine):
             raise ValueError("a batch must contain at least one trajectory")
         local = list(range(self.rank, len(examples), self.world_size))
         # 尾批空 rank 也执行真实 DDP forward/backward，仅将其训练权重置零。
-        work = local or [0]
+        size = self.config.micro_batch_size_per_gpu
+        work = [local[start : start + size] for start in range(0, len(local), size)] or [[0]]
         metric_names, totals = None, None
-        for position, index in enumerate(work):
+        for position, indices in enumerate(work):
+            count = len(indices) if local else 0
             sync = (
                 self.module.no_sync()
                 if not forward_only and self.world_size > 1 and position + 1 < len(work)
                 else nullcontext()
             )
             with sync:
-                output = self.module(examples[index], epoch=epoch, differentiable=not forward_only)
+                output = self.module(
+                    [examples[index] for index in indices],
+                    epoch=epoch,
+                    differentiable=not forward_only,
+                    batched=True,
+                )
                 if not forward_only:
-                    loss = output["loss"] * (1 if local else 0) / len(examples)
+                    loss = output["loss"] * count / len(examples)
                     loss.backward()
                     del loss
             names = sorted(output["metrics"])
@@ -124,9 +132,9 @@ class TokenMemoryEngine(BaseEngine):
             if local:
                 totals += torch.tensor(
                     [
-                        float(output["loss"].detach()),
-                        1,
-                        *(output["metrics"][name] for name in metric_names),
+                        float(output["loss"].detach()) * count,
+                        count,
+                        *(output["metrics"][name] * count for name in metric_names),
                     ],
                     dtype=torch.float64,
                     device=self.device,

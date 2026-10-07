@@ -41,6 +41,8 @@ def run_training(args):
             for key, value in {
                 "max_train_samples": args.max_train_samples,
                 "max_dev_samples": args.max_dev_samples,
+                "micro_batch_size_per_gpu": args.micro_batch_size_per_gpu,
+                "gradient_accumulation_steps": args.gradient_accumulation_steps,
             }.items()
             if value is not None
         }
@@ -103,6 +105,12 @@ def main():
     parser.add_argument("--stop-after-steps", type=int, help="停止于指定的全局 optimizer step")
     parser.add_argument("--max-train-samples", type=int, help="内存选取的训练样本上限")
     parser.add_argument("--max-dev-samples", type=int, help="内存选取的开发集样本上限")
+    parser.add_argument(
+        "--micro-batch-size-per-gpu", type=int, help="每卡一次并行处理的样本/轨迹数"
+    )
+    parser.add_argument(
+        "--gradient-accumulation-steps", type=int, help="每次参数更新累积的 microbatch 数"
+    )
     run_training(parser.parse_args())
 
 

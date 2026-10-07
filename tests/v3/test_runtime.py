@@ -52,14 +52,20 @@ class TinyTask(torch.nn.Module):
         super().__init__()
         self.weight = torch.nn.Parameter(torch.tensor([0.4, -0.2]))
 
-    def forward(self, example, epoch=0, differentiable=True):
-        noise = (
-            torch.rand(()) + random.random() + float(np.random.random()) if differentiable else 0.0
+    def forward(self, example, epoch=0, differentiable=True, batched=False):
+        rows = example if batched else [example]
+        noise = torch.tensor(
+            [
+                float(torch.rand(())) + random.random() + float(np.random.random())
+                if differentiable
+                else 0.0
+                for _ in rows
+            ]
         )
-        prediction = self.weight.dot(torch.tensor(example.values)) + noise
+        prediction = torch.tensor([row.values for row in rows]) @ self.weight + noise
         return {
-            "loss": (prediction - example.target).square(),
-            "metrics": {"input_length": float(len(example.values))},
+            "loss": (prediction - torch.tensor([row.target for row in rows])).square().mean(),
+            "metrics": {"input_length": sum(len(row.values) for row in rows) / len(rows)},
         }
 
     def trainable_state_dict(self):
@@ -87,7 +93,7 @@ def make_config(output, stage="pretrain", init=None):
             dataset_dir="data/unit-fixture",
             output_dir=str(output),
             epochs=2,
-            global_batch_size=2,
+            gradient_accumulation_steps=2,
             learning_rate=0.01,
             weight_decay=0.0,
             gradient_clip=10.0,
@@ -122,20 +128,40 @@ def _run(config, engine, splits, initialization=None):
     return make_run(config, splits, statistics, "cpu", 1, initialization=initialization)
 
 
-def test_checkpoint_resume_matches_uninterrupted_rng_optimizer_and_tail_batch(tmp_path):
+@pytest.mark.parametrize("micro_batch_size,accumulation", [(1, 2), (2, 1)])
+def test_checkpoint_resume_matches_uninterrupted_rng_optimizer_and_tail_batch(
+    tmp_path, micro_batch_size, accumulation
+):
     splits = make_splits()
     full_config = make_config(tmp_path / "full")
+    full_config = replace(
+        full_config,
+        training=replace(
+            full_config.training,
+            micro_batch_size_per_gpu=micro_batch_size,
+            gradient_accumulation_steps=accumulation,
+        ),
+    )
     set_seed(11)
     full = make_engine(full_config)
     expected = train_loop(full_config, full, splits, _run(full_config, full, splits))
 
     partial_config = make_config(tmp_path / "resumed")
+    partial_config = replace(
+        partial_config,
+        training=replace(
+            partial_config.training,
+            micro_batch_size_per_gpu=micro_batch_size,
+            gradient_accumulation_steps=accumulation,
+        ),
+    )
     set_seed(11)
     partial = make_engine(partial_config)
     run = _run(partial_config, partial, splits)
     stopped = train_loop(partial_config, partial, splits, run, stop_after_steps=2)
     assert not stopped["complete"]
     checkpoint = read_checkpoint(stopped["checkpoint"])
+    assert run["global_batch_size"] == checkpoint["run"]["global_batch_size"] == 2
     assert set(checkpoint) == {"run", "trainable", "optimizer", "cursor", "rng"}
     assert checkpoint["cursor"] == {"epoch": 0, "sample_offset": 4, "step": 2, "sample_visits": 4}
 
@@ -268,7 +294,7 @@ def test_finetuning_requires_initialization_and_cursor_contract(tmp_path):
         train_loop(config, engine, splits, _run(config, engine, splits))
     with pytest.raises(ValueError, match="epoch/batch schedule"):
         validate_cursor(
-            {"epoch": 0, "sample_offset": 3, "step": 1, "sample_visits": 3}, config.training, 5
+            {"epoch": 0, "sample_offset": 3, "step": 1, "sample_visits": 3}, config.training, 5, 1
         )
 
 
@@ -328,7 +354,9 @@ def _distributed_training_worker(rank, rendezvous, output):
     )
     try:
         config, splits = make_config(output), make_splits()
-        config = replace(config, training=replace(config.training, epochs=1))
+        config = replace(
+            config, training=replace(config.training, epochs=1, gradient_accumulation_steps=1)
+        )
         set_seed(11)
         engine = make_engine(config)
         statistics = {
