@@ -16,7 +16,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from latent_working_memory.v3.config import DYNAMIC_METHODS, TrainingConfig
 from latent_working_memory.v3.data import load_factqa
 from latent_working_memory.v3.model import GistMemoryModel
-from latent_working_memory.v3.pretrain_data import load_pretraining
+from latent_working_memory.v3.pretrain_data import (
+    load_pretraining,
+    load_reconstruction_pretraining,
+)
 from latent_working_memory.v3.tracking import (
     configure_training_metrics,
     experiment_directory,
@@ -66,9 +69,22 @@ def load_splits(config, tokenizer):
     training = config.training
     pretraining = config.objective.stage in {"pretrain", "lm"}
     if pretraining:
-        splits, statistics = load_pretraining(
-            training.dataset_dir, tokenizer, training.min_input_tokens, training.max_input_tokens
-        )
+        if training.pretrain_data_view == "text_samples":
+            splits, statistics = load_pretraining(
+                training.dataset_dir,
+                tokenizer,
+                training.min_input_tokens,
+                training.max_input_tokens,
+            )
+        else:
+            splits, statistics = load_reconstruction_pretraining(
+                training.dataset_dir,
+                tokenizer,
+                training.min_input_tokens,
+                training.max_input_tokens,
+                training.pretrain_data_view,
+                lm_only=config.objective.stage == "lm",
+            )
         if config.objective.stage == "pretrain":
             for split in ("train", "dev"):
                 if {example.task for example in splits[split]} != {"ae", "continuation"}:

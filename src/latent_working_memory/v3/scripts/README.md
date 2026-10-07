@@ -10,7 +10,7 @@
 | `--micro-batch-size-per-gpu 2 --gradient-accumulation-steps 2` | 2 | 2 | 8 |
 | `--micro-batch-size-per-gpu 4 --gradient-accumulation-steps 1` | 4 | 1 | 8 |
 
-microbatch 内合并实际写入和读取调用，支持不同长度及不同更新动作。`qa_batch_size` 是每条轨迹一次并行读取的题数，因此训练时一次读取最多包含 `microbatch × qa_batch_size` 道题。尾批按真实样本数归一；增加卡数或改变这两个参数会改变全局 batch。H20 上可从第二行试跑，依据吞吐和显存峰值调整；预训练与 QA 可分别选择设置。
+microbatch 内合并实际写入和读取调用，支持不同长度及不同更新动作。`qa_batch_size` 是每条轨迹一次并行读取的题数，因此训练时一次读取最多包含 `microbatch × qa_batch_size` 道题。尾批按真实样本数归一；增加卡数或改变这两个参数会改变全局 batch。第一组实验采用两张 H20、每卡 microbatch 2、累积 2，全局 batch 8；实际显存与吞吐先由 `smoke` 确认。
 
 ## 第一次运行
 
@@ -56,36 +56,57 @@ v3 的凭据选择规则如下；训练、续训与评估均从项目根目录�
 
 ```bash
 export LWM_REPO_DIR="$HOME/percyw/latent_working_memory"
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
 bash "$LWM_REPO_DIR/src/latent_working_memory/v3/scripts/run_gpu.sh" \
-  --mode smoke --method dynamic --gpus 4,5 --run-id view-check-01
+  --mode smoke --method all --gpus 4,5 --run-id 20261007-01 \
+  --micro-batch-size-per-gpu 2 --gradient-accumulation-steps 2 --qa-batch-size 8
 ```
 
 默认数据位置：
 
 | 用途 | 相对仓库路径 |
 |---|---|
-| 动态方法 AE＋LM | `data/fineweb-4096-doc100k_20260910/semantic` |
+| 五方法共用的 AE／LM 索引 | `data/fineweb-reconstruction-k512-doc100k_20260917` |
+| 索引引用的原文 | `data/raw/HuggingFaceFW-fineweb/sample-10BT/` |
 | QA | `data/fineweb-factqa-train1000_20260930` |
 
-数据目录内需有 `train.jsonl`、`dev.jsonl`、`test.jsonl`，QA 还需 `preparation.json`。AE＋LM 使用之前构造的成品，**不把原始 Parquet 目录直接传给训练入口**。可用 `--pretrain-data`、`--qa-data` 指定实际存放位置。
+以上数据在 [ModelScope 数据仓库](https://modelscope.cn/datasets/percyWeeei/latent-working-memory/files) 的根目录分别为 `fineweb-reconstruction-k512-doc100k_20260917/`、`raw/` 与 `fineweb-factqa-train1000_20260930/`。服务器需保留索引与 `raw` 同级的布局；索引保存原文位置，训练时从对应 Parquet 恢复文本。
+
+预训练根目录包含 `preparation.json`，以及 `single/`、`multi/` 各自的 `train.jsonl`、`dev.jsonl`、`test.jsonl`；QA 根目录包含三个 split 文件和 `preparation.json`。`--pretrain-data` 指向索引根目录，`--qa-data` 指向 QA 根目录。
+
+| 方法 | 预训练数据视图与目标 |
+|---|---|
+| 两个动态方法 | 从 `multi` 仅选择首个切点落在 768–1024 tokens 的记录，派生该单段的 AE＋LM，共享预训练一次 |
+| ICAE-single | `single` 最终切点的 1024–4096 tokens 原文，派生 AE＋LM；每例一次压缩 |
+| ICAE-multi | 同一 `single` 原文与 AE＋LM 目标，写入时按 1024 tokens 独立分段，拼接记忆读出 |
+| AutoCompressors | 同一 `single` 的一份 continuation 样本，拼接输入与后续 512 tokens 做随机分段 LM，不另复制 AE 样本 |
+
+两个 ICAE 随后在完整 QA 长轨迹上分别训练全长压缩和多块拼接读出；两个动态方法在同一长轨迹上执行 warmup 与 policy。QA 已标注的文本、段界与题池保持原样。AutoCompressors 仅训练 LM，再在同一 QA 测试集评估。
+
+20261007 使用 Qwen3-4B tokenizer 读取发布数据：QA 为 1007／118／120 条 train／dev／test 轨迹，每条 6–10 段；训练轨迹实际为 3307–15448 tokens，字符估算的 6–8K 不是实际分词长度筛选条件。动态基础预训练保留 3532 条训练原文，派生 7064 个 AE／LM 样本；开发集为 12 条原文、24 个样本。基线保留 31957 条训练原文：每个 ICAE 使用 63914 个 AE／LM 样本，AutoCompressors 使用 31957 个 LM 样本。两种预训练视图均与 QA 来源文档和去重簇无交集。
 
 仓库位于默认路径时，可在网站的启动命令栏填写：
 
 ```bash
 bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode smoke --method dynamic --gpus 4,5 --run-id view-check-01
+  --mode smoke --method all --gpus 4,5 --run-id 20261007-01 \
+  --micro-batch-size-per-gpu 2 --gradient-accumulation-steps 2 --qa-batch-size 8
 ```
 
 这条命令会依次执行：
 
 ```text
 共享单段 AE＋LM 预训练
+ICAE-single：AE＋LM → QA → 开发集 QA 评估
+ICAE-multi：AE＋LM → QA → 开发集 QA 评估
+AutoCompressors：多段 LM → 开发集 QA 评估
+共享 checkpoint
  ├─ 按记忆变化：动作预热 → 策略训练 → 开发集 QA 评估
  └─ 按信息损失：动作预热 → 策略训练 → 开发集 QA 评估
-最后导出两个方法的质量—容量比较点
+最后导出五个方法的质量—容量比较点
 ```
 
-每次训练继承前一阶段实际产出的 checkpoint。两种动态方法共享基础预训练 checkpoint，之后各自训练；阶段间的参数和 optimizer 初始化沿用实验协议。
+每次训练继承前一阶段实际产出的 checkpoint。两种动态方法共享基础预训练 checkpoint，之后各自训练；跨阶段继承可训练参数，optimizer 重建。第一组门控阈值 `threshold_i`、`threshold_d`、`threshold_g` 均为 0.1，`eta=0`；这些是初始设置，尚未做容量校准。
 
 ## 控制运行程度
 
@@ -100,23 +121,25 @@ bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gp
 | 最终 QA 评估 | dev 最多 2 条轨迹 | dev 最多 16 条轨迹 | 完整 test |
 
 - 各档均使用 Qwen3-4B、64 slots 和相同写入实现；QA 保留整条原文、全部更新点与原题池。
-- AE＋LM 在长度筛选后按任务分层选样，train/dev 均保留两类任务。QA 按 seed 选完整轨迹；两种动态方法使用相同样本。
+- AE＋LM 在长度筛选后按任务分层选样，train/dev 均保留两类任务；AutoCompressors 只使用 continuation 视图。QA 按 seed 选完整轨迹；两种动态方法使用相同样本。
 - 限步结束时仍执行开发集验证并保存 checkpoint，因此短跑也会有 `train`、`dev` 与最终 `evaluation` 展示。
 - 样本上限控制计算使用的内存索引，不创建数据副本；首次加载仍读取并分词来源数据。更换档位不会缩短模型加载时间。
 - `smoke`、`pilot` 用于检查实现、显存、耗时和展示；短跑质量不作为研究结论。
 
-检查通过后，可把 `--mode` 改为 `pilot` 或 `full`。每次独立运行使用新的 `--run-id`；正式运行与试跑采用不同命名。未指定 `--init-checkpoint` 时，不会继承试跑权重。
+检查通过后，可把 `--mode` 改为 `pilot` 或 `full`。同一个 `run-id` 的不同档位使用各自目录；重复同档独立运行时换用新的 `run-id`。未指定 `--init-checkpoint` 时，不会继承试跑权重。
 
 ```bash
 bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode full --method dynamic --gpus 4,5 --run-id main-01
+  --mode full --method all --gpus 4,5 --run-id 20261007-01 \
+  --micro-batch-size-per-gpu 2 --gradient-accumulation-steps 2 --qa-batch-size 8
 ```
 
 也可精确覆盖档位中的预算：
 
 ```bash
 bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode pilot --method dynamic --gpus 4,5 --run-id pilot-02 \
+  --mode pilot --method all --gpus 4,5 --run-id 20261007-02 \
+  --micro-batch-size-per-gpu 2 --gradient-accumulation-steps 2 --qa-batch-size 8 \
   --max-steps 10 --train-samples 80 --dev-samples 8 --eval-trajectories 4
 ```
 
@@ -133,19 +156,14 @@ bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gp
 | `--method autocompressors` | LM → 评估 |
 | `--method shared_pretrain` | 仅生成两个动态方法共用的 AE＋LM 预训练 checkpoint，并执行预训练开发集验证 |
 
-动态方法提供 `--init-checkpoint` 时，从已有共享预训练开始，自动执行 warmup → policy → 最终评估。ICAE 和 AutoCompressors 使用已有长文本预设，需提供 `--long-pretrain-data`。该目录采用原有 `TextSample` 格式，输入长度筛选为 4096–12288 个当前模型 tokens；此前 4096 上限的短片段成品不能普遍覆盖此范围。
-
-```bash
-bash /dfs/data/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode smoke --method all --gpus 4,5 --run-id all-check-01 \
-  --long-pretrain-data /dfs/data/fineweb-long-text-samples
-```
+五方法统一使用 `--pretrain-data`，各预设决定读取哪个索引视图。动态方法提供 `--init-checkpoint` 时，从已有共享预训练开始，自动执行 warmup → policy → 最终评估。
 
 先单独准备共享预训练时：
 
 ```bash
 bash src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode smoke --method shared_pretrain --gpus 4,5 --run-id shared-01
+  --mode smoke --method shared_pretrain --gpus 4,5 --run-id shared-01 \
+  --micro-batch-size-per-gpu 2 --gradient-accumulation-steps 2 --qa-batch-size 8
 ```
 
 已有共享预训练 checkpoint 时，一条命令完成某个动态方法的完整 QA 训练流程：

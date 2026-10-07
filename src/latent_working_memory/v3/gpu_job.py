@@ -98,12 +98,10 @@ def parse_args(argv=None):
         "--method", choices=(*METHODS, "shared_pretrain", "dynamic", "all"), default="dynamic"
     )
     parser.add_argument(
-        "--pretrain-data", type=Path, default=Path("data/fineweb-4096-doc100k_20260910/semantic")
-    )
-    parser.add_argument(
-        "--long-pretrain-data",
+        "--pretrain-data",
         type=Path,
-        help="ICAE 与 AutoCompressors 预设所需长文本 TextSample 目录",
+        default=Path("data/fineweb-reconstruction-k512-doc100k_20260917"),
+        help="共用 FineWeb reconstruction 索引根目录，包含 single、multi 和 preparation.json",
     )
     parser.add_argument(
         "--qa-data", type=Path, default=Path("data/fineweb-factqa-train1000_20260930")
@@ -224,14 +222,7 @@ def build_jobs(args):
             if value is not None:
                 objective[name] = value
         is_pretrain = stage in {"pretrain", "lm"}
-        if is_pretrain:
-            dataset = args.pretrain_data if method in DYNAMIC_METHODS else args.long_pretrain_data
-            if dataset is None:
-                raise ValueError(
-                    f"{method}/{stage} requires --long-pretrain-data; keep full-history training lengths"
-                )
-        else:
-            dataset = args.qa_data
+        dataset = args.pretrain_data if is_pretrain else args.qa_data
         root_method = (
             "shared-pretrain"
             if method in DYNAMIC_METHODS and stage == "pretrain"
@@ -427,17 +418,27 @@ def run_job(args):
     if args.tracking == "online":
         environment["SWANLAB_API_KEY"] = swanlab_api_key()
     # 只检查本任务使用的规范数据入口；不扫描下载分片或创建派生数据副本。
-    datasets = {
-        Path(job.config.training.dataset_dir): job.config.objective.stage not in {"pretrain", "lm"}
-        for job in jobs
-    }
+    required_files = set()
+    for job in jobs:
+        dataset = Path(job.config.training.dataset_dir)
+        is_qa = job.config.objective.stage not in {"pretrain", "lm"}
+        view = job.config.training.pretrain_data_view
+        if is_qa or view != "text_samples":
+            required_files.add(dataset / "preparation.json")
+        if not is_qa and view != "text_samples":
+            dataset /= {
+                "reconstruction_single": "single",
+                "reconstruction_first_write": "multi",
+            }[view]
+        required_files.update(dataset / f"{split}.jsonl" for split in ("train", "dev", "test"))
     if any(job.evaluate for job in jobs):
-        datasets[args.qa_data.resolve()] = True
-    for dataset, is_qa in datasets.items():
-        names = ["train.jsonl", "dev.jsonl", "test.jsonl"] + (["preparation.json"] if is_qa else [])
-        for name in names:
-            if not (dataset / name).is_file():
-                raise FileNotFoundError(f"required dataset entry is missing: {dataset / name}")
+        required_files.update(
+            args.qa_data.resolve() / name
+            for name in ("train.jsonl", "dev.jsonl", "test.jsonl", "preparation.json")
+        )
+    for path in sorted(required_files):
+        if not path.is_file():
+            raise FileNotFoundError(f"required dataset entry is missing: {path}")
     plan_directory.mkdir(parents=True)
     save_json(plan_directory / "job.json", plan)
     evaluation_environment = dict(environment, CUDA_VISIBLE_DEVICES=args.gpus.split(",")[0])

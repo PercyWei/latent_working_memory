@@ -91,6 +91,12 @@ def test_sample_limits_default_to_full_splits():
     assert config.max_dev_samples is None
 
 
+def test_pretraining_data_view_requires_an_explicit_supported_format():
+    assert TrainingConfig("data", "output").pretrain_data_view == "text_samples"
+    with pytest.raises(ValueError, match="pretrain_data_view"):
+        TrainingConfig("data", "output", pretrain_data_view="auto")
+
+
 @pytest.mark.parametrize(
     "world_size,microbatch,accumulation,expected", [(2, 1, 4, 8), (2, 2, 2, 8), (4, 2, 3, 24)]
 )

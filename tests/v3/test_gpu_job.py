@@ -26,8 +26,6 @@ def arguments(tmp_path, *options, run_id="unit-job"):
             str(tmp_path / "outputs"),
             "--pretrain-data",
             str(tmp_path / "pretraining data"),
-            "--long-pretrain-data",
-            str(tmp_path / "long pretraining data"),
             "--qa-data",
             str(tmp_path / "qa data"),
             *options,
@@ -37,10 +35,11 @@ def arguments(tmp_path, *options, run_id="unit-job"):
 
 def prepare_dataset_entries(args):
     # 这里只测试编排入口的文件要求；内容解析由真正的训练/评估测试覆盖。
-    for directory in (args.pretrain_data, args.long_pretrain_data, args.qa_data):
-        directory.mkdir()
+    for directory in (args.pretrain_data / "single", args.pretrain_data / "multi", args.qa_data):
+        directory.mkdir(parents=True)
         for split in ("train", "dev", "test"):
             (directory / f"{split}.jsonl").write_text("")
+    (args.pretrain_data / "preparation.json").write_text("{}")
     (args.qa_data / "preparation.json").write_text("{}")
 
 
@@ -204,6 +203,11 @@ def test_dynamic_methods_share_only_pretraining_and_have_independent_warmup_poli
     assert len({job.config.training.group for job in jobs}) == 1
 
 
+def test_default_pretraining_data_is_the_shared_reconstruction_root():
+    args = gpu_job.parse_args([])
+    assert args.pretrain_data == Path("data/fineweb-reconstruction-k512-doc100k_20260917")
+
+
 @pytest.mark.parametrize("method", ["memory_change", "information_loss", "dynamic"])
 def test_auto_from_external_pretraining_checkpoint_skips_pretraining_in_plan(tmp_path, method):
     checkpoint = tmp_path / "shared pretraining.pt"
@@ -253,10 +257,13 @@ def test_all_methods_build_a_complete_topologically_ordered_stage_graph(tmp_path
         seen.add(job.key)
         if job.config.objective.stage in {"qa", "warmup", "policy"}:
             assert Path(job.config.training.dataset_dir) == args.qa_data
-        elif job.config.objective.method in {"memory_change", "information_loss"}:
-            assert Path(job.config.training.dataset_dir) == args.pretrain_data
         else:
-            assert Path(job.config.training.dataset_dir) == args.long_pretrain_data
+            assert Path(job.config.training.dataset_dir) == args.pretrain_data
+            assert job.config.training.pretrain_data_view == (
+                "reconstruction_first_write"
+                if job.config.objective.method in {"memory_change", "information_loss"}
+                else "reconstruction_single"
+            )
     assert len({job.config.training.experiment_dir for job in jobs}) == 6
     for method in ("icae_single", "icae_multi"):
         stages = [job for job in jobs if job.config.objective.method == method]
@@ -375,6 +382,7 @@ def test_plan_derives_each_global_batch_from_selected_gpus_microbatch_and_accumu
         ["--gradient-accumulation-steps", "0"],
         ["--gradient-accumulation-steps", "-1"],
         ["--global-batch-size", "8"],
+        ["--long-pretrain-data", "old-data"],
         ["--run-id", "../escape"],
         ["--stage", "auto"],
         ["--stage", "warmup"],
@@ -464,7 +472,6 @@ def test_auto_from_external_checkpoint_needs_only_qa_and_chains_warmup_into_poli
     methods = ("memory_change", "information_loss") if method == "dynamic" else (method,)
     assert result["status"] == "finished"
     assert not args.pretrain_data.exists()
-    assert not args.long_pretrain_data.exists()
     assert len(commands.calls) == 3 * len(methods) + int(len(methods) > 1)
     for index, name in enumerate(methods):
         warmup, policy, evaluation = commands.calls[index * 3 : index * 3 + 3]
@@ -504,9 +511,10 @@ def test_auto_from_missing_checkpoint_fails_before_starting_training(tmp_path, m
 
 def test_shared_pretraining_entry_requires_only_ae_lm_data(tmp_path, monkeypatch):
     args = arguments(tmp_path, "--mode", "full", "--method", "shared_pretrain")
-    args.pretrain_data.mkdir()
+    (args.pretrain_data / "multi").mkdir(parents=True)
+    (args.pretrain_data / "preparation.json").write_text("{}")
     for split in ("train", "dev", "test"):
-        (args.pretrain_data / f"{split}.jsonl").write_text("")
+        (args.pretrain_data / "multi" / f"{split}.jsonl").write_text("")
     commands = Commands()
     monkeypatch.setattr(gpu_job, "execute", commands)
 
@@ -520,7 +528,43 @@ def test_shared_pretraining_entry_requires_only_ae_lm_data(tmp_path, monkeypatch
     assert Path(config.training.experiment_dir).name == "shared-pretrain-k64_unit-job"
     assert Path(config.training.output_dir) == Path(config.training.experiment_dir) / "pretrain"
     assert not args.qa_data.exists()
-    assert not args.long_pretrain_data.exists()
+    assert not (args.pretrain_data / "single").exists()
+
+
+@pytest.mark.parametrize("method", ["icae_single", "icae_multi", "autocompressors"])
+def test_baselines_need_single_index_but_not_multi_index(tmp_path, monkeypatch, method):
+    args = arguments(tmp_path, "--method", method)
+    prepare_dataset_entries(args)
+    for path in (args.pretrain_data / "multi").iterdir():
+        path.unlink()
+    (args.pretrain_data / "multi").rmdir()
+    commands = Commands()
+    monkeypatch.setattr(gpu_job, "execute", commands)
+
+    result = gpu_job.run_job(args)
+
+    assert result["status"] == "finished"
+    trained = [call["config"] for call in commands.calls if "config" in call]
+    assert trained[0].training.pretrain_data_view == "reconstruction_single"
+    assert Path(trained[0].training.dataset_dir) == args.pretrain_data
+
+
+@pytest.mark.parametrize("missing", ["preparation.json", "single/train.jsonl", "multi/dev.jsonl"])
+def test_all_methods_require_both_selected_index_views_before_execution(
+    tmp_path, monkeypatch, missing
+):
+    args = arguments(tmp_path, "--method", "all")
+    prepare_dataset_entries(args)
+    (args.pretrain_data / missing).unlink()
+    commands = Commands()
+    monkeypatch.setattr(gpu_job, "execute", commands)
+
+    with pytest.raises(FileNotFoundError, match="required dataset entry is missing") as error:
+        gpu_job.run_job(args)
+
+    assert str(args.pretrain_data / missing) in str(error.value)
+    assert not commands.calls
+    assert not args.output_root.exists()
 
 
 def test_separate_methods_share_source_id_and_coexist_without_overwriting_series(

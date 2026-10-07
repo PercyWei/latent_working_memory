@@ -29,7 +29,7 @@
     "seed": 20261004
   },
   "training": {
-    "dataset_dir": "data/REPLACE_WITH_FINEWEB_TEXT_SAMPLES",
+    "dataset_dir": "data/fineweb-reconstruction-k512-doc100k_20260917",
     "output_dir": "artifacts/v3/step1-token-memory/train/dynamic-pretrain",
     "epochs": 1,
     "micro_batch_size_per_gpu": 1,
@@ -42,6 +42,7 @@
     "save_every": 25,
     "min_input_tokens": 768,
     "max_input_tokens": 1024,
-    "init_checkpoint": null
+    "init_checkpoint": null,
+    "pretrain_data_view": "reconstruction_first_write"
   }
 }

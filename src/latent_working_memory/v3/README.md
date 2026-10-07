@@ -50,13 +50,15 @@ d = Lrw - L0; g = Lrw - Lapp
 
 | 数据 | 规范格式 | 处理 |
 |---|---|---|
-| AE＋LM | 基础构造器的 `TextSample`，目录内 `train/dev/test.jsonl` | 使用当前基座分词，按输入长度筛选，不截断文本或目标；记录真实 AE/continuation 比例 |
+| 基础预训练 | `fineweb-reconstruction-k512-doc100k_20260917` 的原文索引，配套同级 `raw/` | 根据原文位置与已保存切点，用当前基座分词并读取正文及紧邻的 512-token 续文 |
+| 已有文本成品 | 基础构造器的 `TextSample`，目录内 `train/dev/test.jsonl` | 由 `pretrain_data_view=text_samples` 显式选择；按输入长度筛选，不截断文本或目标 |
 | QA | FactQA 发布目录的 `preparation.json` 与 `train/dev/test.jsonl` | 校验已有来源、事实与题池隔离；保留原文、分段、更新点及 `usage` |
 
 - QA 加载支持现行构造流程的 **6–10 段**，不会强制重切为旧笔记中的八段，也不会使用预训练长度筛选参数裁剪轨迹。
-- 训练入口读取并验证数据后记录实际 token 长度与题数。AE＋LM 的 train/dev 在长度筛选后必须仍包含两种任务。1000 条正式 QA 尚未在本机，本次测试使用合成小样本。
+- 训练入口读取并验证数据后记录实际 token 长度与题数。AE＋LM 的 train/dev 在长度筛选后必须仍包含两种任务。
 - 阶段衔接保存并核对 AE＋LM 来源文档与去重簇，QA 不能与其重叠。
-- ICAE-single 需要覆盖完整历史长度的预训练样本；ICAE-multi 的预训练样本按 `segment_tokens` 独立写入后联合读取。现有短文本数据不能替代完整长度的基线预训练。
+- 三个 baseline 的首组基础训练选择 `reconstruction_single`：使用 `single/` 的最终切点，正文 1024–4096 tokens。两个 ICAE 从同一正文各构造一条 AE 与 LM 样本，分别训练自己的参数；ICAE-multi 按 1024 tokens 独立写入后联合读取。后续完整 QA 轨迹提供更长的历史与更多记忆块训练。
+- 动态共享预训练选择 `reconstruction_first_write`：使用 `multi/` 的第一个切点，筛选 768–1024 tokens 的正文，并读取该切点后紧邻的 512 tokens 作为 LM 目标；不执行原索引的后续递归写入。两种视图均继承原来源与划分，只在内存组织样本，不保存派生副本；目录名中的 `k512` 不决定当前模型的 64 slots。
 
 | 目标 | 实现细节 |
 |---|---|
@@ -67,7 +69,7 @@ d = Lrw - L0; g = Lrw - Lapp
 | 策略训练 | 采用各自门控；选中路径保留完整跨步梯度，一条轨迹内不更新参数、不 detach 记忆 |
 | AutoCompressors LM | 随机分段，累计记忆参与预测及写入；默认每两段为一个 BPTT 子块，之后 detach 累计记忆，参数在整条样本结束后更新 |
 
-AutoCompressors 对 AE 样本使用输入全文，对 continuation 样本使用输入和续写的 token 流。子块内保留跨分段的下一 token 预测，子块首 token 不计损失；按目标 token 数平均。冻结读取端的损失通过当前子块内的记忆写入回传，不使用 QA 微调。当前随机分段范围为 768–1024 tokens，尾段可以更短。
+AutoCompressors 在索引数据上每条原始索引只生成一个 continuation 样本，拼接正文与 512-token 续文进行 LM 训练，避免同文被 AE/LM 两份重复使用；该长度也保证有足够的随机分段。对已有 `TextSample`，AE 样本使用输入全文，continuation 样本使用输入和续写的 token 流。子块内保留跨分段的下一 token 预测，子块首 token 不计损失；按目标 token 数平均。冻结读取端的损失通过当前子块内的记忆写入回传，不使用 QA 微调。当前随机分段范围为 768–1024 tokens，尾段可以更短；首组训练轨迹较短，评估时需留意更长累计记忆的泛化表现。
 
 每个 global batch 按实际样本数平均，包括不足一批的尾批。配置项 `micro_batch_size_per_gpu` 控制每卡一次并行处理的完整样本数，`gradient_accumulation_steps` 控制累积次数；全局 batch 根据两者与 GPU 数的乘积计算并记录。默认每卡 microbatch 为 1、累积 4 次，双卡全局 batch 为 8；双卡也可用 microbatch 2、累积 2 次保持全局 batch 为 8。
 

@@ -29,7 +29,7 @@
     "seed": 20261004
   },
   "training": {
-    "dataset_dir": "data/REPLACE_WITH_FINEWEB_LONG_TEXT_SAMPLES",
+    "dataset_dir": "data/fineweb-reconstruction-k512-doc100k_20260917",
     "output_dir": "artifacts/v3/step1-token-memory/train/icae-multi-pretrain",
     "epochs": 1,
     "micro_batch_size_per_gpu": 1,
@@ -40,8 +40,9 @@
     "seed": 20261004,
     "eval_every": 25,
     "save_every": 25,
-    "min_input_tokens": 4096,
-    "max_input_tokens": 12288,
-    "init_checkpoint": null
+    "min_input_tokens": 1024,
+    "max_input_tokens": 4096,
+    "init_checkpoint": null,
+    "pretrain_data_view": "reconstruction_single"
   }
 }
