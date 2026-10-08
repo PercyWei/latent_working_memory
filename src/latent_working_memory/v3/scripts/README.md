@@ -27,7 +27,7 @@ LWM_REPO_DIR="/path/to/latent_working_memory"
 
 默认 AE／LM 多段文本数据**尚未构造，须先完成构造再训练**。
 
-构造无放回分批读取到各划分配额，一篇合格文档对应一条轨迹。每条抽取 3–5 段，各段名义 token 长度 l 在 `[K,3K]` 内采样，分别扩为 `ceil(4 × l × α)` 个字符；尾部 `continuation` 独立取 `ceil(4 × Q × α)` 个字符。Q 为续文目标 token 数，α 为 `content_reserve_ratio`，默认 1.5。字符分段在构造时固定；保存的 `estimated_tokens = len(text) / 4` 包含余量，实际 token 数取决于训练 tokenizer。
+构造无放回分批读取到各划分配额，一篇合格文档对应一条轨迹。每条抽取 3–5 段，各段名义 token 长度 l 在 `[K,3K]` 内采样，分别扩为 `ceil(4 × l × α)` 个字符；尾部 `continuation` 独立取 `ceil(4 × Q × α)` 个字符。此处 Q 是构造时估算续文候选长度的参数，α 为 `content_reserve_ratio`，默认 1.5。字符分段在构造时固定；保存的 `estimated_tokens = len(text) / 4` 包含余量，实际 token 数取决于训练 tokenizer。
 
 | 构造配置（α=1.5） | 每段名义 tokens | 每段保存字符数 | 正文保存字符数 | 尾部字符数（Q=512） |
 |---|---:|---:|---:|---:|
@@ -36,7 +36,7 @@ LWM_REPO_DIR="/path/to/latent_working_memory"
 
 预训练目录根层保留 `preparation.json` 与 `train/dev/test.jsonl`，无需原始 FineWeb Parquet。加载使用 `multisegment_random_prefix`：按保存的字符段独立分词，计算不超过 8192 tokens 的最大连续前缀段数，再均匀随机选择段数；只有首段超限时才裁剪首段。
 
-每条来源按 `--lm-ratio` 选择一个 AE 或 LM 目标，默认 LM 概率 0.5。LM 从选中前缀的终点取 Q-token 续文（默认 Q=512），可包含尚未选中的正文；续文不足时转为 AE。采样使用训练 seed 与 `trajectory_id`，加载一次后所有 epoch 复用，结果不受 batch 或 GPU 数量影响。AutoCompressors 保持 LM-only，使用最多 Q-token 的可用续文；短流保留后续分段的监督，使写入器仍能训练。模型的 `memory_slots` 与构造配置的 K 分别设置，当前默认均为 512。
+每条来源按 `--lm-ratio` 选择一个 AE 或 LM 目标，默认 LM 概率 0.5。LM 从选中前缀的终点取 Q-token 续文，可包含尚未选中的正文；训练 Q 由 `training.lm_target_tokens` 决定，默认 512，可通过 `--lm-target-tokens` 修改，不读取构造元信息中的候选长度。续文不足时转为 AE。采样使用训练 seed 与 `trajectory_id`，加载一次后所有 epoch 复用，结果不受 batch 或 GPU 数量影响。AutoCompressors 保持 LM-only，使用最多 Q-token 的可用续文；短流保留后续分段的监督，使写入器仍能训练。模型的 `memory_slots` 与构造配置的 K 分别设置，当前默认均为 512。
 
 QA 默认使用统一格式的 FactQA，可从 [ModelScope 数据仓库](https://modelscope.cn/datasets/percyWeeei/latent-working-memory/files) 下载到表中目录。格式见 [FactQA 构造说明](../../data_preparation/fineweb_factqa/README.md)，训练读取 `preparation.json` 与三个 split 文件。
 
@@ -117,30 +117,35 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 
 ## 4. 调整参数
 
-命令行参数覆盖方法预设，并应用于本次运行的各训练阶段。常用参数如下，完整列表通过 `bash src/latent_working_memory/v3/scripts/run_gpu.sh --help` 查看。
+通用命令行参数覆盖各阶段预设，预训练与动态专用参数仅应用于相应阶段。常用参数如下，完整列表通过 `bash src/latent_working_memory/v3/scripts/run_gpu.sh --help` 查看。
 
 | 参数 | 用途／默认值 |
 |---|---|
 | `--gpus 0,1` | 使用的物理 GPU；默认 `0,1`，最终评估使用第一张卡 |
-| `--micro-batch-size-per-gpu` | 每卡一次并行处理的样本／轨迹数；baseline 默认 4，动态默认 8 |
-| `--gradient-accumulation-steps` | 每次更新累积的 microbatch 数；baseline 默认 2，动态默认 1 |
+| `--micro-batch-size-per-gpu` | 每卡一次并行处理的样本／轨迹数；共享预训练默认 8，其余默认 4 |
+| `--gradient-accumulation-steps` | 每次更新累积的 microbatch 数；共享预训练默认 1，其余默认 2 |
 | `--qa-batch-size 8` | 每条轨迹一次读取的题数，默认 8 |
 | `--append-slots 32` | 动态方法每次追加的 slots 数，默认 32；首次为 512，覆盖保持末块大小 |
 | `--max-input-tokens 8192` | 预训练输入长度上限，默认 8192 tokens |
 | `--lm-ratio 0.5` | ICAE 与动态共享预训练选择 LM 的概率；AutoCompressors 保持 LM-only |
+| `--lm-target-tokens 512` | 预训练 LM 的续文目标长度，由训练配置决定 |
+| `--bptt-steps 0` | 动态 warmup／policy 的 BPTT 窗口；0 表示默认的完整 BPTT，2 表示每两轮截断 |
 | `--epochs` | 各阶段训练轮数 |
 | `--train-samples`、`--dev-samples`、`--max-steps`、`--eval-trajectories` | 覆盖档位预算，`0` 表示不设该上限 |
 | `--threshold-i`、`--threshold-d`、`--threshold-g`、`--eta` | 动态策略阈值 |
 | `--run-id`、`--group` | 运行标识默认按上海时间生成；group 默认直接使用 `run-id`，可单独覆盖 |
 | `--output-root` | 产物父目录，默认 `artifacts/v3` |
 
-全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数。baseline 默认双卡为 **2 × 4 × 2 = 16**，动态为 **2 × 8 × 1 = 16**。标准入口的动态三个阶段均读取 `dynamic_pretrain.json`。以下命令显式运行当前动态设置：
+全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数。共享预训练双卡默认 **2 × 8 × 1 = 16**，其余阶段默认 **2 × 4 × 2 = 16**。`dynamic_pretrain.json` 只配置共享预训练，动态 QA 分别读取 `memory_change.json`、`information_loss.json`；三个 baseline 读取 `icae_single.json`、`icae_multi.json`、`autocompressors.json`。
+
+当前先按完整 BPTT 运行；若要测量两轮截断的显存和质量，可执行：
 
 ```bash
 bash src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode pilot --method dynamic --gpus 0,1 \
-  --micro-batch-size-per-gpu 8 --gradient-accumulation-steps 1 --append-slots 32
+  --mode pilot --method dynamic --gpus 0,1 --bptt-steps 2
 ```
+
+首段也计一轮，每两轮反向传播后 detach 全部记忆，global batch 结束后仍只更新一次参数。该参数不影响 AutoCompressors 的 `ac_bptt_steps`。
 
 动态容量按 `512 → 544 → 576` 逐次追加；覆盖只改写末块，不增加容量。共享预训练生成 512 slots，三个 baseline 的块大小不受 `--append-slots` 影响。
 

@@ -24,11 +24,11 @@ from latent_working_memory.v3.tracking_credentials import swanlab_api_key
 
 
 PRESETS = {
-    "icae_single": "icae_single_pretrain.json",
-    "icae_multi": "icae_multi_pretrain.json",
-    "autocompressors": "autocompressors_lm.json",
-    "memory_change": "dynamic_pretrain.json",
-    "information_loss": "dynamic_pretrain.json",
+    "icae_single": "icae_single.json",
+    "icae_multi": "icae_multi.json",
+    "autocompressors": "autocompressors.json",
+    "memory_change": "memory_change.json",
+    "information_loss": "information_loss.json",
 }
 LEVELS = {
     "smoke": {
@@ -151,6 +151,16 @@ def parse_args(argv=None):
         help="预训练压缩输入的 token 上限，默认 8192；QA 阶段沿用数据中的段界",
     )
     parser.add_argument(
+        "--lm-target-tokens",
+        type=positive_count,
+        help="预训练 LM 目标的真实 token 数，默认 512；续文候选不足时沿用任务回退规则",
+    )
+    parser.add_argument(
+        "--bptt-steps",
+        type=bounded_count,
+        help="动态 warmup/policy 每个反传窗口的写入轮数，0 表示完整 BPTT；默认完整展开",
+    )
+    parser.add_argument(
         "--append-slots",
         type=positive_count,
         help="动态方法每次追加的 slots 数，默认沿用预设 32；首次写入为 512 slots",
@@ -185,6 +195,8 @@ def parse_args(argv=None):
         "autocompressors",
     }:
         parser.error("--append-slots is only supported by dynamic methods")
+    if args.bptt_steps is not None and args.method not in (*DYNAMIC_METHODS, "dynamic", "all"):
+        parser.error("--bptt-steps is only supported by dynamic warmup/policy")
     return args
 
 
@@ -249,7 +261,12 @@ def build_jobs(args):
 
     def append(method, stage, initialize_from=None, key=None, evaluate=False):
         key = key or f"{method.replace('_', '-')}-{stage}"
-        config = load_experiment(Path("configs/v3") / PRESETS[method])
+        preset = (
+            "dynamic_pretrain.json"
+            if method in DYNAMIC_METHODS and stage == "pretrain"
+            else PRESETS[method]
+        )
+        config = load_experiment(Path("configs/v3") / preset)
         objective = {"method": method, "stage": stage}
         for name in ("qa_batch_size", "threshold_i", "threshold_d", "threshold_g", "eta"):
             value = getattr(args, name)
@@ -257,6 +274,12 @@ def build_jobs(args):
                 objective[name] = value
         if method in DYNAMIC_METHODS and args.append_slots is not None:
             objective["append_slots"] = args.append_slots
+        if (
+            method in DYNAMIC_METHODS
+            and stage in {"warmup", "policy"}
+            and args.bptt_steps is not None
+        ):
+            objective["bptt_steps"] = args.bptt_steps or None
         is_pretrain = stage in {"pretrain", "lm"}
         dataset = args.pretrain_data if is_pretrain else args.qa_data
         root_method = (
@@ -288,6 +311,8 @@ def build_jobs(args):
             training["lm_ratio"] = args.lm_ratio
         if is_pretrain and args.max_input_tokens is not None:
             training["max_input_tokens"] = args.max_input_tokens
+        if is_pretrain and args.lm_target_tokens is not None:
+            training["lm_target_tokens"] = args.lm_target_tokens
         # QA 阶段不使用预训练输入长度筛选；真实段界与题池保持原样。
         for name in ("epochs", "micro_batch_size_per_gpu", "gradient_accumulation_steps"):
             value = getattr(args, name)

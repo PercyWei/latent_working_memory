@@ -14,7 +14,7 @@
 | 读取 | 从相同基座复制独立冻结 Decoder，不安装 LoRA；训练时仍保留读取损失对记忆的梯度 |
 | 数值与位置 | 两端基座 bfloat16、LoRA/embeddings float32；CUDA 训练、验证和最终评估使用 BF16 autocast；普通因果位置编码，dropout 为 0 |
 | 激活重计算 | 编码器和解码器默认启用原生非重入逐层 checkpoint；`model.gradient_checkpointing` 控制开关 |
-| 训练框架 | 复用 verl `BaseEngine`、优化器和 replicated DDP；一个外层 forward 并行展开一个 microbatch 的完整轨迹 |
+| 训练框架 | 复用 verl `BaseEngine`、优化器和 replicated DDP；按 microbatch 并行处理轨迹，可将动态轨迹分为 BPTT 窗口 |
 
 | 方法标识 | 写入范围与容量 | 训练流程 |
 |---|---|---|
@@ -63,7 +63,7 @@ d = Lrw - L0; g = Lrw - Lapp
 - 训练入口读取并验证数据后记录实际 token 长度、选中段数、实际任务比例与题数。
 - 阶段衔接保存并核对 AE＋LM 来源文档与去重簇，QA 不能与其重叠。
 - 基础训练统一使用 `multisegment_random_prefix`，`max_input_tokens=8192`。计算从第一段开始、不超过上限的最大完整段数，再均匀抽取 1 至该段数作为连续输入前缀；只有首段超过上限时才裁剪首段，保留较短输入。
-- 两个 ICAE 与动态共享预训练按 `training.lm_ratio` 为每条来源选择 AE 或 LM，默认 LM 概率为 0.5；AE 重建选中前缀，LM 从其实际终点取紧邻的 Q 个 tokens，Q 由数据元信息中的 `continuation_tokens` 指定，默认 512。续文依次来自未选中的正文和保存的 `continuation`；不足 Q 时切换为 AE。
+- 两个 ICAE 与动态共享预训练按 `training.lm_ratio` 为每条来源选择 AE 或 LM，默认 LM 概率为 0.5；AE 重建选中前缀，LM 从其实际终点取紧邻的 Q 个 tokens，Q 由训练配置 `training.lm_target_tokens` 指定，默认 512，与数据构造时估算的续文候选长度分别配置。续文依次来自未选中的正文和保存的 `continuation`；不足 Q 时切换为 AE。
 - 段数和任务由 `training.seed` 与 `trajectory_id` 确定，各来源独立采样，加载后所有 epoch 复用同一结果。每条来源只生成一条训练样本，运行记录保存续文不足导致的任务切换和实际 AE／LM 数量；AutoCompressors 只使用 LM 目标。
 - ICAE-single 与动态共享预训练将完整选中前缀一次写入 512 slots；ICAE-multi 按 `segment_tokens=1024` 独立写入，各块 512 slots，拼接后联合读取。动态 QA 仍按数据保存的段界更新，两种动态方法共用预训练产物。
 - 数据构造无放回分批读取来源，直到各划分达到配额；每篇合格文档只生成一条轨迹。默认抽取 3–5 段，每段先采样名义长度 l∈[K,3K]，分别保存 `ceil(4 × l × α)` 个字符；尾部 `continuation` 独立保存 `ceil(4 × Q × α)` 个字符，α 为 `content_reserve_ratio`。默认 K=512、α=1.5，每段 3072–9216 字符，正文 9216–46080 字符，对应名义总长 1536–7680 tokens；Q=512 的尾部为 3072 字符。K64 的正文段为 384–1152 字符，正文共 1152–5760 字符。保存的 `estimated_tokens = len(text) / 4` 包含余量，实际 token 数仍由 tokenizer 决定；换 tokenizer 不改变字符分段。
@@ -75,12 +75,21 @@ d = Lrw - L0; g = Lrw - Lapp
 | ICAE QA | 完整记忆上读取全部任务题，按实际题数平均 |
 | 动态 QA | 每个更新点读取 `task_new_qa_ids + task_old_qa_ids`，按实际题数平均，再平均更新点 |
 | 动作预热 | 每次更新以 0.5 概率追加；由 seed、epoch、trajectory_id 确定，两组动作日程相同 |
-| 策略训练 | 采用各自门控；选中路径保留完整跨步梯度，一条轨迹内不更新参数、不 detach 记忆 |
+| 策略训练 | 采用各自门控；默认完整 BPTT，选中路径保留跨步梯度；可按 `objective.bptt_steps` 截断 |
 | AutoCompressors LM | 随机分段，累计记忆参与预测及写入；默认每两段为一个 BPTT 子块，之后 detach 累计记忆，参数在整条样本结束后更新 |
 
 AutoCompressors 对每条多段文本轨迹只生成一个 continuation 样本，拼接选中前缀与最多 Q-token 的可用续文，再按自身规则随机分段进行 next-token LM 训练；续文不足 Q 时仍保留 LM 目标。对已有 `TextSample`，AE 样本使用输入全文，continuation 样本使用输入和续写的 token 流。子块内保留跨分段的下一 token 预测，子块首 token 不计损失；按目标 token 数平均。冻结读取端的损失通过当前子块内的记忆写入回传，不使用 QA 微调。当前随机分段范围为 768–1024 tokens，尾段可以更短；短流的首段也可缩短，为后续记忆读取保留至少一个可训练的 next-token 目标，不因随机前缀较短而丢弃来源。
 
-每个 global batch 按实际样本数平均，包括不足一批的尾批。配置项 `micro_batch_size_per_gpu` 控制每卡一次并行处理的完整样本数，`gradient_accumulation_steps` 控制累积次数；全局 batch 根据两者与 GPU 数的乘积计算并记录。标准启动入口中，三个 baseline 默认每卡 microbatch 为 **4**、累积 **2** 次；动态共享预训练、warmup 和 policy 均从 `dynamic_pretrain.json` 取值，默认每卡 **8**、累积 **1** 次。两类设置的双卡全局 batch 均为 **16**；`qa_batch_size` 默认为 8。
+动态 warmup／policy 的 `objective.bptt_steps` 默认 `null`，使用完整轨迹 BPTT；当前先保留此设置。设置为 2 时，首段也计一轮：`[首段, 更新1]`、`[更新2, 更新3]`。每个窗口立即反向传播并累积梯度，随后 detach 全部记忆块；仅在 global batch 结束时更新参数。窗口损失保留原有题目、更新点、轨迹平均权重。截断不改变记忆数值、写入次数或门控题数，后续 QA 无法向此前窗口的写入反传。AutoCompressors 的 `ac_bptt_steps` 独立控制其 LM 截断，不受此参数影响。
+
+每个 global batch 按实际样本数平均，包括不足一批的尾批。`micro_batch_size_per_gpu` 控制每卡一次并行处理的样本／轨迹数，`gradient_accumulation_steps` 控制累积次数；全局 batch 为两者与 GPU 数的乘积。共享预训练默认每卡 **8**、累积 **1** 次；三个 baseline 和动态 warmup／policy 默认每卡 **4**、累积 **2** 次，双卡全局 batch 均为 **16**。`qa_batch_size` 默认为 8。
+
+| 配置 | 作用范围 |
+|---|---|
+| `configs/v3/dynamic_pretrain.json` | 动态共享预训练，参数仅用于此阶段 |
+| `configs/v3/memory_change.json`、`information_loss.json` | 对应动态方法的 warmup＋policy |
+| `configs/v3/icae_single.json`、`icae_multi.json` | 对应基线的 AE／LM＋QA |
+| `configs/v3/autocompressors.json` | AutoCompressors LM |
 
 批量读写采用独立行的右侧 padding，仅使用有效前缀输出；因果 attention 保证有效位置不会读取右侧 padding，因此不传 padding mask，保留 SDPA 的纯 causal 路径。预训练样本在既定 global batch 的每卡分片内按目标长度、输入长度分组，减少补齐计算；采样、各卡样本归属和损失权重保持不变。动态分支按轨迹独立决策。`qa_batch_size` 控制每条轨迹一次读取的题数，批量调用合并各活跃轨迹的题目，但保留原有每题、更新点和轨迹的损失权重。多个样本共享调用的计时按参与样本分摊，调用/题目数仍按每条样本的逻辑工作量记录。
 
@@ -100,7 +109,7 @@ bash /data/zhangdw12/percyw/latent_working_memory/src/latent_working_memory/v3/s
   --mode full --gpus 4,5 --run-id capacity-comparison_20261007-01
 ```
 
-公司 GPU 网站填写脚本的实际绝对路径即可。`--gpus 4,5` 启动两个训练进程，最终评估使用 GPU 4；卡号默认仍为 `0,1`。只运行一个方法时增加 `--method`。命令行参数覆盖方法预设，`all` 下应用于所有方法的各个阶段；`--append-slots` 仅修改动态方法的追加大小。参数与数据准备见 [GPU 任务说明](scripts/README.md)。
+公司 GPU 网站填写脚本的实际绝对路径即可。`--gpus 4,5` 启动两个训练进程，最终评估使用 GPU 4；卡号默认仍为 `0,1`。只运行一个方法时增加 `--method`。通用命令行参数覆盖各阶段预设；`--max-input-tokens`、`--lm-ratio`、`--lm-target-tokens` 仅影响预训练，`--append-slots` 和 `--bptt-steps` 仅影响动态 warmup／policy。参数与数据准备见 [GPU 任务说明](scripts/README.md)。
 
 公开入口按完整方法运行：ICAE 自动执行 pretrain → QA，动态方法执行共享预训练 → warmup → policy，AutoCompressors 执行 LM；`smoke`、`pilot` 仅缩短各阶段预算，仍走完整流程。需要先单独准备两种动态方法的共同起点时，使用 `--method shared_pretrain`。
 

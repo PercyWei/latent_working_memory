@@ -86,6 +86,7 @@ def load_splits(config, tokenizer):
                 lm_only=config.objective.stage == "lm",
                 seed=training.seed,
                 lm_ratio=training.lm_ratio,
+                lm_target_tokens=training.lm_target_tokens,
             )
     else:
         splits = load_factqa(training.dataset_dir, tokenizer)

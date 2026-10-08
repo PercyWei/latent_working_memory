@@ -2,7 +2,7 @@
 
 创建时间：20261008 10:41:43 UTC+08:00
 
-最后修订时间：20261008 17:38:48 UTC+08:00
+最后修订时间：20261008 22:56:37 UTC+08:00
 
 从 FineWeb 原始 Parquet 构造分段正文及续文候选。与 FactQA 共用[分段逻辑](../segmentation.py)，保存固定字符区间；构造不加载 tokenizer，K 与倍率指定余量前的名义长度。
 
@@ -22,12 +22,14 @@
 | `window.max_segment_ratio` | 3 | 名义段长的最大倍率 |
 | `window.min_segments` | 3 | 每条轨迹最少段数 |
 | `window.max_segments` | 5 | 每条轨迹最多段数 |
-| `window.continuation_tokens` | 512 | 续文目标 token 数 Q |
+| `window.continuation_tokens` | 512 | 续文候选的名义 token 数 Q；仅用于估算保存字符数 |
 | `window.content_reserve_ratio` | 1.5 | 每段及续文各自的余量系数 α |
 
 `window` 集中保存分段参数，`source_seed` 决定来源顺序与划分，`selection_seed` 决定文档内采样。只设置 `split_counts`，不另设划分比例。
 
 各段名义长度在 K × 倍率范围内取整数；正文每段按 `ceil(4 × lᵢ × α)`、续文按 `ceil(4 × Q × α)` 换算为字符数，分别取整后求和。
+
+候选续文的实际 token 数由训练 tokenizer 决定，不保证达到 Q。v3 的 LM 目标长度由训练配置 `training.lm_target_tokens` 独立指定，默认 512。
 
 ## 执行与命名
 

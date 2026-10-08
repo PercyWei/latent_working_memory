@@ -19,20 +19,19 @@
     ]
   },
   "objective": {
-    "method": "memory_change",
-    "stage": "warmup",
+    "method": "icae_single",
+    "stage": "pretrain",
     "qa_batch_size": 8,
     "segment_tokens": 1024,
     "ac_min_segment_tokens": 768,
     "ac_max_segment_tokens": 1024,
     "ac_bptt_steps": 2,
     "append_probability": 0.5,
-    "seed": 20261004,
-    "append_slots": 32
+    "seed": 20261004
   },
   "training": {
-    "dataset_dir": "data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008",
-    "output_dir": "artifacts/v3/step1-token-memory/train/memory-change-warmup",
+    "dataset_dir": "data/fineweb-multisegment-k512-seg1to3x_train32k_20261008",
+    "output_dir": "artifacts/v3/step1-token-memory/train/icae-single/pretrain",
     "epochs": 1,
     "micro_batch_size_per_gpu": 4,
     "gradient_accumulation_steps": 2,
@@ -43,7 +42,10 @@
     "eval_every": 25,
     "save_every": 25,
     "min_input_tokens": 1,
-    "max_input_tokens": 32768,
-    "init_checkpoint": "artifacts/v3/step1-token-memory/train/dynamic-pretrain/REPLACE_WITH_CHECKPOINT.pt"
+    "max_input_tokens": 8192,
+    "init_checkpoint": null,
+    "pretrain_data_view": "multisegment_random_prefix",
+    "lm_ratio": 0.5,
+    "lm_target_tokens": 512
   }
 }

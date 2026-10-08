@@ -11,6 +11,7 @@ from verl.workers.config import FSDPOptimizerConfig
 from verl.workers.config.optimizer import build_optimizer
 from verl.workers.engine import BaseEngine, EngineRegistry
 
+from latent_working_memory.v3.objective import TokenMemoryTask
 from latent_working_memory.v3.pretrain_data import PretrainExample
 from latent_working_memory.v4.engine import initialize_device
 
@@ -118,32 +119,77 @@ class TokenMemoryEngine(BaseEngine):
         # 尾批空 rank 也执行真实 DDP forward/backward，仅将其训练权重置零。
         size = self.config.micro_batch_size_per_gpu
         work = [local[start : start + size] for start in range(0, len(local), size)] or [[0]]
+        window_steps = (
+            self.model.cfg.bptt_steps
+            if isinstance(self.model, TokenMemoryTask) and not forward_only
+            else None
+        )
+        if window_steps is not None:
+            # 所有 rank 使用同样的窗口调度，变长轨迹结束或尾批空 rank 仍参与最终同步。
+            microbatches = (len(examples) + size * self.world_size - 1) // (size * self.world_size)
+            work += [[0]] * (microbatches - len(work))
+        used_parameters = [False] * len(self.parameters)
         metric_names, totals = None, None
         for position, indices in enumerate(work):
-            count = len(indices) if local else 0
-            sync = (
-                self.module.no_sync()
-                if not forward_only and self.world_size > 1 and position + 1 < len(work)
-                else nullcontext()
-            )
-            with sync:
-                precision = (
-                    torch.autocast("cuda", dtype=torch.bfloat16)
-                    if self.device.type == "cuda"
+            count = min(size, max(0, len(local) - position * size))
+            windows = 1
+            if window_steps is not None:
+                global_rows = examples[
+                    position * size * self.world_size : (position + 1) * size * self.world_size
+                ]
+                windows = (max(len(row.segments) for row in global_rows) + window_steps - 1) // (
+                    window_steps
+                )
+            qa_state, row_loss = None, 0.0
+            for window in range(windows):
+                final = position + 1 == len(work) and window + 1 == windows
+                sync = (
+                    self.module.no_sync()
+                    if not forward_only
+                    and self.world_size > 1
+                    and (window_steps is not None or not final)
                     else nullcontext()
                 )
-                with precision:
-                    output = self.module(
-                        [examples[index] for index in indices],
-                        epoch=epoch,
-                        differentiable=not forward_only,
-                        batched=True,
+                with sync:
+                    precision = (
+                        torch.autocast("cuda", dtype=torch.bfloat16)
+                        if self.device.type == "cuda"
+                        else nullcontext()
                     )
-                if not forward_only:
-                    loss = output["loss"] * count / len(examples)
-                    loss.backward()
-                    del loss
-            names = sorted(output["metrics"])
+                    arguments = (
+                        {
+                            "window_steps": window_steps,
+                            "qa_state": qa_state,
+                        }
+                        if window_steps is not None
+                        else {}
+                    )
+                    with precision:
+                        output = self.module(
+                            [examples[index] for index in indices],
+                            epoch=epoch,
+                            differentiable=not forward_only,
+                            batched=True,
+                            **arguments,
+                        )
+                    if not forward_only:
+                        loss = output["loss"] * count / len(examples)
+                        loss.backward()
+                        del loss
+                        if window_steps is not None and count:
+                            used_parameters = [
+                                used or parameter.grad is not None
+                                for used, parameter in zip(
+                                    used_parameters, self.parameters, strict=True
+                                )
+                            ]
+                row_loss += float(output["loss"].detach())
+                metrics = output["metrics"]
+                if window_steps is not None:
+                    qa_state = output["qa_state"]
+                # 下一窗口 forward 前释放 loss 持有的图，状态中仅保存 detach 后的记忆。
+                del output
+            names = sorted(metrics)
             if metric_names is None:
                 if {"loss", "samples", "grad_norm"}.intersection(names):
                     raise ValueError("model metrics must not redefine loss, samples or grad_norm")
@@ -151,17 +197,27 @@ class TokenMemoryEngine(BaseEngine):
                 totals = torch.zeros(len(names) + 2, dtype=torch.float64, device=self.device)
             elif names != metric_names:
                 raise ValueError("trajectory metric keys must remain fixed within a batch")
-            if local:
+            if count:
                 totals += torch.tensor(
                     [
-                        float(output["loss"].detach()) * count,
+                        row_loss * count,
                         count,
-                        *(output["metrics"][name] * count for name in metric_names),
+                        *(metrics[name] * count for name in metric_names),
                     ],
                     dtype=torch.float64,
                     device=self.device,
                 )
+        if self.world_size > 1 and window_steps is not None:
+            # 统一的零损失同步覆盖各 rank 在任意窗口使用过的参数。
+            # 保留完全未使用参数的 None 梯度，避免 Adam 推进它们的历史动量。
+            used = torch.tensor(used_parameters, dtype=torch.int32, device=self.device)
+            dist.all_reduce(used, op=dist.ReduceOp.MAX)
+            output = self.module([], sync_parameters=True)
+            output["loss"].backward()
             del output
+            for parameter, active in zip(self.parameters, used.tolist(), strict=True):
+                if not active:
+                    parameter.grad = None
         if self.world_size > 1:
             dist.all_reduce(totals)
         total_loss, samples, *values = totals.tolist()

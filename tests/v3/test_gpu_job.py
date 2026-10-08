@@ -180,8 +180,9 @@ def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode,
         assert job.config.training.init_checkpoint is None
         assert job.config.training.swanlab_project == "latent-working-memory-v3"
         assert job.config.training.tags == (f"study:{'main' if mode == 'full' else mode}",)
-        assert job.config.training.micro_batch_size_per_gpu == 8
-        assert job.config.training.gradient_accumulation_steps == 1
+        shared = job.config.objective.stage == "pretrain"
+        assert job.config.training.micro_batch_size_per_gpu == (8 if shared else 4)
+        assert job.config.training.gradient_accumulation_steps == (1 if shared else 2)
         assert job.config.training.global_batch_size(2) == 16
         assert job.config.training.global_batch_size(4) == 32
         assert job.config.model.memory_slots == 512
@@ -230,6 +231,70 @@ def test_dynamic_methods_share_only_pretraining_and_have_independent_warmup_poli
     assert len({job.config.training.group for job in jobs}) == 1
 
 
+def test_dynamic_stage_training_parameters_come_from_their_own_presets(tmp_path, monkeypatch):
+    calls = []
+
+    def preset(path):
+        calls.append(path.name)
+        config = load_experiment(path)
+        settings = {
+            "dynamic_pretrain.json": (3, 1e-4),
+            "memory_change.json": (4, 2e-4),
+            "information_loss.json": (5, 3e-4),
+        }
+        epochs, learning_rate = settings[path.name]
+        return replace(
+            config,
+            training=replace(config.training, epochs=epochs, learning_rate=learning_rate),
+        )
+
+    monkeypatch.setattr(gpu_job, "load_experiment", preset)
+    _, _, jobs = gpu_job.build_jobs(arguments(tmp_path))
+    assert calls == [
+        "dynamic_pretrain.json",
+        "memory_change.json",
+        "memory_change.json",
+        "information_loss.json",
+        "information_loss.json",
+    ]
+    assert [job.config.training.epochs for job in jobs] == [3, 4, 4, 5, 5]
+    assert [job.config.training.learning_rate for job in jobs] == [
+        1e-4,
+        2e-4,
+        2e-4,
+        3e-4,
+        3e-4,
+    ]
+
+
+@pytest.mark.parametrize("steps", [0, 1, 2])
+def test_bptt_cli_affects_only_dynamic_qa_and_zero_restores_full_bptt(tmp_path, monkeypatch, steps):
+    def preset(path):
+        config = load_experiment(path)
+        if (
+            config.objective.method in gpu_job.DYNAMIC_METHODS
+            and config.objective.stage == "warmup"
+        ):
+            config = replace(config, objective=replace(config.objective, bptt_steps=3))
+        return config
+
+    monkeypatch.setattr(gpu_job, "load_experiment", preset)
+    args = arguments(tmp_path, "--method", "all", "--bptt-steps", str(steps))
+    _, _, jobs = gpu_job.build_jobs(args)
+    for job in jobs:
+        objective = job.config.objective
+        dynamic_qa = objective.method in gpu_job.DYNAMIC_METHODS and objective.stage in {
+            "warmup",
+            "policy",
+        }
+        assert objective.bptt_steps == ((steps or None) if dynamic_qa else None)
+
+
+def test_dynamic_qa_presets_default_to_full_bptt(tmp_path):
+    _, _, jobs = gpu_job.build_jobs(arguments(tmp_path))
+    assert all(job.config.objective.bptt_steps is None for job in jobs)
+
+
 def test_default_pretraining_data_is_the_shared_multisegment_root():
     args = gpu_job.parse_args([])
     assert args.pretrain_data == Path("data/fineweb-multisegment-k512-seg1to3x_train32k_20261008")
@@ -251,9 +316,9 @@ def test_minimal_command_builds_all_methods_with_preset_batch_settings(mode):
         assert job.config.model.model_name_or_path == str(
             Path.home() / "models/Qwen3-4B-Instruct-2507"
         )
-        dynamic = job.config.objective.method in {"memory_change", "information_loss"}
-        assert job.config.training.micro_batch_size_per_gpu == (8 if dynamic else 4)
-        assert job.config.training.gradient_accumulation_steps == (1 if dynamic else 2)
+        shared = job.key == "dynamic-pretrain"
+        assert job.config.training.micro_batch_size_per_gpu == (8 if shared else 4)
+        assert job.config.training.gradient_accumulation_steps == (1 if shared else 2)
         assert job.config.training.global_batch_size(2) == 16
         assert job.config.objective.qa_batch_size == 8
 
@@ -374,14 +439,18 @@ def test_pretraining_sampling_overrides_do_not_change_qa_or_autocompressors_task
         "0.75",
         "--max-input-tokens",
         "2048",
+        "--lm-target-tokens",
+        "256",
     )
     _, _, jobs = gpu_job.build_jobs(args)
     for job in jobs:
         stage = job.config.objective.stage
         assert job.config.training.lm_ratio == (0.75 if stage == "pretrain" else 0.5)
+        dynamic = job.config.objective.method in {"memory_change", "information_loss"}
         assert job.config.training.max_input_tokens == (
-            2048 if stage in {"pretrain", "lm"} else 8192
+            2048 if stage in {"pretrain", "lm"} else 32768 if dynamic else 8192
         )
+        assert job.config.training.lm_target_tokens == (256 if stage in {"pretrain", "lm"} else 512)
     ac = next(job for job in jobs if job.config.objective.method == "autocompressors")
     assert ac.config.objective.stage == "lm"
 
@@ -499,6 +568,13 @@ def test_plan_derives_each_global_batch_from_selected_gpus_microbatch_and_accumu
         ["--lm-ratio", "nan"],
         ["--lm-ratio", "inf"],
         ["--max-input-tokens", "0"],
+        ["--lm-target-tokens", "0"],
+        ["--lm-target-tokens", "-1"],
+        ["--bptt-steps", "-1"],
+        ["--method", "icae_single", "--bptt-steps", "2"],
+        ["--method", "icae_multi", "--bptt-steps", "2"],
+        ["--method", "autocompressors", "--bptt-steps", "2"],
+        ["--method", "shared_pretrain", "--bptt-steps", "2"],
         ["--method", "icae_single", "--append-slots", "8"],
         ["--method", "icae_multi", "--append-slots", "8"],
         ["--method", "autocompressors", "--append-slots", "8"],
@@ -576,10 +652,11 @@ def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
     ]
     world_size = len(gpus.split(","))
     for job in plan["jobs"]:
+        shared = job["key"] == "dynamic-pretrain"
         assert job["batching"] == {
             "world_size": world_size,
-            "micro_batch_size_per_gpu": 8,
-            "gradient_accumulation_steps": 1,
+            "micro_batch_size_per_gpu": 8 if shared else 4,
+            "gradient_accumulation_steps": 1 if shared else 2,
             "global_batch_size": world_size * 8,
         }
         assert "global_batch_size" not in job["config"]["training"]

@@ -1,6 +1,7 @@
 """五种 token-memory 写入流程，按题目、更新点和轨迹依次平均训练目标。"""
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 import hashlib
 import random
 from time import perf_counter
@@ -9,6 +10,16 @@ import torch
 from torch import nn
 
 from latent_working_memory.v3.config import DYNAMIC_METHODS
+
+
+@dataclass
+class QAWindowState:
+    step: int
+    blocks: list
+    rngs: list
+    events: list
+    new_losses: list
+    old_losses: list
 
 
 def memory_change_score(old, rewritten, epsilon):
@@ -117,12 +128,16 @@ class TokenMemoryTask(nn.Module):
             "scores": {},
         }
 
-    def _states_batch(self, trajectories, epoch=0, force_policy=False):
-        blocks = [[] for _ in trajectories]
-        rngs = [example_rng(self.cfg.seed, epoch, row.trajectory_id) for row in trajectories]
+    def _states_batch(
+        self, trajectories, epoch=0, force_policy=False, blocks=None, rngs=None, start=0, stop=None
+    ):
+        if blocks is None:
+            blocks = [[] for _ in trajectories]
+        if rngs is None:
+            rngs = [example_rng(self.cfg.seed, epoch, row.trajectory_id) for row in trajectories]
         single = self.cfg.method == "icae_single"
         steps = 1 if single else max(len(row.segments) for row in trajectories)
-        for step in range(steps):
+        for step in range(start, steps if stop is None else min(stop, steps)):
             active = [i for i, row in enumerate(trajectories) if step < len(row.segments)]
             events = {
                 i: self._event(
@@ -275,18 +290,39 @@ class TokenMemoryTask(nn.Module):
             events.append(event)
         return blocks, events
 
-    def _qa_objective(self, trajectories, epoch):
+    def _qa_objective(self, trajectories, epoch, window_steps=None, state=None):
         losses = [[] for _ in trajectories]
-        events = [[] for _ in trajectories]
-        old_losses, new_losses = [[] for _ in trajectories], [[] for _ in trajectories]
+        if window_steps is not None:
+            if state is None:
+                state = QAWindowState(
+                    0,
+                    [[] for _ in trajectories],
+                    [example_rng(self.cfg.seed, epoch, row.trajectory_id) for row in trajectories],
+                    [[] for _ in trajectories],
+                    [[] for _ in trajectories],
+                    [[] for _ in trajectories],
+                )
+            events, new_losses, old_losses = state.events, state.new_losses, state.old_losses
+            states = self._states_batch(
+                trajectories,
+                epoch,
+                blocks=state.blocks,
+                rngs=state.rngs,
+                start=state.step,
+                stop=state.step + window_steps,
+            )
+        else:
+            events = [[] for _ in trajectories]
+            old_losses, new_losses = [[] for _ in trajectories], [[] for _ in trajectories]
+            states = self._states_batch(trajectories, epoch)
         indices, requests, current_events, new_counts = [], [], [], []
         updates = (
             1
             if self.cfg.method == "icae_single"
             else max(len(row.segments) for row in trajectories)
         )
-        for update, states in enumerate(self._states_batch(trajectories, epoch)):
-            for i, blocks, event in states:
+        for update, current_states in enumerate(states):
+            for i, blocks, event in current_states:
                 trajectory = trajectories[i]
                 events[i].append(event)
                 if self.cfg.method in DYNAMIC_METHODS:
@@ -334,7 +370,21 @@ class TokenMemoryTask(nn.Module):
                 }
             )
             metrics.append(row)
-        return [torch.stack(values).mean() for values in losses], metrics
+        if window_steps is None:
+            return [torch.stack(values).mean() for values in losses], metrics, None
+        state.step = min(state.step + window_steps, updates)
+        # 只把记忆数值交给下一窗口；当前 loss 持有本窗口的图供 engine 立即反传。
+        state.blocks = [[block.detach() for block in blocks] for blocks in state.blocks]
+        return (
+            [
+                torch.stack(values).sum() / len(trajectory.segments)
+                if values
+                else self.codec.memory_embeddings.sum() * 0
+                for trajectory, values in zip(trajectories, losses, strict=True)
+            ],
+            metrics,
+            state,
+        )
 
     def _pretrain_objective(self, examples):
         chunks = []
@@ -484,7 +534,26 @@ class TokenMemoryTask(nn.Module):
                 metrics[f"gate_{score}"] = sum(values) / len(values)
         return metrics
 
-    def forward(self, example, epoch=0, differentiable=True, batched=False):
+    def forward(
+        self,
+        example,
+        epoch=0,
+        differentiable=True,
+        batched=False,
+        window_steps=None,
+        qa_state=None,
+        sync_parameters=False,
+    ):
+        if sync_parameters:
+            # 只同步已累积梯度，不执行写入、读取或决策，也不消耗动作 RNG。
+            return {
+                "loss": sum(
+                    parameter.reshape(-1)[0] * 0
+                    for parameter in self.parameters()
+                    if parameter.requires_grad
+                ),
+                "metrics": {},
+            }
         examples = list(example) if batched else [example]
         if not examples:
             raise ValueError("a microbatch must contain at least one example")
@@ -494,15 +563,20 @@ class TokenMemoryTask(nn.Module):
             elif self.cfg.stage == "lm":
                 losses, metrics = self._ac_objective(examples, epoch)
             else:
-                losses, metrics = self._qa_objective(examples, epoch)
+                losses, metrics, qa_state = self._qa_objective(
+                    examples, epoch, window_steps, qa_state
+                )
             loss = torch.stack(losses).mean()
         names = set().union(*(row.keys() for row in metrics))
-        return {
+        output = {
             "loss": loss,
             "metrics": {
                 name: sum(row.get(name, 0.0) for row in metrics) / len(examples) for name in names
             },
         }
+        if window_steps is not None:
+            output["qa_state"] = qa_state
+        return output
 
     def trainable_state_dict(self):
         return self.codec.trainable_state_dict()

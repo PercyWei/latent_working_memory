@@ -24,6 +24,8 @@ def test_presets_use_requested_model_and_memory_size(filename):
     assert config.training.gradient_accumulation_steps == (1 if shared_pretrain else 2)
     assert config.training.global_batch_size(2) == 16
     assert config.training.swanlab_project is None
+    assert config.training.lm_target_tokens == 512
+    assert config.objective.bptt_steps is None
     if config.objective.stage in {"pretrain", "lm"}:
         assert config.training.pretrain_data_view == "multisegment_random_prefix"
         assert config.training.min_input_tokens == 1
@@ -45,6 +47,12 @@ def test_presets_use_requested_model_and_memory_size(filename):
         {"append_slots": 0},
         {"append_slots": True},
         {"append_slots": 1.5},
+        {"method": "memory_change", "stage": "warmup", "bptt_steps": 0},
+        {"method": "memory_change", "stage": "warmup", "bptt_steps": True},
+        {"method": "memory_change", "stage": "policy", "bptt_steps": 1.5},
+        {"method": "memory_change", "stage": "pretrain", "bptt_steps": 2},
+        {"method": "icae_single", "stage": "qa", "bptt_steps": 2},
+        {"method": "autocompressors", "stage": "lm", "bptt_steps": 2},
     ],
 )
 def test_objective_rejects_invalid_experiment_contracts(options):
@@ -113,6 +121,7 @@ def test_stage_output_belongs_to_method_experiment(tmp_path):
         "max_dev_samples",
         "micro_batch_size_per_gpu",
         "gradient_accumulation_steps",
+        "lm_target_tokens",
     ],
 )
 @pytest.mark.parametrize("value", [0, -1, True, 1.5])
@@ -125,6 +134,24 @@ def test_sample_limits_default_to_full_splits():
     config = TrainingConfig("data", "output")
     assert config.max_train_samples is None
     assert config.max_dev_samples is None
+
+
+@pytest.mark.parametrize("method", ["memory_change", "information_loss"])
+@pytest.mark.parametrize("stage", ["warmup", "policy"])
+def test_dynamic_bptt_window_is_optional_and_counts_write_rounds(method, stage):
+    assert ObjectiveConfig(method=method, stage=stage).bptt_steps is None
+    assert ObjectiveConfig(method=method, stage=stage, bptt_steps=2).bptt_steps == 2
+
+
+def test_presets_are_named_for_complete_method_flows():
+    assert {path.name for path in Path("configs/v3").glob("*.json")} == {
+        "dynamic_pretrain.json",
+        "icae_single.json",
+        "icae_multi.json",
+        "autocompressors.json",
+        "memory_change.json",
+        "information_loss.json",
+    }
 
 
 def test_pretraining_data_view_requires_an_explicit_supported_format():

@@ -77,6 +77,7 @@ class ObjectiveConfig:
     ac_min_segment_tokens: int = 768
     ac_max_segment_tokens: int = 1024
     ac_bptt_steps: int = 2
+    bptt_steps: int | None = None
     append_slots: int = 8
     append_probability: float = 0.5
     threshold_i: float = 0.1
@@ -99,6 +100,10 @@ class ObjectiveConfig:
         }
         if self.method not in allowed or self.stage not in allowed[self.method]:
             raise ValueError(f"unsupported method/stage: {self.method}/{self.stage}")
+        if self.bptt_steps is not None:
+            positive_integer(self.bptt_steps, "bptt_steps")
+            if self.method not in DYNAMIC_METHODS or self.stage not in {"warmup", "policy"}:
+                raise ValueError("bptt_steps is only supported by dynamic warmup/policy")
         for name in (
             "qa_batch_size",
             "segment_tokens",
@@ -152,6 +157,7 @@ class TrainingConfig:
     save_every: int = 25
     pretrain_data_view: str = "text_samples"
     lm_ratio: float = 0.5
+    lm_target_tokens: int = 512
     min_input_tokens: int = 1
     max_input_tokens: int = 8192
     max_train_samples: int | None = None
@@ -174,6 +180,7 @@ class TrainingConfig:
             "save_every",
             "min_input_tokens",
             "max_input_tokens",
+            "lm_target_tokens",
         ):
             positive_integer(getattr(self, name), name)
         for name in ("max_train_samples", "max_dev_samples"):

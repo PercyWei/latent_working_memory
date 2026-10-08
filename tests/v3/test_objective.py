@@ -350,7 +350,9 @@ def test_ac_short_sources_retain_writer_and_memory_gradients(total_tokens):
         for name, parameter in model.codec.language_model.named_parameters()
         if "lora_" in name
     ]
-    assert all(gradient is not None and torch.isfinite(gradient).all() for gradient in adapter_gradients)
+    assert all(
+        gradient is not None and torch.isfinite(gradient).all() for gradient in adapter_gradients
+    )
     assert sum(gradient.abs().sum() for gradient in adapter_gradients) > 0
 
 
@@ -468,6 +470,63 @@ def test_batch_warmup_rng_and_actions_are_independent_of_batch_order():
 def test_empty_microbatch_is_rejected():
     with pytest.raises(ValueError, match="at least one"):
         task("memory_change", "pretrain")([], batched=True)
+
+
+@pytest.mark.parametrize("method", ["memory_change", "information_loss"])
+@pytest.mark.parametrize("stage", ["warmup", "policy"])
+def test_one_bptt_window_matches_full_loss_gradients_and_detaches_memory(method, stage):
+    model = task(method, stage, append_probability=0.0, threshold_i=1e8)
+    reference = deepcopy(model)
+    rows = [trajectory(n=2), replace(trajectory(n=5), trajectory_id="long")]
+    expected = reference(rows, epoch=3, batched=True)
+    actual = model(rows, epoch=3, batched=True, window_steps=5)
+    torch.testing.assert_close(actual["loss"], expected["loss"])
+    expected["loss"].backward()
+    actual["loss"].backward()
+    for name, parameter in model.named_parameters():
+        other = dict(reference.named_parameters())[name]
+        if parameter.grad is None or other.grad is None:
+            assert parameter.grad is other.grad is None
+        else:
+            torch.testing.assert_close(parameter.grad, other.grad)
+    for blocks in actual["qa_state"].blocks:
+        assert all(not block.requires_grad and block.grad_fn is None for block in blocks)
+    assert actual["qa_state"].step == 5
+
+
+@pytest.mark.parametrize("append_probability", [0.0, 1.0])
+def test_two_step_bptt_preserves_values_actions_and_full_trajectory_tail_weights(
+    append_probability,
+):
+    model = task("memory_change", "warmup", append_probability=append_probability)
+    reference = deepcopy(model)
+    rows = [trajectory(n=2), replace(trajectory(n=5), trajectory_id="long")]
+    expected = reference(rows, epoch=4, batched=True)
+    expected["loss"].backward()
+    state, total_loss = None, 0.0
+    for start in (0, 2, 4):
+        actual = model(rows, epoch=4, batched=True, window_steps=2, qa_state=state)
+        total_loss += float(actual["loss"].detach())
+        actual["loss"].backward()
+        state = actual["qa_state"]
+        assert all(
+            not block.requires_grad and block.grad_fn is None
+            for blocks in state.blocks
+            for block in blocks
+        )
+        assert state.step == min(start + 2, 5)
+    assert total_loss == pytest.approx(float(expected["loss"].detach()))
+    for name, value in actual["metrics"].items():
+        if not name.endswith("_seconds"):
+            assert value == pytest.approx(expected["metrics"][name])
+    wanted_action = "append" if append_probability else "overwrite"
+    assert [[event["action"] for event in events] for events in state.events] == [
+        ["initial", wanted_action],
+        ["initial", *([wanted_action] * 4)],
+    ]
+    assert not torch.allclose(
+        model.codec.memory_embeddings.grad, reference.codec.memory_embeddings.grad
+    )
 
 
 def test_batch_damage_gates_discard_each_unselected_candidate_without_gradient():

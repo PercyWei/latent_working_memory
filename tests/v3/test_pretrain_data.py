@@ -228,7 +228,7 @@ def test_multisegment_samples_one_objective_per_source(tmp_path, tokenizer, lm_r
     root = write_multisegment(tmp_path, train=[row])
     before = (root / "train.jsonl").read_bytes()
     splits, statistics = load_multisegment_pretraining(
-        root, tokenizer, 1, 3, "multisegment_random_prefix", lm_ratio=lm_ratio
+        root, tokenizer, 1, 3, "multisegment_random_prefix", lm_ratio=lm_ratio, lm_target_tokens=2
     )
     assert len(splits["train"]) == 1
     example = splits["train"][0]
@@ -252,13 +252,55 @@ def test_multisegment_samples_one_objective_per_source(tmp_path, tokenizer, lm_r
     json.dumps(statistics)
 
 
+@pytest.mark.parametrize("target_tokens", [1, 3, 6])
+def test_training_lm_target_length_is_independent_of_construction_estimate(
+    tmp_path, tokenizer, target_tokens
+):
+    row = multisegment_row(segment_texts=("a b", "c d", "e a"))
+    root = write_multisegment(tmp_path, train=[row])
+    metadata_before = (root / "preparation.json").read_bytes()
+    splits, statistics = load_multisegment_pretraining(
+        root,
+        tokenizer,
+        1,
+        2,
+        "multisegment_random_prefix",
+        lm_ratio=1.0,
+        lm_target_tokens=target_tokens,
+    )
+    example = splits["train"][0]
+    assert example.input_ids == (3, 4)
+    assert example.task == "continuation"
+    assert example.target_ids == (5, 6, 7, 3, 6, 7)[:target_tokens]
+    assert statistics["lm_target_tokens"] == target_tokens
+    assert MULTISEGMENT_CONFIG.window.continuation_tokens == 2
+    assert (root / "preparation.json").read_bytes() == metadata_before
+
+
+def test_default_lm_target_does_not_use_construction_estimate(tmp_path, tokenizer):
+    root = write_multisegment(tmp_path, train=[multisegment_row()])
+    splits, statistics = load_multisegment_pretraining(
+        root, tokenizer, 1, 2, "multisegment_random_prefix", lm_ratio=1.0
+    )
+    assert splits["train"][0].task == "ae"
+    assert statistics["lm_target_tokens"] == 512
+    assert statistics["splits"]["train"]["lm_to_ae_sources"] == 1
+
+
 def test_random_prefix_preserves_segment_boundaries_and_upper_limit(tmp_path, tokenizer):
     rows = [
         multisegment_row(f"sample-{i}", f"document-{i}", ("a b", "c d", "e a")) for i in range(64)
     ]
     root = write_multisegment(tmp_path, train=rows)
     splits, statistics = load_multisegment_pretraining(
-        root, tokenizer, 1, 4, "multisegment_random_prefix", seed=123, lm_ratio=0.5
+        root,
+        tokenizer,
+        1,
+        4,
+        "multisegment_random_prefix",
+        seed=123,
+        lm_ratio=0.5,
+        lm_target_tokens=2,
     )
     assert len(splits["train"]) == len(rows)
     assert {len(row.input_ids) for row in splits["train"]} == {2, 4}
@@ -284,7 +326,14 @@ def test_sampling_is_stable_by_source_across_order_and_task_ratio(tmp_path, toke
 
     def load(seed=123, lm_ratio=0.5):
         return load_multisegment_pretraining(
-            root, tokenizer, 1, 6, "multisegment_random_prefix", seed=seed, lm_ratio=lm_ratio
+            root,
+            tokenizer,
+            1,
+            6,
+            "multisegment_random_prefix",
+            seed=seed,
+            lm_ratio=lm_ratio,
+            lm_target_tokens=2,
         )
 
     splits, statistics = load()
@@ -309,7 +358,7 @@ def test_short_sources_are_retained_and_oversized_first_segment_is_cropped(tmp_p
     ]
     root = write_multisegment(tmp_path, train=rows)
     splits, statistics = load_multisegment_pretraining(
-        root, tokenizer, 1, 3, "multisegment_random_prefix", lm_ratio=1.0
+        root, tokenizer, 1, 3, "multisegment_random_prefix", lm_ratio=1.0, lm_target_tokens=2
     )
     short, long = splits["train"]
     assert len(short.input_ids) in (1, 2)
@@ -332,7 +381,14 @@ def test_short_continuation_keeps_source_and_only_ae_lm_sampling_falls_back(
     row = multisegment_row(segment_texts=("a b c", "d"), continuation="e", config=config)
     root = write_multisegment(tmp_path, config=config, train=[row])
     splits, statistics = load_multisegment_pretraining(
-        root, tokenizer, 1, 3, "multisegment_random_prefix", lm_only=lm_only, lm_ratio=1.0
+        root,
+        tokenizer,
+        1,
+        3,
+        "multisegment_random_prefix",
+        lm_only=lm_only,
+        lm_ratio=1.0,
+        lm_target_tokens=3,
     )
     assert len(splits["train"]) == 1
     example = splits["train"][0]
@@ -399,7 +455,14 @@ def test_multisegment_fixed_character_segments_survive_tokenizer_change(
 def test_multisegment_ac_receives_each_source_once_and_ignores_lm_ratio(tmp_path, tokenizer):
     root = write_multisegment(tmp_path, train=[multisegment_row()])
     splits, statistics = load_multisegment_pretraining(
-        root, tokenizer, 1, 10, "multisegment_random_prefix", lm_only=True, lm_ratio=0.0
+        root,
+        tokenizer,
+        1,
+        10,
+        "multisegment_random_prefix",
+        lm_only=True,
+        lm_ratio=0.0,
+        lm_target_tokens=2,
     )
     assert len(splits["train"]) == 1
     example = splits["train"][0]
@@ -486,6 +549,7 @@ def test_runtime_loads_random_prefix_view_with_one_objective(tmp_path, tokenizer
             max_input_tokens=3,
             seed=456,
             lm_ratio=lm_ratio,
+            lm_target_tokens=2,
         ),
     )
     splits, statistics = load_splits(config, tokenizer)
@@ -501,3 +565,4 @@ def test_runtime_loads_random_prefix_view_with_one_objective(tmp_path, tokenizer
         assert statistics["splits"][split]["selected_input_tokens"] == 3
     assert statistics["sampling_seed"] == 456
     assert statistics["lm_ratio"] == (1.0 if ac else lm_ratio)
+    assert statistics["lm_target_tokens"] == 2

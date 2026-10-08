@@ -124,6 +124,7 @@ def load_multisegment_pretraining(
     lm_only: bool = False,
     seed: int = 20261004,
     lm_ratio: float = 0.5,
+    lm_target_tokens: int = 512,
 ) -> tuple[dict[str, tuple[PretrainExample, ...]], dict]:
     """按来源独立抽取连续前缀与一个任务，加载后固定供各 epoch 复用。"""
     if (
@@ -137,7 +138,6 @@ def load_multisegment_pretraining(
     root = Path(dataset_dir)
     metadata = json.loads((root / "preparation.json").read_text(encoding="utf-8"))
     preparation_config = DataPreparationConfig.from_mapping(metadata["config"]).window
-    continuation_tokens = preparation_config.continuation_tokens
     seen_samples, document_sources, cluster_splits = set(), {}, {}
     splits, statistics = {}, {}
     # Share token integers across samples without duplicating each source for AE/LM.
@@ -216,7 +216,7 @@ def load_multisegment_pretraining(
                         remaining = body_ids[cut:] + tokenizer.encode(
                             sample.continuation, add_special_tokens=False, truncation=False
                         )
-                        if len(remaining) < continuation_tokens:
+                        if len(remaining) < lm_target_tokens:
                             counts["short_continuation_sources"] += 1
                             if not lm_only:
                                 task = "ae"
@@ -224,7 +224,7 @@ def load_multisegment_pretraining(
                         if task == "continuation":
                             target_ids = tuple(
                                 token_pool.setdefault(token, token)
-                                for token in remaining[:continuation_tokens]
+                                for token in remaining[:lm_target_tokens]
                             )
                     examples.append(
                         PretrainExample(
@@ -266,7 +266,7 @@ def load_multisegment_pretraining(
     return splits, {
         "kind": "multisegment_text",
         "view": view,
-        "continuation_tokens": continuation_tokens,
+        "lm_target_tokens": lm_target_tokens,
         "sampling_seed": seed,
         "lm_ratio": 1.0 if lm_only else lm_ratio,
         "input_token_interval": [min_input_tokens, max_input_tokens],
