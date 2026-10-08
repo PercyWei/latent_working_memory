@@ -5,7 +5,7 @@
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
 
-FineWeb FactQA 每种设置维护一份主配置，例如 [fineweb-factqa-k512-seg1.5to2x_train1000.json](data_preparation/fineweb-factqa/fineweb-factqa-k512-seg1.5to2x_train1000.json)。配置集中保存来源目录、读取批量、两个随机种子、`split_counts`、`window`、`batch_split_counts`、`qa`、`annotation` 和 `prompts_dir`；相对路径以项目根目录为基准。示例精确构造 train/dev/test 各 1000/100/100 条，按各划分剩余缺额分配新来源，候选不足继续扩池，不设置总扫描上限或固定旧池排除。
+FineWeb FactQA 每种设置维护一份主配置，例如 [fineweb-factqa-k512-seg1to3x_train1000.json](data_preparation/fineweb-factqa/fineweb-factqa-k512-seg1to3x_train1000.json)。配置集中保存来源目录、读取批量、两个随机种子、`split_counts`、`window`、`batch_split_counts`、`qa`、`annotation` 和 `prompts_dir`；相对路径以项目根目录为基准。示例精确构造 train/dev/test 各 1000/100/100 条，按各划分剩余缺额分配新来源，候选不足继续扩池，不设置总扫描上限或固定旧池排除。
 
 运行标识、输出位置和本次排除依据通过 `--run-id`、`--output-root`、`--artifacts-root`、`--previous-datasets` 指定，便于复用配置。campaign 自动派生运行及批次配置快照、来源分配和请求缓存；这些属于运行产物，不在 `configs/` 手工维护。FactQA 与 multisegment 使用共同的 `used-sources.jsonl` 来源账本，`preparation.json.used_sources_file` 引用该文件；两者可互相排除实际用过的来源，不递归继承历史排除。详细参数与执行命令见[数据构造流程](../src/latent_working_memory/data_preparation/fineweb_factqa/README.md)。
 

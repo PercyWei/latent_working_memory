@@ -105,7 +105,9 @@ def parse_args(argv=None):
         help="共用 FineWeb 多段文本数据根目录，包含 train/dev/test.jsonl 和 preparation.json",
     )
     parser.add_argument(
-        "--qa-data", type=Path, default=Path("data/fineweb-factqa-train1000_20260930")
+        "--qa-data",
+        type=Path,
+        default=Path("data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008"),
     )
     parser.add_argument(
         "--init-checkpoint",

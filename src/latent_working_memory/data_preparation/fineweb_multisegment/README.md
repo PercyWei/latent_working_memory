@@ -12,7 +12,7 @@
 
 | 参数 | 示例值 | 含义 |
 |---|---:|---|
-| `source_dir` | `data/raw/HuggingFaceFW-fineweb/sample-10BT` | FineWeb 原始 Parquet 目录` |
+| `source_dir` | `data/raw/HuggingFaceFW-fineweb/sample-10BT` | FineWeb 原始 Parquet 目录 |
 | `source_batch_size` | 100000 | 每批原文读取量，配额不足继续读 |
 | `source_seed` | 20260907 | 来源顺序与去重簇划分的随机种子 |
 | `selection_seed` | 20260916 | 候选排序、文档分段及窗口起点的随机种子 |

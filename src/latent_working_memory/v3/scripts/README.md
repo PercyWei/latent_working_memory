@@ -23,7 +23,7 @@ LWM_REPO_DIR="/path/to/latent_working_memory"
 |---|---|---|
 | Qwen3-4B-Instruct-2507 | `~/models/Qwen3-4B-Instruct-2507` | `--model-path` |
 | AE／LM 多段文本数据 | `data/fineweb-multisegment-k512-seg1to3x_train32k_20261008/` | `--pretrain-data` |
-| QA 数据 | `data/fineweb-factqa-train1000_20260930/` | `--qa-data` |
+| QA 数据 | `data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008/` | `--qa-data` |
 
 默认 AE／LM 多段文本数据**尚未构造，须先完成构造再训练**。
 
@@ -36,7 +36,9 @@ LWM_REPO_DIR="/path/to/latent_working_memory"
 
 现行 baseline 的最小输入 1024 和动态首段的 768 面向 K512 数据；切换 K64 时，应根据当前 tokenizer 的实际长度分布同步调整 `min_input_tokens`，否则可能大量过滤样本。
 
-预训练目录根层保留 `preparation.json` 与 `train/dev/test.jsonl`，无需原始 FineWeb Parquet。加载时按保存的字符区间分别编码正文段，再拼接各段 tokens 和独立编码的 `continuation`。基础方法使用全文视图 `multisegment_full`，动态共享预训练使用首段视图 `multisegment_first_write`；输入按各自上限右裁剪，LM 从实际裁剪终点取紧邻的 512 tokens，可包含后续正文。QA 数据可从 [ModelScope 数据仓库](https://modelscope.cn/datasets/percyWeeei/latent-working-memory/files) 下载到 `data/`，保留 `preparation.json` 与三个 split 文件。
+预训练目录根层保留 `preparation.json` 与 `train/dev/test.jsonl`，无需原始 FineWeb Parquet。加载时按保存的字符区间分别编码正文段，再拼接各段 tokens 和独立编码的 `continuation`。基础方法使用全文视图 `multisegment_full`，动态共享预训练使用首段视图 `multisegment_first_write`；输入按各自上限右裁剪，LM 从实际裁剪终点取紧邻的 512 tokens，可包含后续正文。
+
+QA 默认使用统一格式的 FactQA，可从 [ModelScope 数据仓库](https://modelscope.cn/datasets/percyWeeei/latent-working-memory/files) 下载到表中目录。格式见 [FactQA 构造说明](../../data_preparation/fineweb_factqa/README.md)，训练读取 `preparation.json` 与三个 split 文件。
 
 默认将实验记录到 SwanLab 项目 `latent-working-memory-v3`。在仓库根目录的 `.env` 中填写：
 

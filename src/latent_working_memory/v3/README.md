@@ -59,7 +59,7 @@ d = Lrw - L0; g = Lrw - Lapp
 | 已有文本成品 | 基础构造器的 `TextSample`，目录内 `train/dev/test.jsonl` | 由 `pretrain_data_view=text_samples` 显式选择；按输入长度筛选，不截断文本或目标 |
 | QA | FactQA 发布目录的 `preparation.json` 与 `train/dev/test.jsonl` | 校验已有来源、事实与题池隔离；保留原文、分段、更新点及 `usage` |
 
-- QA 加载保留冻结的 **6–10 段**，按各段字符区间独立分词，不用预训练长度参数裁剪轨迹。窗口约束读取新构造的 K／倍率配置，同时支持已发布 `20260930` 数据的字符长度配置；旧段长无需为 4 的倍数。
+- QA 加载按保存的字符区间独立分词，保留正文、段界、QA 和 `usage`；验证字符布局、事实与题池隔离、使用安排及跨划分来源一致性。构造参数用于追溯，训练不重放采样或来源划分。当前默认数据为 `data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008/`，由现有成品迁移，保留 6–10 段及全部 1007 / 118 / 120 条轨迹。
 - 训练入口读取并验证数据后记录实际 token 长度与题数。AE＋LM 的 train/dev 在长度筛选后必须仍包含两种任务。
 - 阶段衔接保存并核对 AE＋LM 来源文档与去重簇，QA 不能与其重叠。
 - 三个 baseline 的首组基础训练选择 `multisegment_full`：拼接所有正文段的 token，右裁剪到最多 4096 tokens，再过滤不足 1024 tokens 的输入。两个 ICAE 从同一正文各构造一条 AE 与 LM 样本，分别训练自己的参数；ICAE-multi 按 1024 tokens 独立写入后联合读取。后续完整 QA 轨迹提供更长的历史与更多记忆块训练。

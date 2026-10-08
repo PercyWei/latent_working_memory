@@ -5,9 +5,6 @@ import json
 from pathlib import Path
 
 from latent_working_memory.data_preparation.fineweb_factqa.assembly import validate_trajectory
-from latent_working_memory.data_preparation.pretrain.fineweb import document_split
-from latent_working_memory.data_preparation.fineweb_source import split_fractions
-from latent_working_memory.data_preparation.segmentation import SegmentationConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,40 +170,13 @@ def tokenize_trajectory(
 
 
 def load_factqa(dataset_dir: str | Path, tokenizer) -> dict[str, tuple[FactQATrajectory, ...]]:
-    """Load published train/dev/test JSONL and enforce their frozen source splits."""
+    """Load published JSONL using its saved character spans, QA schedule and splits."""
     root = Path(dataset_dir)
     with (root / "preparation.json").open(encoding="utf-8") as stream:
         preparation = json.load(stream)
     qa_config = preparation["qa"]
     if type(qa_config["max_answer_chars"]) is not int or qa_config["max_answer_chars"] < 1:
         raise ValueError("qa.max_answer_chars must be a positive integer")
-    pool_config = preparation["source_pool_config"]
-    if "source" in pool_config:
-        # The published train1000 dataset records its original source protocol.
-        source_seed = pool_config["source"]["data_seed"]
-        fractions = tuple(pool_config["source"]["split_fractions"])
-    else:
-        source_seed = pool_config["source_seed"]
-        fractions = split_fractions(pool_config["split_counts"])
-    window_config = pool_config["window"]
-    segmentation = None
-    if set(window_config) == {
-        "min_segments",
-        "max_segments",
-        "min_segment_chars",
-        "max_segment_chars",
-    }:
-        # Published 20260930 FactQA sampled arbitrary integer character lengths.
-        min_segments, max_segments = window_config["min_segments"], window_config["max_segments"]
-        min_chars, max_chars = (
-            window_config["min_segment_chars"],
-            window_config["max_segment_chars"],
-        )
-    else:
-        segmentation = SegmentationConfig(**window_config)
-        if segmentation.continuation_tokens != 0:
-            raise ValueError("FactQA window requires continuation_tokens=0")
-        min_segments, max_segments = segmentation.min_segments, segmentation.max_segments
     seen_documents, seen_trajectories, seen_questions, seen_sources = set(), set(), set(), set()
     cluster_splits = {}
     result = {}
@@ -218,37 +188,9 @@ def load_factqa(dataset_dir: str | Path, tokenizer) -> dict[str, tuple[FactQATra
                 try:
                     record = json.loads(line)
                     trajectory = tokenize_trajectory(record, tokenizer, qa_config, split)
-                    if not min_segments <= len(trajectory.segments) <= max_segments:
-                        raise ValueError(
-                            "segment count differs from the frozen window specification"
-                        )
-                    lengths = [
-                        segment.char_span[1] - segment.char_span[0]
-                        for segment in trajectory.segments
-                    ]
-                    valid_lengths = (
-                        all(min_chars <= length <= max_chars for length in lengths)
-                        if segmentation is None
-                        else all(segmentation.is_valid_segment_length(length) for length in lengths)
-                    )
-                    if not valid_lengths:
-                        raise ValueError(
-                            "segment length differs from the frozen window specification"
-                        )
                     cluster = trajectory.dedup_cluster
                     if cluster in cluster_splits and cluster_splits[cluster] != split:
                         raise ValueError("a dedup cluster occurs in multiple dataset splits")
-                    if (
-                        document_split(
-                            cluster,
-                            source_seed,
-                            fractions,
-                        )
-                        != split
-                    ):
-                        raise ValueError(
-                            "trajectory split differs from its frozen source-cluster split"
-                        )
                     source = trajectory.source
                     location = (source["file"], source["row_group"], source["row_index"])
                     if trajectory.document_id in seen_documents:

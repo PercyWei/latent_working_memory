@@ -31,7 +31,7 @@
     "append_slots": 8
   },
   "training": {
-    "dataset_dir": "data/fineweb-factqa-train1000_20260930",
+    "dataset_dir": "data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008",
     "output_dir": "artifacts/v3/step1-token-memory/train/memory-change-warmup",
     "epochs": 1,
     "micro_batch_size_per_gpu": 4,

@@ -2,13 +2,13 @@
 
 创建时间：20260929 16:03:54 UTC+08:00
 
-最后修订时间：20261008 17:39:11 UTC+08:00
+最后修订时间：20261008 19:55:30 UTC+08:00
 
 从 FineWeb 原始 Parquet 构造多段正文、事实问答及逐段使用安排。与多段文本构造共用[分段逻辑](../segmentation.py)，先冻结字符区间，再生成、核验和补齐 QA；构造不加载 tokenizer。
 
 ## 配置
 
-以 [k512 配置](../../../../configs/data_preparation/fineweb-factqa/fineweb-factqa-k512-seg1.5to2x_train1000.json) 为例：
+以 [K512 配置](../../../../configs/data_preparation/fineweb-factqa/fineweb-factqa-k512-seg1to3x_train1000.json) 为例：
 
 | 参数 | 示例值 | 含义 |
 |---|---:|---|
@@ -18,8 +18,8 @@
 | `selection_seed` | 20260928 | 候选排序、文档分段及窗口起点的随机种子 |
 | `split_counts` | 1000 / 100 / 100 | train / dev / test 成品精确配额，也用于确定来源划分比例 |
 | `window.capacity` | 512 | 段长基准 K |
-| `window.min_segment_ratio` | 1.5 | 名义段长的最小倍率 |
-| `window.max_segment_ratio` | 2 | 名义段长的最大倍率 |
+| `window.min_segment_ratio` | 1 | 名义段长的最小倍率 |
+| `window.max_segment_ratio` | 3 | 名义段长的最大倍率 |
 | `window.min_segments` | 6 | 每条轨迹最少段数 |
 | `window.max_segments` | 10 | 每条轨迹最多段数 |
 | `window.content_reserve_ratio` | 1.5 | 各段独立的余量系数 α |
@@ -31,7 +31,7 @@
 | `annotation` | `gpt-6-sol` / `medium` / 并发 4 | 模型服务地址、模型、推理强度、并发及请求预算 |
 | `prompts_dir` | `configs/data_preparation/prompts/fineweb_factqa` | 包含 `generate.txt`、`verify.txt`、`document_review.txt` 的目录 |
 
-名义段长取 `ceil(K × 最小倍率)` 至 `floor(K × 最大倍率)` 的整数，各段独立保存 `ceil(4 × lᵢ × α)` 个字符；示例为名义 768–1024、实际 4,608–6,144 字符。QA 固定不附续文，使用含余量的完整段生成问答，不裁回名义长度；分段不要求句子或词边界。
+名义段长取 `ceil(K × 最小倍率)` 至 `floor(K × 最大倍率)` 的整数，各段独立保存 `ceil(4 × lᵢ × α)` 个字符；示例为名义 512–1536、实际 3,072–9,216 字符。QA 固定不附续文，使用含余量的完整段生成问答，不裁回名义长度；分段不要求句子或词边界。
 
 ## 执行与命名
 
@@ -39,11 +39,11 @@
 
 ```bash
 uv run --frozen python -m latent_working_memory.data_preparation.fineweb_factqa.campaign run \
-  --config configs/data_preparation/fineweb-factqa/fineweb-factqa-k512-seg1.5to2x_train1000.json \
+  --config configs/data_preparation/fineweb-factqa/fineweb-factqa-k512-seg1to3x_train1000.json \
   --run-id 01-20261008
 ```
 
-产物名为 `fineweb-factqa-k512-seg1.5to2x_train1000_01-20261008`，前缀由实际 K、倍率和 train 配额生成。`--output-root` 默认 `data`，`--artifacts-root` 默认 `artifacts/fineweb-factqa`，分别保存数据与运行记录。`--run-id` 默认执行时的上海日期，仅控制命名；恢复、查看进度和汇总须使用原 run-id、参数及输出根目录。
+产物名为 `fineweb-factqa-k512-seg1to3x_train1000_01-20261008`，前缀由实际 K、倍率和 train 配额生成。`--output-root` 默认 `data`，`--artifacts-root` 默认 `artifacts/fineweb-factqa`，分别保存数据与运行记录。`--run-id` 默认执行时的上海日期，仅控制命名；恢复、查看进度和汇总须使用原 run-id、参数及输出根目录。
 
 将命令中的 `run` 替换为 `report` 可只读查看进度，替换为 `finalize` 可重新汇总。campaign 自动保存主配置快照并派生批次配置、来源分配及共享请求缓存。单批阶段使用 `uv run --frozen python -m latent_working_memory.data_preparation.fineweb_factqa <prepare|annotate|finalize> --config <运行目录>/batch-configs/batch-NNN.json`。
 
@@ -82,3 +82,9 @@ uv run --frozen python -m latent_working_memory.data_preparation.fineweb_factqa.
 字符区间均左闭右开，按 Python 字符串索引计数。`window_char_span` 相对原文章；段界、证据和答案区间相对保存的正文 `text`。生成、核验及补题均沿用这些位置。
 
 `preparation.json` 保存实际配置、渲染后的 prompts、run-id、排除记录、构造统计和失败原因，以 `used_sources_file` 引用来源账本。账本每行保存 `document_id`、`dedup_cluster`、`source`，登记本轮实际分配的所有文档，**包括标注失败的来源**，不含仅扫描而未分配的候选；下一轮按整篇原文排除。
+
+## 成品读取
+
+现有 `fineweb-factqa-k512-seg1to3x_train1000_01-20261008` 已发布至 [ModelScope 数据仓库](https://modelscope.cn/datasets/percyWeeei/latent-working-memory/files)，采用上述文件结构，保留原始正文、段界、QA、使用安排及划分，实际 train / dev / test 数量为 **1007 / 118 / 120**。构造参数和来源分配记录保留在元数据及来源池中。
+
+训练读取 `preparation.json` 与三个 split 文件，按保存的字符区间分词，验证正文、QA、使用安排及来源隔离；构造快照用于追溯，无需原始 FineWeb Parquet。
