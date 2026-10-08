@@ -1,6 +1,6 @@
 # 运行 v3 实验
 
-使用 [run_gpu.sh](run_gpu.sh) 完成训练、评估与方法比较。默认使用 Qwen3-4B；基线每块 64 slots，动态方法首次 64 slots、每次追加 8 slots。方法与训练细节见 [v3 说明](../README.md)，预设位于 [configs/v3](../../../../configs/v3/)。
+使用 [run_gpu.sh](run_gpu.sh) 完成训练、评估与方法比较。默认使用 Qwen3-4B；基线每块 512 slots，动态方法首次 512 slots、每次追加 32 slots。方法与训练细节见 [v3 说明](../README.md)，预设位于 [configs/v3](../../../../configs/v3/)。
 
 ## 1. 准备环境、模型与数据
 
@@ -34,9 +34,9 @@ LWM_REPO_DIR="/path/to/latent_working_memory"
 | K512（默认） | 512–1536 | 3072–9216 | 9216–46080 | 3072 |
 | [K64](../../../../configs/data_preparation/fineweb-multisegment/fineweb-multisegment-k64-seg1to3x_train32k.json) | 64–192 | 384–1152 | 1152–5760 | 3072 |
 
-现行 baseline 的最小输入 1024 和动态首段的 768 面向 K512 数据；切换 K64 时，应根据当前 tokenizer 的实际长度分布同步调整 `min_input_tokens`，否则可能大量过滤样本。
+预训练目录根层保留 `preparation.json` 与 `train/dev/test.jsonl`，无需原始 FineWeb Parquet。加载使用 `multisegment_random_prefix`：按保存的字符段独立分词，计算不超过 8192 tokens 的最大连续前缀段数，再均匀随机选择段数；只有首段超限时才裁剪首段。
 
-预训练目录根层保留 `preparation.json` 与 `train/dev/test.jsonl`，无需原始 FineWeb Parquet。加载时按保存的字符区间分别编码正文段，再拼接各段 tokens 和独立编码的 `continuation`。基础方法使用全文视图 `multisegment_full`，动态共享预训练使用首段视图 `multisegment_first_write`；输入按各自上限右裁剪，LM 从实际裁剪终点取紧邻的 512 tokens，可包含后续正文。
+每条来源按 `--lm-ratio` 选择一个 AE 或 LM 目标，默认 LM 概率 0.5。LM 从选中前缀的终点取 Q-token 续文（默认 Q=512），可包含尚未选中的正文；续文不足时转为 AE。采样使用训练 seed 与 `trajectory_id`，加载一次后所有 epoch 复用，结果不受 batch 或 GPU 数量影响。AutoCompressors 保持 LM-only，使用最多 Q-token 的可用续文；短流保留后续分段的监督，使写入器仍能训练。模型的 `memory_slots` 与构造配置的 K 分别设置，当前默认均为 512。
 
 QA 默认使用统一格式的 FactQA，可从 [ModelScope 数据仓库](https://modelscope.cn/datasets/percyWeeei/latent-working-memory/files) 下载到表中目录。格式见 [FactQA 构造说明](../../data_preparation/fineweb_factqa/README.md)，训练读取 `preparation.json` 与三个 split 文件。
 
@@ -122,25 +122,27 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 | 参数 | 用途／默认值 |
 |---|---|
 | `--gpus 0,1` | 使用的物理 GPU；默认 `0,1`，最终评估使用第一张卡 |
-| `--micro-batch-size-per-gpu 4` | 每卡一次并行处理的样本／轨迹数，默认 4 |
-| `--gradient-accumulation-steps 2` | 每次更新累积的 microbatch 数，默认 2 |
+| `--micro-batch-size-per-gpu` | 每卡一次并行处理的样本／轨迹数；baseline 默认 4，动态默认 8 |
+| `--gradient-accumulation-steps` | 每次更新累积的 microbatch 数；baseline 默认 2，动态默认 1 |
 | `--qa-batch-size 8` | 每条轨迹一次读取的题数，默认 8 |
-| `--append-slots 8` | 动态方法每次追加的 slots 数，默认 8；首次仍为 64，覆盖保持末块大小 |
+| `--append-slots 32` | 动态方法每次追加的 slots 数，默认 32；首次为 512，覆盖保持末块大小 |
+| `--max-input-tokens 8192` | 预训练输入长度上限，默认 8192 tokens |
+| `--lm-ratio 0.5` | ICAE 与动态共享预训练选择 LM 的概率；AutoCompressors 保持 LM-only |
 | `--epochs` | 各阶段训练轮数 |
 | `--train-samples`、`--dev-samples`、`--max-steps`、`--eval-trajectories` | 覆盖档位预算，`0` 表示不设该上限 |
 | `--threshold-i`、`--threshold-d`、`--threshold-g`、`--eta` | 动态策略阈值 |
 | `--run-id`、`--group` | 运行标识默认按上海时间生成；group 默认直接使用 `run-id`，可单独覆盖 |
 | `--output-root` | 产物父目录，默认 `artifacts/v3` |
 
-全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数，默认双卡为 **2 × 4 × 2 = 16**。以下命令显式使用当前设置：
+全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数。baseline 默认双卡为 **2 × 4 × 2 = 16**，动态为 **2 × 8 × 1 = 16**。标准入口的动态三个阶段均读取 `dynamic_pretrain.json`。以下命令显式运行当前动态设置：
 
 ```bash
 bash src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode pilot --gpus 0,1 \
-  --micro-batch-size-per-gpu 4 --gradient-accumulation-steps 2 --append-slots 8
+  --mode pilot --method dynamic --gpus 0,1 \
+  --micro-batch-size-per-gpu 8 --gradient-accumulation-steps 1 --append-slots 32
 ```
 
-动态容量按 `64 → 72 → 80` 逐次追加；覆盖只改写末块，不增加容量。共享预训练仍生成 64 slots，三个 baseline 的块大小不受 `--append-slots` 影响。
+动态容量按 `512 → 544 → 576` 逐次追加；覆盖只改写末块，不增加容量。共享预训练生成 512 slots，三个 baseline 的块大小不受 `--append-slots` 影响。
 
 ## 5. 查看结果
 
@@ -153,7 +155,7 @@ eval/<run-name>/<stage>/      评估汇总与逐题结果
 compare/<method>/             多方法质量—容量比较
 ```
 
-SwanLab 中，一个完整方法对应一个 run，训练、验证和最终评估共用；共享预训练单独记录，因此 `all` 共六个 runs。正式名称为 `<method>-k64_<run-id>`，试跑为 `<method>-k64_<mode>_<run-id>`，其中 `<mode>` 为 `smoke` 或 `pilot`。动态方法的 `k64` 表示首次容量，追加大小记录在 config 中。两个动态方法与共享预训练使用相同后缀关联来源；group 默认直接使用 `run-id`，`--group` 可覆盖。
+SwanLab 中，一个完整方法对应一个 run，训练、验证和最终评估共用；共享预训练单独记录，因此 `all` 共六个 runs。正式名称为 `<method>-k512_<run-id>`，试跑为 `<method>-k512_<mode>_<run-id>`，其中 `<mode>` 为 `smoke` 或 `pilot`。动态方法的 `k512` 表示首次容量，追加大小记录在 config 中。两个动态方法与共享预训练使用相同后缀关联来源；group 默认直接使用 `run-id`，`--group` 可覆盖。
 
 阶段用 `train/stage` 曲线展示，最终质量和容量用合并柱状图展示；详细统计与样例保存在本地，不上传表格。指标含义见 [v3 说明](../README.md#评估与产物)。
 

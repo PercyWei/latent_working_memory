@@ -36,10 +36,10 @@
 ```bash
 uv run --frozen python -m latent_working_memory.data_preparation.fineweb_multisegment \
   --config configs/data_preparation/fineweb-multisegment/fineweb-multisegment-k512-seg1to3x_train32k.json \
-  --output-root data --run-id 01-20261008
+  --output-root data --run-id 20261008
 ```
 
-产物目录为 `data/fineweb-multisegment-k512-seg1to3x_train32k_01-20261008/`。前缀由实际配置生成，`--run-id` 默认使用上海时区当天日期；它只用于命名，不改变采样，同名目录拒绝覆盖。
+产物目录为 `data/fineweb-multisegment-k512-seg1to3x_train32k_20261008/`。前缀由实际配置生成，`--run-id` 默认使用上海时区当天日期；它只用于命名，不改变采样，同名目录拒绝覆盖。
 
 再次构造时可复用配置，更换 `--run-id`，并通过 `--previous-datasets DIR [DIR ...]` 排除已有数据。该参数默认空，优先读取所列目录的 `used-sources.jsonl`，并兼容旧发布数据内嵌的 `preparation.json.used_sources`；需排除的目录必须全部显式列出，不递归继承历史排除记录。
 
