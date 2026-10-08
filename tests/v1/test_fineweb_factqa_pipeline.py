@@ -58,7 +58,7 @@ def _selection(segment_count=8, split="train", document_index=0, answer_suffix="
                 "segments": segments,
             }
         ],
-        "statistics": {"scanned_documents": 1, "frozen_documents": 1},
+        "statistics": {"scanned_documents": 1, "frozen_trajectories": 1},
     }
 
 
@@ -160,6 +160,38 @@ def _prepare_fake(
     return config, tmp_path / "artifacts"
 
 
+def test_annotation_and_qa_ids_distinguish_windows_of_the_same_source(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    selection = _selection(segment_count=6)
+    first = selection["documents"][0]
+    second = copy.deepcopy(first)
+    start = first["window_char_span"][1]
+    second["window_char_span"] = [start, start + len(second["text"])]
+    second["trajectory_id"] = "trajectory-1"
+    selection["documents"].append(second)
+    FakeAnnotationClient.calls = []
+    monkeypatch.setattr(pipeline, "AnnotationClient", FakeAnnotationClient)
+    monkeypatch.setattr(pipeline, "prepare_selection", lambda _: selection)
+    pipeline.prepare(config)
+    assert pipeline.annotate(config)["complete_quota_trajectories"] == 2
+    final = pipeline.finalize(config)
+    summary = final["summary"]
+    assert summary["frozen_trajectories"] == summary["complete_trajectories"] == 2
+    assert summary["frozen_source_documents"] == summary["complete_source_documents"] == 1
+    rows = [
+        json.loads(line) for line in (tmp_path / "dataset/train.jsonl").read_text().splitlines()
+    ]
+    assert len(rows) == 2
+    assert {row["document_id"] for row in rows} == {first["document_id"]}
+    ids = [{qa["qa_id"] for qa in row["qas"]} for row in rows]
+    assert ids[0].isdisjoint(ids[1])
+    for row in rows:
+        validate_trajectory(row, config["qa"])
+    before = len(FakeAnnotationClient.calls)
+    pipeline.annotate(config)
+    assert len(FakeAnnotationClient.calls) == before
+
+
 @pytest.mark.parametrize("segments", [6, 7, 8, 9, 10])
 @pytest.mark.parametrize("split", ["train", "dev", "test"])
 def test_three_model_stages_cover_every_candidate_and_finalize_without_requests(
@@ -167,7 +199,7 @@ def test_three_model_stages_cover_every_candidate_and_finalize_without_requests(
 ):
     config, root = _prepare_fake(tmp_path, monkeypatch, segments=segments, split=split)
     result = pipeline.annotate(config)
-    assert result["complete_quota_documents"] == 1
+    assert result["complete_quota_trajectories"] == 1
     calls = FakeAnnotationClient.calls
     assert [stage for stage, _ in calls] == [
         s for _ in range(segments) for s in ("generate", "verify")
@@ -184,7 +216,7 @@ def test_three_model_stages_cover_every_candidate_and_finalize_without_requests(
         pipeline, "AnnotationClient", lambda *_: pytest.fail("finalization must be local")
     )
     final = pipeline.finalize(config)
-    assert final["summary"]["complete_documents"] == 1
+    assert final["summary"]["complete_trajectories"] == 1
     assert final["summary"]["final_qas"] == 8 * segments
     rows = [
         json.loads(line)
@@ -231,7 +263,7 @@ def test_rejected_candidates_are_replaced_through_both_checks(
 ):
     RejectedFirstQuestionClient.rejected_stage = rejected_stage
     config, root = _prepare_fake(tmp_path, monkeypatch, RejectedFirstQuestionClient)
-    assert pipeline.annotate(config)["complete_quota_documents"] == 1
+    assert pipeline.annotate(config)["complete_quota_trajectories"] == 1
     saved = json.loads((root / "documents/doc-000.json").read_text())
     assert len(saved["rounds"]) == 2
     calls = RejectedFirstQuestionClient.calls
@@ -275,7 +307,7 @@ def test_three_supplement_rounds_exhaust_without_publishing_partial_trajectory(
     tmp_path, monkeypatch
 ):
     config, root = _prepare_fake(tmp_path, monkeypatch, NoMoreFactsClient)
-    assert pipeline.annotate(config)["complete_quota_documents"] == 0
+    assert pipeline.annotate(config)["complete_quota_trajectories"] == 0
     result = json.loads((root / "documents/doc-000.json").read_text())
     assert len(result["rounds"]) == 4
     for number in (1, 2, 3):
@@ -284,7 +316,7 @@ def test_three_supplement_rounds_exhaust_without_publishing_partial_trajectory(
             "document_review",
         ]
     final = pipeline.finalize(config)
-    assert final["summary"]["quota_failed_documents"] == 1
+    assert final["summary"]["quota_failed_trajectories"] == 1
     assert final["summary"]["final_qas"] == 0
     assert (tmp_path / "dataset/train.jsonl").read_text() == ""
     failure = json.loads((root / "final-documents/doc-000.json").read_text())
@@ -317,7 +349,7 @@ def test_resume_preserves_completed_rounds_and_finalization_requires_completion(
     InterruptedClient.fail = False
     pipeline.annotate(config)
     assert len(InterruptedClient.calls) == before + 3
-    assert pipeline.finalize(config)["summary"]["complete_documents"] == 1
+    assert pipeline.finalize(config)["summary"]["complete_trajectories"] == 1
 
 
 @pytest.mark.parametrize("failed_stage", PROMPT_STAGES)
@@ -340,9 +372,9 @@ def test_document_failure_in_each_model_stage_preserves_other_documents(
     pipeline.prepare(config)
     pipeline.annotate(config)
     final = pipeline.finalize(config)
-    assert final["summary"]["frozen_documents"] == 2
-    assert final["summary"][error_type.reason + "_documents"] == 1
-    assert final["summary"]["complete_documents"] == 1
+    assert final["summary"]["frozen_trajectories"] == 2
+    assert final["summary"][error_type.reason + "_trajectories"] == 1
+    assert final["summary"]["complete_trajectories"] == 1
     rows = [
         json.loads(line) for line in (tmp_path / "dataset/train.jsonl").read_text().splitlines()
     ]
@@ -430,9 +462,9 @@ def test_pipeline_uses_answer_limit_for_model_prompt_filtering_and_finalization(
     monkeypatch.setattr(pipeline, "AnnotationClient", LongAnswerClient)
     pipeline.prepare(config)
     summary = pipeline.annotate(config)
-    assert summary["complete_quota_documents"] == complete
+    assert summary["complete_quota_trajectories"] == complete
     result = pipeline.finalize(config)
-    assert result["summary"]["complete_documents"] == complete
+    assert result["summary"]["complete_trajectories"] == complete
     rows = [
         json.loads(line)
         for line in Path(config["dataset_dir"]).joinpath("train.jsonl").read_text().splitlines()

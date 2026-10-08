@@ -27,7 +27,7 @@ LWM_REPO_DIR="/path/to/latent_working_memory"
 
 默认 AE／LM 多段文本数据**尚未构造，须先完成构造再训练**。
 
-构造无放回分批读取到各划分配额，一篇合格文档对应一条轨迹。每条抽取 3–5 段，各段名义 token 长度 l 在 `[K,3K]` 内采样，分别扩为 `ceil(4 × l × α)` 个字符；尾部 `continuation` 独立取 `ceil(4 × Q × α)` 个字符。此处 Q 是构造时估算续文候选长度的参数，α 为 `content_reserve_ratio`，默认 1.5。字符分段在构造时固定；保存的 `estimated_tokens = len(text) / 4` 包含余量，实际 token 数取决于训练 tokenizer。
+构造无放回分批读取到各划分配额，每篇代表原文可构造多条正文及续文均不重叠的轨迹，同篇全部轨迹归属同一划分。每条抽取 3–5 段，各段名义 token 长度 l 在 `[K,3K]` 内采样，分别扩为 `ceil(4 × l × α)` 个字符；尾部 `continuation` 独立取 `ceil(4 × Q × α)` 个字符。此处 Q 是构造时估算续文候选长度的参数，α 为 `content_reserve_ratio`，默认 1.5。字符分段在构造时固定；保存的 `estimated_tokens = len(text) / 4` 包含余量，实际 token 数取决于训练 tokenizer。
 
 | 构造配置（α=1.5） | 每段名义 tokens | 每段保存字符数 | 正文保存字符数 | 尾部字符数（Q=512） |
 |---|---:|---:|---:|---:|

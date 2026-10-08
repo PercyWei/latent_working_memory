@@ -11,6 +11,7 @@ from latent_working_memory.data_preparation.fineweb_factqa.pipeline import _requ
 from latent_working_memory.data_preparation.fineweb_factqa.storage import load_json, save_json
 from latent_working_memory.data_preparation.fineweb_source import (
     USED_SOURCES_FILE,
+    SourceWindowTracker,
     write_used_sources,
 )
 
@@ -23,25 +24,36 @@ def publish_dataset(config: dict, template: dict, pool: dict, batches: list[dict
     by_split = {s: Counter() for s in ("train", "dev", "test")}
     stage_counts, request_statistics = defaultdict(Counter), defaultdict(Counter)
     documents, batch_reports, current_sources = [], [], []
-    source_by_id, source_batch = {}, {}
+    trajectory_by_id, trajectory_batch, cluster_sources = {}, {}, {}
+    source_windows = SourceWindowTracker()
     excluded_ids = {d["document_id"] for d in pool["excluded_sources"]}
     excluded_clusters = {d["dedup_cluster"] for d in pool["excluded_sources"]}
     for batch, preparation in zip(batches, preparations, strict=True):
         for split, bounds in batch["source_ranges"].items():
             candidates = [d for d in pool["documents"] if d["split"] == split]
             selected = candidates[bounds["start"] : bounds["stop"]]
-            if len(selected) != preparation["summary"]["by_split"][split]["frozen_documents"]:
+            if len(selected) != preparation["summary"]["by_split"][split]["frozen_trajectories"]:
                 raise ValueError("batch source count differs from its preparation")
             for document in selected:
-                identity = document["document_id"]
+                identity = document["trajectory_id"]
                 if (
-                    identity in source_by_id
-                    or identity in excluded_ids
+                    identity in trajectory_by_id
+                    or document["document_id"] in excluded_ids
                     or document["dedup_cluster"] in excluded_clusters
                 ):
-                    raise ValueError("a previously used source was assigned again")
-                source_by_id[identity] = document
-                source_batch[identity] = batch["batch_index"]
+                    raise ValueError(
+                        "a duplicate trajectory or previously used source was assigned"
+                    )
+                source_windows.add(document)
+                cluster = document["dedup_cluster"]
+                if (
+                    cluster in cluster_sources
+                    and cluster_sources[cluster] != document["document_id"]
+                ):
+                    raise ValueError("a source cluster has more than one representative document")
+                cluster_sources[cluster] = document["document_id"]
+                trajectory_by_id[identity] = document
+                trajectory_batch[identity] = batch["batch_index"]
                 current_sources.append(
                     {key: document[key] for key in ("document_id", "dedup_cluster", "source")}
                 )
@@ -64,11 +76,13 @@ def publish_dataset(config: dict, template: dict, pool: dict, batches: list[dict
             }
         )
     if any(
-        by_split[split]["complete_documents"] != target
+        by_split[split]["complete_trajectories"] != target
         for split, target in config["split_counts"].items()
     ):
         raise ValueError("cannot publish until each split reaches its exact split_counts target")
-    if len(documents) != len(current_sources):
+    if len(documents) != len(trajectory_by_id) or {
+        document["trajectory_id"] for document in documents
+    } != set(trajectory_by_id):
         raise ValueError("final document outcomes do not cover all assigned sources")
     prompts = preparations[0]["prompts"]
     if any(preparation["prompts"] != prompts for preparation in preparations):
@@ -81,7 +95,8 @@ def publish_dataset(config: dict, template: dict, pool: dict, batches: list[dict
     # the completion marker and is written only after all three splits are ready.
     root.mkdir(parents=True, exist_ok=True)
     temporary = {s: root / f".{s}.{uuid.uuid4().hex}.tmp" for s in by_split}
-    seen_documents, seen_trajectories = set(), set()
+    seen_trajectories = set()
+    complete_sources = {split: set() for split in by_split}
     try:
         for split, path in temporary.items():
             with path.open("xb") as output:
@@ -90,38 +105,47 @@ def publish_dataset(config: dict, template: dict, pool: dict, batches: list[dict
                     with (Path(batch["dataset_dir"]) / f"{split}.jsonl").open("rb") as source:
                         for line in source:
                             row = json.loads(line)
-                            identity = row["document_id"]
-                            if (
-                                row["split"] != split
-                                or identity in seen_documents
-                                or row["trajectory_id"] in seen_trajectories
-                            ):
+                            identity = row["trajectory_id"]
+                            if row["split"] != split or identity in seen_trajectories:
                                 raise ValueError(
-                                    "duplicate document or incorrect split in staged data"
+                                    "duplicate trajectory or incorrect split in staged data"
                                 )
-                            expected = source_by_id[identity]
-                            if source_batch[identity] != batch["batch_index"]:
+                            expected = trajectory_by_id[identity]
+                            if trajectory_batch[identity] != batch["batch_index"]:
                                 raise ValueError("staged trajectory belongs to a different batch")
                             if any(
                                 row[k] != expected[k]
-                                for k in ("split", "source", "trajectory_id", "dedup_cluster")
+                                for k in (
+                                    "document_id",
+                                    "split",
+                                    "source",
+                                    "trajectory_id",
+                                    "dedup_cluster",
+                                    "window_char_span",
+                                    "segments",
+                                )
                             ):
                                 raise ValueError("staged trajectory differs from its frozen source")
-                            seen_documents.add(identity)
-                            seen_trajectories.add(row["trajectory_id"])
+                            seen_trajectories.add(identity)
+                            complete_sources[split].add(row["document_id"])
                             count += 1
                             qas += len(row["qas"])
                             output.write(line)
                     expected_counts = preparation["summary"]["by_split"][split]
                     if (count, qas) != (
-                        expected_counts["complete_documents"],
+                        expected_counts["complete_trajectories"],
                         expected_counts["qas"],
                     ):
                         raise ValueError("staged data counts differ from preparation")
                 output.flush()
                 os.fsync(output.fileno())
 
-        complete = sum(d["complete_documents"] for d in by_split.values())
+        complete = sum(d["complete_trajectories"] for d in by_split.values())
+        for split, counts in by_split.items():
+            counts["frozen_source_documents"] = len(
+                {d["document_id"] for d in trajectory_by_id.values() if d["split"] == split}
+            )
+            counts["complete_source_documents"] = len(complete_sources[split])
         usage_keys = (
             "input_tokens",
             "output_tokens",
@@ -149,9 +173,11 @@ def publish_dataset(config: dict, template: dict, pool: dict, batches: list[dict
             "annotation": {k: v for k, v in template["annotation"].items() if k != "endpoint"},
             "prompts": prompts,
             "summary": {
-                "frozen_documents": len(current_sources),
-                "complete_documents": complete,
-                "failed_documents": len(current_sources) - complete,
+                "frozen_trajectories": len(trajectory_by_id),
+                "frozen_source_documents": len({d["document_id"] for d in current_sources}),
+                "complete_trajectories": complete,
+                "complete_source_documents": len(set().union(*complete_sources.values())),
+                "failed_trajectories": len(trajectory_by_id) - complete,
                 "failure_counts": dict(
                     Counter(d["failure_reason"] for d in documents if d["failure_reason"])
                 ),

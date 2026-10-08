@@ -2,12 +2,49 @@
 
 import json
 import os
+from bisect import bisect_left
 from pathlib import Path
 import tempfile
 
 
 USED_SOURCES_FILE = "used-sources.jsonl"
 SPLITS = ("train", "dev", "test")
+
+
+class SourceWindowTracker:
+    """校验跨轨迹的来源身份、划分隔离与完整字符窗口不重叠。"""
+
+    def __init__(self):
+        self.documents = {}
+        self.sources = {}
+        self.clusters = {}
+        self.windows = {}
+
+    def add(self, record, continuation_chars=0):
+        document_id, cluster, split = (
+            record[key] for key in ("document_id", "dedup_cluster", "split")
+        )
+        source = record["source"]
+        location = tuple(source[key] for key in ("file", "row_group", "row_index"))
+        identity = (split, cluster, location)
+        if document_id in self.documents and self.documents[document_id] != identity:
+            raise ValueError("source document changes split, dedup cluster or source location")
+        if location in self.sources and self.sources[location] != document_id:
+            raise ValueError("source row belongs to multiple documents")
+        if cluster in self.clusters and self.clusters[cluster] != split:
+            raise ValueError("a dedup cluster occurs in multiple dataset splits")
+        start, end = record["window_char_span"]
+        end += continuation_chars
+        windows = self.windows.setdefault(document_id, [])
+        index = bisect_left(windows, (start, end))
+        if (index and windows[index - 1][1] > start) or (
+            index < len(windows) and windows[index][0] < end
+        ):
+            raise ValueError("overlapping source windows")
+        windows.insert(index, (start, end))
+        self.documents[document_id] = identity
+        self.sources[location] = document_id
+        self.clusters[cluster] = split
 
 
 def source_files(source_dir) -> list[Path]:

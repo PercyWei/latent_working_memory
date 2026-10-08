@@ -49,8 +49,9 @@ def make_record(
     leading_padding=0,
     answer_suffix="",
     qa_config=None,
+    document_id=None,
 ):
-    document_id = f"document-{split}-{index}"
+    document_id = document_id or f"document-{split}-{index}"
     parts, segments, candidates = [], [], []
     offset = 0
     _, tasks, gates = qa_quotas(segment_count)
@@ -338,8 +339,38 @@ def test_loader_rejects_duplicate_samples_and_ids(tmp_path, tokenizer, duplicate
         first = make_record(6, qa_namespace="shared")
         second = make_record(6, index=1, qa_namespace="shared")
     write_dataset(tmp_path, [first, second])
-    with pytest.raises(ValueError, match="duplicate"):
+    message = {
+        "document": "source document changes",
+        "trajectory": "duplicate trajectory",
+        "source_row": "source row belongs",
+        "qa_id": "duplicate QA",
+    }[duplicate]
+    with pytest.raises(ValueError, match=message):
         load_factqa(tmp_path, tokenizer)
+
+
+@pytest.mark.parametrize("overlap", [False, True])
+def test_loader_accepts_same_source_disjoint_trajectories_and_rejects_overlap(
+    tmp_path, tokenizer, overlap
+):
+    first = make_record(6)
+    second = make_record(6, index=1, document_id=first["document_id"], qa_namespace="second")
+    second["dedup_cluster"] = first["dedup_cluster"]
+    second["source"] = dict(first["source"])
+    start = first["window_char_span"][1] - int(overlap)
+    second["window_char_span"] = [start, start + len(second["text"])]
+    # Read the later window first to exercise order-independent interval checks.
+    write_dataset(tmp_path, [second, first])
+    if overlap:
+        with pytest.raises(ValueError, match="overlapping source windows"):
+            load_factqa(tmp_path, tokenizer)
+    else:
+        rows = load_factqa(tmp_path, tokenizer)["train"]
+        assert [row.trajectory_id for row in rows] == [
+            second["trajectory_id"],
+            first["trajectory_id"],
+        ]
+        assert len({row.document_id for row in rows}) == 1
 
 
 def test_loader_validates_frozen_qa_role_seed(tmp_path, tokenizer):

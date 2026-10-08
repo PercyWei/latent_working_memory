@@ -1,4 +1,5 @@
 from dataclasses import replace
+import math
 from pathlib import Path
 
 import pyarrow as pa
@@ -24,7 +25,7 @@ def config(counts, batch_size=2):
         source_batch_size=batch_size,
         split_counts=counts,
         window=SegmentationConfig(
-            capacity=1,
+            capacity=40,
             min_segments=2,
             max_segments=2,
             min_segment_ratio=1,
@@ -36,10 +37,11 @@ def config(counts, batch_size=2):
 
 
 def record(name, split="train", text=None):
+    phrase = f"{name} source words "
     for index in range(1000):
         url = f"https://example.org/{name}/{index}"
         if document_split(source_key(url), SEED, FRACTIONS) == split:
-            return {"id": name, "url": url, "text": text or f"{name} source words " * 30}
+            return {"id": name, "url": url, "text": text or phrase * math.ceil(400 / len(phrase))}
     raise AssertionError("fixture split not found")
 
 
@@ -78,8 +80,10 @@ def test_quotas_continue_across_batches_without_restarting_or_reusing_sources(mo
     assert statistics["source_batches"] == 3
     assert statistics["scanned_documents"] == 6
     assert statistics["candidate_documents"] == 6
-    assert statistics["available_by_split"] == {"train": 4, "dev": 1, "test": 1}
-    assert statistics["selected_by_split"] == {"train": 1, "dev": 1, "test": 1}
+    assert statistics["available_documents_by_split"] == {"train": 4, "dev": 1, "test": 1}
+    assert statistics["available_trajectories_by_split"] == {"train": 4, "dev": 1, "test": 1}
+    assert statistics["selected_documents_by_split"] == {"train": 1, "dev": 1, "test": 1}
+    assert statistics["selected_trajectories_by_split"] == {"train": 1, "dev": 1, "test": 1}
     assert state == {
         "calls": 1,
         "read_ids": [row["id"] for row in records[:6]],
@@ -202,7 +206,7 @@ def test_base_quality_and_minimum_window_filter_before_candidate_clustering(monk
     )
     assert [row["record"]["id"] for row in selected] == ["good"]
     assert statistics["basic_rejected"] == statistics["length_rejected"] == 1
-    assert statistics["candidate_documents"] == statistics["selected"] == 1
+    assert statistics["candidate_documents"] == statistics["selected_documents"] == 1
 
 
 def test_real_parquet_stream_locations_match_selected_records(tmp_path):
@@ -225,7 +229,11 @@ def test_real_parquet_stream_locations_match_selected_records(tmp_path):
 def test_source_length_filter_sums_independently_rounded_windows(monkeypatch):
     cfg = replace(
         config({"train": 1, "dev": 0, "test": 0}),
-        window=replace(config({"train": 1, "dev": 0, "test": 0}).window, content_reserve_ratio=1.1),
+        window=replace(
+            config({"train": 1, "dev": 0, "test": 0}).window,
+            capacity=1,
+            content_reserve_ratio=1.1,
+        ),
     )
     # 两段正文与续文分别 ceil(4 × 1 × 1.1) = 5，而整体 ceil 只得到 14。
     assert cfg.window.minimum_window_chars == 15
@@ -235,3 +243,40 @@ def test_source_length_filter_sums_independently_rounded_windows(monkeypatch):
     )
     assert [row["record"]["id"] for row in selected] == ["fits"]
     assert statistics["length_rejected"] == 1
+
+
+def test_one_long_source_fills_multiple_trajectory_slots_without_overflow(monkeypatch):
+    cfg = config({"train": 3, "dev": 0, "test": 0}, batch_size=1)
+    window_chars = cfg.window.minimum_window_chars
+    first = record("long", text="x" * (window_chars * 5 + window_chars - 1))
+    state = source_stream(monkeypatch, [first, record("unread")])
+    selected, statistics = sources.collect_documents([], cfg, [], PreparationConfig())
+
+    assert len(selected) == 1
+    assert selected[0]["record"] == first
+    assert selected[0]["windows"] == [
+        (0, [40, 40], window_chars),
+        (window_chars, [40, 40], window_chars * 2),
+        (window_chars * 2, [40, 40], window_chars * 3),
+    ]
+    assert statistics["eligible_documents"] == statistics["selected_documents"] == 1
+    assert statistics["eligible_trajectories"] == 5
+    assert statistics["selected_trajectories"] == 3
+    assert statistics["selected_trajectories_by_split"] == cfg.split_counts
+    assert statistics["source_batches"] == 1
+    assert state["read_ids"] == ["long"] and state["closed"]
+
+
+def test_duplicate_cluster_cannot_contribute_windows_from_a_second_document(monkeypatch):
+    cfg = config({"train": 3, "dev": 0, "test": 0}, batch_size=2)
+    first = record("first", text="x" * (cfg.window.minimum_window_chars * 2))
+    repeated = dict(first, id="same-url-longer", text=first["text"] * 2)
+    last = record("last")
+    source_stream(monkeypatch, [first, repeated, last])
+    selected, statistics = sources.collect_documents([], cfg, [], PreparationConfig())
+
+    assert [row["record"]["id"] for row in selected] == ["first", "last"]
+    assert [len(row["windows"]) for row in selected] == [2, 1]
+    assert statistics["duplicate"] == 1
+    assert statistics["eligible_documents"] == 2
+    assert statistics["selected_trajectories"] == 3

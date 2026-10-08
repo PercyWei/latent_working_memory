@@ -32,7 +32,7 @@ from latent_working_memory.data_preparation.pretrain.sources import (
     parquet_records,
     referenced_records,
 )
-from latent_working_memory.data_preparation.segmentation import SegmentationConfig, sample_window
+from latent_working_memory.data_preparation.segmentation import SegmentationConfig, sample_windows
 
 
 def pool_contract(config: dict) -> dict:
@@ -122,7 +122,12 @@ def prepare_pool(config: dict) -> dict:
                     "near_duplicate_min_words",
                 )
             },
-            "statistics": {"scanned_documents": 0, "source_batches": 0, "frozen_documents": 0},
+            "statistics": {
+                "scanned_documents": 0,
+                "source_batches": 0,
+                "frozen_trajectories": 0,
+                "frozen_source_documents": 0,
+            },
             "exhausted": False,
             "documents": [],
             "split_counts": dict.fromkeys(SPLITS, 0),
@@ -167,7 +172,8 @@ def _extend_pool(config: dict, pool: dict, records) -> None:
     previous = matching_clusters(
         referenced_records(pool["excluded_sources"]), raw, clusters, recipe
     )
-    frozen = matching_clusters(referenced_records(pool["documents"]), raw, clusters, recipe)
+    frozen_sources = {document["document_id"]: document for document in pool["documents"]}
+    frozen = matching_clusters(referenced_records(frozen_sources.values()), raw, clusters, recipe)
     available, seen = [], set()
     for (record, location), cluster in zip(candidates, clusters, strict=True):
         if cluster in previous:
@@ -183,31 +189,32 @@ def _extend_pool(config: dict, pool: dict, records) -> None:
     fractions = split_fractions(config["split_counts"])
     for record, location, cluster in available:
         split = document_split(cluster, config["source_seed"], fractions)
-        start, parts, end = sample_window(
+        for start, parts, end in sample_windows(
             len(record["text"]), record["id"], config["selection_seed"], segmentation
-        )
-        cuts = [0, *itertools.accumulate(segmentation.reserved_chars(part) for part in parts)]
-        pool["documents"].append(
-            {
-                "pool_index": len(pool["documents"]),
-                "trajectory_id": f"{record['id']}:{start}:{end}",
-                "document_id": record["id"],
-                "dedup_cluster": cluster,
-                "split": split,
-                "source": {
-                    "file": location["source_file"],
-                    "row_group": location["row_group"],
-                    "row_index": location["row_index"],
-                },
-                "window_char_span": [start, end],
-                "segments": [
-                    {"segment_id": f"seg{i}", "char_span": [left, right]}
-                    for i, (left, right) in enumerate(zip(cuts, cuts[1:]))
-                ],
-            }
-        )
-        pool["split_counts"][split] += 1
-    counts["frozen_documents"] = len(pool["documents"])
+        ):
+            cuts = [0, *itertools.accumulate(segmentation.reserved_chars(part) for part in parts)]
+            pool["documents"].append(
+                {
+                    "pool_index": len(pool["documents"]),
+                    "trajectory_id": f"{record['id']}:{start}:{end}",
+                    "document_id": record["id"],
+                    "dedup_cluster": cluster,
+                    "split": split,
+                    "source": {
+                        "file": location["source_file"],
+                        "row_group": location["row_group"],
+                        "row_index": location["row_index"],
+                    },
+                    "window_char_span": [start, end],
+                    "segments": [
+                        {"segment_id": f"seg{i}", "char_span": [left, right]}
+                        for i, (left, right) in enumerate(zip(cuts, cuts[1:]))
+                    ],
+                }
+            )
+            pool["split_counts"][split] += 1
+    counts["frozen_trajectories"] = len(pool["documents"])
+    counts["frozen_source_documents"] = len({d["document_id"] for d in pool["documents"]})
     pool["statistics"] = dict(counts)
     pool["segment_counts"] = dict(Counter(str(len(d["segments"])) for d in pool["documents"]))
     # Persist the cursor and all new frozen candidates together, before allocating any of them.
@@ -285,7 +292,8 @@ def prepare_selection(config: dict) -> dict:
         "ranges": ranges,
         "documents": selected,
         "statistics": {
-            "frozen_documents": len(selected),
+            "frozen_trajectories": len(selected),
+            "frozen_source_documents": len({d["document_id"] for d in selected}),
             "selected_by_split": {key: value["selected"] for key, value in ranges.items()},
             "available_by_split": {
                 split: pool["split_counts"][split] - bounds["start"]

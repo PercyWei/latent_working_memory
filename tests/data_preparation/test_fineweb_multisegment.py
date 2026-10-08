@@ -25,7 +25,11 @@ from latent_working_memory.data_preparation.fineweb_multisegment.prepare import 
 from latent_working_memory.data_preparation.fineweb_multisegment.records import MultisegmentSample
 from latent_working_memory.data_preparation.pretrain.dedup import source_key
 from latent_working_memory.data_preparation.pretrain.fineweb import document_split
-from latent_working_memory.data_preparation.segmentation import SegmentationConfig, segment_lengths
+from latent_working_memory.data_preparation.segmentation import (
+    SegmentationConfig,
+    sample_windows,
+    segment_lengths,
+)
 from latent_working_memory.data_preparation.fineweb_source import split_fractions
 
 
@@ -94,7 +98,7 @@ def test_official_config_cli_builds_self_contained_samples_with_unchanged_contin
     metadata = json.loads((root / "preparation.json").read_text())
     assert metadata["config"] == json.loads(temporary_config.read_text())
     assert metadata["config"]["window"]["continuation_tokens"] == 512
-    assert metadata["referenced_documents"] == sum(counts.values())
+    assert 0 < metadata["referenced_documents"] <= sum(counts.values())
     original_text = {record["id"]: record["text"] for record in records}
     samples = read_samples(root)
     for split, rows in samples.items():
@@ -114,6 +118,7 @@ def test_official_config_cli_builds_self_contained_samples_with_unchanged_contin
             assert sample.text == original_text[sample.document_id][start:end]
             totals.append(total)
         assert metadata["statistics"][split]["text_characters"] == 6 * sum(totals)
+        assert_nonoverlapping_windows(rows)
     source.unlink()
     assert read_samples(root) == samples
     assert official_path.read_bytes() == original
@@ -232,7 +237,21 @@ def test_segment_sampling_respects_character_budget_without_filling_it(count, mi
         assert min(totals) < count * maximum
 
 
-def test_one_trajectory_per_source_with_total_derived_from_segments():
+def assert_nonoverlapping_windows(samples):
+    ends, source_identity, clusters = {}, {}, {}
+    assert len({sample.trajectory_id for sample in samples}) == len(samples)
+    for sample in samples:
+        document_id = sample.document_id
+        start, end = sample.window_char_span
+        assert start == ends.get(document_id, 0)
+        ends[document_id] = end + len(sample.continuation)
+        identity = (sample.source, sample.dedup_cluster, sample.split)
+        assert source_identity.setdefault(document_id, identity) == identity
+        assert clusters.setdefault(sample.dedup_cluster, sample.split) == sample.split
+    return ends
+
+
+def test_multiple_trajectories_per_source_with_total_derived_from_segments():
     config = DataPreparationConfig(
         source_dir="unused", split_counts={"train": 100, "dev": 0, "test": 0}
     )
@@ -243,12 +262,15 @@ def test_one_trajectory_per_source_with_total_derived_from_segments():
             "train",
             f"cluster{index}",
             {"file": "unused.parquet", "row_group": 0, "row_index": index},
+            list(sample_windows(50000, f"doc{index}", config.selection_seed, config.window)),
         )
         for index in range(100)
     ]
     samples = list(build_samples(documents, config, "train"))
     assert samples == list(build_samples(documents, config, "train"))
-    assert len({s.document_id for s in samples}) == len(samples) == 100
+    assert len({s.document_id for s in samples}) == 100 < len(samples)
+    ends = assert_nonoverlapping_windows(samples)
+    assert all(0 <= 50000 - end < config.window.minimum_window_chars for end in ends.values())
     assert {len(sample.segments) for sample in samples} == {3, 4, 5}
     assert any(sample.estimated_tokens > 7680 for sample in samples)
     assert max(sample.estimated_tokens for sample in samples) <= 11520
@@ -289,6 +311,7 @@ def test_exact_character_budget_accepts_decimal_reserve_at_boundary():
         "train",
         "cluster",
         {"file": "source.parquet", "row_group": 0, "row_index": 0},
+        list(sample_windows(71, "id", config.selection_seed, config.window)),
     )
     sample = next(build_samples([doc], config, "train"))
     assert [s["char_span"] for s in sample.segments] == [[0, 22], [22, 44], [44, 66]]
@@ -306,6 +329,7 @@ def test_short_eligible_source_limits_segment_count_instead_of_being_discarded()
         "train",
         "short",
         {"file": "source.parquet", "row_group": 0, "row_index": 0},
+        list(sample_windows(chars, "short", config.selection_seed, config.window)),
     )
     sample = next(build_samples([doc], config, "train"))
     assert [s["char_span"] for s in sample.segments] == [[0, 3072], [3072, 6144], [6144, 9216]]
@@ -366,7 +390,7 @@ def test_saved_text_is_self_contained_and_metadata_records_only_used_documents(t
     split_documents = []
     for split, rows in samples.items():
         assert len(rows) == config.split_counts[split]
-        assert len({row.document_id for row in rows}) == len(rows)
+        assert_nonoverlapping_windows(rows)
         split_documents.append({row.document_id for row in rows})
         for sample in rows:
             sample.validate_plan(config.window)
@@ -388,7 +412,13 @@ def test_saved_text_is_self_contained_and_metadata_records_only_used_documents(t
     assert {item["document_id"] for item in load_previous_sources((root,))} == used
     assert metadata["used_sources_file"] == "used-sources.jsonl"
     assert "used_sources" not in metadata
-    assert metadata["referenced_documents"] == len(used) == sum(config.split_counts.values())
+    assert metadata["referenced_documents"] == len(used) < sum(config.split_counts.values())
+    ledger = [json.loads(line) for line in (root / "used-sources.jsonl").read_text().splitlines()]
+    assert len(ledger) == len(used)
+    assert metadata["source_statistics"]["selected_documents"] == len(used)
+    assert metadata["source_statistics"]["selected_trajectories"] == sum(
+        config.split_counts.values()
+    )
     (Path(config.source_dir) / "fineweb.parquet").unlink()
     assert read_samples(root) == samples
     with pytest.raises(FileExistsError):
@@ -480,7 +510,7 @@ def test_cli_reuses_config_for_default_custom_and_source_exclusion_runs(
         assert "创建时间：20261008 00:05:06 UTC+08:00" in (root / "README.md").read_text()
 
     assert config_path.read_text() == original_config
-    # run_id 仅命名产物，不参与来源选择、分段或窗口起点的随机种子。
+    # run_id 仅命名产物，不参与来源选择或分段的随机种子。
     assert read_samples(roots["20261008"]) == read_samples(roots["repeat_2.a-1"])
     used = {
         key: {item["document_id"] for item in load_previous_sources((root,))}

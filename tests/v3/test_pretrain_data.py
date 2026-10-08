@@ -204,7 +204,7 @@ def multisegment_row(
         "segments": segments,
         "continuation": continuation.ljust(tail_length),
         "window_char_span": [100, 100 + len(text)],
-        "source": {"file": "data/raw/source.parquet", "row_group": 0, "row_index": 0},
+        "source": {"file": f"data/raw/{document_id}.parquet", "row_group": 0, "row_index": 0},
         "text_char_length": len(text),
         "estimated_tokens": len(text) / 4,
         "estimated_tokens_rule": "len(text) / 4",
@@ -220,6 +220,32 @@ def write_multisegment(path, config=MULTISEGMENT_CONFIG, **splits):
     )
     write_splits(root, **splits)
     return root
+
+
+@pytest.mark.parametrize("overlap", ("none", "body", "continuation"))
+def test_multisegment_same_document_windows_include_continuation_in_nonoverlap_check(
+    tmp_path, tokenizer, overlap
+):
+    first = multisegment_row(trajectory_id="first")
+    body_end = first["window_char_span"][1]
+    full_end = body_end + len(first["continuation"])
+    start = {"none": full_end, "body": body_end - 1, "continuation": full_end - 1}[overlap]
+    second = multisegment_row(
+        trajectory_id="second", window_char_span=[start, start + len(first["text"])]
+    )
+    directory = write_multisegment(tmp_path, train=[second, first])
+    if overlap != "none":
+        with pytest.raises(ValueError, match="overlapping source windows"):
+            load_multisegment_pretraining(
+                directory, tokenizer, 1, 8192, "multisegment_random_prefix"
+            )
+    else:
+        splits, _ = load_multisegment_pretraining(
+            directory, tokenizer, 1, 8192, "multisegment_random_prefix"
+        )
+        assert len(splits["train"]) == 2
+        assert len({sample.document_id for sample in splits["train"]}) == 1
+        assert len({sample.sample_id for sample in splits["train"]}) == 2
 
 
 @pytest.mark.parametrize("lm_ratio,task", [(0.0, "ae"), (1.0, "continuation")])

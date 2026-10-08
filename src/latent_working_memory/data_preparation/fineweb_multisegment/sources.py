@@ -16,6 +16,7 @@ from latent_working_memory.data_preparation.pretrain.sources import (
     parquet_records,
     referenced_records,
 )
+from latent_working_memory.data_preparation.segmentation import sample_windows
 
 
 def collect_documents(paths, config, previous, recipe):
@@ -61,7 +62,15 @@ def collect_documents(paths, config, previous, recipe):
                 elif record["id"] in document_ids:
                     statistics["duplicate_id"] += 1
                 else:
-                    candidates.append((record, location))
+                    windows = list(
+                        sample_windows(
+                            len(record["text"]),
+                            record["id"],
+                            config.selection_seed,
+                            config.window,
+                        )
+                    )
+                    candidates.append((record, location, windows))
                     document_ids.add(record["id"])
                     added += 1
             print(
@@ -75,7 +84,7 @@ def collect_documents(paths, config, previous, recipe):
                 continue
 
             started = perf_counter()
-            raw = [record for record, _ in candidates]
+            raw = [record for record, _, _ in candidates]
             clusters = cluster_documents(raw, recipe)
             excluded = (
                 matching_clusters(previous_records, raw, clusters, recipe)
@@ -83,10 +92,12 @@ def collect_documents(paths, config, previous, recipe):
                 else set()
             )
             selected, seen = [], set()
-            available_by_split = dict.fromkeys(config.split_counts, 0)
+            available_documents_by_split = dict.fromkeys(config.split_counts, 0)
+            available_trajectories_by_split = dict.fromkeys(config.split_counts, 0)
+            selected_documents_by_split = dict.fromkeys(config.split_counts, 0)
             selected_by_split = dict.fromkeys(config.split_counts, 0)
             duplicates = previously_used = 0
-            for (record, location), cluster in zip(candidates, clusters, strict=True):
+            for (record, location, windows), cluster in zip(candidates, clusters, strict=True):
                 if cluster in excluded:
                     previously_used += 1
                     continue
@@ -95,12 +106,21 @@ def collect_documents(paths, config, previous, recipe):
                     continue
                 seen.add(cluster)
                 split = document_split(cluster, config.source_seed, fractions)
-                available_by_split[split] += 1
+                available_documents_by_split[split] += 1
+                available_trajectories_by_split[split] += len(windows)
                 if selected_by_split[split] < config.split_counts[split]:
+                    chosen = windows[: config.split_counts[split] - selected_by_split[split]]
                     selected.append(
-                        {"record": record, "location": location, "cluster": cluster, "split": split}
+                        {
+                            "record": record,
+                            "location": location,
+                            "cluster": cluster,
+                            "split": split,
+                            "windows": chosen,
+                        }
                     )
-                    selected_by_split[split] += 1
+                    selected_documents_by_split[split] += 1
+                    selected_by_split[split] += len(chosen)
             progress = ", ".join(
                 f"{split}={selected_by_split[split]:,}/{target:,}"
                 for split, target in config.split_counts.items()
@@ -115,8 +135,12 @@ def collect_documents(paths, config, previous, recipe):
                     "candidate_documents": len(candidates),
                     "duplicate": duplicates,
                     "previously_used": previously_used,
-                    "eligible": len(seen),
-                    "selected": len(selected),
-                    "available_by_split": available_by_split,
-                    "selected_by_split": selected_by_split,
+                    "eligible_documents": len(seen),
+                    "eligible_trajectories": sum(available_trajectories_by_split.values()),
+                    "selected_documents": len(selected),
+                    "selected_trajectories": sum(selected_by_split.values()),
+                    "available_documents_by_split": available_documents_by_split,
+                    "available_trajectories_by_split": available_trajectories_by_split,
+                    "selected_documents_by_split": selected_documents_by_split,
+                    "selected_trajectories_by_split": selected_by_split,
                 }

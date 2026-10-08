@@ -70,7 +70,7 @@ def sample_row(split, suffix, parts=PARTS, continuation="sky water", config=None
         "estimated_tokens": len(text) / 4,
         "estimated_tokens_rule": "len(text) / 4",
         "window_char_span": [11, 11 + len(text)],
-        "source": {"file": "missing-raw.parquet", "row_group": 0, "row_index": 0},
+        "source": {"file": f"missing-raw/{split}-{suffix}.parquet", "row_group": 0, "row_index": 0},
     }
 
 
@@ -86,6 +86,31 @@ def write_dataset(root, config=None):
             sample_row(split, "continuation", continuation="sky", config=config),
         ]
         root.joinpath(f"{split}.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+
+@pytest.mark.parametrize("overlap", [False, True])
+def test_same_source_nonoverlap_includes_continuation(tmp_path, tiny_base, overlap):
+    write_dataset(tmp_path)
+    first = sample_row("train", "first")
+    second = sample_row("train", "second")
+    second["document_id"] = first["document_id"]
+    second["dedup_cluster"] = first["dedup_cluster"]
+    second["source"] = dict(first["source"])
+    start = first["window_char_span"][1] + len(first["continuation"]) - int(overlap)
+    second["window_char_span"] = [start, start + len(second["text"])]
+    (tmp_path / "train.jsonl").write_text(json.dumps(second) + "\n" + json.dumps(first) + "\n")
+    tokenizer = AutoTokenizer.from_pretrained(tiny_base)
+    if overlap:
+        with pytest.raises(ValueError, match="overlapping source windows"):
+            load_datasets(SelectionConfig(str(tmp_path)), tokenizer, 128, TrainingConfig())
+    else:
+        datasets, _, _ = load_datasets(
+            SelectionConfig(str(tmp_path)), tokenizer, 128, TrainingConfig()
+        )
+        rows = datasets["multiround"]["train"]
+        assert len(rows) == 2
+        assert len({row.document_id for row in rows}) == 1
+        assert len({row.sample_id for row in rows}) == 2
 
 
 def test_tokenized_filter_is_shared_and_epochs_reuse_rows(tmp_path, tiny_base, monkeypatch):

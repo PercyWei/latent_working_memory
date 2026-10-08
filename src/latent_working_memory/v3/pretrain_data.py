@@ -7,6 +7,7 @@ import random
 
 from latent_working_memory.data_preparation.fineweb_multisegment.config import DataPreparationConfig
 from latent_working_memory.data_preparation.fineweb_multisegment.records import MultisegmentSample
+from latent_working_memory.data_preparation.fineweb_source import SourceWindowTracker
 from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
 
 
@@ -126,7 +127,7 @@ def load_multisegment_pretraining(
     lm_ratio: float = 0.5,
     lm_target_tokens: int = 512,
 ) -> tuple[dict[str, tuple[PretrainExample, ...]], dict]:
-    """按来源独立抽取连续前缀与一个任务，加载后固定供各 epoch 复用。"""
+    """按轨迹独立抽取连续前缀与一个任务，加载后固定供各 epoch 复用。"""
     if (
         type(min_input_tokens) is not int
         or type(max_input_tokens) is not int
@@ -138,7 +139,8 @@ def load_multisegment_pretraining(
     root = Path(dataset_dir)
     metadata = json.loads((root / "preparation.json").read_text(encoding="utf-8"))
     preparation_config = DataPreparationConfig.from_mapping(metadata["config"]).window
-    seen_samples, document_sources, cluster_splits = set(), {}, {}
+    seen_samples = set()
+    source_windows = SourceWindowTracker()
     splits, statistics = {}, {}
     # Share token integers across samples without duplicating each source for AE/LM.
     token_pool = {}
@@ -162,26 +164,15 @@ def load_multisegment_pretraining(
         with path.open(encoding="utf-8") as stream:
             for line_number, line in enumerate(stream, 1):
                 try:
-                    sample = MultisegmentSample(**json.loads(line))
+                    record = json.loads(line)
+                    sample = MultisegmentSample(**record)
                     sample.validate_plan(preparation_config)
                     if sample.split != split:
                         raise ValueError("record split differs from its JSONL split")
                     if sample.trajectory_id in seen_samples:
                         raise ValueError("duplicate pretraining trajectory_id")
-                    identity = (split, sample.dedup_cluster)
-                    if (
-                        sample.document_id in document_sources
-                        and document_sources[sample.document_id] != identity
-                    ):
-                        raise ValueError("source document changes split or dedup cluster")
-                    if (
-                        sample.dedup_cluster in cluster_splits
-                        and cluster_splits[sample.dedup_cluster] != split
-                    ):
-                        raise ValueError("dedup cluster occurs in multiple pretraining splits")
+                    source_windows.add(record, len(sample.continuation))
                     seen_samples.add(sample.trajectory_id)
-                    document_sources[sample.document_id] = identity
-                    cluster_splits[sample.dedup_cluster] = split
                     counts["source_samples"] += 1
                     counts["read"] += 1
                     segment_ids = [

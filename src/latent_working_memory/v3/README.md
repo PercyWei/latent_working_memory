@@ -64,9 +64,9 @@ d = Lrw - L0; g = Lrw - Lapp
 - 阶段衔接保存并核对 AE＋LM 来源文档与去重簇，QA 不能与其重叠。
 - 基础训练统一使用 `multisegment_random_prefix`，`max_input_tokens=8192`。计算从第一段开始、不超过上限的最大完整段数，再均匀抽取 1 至该段数作为连续输入前缀；只有首段超过上限时才裁剪首段，保留较短输入。
 - 两个 ICAE 与动态共享预训练按 `training.lm_ratio` 为每条来源选择 AE 或 LM，默认 LM 概率为 0.5；AE 重建选中前缀，LM 从其实际终点取紧邻的 Q 个 tokens，Q 由训练配置 `training.lm_target_tokens` 指定，默认 512，与数据构造时估算的续文候选长度分别配置。续文依次来自未选中的正文和保存的 `continuation`；不足 Q 时切换为 AE。
-- 段数和任务由 `training.seed` 与 `trajectory_id` 确定，各来源独立采样，加载后所有 epoch 复用同一结果。每条来源只生成一条训练样本，运行记录保存续文不足导致的任务切换和实际 AE／LM 数量；AutoCompressors 只使用 LM 目标。
+- 段数和任务由 `training.seed` 与 `trajectory_id` 确定，各来源独立采样，加载后所有 epoch 复用同一结果。每条轨迹只生成一条训练样本，运行记录保存续文不足导致的任务切换和实际 AE／LM 数量；AutoCompressors 只使用 LM 目标。
 - ICAE-single 与动态共享预训练将完整选中前缀一次写入 512 slots；ICAE-multi 按 `segment_tokens=1024` 独立写入，各块 512 slots，拼接后联合读取。动态 QA 仍按数据保存的段界更新，两种动态方法共用预训练产物。
-- 数据构造无放回分批读取来源，直到各划分达到配额；每篇合格文档只生成一条轨迹。默认抽取 3–5 段，每段先采样名义长度 l∈[K,3K]，分别保存 `ceil(4 × l × α)` 个字符；尾部 `continuation` 独立保存 `ceil(4 × Q × α)` 个字符，α 为 `content_reserve_ratio`。默认 K=512、α=1.5，每段 3072–9216 字符，正文 9216–46080 字符，对应名义总长 1536–7680 tokens；Q=512 的尾部为 3072 字符。K64 的正文段为 384–1152 字符，正文共 1152–5760 字符。保存的 `estimated_tokens = len(text) / 4` 包含余量，实际 token 数仍由 tokenizer 决定；换 tokenizer 不改变字符分段。
+- 数据构造无放回分批读取来源，直到各划分达到配额；每篇代表原文可生成多条轨迹，完整正文及续文窗口互不重叠，同篇全部轨迹属于同一划分。默认抽取 3–5 段，每段先采样名义长度 l∈[K,3K]，分别保存 `ceil(4 × l × α)` 个字符；尾部 `continuation` 独立保存 `ceil(4 × Q × α)` 个字符，α 为 `content_reserve_ratio`。默认 K=512、α=1.5，每段 3072–9216 字符，正文 9216–46080 字符，对应名义总长 1536–7680 tokens；Q=512 的尾部为 3072 字符。K64 的正文段为 384–1152 字符，正文共 1152–5760 字符。保存的 `estimated_tokens = len(text) / 4` 包含余量，实际 token 数仍由 tokenizer 决定；换 tokenizer 不改变字符分段。
 - 默认数据目录为 `data/fineweb-multisegment-k512-seg1to3x_train32k_20261008/`，**尚未构造，训练前须先生成**。每行保存 `trajectory_id`、正文 `text`、字符区间 `segments` 与尾部候选 `continuation`；正文布局与 FactQA 共用，`source` 仅供追溯。元数据中的 `capacity` 控制构造段长，与 `model.memory_slots` 分别配置；当前两者均为 512。加载只在内存组织前缀和任务，不另存派生文本。
 
 | 目标 | 实现细节 |

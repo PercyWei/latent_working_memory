@@ -20,7 +20,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stage", choices=("prepare-pool", "prepare", "annotate", "finalize"))
     add_run_arguments(parser)
-    parser.add_argument("--limit", type=int, help="Number of frozen documents to annotate")
+    parser.add_argument("--limit", type=int, help="Number of frozen trajectories to annotate")
     args = parser.parse_args()
     if args.stage != "annotate" and args.limit is not None:
         parser.error("--limit applies only to annotate")

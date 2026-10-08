@@ -11,6 +11,7 @@ import torch
 
 from latent_working_memory.data_preparation.fineweb_multisegment.config import DataPreparationConfig
 from latent_working_memory.data_preparation.fineweb_multisegment.records import MultisegmentSample
+from latent_working_memory.data_preparation.fineweb_source import SourceWindowTracker
 
 
 @dataclass(frozen=True)
@@ -58,19 +59,26 @@ def load_datasets(config, tokenizer, max_positions, training):
     stages = ("warmup", "multiround") if training.warmup_epochs else ("multiround",)
     datasets = {stage: {} for stage in stages}
     filtering = {stage: {} for stage in stages}
+    seen_samples = set()
+    source_windows = SourceWindowTracker()
     for split in ("train", "dev", "test"):
         path = root / f"{split}.jsonl"
         rows, rejected, candidates = [], Counter(), 0
         with path.open(encoding="utf-8") as stream:
             while lines := list(islice(stream, 64)):
-                batch = [MultisegmentSample(**json.loads(line)) for line in lines]
+                records = [json.loads(line) for line in lines]
+                batch = [MultisegmentSample(**record) for record in records]
                 texts = []
-                for sample in batch:
+                for record, sample in zip(records, batch, strict=True):
                     if sample.split != split:
                         raise ValueError(
                             f"trajectory split differs from {path}: {sample.trajectory_id}"
                         )
                     sample.validate_plan(preparation)
+                    if sample.trajectory_id in seen_samples:
+                        raise ValueError("duplicate pretraining trajectory_id")
+                    source_windows.add(record, len(sample.continuation))
+                    seen_samples.add(sample.trajectory_id)
                     texts.extend(
                         sample.text[slice(*segment["char_span"])] for segment in sample.segments
                     )

@@ -27,7 +27,7 @@ def case(tmp_path, counts=None, size=40, source_batch_size=4):
         {
             "id": f"document-{i}",
             "url": f"https://example.org/document-{i}",
-            "text": " ".join(f"word{i}_{j}" for j in range(90)),
+            "text": " ".join(f"word{i}_{j}" for j in range(15)),
         }
         for i in range(size)
     ]
@@ -88,7 +88,7 @@ def workers(monkeypatch, fail_stage=None, reject_first=False):
             elif self.stage == "finalize":
                 selection = load_json(root / "selection.json")
                 if reject_first and not rejected:
-                    rejected.add(selection["documents"][0]["document_id"])
+                    rejected.add(selection["documents"][0]["trajectory_id"])
                 target = Path(cfg["dataset_dir"])
                 target.mkdir(parents=True)
                 counts, outcomes = {}, []
@@ -97,14 +97,14 @@ def workers(monkeypatch, fail_stage=None, reject_first=False):
                     rows = [
                         dict(doc, qas=[{}])
                         for doc in selected
-                        if doc["document_id"] not in rejected
+                        if doc["trajectory_id"] not in rejected
                     ]
                     (target / f"{split}.jsonl").write_text(
                         "".join(json.dumps(row) + "\n" for row in rows)
                     )
                     counts[split] = {
-                        "frozen_documents": len(selected),
-                        "complete_documents": len(rows),
+                        "frozen_trajectories": len(selected),
+                        "complete_trajectories": len(rows),
                         "qas": len(rows),
                     }
                     outcomes.extend(
@@ -112,7 +112,7 @@ def workers(monkeypatch, fail_stage=None, reject_first=False):
                             "document_index": len(outcomes) + i,
                             "trajectory_id": doc["trajectory_id"],
                             "failure_reason": "quota_shortfall"
-                            if doc["document_id"] in rejected
+                            if doc["trajectory_id"] in rejected
                             else None,
                         }
                         for i, doc in enumerate(selected)
@@ -195,7 +195,12 @@ def test_exact_quotas_replenish_after_rejected_document_and_record_only_used_sou
     pool = load_json(root / "source-pool.json")
     used = load_previous_sources([root])
     assert pool["statistics"]["source_batches"] > 1
-    assert len(used) == 10 and rejected <= {row["document_id"] for row in used}
+    assigned_ids = {
+        item["trajectory_id"]
+        for item in pool["documents"]
+        if item["document_id"] in {row["document_id"] for row in used}
+    }
+    assert len(used) == 10 and rejected <= assigned_ids
     assert pool["statistics"]["scanned_documents"] >= len(used)
     assert len({row["document_id"] for row in used}) == len(used)
     assert load_json(root / "preparation.json")["used_sources_file"] == "used-sources.jsonl"
@@ -206,6 +211,109 @@ def test_exact_quotas_replenish_after_rejected_document_and_record_only_used_sou
     campaign.run(config)
     assert len(calls) == call_count
     assert before == {path.name: path.read_bytes() for path in root.glob("*.jsonl")}
+
+
+@pytest.mark.parametrize("reject_first", [False, True])
+def test_exact_quota_uses_multiple_nonoverlapping_windows_from_one_source(
+    tmp_path, monkeypatch, reject_first
+):
+    config, _ = case(tmp_path, {"train": 3, "dev": 0, "test": 0}, size=1, source_batch_size=1)
+    config["window"].update(
+        capacity=16,
+        min_segment_ratio=1,
+        max_segment_ratio=1,
+        min_segments=2,
+        max_segments=2,
+        content_reserve_ratio=1,
+    )
+    config["batch_split_counts"]["train"] = 1
+    raw = Path(config["source_dir"]) / "000_00000.parquet"
+    record = pq.read_table(raw).to_pylist()[0]
+    record["text"] = "abcdefghij " * 46 + "uvwxyz"
+    assert len(record["text"]) == 512
+    pq.write_table(pa.Table.from_pylist([record]), raw)
+    calls, rejected = workers(monkeypatch, reject_first=reject_first)
+    result = campaign.run(config)
+    root = Path(config["dataset_dir"])
+    pool = load_json(root / "source-pool.json")
+    rows = [json.loads(line) for line in (root / "train.jsonl").read_text().splitlines()]
+    assert result["completed_by_split"]["train"]["trajectories"] == 3
+    assert len(rows) == len({row["trajectory_id"] for row in rows}) == 3
+    assert {row["document_id"] for row in rows} == {record["id"]}
+    expected_start = 128 if reject_first else 0
+    assert [row["window_char_span"] for row in rows] == [
+        [start, start + 128] for start in range(expected_start, expected_start + 384, 128)
+    ]
+    assert all(row["text"] == record["text"][slice(*row["window_char_span"])] for row in rows)
+    assert pool["statistics"]["scanned_documents"] == 1
+    assert pool["statistics"]["source_batches"] == 1
+    assert len(pool["batches"]) == 3 + bool(rejected)
+    assert len(load_previous_sources([root])) == 1
+    summary = load_json(root / "preparation.json")["summary"]
+    assert summary["frozen_trajectories"] == 3 + bool(rejected)
+    assert summary["complete_trajectories"] == 3
+    assert summary["frozen_source_documents"] == summary["complete_source_documents"] == 1
+    assert summary["by_split"]["train"]["frozen_source_documents"] == 1
+    assert summary["by_split"]["train"]["complete_source_documents"] == 1
+    before = {path.name: path.read_bytes() for path in root.glob("*.jsonl")}
+    count = len(calls)
+    campaign.run(config)
+    assert len(calls) == count
+    assert before == {path.name: path.read_bytes() for path in root.glob("*.jsonl")}
+
+
+@pytest.mark.parametrize(
+    "corruption, message",
+    [
+        ("frozen_overlap", "overlapping source windows"),
+        ("window_char_span", "differs from its frozen source"),
+        ("segments", "differs from its frozen source"),
+        ("document_id", "differs from its frozen source"),
+        ("batch", "belongs to a different batch"),
+    ],
+)
+def test_publication_rejects_corrupt_windows_and_batch_identity_before_replacing_files(
+    tmp_path, monkeypatch, corruption, message
+):
+    config, _ = case(tmp_path, {"train": 3, "dev": 0, "test": 0}, size=1, source_batch_size=1)
+    config["window"].update(
+        capacity=16,
+        min_segment_ratio=1,
+        max_segment_ratio=1,
+        min_segments=2,
+        max_segments=2,
+        content_reserve_ratio=1,
+    )
+    config["batch_split_counts"]["train"] = 1
+    raw = Path(config["source_dir"]) / "000_00000.parquet"
+    record = pq.read_table(raw).to_pylist()[0]
+    record["text"] = "abcdefghij " * 46 + "uvwxyz"
+    pq.write_table(pa.Table.from_pylist([record]), raw)
+    workers(monkeypatch)
+    campaign.run(config)
+    root = Path(config["dataset_dir"])
+    if corruption == "frozen_overlap":
+        pool = load_json(root / "source-pool.json")
+        pool["documents"][1]["window_char_span"] = [127, 255]
+        save_json(root / "source-pool.json", pool)
+    else:
+        batches = Path(config["artifacts_dir"]) / "batches"
+        staged_path = batches / "batch-001/dataset/train.jsonl"
+        row = load_json(staged_path)
+        if corruption == "batch":
+            row = load_json(batches / "batch-002/dataset/train.jsonl")
+        elif corruption == "window_char_span":
+            row[corruption] = [127, 255]
+        elif corruption == "segments":
+            row[corruption][0]["char_span"][1] -= 1
+            row[corruption][1]["char_span"][0] -= 1
+        else:
+            row[corruption] = "different-source"
+        staged_path.write_text(json.dumps(row) + "\n")
+    before = {path.name: path.read_bytes() for path in root.glob("*.json*")}
+    with pytest.raises(ValueError, match=message):
+        campaign.finalize(config)
+    assert before == {path.name: path.read_bytes() for path in root.glob("*.json*")}
 
 
 def test_recovery_reuses_pending_allocation_and_allows_endpoint_change(tmp_path, monkeypatch):
@@ -310,7 +418,7 @@ def test_report_and_finalize_use_frozen_prompt_content(tmp_path, monkeypatch):
     for path in Path(config["prompts_dir"]).glob("*.txt"):
         path.unlink()
     assert campaign.report(config)["dataset_published"]
-    assert campaign.finalize(config)["summary"]["complete_documents"] == 1
+    assert campaign.finalize(config)["summary"]["complete_trajectories"] == 1
 
 
 def test_finalize_rejects_changed_rules_and_mixed_prompts_without_replacing_publication(
@@ -347,7 +455,7 @@ def test_atomic_publication_can_resume_after_interruption(tmp_path, monkeypatch)
         campaign.run(config)
     assert not (Path(config["dataset_dir"]) / "preparation.json").exists()
     monkeypatch.setattr(publication.os, "replace", replace)
-    assert campaign.finalize(config)["summary"]["complete_documents"] == 1
+    assert campaign.finalize(config)["summary"]["complete_trajectories"] == 1
 
 
 def test_concurrent_controller_and_live_child_are_rejected(tmp_path, monkeypatch):

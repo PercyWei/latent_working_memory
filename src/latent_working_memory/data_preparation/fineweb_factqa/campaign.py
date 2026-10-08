@@ -120,7 +120,7 @@ def report(config: dict) -> dict:
     completed_indices = {b["batch_index"] for b in completed}
     by_split = {
         split: {
-            "trajectories": sum(b["by_split"][split]["complete_documents"] for b in completed),
+            "trajectories": sum(b["by_split"][split]["complete_trajectories"] for b in completed),
             "qas": sum(b["by_split"][split]["qas"] for b in completed),
         }
         for split in ("train", "dev", "test")
@@ -156,9 +156,9 @@ def report(config: dict) -> dict:
             {
                 "batch_index": index,
                 "published": index in completed_indices,
-                "annotation_finished_documents": finished,
-                "annotation_quota_complete_documents": quota_complete,
-                "document_failures": len(failures),
+                "annotation_finished_trajectories": finished,
+                "annotation_quota_complete_trajectories": quota_complete,
+                "trajectory_failures": len(failures),
                 "usage": usage,
             }
         )
@@ -184,7 +184,7 @@ def report(config: dict) -> dict:
         "completed_batch_tokens_per_train_trajectory": completed_usage["total_tokens"] / train_count
         if train_count
         else None,
-        "usage_scope": "Actual requests for all splits and failed documents; completed_batches_usage includes only published batches, all_batches_usage also includes ongoing batches. Missing usage is not estimated.",
+        "usage_scope": "Actual requests for all splits and failed trajectories; completed_batches_usage includes only published batches, all_batches_usage also includes ongoing batches. Missing usage is not estimated.",
         "batches": batches,
         "status": state,
     }
@@ -232,7 +232,7 @@ def run(config: dict) -> dict:
                     completed = _completed(template, pool)
                     counts = {
                         split: sum(
-                            batch["by_split"][split]["complete_documents"] for batch in completed
+                            batch["by_split"][split]["complete_trajectories"] for batch in completed
                         )
                         for split in ("train", "dev", "test")
                     }

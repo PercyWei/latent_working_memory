@@ -93,18 +93,18 @@ def segment_lengths(count, available_chars, config, rng):
     return parts
 
 
-def sample_window(text_length, document_id, seed, config):
-    """抽取余量前的名义 token 段长及含余量的连续字符窗口。"""
-    available_chars = text_length - config.continuation_chars
-    max_count = min(config.max_segments, available_chars // config.min_segment_chars)
-    if max_count < config.min_segments:
-        raise ValueError("source text cannot fit the minimum segments and continuation")
+def sample_windows(text_length, document_id, seed, config):
+    """顺序抽取不重叠窗口；每个窗口包含逐段余量及 continuation。"""
     rng = random.Random(f"{seed}:segmentation:{document_id}")
-    count = rng.randint(config.min_segments, max_count)
-    parts = segment_lengths(count, available_chars, config, rng)
-    candidate_chars = config.candidate_chars(parts)
-    start = rng.randint(0, text_length - candidate_chars)
-    return start, parts, start + candidate_chars
+    start = 0
+    while text_length - start >= config.minimum_window_chars:
+        available_chars = text_length - start - config.continuation_chars
+        max_count = min(config.max_segments, available_chars // config.min_segment_chars)
+        count = rng.randint(config.min_segments, max_count)
+        parts = segment_lengths(count, available_chars, config, rng)
+        candidate_end = start + config.candidate_chars(parts)
+        yield start, parts, candidate_end
+        start = candidate_end
 
 
 def _nonempty(value: object, name: str) -> str:

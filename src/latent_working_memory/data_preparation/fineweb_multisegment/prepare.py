@@ -20,7 +20,7 @@ from latent_working_memory.data_preparation.fineweb_source import (
     write_used_sources,
 )
 from latent_working_memory.data_preparation.pretrain.config import PreparationConfig
-from latent_working_memory.data_preparation.segmentation import TOKEN_ESTIMATION_RULE, sample_window
+from latent_working_memory.data_preparation.segmentation import TOKEN_ESTIMATION_RULE
 
 
 @dataclass(frozen=True)
@@ -30,34 +30,33 @@ class Document:
     split: str
     dedup_cluster: str
     source: dict
+    windows: list[tuple[int, list[int], int]]
 
 
 def build_samples(documents, config, split):
-    """最终选中来源逐篇构造一次，字符分段与 FactQA 共用采样规则。"""
+    """输出配额选择时保存的非重叠窗口计划，字符分段与 FactQA 共用规则。"""
     for document in (d for d in documents if d.split == split):
-        start, parts, candidate_end = sample_window(
-            len(document.text), document.document_id, config.selection_seed, config.window
-        )
-        cuts = [0, *accumulate(config.window.reserved_chars(part) for part in parts)]
-        end = start + cuts[-1]
-        text = document.text[start:end]
-        yield MultisegmentSample(
-            trajectory_id=f"{document.document_id}:{start}:{end}",
-            document_id=document.document_id,
-            dedup_cluster=document.dedup_cluster,
-            split=split,
-            source=document.source,
-            window_char_span=[start, end],
-            text=text,
-            segments=[
-                {"segment_id": f"seg{i}", "char_span": [a, b]}
-                for i, (a, b) in enumerate(zip(cuts[:-1], cuts[1:], strict=True))
-            ],
-            continuation=document.text[end:candidate_end],
-            text_char_length=len(text),
-            estimated_tokens=len(text) / 4,
-            estimated_tokens_rule=TOKEN_ESTIMATION_RULE,
-        )
+        for start, parts, candidate_end in document.windows:
+            cuts = [0, *accumulate(config.window.reserved_chars(part) for part in parts)]
+            end = start + cuts[-1]
+            text = document.text[start:end]
+            yield MultisegmentSample(
+                trajectory_id=f"{document.document_id}:{start}:{end}",
+                document_id=document.document_id,
+                dedup_cluster=document.dedup_cluster,
+                split=split,
+                source=document.source,
+                window_char_span=[start, end],
+                text=text,
+                segments=[
+                    {"segment_id": f"seg{i}", "char_span": [a, b]}
+                    for i, (a, b) in enumerate(zip(cuts[:-1], cuts[1:], strict=True))
+                ],
+                continuation=document.text[end:candidate_end],
+                text_char_length=len(text),
+                estimated_tokens=len(text) / 4,
+                estimated_tokens_rule=TOKEN_ESTIMATION_RULE,
+            )
 
 
 def write_readme(output_dir, metadata):
@@ -71,7 +70,9 @@ def write_readme(output_dir, metadata):
             if stats["trajectories"]
             else "—"
         )
-        rows.append(f"| {split} | {stats['trajectories']:,} | {interval} |")
+        rows.append(
+            f"| {split} | {stats['trajectories']:,} | {stats['documents']:,} | {interval} |"
+        )
     total = sum(s["trajectories"] for s in metadata["statistics"].values())
     text = f"""# {created:%Y%m%d}_FineWeb 多段文本数据集
 
@@ -79,14 +80,14 @@ def write_readme(output_dir, metadata):
 
 最后修订时间：{stamp}
 
-`{output_dir.name}` 基于 [FineWeb sample-10BT](https://huggingface.co/datasets/HuggingFaceFW/fineweb) 英文网页构建，用于多段写入、正文重构与续文预测。每篇文档生成一条轨迹，保存正文、固定字符分段和紧邻正文的续文候选，无需原始 Parquet 即可读取。
+`{output_dir.name}` 基于 [FineWeb sample-10BT](https://huggingface.co/datasets/HuggingFaceFW/fineweb) 英文网页构建，用于多段写入、正文重构与续文预测。每篇文档可生成多条互不重叠的轨迹，保存正文、固定字符分段和紧邻正文的续文候选，无需原始 Parquet 即可读取。
 
 ## 规模与规则
 
 共 {total:,} 条轨迹，引用 {metadata["referenced_documents"]:,} 篇文档；分 {metadata["source_statistics"]["source_batches"]:,} 批扫描 {metadata["source_statistics"]["scanned_documents"]:,} 篇来源文档。
 
-| 划分 | 轨迹数 | 正文字符数范围 |
-|---|---:|---:|
+| 划分 | 轨迹数 | 来源文档数 | 正文字符数范围 |
+|---|---:|---:|---:|
 {chr(10).join(rows)}
 
 | 参数 | 取值 |
@@ -103,9 +104,9 @@ K 与倍率指定余量前的名义长度；保存的正文包含逐段余量，
 
 ## 构造流程
 
-1. 按固定随机流无放回分批读取，质量及长度过滤后加入累计候选池。按文档 ID、规范化 URL、正文及近重复关系聚类，排除已有数据使用的来源及其匹配簇；每簇至多选一篇，按簇划分 train/dev/test。配额不足继续读取，来源耗尽则报错。
-2. 扣除续文窗口后，根据原文字符预算抽取段数及每段名义长度 `lᵢ`。各段独立扩充为 `ceil(4 × lᵢ × α)` 个字符，逐段取整后求和得到正文长度。采样时为剩余段保留最低字符预算。
-3. 在正文后保留独立的 `ceil(4 × Q × α)` 字符续文窗口，以各窗口之和确定随机截取范围。正文保存为 `text`，尾部保存为 `continuation`；按最终字符长度记录分段。读取时先切段再分别分词，实际续文不足 Q tokens 时过滤。
+1. 按固定随机流无放回分批读取，质量及长度过滤后加入累计候选池。按文档 ID、规范化 URL、正文及近重复关系聚类，排除已有数据使用的来源及其匹配簇；每簇至多选一篇，按簇划分 train/dev/test，同篇全部轨迹归于同一划分。配额按轨迹计数，不足继续读取，来源耗尽则报错。
+2. 从原文起点顺序构造窗口，根据剩余字符预算抽取段数及每段名义长度 `lᵢ`。各段独立扩充为 `ceil(4 × lᵢ × α)` 个字符，逐段取整后求和得到正文长度；采样时为剩余段保留最低字符预算。
+3. 正文后保留独立的 `ceil(4 × Q × α)` 字符续文窗口，下一条从该续文末尾开始，保证正文及续文完整窗口无重叠。余文不足最小窗口时停止；配额最后一篇仅保留所需轨迹。正文保存为 `text`，尾部保存为 `continuation`，按最终字符长度记录分段。读取时先切段再分别分词，实际续文不足 Q tokens 时过滤。
 
 ## 文件与字段
 
@@ -139,7 +140,11 @@ def prepare_dataset(config, output_root, run_id=None, previous_datasets=()):
     previous = load_previous_sources(previous_datasets)
     recipe = PreparationConfig()
     sources, source_statistics = collect_documents(paths, config, previous, recipe)
-    print(f"Source quotas filled; saving {len(sources):,} trajectories to {output_dir}", flush=True)
+    print(
+        f"Source quotas filled; saving {source_statistics['selected_trajectories']:,} "
+        f"trajectories from {len(sources):,} documents to {output_dir}",
+        flush=True,
+    )
     documents = []
     for row in sources:
         documents.append(
@@ -153,6 +158,7 @@ def prepare_dataset(config, output_root, run_id=None, previous_datasets=()):
                     "row_group": row["location"]["row_group"],
                     "row_index": row["location"]["row_index"],
                 },
+                row["windows"],
             )
         )
     output_dir.mkdir(parents=True)

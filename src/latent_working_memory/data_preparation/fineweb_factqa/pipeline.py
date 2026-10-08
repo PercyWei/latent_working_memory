@@ -112,7 +112,7 @@ def prepare(config: dict) -> dict:
     return {
         "stage": "prepare",
         "selection": str(path),
-        "frozen_documents": len(selection["documents"]),
+        "frozen_trajectories": len(selection["documents"]),
         "source_pool_id": selection["source_pool_id"],
         "batch_index": selection["batch_index"],
         "ranges": selection["ranges"],
@@ -137,7 +137,7 @@ def _document_failures(root: Path, documents: list[dict]) -> dict[int, dict]:
 
 def _failure_counts(failures: dict[int, dict]) -> dict[str, int]:
     return {
-        f"{reason}_documents": sum(f["reason"] == reason for f in failures.values())
+        f"{reason}_trajectories": sum(f["reason"] == reason for f in failures.values())
         for reason in ("content_filtered", "annotation_contract_failed")
     }
 
@@ -490,8 +490,8 @@ def _round_summary(results: list[dict]) -> dict:
         rounds.append(
             {
                 "round_index": number,
-                "documents": len(entries),
-                "complete_quota_documents": sum(r["complete_quota"] for r in entries),
+                "trajectories": len(entries),
+                "complete_quota_trajectories": sum(r["complete_quota"] for r in entries),
                 "generated_candidates": sum(
                     s["generated_count"] for r in entries for s in r["segments"]
                 ),
@@ -512,9 +512,9 @@ def _round_summary(results: list[dict]) -> dict:
             }
         )
     return {
-        "documents": len(results),
-        "initial_complete_documents": sum(r["rounds"][0]["complete_quota"] for r in results),
-        "latest_complete_documents": sum(r["assembly"]["ok"] for r in results),
+        "trajectories": len(results),
+        "initial_complete_trajectories": sum(r["rounds"][0]["complete_quota"] for r in results),
+        "latest_complete_trajectories": sum(r["assembly"]["ok"] for r in results),
         "rounds": rounds,
     }
 
@@ -523,14 +523,14 @@ def _annotation_summary(root: Path, documents: list[dict]) -> dict:
     results = _document_results(root, documents)
     failures = _document_failures(root, documents)
     return {
-        "frozen_documents": len(documents),
-        "annotated_documents": sum(result["finished"] for result in results),
+        "frozen_trajectories": len(documents),
+        "annotated_trajectories": sum(result["finished"] for result in results),
         **_failure_counts(failures),
-        "incomplete_documents": sum(
+        "incomplete_trajectories": sum(
             not result["finished"] and result["document_index"] not in failures
             for result in results
         ),
-        "complete_quota_documents": sum(result["assembly"]["ok"] for result in results),
+        "complete_quota_trajectories": sum(result["assembly"]["ok"] for result in results),
         "generated_candidates": sum(
             segment["generated_count"]
             for result in results
@@ -554,13 +554,13 @@ def _annotation_summary(root: Path, documents: list[dict]) -> dict:
 
 
 def annotate(config: dict, limit: int | None = None) -> dict:
-    """Generate, locally verify and review the frozen documents without replacing any."""
+    """Generate, locally verify and review the frozen trajectories without replacing any."""
     root, prompts = _batch(config)
     documents = _selection(root)["documents"]
     if limit is None:
         limit = len(documents)
     if type(limit) is not int or not 0 <= limit <= len(documents):
-        raise ValueError("annotate limit must be within the frozen document count")
+        raise ValueError("annotate limit must be within the frozen trajectory count")
     client = AnnotationClient(config["annotation"], root, Path(config["cache_dir"]), prompts)
     pending = [(index, document) for index, document in enumerate(documents[:limit])]
     failures: list[Exception] = []
@@ -718,23 +718,31 @@ def finalize(config: dict) -> dict:
         stage["input_tokens"] + stage["output_tokens"] for stage in request_stats.values()
     )
     summary = {
-        "frozen_documents": len(documents),
-        "annotated_documents": sum(r["finished"] for r in results),
-        "complete_documents": len(trajectories),
+        "frozen_trajectories": len(documents),
+        "frozen_source_documents": len({d["document_id"] for d in documents}),
+        "annotated_trajectories": sum(r["finished"] for r in results),
+        "complete_trajectories": len(trajectories),
+        "complete_source_documents": len({d["document_id"] for d in trajectories}),
         **_failure_counts(failures),
-        "quota_failed_documents": sum(
+        "quota_failed_trajectories": sum(
             d["failure_reason"] == "quota_shortfall" for d in final_results
         ),
         "trajectory_success_rate": len(trajectories) / len(documents) if documents else None,
         "final_qas": sum(len(t["qas"]) for t in trajectories),
         "by_split": {
             split: {
-                "frozen_documents": sum(d["split"] == split for d in documents),
-                "complete_documents": sum(d["split"] == split for d in trajectories),
+                "frozen_trajectories": sum(d["split"] == split for d in documents),
+                "frozen_source_documents": len(
+                    {d["document_id"] for d in documents if d["split"] == split}
+                ),
+                "complete_trajectories": sum(d["split"] == split for d in trajectories),
+                "complete_source_documents": len(
+                    {d["document_id"] for d in trajectories if d["split"] == split}
+                ),
                 **_failure_counts(
                     {i: f for i, f in failures.items() if documents[i]["split"] == split}
                 ),
-                "quota_failed_documents": sum(
+                "quota_failed_trajectories": sum(
                     d["split"] == split and d["failure_reason"] == "quota_shortfall"
                     for d in final_results
                 ),
@@ -744,12 +752,14 @@ def finalize(config: dict) -> dict:
         },
         "by_segment_count": {
             str(n): {
-                "frozen_documents": sum(len(d["segments"]) == n for d in documents),
-                "complete_documents": sum(len(d["segments"]) == n for d in trajectories),
+                "frozen_trajectories": sum(len(d["segments"]) == n for d in documents),
+                "complete_trajectories": sum(len(d["segments"]) == n for d in trajectories),
             }
             for n in sorted({len(d["segments"]) for d in documents})
         },
-        "network_tokens_per_frozen_document": total_tokens / len(documents) if documents else None,
+        "network_tokens_per_frozen_trajectory": total_tokens / len(documents)
+        if documents
+        else None,
         "network_tokens_per_successful_trajectory": total_tokens / len(trajectories)
         if trajectories
         else None,

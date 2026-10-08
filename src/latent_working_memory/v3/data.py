@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from latent_working_memory.data_preparation.fineweb_factqa.assembly import validate_trajectory
+from latent_working_memory.data_preparation.fineweb_source import SourceWindowTracker
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,8 +178,8 @@ def load_factqa(dataset_dir: str | Path, tokenizer) -> dict[str, tuple[FactQATra
     qa_config = preparation["qa"]
     if type(qa_config["max_answer_chars"]) is not int or qa_config["max_answer_chars"] < 1:
         raise ValueError("qa.max_answer_chars must be a positive integer")
-    seen_documents, seen_trajectories, seen_questions, seen_sources = set(), set(), set(), set()
-    cluster_splits = {}
+    seen_trajectories, seen_questions = set(), set()
+    source_windows = SourceWindowTracker()
     result = {}
     for split in ("train", "dev", "test"):
         trajectories = []
@@ -188,24 +189,13 @@ def load_factqa(dataset_dir: str | Path, tokenizer) -> dict[str, tuple[FactQATra
                 try:
                     record = json.loads(line)
                     trajectory = tokenize_trajectory(record, tokenizer, qa_config, split)
-                    cluster = trajectory.dedup_cluster
-                    if cluster in cluster_splits and cluster_splits[cluster] != split:
-                        raise ValueError("a dedup cluster occurs in multiple dataset splits")
-                    source = trajectory.source
-                    location = (source["file"], source["row_group"], source["row_index"])
-                    if trajectory.document_id in seen_documents:
-                        raise ValueError("duplicate source document in FactQA dataset")
                     if trajectory.trajectory_id in seen_trajectories:
                         raise ValueError("duplicate trajectory ID in FactQA dataset")
-                    if location in seen_sources:
-                        raise ValueError("duplicate source row in FactQA dataset")
+                    source_windows.add(record)
                     if seen_questions.intersection(trajectory.qas):
                         raise ValueError("duplicate QA ID in FactQA dataset")
-                    seen_documents.add(trajectory.document_id)
                     seen_trajectories.add(trajectory.trajectory_id)
-                    seen_sources.add(location)
                     seen_questions.update(trajectory.qas)
-                    cluster_splits[cluster] = split
                     trajectories.append(trajectory)
                 except (ValueError, KeyError, TypeError) as error:
                     raise ValueError(f"{path}:{line_number}: {error}") from error

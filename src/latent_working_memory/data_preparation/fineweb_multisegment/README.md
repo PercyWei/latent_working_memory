@@ -15,7 +15,7 @@
 | `source_dir` | `data/raw/HuggingFaceFW-fineweb/sample-10BT` | FineWeb 原始 Parquet 目录 |
 | `source_batch_size` | 100000 | 每批原文读取量，配额不足继续读 |
 | `source_seed` | 20260907 | 来源顺序与去重簇划分的随机种子 |
-| `selection_seed` | 20260916 | 候选排序、文档分段及窗口起点的随机种子 |
+| `selection_seed` | 20260916 | 文档内段数与段长的随机种子 |
 | `split_counts` | 32000 / 128 / 128 | train / dev / test 成品精确配额，也用于确定来源划分比例 |
 | `window.capacity` | 512 | 段长基准 K |
 | `window.min_segment_ratio` | 1 | 名义段长的最小倍率 |
@@ -48,9 +48,9 @@ uv run --frozen python -m latent_working_memory.data_preparation.fineweb_multise
 ## 构造流程
 
 1. **读取与过滤**：按 `source_seed` 无放回分批读取，保留能容纳最低分段要求及续文余量的文档，重复 ID 不再入池。
-2. **去重与选源**：对累计候选按 ID、规范化 URL、正文及词 5-gram Jaccard 相似度 ≥ 0.9 的近重复关系分组，排除与已有数据匹配的整个簇。每簇最多选一篇，按簇划分 train/dev/test；全部配额满足后固定来源，来源耗尽则报告缺额。
-3. **采样分段**：每篇选中文档生成一条轨迹。扣除独立续文窗口后，按字符预算抽取段数及各段名义长度；每次为后续段保留最低字符预算。正文长度为各段 `ceil(4 × lᵢ × α)` 之和。随机流由 `selection_seed` 和文档 ID 决定。
-4. **截取窗口**：按逐段取整后的正文总长与续文长度之和随机截取连续原文；正文保存为 `text`，尾部保存为 `continuation`，按最终字符长度记录分段。FactQA 使用相同规则，仅取 Q=0，并在含余量的完整段上生成 QA。
+2. **去重与选源**：对累计候选按 ID、规范化 URL、正文及词 5-gram Jaccard 相似度 ≥ 0.9 的近重复关系分组，排除与已有数据匹配的整个簇。每簇最多选一篇，按簇划分 train/dev/test；配额按轨迹数计，全部达标后固定来源，来源耗尽则报告缺额。
+3. **采样分段**：从每篇代表原文开头依次构造多条轨迹。按剩余字符预算扣除续文窗口，抽取段数及各段名义长度，并为后续段保留最低预算。正文长度为各段 `ceil(4 × lᵢ × α)` 之和；随机流由 `selection_seed` 和文档 ID 决定。
+4. **截取窗口**：正文保存为 `text`，紧邻尾部保存为 `continuation`；下一条从本条续文末尾开始，完整窗口（含余量）互不重叠，剩余原文不足最小窗口时停止。同篇全部轨迹属于同一 split，最后一篇只取填满配额所需的窗口。FactQA 共用此规则，取 Q=0 并在完整段上生成 QA。
 
 ## 输出
 
@@ -64,6 +64,6 @@ uv run --frozen python -m latent_working_memory.data_preparation.fineweb_multise
 | `text_char_length` / `estimated_tokens` / `estimated_tokens_rule` | 正文字符数、估算 token 数及规则 `len(text) / 4` |
 | `continuation` | 紧接正文的连续尾部，仅含续文目标及其自身余量 |
 
-以上共有字段与 FactQA 同名同结构。字符区间左闭右开，按 Python 字符串索引计数；各段连续覆盖 `text`。`estimated_tokens` 按含余量的实际正文字符数计算，与余量前的名义长度不同。读取时先切段再分别分词，实际 token 数与 tokenizer 有关；续文不足 Q tokens 的样本由使用端过滤。
+以上共有字段与 FactQA 同名同结构。字符区间左闭右开，按 Python 字符串索引计数；各段连续覆盖 `text`。`estimated_tokens` 按含余量的实际正文字符数计算，与余量前的名义长度不同。读取时先切段再分别分词，实际 token 数与 tokenizer 有关；续文候选由使用端按训练目标长度处理。
 
-`used-sources.jsonl` 按文档 ID 去重排序，逐条保存 `{document_id, dedup_cluster, source}`，仅登记本次实际生成轨迹的文档，供后续构造排除来源。`preparation.json` 保存构造配置、`run_id`、实际创建时间、显式排除目录、排除来源数和统计，通过 `used_sources_file` 指向该文件，不重复保存来源大列表。
+`used-sources.jsonl` 按文档 ID 去重排序，逐条保存 `{document_id, dedup_cluster, source}`，每篇实际使用原文仅登记一次，后续构造按整篇原文排除。`preparation.json` 保存构造配置、`run_id`、实际创建时间、显式排除目录、排除来源数及独立原文数、轨迹数统计，通过 `used_sources_file` 指向该文件，不重复保存来源大列表。

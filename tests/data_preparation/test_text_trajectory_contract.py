@@ -12,18 +12,26 @@ from latent_working_memory.data_preparation.fineweb_factqa.assembly import (
     assemble_document,
     qa_quotas,
 )
+from latent_working_memory.data_preparation.segmentation import sample_windows
 
 
 def test_multisegment_text_layout_is_preserved_by_factqa_assembly():
     source_text = "".join(f"Fact {index:06d} has value-{index:06d}.\n" for index in range(2000))
+    config = DataPreparationConfig(source_dir="unused")
     document = Document(
         document_id="contract-document",
         text=source_text,
         split="train",
         dedup_cluster="example.org/contract-document",
         source={"file": "synthetic.parquet", "row_group": 2, "row_index": 7},
+        windows=[
+            next(
+                sample_windows(
+                    len(source_text), "contract-document", config.selection_seed, config.window
+                )
+            )
+        ],
     )
-    config = DataPreparationConfig(source_dir="unused")
     (sample,) = build_samples([document], config, "train")
     sample.validate_plan(config.window)
     multisegment = asdict(sample)

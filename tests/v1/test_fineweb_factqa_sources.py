@@ -14,7 +14,7 @@ from latent_working_memory.data_preparation.fineweb_factqa.storage import load_j
 from latent_working_memory.data_preparation.fineweb_source import write_used_sources
 from latent_working_memory.data_preparation.pretrain.dedup import source_key
 from latent_working_memory.data_preparation.pretrain.fineweb import document_split
-from latent_working_memory.data_preparation.segmentation import SegmentationConfig, sample_window
+from latent_working_memory.data_preparation.segmentation import SegmentationConfig, sample_windows
 
 
 SEED = 20260907
@@ -29,7 +29,7 @@ def _record(name, split="train", text=None):
             return {
                 "id": name,
                 "url": url,
-                "text": text if text is not None else (name + " document. ") * 30,
+                "text": text if text is not None else ((name + " document. ") * 30)[:120],
             }
     raise AssertionError("fixture split not found")
 
@@ -165,6 +165,44 @@ def test_partial_batches_consume_candidates_before_reading_another_source_batch(
     assert activity["reads"] == [0, 1, 2, 3]
 
 
+def test_one_source_supplies_disjoint_batches_and_is_referenced_only_once(tmp_path, monkeypatch):
+    records = [
+        _record("long", text="unique-long article " * 40),
+        dict(_record("fresh", text="fresh content " * 30), id="long"),
+    ]
+    config, activity = _pool_config(tmp_path, records, monkeypatch, source_batch_size=1)
+    config["window"].update(
+        capacity=16, min_segment_ratio=1, max_segment_ratio=1, min_segments=2, max_segments=2
+    )
+    references, read_references = [], sources.referenced_records
+
+    def capture(values):
+        values = list(values)
+        references.append([row["document_id"] for row in values])
+        yield from read_references(values)
+
+    monkeypatch.setattr(sources, "referenced_records", capture)
+    pool = sources.prepare_pool(config)
+    selected = []
+    with closing(sources.source_records(pool)) as stream:
+        source_trajectories = len(records[0]["text"]) // 128
+        for index in range(source_trajectories):
+            sources.allocate_batch(config, pool, stream, {"train": 1, "dev": 0, "test": 0})
+            selected.extend(_selection(config, index)["documents"])
+            assert activity["reads"] == [0]
+            assert len(_used(config)) == 1
+        with pytest.raises(ValueError, match="exhausted"):
+            sources.allocate_batch(config, pool, stream, {"train": 1, "dev": 0, "test": 0})
+    assert [document["window_char_span"] for document in selected] == [
+        [index * 128, (index + 1) * 128] for index in range(source_trajectories)
+    ]
+    assert len({document["trajectory_id"] for document in selected}) == source_trajectories
+    assert {document["document_id"] for document in selected} == {"long"}
+    assert pool["statistics"]["frozen_trajectories"] == source_trajectories
+    assert pool["statistics"]["frozen_source_documents"] == 1
+    assert references.count(["long"]) == 1
+
+
 def test_ledger_records_assigned_sources_before_annotation_not_unused_or_rejected(
     tmp_path, monkeypatch
 ):
@@ -205,11 +243,11 @@ def test_late_bridge_and_same_id_do_not_change_old_splits_or_add_duplicate_sourc
     config, activity = _pool_config(tmp_path, records, monkeypatch, source_batch_size=3)
     pool = sources.prepare_pool(config)
     with closing(sources.source_records(pool)) as stream:
-        sources.allocate_batch(config, pool, stream, config["batch_split_counts"])
+        sources.allocate_batch(config, pool, stream, dict.fromkeys(SPLITS, 100))
         old = copy.deepcopy(pool["documents"])
         sources.allocate_batch(config, pool, stream, {"train": 1, "dev": 0, "test": 0})
-    assert pool["documents"][:3] == old
-    assert pool["documents"][3]["document_id"] == "survivor"
+    assert pool["documents"][: len(old)] == old
+    assert pool["documents"][len(old)]["document_id"] == "survivor"
     assert {doc["document_id"]: doc["split"] for doc in old} == {
         "a": "train",
         "b": "test",
@@ -247,7 +285,7 @@ def test_previous_ledger_excludes_ids_urls_text_and_transitive_near_clusters_wit
     assert sources.prepare_pool(config) == pool
     with closing(sources.source_records(pool)) as stream:
         sources.allocate_batch(config, pool, stream, {"train": 1, "dev": 0, "test": 0})
-    assert [d["document_id"] for d in pool["documents"]] == ["unused"]
+    assert {d["document_id"] for d in pool["documents"]} == {"unused"}
     assert pool["statistics"]["previously_used_documents"] == 5
     assert [d["document_id"] for d in _used(config)] == ["unused"]
 
@@ -307,21 +345,26 @@ def test_variable_character_windows_always_fit_and_reproduce(length):
         content_reserve_ratio=1.5,
     )
     for seed in range(40):
-        start, parts, end = sample_window(length, "document", seed, config)
-        assert (start, parts, end) == sample_window(length, "document", seed, config)
-        assert 6 <= len(parts) <= min(10, length // 4608)
-        assert 0 <= start < end <= length
-        assert all(4608 <= config.reserved_chars(part) <= 6144 for part in parts)
-        assert end - start == sum(config.reserved_chars(part) for part in parts)
+        windows = list(sample_windows(length, "document", seed, config))
+        assert windows == list(sample_windows(length, "document", seed, config))
+        cursor = 0
+        for start, parts, end in windows:
+            assert start == cursor
+            assert 6 <= len(parts) <= min(10, (length - start) // 4608)
+            assert 0 <= start < end <= length
+            assert all(4608 <= config.reserved_chars(part) <= 6144 for part in parts)
+            assert end - start == sum(config.reserved_chars(part) for part in parts)
+            cursor = end
+        assert length - cursor < config.minimum_window_chars
         if length == 27648:
-            assert start == 0 and parts == [768] * 6 and end == 27648
+            assert windows == [(0, [768] * 6, 27648)]
 
 
 def test_long_documents_cover_all_segment_counts_and_lengths_vary():
     config = SegmentationConfig(
         capacity=512, min_segment_ratio=1.5, max_segment_ratio=2, min_segments=6, max_segments=10
     )
-    windows = [sample_window(60000, f"doc-{i}", 17, config) for i in range(100)]
+    windows = [next(sample_windows(60000, f"doc-{i}", 17, config)) for i in range(100)]
     assert {len(parts) for _, parts, _ in windows} == set(range(6, 11))
     assert len({tuple(parts) for _, parts, _ in windows}) == 100
 
@@ -338,8 +381,8 @@ def test_factqa_pool_uses_shared_window_and_freezes_character_boundaries(
     with closing(sources.source_records(pool)) as stream:
         sources.allocate_batch(config, pool, stream, {"train": 1, "dev": 0, "test": 0})
     frozen = pool["documents"][0]
-    start, parts, end = sample_window(
-        len(record["text"]), record["id"], config["selection_seed"], segmentation
+    start, parts, end = next(
+        sample_windows(len(record["text"]), record["id"], config["selection_seed"], segmentation)
     )
     assert frozen["window_char_span"] == [start, end]
     assert frozen["trajectory_id"] == f"first:{start}:{end}"
