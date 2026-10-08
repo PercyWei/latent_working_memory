@@ -35,11 +35,16 @@ def collect_documents(paths, config, previous, recipe):
         duplicate_id=0,
     )
     selected_by_split = dict.fromkeys(config.split_counts, 0)
+    progress = ", ".join(
+        f"{split}={selected_by_split[split]:,}/{target:,}"
+        for split, target in config.split_counts.items()
+    )
     with closing(parquet_records(paths, config.source_seed)) as records:
         while True:
             batch_index = statistics["source_batches"] + 1
             print(
-                f"Batch {batch_index}: reading up to {config.source_batch_size:,} documents",
+                f"Batch {batch_index}: reading up to {config.source_batch_size:,} documents; "
+                f"last selection: {progress}",
                 flush=True,
             )
             started = perf_counter()
@@ -77,6 +82,7 @@ def collect_documents(paths, config, previous, recipe):
                 f"Batch {batch_index}: read/filter {perf_counter() - started:.1f}s; "
                 f"scanned={statistics['scanned_documents']:,}; "
                 f"candidates={len(candidates):,} (+{added:,}); "
+                f"last selection: {progress}; "
                 + ("deduplicating" if added else "no new candidates, skipping deduplication"),
                 flush=True,
             )
