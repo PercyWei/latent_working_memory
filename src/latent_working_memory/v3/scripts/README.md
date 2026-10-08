@@ -38,6 +38,8 @@ LWM_REPO_DIR="/path/to/latent_working_memory"
 
 每条来源按 `--lm-ratio` 选择一个 AE 或 LM 目标，默认 LM 概率 0.5。LM 从选中前缀的终点取 Q-token 续文，可包含尚未选中的正文；训练 Q 由 `training.lm_target_tokens` 决定，默认 512，可通过 `--lm-target-tokens` 修改，不读取构造元信息中的候选长度。续文不足时转为 AE。采样使用训练 seed 与 `trajectory_id`，加载一次后所有 epoch 复用，结果不受 batch 或 GPU 数量影响。AutoCompressors 保持 LM-only，使用最多 Q-token 的可用续文；短流保留后续分段的监督，使写入器仍能训练。模型的 `memory_slots` 与构造配置的 K 分别设置，当前默认均为 512。
 
+ICAE-single 一次压缩选中前缀；ICAE-multi 预训练按 `memory_slots × icae_segment_ratio` 分块，默认 `512 × 3 = 1536 tokens`，尾块允许更短。每块独立压缩为 512 slots，拼接后计算 AE／LM 损失；QA 与评估保留 FactQA 原有段界。
+
 QA 默认使用统一格式的 FactQA，可从 [ModelScope 数据仓库](https://modelscope.cn/datasets/percyWeeei/latent-working-memory/files) 下载到表中目录。格式见 [FactQA 构造说明](../../data_preparation/fineweb_factqa/README.md)，训练读取 `preparation.json` 与三个 split 文件。
 
 默认将实验记录到 SwanLab 项目 `latent-working-memory-v3`。在仓库根目录的 `.env` 中填写：
@@ -122,13 +124,14 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 | 参数 | 用途／默认值 |
 |---|---|
 | `--gpus 0,1` | 使用的物理 GPU；默认 `0,1`，最终评估使用第一张卡 |
-| `--micro-batch-size-per-gpu` | 每卡一次并行处理的样本／轨迹数；共享预训练默认 8，其余默认 4 |
-| `--gradient-accumulation-steps` | 每次更新累积的 microbatch 数；共享预训练默认 1，其余默认 2 |
+| `--micro-batch-size-per-gpu` | 每卡一次并行处理的样本／轨迹数；ICAE 两阶段和共享预训练默认 8，其余默认 4 |
+| `--gradient-accumulation-steps` | 每次更新累积的 microbatch 数；ICAE 两阶段和共享预训练默认 1，其余默认 2 |
 | `--qa-batch-size 8` | 每条轨迹一次读取的题数，默认 8 |
 | `--append-slots 32` | 动态方法每次追加的 slots 数，默认 32；首次为 512，覆盖保持末块大小 |
 | `--max-input-tokens 8192` | 预训练输入长度上限，默认 8192 tokens |
 | `--lm-ratio 0.5` | ICAE 与动态共享预训练选择 LM 的概率；AutoCompressors 保持 LM-only |
 | `--lm-target-tokens 512` | 预训练 LM 的续文目标长度，由训练配置决定 |
+| `--icae-segment-ratio 3` | ICAE-multi 预训练块长与每块 slots 数的比值；QA 与评估保留原段界 |
 | `--bptt-steps 0` | 动态 warmup／policy 的 BPTT 窗口；0 表示默认的完整 BPTT，2 表示每两轮截断 |
 | `--epochs` | 各阶段训练轮数 |
 | `--train-samples`、`--dev-samples`、`--max-steps`、`--eval-trajectories` | 覆盖档位预算，`0` 表示不设该上限 |
@@ -136,7 +139,15 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 | `--run-id`、`--group` | 运行标识默认按上海时间生成；group 默认直接使用 `run-id`，可单独覆盖 |
 | `--output-root` | 产物父目录，默认 `artifacts/v3` |
 
-全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数。共享预训练双卡默认 **2 × 8 × 1 = 16**，其余阶段默认 **2 × 4 × 2 = 16**。`dynamic_pretrain.json` 只配置共享预训练，动态 QA 分别读取 `memory_change.json`、`information_loss.json`；三个 baseline 读取 `icae_single.json`、`icae_multi.json`、`autocompressors.json`。
+全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数，双卡默认均为 16：
+
+| 方法／阶段 | 每卡 microbatch | 梯度累积 |
+|---|---:|---:|
+| ICAE-single／ICAE-multi：预训练、QA | 8 | 1 |
+| 动态共享预训练 | 8 | 1 |
+| AutoCompressors、动态 warmup／policy | 4 | 2 |
+
+`dynamic_pretrain.json` 只配置共享预训练，动态 QA 分别读取 `memory_change.json`、`information_loss.json`；三个 baseline 读取 `icae_single.json`、`icae_multi.json`、`autocompressors.json`。
 
 当前先按完整 BPTT 运行；若要测量两轮截断的显存和质量，可执行：
 

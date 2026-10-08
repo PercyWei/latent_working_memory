@@ -316,9 +316,12 @@ def test_minimal_command_builds_all_methods_with_preset_batch_settings(mode):
         assert job.config.model.model_name_or_path == str(
             Path.home() / "models/Qwen3-4B-Instruct-2507"
         )
-        shared = job.key == "dynamic-pretrain"
-        assert job.config.training.micro_batch_size_per_gpu == (8 if shared else 4)
-        assert job.config.training.gradient_accumulation_steps == (1 if shared else 2)
+        batch_eight = job.key == "dynamic-pretrain" or job.config.objective.method in {
+            "icae_single",
+            "icae_multi",
+        }
+        assert job.config.training.micro_batch_size_per_gpu == (8 if batch_eight else 4)
+        assert job.config.training.gradient_accumulation_steps == (1 if batch_eight else 2)
         assert job.config.training.global_batch_size(2) == 16
         assert job.config.objective.qa_batch_size == 8
 
@@ -455,6 +458,39 @@ def test_pretraining_sampling_overrides_do_not_change_qa_or_autocompressors_task
     assert ac.config.objective.stage == "lm"
 
 
+@pytest.mark.parametrize(
+    "method", ["all", "icae_multi", "icae_single", "dynamic", "autocompressors"]
+)
+def test_icae_segment_ratio_override_only_changes_multi_pretraining(tmp_path, method):
+    _, _, defaults = gpu_job.build_jobs(arguments(tmp_path, "--method", method))
+    _, _, overridden = gpu_job.build_jobs(
+        arguments(tmp_path, "--method", method, "--icae-segment-ratio", "5")
+    )
+    for before, after in zip(defaults, overridden, strict=True):
+        multi_pretrain = (
+            after.config.objective.method == "icae_multi"
+            and after.config.objective.stage == "pretrain"
+        )
+        expected = (
+            replace(before.config.objective, icae_segment_ratio=5)
+            if multi_pretrain
+            else before.config.objective
+        )
+        assert after.config.objective == expected
+        assert after.config.training == before.config.training
+        assert after.config.model == before.config.model
+
+
+def test_icae_segment_ratio_default_preserves_the_preset(tmp_path, monkeypatch):
+    def preset(path):
+        config = load_experiment(path)
+        return replace(config, objective=replace(config.objective, icae_segment_ratio=4))
+
+    monkeypatch.setattr(gpu_job, "load_experiment", preset)
+    _, _, jobs = gpu_job.build_jobs(arguments(tmp_path, "--method", "icae_multi"))
+    assert all(job.config.objective.icae_segment_ratio == 4 for job in jobs)
+
+
 def test_explicit_overrides_and_zero_remove_profile_limits(tmp_path):
     args = arguments(
         tmp_path,
@@ -570,6 +606,9 @@ def test_plan_derives_each_global_batch_from_selected_gpus_microbatch_and_accumu
         ["--max-input-tokens", "0"],
         ["--lm-target-tokens", "0"],
         ["--lm-target-tokens", "-1"],
+        ["--icae-segment-ratio", "0"],
+        ["--icae-segment-ratio", "-1"],
+        ["--icae-segment-ratio", "1.5"],
         ["--bptt-steps", "-1"],
         ["--method", "icae_single", "--bptt-steps", "2"],
         ["--method", "icae_multi", "--bptt-steps", "2"],

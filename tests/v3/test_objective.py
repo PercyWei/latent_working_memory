@@ -272,7 +272,7 @@ def test_dynamic_initial_64_append_8_and_overwrite_preserves_last_block_size(
 )
 @pytest.mark.parametrize("kind", ["ae", "continuation"])
 def test_pretrain_ae_and_lm_backpropagate_from_frozen_reader(method, kind):
-    model = task(method, "pretrain", segment_tokens=3)
+    model = task(method, "pretrain", icae_segment_ratio=1)
     calls = trace_writes(model)
     example = PretrainExample("s", "d", "c", kind, (3, 4, 5, 6, 7, 8), (9, 10))
     if kind == "ae":
@@ -287,6 +287,58 @@ def test_pretrain_ae_and_lm_backpropagate_from_frozen_reader(method, kind):
         assert calls[0][0].tolist() == list(example.input_ids)
     assert result["metrics"]["slots_final"] == model.codec.memory_slots * len(calls)
     assert result["metrics"]["target_tokens"] == len(example.target_ids) + 1
+
+
+@pytest.mark.parametrize("memory_slots,ratio", [(3, 1), (4, 1), (3, 2), (4, 2)])
+def test_icae_multi_pretrain_uses_slot_scaled_chunks_and_joint_reader(memory_slots, ratio):
+    model = TokenMemoryTask(
+        build_model(memory_slots=memory_slots),
+        TinyTokenizer(),
+        ObjectiveConfig(method="icae_multi", icae_segment_ratio=ratio),
+    )
+    writes = trace_writes(model)
+    reads, original = [], model.codec.answer_nll
+
+    def traced(memories, prompts, answers):
+        reads.append(memories)
+        return original(memories, prompts, answers)
+
+    model.codec.answer_nll = traced
+    tokens = tuple(range(3, 17))
+    example = PretrainExample("ae", "d", "c", "ae", tokens, tokens)
+    result = model(example)
+    result["loss"].backward()
+    chunk_length = memory_slots * ratio
+    expected = [tokens[i : i + chunk_length] for i in range(0, len(tokens), chunk_length)]
+    assert [tuple(tokens.tolist()) for tokens, _, _ in writes] == expected
+    assert len(expected[-1]) < chunk_length
+    assert all(not history for _, history, _ in writes)
+    assert all(len(memory) == memory_slots for _, _, memory in writes)
+    assert all(memory.grad is not None and memory.grad.abs().sum() > 0 for _, _, memory in writes)
+    assert len(reads) == 1 and len(reads[0]) == 1
+    torch.testing.assert_close(reads[0][0], torch.cat([memory for _, _, memory in writes]))
+    assert result["metrics"]["slots_final"] == memory_slots * len(expected)
+
+
+@pytest.mark.parametrize("ratio", [1, 3])
+def test_icae_multi_qa_preserves_variable_data_segments_independent_of_ratio(ratio):
+    model = task("icae_multi", "qa", icae_segment_ratio=ratio)
+    record = trajectory()
+    segment_tokens = ((3, 4), tuple(range(5, 12)), (12, 13, 14, 15))
+    record = replace(
+        record,
+        segments=tuple(
+            replace(segment, input_ids=tokens)
+            for segment, tokens in zip(record.segments, segment_tokens, strict=True)
+        ),
+        full_input_ids=tuple(token for tokens in segment_tokens for token in tokens),
+    )
+    writes = trace_writes(model)
+    result = model(record)
+    result["loss"].backward()
+    assert [tuple(tokens.tolist()) for tokens, _, _ in writes] == list(segment_tokens)
+    assert all(not history for _, history, _ in writes)
+    assert result["metrics"]["slots_final"] == len(segment_tokens) * model.codec.memory_slots
 
 
 def test_ac_truncates_memory_at_two_segments_but_retains_writer_learning():
@@ -360,7 +412,7 @@ def test_ac_short_sources_retain_writer_and_memory_gradients(total_tokens):
     "method,stage,options",
     [
         ("icae_single", "pretrain", {}),
-        ("icae_multi", "pretrain", {"segment_tokens": 3}),
+        ("icae_multi", "pretrain", {"icae_segment_ratio": 1}),
         ("memory_change", "pretrain", {}),
         ("information_loss", "pretrain", {}),
         ("icae_single", "qa", {}),

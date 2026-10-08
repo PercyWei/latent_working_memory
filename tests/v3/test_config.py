@@ -19,13 +19,17 @@ def test_presets_use_requested_model_and_memory_size(filename):
     assert config.model.gradient_checkpointing is True
     dynamic = config.objective.method in {"memory_change", "information_loss"}
     assert config.objective.append_slots == (32 if dynamic else 8)
-    shared_pretrain = filename.name == "dynamic_pretrain.json"
-    assert config.training.micro_batch_size_per_gpu == (8 if shared_pretrain else 4)
-    assert config.training.gradient_accumulation_steps == (1 if shared_pretrain else 2)
+    large_microbatch = filename.name == "dynamic_pretrain.json" or config.objective.method in {
+        "icae_single",
+        "icae_multi",
+    }
+    assert config.training.micro_batch_size_per_gpu == (8 if large_microbatch else 4)
+    assert config.training.gradient_accumulation_steps == (1 if large_microbatch else 2)
     assert config.training.global_batch_size(2) == 16
     assert config.training.swanlab_project is None
     assert config.training.lm_target_tokens == 512
     assert config.objective.bptt_steps is None
+    assert config.objective.icae_segment_ratio == 3
     if config.objective.stage in {"pretrain", "lm"}:
         assert config.training.pretrain_data_view == "multisegment_random_prefix"
         assert config.training.min_input_tokens == 1
@@ -58,6 +62,17 @@ def test_presets_use_requested_model_and_memory_size(filename):
 def test_objective_rejects_invalid_experiment_contracts(options):
     with pytest.raises(ValueError):
         ObjectiveConfig(**options)
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5])
+def test_icae_segment_ratio_requires_a_positive_integer(value):
+    with pytest.raises(ValueError, match="icae_segment_ratio"):
+        ObjectiveConfig(method="icae_multi", icae_segment_ratio=value)
+
+
+def test_icae_segment_ratio_defaults_to_three():
+    assert ObjectiveConfig(method="icae_multi").icae_segment_ratio == 3
+    assert ObjectiveConfig(method="icae_multi", icae_segment_ratio=2).icae_segment_ratio == 2
 
 
 def test_model_rejects_module_string_in_place_of_list():

@@ -53,7 +53,7 @@ def tiny_task(model_type, method, stage, **options):
     config = ObjectiveConfig(
         method=method,
         stage=stage,
-        segment_tokens=3 if method == "icae_multi" else 12,
+        icae_segment_ratio=1 if method == "icae_multi" else 3,
         ac_min_segment_tokens=3,
         ac_max_segment_tokens=3,
         ac_bptt_steps=2,

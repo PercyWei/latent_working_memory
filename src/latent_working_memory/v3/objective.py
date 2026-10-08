@@ -387,12 +387,17 @@ class TokenMemoryTask(nn.Module):
         )
 
     def _pretrain_objective(self, examples):
+        chunk_tokens = (
+            self.codec.memory_slots * self.cfg.icae_segment_ratio
+            if self.cfg.method == "icae_multi"
+            else None
+        )
         chunks = []
         for example in examples:
             chunks.append(
                 [
-                    example.input_ids[i : i + self.cfg.segment_tokens]
-                    for i in range(0, len(example.input_ids), self.cfg.segment_tokens)
+                    example.input_ids[i : i + chunk_tokens]
+                    for i in range(0, len(example.input_ids), chunk_tokens)
                 ]
                 if self.cfg.method == "icae_multi"
                 else [example.input_ids]

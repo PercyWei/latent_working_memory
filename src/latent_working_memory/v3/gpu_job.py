@@ -156,6 +156,11 @@ def parse_args(argv=None):
         help="预训练 LM 目标的真实 token 数，默认 512；续文候选不足时沿用任务回退规则",
     )
     parser.add_argument(
+        "--icae-segment-ratio",
+        type=positive_count,
+        help="ICAE-multi 预训练块长为 memory_slots × ratio，默认 3；QA 保留原段界",
+    )
+    parser.add_argument(
         "--bptt-steps",
         type=bounded_count,
         help="动态 warmup/policy 每个反传窗口的写入轮数，0 表示完整 BPTT；默认完整展开",
@@ -274,6 +279,8 @@ def build_jobs(args):
                 objective[name] = value
         if method in DYNAMIC_METHODS and args.append_slots is not None:
             objective["append_slots"] = args.append_slots
+        if method == "icae_multi" and stage == "pretrain" and args.icae_segment_ratio is not None:
+            objective["icae_segment_ratio"] = args.icae_segment_ratio
         if (
             method in DYNAMIC_METHODS
             and stage in {"warmup", "policy"}

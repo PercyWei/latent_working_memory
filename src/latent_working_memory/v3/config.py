@@ -74,6 +74,7 @@ class ObjectiveConfig:
     stage: str = "pretrain"
     qa_batch_size: int = 8
     segment_tokens: int = 1024
+    icae_segment_ratio: int = 3
     ac_min_segment_tokens: int = 768
     ac_max_segment_tokens: int = 1024
     ac_bptt_steps: int = 2
@@ -107,6 +108,7 @@ class ObjectiveConfig:
         for name in (
             "qa_batch_size",
             "segment_tokens",
+            "icae_segment_ratio",
             "ac_min_segment_tokens",
             "ac_max_segment_tokens",
             "ac_bptt_steps",
