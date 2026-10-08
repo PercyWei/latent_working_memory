@@ -137,9 +137,9 @@ def prepare_dataset(config, output_root, run_id=None, previous_datasets=()):
     paths = source_files(config.source_dir)
     previous_datasets = [str(path) for path in previous_datasets]
     previous = load_previous_sources(previous_datasets)
-    print("Reading source batches until all split quotas are filled", flush=True)
     recipe = PreparationConfig()
     sources, source_statistics = collect_documents(paths, config, previous, recipe)
+    print(f"Source quotas filled; saving {len(sources):,} trajectories to {output_dir}", flush=True)
     documents = []
     for row in sources:
         documents.append(

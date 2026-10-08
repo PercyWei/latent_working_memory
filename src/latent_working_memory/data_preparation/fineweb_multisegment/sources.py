@@ -3,6 +3,7 @@
 from collections import Counter
 from contextlib import closing
 from itertools import islice
+from time import perf_counter
 
 from latent_working_memory.data_preparation.fineweb_source import split_fractions
 from latent_working_memory.data_preparation.pretrain.dedup import (
@@ -21,6 +22,8 @@ def collect_documents(paths, config, previous, recipe):
     """累计候选参与重聚类，避免后续桥接文档改变已写出的簇或 split。"""
     minimum_chars = config.window.minimum_window_chars
     fractions = split_fractions(config.split_counts)
+    if previous:
+        print(f"Loading {len(previous):,} previously used source documents", flush=True)
     previous_records = list(referenced_records(previous))
     candidates, document_ids = [], set()
     statistics = Counter(
@@ -33,6 +36,12 @@ def collect_documents(paths, config, previous, recipe):
     selected_by_split = dict.fromkeys(config.split_counts, 0)
     with closing(parquet_records(paths, config.source_seed)) as records:
         while True:
+            batch_index = statistics["source_batches"] + 1
+            print(
+                f"Batch {batch_index}: reading up to {config.source_batch_size:,} documents",
+                flush=True,
+            )
+            started = perf_counter()
             batch = list(islice(records, config.source_batch_size))
             if not batch:
                 deficits = ", ".join(
@@ -55,9 +64,17 @@ def collect_documents(paths, config, previous, recipe):
                     candidates.append((record, location))
                     document_ids.add(record["id"])
                     added += 1
+            print(
+                f"Batch {batch_index}: read/filter {perf_counter() - started:.1f}s; "
+                f"scanned={statistics['scanned_documents']:,}; "
+                f"candidates={len(candidates):,} (+{added:,}); "
+                + ("deduplicating" if added else "no new candidates, skipping deduplication"),
+                flush=True,
+            )
             if not added:
                 continue
 
+            started = perf_counter()
             raw = [record for record, _ in candidates]
             clusters = cluster_documents(raw, recipe)
             excluded = (
@@ -84,6 +101,14 @@ def collect_documents(paths, config, previous, recipe):
                         {"record": record, "location": location, "cluster": cluster, "split": split}
                     )
                     selected_by_split[split] += 1
+            progress = ", ".join(
+                f"{split}={selected_by_split[split]:,}/{target:,}"
+                for split, target in config.split_counts.items()
+            )
+            print(
+                f"Batch {batch_index}: dedup/select {perf_counter() - started:.1f}s; {progress}",
+                flush=True,
+            )
             if selected_by_split == config.split_counts:
                 return selected, {
                     **statistics,
