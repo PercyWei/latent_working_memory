@@ -182,8 +182,8 @@ class TrainingConfig:
             raise ValueError("invalid pretraining length interval")
         if self.pretrain_data_view not in {
             "text_samples",
-            "reconstruction_single",
-            "reconstruction_first_write",
+            "multisegment_full",
+            "multisegment_first_write",
         }:
             raise ValueError("unsupported pretrain_data_view")
         for name in ("learning_rate", "weight_decay", "gradient_clip"):

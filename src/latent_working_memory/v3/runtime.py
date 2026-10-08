@@ -18,7 +18,7 @@ from latent_working_memory.v3.data import load_factqa
 from latent_working_memory.v3.model import GistMemoryModel
 from latent_working_memory.v3.pretrain_data import (
     load_pretraining,
-    load_reconstruction_pretraining,
+    load_multisegment_pretraining,
 )
 from latent_working_memory.v3.tracking import (
     configure_training_metrics,
@@ -77,7 +77,7 @@ def load_splits(config, tokenizer):
                 training.max_input_tokens,
             )
         else:
-            splits, statistics = load_reconstruction_pretraining(
+            splits, statistics = load_multisegment_pretraining(
                 training.dataset_dir,
                 tokenizer,
                 training.min_input_tokens,

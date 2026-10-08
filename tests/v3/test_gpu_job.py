@@ -40,7 +40,7 @@ def arguments(tmp_path, *options, run_id="unit-job"):
 
 def prepare_dataset_entries(args):
     # 这里只测试编排入口的文件要求；内容解析由真正的训练/评估测试覆盖。
-    for directory in (args.pretrain_data / "single", args.pretrain_data / "multi", args.qa_data):
+    for directory in (args.pretrain_data, args.qa_data):
         directory.mkdir(parents=True)
         for split in ("train", "dev", "test"):
             (directory / f"{split}.jsonl").write_text("")
@@ -228,9 +228,9 @@ def test_dynamic_methods_share_only_pretraining_and_have_independent_warmup_poli
     assert len({job.config.training.group for job in jobs}) == 1
 
 
-def test_default_pretraining_data_is_the_shared_reconstruction_root():
+def test_default_pretraining_data_is_the_shared_multisegment_root():
     args = gpu_job.parse_args([])
-    assert args.pretrain_data == Path("data/fineweb-reconstruction-k512-doc100k_20260917")
+    assert args.pretrain_data == Path("data/fineweb-multisegment-k512-seg1to3x_train32k_20261008")
 
 
 @pytest.mark.parametrize("mode", ["smoke", "full"])
@@ -348,9 +348,9 @@ def test_all_methods_build_a_complete_topologically_ordered_stage_graph(tmp_path
         else:
             assert Path(job.config.training.dataset_dir) == args.pretrain_data
             assert job.config.training.pretrain_data_view == (
-                "reconstruction_first_write"
+                "multisegment_first_write"
                 if job.config.objective.method in {"memory_change", "information_loss"}
-                else "reconstruction_single"
+                else "multisegment_full"
             )
     assert len({job.config.training.experiment_dir for job in jobs}) == 6
     for method in ("icae_single", "icae_multi"):
@@ -616,10 +616,10 @@ def test_auto_from_missing_checkpoint_fails_before_starting_training(tmp_path, m
 
 def test_shared_pretraining_entry_requires_only_ae_lm_data(tmp_path, monkeypatch):
     args = arguments(tmp_path, "--mode", "full", "--method", "shared_pretrain")
-    (args.pretrain_data / "multi").mkdir(parents=True)
+    args.pretrain_data.mkdir(parents=True)
     (args.pretrain_data / "preparation.json").write_text("{}")
     for split in ("train", "dev", "test"):
-        (args.pretrain_data / "multi" / f"{split}.jsonl").write_text("")
+        (args.pretrain_data / f"{split}.jsonl").write_text("")
     commands = Commands()
     monkeypatch.setattr(gpu_job, "execute", commands)
 
@@ -637,12 +637,9 @@ def test_shared_pretraining_entry_requires_only_ae_lm_data(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("method", ["icae_single", "icae_multi", "autocompressors"])
-def test_baselines_need_single_index_but_not_multi_index(tmp_path, monkeypatch, method):
+def test_baselines_use_the_same_multisegment_root(tmp_path, monkeypatch, method):
     args = arguments(tmp_path, "--method", method)
     prepare_dataset_entries(args)
-    for path in (args.pretrain_data / "multi").iterdir():
-        path.unlink()
-    (args.pretrain_data / "multi").rmdir()
     commands = Commands()
     monkeypatch.setattr(gpu_job, "execute", commands)
 
@@ -650,12 +647,12 @@ def test_baselines_need_single_index_but_not_multi_index(tmp_path, monkeypatch, 
 
     assert result["status"] == "finished"
     trained = [config for call in commands.calls for config in call.get("configs", [])]
-    assert trained[0].training.pretrain_data_view == "reconstruction_single"
+    assert trained[0].training.pretrain_data_view == "multisegment_full"
     assert Path(trained[0].training.dataset_dir) == args.pretrain_data
 
 
-@pytest.mark.parametrize("missing", ["preparation.json", "single/train.jsonl", "multi/dev.jsonl"])
-def test_all_methods_require_both_selected_index_views_before_execution(
+@pytest.mark.parametrize("missing", ["preparation.json", "train.jsonl", "dev.jsonl", "test.jsonl"])
+def test_all_methods_require_multisegment_root_entries_before_execution(
     tmp_path, monkeypatch, missing
 ):
     args = arguments(tmp_path, "--method", "all")

@@ -1,15 +1,15 @@
 # 20260929_FineWeb 事实 QA 构造接口
 
 创建时间：20260929 16:03:54 UTC+08:00
-最后修订时间：20261004 20:46:56 UTC+08:00
+最后修订时间：20261008 11:39:39 UTC+08:00
 
 本目录实现来源筛选、6–10 段随机切分、QA 生成、全量局部核验、全文审查、配额补题和统一交付。运行记录保存在 `artifacts_dir`，正式数据保存在 `dataset_dir`。
 
 ## 配置与入口
 
-- [来源配置](../../../../configs/data_preparation/fineweb-factqa-source-pool.json)：原始语料、来源排除、去重、划分、窗口和批次份额。
-- [批次模板](../../../../configs/data_preparation/fineweb-factqa-6to10-batch000.json)：QA 配额、模型、并发、重试及输出预算。
-- [整轮配置](../../../../configs/data_preparation/fineweb-factqa-train1000.json)：来源配置、批次模板、train 目标、根目录和显式排除的数据集。
+- [来源配置](../../../../configs/data_preparation/fineweb-factqa/fineweb-factqa-source-pool.json)：原始语料、来源排除、去重、划分、窗口和批次份额。
+- [批次模板](../../../../configs/data_preparation/fineweb-factqa/fineweb-factqa-6to10-batch000.json)：QA 配额、模型、并发、重试及输出预算。
+- [整轮配置](../../../../configs/data_preparation/fineweb-factqa/fineweb-factqa-train1000.json)：来源配置、批次模板、train 目标、根目录和显式排除的数据集。
 
 在项目根目录运行：
 

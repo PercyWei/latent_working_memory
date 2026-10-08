@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import itertools
 from bisect import bisect_right
+from collections import defaultdict
 import json
 import random
 from contextlib import ExitStack, closing
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 import pyarrow.parquet as pq
 
@@ -104,3 +105,19 @@ def load_sources(metadata_path: Path) -> list[dict]:
         tuple(metadata["split_fractions"]),
         recipe,
     )
+
+
+def referenced_records(references: Iterable[dict]) -> Iterator[dict]:
+    """Read registered source documents once per row group and verify their identity."""
+    grouped = defaultdict(list)
+    for reference in references:
+        location = reference["source"]
+        grouped[(location["file"], location["row_group"])].append(reference)
+    for (filename, group), entries in grouped.items():
+        with pq.ParquetFile(filename) as parquet:
+            table = parquet.read_row_group(group, columns=["id", "url", "text"])
+        for reference in entries:
+            record = table.slice(reference["source"]["row_index"], 1).to_pylist()[0]
+            if record["id"] != reference["document_id"]:
+                raise ValueError("previous source document differs from its recorded location")
+            yield record

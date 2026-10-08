@@ -101,8 +101,8 @@ def parse_args(argv=None):
     parser.add_argument(
         "--pretrain-data",
         type=Path,
-        default=Path("data/fineweb-reconstruction-k512-doc100k_20260917"),
-        help="共用 FineWeb reconstruction 索引根目录，包含 single、multi 和 preparation.json",
+        default=Path("data/fineweb-multisegment-k512-seg1to3x_train32k_20261008"),
+        help="共用 FineWeb 多段文本数据根目录，包含 train/dev/test.jsonl 和 preparation.json",
     )
     parser.add_argument(
         "--qa-data", type=Path, default=Path("data/fineweb-factqa-train1000_20260930")
@@ -456,11 +456,6 @@ def run_job(args):
         view = job.config.training.pretrain_data_view
         if is_qa or view != "text_samples":
             required_files.add(dataset / "preparation.json")
-        if not is_qa and view != "text_samples":
-            dataset /= {
-                "reconstruction_single": "single",
-                "reconstruction_first_write": "multi",
-            }[view]
         required_files.update(dataset / f"{split}.jsonl" for split in ("train", "dev", "test"))
     if any(job.evaluate for job in jobs):
         required_files.update(

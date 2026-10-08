@@ -1,12 +1,10 @@
 """Tokenize canonical FineWeb AE/continuation samples for v3 pretraining."""
 
-from collections import defaultdict
 from dataclasses import dataclass
 import json
 from pathlib import Path
 
-import pyarrow.parquet as pq
-
+from latent_working_memory.data_preparation.fineweb_multisegment.records import MultisegmentSample
 from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
 
 
@@ -115,7 +113,7 @@ def load_pretraining(
     }
 
 
-def load_reconstruction_pretraining(
+def load_multisegment_pretraining(
     dataset_dir: str | Path,
     tokenizer,
     min_input_tokens: int,
@@ -123,11 +121,11 @@ def load_reconstruction_pretraining(
     view: str,
     lm_only: bool = False,
 ) -> tuple[dict[str, tuple[PretrainExample, ...]], dict]:
-    """Read existing reconstruction indices without materializing another text dataset.
+    """Read text windows and derive paired AE/LM samples from the chosen prefix.
 
-    A single index supplies its final prefix; a multi index supplies its first write.
-    AE and continuation share that prefix, and LM starts immediately after its cut.
-    The old index's memory capacity does not constrain the current model's slots.
+    The maximum crops the selected prefix on the right. Continuation starts at
+    that actual endpoint, including when it precedes the saved write boundary.
+    Source locations are provenance; loading never reads the original Parquet.
     """
     if (
         type(min_input_tokens) is not int
@@ -135,31 +133,29 @@ def load_reconstruction_pretraining(
         or not 1 <= min_input_tokens <= max_input_tokens
     ):
         raise ValueError("input token interval requires positive integers with min <= max")
-    directories = {
-        "reconstruction_single": "single",
-        "reconstruction_first_write": "multi",
-    }
-    if view not in directories:
-        raise ValueError(f"unknown reconstruction data view: {view}")
+    if view not in {"multisegment_full", "multisegment_first_write"}:
+        raise ValueError(f"unknown multisegment data view: {view}")
     root = Path(dataset_dir)
     metadata = json.loads((root / "preparation.json").read_text(encoding="utf-8"))
     continuation_tokens = metadata["config"]["continuation_tokens"]
     if type(continuation_tokens) is not int or continuation_tokens < 1:
-        raise ValueError("reconstruction continuation_tokens must be a positive integer")
+        raise ValueError("multisegment continuation_tokens must be a positive integer")
     tasks = ("continuation",) if lm_only else ("ae", "continuation")
-    groups = defaultdict(lambda: defaultdict(list))
-    indices_by_split, statistics = {}, {}
     seen_samples, document_sources, cluster_splits = set(), {}, {}
+    splits, statistics = {}, {}
+    # Share token integers across samples and each input tuple between its AE/LM pair.
+    token_pool = {}
     for split in ("train", "dev", "test"):
-        path = root / directories[view] / f"{split}.jsonl"
-        indices_by_split[split] = []
-        statistics[split] = {
-            "source_index_candidates": 0,
-            "kept_source_indices": 0,
+        path = root / f"{split}.jsonl"
+        examples, original_lengths, actual_lengths = [], [], []
+        counts = {
+            "source_samples": 0,
+            "kept_source_samples": 0,
+            "cropped_source_samples": 0,
+            "cropped_source_tokens": 0,
             "read": 0,
             "kept": 0,
             "filtered_too_short": 0,
-            "filtered_too_long": 0,
             "filtered_content_length": 0,
             "filtered_continuation_length": 0,
             "read_by_task": {"ae": 0, "continuation": 0},
@@ -168,135 +164,82 @@ def load_reconstruction_pretraining(
         with path.open(encoding="utf-8") as stream:
             for line_number, line in enumerate(stream, 1):
                 try:
-                    row = json.loads(line)
-                    sample_id = row["sample_id"]
-                    if sample_id in seen_samples:
+                    sample = MultisegmentSample(**json.loads(line))
+                    if sample.sample_id in seen_samples:
                         raise ValueError("duplicate pretraining sample_id")
-                    identity = (split, row["dedup_cluster"])
+                    identity = (split, sample.dedup_cluster)
                     if (
-                        row["document_id"] in document_sources
-                        and document_sources[row["document_id"]] != identity
+                        sample.document_id in document_sources
+                        and document_sources[sample.document_id] != identity
                     ):
                         raise ValueError("source document changes split or dedup cluster")
                     if (
-                        row["dedup_cluster"] in cluster_splits
-                        and cluster_splits[row["dedup_cluster"]] != split
+                        sample.dedup_cluster in cluster_splits
+                        and cluster_splits[sample.dedup_cluster] != split
                     ):
                         raise ValueError("dedup cluster occurs in multiple pretraining splits")
-                    if Path(row["source_file"]).is_absolute() or any(
-                        type(row[name]) is not int or row[name] < 0
-                        for name in ("row_group", "row_index")
-                    ):
-                        raise ValueError(
-                            "expected relative source path and nonnegative row location"
-                        )
-                    cuts = row["write_token_ends"]
-                    if (
-                        not cuts
-                        or any(type(cut) is not int or cut < 1 for cut in cuts)
-                        or cuts != sorted(set(cuts))
-                    ):
-                        raise ValueError("invalid target token cuts")
-                    start, end = row["char_start"], row["char_end"]
-                    if type(start) is not int or type(end) is not int or not 0 <= start < end:
-                        raise ValueError("invalid source character interval")
-                    seen_samples.add(sample_id)
-                    document_sources[row["document_id"]] = identity
-                    cluster_splits[row["dedup_cluster"]] = split
-                    indices_by_split[split].append(sample_id)
-                    counts = statistics[split]
-                    counts["source_index_candidates"] += 1
+                    seen_samples.add(sample.sample_id)
+                    document_sources[sample.document_id] = identity
+                    cluster_splits[sample.dedup_cluster] = split
+                    counts["source_samples"] += 1
                     counts["read"] += len(tasks)
                     for task in tasks:
                         counts["read_by_task"][task] += 1
-                    cut = cuts[-1 if view == "reconstruction_single" else 0]
+                    original_cut = sample.write_token_ends[-1 if view == "multisegment_full" else 0]
+                    cut = min(original_cut, max_input_tokens)
                     if cut < min_input_tokens:
                         counts["filtered_too_short"] += len(tasks)
                         continue
-                    if cut > max_input_tokens:
-                        counts["filtered_too_long"] += len(tasks)
+                    ids = tokenizer.encode(sample.text, add_special_tokens=False, truncation=False)
+                    if len(ids) < cut:
+                        counts["filtered_content_length"] += len(tasks)
                         continue
-                    groups[row["source_file"]][row["row_group"]].append(
-                        (split, path, line_number, row)
+                    if len(ids) < cut + continuation_tokens:
+                        counts["filtered_continuation_length"] += len(tasks)
+                        continue
+                    input_ids = tuple(token_pool.setdefault(token, token) for token in ids[:cut])
+                    continuation = tuple(
+                        token_pool.setdefault(token, token)
+                        for token in ids[cut : cut + continuation_tokens]
                     )
+                    examples.extend(
+                        PretrainExample(
+                            f"{sample.sample_id}:{task}",
+                            sample.document_id,
+                            sample.dedup_cluster,
+                            task,
+                            input_ids,
+                            input_ids if task == "ae" else continuation,
+                        )
+                        for task in tasks
+                    )
+                    original_lengths.append(original_cut)
+                    actual_lengths.append(cut)
+                    counts["kept_source_samples"] += 1
+                    counts["cropped_source_samples"] += int(cut < original_cut)
+                    counts["cropped_source_tokens"] += original_cut - cut
+                    counts["kept"] += len(tasks)
+                    for task in tasks:
+                        counts["kept_by_task"][task] += 1
                 except (ValueError, KeyError, TypeError) as error:
                     raise ValueError(f"{path}:{line_number}: {error}") from error
-
-    examples_by_id = {}
-    # Reuse integer objects across the vocabulary, and share each input tuple between
-    # its AE/LM examples. This keeps Python-token storage small on multi-process runs.
-    token_pool = {}
-    for source_file, row_groups in groups.items():
-        with pq.ParquetFile(root / source_file) as source:
-            for row_group, requests in row_groups.items():
-                positions = sorted({row["row_index"] for _, _, _, row in requests})
-                table = source.read_row_group(row_group, columns=["id", "text"])
-                documents = dict(zip(positions, table.take(positions).to_pylist(), strict=True))
-                del table
-                for split, path, line_number, row in requests:
-                    try:
-                        document = documents[row["row_index"]]
-                        if document["id"] != row["document_id"]:
-                            raise ValueError("Parquet location does not match document_id")
-                        start, end = row["char_start"], row["char_end"]
-                        if end > len(document["text"]):
-                            raise ValueError("invalid source character interval")
-                        cut = row["write_token_ends"][-1 if view == "reconstruction_single" else 0]
-                        counts = statistics[split]
-                        ids = tokenizer.encode(
-                            document["text"][start:end],
-                            add_special_tokens=False,
-                            truncation=False,
-                        )
-                        if len(ids) < cut:
-                            counts["filtered_content_length"] += len(tasks)
-                            continue
-                        if len(ids) < cut + continuation_tokens:
-                            counts["filtered_continuation_length"] += len(tasks)
-                            continue
-                        input_ids = tuple(
-                            token_pool.setdefault(token, token) for token in ids[:cut]
-                        )
-                        continuation = tuple(
-                            token_pool.setdefault(token, token)
-                            for token in ids[cut : cut + continuation_tokens]
-                        )
-                        examples_by_id[row["sample_id"]] = tuple(
-                            PretrainExample(
-                                f"{row['sample_id']}:{task}",
-                                row["document_id"],
-                                row["dedup_cluster"],
-                                task,
-                                input_ids,
-                                input_ids if task == "ae" else continuation,
-                            )
-                            for task in tasks
-                        )
-                        counts["kept_source_indices"] += 1
-                        counts["kept"] += len(tasks)
-                        for task in tasks:
-                            counts["kept_by_task"][task] += 1
-                    except (ValueError, KeyError, TypeError) as error:
-                        raise ValueError(f"{path}:{line_number}: {error}") from error
-                del documents
-
-    splits = {}
-    for split, sample_ids in indices_by_split.items():
-        examples = tuple(
-            example for sample_id in sample_ids for example in examples_by_id.get(sample_id, ())
-        )
-        splits[split] = examples
-        for name, field in (("input_tokens", "input_ids"), ("target_tokens", "target_ids")):
-            lengths = [len(getattr(example, field)) for example in examples]
-            statistics[split][name] = {
+        # Prefix statistics count retained sources once; example statistics count AE/LM.
+        for name, lengths in (
+            ("original_source_prefix_tokens", original_lengths),
+            ("actual_source_prefix_tokens", actual_lengths),
+            ("input_tokens", [len(example.input_ids) for example in examples]),
+            ("target_tokens", [len(example.target_ids) for example in examples]),
+        ):
+            counts[name] = {
                 "min": min(lengths) if lengths else None,
                 "max": max(lengths) if lengths else None,
                 "total": sum(lengths),
             }
+        splits[split] = tuple(examples)
+        statistics[split] = counts
     return splits, {
-        "kind": "reconstruction_indices",
+        "kind": "multisegment_text",
         "view": view,
-        "index_directory": directories[view],
         "continuation_tokens": continuation_tokens,
         "input_token_interval": [min_input_tokens, max_input_tokens],
         "splits": statistics,

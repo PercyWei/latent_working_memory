@@ -2,7 +2,7 @@
 
 创建时间：20260915 19:10:20 UTC+08:00
 
-最后修订时间：20261006 15:19:07 UTC+08:00
+最后修订时间：20261008 11:40:33 UTC+08:00
 
 ## 当前入口：固定容量重构预训练
 
@@ -12,7 +12,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `pretrain/prepare_data.py` | 无 tokenizer 的独立构造，仅保存 Parquet 位置、候选字符范围与 token 切分计划 |
+| `../data_preparation/fineweb_multisegment/` | 无 tokenizer 的共用构造，保存完整候选文本、来源与多段 token 切分计划 |
 | `pretrain/data.py` | 读取已保存数据，启动时分词和按真实长度筛选，epoch 复用 |
 | `pretrain/objective.py` | 每次写入后的累计历史 AE 与紧邻续文 LM，完整跨压缩步骤反向传播 |
 | `pretrain/engine.py` | verl BaseEngine＋PyTorch DDP，沿用 v1 replicated engine 的执行方式 |
@@ -21,20 +21,34 @@
 | `pretrain/evaluation.py` | 各次压缩后的损失、一次压缩对照、最终自由重构 |
 | `pretrain/checkpoint.py` | 可变权重、optimizer、游标与各 rank RNG，不保存数据集 |
 
-数据先独立构造并保存：`single/` 与 `multi/` 各自保存 train/dev/test 索引，直接引用原始 Parquet 的文件路径、row group、组内行号、候选字符区间及目标 `write_token_ends`，不另存正文。文件路径相对于数据集目录。构造沿用 v1 质量过滤、去重和来源划分，构造无需 tokenizer，候选字符预算为 `ceil(4 × L × content_reserve_ratio) + 4 × continuation_reserve_tokens`；默认主内容系数 1.5、续文预算 768，实际 LM 目标仍为 512 tokens。训练启动后按文件和 row group 合并读取请求，每个 row group 只读一次、每篇文章在内存中复用，再按当前 tokenizer 分词、按目标 token 计划截取并筛选一次，各 epoch 完整复用保留样本。缓冲只扩大候选读取范围，实际写入和 LM 目标分别限定为 L 与 Q 个连续 tokens。六组共用 multi dev/test；E／F 静态 baseline 同样加载 multi 训练数据，在每个切点从空记忆独立压缩完整前缀。真实单次输入为 `[2K,8K]`；多次为 3～5 段、每段 `[K,3K]`、总长不超过 8K；续文不足 Q 或超出模型窗口的样本也排除，AE／AE＋LM 使用相同筛选。候选数与排除原因写入 `data-filtering.json`，训练步数按保留数量计算。
+新数据由共用 `data_preparation.fineweb_multisegment` 构造器生成。规范目录包含根层 `train.jsonl`、`dev.jsonl`、`test.jsonl`、`preparation.json` 和按实际统计生成的 `README.md`；每条记录保存完整候选 `text`、累计 `write_token_ends` 及来源身份，`source` 中的原始文件、行位置和字符区间只用于追溯。训练不再读取 raw Parquet，也没有 `single/`、`multi/` 两套数据。
+
+构造沿用共用来源过滤、去重和划分，不加载 tokenizer。来源分批读取，`source_batch_size` 控制每批处理量；每篇文档最多构造一条多段轨迹，无放回选样。先采样各段长度，令正文总长 L 为段长之和，再用统一余量系数计算整个候选窗口：`ceil(4 × (L + Q) × content_reserve_ratio)`。默认系数为 1.5，实际 LM 目标 Q 为 512 tokens；正文与续文使用同一余量口径。完整候选窗口包含缓冲，不在构造阶段按某个 tokenizer 截断或固定字符段界。
+
+训练按当前 tokenizer 对每条候选一次性分词，验证保存配置中的段数和每段容量倍率，通过实际长度和模型窗口筛选后保留前 `L + Q` 个连续 tokens。默认 K=512、3–5 段、每段为 `[K,3K]`，正文总长由各段自然累加为 1536–7680 tokens，没有独立总长截断参数；具体约束以 `preparation.json` 为准。各 epoch 复用保留结果，AE／AE＋LM 使用相同筛选，候选数及排除原因写入 `data-filtering.json`。
+
+| 训练或评估路径 | 同一条多段数据的使用方式 |
+|---|---|
+| warm-up | 从空记忆一次压缩最终完整前缀，写入终点取最后一个切点 |
+| 递归训练 | 按全部切点依次写入新段，每步监督累计历史 AE 或紧邻续文 LM |
+| 独立前缀训练 | 各切点从空记忆压缩完整前缀，不传递记忆 |
+| dev/test | 同时评估递归与各位置独立前缀两条路径 |
+
+所有路径共享来源、正文和末尾续文。新 warm-up 使用多段数据的最终前缀，长度分布不同于历史独立 single 数据；旧实验结果以原配置和数据保留，不能按新数据直接续训。当前 `selection.json` 指向新目录，**必须先构造数据，再启动训练**。构造目录由实际配置前缀和 `--run-id` 组成，省略标识时使用执行当天的上海日期；使用其他日期或自定义标识时，需将 `selection.json` 改为实际生成路径。已有消费配置中的 `20261008` 后缀保持不变：
 
 ```bash
-uv run --frozen --no-group cuda124 --group torch214 python -m latent_working_memory.v2.pretrain.prepare_data \
-  --config configs/data_preparation/fineweb-reconstruction-k512-doc100k.json \
-  --output-dir data/fineweb-reconstruction-k512-doc100k_20260917
+uv run --frozen python -m latent_working_memory.data_preparation.fineweb_multisegment \
+  --config configs/data_preparation/fineweb-multisegment/fineweb-multisegment-k512-seg1to3x_train32k.json \
+  --output-root data
 ```
 
+重复使用配置构造独立数据时，以 `--previous-datasets` 显式列出本次全部需排除的旧目录；只更换 `--run-id` 不改变 seed 或样本。成对构造示例和元数据契约见[多段文本构造说明](../data_preparation/fineweb_multisegment/README.md)。
 
 训练后端依赖 `verl==0.8.0`，复用 `codex/verl-v1@e0bfa37` 中经过收敛的 replicated 方案。它是项目对 verl 的 DDP engine 扩展，不使用旧 FSDP2 实验实现。尾批保留全部真实样本；空 rank 执行零权重占位计算参与同步，不增加样本计数。CUDA 采用 BF16 autocast、FP32 可训练权重，CPU 验证采用 FP32。
 
 变长输入只在末尾补齐，补齐状态不进入 pooling 或损失；causal attention 保证有效 token 不会读取末尾补齐位置。模型接收全有效二维 mask，避免 packed-position 检测生成阻止 FlashAttention 的四维 mask。对齐输出转回基座 dtype；基础 pooling 在 FP32 中使用连续分段归约，保持原分组边界并避免原子累加的顺序波动。两个模型各自使用 Transformers 原生逐层 checkpoint（`use_reentrant=False`），不在前向或重算期间切换 adapter。Decoder 的 attention dropout 固定为 0，训练模式用于启用逐层重算，参数仍全部冻结；读取不使用 `no_grad()`，保留到 memory 的梯度。生成时临时切换 Decoder 到 eval 以使用 KV cache，结束后恢复。
 
-`micro_batch_size` 是单卡一次并行的轨迹上限：六组固定为 8；六组 `global_batch_size=32`。每个实验使用两卡，对应正常满批梯度累积 2 次，尾批按实际样本数归一化。A／B 切换训练阶段时不改变 microbatch。同一 rank 的候选按预计读取长度排序，在相同容量下合批；AE／LM 任务和压缩次数可以不同。encoder／decoder 的有效位置预算为：A／B 32768／36928、C／D 16384／36928、E／F 32768／36928。A／B 的 encoder 预算覆盖单压缩最长输入，避免 warm-up 被额外拆批。
+`micro_batch_size` 是单卡一次并行的轨迹上限：六组固定为 8；六组 `global_batch_size=32`。每个实验使用两卡，对应正常满批梯度累积 2 次，尾批按实际样本数归一化。A／B 切换训练阶段时不改变 microbatch。同一 rank 的候选按预计读取长度排序，在相同容量下合批；AE／LM 任务和压缩次数可以不同。encoder／decoder 的有效位置预算为：A／B 32768／36928、C／D 16384／36928、E／F 32768／36928。默认多段计划最长为 7680 tokens，长轨迹可能按位置预算进一步拆批；microbatch=8 是上限，不保证每批均有 8 条。
 
 每条样本分别拼接 prompt 与目标前缀，再统一右侧补齐，按各自目标位置计算损失。同一压缩步骤只调用一次批量读取；已结束轨迹从后续写入与读取中移除，记忆通过可微索引保留跨压缩步骤的梯度。损失先按各自目标 tokens、各自压缩次数平均，再按全局轨迹数平均。`resources/mean_microbatch_size` 记录轨迹组初始平均大小，`resources/mean_active_microbatch_size` 记录各次压缩时实际活跃的平均批大小。
 
@@ -42,7 +56,7 @@ uv run --frozen --no-group cuda124 --group torch214 python -m latent_working_mem
 
 该模式需要 CUDA、BF16/FP16、完整 causal attention 和零 attention dropout，`attention_implementation` 保持 `sdpa`。`padding_free=false` 保留矩形补齐路径用于对照。位置预算在 padding-free 模式下按有效位置之和计算，在矩形模式下按补齐后位置数计算。每条样本仍独立检查模型窗口，展平总长不视为单条上下文长度。
 
-六份可执行起点配置位于 `configs/v2/pretrain/qwen3-4b_pooling_*`，包含 AE／AE＋LM × warm-up／直接多次压缩四组主实验，以及 `ae-static`、`ae-lm-static` 两组独立前缀压缩 baseline。本次六组均使用基础 pooling。默认完整 Encoder（`encoder_layers: null`）、K=512、Q=512、全局 batch=32、学习率 1e-4；两阶段各 32000 条候选训练轨迹，warm-up 组为 1＋2 epochs，直接多次压缩组为 3 epochs，静态 baseline 使用 `independent_prefix_epochs=3`、`warmup_epochs=0`、`multiround_epochs=0`，独立前缀压缩 3 epochs，实际 optimizer steps 按筛选后的样本数计算。模型名沿用已有 Qwen3 配置；真实数据路径、基座 revision 与超参数需按实际实验确定。
+六份可执行起点配置位于 `configs/v2/pretrain/qwen3-4b_pooling_*`，包含 AE／AE＋LM × warm-up／直接多次压缩四组主实验，以及 `ae-static`、`ae-lm-static` 两组独立前缀压缩 baseline。本次六组均使用基础 pooling。默认完整 Encoder（`encoder_layers: null`）、K=512、Q=512、全局 batch=32、学习率 1e-4；两阶段共用 32000 条候选训练轨迹，warm-up 组为 1＋2 epochs，直接多次压缩组为 3 epochs，静态 baseline 使用 `independent_prefix_epochs=3`、`warmup_epochs=0`、`multiround_epochs=0`，独立前缀压缩 3 epochs，实际 optimizer steps 按筛选后的样本数计算。模型名沿用已有 Qwen3 配置；真实数据路径、基座 revision 与超参数需按实际实验确定。
 
 ```bash
 uv sync --frozen --no-group cuda124 --group torch214
@@ -58,7 +72,7 @@ CUDA_VISIBLE_DEVICES=4,5 uv run --frozen --no-group cuda124 --group torch214 pyt
 
 AE＋LM 使用 `training.lm_ratio` 指定每条轨迹本次选择 LM 的概率，否则选择 AE；六组中 AE-only 为 0，AE＋LM 为 0.5。任务贯穿轨迹内全部压缩步骤，每次只执行一次读取；训练损失是选中任务的 token 平均、压缩次数平均与全局样本平均，不再使用 `lm_weight`。任务分配由 seed 和全局 step 确定，在 rank 划分前完成，独立于 dropout RNG；各 epoch 复用文本和切点，但可以选择不同任务。dev/test 始终同时计算 AE 和 LM，保持完整配对评估。
 
-E／F 与 C／D 使用相同的 multi 轨迹、切点、epoch 顺序和任务抽样。对每个终点 `e_t`，从空记忆压缩 `S[:e_t]`，各位置计算相同的累计 AE 或紧邻 LM，先按目标 tokens 平均，再按位置和轨迹平均。位置之间不传递 memory，不训练 Aw；每卡 microbatch=8、全局 batch=32，encoder 预算按完整前缀计。独立前缀阶段不能与其他训练阶段混用。
+E／F 与 C／D 使用相同的多段轨迹、切点、epoch 顺序和任务抽样。对每个终点 `e_t`，从空记忆压缩 `S[:e_t]`，各位置计算相同的累计 AE 或紧邻 LM，先按目标 tokens 平均，再按位置和轨迹平均。位置之间不传递 memory，不训练 Aw；每卡 microbatch=8、全局 batch=32，encoder 预算按完整前缀计。独立前缀阶段不能与其他训练阶段混用。
 
 Dev/test 同时执行递归写入和各位置独立前缀写入。结果 JSON 的两条路径分别使用 `multi_compression/` 和 `single_compression/` 命名空间，逐样本切点记录分别保存为 `multi_compression` 和 `single_compression`。每条路径都报告 `round/<t>/*_nll`、`trajectory_<ae|lm>`、`all/*_nll`、`depth/<T>/*_nll`、`ratio/<b>/*_nll` 及 token 分母。SwanLab dev 的 AE／LM NLL 图用 `compression-1`～`compression-5`、`compression-trajectory` 标记递归结果，用 `single-1`～`single-5`、`single-trajectory` 标记单次结果。dev JSON 另保存 `final_round_multi_compression_<ae|lm>`、`final_round_single_compression_<ae|lm>`：每条轨迹取最后切点，两种 NLL 分别按轨迹等权平均；其差值 `final_round_compression_gap_<ae|lm>` 用于 `dev/paired_gap`，正值表示递归压缩较差。单次路径的最终 NLL 在 dev 图中标为 `single-final`；轨迹深度不一，因此它不等于 `single-5` 或 `single-trajectory`。test JSON 省略这三个可由逐样本切点重算的最终汇总。两条路径的最终自由重构分别保存为逐样本的 `multi_compression_generation`、`single_compression_generation`，汇总指标分别使用 `multi_compression/generation/*` 和 `single_compression/generation/*`。E／F 以独立前缀为主评估，递归路径只是迁移诊断，临时以 Ar 代替未训练的 Aw。旧 E／F checkpoint 不可按新训练协议续训，需重新初始化并使用新输出目录。
 
@@ -68,7 +82,7 @@ warm-up 结束后复制已训练的读取对齐初始化写入对齐，重建 Ad
 
 checkpoint 仅保存 `encoder.*` 下的 LoRA、压缩模块及读写对齐，不保存两份冻结基座。旧共享对象的 `backbone.*` checkpoint 不做自动转换，新实现需新建 run。
 
-中断续训使用相同配置、输出目录和 world size，添加 `--resume <output-dir>/checkpoints/step-XXXXXX.pt`。`--stop-after-steps N` 仅截短本次执行，不改变总预算。启动时读取同一构造身份并重新进行确定性的分词、筛选，随后恢复权重、optimizer、epoch／batch 游标及 RNG；阶段数据随机数与顺序打乱相互独立。
+中断续训使用相同配置、输出目录和 world size，添加 `--resume <output-dir>/checkpoints/step-XXXXXX.pt`。`--stop-after-steps N` 仅截短本次执行，不改变总预算。启动时读取同一构造身份并重新进行确定性的分词、筛选，随后恢复权重、optimizer、epoch／batch 游标及 RNG；构造采样与训练顺序打乱相互独立。
 
 Dev 评估支持互斥的两种设置：`eval_every=1000`（全局间隔＋epoch 结束），或 `eval_every=null, evals_per_epoch=4`（每个 epoch 均匀四次，向上取整并去重）。评估点随实际 epoch 步数生成并记录到 `epoch-plan.json`，恢复训练沿用同一组全局点。A／B 当前运行保留旧间隔；C～F 在启动前切换为四次评估。保存频率及最终 test 独立于 dev 频率。
 

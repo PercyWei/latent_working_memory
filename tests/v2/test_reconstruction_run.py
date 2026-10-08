@@ -15,7 +15,8 @@ import torch.multiprocessing as mp
 from latent_working_memory.v2.memory_codec import CodecConfig
 from latent_working_memory.v2.pretrain.config import SelectionConfig, TrainingConfig
 from latent_working_memory.v2.pretrain.train import run_training
-from latent_working_memory.v2.pretrain.prepare_data import DataPreparationConfig, prepare_dataset
+from latent_working_memory.data_preparation.fineweb_multisegment.config import DataPreparationConfig
+from latent_working_memory.data_preparation.fineweb_multisegment.prepare import prepare_dataset
 from latent_working_memory.v2.pretrain.checkpoint import prune_checkpoints
 
 
@@ -25,9 +26,9 @@ def make_experiment(tmp_path, tiny_base, train_samples=12):
         {
             "id": str(i),
             "url": f"https://example.org/document/{i}",
-            "text": f"article{i} " + "red blue sky water " * (8 + i % 4),
+            "text": f"article{i} " + "red blue sky water " * (12 + i % 3),
         }
-        for i in range(100)
+        for i in range(300)
     ]
     pq.write_table(pa.Table.from_pylist(records), parquet)
     model = CodecConfig(
@@ -44,14 +45,13 @@ def make_experiment(tmp_path, tiny_base, train_samples=12):
         str(parquet),
         capacity=2,
         continuation_tokens=2,
-        continuation_reserve_tokens=3,
-        max_documents=100,
+        source_batch_size=100,
         split_fractions=(0.6, 0.2, 0.2),
-        warmup={"train": train_samples, "dev": 8, "test": 8},
-        multiround={"train": train_samples, "dev": 8, "test": 8},
+        counts={"train": train_samples, "dev": 8, "test": 8},
     )
-    prepare_dataset(preparation, tmp_path / "dataset")
-    selection = SelectionConfig(str(tmp_path / "dataset"))
+    dataset_root = tmp_path / "datasets"
+    metadata = prepare_dataset(preparation, dataset_root, run_id="test")
+    selection = SelectionConfig(str(dataset_root / metadata["dataset"]))
     training = TrainingConfig(
         objective="ae_lm",
         lm_ratio=0.5,

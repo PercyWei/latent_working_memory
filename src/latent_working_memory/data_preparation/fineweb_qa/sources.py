@@ -6,7 +6,6 @@ import copy
 import hashlib
 import itertools
 import math
-import re
 import random
 import uuid
 from datetime import datetime
@@ -15,93 +14,23 @@ import pyarrow.parquet as pq
 from collections import Counter, defaultdict
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Mapping
 
 from latent_working_memory.data_preparation.fineweb_qa.storage import save_json, load_json
 from latent_working_memory.data_preparation.pretrain.config import PreparationConfig
-from latent_working_memory.data_preparation.pretrain.dedup import cluster_documents, source_key
+from latent_working_memory.data_preparation.pretrain.dedup import (
+    cluster_documents,
+    matching_clusters,
+)
 from latent_working_memory.data_preparation.pretrain.fineweb import document_split
 from latent_working_memory.data_preparation.pretrain.quality import document_rejection_reason
-from latent_working_memory.data_preparation.pretrain.sources import parquet_records
-
-
-_WORDS = re.compile(r"\w+")
+from latent_working_memory.data_preparation.pretrain.sources import (
+    parquet_records,
+    referenced_records,
+)
 
 
 def _rank(*parts: object) -> bytes:
     return hashlib.blake2b("\0".join(map(str, parts)).encode(), digest_size=16).digest()
-
-
-def _normalized_text(record: Mapping[str, Any]) -> str:
-    return " ".join(record["text"].split())
-
-
-def _shingles(text: str, min_words: int) -> set[bytes]:
-    words = _WORDS.findall(text.casefold())
-    if len(words) < min_words:
-        return set()
-    return {
-        hashlib.blake2b(" ".join(words[i : i + 5]).encode(), digest_size=8).digest()
-        for i in range(len(words) - 4)
-    }
-
-
-def _prefix(values: set[bytes], frequency: Counter[bytes], threshold: float) -> list[bytes]:
-    ordered = sorted(values, key=lambda token: (frequency[token], token))
-    return ordered[: len(values) - math.ceil(threshold * len(values)) + 1]
-
-
-def _matching_clusters(
-    reference_records, new_records: list[dict], clusters: list[str], recipe: PreparationConfig
-) -> set[str]:
-    """Exclude exact and near-duplicate clusters matched by any reference document."""
-    if not new_records:
-        return set()
-
-    ids: dict[str, set[int]] = defaultdict(set)
-    urls: dict[str, set[int]] = defaultdict(set)
-    texts: dict[str, set[int]] = defaultdict(set)
-    shingle_sets = []
-    for index, record in enumerate(new_records):
-        normalized = _normalized_text(record)
-        ids[record["id"]].add(index)
-        urls[source_key(record["url"])].add(index)
-        texts[normalized].add(index)
-        shingle_sets.append(_shingles(normalized, recipe.near_duplicate_min_words))
-
-    frequency = Counter(token for values in shingle_sets for token in values)
-    postings: dict[bytes, list[int]] = defaultdict(list)
-    for index, values in enumerate(shingle_sets):
-        if values:
-            for token in _prefix(values, frequency, recipe.near_duplicate_threshold):
-                postings[token].append(index)
-
-    excluded: set[str] = set()
-    for old in reference_records:
-        normalized = _normalized_text(old)
-        exact = set(ids.get(old["id"], ()))
-        exact.update(urls.get(source_key(old["url"]), ()))
-        exact.update(texts.get(normalized, ()))
-        excluded.update(clusters[index] for index in exact)
-
-        old_values = _shingles(normalized, recipe.near_duplicate_min_words)
-        if not old_values:
-            continue
-        possible: set[int] = set()
-        for token in _prefix(old_values, frequency, recipe.near_duplicate_threshold):
-            possible.update(postings.get(token, ()))
-        for index in possible:
-            values = shingle_sets[index]
-            if min(len(values), len(old_values)) < recipe.near_duplicate_threshold * max(
-                len(values), len(old_values)
-            ):
-                continue
-            overlap = len(values & old_values)
-            if overlap >= recipe.near_duplicate_threshold * (
-                len(values) + len(old_values) - overlap
-            ):
-                excluded.add(clusters[index])
-    return excluded
 
 
 def _old_pool_matches(
@@ -121,22 +50,7 @@ def _old_pool_matches(
                     raise ValueError("FineWeb ended before the old source pool was reconstructed")
                 yield pair[0]
 
-        return _matching_clusters(references(), new_records, clusters, recipe)
-
-
-def _referenced_records(references):
-    grouped = defaultdict(list)
-    for reference in references:
-        location = reference["source"]
-        grouped[(location["file"], location["row_group"])].append(reference)
-    for (filename, group), entries in grouped.items():
-        with pq.ParquetFile(filename) as parquet:
-            table = parquet.read_row_group(group, columns=["id", "url", "text"])
-        for reference in entries:
-            record = table.slice(reference["source"]["row_index"], 1).to_pylist()[0]
-            if record["id"] != reference["document_id"]:
-                raise ValueError("previous source document differs from its recorded location")
-            yield record
+        return matching_clusters(references(), new_records, clusters, recipe)
 
 
 def pool_after_exclusions(
@@ -253,7 +167,7 @@ def prepare_pool(config: dict, excluded_sources=(), previous_datasets=()) -> dic
         files, source["data_seed"], source["old_pool_documents"], raw, clusters, recipe
     )
     used_clusters = (
-        _matching_clusters(_referenced_records(excluded_sources), raw, clusters, recipe)
+        matching_clusters(referenced_records(excluded_sources), raw, clusters, recipe)
         if excluded_sources
         else set()
     )

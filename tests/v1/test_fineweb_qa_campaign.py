@@ -13,6 +13,37 @@ from latent_working_memory.data_preparation.fineweb_qa.annotation import STAGES
 from latent_working_memory.data_preparation.fineweb_qa.storage import save_json, load_json
 
 
+def test_repository_campaign_resolves_configuration_and_prompt_dependencies(tmp_path, monkeypatch):
+    repository = Path(__file__).resolve().parents[2]
+    monkeypatch.chdir(repository)
+    config_path = Path("configs/data_preparation/fineweb-factqa/fineweb-factqa-train1000.json")
+    config = load_json(config_path)
+    recipe = load_json(Path(config["source_pool_config"]))
+    assert Path(config["batch_template"]).parent == config_path.parent
+    assert Path(config["source_pool_config"]).parent == config_path.parent
+    # Only the frozen source snapshot is synthetic; config and prompts are the
+    # actual published recipe. Resolving inputs must not read Parquet or call a model.
+    config["dataset_dir"] = str(tmp_path / "dataset")
+    config["artifacts_dir"] = str(tmp_path / "campaign")
+    save_json(
+        Path(config["dataset_dir"]) / "source-pool.json",
+        {
+            "config": {key: recipe[key] for key in ("source", "window", "batch_counts")},
+            "previous_datasets": config["previous_datasets"],
+            "split_counts": {"train": config["target_train_trajectories"]},
+        },
+    )
+
+    template, pool = campaign._inputs(config)
+    prompts = campaign._prompt_texts(template)
+
+    assert pool["config"]["window"] == recipe["window"]
+    assert template["source_pool_dir"] == config["dataset_dir"]
+    assert set(prompts) == set(STAGES)
+    assert all(text.strip() for text in prompts.values())
+    assert not Path(config["artifacts_dir"]).exists()
+
+
 def setup_campaign(tmp_path, target=5):
     recipe = {
         "source": {"dataset": "fixture", "scan_documents": 10},

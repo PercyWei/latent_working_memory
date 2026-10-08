@@ -30,7 +30,7 @@
     "seed": 20261004
   },
   "training": {
-    "dataset_dir": "data/fineweb-reconstruction-k512-doc100k_20260917",
+    "dataset_dir": "data/fineweb-multisegment-k512-seg1to3x_train32k_20261008",
     "output_dir": "artifacts/v3/step1-token-memory/train/icae-multi-pretrain",
     "epochs": 1,
     "micro_batch_size_per_gpu": 4,
@@ -44,6 +44,6 @@
     "min_input_tokens": 1024,
     "max_input_tokens": 4096,
     "init_checkpoint": null,
-    "pretrain_data_view": "reconstruction_single"
+    "pretrain_data_view": "multisegment_full"
   }
 }

@@ -55,15 +55,17 @@ d = Lrw - L0; g = Lrw - Lapp
 
 | 数据 | 规范格式 | 处理 |
 |---|---|---|
-| 基础预训练 | `fineweb-reconstruction-k512-doc100k_20260917` 的原文索引，配套同级 `raw/` | 根据原文位置与已保存切点，用当前基座分词并读取正文及紧邻的 512-token 续文 |
+| 基础预训练 | `MultisegmentSample` 文本，根目录 `train/dev/test.jsonl` 与 `preparation.json` | 对保存正文使用当前基座分词，按视图选前缀并右裁剪；从实际终点紧邻读取续文，无需原始 Parquet |
 | 已有文本成品 | 基础构造器的 `TextSample`，目录内 `train/dev/test.jsonl` | 由 `pretrain_data_view=text_samples` 显式选择；按输入长度筛选，不截断文本或目标 |
 | QA | FactQA 发布目录的 `preparation.json` 与 `train/dev/test.jsonl` | 校验已有来源、事实与题池隔离；保留原文、分段、更新点及 `usage` |
 
 - QA 加载支持现行构造流程的 **6–10 段**，不会强制重切为旧笔记中的八段，也不会使用预训练长度筛选参数裁剪轨迹。
 - 训练入口读取并验证数据后记录实际 token 长度与题数。AE＋LM 的 train/dev 在长度筛选后必须仍包含两种任务。
 - 阶段衔接保存并核对 AE＋LM 来源文档与去重簇，QA 不能与其重叠。
-- 三个 baseline 的首组基础训练选择 `reconstruction_single`：使用 `single/` 的最终切点，正文 1024–4096 tokens。两个 ICAE 从同一正文各构造一条 AE 与 LM 样本，分别训练自己的参数；ICAE-multi 按 1024 tokens 独立写入后联合读取。后续完整 QA 轨迹提供更长的历史与更多记忆块训练。
-- 动态共享预训练选择 `reconstruction_first_write`：使用 `multi/` 的第一个切点，筛选 768–1024 tokens 的正文，并读取该切点后紧邻的 512 tokens 作为 LM 目标；不执行原索引的后续递归写入。两种视图均继承原来源与划分，只在内存组织样本，不保存派生副本；目录名中的 `k512` 不决定当前模型的 64 slots。
+- 三个 baseline 的首组基础训练选择 `multisegment_full`：使用末个写入切点，右裁剪到最多 4096 tokens，再过滤不足 1024 tokens 的输入。两个 ICAE 从同一正文各构造一条 AE 与 LM 样本，分别训练自己的参数；ICAE-multi 按 1024 tokens 独立写入后联合读取。后续完整 QA 轨迹提供更长的历史与更多记忆块训练。
+- 动态共享预训练选择 `multisegment_first_write`：使用第一个写入切点，右裁剪到最多 1024 tokens，再过滤不足 768 tokens 的输入；只要求首段实际输入及续文足够，不要求末个切点可用。两种视图均从实际裁剪终点紧邻读取 `preparation.json` 中 `config.continuation_tokens` 指定的续文，默认 512 tokens。AE 与 LM 成对保留；AutoCompressors 只保留 LM。
+- 数据构造按无放回顺序分批读取来源，直到各划分达到配额；每篇合格文档只生成一条轨迹。先抽取 3–5 段及各段长度，每段为 1–3K tokens（K=512，即 512–1536），再求和得到正文计划长度 L，自然范围为 1536–7680 tokens；正文与续文共用候选窗口的 reserve。v3 仍按上述 `max_input_tokens` 右裁剪，不改变原始段长计划。
+- 默认数据目录为 `data/fineweb-multisegment-k512-seg1to3x_train32k_20261008/`，**尚未构造，训练前须先生成**。每行保存正文与切点，`source` 仅记录来源位置；`capacity` 位于元数据 `config`，不决定当前模型的 64 slots。两种视图继承相同来源与划分，只在内存组织样本。运行记录按来源统计原始／实际前缀长度、裁剪条数和裁剪 token 数，并保留任务数、长度过滤和续文不足计数。
 
 | 目标 | 实现细节 |
 |---|---|
@@ -74,7 +76,7 @@ d = Lrw - L0; g = Lrw - Lapp
 | 策略训练 | 采用各自门控；选中路径保留完整跨步梯度，一条轨迹内不更新参数、不 detach 记忆 |
 | AutoCompressors LM | 随机分段，累计记忆参与预测及写入；默认每两段为一个 BPTT 子块，之后 detach 累计记忆，参数在整条样本结束后更新 |
 
-AutoCompressors 在索引数据上每条原始索引只生成一个 continuation 样本，拼接正文与 512-token 续文进行 LM 训练，避免同文被 AE/LM 两份重复使用；该长度也保证有足够的随机分段。对已有 `TextSample`，AE 样本使用输入全文，continuation 样本使用输入和续写的 token 流。子块内保留跨分段的下一 token 预测，子块首 token 不计损失；按目标 token 数平均。冻结读取端的损失通过当前子块内的记忆写入回传，不使用 QA 微调。当前随机分段范围为 768–1024 tokens，尾段可以更短；首组训练轨迹较短，评估时需留意更长累计记忆的泛化表现。
+AutoCompressors 对每条多段文本轨迹只生成一个 continuation 样本，拼接正文与 512-token 续文进行 LM 训练，避免同文被 AE/LM 两份重复使用；该长度也保证有足够的随机分段。对已有 `TextSample`，AE 样本使用输入全文，continuation 样本使用输入和续写的 token 流。子块内保留跨分段的下一 token 预测，子块首 token 不计损失；按目标 token 数平均。冻结读取端的损失通过当前子块内的记忆写入回传，不使用 QA 微调。当前随机分段范围为 768–1024 tokens，尾段可以更短；首组训练轨迹较短，评估时需留意更长累计记忆的泛化表现。
 
 每个 global batch 按实际样本数平均，包括不足一批的尾批。配置项 `micro_batch_size_per_gpu` 控制每卡一次并行处理的完整样本数，`gradient_accumulation_steps` 控制累积次数；全局 batch 根据两者与 GPU 数的乘积计算并记录。五方法默认每卡 microbatch 为 **4**、累积 **2** 次，双卡全局 batch 为 **16**；`qa_batch_size` 默认为 8。相同样本数下，optimizer 更新次数约为原全局 batch 8 设置的一半。
 
