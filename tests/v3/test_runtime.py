@@ -445,7 +445,7 @@ def test_distributed_startup_checkpoint_and_resume_with_empty_tail_rank(tmp_path
 
 
 @pytest.mark.parametrize("filtered_split", ["train", "dev"])
-def test_pretraining_requires_both_objectives_after_actual_length_filtering(
+def test_pretraining_accepts_a_single_objective_after_actual_length_filtering(
     tmp_path, filtered_split
 ):
     backend = Tokenizer(WordLevel({"[UNK]": 0, "a": 1, "b": 2, "c": 3}, unk_token="[UNK]"))
@@ -480,8 +480,8 @@ def test_pretraining_requires_both_objectives_after_actual_length_filtering(
     splits, _ = load_splits(config, tokenizer)
     assert {row.task for row in splits["test"]} == {"ae"}
     restricted = replace(config, training=replace(config.training, max_input_tokens=2))
-    with pytest.raises(ValueError, match=f"pretrain {filtered_split} requires both"):
-        load_splits(restricted, tokenizer)
+    splits, _ = load_splits(restricted, tokenizer)
+    assert {row.task for row in splits[filtered_split]} == {"ae"}
     lm = replace(restricted, objective=ObjectiveConfig(method="autocompressors", stage="lm"))
     splits, _ = load_splits(lm, tokenizer)
     assert {row.task for row in splits[filtered_split]} == {"ae"}
@@ -576,15 +576,20 @@ def test_sample_limits_keep_both_pretraining_tasks_and_full_test_source_identity
 
 
 @pytest.mark.parametrize("name", ["max_train_samples", "max_dev_samples"])
-def test_pretraining_sample_limit_cannot_drop_an_objective(tmp_path, name):
+def test_pretraining_sample_limit_can_keep_one_source_without_forcing_both_objectives(
+    tmp_path, name
+):
     tokenizer = pretraining_corpus(tmp_path)
     config = make_config(tmp_path / "output")
     config = replace(
         config,
         training=replace(config.training, dataset_dir=str(tmp_path), **{name: 1}),
     )
-    with pytest.raises(ValueError, match="at least one example per AE/LM task"):
-        load_splits(config, tokenizer)
+    splits, statistics = load_splits(config, tokenizer)
+    split = "train" if name == "max_train_samples" else "dev"
+    assert len(splits[split]) == statistics["splits"][split]["selected"] == 1
+    assert sum(statistics["splits"][split]["selected_by_task"].values()) == 1
+    assert load_splits(config, tokenizer) == (splits, statistics)
 
 
 def test_selection_follows_full_canonical_validation(tmp_path):

@@ -180,17 +180,17 @@ def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode,
         assert job.config.training.init_checkpoint is None
         assert job.config.training.swanlab_project == "latent-working-memory-v3"
         assert job.config.training.tags == (f"study:{'main' if mode == 'full' else mode}",)
-        assert job.config.training.micro_batch_size_per_gpu == 4
-        assert job.config.training.gradient_accumulation_steps == 2
+        assert job.config.training.micro_batch_size_per_gpu == 8
+        assert job.config.training.gradient_accumulation_steps == 1
         assert job.config.training.global_batch_size(2) == 16
         assert job.config.training.global_batch_size(4) == 32
-        assert job.config.model.memory_slots == 64
-        assert job.config.objective.append_slots == 8
+        assert job.config.model.memory_slots == 512
+        assert job.config.objective.append_slots == 32
         assert job.config.training.experiment_id == "unit-job"
         assert job.config.training.group == "unit-job"
         root = Path(job.config.training.experiment_dir)
         assert Path(job.config.training.output_dir) == root / job.config.objective.stage
-        assert root.name.endswith("-k64_unit-job" if mode == "full" else f"-k64_{mode}_unit-job")
+        assert root.name.endswith("-k512_unit-job" if mode == "full" else f"-k512_{mode}_unit-job")
         assert job.config_path.parent == directory / "plan" / "dynamic"
         assert "global_batch_size" not in job.config.to_dict()["training"]
         command = gpu_job.training_command([job], 4, level["max_steps"])
@@ -221,7 +221,9 @@ def test_dynamic_methods_share_only_pretraining_and_have_independent_warmup_poli
     assert [job.evaluate for job in jobs] == [False, False, True, False, True]
     assert len({job.config.training.output_dir for job in jobs}) == 5
     assert len({job.config.training.experiment_dir for job in jobs}) == 3
-    assert Path(jobs[0].config.training.experiment_dir).name == "shared-pretrain-k64_smoke_unit-job"
+    assert (
+        Path(jobs[0].config.training.experiment_dir).name == "shared-pretrain-k512_smoke_unit-job"
+    )
     assert jobs[1].config.training.experiment_dir == jobs[2].config.training.experiment_dir
     assert jobs[3].config.training.experiment_dir == jobs[4].config.training.experiment_dir
     assert len({job.config.training.seed for job in jobs}) == 1
@@ -234,7 +236,7 @@ def test_default_pretraining_data_is_the_shared_multisegment_root():
 
 
 @pytest.mark.parametrize("mode", ["smoke", "full"])
-def test_minimal_command_builds_all_methods_with_shared_default_settings(mode):
+def test_minimal_command_builds_all_methods_with_preset_batch_settings(mode):
     args = gpu_job.parse_args(["--mode", mode, "--gpus", "4,5"])
     assert args.method == "all"
     assert args.run_id is None
@@ -249,8 +251,9 @@ def test_minimal_command_builds_all_methods_with_shared_default_settings(mode):
         assert job.config.model.model_name_or_path == str(
             Path.home() / "models/Qwen3-4B-Instruct-2507"
         )
-        assert job.config.training.micro_batch_size_per_gpu == 4
-        assert job.config.training.gradient_accumulation_steps == 2
+        dynamic = job.config.objective.method in {"memory_change", "information_loss"}
+        assert job.config.training.micro_batch_size_per_gpu == (8 if dynamic else 4)
+        assert job.config.training.gradient_accumulation_steps == (1 if dynamic else 2)
         assert job.config.training.global_batch_size(2) == 16
         assert job.config.objective.qa_batch_size == 8
 
@@ -290,7 +293,7 @@ def test_cli_only_overrides_explicitly_supplied_preset_values(monkeypatch, overr
         assert job.config.objective.qa_batch_size == 5
         dynamic = job.config.objective.method in {"memory_change", "information_loss"}
         assert job.config.objective.append_slots == (16 if override and dynamic else 12)
-        assert job.config.model.memory_slots == 64
+        assert job.config.model.memory_slots == 512
         assert job.config.model.model_name_or_path == (
             str(Path.home() / "models/override-model") if override else "local/preset-model"
         )
@@ -347,11 +350,10 @@ def test_all_methods_build_a_complete_topologically_ordered_stage_graph(tmp_path
             assert Path(job.config.training.dataset_dir) == args.qa_data
         else:
             assert Path(job.config.training.dataset_dir) == args.pretrain_data
-            assert job.config.training.pretrain_data_view == (
-                "multisegment_first_write"
-                if job.config.objective.method in {"memory_change", "information_loss"}
-                else "multisegment_full"
-            )
+            assert job.config.training.pretrain_data_view == "multisegment_random_prefix"
+            assert job.config.training.min_input_tokens == 1
+            assert job.config.training.max_input_tokens == 8192
+            assert job.config.training.lm_ratio == 0.5
     assert len({job.config.training.experiment_dir for job in jobs}) == 6
     for method in ("icae_single", "icae_multi"):
         stages = [job for job in jobs if job.config.objective.method == method]
@@ -359,8 +361,29 @@ def test_all_methods_build_a_complete_topologically_ordered_stage_graph(tmp_path
         assert stages[0].config.training.experiment_dir == stages[1].config.training.experiment_dir
         assert (
             Path(stages[0].config.training.experiment_dir).name
-            == f"{method.replace('_', '-')}-k64_unit-job"
+            == f"{method.replace('_', '-')}-k512_unit-job"
         )
+
+
+def test_pretraining_sampling_overrides_do_not_change_qa_or_autocompressors_tasks(tmp_path):
+    args = arguments(
+        tmp_path,
+        "--method",
+        "all",
+        "--lm-ratio",
+        "0.75",
+        "--max-input-tokens",
+        "2048",
+    )
+    _, _, jobs = gpu_job.build_jobs(args)
+    for job in jobs:
+        stage = job.config.objective.stage
+        assert job.config.training.lm_ratio == (0.75 if stage == "pretrain" else 0.5)
+        assert job.config.training.max_input_tokens == (
+            2048 if stage in {"pretrain", "lm"} else 8192
+        )
+    ac = next(job for job in jobs if job.config.objective.method == "autocompressors")
+    assert ac.config.objective.stage == "lm"
 
 
 def test_explicit_overrides_and_zero_remove_profile_limits(tmp_path):
@@ -471,6 +494,11 @@ def test_plan_derives_each_global_batch_from_selected_gpus_microbatch_and_accumu
         ["--gradient-accumulation-steps", "-1"],
         ["--append-slots", "0"],
         ["--append-slots", "-1"],
+        ["--lm-ratio", "-0.1"],
+        ["--lm-ratio", "1.1"],
+        ["--lm-ratio", "nan"],
+        ["--lm-ratio", "inf"],
+        ["--max-input-tokens", "0"],
         ["--method", "icae_single", "--append-slots", "8"],
         ["--method", "icae_multi", "--append-slots", "8"],
         ["--method", "autocompressors", "--append-slots", "8"],
@@ -550,8 +578,8 @@ def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
     for job in plan["jobs"]:
         assert job["batching"] == {
             "world_size": world_size,
-            "micro_batch_size_per_gpu": 4,
-            "gradient_accumulation_steps": 2,
+            "micro_batch_size_per_gpu": 8,
+            "gradient_accumulation_steps": 1,
             "global_batch_size": world_size * 8,
         }
         assert "global_batch_size" not in job["config"]["training"]
@@ -630,7 +658,7 @@ def test_shared_pretraining_entry_requires_only_ae_lm_data(tmp_path, monkeypatch
     config = commands.calls[0]["configs"][0]
     assert config.objective.stage == "pretrain"
     assert config.training.experiment_id == "unit-job"
-    assert Path(config.training.experiment_dir).name == "shared-pretrain-k64_unit-job"
+    assert Path(config.training.experiment_dir).name == "shared-pretrain-k512_unit-job"
     assert Path(config.training.output_dir) == Path(config.training.experiment_dir) / "pretrain"
     assert not args.qa_data.exists()
     assert not (args.pretrain_data / "single").exists()
@@ -647,7 +675,7 @@ def test_baselines_use_the_same_multisegment_root(tmp_path, monkeypatch, method)
 
     assert result["status"] == "finished"
     trained = [config for call in commands.calls for config in call.get("configs", [])]
-    assert trained[0].training.pretrain_data_view == "multisegment_full"
+    assert trained[0].training.pretrain_data_view == "multisegment_random_prefix"
     assert Path(trained[0].training.dataset_dir) == args.pretrain_data
 
 
@@ -708,10 +736,10 @@ def test_separate_methods_share_source_id_and_coexist_without_overwriting_series
         "icae-single",
     }
     assert {path.name for path in (directory / "train").iterdir()} == {
-        "shared-pretrain-k64_unit-job",
-        "memory-change-k64_unit-job",
-        "information-loss-k64_unit-job",
-        "icae-single-k64_unit-job",
+        "shared-pretrain-k512_unit-job",
+        "memory-change-k512_unit-job",
+        "information-loss-k512_unit-job",
+        "icae-single-k512_unit-job",
     }
     assert source_metadata.read_bytes() == original_source
     for method in ("memory_change", "information_loss"):

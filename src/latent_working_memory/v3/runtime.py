@@ -84,13 +84,9 @@ def load_splits(config, tokenizer):
                 training.max_input_tokens,
                 training.pretrain_data_view,
                 lm_only=config.objective.stage == "lm",
+                seed=training.seed,
+                lm_ratio=training.lm_ratio,
             )
-        if config.objective.stage == "pretrain":
-            for split in ("train", "dev"):
-                if {example.task for example in splits[split]} != {"ae", "continuation"}:
-                    raise ValueError(
-                        f"pretrain {split} requires both AE and continuation after length filtering"
-                    )
     else:
         splits = load_factqa(training.dataset_dir, tokenizer)
         statistics = {
@@ -143,22 +139,14 @@ def select_examples(rows, limit, seed, split, pretraining):
         task: sorted((row for row in rows if row.task == task), key=priority)
         for task in sorted({row.task for row in rows})
     }
-    if limit < len(groups):
-        raise ValueError(f"{split} sample limit must retain at least one example per AE/LM task")
     quotas = {task: limit * len(group) / len(rows) for task, group in groups.items()}
-    counts = {task: max(1, math.floor(quota)) for task, quota in quotas.items()}
+    counts = {task: math.floor(quota) for task, quota in quotas.items()}
     while sum(counts.values()) < limit:
         task = max(
             (task for task in groups if counts[task] < len(groups[task])),
             key=lambda task: (quotas[task] - counts[task], task),
         )
         counts[task] += 1
-    while sum(counts.values()) > limit:
-        task = max(
-            (task for task in groups if counts[task] > 1),
-            key=lambda task: (counts[task] - quotas[task], task),
-        )
-        counts[task] -= 1
     return tuple(
         sorted(
             (row for task, group in groups.items() for row in group[: counts[task]]), key=priority

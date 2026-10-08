@@ -5,7 +5,7 @@
     "dtype": "bfloat16",
     "attention_implementation": "sdpa",
     "gradient_checkpointing": true,
-    "memory_slots": 64,
+    "memory_slots": 512,
     "lora_rank": 128,
     "lora_alpha": 32,
     "lora_target_modules": [
@@ -28,23 +28,24 @@
     "ac_bptt_steps": 2,
     "append_probability": 0.5,
     "seed": 20261004,
-    "append_slots": 8
+    "append_slots": 32
   },
   "training": {
     "dataset_dir": "data/fineweb-multisegment-k512-seg1to3x_train32k_20261008",
     "output_dir": "artifacts/v3/step1-token-memory/train/dynamic-pretrain",
     "epochs": 1,
-    "micro_batch_size_per_gpu": 4,
-    "gradient_accumulation_steps": 2,
+    "micro_batch_size_per_gpu": 8,
+    "gradient_accumulation_steps": 1,
     "learning_rate": 0.0001,
     "weight_decay": 0.01,
     "gradient_clip": 1,
     "seed": 20261004,
     "eval_every": 25,
     "save_every": 25,
-    "min_input_tokens": 768,
-    "max_input_tokens": 1024,
+    "min_input_tokens": 1,
+    "max_input_tokens": 8192,
     "init_checkpoint": null,
-    "pretrain_data_view": "multisegment_first_write"
+    "pretrain_data_view": "multisegment_random_prefix",
+    "lm_ratio": 0.5
   }
 }

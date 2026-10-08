@@ -339,13 +339,6 @@ class TokenMemoryTask(nn.Module):
     def _pretrain_objective(self, examples):
         chunks = []
         for example in examples:
-            if (
-                self.cfg.method in DYNAMIC_METHODS
-                and len(example.input_ids) > self.cfg.segment_tokens
-            ):
-                raise ValueError(
-                    "dynamic pretraining requires a single segment within segment_tokens"
-                )
             chunks.append(
                 [
                     example.input_ids[i : i + self.cfg.segment_tokens]
@@ -397,10 +390,18 @@ class TokenMemoryTask(nn.Module):
                 if example.task == "ae"
                 else example.input_ids + example.target_ids
             )
+            if len(tokens) < 3:
+                raise ValueError(
+                    "AutoCompressors has no trainable next-token target in the second segment"
+                )
             rng = example_rng(self.cfg.seed, epoch, example.sample_id)
             parts, offset = [], 0
             while offset < len(tokens):
-                size = rng.randint(self.cfg.ac_min_segment_tokens, self.cfg.ac_max_segment_tokens)
+                maximum = self.cfg.ac_max_segment_tokens
+                if offset == 0:
+                    # 短输入也保留第二段监督，使冻结 reader 的损失可经首段记忆反传。
+                    maximum = min(maximum, len(tokens) - 2)
+                size = rng.randint(min(self.cfg.ac_min_segment_tokens, maximum), maximum)
                 parts.append(tokens[offset : offset + size])
                 offset += size
             if len(parts) < 2 or self.cfg.ac_bptt_steps < 2:

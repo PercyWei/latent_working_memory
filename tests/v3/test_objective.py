@@ -272,7 +272,7 @@ def test_dynamic_initial_64_append_8_and_overwrite_preserves_last_block_size(
 )
 @pytest.mark.parametrize("kind", ["ae", "continuation"])
 def test_pretrain_ae_and_lm_backpropagate_from_frozen_reader(method, kind):
-    model = task(method, "pretrain", segment_tokens=3 if method == "icae_multi" else 9)
+    model = task(method, "pretrain", segment_tokens=3)
     calls = trace_writes(model)
     example = PretrainExample("s", "d", "c", kind, (3, 4, 5, 6, 7, 8), (9, 10))
     if kind == "ae":
@@ -282,6 +282,10 @@ def test_pretrain_ae_and_lm_backpropagate_from_frozen_reader(method, kind):
     assert model.codec.memory_embeddings.grad.abs().sum() > 0
     assert all(call[2].grad.abs().sum() > 0 for call in calls)
     assert all(len(history) == 0 for _, history, _ in calls)
+    assert len(calls) == (2 if method == "icae_multi" else 1)
+    if method != "icae_multi":
+        assert calls[0][0].tolist() == list(example.input_ids)
+    assert result["metrics"]["slots_final"] == model.codec.memory_slots * len(calls)
     assert result["metrics"]["target_tokens"] == len(example.target_ids) + 1
 
 
@@ -322,9 +326,32 @@ def test_eval_forward_never_creates_gradient_graph():
 
 def test_ac_rejects_sample_without_any_trainable_cross_segment_target():
     model = task("autocompressors", "lm", ac_min_segment_tokens=3, ac_max_segment_tokens=3)
-    example = PretrainExample("s", "d", "c", "ae", (3, 4, 5, 6), (3, 4, 5, 6))
+    example = PretrainExample("s", "d", "c", "ae", (3, 4), (3, 4))
     with pytest.raises(ValueError, match="no trainable next-token target"):
         model(example)
+
+
+@pytest.mark.parametrize("total_tokens", [3, 4, 6])
+def test_ac_short_sources_retain_writer_and_memory_gradients(total_tokens):
+    model = task("autocompressors", "lm", ac_min_segment_tokens=8, ac_max_segment_tokens=10)
+    calls = trace_writes(model)
+    example = PretrainExample(
+        "short", "document", "cluster", "continuation", (3,), tuple(range(4, 3 + total_tokens))
+    )
+    result = model(example)
+    result["loss"].backward()
+    assert result["metrics"]["segments"] == 2
+    assert result["metrics"]["input_tokens"] == total_tokens
+    assert len(calls) == 1
+    assert calls[0][2].grad.abs().sum() > 0
+    assert model.codec.memory_embeddings.grad.abs().sum() > 0
+    adapter_gradients = [
+        parameter.grad
+        for name, parameter in model.codec.language_model.named_parameters()
+        if "lora_" in name
+    ]
+    assert all(gradient is not None and torch.isfinite(gradient).all() for gradient in adapter_gradients)
+    assert sum(gradient.abs().sum() for gradient in adapter_gradients) > 0
 
 
 @pytest.mark.parametrize(

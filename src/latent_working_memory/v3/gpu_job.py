@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from itertools import groupby
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -83,6 +84,13 @@ def positive_count(value):
     return number
 
 
+def probability(value):
+    number = float(value)
+    if not math.isfinite(number) or not 0 <= number <= 1:
+        raise argparse.ArgumentTypeError("must be a finite probability in [0, 1]")
+    return number
+
+
 def physical_gpus(value):
     devices = [device.strip() for device in value.split(",")]
     if any(re.fullmatch(r"[0-9]+", device) is None for device in devices) or len(
@@ -133,9 +141,19 @@ def parse_args(argv=None):
     )
     parser.add_argument("--qa-batch-size", type=positive_count)
     parser.add_argument(
+        "--lm-ratio",
+        type=probability,
+        help="AE＋LM 预训练中每条来源选择 LM 的概率，默认 0.5；AutoCompressors 始终使用 LM",
+    )
+    parser.add_argument(
+        "--max-input-tokens",
+        type=positive_count,
+        help="预训练压缩输入的 token 上限，默认 8192；QA 阶段沿用数据中的段界",
+    )
+    parser.add_argument(
         "--append-slots",
         type=positive_count,
-        help="动态方法每次追加的 slots 数，默认沿用预设 8；首次写入仍为 64 slots",
+        help="动态方法每次追加的 slots 数，默认沿用预设 32；首次写入为 512 slots",
     )
     for name in ("train-samples", "dev-samples", "max-steps", "eval-trajectories"):
         parser.add_argument(f"--{name}", type=bounded_count, help="覆盖运行档位，0 表示不限")
@@ -266,6 +284,10 @@ def build_jobs(args):
             "group": group,
             "tags": (f"study:{'main' if args.mode == 'full' else args.mode}",),
         }
+        if stage == "pretrain" and args.lm_ratio is not None:
+            training["lm_ratio"] = args.lm_ratio
+        if is_pretrain and args.max_input_tokens is not None:
+            training["max_input_tokens"] = args.max_input_tokens
         # QA 阶段不使用预训练输入长度筛选；真实段界与题池保持原样。
         for name in ("epochs", "micro_batch_size_per_gpu", "gradient_accumulation_steps"):
             value = getattr(args, name)

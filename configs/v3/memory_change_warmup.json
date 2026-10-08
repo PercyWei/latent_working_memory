@@ -5,7 +5,7 @@
     "dtype": "bfloat16",
     "attention_implementation": "sdpa",
     "gradient_checkpointing": true,
-    "memory_slots": 64,
+    "memory_slots": 512,
     "lora_rank": 128,
     "lora_alpha": 32,
     "lora_target_modules": [
@@ -28,7 +28,7 @@
     "ac_bptt_steps": 2,
     "append_probability": 0.5,
     "seed": 20261004,
-    "append_slots": 8
+    "append_slots": 32
   },
   "training": {
     "dataset_dir": "data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008",

@@ -15,13 +15,20 @@ from latent_working_memory.v3.config import (
 def test_presets_use_requested_model_and_memory_size(filename):
     config = load_experiment(filename)
     assert config.model.model_name_or_path == str(Path.home() / "models/Qwen3-4B-Instruct-2507")
-    assert config.model.memory_slots == 64
+    assert config.model.memory_slots == 512
     assert config.model.gradient_checkpointing is True
-    assert config.objective.append_slots == 8
-    assert config.training.micro_batch_size_per_gpu == 4
-    assert config.training.gradient_accumulation_steps == 2
+    dynamic = config.objective.method in {"memory_change", "information_loss"}
+    assert config.objective.append_slots == (32 if dynamic else 8)
+    shared_pretrain = filename.name == "dynamic_pretrain.json"
+    assert config.training.micro_batch_size_per_gpu == (8 if shared_pretrain else 4)
+    assert config.training.gradient_accumulation_steps == (1 if shared_pretrain else 2)
     assert config.training.global_batch_size(2) == 16
     assert config.training.swanlab_project is None
+    if config.objective.stage in {"pretrain", "lm"}:
+        assert config.training.pretrain_data_view == "multisegment_random_prefix"
+        assert config.training.min_input_tokens == 1
+        assert config.training.max_input_tokens == 8192
+        assert config.training.lm_ratio == 0.5
 
 
 @pytest.mark.parametrize(
@@ -122,11 +129,32 @@ def test_sample_limits_default_to_full_splits():
 
 def test_pretraining_data_view_requires_an_explicit_supported_format():
     assert TrainingConfig("data", "output").pretrain_data_view == "text_samples"
-    for view in ("multisegment_full", "multisegment_first_write"):
-        assert TrainingConfig("data", "output", pretrain_data_view=view).pretrain_data_view == view
-    for view in ("auto", "reconstruction_single", "reconstruction_first_write"):
+    assert (
+        TrainingConfig(
+            "data", "output", pretrain_data_view="multisegment_random_prefix"
+        ).pretrain_data_view
+        == "multisegment_random_prefix"
+    )
+    for view in (
+        "auto",
+        "reconstruction_single",
+        "reconstruction_first_write",
+        "multisegment_full",
+        "multisegment_first_write",
+    ):
         with pytest.raises(ValueError, match="pretrain_data_view"):
             TrainingConfig("data", "output", pretrain_data_view=view)
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1, float("nan"), float("inf"), True, "0.5"])
+def test_lm_ratio_requires_a_finite_probability(value):
+    with pytest.raises(ValueError, match="lm_ratio"):
+        TrainingConfig("data", "output", lm_ratio=value)
+
+
+@pytest.mark.parametrize("value", [0, 0.5, 1])
+def test_lm_ratio_allows_ae_only_and_lm_only(value):
+    assert TrainingConfig("data", "output", lm_ratio=value).lm_ratio == value
 
 
 @pytest.mark.parametrize(

@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import random
 
 from latent_working_memory.data_preparation.fineweb_multisegment.config import DataPreparationConfig
 from latent_working_memory.data_preparation.fineweb_multisegment.records import MultisegmentSample
@@ -121,33 +122,30 @@ def load_multisegment_pretraining(
     max_input_tokens: int,
     view: str,
     lm_only: bool = False,
+    seed: int = 20261004,
+    lm_ratio: float = 0.5,
 ) -> tuple[dict[str, tuple[PretrainExample, ...]], dict]:
-    """Tokenize fixed character segments and pair AE/LM on the selected prefix.
-
-    The maximum crops the selected prefix on the right. Continuation starts at
-    that actual endpoint in the concatenated segment and continuation token stream.
-    Source locations are provenance; loading never reads the original Parquet.
-    """
+    """按来源独立抽取连续前缀与一个任务，加载后固定供各 epoch 复用。"""
     if (
         type(min_input_tokens) is not int
         or type(max_input_tokens) is not int
         or not 1 <= min_input_tokens <= max_input_tokens
     ):
         raise ValueError("input token interval requires positive integers with min <= max")
-    if view not in {"multisegment_full", "multisegment_first_write"}:
+    if view != "multisegment_random_prefix":
         raise ValueError(f"unknown multisegment data view: {view}")
     root = Path(dataset_dir)
     metadata = json.loads((root / "preparation.json").read_text(encoding="utf-8"))
     preparation_config = DataPreparationConfig.from_mapping(metadata["config"]).window
     continuation_tokens = preparation_config.continuation_tokens
-    tasks = ("continuation",) if lm_only else ("ae", "continuation")
     seen_samples, document_sources, cluster_splits = set(), {}, {}
     splits, statistics = {}, {}
-    # Share token integers across samples and each input tuple between its AE/LM pair.
+    # Share token integers across samples without duplicating each source for AE/LM.
     token_pool = {}
     for split in ("train", "dev", "test"):
         path = root / f"{split}.jsonl"
         examples, original_lengths, actual_lengths = [], [], []
+        prefix_segments, available_segments = [], []
         counts = {
             "source_samples": 0,
             "kept_source_samples": 0,
@@ -156,7 +154,8 @@ def load_multisegment_pretraining(
             "read": 0,
             "kept": 0,
             "filtered_too_short": 0,
-            "filtered_continuation_length": 0,
+            "short_continuation_sources": 0,
+            "lm_to_ae_sources": 0,
             "read_by_task": {"ae": 0, "continuation": 0},
             "kept_by_task": {"ae": 0, "continuation": 0},
         }
@@ -184,9 +183,7 @@ def load_multisegment_pretraining(
                     document_sources[sample.document_id] = identity
                     cluster_splits[sample.dedup_cluster] = split
                     counts["source_samples"] += 1
-                    counts["read"] += len(tasks)
-                    for task in tasks:
-                        counts["read_by_task"][task] += 1
+                    counts["read"] += 1
                     segment_ids = [
                         tokenizer.encode(
                             sample.text[slice(*segment["char_span"])],
@@ -196,49 +193,66 @@ def load_multisegment_pretraining(
                         for segment in sample.segments
                     ]
                     body_ids = [token for segment in segment_ids for token in segment]
-                    original_cut = (
-                        len(body_ids) if view == "multisegment_full" else len(segment_ids[0])
-                    )
+                    cuts, total = [], 0
+                    for segment in segment_ids:
+                        total += len(segment)
+                        if total > max_input_tokens:
+                            break
+                        cuts.append(total)
+                    rng = random.Random(f"{seed}:pretraining:{sample.trajectory_id}")
+                    count = rng.randint(1, len(cuts)) if cuts else 1
+                    original_cut = cuts[count - 1] if cuts else len(segment_ids[0])
                     cut = min(original_cut, max_input_tokens)
+                    task = "continuation" if lm_only or rng.random() < lm_ratio else "ae"
+                    counts["read_by_task"][task] += 1
                     if cut < min_input_tokens:
-                        counts["filtered_too_short"] += len(tasks)
+                        counts["filtered_too_short"] += 1
                         continue
-                    ids = body_ids + tokenizer.encode(
-                        sample.continuation, add_special_tokens=False, truncation=False
+                    input_ids = tuple(
+                        token_pool.setdefault(token, token) for token in body_ids[:cut]
                     )
-                    if len(ids) < cut + continuation_tokens:
-                        counts["filtered_continuation_length"] += len(tasks)
-                        continue
-                    input_ids = tuple(token_pool.setdefault(token, token) for token in ids[:cut])
-                    continuation = tuple(
-                        token_pool.setdefault(token, token)
-                        for token in ids[cut : cut + continuation_tokens]
-                    )
-                    examples.extend(
+                    target_ids = input_ids
+                    if task == "continuation":
+                        remaining = body_ids[cut:] + tokenizer.encode(
+                            sample.continuation, add_special_tokens=False, truncation=False
+                        )
+                        if len(remaining) < continuation_tokens:
+                            counts["short_continuation_sources"] += 1
+                            if not lm_only:
+                                task = "ae"
+                                counts["lm_to_ae_sources"] += 1
+                        if task == "continuation":
+                            target_ids = tuple(
+                                token_pool.setdefault(token, token)
+                                for token in remaining[:continuation_tokens]
+                            )
+                    examples.append(
                         PretrainExample(
                             f"{sample.trajectory_id}:{task}",
                             sample.document_id,
                             sample.dedup_cluster,
                             task,
                             input_ids,
-                            input_ids if task == "ae" else continuation,
+                            target_ids,
                         )
-                        for task in tasks
                     )
                     original_lengths.append(original_cut)
                     actual_lengths.append(cut)
+                    prefix_segments.append(count)
+                    available_segments.append(len(cuts))
                     counts["kept_source_samples"] += 1
                     counts["cropped_source_samples"] += int(cut < original_cut)
                     counts["cropped_source_tokens"] += original_cut - cut
-                    counts["kept"] += len(tasks)
-                    for task in tasks:
-                        counts["kept_by_task"][task] += 1
+                    counts["kept"] += 1
+                    counts["kept_by_task"][task] += 1
                 except (ValueError, KeyError, TypeError) as error:
                     raise ValueError(f"{path}:{line_number}: {error}") from error
-        # Prefix statistics count retained sources once; example statistics count AE/LM.
+        # Each retained source contributes one prefix and one training objective.
         for name, lengths in (
             ("original_source_prefix_tokens", original_lengths),
             ("actual_source_prefix_tokens", actual_lengths),
+            ("prefix_segments", prefix_segments),
+            ("available_prefix_segments", available_segments),
             ("input_tokens", [len(example.input_ids) for example in examples]),
             ("target_tokens", [len(example.target_ids) for example in examples]),
         ):
@@ -253,6 +267,8 @@ def load_multisegment_pretraining(
         "kind": "multisegment_text",
         "view": view,
         "continuation_tokens": continuation_tokens,
+        "sampling_seed": seed,
+        "lm_ratio": 1.0 if lm_only else lm_ratio,
         "input_token_interval": [min_input_tokens, max_input_tokens],
         "splits": statistics,
     }

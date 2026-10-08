@@ -34,7 +34,7 @@ class ModelConfig:
     dtype: str = "bfloat16"
     attention_implementation: str = "sdpa"
     gradient_checkpointing: bool = True
-    memory_slots: int = 64
+    memory_slots: int = 512
     lora_rank: int = 128
     lora_alpha: int = 32
     lora_target_modules: tuple[str, ...] = (
@@ -151,8 +151,9 @@ class TrainingConfig:
     eval_every: int = 25
     save_every: int = 25
     pretrain_data_view: str = "text_samples"
+    lm_ratio: float = 0.5
     min_input_tokens: int = 1
-    max_input_tokens: int = 1024
+    max_input_tokens: int = 8192
     max_train_samples: int | None = None
     max_dev_samples: int | None = None
     init_checkpoint: str | None = None
@@ -182,10 +183,12 @@ class TrainingConfig:
             raise ValueError("invalid pretraining length interval")
         if self.pretrain_data_view not in {
             "text_samples",
-            "multisegment_full",
-            "multisegment_first_write",
+            "multisegment_random_prefix",
         }:
             raise ValueError("unsupported pretrain_data_view")
+        finite(self.lm_ratio, "lm_ratio")
+        if self.lm_ratio > 1:
+            raise ValueError("lm_ratio must be <= 1")
         for name in ("learning_rate", "weight_decay", "gradient_clip"):
             finite(getattr(self, name), name)
         if self.learning_rate == 0 or self.gradient_clip == 0:
