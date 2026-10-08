@@ -6,7 +6,7 @@ import pytest
 from tokenizers import Tokenizer, models, processors
 from transformers import PreTrainedTokenizerFast
 
-from latent_working_memory.data_preparation.fineweb_qa.assembly import (
+from latent_working_memory.data_preparation.fineweb_factqa.assembly import (
     assemble_document,
     qa_quotas,
 )
@@ -15,6 +15,7 @@ from latent_working_memory.v3.data import load_factqa, tokenize_trajectory
 
 
 ROLE_SEED = 17
+QA_CONFIG = {"role_seed": ROLE_SEED, "max_answer_chars": 128}
 SOURCE_SEED = 37
 SPLIT_FRACTIONS = (0.8, 0.1, 0.1)
 
@@ -49,17 +50,26 @@ def source_cluster(split, index):
     raise AssertionError("synthetic source split was not found")
 
 
-def make_record(segment_count=8, split="train", index=0, qa_namespace=None):
+def make_record(
+    segment_count=8,
+    split="train",
+    index=0,
+    qa_namespace=None,
+    segment_chars=None,
+    leading_padding=0,
+    answer_suffix="",
+    qa_config=None,
+):
     document_id = f"document-{split}-{index}"
     parts, segments, candidates = [], [], []
     offset = 0
     _, tasks, gates = qa_quotas(segment_count)
     for segment_index in range(segment_count):
         segment_id = f"seg{segment_index}"
-        lines = [f"b\n标题 🌍 {document_id} {segment_id}\n"]
+        lines = [f"b\n标题 🌍 {document_id} {segment_id}\n", " " * leading_padding]
         for item in range(tasks[segment_index] + gates[segment_index]):
             name = f"{index}_{segment_index}_{item}"
-            answer = f"value_{name}"
+            answer = f"value_{name}{answer_suffix}"
             evidence = f"Fact {name} has {answer}.\n"
             start = offset + sum(map(len, lines))
             answer_start = start + evidence.index(answer)
@@ -76,6 +86,8 @@ def make_record(segment_count=8, split="train", index=0, qa_namespace=None):
             )
             lines.append(evidence)
         # Consecutive segments meet at 'ab', which merges only in full-prefix encoding.
+        if segment_chars is not None:
+            lines.append(" " * (segment_chars - sum(map(len, lines)) - 1))
         lines.append("a")
         text = "".join(lines)
         parts.append(text)
@@ -95,17 +107,16 @@ def make_record(segment_count=8, split="train", index=0, qa_namespace=None):
         {"qa_id": q["qa_id"], "accepted": True, "reason": "", "fact_group_id": q["qa_id"]}
         for q in candidates
     ]
-    return assemble_document(document, candidates, decisions, {"role_seed": ROLE_SEED})[
-        "trajectory"
-    ]
+    return assemble_document(document, candidates, decisions, qa_config or QA_CONFIG)["trajectory"]
 
 
-def write_dataset(directory, records):
+def write_dataset(directory, records, window=None, qa_config=None):
     preparation = {
-        "qa": {"role_seed": ROLE_SEED},
+        "qa": dict(qa_config or QA_CONFIG),
         "source_pool_config": {
             "source": {"data_seed": SOURCE_SEED, "split_fractions": list(SPLIT_FRACTIONS)},
-            "window": {
+            "window": window
+            or {
                 "min_segments": 6,
                 "max_segments": 10,
                 "min_segment_chars": 1,
@@ -130,7 +141,7 @@ def test_tokenization_preserves_variable_segments_roles_and_actual_usage(
     tokenizer, segment_count, split
 ):
     record = make_record(segment_count, split)
-    trajectory = tokenize_trajectory(record, tokenizer, ROLE_SEED, split)
+    trajectory = tokenize_trajectory(record, tokenizer, QA_CONFIG, split)
     assert trajectory.text == record["text"]
     assert trajectory.source == record["source"]
     assert trajectory.window_char_span == tuple(record["window_char_span"])
@@ -165,7 +176,7 @@ def test_tokenization_preserves_variable_segments_roles_and_actual_usage(
 
 def test_prefix_encoding_uses_original_text_without_special_tokens_or_truncation(tokenizer):
     record = make_record(6)
-    trajectory = tokenize_trajectory(record, tokenizer, ROLE_SEED, "train")
+    trajectory = tokenize_trajectory(record, tokenizer, QA_CONFIG, "train")
     flattened = sum((segment.input_ids for segment in trajectory.segments), ())
     assert trajectory.full_input_ids != flattened
     assert len(trajectory.full_input_ids) > tokenizer.model_max_length
@@ -195,6 +206,114 @@ def test_load_reads_all_splits_and_constructor_seed_from_preparation(tmp_path, t
         trajectory = dataset[split][0]
         final = trajectory.usage[-1]
         assert len(final.new_qa_ids + final.old_qa_ids) == 4 * len(trajectory.segments)
+
+
+@pytest.mark.parametrize("answer_suffix,limit", [("", 32), ("x" * 140, 192)])
+def test_loader_uses_metadata_answer_limit(tmp_path, tokenizer, answer_suffix, limit):
+    config = dict(QA_CONFIG, max_answer_chars=limit)
+    record = make_record(6, answer_suffix=answer_suffix, qa_config=config)
+    metadata = write_dataset(tmp_path, [record], qa_config=config)
+    trajectory = load_factqa(tmp_path, tokenizer)["train"][0]
+    assert set(trajectory.qas) == {qa["qa_id"] for qa in record["qas"]}
+    maximum = max(len(qa.answer) for qa in trajectory.qas.values())
+    if answer_suffix:
+        assert maximum > 128
+    metadata["qa"]["max_answer_chars"] = maximum - 1
+    (tmp_path / "preparation.json").write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match=f"answer exceeds {maximum - 1} characters"):
+        load_factqa(tmp_path, tokenizer)
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5, "128"])
+def test_loader_rejects_invalid_metadata_answer_limit(tmp_path, tokenizer, limit):
+    write_dataset(tmp_path, [make_record(6)], qa_config=dict(QA_CONFIG, max_answer_chars=limit))
+    with pytest.raises(ValueError, match="qa.max_answer_chars must be a positive integer"):
+        load_factqa(tmp_path, tokenizer)
+
+
+def shared_window(reserve_ratio=1.5):
+    return {
+        "capacity": 512,
+        "min_segment_ratio": 1.5,
+        "max_segment_ratio": 2,
+        "min_segments": 6,
+        "max_segments": 10,
+        "continuation_tokens": 0,
+        "content_reserve_ratio": reserve_ratio,
+    }
+
+
+@pytest.mark.parametrize("segment_chars", (4608, 6144))
+def test_loader_uses_shared_window_bounds_without_resegmenting(tmp_path, tokenizer, segment_chars):
+    record = make_record(6, segment_chars=segment_chars)
+    write_dataset(tmp_path, [record], shared_window())
+    trajectory = load_factqa(tmp_path, tokenizer)["train"][0]
+    for segment, raw in zip(trajectory.segments, record["segments"], strict=True):
+        assert segment.char_span == tuple(raw["char_span"])
+        assert segment.input_ids == tuple(
+            tokenizer.encode(record["text"][slice(*segment.char_span)], add_special_tokens=False)
+        )
+
+
+def test_loader_preserves_evidence_in_expanded_part_of_each_segment(tmp_path, tokenizer):
+    nominal_tokens = 769
+    record = make_record(6, segment_chars=4614, leading_padding=3300)
+    write_dataset(tmp_path, [record], shared_window())
+    trajectory = load_factqa(tmp_path, tokenizer)["train"][0]
+    assert trajectory.text == record["text"]
+    assert record["estimated_tokens"] == 6 * 4614 / 4
+    for qa in trajectory.qas.values():
+        segment = trajectory.segments[int(qa.segment_id[3:])]
+        assert qa.evidence_char_span[0] - segment.char_span[0] > 4 * nominal_tokens
+        assert trajectory.text[slice(*qa.answer_char_span)] == qa.answer
+        assert segment.input_ids == tuple(
+            tokenizer.encode(trajectory.text[slice(*segment.char_span)], add_special_tokens=False)
+        )
+
+
+def test_loader_accepts_decimal_reserve_rounding_to_nonmultiple_of_four(tmp_path, tokenizer):
+    # ceil(4 * 771 * 1.1) = 3393; valid expanded lengths need not be multiples of four.
+    record = make_record(6, segment_chars=3393)
+    write_dataset(tmp_path, [record], shared_window(1.1))
+    trajectory = load_factqa(tmp_path, tokenizer)["train"][0]
+    assert all(s.char_span[1] - s.char_span[0] == 3393 for s in trajectory.segments)
+    write_dataset(tmp_path, [make_record(6, segment_chars=3392)], shared_window(1.1))
+    with pytest.raises(ValueError, match="segment length differs"):
+        load_factqa(tmp_path, tokenizer)
+
+
+def test_loader_keeps_published_nonmultiple_of_four_character_lengths(tmp_path, tokenizer):
+    record = make_record(6, segment_chars=3073)
+    write_dataset(tmp_path, [record])
+    trajectory = load_factqa(tmp_path, tokenizer)["train"][0]
+    assert all(
+        segment.char_span[1] - segment.char_span[0] == 3073 for segment in trajectory.segments
+    )
+
+
+@pytest.mark.parametrize("segment_chars", (4607, 4610, 6145))
+def test_loader_rejects_lengths_outside_shared_window_plan(tmp_path, tokenizer, segment_chars):
+    write_dataset(tmp_path, [make_record(6, segment_chars=segment_chars)], shared_window())
+    with pytest.raises(
+        ValueError, match="segment length differs from the frozen window specification"
+    ):
+        load_factqa(tmp_path, tokenizer)
+
+
+def test_loader_rejects_nonqa_shared_window(tmp_path, tokenizer):
+    window = shared_window()
+    window["continuation_tokens"] = 512
+    write_dataset(tmp_path, [make_record(6, segment_chars=4608)], window)
+    with pytest.raises(ValueError, match="FactQA window requires"):
+        load_factqa(tmp_path, tokenizer)
+
+
+def test_loader_rejects_mixed_window_metadata(tmp_path, tokenizer):
+    window = shared_window()
+    window["min_segment_chars"] = 3072
+    write_dataset(tmp_path, [make_record(6, segment_chars=3072)], window)
+    with pytest.raises(TypeError, match="min_segment_chars"):
+        load_factqa(tmp_path, tokenizer)
 
 
 @pytest.mark.parametrize(
@@ -233,7 +352,7 @@ def test_invalid_evidence_fact_pools_and_schedules_are_rejected(tokenizer, chang
     else:
         record["unexpected"] = True
     with pytest.raises(ValueError, match=error):
-        tokenize_trajectory(record, tokenizer, ROLE_SEED, "train")
+        tokenize_trajectory(record, tokenizer, QA_CONFIG, "train")
 
 
 @pytest.mark.parametrize("mismatch", ("file_split", "source_split", "cluster_split"))
@@ -288,3 +407,23 @@ def test_loader_uses_frozen_construction_parameters(tmp_path, tokenizer, setting
     (tmp_path / "preparation.json").write_text(json.dumps(preparation))
     with pytest.raises(ValueError, match="window specification|role order"):
         load_factqa(tmp_path, tokenizer)
+
+
+def test_new_source_metadata_derives_split_probabilities_from_counts(tmp_path, tokenizer):
+    records = [make_record(split=split, segment_chars=1024) for split in ("train", "dev", "test")]
+    preparation = write_dataset(tmp_path, records)
+    preparation["source_pool_config"] = {
+        "source_seed": SOURCE_SEED,
+        "split_counts": {"train": 8, "dev": 1, "test": 1},
+        "window": {
+            "capacity": 64,
+            "min_segment_ratio": 4,
+            "max_segment_ratio": 4,
+            "min_segments": 8,
+            "max_segments": 8,
+            "content_reserve_ratio": 1,
+        },
+    }
+    (tmp_path / "preparation.json").write_text(json.dumps(preparation), encoding="utf-8")
+    result = load_factqa(tmp_path, tokenizer)
+    assert {split: len(rows) for split, rows in result.items()} == {"train": 1, "dev": 1, "test": 1}

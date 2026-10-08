@@ -2,7 +2,7 @@
 
 创建时间：20260915 19:10:20 UTC+08:00
 
-最后修订时间：20261008 11:40:33 UTC+08:00
+最后修订时间：20261008 15:01:29 UTC+08:00
 
 ## 当前入口：固定容量重构预训练
 
@@ -12,7 +12,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `../data_preparation/fineweb_multisegment/` | 无 tokenizer 的共用构造，保存完整候选文本、来源与多段 token 切分计划 |
+| `../data_preparation/fineweb_multisegment/` | 无 tokenizer 的共用构造，保存正文、续文及固定字符分段 |
 | `pretrain/data.py` | 读取已保存数据，启动时分词和按真实长度筛选，epoch 复用 |
 | `pretrain/objective.py` | 每次写入后的累计历史 AE 与紧邻续文 LM，完整跨压缩步骤反向传播 |
 | `pretrain/engine.py` | verl BaseEngine＋PyTorch DDP，沿用 v1 replicated engine 的执行方式 |
@@ -21,11 +21,13 @@
 | `pretrain/evaluation.py` | 各次压缩后的损失、一次压缩对照、最终自由重构 |
 | `pretrain/checkpoint.py` | 可变权重、optimizer、游标与各 rank RNG，不保存数据集 |
 
-新数据由共用 `data_preparation.fineweb_multisegment` 构造器生成。规范目录包含根层 `train.jsonl`、`dev.jsonl`、`test.jsonl`、`preparation.json` 和按实际统计生成的 `README.md`；每条记录保存完整候选 `text`、累计 `write_token_ends` 及来源身份，`source` 中的原始文件、行位置和字符区间只用于追溯。训练不再读取 raw Parquet，也没有 `single/`、`multi/` 两套数据。
+新数据由共用 `data_preparation.fineweb_multisegment` 构造器生成。规范目录包含根层 `train.jsonl`、`dev.jsonl`、`test.jsonl`、`preparation.json` 和按实际统计生成的 `README.md`。每条记录与 FactQA 共用正文布局：`trajectory_id`、`split`、正文 `text`、相对正文的 `segments[].char_span`、绝对原文区间 `window_char_span` 及来源身份；额外保存紧接正文的 `continuation`。`source` 仅记录原始文件和行位置，训练直接读取已保存文本。
 
-构造沿用共用来源过滤、去重和划分，不加载 tokenizer。来源分批读取，`source_batch_size` 控制每批处理量；每篇文档最多构造一条多段轨迹，无放回选样。先采样各段长度，令正文总长 L 为段长之和，再用统一余量系数计算整个候选窗口：`ceil(4 × (L + Q) × content_reserve_ratio)`。默认系数为 1.5，实际 LM 目标 Q 为 512 tokens；正文与续文使用同一余量口径。完整候选窗口包含缓冲，不在构造阶段按某个 tokenizer 截断或固定字符段界。
+构造沿用共用来源过滤、去重和划分，不加载 tokenizer。来源分批读取，`source_batch_size` 控制每批处理量；每篇文档最多构造一条多段轨迹，无放回选样。先按 K 的倍率采样每段名义 token 长度 l，再为每段分别保存 `ceil(4 × l × α)` 个字符；α 为 `content_reserve_ratio`。尾部 `continuation` 独立保存 `ceil(4 × Q × α)` 个字符，Q 为实际 LM 目标 token 数。正文长度是各段字符数之和；保存的 `estimated_tokens = len(text) / 4` 包含余量，不等于名义长度之和，也不保证等于实际 token 数。
 
-训练按当前 tokenizer 对每条候选一次性分词，验证保存配置中的段数和每段容量倍率，通过实际长度和模型窗口筛选后保留前 `L + Q` 个连续 tokens。默认 K=512、3–5 段、每段为 `[K,3K]`，正文总长由各段自然累加为 1536–7680 tokens，没有独立总长截断参数；具体约束以 `preparation.json` 为准。各 epoch 复用保留结果，AE／AE＋LM 使用相同筛选，候选数及排除原因写入 `data-filtering.json`。
+默认 K=512、3–5 段、名义段长 `[K,3K]`、α=1.5：每段保存 3072–9216 字符，正文共 9216–46080 字符，对应名义总长 1536–7680 tokens；Q=512 的尾部固定为 3072 字符。K64 配置每段保存 384–1152 字符，正文共 1152–5760 字符，尾部长度相同。
+
+训练先验证字符布局、逐段余量预算与文件划分，再按固定字符段分别分词；拼接各段 tokens，并从各段实际长度生成内存中的累计 `write_ends`。续文独立分词后取前 Q 个 tokens，正文和末尾续文共同供所有训练路径使用。更换 tokenizer 会改变 token 数与内部切点，但不会改变各段原文；真实段长不受构造时 K 倍率的限制。空 token 段、续文不足及超出模型窗口的样本会被筛除；各 epoch 复用保留结果，AE／AE＋LM 使用相同筛选，候选数及排除原因写入 `data-filtering.json`。
 
 | 训练或评估路径 | 同一条多段数据的使用方式 |
 |---|---|
@@ -48,7 +50,7 @@ uv run --frozen python -m latent_working_memory.data_preparation.fineweb_multise
 
 变长输入只在末尾补齐，补齐状态不进入 pooling 或损失；causal attention 保证有效 token 不会读取末尾补齐位置。模型接收全有效二维 mask，避免 packed-position 检测生成阻止 FlashAttention 的四维 mask。对齐输出转回基座 dtype；基础 pooling 在 FP32 中使用连续分段归约，保持原分组边界并避免原子累加的顺序波动。两个模型各自使用 Transformers 原生逐层 checkpoint（`use_reentrant=False`），不在前向或重算期间切换 adapter。Decoder 的 attention dropout 固定为 0，训练模式用于启用逐层重算，参数仍全部冻结；读取不使用 `no_grad()`，保留到 memory 的梯度。生成时临时切换 Decoder 到 eval 以使用 KV cache，结束后恢复。
 
-`micro_batch_size` 是单卡一次并行的轨迹上限：六组固定为 8；六组 `global_batch_size=32`。每个实验使用两卡，对应正常满批梯度累积 2 次，尾批按实际样本数归一化。A／B 切换训练阶段时不改变 microbatch。同一 rank 的候选按预计读取长度排序，在相同容量下合批；AE／LM 任务和压缩次数可以不同。encoder／decoder 的有效位置预算为：A／B 32768／36928、C／D 16384／36928、E／F 32768／36928。默认多段计划最长为 7680 tokens，长轨迹可能按位置预算进一步拆批；microbatch=8 是上限，不保证每批均有 8 条。
+`micro_batch_size` 是单卡一次并行的轨迹上限：六组固定为 8；六组 `global_batch_size=32`。每个实验使用两卡，对应正常满批梯度累积 2 次，尾批按实际样本数归一化。A／B 切换训练阶段时不改变 microbatch。同一 rank 的候选按预计读取长度排序，在相同容量下合批；AE／LM 任务和压缩次数可以不同。encoder／decoder 的有效位置预算为：A／B 32768／36928、C／D 16384／36928、E／F 32768／36928。默认多段正文的名义总长最多为 7680 tokens，含余量后 `len(text) / 4` 最多为 11520，实际 token 数依分词结果而定；长轨迹可能按位置预算进一步拆批；microbatch=8 是上限，不保证每批均有 8 条。
 
 每条样本分别拼接 prompt 与目标前缀，再统一右侧补齐，按各自目标位置计算损失。同一压缩步骤只调用一次批量读取；已结束轨迹从后续写入与读取中移除，记忆通过可微索引保留跨压缩步骤的梯度。损失先按各自目标 tokens、各自压缩次数平均，再按全局轨迹数平均。`resources/mean_microbatch_size` 记录轨迹组初始平均大小，`resources/mean_active_microbatch_size` 记录各次压缩时实际活跃的平均批大小。
 

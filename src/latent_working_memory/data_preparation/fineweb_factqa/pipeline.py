@@ -15,7 +15,7 @@ from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
 
-from latent_working_memory.data_preparation.fineweb_qa.annotation import (
+from latent_working_memory.data_preparation.fineweb_factqa.annotation import (
     DOCUMENT_REVIEW_SCHEMA,
     GENERATE_SCHEMA,
     VERIFY_SCHEMA,
@@ -24,13 +24,13 @@ from latent_working_memory.data_preparation.fineweb_qa.annotation import (
     DocumentAnnotationError,
     locate_candidates,
 )
-from latent_working_memory.data_preparation.fineweb_qa.assembly import (
+from latent_working_memory.data_preparation.fineweb_factqa.assembly import (
     qa_quotas,
     assemble_document,
     validate_trajectory,
 )
-from latent_working_memory.data_preparation.fineweb_qa.sources import prepare_selection
-from latent_working_memory.data_preparation.fineweb_qa.storage import (
+from latent_working_memory.data_preparation.fineweb_factqa.sources import prepare_selection
+from latent_working_memory.data_preparation.fineweb_factqa.storage import (
     save_json as _save_json,
     load_json as _load_json,
 )
@@ -45,6 +45,9 @@ def _root(config: dict) -> Path:
 
 
 def _prompt_texts(config: dict) -> dict[str, str]:
+    max_answer_chars = config["qa"]["max_answer_chars"]
+    if type(max_answer_chars) is not int or max_answer_chars < 1:
+        raise ValueError("qa.max_answer_chars must be a positive integer")
     required = set(STAGES)
     if set(config["prompts"]) != required:
         raise ValueError("FineWeb QA prompts must name generate, verify and document_review")
@@ -53,6 +56,10 @@ def _prompt_texts(config: dict) -> dict[str, str]:
     }
     if any(not value.strip() for value in texts.values()):
         raise ValueError("FineWeb QA prompts must not be empty")
+    placeholder = "{{max_answer_chars}}"
+    if placeholder not in texts["generate"]:
+        raise ValueError("generate prompt requires {{max_answer_chars}}")
+    texts["generate"] = texts["generate"].replace(placeholder, str(max_answer_chars))
     return texts
 
 

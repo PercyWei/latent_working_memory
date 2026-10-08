@@ -11,7 +11,7 @@ from urllib.error import HTTPError
 
 import pytest
 
-from latent_working_memory.data_preparation.fineweb_qa import annotation, pipeline
+from latent_working_memory.data_preparation.fineweb_factqa import annotation, pipeline
 
 
 @pytest.fixture
@@ -97,6 +97,7 @@ def test_payload_identity_and_shared_cache_exclude_endpoint(
     ) == {"qas": [], "skip_reason": "No supported facts"}
     assert len(sent) == 1
     assert sent[0][1]["model"] == "gpt-6-sol"
+    assert sent[0][1]["text"]["format"]["name"] == "fineweb_qa_generate"
     assert sent[0][1]["reasoning"] == {"effort": "medium"}
     assert sent[0][1]["text"]["format"]["schema"] == annotation.GENERATE_SCHEMA
     assert sent[0][1]["store"] is False
@@ -375,6 +376,29 @@ def test_candidate_locator_rejects_answer_over_character_limit():
     assert not valid
     assert rejected[0]["qa_id"] == "t:seg7:round0:qa0"
     assert "character limit" in rejected[0]["reason"]
+
+
+def test_candidate_locator_accepts_configured_answers_longer_than_128_characters():
+    answer = "Northern Harbor " * 9 + "Station"
+    text = f"The full destination name was {answer}."
+    generated = {
+        "qas": [
+            {
+                "fact_statement": f"The destination was {answer}.",
+                "question": "What was the full destination name?",
+                "answer": answer,
+                "evidence_quote": text,
+            }
+        ],
+        "skip_reason": "",
+    }
+    assert len(answer) > 128
+    valid, rejected = annotation.locate_candidates(text, generated, "t", 0, 20, 1, len(answer), 0)
+    assert not rejected and valid[0]["answer"] == answer
+    valid, rejected = annotation.locate_candidates(
+        text, generated, "t", 0, 20, 1, len(answer) - 1, 0
+    )
+    assert not valid and "character limit" in rejected[0]["reason"]
 
 
 def test_candidate_locator_detects_overlapping_quote_occurrences():

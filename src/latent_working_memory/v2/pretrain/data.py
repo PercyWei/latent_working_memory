@@ -1,8 +1,8 @@
-"""读取多段候选文本，分词筛选一次；单次与多次写入共用连续 token 序列。"""
+"""按固定字符段独立分词；单次与多次写入共用拼接后的 token 序列。"""
 
 from collections import Counter
 from dataclasses import dataclass, replace
-from itertools import islice
+from itertools import accumulate, islice
 import json
 from pathlib import Path
 import random
@@ -26,8 +26,8 @@ class Trajectory:
 def rejection_reason(ends, token_count, preparation, max_positions, prompts):
     capacity = preparation.capacity
     continuation_tokens = preparation.continuation_tokens
-    if token_count < ends[-1]:
-        return "content_length"
+    if any(end <= start for start, end in zip((0,) + ends[:-1], ends, strict=True)):
+        return "empty_segment"
     if token_count - ends[-1] < continuation_tokens:
         return "continuation_length"
     writer_lengths = [ends[-1]] + [
@@ -49,7 +49,7 @@ def rejection_reason(ends, token_count, preparation, max_positions, prompts):
 def load_datasets(config, tokenizer, max_positions, training):
     root = Path(config.dataset_dir)
     metadata = json.loads((root / "preparation.json").read_text(encoding="utf-8"))
-    preparation = DataPreparationConfig(**metadata["config"])
+    preparation = DataPreparationConfig.from_mapping(metadata["config"]).window
     capacity, q = preparation.capacity, preparation.continuation_tokens
     prompts = {
         task: len(tokenizer.encode(getattr(training, task + "_prompt"), add_special_tokens=False))
@@ -64,30 +64,43 @@ def load_datasets(config, tokenizer, max_positions, training):
         with path.open(encoding="utf-8") as stream:
             while lines := list(islice(stream, 64)):
                 batch = [MultisegmentSample(**json.loads(line)) for line in lines]
+                texts = []
                 for sample in batch:
+                    if sample.split != split:
+                        raise ValueError(
+                            f"trajectory split differs from {path}: {sample.trajectory_id}"
+                        )
                     sample.validate_plan(preparation)
+                    texts.extend(
+                        sample.text[slice(*segment["char_span"])] for segment in sample.segments
+                    )
+                    texts.append(sample.continuation)
                 candidates += len(batch)
                 encoded = tokenizer(
-                    [sample.text for sample in batch],
+                    texts,
                     add_special_tokens=False,
                     truncation=False,
                 )
-                for sample, ids in zip(batch, encoded["input_ids"], strict=True):
-                    # Tokenize the complete candidate once, including all reserve text.
-                    # AE, LM and both write modes reuse the same contiguous token sequence.
-                    ends = tuple(sample.write_token_ends)
-                    reason = rejection_reason(ends, len(ids), preparation, max_positions, prompts)
+                tokenized = iter(encoded["input_ids"])
+                for sample in batch:
+                    parts = [next(tokenized) for _ in sample.segments]
+                    continuation = next(tokenized)
+                    ends = tuple(accumulate(map(len, parts)))
+                    reason = rejection_reason(
+                        ends, ends[-1] + len(continuation), preparation, max_positions, prompts
+                    )
                     if reason:
                         rejected[reason] += 1
                         continue
+                    ids = [token for part in parts for token in part] + continuation[:q]
                     rows.append(
                         Trajectory(
                             sample.document_id,
-                            sample.source["char_span"][0],
-                            torch.tensor(ids[: ends[-1] + q], dtype=torch.long),
+                            sample.window_char_span[0],
+                            torch.tensor(ids, dtype=torch.long),
                             ends,
                             capacity,
-                            sample.sample_id,
+                            sample.trajectory_id,
                         )
                     )
         if candidates and not rows:

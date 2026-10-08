@@ -6,26 +6,30 @@ import re
 import threading
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
-from latent_working_memory.data_preparation.fineweb_qa import pipeline, campaign
-from latent_working_memory.data_preparation.fineweb_qa.storage import load_json, save_json
-from latent_working_memory.data_preparation.fineweb_qa.annotation import (
+from latent_working_memory.data_preparation.fineweb_factqa import pipeline, campaign
+from latent_working_memory.data_preparation.fineweb_factqa.storage import load_json, save_json
+from latent_working_memory.data_preparation.fineweb_factqa.annotation import (
     ContentFilteredError,
     AnnotationContractError,
 )
-from latent_working_memory.data_preparation.fineweb_qa.assembly import validate_trajectory
+from latent_working_memory.data_preparation.fineweb_factqa.assembly import validate_trajectory
+from latent_working_memory.data_preparation.pretrain.dedup import source_key
+from latent_working_memory.data_preparation.pretrain.fineweb import document_split
 
 
 PROMPT_STAGES = ("generate", "verify", "document_review")
 
 
-def _selection(segment_count=8, split="train", document_index=0):
+def _selection(segment_count=8, split="train", document_index=0, answer_suffix=""):
     parts, segments = [], []
     offset = 0
     for segment_index, count in enumerate([12] + [8] * (segment_count - 2) + [4]):
         segment_text = "".join(
-            f"Fact-{segment_index}-{qa_index} has answer-{segment_index}-{qa_index}.\n"
+            f"Fact-{segment_index}-{qa_index} has answer-{segment_index}-{qa_index}{answer_suffix}.\n"
             for qa_index in range(count)
         )
         parts.append(segment_text)
@@ -62,7 +66,10 @@ def _config(tmp_path):
     prompt_paths = {}
     for stage in PROMPT_STAGES:
         path = tmp_path / f"{stage}.txt"
-        path.write_text(f"Pilot {stage} instructions.\n", encoding="utf-8")
+        text = f"Pilot {stage} instructions.\n"
+        if stage == "generate":
+            text += "Answer limit: {{max_answer_chars}} characters.\n"
+        path.write_text(text, encoding="utf-8")
         prompt_paths[stage] = str(path)
     return {
         "source_pool_dir": str(tmp_path / "pool"),
@@ -351,39 +358,176 @@ def test_batch_configuration_and_prompts_are_frozen(tmp_path, monkeypatch):
     changed["qa"]["role_seed"] += 1
     with pytest.raises(ValueError, match="configuration changed"):
         pipeline.annotate(changed)
+    changed = copy.deepcopy(config)
+    changed["qa"]["max_answer_chars"] = 256
+    with pytest.raises(ValueError, match="configuration changed"):
+        pipeline.annotate(changed)
     Path(config["prompts"]["verify"]).write_text("Changed verifier instructions")
     with pytest.raises(ValueError, match="prompts changed"):
         pipeline.annotate(config)
 
 
+@pytest.mark.parametrize("limit", [8, 256])
+def test_generation_prompt_renders_and_freezes_actual_answer_limit(tmp_path, monkeypatch, limit):
+    config = _config(tmp_path)
+    config["qa"]["max_answer_chars"] = limit
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "configs/data_preparation/prompts/fineweb_factqa/generate.txt"
+    )
+    Path(config["prompts"]["generate"]).write_text(source.read_text())
+    monkeypatch.setattr(pipeline, "prepare_selection", lambda _: _selection())
+    pipeline.prepare(config)
+    rendered = load_json(Path(config["artifacts_dir"]) / "prompts.json")["generate"]
+    assert f"must be at most {limit} characters" in rendered
+    assert "{{max_answer_chars}}" not in rendered
+    assert '{"qas": [{"fact_statement": "..."' in rendered
+    assert "{{max_answer_chars}}" in Path(config["prompts"]["generate"]).read_text()
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5, "128"])
+def test_answer_limit_must_be_positive_integer_before_freezing(tmp_path, monkeypatch, limit):
+    config = _config(tmp_path)
+    config["qa"]["max_answer_chars"] = limit
+    monkeypatch.setattr(
+        pipeline, "prepare_selection", lambda _: pytest.fail("invalid config read sources")
+    )
+    with pytest.raises(ValueError, match="qa.max_answer_chars must be a positive integer"):
+        pipeline.prepare(config)
+    assert not Path(config["artifacts_dir"]).exists()
+
+
+@pytest.mark.parametrize("limit,complete", [(192, 1), (8, 0)])
+def test_pipeline_uses_answer_limit_for_model_prompt_filtering_and_finalization(
+    tmp_path, monkeypatch, limit, complete
+):
+    class LongAnswerClient(FakeAnnotationClient):
+        def __init__(self, annotation_config, batch_root, cache_root, prompts):
+            super().__init__(annotation_config, batch_root, cache_root, prompts)
+            assert f"Answer limit: {limit} characters." in prompts["generate"]
+
+        def call(self, stage, content, schema):
+            if stage != "generate":
+                return super().call(stage, content, schema)
+            qas = []
+            for line in content["segment_text"].splitlines():
+                fact, answer = line[:-1].split(" has ")
+                qas.append(
+                    {
+                        "fact_statement": f"{fact} has {answer}",
+                        "question": f"What does {fact} have?",
+                        "answer": answer,
+                        "evidence_quote": line,
+                    }
+                )
+            return {"qas": qas[: content["candidate_limit"]], "skip_reason": ""}
+
+    config = _config(tmp_path)
+    config["qa"].update(max_answer_chars=limit, max_supplement_rounds=0)
+    monkeypatch.setattr(
+        pipeline, "prepare_selection", lambda _: _selection(answer_suffix="x" * 140)
+    )
+    monkeypatch.setattr(pipeline, "AnnotationClient", LongAnswerClient)
+    pipeline.prepare(config)
+    summary = pipeline.annotate(config)
+    assert summary["complete_quota_documents"] == complete
+    result = pipeline.finalize(config)
+    assert result["summary"]["complete_documents"] == complete
+    rows = [
+        json.loads(line)
+        for line in Path(config["dataset_dir"]).joinpath("train.jsonl").read_text().splitlines()
+    ]
+    assert len(rows) == complete
+    if complete:
+        assert all(128 < len(qa["answer"]) <= limit for qa in rows[0]["qas"])
+    else:
+        document = load_json(Path(config["artifacts_dir"]) / "documents/doc-000.json")
+        assert document["candidates"] == []
+        assert all(
+            rejection["reason"] == "answer exceeds character limit"
+            for segment in document["rounds"][0]["segments"]
+            for rejection in segment["program_rejections"]
+        )
+
+
+def test_generation_prompt_must_include_answer_limit_placeholder(tmp_path):
+    config = _config(tmp_path)
+    Path(config["prompts"]["generate"]).write_text("Use a fixed answer length.")
+    with pytest.raises(ValueError, match="generate prompt requires"):
+        pipeline._prompt_texts(config)
+
+
 def test_campaign_executes_real_batch_pipeline_and_publishes_flat_dataset(tmp_path, monkeypatch):
     template = _config(tmp_path)
-    selection = _selection()
-    recipe = {"source": {}, "window": {}, "batch_counts": {"train": 1, "dev": 1, "test": 1}}
-    data = tmp_path / "complete-dataset"
-    pool = {
-        "pool_id": "pool-test",
-        "config": recipe,
-        "previous_datasets": [],
-        "excluded_sources": [],
-        "documents": selection["documents"],
-        "split_counts": {"train": 1, "dev": 0, "test": 0},
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    records = []
+    for document_index, split in enumerate(("train", "train", "dev", "test")):
+        for candidate in range(1000):
+            url = f"https://example.org/document-{document_index}/{candidate}"
+            if document_split(source_key(url), 37, (1 / 3, 1 / 3, 1 / 3)) == split:
+                break
+        else:
+            raise AssertionError("fixture split not found")
+        parts = []
+        for segment_index, count in enumerate((12, 8, 8, 8, 8, 4)):
+            fact = 10 * document_index + segment_index
+            text = "".join(
+                f"Fact-{fact}-{index} has answer-{fact}-{index}.\n" for index in range(count)
+            )
+            assert len(text) < 512
+            parts.append(text.ljust(512))
+        records.append({"id": f"document-{document_index}", "url": url, "text": "".join(parts)})
+    pq.write_table(pa.Table.from_pylist(records), raw / "sample.parquet")
+    main = {
+        "source_dir": str(raw),
+        "source_batch_size": 4,
+        "source_seed": 37,
+        "selection_seed": 31,
+        "split_counts": {"train": 1, "dev": 1, "test": 1},
+        "window": {
+            "capacity": 128,
+            "min_segment_ratio": 1,
+            "max_segment_ratio": 1,
+            "min_segments": 6,
+            "max_segments": 6,
+            "content_reserve_ratio": 1,
+        },
+        "batch_split_counts": {"train": 2, "dev": 2, "test": 2},
+        "qa": template["qa"],
+        "annotation": template["annotation"],
+        "prompts_dir": str(tmp_path),
     }
-    save_json(data / "source-pool.json", pool)
-    save_json(tmp_path / "recipe.json", recipe)
-    save_json(tmp_path / "template.json", template)
-    selection["ranges"] = campaign.batch_ranges(pool, {"train": 0, "dev": 0, "test": 0}, 0)
-    config = {
-        "batch_template": str(tmp_path / "template.json"),
-        "source_pool_config": str(tmp_path / "recipe.json"),
-        "previous_datasets": [],
-        "artifacts_dir": str(tmp_path / "run"),
-        "dataset_dir": str(data),
-        "target_train_trajectories": 1,
-    }
-    FakeAnnotationClient.calls = []
-    monkeypatch.setattr(pipeline, "prepare_selection", lambda _: selection)
-    monkeypatch.setattr(pipeline, "AnnotationClient", FakeAnnotationClient)
+    path = tmp_path / "main.json"
+    save_json(path, main)
+    config = campaign.run_config(
+        campaign.load_config(path), tmp_path / "datasets", tmp_path / "runs", "offline"
+    )
+    data, run = Path(config["dataset_dir"]), Path(config["artifacts_dir"])
+
+    class ParquetAnnotationClient(FakeAnnotationClient):
+        calls = []
+
+        def call(self, stage, content, schema):
+            if stage != "generate":
+                return super().call(stage, content, schema)
+            with self.lock:
+                self.calls.append((stage, copy.deepcopy(content)))
+            qas = []
+            for match in re.finditer(
+                r"(Fact-\d+-\d+) has (answer-\d+-\d+)\.", content["segment_text"]
+            ):
+                qas.append(
+                    {
+                        "fact_statement": f"{match[1]} has {match[2]}",
+                        "question": f"What does {match[1]} have?",
+                        "answer": match[2],
+                        "evidence_quote": match[0],
+                    }
+                )
+            return {"qas": qas[: content["candidate_limit"]], "skip_reason": ""}
+
+    monkeypatch.setattr(pipeline, "AnnotationClient", ParquetAnnotationClient)
     executed = []
 
     class Process:
@@ -391,6 +535,12 @@ def test_campaign_executes_real_batch_pipeline_and_publishes_flat_dataset(tmp_pa
 
         def __init__(self, command, **kwargs):
             self.stage, self.config = command[4], load_json(Path(command[-1]))
+            for key in ("qa", "annotation"):
+                assert self.config[key] == config[key]
+            assert self.config["prompts"] == template["prompts"]
+            assert self.config["source_pool_dir"] == str(data)
+            assert self.config["dataset_dir"] == str(run / "batches/batch-000/dataset")
+            assert self.config["cache_dir"] == str(run / "requests")
 
         def wait(self):
             executed.append(self.stage)
@@ -401,17 +551,38 @@ def test_campaign_executes_real_batch_pipeline_and_publishes_flat_dataset(tmp_pa
     result = campaign.run(config)
     assert executed == ["prepare", "annotate", "finalize"]
     assert result["dataset_published"]
-    assert result["completed_by_split"]["train"] == {"trajectories": 1, "qas": 64}
+    assert result["completed_by_split"] == {
+        split: {"trajectories": 1, "qas": 48} for split in ("train", "dev", "test")
+    }
     assert {p.name for p in data.iterdir()} == {
         "source-pool.json",
+        "used-sources.jsonl",
         "train.jsonl",
         "dev.jsonl",
         "test.jsonl",
         "preparation.json",
     }
+    pool = load_json(data / "source-pool.json")
+    assert pool["statistics"]["scanned_documents"] == len(records)
+    assert len(pool["documents"]) == 4
+    assert all(bounds["selected"] == 1 for bounds in pool["batches"][0]["ranges"].values())
+    rows = [load_json(data / f"{split}.jsonl") for split in ("train", "dev", "test")]
+    for row in rows:
+        original = next(record for record in records if record["id"] == row["document_id"])
+        assert row["text"] == original["text"]
+        assert row["window_char_span"] == [0, len(original["text"])]
+        validate_trajectory(row, config["qa"])
     metadata = load_json(data / "preparation.json")
     assert set(metadata["prompts"]) == {"generate", "verify", "document_review"}
     assert "review" not in metadata and "diagnostics" not in metadata
-    before = len(FakeAnnotationClient.calls)
+    assert "used_sources" not in metadata
+    assert metadata["used_sources_file"] == "used-sources.jsonl"
+    ledger = [
+        json.loads(line) for line in (data / metadata["used_sources_file"]).read_text().splitlines()
+    ]
+    assert len(ledger) == 3
+    assert {entry["document_id"] for entry in ledger} == {row["document_id"] for row in rows}
+    assert all(set(entry) == {"document_id", "dedup_cluster", "source"} for entry in ledger)
+    before = len(ParquetAnnotationClient.calls)
     campaign.run(config)
-    assert len(FakeAnnotationClient.calls) == before
+    assert len(ParquetAnnotationClient.calls) == before

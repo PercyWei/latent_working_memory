@@ -1,4 +1,4 @@
-"""Run frozen FineWeb batches to a train-trajectory target and report construction cost."""
+"""Construct FactQA to exact split quotas with resumable source and annotation batches."""
 
 from __future__ import annotations
 
@@ -6,25 +6,32 @@ import argparse
 import copy
 import fcntl
 import json
-import math
 import os
 import subprocess
 import sys
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
-from latent_working_memory.data_preparation.fineweb_qa.pipeline import (
+from latent_working_memory.data_preparation.fineweb_factqa.pipeline import (
     _prompt_texts,
     _request_statistics,
     _without_endpoint,
 )
-from latent_working_memory.data_preparation.fineweb_qa.storage import load_json, save_json
-from latent_working_memory.data_preparation.fineweb_qa.sources import (
+from latent_working_memory.data_preparation.fineweb_factqa.storage import load_json, save_json
+from latent_working_memory.data_preparation.fineweb_factqa.sources import (
     batch_ranges,
     prepare_pool,
-    pool_after_exclusions,
+    pool_contract,
+    source_records,
+    allocate_batch,
 )
-from latent_working_memory.data_preparation.fineweb_qa.publication import publish_dataset
+from latent_working_memory.data_preparation.fineweb_factqa.publication import publish_dataset
+from latent_working_memory.data_preparation.fineweb_factqa.config import (
+    add_run_arguments,
+    load_config,
+    run_config,
+)
 
 STAGES = ("prepare", "annotate", "finalize")
 
@@ -42,69 +49,25 @@ def batch_config(template: dict, index: int) -> dict:
 
 
 def initialize(config: dict) -> dict:
-    """Freeze exclusions from explicitly listed datasets, without following their history."""
-    root = Path(config["dataset_dir"])
-    path = root / "source-pool.json"
-    recipe = load_json(Path(config["source_pool_config"]))
-    recipe["pool_dir"] = str(root)
-    contract = {key: recipe[key] for key in ("source", "window", "batch_counts")}
-    previous_dirs = config["previous_datasets"]
-    if not isinstance(previous_dirs, list) or any(
-        not isinstance(p, str) or not p for p in previous_dirs
-    ):
-        raise ValueError("previous_datasets must be a list of dataset directories")
-    if any(Path(p).resolve() == root.resolve() for p in previous_dirs):
-        raise ValueError("an appended campaign requires a new dataset directory")
-    if path.exists():
-        pool = load_json(path)
-        if pool["config"] != contract or pool["previous_datasets"] != previous_dirs:
-            raise ValueError("source snapshot configuration changed")
-        return pool
-    if not previous_dirs:
-        return prepare_pool(recipe)
-    excluded_by_id, previous_pools = {}, []
-    new_source = {k: v for k, v in recipe["source"].items() if k != "scan_documents"}
-    for previous_dir in previous_dirs:
-        previous = load_json(Path(previous_dir) / "preparation.json")
-        previous_pool = load_json(Path(previous_dir) / "source-pool.json")
-        if previous["source_pool_id"] != previous_pool["pool_id"]:
-            raise ValueError("previous dataset and source snapshot do not match")
-        old_source = {
-            k: v for k, v in previous_pool["config"]["source"].items() if k != "scan_documents"
-        }
-        if old_source != new_source:
-            raise ValueError("appending must retain the original corpus, split and exclusion rules")
-        for source in previous["used_sources"]:
-            excluded_by_id.setdefault(source["document_id"], source)
-        previous_pools.append(previous_pool)
-    excluded_sources = list(excluded_by_id.values())
-    # A filtered snapshot would silently carry exclusions from unlisted datasets.
-    # Reuse only a complete snapshot under the same recipe; otherwise rescan.
-    if all(p["config"] == contract for p in previous_pools):
-        for previous_pool in previous_pools:
-            if not previous_pool["excluded_sources"]:
-                pool = pool_after_exclusions(previous_pool, excluded_sources, previous_dirs)
-                save_json(path, pool)
-                return pool
-    return prepare_pool(recipe, excluded_sources, previous_dirs)
+    """Freeze this run's source settings and explicit previous-source exclusions."""
+    return prepare_pool(config)
 
 
 def _inputs(config: dict) -> tuple[dict, dict]:
-    template = load_json(Path(config["batch_template"]))
+    template = {key: copy.deepcopy(config[key]) for key in ("qa", "annotation")}
+    template["prompts"] = {
+        stage: str(Path(config["prompts_dir"]) / f"{stage}.txt")
+        for stage in ("generate", "verify", "document_review")
+    }
     pool = load_json(Path(config["dataset_dir"]) / "source-pool.json")
-    recipe = load_json(Path(config["source_pool_config"]))
     if (
-        pool["config"] != {key: recipe[key] for key in ("source", "window", "batch_counts")}
+        pool["config"] != pool_contract(config)
         or pool["previous_datasets"] != config["previous_datasets"]
     ):
         raise ValueError("source snapshot configuration changed")
-    target = config["target_train_trajectories"]
-    if type(target) is not int or not 0 < target <= pool["split_counts"]["train"]:
-        raise ValueError("train target must be positive and fit the unused source pool")
     batch_root = Path(config["artifacts_dir"]) / "batches/batch-000"
     template.update(
         batch_index=0,
-        source_offsets=dict.fromkeys(("train", "dev", "test"), 0),
         source_pool_dir=config["dataset_dir"],
         artifacts_dir=str(batch_root),
         dataset_dir=str(batch_root / "dataset"),
@@ -113,14 +76,9 @@ def _inputs(config: dict) -> tuple[dict, dict]:
     return template, pool
 
 
-def _batch_count(template: dict, pool: dict) -> int:
-    remaining = pool["split_counts"]["train"] - template["source_offsets"]["train"]
-    return math.ceil(remaining / pool["config"]["batch_counts"]["train"])
-
-
 def _completed(template: dict, pool: dict) -> list[dict]:
     batches = []
-    for index in range(_batch_count(template, pool)):
+    for index in range(len(pool["batches"])):
         batch = batch_config(template, index)
         path = Path(batch["dataset_dir"]) / "preparation.json"
         if not path.exists():
@@ -128,7 +86,7 @@ def _completed(template: dict, pool: dict) -> list[dict]:
         preparation = load_json(path)
         if preparation["source_pool_id"] != pool["pool_id"] or preparation["batch_index"] != index:
             raise ValueError("published batch does not belong to this frozen source pool")
-        if preparation["batch_ranges"] != batch_ranges(pool, template["source_offsets"], index):
+        if preparation["batch_ranges"] != batch_ranges(pool, index):
             raise ValueError("published batch source ranges differ from this campaign")
         frozen = load_json(Path(batch["artifacts_dir"]) / "config.json")
         if _without_endpoint(frozen) != _without_endpoint(batch):
@@ -150,7 +108,7 @@ def report(config: dict) -> dict:
     contract_path = Path(config["artifacts_dir"]) / "config.json"
     if contract_path.exists():
         contract = load_json(contract_path)
-        if contract["config"] != config:
+        if contract["config"] != _without_endpoint(config):
             raise ValueError("report configuration differs from the frozen campaign")
         template = contract["batch_template"]
         pool = load_json(Path(template["source_pool_dir"]) / "source-pool.json")
@@ -171,7 +129,7 @@ def report(config: dict) -> dict:
     all_usage = dict.fromkeys(keys, 0)
     completed_usage = dict.fromkeys(keys, 0)
     batches = []
-    for index in range(_batch_count(template, pool)):
+    for index in range(len(pool["batches"])):
         batch = batch_config(template, index)
         root = Path(batch["artifacts_dir"])
         if not root.exists():
@@ -213,8 +171,11 @@ def report(config: dict) -> dict:
         state = {key: value for key, value in state.items() if key != "stages"}
     return {
         "observed_at": _now(),
-        "target_train_trajectories": config["target_train_trajectories"],
-        "remaining_train_trajectories": max(0, config["target_train_trajectories"] - train_count),
+        "split_counts": config["split_counts"],
+        "remaining_split_counts": {
+            split: max(0, target - by_split[split]["trajectories"])
+            for split, target in config["split_counts"].items()
+        },
         "dataset_published": (Path(config["dataset_dir"]) / "preparation.json").is_file(),
         "completed_batches": sorted(completed_indices),
         "completed_by_split": by_split,
@@ -250,7 +211,7 @@ def run(config: dict) -> dict:
         initialize(config)
         template, pool = _inputs(config)
         contract = {
-            "config": config,
+            "config": _without_endpoint(config),
             "batch_template": _without_endpoint(template),
             "prompts": _prompt_texts(template),
             "source_pool_id": pool["pool_id"],
@@ -266,72 +227,102 @@ def run(config: dict) -> dict:
         state.update(status="running", pid=os.getpid(), updated_at=_now(), error=None)
         save_json(state_path, state)
         try:
-            max_batches = _batch_count(template, pool)
-            for index in range(max_batches + 1):
-                completed = _completed(template, pool)
-                train_count = sum(b["by_split"]["train"]["complete_documents"] for b in completed)
-                state.update(
-                    completed_train_trajectories=train_count,
-                    target_train_trajectories=config["target_train_trajectories"],
-                    updated_at=_now(),
-                )
-                save_json(state_path, state)
-                if train_count >= config["target_train_trajectories"]:
-                    publish_dataset(config, template, pool, completed)
-                    state.update(
-                        status="complete", completed_at=_now(), current_stage=None, stage_pid=None
-                    )
-                    save_json(state_path, state)
-                    return report(config)
-                if index == max_batches:
-                    raise RuntimeError(
-                        "frozen train source pool exhausted before reaching the target"
-                    )
-                if index in {b["batch_index"] for b in completed}:
-                    continue
-                batch = batch_config(template, index)
-                path = root / "batch-configs" / f"batch-{index:03d}.json"
-                save_json(path, batch)
-                for stage in STAGES:
-                    if _prompt_texts(template) != contract["prompts"]:
-                        raise ValueError("prompts changed during campaign")
-                    command = [
-                        sys.executable,
-                        "-u",
-                        "-m",
-                        "latent_working_memory.data_preparation.fineweb_qa",
-                        stage,
-                        "--config",
-                        str(path),
-                    ]
-                    entry = {
-                        "batch_index": index,
-                        "stage": stage,
-                        "command": command,
-                        "started_at": _now(),
-                        "status": "running",
-                    }
-                    state["stages"].append(entry)
-                    state.update(current_batch_index=index, current_stage=stage, updated_at=_now())
-                    save_json(state_path, state)
-                    log_path = Path(batch["artifacts_dir"]) / f"{stage}.log"
-                    log_path.parent.mkdir(parents=True, exist_ok=True)
-                    with log_path.open("a", encoding="utf-8") as log:
-                        child = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
-                        state["stage_pid"] = child.pid
-                        save_json(state_path, state)
-                        code = child.wait()
-                    entry.update(
-                        exit_code=code,
-                        finished_at=_now(),
-                        status="complete" if code == 0 else "failed",
-                    )
-                    state.update(updated_at=_now(), stage_pid=None)
-                    save_json(state_path, state)
-                    if code:
-                        raise RuntimeError(
-                            f"batch {index} stage {stage} exited with {code}; see {log_path}"
+            with closing(source_records(pool)) as records:
+                while True:
+                    completed = _completed(template, pool)
+                    counts = {
+                        split: sum(
+                            batch["by_split"][split]["complete_documents"] for batch in completed
                         )
+                        for split in ("train", "dev", "test")
+                    }
+                    remaining = {
+                        split: target - counts[split]
+                        for split, target in config["split_counts"].items()
+                    }
+                    state.update(
+                        completed_split_counts=counts,
+                        split_counts=config["split_counts"],
+                        updated_at=_now(),
+                    )
+                    save_json(state_path, state)
+                    if all(value == 0 for value in remaining.values()):
+                        publish_dataset(config, template, pool, completed)
+                        state.update(
+                            status="complete",
+                            completed_at=_now(),
+                            current_stage=None,
+                            stage_pid=None,
+                        )
+                        save_json(state_path, state)
+                        return report(config)
+                    if any(value < 0 for value in remaining.values()):
+                        raise ValueError("completed batches exceed split_counts")
+                    completed_indices = {batch["batch_index"] for batch in completed}
+                    pending = [
+                        index
+                        for index in range(len(pool["batches"]))
+                        if index not in completed_indices
+                    ]
+                    if pending:
+                        index = pending[0]
+                    else:
+                        requested = {
+                            split: min(config["batch_split_counts"][split], remaining[split])
+                            for split in remaining
+                        }
+                        try:
+                            entry = allocate_batch(config, pool, records, requested)
+                        except ValueError as error:
+                            raise ValueError(
+                                f"{error}; remaining trajectories: {remaining}"
+                            ) from error
+                        index = entry["batch_index"]
+                    batch = batch_config(template, index)
+                    path = root / "batch-configs" / f"batch-{index:03d}.json"
+                    save_json(path, batch)
+                    for stage in STAGES:
+                        if _prompt_texts(template) != contract["prompts"]:
+                            raise ValueError("prompts changed during campaign")
+                        command = [
+                            sys.executable,
+                            "-u",
+                            "-m",
+                            "latent_working_memory.data_preparation.fineweb_factqa",
+                            stage,
+                            "--config",
+                            str(path),
+                        ]
+                        entry = {
+                            "batch_index": index,
+                            "stage": stage,
+                            "command": command,
+                            "started_at": _now(),
+                            "status": "running",
+                        }
+                        state["stages"].append(entry)
+                        state.update(
+                            current_batch_index=index, current_stage=stage, updated_at=_now()
+                        )
+                        save_json(state_path, state)
+                        log_path = Path(batch["artifacts_dir"]) / f"{stage}.log"
+                        log_path.parent.mkdir(parents=True, exist_ok=True)
+                        with log_path.open("a", encoding="utf-8") as log:
+                            child = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
+                            state["stage_pid"] = child.pid
+                            save_json(state_path, state)
+                            code = child.wait()
+                        entry.update(
+                            exit_code=code,
+                            finished_at=_now(),
+                            status="complete" if code == 0 else "failed",
+                        )
+                        state.update(updated_at=_now(), stage_pid=None)
+                        save_json(state_path, state)
+                        if code:
+                            raise RuntimeError(
+                                f"batch {index} stage {stage} exited with {code}; see {log_path}"
+                            )
         except BaseException as error:
             state.update(
                 status="failed", updated_at=_now(), error=f"{type(error).__name__}: {error}"
@@ -345,6 +336,10 @@ def finalize(config: dict) -> dict:
     root = Path(config["artifacts_dir"])
     with (root / "campaign.lock").open("a+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        contract_path = root / "config.json"
+        if contract_path.exists():
+            if load_json(contract_path)["config"] != _without_endpoint(config):
+                raise ValueError("finalize configuration differs from the frozen campaign")
         template, pool = _inputs(config)
         return publish_dataset(config, template, pool, _completed(template, pool))
 
@@ -352,9 +347,15 @@ def finalize(config: dict) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("run", "report", "finalize"))
-    parser.add_argument("--config", type=Path, required=True)
+    add_run_arguments(parser)
     args = parser.parse_args()
-    config = load_json(args.config)
+    config = run_config(
+        load_config(args.config),
+        args.output_root,
+        args.artifacts_root,
+        args.run_id,
+        args.previous_datasets,
+    )
     result = {"run": run, "report": report, "finalize": finalize}[args.action](config)
     print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
 

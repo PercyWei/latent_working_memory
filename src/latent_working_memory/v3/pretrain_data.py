@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 
+from latent_working_memory.data_preparation.fineweb_multisegment.config import DataPreparationConfig
 from latent_working_memory.data_preparation.fineweb_multisegment.records import MultisegmentSample
 from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
 
@@ -121,10 +122,10 @@ def load_multisegment_pretraining(
     view: str,
     lm_only: bool = False,
 ) -> tuple[dict[str, tuple[PretrainExample, ...]], dict]:
-    """Read text windows and derive paired AE/LM samples from the chosen prefix.
+    """Tokenize fixed character segments and pair AE/LM on the selected prefix.
 
     The maximum crops the selected prefix on the right. Continuation starts at
-    that actual endpoint, including when it precedes the saved write boundary.
+    that actual endpoint in the concatenated segment and continuation token stream.
     Source locations are provenance; loading never reads the original Parquet.
     """
     if (
@@ -137,9 +138,8 @@ def load_multisegment_pretraining(
         raise ValueError(f"unknown multisegment data view: {view}")
     root = Path(dataset_dir)
     metadata = json.loads((root / "preparation.json").read_text(encoding="utf-8"))
-    continuation_tokens = metadata["config"]["continuation_tokens"]
-    if type(continuation_tokens) is not int or continuation_tokens < 1:
-        raise ValueError("multisegment continuation_tokens must be a positive integer")
+    preparation_config = DataPreparationConfig.from_mapping(metadata["config"]).window
+    continuation_tokens = preparation_config.continuation_tokens
     tasks = ("continuation",) if lm_only else ("ae", "continuation")
     seen_samples, document_sources, cluster_splits = set(), {}, {}
     splits, statistics = {}, {}
@@ -156,7 +156,6 @@ def load_multisegment_pretraining(
             "read": 0,
             "kept": 0,
             "filtered_too_short": 0,
-            "filtered_content_length": 0,
             "filtered_continuation_length": 0,
             "read_by_task": {"ae": 0, "continuation": 0},
             "kept_by_task": {"ae": 0, "continuation": 0},
@@ -165,8 +164,11 @@ def load_multisegment_pretraining(
             for line_number, line in enumerate(stream, 1):
                 try:
                     sample = MultisegmentSample(**json.loads(line))
-                    if sample.sample_id in seen_samples:
-                        raise ValueError("duplicate pretraining sample_id")
+                    sample.validate_plan(preparation_config)
+                    if sample.split != split:
+                        raise ValueError("record split differs from its JSONL split")
+                    if sample.trajectory_id in seen_samples:
+                        raise ValueError("duplicate pretraining trajectory_id")
                     identity = (split, sample.dedup_cluster)
                     if (
                         sample.document_id in document_sources
@@ -178,22 +180,32 @@ def load_multisegment_pretraining(
                         and cluster_splits[sample.dedup_cluster] != split
                     ):
                         raise ValueError("dedup cluster occurs in multiple pretraining splits")
-                    seen_samples.add(sample.sample_id)
+                    seen_samples.add(sample.trajectory_id)
                     document_sources[sample.document_id] = identity
                     cluster_splits[sample.dedup_cluster] = split
                     counts["source_samples"] += 1
                     counts["read"] += len(tasks)
                     for task in tasks:
                         counts["read_by_task"][task] += 1
-                    original_cut = sample.write_token_ends[-1 if view == "multisegment_full" else 0]
+                    segment_ids = [
+                        tokenizer.encode(
+                            sample.text[slice(*segment["char_span"])],
+                            add_special_tokens=False,
+                            truncation=False,
+                        )
+                        for segment in sample.segments
+                    ]
+                    body_ids = [token for segment in segment_ids for token in segment]
+                    original_cut = (
+                        len(body_ids) if view == "multisegment_full" else len(segment_ids[0])
+                    )
                     cut = min(original_cut, max_input_tokens)
                     if cut < min_input_tokens:
                         counts["filtered_too_short"] += len(tasks)
                         continue
-                    ids = tokenizer.encode(sample.text, add_special_tokens=False, truncation=False)
-                    if len(ids) < cut:
-                        counts["filtered_content_length"] += len(tasks)
-                        continue
+                    ids = body_ids + tokenizer.encode(
+                        sample.continuation, add_special_tokens=False, truncation=False
+                    )
                     if len(ids) < cut + continuation_tokens:
                         counts["filtered_continuation_length"] += len(tasks)
                         continue
@@ -204,7 +216,7 @@ def load_multisegment_pretraining(
                     )
                     examples.extend(
                         PretrainExample(
-                            f"{sample.sample_id}:{task}",
+                            f"{sample.trajectory_id}:{task}",
                             sample.document_id,
                             sample.dedup_cluster,
                             task,

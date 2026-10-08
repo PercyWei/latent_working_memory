@@ -2,41 +2,51 @@
 
 import argparse
 import json
-from pathlib import Path
-
-from latent_working_memory.data_preparation.fineweb_qa.pipeline import (
+from latent_working_memory.data_preparation.fineweb_factqa.campaign import initialize
+from latent_working_memory.data_preparation.fineweb_factqa.config import (
+    add_run_arguments,
+    load_config,
+    run_config,
+)
+from latent_working_memory.data_preparation.fineweb_factqa.pipeline import (
     annotate,
     finalize,
     prepare,
 )
-
-
-from latent_working_memory.data_preparation.fineweb_qa.sources import prepare_pool
+from latent_working_memory.data_preparation.fineweb_factqa.storage import load_json
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stage", choices=("prepare-pool", "prepare", "annotate", "finalize"))
-    parser.add_argument("--config", type=Path, required=True)
+    add_run_arguments(parser)
     parser.add_argument("--limit", type=int, help="Number of frozen documents to annotate")
     args = parser.parse_args()
-    config = json.loads(args.config.read_text())
     if args.stage != "annotate" and args.limit is not None:
         parser.error("--limit applies only to annotate")
     if args.stage == "prepare-pool":
-        pool = prepare_pool(config)
+        config = run_config(
+            load_config(args.config),
+            args.output_root,
+            args.artifacts_root,
+            args.run_id,
+            args.previous_datasets,
+        )
+        pool = initialize(config)
         result = {
             "stage": "prepare-pool",
             "pool_id": pool["pool_id"],
             "statistics": pool["statistics"],
             "split_counts": pool["split_counts"],
         }
-    elif args.stage == "prepare":
-        result = prepare(config)
-    elif args.stage == "annotate":
-        result = annotate(config, args.limit)
     else:
-        result = finalize(config)
+        config = load_json(args.config)
+        if args.stage == "prepare":
+            result = prepare(config)
+        elif args.stage == "annotate":
+            result = annotate(config, args.limit)
+        else:
+            result = finalize(config)
     print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
 
 

@@ -321,6 +321,7 @@ class AnnotationClient:
             "text": {
                 "format": {
                     "type": "json_schema",
+                    # 名称参与 request_id 散列，保留原值以复用已有请求缓存。
                     "name": f"fineweb_qa_{stage}",
                     "strict": True,
                     "schema": schema,

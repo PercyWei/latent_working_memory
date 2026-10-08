@@ -4,6 +4,7 @@ from collections import Counter
 from contextlib import closing
 from itertools import islice
 
+from latent_working_memory.data_preparation.fineweb_source import split_fractions
 from latent_working_memory.data_preparation.pretrain.dedup import (
     cluster_documents,
     matching_clusters,
@@ -18,7 +19,8 @@ from latent_working_memory.data_preparation.pretrain.sources import (
 
 def collect_documents(paths, config, previous, recipe):
     """累计候选参与重聚类，避免后续桥接文档改变已写出的簇或 split。"""
-    minimum_chars = config.candidate_chars(config.min_segments * config.min_segment_tokens)
+    minimum_chars = config.window.minimum_window_chars
+    fractions = split_fractions(config.split_counts)
     previous_records = list(referenced_records(previous))
     candidates, document_ids = [], set()
     statistics = Counter(
@@ -28,14 +30,14 @@ def collect_documents(paths, config, previous, recipe):
         length_rejected=0,
         duplicate_id=0,
     )
-    selected_by_split = dict.fromkeys(config.counts, 0)
+    selected_by_split = dict.fromkeys(config.split_counts, 0)
     with closing(parquet_records(paths, config.source_seed)) as records:
         while True:
             batch = list(islice(records, config.source_batch_size))
             if not batch:
                 deficits = ", ".join(
                     f"{split}={count - selected_by_split[split]}"
-                    for split, count in config.counts.items()
+                    for split, count in config.split_counts.items()
                     if count > selected_by_split[split]
                 )
                 raise ValueError(f"FineWeb source exhausted; missing trajectories: {deficits}")
@@ -64,8 +66,8 @@ def collect_documents(paths, config, previous, recipe):
                 else set()
             )
             selected, seen = [], set()
-            available_by_split = dict.fromkeys(config.counts, 0)
-            selected_by_split = dict.fromkeys(config.counts, 0)
+            available_by_split = dict.fromkeys(config.split_counts, 0)
+            selected_by_split = dict.fromkeys(config.split_counts, 0)
             duplicates = previously_used = 0
             for (record, location), cluster in zip(candidates, clusters, strict=True):
                 if cluster in excluded:
@@ -75,14 +77,14 @@ def collect_documents(paths, config, previous, recipe):
                     duplicates += 1
                     continue
                 seen.add(cluster)
-                split = document_split(cluster, config.source_seed, config.split_fractions)
+                split = document_split(cluster, config.source_seed, fractions)
                 available_by_split[split] += 1
-                if selected_by_split[split] < config.counts[split]:
+                if selected_by_split[split] < config.split_counts[split]:
                     selected.append(
                         {"record": record, "location": location, "cluster": cluster, "split": split}
                     )
                     selected_by_split[split] += 1
-            if selected_by_split == config.counts:
+            if selected_by_split == config.split_counts:
                 return selected, {
                     **statistics,
                     "candidate_documents": len(candidates),

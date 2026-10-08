@@ -55,17 +55,17 @@ d = Lrw - L0; g = Lrw - Lapp
 
 | 数据 | 规范格式 | 处理 |
 |---|---|---|
-| 基础预训练 | `MultisegmentSample` 文本，根目录 `train/dev/test.jsonl` 与 `preparation.json` | 对保存正文使用当前基座分词，按视图选前缀并右裁剪；从实际终点紧邻读取续文，无需原始 Parquet |
+| 基础预训练 | `MultisegmentSample` 文本，根目录 `train/dev/test.jsonl` 与 `preparation.json` | 按固定字符段分别分词，再拼接为 token 序列；按视图选前缀并右裁剪，从实际终点紧邻读取续文，无需原始 Parquet |
 | 已有文本成品 | 基础构造器的 `TextSample`，目录内 `train/dev/test.jsonl` | 由 `pretrain_data_view=text_samples` 显式选择；按输入长度筛选，不截断文本或目标 |
 | QA | FactQA 发布目录的 `preparation.json` 与 `train/dev/test.jsonl` | 校验已有来源、事实与题池隔离；保留原文、分段、更新点及 `usage` |
 
-- QA 加载支持现行构造流程的 **6–10 段**，不会强制重切为旧笔记中的八段，也不会使用预训练长度筛选参数裁剪轨迹。
+- QA 加载保留冻结的 **6–10 段**，按各段字符区间独立分词，不用预训练长度参数裁剪轨迹。窗口约束读取新构造的 K／倍率配置，同时支持已发布 `20260930` 数据的字符长度配置；旧段长无需为 4 的倍数。
 - 训练入口读取并验证数据后记录实际 token 长度与题数。AE＋LM 的 train/dev 在长度筛选后必须仍包含两种任务。
 - 阶段衔接保存并核对 AE＋LM 来源文档与去重簇，QA 不能与其重叠。
-- 三个 baseline 的首组基础训练选择 `multisegment_full`：使用末个写入切点，右裁剪到最多 4096 tokens，再过滤不足 1024 tokens 的输入。两个 ICAE 从同一正文各构造一条 AE 与 LM 样本，分别训练自己的参数；ICAE-multi 按 1024 tokens 独立写入后联合读取。后续完整 QA 轨迹提供更长的历史与更多记忆块训练。
-- 动态共享预训练选择 `multisegment_first_write`：使用第一个写入切点，右裁剪到最多 1024 tokens，再过滤不足 768 tokens 的输入；只要求首段实际输入及续文足够，不要求末个切点可用。两种视图均从实际裁剪终点紧邻读取 `preparation.json` 中 `config.continuation_tokens` 指定的续文，默认 512 tokens。AE 与 LM 成对保留；AutoCompressors 只保留 LM。
-- 数据构造按无放回顺序分批读取来源，直到各划分达到配额；每篇合格文档只生成一条轨迹。先抽取 3–5 段及各段长度，每段为 1–3K tokens（K=512，即 512–1536），再求和得到正文计划长度 L，自然范围为 1536–7680 tokens；正文与续文共用候选窗口的 reserve。v3 仍按上述 `max_input_tokens` 右裁剪，不改变原始段长计划。
-- 默认数据目录为 `data/fineweb-multisegment-k512-seg1to3x_train32k_20261008/`，**尚未构造，训练前须先生成**。每行保存正文与切点，`source` 仅记录来源位置；`capacity` 位于元数据 `config`，不决定当前模型的 64 slots。两种视图继承相同来源与划分，只在内存组织样本。运行记录按来源统计原始／实际前缀长度、裁剪条数和裁剪 token 数，并保留任务数、长度过滤和续文不足计数。
+- 三个 baseline 的首组基础训练选择 `multisegment_full`：拼接所有正文段的 token，右裁剪到最多 4096 tokens，再过滤不足 1024 tokens 的输入。两个 ICAE 从同一正文各构造一条 AE 与 LM 样本，分别训练自己的参数；ICAE-multi 按 1024 tokens 独立写入后联合读取。后续完整 QA 轨迹提供更长的历史与更多记忆块训练。
+- 动态共享预训练选择 `multisegment_first_write`：使用首个字符段编码后的 token，右裁剪到最多 1024 tokens，再过滤不足 768 tokens 的输入。两种视图均从实际裁剪终点紧邻读取 `config.window.continuation_tokens` 指定的 Q 个 tokens，默认 Q=512；候选依次来自未用的正文 token 与单独编码的 `continuation`。不足 Q 时整对过滤；AE 与 LM 成对保留，AutoCompressors 只保留 LM。
+- 数据构造无放回分批读取来源，直到各划分达到配额；每篇合格文档只生成一条轨迹。默认抽取 3–5 段，每段先采样名义长度 l∈[K,3K]，分别保存 `ceil(4 × l × α)` 个字符；尾部 `continuation` 独立保存 `ceil(4 × Q × α)` 个字符，α 为 `content_reserve_ratio`。默认 K=512、α=1.5，每段 3072–9216 字符，正文 9216–46080 字符，对应名义总长 1536–7680 tokens；Q=512 的尾部为 3072 字符。K64 的正文段为 384–1152 字符，正文共 1152–5760 字符。保存的 `estimated_tokens = len(text) / 4` 包含余量，实际 token 数仍由 tokenizer 决定；换 tokenizer 不改变字符分段。
+- 默认数据目录为 `data/fineweb-multisegment-k512-seg1to3x_train32k_20261008/`，**尚未构造，训练前须先生成**。每行保存 `trajectory_id`、正文 `text`、字符区间 `segments` 与尾部候选 `continuation`；正文布局与 FactQA 共用，`source` 仅供追溯。元数据中的 `capacity` 控制构造段长，不决定当前模型的 64 slots。两种视图继承相同来源与划分，只在内存组织样本；运行记录保留实际 token 长度、裁剪和过滤统计。
 
 | 目标 | 实现细节 |
 |---|---|

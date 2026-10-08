@@ -4,8 +4,10 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 
-from latent_working_memory.data_preparation.fineweb_qa.assembly import validate_trajectory
+from latent_working_memory.data_preparation.fineweb_factqa.assembly import validate_trajectory
 from latent_working_memory.data_preparation.pretrain.fineweb import document_split
+from latent_working_memory.data_preparation.fineweb_source import split_fractions
+from latent_working_memory.data_preparation.segmentation import SegmentationConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +83,7 @@ def _encode_texts(tokenizer, texts: list[str]) -> tuple[tuple[int, ...], ...]:
 
 
 def tokenize_trajectory(
-    record: dict, tokenizer, role_seed: int, expected_split: str
+    record: dict, tokenizer, qa_config: dict, expected_split: str
 ) -> FactQATrajectory:
     """Validate one published record, then tokenize source and QA fields separately."""
     _exact_fields(
@@ -107,7 +109,7 @@ def tokenize_trajectory(
         raise ValueError("trajectory split differs from the requested dataset split")
     # Reuse the writer's contract: fact isolation, source spans, role quotas and
     # the exact fixed usage schedule, including all historical dev/test tasks.
-    validate_trajectory(record, {"role_seed": role_seed})
+    validate_trajectory(record, qa_config)
     _exact_fields(record["source"], {"file", "row_group", "row_index"}, "source")
     for segment in record["segments"]:
         _exact_fields(segment, {"segment_id", "char_span"}, "segment")
@@ -175,9 +177,36 @@ def load_factqa(dataset_dir: str | Path, tokenizer) -> dict[str, tuple[FactQATra
     root = Path(dataset_dir)
     with (root / "preparation.json").open(encoding="utf-8") as stream:
         preparation = json.load(stream)
-    role_seed = preparation["qa"]["role_seed"]
-    source_config = preparation["source_pool_config"]["source"]
-    window_config = preparation["source_pool_config"]["window"]
+    qa_config = preparation["qa"]
+    if type(qa_config["max_answer_chars"]) is not int or qa_config["max_answer_chars"] < 1:
+        raise ValueError("qa.max_answer_chars must be a positive integer")
+    pool_config = preparation["source_pool_config"]
+    if "source" in pool_config:
+        # The published train1000 dataset records its original source protocol.
+        source_seed = pool_config["source"]["data_seed"]
+        fractions = tuple(pool_config["source"]["split_fractions"])
+    else:
+        source_seed = pool_config["source_seed"]
+        fractions = split_fractions(pool_config["split_counts"])
+    window_config = pool_config["window"]
+    segmentation = None
+    if set(window_config) == {
+        "min_segments",
+        "max_segments",
+        "min_segment_chars",
+        "max_segment_chars",
+    }:
+        # Published 20260930 FactQA sampled arbitrary integer character lengths.
+        min_segments, max_segments = window_config["min_segments"], window_config["max_segments"]
+        min_chars, max_chars = (
+            window_config["min_segment_chars"],
+            window_config["max_segment_chars"],
+        )
+    else:
+        segmentation = SegmentationConfig(**window_config)
+        if segmentation.continuation_tokens != 0:
+            raise ValueError("FactQA window requires continuation_tokens=0")
+        min_segments, max_segments = segmentation.min_segments, segmentation.max_segments
     seen_documents, seen_trajectories, seen_questions, seen_sources = set(), set(), set(), set()
     cluster_splits = {}
     result = {}
@@ -188,21 +217,21 @@ def load_factqa(dataset_dir: str | Path, tokenizer) -> dict[str, tuple[FactQATra
             for line_number, line in enumerate(stream, 1):
                 try:
                     record = json.loads(line)
-                    trajectory = tokenize_trajectory(record, tokenizer, role_seed, split)
-                    if (
-                        not window_config["min_segments"]
-                        <= len(trajectory.segments)
-                        <= window_config["max_segments"]
-                    ):
+                    trajectory = tokenize_trajectory(record, tokenizer, qa_config, split)
+                    if not min_segments <= len(trajectory.segments) <= max_segments:
                         raise ValueError(
                             "segment count differs from the frozen window specification"
                         )
-                    if any(
-                        not window_config["min_segment_chars"]
-                        <= segment.char_span[1] - segment.char_span[0]
-                        <= window_config["max_segment_chars"]
+                    lengths = [
+                        segment.char_span[1] - segment.char_span[0]
                         for segment in trajectory.segments
-                    ):
+                    ]
+                    valid_lengths = (
+                        all(min_chars <= length <= max_chars for length in lengths)
+                        if segmentation is None
+                        else all(segmentation.is_valid_segment_length(length) for length in lengths)
+                    )
+                    if not valid_lengths:
                         raise ValueError(
                             "segment length differs from the frozen window specification"
                         )
@@ -212,8 +241,8 @@ def load_factqa(dataset_dir: str | Path, tokenizer) -> dict[str, tuple[FactQATra
                     if (
                         document_split(
                             cluster,
-                            source_config["data_seed"],
-                            tuple(source_config["split_fractions"]),
+                            source_seed,
+                            fractions,
                         )
                         != split
                     ):

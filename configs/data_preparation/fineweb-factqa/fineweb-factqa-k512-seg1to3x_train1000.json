@@ -1,0 +1,44 @@
+{
+  "source_dir": "data/raw/HuggingFaceFW-fineweb/sample-10BT",
+  "source_batch_size": 100000,
+  "source_seed": 20260907,
+  "selection_seed": 20260928,
+  "split_counts": {
+    "train": 1000,
+    "dev": 100,
+    "test": 100
+  },
+  "window": {
+    "capacity": 512,
+    "min_segment_ratio": 1,
+    "max_segment_ratio": 3,
+    "min_segments": 6,
+    "max_segments": 10,
+    "content_reserve_ratio": 1.5
+  },
+  "batch_split_counts": {
+    "train": 150,
+    "dev": 25,
+    "test": 25
+  },
+  "qa": {
+    "max_answer_chars": 128,
+    "role_seed": 20260928,
+    "max_supplement_rounds": 3,
+    "supplement_surplus": 2
+  },
+  "annotation": {
+    "endpoint": "http://127.0.0.1:4141/v1/responses",
+    "model": "gpt-6-sol",
+    "reasoning_effort": "medium",
+    "concurrency": 4,
+    "max_attempts": 3,
+    "timeout_seconds": 300,
+    "max_output_tokens": {
+      "generate": 8192,
+      "verify": 4096,
+      "document_review": 32768
+    }
+  },
+  "prompts_dir": "configs/data_preparation/prompts/fineweb_factqa"
+}

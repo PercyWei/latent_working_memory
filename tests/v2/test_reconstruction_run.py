@@ -16,6 +16,7 @@ from latent_working_memory.v2.memory_codec import CodecConfig
 from latent_working_memory.v2.pretrain.config import SelectionConfig, TrainingConfig
 from latent_working_memory.v2.pretrain.train import run_training
 from latent_working_memory.data_preparation.fineweb_multisegment.config import DataPreparationConfig
+from latent_working_memory.data_preparation.segmentation import SegmentationConfig
 from latent_working_memory.data_preparation.fineweb_multisegment.prepare import prepare_dataset
 from latent_working_memory.v2.pretrain.checkpoint import prune_checkpoints
 
@@ -42,12 +43,10 @@ def make_experiment(tmp_path, tiny_base, train_samples=12):
         attention_implementation="eager",
     )
     preparation = DataPreparationConfig(
-        str(parquet),
-        capacity=2,
-        continuation_tokens=2,
+        source_dir=str(parquet.parent),
         source_batch_size=100,
-        split_fractions=(0.6, 0.2, 0.2),
-        counts={"train": train_samples, "dev": 8, "test": 8},
+        split_counts={"train": train_samples, "dev": 8, "test": 8},
+        window=SegmentationConfig(capacity=2, continuation_tokens=2, content_reserve_ratio=1.5),
     )
     dataset_root = tmp_path / "datasets"
     metadata = prepare_dataset(preparation, dataset_root, run_id="test")

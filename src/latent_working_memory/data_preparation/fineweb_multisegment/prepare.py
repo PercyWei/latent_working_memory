@@ -1,21 +1,26 @@
-"""从 FineWeb 构造完整候选窗口、来源记录与多段 token 计划。"""
+"""从 FineWeb 构造固定字符分段的正文、续文候选及来源记录。"""
 
 import argparse
 from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from glob import glob
 from itertools import accumulate
 import json
 from pathlib import Path
-import random
 import uuid
 from zoneinfo import ZoneInfo
 
 from latent_working_memory.data_preparation.fineweb_multisegment.config import DataPreparationConfig
 from latent_working_memory.data_preparation.fineweb_multisegment.records import MultisegmentSample
 from latent_working_memory.data_preparation.fineweb_multisegment.sources import collect_documents
+from latent_working_memory.data_preparation.fineweb_source import (
+    USED_SOURCES_FILE,
+    load_previous_sources,
+    source_files,
+    write_used_sources,
+)
 from latent_working_memory.data_preparation.pretrain.config import PreparationConfig
+from latent_working_memory.data_preparation.segmentation import TOKEN_ESTIMATION_RULE, sample_window
 
 
 @dataclass(frozen=True)
@@ -27,67 +32,46 @@ class Document:
     source: dict
 
 
-def segment_lengths(count, minimum, maximum, available, rng):
-    """先采样各段长度；available 只约束可用预算，不是待分配的目标总长。"""
-    remaining, parts = available, []
-    for slots in range(count, 0, -1):
-        high = min(maximum, remaining - minimum * (slots - 1))
-        part = rng.randint(minimum, high)
-        parts.append(part)
-        remaining -= part
-    rng.shuffle(parts)
-    return parts
-
-
 def build_samples(documents, config, split):
-    """最终选中来源逐篇构造一次；同一文档的分段随机流不受读取批次影响。"""
-    for i, document in enumerate(d for d in documents if d.split == split):
-        rng = random.Random(f"{config.seed}:multisegment:{document.document_id}")
-        available = config.available_content_tokens(len(document.text))
-        max_count = min(config.max_segments, available // config.min_segment_tokens)
-        count = rng.randint(config.min_segments, max_count)
-        parts = segment_lengths(
-            count, config.min_segment_tokens, config.max_segment_tokens, available, rng
+    """最终选中来源逐篇构造一次，字符分段与 FactQA 共用采样规则。"""
+    for document in (d for d in documents if d.split == split):
+        start, parts, candidate_end = sample_window(
+            len(document.text), document.document_id, config.selection_seed, config.window
         )
-        chars = config.candidate_chars(sum(parts))
-        start = rng.randint(0, len(document.text) - chars)
+        cuts = [0, *accumulate(config.window.reserved_chars(part) for part in parts)]
+        end = start + cuts[-1]
+        text = document.text[start:end]
         yield MultisegmentSample(
-            f"{split}/{i:06d}",
-            document.document_id,
-            document.dedup_cluster,
-            document.text[start : start + chars],
-            tuple(accumulate(parts)),
-            dict(document.source, char_span=[start, start + chars]),
+            trajectory_id=f"{document.document_id}:{start}:{end}",
+            document_id=document.document_id,
+            dedup_cluster=document.dedup_cluster,
+            split=split,
+            source=document.source,
+            window_char_span=[start, end],
+            text=text,
+            segments=[
+                {"segment_id": f"seg{i}", "char_span": [a, b]}
+                for i, (a, b) in enumerate(zip(cuts[:-1], cuts[1:], strict=True))
+            ],
+            continuation=document.text[end:candidate_end],
+            text_char_length=len(text),
+            estimated_tokens=len(text) / 4,
+            estimated_tokens_rule=TOKEN_ESTIMATION_RULE,
         )
-
-
-def load_previous_sources(datasets):
-    """仅合并显式指定数据集实际用过的文档，不递归读取它们的历史依赖。"""
-    sources = {}
-    for directory in datasets:
-        metadata = json.loads((Path(directory) / "preparation.json").read_text(encoding="utf-8"))
-        for item in metadata["used_sources"]:
-            identity = item["document_id"]
-            if identity in sources and sources[identity]["source"] != item["source"]:
-                raise ValueError(f"previous document has inconsistent source locations: {identity}")
-            sources[identity] = item
-    return list(sources.values())
 
 
 def write_readme(output_dir, metadata):
     created = datetime.fromisoformat(metadata["created_at"])
     stamp = created.strftime("%Y%m%d %H:%M:%S UTC+08:00")
-    config = DataPreparationConfig(**metadata["config"])
+    config = DataPreparationConfig.from_mapping(metadata["config"])
     rows = []
     for split, stats in metadata["statistics"].items():
         interval = (
-            f"{stats['content_tokens_min']:,}–{stats['content_tokens_max']:,}"
+            f"{stats['text_char_length_min']:,}–{stats['text_char_length_max']:,}"
             if stats["trajectories"]
             else "—"
         )
-        rows.append(
-            f"| {split} | {stats['trajectories']:,} | {stats['documents']:,} | {interval} |"
-        )
+        rows.append(f"| {split} | {stats['trajectories']:,} | {interval} |")
     total = sum(s["trajectories"] for s in metadata["statistics"].values())
     text = f"""# {created:%Y%m%d}_FineWeb 多段文本数据集
 
@@ -95,45 +79,50 @@ def write_readme(output_dir, metadata):
 
 最后修订时间：{stamp}
 
-`{output_dir.name}` 基于 [FineWeb sample-10BT](https://huggingface.co/datasets/HuggingFaceFW/fineweb) 英文网页文本构建，用于单次压缩、多段写入、历史重构及续文预测。每行保存一条完整候选窗口与累计 token 写入切点，训练无需原始 Parquet。
-
-本次运行标识为 `{metadata["run_id"]}`；目录名由构造参数与该标识组成，创建时间记录实际执行时间。本次显式排除 {len(metadata["previous_datasets"])} 份已有数据集，目录清单见 `preparation.json.previous_datasets`。
+`{output_dir.name}` 基于 [FineWeb sample-10BT](https://huggingface.co/datasets/HuggingFaceFW/fineweb) 英文网页构建，用于多段写入、正文重构与续文预测。每篇文档生成一条轨迹，保存正文、固定字符分段和紧邻正文的续文候选，无需原始 Parquet 即可读取。
 
 ## 规模与规则
 
-共 {total:,} 条候选轨迹，引用 {metadata["referenced_documents"]:,} 篇来源文档；分 {metadata["source_statistics"]["source_batches"]:,} 批扫描 {metadata["source_statistics"]["scanned_documents"]:,} 篇原始文档。
+共 {total:,} 条轨迹，引用 {metadata["referenced_documents"]:,} 篇文档；分 {metadata["source_statistics"]["source_batches"]:,} 批扫描 {metadata["source_statistics"]["scanned_documents"]:,} 篇来源文档。
 
-| 划分 | 候选轨迹 | 来源文档 | 计划正文 tokens 范围 |
-|---|---:|---:|---:|
+| 划分 | 轨迹数 | 正文字符数范围 |
+|---|---:|---:|
 {chr(10).join(rows)}
 
 | 参数 | 取值 |
 |---|---|
-| 构建基准 K | {config.capacity} |
-| 每段倍率 | {config.min_segment_ratio:g}–{config.max_segment_ratio:g} × K |
-| 每段计划长度 | {config.min_segment_tokens}–{config.max_segment_tokens} tokens |
-| 每条段数 | {config.min_segments}–{config.max_segments} |
-| 正文自然范围 | {config.min_segments * config.min_segment_tokens}–{config.max_segments * config.max_segment_tokens} tokens，不含续文与字符缓冲 |
-| 续文目标 | {config.continuation_tokens} tokens |
-| 整体字符余量系数 | {config.content_reserve_ratio:g} |
-| 每批原始读取量 | {config.source_batch_size:,} 篇；不足配额则继续读取 |
+| 构建基准 K | {config.window.capacity} |
+| 每段倍率 | {config.window.min_segment_ratio:g}–{config.window.max_segment_ratio:g} × K |
+| 每段字符数（含余量） | {config.window.min_segment_chars}–{config.window.max_segment_chars} |
+| 每条段数 | {config.window.min_segments}–{config.window.max_segments} |
+| 续文目标 Q | {config.window.continuation_tokens} tokens |
+| 各段与续文余量系数 α | {config.window.content_reserve_ratio:g} |
+| 每批原始读取量 | {config.source_batch_size:,} 篇 |
 
-名称中的 train 规模为目标训练轨迹数的简写，精确配额与实际产量见元数据；K 用于构建段长，不强制下游模型采用相同记忆容量。每篇最终选中的文档只生成一条轨迹，累计合格来源池中每个去重簇至多选一篇，三份划分按来源簇隔离。
+K 与倍率指定余量前的名义长度；保存的正文包含逐段余量，`estimated_tokens` 按实际正文字符数÷4计算，不等同于名义长度，也不约束 tokenizer 的实际 token 数。目录名由构造参数和 `run_id={metadata["run_id"]}` 组成，train 规模是目标训练轨迹数的简写，精确配额见 `preparation.json.config`。
 
-## 构建与使用
+## 构造流程
 
-1. 从同一 Parquet 随机流无放回地分批读取，基础及长度过滤后加入累计候选池；每轮重新聚类、排除旧数据集已用来源及其匹配簇，再按来源簇划分并填充配额。配额不足继续读，原始来源耗尽则报错。
-2. 对最终选中的每篇文档，先在原文可容纳的范围内抽取段数和各段长度，再计算计划正文长度 `L = sum(各段长度)`；没有独立固定总长或总长上限。
-3. 令 Q 为续文目标 {config.continuation_tokens} tokens，按 `ceil(4 × (L + Q) × {config.content_reserve_ratio:g})` 估算完整窗口字符数，再随机选择窗口起点；构建时不加载 tokenizer。
-4. 使用时对全文一次分词，按 `write_token_ends` 切分；单次压缩取完整前缀，首次写入取首段。按需要右裁剪后，续文从实际终点紧邻读取；余量不参与正文监督。
+1. 按固定随机流无放回分批读取，质量及长度过滤后加入累计候选池。按文档 ID、规范化 URL、正文及近重复关系聚类，排除已有数据使用的来源及其匹配簇；每簇至多选一篇，按簇划分 train/dev/test。配额不足继续读取，来源耗尽则报错。
+2. 扣除续文窗口后，根据原文字符预算抽取段数及每段名义长度 `lᵢ`。各段独立扩充为 `ceil(4 × lᵢ × α)` 个字符，逐段取整后求和得到正文长度。采样时为剩余段保留最低字符预算。
+3. 在正文后保留独立的 `ceil(4 × Q × α)` 字符续文窗口，以各窗口之和确定随机截取范围。正文保存为 `text`，尾部保存为 `continuation`；按最终字符长度记录分段。读取时先切段再分别分词，实际续文不足 Q tokens 时过滤。
 
 ## 文件与字段
 
-- `train.jsonl`、`dev.jsonl`、`test.jsonl`：每行含 `sample_id`、`document_id`、`dedup_cluster`、`text`、`write_token_ends` 和 `source`。
-- `source` 保存原文文件、row group、组内行号及左闭右开的字符区间，仅用于追溯；正文已包含在 `text`。
-- [preparation.json](preparation.json)：精确构建参数、运行标识、来源规则、排除记录、统计及 `used_sources`。后续构建可通过 `--previous-datasets` 显式传入本目录，排除这些已用文档。
+- `train.jsonl`、`dev.jsonl`、`test.jsonl`：每行一条轨迹，共有字段与 FactQA 一致。
+- `preparation.json`：配置、创建时间、来源规则、排除目录、实际统计及 `used_sources_file`。本次显式排除 {len(metadata["previous_datasets"])} 份数据集；后续构造可通过 `--previous-datasets` 传入本目录。
+- `used-sources.jsonl`：按文档 ID 去重排序的实际已用原文，仅登记本次生成轨迹的文档。
 
-写入切点是目标 token 位置，字符缓冲可能比分词后的实际需求更长。可用样本数依 tokenizer、输入裁剪与续文要求而变；本表报告构建候选数。原始语料与许可说明见 [FineWeb 数据卡](https://huggingface.co/datasets/HuggingFaceFW/fineweb)。
+| 字段 | 含义 |
+|---|---|
+| `trajectory_id` / `document_id` / `dedup_cluster` / `split` | 轨迹、来源文档、去重簇及数据划分 |
+| `source` | 原文 `file`、`row_group`、`row_index` |
+| `window_char_span` | 正文在原文中的左闭右开字符区间 |
+| `text` / `segments` | 正文及分段；每段含 `segment_id` 和相对正文的 `char_span` |
+| `text_char_length` / `estimated_tokens` / `estimated_tokens_rule` | 正文字符数、估算 token 数及规则 `len(text) / 4` |
+| `continuation` | 紧接正文的连续尾部，仅含续文目标及其自身余量 |
+
+字符下标按 Python 字符串索引计数，分段无间隙地覆盖正文；不保存 token 切点。上表报告构建轨迹数，实际可用数量受 tokenizer 及输入预算影响。原始语料与许可说明见 [FineWeb 数据卡](https://huggingface.co/datasets/HuggingFaceFW/fineweb)。
 """
     (output_dir / "README.md").write_text(text, encoding="utf-8")
 
@@ -145,9 +134,7 @@ def prepare_dataset(config, output_root, run_id=None, previous_datasets=()):
     output_dir = Path(output_root) / config.dataset_name(run_id)
     if output_dir.exists():
         raise FileExistsError(f"use a new dataset directory: {output_dir}")
-    paths = [Path(p) for p in sorted(glob(config.source_glob, recursive=True))]
-    if not paths:
-        raise ValueError(f"no FineWeb Parquet files match {config.source_glob}")
+    paths = source_files(config.source_dir)
     previous_datasets = [str(path) for path in previous_datasets]
     previous = load_previous_sources(previous_datasets)
     print("Reading source batches until all split quotas are filled", flush=True)
@@ -173,36 +160,39 @@ def prepare_dataset(config, output_root, run_id=None, previous_datasets=()):
     for split in ("train", "dev", "test"):
         doc_ids, segment_counts = set(), Counter()
         segment_min, segment_max, total_min, total_max = None, None, None, None
-        planned_tokens = characters = trajectories = 0
+        characters = continuation_characters = trajectories = 0
         with (output_dir / f"{split}.jsonl").open("w", encoding="utf-8") as stream:
             for sample in build_samples(documents, config, split):
                 stream.write(json.dumps(asdict(sample), ensure_ascii=False) + "\n")
-                ends = sample.write_token_ends
-                parts = [b - a for a, b in zip((0,) + ends[:-1], ends, strict=True)]
+                parts = [b - a for a, b in (s["char_span"] for s in sample.segments)]
                 segment_counts[len(parts)] += 1
                 segment_min = min(parts) if segment_min is None else min(segment_min, *parts)
                 segment_max = max(parts) if segment_max is None else max(segment_max, *parts)
-                total_min = ends[-1] if total_min is None else min(total_min, ends[-1])
-                total_max = ends[-1] if total_max is None else max(total_max, ends[-1])
-                planned_tokens += ends[-1]
+                total_min = (
+                    len(sample.text) if total_min is None else min(total_min, len(sample.text))
+                )
+                total_max = (
+                    len(sample.text) if total_max is None else max(total_max, len(sample.text))
+                )
                 characters += len(sample.text)
+                continuation_characters += len(sample.continuation)
                 trajectories += 1
                 doc_ids.add(sample.document_id)
                 used[sample.document_id] = {
                     "document_id": sample.document_id,
                     "dedup_cluster": sample.dedup_cluster,
-                    "source": {k: v for k, v in sample.source.items() if k != "char_span"},
+                    "source": sample.source,
                 }
         statistics[split] = {
             "trajectories": trajectories,
             "documents": len(doc_ids),
             "segment_counts": dict(sorted(segment_counts.items())),
-            "segment_tokens_min": segment_min,
-            "segment_tokens_max": segment_max,
-            "content_tokens_min": total_min,
-            "content_tokens_max": total_max,
-            "planned_content_tokens": planned_tokens,
-            "candidate_text_characters": characters,
+            "segment_char_length_min": segment_min,
+            "segment_char_length_max": segment_max,
+            "text_char_length_min": total_min,
+            "text_char_length_max": total_max,
+            "text_characters": characters,
+            "continuation_characters": continuation_characters,
         }
     metadata = {
         "preparation_id": str(uuid.uuid4()),
@@ -211,8 +201,8 @@ def prepare_dataset(config, output_root, run_id=None, previous_datasets=()):
         "dataset": output_dir.name,
         "source_dataset": "HuggingFaceFW/fineweb",
         "source_subset": "sample-10BT",
-        "config": asdict(config),
-        "length_estimation": "L = sum(sampled segment lengths); candidate characters = ceil(4 * (L + continuation_tokens) * content_reserve_ratio); write_token_ends are target token positions",
+        "config": config.to_dict(),
+        "length_estimation": "Segment characters = ceil(4 * sampled nominal tokens * content_reserve_ratio); continuation characters = ceil(4 * continuation_tokens * content_reserve_ratio); sum the independently rounded windows; estimated_tokens = len(text) / 4 includes segment reserves",
         "source_recipe": {
             name: getattr(recipe, name)
             for name in (
@@ -224,11 +214,12 @@ def prepare_dataset(config, output_root, run_id=None, previous_datasets=()):
         "source_files": [str(p) for p in paths],
         "source_statistics": dict(source_statistics),
         "previous_datasets": previous_datasets,
-        "excluded_sources": previous,
-        "used_sources": sorted(used.values(), key=lambda item: item["document_id"]),
+        "excluded_source_count": len(previous),
+        "used_sources_file": USED_SOURCES_FILE,
         "referenced_documents": len(used),
         "statistics": statistics,
     }
+    write_used_sources(output_dir, used.values())
     write_readme(output_dir, metadata)
     (output_dir / "preparation.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -241,7 +232,9 @@ def prepare_dataset(config, output_root, run_id=None, previous_datasets=()):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="构造自包含 FineWeb 多段文本与 token 写入计划")
+    parser = argparse.ArgumentParser(
+        description="构造自包含 FineWeb 多段文本、固定字符分段与续文候选"
+    )
     parser.add_argument(
         "--config",
         type=Path,
@@ -256,8 +249,8 @@ def main():
         nargs="+",
         default=[],
         metavar="DIR",
-        help="本次需排除的已有数据集目录；读取各自 preparation.json.used_sources",
+        help="本次需排除的已有数据集目录；读取各自 used-sources.jsonl（兼容旧 preparation.json.used_sources）",
     )
     args = parser.parse_args()
-    config = DataPreparationConfig(**json.loads(args.config.read_text(encoding="utf-8")))
+    config = DataPreparationConfig.from_mapping(json.loads(args.config.read_text(encoding="utf-8")))
     prepare_dataset(config, args.output_root, args.run_id, args.previous_datasets)

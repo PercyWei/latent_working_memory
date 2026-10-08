@@ -2,7 +2,7 @@ import subprocess
 
 import pytest
 
-from latent_working_memory.data_preparation.fineweb_qa import download
+from latent_working_memory.data_preparation.fineweb_factqa import download
 
 
 ENDPOINT = "https://hf-mirror.com"

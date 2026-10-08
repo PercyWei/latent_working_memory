@@ -1,6 +1,6 @@
 # 20260912_latent_working_memory
 
-最后修订时间：20261008 11:19:59 UTC+08:00
+最后修订时间：20261008 17:39:11 UTC+08:00
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理；ICAE v1 和 C-DIC 分别位于 `reproductions/icae/` 与 `reproductions/cdic/`，各自使用独立的 `uv` 环境。
 
@@ -14,11 +14,11 @@
 
 创建和整理配置遵守 [配置组织规则](configs/README.md)：基础数据准备与实验选样分开，每个配置目录只描述一个具体实验，实验组通过运行记录关联。
 
-数据构造按流程分包：[pretrain/](src/latent_working_memory/data_preparation/pretrain/) 负责 FineWeb 预训练文本构造、质量审查与恢复，[personamem/](src/latent_working_memory/data_preparation/personamem/) 负责 PersonaMem 事实 QA 构造，[fineweb_qa/](src/latent_working_memory/data_preparation/fineweb_qa/) 负责 FineWeb 事实 QA 的冻结来源池、6–10 段随机切分、三划分批次、生成、全量局部核验、全文审查、补题与定稿；完整接口及产物索引见 [FineWeb QA 数据构造流程](src/latent_working_memory/data_preparation/fineweb_qa/README.md)。预训练的来源、句界、截断、文本格式、审查和恢复模块均位于 `pretrain/`；训练时的数据读取与实验选样继续使用 `v1/pretrain/prepared_data.py` 和 `v1/pretrain/data_selection.py`。
+数据构造按流程分包：[pretrain/](src/latent_working_memory/data_preparation/pretrain/) 负责 FineWeb 预训练文本构造、质量审查与恢复，[personamem/](src/latent_working_memory/data_preparation/personamem/) 负责 PersonaMem 事实 QA 构造，[fineweb_factqa/](src/latent_working_memory/data_preparation/fineweb_factqa/) 负责 FineWeb 事实 QA：动态扩展来源池，冻结各文档的 6–10 段字符边界，执行生成、局部核验、全文审查和补题，直到精确达到 train/dev/test 各 1000/100/100 条。单一主配置保存构造参数，运行标识、输出目录和历史排除通过 CLI 指定；完整接口见 [FineWeb FactQA 数据构造流程](src/latent_working_memory/data_preparation/fineweb_factqa/README.md)。预训练的来源、句界、截断、文本格式、审查和恢复模块均位于 `pretrain/`；训练时的数据读取与实验选样继续使用 `v1/pretrain/prepared_data.py` 和 `v1/pretrain/data_selection.py`。
 
-[fineweb_multisegment/](src/latent_working_memory/data_preparation/fineweb_multisegment/README.md) 负责跨 v2/v3 共用的多段文本构造：默认 K=512、每段 1–3K、3–5 段，正文计划长度由各段求和。无放回分批读取、累计去重，直到填满 32,000/128/128 条配额，每篇选中文档只构造一条轨迹；根层 JSONL 保存完整候选窗口与写入计划，训练无需原始 Parquet。
+[fineweb_multisegment/](src/latent_working_memory/data_preparation/fineweb_multisegment/README.md) 负责跨 v2/v3 共用的多段文本构造：默认 K=512、每段名义长度 1–3K、3–5 段，各段与续文独立计入余量并向上取整，正文字符数由各段求和。无放回分批读取、累计去重，直到填满 32,000/128/128 条配额，每篇选中文档只构造一条轨迹；与 FactQA 共用分段逻辑；根层 JSONL 保存正文、固定字符分段及独立续文候选，训练无需原始 Parquet。
 
-目录前缀由实际配置中的 K、倍率与训练规模生成，后接 `--run-id`（默认执行时的上海日期）。采样配置可复用；本次要排除的所有旧数据通过 `--previous-datasets` 显式列出，不递归继承历史排除。元数据顶层保存 `run_id`、`previous_datasets`、真实创建时间及实际 `used_sources`，命名标识不改变 seed 或样本。
+FactQA 与 multisegment 的目录前缀由实际 K、倍率与训练规模生成，后接 `--run-id`（默认执行时的上海日期）；命名标识不改变 seed 或样本。配置可复用，本次要排除的全部旧数据通过 `--previous-datasets` 显式列出，不递归继承历史排除。两个流程共用 `used-sources.jsonl`，仅记录实际用于构造的来源，FactQA 包括标注失败文档；`preparation.json.used_sources_file` 引用账本，避免重复保存列表，并保留运行标识、排除记录和真实创建时间。
 
 ```bash
 uv python install 3.11

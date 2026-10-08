@@ -1,9 +1,12 @@
+from dataclasses import replace
 import json
 
 import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers, processors
 from transformers import PreTrainedTokenizerFast
 
+from latent_working_memory.data_preparation.fineweb_multisegment.config import DataPreparationConfig
+from latent_working_memory.data_preparation.segmentation import SegmentationConfig
 from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
 from latent_working_memory.v3.config import (
     ExperimentConfig,
@@ -155,37 +158,73 @@ def test_invalid_input_interval_fails_before_reading(tmp_path, tokenizer, minimu
         load_pretraining(tmp_path, tokenizer, minimum, maximum)
 
 
+MULTISEGMENT_CONFIG = DataPreparationConfig(
+    source_dir="unused",
+    window=SegmentationConfig(
+        capacity=1,
+        min_segment_ratio=1,
+        max_segment_ratio=4,
+        min_segments=2,
+        max_segments=3,
+        continuation_tokens=2,
+        content_reserve_ratio=1,
+    ),
+)
+
+
 def multisegment_row(
-    sample_id="sample", document_id="document", cuts=(3,), text="a b c d e a b c d e", **changes
+    trajectory_id="sample",
+    document_id="document",
+    segment_texts=("a b", "c"),
+    continuation="d e",
+    split="train",
+    config=MULTISEGMENT_CONFIG,
+    nominal_parts=None,
+    **changes,
 ):
+    if nominal_parts is None:
+        nominal_parts = [(len(part) + 3) // 4 for part in segment_texts]
+    parts = [
+        part.ljust(config.window.reserved_chars(nominal))
+        for part, nominal in zip(segment_texts, nominal_parts, strict=True)
+    ]
+    text = "".join(parts)
+    segments, start = [], 0
+    for index, part in enumerate(parts):
+        segments.append({"segment_id": f"seg{index}", "char_span": [start, start + len(part)]})
+        start += len(part)
+    tail_length = config.window.continuation_chars
+    assert len(continuation) <= tail_length
     row = {
-        "sample_id": sample_id,
+        "trajectory_id": trajectory_id,
         "document_id": document_id,
         "dedup_cluster": f"{document_id}:cluster",
+        "split": split,
         "text": text,
-        "write_token_ends": list(cuts),
-        "source": {
-            "file": "data/raw/source.parquet",
-            "row_group": 0,
-            "row_index": 0,
-            "char_span": [100, 100 + len(text)],
-        },
+        "segments": segments,
+        "continuation": continuation.ljust(tail_length),
+        "window_char_span": [100, 100 + len(text)],
+        "source": {"file": "data/raw/source.parquet", "row_group": 0, "row_index": 0},
+        "text_char_length": len(text),
+        "estimated_tokens": len(text) / 4,
+        "estimated_tokens_rule": "len(text) / 4",
     }
     return row | changes
 
 
-def write_multisegment(path, **splits):
+def write_multisegment(path, config=MULTISEGMENT_CONFIG, **splits):
     root = path / "multisegment"
     root.mkdir(exist_ok=True)
     (root / "preparation.json").write_text(
-        json.dumps({"config": {"capacity": 512, "continuation_tokens": 2}}), encoding="utf-8"
+        json.dumps({"config": config.to_dict()}), encoding="utf-8"
     )
     write_splits(root, **splits)
     return root
 
 
 def test_multisegment_ae_and_lm_share_text_without_raw_source(tmp_path, tokenizer):
-    root = write_multisegment(tmp_path, train=[multisegment_row(text="b c d e a b c d")])
+    row = multisegment_row(segment_texts=("b c", "d"), continuation="e a")
+    root = write_multisegment(tmp_path, train=[row])
     splits, statistics = load_multisegment_pretraining(root, tokenizer, 3, 3, "multisegment_full")
     ae, lm = splits["train"]
     assert ae.input_ids == (4, 5, 6)
@@ -207,9 +246,9 @@ def test_multisegment_ae_and_lm_share_text_without_raw_source(tmp_path, tokenize
     json.dumps(statistics)
 
 
-def test_multisegment_first_write_needs_only_its_prefix_and_continuation(tmp_path, tokenizer):
-    # A tokenizer change can shorten the full text below its saved final cut.
-    root = write_multisegment(tmp_path, train=[multisegment_row(cuts=(2, 5, 8), text="a b c d")])
+def test_multisegment_first_write_uses_following_segments_for_lm(tmp_path, tokenizer):
+    row = multisegment_row(segment_texts=("a b", "c d"), continuation="e")
+    root = write_multisegment(tmp_path, train=[row])
     splits, statistics = load_multisegment_pretraining(
         root, tokenizer, 2, 2, "multisegment_first_write"
     )
@@ -221,9 +260,70 @@ def test_multisegment_first_write_needs_only_its_prefix_and_continuation(tmp_pat
 
 
 @pytest.mark.parametrize("view", ["multisegment_full", "multisegment_first_write"])
+@pytest.mark.parametrize("reserve_ratio,segment_chars,tail_chars", [(1.5, 6, 12), (1.1, 5, 9)])
+def test_multisegment_fixed_character_segments_survive_tokenizer_change(
+    tmp_path, view, reserve_ratio, segment_chars, tail_chars
+):
+    config = replace(
+        MULTISEGMENT_CONFIG,
+        window=replace(MULTISEGMENT_CONFIG.window, content_reserve_ratio=reserve_ratio),
+    )
+    first, second = "a" * (segment_chars - 1) + "b", "c" * (segment_chars - 1) + "d"
+    word_backend = Tokenizer(
+        models.WordLevel({"<unk>": 0, first: 1, second: 2, "e": 3, "f": 4}, unk_token="<unk>")
+    )
+    word_backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    word_tokenizer = PreTrainedTokenizerFast(tokenizer_object=word_backend, unk_token="<unk>")
+    char_backend = Tokenizer(
+        models.BPE(
+            {"<unk>": 0, **{char: i for i, char in enumerate("abcdef ", 1)}}, [], unk_token="<unk>"
+        )
+    )
+    char_tokenizer = PreTrainedTokenizerFast(tokenizer_object=char_backend, unk_token="<unk>")
+    row = multisegment_row(
+        segment_texts=(first, second), continuation="e f", config=config, nominal_parts=(1, 1)
+    )
+    assert [segment["char_span"] for segment in row["segments"]] == [
+        [0, segment_chars],
+        [segment_chars, segment_chars * 2],
+    ]
+    assert len(row["continuation"]) == tail_chars
+    assert row["estimated_tokens"] == segment_chars / 2
+    root = write_multisegment(tmp_path, config=config, train=[row])
+    before = (root / "train.jsonl").read_bytes()
+    word_splits, word_stats = load_multisegment_pretraining(root, word_tokenizer, 1, 20, view)
+    char_splits, char_stats = load_multisegment_pretraining(root, char_tokenizer, 1, 20, view)
+    word_ae, word_lm = word_splits["train"]
+    char_ae, char_lm = char_splits["train"]
+    if view == "multisegment_full":
+        assert word_ae.input_ids == (1, 2)
+        assert word_lm.target_ids == (3, 4)
+        assert char_ae.input_ids == (1,) * (segment_chars - 1) + (2,) + (3,) * (
+            segment_chars - 1
+        ) + (4,)
+        assert char_lm.target_ids == (5, 7)
+    else:
+        assert word_ae.input_ids == (1,)
+        assert word_lm.target_ids == (2, 3)
+        assert char_ae.input_ids == (1,) * (segment_chars - 1) + (2,)
+        assert char_lm.target_ids == (3, 3)
+    assert (
+        word_stats["splits"]["train"]["actual_source_prefix_tokens"]["total"] * segment_chars
+        == (char_stats["splits"]["train"]["actual_source_prefix_tokens"]["total"])
+    )
+    # Encoding the full body at once would merge these two saved character segments.
+    assert word_tokenizer.encode(row["text"], add_special_tokens=False) == [0]
+    assert (root / "train.jsonl").read_bytes() == before
+
+
+@pytest.mark.parametrize("view", ["multisegment_full", "multisegment_first_write"])
 def test_multisegment_crop_moves_lm_target_to_actual_endpoint(tmp_path, tokenizer, view):
-    cuts = (2, 6) if view == "multisegment_full" else (6, 9)
-    root = write_multisegment(tmp_path, train=[multisegment_row(cuts=cuts)])
+    config = replace(
+        MULTISEGMENT_CONFIG, window=replace(MULTISEGMENT_CONFIG.window, content_reserve_ratio=1.5)
+    )
+    parts = ("a b", "c d e a") if view == "multisegment_full" else ("a b c d e a", "b c")
+    row = multisegment_row(segment_texts=parts, config=config)
+    root = write_multisegment(tmp_path, config=config, train=[row])
     splits, statistics = load_multisegment_pretraining(root, tokenizer, 2, 4, view)
     ae, lm = splits["train"]
     assert ae.input_ids is lm.input_ids
@@ -237,8 +337,9 @@ def test_multisegment_crop_moves_lm_target_to_actual_endpoint(tmp_path, tokenize
     assert counts["input_tokens"] == {"min": 4, "max": 4, "total": 8}
 
 
-def test_multisegment_crop_requires_only_actual_prefix_not_original_cut(tmp_path, tokenizer):
-    root = write_multisegment(tmp_path, train=[multisegment_row(cuts=(8,), text="a b c d e")])
+def test_multisegment_crop_can_use_body_despite_short_tail(tmp_path, tokenizer):
+    row = multisegment_row(segment_texts=("a b c d", "e a b c"), continuation="d")
+    root = write_multisegment(tmp_path, train=[row])
     splits, statistics = load_multisegment_pretraining(root, tokenizer, 3, 3, "multisegment_full")
     assert [row.target_ids for row in splits["train"]] == [(3, 4, 5), (6, 7)]
     assert statistics["splits"]["train"]["cropped_source_tokens"] == 5
@@ -256,16 +357,15 @@ def test_multisegment_ac_receives_each_source_once(tmp_path, tokenizer):
     assert statistics["splits"]["train"]["kept_by_task"] == {"ae": 0, "continuation": 1}
 
 
-def test_multisegment_filters_unavailable_tokens_and_keeps_pairs(tmp_path, tokenizer):
+def test_multisegment_filters_actual_lengths_and_keeps_pairs(tmp_path, tokenizer):
     rows = [
-        multisegment_row("short", cuts=(1,)),
-        multisegment_row("kept", cuts=(2,)),
-        multisegment_row("long", cuts=(6,)),
-        multisegment_row("content", cuts=(5,), text="a b c d"),
-        multisegment_row("continuation", cuts=(3,), text="a b c d"),
+        multisegment_row("short", segment_texts=("a", "b")),
+        multisegment_row("kept"),
+        multisegment_row("long", segment_texts=("a b c", "d e a")),
+        multisegment_row("continuation", continuation="d"),
     ]
     root = write_multisegment(tmp_path, train=rows)
-    splits, statistics = load_multisegment_pretraining(root, tokenizer, 2, 5, "multisegment_full")
+    splits, statistics = load_multisegment_pretraining(root, tokenizer, 3, 5, "multisegment_full")
     assert [row.sample_id for row in splits["train"]] == [
         "kept:ae",
         "kept:continuation",
@@ -273,41 +373,48 @@ def test_multisegment_filters_unavailable_tokens_and_keeps_pairs(tmp_path, token
         "long:continuation",
     ]
     counts = statistics["splits"]["train"]
-    assert counts["source_samples"] == 5
+    assert counts["source_samples"] == 4
     assert counts["kept_source_samples"] == 2
-    assert counts["read"] == 10
+    assert counts["read"] == 8
     assert counts["kept_by_task"] == {"ae": 2, "continuation": 2}
     assert counts["cropped_source_samples"] == 1
-    for reason in ("too_short", "content_length", "continuation_length"):
-        assert counts[f"filtered_{reason}"] == 2
+    assert counts["filtered_too_short"] == counts["filtered_continuation_length"] == 2
 
 
-@pytest.mark.parametrize("leak", ("document", "cluster", "sample_id"))
+@pytest.mark.parametrize("leak", ("document", "cluster", "trajectory_id"))
 def test_multisegment_source_isolation_before_filtering(tmp_path, tokenizer, leak):
-    train = multisegment_row("train", cuts=(1,))
-    dev = multisegment_row("dev", document_id="dev-document")
+    train = multisegment_row("train", segment_texts=("a", "b"))
+    dev = multisegment_row("dev", document_id="dev-document", split="dev")
     if leak == "document":
         dev["document_id"] = train["document_id"]
     elif leak == "cluster":
         dev["dedup_cluster"] = train["dedup_cluster"]
     else:
-        dev["sample_id"] = train["sample_id"]
+        dev["trajectory_id"] = train["trajectory_id"]
     root = write_multisegment(tmp_path, train=[train], dev=[dev])
     with pytest.raises(ValueError, match="dev.jsonl:1:.*(source document|dedup cluster|duplicate)"):
-        load_multisegment_pretraining(root, tokenizer, 2, 5, "multisegment_full")
+        load_multisegment_pretraining(root, tokenizer, 3, 5, "multisegment_full")
 
 
-@pytest.mark.parametrize("invalid", ["cuts", "source", "old_field", "text"])
+@pytest.mark.parametrize(
+    "invalid", ["segments", "source", "old_field", "text", "split", "segment_length", "tail_length"]
+)
 def test_multisegment_row_contract_is_enforced_with_location(tmp_path, tokenizer, invalid):
     row = multisegment_row()
-    if invalid == "cuts":
-        row["write_token_ends"] = [3, 2]
+    if invalid == "segments":
+        row["segments"][1]["char_span"][0] += 1
     elif invalid == "source":
         row["source"]["row_group"] = -1
     elif invalid == "old_field":
-        row["capacity"] = 512
-    else:
+        row["write_token_ends"] = [2, 3]
+    elif invalid == "text":
         row["text"] = ""
+    elif invalid == "split":
+        row["split"] = "dev"
+    elif invalid == "segment_length":
+        row = multisegment_row(segment_texts=("a b c d e a b c d", "e"))
+    else:
+        row["continuation"] = row["continuation"][:-1]
     root = write_multisegment(tmp_path, train=[row])
     with pytest.raises(ValueError, match="train.jsonl:1"):
         load_multisegment_pretraining(root, tokenizer, 2, 5, "multisegment_full")
@@ -316,9 +423,14 @@ def test_multisegment_row_contract_is_enforced_with_location(tmp_path, tokenizer
 @pytest.mark.parametrize("continuation_tokens", [0, True, 2.5])
 def test_multisegment_invalid_continuation_metadata_fails(tmp_path, tokenizer, continuation_tokens):
     root = write_multisegment(tmp_path)
-    (root / "preparation.json").write_text(
-        json.dumps({"config": {"capacity": 512, "continuation_tokens": continuation_tokens}})
-    )
+    metadata = {
+        "config": MULTISEGMENT_CONFIG.to_dict()
+        | {
+            "window": MULTISEGMENT_CONFIG.to_dict()["window"]
+            | {"continuation_tokens": continuation_tokens}
+        }
+    }
+    (root / "preparation.json").write_text(json.dumps(metadata))
     with pytest.raises(ValueError, match="continuation_tokens"):
         load_multisegment_pretraining(root, tokenizer, 2, 5, "multisegment_full")
 
@@ -329,7 +441,7 @@ def test_multisegment_preserves_jsonl_order(tmp_path, tokenizer):
         train=[
             multisegment_row("one"),
             multisegment_row("two", document_id="second"),
-            multisegment_row("three", cuts=(4,)),
+            multisegment_row("three", segment_texts=("a b", "c d")),
         ],
     )
     splits, _ = load_multisegment_pretraining(
@@ -349,11 +461,11 @@ def test_runtime_loads_selected_multisegment_view(tmp_path, tokenizer, method):
     dynamic = method == "memory_change"
     ac = method == "autocompressors"
     view = "multisegment_first_write" if dynamic else "multisegment_full"
-    cuts = (3, 5, 8) if dynamic else (3,)
+    parts = ("a b c", "d e", "a b") if dynamic else ("a b", "c")
     root = write_multisegment(
         tmp_path,
-        train=[multisegment_row(cuts=cuts)],
-        dev=[multisegment_row("dev", "dev-document", cuts)],
+        train=[multisegment_row(segment_texts=parts)],
+        dev=[multisegment_row("dev", "dev-document", parts, split="dev")],
     )
     config = ExperimentConfig(
         ModelConfig(),

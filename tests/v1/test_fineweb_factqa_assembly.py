@@ -2,7 +2,7 @@ import copy
 
 import pytest
 
-from latent_working_memory.data_preparation.fineweb_qa.assembly import (
+from latent_working_memory.data_preparation.fineweb_factqa.assembly import (
     assemble_document,
     validate_trajectory,
     qa_quotas,
@@ -11,10 +11,13 @@ from latent_working_memory.data_preparation.fineweb_qa.assembly import (
 
 QA_CONFIG = {
     "role_seed": 20260928,
+    "max_answer_chars": 128,
 }
 
 
-def example_document(extra_per_segment=None, repeat_fact=False, segment_count=8, split="train"):
+def example_document(
+    extra_per_segment=None, repeat_fact=False, segment_count=8, split="train", answer_suffix=""
+):
     extras = extra_per_segment or {}
     text_parts, segments, candidates = [], [], []
     offset = 0
@@ -28,7 +31,7 @@ def example_document(extra_per_segment=None, repeat_fact=False, segment_count=8,
             fact_name = f"{segment_index}-{item_index}"
             if repeat_fact and (segment_index, item_index) == (1, 0):
                 fact_name = "0-1"
-            answer = f"value-{fact_name}"
+            answer = f"value-{fact_name}{answer_suffix}"
             line = f"Fact {fact_name} has {answer}.\n"
             evidence_start = offset + sum(len(part) for part in lines)
             answer_start = evidence_start + line.index(answer)
@@ -202,6 +205,22 @@ def test_role_order_is_stable_when_candidate_listing_is_reordered():
     assert first["trajectory"]["usage"] == second["trajectory"]["usage"]
 
 
+@pytest.mark.parametrize("answer_suffix,limit", [("", 16), ("x" * 140, 192)])
+def test_answer_limit_applies_to_assembly_and_final_validation(answer_suffix, limit):
+    document, candidates, decisions = example_document(answer_suffix=answer_suffix)
+    config = dict(QA_CONFIG, max_answer_chars=limit)
+    trajectory = assemble_document(document, candidates, decisions, config)["trajectory"]
+    validate_trajectory(trajectory, config)
+    maximum = max(len(qa["answer"]) for qa in trajectory["qas"])
+    if answer_suffix:
+        assert maximum > 128
+    smaller = dict(config, max_answer_chars=maximum - 1)
+    with pytest.raises(ValueError, match=f"answer exceeds {maximum - 1} characters"):
+        assemble_document(document, candidates, decisions, smaller)
+    with pytest.raises(ValueError, match=f"answer exceeds {maximum - 1} characters"):
+        validate_trajectory(trajectory, smaller)
+
+
 def test_config_and_segment_contract_is_fixed():
     document, candidates, decisions = example_document()
     document["segments"][3]["char_span"][0] += 1
@@ -213,8 +232,10 @@ def test_config_and_segment_contract_is_fixed():
 @pytest.mark.parametrize("split", ["train", "dev", "test"])
 def test_variable_length_roles_and_all_prefix_evaluation(segment_count, split):
     document, candidates, decisions = example_document(segment_count=segment_count, split=split)
-    trajectory = assemble_document(document, candidates, decisions, {"role_seed": 17})["trajectory"]
-    validate_trajectory(trajectory, {"role_seed": 17})
+    trajectory = assemble_document(document, candidates, decisions, dict(QA_CONFIG, role_seed=17))[
+        "trajectory"
+    ]
+    validate_trajectory(trajectory, dict(QA_CONFIG, role_seed=17))
     assert len(trajectory["qas"]) == 8 * segment_count
     role = "train" if split == "train" else "evaluation"
     assert sum(q["role"] == role for q in trajectory["qas"]) == 4 * segment_count

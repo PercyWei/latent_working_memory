@@ -5,6 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 
+from latent_working_memory.data_preparation.segmentation import (
+    TOKEN_ESTIMATION_RULE,
+    _nonempty,
+    _nonnegative_integer,
+    _span,
+    validate_text_layout,
+)
+
 
 QA_FIELDS = (
     "qa_id",
@@ -16,29 +24,6 @@ QA_FIELDS = (
     "evidence_char_span",
     "answer_char_span",
 )
-TOKEN_ESTIMATION_RULE = "len(text) / 4"
-
-
-def _nonempty(value: object, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{name} must be a nonempty string")
-    return value
-
-
-def _nonnegative_integer(value: object, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"{name} must be a nonnegative integer")
-    return value
-
-
-def _span(value: object, name: str, length: int) -> tuple[int, int]:
-    if not isinstance(value, (list, tuple)) or len(value) != 2:
-        raise ValueError(f"{name} must be a two-item character span")
-    start = _nonnegative_integer(value[0], f"{name} start")
-    end = _nonnegative_integer(value[1], f"{name} end")
-    if not start < end <= length:
-        raise ValueError(f"{name} is outside the text")
-    return start, end
 
 
 def qa_quotas(segment_count: int) -> tuple[list[int], list[int], list[int]]:
@@ -52,42 +37,9 @@ def qa_quotas(segment_count: int) -> tuple[list[int], list[int], list[int]]:
     )
 
 
-def _document_layout(document: dict) -> tuple[str, dict[str, tuple[int, int]]]:
-    _nonempty(document["trajectory_id"], "trajectory_id")
-    document_id = _nonempty(document["document_id"], "document_id")
-    _nonempty(document["dedup_cluster"], "dedup_cluster")
-    if document["split"] not in ("train", "dev", "test"):
-        raise ValueError("split must be train, dev or test")
-    source = document["source"]
-    _nonempty(source["file"], "source.file")
-    _nonnegative_integer(source["row_group"], "source.row_group")
-    _nonnegative_integer(source["row_index"], "source.row_index")
-    text = document["text"]
-    if not isinstance(text, str) or not text:
-        raise ValueError("trajectory text must be nonempty")
-    window_start, window_end = _span(document["window_char_span"], "window_char_span", 2**63)
-    if window_end - window_start != len(text):
-        raise ValueError("window_char_span does not match trajectory text length")
-    segments = document["segments"]
-    if not isinstance(segments, list) or len(segments) < 2:
-        raise ValueError("trajectory must have at least two segments")
-    layout = {}
-    next_start = 0
-    for index, segment in enumerate(segments):
-        expected_id = f"seg{index}"
-        if segment["segment_id"] != expected_id:
-            raise ValueError(f"expected segment {expected_id}")
-        start, end = _span(segment["char_span"], f"{expected_id}.char_span", len(text))
-        if start != next_start:
-            raise ValueError("segment spans must consecutively cover the trajectory text")
-        layout[expected_id] = (start, end)
-        next_start = end
-    if next_start != len(text):
-        raise ValueError("segment spans do not cover the trajectory text")
-    return document_id, layout
-
-
-def _candidate_qa(candidate: dict, text: str, layout: dict[str, tuple[int, int]]) -> dict:
+def _candidate_qa(
+    candidate: dict, text: str, layout: dict[str, tuple[int, int]], max_answer_chars: int
+) -> dict:
     qa_id = _nonempty(candidate["qa_id"], "qa_id")
     segment_id = candidate["segment_id"]
     if segment_id not in layout:
@@ -95,8 +47,8 @@ def _candidate_qa(candidate: dict, text: str, layout: dict[str, tuple[int, int]]
     fact_statement = _nonempty(candidate["fact_statement"], f"{qa_id}.fact_statement")
     question = _nonempty(candidate["question"], f"{qa_id}.question")
     answer = _nonempty(candidate["answer"], f"{qa_id}.answer")
-    if len(answer) > 128:
-        raise ValueError(f"answer exceeds 128 characters for {qa_id}")
+    if len(answer) > max_answer_chars:
+        raise ValueError(f"answer exceeds {max_answer_chars} characters for {qa_id}")
     evidence_start, evidence_end = _span(
         candidate["evidence_char_span"], f"{qa_id}.evidence_char_span", len(text)
     )
@@ -184,12 +136,14 @@ def assemble_document(
     partial trajectory can enter the final JSONL dataset.
     """
     seed = _nonnegative_integer(qa_config["role_seed"], "role_seed")
-    document_id, layout = _document_layout(document)
+    document_id, layout = validate_text_layout(document)
     segment_ids = tuple(layout)
     _, task_counts, gate_counts = qa_quotas(len(segment_ids))
     task_role = "train" if document["split"] == "train" else "evaluation"
     text = document["text"]
-    canonical = [_candidate_qa(qa, text, layout) for qa in candidates]
+    canonical = [
+        _candidate_qa(qa, text, layout, qa_config["max_answer_chars"]) for qa in candidates
+    ]
     qa_ids = [qa["qa_id"] for qa in canonical]
     if len(set(qa_ids)) != len(qa_ids):
         raise ValueError("candidate QA IDs must be unique")
@@ -309,7 +263,7 @@ def assemble_document(
 def validate_trajectory(trajectory: dict, qa_config: dict) -> None:
     """Reject a trajectory that violates offsets, fact isolation or the fixed schedule."""
     seed = _nonnegative_integer(qa_config["role_seed"], "role_seed")
-    document_id, layout = _document_layout(trajectory)
+    document_id, layout = validate_text_layout(trajectory)
     segment_ids = tuple(layout)
     _, task_counts, gate_counts = qa_quotas(len(segment_ids))
     task_role = "train" if trajectory["split"] == "train" else "evaluation"
@@ -350,7 +304,7 @@ def validate_trajectory(trajectory: dict, qa_config: dict) -> None:
         for qa in segment_qas:
             if set(qa) != set(QA_FIELDS) | {"role"}:
                 raise ValueError(f"QA fields are not canonical for {qa['qa_id']}")
-            checked = _candidate_qa(qa, text, layout)
+            checked = _candidate_qa(qa, text, layout, qa_config["max_answer_chars"])
             if any(qa[key] != checked[key] for key in checked):
                 raise ValueError(f"QA differs from its canonical offsets: {qa['qa_id']}")
             _nonempty(qa["fact_group_id"], f"{qa['qa_id']}.fact_group_id")

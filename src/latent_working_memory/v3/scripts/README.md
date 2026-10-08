@@ -27,11 +27,16 @@ LWM_REPO_DIR="/path/to/latent_working_memory"
 
 默认 AE／LM 多段文本数据**尚未构造，须先完成构造再训练**。
 
-构造无放回分批读取到各划分配额，一篇合格文档对应一条轨迹。每条先抽取 3–5 段，每段 512–1536 tokens（1–3K，K=512），再相加得到自然范围 1536–7680 tokens 的正文计划；正文与续文共用 reserve。
+构造无放回分批读取到各划分配额，一篇合格文档对应一条轨迹。每条抽取 3–5 段，各段名义 token 长度 l 在 `[K,3K]` 内采样，分别扩为 `ceil(4 × l × α)` 个字符；尾部 `continuation` 独立取 `ceil(4 × Q × α)` 个字符。Q 为续文目标 token 数，α 为 `content_reserve_ratio`，默认 1.5。字符分段在构造时固定；保存的 `estimated_tokens = len(text) / 4` 包含余量，实际 token 数取决于训练 tokenizer。
 
-构造配置另提供 [K64](../../../../configs/data_preparation/fineweb-multisegment/fineweb-multisegment-k64-seg1to3x_train32k.json)，每段 64–192、全文 192–960 tokens，续文仍为 512 tokens。使用该数据时需同步修改预训练配置中的 `min_input_tokens`；现行 baseline 的 1024 和动态首段的 768 都高于 K64 可用范围，仅切换 `--pretrain-data` 会使全部样本被过滤。保留完整范围时可分别设为 192、64。
+| 构造配置（α=1.5） | 每段名义 tokens | 每段保存字符数 | 正文保存字符数 | 尾部字符数（Q=512） |
+|---|---:|---:|---:|---:|
+| K512（默认） | 512–1536 | 3072–9216 | 9216–46080 | 3072 |
+| [K64](../../../../configs/data_preparation/fineweb-multisegment/fineweb-multisegment-k64-seg1to3x_train32k.json) | 64–192 | 384–1152 | 1152–5760 | 3072 |
 
-预训练目录根层保留 `preparation.json` 与 `train/dev/test.jsonl`，加载时直接使用保存的正文，无需原始 FineWeb Parquet。基础方法使用 `multisegment_full`，动态共享预训练使用 `multisegment_first_write`；输入按各自上限右裁剪，LM 从实际裁剪终点取紧邻的续文，默认 512 tokens。QA 数据可从 [ModelScope 数据仓库](https://modelscope.cn/datasets/percyWeeei/latent-working-memory/files) 下载到 `data/`，保留 `preparation.json` 与三个 split 文件。
+现行 baseline 的最小输入 1024 和动态首段的 768 面向 K512 数据；切换 K64 时，应根据当前 tokenizer 的实际长度分布同步调整 `min_input_tokens`，否则可能大量过滤样本。
+
+预训练目录根层保留 `preparation.json` 与 `train/dev/test.jsonl`，无需原始 FineWeb Parquet。加载时按保存的字符区间分别编码正文段，再拼接各段 tokens 和独立编码的 `continuation`。基础方法使用全文视图 `multisegment_full`，动态共享预训练使用首段视图 `multisegment_first_write`；输入按各自上限右裁剪，LM 从实际裁剪终点取紧邻的 512 tokens，可包含后续正文。QA 数据可从 [ModelScope 数据仓库](https://modelscope.cn/datasets/percyWeeei/latent-working-memory/files) 下载到 `data/`，保留 `preparation.json` 与三个 split 文件。
 
 默认将实验记录到 SwanLab 项目 `latent-working-memory-v3`。在仓库根目录的 `.env` 中填写：
 

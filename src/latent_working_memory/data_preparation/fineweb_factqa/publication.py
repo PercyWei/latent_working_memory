@@ -7,11 +7,17 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from latent_working_memory.data_preparation.fineweb_qa.pipeline import _request_statistics
-from latent_working_memory.data_preparation.fineweb_qa.storage import load_json, save_json
+from latent_working_memory.data_preparation.fineweb_factqa.pipeline import _request_statistics
+from latent_working_memory.data_preparation.fineweb_factqa.storage import load_json, save_json
+from latent_working_memory.data_preparation.fineweb_source import (
+    USED_SOURCES_FILE,
+    write_used_sources,
+)
 
 
 def publish_dataset(config: dict, template: dict, pool: dict, batches: list[dict]) -> dict:
+    if len(batches) != len(pool["batches"]):
+        raise ValueError("cannot publish while allocated batches remain unfinished")
     root = Path(config["dataset_dir"])
     preparations = [load_json(Path(b["dataset_dir"]) / "preparation.json") for b in batches]
     by_split = {s: Counter() for s in ("train", "dev", "test")}
@@ -57,10 +63,19 @@ def publish_dataset(config: dict, template: dict, pool: dict, batches: list[dict
                 "supplementation": preparation["supplementation"],
             }
         )
-    if by_split["train"]["complete_documents"] < config["target_train_trajectories"]:
-        raise ValueError("cannot publish before the current run reaches its train target")
+    if any(
+        by_split[split]["complete_documents"] != target
+        for split, target in config["split_counts"].items()
+    ):
+        raise ValueError("cannot publish until each split reaches its exact split_counts target")
     if len(documents) != len(current_sources):
         raise ValueError("final document outcomes do not cover all assigned sources")
+    prompts = preparations[0]["prompts"]
+    if any(preparation["prompts"] != prompts for preparation in preparations):
+        raise ValueError("finalized batches have different prompts")
+    contract_path = Path(config["artifacts_dir"]) / "config.json"
+    if contract_path.exists() and load_json(contract_path)["prompts"] != prompts:
+        raise ValueError("finalized batch prompts differ from the frozen campaign")
 
     # Validate all staged splits before replacing any public file. The metadata is
     # the completion marker and is written only after all three splits are ready.
@@ -124,11 +139,15 @@ def publish_dataset(config: dict, template: dict, pool: dict, batches: list[dict
             "dataset": root.name,
             "source_pool_id": pool["pool_id"],
             "source_pool_config": pool["config"],
+            "source_files": pool["source_files"],
+            "source_recipe": pool["source_recipe"],
+            "source_statistics": pool["statistics"],
             "previous_datasets": config["previous_datasets"],
-            "target_train_trajectories": config["target_train_trajectories"],
+            "split_counts": config["split_counts"],
+            "run_id": config["run_id"],
             "qa": template["qa"],
             "annotation": {k: v for k, v in template["annotation"].items() if k != "endpoint"},
-            "prompts": preparations[0]["prompts"],
+            "prompts": prompts,
             "summary": {
                 "frozen_documents": len(current_sources),
                 "complete_documents": complete,
@@ -139,7 +158,7 @@ def publish_dataset(config: dict, template: dict, pool: dict, batches: list[dict
                 "final_qas": sum(d["qas"] for d in by_split.values()),
                 "by_split": {s: dict(counts) for s, counts in by_split.items()},
             },
-            "used_sources": current_sources,
+            "used_sources_file": USED_SOURCES_FILE,
             "stage_counts": {k: dict(v) for k, v in stage_counts.items()},
             "request_statistics": {k: dict(v) for k, v in request_statistics.items()},
             "usage": usage,
@@ -148,6 +167,7 @@ def publish_dataset(config: dict, template: dict, pool: dict, batches: list[dict
             "artifacts_dir": config["artifacts_dir"],
         }
         marker.unlink(missing_ok=True)
+        write_used_sources(root, current_sources)
         for split, path in temporary.items():
             os.replace(path, root / f"{split}.jsonl")
         save_json(marker, result)

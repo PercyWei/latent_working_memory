@@ -6,6 +6,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from latent_working_memory.data_preparation.fineweb_multisegment.config import DataPreparationConfig
+from latent_working_memory.data_preparation.segmentation import SegmentationConfig
 from latent_working_memory.data_preparation.fineweb_multisegment import sources
 from latent_working_memory.data_preparation.pretrain.config import PreparationConfig
 from latent_working_memory.data_preparation.pretrain.dedup import source_key
@@ -13,23 +14,24 @@ from latent_working_memory.data_preparation.pretrain.fineweb import document_spl
 
 
 SEED = 20260907
-FRACTIONS = (0.6, 0.2, 0.2)
+FRACTIONS = (1 / 3, 1 / 3, 1 / 3)
 
 
 def config(counts, batch_size=2):
     return DataPreparationConfig(
-        "unused",
-        capacity=1,
-        min_segments=2,
-        max_segments=2,
-        min_segment_ratio=1,
-        max_segment_ratio=1,
-        continuation_tokens=1,
-        content_reserve_ratio=1,
+        source_dir="unused",
         source_seed=SEED,
         source_batch_size=batch_size,
-        split_fractions=FRACTIONS,
-        counts=counts,
+        split_counts=counts,
+        window=SegmentationConfig(
+            capacity=1,
+            min_segments=2,
+            max_segments=2,
+            min_segment_ratio=1,
+            max_segment_ratio=1,
+            continuation_tokens=1,
+            content_reserve_ratio=1,
+        ),
     )
 
 
@@ -189,7 +191,10 @@ def test_exhaustion_reports_each_unfilled_split_and_closes_stream(monkeypatch):
 
 
 def test_base_quality_and_minimum_window_filter_before_candidate_clustering(monkeypatch):
-    cfg = replace(config({"train": 1, "dev": 0, "test": 0}), capacity=10)
+    cfg = replace(
+        config({"train": 1, "dev": 0, "test": 0}),
+        window=replace(config({"train": 1, "dev": 0, "test": 0}).window, capacity=10),
+    )
     records = [record("basic", text="x"), record("short", text="longer than basic"), record("good")]
     source_stream(monkeypatch, records)
     selected, statistics = sources.collect_documents(
@@ -215,3 +220,18 @@ def test_real_parquet_stream_locations_match_selected_records(tmp_path):
             assert Path(location["source_file"]) == path
             original = parquet.read_row_group(location["row_group"]).slice(location["row_index"], 1)
             assert original.to_pylist()[0] == row["record"]
+
+
+def test_source_length_filter_sums_independently_rounded_windows(monkeypatch):
+    cfg = replace(
+        config({"train": 1, "dev": 0, "test": 0}),
+        window=replace(config({"train": 1, "dev": 0, "test": 0}).window, content_reserve_ratio=1.1),
+    )
+    # 两段正文与续文分别 ceil(4 × 1 × 1.1) = 5，而整体 ceil 只得到 14。
+    assert cfg.window.minimum_window_chars == 15
+    source_stream(monkeypatch, [record("short", text="x" * 14), record("fits", text="y" * 15)])
+    selected, statistics = sources.collect_documents(
+        [], cfg, [], PreparationConfig(min_document_chars=4)
+    )
+    assert [row["record"]["id"] for row in selected] == ["fits"]
+    assert statistics["length_rejected"] == 1

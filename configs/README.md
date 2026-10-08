@@ -1,18 +1,20 @@
 # 20260914_配置组织规则
 
 创建时间：20260914 11:48:20 UTC+08:00
-最后修订时间：20261008 11:40:33 UTC+08:00
+最后修订时间：20261008 17:39:11 UTC+08:00
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
 
-FineWeb FactQA 的来源配置、批次模板和整轮目标统一放在 `data_preparation/fineweb-factqa/`，分别为 `fineweb-factqa-source-pool.json`、`fineweb-factqa-6to10-batch000.json` 和 `fineweb-factqa-train1000.json`。配置内的文件引用仍相对于项目根目录。模型请求为 generate、verify 和 document_review。campaign 统一生成本轮来源快照、批次和缓存路径，正式输出为 source-pool、train/dev/test 和 preparation。`previous_datasets` 显式列出要排除的数据目录，首次运行为空列表；只合并各目录自己的 `used_sources`，不追溯历史依赖。详细契约见[数据构造流程](../src/latent_working_memory/data_preparation/fineweb_qa/README.md)。
+FineWeb FactQA 每种设置维护一份主配置，例如 [fineweb-factqa-k512-seg1.5to2x_train1000.json](data_preparation/fineweb-factqa/fineweb-factqa-k512-seg1.5to2x_train1000.json)。配置集中保存来源目录、读取批量、两个随机种子、`split_counts`、`window`、`batch_split_counts`、`qa`、`annotation` 和 `prompts_dir`；相对路径以项目根目录为基准。示例精确构造 train/dev/test 各 1000/100/100 条，按各划分剩余缺额分配新来源，候选不足继续扩池，不设置总扫描上限或固定旧池排除。
+
+运行标识、输出位置和本次排除依据通过 `--run-id`、`--output-root`、`--artifacts-root`、`--previous-datasets` 指定，便于复用配置。campaign 自动派生运行及批次配置快照、来源分配和请求缓存；这些属于运行产物，不在 `configs/` 手工维护。FactQA 与 multisegment 使用共同的 `used-sources.jsonl` 来源账本，`preparation.json.used_sources_file` 引用该文件；两者可互相排除实际用过的来源，不递归继承历史排除。详细参数与执行命令见[数据构造流程](../src/latent_working_memory/data_preparation/fineweb_factqa/README.md)。
 
 ## 目录与职责
 
 ```text
 configs/
   data_preparation/                 # 构造基础数据
-    fineweb-factqa/                # 来源池、批次模板及整轮构造配置
+    fineweb-factqa/                # FactQA 构造配置，每种设置一份
     fineweb-multisegment/          # K64、K512 多段文本构造配置
     prompts/                      # 数据构造提示词
   v1/
@@ -48,15 +50,15 @@ configs/
 
 `CodecConfig.padding_free` 默认 false，六份 pooling 配置显式设为 true；开启后 Encoder／Decoder 复用 PyTorch 2.14 原生变长 FlashAttention，使用 `attention_implementation: "sdpa"`，预算改按有效位置总数计算。无需安装独立 flash-attn 包；CUDA 接口通过 Transformers `AttentionInterface` 接入，详见 [v2 开发记录](../src/latent_working_memory/v2/README.md)。
 
-先通过 `data_preparation.fineweb_multisegment` 和 `data_preparation/fineweb-multisegment/fineweb-multisegment-k512-seg1to3x_train32k.json` 构造自包含多段文本。默认 K=512、每段 1–3 倍、3–5 段，正文长度由各段求和，自然范围为 1536–7680 tokens；正文和续文统一使用 `content_reserve_ratio` 估算字符窗口。按 `source_batch_size` 无放回分批读取、累计过滤去重，直到填满 32000/128/128 条配额，每篇选中文档只生成一条轨迹。根层 JSONL 保存完整候选窗口、来源及累计 token 切点，训练不再依赖原始 Parquet。
+先通过 `data_preparation.fineweb_multisegment` 和 `data_preparation/fineweb-multisegment/fineweb-multisegment-k512-seg1to3x_train32k.json` 构造自包含多段文本。默认 K=512、每段名义长度 1–3 倍 K、3–5 段，`content_reserve_ratio=1.5` 分别作用于每段和续文。每段保存 `ceil(4 × 名义长度 × 1.5)` 个字符，正文为 9216–46080 字符；续文独立保存 3072 字符至 `continuation`。整体长度按各窗口分别取整后求和，`estimated_tokens` 记录含余量正文的字符数÷4。按 `source_batch_size` 无放回分批读取、累计过滤去重，直到填满 32000/128/128 条配额，每篇选中文档只生成一条轨迹。与 FactQA 共用分段采样及字段结构；根层 JSONL 保存正文、来源、字符区间及续文候选，训练不再依赖原始 Parquet。
 
 同目录另提供 `fineweb-multisegment-k64-seg1to3x_train32k.json`：每段 64–192 tokens，正文自然范围 192–960 tokens，续文仍为 512 tokens。两份配置共用构造入口，通过 `--config` 选择；构建基准 K 与下游模型的记忆容量分别配置。
 
-多段文本的采样配置不包含 `previous_datasets`；每次运行通过 `--previous-datasets DIR [DIR ...]` 显式列出全部历史排除依据，只读取各自 `used_sources`，不递归继承。`--run-id` 默认使用执行时的上海日期，也可设为 `01-20261008`；它只控制产物后缀，不改变 seed 或样本。`preparation.json` 顶层记录本次标识、排除列表与真实创建时间，`config` 只保存采样参数，同名目录拒绝覆盖。
+多段文本的采样配置不包含 `previous_datasets`；每次运行通过 `--previous-datasets DIR [DIR ...]` 显式列出全部历史排除依据，读取各目录实际使用来源的账本，不递归继承；已发布数据的 `preparation.json.used_sources` 仍可作为排除依据。`--run-id` 默认使用执行时的上海日期，也可设为 `01-20261008`；它只控制产物后缀，不改变 seed 或样本。`preparation.json` 顶层记录本次标识、排除列表、真实创建时间及 `used_sources_file`，`config` 只保存采样参数，同名目录拒绝覆盖。
 
 训练时按当前 tokenizer 分词，v2 保留完整多段计划并从最后切点派生单次 warm-up，v3 按所选全文／首段视图右裁剪并从实际终点取紧邻续文。构建参数、数据格式和命名见 [多段文本构造](../src/latent_working_memory/data_preparation/fineweb_multisegment/README.md)。
 
-六份 `selection.json` 只包含 `dataset_dir`。训练启动时读取各划分 JSONL 中的完整候选窗口，分词并按真实长度筛选一次，各 epoch 完整复用；AE／AE＋LM 的过滤一致，记录候选数、保留数和原因。预算由 `warmup_epochs`、`multiround_epochs`、`independent_prefix_epochs` 与各阶段筛选后的样本数计算，尾批保留；`global_batch_size` 不随 world size 改变。 六组的 `micro_batch_size=8`，六组全局 batch 均为 32；双卡满批累积 2 次，A／B 全程不切换 batch。该字段表示每卡最大并行样本数；按预计读取长度排序后，在相同容量下合批，允许 AE／LM 和压缩次数不同。encoder／decoder 预算 A／B=32768／36928、C／D=16384／36928、E／F=32768／36928 约束每次压缩中实际活跃样本的位置数；padding-free 按有效位置之和计算，矩形路径按补齐后位置数计算；已结束轨迹退出后续计算。超预算时拆批，不强制凑满样本上限。词表损失分块大小由模型配置的 `lm_head_chunk_size` 控制，默认 256。静态 baseline 设置 `independent_prefix_epochs=3`、`warmup_epochs=0`、`multiround_epochs=0`，使用 multi 训练轨迹，在相同切点从空记忆独立压缩累计前缀并平均损失；dev/test 分别以 `single_compression/*` 与 `multi_compression/*` 记录两条路径的指标；六组均训练 3 epochs，使用相同的多次压缩 dev/test 与评估指标。`compression` 可选 `mean`、`weighted`、`spectral`。六份默认配置均使用完整 causal Encoder（`encoder_layers: null`）与基础 pooling。正式入口默认 SwanLab online，project 为 `latent-working-memory-v2`，要求显式指定同组 runs 共用的 `--swanlab-group`；具体参数进入 config，运行名称取输出目录名。已完成真实模型资源短测，完整训练仍保持停止；运行、恢复与产物说明见 [v2 开发记录](../src/latent_working_memory/v2/README.md)。
+六份 `selection.json` 只包含 `dataset_dir`。训练启动时读取各划分 JSONL，按固定字符区间切段，逐段及对续文候选分别分词，再按真实长度筛选一次，各 epoch 完整复用；AE／AE＋LM 的过滤一致，记录候选数、保留数和原因。预算由 `warmup_epochs`、`multiround_epochs`、`independent_prefix_epochs` 与各阶段筛选后的样本数计算，尾批保留；`global_batch_size` 不随 world size 改变。 六组的 `micro_batch_size=8`，六组全局 batch 均为 32；双卡满批累积 2 次，A／B 全程不切换 batch。该字段表示每卡最大并行样本数；按预计读取长度排序后，在相同容量下合批，允许 AE／LM 和压缩次数不同。encoder／decoder 预算 A／B=32768／36928、C／D=16384／36928、E／F=32768／36928 约束每次压缩中实际活跃样本的位置数；padding-free 按有效位置之和计算，矩形路径按补齐后位置数计算；已结束轨迹退出后续计算。超预算时拆批，不强制凑满样本上限。词表损失分块大小由模型配置的 `lm_head_chunk_size` 控制，默认 256。静态 baseline 设置 `independent_prefix_epochs=3`、`warmup_epochs=0`、`multiround_epochs=0`，使用 multi 训练轨迹，在相同切点从空记忆独立压缩累计前缀并平均损失；dev/test 分别以 `single_compression/*` 与 `multi_compression/*` 记录两条路径的指标；六组均训练 3 epochs，使用相同的多次压缩 dev/test 与评估指标。`compression` 可选 `mean`、`weighted`、`spectral`。六份默认配置均使用完整 causal Encoder（`encoder_layers: null`）与基础 pooling。正式入口默认 SwanLab online，project 为 `latent-working-memory-v2`，要求显式指定同组 runs 共用的 `--swanlab-group`；具体参数进入 config，运行名称取输出目录名。已完成真实模型资源短测，完整训练仍保持停止；运行、恢复与产物说明见 [v2 开发记录](../src/latent_working_memory/v2/README.md)。
 
 ### v2 初始静态训练配置
 
