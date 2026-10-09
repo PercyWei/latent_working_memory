@@ -2,6 +2,8 @@
 
 实现依据：`notes/v3/20260926_step1_damage_guided_capacity_experiment.md`。首版实现五个比较对象及动态方法的**局部写入版本**，用于检验“按信息损失程度扩容”能否在相近容量下改善旧信息保留。
 
+[job_plan.py](job_plan.py) 负责配置展开、阶段依赖和运行命名；[gpu_job.py](gpu_job.py) 提供统一命令行入口，执行训练、评估并收集结果。同一方法的连续阶段由 [train.py](train.py) 执行，压缩与扩容计算位于 [objective.py](objective.py)。
+
 ## 模型与方法
 
 统一使用 **Qwen/Qwen3-4B-Instruct-2507**。基线每块 512 slots；动态方法首次写入 512 slots，后续每次追加 32 slots。
@@ -92,6 +94,8 @@ AutoCompressors 对每条多段文本轨迹只生成一个 continuation 样本�
 | `configs/v3/autocompressors.json` | AutoCompressors LM | `["lm"]` |
 
 预设通过 `objective.stages` 声明阶段及执行顺序，并提供超参数与数据默认值，不指定产物目录或初始化 checkpoint。启动器按列表生成 `plan/<method-dir>/<stage>.json`；生成配置和训练保存的 `config.json` 用单个 `objective.stage` 明确当前阶段。修改为单元素列表，例如 `["pretrain"]`，可只执行该阶段；正式实验保留默认完整流程。中断恢复使用阶段目录保存的 `config.json`，未解析的预设不能直接启动内部训练模块。
+
+单方法运行支持 `--method <方法> --config <JSON预设路径>`，未传 `--config` 时沿用默认文件。显式超参数覆盖文件值；数据入口、档位预算和运行身份仍由启动参数控制。动态共享预训练可单独使用自定义文件；后训练的自定义文件不替换共享预训练配置。用法见 [GPU 任务说明](scripts/README.md#4-调整参数)。
 
 批量读写采用独立行的右侧 padding，仅使用有效前缀输出；因果 attention 保证有效位置不会读取右侧 padding，因此不传 padding mask，保留 SDPA 的纯 causal 路径。预训练样本在既定 global batch 的每卡分片内按目标长度、输入长度分组，减少补齐计算；采样、各卡样本归属和损失权重保持不变。动态分支按轨迹独立决策。`qa_batch_size` 控制每条轨迹一次读取的题数，批量调用合并各活跃轨迹的题目，但保留原有每题、更新点和轨迹的损失权重。多个样本共享调用的计时按参与样本分摊，调用/题目数仍按每条样本的逻辑工作量记录。
 
