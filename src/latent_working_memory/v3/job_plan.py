@@ -182,13 +182,7 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
 
 def build_jobs(args):
     level = resolve_level(args)
-    methods = (
-        METHODS
-        if args.method == "all"
-        else DYNAMIC_METHODS
-        if args.method == "dynamic"
-        else (args.method,)
-    )
+    methods = METHODS if args.method == "all" else (args.method,)
     presets = {
         method: load_preset(args.config or Path("configs/v3") / PRESETS[method])
         for method in methods

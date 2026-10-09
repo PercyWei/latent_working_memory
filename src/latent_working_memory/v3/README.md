@@ -132,7 +132,7 @@ bash /data/zhangdw12/percyw/latent_working_memory/src/latent_working_memory/v3/s
   --init-checkpoint artifacts/v3/capacity-comparison_20261007-01/train/dynamic-pretrain-k512/pretrain/checkpoints/step-NNNNNN.pt
 ```
 
-外部 checkpoint 的同阶段 `run.json` 提供 `run-id`，省略时自动继承，显式指定不同值会报错。将 `--method` 改为 `information_loss` 并保持同一 checkpoint，即可在同一系列中分别启动两个动态方法；它们与共享预训练使用相同名称后缀。`--method dynamic` 顺序运行这两种方法，`--method all` 运行全部五种方法。
+外部 checkpoint 的同阶段 `run.json` 提供 `run-id`，省略时自动继承，显式指定不同值会报错。将 `--method` 改为 `information_loss` 并保持同一 checkpoint，即可在同一系列中分别启动两个动态方法；它们与共享预训练使用相同名称后缀。`--method all` 运行全部五种方法。
 
 SwanLab 以一个完整方法为一个 run，阶段间累计 optimizer step。ICAE 的 pretrain 与 QA 共用 run；动态方法的 warmup 与 policy 共用 run，其步数从自身 warmup 开始，不包含共享预训练；AutoCompressors 使用一个 LM run。共享预训练单独记录，因此默认 `all` 完整流程共六个 run。
 
@@ -158,7 +158,7 @@ artifacts/v3/<run-id>/
 
 `plan`、`train`、`eval` 使用相同的短方法目录 `<method-dir>`：正式运行为 `<method>-k<K>`，试跑为 `<method>-k<K>_<mode>`。例如正式 ICAE-single 的计划配置为 `plan/icae-single-k512/pretrain.json`、`qa.json`，训练目录为 `train/icae-single-k512/pretrain/`、`qa/`，最终评估目录为 `eval/icae-single-k512/qa/`。SwanLab 名称在短方法目录后添加 `_<run-id>`。
 
-`--method all`、`dynamic` 也为每个具体方法分别保存 `job.json` 和 `result.json`；同一方法的各训练阶段共用 `plan/<method-dir>/train.log`，最终评估日志为 `eval.log`。失败时先查看对应方法的 `result.json` 和日志。试跑和正式训练作为独立运行时，使用不同 `run-id` 或省略该参数自动生成，避免已有方法目录冲突。
+`--method all` 为每个具体方法分别保存 `job.json` 和 `result.json`；同一方法的各训练阶段共用 `plan/<method-dir>/train.log`，最终评估日志为 `eval.log`。失败时先查看对应方法的 `result.json` 和日志。试跑和正式训练作为独立运行时，使用不同 `run-id` 或省略该参数自动生成，避免已有方法目录冲突。
 
 本次调用产出至少两个方法评估结果时生成比较，四个文件直接保存到 `compare/`：`points.json`、`points.csv` 保存比较点，`compare.log` 保存日志，`result.json` 记录参与的评估结果与执行状态。比较范围为本次调用产出的全部评估结果，不自动扫描已有结果。
 

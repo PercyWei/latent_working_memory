@@ -50,9 +50,7 @@ def physical_gpus(value):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=job_plan.LEVELS, default="smoke")
-    parser.add_argument(
-        "--method", choices=(*METHODS, "dynamic_pretrain", "dynamic", "all"), default="all"
-    )
+    parser.add_argument("--method", choices=(*METHODS, "dynamic_pretrain", "all"), default="all")
     parser.add_argument(
         "--config",
         type=Path,
@@ -142,11 +140,11 @@ def parse_args(argv=None):
         "--dry-run", action="store_true", help="只打印解析后的计划，不加载数据/模型，不连接 SwanLab"
     )
     args = parser.parse_args(argv)
-    if args.config is not None and args.method in {"all", "dynamic"}:
-        parser.error("--config requires a single --method; all and dynamic use default presets")
+    if args.config is not None and args.method == "all":
+        parser.error("--config requires a single --method; all uses default presets")
     if args.run_id is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.run_id):
         parser.error("run-id must contain only letters, digits, '-' and '_'")
-    if args.init_checkpoint is not None and args.method not in (*DYNAMIC_METHODS, "dynamic"):
+    if args.init_checkpoint is not None and args.method not in DYNAMIC_METHODS:
         parser.error("--init-checkpoint is only supported by dynamic methods")
     if args.append_slots is not None and args.method in {
         "icae_single",
@@ -154,7 +152,7 @@ def parse_args(argv=None):
         "autocompressors",
     }:
         parser.error("--append-slots is only supported by dynamic methods")
-    if args.bptt_steps is not None and args.method not in (*DYNAMIC_METHODS, "dynamic", "all"):
+    if args.bptt_steps is not None and args.method not in (*DYNAMIC_METHODS, "all"):
         parser.error("--bptt-steps is only supported by dynamic warmup/policy")
     return args
 

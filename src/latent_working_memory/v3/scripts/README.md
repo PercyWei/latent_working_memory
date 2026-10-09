@@ -86,7 +86,6 @@ GPU 任务平台使用同一命令，将脚本位置替换为绝对路径即可�
 | `icae_single`、`icae_multi` | 所选 ICAE 的 AE＋LM → QA → 评估 |
 | `autocompressors` | 分段 LM → 评估 |
 | `memory_change`、`information_loss` | 共享预训练 → 所选方法的动作预热 → 策略训练 → 评估 |
-| `dynamic` | 共享预训练一次，再分别完成两个动态方法 |
 | `dynamic_pretrain` | 仅生成动态方法共用的预训练 checkpoint |
 
 例如，只试跑 ICAE-single：
@@ -114,7 +113,7 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 ```
 
 - 默认连续执行动作预热、策略训练和最终评估，此时只需要 QA 数据。
-- 将方法改为 `information_loss` 可单独训练另一组；改为 `dynamic` 可顺序完成两组。
+- 将方法改为 `information_loss` 并使用同一 checkpoint，可单独训练另一组。
 - 保留原预训练运行目录及路径，包括 `pretrain/run.json` 和在线运行生成的 `swanlab.json`。运行标识自动继承，模型配置须与预训练一致。
 
 ## 4. 调整参数
@@ -167,7 +166,7 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 
 - 文件中的 `objective.method` 须与所选方法一致，阶段使用 `objective.stages`；`--method dynamic_pretrain` 的文件保留 `memory_change` 或 `information_loss`，并仅声明 `["pretrain"]`。
 - 显式超参数覆盖文件值；数据入口仍由 `--pretrain-data`／`--qa-data` 指定，样本预算和评估／保存频率仍由运行档位及对应 CLI 参数控制，产物与 SwanLab 身份由启动器生成。
-- `--config` 用于单方法，不与 `all`／`dynamic` 组合。`dynamic_pretrain` 可传入自己的预训练文件；动态后训练的自定义文件只替换 warmup／policy，共享预训练仍读取默认文件。更换动态模型或 slots 时，先生成匹配的预训练 checkpoint，再通过 `--init-checkpoint` 使用。
+- `--config` 用于单方法，不与 `all` 组合。`dynamic_pretrain` 可传入自己的预训练文件；动态后训练的自定义文件只替换 warmup／policy，共享预训练仍读取默认文件。更换动态模型或 slots 时，先生成匹配的预训练 checkpoint，再通过 `--init-checkpoint` 使用。
 
 - 启动器按列表生成阶段配置；单元素列表如 `["pretrain"]` 只执行该阶段。正式实验保留默认完整流程。
 - 仅运行后训练时，首阶段可用 `training.init_checkpoint` 指定来源；动态方法也支持 `--init-checkpoint`，未指定时先执行共享预训练。后继阶段自动继承前一阶段，单独 `warmup` 不触发最终评估。
@@ -178,7 +177,7 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 
 ```bash
 bash src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode pilot --method dynamic --gpus 0,1 --bptt-steps 2
+  --mode pilot --method memory_change --gpus 0,1 --bptt-steps 2
 ```
 
 首段也计一轮，每两轮反向传播后 detach 全部记忆，global batch 结束后仍只更新一次参数。该参数不影响 AutoCompressors 的 `ac_bptt_steps`。

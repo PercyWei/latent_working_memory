@@ -25,7 +25,7 @@ def arguments(tmp_path, *options, run_id="unit-job"):
     return gpu_job.parse_args(
         [
             "--method",
-            "dynamic",
+            "memory_change",
             *(["--run-id", run_id] if run_id is not None else []),
             "--output-root",
             str(tmp_path / "outputs"),
@@ -320,7 +320,9 @@ def test_all_methods_store_artifacts_under_one_run_directory(tmp_path, monkeypat
 
 
 def test_dynamic_methods_share_only_pretraining_and_have_independent_warmup_policy(tmp_path):
-    _, _, jobs = job_plan.build_jobs(arguments(tmp_path))
+    _, _, all_jobs = job_plan.build_jobs(arguments(tmp_path, "--method", "all"))
+    jobs = [job for job in all_jobs if job.method in (*DYNAMIC_METHODS, "dynamic_pretrain")]
+    assert sum(job.key == "dynamic-pretrain" for job in all_jobs) == 1
     assert [job.key for job in jobs] == [
         "dynamic-pretrain",
         "memory-change-warmup",
@@ -356,23 +358,27 @@ def test_dynamic_stage_training_parameters_come_from_their_own_presets(tmp_path,
     calls = []
 
     def preset(path):
-        calls.append(path.name)
         settings = {
             "dynamic_pretrain.json": (3, 1e-4),
             "memory_change.json": (4, 2e-4),
             "information_loss.json": (5, 3e-4),
         }
+        configs = load_preset(path)
+        if path.name not in settings:
+            return configs
+        calls.append(path.name)
         epochs, learning_rate = settings[path.name]
         return tuple(
             replace(
                 config,
                 training=replace(config.training, epochs=epochs, learning_rate=learning_rate),
             )
-            for config in load_preset(path)
+            for config in configs
         )
 
     monkeypatch.setattr(job_plan, "load_preset", preset)
-    _, _, jobs = job_plan.build_jobs(arguments(tmp_path))
+    _, _, all_jobs = job_plan.build_jobs(arguments(tmp_path, "--method", "all"))
+    jobs = [job for job in all_jobs if job.method in (*DYNAMIC_METHODS, "dynamic_pretrain")]
     assert sorted(calls) == sorted(
         [
             "dynamic_pretrain.json",
@@ -390,8 +396,11 @@ def test_dynamic_stage_training_parameters_come_from_their_own_presets(tmp_path,
     ]
 
 
+@pytest.mark.parametrize("method", [*DYNAMIC_METHODS, "all"])
 @pytest.mark.parametrize("steps", [0, 1, 2])
-def test_bptt_cli_affects_only_dynamic_qa_and_zero_restores_full_bptt(tmp_path, monkeypatch, steps):
+def test_bptt_cli_affects_only_dynamic_qa_and_zero_restores_full_bptt(
+    tmp_path, monkeypatch, method, steps
+):
     def preset(path):
         return tuple(
             replace(config, objective=replace(config.objective, bptt_steps=3))
@@ -401,7 +410,7 @@ def test_bptt_cli_affects_only_dynamic_qa_and_zero_restores_full_bptt(tmp_path, 
         )
 
     monkeypatch.setattr(job_plan, "load_preset", preset)
-    args = arguments(tmp_path, "--method", "all", "--bptt-steps", str(steps))
+    args = arguments(tmp_path, "--method", method, "--bptt-steps", str(steps))
     _, _, jobs = job_plan.build_jobs(args)
     for job in jobs:
         objective = job.config.objective
@@ -413,7 +422,7 @@ def test_bptt_cli_affects_only_dynamic_qa_and_zero_restores_full_bptt(tmp_path, 
 
 
 def test_dynamic_qa_presets_default_to_full_bptt(tmp_path):
-    _, _, jobs = job_plan.build_jobs(arguments(tmp_path))
+    _, _, jobs = job_plan.build_jobs(arguments(tmp_path, "--method", "all"))
     assert all(job.config.objective.bptt_steps is None for job in jobs)
 
 
@@ -423,10 +432,19 @@ def test_default_pretraining_data_is_the_shared_multisegment_root():
     assert args.pretrain_data == Path("data/fineweb-multisegment-k512-seg1to3x_train32k_20261008")
 
 
-@pytest.mark.parametrize("options", [[], ["--method", "all"], ["--method", "dynamic"]])
+@pytest.mark.parametrize("options", [[], ["--method", "all"]])
 def test_custom_config_requires_an_explicit_single_method(options):
     with pytest.raises(SystemExit):
         gpu_job.parse_args(["--config", "custom experiment.json", *options])
+
+
+@pytest.mark.parametrize(
+    "options",
+    [[], ["--config", "custom.json"], ["--init-checkpoint", "parent.pt"], ["--bptt-steps", "2"]],
+)
+def test_removed_dynamic_method_is_rejected(options):
+    with pytest.raises(SystemExit):
+        gpu_job.parse_args(["--method", "dynamic", *options])
 
 
 @pytest.mark.parametrize(
@@ -841,7 +859,7 @@ def test_cli_only_overrides_explicitly_supplied_preset_values(monkeypatch, overr
         )
 
 
-@pytest.mark.parametrize("method", ["memory_change", "information_loss", "dynamic"])
+@pytest.mark.parametrize("method", DYNAMIC_METHODS)
 def test_auto_from_external_pretraining_checkpoint_skips_pretraining_in_plan(tmp_path, method):
     checkpoint = tmp_path / "shared pretraining.pt"
     args = arguments(
@@ -850,23 +868,21 @@ def test_auto_from_external_pretraining_checkpoint_skips_pretraining_in_plan(tmp
 
     _, _, jobs = job_plan.build_jobs(args)
 
-    methods = ("memory_change", "information_loss") if method == "dynamic" else (method,)
-    assert len(jobs) == 2 * len(methods)
-    for index, name in enumerate(methods):
-        warmup, policy = jobs[index * 2 : index * 2 + 2]
-        prefix = name.replace("_", "-")
-        assert warmup.key == f"{prefix}-warmup"
-        assert policy.key == f"{prefix}-policy"
-        assert warmup.config.objective.method == policy.config.objective.method == name
-        assert warmup.config.objective.stage == "warmup"
-        assert policy.config.objective.stage == "policy"
-        assert warmup.config.training.init_checkpoint == str(checkpoint.resolve())
-        assert warmup.initialize_from is None
-        assert policy.config.training.init_checkpoint is None
-        assert policy.initialize_from == warmup.key
-        assert not warmup.evaluate and policy.evaluate
-        assert Path(warmup.config.training.dataset_dir) == args.qa_data
-        assert Path(policy.config.training.dataset_dir) == args.qa_data
+    assert len(jobs) == 2
+    warmup, policy = jobs
+    prefix = method.replace("_", "-")
+    assert warmup.key == f"{prefix}-warmup"
+    assert policy.key == f"{prefix}-policy"
+    assert warmup.config.objective.method == policy.config.objective.method == method
+    assert warmup.config.objective.stage == "warmup"
+    assert policy.config.objective.stage == "policy"
+    assert warmup.config.training.init_checkpoint == str(checkpoint.resolve())
+    assert warmup.initialize_from is None
+    assert policy.config.training.init_checkpoint is None
+    assert policy.initialize_from == warmup.key
+    assert not warmup.evaluate and policy.evaluate
+    assert Path(warmup.config.training.dataset_dir) == args.qa_data
+    assert Path(policy.config.training.dataset_dir) == args.qa_data
     assert not checkpoint.exists()
     assert list(tmp_path.iterdir()) == []
 
@@ -1153,7 +1169,8 @@ def test_pretraining_sampling_overrides_do_not_change_qa_or_autocompressors_task
 
 
 @pytest.mark.parametrize(
-    "method", ["all", "icae_multi", "icae_single", "dynamic", "autocompressors"]
+    "method",
+    ["all", "icae_multi", "icae_single", "memory_change", "information_loss", "autocompressors"],
 )
 def test_icae_segment_ratio_override_only_changes_multi_pretraining(tmp_path, method):
     _, _, defaults = job_plan.build_jobs(arguments(tmp_path, "--method", method))
@@ -1251,6 +1268,8 @@ def test_explicit_overrides_and_zero_remove_profile_limits(tmp_path):
 def test_plan_derives_each_global_batch_from_selected_gpus_microbatch_and_accumulation(tmp_path):
     args = arguments(
         tmp_path,
+        "--method",
+        "all",
         "--dry-run",
         "--gpus",
         "4,5,6,7",
@@ -1262,7 +1281,7 @@ def test_plan_derives_each_global_batch_from_selected_gpus_microbatch_and_accumu
 
     plan = gpu_job.run_job(args)
 
-    assert len(plan["jobs"]) == 5
+    assert len(plan["jobs"]) == 10
     assert all(
         job["batching"]
         == {
@@ -1336,7 +1355,7 @@ def test_invalid_gpu_scope_or_stage_arguments_are_rejected(tmp_path, options):
 def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
     tmp_path, monkeypatch, gpus
 ):
-    args = arguments(tmp_path, "--gpus", gpus)
+    args = arguments(tmp_path, "--method", "all", "--gpus", gpus)
     prepare_dataset_entries(args)
     commands = Commands()
     monkeypatch.setattr(gpu_job, "execute", commands)
@@ -1350,9 +1369,10 @@ def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
     evaluations = [
         call for call in commands.calls if "latent_working_memory.v3.evaluate" in call["command"]
     ]
-    assert len(training) == 3 and len(evaluations) == 2 and len(commands.calls) == 6
+    assert len(training) == 6 and len(evaluations) == 5 and len(commands.calls) == 12
     assert training[0]["configs"][0].training.init_checkpoint is None
-    for call in training[1:]:
+    assert [config.objective.stage for config in training[0]["configs"]] == ["pretrain"]
+    for call in training[4:]:
         warmup, policy = call["configs"]
         assert warmup.training.init_checkpoint == str(training[0]["checkpoints"][0])
         assert policy.training.init_checkpoint == str(call["checkpoints"][0])
@@ -1395,16 +1415,22 @@ def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
     ]
     assert [plan["training_runs"][0]["stages"] for plan in plans] == [
         ["dynamic-pretrain"],
+        ["icae-single-pretrain", "icae-single-qa"],
+        ["icae-multi-pretrain", "icae-multi-qa"],
+        ["autocompressors-lm"],
         ["memory-change-warmup", "memory-change-policy"],
         ["information-loss-warmup", "information-loss-policy"],
     ]
     world_size = len(gpus.split(","))
     for job in (job for plan in plans for job in plan["jobs"]):
-        shared = job["key"] == "dynamic-pretrain"
+        batch_eight = job["key"] == "dynamic-pretrain" or job["config"]["objective"]["method"] in {
+            "icae_single",
+            "icae_multi",
+        }
         assert job["batching"] == {
             "world_size": world_size,
-            "micro_batch_size_per_gpu": 8 if shared else 4,
-            "gradient_accumulation_steps": 1 if shared else 2,
+            "micro_batch_size_per_gpu": 8 if batch_eight else 4,
+            "gradient_accumulation_steps": 1 if batch_eight else 2,
             "global_batch_size": world_size * 8,
         }
         assert "global_batch_size" not in job["config"]["training"]
@@ -1412,7 +1438,7 @@ def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
         gpu_job.run_job(args)
 
 
-@pytest.mark.parametrize("method", ["memory_change", "information_loss", "dynamic"])
+@pytest.mark.parametrize("method", DYNAMIC_METHODS)
 def test_auto_from_external_checkpoint_needs_only_qa_and_chains_warmup_into_policy(
     tmp_path, monkeypatch, method
 ):
@@ -1426,29 +1452,25 @@ def test_auto_from_external_checkpoint_needs_only_qa_and_chains_warmup_into_poli
 
     result = gpu_job.run_job(args)
 
-    methods = ("memory_change", "information_loss") if method == "dynamic" else (method,)
     assert result["status"] == "finished"
     assert not args.pretrain_data.exists()
-    assert len(commands.calls) == 2 * len(methods) + int(len(methods) > 1)
-    for index, name in enumerate(methods):
-        training, evaluation = commands.calls[index * 2 : index * 2 + 2]
-        warmup, policy = training["configs"]
-        assert warmup.objective.method == policy.objective.method == name
-        assert warmup.objective.stage == "warmup"
-        assert policy.objective.stage == "policy"
-        assert warmup.training.init_checkpoint == str(checkpoint.resolve())
-        assert policy.training.init_checkpoint == str(training["checkpoints"][0])
-        assert policy.training.init_checkpoint != str(checkpoint.resolve())
-        assert "latent_working_memory.v3.evaluate" in evaluation["command"]
-        assert value(evaluation["command"], "--checkpoint") == str(training["checkpoints"][1])
-        assert "--log-to-swanlab" in evaluation["command"]
-        prefix = name.replace("_", "-")
-        assert result["checkpoints"][f"{prefix}-warmup"] == str(training["checkpoints"][0])
-        assert result["checkpoints"][f"{prefix}-policy"] == str(training["checkpoints"][1])
-    assert len(result["summaries"]) == len(methods)
+    assert len(commands.calls) == 2
+    training, evaluation = commands.calls
+    warmup, policy = training["configs"]
+    assert warmup.objective.method == policy.objective.method == method
+    assert warmup.objective.stage == "warmup"
+    assert policy.objective.stage == "policy"
+    assert warmup.training.init_checkpoint == str(checkpoint.resolve())
+    assert policy.training.init_checkpoint == str(training["checkpoints"][0])
+    assert policy.training.init_checkpoint != str(checkpoint.resolve())
+    assert "latent_working_memory.v3.evaluate" in evaluation["command"]
+    assert value(evaluation["command"], "--checkpoint") == str(training["checkpoints"][1])
+    assert "--log-to-swanlab" in evaluation["command"]
+    prefix = method.replace("_", "-")
+    assert result["checkpoints"][f"{prefix}-warmup"] == str(training["checkpoints"][0])
+    assert result["checkpoints"][f"{prefix}-policy"] == str(training["checkpoints"][1])
+    assert len(result["summaries"]) == 1
     assert "dynamic-pretrain" not in result["checkpoints"]
-    if len(methods) > 1:
-        assert "latent_working_memory.v3.compare" in commands.calls[-1]["command"]
 
 
 def test_auto_from_missing_checkpoint_fails_before_starting_training(tmp_path, monkeypatch):
@@ -1585,7 +1607,9 @@ def test_separate_methods_share_source_id_and_coexist_without_overwriting_series
     assert source_metadata.read_bytes() == original_source
 
 
-def test_dynamic_batch_reuses_dynamic_pretraining_within_the_same_run_id(tmp_path, monkeypatch):
+def test_separate_dynamic_methods_reuse_pretraining_without_changing_its_plan(
+    tmp_path, monkeypatch
+):
     shared = arguments(tmp_path, "--mode", "full", "--method", "dynamic_pretrain")
     prepare_dataset_entries(shared)
     commands = Commands()
@@ -1595,11 +1619,15 @@ def test_dynamic_batch_reuses_dynamic_pretraining_within_the_same_run_id(tmp_pat
     shared_directory = shared.output_root / "unit-job" / "plan/dynamic-pretrain-k512"
     original_plan = {path.name: path.read_bytes() for path in shared_directory.iterdir()}
 
-    dynamic = arguments(tmp_path, "--mode", "full", "--init-checkpoint", source_checkpoint)
-    result = gpu_job.run_job(dynamic)
+    results = []
+    for method in DYNAMIC_METHODS:
+        args = arguments(
+            tmp_path, "--mode", "full", "--method", method, "--init-checkpoint", source_checkpoint
+        )
+        results.append(gpu_job.run_job(args))
 
-    assert result["status"] == "finished"
-    assert set(result["checkpoints"]) == {
+    assert all(result["status"] == "finished" for result in results)
+    assert {key for result in results for key in result["checkpoints"]} == {
         "memory-change-warmup",
         "memory-change-policy",
         "information-loss-warmup",
@@ -1616,6 +1644,8 @@ def test_dynamic_batch_reuses_dynamic_pretraining_within_the_same_run_id(tmp_pat
     assert all(
         call["configs"][0].training.init_checkpoint == source_checkpoint for call in training[1:]
     )
+    assert len(commands.calls) == 5
+    assert not (shared.output_root / "unit-job/compare").exists()
 
 
 @pytest.mark.parametrize("dry_run", [False, True])
@@ -1664,7 +1694,7 @@ def test_initialization_requires_valid_source_experiment_id(tmp_path, identity):
 
 @pytest.mark.parametrize("target", ["stage", "plan", "evaluation", "compare"])
 def test_existing_owned_output_is_rejected_without_touching_it(tmp_path, monkeypatch, target):
-    args = arguments(tmp_path)
+    args = arguments(tmp_path, "--method", "all")
     directory, _, jobs = job_plan.build_jobs(args)
     evaluated = next(job for job in jobs if job.evaluate)
     path = {
@@ -1673,7 +1703,7 @@ def test_existing_owned_output_is_rejected_without_touching_it(tmp_path, monkeyp
         "evaluation": directory
         / "eval"
         / Path(evaluated.config.training.experiment_dir).name
-        / "policy",
+        / evaluated.config.objective.stage,
         "compare": directory / "compare",
     }[target]
     path.mkdir(parents=True)
@@ -1710,9 +1740,9 @@ def test_full_execution_starts_a_new_unbounded_run_without_smoke_checkpoint(tmp_
     assert full_call["configs"][0].training.max_dev_samples is None
 
 
-@pytest.mark.parametrize("fail_at", [1, 3])
+@pytest.mark.parametrize("fail_at", [1, 9])
 def test_failed_training_or_evaluation_stops_the_remaining_graph(tmp_path, monkeypatch, fail_at):
-    args = arguments(tmp_path)
+    args = arguments(tmp_path, "--method", "all")
     prepare_dataset_entries(args)
     commands = Commands(fail_at=fail_at)
     monkeypatch.setattr(gpu_job, "execute", commands)
@@ -1740,6 +1770,10 @@ def test_failed_training_or_evaluation_stops_the_remaining_graph(tmp_path, monke
     assert all(not result["summaries"] for result in results.values())
     assert "error" in (shared if fail_at == 1 else memory)
     assert "error" not in information
+    for method in ("icae-single", "icae-multi", "autocompressors"):
+        baseline = json.loads((directory / "plan" / f"{method}-k512_smoke/result.json").read_text())
+        assert baseline["status"] == ("pending" if fail_at == 1 else "finished")
+        assert len(baseline["summaries"]) == int(fail_at != 1)
     pending_directory = directory / "plan/information-loss-k512_smoke"
     assert {path.name for path in pending_directory.iterdir()} == {
         "job.json",
@@ -1750,7 +1784,7 @@ def test_failed_training_or_evaluation_stops_the_remaining_graph(tmp_path, monke
 
 
 def test_second_stage_failure_preserves_first_stage_checkpoint_in_result(tmp_path, monkeypatch):
-    args = arguments(tmp_path)
+    args = arguments(tmp_path, "--method", "all")
     prepare_dataset_entries(args)
     commands = Commands(fail_stage="policy")
     monkeypatch.setattr(gpu_job, "execute", commands)
@@ -1758,13 +1792,13 @@ def test_second_stage_failure_preserves_first_stage_checkpoint_in_result(tmp_pat
     with pytest.raises(subprocess.CalledProcessError):
         gpu_job.run_job(args)
 
-    assert len(commands.calls) == 2
+    assert len(commands.calls) == 8
     directory, _, _ = job_plan.build_jobs(args)
     failure = json.loads((directory / "plan/memory-change-k512_smoke/result.json").read_text())
     assert failure["status"] == "failed"
     assert set(failure["checkpoints"]) == {"memory-change-warmup"}
     assert failure["checkpoints"]["memory-change-warmup"] == str(
-        commands.calls[1]["checkpoints"][0]
+        commands.calls[-1]["checkpoints"][0]
     )
     assert not failure["summaries"]
     assert (
@@ -1782,16 +1816,16 @@ def test_second_stage_failure_preserves_first_stage_checkpoint_in_result(tmp_pat
 
 
 def test_comparison_failure_preserves_finished_method_results(tmp_path, monkeypatch):
-    args = arguments(tmp_path)
+    args = arguments(tmp_path, "--method", "all")
     prepare_dataset_entries(args)
-    commands = Commands(fail_at=6)
+    commands = Commands(fail_at=12)
     monkeypatch.setattr(gpu_job, "execute", commands)
 
     with pytest.raises(subprocess.CalledProcessError):
         gpu_job.run_job(args)
 
     directory = args.output_root / "unit-job"
-    assert len(commands.calls) == 6
+    assert len(commands.calls) == 12
     assert commands.calls[-1]["log_path"] == directory / "compare/compare.log"
     assert all(
         json.loads(path.read_text())["status"] == "finished"
@@ -1869,9 +1903,14 @@ def test_dry_run_does_not_access_datasets_or_execute_or_create_artifacts(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_external_checkpoint_dry_run_does_not_read_or_check_checkpoint(tmp_path, monkeypatch):
+@pytest.mark.parametrize("method", DYNAMIC_METHODS)
+def test_external_checkpoint_dry_run_does_not_read_or_check_checkpoint(
+    tmp_path, monkeypatch, method
+):
     checkpoint = tmp_path / "unavailable shared pretraining.pt"
-    args = arguments(tmp_path, "--dry-run", "--init-checkpoint", str(checkpoint))
+    args = arguments(
+        tmp_path, "--method", method, "--dry-run", "--init-checkpoint", str(checkpoint)
+    )
 
     def forbidden(*args, **kwargs):
         raise AssertionError("dry-run must not inspect checkpoints, datasets or credentials")
@@ -1883,10 +1922,10 @@ def test_external_checkpoint_dry_run_does_not_read_or_check_checkpoint(tmp_path,
 
     plan = gpu_job.run_job(args)
 
-    assert len(plan["jobs"]) == 4
+    assert len(plan["jobs"]) == 2
     assert all(job["config"]["objective"]["stage"] in {"warmup", "policy"} for job in plan["jobs"])
     assert plan["jobs"][0]["config"]["training"]["init_checkpoint"] == str(checkpoint)
-    assert plan["jobs"][2]["config"]["training"]["init_checkpoint"] == str(checkpoint)
+    assert all(job["config"]["objective"]["method"] == method for job in plan["jobs"])
     assert list(tmp_path.iterdir()) == []
 
 
@@ -1949,7 +1988,7 @@ def test_selected_key_reaches_all_stages_without_being_persisted(
     monkeypatch.setenv("SWANLAB_API_KEY", "terminal-test-key")
     if dotenv is not None:
         (tmp_path / ".env").write_text(dotenv)
-    args = arguments(tmp_path)
+    args = arguments(tmp_path, "--method", "all")
     prepare_dataset_entries(args)
     commands = Commands()
     monkeypatch.setattr(gpu_job, "execute", commands)
