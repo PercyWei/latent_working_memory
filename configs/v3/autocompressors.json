@@ -20,7 +20,7 @@
   },
   "objective": {
     "method": "autocompressors",
-    "stage": "lm",
+    "stages": ["lm"],
     "qa_batch_size": 8,
     "segment_tokens": 1024,
     "ac_min_segment_tokens": 768,
@@ -31,7 +31,6 @@
   },
   "training": {
     "dataset_dir": "data/fineweb-multisegment-k512-seg1to3x_train32k_20261008",
-    "output_dir": "artifacts/v3/step1-token-memory/train/autocompressors/lm",
     "epochs": 1,
     "micro_batch_size_per_gpu": 4,
     "gradient_accumulation_steps": 2,

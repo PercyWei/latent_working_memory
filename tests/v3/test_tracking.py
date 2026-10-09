@@ -7,6 +7,7 @@ import numpy as np
 import torch
 
 from latent_working_memory.v3 import runtime, tracking
+from latent_working_memory.v3.evaluate import _training_run_directory
 from latent_working_memory.v3.runtime import load_initialization, prepare_training, train_loop
 from latent_working_memory.v3.tracking import method_tracking_run, update_method_tracking
 from latent_working_memory.v4.checkpoint import capture_rng
@@ -217,22 +218,38 @@ def run_stage(config, steps, prefix="qa"):
     return result, run
 
 
+@pytest.mark.parametrize("explicit_name", [False, True])
 def test_two_dynamic_methods_share_one_source_and_keep_one_run_per_method(
-    tmp_path, recorded_swanlab
+    tmp_path, recorded_swanlab, explicit_name
 ):
-    source = online_config(tmp_path / "shared-pretrain-k64_trial", "pretrain")
+    source_root = tmp_path / (
+        "dynamic-pretrain-k64" if explicit_name else "dynamic-pretrain-k64_trial"
+    )
+    source = online_config(source_root, "pretrain")
+    if explicit_name:
+        source = replace(
+            source,
+            training=replace(source.training, experiment_name="dynamic-pretrain-k64_trial"),
+        )
     source_result, source_run = run_stage(source, 2, "pretrain")
-    source_identity = json.loads((tmp_path / "shared-pretrain-k64_trial/swanlab.json").read_text())
-    assert "method:shared-pretrain" in source_identity["tags"]
+    source_identity = json.loads((source_root / "swanlab.json").read_text())
+    assert "method:dynamic-pretrain" in source_identity["tags"]
+    assert recorded_swanlab.runs[source_identity["id"]]["name"] == "dynamic-pretrain-k64_trial"
     sources = []
     for method in ("memory_change", "information_loss"):
-        root = tmp_path / f"{method}-k64_trial"
+        method_name = method.replace("_", "-") if explicit_name else method
+        root = tmp_path / (f"{method_name}-k64" if explicit_name else f"{method_name}-k64_trial")
+        cloud_name = f"{method_name}-k64_trial"
         warmup = online_config(root, "warmup", method, source_result["checkpoint"])
+        if explicit_name:
+            warmup = replace(warmup, training=replace(warmup.training, experiment_name=cloud_name))
         warmup_result, warmup_run = run_stage(warmup, 2)
         identity_bytes = (root / "swanlab.json").read_bytes()
         identity = json.loads(identity_bytes)
         before = json.loads((root / "experiment.json").read_text())
         policy = online_config(root, "policy", method, warmup_result["checkpoint"])
+        if explicit_name:
+            policy = replace(policy, training=replace(policy.training, experiment_name=cloud_name))
         policy_result, policy_run = run_stage(policy, 2)
         combined = json.loads((root / "experiment.json").read_text())
         assert before["stages"]["warmup"] == combined["stages"]["warmup"]
@@ -243,7 +260,7 @@ def test_two_dynamic_methods_share_one_source_and_keep_one_run_per_method(
         assert policy_result["global_step"] == 4
         cloud = recorded_swanlab.runs[identity["id"]]
         assert cloud["config"] == serialized_config(combined)
-        assert cloud["name"] == root.name
+        assert cloud["name"] == cloud_name
         assert [step for step, values in cloud["logs"] if "train/qa_loss" in values] == [1, 2, 3, 4]
         assert not any("train/ae_lm_loss" in values for _, values in cloud["logs"])
         assert [(step, values["train/stage"]) for step, values in cloud["logs"]] == [
@@ -264,7 +281,58 @@ def test_two_dynamic_methods_share_one_source_and_keep_one_run_per_method(
     assert sources[0] == sources[1]
     assert sources[0]["run_id"] == source_identity["id"]
     assert sources[0]["run_url"] == source_identity["url"]
+    assert sources[0]["run_name"] == "dynamic-pretrain-k64_trial"
+    assert sources[0]["run_dir"] == str(source_root.resolve())
     assert sources[0]["step"] == 2
+
+
+def test_existing_shared_pretrain_identity_resumes_and_initializes_new_dynamic_method(
+    tmp_path, recorded_swanlab, monkeypatch
+):
+    root = tmp_path / "shared-pretrain-k64_trial"
+    source = online_config(root, "pretrain")
+    # 按改名前的实现生成真实 checkpoint、本地身份和同一云端记录。
+    with monkeypatch.context() as legacy:
+        legacy.setattr(tracking, "tracking_method", lambda config, previous=None: "shared-pretrain")
+        result, record = run_stage(source, 2, "pretrain")
+    assert "experiment_name" not in record["config"]["training"]
+    original_manifest = (root / "experiment.json").read_bytes()
+    original_identity = (root / "swanlab.json").read_bytes()
+    identity = json.loads(original_identity)
+    cloud = recorded_swanlab.runs[identity["id"]]
+    original_cloud_config = deepcopy(dict(cloud["config"]))
+    assert original_cloud_config["method"] == "shared-pretrain"
+    assert "method:shared-pretrain" in identity["tags"]
+    checkpoint = runtime.read_checkpoint(result["checkpoint"])
+    assert _training_run_directory(source, checkpoint["run"]) == root
+
+    with method_tracking_run(source, record, torch.device("cpu"), api_key="test-api-key"):
+        pass
+    assert (root / "experiment.json").read_bytes() == original_manifest
+    assert (root / "swanlab.json").read_bytes() == original_identity
+    assert dict(cloud["config"]) == original_cloud_config
+    resumed = recorded_swanlab.initializations[-1]
+    assert resumed["id"] == identity["id"]
+    assert resumed["resume"] == "must"
+    assert resumed["name"] == root.name
+    assert resumed["tags"] == identity["tags"]
+    assert len(recorded_swanlab.runs) == 1
+
+    target = online_config(tmp_path / "memory-change-k64", "warmup", init=result["checkpoint"])
+    target = replace(
+        target,
+        training=replace(target.training, experiment_name="memory-change-k64_trial"),
+    )
+    _, target_record = run_stage(target, 1)
+    provenance = target_record["pretraining"]
+    assert provenance["run_name"] == "shared-pretrain-k64_trial"
+    assert provenance["run_dir"] == str(root.resolve())
+    assert provenance["run_id"] == identity["id"]
+    assert provenance["run_url"] == identity["url"]
+    assert provenance["checkpoint"] == result["checkpoint"]
+    assert (root / "experiment.json").read_bytes() == original_manifest
+    assert (root / "swanlab.json").read_bytes() == original_identity
+    assert dict(cloud["config"]) == original_cloud_config
 
 
 @pytest.mark.parametrize("online", [False, True])
@@ -382,7 +450,7 @@ def test_live_stage_update_rejects_invalid_transition_before_mutation(
 def test_same_stage_checkpoint_resume_obeys_session_state(
     tmp_path, recorded_swanlab, state, allowed
 ):
-    root = tmp_path / "shared-pretrain-k64_trial"
+    root = tmp_path / "dynamic-pretrain-k64_trial"
     config = online_config(root, "pretrain")
     result, run = run_stage(config, 1, "pretrain")
     identity = json.loads((root / "swanlab.json").read_text())
@@ -483,7 +551,7 @@ def test_cross_stage_recovers_failure_before_successor_registration(
 def test_method_manifest_rejects_source_replacement_and_step_rewind_without_cloud_changes(
     tmp_path, recorded_swanlab
 ):
-    source = online_config(tmp_path / "shared-pretrain-k64_trial", "pretrain")
+    source = online_config(tmp_path / "dynamic-pretrain-k64_trial", "pretrain")
     source_result, _ = run_stage(source, 2, "pretrain")
     root = tmp_path / "memory-change-k64_trial"
     warmup = online_config(root, "warmup", init=source_result["checkpoint"])
@@ -515,7 +583,7 @@ def test_method_manifest_rejects_source_replacement_and_step_rewind_without_clou
 def test_tracking_setup_preserves_random_state_in_api_and_sdk_calls(
     tmp_path, monkeypatch, recorded_swanlab
 ):
-    root = tmp_path / "shared-pretrain-k64_trial"
+    root = tmp_path / "dynamic-pretrain-k64_trial"
     config = online_config(root, "pretrain")
     _, record = run_stage(config, 1, "pretrain")
     original_remote, original_init = recorded_swanlab.remote, recorded_swanlab.init

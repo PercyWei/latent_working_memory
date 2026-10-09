@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import timedelta
 import json
+from pathlib import Path
 
 import pytest
 import torch
@@ -47,9 +48,10 @@ def stage_data(config, tokenizer):
     return splits, {"source_data": {name: dataset_identity(rows) for name, rows in splits.items()}}
 
 
-def stage_configs(tmp_path, method="icae_single", source=None):
+def stage_configs(tmp_path, method="icae_single", source=None, stages=None):
     root = tmp_path / method
-    stages = ("pretrain", "qa") if method.startswith("icae") else ("warmup", "policy")
+    if stages is None:
+        stages = ("pretrain", "qa") if method.startswith("icae") else ("warmup", "policy")
     paths = []
     for index, stage in enumerate(stages):
         config = experiment_config(root, stage, method=method, init=source if index == 0 else None)
@@ -170,7 +172,7 @@ def test_second_stage_can_resume_from_its_saved_checkpoint(tmp_path, monkeypatch
     assert [row["global_step"] for row in records] == [2, 3]
 
 
-@pytest.mark.parametrize("change", ["method", "model", "order", "source", "identity"])
+@pytest.mark.parametrize("change", ["method", "model", "order", "duplicate", "source", "identity"])
 def test_invalid_sequence_fails_before_loading_any_model(tmp_path, monkeypatch, change):
     loads, _ = install_small_training(monkeypatch)
     paths = stage_configs(tmp_path)
@@ -182,6 +184,8 @@ def test_invalid_sequence_fails_before_loading_any_model(tmp_path, monkeypatch, 
     elif change == "order":
         paths.reverse()
         config = json.loads(paths[1].read_text())
+    elif change == "duplicate":
+        config["objective"]["stage"] = "pretrain"
     elif change == "source":
         config["training"]["init_checkpoint"] = "unrelated.pt"
     else:
@@ -190,6 +194,93 @@ def test_invalid_sequence_fails_before_loading_any_model(tmp_path, monkeypatch, 
     with pytest.raises(ValueError):
         train.run_training(arguments(paths))
     assert not loads
+
+
+@pytest.mark.parametrize("stage_index", [0, 1])
+def test_unresolved_stage_output_fails_before_loading_any_model(tmp_path, monkeypatch, stage_index):
+    loads, _ = install_small_training(monkeypatch)
+    paths = stage_configs(tmp_path)
+    config = json.loads(paths[stage_index].read_text())
+    for name in ("output_dir", "experiment_dir", "experiment_id"):
+        config["training"].pop(name)
+    paths[stage_index].write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="output_dir"):
+        train.run_training(arguments(paths))
+    assert not loads
+
+
+@pytest.mark.parametrize("explicit_output", [False, True])
+def test_worker_rejects_preset_before_loading_any_model(tmp_path, monkeypatch, explicit_output):
+    loads, _ = install_small_training(monkeypatch)
+    preset = Path("configs/v3/icae_single.json")
+    options = ["--output-dir", str(tmp_path / "resolved-output")] if explicit_output else []
+    with pytest.raises(ValueError, match="stages|preset"):
+        train.run_training(arguments([preset], *options))
+    assert not loads
+    assert not (tmp_path / "resolved-output").exists()
+
+
+@pytest.mark.parametrize("method", ["icae_single", "icae_multi"])
+def test_worker_accepts_single_pretraining_stage(tmp_path, monkeypatch, method):
+    loads, records = install_small_training(monkeypatch)
+    paths = stage_configs(tmp_path, method, stages=("pretrain",))
+
+    result = train.run_training(arguments(paths))
+
+    assert len(loads) == len(records) == 1
+    assert records[0]["stage"] == "pretrain"
+    assert result["global_step"] == result["completed_steps"] == 1
+    manifest = json.loads((tmp_path / method / "experiment.json").read_text())
+    assert list(manifest["stages"]) == ["pretrain"]
+
+
+@pytest.mark.parametrize(
+    "method,stage",
+    [
+        ("icae_single", "qa"),
+        ("icae_multi", "qa"),
+        ("memory_change", "warmup"),
+        ("memory_change", "policy"),
+        ("information_loss", "warmup"),
+        ("information_loss", "policy"),
+    ],
+)
+def test_single_posttraining_stage_requires_initialization(tmp_path, monkeypatch, method, stage):
+    loads, _ = install_small_training(monkeypatch)
+    paths = stage_configs(tmp_path, method, stages=(stage,))
+
+    with pytest.raises(ValueError, match="requires.*init_checkpoint|requires.*init-checkpoint"):
+        train.run_training(arguments(paths))
+
+    assert not loads
+
+
+@pytest.mark.parametrize(
+    "method,stage",
+    [("icae_single", "qa"), ("memory_change", "warmup"), ("information_loss", "policy")],
+)
+def test_worker_accepts_single_posttraining_stage_from_pretraining(
+    tmp_path, monkeypatch, method, stage
+):
+    loads, records = install_small_training(monkeypatch)
+    source_config = experiment_config(tmp_path / "source", "pretrain", method=method)
+    source_path = tmp_path / "source.json"
+    source_path.write_text(json.dumps(source_config.to_dict()))
+    source = train.run_training(arguments([source_path]))["checkpoint"]
+    source_weights = records[0]["final"]
+    loads.clear()
+    records.clear()
+    paths = stage_configs(tmp_path, method, source, stages=(stage,))
+
+    result = train.run_training(arguments(paths))
+
+    assert len(loads) == len(records) == 1
+    assert records[0]["stage"] == stage
+    torch.testing.assert_close(source_weights, records[0]["initial"], rtol=0, atol=0)
+    checkpoint = read_checkpoint(result["checkpoint"])
+    assert checkpoint["run"]["initialization"]["checkpoint"] == source
+    manifest = json.loads((tmp_path / method / "experiment.json").read_text())
+    assert list(manifest["stages"]) == [stage]
 
 
 def _distributed_stages(rank, rendezvous, paths):

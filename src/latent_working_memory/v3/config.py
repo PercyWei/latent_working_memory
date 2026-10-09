@@ -1,4 +1,4 @@
-"""v3 实验的单一配置；数据与输出的相对路径以项目运行目录为基准。"""
+"""v3 预设阶段序列与单阶段运行配置；相对路径以项目运行目录为基准。"""
 
 from dataclasses import asdict, dataclass
 import json
@@ -10,6 +10,28 @@ import re
 
 METHODS = ("icae_single", "icae_multi", "autocompressors", "memory_change", "information_loss")
 DYNAMIC_METHODS = ("memory_change", "information_loss")
+
+
+def validate_stage_sequence(method, stages):
+    """阶段必须是方法流程中的连续有序片段；共享预训练单独运行。"""
+    if not isinstance(stages, (list, tuple)) or not stages:
+        raise ValueError("stages must be a nonempty list or tuple")
+    pipelines = {
+        "icae_single": ("pretrain", "qa"),
+        "icae_multi": ("pretrain", "qa"),
+        "autocompressors": ("lm",),
+        "memory_change": ("warmup", "policy"),
+        "information_loss": ("warmup", "policy"),
+    }
+    if method not in pipelines:
+        raise ValueError(f"unsupported method: {method}")
+    stages = tuple(stages)
+    if method in DYNAMIC_METHODS and stages == ("pretrain",):
+        return stages
+    pipeline = pipelines[method]
+    if not any(stages == pipeline[start : start + len(stages)] for start in range(len(pipeline))):
+        raise ValueError(f"stages must follow a contiguous ordered {method} pipeline: {stages}")
+    return stages
 
 
 def positive_integer(value, name):
@@ -147,7 +169,7 @@ class ObjectiveConfig:
 @dataclass(frozen=True)
 class TrainingConfig:
     dataset_dir: str
-    output_dir: str
+    output_dir: str | None = None
     epochs: int = 1
     micro_batch_size_per_gpu: int = 1
     gradient_accumulation_steps: int = 4
@@ -167,13 +189,16 @@ class TrainingConfig:
     init_checkpoint: str | None = None
     experiment_dir: str | None = None
     experiment_id: str | None = None
+    experiment_name: str | None = None
     swanlab_project: str | None = None
     group: str | None = None
     tags: tuple[str, ...] = ()
 
     def __post_init__(self):
-        if not self.dataset_dir or not self.output_dir:
-            raise ValueError("dataset_dir and output_dir are required")
+        if not self.dataset_dir:
+            raise ValueError("dataset_dir is required")
+        if self.output_dir is not None and not self.output_dir:
+            raise ValueError("output_dir must be a nonempty path when specified")
         for name in (
             "epochs",
             "micro_batch_size_per_gpu",
@@ -213,6 +238,10 @@ class TrainingConfig:
             r"[A-Za-z0-9][A-Za-z0-9_-]*", self.experiment_id
         ):
             raise ValueError("experiment_id must contain only letters, digits, '-' and '_'")
+        if self.experiment_name is not None and (
+            not isinstance(self.experiment_name, str) or not self.experiment_name
+        ):
+            raise ValueError("experiment_name must be a nonempty string when specified")
 
     def global_batch_size(self, world_size):
         return world_size * self.micro_batch_size_per_gpu * self.gradient_accumulation_steps
@@ -232,19 +261,47 @@ class ExperimentConfig:
             raise ValueError("append_slots must not exceed model.memory_slots")
         if self.training.experiment_dir is not None:
             expected = Path(self.training.experiment_dir) / self.objective.stage
-            if Path(self.training.output_dir).resolve() != expected.resolve():
+            if (
+                self.training.output_dir is None
+                or Path(self.training.output_dir).resolve() != expected.resolve()
+            ):
                 raise ValueError("output_dir must be experiment_dir / objective.stage")
 
     def to_dict(self):
-        return json.loads(json.dumps(asdict(self)))
+        raw = json.loads(json.dumps(asdict(self)))
+        if self.training.experiment_name is None:
+            del raw["training"]["experiment_name"]
+        return raw
 
 
 def load_experiment(path):
+    """读取已展开的单阶段运行配置，拒绝方法预设。"""
     raw = json.loads(Path(path).read_text())
     if set(raw) != {"model", "objective", "training"}:
         raise ValueError("experiment must contain model, objective and training")
+    if "stages" in raw["objective"]:
+        raise ValueError("runtime objective requires stage; use load_preset for objective.stages")
+    if "stage" not in raw["objective"]:
+        raise ValueError("runtime objective requires an explicit stage")
     return ExperimentConfig(
         ModelConfig(**raw["model"]),
         ObjectiveConfig(**raw["objective"]),
         TrainingConfig(**raw["training"]),
+    )
+
+
+def load_preset(path):
+    """按 objective.stages 的显式顺序展开方法预设。"""
+    raw = json.loads(Path(path).read_text())
+    if set(raw) != {"model", "objective", "training"}:
+        raise ValueError("preset must contain model, objective and training")
+    objective = dict(raw["objective"])
+    if "stage" in objective or "stages" not in objective:
+        raise ValueError("preset objective requires stages and must not contain stage")
+    stages = validate_stage_sequence(objective["method"], objective.pop("stages"))
+    model = ModelConfig(**raw["model"])
+    training = TrainingConfig(**raw["training"])
+    return tuple(
+        ExperimentConfig(model, ObjectiveConfig(**objective, stage=stage), training)
+        for stage in stages
     )

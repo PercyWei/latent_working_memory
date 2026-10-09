@@ -8,7 +8,7 @@ from pathlib import Path
 import torch.distributed as dist
 from transformers import set_seed
 
-from latent_working_memory.v3.config import load_experiment
+from latent_working_memory.v3.config import load_experiment, validate_stage_sequence
 from latent_working_memory.v3.engine import TokenMemoryEngine, initialize_device
 from latent_working_memory.v3.objective import TokenMemoryTask
 from latent_working_memory.v3.runtime import (
@@ -53,16 +53,14 @@ def training_configs(args):
         }
     )
     configs = [replace(config, training=replace(config.training, **training)) for config in configs]
+    if any(config.training.output_dir is None for config in configs):
+        raise ValueError(
+            "training requires a resolved output_dir; start experiments with v3.gpu_job "
+            "or resume using the saved stage config.json"
+        )
     first = configs[0]
+    validate_stage_sequence(first.objective.method, [config.objective.stage for config in configs])
     if len(configs) > 1:
-        stages = {
-            "icae_single": ["pretrain", "qa"],
-            "icae_multi": ["pretrain", "qa"],
-            "memory_change": ["warmup", "policy"],
-            "information_loss": ["warmup", "policy"],
-        }
-        if [config.objective.stage for config in configs] != stages.get(first.objective.method):
-            raise ValueError("configs must contain the ordered stages of one method")
         for config in configs[1:]:
             if (
                 config.model != first.model
@@ -70,7 +68,13 @@ def training_configs(args):
                 or experiment_directory(config.training) != experiment_directory(first.training)
                 or any(
                     getattr(config.training, name) != getattr(first.training, name)
-                    for name in ("experiment_id", "swanlab_project", "group", "tags")
+                    for name in (
+                        "experiment_id",
+                        "experiment_name",
+                        "swanlab_project",
+                        "group",
+                        "tags",
+                    )
                 )
             ):
                 raise ValueError("continuous stages must share their model and method identity")

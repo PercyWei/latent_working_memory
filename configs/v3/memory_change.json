@@ -20,7 +20,7 @@
   },
   "objective": {
     "method": "memory_change",
-    "stage": "warmup",
+    "stages": ["warmup", "policy"],
     "qa_batch_size": 8,
     "segment_tokens": 1024,
     "ac_min_segment_tokens": 768,
@@ -33,7 +33,6 @@
   },
   "training": {
     "dataset_dir": "data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008",
-    "output_dir": "artifacts/v3/step1-token-memory/train/memory-change/warmup",
     "epochs": 1,
     "micro_batch_size_per_gpu": 4,
     "gradient_accumulation_steps": 2,
@@ -45,7 +44,6 @@
     "save_every": 25,
     "min_input_tokens": 1,
     "max_input_tokens": 32768,
-    "init_checkpoint": "artifacts/v3/step1-token-memory/train/dynamic-pretrain/REPLACE_WITH_CHECKPOINT.pt",
     "lm_target_tokens": 512
   }
 }

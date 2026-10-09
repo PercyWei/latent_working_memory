@@ -23,6 +23,7 @@ from latent_working_memory.v3.pretrain_data import (
 from latent_working_memory.v3.tracking import (
     configure_training_metrics,
     experiment_directory,
+    experiment_name,
     method_tracking_run,
     training_metrics,
 )
@@ -298,7 +299,7 @@ def initialization_record(path, previous_run, step, config):
             raise ValueError("online pretraining checkpoint requires its original swanlab.json")
         pretraining = {
             "experiment_id": previous_training.experiment_id,
-            "run_name": root.name,
+            "run_name": experiment_name(previous_training),
             "run_dir": str(root),
             "run_id": identity["id"] if identity is not None else None,
             "run_url": identity["url"] if identity is not None else None,

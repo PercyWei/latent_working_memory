@@ -92,7 +92,7 @@ def _training_run_directory(config, run):
         stage = experiment["stages"][config.objective.stage]
         if (
             experiment["experiment_id"] != config.training.experiment_id
-            or experiment["method"] != tracking_method(config)
+            or experiment["method"] != tracking_method(config, experiment)
             or any(stage[name] != run[name] for name in ("config", "step_offset", "pretraining"))
         ):
             raise ValueError("checkpoint stage differs from the saved method experiment")

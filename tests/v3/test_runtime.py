@@ -22,6 +22,7 @@ from latent_working_memory.v3.config import (
     ModelConfig,
     ObjectiveConfig,
     TrainingConfig,
+    load_experiment,
 )
 from latent_working_memory.v3.engine import TokenMemoryEngine
 from latent_working_memory.v3.runtime import (
@@ -229,6 +230,35 @@ def test_checkpoint_resume_matches_uninterrupted_rng_optimizer_and_tail_batch(
     assert all(row["resources/optimizer_step_seconds"] > 0 for row in resumed_records)
     assert all("resources/peak_memory_allocated_bytes" not in row for row in resumed_records)
     assert not (tmp_path / "resumed/swanlab.json").exists()
+
+
+def test_resume_from_saved_run_without_explicit_experiment_name(tmp_path):
+    config = make_config(tmp_path / "source")
+    engine, splits = make_engine(config), make_splits()
+    run = _run(config, engine, splits)
+    stopped = train_loop(config, engine, splits, run, stop_after_steps=1)
+    output = tmp_path / "source"
+    saved_config = json.loads((output / "config.json").read_text())
+    saved_config["training"].pop("experiment_name", None)
+    (output / "config.json").write_text(json.dumps(saved_config))
+    saved_run = deepcopy(run)
+    saved_run["config"] = saved_config
+    (output / "run.json").write_text(json.dumps(saved_run))
+    checkpoint = read_checkpoint(stopped["checkpoint"])
+    checkpoint["run"] = saved_run
+    torch.save(checkpoint, stopped["checkpoint"])
+
+    restored_config = load_experiment(output / "config.json")
+    restored = make_engine(restored_config)
+    result = train_loop(
+        restored_config,
+        restored,
+        splits,
+        _run(restored_config, restored, splits),
+        resume=stopped["checkpoint"],
+    )
+    assert result["complete"]
+    assert result["sample_visits"] == 10
 
 
 def test_resume_rejects_changed_config_or_data_before_loading_weights(tmp_path):
@@ -652,8 +682,17 @@ def experiment_config(root, stage, identifier="trial", method="memory_change", i
     )
 
 
-def test_dynamic_stages_preserve_shared_source_and_accumulate_only_method_steps(tmp_path):
-    source_config = experiment_config(tmp_path / "shared-pretrain_trial", "pretrain")
+@pytest.mark.parametrize("explicit_name", [False, True])
+def test_dynamic_stages_preserve_shared_source_and_accumulate_only_method_steps(
+    tmp_path, explicit_name
+):
+    source_root = tmp_path / ("dynamic-pretrain" if explicit_name else "dynamic-pretrain_trial")
+    source_config = experiment_config(source_root, "pretrain")
+    if explicit_name:
+        source_config = replace(
+            source_config,
+            training=replace(source_config.training, experiment_name="dynamic-pretrain_trial"),
+        )
     source_engine = make_engine(source_config)
     pretraining = make_splits()
     source_result = train_loop(
@@ -710,9 +749,23 @@ def test_dynamic_stages_preserve_shared_source_and_accumulate_only_method_steps(
         assert "pretraining_sources" not in json.dumps(manifest)
     assert sources[0] == sources[1]
     assert sources[0]["experiment_id"] == "trial"
-    assert sources[0]["run_name"] == "shared-pretrain_trial"
+    assert sources[0]["run_name"] == "dynamic-pretrain_trial"
+    assert sources[0]["run_dir"] == str(source_root.resolve())
     assert sources[0]["step"] == 2
     assert sources[0]["run_id"] is sources[0]["run_url"] is None
+
+
+def test_saved_pretraining_without_explicit_name_uses_its_directory_name(tmp_path):
+    root = tmp_path / "shared-pretrain-k64_trial"
+    source = experiment_config(root, "pretrain")
+    source_run = _run(source, make_engine(source), make_splits())
+    source_run["config"]["training"].pop("experiment_name", None)
+    target = experiment_config(tmp_path / "memory-change-k64", "warmup")
+    initialization = runtime.initialization_record(
+        root / "pretrain/checkpoints/step-2.pt", source_run, 2, target
+    )
+    assert initialization["pretraining"]["run_name"] == root.name
+    assert initialization["pretraining"]["run_dir"] == str(root.resolve())
 
 
 def test_icae_qa_offset_includes_pretraining_in_same_method_run(tmp_path):

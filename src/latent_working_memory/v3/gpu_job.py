@@ -18,7 +18,7 @@ from latent_working_memory.v3.config import (
     DYNAMIC_METHODS,
     METHODS,
     ExperimentConfig,
-    load_experiment,
+    load_preset,
 )
 from latent_working_memory.v3.tracking_credentials import swanlab_api_key
 
@@ -104,7 +104,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=LEVELS, default="smoke")
     parser.add_argument(
-        "--method", choices=(*METHODS, "shared_pretrain", "dynamic", "all"), default="all"
+        "--method", choices=(*METHODS, "dynamic_pretrain", "dynamic", "all"), default="all"
     )
     parser.add_argument(
         "--pretrain-data",
@@ -214,10 +214,11 @@ def resolve_level(args):
     return level
 
 
-def resolve_experiment_id(args):
+def resolve_experiment_id(args, init_checkpoint=None):
     """只读来源 run.json 获取身份；预览不加载 checkpoint 权重。"""
-    if args.init_checkpoint is not None:
-        checkpoint = args.init_checkpoint.resolve()
+    source = init_checkpoint if init_checkpoint is not None else args.init_checkpoint
+    if source is not None:
+        checkpoint = source.resolve()
         if not args.dry_run and not checkpoint.is_file():
             raise FileNotFoundError(checkpoint)
         metadata = checkpoint.parent.parent / "run.json"
@@ -250,11 +251,7 @@ def resolve_experiment_id(args):
 
 
 def build_jobs(args):
-    args.run_id = resolve_experiment_id(args)
     level = resolve_level(args)
-    directory = args.output_root.resolve() / args.run_id
-    plan_directory = directory / "plan" / args.method.replace("_", "-")
-    group = args.group or args.run_id
     methods = (
         METHODS
         if args.method == "all"
@@ -262,17 +259,41 @@ def build_jobs(args):
         if args.method == "dynamic"
         else (args.method,)
     )
+    presets = {
+        method: load_preset(Path("configs/v3") / PRESETS[method])
+        for method in methods
+        if method != "dynamic_pretrain"
+    }
+    for method, configs in presets.items():
+        if any(config.objective.method != method for config in configs):
+            raise ValueError(f"preset method differs from requested method: {method}")
+        if method in DYNAMIC_METHODS and any(
+            config.objective.stage == "pretrain" for config in configs
+        ):
+            raise ValueError("dynamic pretraining must be declared in dynamic_pretrain.json")
+    initializations = (
+        [args.init_checkpoint]
+        if args.init_checkpoint is not None
+        else [
+            Path(configs[0].training.init_checkpoint)
+            for method, configs in presets.items()
+            if method in DYNAMIC_METHODS and configs[0].training.init_checkpoint is not None
+        ]
+    )
+    identities = {
+        resolve_experiment_id(args, checkpoint) for checkpoint in dict.fromkeys(initializations)
+    }
+    if len(identities) > 1:
+        raise ValueError("dynamic initialization checkpoints must share one experiment_id")
+    args.run_id = next(iter(identities)) if identities else resolve_experiment_id(args)
+    directory = args.output_root.resolve() / args.run_id
+    group = args.group or args.run_id
     jobs = []
 
-    def append(method, stage, initialize_from=None, key=None, evaluate=False):
+    def append(config, initialize_from=None, key=None):
+        method, stage = config.objective.method, config.objective.stage
         key = key or f"{method.replace('_', '-')}-{stage}"
-        preset = (
-            "dynamic_pretrain.json"
-            if method in DYNAMIC_METHODS and stage == "pretrain"
-            else PRESETS[method]
-        )
-        config = load_experiment(Path("configs/v3") / preset)
-        objective = {"method": method, "stage": stage}
+        objective = {}
         for name in ("qa_batch_size", "threshold_i", "threshold_d", "threshold_g", "eta"):
             value = getattr(args, name)
             if value is not None:
@@ -290,21 +311,24 @@ def build_jobs(args):
         is_pretrain = stage in {"pretrain", "lm"}
         dataset = args.pretrain_data if is_pretrain else args.qa_data
         root_method = (
-            "shared-pretrain"
+            "dynamic-pretrain"
             if method in DYNAMIC_METHODS and stage == "pretrain"
             else method.replace("_", "-")
         )
-        suffix = args.run_id if args.mode == "full" else f"{args.mode}_{args.run_id}"
-        experiment_dir = (
-            directory / "train" / f"{root_method}-k{config.model.memory_slots}_{suffix}"
-        )
+        method_directory = f"{root_method}-k{config.model.memory_slots}"
+        if args.mode != "full":
+            method_directory += f"_{args.mode}"
+        experiment_dir = directory / "train" / method_directory
         training = {
             "dataset_dir": str(dataset.resolve()),
             "experiment_dir": str(experiment_dir),
             "experiment_id": args.run_id,
+            "experiment_name": f"{method_directory}_{args.run_id}",
             "output_dir": str(experiment_dir / stage),
             "init_checkpoint": str(args.init_checkpoint.resolve())
             if args.init_checkpoint is not None and initialize_from is None
+            else config.training.init_checkpoint
+            if initialize_from is None
             else None,
             "max_train_samples": level["train_samples"],
             "max_dev_samples": level["dev_samples"],
@@ -337,25 +361,41 @@ def build_jobs(args):
             training=replace(config.training, **training),
         )
         jobs.append(
-            TrainingJob(key, config, plan_directory / f"{key}.json", initialize_from, evaluate)
+            TrainingJob(
+                key,
+                config,
+                directory / "plan" / method_directory / f"{stage}.json",
+                initialize_from,
+                stage in {"qa", "policy", "lm"},
+            )
         )
         return key
 
-    if args.method == "shared_pretrain":
-        append("memory_change", "pretrain", key="dynamic-pretrain")
-    else:
-        shared = None
-        if args.init_checkpoint is None and any(method in DYNAMIC_METHODS for method in methods):
-            shared = append("memory_change", "pretrain", key="dynamic-pretrain")
-        for method in methods:
-            if method in DYNAMIC_METHODS:
-                warmup = append(method, "warmup", shared)
-                append(method, "policy", warmup, evaluate=True)
-            elif method == "autocompressors":
-                append(method, "lm", evaluate=True)
-            else:
-                pretrain = append(method, "pretrain")
-                append(method, "qa", pretrain, evaluate=True)
+    shared = None
+    needs_pretrain = args.method == "dynamic_pretrain" or (
+        args.init_checkpoint is None
+        and any(
+            method in DYNAMIC_METHODS and configs[0].training.init_checkpoint is None
+            for method, configs in presets.items()
+        )
+    )
+    if needs_pretrain:
+        pretrain = load_preset(Path("configs/v3/dynamic_pretrain.json"))
+        if (
+            len(pretrain) != 1
+            or pretrain[0].objective.method not in DYNAMIC_METHODS
+            or pretrain[0].objective.stage != "pretrain"
+        ):
+            raise ValueError("dynamic_pretrain.json must declare only the pretrain stage")
+        shared = append(pretrain[0], key="dynamic-pretrain")
+    for method, configs in presets.items():
+        initialize_from = (
+            shared
+            if method in DYNAMIC_METHODS and configs[0].training.init_checkpoint is None
+            else None
+        )
+        for config in configs:
+            initialize_from = append(config, initialize_from)
     return directory, level, jobs
 
 
@@ -436,9 +476,8 @@ def run_job(args):
         for _, stages in groupby(jobs, key=lambda job: job.config.training.experiment_dir)
     ]
     gpu_count = len(args.gpus.split(","))
-    invocation = args.method.replace("_", "-")
-    plan_directory = directory / "plan" / invocation
-    compare_directory = directory / "compare" / invocation
+    plan_directory = directory / "plan"
+    compare_directory = directory / "compare"
     evaluation_directories = {
         job.key: directory
         / "eval"
@@ -459,6 +498,7 @@ def run_job(args):
         "jobs": [
             {
                 "key": job.key,
+                "config_path": str(job.config_path),
                 "initialize_from": job.initialize_from,
                 "evaluate": job.evaluate,
                 "batching": {
@@ -475,10 +515,7 @@ def run_job(args):
             {
                 "stages": [job.key for job in stages],
                 "command": training_command(stages, gpu_count, level["max_steps"]),
-                "log_path": str(
-                    plan_directory
-                    / f"{Path(stages[0].config.training.experiment_dir).name}-train.log"
-                ),
+                "log_path": str(stages[0].config_path.parent / "train.log"),
             }
             for stages in training_runs
         ],
@@ -486,10 +523,9 @@ def run_job(args):
     if args.dry_run:
         print(json.dumps(plan, ensure_ascii=False, indent=2), flush=True)
         return plan
-    targets = [plan_directory]
-    targets.extend(Path(job.config.training.output_dir) for job in jobs)
-    targets.extend(job.config_path for job in jobs)
-    targets.extend(evaluation_directories.values())
+    targets = [stages[0].config_path.parent for stages in training_runs]
+    targets.extend(Path(stages[0].config.training.experiment_dir) for stages in training_runs)
+    targets.extend(path.parent for path in evaluation_directories.values())
     if len(evaluation_directories) > 1:
         targets.append(compare_directory)
     for path in targets:
@@ -521,17 +557,55 @@ def run_job(args):
     for path in sorted(required_files):
         if not path.is_file():
             raise FileNotFoundError(f"required dataset entry is missing: {path}")
-    plan_directory.mkdir(parents=True)
-    save_json(plan_directory / "job.json", plan)
+    checkpoints, summaries = {}, []
+
+    def save_method_result(stages, status, error=None):
+        keys = {job.key for job in stages}
+        outputs = {
+            evaluation_directories[job.key] / "summary.json" for job in stages if job.evaluate
+        }
+        record = {
+            "status": status,
+            "mode": args.mode,
+            "experiment_id": args.run_id,
+            "checkpoints": {key: str(value) for key, value in checkpoints.items() if key in keys},
+            "summaries": [str(path) for path in summaries if path in outputs],
+        }
+        if error is not None:
+            record["error"] = str(error)
+        save_json(stages[0].config_path.parent / "result.json", record)
+
+    for stages, training_run in zip(training_runs, plan["training_runs"], strict=True):
+        first = stages[0]
+        method = first.config.objective.method
+        if method in DYNAMIC_METHODS and first.config.objective.stage == "pretrain":
+            method = "dynamic_pretrain"
+        keys = {job.key for job in stages}
+        first.config_path.parent.mkdir(parents=True)
+        save_json(
+            first.config_path.parent / "job.json",
+            {
+                **plan,
+                "method": method,
+                "plan_directory": str(first.config_path.parent),
+                "jobs": [job for job in plan["jobs"] if job["key"] in keys],
+                "training_runs": [training_run],
+            },
+        )
+        for job in stages:
+            save_json(job.config_path, job.config.to_dict())
+        save_method_result(stages, "pending")
     print(
         f"[start] method={args.method} mode={args.mode} runs={len(training_runs)} "
-        f"stages={len(jobs)} gpus={args.gpus} plan={plan_directory / 'job.json'}",
+        f"stages={len(jobs)} gpus={args.gpus} plan={plan_directory}",
         flush=True,
     )
     evaluation_environment = dict(environment, CUDA_VISIBLE_DEVICES=args.gpus.split(",")[0])
-    checkpoints, summaries = {}, []
+    active_stages, comparing = None, False
     try:
         for stages, training_run in zip(training_runs, plan["training_runs"], strict=True):
+            active_stages = stages
+            save_method_result(stages, "running")
             first = stages[0]
             if first.initialize_from is not None:
                 first.config = replace(
@@ -567,10 +641,18 @@ def run_job(args):
                     execute(
                         evaluation_command(args, level, checkpoint, output),
                         evaluation_environment,
-                        plan_directory / f"{job.key}-eval.log",
+                        job.config_path.parent / "eval.log",
                     )
                     summaries.append(output / "summary.json")
+            save_method_result(stages, "finished")
+            active_stages = None
         if len(summaries) > 1:
+            comparing = True
+            compare_directory.mkdir(parents=True)
+            save_json(
+                compare_directory / "result.json",
+                {"status": "running", "summaries": [str(path) for path in summaries]},
+            )
             execute(
                 [
                     sys.executable,
@@ -581,8 +663,13 @@ def run_job(args):
                     str(compare_directory),
                 ],
                 environment,
-                plan_directory / "compare.log",
+                compare_directory / "compare.log",
             )
+            save_json(
+                compare_directory / "result.json",
+                {"status": "finished", "summaries": [str(path) for path in summaries]},
+            )
+            comparing = False
     except Exception as error:
         # 同一训练进程可能在后续阶段失败，仍记录它已完成阶段的产物。
         for job in jobs:
@@ -595,15 +682,17 @@ def run_job(args):
                         json.loads((result_path.parent / "config.json").read_text()),
                     )
                     checkpoints[job.key] = checkpoint
-        save_json(
-            plan_directory / "result.json",
-            {
-                "status": "failed",
-                "error": str(error),
-                "checkpoints": {key: str(value) for key, value in checkpoints.items()},
-                "summaries": [str(value) for value in summaries],
-            },
-        )
+        if active_stages is not None:
+            save_method_result(active_stages, "failed", error)
+        if comparing:
+            save_json(
+                compare_directory / "result.json",
+                {
+                    "status": "failed",
+                    "error": str(error),
+                    "summaries": [str(path) for path in summaries],
+                },
+            )
         raise
     result = {
         "status": "finished",
@@ -612,11 +701,10 @@ def run_job(args):
         "checkpoints": {key: str(value) for key, value in checkpoints.items()},
         "summaries": [str(value) for value in summaries],
     }
-    save_json(plan_directory / "result.json", result)
     print(
         f"[finished] method={args.method} mode={args.mode} "
         f"checkpoints={len(checkpoints)} evaluations={len(summaries)} "
-        f"result={plan_directory / 'result.json'}",
+        f"plan={plan_directory}",
         flush=True,
     )
     return result

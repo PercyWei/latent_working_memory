@@ -1,3 +1,5 @@
+import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -8,33 +10,38 @@ from latent_working_memory.v3.config import (
     ObjectiveConfig,
     TrainingConfig,
     load_experiment,
+    load_preset,
+    validate_stage_sequence,
 )
 
 
 @pytest.mark.parametrize("filename", sorted(Path("configs/v3").glob("*.json")))
 def test_presets_use_requested_model_and_memory_size(filename):
-    config = load_experiment(filename)
-    assert config.model.model_name_or_path == str(Path.home() / "models/Qwen3-4B-Instruct-2507")
-    assert config.model.memory_slots == 512
-    assert config.model.gradient_checkpointing is True
-    dynamic = config.objective.method in {"memory_change", "information_loss"}
-    assert config.objective.append_slots == (32 if dynamic else 8)
-    large_microbatch = filename.name == "dynamic_pretrain.json" or config.objective.method in {
-        "icae_single",
-        "icae_multi",
-    }
-    assert config.training.micro_batch_size_per_gpu == (8 if large_microbatch else 4)
-    assert config.training.gradient_accumulation_steps == (1 if large_microbatch else 2)
-    assert config.training.global_batch_size(2) == 16
-    assert config.training.swanlab_project is None
-    assert config.training.lm_target_tokens == 512
-    assert config.objective.bptt_steps is None
-    assert config.objective.icae_segment_ratio == 3
-    if config.objective.stage in {"pretrain", "lm"}:
-        assert config.training.pretrain_data_view == "multisegment_random_prefix"
-        assert config.training.min_input_tokens == 1
-        assert config.training.max_input_tokens == 8192
-        assert config.training.lm_ratio == 0.5
+    for config in load_preset(filename):
+        assert "output_dir" not in json.loads(filename.read_text())["training"]
+        assert config.training.output_dir is None
+        assert config.training.init_checkpoint is None
+        assert config.model.model_name_or_path == str(Path.home() / "models/Qwen3-4B-Instruct-2507")
+        assert config.model.memory_slots == 512
+        assert config.model.gradient_checkpointing is True
+        dynamic = config.objective.method in {"memory_change", "information_loss"}
+        assert config.objective.append_slots == (32 if dynamic else 8)
+        large_microbatch = filename.name == "dynamic_pretrain.json" or config.objective.method in {
+            "icae_single",
+            "icae_multi",
+        }
+        assert config.training.micro_batch_size_per_gpu == (8 if large_microbatch else 4)
+        assert config.training.gradient_accumulation_steps == (1 if large_microbatch else 2)
+        assert config.training.global_batch_size(2) == 16
+        assert config.training.swanlab_project is None
+        assert config.training.lm_target_tokens == 512
+        assert config.objective.bptt_steps is None
+        assert config.objective.icae_segment_ratio == 3
+        if config.objective.stage in {"pretrain", "lm"}:
+            assert config.training.pretrain_data_view == "multisegment_random_prefix"
+            assert config.training.min_input_tokens == 1
+            assert config.training.max_input_tokens == 8192
+            assert config.training.lm_ratio == 0.5
 
 
 @pytest.mark.parametrize(
@@ -129,6 +136,18 @@ def test_stage_output_belongs_to_method_experiment(tmp_path):
         ExperimentConfig(ModelConfig(), ObjectiveConfig(stage="policy"), training)
 
 
+def test_output_can_be_unresolved_only_without_a_method_directory():
+    template = TrainingConfig("data")
+    assert template.output_dir is None
+    ExperimentConfig(ModelConfig(), ObjectiveConfig(), template)
+    with pytest.raises(ValueError, match="output_dir"):
+        ExperimentConfig(
+            ModelConfig(),
+            ObjectiveConfig(),
+            replace(template, experiment_dir="experiment", experiment_id="unit-job"),
+        )
+
+
 @pytest.mark.parametrize(
     "name",
     [
@@ -167,6 +186,135 @@ def test_presets_are_named_for_complete_method_flows():
         "memory_change.json",
         "information_loss.json",
     }
+
+
+@pytest.mark.parametrize(
+    "filename,stages",
+    [
+        ("icae_single.json", ("pretrain", "qa")),
+        ("icae_multi.json", ("pretrain", "qa")),
+        ("dynamic_pretrain.json", ("pretrain",)),
+        ("autocompressors.json", ("lm",)),
+        ("memory_change.json", ("warmup", "policy")),
+        ("information_loss.json", ("warmup", "policy")),
+    ],
+)
+def test_presets_expand_explicit_stage_sequences_without_changing_other_options(filename, stages):
+    preset = Path("configs/v3") / filename
+    raw = json.loads(preset.read_text())
+    assert "stage" not in raw["objective"]
+    configs = load_preset(preset)
+    assert tuple(config.objective.stage for config in configs) == stages
+    for config in configs:
+        assert config.model == configs[0].model
+        assert config.training == configs[0].training
+        assert replace(config.objective, stage=stages[0]) == configs[0].objective
+        assert config.objective.seed == raw["objective"]["seed"]
+        assert "stages" not in config.to_dict()["objective"]
+
+
+@pytest.mark.parametrize("method", ["icae_single", "icae_multi"])
+@pytest.mark.parametrize("stages", [["pretrain", "qa"], ["pretrain"], ["qa"]])
+def test_icae_accepts_full_pipeline_and_single_stage_presets(method, stages):
+    assert validate_stage_sequence(method, stages) == tuple(stages)
+
+
+@pytest.mark.parametrize("method", ["memory_change", "information_loss"])
+@pytest.mark.parametrize("stages", [["warmup", "policy"], ["warmup"], ["policy"], ["pretrain"]])
+def test_dynamic_accepts_qa_pipeline_subsets_and_separate_shared_pretraining(method, stages):
+    assert validate_stage_sequence(method, stages) == tuple(stages)
+
+
+def test_stage_sequence_accepts_tuples_and_autocompressors_lm():
+    assert validate_stage_sequence("autocompressors", ("lm",)) == ("lm",)
+
+
+@pytest.mark.parametrize(
+    "method,stages",
+    [
+        ("unknown", ["pretrain"]),
+        ("icae_single", ["qa", "pretrain"]),
+        ("icae_single", ["pretrain", "pretrain"]),
+        ("icae_multi", ["pretrain", "policy"]),
+        ("memory_change", ["policy", "warmup"]),
+        ("memory_change", ["warmup", "warmup"]),
+        ("memory_change", ["pretrain", "warmup"]),
+        ("memory_change", ["pretrain", "policy"]),
+        ("information_loss", ["pretrain", "warmup", "policy"]),
+        ("information_loss", ["warmup", "qa", "policy"]),
+        ("autocompressors", ["lm", "lm"]),
+        ("autocompressors", ["pretrain"]),
+        ("icae_single", []),
+        ("icae_single", ()),
+        ("icae_single", "pretrain"),
+        ("icae_single", {"pretrain"}),
+        ("icae_single", None),
+        ("icae_single", [None]),
+    ],
+)
+def test_stage_sequence_rejects_invalid_and_mixed_pipeline_orders(method, stages):
+    with pytest.raises(ValueError):
+        validate_stage_sequence(method, stages)
+
+
+@pytest.mark.parametrize("stages", [["pretrain"], ["qa"]])
+def test_single_stage_preset_uses_requested_stage(tmp_path, stages):
+    raw = json.loads(Path("configs/v3/icae_single.json").read_text())
+    raw["objective"]["stages"] = stages
+    preset = tmp_path / "preset.json"
+    preset.write_text(json.dumps(raw))
+    (config,) = load_preset(preset)
+    assert config.objective.stage == stages[0]
+
+
+@pytest.mark.parametrize("stages", [[], "pretrain", ["qa", "pretrain"]])
+def test_preset_validates_sequence_at_input_boundary(tmp_path, stages):
+    raw = json.loads(Path("configs/v3/icae_single.json").read_text())
+    raw["objective"]["stages"] = stages
+    preset = tmp_path / "preset.json"
+    preset.write_text(json.dumps(raw))
+    with pytest.raises(ValueError, match="stages"):
+        load_preset(preset)
+
+
+@pytest.mark.parametrize("include_stages", [False, True])
+def test_preset_rejects_singular_stage_and_mixed_stage_formats(tmp_path, include_stages):
+    raw = json.loads(Path("configs/v3/icae_single.json").read_text())
+    raw["objective"]["stage"] = "pretrain"
+    if not include_stages:
+        del raw["objective"]["stages"]
+    preset = tmp_path / "preset.json"
+    preset.write_text(json.dumps(raw))
+    with pytest.raises(ValueError, match="requires stages"):
+        load_preset(preset)
+
+
+def test_preset_validates_each_expanded_objective(tmp_path):
+    raw = json.loads(Path("configs/v3/icae_single.json").read_text())
+    raw["objective"]["bptt_steps"] = 2
+    preset = tmp_path / "preset.json"
+    preset.write_text(json.dumps(raw))
+    with pytest.raises(ValueError, match="bptt_steps"):
+        load_preset(preset)
+
+
+def test_runtime_loader_rejects_preset_and_round_trips_saved_stage_configs(tmp_path):
+    preset = Path("configs/v3/icae_single.json")
+    with pytest.raises(ValueError, match="use load_preset"):
+        load_experiment(preset)
+    for config in load_preset(preset):
+        saved = tmp_path / f"{config.objective.stage}.json"
+        saved.write_text(json.dumps(config.to_dict()))
+        assert load_experiment(saved) == config
+
+
+def test_runtime_loader_requires_an_explicit_stage(tmp_path):
+    raw = load_preset("configs/v3/icae_single.json")[0].to_dict()
+    del raw["objective"]["stage"]
+    saved = tmp_path / "missing-stage.json"
+    saved.write_text(json.dumps(raw))
+    with pytest.raises(ValueError, match="explicit stage"):
+        load_experiment(saved)
 
 
 def test_pretraining_data_view_requires_an_explicit_supported_format():

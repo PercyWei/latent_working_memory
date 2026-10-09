@@ -37,9 +37,17 @@ def experiment_directory(training):
     return Path(training.experiment_dir or training.output_dir).resolve()
 
 
-def tracking_method(config):
+def experiment_name(training):
+    """云端展示名与本地目录分开；未指定时沿用目录名称。"""
+    return training.experiment_name or experiment_directory(training).name
+
+
+def tracking_method(config, previous=None):
     if config.objective.method in DYNAMIC_METHODS and config.objective.stage == "pretrain":
-        return "shared-pretrain"
+        # 旧预训练会话继续沿用已保存的身份，不改名或改写云端配置。
+        if previous is not None and previous["method"] == "shared-pretrain":
+            return previous["method"]
+        return "dynamic-pretrain"
     return config.objective.method
 
 
@@ -56,7 +64,7 @@ def _experiment_config(config, run, previous):
     """只增加新阶段；已有阶段配置与原始预训练来源必须保持不变。"""
     fixed = {
         "experiment_id": config.training.experiment_id,
-        "method": tracking_method(config),
+        "method": tracking_method(config, previous),
         "model": run["config"]["model"],
         "resolved_model_revision": run["resolved_model_revision"],
     }
@@ -108,10 +116,10 @@ def method_tracking_run(config, run, device, api_key=None):
         _save_record(record_path, combined)
         yield None
         return
-    method = tracking_method(config)
+    method = combined["method"]
     data = (
         ("fineweb",)
-        if method in {"shared-pretrain", "autocompressors"}
+        if method in {"dynamic-pretrain", "shared-pretrain", "autocompressors"}
         else (
             ("fineweb", "fineweb-factqa")
             if method in {"icae_single", "icae_multi"}
@@ -175,7 +183,7 @@ def method_tracking_run(config, run, device, api_key=None):
         tracking = swanlab.init(
             project=config.training.swanlab_project,
             workspace=workspace,
-            name=root.name,
+            name=experiment_name(config.training),
             config=upload_config,
             mode="online",
             public=False,
