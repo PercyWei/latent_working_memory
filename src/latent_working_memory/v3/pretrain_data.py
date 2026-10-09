@@ -5,10 +5,10 @@ import json
 from pathlib import Path
 import random
 
-from latent_working_memory.data_preparation.fineweb_multisegment.config import DataPreparationConfig
 from latent_working_memory.data_preparation.fineweb_multisegment.records import MultisegmentSample
 from latent_working_memory.data_preparation.fineweb_source import SourceWindowTracker
 from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
+from latent_working_memory.data_preparation.segmentation import SegmentationConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +100,8 @@ def load_pretraining(
                     counts["kept"] += 1
                     counts["kept_by_task"][sample.task] += 1
                 except (ValueError, KeyError, TypeError) as error:
-                    raise ValueError(f"{path}:{line_number}: {error}") from error
+                    error.add_note(f"{path}:{line_number}")
+                    raise
         for name, field in (("input_tokens", "input_ids"), ("target_tokens", "target_ids")):
             lengths = [len(getattr(example, field)) for example in examples]
             counts[name] = {
@@ -138,7 +139,9 @@ def load_multisegment_pretraining(
         raise ValueError(f"unknown multisegment data view: {view}")
     root = Path(dataset_dir)
     metadata = json.loads((root / "preparation.json").read_text(encoding="utf-8"))
-    preparation_config = DataPreparationConfig.from_mapping(metadata["config"]).window
+    preparation_config = SegmentationConfig(**metadata["config"]["window"])
+    if preparation_config.continuation_tokens < 1:
+        raise ValueError("continuation_tokens must be a positive integer")
     seen_samples = set()
     source_windows = SourceWindowTracker()
     splits, statistics = {}, {}
@@ -237,7 +240,8 @@ def load_multisegment_pretraining(
                     counts["kept"] += 1
                     counts["kept_by_task"][task] += 1
                 except (ValueError, KeyError, TypeError) as error:
-                    raise ValueError(f"{path}:{line_number}: {error}") from error
+                    error.add_note(f"{path}:{line_number}")
+                    raise
         # Each retained source contributes one prefix and one training objective.
         for name, lengths in (
             ("original_source_prefix_tokens", original_lengths),

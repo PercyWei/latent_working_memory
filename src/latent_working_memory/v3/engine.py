@@ -11,7 +11,6 @@ from verl.workers.config import FSDPOptimizerConfig
 from verl.workers.config.optimizer import build_optimizer
 from verl.workers.engine import BaseEngine, EngineRegistry
 
-from latent_working_memory.v3.objective import TokenMemoryTask
 from latent_working_memory.v3.pretrain_data import PretrainExample
 from latent_working_memory.v4.engine import initialize_device
 
@@ -119,11 +118,7 @@ class TokenMemoryEngine(BaseEngine):
         # 尾批空 rank 也执行真实 DDP forward/backward，仅将其训练权重置零。
         size = self.config.micro_batch_size_per_gpu
         work = [local[start : start + size] for start in range(0, len(local), size)] or [[0]]
-        window_steps = (
-            self.model.cfg.bptt_steps
-            if isinstance(self.model, TokenMemoryTask) and not forward_only
-            else None
-        )
+        window_steps = self.model.cfg.bptt_steps if not forward_only else None
         if window_steps is not None:
             # 所有 rank 使用同样的窗口调度，变长轨迹结束或尾批空 rank 仍参与最终同步。
             microbatches = (len(examples) + size * self.world_size - 1) // (size * self.world_size)

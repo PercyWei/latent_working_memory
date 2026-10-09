@@ -289,14 +289,11 @@ def initialization_record(path, previous_run, step, config):
     previous_training = TrainingConfig(**previous["training"])
     root = experiment_directory(previous_training)
     if previous["objective"]["stage"] == "pretrain":
-        identity_path = root / "swanlab.json"
         identity = (
-            json.loads(identity_path.read_text(encoding="utf-8"))
-            if identity_path.exists()
+            json.loads((root / "swanlab.json").read_text(encoding="utf-8"))
+            if previous_training.swanlab_project is not None
             else None
         )
-        if previous_training.swanlab_project is not None and identity is None:
-            raise ValueError("online pretraining checkpoint requires its original swanlab.json")
         pretraining = {
             "experiment_id": previous_training.experiment_id,
             "run_name": experiment_name(previous_training),

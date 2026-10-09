@@ -8,7 +8,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from latent_working_memory.v3.engine import TokenMemoryEngine, initialize_device
-from latent_working_memory.v3.config import TrainingConfig
+from latent_working_memory.v3.config import ObjectiveConfig, TrainingConfig
 from latent_working_memory.v3.pretrain_data import PretrainExample
 from latent_working_memory.v4 import engine as engine_module
 
@@ -68,6 +68,7 @@ def test_cpu_initialization_does_not_require_gpu_selection(monkeypatch):
 class BranchModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
+        self.cfg = ObjectiveConfig()
         self.first = torch.nn.Parameter(torch.tensor(0.7, dtype=torch.float64))
         self.second = torch.nn.Parameter(torch.tensor(-0.2, dtype=torch.float64))
         self.frozen = torch.nn.Parameter(
@@ -259,6 +260,7 @@ def test_pretraining_groups_read_lengths_without_changing_global_sample_mean():
 class AutocastModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
+        self.cfg = ObjectiveConfig()
         self.linear = torch.nn.Linear(2, 1, device="cuda", dtype=torch.float32)
         self.output_dtypes = []
 

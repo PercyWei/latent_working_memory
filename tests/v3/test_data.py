@@ -206,6 +206,20 @@ def test_load_preserves_all_splits_and_usage(tmp_path, tokenizer):
         assert len(final.new_qa_ids + final.old_qa_ids) == 4 * len(trajectory.segments)
 
 
+@pytest.mark.parametrize("error_type", (ValueError, KeyError, TypeError))
+def test_loader_preserves_tokenizer_error_and_notes_location(tmp_path, error_type):
+    write_dataset(tmp_path, [make_record(6)])
+    error = error_type("tokenizer failed")
+
+    def failing_tokenizer(*args, **kwargs):
+        raise error
+
+    with pytest.raises(error_type) as caught:
+        load_factqa(tmp_path, failing_tokenizer)
+    assert caught.value is error
+    assert caught.value.__notes__ == [f"{tmp_path / 'train.jsonl'}:1"]
+
+
 @pytest.mark.parametrize("answer_suffix,limit", [("", 32), ("x" * 140, 192)])
 def test_loader_uses_metadata_answer_limit(tmp_path, tokenizer, answer_suffix, limit):
     config = dict(QA_CONFIG, max_answer_chars=limit)

@@ -426,18 +426,18 @@ def run_job(args):
             )
             comparing = False
     except Exception as error:
-        # 同一训练进程可能在后续阶段失败，仍记录它已完成阶段的产物。
-        for job in jobs:
-            result_path = Path(job.config.training.output_dir) / "training-result.json"
-            if job.key not in checkpoints and result_path.is_file():
-                checkpoint = Path(json.loads(result_path.read_text())["checkpoint"])
-                if checkpoint.is_file():
-                    save_json(
-                        job.config_path,
-                        json.loads((result_path.parent / "config.json").read_text()),
-                    )
-                    checkpoints[job.key] = checkpoint
         if active_stages is not None:
+            # 当前训练组可能在后续阶段失败，保留它已经完成的阶段产物。
+            for job in active_stages:
+                result_path = Path(job.config.training.output_dir) / "training-result.json"
+                if job.key not in checkpoints and result_path.is_file():
+                    checkpoint = Path(json.loads(result_path.read_text())["checkpoint"])
+                    if checkpoint.is_file():
+                        save_json(
+                            job.config_path,
+                            json.loads((result_path.parent / "config.json").read_text()),
+                        )
+                        checkpoints[job.key] = checkpoint
             save_method_result(active_stages, "failed", error)
         if comparing:
             save_json(

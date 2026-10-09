@@ -230,10 +230,6 @@ class TokenMemoryTask(nn.Module):
                         )
                     )
                     gate_ids = [trajectories[i].usage[step].gate_qa_ids for i in active]
-                    if not all(gate_ids):
-                        raise ValueError(
-                            "information-loss updates require historical gate questions"
-                        )
                     with torch.no_grad():
                         losses = []
                         for states in (
@@ -459,14 +455,6 @@ class TokenMemoryTask(nn.Module):
                 size = rng.randint(min(self.cfg.ac_min_segment_tokens, maximum), maximum)
                 parts.append(tokens[offset : offset + size])
                 offset += size
-            if len(parts) < 2 or self.cfg.ac_bptt_steps < 2:
-                raise ValueError(
-                    "frozen-reader AutoCompressors LM needs at least two segments per BPTT group"
-                )
-            if len(parts) == 2 and len(parts[-1]) < 2:
-                raise ValueError(
-                    "AutoCompressors has no trainable next-token target in the second segment"
-                )
             segments.append(parts)
         blocks, losses = [[] for _ in examples], [[] for _ in examples]
         targets = [0 for _ in examples]
@@ -572,12 +560,10 @@ class TokenMemoryTask(nn.Module):
                     examples, epoch, window_steps, qa_state
                 )
             loss = torch.stack(losses).mean()
-        names = set().union(*(row.keys() for row in metrics))
+        names = metrics[0].keys()
         output = {
             "loss": loss,
-            "metrics": {
-                name: sum(row.get(name, 0.0) for row in metrics) / len(examples) for name in names
-            },
+            "metrics": {name: sum(row[name] for row in metrics) / len(examples) for name in names},
         }
         if window_steps is not None:
             output["qa_state"] = qa_state

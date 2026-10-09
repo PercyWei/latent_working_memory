@@ -524,6 +524,22 @@ def test_empty_microbatch_is_rejected():
         task("memory_change", "pretrain")([], batched=True)
 
 
+def test_missing_sample_metric_is_not_replaced_with_zero(monkeypatch):
+    model = task("memory_change", "pretrain")
+    text = (3, 4, 5)
+    examples = [PretrainExample(str(i), "d", "c", "ae", text, text) for i in range(2)]
+    objective = model._pretrain_objective
+
+    def omit_metric(rows):
+        losses, metrics = objective(rows)
+        del metrics[1]["input_tokens"]
+        return losses, metrics
+
+    monkeypatch.setattr(model, "_pretrain_objective", omit_metric)
+    with pytest.raises(KeyError, match="input_tokens"):
+        model(examples, batched=True)
+
+
 @pytest.mark.parametrize("method", ["memory_change", "information_loss"])
 @pytest.mark.parametrize("stage", ["warmup", "policy"])
 def test_one_bptt_window_matches_full_loss_gradients_and_detaches_memory(method, stage):

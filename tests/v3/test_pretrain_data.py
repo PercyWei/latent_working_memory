@@ -132,8 +132,9 @@ def test_invalid_source_is_rejected_even_if_its_input_would_be_filtered(tmp_path
 def test_duplicate_sample_in_one_split_is_rejected(tmp_path, tokenizer):
     row = sample("same")
     write_splits(tmp_path, train=[row, row])
-    with pytest.raises(ValueError, match="train.jsonl:2: duplicate"):
+    with pytest.raises(ValueError, match="duplicate") as caught:
         load_pretraining(tmp_path, tokenizer, 1, 4)
+    assert caught.value.__notes__ == [f"{tmp_path / 'train.jsonl'}:2"]
 
 
 @pytest.mark.parametrize("invalid", ("span", "continuation", "field", "task"))
@@ -148,8 +149,10 @@ def test_existing_textsample_contract_is_enforced(tmp_path, tokenizer, invalid):
     else:
         row["task"] = "qa"
     write_splits(tmp_path, train=[row])
-    with pytest.raises(ValueError, match="train.jsonl:1"):
+    error_type = TypeError if invalid == "field" else ValueError
+    with pytest.raises(error_type) as caught:
         load_pretraining(tmp_path, tokenizer, 1, 4)
+    assert caught.value.__notes__ == [f"{tmp_path / 'train.jsonl'}:1"]
 
 
 @pytest.mark.parametrize("minimum,maximum", [(0, 3), (4, 3), (True, 4), (1, 4.0)])
@@ -220,6 +223,53 @@ def write_multisegment(path, config=MULTISEGMENT_CONFIG, **splits):
     )
     write_splits(root, **splits)
     return root
+
+
+@pytest.mark.parametrize("view", ("text_samples", "multisegment_random_prefix"))
+@pytest.mark.parametrize("error_type", (ValueError, KeyError, TypeError))
+def test_pretraining_preserves_tokenizer_error_and_notes_location(
+    tmp_path, tokenizer, monkeypatch, view, error_type
+):
+    if view == "text_samples":
+        write_splits(tmp_path, train=[sample("sample")])
+        root = tmp_path
+    else:
+        root = write_multisegment(tmp_path, train=[multisegment_row()])
+    error = error_type("tokenizer failed")
+
+    def failing_encode(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(tokenizer, "encode", failing_encode)
+    with pytest.raises(error_type) as caught:
+        if view == "text_samples":
+            load_pretraining(root, tokenizer, 1, 4)
+        else:
+            load_multisegment_pretraining(root, tokenizer, 1, 4, view)
+    assert caught.value is error
+    assert caught.value.__notes__ == [f"{root / 'train.jsonl'}:1"]
+
+
+@pytest.mark.parametrize("include_construction_settings", (False, True))
+def test_multisegment_loader_uses_only_saved_window_configuration(
+    tmp_path, tokenizer, include_construction_settings
+):
+    root = write_multisegment(tmp_path, train=[multisegment_row()])
+    expected = load_multisegment_pretraining(root, tokenizer, 1, 4, "multisegment_random_prefix")
+    config = {"window": MULTISEGMENT_CONFIG.to_dict()["window"]}
+    if include_construction_settings:
+        config.update(
+            source_dir="",
+            source_batch_size=0,
+            source_seed=-1,
+            selection_seed=-1,
+            split_counts={"train": 0},
+        )
+    (root / "preparation.json").write_text(json.dumps({"config": config}), encoding="utf-8")
+    assert (
+        load_multisegment_pretraining(root, tokenizer, 1, 4, "multisegment_random_prefix")
+        == expected
+    )
 
 
 @pytest.mark.parametrize("overlap", ("none", "body", "continuation"))
@@ -509,8 +559,9 @@ def test_multisegment_source_isolation_before_filtering(tmp_path, tokenizer, lea
     else:
         dev["trajectory_id"] = train["trajectory_id"]
     root = write_multisegment(tmp_path, train=[train], dev=[dev])
-    with pytest.raises(ValueError, match="dev.jsonl:1:.*(source document|dedup cluster|duplicate)"):
+    with pytest.raises(ValueError, match="source document|dedup cluster|duplicate") as caught:
         load_multisegment_pretraining(root, tokenizer, 3, 5, "multisegment_random_prefix")
+    assert caught.value.__notes__ == [f"{root / 'dev.jsonl'}:1"]
 
 
 @pytest.mark.parametrize(
@@ -533,8 +584,10 @@ def test_multisegment_row_contract_is_enforced_with_location(tmp_path, tokenizer
     else:
         row["continuation"] = row["continuation"][:-1]
     root = write_multisegment(tmp_path, train=[row])
-    with pytest.raises(ValueError, match="train.jsonl:1"):
+    error_type = TypeError if invalid == "old_field" else ValueError
+    with pytest.raises(error_type) as caught:
         load_multisegment_pretraining(root, tokenizer, 2, 5, "multisegment_random_prefix")
+    assert caught.value.__notes__ == [f"{root / 'train.jsonl'}:1"]
 
 
 @pytest.mark.parametrize("continuation_tokens", [0, True, 2.5])

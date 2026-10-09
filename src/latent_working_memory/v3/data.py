@@ -108,15 +108,8 @@ def tokenize_trajectory(
     # Reuse the writer's contract: fact isolation, source spans, role quotas and
     # the exact fixed usage schedule, including all historical dev/test tasks.
     validate_trajectory(record, qa_config)
-    _exact_fields(record["source"], {"file", "row_group", "row_index"}, "source")
     for segment in record["segments"]:
         _exact_fields(segment, {"segment_id", "char_span"}, "segment")
-    for step in record["usage"]:
-        _exact_fields(
-            step,
-            {"segment_id", "task_new_qa_ids", "task_old_qa_ids", "gate_qa_ids"},
-            "usage step",
-        )
 
     texts = [record["text"]]
     texts.extend(record["text"][slice(*segment["char_span"])] for segment in record["segments"])
@@ -198,6 +191,7 @@ def load_factqa(dataset_dir: str | Path, tokenizer) -> dict[str, tuple[FactQATra
                     seen_questions.update(trajectory.qas)
                     trajectories.append(trajectory)
                 except (ValueError, KeyError, TypeError) as error:
-                    raise ValueError(f"{path}:{line_number}: {error}") from error
+                    error.add_note(f"{path}:{line_number}")
+                    raise
         result[split] = tuple(trajectories)
     return result

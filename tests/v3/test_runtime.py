@@ -68,6 +68,7 @@ class Example:
 class TinyTask(torch.nn.Module):
     def __init__(self):
         super().__init__()
+        self.cfg = ObjectiveConfig()
         self.weight = torch.nn.Parameter(torch.tensor([0.4, -0.2]))
 
     def forward(self, example, epoch=0, differentiable=True, batched=False):
