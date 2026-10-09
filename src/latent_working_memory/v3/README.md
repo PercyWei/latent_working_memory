@@ -20,8 +20,8 @@ AE 表示重建输入，LM 表示预测后续文本，QA 表示问答训练。
 | `icae_single` | 完整历史一次压缩为 K slots | AE／LM → QA |
 | `icae_multi` | 各段独立压缩为 K slots，拼接全部块 | 多段 AE／LM → QA |
 | `autocompressors` | 新段与累计记忆共同压缩，每次追加 K slots | 随机分段 next-token LM |
-| `memory_change` | 覆盖末块或追加 ΔK slots，按记忆表示变化决定 | 预训练 → 动作预热 → 策略训练 |
-| `information_loss` | 同样的写入方式，按旧信息损失决定 | 预训练 → 动作预热 → 策略训练 |
+| `memory_change` | 覆盖末块或追加 ΔK slots，按记忆表示变化决定 | AE／LM → 动作预热 → 策略训练 |
+| `information_loss` | 同样的写入方式，按旧信息损失决定 | AE／LM → 动作预热 → 策略训练 |
 
 五组使用相同的模型设置，各自采用表中的记忆组织和训练目标：
 
