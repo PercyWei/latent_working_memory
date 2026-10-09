@@ -84,12 +84,14 @@ AutoCompressors 对每条多段文本轨迹只生成一个 continuation 样本�
 
 每个 global batch 按实际样本数平均，包括不足一批的尾批。`micro_batch_size_per_gpu` 控制每卡一次并行处理的样本／轨迹数，`gradient_accumulation_steps` 控制累积次数；全局 batch 为两者与 GPU 数的乘积。共享预训练与两个 ICAE 的 AE／LM、QA 阶段默认每卡 **8**、累积 **1** 次；AutoCompressors 与动态 warmup／policy 默认每卡 **4**、累积 **2** 次，双卡全局 batch 均为 **16**。`qa_batch_size` 默认为 8。
 
-| 配置 | 作用范围 |
-|---|---|
-| `configs/v3/dynamic_pretrain.json` | 动态共享预训练，参数仅用于此阶段 |
-| `configs/v3/memory_change.json`、`information_loss.json` | 对应动态方法的 warmup＋policy |
-| `configs/v3/icae_single.json`、`icae_multi.json` | 对应基线的 AE／LM＋QA |
-| `configs/v3/autocompressors.json` | AutoCompressors LM |
+| 配置 | 作用范围 | 默认 `objective.stages` |
+|---|---|---|
+| `configs/v3/dynamic_pretrain.json` | 动态共享预训练，参数仅用于此阶段 | `["pretrain"]` |
+| `configs/v3/memory_change.json`、`information_loss.json` | 对应动态方法的 warmup＋policy | `["warmup", "policy"]` |
+| `configs/v3/icae_single.json`、`icae_multi.json` | 对应基线的 AE／LM＋QA | `["pretrain", "qa"]` |
+| `configs/v3/autocompressors.json` | AutoCompressors LM | `["lm"]` |
+
+预设通过 `objective.stages` 声明阶段及执行顺序，并提供超参数与数据默认值，不指定产物目录或初始化 checkpoint。启动器按列表生成 `plan/<method-dir>/<stage>.json`；生成配置和训练保存的 `config.json` 用单个 `objective.stage` 明确当前阶段。修改为单元素列表，例如 `["pretrain"]`，可只执行该阶段；正式实验保留默认完整流程。中断恢复使用阶段目录保存的 `config.json`，未解析的预设不能直接启动内部训练模块。
 
 批量读写采用独立行的右侧 padding，仅使用有效前缀输出；因果 attention 保证有效位置不会读取右侧 padding，因此不传 padding mask，保留 SDPA 的纯 causal 路径。预训练样本在既定 global batch 的每卡分片内按目标长度、输入长度分组，减少补齐计算；采样、各卡样本归属和损失权重保持不变。动态分支按轨迹独立决策。`qa_batch_size` 控制每条轨迹一次读取的题数，批量调用合并各活跃轨迹的题目，但保留原有每题、更新点和轨迹的损失权重。多个样本共享调用的计时按参与样本分摊，调用/题目数仍按每条样本的逻辑工作量记录。
 
@@ -111,45 +113,61 @@ bash /data/zhangdw12/percyw/latent_working_memory/src/latent_working_memory/v3/s
 
 公司 GPU 网站填写脚本的实际绝对路径即可。`--gpus 4,5` 启动两个训练进程，最终评估使用 GPU 4；卡号默认仍为 `0,1`。只运行一个方法时增加 `--method`。通用命令行参数覆盖各阶段预设；`--max-input-tokens`、`--lm-ratio`、`--lm-target-tokens` 仅影响预训练，`--icae-segment-ratio` 仅控制 ICAE-multi 预训练块长，`--append-slots` 和 `--bptt-steps` 仅影响动态 warmup／policy。参数与数据准备见 [GPU 任务说明](scripts/README.md)。
 
-公开入口按完整方法运行：ICAE 自动执行 pretrain → QA，动态方法执行共享预训练 → warmup → policy，AutoCompressors 执行 LM；`smoke`、`pilot` 仅缩短各阶段预算，仍走完整流程。需要先单独准备两种动态方法的共同起点时，使用 `--method shared_pretrain`。
+公开入口默认按完整方法运行：ICAE 执行 pretrain → QA，动态方法执行共享预训练 → warmup → policy，AutoCompressors 执行 LM。实际阶段由各预设的 `objective.stages` 决定，`smoke`、`pilot` 仅缩短这些阶段的预算。仅运行后训练时，首阶段可通过 `training.init_checkpoint` 指定来源；动态方法也支持 `--init-checkpoint`，未指定时先执行共享预训练。动态方法仅执行 `warmup` 时不生成最终评估。需要先单独准备两种动态方法的共同起点时，使用 `--method dynamic_pretrain`。
 
 ```bash
 bash /data/zhangdw12/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode full --method shared_pretrain --gpus 4,5 --run-id capacity-comparison_20261007-01
+  --mode full --method dynamic_pretrain --gpus 4,5 --run-id capacity-comparison_20261007-01
 ```
 
-已有共享预训练 checkpoint 时，动态方法通过 `--init-checkpoint` 接着执行 warmup → policy → 最终评估，不读取预训练数据：
+已有共享预训练 checkpoint 时，动态方法通过 `--init-checkpoint` 默认接着执行 warmup → policy → 最终评估，不读取预训练数据：
 
 ```bash
 bash /data/zhangdw12/percyw/latent_working_memory/src/latent_working_memory/v3/scripts/run_gpu.sh \
   --mode full --method memory_change --gpus 4,5 \
-  --init-checkpoint artifacts/v3/capacity-comparison_20261007-01/train/shared-pretrain-k512_capacity-comparison_20261007-01/pretrain/checkpoints/step-NNNNNN.pt
+  --init-checkpoint artifacts/v3/capacity-comparison_20261007-01/train/dynamic-pretrain-k512/pretrain/checkpoints/step-NNNNNN.pt
 ```
 
 外部 checkpoint 的同阶段 `run.json` 提供 `run-id`，省略时自动继承，显式指定不同值会报错。将 `--method` 改为 `information_loss` 并保持同一 checkpoint，即可在同一系列中分别启动两个动态方法；它们与共享预训练使用相同名称后缀。`--method dynamic` 顺序运行这两种方法，`--method all` 运行全部五种方法。
 
-SwanLab 以一个完整方法为一个 run，阶段间累计 optimizer step。ICAE 的 pretrain 与 QA 共用 run；动态方法的 warmup 与 policy 共用 run，其步数从自身 warmup 开始，不包含共享预训练；AutoCompressors 使用一个 LM run。共享预训练单独记为 `shared-pretrain-k512_<run-id>`，因此一次 `all` 完整流程共六个 run。正式方法名为 `<method>-k512_<run-id>`，试跑方法名为 `<method>-k512_<mode>_<run-id>`，其中 `<mode>` 为 `smoke` 或 `pilot`，共享预训练遵循同一命名规则。动态方法名称中的 `k512` 表示首次容量，追加大小单独记录在 config 中。
+SwanLab 以一个完整方法为一个 run，阶段间累计 optimizer step。ICAE 的 pretrain 与 QA 共用 run；动态方法的 warmup 与 policy 共用 run，其步数从自身 warmup 开始，不包含共享预训练；AutoCompressors 使用一个 LM run。共享预训练单独记录，因此默认 `all` 完整流程共六个 run。
+
+SwanLab 正式 run 名称为 `<method>-k<K>_<run-id>`，试跑名称为 `<method>-k<K>_<mode>_<run-id>`，其中 `<mode>` 为 `smoke` 或 `pilot`。完整名称保存在 `training.experiment_name`，本地方法目录不包含 `run-id`。方法标识的下划线转为连字符，例如 `icae_multi` → `icae-multi`；共享预训练使用 `dynamic-pretrain`。K 取 `model.memory_slots`，动态方法表示首次容量，追加大小单独记录在 config 中。两个动态方法与共享预训练保持相同后缀，关联共同的预训练来源。
 
 同一方法的训练阶段由同一组进程连续执行，复用模型、DDP 和 SwanLab 会话。切换时保留 LoRA 与 gist embeddings，重置 optimizer 和阶段内步数，按新阶段配置切换数据、目标及 seed；累计 optimizer step 连续。共享预训练与不同方法分别启动，最终评估独立执行。
 
-checkpoint 仍分阶段保存在 `train/<run-name>/<stage>/checkpoints/`，来源路径、step、SwanLab ID 和 URL 记录在 config 中。中断恢复使用内部训练模块的 `--resume` 与该阶段保存的 `config.json`，沿用原目录、卡数及批处理设置。
+checkpoint 仍分阶段保存在 `train/<method-dir>/<stage>/checkpoints/`，来源路径、step、SwanLab 完整名称、ID 和 URL 记录在 config 中。中断恢复使用内部训练模块的 `--resume` 与该阶段保存的 `config.json`，沿用原目录、卡数及批处理设置。
 
 ## 评估与产物
 
 默认评估最后一个 checkpoint，不改写训练阈值。最终评估追加到对应方法的 SwanLab run，使用该方法的累计 optimizer step。所有方法在同一批轨迹的最终记忆上回答评估题；按末段新事实、更早旧事实以及段距离分别统计。
 
-所有档位的产物统一保存在 `artifacts/v3/<run-id>/`。相同 `run-id` 的不同档位共用 `plan/<method>/`；试跑和正式训练作为独立运行时，使用不同 `run-id` 或省略该参数自动生成，避免已有方法目录冲突。
+所有档位的产物统一保存在 `artifacts/v3/<run-id>/`，`--output-root` 可替换父目录：
+
+```text
+artifacts/v3/<run-id>/
+├── plan/<method-dir>/            job.json、阶段配置、日志与 result.json
+├── train/<method-dir>/<stage>/   训练配置、指标与 checkpoints/
+├── eval/<method-dir>/<stage>/    最终评估汇总与逐题结果
+└── compare/                     多方法质量—容量比较、日志与执行结果
+```
+
+`plan`、`train`、`eval` 使用相同的短方法目录 `<method-dir>`：正式运行为 `<method>-k<K>`，试跑为 `<method>-k<K>_<mode>`。例如正式 ICAE-single 的计划配置为 `plan/icae-single-k512/pretrain.json`、`qa.json`，训练目录为 `train/icae-single-k512/pretrain/`、`qa/`，最终评估目录为 `eval/icae-single-k512/qa/`。SwanLab 名称在短方法目录后添加 `_<run-id>`。
+
+`--method all`、`dynamic` 也为每个具体方法分别保存 `job.json` 和 `result.json`；同一方法的各训练阶段共用 `plan/<method-dir>/train.log`，最终评估日志为 `eval.log`。失败时先查看对应方法的 `result.json` 和日志。试跑和正式训练作为独立运行时，使用不同 `run-id` 或省略该参数自动生成，避免已有方法目录冲突。
+
+本次调用产出至少两个方法评估结果时生成比较，四个文件直接保存到 `compare/`：`points.json`、`points.csv` 保存比较点，`compare.log` 保存日志，`result.json` 记录参与的评估结果与执行状态。比较范围为本次调用产出的全部评估结果，不自动扫描已有结果。
 
 ```bash
 CUDA_VISIBLE_DEVICES=4 uv run --frozen python -m latent_working_memory.v3.evaluate \
-  --checkpoint artifacts/v3/capacity-comparison_20261007-01/train/memory-change-k512_capacity-comparison_20261007-01/policy/checkpoints/step-NNNNNN.pt \
+  --checkpoint artifacts/v3/capacity-comparison_20261007-01/train/memory-change-k512/policy/checkpoints/step-NNNNNN.pt \
   --dataset-dir /absolute/path/to/fineweb-factqa \
-  --output-dir artifacts/v3/capacity-comparison_20261007-01/eval/memory-change-k512_capacity-comparison_20261007-01/policy \
+  --output-dir artifacts/v3/capacity-comparison_20261007-01/eval/memory-change-k512/policy \
   --split test --device cuda --max-new-tokens 64 --log-to-swanlab
 
 uv run --frozen python -m latent_working_memory.v3.compare \
   /absolute/path/to/eval-one/summary.json /absolute/path/to/eval-two/summary.json \
-  --output-dir artifacts/v3/capacity-comparison_20261007-01/compare/dynamic
+  --output-dir artifacts/v3/capacity-comparison_20261007-01/compare
 ```
 
 | 产物 | 内容 |

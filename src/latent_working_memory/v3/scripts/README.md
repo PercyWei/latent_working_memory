@@ -74,20 +74,20 @@ GPU 任务平台使用同一命令，将脚本位置替换为绝对路径即可�
 | `pilot` | 256／32 | 20 | dev，最多 16 条轨迹 |
 | `full` | 全部 | 按预设训练，默认 1 epoch | 完整 test |
 
-各档均执行完整方法流程，QA 保留整条轨迹。先用 `smoke` 检查显存、日志和 SwanLab 展示，再切换 `full`；正式运行重新训练，不自动沿用试跑权重。提高 microbatch 后可先运行 `pilot`，检查更多长轨迹的显存峰值；少量 smoke 样本的显存不能代表完整数据。
+各档默认均执行完整方法流程，具体阶段由预设的 `objective.stages` 决定；QA 保留整条轨迹。先用 `smoke` 检查显存、日志和 SwanLab 展示，再切换 `full`；正式运行重新训练，不自动沿用试跑权重。提高 microbatch 后可先运行 `pilot`，检查更多长轨迹的显存峰值；少量 smoke 样本的显存不能代表完整数据。
 
 同一方法只加载一次模型：ICAE 的 AE＋LM → QA、动态方法的动作预热 → 策略训练在同一组训练进程中连续完成，阶段切换时保留模型权重、重置优化器。共享预训练和不同方法分别启动；最终评估独立运行。
 
 用 `--method` 选择运行对象：
 
-| 值 | 执行内容 |
+| 值 | 默认执行内容 |
 |---|---|
 | `all`（默认） | 三个 baseline 和两个动态方法；动态预训练只执行一次 |
 | `icae_single`、`icae_multi` | 所选 ICAE 的 AE＋LM → QA → 评估 |
 | `autocompressors` | 分段 LM → 评估 |
 | `memory_change`、`information_loss` | 共享预训练 → 所选方法的动作预热 → 策略训练 → 评估 |
 | `dynamic` | 共享预训练一次，再分别完成两个动态方法 |
-| `shared_pretrain` | 仅生成动态方法共用的预训练 checkpoint |
+| `dynamic_pretrain` | 仅生成动态方法共用的预训练 checkpoint |
 
 例如，只试跑 ICAE-single：
 
@@ -102,18 +102,18 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 
 ```bash
 bash src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode full --method shared_pretrain --gpus 0,1 --run-id capacity-comparison_20261007-01
+  --mode full --method dynamic_pretrain --gpus 0,1 --run-id capacity-comparison_20261007-01
 ```
 
-从 `artifacts/v3/capacity-comparison_20261007-01/plan/shared-pretrain/result.json` 取得 checkpoint 路径，再执行：
+从 `artifacts/v3/capacity-comparison_20261007-01/plan/dynamic-pretrain-k512/result.json` 取得 checkpoint 路径，再执行：
 
 ```bash
 bash src/latent_working_memory/v3/scripts/run_gpu.sh \
   --mode full --method memory_change --gpus 0,1 \
-  --init-checkpoint /path/to/pretrain/checkpoints/step-NNNNNN.pt
+  --init-checkpoint artifacts/v3/capacity-comparison_20261007-01/train/dynamic-pretrain-k512/pretrain/checkpoints/step-NNNNNN.pt
 ```
 
-- 自动连续执行动作预热、策略训练和最终评估，此时只需要 QA 数据。
+- 默认连续执行动作预热、策略训练和最终评估，此时只需要 QA 数据。
 - 将方法改为 `information_loss` 可单独训练另一组；改为 `dynamic` 可顺序完成两组。
 - 保留原预训练运行目录及路径，包括 `pretrain/run.json` 和在线运行生成的 `swanlab.json`。运行标识自动继承，模型配置须与预训练一致。
 
@@ -147,7 +147,19 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 | 动态共享预训练 | 8 | 1 |
 | AutoCompressors、动态 warmup／policy | 4 | 2 |
 
-`dynamic_pretrain.json` 只配置共享预训练，动态 QA 分别读取 `memory_change.json`、`information_loss.json`；三个 baseline 读取 `icae_single.json`、`icae_multi.json`、`autocompressors.json`。
+预设位于 `configs/v3/`，通过 `objective.stages` 声明阶段及执行顺序：
+
+| 预设 | 默认 `objective.stages` |
+|---|---|
+| `icae_single.json`、`icae_multi.json` | `["pretrain", "qa"]` |
+| `memory_change.json`、`information_loss.json` | `["warmup", "policy"]` |
+| `dynamic_pretrain.json` | `["pretrain"]` |
+| `autocompressors.json` | `["lm"]` |
+
+- 启动器按列表生成阶段配置；单元素列表如 `["pretrain"]` 只执行该阶段。正式实验保留默认完整流程。
+- 仅运行后训练时，首阶段可用 `training.init_checkpoint` 指定来源；动态方法也支持 `--init-checkpoint`，未指定时先执行共享预训练。后继阶段自动继承前一阶段，单独 `warmup` 不触发最终评估。
+
+预设不指定产物目录。启动器根据 `--run-id` 生成运行配置，写入 `plan/<method-dir>/<stage>.json`，每份配置用 `objective.stage` 明确当前阶段；训练保存的 `config.json` 也使用该单阶段字段。中断恢复使用阶段目录保存的 `config.json` 和 checkpoint，不直接运行预设。
 
 当前先按完整 BPTT 运行；若要测量两轮截断的显存和质量，可执行：
 
@@ -162,19 +174,38 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 
 ## 5. 查看结果
 
-`full`、`smoke`、`pilot` 的产物统一位于 `artifacts/v3/<run-id>/`：
+各档位产物统一保存到 `artifacts/v3/<run-id>/`，父目录可用 `--output-root` 修改。
 
 ```text
-plan/<method>/                运行计划、各方法的训练日志、result.json
-train/<run-name>/<stage>/     配置、训练指标、checkpoints/
-eval/<run-name>/<stage>/      评估汇总与逐题结果
-compare/<method>/             多方法质量—容量比较
+artifacts/v3/<run-id>/
+├── plan/<method-dir>/             job.json、<stage>.json、train.log、eval.log、result.json
+├── train/<method-dir>/<stage>/    config.json、metrics.jsonl、checkpoints/
+├── eval/<method-dir>/<最终阶段>/   summary.json、trajectories.jsonl
+└── compare/                      points.json、points.csv、compare.log、result.json
 ```
 
-SwanLab 中，一个完整方法对应一个 run，训练、验证和最终评估共用；共享预训练单独记录，因此 `all` 共六个 runs。正式名称为 `<method>-k512_<run-id>`，试跑为 `<method>-k512_<mode>_<run-id>`，其中 `<mode>` 为 `smoke` 或 `pilot`。动态方法的 `k512` 表示首次容量，追加大小记录在 config 中。两个动态方法与共享预训练使用相同后缀关联来源；group 默认直接使用 `run-id`，`--group` 可覆盖。
+**`<method-dir>` 命名规则**
 
-阶段用 `train/stage` 曲线展示，最终质量和容量用合并柱状图展示；详细统计与样例保存在本地，不上传表格。指标含义见 [v3 说明](../README.md#评估与产物)。
+| 运行模式 | 命名 |
+|---|---|
+| `full` | `<method>-k<K>` |
+| `smoke`、`pilot` | `<method>-k<K>_<mode>` |
 
-终端每个 optimizer step 打印一行摘要：方法／阶段、epoch、阶段内步数、损失、容量、耗时和峰值显存；执行验证时附带 dev loss。完整指标保存在阶段目录的 `metrics.jsonl`。
+- 方法名将 `_` 转为 `-`，如 `memory-change`；共享预训练使用 `dynamic-pretrain`。K 为 `model.memory_slots`，动态方法表示首次容量。
+- SwanLab 名称为 `<method-dir>_<run-id>`；两个动态方法与共享预训练使用相同后缀关联来源。
 
-相同 `run-id` 的不同档位共用 `plan/<method>/`；试跑与正式训练作为独立运行时，使用不同 `run-id` 或省略该参数自动生成。重复启动已有方法目录会报错；失败时查看 `plan/<method>/result.json` 和 `<run-name>-train.log`，同一方法的各阶段共用一个训练日志。
+| 方法 | 默认训练阶段 | 默认最终评估目录的阶段 |
+|---|---|---|
+| ICAE | `pretrain` → `qa` | `qa` |
+| 动态方法 | `warmup` → `policy` | `policy` |
+| 共享预训练 | `pretrain` | 无 |
+| AutoCompressors | `lm` | `lm` |
+
+**查看步骤**
+
+1. **训练进度**：终端每个 optimizer step 打印一行摘要；完整指标查看阶段目录的 `metrics.jsonl`。
+2. **SwanLab**：每个方法的训练、验证、评估共用一个 run；共享预训练独立记录，默认 `all` 共六个。阶段看 `train/stage`，最终质量与容量看柱状图；指标含义见 [v3 说明](../README.md#评估与产物)。
+3. **方法比较**：本次调用产出至少两个评估结果时，统一导出 `points.json` 和 `points.csv`；参与的结果路径与执行状态见 `compare/result.json`。
+4. **失败排查**：先看对应方法的 `plan/<method-dir>/result.json`，再看 `train.log` 或 `eval.log`；比较失败查看 `compare/result.json` 和同目录的 `compare.log`。
+
+已有产物不覆盖；独立试跑与正式运行使用不同 `run-id`，省略时自动生成。
