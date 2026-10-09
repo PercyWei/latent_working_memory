@@ -10,7 +10,7 @@ from latent_working_memory.data_preparation.fineweb_factqa.assembly import (
     assemble_document,
     qa_quotas,
 )
-from latent_working_memory.v3.data import load_factqa, tokenize_trajectory
+from latent_working_memory.v3.data import filter_factqa, load_factqa, tokenize_trajectory
 
 
 ROLE_SEED = 17
@@ -407,3 +407,119 @@ def test_loader_does_not_replay_source_selection_from_construction_snapshot(tmp_
     for split, raw in zip(("train", "dev", "test"), records, strict=True):
         assert result[split][0].split == raw["split"]
         assert result[split][0].text == raw["text"]
+
+
+def test_factqa_length_filter_preserves_exact_boundary_and_complete_qa(tmp_path, tokenizer):
+    record = make_record(6)
+    write_dataset(tmp_path, [record])
+    original = load_factqa(tmp_path, tokenizer)
+    trajectory = original["train"][0]
+    limit = len(trajectory.full_input_ids)
+    # Per-segment tokenization includes boundary tokens that merge in the full text.
+    assert sum(len(segment.input_ids) for segment in trajectory.segments) > limit
+    assert (
+        limit + sum(len(qa.question_ids) + len(qa.answer_ids) for qa in trajectory.qas.values())
+        > limit
+    )
+
+    retained, statistics = filter_factqa(original, limit, limit * 2)
+    assert retained["train"] == (trajectory,)
+    assert retained["train"][0] is trajectory
+    assert retained["train"][0].qas is trajectory.qas
+    assert retained["train"][0].usage is trajectory.usage
+    assert retained["train"][0].segments is trajectory.segments
+    assert original["train"] == (trajectory,)
+    assert statistics == {
+        "kind": "factqa",
+        "input_token_interval": [1, limit],
+        "upper_limit_split": "train",
+        "splits": {
+            "train": {
+                "read": 1,
+                "kept": 1,
+                "filtered_too_long": 0,
+                "trajectories": 1,
+                "source_tokens": limit,
+                "questions": len(trajectory.qas),
+            },
+            "dev": {
+                "read": 0,
+                "kept": 0,
+                "filtered_too_long": 0,
+                "trajectories": 0,
+                "source_tokens": 0,
+                "questions": 0,
+            },
+            "test": {
+                "read": 0,
+                "kept": 0,
+                "filtered_too_long": 0,
+                "trajectories": 0,
+                "source_tokens": 0,
+                "questions": 0,
+            },
+        },
+    }
+
+    rejected, rejected_statistics = filter_factqa(original, limit - 1, limit * 2)
+    assert rejected["train"] == ()
+    assert rejected_statistics["splits"]["train"] == {
+        "read": 1,
+        "kept": 0,
+        "filtered_too_long": 1,
+        "trajectories": 0,
+        "source_tokens": 0,
+        "questions": 0,
+    }
+    assert original["train"][0] is trajectory
+
+
+@pytest.mark.parametrize(
+    "max_input_tokens,model_window", [(3000, 4000), (None, 3000), (4000, 3000)]
+)
+def test_factqa_length_filter_applies_effective_limit_only_to_train(
+    tmp_path, tokenizer, max_input_tokens, model_window
+):
+    records = [
+        make_record(6, split, index=index, segment_chars=length)
+        for split in ("train", "dev", "test")
+        for index, length in enumerate((400, 500, 800))
+    ]
+    write_dataset(tmp_path, records)
+    original = load_factqa(tmp_path, tokenizer)
+    retained, statistics = filter_factqa(original, max_input_tokens, model_window)
+    assert statistics["input_token_interval"] == [1, 3000]
+    assert statistics["upper_limit_split"] == "train"
+    for split in ("train", "dev", "test"):
+        expected_rows = original[split][:2] if split == "train" else original[split]
+        assert retained[split] == expected_rows
+        if split != "train":
+            assert retained[split] is original[split]
+            assert len(retained[split][-1].full_input_ids) > model_window
+        assert all(
+            actual is expected
+            for actual, expected in zip(retained[split], expected_rows, strict=True)
+        )
+        assert statistics["splits"][split] == {
+            "read": 3,
+            "kept": len(expected_rows),
+            "filtered_too_long": 3 - len(expected_rows),
+            "trajectories": len(expected_rows),
+            "source_tokens": sum(len(row.full_input_ids) for row in expected_rows),
+            "questions": sum(len(row.qas) for row in expected_rows),
+        }
+        assert len(original[split]) == 3
+
+
+@pytest.mark.parametrize("model_window", [0, -1, True, 1.5, "4096", None])
+def test_factqa_length_filter_requires_positive_integer_model_window(model_window):
+    with pytest.raises(ValueError, match="model_window must be a positive integer"):
+        filter_factqa({"train": (), "dev": (), "test": ()}, None, model_window)
+
+
+def test_factqa_length_filter_does_not_hide_invalid_long_sources(tmp_path, tokenizer):
+    first = make_record(6)
+    duplicate = copy.deepcopy(first)
+    write_dataset(tmp_path, [first, duplicate])
+    with pytest.raises(ValueError, match="duplicate trajectory"):
+        filter_factqa(load_factqa(tmp_path, tokenizer), 1, 4096)

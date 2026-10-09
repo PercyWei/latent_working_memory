@@ -221,7 +221,7 @@ def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode,
         assert job.config.training.global_batch_size(2) == 16
         assert job.config.training.global_batch_size(4) == 32
         assert job.config.model.memory_slots == 512
-        assert job.config.objective.append_slots == 32
+        assert job.config.objective.append_slots == (8 if shared else 32)
         assert job.config.training.experiment_id == "unit-job"
         assert job.config.training.group == "unit-job"
         root = Path(job.config.training.experiment_dir)
@@ -407,15 +407,17 @@ def test_dynamic_stage_training_parameters_come_from_their_own_presets(tmp_path,
     ]
 
 
-@pytest.mark.parametrize("method", [*DYNAMIC_METHODS, "all"])
-@pytest.mark.parametrize("steps", [0, 1, 2])
-def test_bptt_cli_affects_only_dynamic_qa_and_zero_restores_full_bptt(
+@pytest.mark.parametrize("method", ["autocompressors", *DYNAMIC_METHODS, "all"])
+@pytest.mark.parametrize("steps", [0, 1, 2, 7])
+def test_bptt_cli_affects_only_ac_lm_and_dynamic_qa_and_zero_restores_full_bptt(
     tmp_path, monkeypatch, method, steps
 ):
     def preset(path):
         return tuple(
             replace(config, objective=replace(config.objective, bptt_steps=3))
-            if config.objective.method in DYNAMIC_METHODS and config.objective.stage == "warmup"
+            if config.objective.method == "autocompressors"
+            or config.objective.method in DYNAMIC_METHODS
+            and config.objective.stage == "warmup"
             else config
             for config in load_preset(path)
         )
@@ -425,16 +427,35 @@ def test_bptt_cli_affects_only_dynamic_qa_and_zero_restores_full_bptt(
     _, _, jobs = job_plan.build_jobs(args)
     for job in jobs:
         objective = job.config.objective
-        dynamic_qa = objective.method in DYNAMIC_METHODS and objective.stage in {
-            "warmup",
-            "policy",
-        }
-        assert objective.bptt_steps == ((steps or None) if dynamic_qa else None)
+        uses_bptt = objective.method == "autocompressors" or (
+            objective.method in DYNAMIC_METHODS and objective.stage in {"warmup", "policy"}
+        )
+        assert objective.bptt_steps == ((steps or None) if uses_bptt else None)
 
 
 def test_dynamic_qa_presets_default_to_full_bptt(tmp_path):
     _, _, jobs = job_plan.build_jobs(arguments(tmp_path, "--method", "all"))
-    assert all(job.config.objective.bptt_steps is None for job in jobs)
+    for job in jobs:
+        assert job.config.objective.bptt_steps == (2 if job.method == "autocompressors" else None)
+
+
+@pytest.mark.parametrize("method", ["autocompressors", *DYNAMIC_METHODS])
+@pytest.mark.parametrize("configured", [None, 3])
+@pytest.mark.parametrize("override", [None, 0, 1])
+def test_bptt_custom_config_is_preserved_unless_cli_overrides_it(
+    tmp_path, method, configured, override
+):
+    path = custom_preset_file(tmp_path, method, objective={"bptt_steps": configured})
+    options = () if override is None else ("--bptt-steps", str(override))
+    _, _, jobs = job_plan.build_jobs(
+        arguments(tmp_path, "--method", method, "--config", str(path), *options)
+    )
+    expected = configured if override is None else override or None
+    for job in jobs:
+        if job.method == "dynamic_pretrain":
+            assert job.config.objective.bptt_steps is None
+        else:
+            assert job.config.objective.bptt_steps == expected
 
 
 def test_full_plan_preserves_each_stage_training_budget(tmp_path):
@@ -485,6 +506,23 @@ def test_zero_input_limit_selects_model_window_only_for_ae_lm(tmp_path):
             if after.config.objective.stage in {"pretrain", "lm"}
             else before.config.training.max_input_tokens
         )
+        assert (
+            after.config.training.max_qa_input_tokens == before.config.training.max_qa_input_tokens
+        )
+
+
+@pytest.mark.parametrize(
+    "method", ["all", "icae_single", "icae_multi", "autocompressors", *DYNAMIC_METHODS]
+)
+@pytest.mark.parametrize("limit", [0, 4096])
+def test_factqa_input_limit_is_saved_without_changing_pretraining_limit(tmp_path, method, limit):
+    _, _, defaults = job_plan.build_jobs(arguments(tmp_path, "--method", method))
+    _, _, overridden = job_plan.build_jobs(
+        arguments(tmp_path, "--method", method, "--max-qa-input-tokens", str(limit))
+    )
+    for before, after in zip(defaults, overridden, strict=True):
+        assert after.config.training.max_qa_input_tokens == (limit or None)
+        assert after.config.training.max_input_tokens == before.config.training.max_input_tokens
 
 
 def test_removed_shared_training_limit_is_rejected():
@@ -880,6 +918,7 @@ def test_minimal_command_builds_all_methods_with_preset_batch_settings(mode):
         batch_eight = job.key == "dynamic-pretrain" or job.config.objective.method in {
             "icae_single",
             "icae_multi",
+            "autocompressors",
         }
         assert job.config.training.micro_batch_size_per_gpu == (8 if batch_eight else 4)
         assert job.config.training.gradient_accumulation_steps == (1 if batch_eight else 2)
@@ -991,7 +1030,6 @@ def test_all_methods_build_a_complete_topologically_ordered_stage_graph(tmp_path
             assert Path(job.config.training.dataset_dir) == args.qa_data
         else:
             assert Path(job.config.training.dataset_dir) == args.pretrain_data
-            assert job.config.training.pretrain_data_view == "multisegment_full_text"
             assert job.config.training.min_input_tokens == 1
             assert job.config.training.max_input_tokens == 12288
             assert job.config.training.lm_ratio == 0.5
@@ -1283,6 +1321,39 @@ def test_icae_segment_count_defaults_preserve_the_preset(tmp_path, monkeypatch):
     )
 
 
+@pytest.mark.parametrize("method", ["all", "autocompressors"])
+def test_autocompressors_overrides_apply_only_to_autocompressors(tmp_path, method):
+    _, _, defaults = job_plan.build_jobs(arguments(tmp_path, "--method", method))
+    _, _, overridden = job_plan.build_jobs(
+        arguments(tmp_path, "--method", method, "--ac-num-segments", "5")
+    )
+    for before, after in zip(defaults, overridden, strict=True):
+        expected = (
+            replace(before.config.objective, ac_num_segments=5)
+            if after.config.objective.method == "autocompressors"
+            else before.config.objective
+        )
+        assert after.config.objective == expected
+        assert after.config.training == before.config.training
+        assert after.config.model == before.config.model
+
+
+def test_autocompressors_defaults_preserve_the_preset(tmp_path, monkeypatch):
+    def preset(path):
+        return tuple(
+            replace(config, objective=replace(config.objective, ac_num_segments=5, bptt_steps=3))
+            for config in load_preset(path)
+        )
+
+    monkeypatch.setattr(job_plan, "load_preset", preset)
+    _, _, jobs = job_plan.build_jobs(arguments(tmp_path, "--method", "autocompressors"))
+    assert len(jobs) == 1
+    assert (jobs[0].config.objective.ac_num_segments, jobs[0].config.objective.bptt_steps) == (
+        5,
+        3,
+    )
+
+
 def test_explicit_overrides_and_zero_remove_profile_limits(tmp_path):
     args = arguments(
         tmp_path,
@@ -1402,15 +1473,26 @@ def test_plan_derives_each_global_batch_from_selected_gpus_microbatch_and_accumu
         ["--lm-ratio", "nan"],
         ["--lm-ratio", "inf"],
         ["--max-input-tokens", "-1"],
+        ["--max-qa-input-tokens", "-1"],
         ["--lm-target-tokens", "0"],
         ["--lm-target-tokens", "-1"],
         ["--icae-min-segments", "0"],
         ["--icae-min-segments", "-1"],
         ["--icae-max-segments", "1.5"],
+        ["--ac-num-segments", "0"],
+        ["--ac-num-segments", "-1"],
+        ["--ac-num-segments", "1.5"],
+        ["--ac-bptt-steps", "0"],
+        ["--ac-bptt-steps", "-1"],
+        ["--method", "autocompressors", "--ac-bptt-steps", "2"],
+        ["--method", "icae_single", "--ac-num-segments", "4"],
+        ["--method", "icae_multi", "--ac-num-segments", "4"],
+        ["--method", "memory_change", "--ac-bptt-steps", "2"],
+        ["--method", "information_loss", "--ac-bptt-steps", "2"],
+        ["--method", "dynamic_pretrain", "--ac-num-segments", "4"],
         ["--bptt-steps", "-1"],
         ["--method", "icae_single", "--bptt-steps", "2"],
         ["--method", "icae_multi", "--bptt-steps", "2"],
-        ["--method", "autocompressors", "--bptt-steps", "2"],
         ["--method", "dynamic_pretrain", "--bptt-steps", "2"],
         ["--method", "icae_single", "--append-slots", "8"],
         ["--method", "icae_multi", "--append-slots", "8"],
@@ -1509,6 +1591,7 @@ def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
         batch_eight = job["key"] == "dynamic-pretrain" or job["config"]["objective"]["method"] in {
             "icae_single",
             "icae_multi",
+            "autocompressors",
         }
         assert job["batching"] == {
             "world_size": world_size,
@@ -1606,7 +1689,6 @@ def test_baselines_use_the_same_multisegment_root(tmp_path, monkeypatch, method)
 
     assert result["status"] == "finished"
     trained = [config for call in commands.calls for config in call.get("configs", [])]
-    assert trained[0].training.pretrain_data_view == "multisegment_full_text"
     assert Path(trained[0].training.dataset_dir) == args.pretrain_data
 
 

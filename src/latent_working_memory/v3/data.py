@@ -195,3 +195,37 @@ def load_factqa(dataset_dir: str | Path, tokenizer) -> dict[str, tuple[FactQATra
                     raise
         result[split] = tuple(trajectories)
     return result
+
+
+def filter_factqa(
+    splits: dict[str, tuple[FactQATrajectory, ...]],
+    max_input_tokens: int | None,
+    model_window: int,
+) -> tuple[dict[str, tuple[FactQATrajectory, ...]], dict]:
+    """Filter train by full source length; retain complete dev/test trajectories."""
+    if type(model_window) is not int or model_window < 1:
+        raise ValueError("model_window must be a positive integer")
+    limit = model_window if max_input_tokens is None else min(max_input_tokens, model_window)
+    filtered, statistics = {}, {}
+    for split in ("train", "dev", "test"):
+        rows = splits[split]
+        kept = (
+            tuple(row for row in rows if len(row.full_input_ids) <= limit)
+            if split == "train"
+            else rows
+        )
+        filtered[split] = kept
+        statistics[split] = {
+            "read": len(rows),
+            "kept": len(kept),
+            "filtered_too_long": len(rows) - len(kept),
+            "trajectories": len(kept),
+            "source_tokens": sum(len(row.full_input_ids) for row in kept),
+            "questions": sum(len(row.qas) for row in kept),
+        }
+    return filtered, {
+        "kind": "factqa",
+        "input_token_interval": [1, limit],
+        "upper_limit_split": "train",
+        "splits": statistics,
+    }

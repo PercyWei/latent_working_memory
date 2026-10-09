@@ -9,7 +9,12 @@ from latent_working_memory.v3.config import ObjectiveConfig
 from latent_working_memory.v3.data import FactQATrajectory, QA, Segment, StepUsage
 from latent_working_memory.v3.objective import TokenMemoryTask, damage_action, memory_change_score
 from latent_working_memory.v3.pretrain_data import PretrainExample
-from latent_working_memory.v3.segmentation import even_token_chunks, icae_multi_plan
+from latent_working_memory.v3.segmentation import (
+    ac_plan,
+    even_token_chunks,
+    example_rng,
+    icae_multi_plan,
+)
 from .test_model import build_model
 
 
@@ -69,12 +74,16 @@ def trajectory(split="train", n=3):
 def task(method, stage, memory_slots=3, **options):
     if method == "icae_multi":
         options = {"icae_min_segments": 3, "icae_max_segments": 3, **options}
+    elif method == "autocompressors":
+        options = {"ac_num_segments": 3, "bptt_steps": 2, **options}
     config = ObjectiveConfig(method=method, stage=stage, **{"append_slots": 3, **options})
     return TokenMemoryTask(
         build_model(
             memory_slots=memory_slots,
             write_slots=(memory_slots + config.icae_min_segments - 1) // config.icae_min_segments
             if method == "icae_multi"
+            else (memory_slots + config.ac_num_segments - 1) // config.ac_num_segments
+            if method == "autocompressors"
             else None,
         ),
         TinyTokenizer(),
@@ -132,7 +141,7 @@ def test_damage_rule(values, expected):
     [
         ("icae_single", [0], 3),
         ("icae_multi", [0, 0, 0], 3),
-        ("autocompressors", [0, 1, 2], 9),
+        ("autocompressors", [0, 1, 2], 3),
     ],
 )
 def test_baselines_write_scopes(method, expected_histories, expected_slots):
@@ -420,17 +429,22 @@ def test_icae_multi_keeps_sampled_chunks_across_epochs():
     assert all(event["segment_id"] is None for event in first_events + later_events)
 
 
-def test_ac_truncates_memory_at_two_segments_but_retains_writer_learning():
-    model = task("autocompressors", "lm", ac_min_segment_tokens=3, ac_max_segment_tokens=3)
+def test_ac_truncates_memory_at_two_segments_but_retains_writer_learning(monkeypatch):
+    class MiddleCuts:
+        def randint(self, low, high):
+            return (low + high) // 2
+
+    monkeypatch.setattr(objective, "example_rng", lambda *args: MiddleCuts())
+    model = task("autocompressors", "lm", memory_slots=9, ac_num_segments=4)
     calls = trace_writes(model)
     source = tuple(range(3, 15))
-    example = PretrainExample("s", "d", "c", "ae", source, source)
+    example = PretrainExample("s", "d", "c", "continuation", source, (18, 19))
     reads, original = [], model.codec.answer_nll
 
     def traced(memories, prompts, answers):
         reads.extend(
-            (prompt.tolist(), answer.tolist())
-            for prompt, answer in zip(prompts, answers, strict=True)
+            (len(memory), prompt.tolist(), answer.tolist())
+            for memory, prompt, answer in zip(memories, prompts, answers, strict=True)
         )
         return original(memories, prompts, answers)
 
@@ -438,13 +452,25 @@ def test_ac_truncates_memory_at_two_segments_but_retains_writer_learning():
     result = model(example)
     result["loss"].backward()
     assert result["metrics"]["segments"] == 4
-    assert reads == [([3], [4, 5, 6]), ([6], [7, 8]), ([9], [10, 11, 12]), ([12], [13, 14])]
-    assert result["metrics"]["target_tokens"] == 10  # exclude one leading token per BPTT group
-    assert [len(history) for _, history, _ in calls] == [0, 1, 2]
+    assert reads[:4] == [
+        (0, [3], [4, 5, 6]),
+        (3, [6], [7, 8, 9]),
+        (5, [9], [10, 11, 12]),
+        (7, [12], [13, 14]),
+    ]
+    assert reads[4] == (9, model.tokenizer.encode(model.cfg.lm_prompt), [18, 19, 2])
+    assert result["metrics"]["input_tokens"] == 12
+    assert result["metrics"]["target_tokens"] == 14  # 11正文 targets + 3续文 targets
+    assert result["metrics"]["slots_final"] == 9
+    assert result["metrics"]["write_calls"] == 4
+    assert [len(history) for _, history, _ in calls] == [0, 1, 2, 3]
+    assert [len(memory) for _, _, memory in calls] == [3, 2, 2, 2]
+    assert torch.cat([ids for ids, _, _ in calls]).tolist() == list(source)
     assert not any(block.requires_grad for block in calls[2][1])
     assert calls[0][2].grad is not None and calls[0][2].grad.abs().sum() > 0
-    assert calls[1][2].grad is None
+    assert calls[1][2].grad is not None and calls[1][2].grad.abs().sum() > 0
     assert calls[2][2].grad is not None and calls[2][2].grad.abs().sum() > 0
+    assert calls[3][2].grad is not None and calls[3][2].grad.abs().sum() > 0
     assert model.codec.memory_embeddings.grad.abs().sum() > 0
 
 
@@ -455,26 +481,26 @@ def test_eval_forward_never_creates_gradient_graph():
     assert all(parameter.grad is None for parameter in model.parameters())
 
 
-def test_ac_rejects_sample_without_any_trainable_cross_segment_target():
-    model = task("autocompressors", "lm", ac_min_segment_tokens=3, ac_max_segment_tokens=3)
-    example = PretrainExample("s", "d", "c", "ae", (3, 4), (3, 4))
-    with pytest.raises(ValueError, match="no trainable next-token target"):
+def test_ac_rejects_source_too_short_for_fixed_segment_count():
+    model = task("autocompressors", "lm", ac_num_segments=2)
+    example = PretrainExample("s", "d", "c", "continuation", (3, 4, 5), (6, 7))
+    with pytest.raises(ValueError, match="at least two tokens per segment"):
         model(example)
 
 
-@pytest.mark.parametrize("total_tokens", [3, 4, 6])
+@pytest.mark.parametrize("total_tokens", [4, 5, 6])
 def test_ac_short_sources_retain_writer_and_memory_gradients(total_tokens):
-    model = task("autocompressors", "lm", ac_min_segment_tokens=8, ac_max_segment_tokens=10)
+    model = task("autocompressors", "lm", ac_num_segments=2)
     calls = trace_writes(model)
     example = PretrainExample(
-        "short", "document", "cluster", "continuation", (3,), tuple(range(4, 3 + total_tokens))
+        "short", "document", "cluster", "continuation", tuple(range(3, 3 + total_tokens)), (20, 21)
     )
     result = model(example)
     result["loss"].backward()
     assert result["metrics"]["segments"] == 2
     assert result["metrics"]["input_tokens"] == total_tokens
-    assert len(calls) == 1
-    assert calls[0][2].grad.abs().sum() > 0
+    assert len(calls) == 2
+    assert all(call[2].grad.abs().sum() > 0 for call in calls)
     assert model.codec.memory_embeddings.grad.abs().sum() > 0
     adapter_gradients = [
         parameter.grad
@@ -485,6 +511,87 @@ def test_ac_short_sources_retain_writer_and_memory_gradients(total_tokens):
         gradient is not None and torch.isfinite(gradient).all() for gradient in adapter_gradients
     )
     assert sum(gradient.abs().sum() for gradient in adapter_gradients) > 0
+
+
+def test_ac_random_segments_match_paper_pairs_and_reproduce_per_example_epoch():
+    source = tuple(range(6144))
+
+    def plan(epoch, identifier="sample"):
+        return ac_plan(source, 512, 4, 2, 8192, example_rng(23, epoch, identifier))
+
+    chunks, slots = plan(0)
+    assert slots == [128] * 4
+    assert len(chunks) == 4
+    assert tuple(token for chunk in chunks for token in chunk) == source
+    assert all(1024 <= len(chunk) <= 2048 for chunk in chunks)
+    assert [sum(len(chunk) for chunk in chunks[start : start + 2]) for start in (0, 2)] == [
+        3072,
+        3072,
+    ]
+    assert plan(0) == plan(0)
+    assert plan(0) != plan(1)
+    assert plan(0) != plan(0, "other")
+
+
+def test_ac_random_segments_keep_partial_window_and_respect_cumulative_memory_budget():
+    source = tuple(range(81))
+    chunks, slots = ac_plan(source, 13, 5, 2, 64, example_rng(1, 3, "tail"))
+    assert slots == [3, 3, 3, 2, 2]
+    assert [sum(map(len, chunks[start : start + 2])) for start in (0, 2, 4)] == [33, 32, 16]
+    assert len(chunks[-1]) == 16
+    assert tuple(token for chunk in chunks for token in chunk) == source
+    for seed in range(10):
+        chunks, slots = ac_plan(tuple(range(20)), 8, 4, 2, 13, example_rng(seed, 0, "budget"))
+        assert all(len(chunk) + sum(slots[: index + 1]) <= 13 for index, chunk in enumerate(chunks))
+    with pytest.raises(ValueError, match="exceed model window"):
+        ac_plan(tuple(range(8)), 8, 4, 2, 9, example_rng(1, 0, "too-long"))
+
+
+@pytest.mark.parametrize("num_segments", [4, 5])
+def test_ac_full_bptt_random_segments_match_one_window(num_segments):
+    source = tuple(range(81))
+
+    def plan(bptt_steps):
+        return ac_plan(source, 13, num_segments, bptt_steps, 64, example_rng(1, 3, "full-bptt"))
+
+    assert plan(None) == plan(num_segments) == plan(num_segments + 2)
+
+
+@pytest.mark.parametrize("bptt_steps", [4, 6])
+def test_ac_full_bptt_matches_large_window_losses_and_gradients(bptt_steps):
+    model = task("autocompressors", "lm", memory_slots=9, ac_num_segments=4, bptt_steps=None)
+    reference = deepcopy(model)
+    reference.cfg = replace(reference.cfg, bptt_steps=bptt_steps)
+    calls = trace_writes(model)
+    example = PretrainExample(
+        "full-bptt", "document", "cluster", "continuation", tuple(range(3, 24)), (26, 27)
+    )
+    actual = model(example, epoch=3)
+    expected = reference(example, epoch=3)
+    torch.testing.assert_close(actual["loss"], expected["loss"], rtol=0, atol=0)
+    actual["loss"].backward()
+    expected["loss"].backward()
+    for parameter, other in zip(model.parameters(), reference.parameters(), strict=True):
+        if parameter.requires_grad:
+            torch.testing.assert_close(parameter.grad, other.grad, rtol=0, atol=0)
+    assert all(block.requires_grad for _, history, _ in calls for block in history)
+    assert all(output.grad is not None and output.grad.abs().sum() > 0 for _, _, output in calls)
+
+
+@pytest.mark.parametrize("bptt_steps", [None, 1, 2, 6])
+def test_ac_evaluation_evenly_splits_full_body_independent_of_factqa_segments(bptt_steps):
+    model = task("autocompressors", "lm", memory_slots=8, ac_num_segments=4, bptt_steps=bptt_steps)
+    calls = trace_writes(model)
+    record = trajectory(n=5)
+    blocks, events = model.build_memory(record, epoch=7)
+    assert [ids.tolist() for ids, _, _ in calls] == [
+        list(chunk) for chunk in even_token_chunks(record.full_input_ids, 4)
+    ]
+    assert [len(history) for _, history, _ in calls] == [0, 1, 2, 3]
+    assert sum(map(len, blocks)) == 8
+    assert [event["slots"] for event in events] == [2, 4, 6, 8]
+    assert [event["step"] for event in events] == [0, 1, 2, 3]
+    assert all(event["segment_id"] is None for event in events)
 
 
 @pytest.mark.parametrize(
@@ -510,7 +617,7 @@ def test_ac_short_sources_retain_writer_and_memory_gradients(total_tokens):
         ("memory_change", "policy", {"threshold_i": 1e8}),
         ("information_loss", "policy", {"threshold_g": 1e-8, "eta": 0.0}),
         ("information_loss", "policy", {"threshold_d": 1e8, "threshold_g": 1e8}),
-        ("autocompressors", "lm", {"ac_min_segment_tokens": 3, "ac_max_segment_tokens": 4}),
+        ("autocompressors", "lm", {"ac_num_segments": 3}),
     ],
 )
 def test_batch_matches_individual_losses_gradients_and_metrics(method, stage, options):
@@ -522,6 +629,8 @@ def test_batch_matches_individual_losses_gradients_and_metrics(method, stage, op
             PretrainExample("ae", "d", "c", "ae", text, text),
             PretrainExample("lm", "d2", "c2", "continuation", text[:8], (17, 18, 19)),
         ]
+        if stage == "lm":
+            examples[0] = replace(examples[0], task="continuation", target_ids=(20, 21))
     else:
         examples = [trajectory(n=2), replace(trajectory(n=4), trajectory_id="other")]
     expected = [reference(row, epoch=3) for row in examples]

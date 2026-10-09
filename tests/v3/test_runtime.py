@@ -1,8 +1,9 @@
 from contextlib import nullcontext
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import timedelta
 import json
+from pathlib import Path
 import random
 from types import SimpleNamespace
 
@@ -15,7 +16,7 @@ from tokenizers import Tokenizer, pre_tokenizers
 from tokenizers.models import WordLevel
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast, set_seed
 
-from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
+from latent_working_memory.data_preparation.segmentation import SegmentationConfig
 from latent_working_memory.v3 import runtime
 from latent_working_memory.v3.config import (
     ExperimentConfig,
@@ -433,6 +434,14 @@ def test_load_codec_uses_a_local_tiny_pretrained_base_without_network(tmp_path):
     assert multi.memory_slots == 5
     assert multi.write_slots == 2
     assert multi.memory_embeddings.shape == (2, 16)
+    ac, _ = load_codec(
+        replace(model_config, memory_slots=5),
+        torch.device("cpu"),
+        ObjectiveConfig(method="autocompressors", stage="lm", ac_num_segments=4),
+    )
+    assert ac.memory_slots == 5
+    assert ac.write_slots == 2
+    assert ac.memory_embeddings.shape == (2, 16)
     tokenizer.eos_token = None
     tokenizer.save_pretrained(model_dir)
     with pytest.raises(ValueError, match="eos_token_id"):
@@ -497,36 +506,29 @@ def test_pretraining_accepts_a_single_objective_after_actual_length_filtering(
         rows = []
         for task in ("ae", "continuation") if split != "test" else ("ae",):
             text = "a b c" if split == filtered_split and task == "continuation" else "a b"
-            rows.append(
-                TextSample(
-                    sample_id=f"{split}-{task}",
-                    document_id=split,
-                    source_id=f"{split}:source",
-                    dedup_cluster=f"{split}:cluster",
-                    task=task,
-                    text=text,
-                    continuation="c" if task == "continuation" else None,
-                    x_char_span=[0, len(text)],
-                    y_char_span=[len(text), len(text) + 1] if task == "continuation" else None,
-                    boundary_method="random_token",
-                    reference_input_tokens=len(text.split()),
-                    reference_target_tokens=1 if task == "continuation" else len(text.split()),
-                ).to_record()
-            )
+            rows.append(pretraining_record(split, f"{split}-{task}", task, text))
         (tmp_path / f"{split}.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    write_pretraining_metadata(tmp_path)
     config = make_config(tmp_path / "output")
     config = replace(
         config,
-        training=replace(config.training, dataset_dir=str(tmp_path), max_input_tokens=3),
+        training=replace(
+            config.training, dataset_dir=str(tmp_path), max_input_tokens=3, lm_target_tokens=1
+        ),
     )
     splits, _ = load_splits(config, tokenizer, 64)
     assert {row.task for row in splits["test"]} == {"ae"}
     restricted = replace(config, training=replace(config.training, max_input_tokens=2))
     splits, _ = load_splits(restricted, tokenizer, 64)
-    assert {row.task for row in splits[filtered_split]} == {"ae"}
-    lm = replace(restricted, objective=ObjectiveConfig(method="autocompressors", stage="lm"))
+    expected_tasks = {"ae"} if filtered_split == "train" else {"ae", "continuation"}
+    assert {row.task for row in splits[filtered_split]} == expected_tasks
+    lm = replace(
+        restricted,
+        objective=ObjectiveConfig(method="autocompressors", stage="lm", ac_num_segments=1),
+    )
     splits, _ = load_splits(lm, tokenizer, 64)
-    assert {row.task for row in splits[filtered_split]} == {"ae"}
+    assert len(splits[filtered_split]) == (1 if filtered_split == "train" else 2)
+    assert {row.task for row in splits[filtered_split]} == {"continuation"}
 
 
 def test_tracking_context_uses_explicit_credentials_only_on_root_rank(tmp_path, monkeypatch):
@@ -559,6 +561,52 @@ def test_tracking_context_uses_explicit_credentials_only_on_root_rank(tmp_path, 
     assert run == original
 
 
+def pretraining_record(split, identifier, task, text="a b"):
+    suffix = 0
+    while True:
+        trajectory_id = f"{identifier}-{suffix}"
+        sampled_task = (
+            "continuation"
+            if random.Random(f"123:pretraining:{trajectory_id}").random() < 0.5
+            else "ae"
+        )
+        if sampled_task == task:
+            break
+        suffix += 1
+    first, rest = text.split(" ", 1)
+    first, rest = first.ljust(4), rest.ljust(4)
+    body = first + rest
+    return {
+        "trajectory_id": trajectory_id,
+        "document_id": identifier,
+        "dedup_cluster": f"{identifier}:cluster",
+        "split": split,
+        "source": {"file": f"{identifier}.parquet", "row_group": 0, "row_index": 0},
+        "window_char_span": [0, len(body)],
+        "text": body,
+        "segments": [
+            {"segment_id": "seg0", "char_span": [0, 4]},
+            {"segment_id": "seg1", "char_span": [4, len(body)]},
+        ],
+        "continuation": "c".ljust(8),
+        "text_char_length": len(body),
+        "estimated_tokens": len(body) / 4,
+        "estimated_tokens_rule": "len(text) / 4",
+    }
+
+
+def write_pretraining_metadata(path):
+    window = SegmentationConfig(
+        capacity=1,
+        min_segment_ratio=1,
+        max_segment_ratio=4,
+        min_segments=2,
+        max_segments=2,
+        continuation_tokens=2,
+    )
+    (path / "preparation.json").write_text(json.dumps({"config": {"window": asdict(window)}}))
+
+
 def pretraining_corpus(path):
     backend = Tokenizer(WordLevel({"[UNK]": 0, "a": 1, "b": 2, "c": 3}, unk_token="[UNK]"))
     backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
@@ -567,30 +615,24 @@ def pretraining_corpus(path):
         records = []
         for task, count in (("ae", 8), ("continuation", 4)):
             for index in range(count):
-                records.append(
-                    TextSample(
-                        sample_id=f"{split}-{task}-{index}",
-                        document_id=f"{split}-{index}",
-                        source_id=f"{split}-{index}:source",
-                        dedup_cluster=f"{split}-{index}:cluster",
-                        task=task,
-                        text="a b",
-                        continuation="c" if task == "continuation" else None,
-                        x_char_span=[0, 3],
-                        y_char_span=[3, 4] if task == "continuation" else None,
-                        boundary_method="random_token",
-                        reference_input_tokens=2,
-                        reference_target_tokens=1 if task == "continuation" else 2,
-                    ).to_record()
-                )
+                records.append(pretraining_record(split, f"{split}-{task}-{index}", task))
         (path / f"{split}.jsonl").write_text("".join(json.dumps(row) + "\n" for row in records))
+    write_pretraining_metadata(path)
     return tokenizer
 
 
 def test_sample_limits_keep_both_pretraining_tasks_and_full_test_source_identity(tmp_path):
     tokenizer = pretraining_corpus(tmp_path)
     config = make_config(tmp_path / "output")
-    config = replace(config, training=replace(config.training, dataset_dir=str(tmp_path)))
+    config = replace(
+        config,
+        training=replace(
+            config.training,
+            dataset_dir=str(tmp_path),
+            lm_target_tokens=1,
+            max_qa_input_tokens=1,
+        ),
+    )
     full, full_statistics = load_splits(config, tokenizer, 64)
     limited = replace(
         config,
@@ -644,7 +686,7 @@ def test_selection_follows_full_canonical_validation(tmp_path):
         config,
         training=replace(config.training, dataset_dir=str(tmp_path), max_train_samples=2),
     )
-    with pytest.raises(ValueError, match="duplicate pretraining sample_id"):
+    with pytest.raises(ValueError, match="duplicate pretraining trajectory_id"):
         load_splits(config, tokenizer, 64)
 
 
@@ -680,12 +722,116 @@ def test_qa_selection_keeps_complete_trajectories_and_original_test_split(tmp_pa
     assert load_splits(changed, None, 64)[0] == splits
 
 
+@pytest.mark.parametrize(
+    "method,stage",
+    [
+        ("icae_single", "qa"),
+        ("icae_multi", "qa"),
+        ("memory_change", "warmup"),
+        ("memory_change", "policy"),
+        ("information_loss", "warmup"),
+        ("information_loss", "policy"),
+    ],
+)
+def test_factqa_train_length_filter_precedes_selection_and_preserves_dev_test_source(
+    tmp_path, monkeypatch, method, stage
+):
+    original = {
+        split: tuple(
+            replace(
+                trajectory(split=split),
+                trajectory_id=f"{split}-{index}",
+                document_id=f"{split}-doc-{index}",
+                full_input_ids=tuple(range(length)),
+            )
+            for index, length in enumerate((6, 9, 10, 12) * 2)
+        )
+        for split in ("train", "dev", "test")
+    }
+    monkeypatch.setattr(runtime, "load_factqa", lambda path, tokenizer: original)
+    config = make_config(tmp_path / "output")
+    config = replace(
+        config,
+        objective=replace(
+            config.objective, method=method, stage=stage, icae_min_segments=2, icae_max_segments=2
+        ),
+        training=replace(
+            config.training,
+            max_input_tokens=1,
+            max_qa_input_tokens=9,
+            max_train_samples=3,
+            max_dev_samples=2,
+        ),
+    )
+    splits, statistics = load_splits(config, None, 64)
+    assert statistics["kind"] == "factqa"
+    assert statistics["upper_limit_split"] == "train"
+    assert {name: len(rows) for name, rows in splits.items()} == {"train": 3, "dev": 2, "test": 8}
+    assert splits["test"] is original["test"]
+    for split, rows in original.items():
+        filtered = (
+            tuple(row for row in rows if len(row.full_input_ids) <= 9) if split == "train" else rows
+        )
+        assert statistics["source_data"][split] == dataset_identity(filtered)
+        counts = statistics["splits"][split]
+        assert counts["read"] == 8
+        assert counts["kept"] == counts["trajectories"] == len(filtered)
+        assert counts["filtered_too_long"] == (4 if split == "train" else 0)
+        assert counts["source_tokens"] == sum(len(row.full_input_ids) for row in filtered)
+        assert counts["questions"] == sum(len(row.qas) for row in filtered)
+        assert counts["selected"] == len(splits[split])
+        assert counts["selected_source_tokens"] == sum(
+            len(row.full_input_ids) for row in splits[split]
+        )
+        for selected in splits[split]:
+            assert any(selected is row for row in filtered)
+            assert len(selected.segments) == 3
+            assert len(selected.qas) == 6
+            assert len(selected.usage) == 3
+    changed = replace(config, training=replace(config.training, max_input_tokens=64))
+    assert load_splits(changed, None, 64) == (splits, statistics)
+    run = make_run(config, splits, statistics, "cpu", 1)
+    assert run["source_data"]["train"] != run["data"]["train"]
+    assert run["data_statistics"]["splits"]["train"]["filtered_too_long"] == 4
+    assert run["source_data"]["dev"] == dataset_identity(original["dev"])
+    assert run["source_data"]["test"] == run["data"]["test"] == dataset_identity(original["test"])
+
+
+@pytest.mark.parametrize("max_qa_input_tokens", [None, 8, 12])
+def test_factqa_train_length_filter_uses_real_model_window(
+    tmp_path, monkeypatch, max_qa_input_tokens
+):
+    original = {
+        split: (trajectory(split=split, n=2), trajectory(split=split, n=3))
+        for split in ("train", "dev", "test")
+    }
+    monkeypatch.setattr(runtime, "load_factqa", lambda path, tokenizer: original)
+    config = make_config(tmp_path / "output", "policy")
+    config = replace(
+        config,
+        training=replace(config.training, max_qa_input_tokens=max_qa_input_tokens),
+    )
+    splits, statistics = load_splits(config, None, 8)
+    assert splits["train"] == (original["train"][0],)
+    assert statistics["splits"]["train"]["filtered_too_long"] == 1
+    for split in ("dev", "test"):
+        assert splits[split] is original[split]
+        assert len(splits[split][-1].full_input_ids) > 8
+        assert statistics["splits"][split]["filtered_too_long"] == 0
+        assert statistics["source_data"][split] == dataset_identity(original[split])
+
+
 def experiment_config(root, stage, identifier="trial", method="memory_change", init=None):
     config = make_config(root / stage)
     return replace(
         config,
         objective=replace(
-            config.objective, method=method, stage=stage, icae_min_segments=2, icae_max_segments=2
+            config.objective,
+            method=method,
+            stage=stage,
+            icae_min_segments=2,
+            icae_max_segments=2,
+            ac_num_segments=2,
         ),
         training=replace(
             config.training,

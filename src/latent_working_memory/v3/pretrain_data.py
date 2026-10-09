@@ -1,4 +1,4 @@
-"""加载完整 AE／LM 正文，按正文 token 长度过滤整条样本。"""
+"""加载完整 AE／LM 正文，仅对训练集应用正文 token 长度上限。"""
 
 from dataclasses import dataclass
 import json
@@ -7,7 +7,6 @@ import random
 
 from latent_working_memory.data_preparation.fineweb_multisegment.records import MultisegmentSample
 from latent_working_memory.data_preparation.fineweb_source import SourceWindowTracker
-from latent_working_memory.data_preparation.pretrain.text_samples import TextSample
 from latent_working_memory.data_preparation.segmentation import SegmentationConfig
 
 
@@ -29,6 +28,8 @@ def _limits(config, model_window):
     minimum = config.training.min_input_tokens
     if config.objective.method == "icae_multi":
         minimum = max(minimum, config.objective.icae_max_segments)
+    elif config.objective.method == "autocompressors":
+        minimum = max(minimum, 2 * config.objective.ac_num_segments)
     return minimum, limit
 
 
@@ -55,7 +56,7 @@ def _keep(example, minimum, limit, counts):
     if len(example.input_ids) < minimum:
         counts["filtered_too_short"] += 1
         return False
-    if len(example.input_ids) > limit:
+    if limit is not None and len(example.input_ids) > limit:
         counts["filtered_too_long"] += 1
         return False
     counts["kept"] += 1
@@ -72,68 +73,6 @@ def _summarize(examples, counts):
 
 
 def load_pretraining(config, tokenizer, model_window):
-    """已有 TextSample 也保留完整输入与目标，使用同一正文长度上限。"""
-    minimum, limit = _limits(config, model_window)
-    root = Path(config.training.dataset_dir)
-    seen_samples, document_sources, cluster_splits = set(), {}, {}
-    splits, statistics = {}, {}
-    for split in ("train", "dev", "test"):
-        examples, counts = [], _counts()
-        path = root / f"{split}.jsonl"
-        with path.open(encoding="utf-8") as stream:
-            for line_number, line in enumerate(stream, 1):
-                try:
-                    sample = TextSample(**json.loads(line))
-                    if sample.sample_id in seen_samples:
-                        raise ValueError("duplicate pretraining sample_id")
-                    identity = (split, sample.dedup_cluster)
-                    if (
-                        sample.document_id in document_sources
-                        and document_sources[sample.document_id] != identity
-                    ):
-                        raise ValueError("source document changes split or dedup cluster")
-                    if (
-                        sample.dedup_cluster in cluster_splits
-                        and cluster_splits[sample.dedup_cluster] != split
-                    ):
-                        raise ValueError("dedup cluster occurs in multiple pretraining splits")
-                    seen_samples.add(sample.sample_id)
-                    document_sources[sample.document_id] = identity
-                    cluster_splits[sample.dedup_cluster] = split
-                    counts["read"] += 1
-                    counts["read_by_task"][sample.task] += 1
-                    input_ids = tuple(tokenizer.encode(sample.text, add_special_tokens=False))
-                    target_ids = (
-                        input_ids
-                        if sample.task == "ae"
-                        else tuple(tokenizer.encode(sample.continuation, add_special_tokens=False))
-                    )
-                    if not target_ids:
-                        raise ValueError("continuation tokenized to an empty target")
-                    example = PretrainExample(
-                        sample.sample_id,
-                        sample.document_id,
-                        sample.dedup_cluster,
-                        sample.task,
-                        input_ids,
-                        target_ids,
-                    )
-                    if _keep(example, minimum, limit, counts):
-                        examples.append(example)
-                except (ValueError, KeyError, TypeError) as error:
-                    error.add_note(f"{path}:{line_number}")
-                    raise
-        _summarize(examples, counts)
-        splits[split], statistics[split] = tuple(examples), counts
-    return splits, {
-        "kind": "text_samples",
-        "view": "text_samples",
-        "input_token_interval": [minimum, limit],
-        "splits": statistics,
-    }
-
-
-def load_multisegment_pretraining(config, tokenizer, model_window):
     """完整正文只构造一个 AE 或 LM 样本；LM 续文来自正文后的 continuation。"""
     minimum, limit = _limits(config, model_window)
     training = config.training
@@ -147,6 +86,7 @@ def load_multisegment_pretraining(config, tokenizer, model_window):
     source_windows = SourceWindowTracker()
     splits, statistics, token_pool = {}, {}, {}
     for split in ("train", "dev", "test"):
+        split_limit = limit if split == "train" else None
         examples, segment_counts = [], []
         counts = {
             **_counts(),
@@ -197,7 +137,7 @@ def load_multisegment_pretraining(config, tokenizer, model_window):
                         input_ids,
                         target_ids,
                     )
-                    if _keep(example, minimum, limit, counts):
+                    if _keep(example, minimum, split_limit, counts):
                         examples.append(example)
                         segment_counts.append(len(sample.segments))
                 except (ValueError, KeyError, TypeError) as error:
@@ -208,8 +148,8 @@ def load_multisegment_pretraining(config, tokenizer, model_window):
         splits[split], statistics[split] = tuple(examples), counts
     return splits, {
         "kind": "multisegment_text",
-        "view": training.pretrain_data_view,
         "input_token_interval": [minimum, limit],
+        "upper_limit_split": "train",
         "sampling_seed": training.seed,
         "lm_ratio": 1.0 if lm_only else training.lm_ratio,
         "lm_target_tokens": training.lm_target_tokens,

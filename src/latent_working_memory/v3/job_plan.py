@@ -125,7 +125,14 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
             value = getattr(args, name)
             if value is not None:
                 objective[name] = value
-    if method in DYNAMIC_METHODS and stage in {"warmup", "policy"} and args.bptt_steps is not None:
+    if method == "autocompressors" and args.ac_num_segments is not None:
+        objective["ac_num_segments"] = args.ac_num_segments
+    uses_bptt = (
+        method == "autocompressors"
+        and stage == "lm"
+        or (method in DYNAMIC_METHODS and stage in {"warmup", "policy"})
+    )
+    if uses_bptt and args.bptt_steps is not None:
         objective["bptt_steps"] = args.bptt_steps or None
     is_pretrain = stage in {"pretrain", "lm"}
     dataset = args.pretrain_data if is_pretrain else args.qa_data
@@ -165,7 +172,8 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
         training["max_input_tokens"] = args.max_input_tokens or None
     if is_pretrain and args.lm_target_tokens is not None:
         training["lm_target_tokens"] = args.lm_target_tokens
-    # QA 阶段不使用预训练输入长度筛选；真实段界与题池保持原样。
+    if args.max_qa_input_tokens is not None:
+        training["max_qa_input_tokens"] = args.max_qa_input_tokens or None
     for name in ("epochs", "micro_batch_size_per_gpu", "gradient_accumulation_steps"):
         value = getattr(args, name)
         if value is not None:

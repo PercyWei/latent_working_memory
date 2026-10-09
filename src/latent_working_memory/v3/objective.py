@@ -8,7 +8,7 @@ import torch
 from torch import nn
 
 from latent_working_memory.v3.config import DYNAMIC_METHODS
-from latent_working_memory.v3.segmentation import ac_token_chunks, example_rng, icae_multi_plan
+from latent_working_memory.v3.segmentation import ac_plan, example_rng, icae_multi_plan
 
 
 @dataclass
@@ -139,6 +139,8 @@ class TokenMemoryTask(nn.Module):
                 )
                 for row in trajectories
             )
+        if self.cfg.method == "autocompressors":
+            return self.cfg.ac_num_segments
         return max(len(row.segments) for row in trajectories)
 
     def _states_batch(
@@ -150,6 +152,7 @@ class TokenMemoryTask(nn.Module):
             rngs = [example_rng(self.cfg.seed, epoch, row.trajectory_id) for row in trajectories]
         single = self.cfg.method == "icae_single"
         multi = self.cfg.method == "icae_multi"
+        ac = self.cfg.method == "autocompressors"
         if single:
             chunks = [[row.full_input_ids] for row in trajectories]
         elif multi:
@@ -166,6 +169,19 @@ class TokenMemoryTask(nn.Module):
             ]
             chunks = [plan[0] for plan in plans]
             slot_counts = [plan[1] for plan in plans]
+        elif ac:
+            plans = [
+                ac_plan(
+                    row.full_input_ids,
+                    self.codec.memory_slots,
+                    self.cfg.ac_num_segments,
+                    self.cfg.bptt_steps,
+                    self.codec.max_positions,
+                )
+                for row in trajectories
+            ]
+            chunks = [plan[0] for plan in plans]
+            slot_counts = [plan[1] for plan in plans]
         else:
             chunks = [[segment.input_ids for segment in row.segments] for row in trajectories]
         steps = max(map(len, chunks))
@@ -174,7 +190,9 @@ class TokenMemoryTask(nn.Module):
             events = {
                 i: self._event(
                     len(trajectories[i].segments) - 1 if single else step,
-                    None if multi else trajectories[i].segments[-1 if single else step].segment_id,
+                    None
+                    if multi or ac
+                    else trajectories[i].segments[-1 if single else step].segment_id,
                 )
                 for i in active
             }
@@ -184,7 +202,7 @@ class TokenMemoryTask(nn.Module):
                     [chunks[i][step] for i in indices],
                     histories,
                     [events[i] for i in indices],
-                    [slot_counts[i][step] for i in indices] if multi else output_slots,
+                    [slot_counts[i][step] for i in indices] if multi or ac else output_slots,
                 )
 
             if single or self.cfg.method in {"icae_multi", "autocompressors"} or step == 0:
@@ -351,7 +369,7 @@ class TokenMemoryTask(nn.Module):
                 # multi 在累计写满总 K 后监督，独立于数据原始段数。
                 elif (
                     event["slots"] == self.codec.memory_slots
-                    if self.cfg.method == "icae_multi"
+                    if self.cfg.method in {"icae_multi", "autocompressors"}
                     else event["step"] == len(trajectory.segments) - 1
                 ):
                     last_segment = trajectory.segments[-1].segment_id
@@ -466,66 +484,66 @@ class TokenMemoryTask(nn.Module):
         return list(losses.unbind()), metrics
 
     def _ac_objective(self, examples, epoch):
-        # 每个训练子块最多两段；子块结束后 detach 全部累计摘要。
-        # 冻结读取端与写入 LoRA 分开执行，但 LM 只预测尚未进入摘要的原文。
-        segments = []
-        for example in examples:
-            tokens = (
-                example.input_ids
-                if example.task == "ae"
-                else example.input_ids + example.target_ids
+        # 正文固定 n 个压缩块，独立续文只作为最后一次写入后的监督。
+        # 每 B 次写入接受紧邻后继文本监督后截断；末次写入由独立续文监督。
+        plans = [
+            ac_plan(
+                example.input_ids,
+                self.codec.memory_slots,
+                self.cfg.ac_num_segments,
+                self.cfg.bptt_steps,
+                self.codec.max_positions,
+                example_rng(self.cfg.seed, epoch, example.sample_id),
             )
-            rng = example_rng(self.cfg.seed, epoch, example.sample_id)
-            segments.append(
-                ac_token_chunks(
-                    tokens, self.cfg.ac_min_segment_tokens, self.cfg.ac_max_segment_tokens, rng
-                )
-            )
+            for example in examples
+        ]
+        segments = [plan[0] for plan in plans]
+        slot_counts = [plan[1] for plan in plans]
         blocks, losses = [[] for _ in examples], [[] for _ in examples]
         targets = [0 for _ in examples]
-        for step in range(max(map(len, segments))):
-            active = [i for i, parts in enumerate(segments) if step < len(parts)]
-            group_end = {
-                i: (step + 1) % self.cfg.ac_bptt_steps == 0 or step == len(segments[i]) - 1
-                for i in active
-            }
-            indices, answers = [], []
-            for i in active:
+        continuation = [example.target_ids + (self.tokenizer.eos_token_id,) for example in examples]
+        for step in range(self.cfg.ac_num_segments):
+            answers = []
+            for i in range(len(examples)):
                 target = segments[i][step][1:]
-                # 原始 next-token 目标跨同一子块分段边界；子块首 token 不计入损失。
-                if not group_end[i]:
+                # 下一段首 token 在当前原文末 token 上预测，正文各 target 只计一次。
+                if step + 1 < self.cfg.ac_num_segments:
                     target += segments[i][step + 1][:1]
-                if target:
-                    indices.append(i)
-                    answers.append(self.ids(target))
-            if indices:
-                values = self.codec.answer_nll(
-                    [
-                        torch.cat(blocks[i]) if blocks[i] else self.codec.memory_embeddings[:0]
-                        for i in indices
-                    ],
-                    [self.ids(segments[i][step][:1]) for i in indices],
-                    answers,
-                )
-                for i, value, answer in zip(indices, values, answers, strict=True):
-                    losses[i].append(value * len(answer))
-                    targets[i] += len(answer)
-            indices = [i for i in active if step < len(segments[i]) - 1]
-            if indices:
-                candidates = self.codec.compress_batch(
-                    [self.ids(segments[i][step]) for i in indices], [blocks[i] for i in indices]
-                )
-                for i, candidate in zip(indices, candidates, strict=True):
-                    blocks[i].append(candidate)
-            for i in active:
-                if group_end[i]:
-                    blocks[i] = [block.detach() for block in blocks[i]]
+                answers.append(self.ids(target))
+            values = self.codec.answer_nll(
+                [torch.cat(row) if row else self.codec.memory_embeddings[:0] for row in blocks],
+                [self.ids(parts[step][:1]) for parts in segments],
+                answers,
+            )
+            for i, (value, answer) in enumerate(zip(values, answers, strict=True)):
+                losses[i].append(value * len(answer))
+                targets[i] += len(answer)
+            if self.cfg.bptt_steps is not None and step > 0 and step % self.cfg.bptt_steps == 0:
+                blocks = [[block.detach() for block in row] for row in blocks]
+            candidates = self.codec.compress_batch(
+                [self.ids(parts[step]) for parts in segments],
+                blocks,
+                [counts[step] for counts in slot_counts],
+            )
+            for row, candidate in zip(blocks, candidates, strict=True):
+                row.append(candidate)
+        values = self.codec.answer_nll(
+            [torch.cat(row) for row in blocks],
+            [
+                self.ids(self.tokenizer.encode(self.cfg.lm_prompt, add_special_tokens=False))
+                for _ in examples
+            ],
+            [self.ids(target) for target in continuation],
+        )
+        for i, (value, target) in enumerate(zip(values, continuation, strict=True)):
+            losses[i].append(value * len(target))
+            targets[i] += len(target)
         metrics = [
             {
                 "input_tokens": float(sum(map(len, parts))),
                 "target_tokens": float(target),
                 "slots_final": float(sum(map(len, values))),
-                "write_calls": float(len(parts) - 1),
+                "write_calls": float(len(parts)),
                 "segments": float(len(parts)),
             }
             for parts, target, values in zip(segments, targets, blocks, strict=True)

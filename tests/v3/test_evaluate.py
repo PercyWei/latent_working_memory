@@ -77,6 +77,7 @@ class Codec(nn.Module):
     def __init__(self):
         super().__init__()
         self.memory_embeddings = nn.Parameter(torch.zeros(2, 3))
+        self.max_positions = 64
         self.generated = []
         self.loaded = None
 
@@ -290,7 +291,11 @@ def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
     monkeypatch.setattr(evaluation, "load_codec", load_codec)
     monkeypatch.setattr(evaluation, "TokenMemoryTask", lambda codec, tokenizer, objective: task)
     monkeypatch.setattr(
-        evaluation, "load_factqa", lambda directory, tokenizer: {"test": [trajectory()]}
+        evaluation,
+        "load_factqa",
+        lambda directory, tokenizer: {
+            name: [trajectory(split=name)] for name in ("train", "dev", "test")
+        },
     )
     published = []
     monkeypatch.setattr(evaluation, "_training_run_directory", lambda *args: tmp_path)
@@ -369,7 +374,12 @@ def test_real_tiny_model_evaluates_all_methods_without_training_or_gate_leakage(
         build_model(),
         DecoderTokenizer(),
         ObjectiveConfig(
-            method=method, stage=stage, append_slots=1, icae_min_segments=2, icae_max_segments=2
+            method=method,
+            stage=stage,
+            append_slots=1,
+            icae_min_segments=2,
+            icae_max_segments=2,
+            ac_num_segments=2,
         ),
     )
     example = objective_trajectory(split="test")
@@ -548,7 +558,14 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
     monkeypatch.setattr(evaluation, "read_checkpoint", lambda path: checkpoint)
     monkeypatch.setattr(evaluation, "load_codec", lambda *args: (task.codec, task.tokenizer))
     monkeypatch.setattr(evaluation, "TokenMemoryTask", lambda *args: task)
-    monkeypatch.setattr(evaluation, "load_factqa", lambda *args: {"dev": examples})
+    monkeypatch.setattr(
+        evaluation,
+        "load_factqa",
+        lambda *args: {
+            name: tuple(replace(row, split=name) for row in examples)
+            for name in ("train", "dev", "test")
+        },
+    )
     arguments = [
         "--checkpoint",
         "unused.pt",
@@ -582,6 +599,98 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
     ]
     assert [row["trajectory_id"] for row in records] == [row.trajectory_id for row in selected]
     assert all(row["segments"] == 3 for row in records)
+
+
+@pytest.mark.parametrize(
+    "method", ["icae_single", "icae_multi", "autocompressors", "memory_change", "information_loss"]
+)
+@pytest.mark.parametrize("max_qa_input_tokens,model_window", [(3, 64), (None, 3), (9, 3)])
+@pytest.mark.parametrize("max_trajectories", [None, 1])
+def test_cli_ignores_training_length_limits_and_selects_from_complete_factqa_split(
+    tmp_path, monkeypatch, method, max_qa_input_tokens, model_window, max_trajectories
+):
+    examples = tuple(
+        replace(trajectory(f"doc{length}"), full_input_ids=tuple(range(length)))
+        for length in (2, 3, 4)
+    )
+    selected = evaluation.select_examples(examples, max_trajectories, 42, "test", pretraining=False)
+    task = Task(method)
+    task.codec.max_positions = model_window
+    config = ExperimentConfig(
+        ModelConfig(model_name_or_path="local-tiny"),
+        task.cfg,
+        TrainingConfig(
+            dataset_dir="train-data",
+            output_dir="training",
+            max_input_tokens=1,
+            max_qa_input_tokens=max_qa_input_tokens,
+            seed=42,
+        ),
+    )
+    checkpoint = {
+        "run": {
+            "config": config.to_dict(),
+            "resolved_model_revision": None,
+            "step_offset": 0,
+            "pretraining": None,
+            "pretraining_sources": {"document_ids": [], "dedup_clusters": []},
+            "source_data": {
+                "test": (
+                    {"examples": 1, "fingerprint": "unrelated-lm-source"}
+                    if method == "autocompressors"
+                    else evaluation.dataset_identity(examples)
+                )
+            },
+        },
+        "trainable": {},
+        "cursor": {"step": 7},
+    }
+    monkeypatch.setattr(evaluation, "read_checkpoint", lambda path: checkpoint)
+    monkeypatch.setattr(evaluation, "load_codec", lambda *args: (task.codec, task.tokenizer))
+    monkeypatch.setattr(evaluation, "TokenMemoryTask", lambda *args: task)
+    monkeypatch.setattr(
+        evaluation,
+        "load_factqa",
+        lambda *args: {
+            name: tuple(replace(row, split=name) for row in examples)
+            for name in ("train", "dev", "test")
+        },
+    )
+    arguments = [
+        "--checkpoint",
+        "unused.pt",
+        "--dataset-dir",
+        "data",
+        "--output-dir",
+        str(tmp_path),
+        "--split",
+        "test",
+        "--device",
+        "cpu",
+    ]
+    if max_trajectories is not None:
+        arguments.extend(["--max-trajectories", str(max_trajectories)])
+    evaluation.main(arguments)
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["dataset_signature"] == evaluation.dataset_identity(selected)["fingerprint"]
+    assert summary["metadata"]["config"]["training"]["max_input_tokens"] == 1
+    assert summary["metadata"]["selection"] == {
+        "total": 3,
+        "selected": len(selected),
+        "limit": max_trajectories,
+        "seed": 42,
+    }
+    records = [
+        json.loads(line) for line in (tmp_path / "trajectories.jsonl").read_text().splitlines()
+    ]
+    assert [row["trajectory_id"] for row in records] == [row.trajectory_id for row in selected]
+    assert [row["source_tokens"] for row in records] == [
+        len(row.full_input_ids) for row in selected
+    ]
+    assert all(row["segments"] == 3 for row in records)
+    assert all([qa["age"] for qa in row["questions"]] == [2, 0] for row in records)
+    assert summary["quality"]["old"]["questions"] == len(selected)
+    assert summary["quality"]["new"]["questions"] == len(selected)
 
 
 @pytest.mark.parametrize("limit", ["0", "-1", "1.5"])

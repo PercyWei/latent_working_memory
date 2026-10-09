@@ -22,18 +22,15 @@
     "method": "autocompressors",
     "stages": ["lm"],
     "qa_batch_size": 8,
-    "segment_tokens": 1024,
-    "ac_min_segment_tokens": 768,
-    "ac_max_segment_tokens": 1024,
-    "ac_bptt_steps": 2,
-    "append_probability": 0.5,
+    "ac_num_segments": 4,
+    "bptt_steps": 2,
     "seed": 20261004
   },
   "training": {
     "dataset_dir": "data/fineweb-multisegment-k512-seg1to3x_train32k_20261008",
     "epochs": 1,
-    "micro_batch_size_per_gpu": 4,
-    "gradient_accumulation_steps": 2,
+    "micro_batch_size_per_gpu": 8,
+    "gradient_accumulation_steps": 1,
     "learning_rate": 0.0001,
     "weight_decay": 0.01,
     "gradient_clip": 1,
@@ -42,8 +39,6 @@
     "save_every": 25,
     "min_input_tokens": 1,
     "init_checkpoint": null,
-    "pretrain_data_view": "multisegment_full_text",
-    "lm_ratio": 0.5,
     "lm_target_tokens": 512,
     "stage_max_train_samples": {
       "lm": 12800

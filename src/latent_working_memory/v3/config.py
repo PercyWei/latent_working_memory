@@ -95,12 +95,9 @@ class ObjectiveConfig:
     method: str = "memory_change"
     stage: str = "pretrain"
     qa_batch_size: int = 8
-    segment_tokens: int = 1024
     icae_min_segments: int = 3
     icae_max_segments: int = 6
-    ac_min_segment_tokens: int = 768
-    ac_max_segment_tokens: int = 1024
-    ac_bptt_steps: int = 2
+    ac_num_segments: int = 4
     bptt_steps: int | None = None
     append_slots: int = 8
     append_probability: float = 0.5
@@ -126,29 +123,25 @@ class ObjectiveConfig:
             raise ValueError(f"unsupported method/stage: {self.method}/{self.stage}")
         if self.bptt_steps is not None:
             positive_integer(self.bptt_steps, "bptt_steps")
-            if self.method not in DYNAMIC_METHODS or self.stage not in {"warmup", "policy"}:
-                raise ValueError("bptt_steps is only supported by dynamic warmup/policy")
+            if not (
+                self.method == "autocompressors"
+                and self.stage == "lm"
+                or self.method in DYNAMIC_METHODS
+                and self.stage in {"warmup", "policy"}
+            ):
+                raise ValueError(
+                    "bptt_steps is only supported by AutoCompressors LM or dynamic warmup/policy"
+                )
         for name in (
             "qa_batch_size",
-            "segment_tokens",
             "icae_min_segments",
             "icae_max_segments",
-            "ac_min_segment_tokens",
-            "ac_max_segment_tokens",
-            "ac_bptt_steps",
+            "ac_num_segments",
             "append_slots",
         ):
             positive_integer(getattr(self, name), name)
         if self.icae_min_segments > self.icae_max_segments:
             raise ValueError("invalid ICAE-multi segment count interval")
-        if self.ac_min_segment_tokens > self.ac_max_segment_tokens:
-            raise ValueError("invalid AutoCompressors segment interval")
-        if self.method == "autocompressors" and (
-            self.ac_bptt_steps < 2 or self.ac_min_segment_tokens < 2
-        ):
-            raise ValueError(
-                "AutoCompressors needs at least two segments and two tokens per segment"
-            )
         for name in (
             "threshold_i",
             "threshold_d",
@@ -183,11 +176,11 @@ class TrainingConfig:
     seed: int = 20261004
     eval_every: int = 25
     save_every: int = 25
-    pretrain_data_view: str = "text_samples"
     lm_ratio: float = 0.5
     lm_target_tokens: int = 512
     min_input_tokens: int = 1
     max_input_tokens: int | None = None
+    max_qa_input_tokens: int | None = None
     max_train_samples: int | None = None
     max_dev_samples: int | None = None
     init_checkpoint: str | None = None
@@ -213,16 +206,16 @@ class TrainingConfig:
             "lm_target_tokens",
         ):
             positive_integer(getattr(self, name), name)
-        for name in ("max_input_tokens", "max_train_samples", "max_dev_samples"):
+        for name in (
+            "max_input_tokens",
+            "max_qa_input_tokens",
+            "max_train_samples",
+            "max_dev_samples",
+        ):
             if getattr(self, name) is not None:
                 positive_integer(getattr(self, name), name)
         if self.max_input_tokens is not None and self.min_input_tokens > self.max_input_tokens:
             raise ValueError("min_input_tokens must not exceed max_input_tokens")
-        if self.pretrain_data_view not in {
-            "text_samples",
-            "multisegment_full_text",
-        }:
-            raise ValueError("unsupported pretrain_data_view")
         finite(self.lm_ratio, "lm_ratio")
         if self.lm_ratio > 1:
             raise ValueError("lm_ratio must be <= 1")
@@ -262,6 +255,11 @@ class ExperimentConfig:
             and self.objective.icae_max_segments > self.model.memory_slots
         ):
             raise ValueError("ICAE-multi icae_max_segments must not exceed memory_slots")
+        if (
+            self.objective.method == "autocompressors"
+            and self.objective.ac_num_segments > self.model.memory_slots
+        ):
+            raise ValueError("AutoCompressors ac_num_segments must not exceed memory_slots")
         if (
             self.objective.method in DYNAMIC_METHODS
             and self.objective.append_slots > self.model.memory_slots

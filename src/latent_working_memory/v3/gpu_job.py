@@ -98,7 +98,12 @@ def parse_args(argv=None):
     parser.add_argument(
         "--max-input-tokens",
         type=bounded_count,
-        help="AE/LM 完整正文 token 上限，预设 12288；0 表示模型窗口，超限样本整条过滤",
+        help="AE/LM 训练正文 token 上限，预设 12288；0 表示模型窗口，仅过滤 train",
+    )
+    parser.add_argument(
+        "--max-qa-input-tokens",
+        type=bounded_count,
+        help="FactQA 训练正文 token 上限，预设 12288；0 表示模型窗口，仅过滤 train",
     )
     parser.add_argument(
         "--lm-target-tokens",
@@ -116,9 +121,14 @@ def parse_args(argv=None):
         help="ICAE-multi 随机分块数量上限，默认 6，不超过 K",
     )
     parser.add_argument(
+        "--ac-num-segments",
+        type=positive_count,
+        help="AutoCompressors 正文压缩块数量，默认 4；总容量 K 均分给各块",
+    )
+    parser.add_argument(
         "--bptt-steps",
         type=bounded_count,
-        help="动态 warmup/policy 每个反传窗口的写入轮数，0 表示完整 BPTT；默认完整展开",
+        help="每个反传窗口的写入轮数，0 表示完整 BPTT；AutoCompressors 同时据此分组随机切分文本",
     )
     parser.add_argument(
         "--append-slots",
@@ -163,8 +173,14 @@ def parse_args(argv=None):
         "autocompressors",
     }:
         parser.error("--append-slots is only supported by dynamic methods")
-    if args.bptt_steps is not None and args.method not in (*DYNAMIC_METHODS, "all"):
-        parser.error("--bptt-steps is only supported by dynamic warmup/policy")
+    if args.bptt_steps is not None and args.method not in (
+        "autocompressors",
+        *DYNAMIC_METHODS,
+        "all",
+    ):
+        parser.error("--bptt-steps is only supported by AutoCompressors or dynamic methods")
+    if args.ac_num_segments is not None and args.method not in {"autocompressors", "all"}:
+        parser.error("--ac-num-segments is only supported by AutoCompressors")
     return args
 
 
@@ -313,11 +329,10 @@ def run_job(args):
     required_files = set()
     for job in jobs:
         dataset = Path(job.config.training.dataset_dir)
-        is_qa = job.config.objective.stage not in {"pretrain", "lm"}
-        view = job.config.training.pretrain_data_view
-        if is_qa or view != "text_samples":
-            required_files.add(dataset / "preparation.json")
-        required_files.update(dataset / f"{split}.jsonl" for split in ("train", "dev", "test"))
+        required_files.update(
+            dataset / name
+            for name in ("preparation.json", "train.jsonl", "dev.jsonl", "test.jsonl")
+        )
     if any(job.evaluate for job in jobs):
         required_files.update(
             args.qa_data.resolve() / name

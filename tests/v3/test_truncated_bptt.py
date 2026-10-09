@@ -10,6 +10,9 @@ import torch.multiprocessing as mp
 from latent_working_memory.v3.config import ObjectiveConfig, TrainingConfig
 from latent_working_memory.v3.engine import TokenMemoryEngine
 from latent_working_memory.v3.objective import TokenMemoryTask, example_rng
+from latent_working_memory.v3 import objective
+from latent_working_memory.v3.pretrain_data import PretrainExample
+from latent_working_memory.v3.segmentation import even_token_chunks
 from .test_objective import TinyTokenizer, trajectory
 
 
@@ -223,3 +226,118 @@ def test_distributed_window_schedule_handles_lengths_branches_and_empty_ranks(
         nprocs=world_size,
         join=True,
     )
+
+
+class ACWindowCodec(torch.nn.Module):
+    """每个正文段使用独立参数，检测 BPTT 边界是否丢掉末次写入的监督。"""
+
+    def __init__(self, num_segments, memory_slots):
+        super().__init__()
+        self.memory_slots = memory_slots
+        self.max_positions = 128
+        self.memory_embeddings = torch.nn.Parameter(torch.tensor([[0.7]], dtype=torch.float64))
+        self.writes = torch.nn.Parameter(torch.arange(num_segments, dtype=torch.float64) / 10 + 0.1)
+        self.histories, self.outputs = [], []
+
+    def compress_batch(self, inputs, histories, output_slots):
+        results = []
+        for tokens, blocks, slots in zip(inputs, histories, output_slots, strict=True):
+            self.histories.append([block.requires_grad for block in blocks])
+            index = (int(tokens[0]) - 3) // 3
+            value = self.writes[index] + self.memory_embeddings.sum() * 0.2
+            value = value + sum(block.sum() for block in blocks) * 0.3
+            result = value.expand(slots, 1)
+            if result.requires_grad:
+                result.retain_grad()
+            self.outputs.append(result)
+            results.append(result)
+        return results
+
+    def answer_nll(self, memories, prompts, answers):
+        return torch.stack(
+            [
+                (memory.sum() - answer.double().mean() / 10).square() + 0.1
+                for memory, answer in zip(memories, answers, strict=True)
+            ]
+        )
+
+
+def ac_reference_loss(model, example):
+    """独立逐段展开，按所有实际预测 token 加权，并在后继监督后截断。"""
+    segments = even_token_chunks(example.input_ids, model.cfg.ac_num_segments)
+    count, remainder = divmod(model.codec.memory_slots, len(segments))
+    blocks, losses, target_count = [], [], 0
+    for step, segment in enumerate(segments):
+        answer = segment[1:] + (segments[step + 1][:1] if step + 1 < len(segments) else ())
+        memory = torch.cat(blocks) if blocks else model.codec.memory_embeddings[:0]
+        value = model.codec.answer_nll([memory], [model.ids(segment[:1])], [model.ids(answer)])[0]
+        losses.append(value * len(answer))
+        target_count += len(answer)
+        if model.cfg.bptt_steps is not None and step and step % model.cfg.bptt_steps == 0:
+            blocks = [block.detach() for block in blocks]
+        blocks.append(
+            model.codec.compress_batch(
+                [model.ids(segment)], [blocks], [count + (step < remainder)]
+            )[0]
+        )
+    answer = example.target_ids + (model.tokenizer.eos_token_id,)
+    prompt = model.ids(model.tokenizer.encode(model.cfg.lm_prompt))
+    value = model.codec.answer_nll([torch.cat(blocks)], [prompt], [model.ids(answer)])[0]
+    losses.append(value * len(answer))
+    return torch.stack(losses).sum() / (target_count + len(answer))
+
+
+@pytest.mark.parametrize(
+    "num_segments,bptt_steps",
+    [(4, None), (5, None), (4, 1), (4, 2), (4, 3), (5, 2), (4, 4), (4, 6)],
+)
+def test_ac_full_and_partial_bptt_windows_match_independent_gradients(
+    monkeypatch, num_segments, bptt_steps
+):
+    class MiddleCuts:
+        def randint(self, low, high):
+            return (low + high) // 2
+
+    monkeypatch.setattr(objective, "example_rng", lambda *args: MiddleCuts())
+    config = ObjectiveConfig(
+        method="autocompressors",
+        stage="lm",
+        ac_num_segments=num_segments,
+        bptt_steps=bptt_steps,
+    )
+    model = TokenMemoryTask(ACWindowCodec(num_segments, 9), TinyTokenizer(), config)
+    reference = deepcopy(model)
+    example = PretrainExample(
+        "ac",
+        "document",
+        "cluster",
+        "continuation",
+        tuple(range(3, 3 + 3 * num_segments)),
+        (30, 31),
+    )
+    expected = ac_reference_loss(reference, example)
+    actual = model(example)
+    torch.testing.assert_close(actual["loss"], expected, rtol=1e-12, atol=1e-12)
+    actual["loss"].backward()
+    expected.backward()
+    torch.testing.assert_close(
+        model.codec.writes.grad, reference.codec.writes.grad, rtol=1e-12, atol=1e-12
+    )
+    torch.testing.assert_close(
+        model.codec.memory_embeddings.grad,
+        reference.codec.memory_embeddings.grad,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    assert torch.all(model.codec.writes.grad != 0)
+    assert all(
+        output.grad is not None and output.grad.abs().sum() > 0 for output in model.codec.outputs
+    )
+    for step, history in enumerate(model.codec.histories):
+        latest_boundary = 0 if bptt_steps is None else step - step % bptt_steps
+        assert history == [index >= latest_boundary for index in range(step)]
+    assert actual["metrics"]["segments"] == num_segments
+    assert actual["metrics"]["write_calls"] == num_segments
+    assert actual["metrics"]["slots_final"] == 9
+    assert actual["metrics"]["input_tokens"] == len(example.input_ids)
+    assert actual["metrics"]["target_tokens"] == len(example.input_ids) + len(example.target_ids)

@@ -14,12 +14,9 @@ import torch.distributed as dist
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from latent_working_memory.v3.config import DYNAMIC_METHODS, ModelConfig
-from latent_working_memory.v3.data import load_factqa
+from latent_working_memory.v3.data import filter_factqa, load_factqa
 from latent_working_memory.v3.model import GistMemoryModel
-from latent_working_memory.v3.pretrain_data import (
-    load_pretraining,
-    load_multisegment_pretraining,
-)
+from latent_working_memory.v3.pretrain_data import load_pretraining
 from latent_working_memory.v3.tracking import (
     configure_training_metrics,
     experiment_directory,
@@ -54,15 +51,17 @@ def load_codec(model_config, device, objective_config):
         torch_dtype=getattr(torch, model_config.dtype),
         attn_implementation=model_config.attention_implementation,
     ).to(device)
+    write_divisor = (
+        objective_config.icae_min_segments
+        if objective_config.method == "icae_multi"
+        else objective_config.ac_num_segments
+        if objective_config.method == "autocompressors"
+        else 1
+    )
     codec = GistMemoryModel(
         base,
         memory_slots=model_config.memory_slots,
-        write_slots=(
-            (model_config.memory_slots + objective_config.icae_min_segments - 1)
-            // objective_config.icae_min_segments
-            if objective_config.method == "icae_multi"
-            else model_config.memory_slots
-        ),
+        write_slots=((model_config.memory_slots + write_divisor - 1) // write_divisor),
         lora_rank=model_config.lora_rank,
         lora_alpha=model_config.lora_alpha,
         lora_target_modules=model_config.lora_target_modules,
@@ -75,25 +74,13 @@ def load_splits(config, tokenizer, model_window):
     training = config.training
     pretraining = config.objective.stage in {"pretrain", "lm"}
     if pretraining:
-        loader = (
-            load_pretraining
-            if training.pretrain_data_view == "text_samples"
-            else load_multisegment_pretraining
-        )
-        splits, statistics = loader(config, tokenizer, model_window)
+        splits, statistics = load_pretraining(config, tokenizer, model_window)
     else:
-        splits = load_factqa(training.dataset_dir, tokenizer)
-        statistics = {
-            "kind": "factqa",
-            "splits": {
-                name: {
-                    "trajectories": len(rows),
-                    "source_tokens": sum(len(row.full_input_ids) for row in rows),
-                    "questions": sum(len(row.qas) for row in rows),
-                }
-                for name, rows in splits.items()
-            },
-        }
+        splits, statistics = filter_factqa(
+            load_factqa(training.dataset_dir, tokenizer),
+            training.max_qa_input_tokens,
+            model_window,
+        )
     statistics["source_data"] = {name: dataset_identity(rows) for name, rows in splits.items()}
     statistics["selection"] = {
         "seed": training.seed,

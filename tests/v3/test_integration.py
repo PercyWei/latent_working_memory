@@ -50,14 +50,13 @@ def engine_config(micro_batch_size=1):
 
 
 def tiny_task(model_type, method, stage, **options):
+    options.setdefault("bptt_steps", 2 if method == "autocompressors" else None)
     config = ObjectiveConfig(
         method=method,
         stage=stage,
         icae_min_segments=3,
         icae_max_segments=3,
-        ac_min_segment_tokens=3,
-        ac_max_segment_tokens=3,
-        ac_bptt_steps=2,
+        ac_num_segments=3,
         append_slots=1,
         **options,
     )
@@ -65,7 +64,7 @@ def tiny_task(model_type, method, stage, **options):
         build_model(
             model_type,
             memory_slots=3,
-            write_slots=1 if method == "icae_multi" else None,
+            write_slots=1 if method in {"icae_multi", "autocompressors"} else None,
             attention_implementation="sdpa" if model_type == "qwen3" else "eager",
         ),
         TinyTokenizer(),
@@ -135,6 +134,8 @@ def test_actual_writer_reader_and_engine_train_every_method_stage(
         if stage in {"pretrain", "lm"}
         else (trajectory(n=2), replace(trajectory(n=3), trajectory_id="other"))
     )
+    if stage == "lm":
+        batch = (replace(batch[0], task="continuation", target_ids=(11, 12)), batch[1])
     frozen, writer = parameter_snapshot(model, False), parameter_snapshot(model, True)
 
     calls = {"writer": [], "reader": []}
@@ -162,7 +163,7 @@ def test_actual_writer_reader_and_engine_train_every_method_stage(
     if stage not in {"pretrain", "lm"}:
         assert max(calls["reader"]) <= micro_batch_size * model.cfg.qa_batch_size
     assert metrics["samples"] == 2
-    if method in {"icae_single", "icae_multi"}:
+    if method in {"icae_single", "icae_multi", "autocompressors"}:
         assert metrics["slots_final"] == 3
     assert math.isfinite(metrics["loss"]) and metrics["loss"] > 0
     assert math.isfinite(metrics["grad_norm"]) and metrics["grad_norm"] > 0
@@ -175,6 +176,23 @@ def test_actual_writer_reader_and_engine_train_every_method_stage(
     assert model.training and model.codec.language_model.training and model.codec.decoder.training
     for name, value in parameter_snapshot(model, True).items():
         torch.testing.assert_close(value, after_training[name], rtol=0, atol=0)
+    assert_frozen(model, frozen)
+
+
+@pytest.mark.parametrize("model_type", ["llama", "qwen3"])
+@pytest.mark.parametrize("micro_batch_size", [1, 2])
+def test_actual_autocompressors_full_bptt_engine_updates_writer(model_type, micro_batch_size):
+    model = tiny_task(model_type, "autocompressors", "lm", bptt_steps=None)
+    engine = TokenMemoryEngine(model, engine_config(micro_batch_size), "cpu")
+    engine.initialize()
+    batch = tuple(replace(row, task="continuation") for row in pretraining_examples())
+    frozen, writer = parameter_snapshot(model, False), parameter_snapshot(model, True)
+
+    metrics = engine.step(batch)
+
+    assert metrics["samples"] == 2 and metrics["slots_final"] == 3
+    assert math.isfinite(metrics["loss"]) and metrics["loss"] > 0
+    assert_writer_updated(model, writer)
     assert_frozen(model, frozen)
 
 
@@ -246,7 +264,7 @@ def serial_step(model, optimizer, batch):
     return float(loss.detach()), float(norm)
 
 
-def distributed_gist_worker(rank, rendezvous, method):
+def distributed_gist_worker(rank, rendezvous, method, bptt_steps=None):
     torch.set_num_threads(1)
     dist.init_process_group(
         "gloo",
@@ -256,7 +274,11 @@ def distributed_gist_worker(rank, rendezvous, method):
         timeout=timedelta(seconds=60),
     )
     try:
-        model, batch = calibrated_dynamic_batch(method)
+        if method == "autocompressors":
+            model = tiny_task("qwen3", method, "lm", bptt_steps=bptt_steps)
+            batch = tuple(replace(row, task="continuation") for row in pretraining_examples())
+        else:
+            model, batch = calibrated_dynamic_batch(method)
         reference = deepcopy(model)
         frozen = parameter_snapshot(model, False)
         engine = TokenMemoryEngine(model, engine_config(), "cpu")
@@ -272,8 +294,10 @@ def distributed_gist_worker(rank, rendezvous, method):
             assert observed["loss"] == pytest.approx(expected_loss, rel=1e-5, abs=1e-6)
             assert observed["grad_norm"] == pytest.approx(expected_norm, rel=1e-4, abs=1e-6)
             assert observed["samples"] == len(rows)
-            if index == 0:
+            if index == 0 and method != "autocompressors":
                 assert observed["appends"] == observed["overwrites"] == 0.5
+            if method == "autocompressors":
+                assert observed["slots_final"] == 3
             for actual, expected in zip(model.parameters(), reference.parameters(), strict=True):
                 torch.testing.assert_close(actual, expected, rtol=1e-4, atol=2e-6)
             assert_frozen(model, frozen)
@@ -286,6 +310,16 @@ def test_actual_gist_ddp_opposite_actions_and_empty_rank_match_serial(tmp_path, 
     mp.spawn(
         distributed_gist_worker,
         args=(str(tmp_path / "rendezvous"), method),
+        nprocs=2,
+        join=True,
+    )
+
+
+@pytest.mark.parametrize("bptt_steps", [None, 2])
+def test_actual_autocompressors_ddp_bptt_and_empty_rank_match_serial(tmp_path, bptt_steps):
+    mp.spawn(
+        distributed_gist_worker,
+        args=(str(tmp_path / "rendezvous"), "autocompressors", bptt_steps),
         nprocs=2,
         join=True,
     )

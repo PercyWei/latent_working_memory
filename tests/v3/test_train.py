@@ -21,14 +21,16 @@ from .test_runtime import experiment_config
 def stage_data(config, tokenizer, model_window):
     splits = {}
     for split in ("train", "dev", "test"):
-        if config.objective.stage == "pretrain":
+        if config.objective.stage in {"pretrain", "lm"}:
             rows = tuple(
                 PretrainExample(
                     f"{split}-{index}",
                     f"pre-{split}-{index}",
                     f"pre-cluster-{split}-{index}",
-                    "ae" if index % 2 == 0 else "continuation",
-                    (3, 4, 5),
+                    "ae"
+                    if config.objective.stage == "pretrain" and index % 2 == 0
+                    else "continuation",
+                    (3, 4, 5, 6, 7, 8) if config.objective.stage == "lm" else (3, 4, 5),
                     (6, 7),
                 )
                 for index in range(4)
@@ -51,7 +53,13 @@ def stage_data(config, tokenizer, model_window):
 def stage_configs(tmp_path, method="icae_single", source=None, stages=None):
     root = tmp_path / method
     if stages is None:
-        stages = ("pretrain", "qa") if method.startswith("icae") else ("warmup", "policy")
+        stages = (
+            ("pretrain", "qa")
+            if method.startswith("icae")
+            else ("lm",)
+            if method == "autocompressors"
+            else ("warmup", "policy")
+        )
     paths = []
     for index, stage in enumerate(stages):
         config = experiment_config(root, stage, method=method, init=source if index == 0 else None)
@@ -75,11 +83,13 @@ def install_small_training(monkeypatch):
     loads, records = [], []
 
     def load_codec(config, device, objective):
-        slots = (
-            (config.memory_slots + objective.icae_min_segments - 1) // objective.icae_min_segments
-            if objective.method == "icae_multi"
-            else config.memory_slots
-        )
+        if objective.method == "icae_multi":
+            segments = objective.icae_min_segments
+        elif objective.method == "autocompressors":
+            segments = objective.ac_num_segments
+        else:
+            segments = 1
+        slots = (config.memory_slots + segments - 1) // segments
         codec = build_model(memory_slots=config.memory_slots, write_slots=slots)
         loads.append(codec)
         return codec, TinyTokenizer()
@@ -175,6 +185,34 @@ def test_second_stage_can_resume_from_its_saved_checkpoint(tmp_path, monkeypatch
         for row in (tmp_path / "icae_single/qa/metrics.jsonl").read_text().splitlines()
     ]
     assert [row["global_step"] for row in records] == [2, 3]
+
+
+@pytest.mark.parametrize("bptt_steps", [None, 1, 2, 3])
+def test_autocompressors_lm_training_updates_compressor_with_fixed_total_capacity(
+    tmp_path, monkeypatch, bptt_steps
+):
+    loads, records = install_small_training(monkeypatch)
+    (path,) = stage_configs(tmp_path, "autocompressors")
+    config = json.loads(path.read_text())
+    config["objective"]["ac_num_segments"] = 2
+    config["objective"]["bptt_steps"] = bptt_steps
+    config["training"]["micro_batch_size_per_gpu"] = 4
+    path.write_text(json.dumps(config))
+
+    result = train.run_training(arguments([path]))
+
+    assert len(loads) == len(records) == 1
+    record = records[0]
+    assert record["stage"] == "lm"
+    assert loads[0].memory_embeddings.shape[0] == 1
+    assert result["complete"] and result["completed_steps"] == 1
+    assert Path(result["checkpoint"]).is_file()
+    checkpoint = read_checkpoint(result["checkpoint"])
+    assert checkpoint["run"]["config"]["objective"]["ac_num_segments"] == 2
+    assert checkpoint["run"]["config"]["objective"]["bptt_steps"] == bptt_steps
+    assert not torch.equal(
+        record["initial"]["memory_embeddings"], record["final"]["memory_embeddings"]
+    )
 
 
 @pytest.mark.parametrize("change", ["method", "model", "order", "duplicate", "source", "identity"])

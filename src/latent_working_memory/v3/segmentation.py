@@ -31,16 +31,52 @@ def icae_multi_plan(token_ids, total_slots, min_segments, max_segments, seed, id
     return chunks, slot_counts
 
 
-def ac_token_chunks(token_ids, min_segment_tokens, max_segment_tokens, rng):
-    """AutoCompressors 随机连续分段；首段后至少保留两个 token 的监督。"""
-    if len(token_ids) < 3:
-        raise ValueError("AutoCompressors has no trainable next-token target in the second segment")
+def ac_plan(token_ids, total_slots, num_segments, bptt_steps, max_positions, rng=None):
+    """固定正文段数与总 K；每个 BPTT 子块内部随机切分连续文本。
+
+    每组段数由 bptt_steps 决定，尾组取剩余段数；None 将全部段作为一组。
+    先均分正文以固定各组的 token 总数，再让组内段长在平均段长的 2/3–4/3 内变化。
+    6144 tokens、4 段、BPTT=2 时得到论文的
+    3072-token 子块及 1024–2048-token 段。rng=None 用于确定性均分评估。
+    """
+    if len(token_ids) < 2 * num_segments:
+        raise ValueError("AutoCompressors input must contain at least two tokens per segment")
+    if total_slots < num_segments:
+        raise ValueError("AutoCompressors num_segments must not exceed total memory slots")
+    slots, remainder = divmod(total_slots, num_segments)
+    slot_counts = [slots + (index < remainder) for index in range(num_segments)]
+    nominal = even_token_chunks(token_ids, num_segments)
+    cumulative = 0
+    capacities = []
+    for count in slot_counts:
+        cumulative += count
+        capacities.append(max_positions - cumulative)
     chunks, offset = [], 0
-    while offset < len(token_ids):
-        maximum = max_segment_tokens
-        if offset == 0:
-            maximum = min(maximum, len(token_ids) - 2)
-        size = rng.randint(min(min_segment_tokens, maximum), maximum)
-        chunks.append(token_ids[offset : offset + size])
-        offset += size
-    return chunks
+    group_steps = num_segments if bptt_steps is None else bptt_steps
+    for start in range(0, num_segments, group_steps):
+        stop = min(start + group_steps, num_segments)
+        window_tokens = sum(len(part) for part in nominal[start:stop])
+        count = stop - start
+        minimum = max(2, (2 * window_tokens + 3 * count - 1) // (3 * count))
+        maximum = 4 * window_tokens // (3 * count)
+        upper = [min(maximum, capacity) for capacity in capacities[start:stop]]
+        if any(limit < minimum for limit in upper) or not (
+            count * minimum <= window_tokens <= sum(upper)
+        ):
+            raise ValueError("AutoCompressors segments and cumulative memory exceed model window")
+        remaining = window_tokens
+        for index in range(count):
+            if rng is None:
+                size = len(nominal[start + index])
+                if size > upper[index]:
+                    raise ValueError(
+                        "AutoCompressors segments and cumulative memory exceed model window"
+                    )
+            else:
+                low = max(minimum, remaining - sum(upper[index + 1 :]))
+                high = min(upper[index], remaining - minimum * (count - index - 1))
+                size = rng.randint(low, high)
+            chunks.append(token_ids[offset : offset + size])
+            offset += size
+            remaining -= size
+    return chunks, slot_counts

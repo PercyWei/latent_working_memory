@@ -25,20 +25,33 @@ def test_presets_use_requested_model_and_memory_size(filename):
         assert config.model.memory_slots == 512
         assert config.model.gradient_checkpointing is True
         dynamic = config.objective.method in {"memory_change", "information_loss"}
-        assert config.objective.append_slots == (32 if dynamic else 8)
+        assert config.objective.append_slots == (
+            32 if dynamic and config.objective.stage != "pretrain" else 8
+        )
         large_microbatch = filename.name == "dynamic_pretrain.json" or config.objective.method in {
             "icae_single",
             "icae_multi",
+            "autocompressors",
         }
         assert config.training.micro_batch_size_per_gpu == (8 if large_microbatch else 4)
         assert config.training.gradient_accumulation_steps == (1 if large_microbatch else 2)
         assert config.training.global_batch_size(2) == 16
         assert config.training.swanlab_project is None
         assert config.training.lm_target_tokens == 512
-        assert config.objective.bptt_steps is None
+        assert config.training.max_qa_input_tokens == (
+            None if filename.name in {"dynamic_pretrain.json", "autocompressors.json"} else 12288
+        )
+        assert config.objective.bptt_steps == (
+            2 if config.objective.method == "autocompressors" else None
+        )
         assert (config.objective.icae_min_segments, config.objective.icae_max_segments) == (3, 6)
+        raw_objective = json.loads(filename.read_text())["objective"]
+        ac_fields = {name for name in raw_objective if name.startswith("ac_")}
+        assert ac_fields == (
+            {"ac_num_segments"} if config.objective.method == "autocompressors" else set()
+        )
+        assert config.objective.ac_num_segments == 4
         if config.objective.stage in {"pretrain", "lm"}:
-            assert config.training.pretrain_data_view == "multisegment_full_text"
             assert config.training.min_input_tokens == 1
             assert config.training.max_input_tokens == 12288
             assert config.training.lm_ratio == 0.5
@@ -51,7 +64,6 @@ def test_presets_use_requested_model_and_memory_size(filename):
     "options",
     [
         {"method": "autocompressors", "stage": "qa"},
-        {"method": "autocompressors", "stage": "lm", "ac_bptt_steps": 1},
         {"method": "information_loss", "stage": "policy", "eta": 0.1, "threshold_g": 0.1},
         {"threshold_i": float("nan")},
         {"rms_epsilon": 0.0},
@@ -66,7 +78,7 @@ def test_presets_use_requested_model_and_memory_size(filename):
         {"method": "memory_change", "stage": "policy", "bptt_steps": 1.5},
         {"method": "memory_change", "stage": "pretrain", "bptt_steps": 2},
         {"method": "icae_single", "stage": "qa", "bptt_steps": 2},
-        {"method": "autocompressors", "stage": "lm", "bptt_steps": 2},
+        {"method": "icae_multi", "stage": "pretrain", "bptt_steps": 2},
     ],
 )
 def test_objective_rejects_invalid_experiment_contracts(options):
@@ -105,6 +117,94 @@ def test_icae_multi_slot_budget_does_not_need_to_be_divisible_by_segment_count()
         ModelConfig(memory_slots=512), ObjectiveConfig(method="icae_multi"), TrainingConfig("data")
     )
     assert config.objective.icae_max_segments == 6
+
+
+@pytest.mark.parametrize("name", ["ac_num_segments", "bptt_steps"])
+@pytest.mark.parametrize("value", [0, -1, True, 1.5])
+def test_autocompressors_counts_require_positive_integers(name, value):
+    with pytest.raises(ValueError, match=name):
+        ObjectiveConfig(method="autocompressors", stage="lm", **{name: value})
+
+
+def test_autocompressors_runtime_default_is_full_bptt_and_preset_uses_two_steps():
+    config = ObjectiveConfig(method="autocompressors", stage="lm")
+    assert (config.ac_num_segments, config.bptt_steps) == (4, None)
+    (preset,) = load_preset("configs/v3/autocompressors.json")
+    assert preset.objective.bptt_steps == 2
+
+
+@pytest.mark.parametrize("segments,bptt_steps", [(1, 1), (1, 2), (4, 7)])
+def test_autocompressors_accepts_one_segment_and_bptt_windows_longer_than_the_document(
+    segments, bptt_steps
+):
+    config = ExperimentConfig(
+        ModelConfig(memory_slots=7),
+        ObjectiveConfig(
+            method="autocompressors",
+            stage="lm",
+            ac_num_segments=segments,
+            bptt_steps=bptt_steps,
+        ),
+        TrainingConfig("data"),
+    )
+    assert (config.objective.ac_num_segments, config.objective.bptt_steps) == (
+        segments,
+        bptt_steps,
+    )
+
+
+def test_autocompressors_segment_count_does_not_need_to_be_divisible_by_bptt_window():
+    config = ObjectiveConfig(method="autocompressors", stage="lm", ac_num_segments=5, bptt_steps=2)
+    assert (config.ac_num_segments, config.bptt_steps) == (5, 2)
+
+
+@pytest.mark.parametrize(
+    "method,stage",
+    [
+        ("icae_single", "pretrain"),
+        ("icae_single", "qa"),
+        ("icae_multi", "pretrain"),
+        ("icae_multi", "qa"),
+        ("autocompressors", "lm"),
+        ("memory_change", "pretrain"),
+        ("memory_change", "warmup"),
+        ("memory_change", "policy"),
+        ("information_loss", "pretrain"),
+        ("information_loss", "warmup"),
+        ("information_loss", "policy"),
+    ],
+)
+def test_full_bptt_is_valid_for_each_method_stage(method, stage):
+    assert ObjectiveConfig(method=method, stage=stage, bptt_steps=None).bptt_steps is None
+
+
+def test_removed_autocompressors_bptt_field_is_rejected(tmp_path):
+    with pytest.raises(TypeError, match="ac_bptt_steps"):
+        ObjectiveConfig(method="autocompressors", stage="lm", ac_bptt_steps=2)
+    raw = json.loads(Path("configs/v3/autocompressors.json").read_text())
+    raw["objective"]["ac_bptt_steps"] = raw["objective"].pop("bptt_steps")
+    preset = tmp_path / "old-ac.json"
+    preset.write_text(json.dumps(raw))
+    with pytest.raises(TypeError, match="ac_bptt_steps"):
+        load_preset(preset)
+
+
+def test_autocompressors_allocates_a_positive_slot_count_to_every_segment():
+    with pytest.raises(ValueError, match="ac_num_segments.*memory_slots"):
+        ExperimentConfig(
+            ModelConfig(memory_slots=3),
+            ObjectiveConfig(method="autocompressors", stage="lm"),
+            TrainingConfig("data"),
+        )
+
+
+def test_autocompressors_slot_budget_does_not_need_to_be_divisible_by_segment_count():
+    config = ExperimentConfig(
+        ModelConfig(memory_slots=7),
+        ObjectiveConfig(method="autocompressors", stage="lm"),
+        TrainingConfig("data"),
+    )
+    assert config.objective.ac_num_segments == 4
 
 
 def test_model_rejects_module_string_in_place_of_list():
@@ -182,6 +282,7 @@ def test_output_can_be_unresolved_only_without_a_method_directory():
         "gradient_accumulation_steps",
         "lm_target_tokens",
         "max_input_tokens",
+        "max_qa_input_tokens",
     ],
 )
 @pytest.mark.parametrize("value", [0, -1, True, 1.5])
@@ -195,6 +296,7 @@ def test_sample_limits_default_to_full_splits():
     assert config.max_train_samples is None
     assert config.max_dev_samples is None
     assert config.max_input_tokens is None
+    assert config.max_qa_input_tokens is None
 
 
 def test_pretraining_minimum_cannot_exceed_the_input_limit():
@@ -247,7 +349,6 @@ def test_presets_expand_explicit_stage_sequences_without_changing_other_options(
             == raw["training"]["stage_max_train_samples"][config.objective.stage]
         )
         assert replace(config.objective, stage=stages[0]) == configs[0].objective
-        assert config.objective.seed == raw["objective"]["seed"]
         assert "stages" not in config.to_dict()["objective"]
         assert "stage_max_train_samples" not in config.to_dict()["training"]
 
@@ -395,25 +496,6 @@ def test_runtime_loader_requires_an_explicit_stage(tmp_path):
     saved.write_text(json.dumps(raw))
     with pytest.raises(ValueError, match="explicit stage"):
         load_experiment(saved)
-
-
-def test_pretraining_data_view_requires_an_explicit_supported_format():
-    assert TrainingConfig("data", "output").pretrain_data_view == "text_samples"
-    assert (
-        TrainingConfig(
-            "data", "output", pretrain_data_view="multisegment_full_text"
-        ).pretrain_data_view
-        == "multisegment_full_text"
-    )
-    for view in (
-        "auto",
-        "reconstruction_single",
-        "reconstruction_first_write",
-        "multisegment_full",
-        "multisegment_first_write",
-    ):
-        with pytest.raises(ValueError, match="pretrain_data_view"):
-            TrainingConfig("data", "output", pretrain_data_view=view)
 
 
 @pytest.mark.parametrize("value", [-0.1, 1.1, float("nan"), float("inf"), True, "0.5"])
