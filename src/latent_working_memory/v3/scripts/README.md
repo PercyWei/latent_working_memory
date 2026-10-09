@@ -98,7 +98,7 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 ```bash
 bash src/latent_working_memory/v3/scripts/run_gpu.sh \
   --mode full --method memory_change --gpus 0,1 \
-  --init-checkpoint artifacts/v3/capacity-comparison_20261007-01/train/dynamic-pretrain-k512/pretrain/checkpoints/step-NNNNNN.pt
+  --init-checkpoint artifacts/v3/capacity-comparison_20261007-01/train/dynamic-pretrain-k512/pretrain/checkpoints/global_step_N
 ```
 
 - 默认连续执行动作预热、策略训练和最终评估，此时只需要 QA 数据。
@@ -218,6 +218,6 @@ artifacts/v3/<run-id>/
 3. **方法比较**：本次调用产出至少两个评估结果时，统一导出 `points.json` 和 `points.csv`；参与的结果路径与执行状态见 `compare/result.json`。
 4. **失败排查**：先看对应方法的 `plan/<method-dir>/result.json`，再看 `train.log` 或 `eval.log`；比较失败查看 `compare/result.json` 和同目录的 `compare.log`。
 
-各阶段的 `checkpoints/` 默认保留最近两个 checkpoint（`training.save_total_limit=2`）。新文件完整写入后才清理旧文件；训练中断后可从最近一次成功保存的 checkpoint 恢复。
+各阶段的 `checkpoints/` 默认保留最近两个 `global_step_<阶段step>/` 目录（`training.save_total_limit=2`）。目录内包含 `state.pt` 和各卡的 `data_<rank>.pt`；`--init-checkpoint`、`--resume` 与评估的 `--checkpoint` 均传目录路径。
 
 已有产物不覆盖；独立试跑与正式运行使用不同 `run-id`，省略时自动生成。

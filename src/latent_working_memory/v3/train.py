@@ -148,7 +148,7 @@ def run_training(args):
                 ),
                 initialization=initialization,
             )
-            cursor, checkpoint_path = prepare_training(
+            stage = prepare_training(
                 config,
                 engine,
                 splits,
@@ -167,8 +167,7 @@ def run_training(args):
                 engine,
                 splits,
                 run,
-                cursor,
-                checkpoint_path,
+                stage,
                 stop_after_steps=args.stop_after_steps,
                 tracking=tracking,
             )

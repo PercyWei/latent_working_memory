@@ -79,7 +79,7 @@ def resolve_experiment_id(args, init_checkpoint=None):
     source = init_checkpoint if init_checkpoint is not None else args.init_checkpoint
     if source is not None:
         checkpoint = source.resolve()
-        if not args.dry_run and not checkpoint.is_file():
+        if not args.dry_run and not (checkpoint / "state.pt").is_file():
             raise FileNotFoundError(checkpoint)
         metadata = checkpoint.parent.parent / "run.json"
         if metadata.exists():

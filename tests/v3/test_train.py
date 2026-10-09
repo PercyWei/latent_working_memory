@@ -206,7 +206,7 @@ def test_autocompressors_lm_training_updates_compressor_with_fixed_total_capacit
     assert record["stage"] == "lm"
     assert loads[0].memory_embeddings.shape[0] == 1
     assert result["complete"] and result["completed_steps"] == 1
-    assert Path(result["checkpoint"]).is_file()
+    assert (Path(result["checkpoint"]) / "state.pt").is_file()
     checkpoint = read_checkpoint(result["checkpoint"])
     assert checkpoint["run"]["config"]["objective"]["ac_num_segments"] == 2
     assert checkpoint["run"]["config"]["objective"]["bptt_steps"] == bptt_steps

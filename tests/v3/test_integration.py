@@ -2,6 +2,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import timedelta
 import math
+from pathlib import Path
 
 import pytest
 import torch
@@ -14,17 +15,17 @@ from latent_working_memory.v3.config import (
     ObjectiveConfig,
     TrainingConfig,
 )
+from latent_working_memory.v3.checkpoint import TokenMemoryCheckpointHandler
 from latent_working_memory.v3.engine import TokenMemoryEngine
 from latent_working_memory.v3.objective import TokenMemoryTask, memory_change_score
 from latent_working_memory.v3.pretrain_data import PretrainExample
 from latent_working_memory.v3.runtime import (
     dataset_identity,
-    load_checkpoint,
     load_initialization,
     make_run,
     read_checkpoint,
-    save_checkpoint,
 )
+from latent_working_memory.v3.training_data import make_data_loader
 from .test_model import build_model
 from .test_objective import TinyTokenizer, trajectory
 
@@ -356,6 +357,20 @@ def assert_same_writer(left, right):
         torch.testing.assert_close(value, right_state[name], rtol=0, atol=0)
 
 
+def checkpoint_handler(engine, run, cursor, examples, resume=None):
+    loader = make_data_loader(examples, engine.global_batch_size, engine.config.seed)
+    if resume is None:
+        next(iter(loader))
+    return TokenMemoryCheckpointHandler(
+        engine,
+        loader,
+        Path(engine.config.output_dir) / "checkpoints",
+        run,
+        cursor,
+        resume_from_path=resume,
+    )
+
+
 def test_actual_writer_checkpoint_resume_and_pretrain_warmup_policy_chain(tmp_path):
     model = tiny_task("qwen3", "memory_change", "pretrain")
     config = experiment_config(model, tmp_path / "pretrain")
@@ -366,16 +381,23 @@ def test_actual_writer_checkpoint_resume_and_pretrain_warmup_policy_chain(tmp_pa
     statistics = {"source_data": {name: dataset_identity(rows) for name, rows in splits.items()}}
     run = make_run(config, splits, statistics, "cpu", 1, resolved_model_revision="tiny-fixture")
     engine.step(examples)
-    checkpoint = tmp_path / "pretrain.pt"
+    checkpoint = tmp_path / "pretrain/checkpoints/global_step_1"
     cursor = {"epoch": 1, "sample_offset": 0, "step": 1, "sample_visits": 2}
-    save_checkpoint(checkpoint, engine, run, cursor)
+    checkpoint_handler(engine, run, cursor, examples).save_checkpoint(1)
     saved = read_checkpoint(checkpoint)
     assert set(saved["trainable"]) == {"memory_embeddings", "adapter"}
 
     resumed = tiny_task("qwen3", "memory_change", "pretrain")
     resumed_engine = TokenMemoryEngine(resumed, config.training, "cpu")
     resumed_engine.initialize()
-    assert load_checkpoint(checkpoint, resumed_engine, run) == cursor
+    restored_cursor = {}
+    assert (
+        checkpoint_handler(
+            resumed_engine, run, restored_cursor, examples, resume=checkpoint
+        ).load_checkpoint()
+        == cursor["step"]
+    )
+    assert restored_cursor == cursor
     assert_same_writer(model, resumed)
     assert all(state["step"].item() == 1 for state in resumed_engine.optimizer.state.values())
 
@@ -407,8 +429,8 @@ def test_actual_writer_checkpoint_resume_and_pretrain_warmup_policy_chain(tmp_pa
         current_engine.step(batch)
         assert_writer_updated(current, writer)
         assert_frozen(current, frozen)
-        checkpoint = tmp_path / f"{stage}.pt"
-        save_checkpoint(checkpoint, current_engine, run, cursor)
+        checkpoint = tmp_path / stage / "checkpoints/global_step_1"
+        checkpoint_handler(current_engine, run, cursor, batch).save_checkpoint(1)
         model = current
 
 

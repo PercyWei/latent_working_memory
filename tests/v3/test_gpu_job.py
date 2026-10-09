@@ -93,8 +93,9 @@ def external_checkpoint(
     root = tmp_path / "source" / f"dynamic-pretrain-k64_{experiment_id}"
     output = root / stage
     (output / "checkpoints").mkdir(parents=True)
-    checkpoint = output / "checkpoints" / "step-000002.pt"
-    checkpoint.write_bytes(b"opaque external pretraining checkpoint fixture")
+    checkpoint = output / "checkpoints" / "global_step_2"
+    checkpoint.mkdir()
+    (checkpoint / "state.pt").write_bytes(b"opaque external pretraining checkpoint fixture")
     (output / "run.json").write_text(
         json.dumps(
             {
@@ -148,10 +149,13 @@ class Commands:
                     if "--stop-after-steps" in command
                     else 80
                 )
-                checkpoint = output / "checkpoints" / f"step-{steps:06d}.pt"
+                checkpoint = output / "checkpoints" / f"global_step_{steps}"
                 if not self.omit_checkpoint:
                     # 编排器只传递此文件，不读取权重；这不是可加载的模型 checkpoint。
-                    checkpoint.write_bytes(b"opaque orchestration checkpoint fixture")
+                    checkpoint.mkdir()
+                    (checkpoint / "state.pt").write_bytes(
+                        b"opaque orchestration checkpoint fixture"
+                    )
                 (output / "training-result.json").write_text(
                     json.dumps(
                         {
@@ -2103,7 +2107,8 @@ def test_preview_inherits_id_from_lightweight_sidecar_without_loading_weights(
     tmp_path, monkeypatch
 ):
     checkpoint = external_checkpoint(tmp_path, experiment_id="source-id")
-    checkpoint.unlink()
+    (checkpoint / "state.pt").unlink()
+    checkpoint.rmdir()
     args = arguments(tmp_path, "--dry-run", "--init-checkpoint", str(checkpoint), run_id=None)
 
     def forbidden(*args, **kwargs):

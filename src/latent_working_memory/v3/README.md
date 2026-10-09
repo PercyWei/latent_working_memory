@@ -66,6 +66,7 @@
 - **FineWeb Multisegment**：使用完整正文，训练时超出 `training.max_input_tokens` 的样本整条过滤。默认 12288，`null` 使用模型窗口。每次实际编码／解码另行检查窗口长度。
 - **FineWeb FactQA**：使用完整正文，训练时超出 `training.max_qa_input_tokens` 的样本整条过滤。默认 12288，`null` 使用模型窗口。原始段界用于确定题目来源及 old／new 分类；各方法的压缩分段见下文。
 - **QA 损失**：先平均每题答案 token 的 NLL，再按实际题数平均；任务题与门控题分离。
+- **数据管线**：复用 verl 的 collator 和其 SFT 流程使用的 StatefulDataLoader；保持原随机顺序与完整 global batch，尾批按真实样本数处理，加载器状态负责恢复读取进度。
 
 ### 3.2 ICAE-single：完整正文单次压缩
 
@@ -169,6 +170,8 @@ artifacts/v3/<run-id>/
 ```
 
 `<method-dir>` 正式运行使用 `<method>-k<K>`，试跑添加 `_<mode>`；方法名中的 `_` 转为 `-`，共享预训练使用 `dynamic-pretrain`，K 对应 `model.memory_slots`，追加容量 ΔK 单独记录在配置中。`run-id` 默认是上海时间 `YYYYMMDD-HHMMSS`，可用 `--run-id` 指定；父目录可用 `--output-root` 修改。
+
+checkpoint 使用 verl 的目录形式：`checkpoints/global_step_<阶段step>/`，包含新增权重、优化器与运行状态的 `state.pt`，以及各卡加载器状态 `data_<rank>.pt`。每阶段默认保留最近两个；初始化、恢复和评估参数均传入该目录。
 
 - **本地结果**：`summary.json` 汇总质量、容量与读写成本，`trajectories.jsonl` 保存动作、分数、计时及逐题结果。本次调用有至少两个评估结果时生成比较，不扫描既有运行。
 - **SwanLab 组织**：默认 project 为 `latent-working-memory-v3`，group 为 `run-id`。每个方法的训练、验证与最终评估共用一个 run；共享预训练独立，因此默认 `all` 共六个 run。

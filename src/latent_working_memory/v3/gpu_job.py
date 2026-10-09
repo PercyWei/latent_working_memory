@@ -413,7 +413,7 @@ def run_job(args):
                     (Path(job.config.training.output_dir) / "training-result.json").read_text()
                 )
                 checkpoint = Path(result["checkpoint"])
-                if not checkpoint.is_file():
+                if not (checkpoint / "state.pt").is_file():
                     raise FileNotFoundError(
                         f"training did not save its reported checkpoint: {checkpoint}"
                     )
@@ -463,7 +463,7 @@ def run_job(args):
                 result_path = Path(job.config.training.output_dir) / "training-result.json"
                 if job.key not in checkpoints and result_path.is_file():
                     checkpoint = Path(json.loads(result_path.read_text())["checkpoint"])
-                    if checkpoint.is_file():
+                    if (checkpoint / "state.pt").is_file():
                         save_json(
                             job.config_path,
                             json.loads((result_path.parent / "config.json").read_text()),

@@ -279,8 +279,9 @@ def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
     }
     if changed_split:
         checkpoint["run"]["source_data"]["test"]["fingerprint"] = "another-panel"
-    path = tmp_path / "checkpoint.pt"
-    torch.save(checkpoint, path)
+    path = tmp_path / "global_step_2"
+    path.mkdir()
+    torch.save(checkpoint, path / "state.pt")
     task = Task("icae_single")
     loaded = []
 

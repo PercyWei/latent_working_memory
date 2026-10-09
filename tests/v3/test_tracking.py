@@ -210,10 +210,10 @@ def run_stage(config, steps, prefix="qa"):
         else None
     )
     run = _run(config, engine, data, initialization)
-    cursor, checkpoint = prepare_training(config, engine, data, run, stop_after_steps=steps)
+    stage = prepare_training(config, engine, data, run, stop_after_steps=steps)
     with runtime._tracking_context(config, engine, run) as active:
         result = train_loop(
-            config, engine, data, run, cursor, checkpoint, stop_after_steps=steps, tracking=active
+            config, engine, data, run, stage, stop_after_steps=steps, tracking=active
         )
     return result, run
 
@@ -346,15 +346,14 @@ def test_live_method_run_continues_two_stages_without_reinitializing(
     engine = make_engine(config)
     pretrain_data = make_splits("pretrain")
     run = _run(config, engine, pretrain_data)
-    cursor, checkpoint = prepare_training(config, engine, pretrain_data, run, stop_after_steps=2)
+    stage = prepare_training(config, engine, pretrain_data, run, stop_after_steps=2)
     with runtime._tracking_context(config, engine, run) as active:
         result = train_loop(
             config,
             engine,
             pretrain_data,
             run,
-            cursor,
-            checkpoint,
+            stage,
             stop_after_steps=2,
             tracking=active,
         )
@@ -365,7 +364,7 @@ def test_live_method_run_continues_two_stages_without_reinitializing(
         qa_data = make_splits("qa")
         initialization = load_initialization(result["checkpoint"], engine.model, target)
         qa_run = _run(target, engine, qa_data, initialization)
-        cursor, checkpoint = prepare_training(target, engine, qa_data, qa_run, stop_after_steps=2)
+        stage = prepare_training(target, engine, qa_data, qa_run, stop_after_steps=2)
         update_method_tracking(target, qa_run, active)
         combined = json.loads((root / "experiment.json").read_text())
         assert list(combined["stages"]) == ["pretrain", "qa"]
@@ -376,7 +375,7 @@ def test_live_method_run_continues_two_stages_without_reinitializing(
             assert active.record["state"] == "RUNNING"
             assert active.config == serialized_config(combined)
         result = train_loop(
-            target, engine, qa_data, qa_run, cursor, checkpoint, stop_after_steps=2, tracking=active
+            target, engine, qa_data, qa_run, stage, stop_after_steps=2, tracking=active
         )
         assert result["global_step"] == 4
     if online:
@@ -407,11 +406,9 @@ def test_live_stage_update_rejects_invalid_transition_before_mutation(
     config = online_config(root, "pretrain", "icae_single")
     engine, data = make_engine(config), make_splits("pretrain")
     run = _run(config, engine, data)
-    cursor, checkpoint = prepare_training(config, engine, data, run, stop_after_steps=1)
+    stage = prepare_training(config, engine, data, run, stop_after_steps=1)
     with runtime._tracking_context(config, engine, run) as active:
-        result = train_loop(
-            config, engine, data, run, cursor, checkpoint, stop_after_steps=1, tracking=active
-        )
+        result = train_loop(config, engine, data, run, stage, stop_after_steps=1, tracking=active)
         target = online_config(root, "qa", "icae_single", result["checkpoint"])
         initialization = load_initialization(result["checkpoint"], engine.model, target)
         qa_run = _run(target, engine, make_splits("qa"), initialization)
@@ -457,7 +454,7 @@ def test_same_stage_checkpoint_resume_obeys_session_state(
     recorded_swanlab.runs[identity["id"]]["state"] = state
     engine = make_engine(config)
     data = make_splits()
-    cursor, checkpoint = prepare_training(
+    stage = prepare_training(
         config, engine, data, run, resume=result["checkpoint"], stop_after_steps=2
     )
     if not allowed:
@@ -468,8 +465,7 @@ def test_same_stage_checkpoint_resume_obeys_session_state(
                     engine,
                     data,
                     run,
-                    cursor,
-                    checkpoint,
+                    stage,
                     stop_after_steps=2,
                     tracking=active,
                 )
@@ -481,8 +477,7 @@ def test_same_stage_checkpoint_resume_obeys_session_state(
             engine,
             data,
             run,
-            cursor,
-            checkpoint,
+            stage,
             stop_after_steps=2,
             tracking=active,
         )
@@ -525,11 +520,11 @@ def test_cross_stage_recovers_failure_before_successor_registration(
     config = online_config(root, "pretrain", "icae_single")
     engine, data = make_engine(config), make_splits("pretrain")
     run = _run(config, engine, data)
-    cursor, checkpoint = prepare_training(config, engine, data, run, stop_after_steps=1)
+    stage = prepare_training(config, engine, data, run, stop_after_steps=1)
     with pytest.raises(RuntimeError, match="QA data unavailable"):
         with runtime._tracking_context(config, engine, run) as active:
             result = train_loop(
-                config, engine, data, run, cursor, checkpoint, stop_after_steps=1, tracking=active
+                config, engine, data, run, stage, stop_after_steps=1, tracking=active
             )
             raise RuntimeError("QA data unavailable before stage registration")
     identity = json.loads((root / "swanlab.json").read_text())

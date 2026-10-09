@@ -89,6 +89,21 @@ class TokenMemoryEngine(BaseEngine):
     def optimizer_zero_grad(self):
         self.optimizer.zero_grad(set_to_none=True)
 
+    def save_checkpoint(
+        self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None, **kwargs
+    ):
+        self.checkpoint_manager.save_checkpoint(
+            local_path,
+            hdfs_path=hdfs_path,
+            global_step=global_step,
+            max_ckpt_to_keep=max_ckpt_to_keep,
+        )
+
+    def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False, **kwargs):
+        self.checkpoint_manager.load_checkpoint(
+            local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load
+        )
+
     def optimizer_step(self):
         # backward 已除以全局真实轨迹数，抵消 DDP 对梯度额外执行的 rank 平均。
         if self.world_size > 1:

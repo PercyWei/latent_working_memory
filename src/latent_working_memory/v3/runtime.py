@@ -1,18 +1,18 @@
 """v3 模型加载、阶段衔接、可恢复训练与本地运行记录。"""
 
 from contextlib import nullcontext
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import math
 from pathlib import Path
-import random
 import time
 
 import torch
 import torch.distributed as dist
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from latent_working_memory.v3.checkpoint import TokenMemoryCheckpointHandler, read_checkpoint
 from latent_working_memory.v3.config import DYNAMIC_METHODS, ModelConfig
 from latent_working_memory.v3.data import filter_factqa, load_factqa
 from latent_working_memory.v3.model import GistMemoryModel
@@ -24,7 +24,7 @@ from latent_working_memory.v3.tracking import (
     training_metrics,
 )
 from latent_working_memory.v3.tracking_credentials import swanlab_api_key
-from latent_working_memory.v4.checkpoint import capture_rng, restore_rng
+from latent_working_memory.v3.training_data import TrainingDataLoader, make_data_loader
 
 
 def write_json(path, value):
@@ -214,29 +214,6 @@ def make_run(
     }
 
 
-def read_checkpoint(path):
-    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    if not isinstance(checkpoint, dict) or set(checkpoint) != {
-        "run",
-        "trainable",
-        "optimizer",
-        "cursor",
-        "rng",
-    }:
-        raise ValueError("checkpoint requires exactly run, trainable, optimizer, cursor and rng")
-    objective = checkpoint["run"]["config"]["objective"]
-    if (
-        objective["method"] in DYNAMIC_METHODS
-        and objective["stage"] in {"warmup", "policy"}
-        and "append_slots" not in objective
-    ):
-        raise ValueError(
-            "dynamic QA checkpoint requires explicit objective.append_slots; "
-            "cannot infer the capacity policy from current defaults"
-        )
-    return checkpoint
-
-
 def load_initialization(path, model, config):
     """阶段切换只载入新增权重，不继承优化器、训练游标或随机状态。"""
     checkpoint = read_checkpoint(path)
@@ -308,49 +285,6 @@ def initialization_record(path, previous_run, step, config):
     }
 
 
-def save_checkpoint(path, engine, run, cursor):
-    local_rng = capture_rng(engine.device)
-    rng = [local_rng]
-    if engine.world_size > 1:
-        rng = [None] * engine.world_size
-        dist.all_gather_object(rng, local_rng)
-    if engine.rank == 0:
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(".tmp")
-        torch.save(
-            {
-                "run": run,
-                "trainable": engine.model.trainable_state_dict(),
-                "optimizer": engine.optimizer.state_dict(),
-                "cursor": dict(cursor),
-                "rng": rng,
-            },
-            temporary,
-        )
-        temporary.replace(path)
-        checkpoints = sorted(
-            path.parent.glob("step-*.pt"),
-            key=lambda checkpoint: int(checkpoint.stem.removeprefix("step-")),
-        )
-        for checkpoint in checkpoints[: -engine.config.save_total_limit]:
-            checkpoint.unlink()
-    if engine.world_size > 1:
-        dist.barrier()
-
-
-def load_checkpoint(path, engine, run):
-    checkpoint = read_checkpoint(path)
-    if checkpoint["run"] != run:
-        raise ValueError("resume configuration, data, initialization, device or world size differs")
-    if len(checkpoint["rng"]) != engine.world_size:
-        raise ValueError("checkpoint RNG states do not match world size")
-    engine.model.load_trainable_state_dict(checkpoint["trainable"])
-    engine.optimizer.load_state_dict(checkpoint["optimizer"])
-    restore_rng(checkpoint["rng"][engine.rank], engine.device)
-    return checkpoint["cursor"]
-
-
 def validate_cursor(cursor, config, samples, world_size):
     batch_size = config.global_batch_size(world_size)
     names = {"epoch", "sample_offset", "step", "sample_visits"}
@@ -370,16 +304,11 @@ def validate_cursor(cursor, config, samples, world_size):
         raise ValueError("checkpoint cursor does not match the epoch/batch schedule")
 
 
-def epoch_order(examples, seed, epoch):
-    indices = list(range(len(examples)))
-    random.Random(f"{seed}:v3:{epoch}").shuffle(indices)
-    return tuple(examples[index] for index in indices)
-
-
 def evaluate_split(engine, examples, epoch=0):
     totals, samples = {}, 0
-    for start in range(0, len(examples), engine.global_batch_size):
-        metrics = engine.eval_batch(examples[start : start + engine.global_batch_size], epoch=epoch)
+    loader = make_data_loader(examples, engine.global_batch_size, engine.config.seed, shuffle=False)
+    for batch in loader:
+        metrics = engine.eval_batch(batch, epoch=epoch)
         weight = metrics["samples"]
         for name, value in metrics.items():
             if name != "samples" and value is not None:
@@ -417,6 +346,14 @@ def _tracking_context(config, engine, run):
     )
 
 
+@dataclass
+class TrainingStage:
+    cursor: dict
+    data_loader: TrainingDataLoader
+    checkpoint_handler: TokenMemoryCheckpointHandler
+    checkpoint_path: Path | None = None
+
+
 def prepare_training(config, engine, splits, run, resume=None, stop_after_steps=None):
     """先校验并准备阶段目录或恢复进度，再开启／更新方法级跟踪会话。"""
     settings = config.training
@@ -437,10 +374,6 @@ def prepare_training(config, engine, splits, run, resume=None, stop_after_steps=
             raise ValueError("resume checkpoint must belong to output_dir/checkpoints")
         if json.loads((output / "run.json").read_text(encoding="utf-8")) != run:
             raise ValueError("saved run differs from the resume configuration or data")
-        cursor = load_checkpoint(resume, engine, run)
-        validate_cursor(cursor, settings, len(train), engine.world_size)
-        if engine.rank == 0:
-            _rewind_metrics(metrics_path, cursor["step"])
     else:
         error = None
         if engine.rank == 0 and output.exists() and any(output.iterdir()):
@@ -458,17 +391,27 @@ def prepare_training(config, engine, splits, run, resume=None, stop_after_steps=
             metrics_path.touch()
     if engine.world_size > 1:
         dist.barrier()
-    return cursor, checkpoint_path
+    loader = make_data_loader(train, engine.global_batch_size, settings.seed)
+    handler = TokenMemoryCheckpointHandler(
+        engine, loader, output / "checkpoints", run, cursor, resume_from_path=resume
+    )
+    if resume is not None:
+        step = handler.load_checkpoint()
+        validate_cursor(cursor, settings, len(train), engine.world_size)
+        if step != cursor["step"]:
+            raise ValueError("checkpoint directory step differs from its saved cursor")
+        if engine.rank == 0:
+            _rewind_metrics(metrics_path, step)
+    return TrainingStage(cursor, loader, handler, checkpoint_path)
 
 
-def train_loop(
-    config, engine, splits, run, cursor, checkpoint_path=None, stop_after_steps=None, tracking=None
-):
+def train_loop(config, engine, splits, run, stage, stop_after_steps=None, tracking=None):
     """执行已准备阶段的全局 batch 日程，跟踪会话由方法训练入口管理。"""
     settings = config.training
     train, dev = splits["train"], splits["dev"]
     output = Path(settings.output_dir)
     metrics_path = output / "metrics.jsonl"
+    cursor = stage.cursor
     total_steps = settings.epochs * math.ceil(len(train) / engine.global_batch_size)
     planned_steps = (
         min(total_steps, stop_after_steps) if stop_after_steps is not None else total_steps
@@ -476,11 +419,10 @@ def train_loop(
     if tracking is not None:
         configure_training_metrics(tracking, config.objective.stage)
     for epoch in range(cursor["epoch"], settings.epochs):
-        ordered = epoch_order(train, settings.seed, epoch)
-        for start in range(cursor["sample_offset"], len(ordered), engine.global_batch_size):
-            if stop_after_steps is not None and cursor["step"] >= stop_after_steps:
-                break
-            batch = ordered[start : start + engine.global_batch_size]
+        if stop_after_steps is not None and cursor["step"] >= stop_after_steps:
+            break
+        stage.data_loader.sampler.set_epoch(epoch)
+        for batch in stage.data_loader:
             if engine.device.type == "cuda":
                 torch.cuda.synchronize(engine.device)
                 torch.cuda.reset_peak_memory_stats(engine.device)
@@ -501,9 +443,10 @@ def train_loop(
                 resources = dict(zip(resources, maximum.tolist(), strict=True))
             cursor["step"] += 1
             cursor["sample_visits"] += len(batch)
-            epoch_end = start + len(batch) == len(ordered)
+            consumed = cursor["sample_offset"] + len(batch)
+            epoch_end = consumed == len(train)
             cursor["epoch"] = epoch + int(epoch_end)
-            cursor["sample_offset"] = 0 if epoch_end else start + len(batch)
+            cursor["sample_offset"] = 0 if epoch_end else consumed
             step = cursor["step"]
             stopping = stop_after_steps is not None and step >= stop_after_steps
             record = {
@@ -540,8 +483,10 @@ def train_loop(
                 if tracking is not None:
                     tracking.log(training_metrics(record), step=record["global_step"])
             if step % settings.save_every == 0 or epoch_end or stopping:
-                checkpoint_path = output / "checkpoints" / f"step-{step:06d}.pt"
-                save_checkpoint(checkpoint_path, engine, run, cursor)
+                stage.checkpoint_handler.save_checkpoint(step)
+                stage.checkpoint_path = output / "checkpoints" / f"global_step_{step}"
+            if stopping:
+                break
         if stop_after_steps is not None and cursor["step"] >= stop_after_steps:
             break
     result = {
@@ -552,7 +497,7 @@ def train_loop(
         "completed_epochs": cursor["epoch"],
         "sample_visits": cursor["sample_visits"],
         "stop_after_steps": stop_after_steps,
-        "checkpoint": str(checkpoint_path),
+        "checkpoint": str(stage.checkpoint_path),
     }
     if engine.rank == 0:
         write_json(output / "training-result.json", result)

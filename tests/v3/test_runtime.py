@@ -18,6 +18,7 @@ from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast,
 
 from latent_working_memory.data_preparation.segmentation import SegmentationConfig
 from latent_working_memory.v3 import runtime
+from latent_working_memory.v3.checkpoint import TokenMemoryCheckpointHandler
 from latent_working_memory.v3.config import (
     ExperimentConfig,
     ModelConfig,
@@ -28,21 +29,21 @@ from latent_working_memory.v3.config import (
 from latent_working_memory.v3.engine import TokenMemoryEngine
 from latent_working_memory.v3.runtime import (
     dataset_identity,
-    load_checkpoint,
     load_codec,
     load_initialization,
     load_splits,
     make_run,
     read_checkpoint,
-    save_checkpoint,
     train_loop as stage_train_loop,
     validate_cursor,
 )
+from latent_working_memory.v3.training_data import make_data_loader
+from latent_working_memory.v4.checkpoint import capture_rng
 from .test_objective import trajectory
 
 
 def train_loop(config, engine, splits, run, resume=None, stop_after_steps=None):
-    cursor, checkpoint_path = runtime.prepare_training(
+    stage = runtime.prepare_training(
         config, engine, splits, run, resume=resume, stop_after_steps=stop_after_steps
     )
     with runtime._tracking_context(config, engine, run) as tracking:
@@ -51,8 +52,7 @@ def train_loop(config, engine, splits, run, resume=None, stop_after_steps=None):
             engine,
             splits,
             run,
-            cursor,
-            checkpoint_path,
+            stage,
             tracking=tracking,
             stop_after_steps=stop_after_steps,
         )
@@ -148,27 +148,57 @@ def _run(config, engine, splits, initialization=None):
     return make_run(config, splits, statistics, "cpu", 1, initialization=initialization)
 
 
+def checkpoint_handler(engine, run, cursor, directory=None, resume=None, rows=None):
+    loader = make_data_loader(
+        make_splits()["train"] if rows is None else rows,
+        engine.global_batch_size,
+        engine.config.seed,
+    )
+    return TokenMemoryCheckpointHandler(
+        engine,
+        loader,
+        directory or Path(engine.config.output_dir) / "checkpoints",
+        run,
+        cursor,
+        resume_from_path=resume,
+    )
+
+
+def restore_checkpoint(path, engine, run):
+    cursor = {}
+    handler = checkpoint_handler(engine, run, cursor, directory=Path(path).parent, resume=path)
+    assert handler.load_checkpoint() == cursor["step"]
+    return cursor
+
+
 @pytest.mark.parametrize("limit", [1, 2, 3])
-def test_checkpoint_retention_uses_numeric_steps_and_ignores_temporary_files(tmp_path, limit):
+def test_checkpoint_retention_uses_numeric_steps_and_ignores_incomplete_directories(
+    tmp_path, limit
+):
     config = make_config(tmp_path / "run")
-    config = replace(config, training=replace(config.training, save_total_limit=limit))
+    config = replace(config, training=replace(config.training, save_total_limit=4))
     engine, splits = make_engine(config), make_splits()
     run = _run(config, engine, splits)
     directory = tmp_path / "run/checkpoints"
-    directory.mkdir(parents=True)
-    temporary = directory / "step-999.tmp"
+    unfinished = directory / "global_step_999"
+    unfinished.mkdir(parents=True)
+    temporary = unfinished / "state.tmp"
     temporary.write_bytes(b"unfinished checkpoint")
+    cursor = {"epoch": 0, "sample_offset": 0, "step": 0, "sample_visits": 0}
+    handler = checkpoint_handler(engine, run, cursor, directory)
+    for step in (1, 2, 3, 10):
+        cursor["step"] = step
+        handler.save_checkpoint(step)
+    engine.reset_optimizer(replace(config.training, save_total_limit=limit))
+    cursor["step"] = 11
+    checkpoint_handler(engine, run, cursor, directory).save_checkpoint(11)
 
-    for step in (1, 2, 10, 3):
-        save_checkpoint(
-            directory / f"step-{step}.pt",
-            engine,
-            run,
-            {"epoch": 0, "sample_offset": 0, "step": step, "sample_visits": 0},
-        )
-
-    retained = sorted(read_checkpoint(path)["cursor"]["step"] for path in directory.glob("*.pt"))
-    assert retained == [1, 2, 3, 10][-limit:]
+    retained = sorted(
+        read_checkpoint(path)["cursor"]["step"]
+        for path in directory.glob("global_step_*")
+        if (path / "state.pt").is_file()
+    )
+    assert retained == [1, 2, 3, 10, 11][-limit:]
     assert temporary.read_bytes() == b"unfinished checkpoint"
 
 
@@ -178,60 +208,80 @@ def test_checkpoint_retention_is_stage_local_and_uses_updated_engine_config(tmp_
     engine, splits = make_engine(pretrain), make_splits()
     run = _run(pretrain, engine, splits)
     source = tmp_path / "method/pretrain/checkpoints"
+    cursor = {"step": 0}
+    handler = checkpoint_handler(engine, run, cursor, source)
     for step in (1, 2, 3):
-        save_checkpoint(source / f"step-{step}.pt", engine, run, {"step": step})
+        cursor["step"] = step
+        handler.save_checkpoint(step)
 
-    warmup = make_config(tmp_path / "method/warmup", "warmup", str(source / "step-3.pt"))
+    warmup = make_config(tmp_path / "method/warmup", "warmup", str(source / "global_step_3"))
     warmup = replace(warmup, training=replace(warmup.training, save_total_limit=1))
     engine.reset_optimizer(warmup.training)
-    initialization = load_initialization(source / "step-3.pt", engine.model, warmup)
+    initialization = load_initialization(source / "global_step_3", engine.model, warmup)
     run = _run(warmup, engine, make_splits("qa"), initialization)
     target = tmp_path / "method/warmup/checkpoints"
+    cursor = {"step": 0}
+    handler = checkpoint_handler(engine, run, cursor, target)
     for step in (1, 2, 3):
-        save_checkpoint(target / f"step-{step}.pt", engine, run, {"step": step})
+        cursor["step"] = step
+        handler.save_checkpoint(step)
 
-    assert sorted(path.name for path in source.glob("*.pt")) == [
-        "step-1.pt",
-        "step-2.pt",
-        "step-3.pt",
+    assert sorted(path.name for path in source.glob("global_step_*")) == [
+        "global_step_1",
+        "global_step_2",
+        "global_step_3",
     ]
-    assert [path.name for path in target.glob("*.pt")] == ["step-3.pt"]
-    assert read_checkpoint(target / "step-3.pt")["cursor"]["step"] == 3
+    assert [path.name for path in target.glob("global_step_*")] == ["global_step_3"]
+    assert read_checkpoint(target / "global_step_3")["cursor"]["step"] == 3
 
 
-def test_nonzero_rank_does_not_save_or_delete_checkpoints(tmp_path, monkeypatch):
+def test_nonzero_rank_only_saves_its_loader_without_deleting_model_states(tmp_path, monkeypatch):
     config = make_config(tmp_path / "run")
     engine = make_engine(config)
     engine.rank, engine.world_size = 1, 2
     directory = tmp_path / "run/checkpoints"
     directory.mkdir(parents=True)
     for step in (1, 2, 3):
-        (directory / f"step-{step}.pt").write_bytes(b"saved by rank zero")
+        checkpoint = directory / f"global_step_{step}"
+        checkpoint.mkdir()
+        (checkpoint / "state.pt").write_bytes(b"saved by rank zero")
     monkeypatch.setattr(runtime.dist, "all_gather_object", lambda result, value: None)
     monkeypatch.setattr(runtime.dist, "barrier", lambda: None)
 
-    save_checkpoint(directory / "step-4.pt", engine, {}, {"step": 4})
+    checkpoint_handler(engine, {}, {"step": 4}, directory).save_checkpoint(4)
 
-    assert sorted(path.name for path in directory.iterdir()) == [
-        "step-1.pt",
-        "step-2.pt",
-        "step-3.pt",
-    ]
+    assert all(
+        (directory / f"global_step_{step}/state.pt").read_bytes() == b"saved by rank zero"
+        for step in (1, 2, 3)
+    )
+    assert not (directory / "global_step_4/state.pt").exists()
+    assert (directory / "global_step_4/data_1.pt").is_file()
 
 
-@pytest.mark.parametrize("failure", ["save", "replace"])
+@pytest.mark.parametrize("failure", ["save", "replace", "loader"])
 def test_failed_checkpoint_save_preserves_previous_complete_files(tmp_path, monkeypatch, failure):
     config = make_config(tmp_path / "run")
     engine, splits = make_engine(config), make_splits()
     run = _run(config, engine, splits)
     directory = tmp_path / "run/checkpoints"
+    cursor = {"step": 0}
+    handler = checkpoint_handler(engine, run, cursor, directory)
     for step in (1, 2):
-        save_checkpoint(directory / f"step-{step}.pt", engine, run, {"step": step})
-    original = {path.name: path.read_bytes() for path in directory.glob("*.pt")}
+        cursor["step"] = step
+        handler.save_checkpoint(step)
+    original = {
+        str(path.relative_to(directory)): path.read_bytes()
+        for checkpoint in (directory / "global_step_1", directory / "global_step_2")
+        for path in checkpoint.iterdir()
+    }
+    original_save = torch.save
 
-    if failure == "save":
+    if failure in {"save", "loader"}:
 
         def failed_save(value, path):
+            target = "state.tmp" if failure == "save" else "data_0.pt"
+            if Path(path).name != target:
+                return original_save(value, path)
             Path(path).write_bytes(b"partial checkpoint")
             raise OSError("checkpoint save interrupted")
 
@@ -244,12 +294,13 @@ def test_failed_checkpoint_save_preserves_previous_complete_files(tmp_path, monk
         monkeypatch.setattr(Path, "replace", failed_replace)
 
     with pytest.raises(OSError, match="interrupted"):
-        save_checkpoint(directory / "step-3.pt", engine, run, {"step": 3})
+        cursor["step"] = 3
+        handler.save_checkpoint(3)
 
-    assert {path.name: path.read_bytes() for path in directory.glob("*.pt")} == original
-    assert (directory / "step-3.tmp").exists()
+    assert {name: (directory / name).read_bytes() for name in original} == original
+    assert (directory / "global_step_3").is_dir()
     assert [
-        read_checkpoint(directory / f"step-{step}.pt")["cursor"]["step"] for step in (1, 2)
+        read_checkpoint(directory / f"global_step_{step}")["cursor"]["step"] for step in (1, 2)
     ] == [1, 2]
 
 
@@ -272,13 +323,13 @@ def test_interrupted_training_retains_two_recent_readable_checkpoints(tmp_path, 
         train_loop(config, engine, splits, run)
 
     directory = tmp_path / "run/checkpoints"
-    assert sorted(path.name for path in directory.glob("*.pt")) == [
-        "step-000002.pt",
-        "step-000003.pt",
+    assert sorted(path.name for path in directory.glob("global_step_*")) == [
+        "global_step_2",
+        "global_step_3",
     ]
     for step in (2, 3):
         restored = make_engine(config)
-        cursor = load_checkpoint(directory / f"step-{step:06d}.pt", restored, run)
+        cursor = restore_checkpoint(directory / f"global_step_{step}", restored, run)
         assert cursor["step"] == step
         assert restored.optimizer.state
 
@@ -291,7 +342,7 @@ def test_checkpoint_requires_explicit_append_size_only_after_dynamic_pretraining
     saved = read_checkpoint(result["checkpoint"])
     saved["run"]["config"]["objective"]["stage"] = stage
     del saved["run"]["config"]["objective"]["append_slots"]
-    torch.save(saved, result["checkpoint"])
+    torch.save(saved, Path(result["checkpoint"]) / "state.pt")
     if stage == "pretrain":
         target = make_config(tmp_path / "target", "warmup", result["checkpoint"])
         restored = make_engine(target)
@@ -303,8 +354,9 @@ def test_checkpoint_requires_explicit_append_size_only_after_dynamic_pretraining
 
 
 @pytest.mark.parametrize("micro_batch_size,accumulation", [(1, 2), (2, 1)])
+@pytest.mark.parametrize("stop_step", [2, 3])
 def test_checkpoint_resume_matches_uninterrupted_rng_optimizer_and_tail_batch(
-    tmp_path, micro_batch_size, accumulation
+    tmp_path, micro_batch_size, accumulation, stop_step
 ):
     splits = make_splits()
     full_config = make_config(tmp_path / "full")
@@ -319,6 +371,7 @@ def test_checkpoint_resume_matches_uninterrupted_rng_optimizer_and_tail_batch(
     set_seed(11)
     full = make_engine(full_config)
     expected = train_loop(full_config, full, splits, _run(full_config, full, splits))
+    expected_rng = capture_rng(torch.device("cpu"))
 
     partial_config = make_config(tmp_path / "resumed")
     partial_config = replace(
@@ -332,16 +385,21 @@ def test_checkpoint_resume_matches_uninterrupted_rng_optimizer_and_tail_batch(
     set_seed(11)
     partial = make_engine(partial_config)
     run = _run(partial_config, partial, splits)
-    stopped = train_loop(partial_config, partial, splits, run, stop_after_steps=2)
+    stopped = train_loop(partial_config, partial, splits, run, stop_after_steps=stop_step)
     assert not stopped["complete"]
     checkpoint = read_checkpoint(stopped["checkpoint"])
     assert run["global_batch_size"] == checkpoint["run"]["global_batch_size"] == 2
     assert set(checkpoint) == {"run", "trainable", "optimizer", "cursor", "rng"}
-    assert checkpoint["cursor"] == {"epoch": 0, "sample_offset": 4, "step": 2, "sample_visits": 4}
+    assert checkpoint["cursor"] == (
+        {"epoch": 0, "sample_offset": 4, "step": 2, "sample_visits": 4}
+        if stop_step == 2
+        else {"epoch": 1, "sample_offset": 0, "step": 3, "sample_visits": 5}
+    )
 
     set_seed(999)
     resumed = make_engine(partial_config)
     result = train_loop(partial_config, resumed, splits, run, resume=stopped["checkpoint"])
+    actual_rng = capture_rng(torch.device("cpu"))
     assert result["complete"]
     assert result["completed_steps"] == expected["completed_steps"] == 6
     assert result["sample_visits"] == 10
@@ -349,6 +407,9 @@ def test_checkpoint_resume_matches_uninterrupted_rng_optimizer_and_tail_batch(
     torch.testing.assert_close(
         resumed.optimizer.state_dict(), full.optimizer.state_dict(), rtol=0, atol=0
     )
+    assert actual_rng["python"] == expected_rng["python"]
+    np.testing.assert_equal(actual_rng["numpy"], expected_rng["numpy"])
+    torch.testing.assert_close(actual_rng["torch"], expected_rng["torch"], rtol=0, atol=0)
     full_records = [
         json.loads(line) for line in (tmp_path / "full/metrics.jsonl").read_text().splitlines()
     ]
@@ -383,7 +444,7 @@ def test_resume_from_saved_run_without_explicit_experiment_name(tmp_path):
     (output / "run.json").write_text(json.dumps(saved_run))
     checkpoint = read_checkpoint(stopped["checkpoint"])
     checkpoint["run"] = saved_run
-    torch.save(checkpoint, stopped["checkpoint"])
+    torch.save(checkpoint, Path(stopped["checkpoint"]) / "state.pt")
 
     restored_config = load_experiment(output / "config.json")
     restored = make_engine(restored_config)
@@ -407,10 +468,10 @@ def test_resume_rejects_changed_config_or_data_before_loading_weights(tmp_path):
     before = fresh.model.weight.detach().clone()
     changed = replace(config, training=replace(config.training, learning_rate=0.02))
     with pytest.raises(ValueError, match="resume configuration"):
-        load_checkpoint(result["checkpoint"], fresh, _run(changed, fresh, splits))
+        restore_checkpoint(result["checkpoint"], fresh, _run(changed, fresh, splits))
     different = {**splits, "test": (replace(splits["test"][0], target=9.0),)}
     with pytest.raises(ValueError, match="resume configuration"):
-        load_checkpoint(result["checkpoint"], fresh, _run(config, fresh, different))
+        restore_checkpoint(result["checkpoint"], fresh, _run(config, fresh, different))
     torch.testing.assert_close(fresh.model.weight, before, rtol=0, atol=0)
     assert dataset_identity(splits["test"]) != dataset_identity(different["test"])
 
@@ -431,7 +492,7 @@ def test_early_stop_always_evaluates_and_saves_at_the_actual_last_step(tmp_path)
     assert "dev/loss" not in records[0]
     assert records[1]["step"] == 2 and records[1]["dev/samples"] == 2
     assert read_checkpoint(result["checkpoint"])["cursor"]["step"] == 2
-    assert result["checkpoint"].endswith("step-000002.pt")
+    assert result["checkpoint"].endswith("global_step_2")
 
 
 @pytest.mark.parametrize("source_checkpointing", [True, False, None])
@@ -448,7 +509,7 @@ def test_stage_initialization_loads_only_trainable_weights_and_preserves_ancestr
         del source["run"]["config"]["model"]["gradient_checkpointing"]
     else:
         source["run"]["config"]["model"]["gradient_checkpointing"] = source_checkpointing
-    torch.save(source, result["checkpoint"])
+    torch.save(source, Path(result["checkpoint"]) / "state.pt")
     warmup = make_config(tmp_path / "warmup", "warmup", result["checkpoint"])
     fresh = make_engine(warmup)
     torch_rng, python_rng, numpy_rng = (
@@ -467,10 +528,10 @@ def test_stage_initialization_loads_only_trainable_weights_and_preserves_ancestr
     assert run["pretraining_sources"]["document_ids"] == sorted(
         row.document_id for rows in splits.values() for row in rows
     )
-    warmup_path = tmp_path / "warmup.pt"
-    save_checkpoint(
-        warmup_path, fresh, run, {"epoch": 0, "sample_offset": 0, "step": 0, "sample_visits": 0}
-    )
+    warmup_path = tmp_path / "warmup/checkpoints/global_step_0"
+    checkpoint_handler(
+        fresh, run, {"epoch": 0, "sample_offset": 0, "step": 0, "sample_visits": 0}
+    ).save_checkpoint(0)
     policy = make_config(tmp_path / "policy", "policy", str(warmup_path))
     policy_init = load_initialization(warmup_path, TinyTask(), policy)
     assert policy_init["pretraining_sources"] == initialization["pretraining_sources"]
@@ -1057,7 +1118,7 @@ def test_saved_pretraining_without_explicit_name_uses_its_directory_name(tmp_pat
     source_run["config"]["training"].pop("experiment_name", None)
     target = experiment_config(tmp_path / "memory-change-k64", "warmup")
     initialization = runtime.initialization_record(
-        root / "pretrain/checkpoints/step-2.pt", source_run, 2, target
+        root / "pretrain/checkpoints/global_step_2", source_run, 2, target
     )
     assert initialization["pretraining"]["run_name"] == root.name
     assert initialization["pretraining"]["run_dir"] == str(root.resolve())
