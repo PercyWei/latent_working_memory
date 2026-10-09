@@ -1,6 +1,6 @@
 # 运行 v3 实验
 
-使用 [run_gpu.sh](run_gpu.sh) 完成训练、评估与方法比较。默认使用 Qwen3-4B，容量 K=512、追加容量 ΔK=32；K 分别表示 ICAE 总容量、AutoCompressors 每块容量和动态首次容量。方法细节见 [v3 说明](../README.md)，预设位于 [configs/v3](../../../../configs/v3/)。
+使用 [run_gpu.sh](run_gpu.sh) 完成训练、评估与方法比较。默认使用 Qwen3-4B，容量 K=512、追加容量 ΔK=32；K 表示三个基线的总容量和动态方法的首次容量。方法细节见 [v3 说明](../README.md)，预设位于 [configs/v3](../../../../configs/v3/)。
 
 ## 1. 准备环境、模型与数据
 
@@ -113,16 +113,19 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 |---|---|
 | `--config <文件路径>` | 替换所选单方法的 JSON 预设；未指定时读取 `configs/v3/` 中的默认文件 |
 | `--gpus 0,1` | 使用的物理 GPU；默认 `0,1`，最终评估使用第一张卡 |
-| `--micro-batch-size-per-gpu` | 每卡一次并行处理的样本／轨迹数；ICAE 两阶段和共享预训练默认 8，其余默认 4 |
-| `--gradient-accumulation-steps` | 每次更新累积的 microbatch 数；ICAE 两阶段和共享预训练默认 1，其余默认 2 |
+| `--micro-batch-size-per-gpu` | 每卡一次并行处理的样本／轨迹数；ICAE、AutoCompressors 和共享预训练默认 8，动态 warmup／policy 默认 4 |
+| `--gradient-accumulation-steps` | 每次更新累积的 microbatch 数；ICAE、AutoCompressors 和共享预训练默认 1，动态 warmup／policy 默认 2 |
 | `--qa-batch-size 8` | 每条轨迹一次读取的题数，默认 8 |
 | `--append-slots 32` | 动态方法每次追加的 slots 数，默认 32；首次为 512，覆盖保持末块大小 |
-| `--max-input-tokens 12288` | AE／LM 完整正文 token 上限；超限整条过滤，不计 memory／提示／目标；`0` 使用模型窗口 |
+| `--max-input-tokens 12288` | AE／LM 训练正文 token 上限；超限整条过滤，不计 memory／提示／目标；`0` 使用模型窗口 |
+| `--max-qa-input-tokens 12288` | FactQA 训练正文 token 上限；超限整条过滤，不计 memory／提示／目标；`0` 使用模型窗口 |
 | `--lm-ratio 0.5` | ICAE 与动态共享预训练选择 LM 的概率；AutoCompressors 保持 LM-only |
 | `--lm-target-tokens 512` | 预训练 LM 的续文目标长度，由训练配置决定 |
 | `--icae-min-segments 3`、`--icae-max-segments 6` | ICAE-multi 的随机块数范围，两个训练阶段均应用；总容量固定为 K |
-| `--bptt-steps 0` | 动态 warmup／policy 的 BPTT 窗口；0 表示默认的完整 BPTT，2 表示每两轮截断 |
+| `--ac-num-segments 4` | AutoCompressors 的正文压缩段数；每段追加约 K/n slots，最终合计 K |
+| `--bptt-steps` | BPTT 写入窗口；AutoCompressors 默认 2，动态 warmup／policy 默认完整；`0` 表示完整 BPTT。AutoCompressors 还用该值组织随机分段 |
 | `--epochs` | 各阶段训练轮数 |
+| `--save-total-limit 2` | 每阶段保留最近成功保存的 checkpoint 数；默认 2 |
 | `--pretrain-train-samples`、`--lm-train-samples` | 分别覆盖预训练和 AutoCompressors LM 的训练样本上限，默认各 12800 |
 | `--qa-train-samples`、`--warmup-train-samples`、`--policy-train-samples` | 分别覆盖对应阶段的训练样本上限，默认不限 |
 | `--dev-samples`、`--max-steps`、`--eval-trajectories` | 覆盖档位的开发集、每阶段步数和最终评估轨迹上限，`0` 表示不限 |
@@ -136,9 +139,10 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 |---|---:|---:|
 | ICAE-single／ICAE-multi：预训练、QA | 8 | 1 |
 | 动态共享预训练 | 8 | 1 |
-| AutoCompressors、动态 warmup／policy | 4 | 2 |
+| AutoCompressors | 8 | 1 |
+| 动态 warmup／policy | 4 | 2 |
 
-阶段训练样本参数的 `0` 表示不限；`smoke`／`pilot` 仍保留档位上限。`max_input_tokens` 仅作用于 AE／LM，配置值 `null` 表示模型窗口；模型另行检查实际调用窗口长度。
+阶段训练样本参数的 `0` 表示不限；`smoke`／`pilot` 仍保留档位上限。`max_input_tokens` 与 `max_qa_input_tokens` 分别控制 AE／LM 和 FactQA 的训练正文上限；dev／test 不按长度上限过滤。配置值 `null` 表示训练上限采用模型窗口，模型另行检查实际调用窗口长度。
 
 预设通过 `objective.stages` 声明阶段顺序，通过 `training.stage_max_train_samples` 分别设置各阶段训练预算：
 
@@ -161,7 +165,9 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 
 ```bash
 bash src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode pilot --method icae_single --config configs/v3/icae_single_custom.json \
+  --mode full \
+  --method icae_single \
+  --config configs/v3/icae_single_custom.json \
   --gpus 0,1 --micro-batch-size-per-gpu 4
 ```
 
@@ -174,7 +180,7 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 
 预设不指定产物目录。启动器根据 `--run-id` 生成运行配置，写入 `plan/<method-dir>/<stage>.json`，每份配置用 `objective.stage` 明确当前阶段；训练保存的 `config.json` 也使用该单阶段字段。中断恢复使用阶段目录保存的 `config.json` 和 checkpoint，不直接运行预设。
 
-动态 BPTT 默认完整展开；`--bptt-steps 2` 表示每两轮反向传播后 detach 记忆，首次写入也计一轮，global batch 结束后更新参数。该参数不影响 AutoCompressors 的 `ac_bptt_steps`。
+`--bptt-steps` 统一控制写入窗口，`0` 对应配置中的 `null`，表示完整 BPTT。动态方法默认完整展开；设为 2 时每两轮反向并 detach 记忆，首次写入也计一轮。AutoCompressors 默认 2，在窗口完成后继文本监督后截断；完整 BPTT 时将全部 n 段作为一个随机切分组。各方法均在 global batch 结束后更新参数。
 
 ## 5. 查看结果
 
@@ -211,5 +217,7 @@ artifacts/v3/<run-id>/
 2. **SwanLab**：每个方法的训练、验证、评估共用一个 run；共享预训练独立记录，默认 `all` 共六个。阶段看 `train/stage`，最终质量与容量看柱状图；指标含义见 [v3 说明](../README.md#评估与产物)。
 3. **方法比较**：本次调用产出至少两个评估结果时，统一导出 `points.json` 和 `points.csv`；参与的结果路径与执行状态见 `compare/result.json`。
 4. **失败排查**：先看对应方法的 `plan/<method-dir>/result.json`，再看 `train.log` 或 `eval.log`；比较失败查看 `compare/result.json` 和同目录的 `compare.log`。
+
+各阶段的 `checkpoints/` 默认保留最近两个 checkpoint（`training.save_total_limit=2`）。新文件完整写入后才清理旧文件；训练中断后可从最近一次成功保存的 checkpoint 恢复。
 
 已有产物不覆盖；独立试跑与正式运行使用不同 `run-id`，省略时自动生成。
