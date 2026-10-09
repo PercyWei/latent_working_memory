@@ -1390,6 +1390,8 @@ def test_explicit_overrides_and_zero_remove_profile_limits(tmp_path):
         "2",
         "--save-every",
         "3",
+        "--save-total-limit",
+        "4",
         "--tracking",
         "disabled",
         "--group",
@@ -1409,6 +1411,7 @@ def test_explicit_overrides_and_zero_remove_profile_limits(tmp_path):
     assert job.config.training.micro_batch_size_per_gpu == 2
     assert job.config.training.gradient_accumulation_steps == 3
     assert job.config.training.global_batch_size(2) == 12
+    assert all(item.config.training.save_total_limit == 4 for item in jobs)
     assert job.config.training.group == "chosen-group"
     assert job.config.training.swanlab_project is None
     assert job.config.objective.qa_batch_size == 2
@@ -1476,6 +1479,8 @@ def test_plan_derives_each_global_batch_from_selected_gpus_microbatch_and_accumu
         ["--max-qa-input-tokens", "-1"],
         ["--lm-target-tokens", "0"],
         ["--lm-target-tokens", "-1"],
+        ["--save-total-limit", "0"],
+        ["--save-total-limit", "-1"],
         ["--icae-min-segments", "0"],
         ["--icae-min-segments", "-1"],
         ["--icae-max-segments", "1.5"],

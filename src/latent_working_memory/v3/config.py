@@ -176,6 +176,7 @@ class TrainingConfig:
     seed: int = 20261004
     eval_every: int = 25
     save_every: int = 25
+    save_total_limit: int = 2
     lm_ratio: float = 0.5
     lm_target_tokens: int = 512
     min_input_tokens: int = 1
@@ -202,6 +203,7 @@ class TrainingConfig:
             "gradient_accumulation_steps",
             "eval_every",
             "save_every",
+            "save_total_limit",
             "min_input_tokens",
             "lm_target_tokens",
         ):

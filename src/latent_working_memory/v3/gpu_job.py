@@ -145,6 +145,11 @@ def parse_args(argv=None):
         parser.add_argument(f"--{name}", type=bounded_count, help="覆盖运行档位，0 表示不限")
     for name in ("eval-every", "save-every"):
         parser.add_argument(f"--{name}", type=positive_count)
+    parser.add_argument(
+        "--save-total-limit",
+        type=positive_count,
+        help="每阶段保留最近成功保存的 checkpoint 数，默认 2",
+    )
     parser.add_argument("--eval-split", choices=("dev", "test"))
     parser.add_argument("--max-new-tokens", type=positive_count, default=64)
     for name in ("threshold-i", "threshold-d", "threshold-g", "eta"):

@@ -329,6 +329,12 @@ def save_checkpoint(path, engine, run, cursor):
             temporary,
         )
         temporary.replace(path)
+        checkpoints = sorted(
+            path.parent.glob("step-*.pt"),
+            key=lambda checkpoint: int(checkpoint.stem.removeprefix("step-")),
+        )
+        for checkpoint in checkpoints[: -engine.config.save_total_limit]:
+            checkpoint.unlink()
     if engine.world_size > 1:
         dist.barrier()
 

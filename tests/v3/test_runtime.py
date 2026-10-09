@@ -148,6 +148,141 @@ def _run(config, engine, splits, initialization=None):
     return make_run(config, splits, statistics, "cpu", 1, initialization=initialization)
 
 
+@pytest.mark.parametrize("limit", [1, 2, 3])
+def test_checkpoint_retention_uses_numeric_steps_and_ignores_temporary_files(tmp_path, limit):
+    config = make_config(tmp_path / "run")
+    config = replace(config, training=replace(config.training, save_total_limit=limit))
+    engine, splits = make_engine(config), make_splits()
+    run = _run(config, engine, splits)
+    directory = tmp_path / "run/checkpoints"
+    directory.mkdir(parents=True)
+    temporary = directory / "step-999.tmp"
+    temporary.write_bytes(b"unfinished checkpoint")
+
+    for step in (1, 2, 10, 3):
+        save_checkpoint(
+            directory / f"step-{step}.pt",
+            engine,
+            run,
+            {"epoch": 0, "sample_offset": 0, "step": step, "sample_visits": 0},
+        )
+
+    retained = sorted(read_checkpoint(path)["cursor"]["step"] for path in directory.glob("*.pt"))
+    assert retained == [1, 2, 3, 10][-limit:]
+    assert temporary.read_bytes() == b"unfinished checkpoint"
+
+
+def test_checkpoint_retention_is_stage_local_and_uses_updated_engine_config(tmp_path):
+    pretrain = make_config(tmp_path / "method/pretrain")
+    pretrain = replace(pretrain, training=replace(pretrain.training, save_total_limit=3))
+    engine, splits = make_engine(pretrain), make_splits()
+    run = _run(pretrain, engine, splits)
+    source = tmp_path / "method/pretrain/checkpoints"
+    for step in (1, 2, 3):
+        save_checkpoint(source / f"step-{step}.pt", engine, run, {"step": step})
+
+    warmup = make_config(tmp_path / "method/warmup", "warmup", str(source / "step-3.pt"))
+    warmup = replace(warmup, training=replace(warmup.training, save_total_limit=1))
+    engine.reset_optimizer(warmup.training)
+    initialization = load_initialization(source / "step-3.pt", engine.model, warmup)
+    run = _run(warmup, engine, make_splits("qa"), initialization)
+    target = tmp_path / "method/warmup/checkpoints"
+    for step in (1, 2, 3):
+        save_checkpoint(target / f"step-{step}.pt", engine, run, {"step": step})
+
+    assert sorted(path.name for path in source.glob("*.pt")) == [
+        "step-1.pt",
+        "step-2.pt",
+        "step-3.pt",
+    ]
+    assert [path.name for path in target.glob("*.pt")] == ["step-3.pt"]
+    assert read_checkpoint(target / "step-3.pt")["cursor"]["step"] == 3
+
+
+def test_nonzero_rank_does_not_save_or_delete_checkpoints(tmp_path, monkeypatch):
+    config = make_config(tmp_path / "run")
+    engine = make_engine(config)
+    engine.rank, engine.world_size = 1, 2
+    directory = tmp_path / "run/checkpoints"
+    directory.mkdir(parents=True)
+    for step in (1, 2, 3):
+        (directory / f"step-{step}.pt").write_bytes(b"saved by rank zero")
+    monkeypatch.setattr(runtime.dist, "all_gather_object", lambda result, value: None)
+    monkeypatch.setattr(runtime.dist, "barrier", lambda: None)
+
+    save_checkpoint(directory / "step-4.pt", engine, {}, {"step": 4})
+
+    assert sorted(path.name for path in directory.iterdir()) == [
+        "step-1.pt",
+        "step-2.pt",
+        "step-3.pt",
+    ]
+
+
+@pytest.mark.parametrize("failure", ["save", "replace"])
+def test_failed_checkpoint_save_preserves_previous_complete_files(tmp_path, monkeypatch, failure):
+    config = make_config(tmp_path / "run")
+    engine, splits = make_engine(config), make_splits()
+    run = _run(config, engine, splits)
+    directory = tmp_path / "run/checkpoints"
+    for step in (1, 2):
+        save_checkpoint(directory / f"step-{step}.pt", engine, run, {"step": step})
+    original = {path.name: path.read_bytes() for path in directory.glob("*.pt")}
+
+    if failure == "save":
+
+        def failed_save(value, path):
+            Path(path).write_bytes(b"partial checkpoint")
+            raise OSError("checkpoint save interrupted")
+
+        monkeypatch.setattr(runtime.torch, "save", failed_save)
+    else:
+
+        def failed_replace(self, target):
+            raise OSError("checkpoint replace interrupted")
+
+        monkeypatch.setattr(Path, "replace", failed_replace)
+
+    with pytest.raises(OSError, match="interrupted"):
+        save_checkpoint(directory / "step-3.pt", engine, run, {"step": 3})
+
+    assert {path.name: path.read_bytes() for path in directory.glob("*.pt")} == original
+    assert (directory / "step-3.tmp").exists()
+    assert [
+        read_checkpoint(directory / f"step-{step}.pt")["cursor"]["step"] for step in (1, 2)
+    ] == [1, 2]
+
+
+def test_interrupted_training_retains_two_recent_readable_checkpoints(tmp_path, monkeypatch):
+    config, splits = make_config(tmp_path / "run"), make_splits()
+    engine = make_engine(config)
+    run = _run(config, engine, splits)
+    original_step = engine.step
+    calls = 0
+
+    def interrupted_step(batch, epoch=0):
+        nonlocal calls
+        calls += 1
+        if calls == 4:
+            raise RuntimeError("training interrupted")
+        return original_step(batch, epoch=epoch)
+
+    monkeypatch.setattr(engine, "step", interrupted_step)
+    with pytest.raises(RuntimeError, match="training interrupted"):
+        train_loop(config, engine, splits, run)
+
+    directory = tmp_path / "run/checkpoints"
+    assert sorted(path.name for path in directory.glob("*.pt")) == [
+        "step-000002.pt",
+        "step-000003.pt",
+    ]
+    for step in (2, 3):
+        restored = make_engine(config)
+        cursor = load_checkpoint(directory / f"step-{step:06d}.pt", restored, run)
+        assert cursor["step"] == step
+        assert restored.optimizer.state
+
+
 @pytest.mark.parametrize("stage", ["pretrain", "warmup", "policy"])
 def test_checkpoint_requires_explicit_append_size_only_after_dynamic_pretraining(tmp_path, stage):
     config = make_config(tmp_path / "source")

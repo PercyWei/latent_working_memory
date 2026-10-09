@@ -174,7 +174,12 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
         training["lm_target_tokens"] = args.lm_target_tokens
     if args.max_qa_input_tokens is not None:
         training["max_qa_input_tokens"] = args.max_qa_input_tokens or None
-    for name in ("epochs", "micro_batch_size_per_gpu", "gradient_accumulation_steps"):
+    for name in (
+        "epochs",
+        "micro_batch_size_per_gpu",
+        "gradient_accumulation_steps",
+        "save_total_limit",
+    ):
         value = getattr(args, name)
         if value is not None:
             training[name] = value

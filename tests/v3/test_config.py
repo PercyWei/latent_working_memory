@@ -36,6 +36,7 @@ def test_presets_use_requested_model_and_memory_size(filename):
         assert config.training.micro_batch_size_per_gpu == (8 if large_microbatch else 4)
         assert config.training.gradient_accumulation_steps == (1 if large_microbatch else 2)
         assert config.training.global_batch_size(2) == 16
+        assert config.training.save_total_limit == 2
         assert config.training.swanlab_project is None
         assert config.training.lm_target_tokens == 512
         assert config.training.max_qa_input_tokens == (
@@ -280,6 +281,7 @@ def test_output_can_be_unresolved_only_without_a_method_directory():
         "max_dev_samples",
         "micro_batch_size_per_gpu",
         "gradient_accumulation_steps",
+        "save_total_limit",
         "lm_target_tokens",
         "max_input_tokens",
         "max_qa_input_tokens",
