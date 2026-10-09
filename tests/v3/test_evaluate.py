@@ -283,7 +283,7 @@ def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
     task = Task("icae_single")
     loaded = []
 
-    def load_codec(model_config, device):
+    def load_codec(model_config, device, objective):
         loaded.append((model_config, device))
         return task.codec, task.tokenizer
 
@@ -368,7 +368,9 @@ def test_real_tiny_model_evaluates_all_methods_without_training_or_gate_leakage(
     task = TokenMemoryTask(
         build_model(),
         DecoderTokenizer(),
-        ObjectiveConfig(method=method, stage=stage, append_slots=1),
+        ObjectiveConfig(
+            method=method, stage=stage, append_slots=1, icae_min_segments=2, icae_max_segments=2
+        ),
     )
     example = objective_trajectory(split="test")
     summary = evaluation.evaluate(task, [example], tmp_path / method, "test", 2)

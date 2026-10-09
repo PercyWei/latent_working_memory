@@ -36,12 +36,15 @@ def test_presets_use_requested_model_and_memory_size(filename):
         assert config.training.swanlab_project is None
         assert config.training.lm_target_tokens == 512
         assert config.objective.bptt_steps is None
-        assert config.objective.icae_segment_ratio == 3
+        assert (config.objective.icae_min_segments, config.objective.icae_max_segments) == (3, 6)
         if config.objective.stage in {"pretrain", "lm"}:
-            assert config.training.pretrain_data_view == "multisegment_random_prefix"
+            assert config.training.pretrain_data_view == "multisegment_full_text"
             assert config.training.min_input_tokens == 1
-            assert config.training.max_input_tokens == 8192
+            assert config.training.max_input_tokens == 12288
             assert config.training.lm_ratio == 0.5
+        assert config.training.max_train_samples == (
+            12800 if config.objective.stage in {"pretrain", "lm"} else None
+        )
 
 
 @pytest.mark.parametrize(
@@ -71,15 +74,37 @@ def test_objective_rejects_invalid_experiment_contracts(options):
         ObjectiveConfig(**options)
 
 
+@pytest.mark.parametrize("name", ["icae_min_segments", "icae_max_segments"])
 @pytest.mark.parametrize("value", [0, -1, True, 1.5])
-def test_icae_segment_ratio_requires_a_positive_integer(value):
-    with pytest.raises(ValueError, match="icae_segment_ratio"):
-        ObjectiveConfig(method="icae_multi", icae_segment_ratio=value)
+def test_icae_segment_count_bounds_require_positive_integers(name, value):
+    with pytest.raises(ValueError, match=name):
+        ObjectiveConfig(method="icae_multi", **{name: value})
 
 
-def test_icae_segment_ratio_defaults_to_three():
-    assert ObjectiveConfig(method="icae_multi").icae_segment_ratio == 3
-    assert ObjectiveConfig(method="icae_multi", icae_segment_ratio=2).icae_segment_ratio == 2
+def test_icae_segment_count_defaults_to_three_through_six():
+    config = ObjectiveConfig(method="icae_multi")
+    assert (config.icae_min_segments, config.icae_max_segments) == (3, 6)
+    fixed = ObjectiveConfig(method="icae_multi", icae_min_segments=2, icae_max_segments=2)
+    assert fixed.icae_min_segments == fixed.icae_max_segments == 2
+    with pytest.raises(ValueError, match="interval"):
+        ObjectiveConfig(method="icae_multi", icae_min_segments=7, icae_max_segments=6)
+
+
+@pytest.mark.parametrize("slots,segments", [(4, 6), (8, 16)])
+def test_icae_multi_requires_a_positive_slot_allocation_for_every_segment(slots, segments):
+    with pytest.raises(ValueError, match="must not exceed memory_slots"):
+        ExperimentConfig(
+            ModelConfig(memory_slots=slots),
+            ObjectiveConfig(method="icae_multi", icae_max_segments=segments),
+            TrainingConfig("data"),
+        )
+
+
+def test_icae_multi_slot_budget_does_not_need_to_be_divisible_by_segment_count():
+    config = ExperimentConfig(
+        ModelConfig(memory_slots=512), ObjectiveConfig(method="icae_multi"), TrainingConfig("data")
+    )
+    assert config.objective.icae_max_segments == 6
 
 
 def test_model_rejects_module_string_in_place_of_list():
@@ -156,6 +181,7 @@ def test_output_can_be_unresolved_only_without_a_method_directory():
         "micro_batch_size_per_gpu",
         "gradient_accumulation_steps",
         "lm_target_tokens",
+        "max_input_tokens",
     ],
 )
 @pytest.mark.parametrize("value", [0, -1, True, 1.5])
@@ -168,6 +194,12 @@ def test_sample_limits_default_to_full_splits():
     config = TrainingConfig("data", "output")
     assert config.max_train_samples is None
     assert config.max_dev_samples is None
+    assert config.max_input_tokens is None
+
+
+def test_pretraining_minimum_cannot_exceed_the_input_limit():
+    with pytest.raises(ValueError, match="min_input_tokens"):
+        TrainingConfig("data", min_input_tokens=2048, max_input_tokens=1024)
 
 
 @pytest.mark.parametrize("method", ["memory_change", "information_loss"])
@@ -207,10 +239,55 @@ def test_presets_expand_explicit_stage_sequences_without_changing_other_options(
     assert tuple(config.objective.stage for config in configs) == stages
     for config in configs:
         assert config.model == configs[0].model
-        assert config.training == configs[0].training
+        assert replace(
+            config.training, max_train_samples=configs[0].training.max_train_samples
+        ) == (configs[0].training)
+        assert (
+            config.training.max_train_samples
+            == raw["training"]["stage_max_train_samples"][config.objective.stage]
+        )
         assert replace(config.objective, stage=stages[0]) == configs[0].objective
         assert config.objective.seed == raw["objective"]["seed"]
         assert "stages" not in config.to_dict()["objective"]
+        assert "stage_max_train_samples" not in config.to_dict()["training"]
+
+
+def test_preset_expands_independent_stage_budgets(tmp_path):
+    raw = json.loads(Path("configs/v3/icae_single.json").read_text())
+    raw["training"]["stage_max_train_samples"] = {"pretrain": 37, "qa": None}
+    path = tmp_path / "preset.json"
+    path.write_text(json.dumps(raw))
+    pretrain, qa = load_preset(path)
+    assert pretrain.training.max_train_samples == 37
+    assert qa.training.max_train_samples is None
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [
+        {"pretrain": 4},
+        {"pretrain": 4, "qa": 3, "policy": 2},
+        {"pretrain": 0, "qa": 3},
+        {"pretrain": True, "qa": 3},
+        [4, 3],
+    ],
+)
+def test_preset_rejects_missing_extra_or_invalid_stage_budgets(tmp_path, limits):
+    raw = json.loads(Path("configs/v3/icae_single.json").read_text())
+    raw["training"]["stage_max_train_samples"] = limits
+    path = tmp_path / "preset.json"
+    path.write_text(json.dumps(raw))
+    with pytest.raises(ValueError, match="stage_max_train_samples|max_train_samples"):
+        load_preset(path)
+
+
+def test_preset_rejects_one_shared_training_budget(tmp_path):
+    raw = json.loads(Path("configs/v3/icae_single.json").read_text())
+    raw["training"]["max_train_samples"] = 7
+    path = tmp_path / "preset.json"
+    path.write_text(json.dumps(raw))
+    with pytest.raises(ValueError, match="stage_max_train_samples"):
+        load_preset(path)
 
 
 @pytest.mark.parametrize("method", ["icae_single", "icae_multi"])
@@ -261,6 +338,9 @@ def test_stage_sequence_rejects_invalid_and_mixed_pipeline_orders(method, stages
 def test_single_stage_preset_uses_requested_stage(tmp_path, stages):
     raw = json.loads(Path("configs/v3/icae_single.json").read_text())
     raw["objective"]["stages"] = stages
+    raw["training"]["stage_max_train_samples"] = {
+        stage: raw["training"]["stage_max_train_samples"][stage] for stage in stages
+    }
     preset = tmp_path / "preset.json"
     preset.write_text(json.dumps(raw))
     (config,) = load_preset(preset)
@@ -321,9 +401,9 @@ def test_pretraining_data_view_requires_an_explicit_supported_format():
     assert TrainingConfig("data", "output").pretrain_data_view == "text_samples"
     assert (
         TrainingConfig(
-            "data", "output", pretrain_data_view="multisegment_random_prefix"
+            "data", "output", pretrain_data_view="multisegment_full_text"
         ).pretrain_data_view
-        == "multisegment_random_prefix"
+        == "multisegment_full_text"
     )
     for view in (
         "auto",

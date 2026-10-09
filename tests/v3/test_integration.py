@@ -53,7 +53,8 @@ def tiny_task(model_type, method, stage, **options):
     config = ObjectiveConfig(
         method=method,
         stage=stage,
-        icae_segment_ratio=1 if method == "icae_multi" else 3,
+        icae_min_segments=3,
+        icae_max_segments=3,
         ac_min_segment_tokens=3,
         ac_max_segment_tokens=3,
         ac_bptt_steps=2,
@@ -62,7 +63,10 @@ def tiny_task(model_type, method, stage, **options):
     )
     return TokenMemoryTask(
         build_model(
-            model_type, attention_implementation="sdpa" if model_type == "qwen3" else "eager"
+            model_type,
+            memory_slots=3,
+            write_slots=1 if method == "icae_multi" else None,
+            attention_implementation="sdpa" if model_type == "qwen3" else "eager",
         ),
         TinyTokenizer(),
         config,
@@ -158,6 +162,8 @@ def test_actual_writer_reader_and_engine_train_every_method_stage(
     if stage not in {"pretrain", "lm"}:
         assert max(calls["reader"]) <= micro_batch_size * model.cfg.qa_batch_size
     assert metrics["samples"] == 2
+    if method in {"icae_single", "icae_multi"}:
+        assert metrics["slots_final"] == 3
     assert math.isfinite(metrics["loss"]) and metrics["loss"] > 0
     assert math.isfinite(metrics["grad_norm"]) and metrics["grad_norm"] > 0
     assert_writer_updated(model, writer)

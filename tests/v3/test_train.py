@@ -18,7 +18,7 @@ from .test_objective import TinyTokenizer, trajectory
 from .test_runtime import experiment_config
 
 
-def stage_data(config, tokenizer):
+def stage_data(config, tokenizer, model_window):
     splits = {}
     for split in ("train", "dev", "test"):
         if config.objective.stage == "pretrain":
@@ -74,8 +74,13 @@ def stage_configs(tmp_path, method="icae_single", source=None, stages=None):
 def install_small_training(monkeypatch):
     loads, records = [], []
 
-    def load_codec(config, device):
-        codec = build_model(memory_slots=config.memory_slots)
+    def load_codec(config, device, objective):
+        slots = (
+            (config.memory_slots + objective.icae_min_segments - 1) // objective.icae_min_segments
+            if objective.method == "icae_multi"
+            else config.memory_slots
+        )
+        codec = build_model(memory_slots=config.memory_slots, write_slots=slots)
         loads.append(codec)
         return codec, TinyTokenizer()
 
@@ -218,6 +223,32 @@ def test_worker_rejects_preset_before_loading_any_model(tmp_path, monkeypatch, e
         train.run_training(arguments([preset], *options))
     assert not loads
     assert not (tmp_path / "resolved-output").exists()
+
+
+def test_continuous_worker_keeps_stage_specific_sample_limits(tmp_path):
+    paths = stage_configs(tmp_path)
+    for path, limit in zip(paths, (3, 2), strict=True):
+        raw = json.loads(path.read_text())
+        raw["training"]["max_train_samples"] = limit
+        path.write_text(json.dumps(raw))
+    configs = train.training_configs(arguments(paths))
+    assert [config.training.max_train_samples for config in configs] == [3, 2]
+    with pytest.raises(ValueError, match="separate max_train_samples"):
+        train.training_configs(arguments(paths, "--max-train-samples", "1"))
+    (config,) = train.training_configs(arguments([paths[0]], "--max-train-samples", "1"))
+    assert config.training.max_train_samples == 1
+
+
+def test_continuous_multi_stages_require_the_same_memory_embedding_shape(tmp_path):
+    paths = stage_configs(tmp_path)
+    for index, path in enumerate(paths):
+        raw = json.loads(path.read_text())
+        raw["objective"]["method"] = "icae_multi"
+        raw["objective"]["icae_min_segments"] = index + 1
+        raw["objective"]["icae_max_segments"] = index + 1
+        path.write_text(json.dumps(raw))
+    with pytest.raises(ValueError, match="share their model"):
+        train.training_configs(arguments(paths))
 
 
 @pytest.mark.parametrize("method", ["icae_single", "icae_multi"])

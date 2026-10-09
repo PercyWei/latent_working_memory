@@ -17,6 +17,7 @@ def build_model(
     dtype=torch.float32,
     attention_implementation="eager",
     gradient_checkpointing=True,
+    write_slots=None,
 ):
     torch.manual_seed(93)
     config_type, model_class = {
@@ -46,6 +47,7 @@ def build_model(
         4,
         ("q_proj", "v_proj"),
         gradient_checkpointing=gradient_checkpointing,
+        write_slots=write_slots,
     )
 
 
@@ -351,6 +353,27 @@ def test_context_limits_fail_without_truncation():
     with pytest.raises(ValueError, match="exceeds model window"):
         model.compress(torch.arange(10), [torch.zeros(1, 16)], output_slots=2)
     assert model.answer_nll([torch.zeros(9, 16)], [ids(3, 4)], [ids(5, 6)]).shape == (1,)
+
+
+def test_total_memory_budget_and_writer_embedding_count_are_distinct():
+    model = build_model(memory_slots=8, write_slots=3)
+    assert model.memory_slots == 8
+    assert model.write_slots == 3
+    assert model.memory_embeddings.shape == (3, model.width)
+    first, second = model.compress_batch([ids(3, 4), ids(5, 6)], output_slots=[3, 2])
+    assert [len(first), len(second)] == [3, 2]
+    assert len(model.compress(ids(7, 8))) == 3
+    with pytest.raises(ValueError, match="write_slots"):
+        model.compress(ids(3, 4), output_slots=4)
+    loss = model.answer_nll([torch.cat((first, second))], [ids(9)], [ids(10, 11)]).mean()
+    loss.backward()
+    assert torch.all(model.memory_embeddings.grad.abs().sum(dim=1) > 0)
+
+
+@pytest.mark.parametrize("write_slots", [0, -1, 4, 1.0, True])
+def test_invalid_writer_embedding_count_is_rejected(write_slots):
+    with pytest.raises(ValueError, match="write_slots"):
+        build_model(memory_slots=3, write_slots=write_slots)
 
 
 def test_invalid_writer_blocks_and_empty_answers_are_rejected():

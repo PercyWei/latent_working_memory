@@ -13,7 +13,7 @@ import torch
 import torch.distributed as dist
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from latent_working_memory.v3.config import DYNAMIC_METHODS, ModelConfig, TrainingConfig
+from latent_working_memory.v3.config import DYNAMIC_METHODS, ModelConfig
 from latent_working_memory.v3.data import load_factqa
 from latent_working_memory.v3.model import GistMemoryModel
 from latent_working_memory.v3.pretrain_data import (
@@ -23,7 +23,6 @@ from latent_working_memory.v3.pretrain_data import (
 from latent_working_memory.v3.tracking import (
     configure_training_metrics,
     experiment_directory,
-    experiment_name,
     method_tracking_run,
     training_metrics,
 )
@@ -40,7 +39,7 @@ def write_json(path, value):
     temporary.replace(path)
 
 
-def load_codec(model_config, device):
+def load_codec(model_config, device, objective_config):
     """同源独立编码器／解码器；编码训练 LoRA，冻结读取保留记忆梯度。"""
     tokenizer = AutoTokenizer.from_pretrained(
         model_config.model_name_or_path, revision=model_config.revision
@@ -58,6 +57,12 @@ def load_codec(model_config, device):
     codec = GistMemoryModel(
         base,
         memory_slots=model_config.memory_slots,
+        write_slots=(
+            (model_config.memory_slots + objective_config.icae_min_segments - 1)
+            // objective_config.icae_min_segments
+            if objective_config.method == "icae_multi"
+            else model_config.memory_slots
+        ),
         lora_rank=model_config.lora_rank,
         lora_alpha=model_config.lora_alpha,
         lora_target_modules=model_config.lora_target_modules,
@@ -66,29 +71,16 @@ def load_codec(model_config, device):
     return codec, tokenizer
 
 
-def load_splits(config, tokenizer):
+def load_splits(config, tokenizer, model_window):
     training = config.training
     pretraining = config.objective.stage in {"pretrain", "lm"}
     if pretraining:
-        if training.pretrain_data_view == "text_samples":
-            splits, statistics = load_pretraining(
-                training.dataset_dir,
-                tokenizer,
-                training.min_input_tokens,
-                training.max_input_tokens,
-            )
-        else:
-            splits, statistics = load_multisegment_pretraining(
-                training.dataset_dir,
-                tokenizer,
-                training.min_input_tokens,
-                training.max_input_tokens,
-                training.pretrain_data_view,
-                lm_only=config.objective.stage == "lm",
-                seed=training.seed,
-                lm_ratio=training.lm_ratio,
-                lm_target_tokens=training.lm_target_tokens,
-            )
+        loader = (
+            load_pretraining
+            if training.pretrain_data_view == "text_samples"
+            else load_multisegment_pretraining
+        )
+        splits, statistics = loader(config, tokenizer, model_window)
     else:
         splits = load_factqa(training.dataset_dir, tokenizer)
         statistics = {
@@ -286,17 +278,26 @@ def initialization_record(path, previous_run, step, config):
     stage = config.objective.stage
     if stage in required_stages and previous["objective"]["stage"] not in required_stages[stage]:
         raise ValueError(f"{stage} initialization requires {sorted(required_stages[stage])}")
-    previous_training = TrainingConfig(**previous["training"])
-    root = experiment_directory(previous_training)
+    if config.objective.method == "icae_multi" and (
+        previous["objective"]["method"] != "icae_multi"
+        or any(
+            previous["objective"].get(name) != getattr(config.objective, name)
+            for name in ("icae_min_segments", "icae_max_segments")
+        )
+    ):
+        raise ValueError("ICAE-multi initialization requires the same segment range")
+    # 初始化只读取来源身份，保留原 checkpoint 的训练配置与数据协议。
+    previous_training = previous["training"]
+    root = Path(previous_training["experiment_dir"] or previous_training["output_dir"]).resolve()
     if previous["objective"]["stage"] == "pretrain":
         identity = (
             json.loads((root / "swanlab.json").read_text(encoding="utf-8"))
-            if previous_training.swanlab_project is not None
+            if previous_training["swanlab_project"] is not None
             else None
         )
         pretraining = {
-            "experiment_id": previous_training.experiment_id,
-            "run_name": experiment_name(previous_training),
+            "experiment_id": previous_training["experiment_id"],
+            "run_name": previous_training.get("experiment_name") or root.name,
             "run_dir": str(root),
             "run_id": identity["id"] if identity is not None else None,
             "run_url": identity["url"] if identity is not None else None,
@@ -313,7 +314,7 @@ def initialization_record(path, previous_run, step, config):
         "step": step,
         "global_step": previous_run["step_offset"] + step,
         "experiment_dir": str(root),
-        "experiment_id": previous_training.experiment_id,
+        "experiment_id": previous_training["experiment_id"],
         "resolved_model_revision": previous_run["resolved_model_revision"],
         "pretraining_sources": previous_run["pretraining_sources"],
         "pretraining": pretraining,

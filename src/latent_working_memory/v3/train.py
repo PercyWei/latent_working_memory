@@ -27,6 +27,10 @@ from latent_working_memory.v3.tracking import experiment_directory, update_metho
 
 def training_configs(args):
     configs = [load_experiment(path) for path in args.config]
+    if len(configs) > 1 and args.max_train_samples is not None:
+        raise ValueError(
+            "multi-stage training requires a separate max_train_samples in each config"
+        )
     if len(configs) > 1 and any(
         value is not None for value in (args.dataset_dir, args.output_dir, args.init_checkpoint)
     ):
@@ -65,6 +69,13 @@ def training_configs(args):
             if (
                 config.model != first.model
                 or config.objective.method != first.objective.method
+                or (
+                    first.objective.method == "icae_multi"
+                    and (
+                        config.objective.icae_min_segments != first.objective.icae_min_segments
+                        or config.objective.icae_max_segments != first.objective.icae_max_segments
+                    )
+                )
                 or experiment_directory(config.training) != experiment_directory(first.training)
                 or any(
                     getattr(config.training, name) != getattr(first.training, name)
@@ -100,7 +111,7 @@ def run_training(args):
         resolved = previous["run"]["resolved_model_revision"]
         if resolved is not None:
             model_config = replace(model_config, revision=resolved)
-    codec, tokenizer = load_codec(model_config, device)
+    codec, tokenizer = load_codec(model_config, device, config.objective)
     initialization = None
     if args.resume is not None:
         initialization = previous["run"]["initialization"]
@@ -125,7 +136,7 @@ def run_training(args):
                 set_seed(config.training.seed)
                 model.cfg = config.objective
                 engine.reset_optimizer(config.training)
-            splits, statistics = load_splits(config, tokenizer)
+            splits, statistics = load_splits(config, tokenizer, codec.max_positions)
             run = make_run(
                 config,
                 splits,

@@ -97,8 +97,8 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--max-input-tokens",
-        type=positive_count,
-        help="预训练压缩输入的 token 上限，默认 8192；QA 阶段沿用数据中的段界",
+        type=bounded_count,
+        help="AE/LM 完整正文 token 上限，预设 12288；0 表示模型窗口，超限样本整条过滤",
     )
     parser.add_argument(
         "--lm-target-tokens",
@@ -106,9 +106,14 @@ def parse_args(argv=None):
         help="预训练 LM 目标的真实 token 数，默认 512；续文候选不足时沿用任务回退规则",
     )
     parser.add_argument(
-        "--icae-segment-ratio",
+        "--icae-min-segments",
         type=positive_count,
-        help="ICAE-multi 预训练块长为 memory_slots × ratio，默认 3；QA 保留原段界",
+        help="ICAE-multi 随机分块数量下限，默认 3；总容量 K 均分给各块",
+    )
+    parser.add_argument(
+        "--icae-max-segments",
+        type=positive_count,
+        help="ICAE-multi 随机分块数量上限，默认 6，不超过 K",
     )
     parser.add_argument(
         "--bptt-steps",
@@ -120,7 +125,13 @@ def parse_args(argv=None):
         type=positive_count,
         help="动态方法每次追加的 slots 数，默认沿用预设 32；首次写入为 512 slots",
     )
-    for name in ("train-samples", "dev-samples", "max-steps", "eval-trajectories"):
+    for stage in ("pretrain", "lm", "qa", "warmup", "policy"):
+        parser.add_argument(
+            f"--{stage}-train-samples",
+            type=bounded_count,
+            help=f"{stage} 阶段训练样本上限，0 表示不限；smoke/pilot 另受档位上限约束",
+        )
+    for name in ("dev-samples", "max-steps", "eval-trajectories"):
         parser.add_argument(f"--{name}", type=bounded_count, help="覆盖运行档位，0 表示不限")
     for name in ("eval-every", "save-every"):
         parser.add_argument(f"--{name}", type=positive_count)

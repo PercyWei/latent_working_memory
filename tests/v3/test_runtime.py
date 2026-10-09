@@ -405,7 +405,8 @@ def test_load_codec_uses_a_local_tiny_pretrained_base_without_network(tmp_path):
     model_config = replace(
         make_config(tmp_path / "unused").model, model_name_or_path=str(model_dir)
     )
-    codec, loaded_tokenizer = load_codec(model_config, torch.device("cpu"))
+    objective = ObjectiveConfig(method="icae_single", stage="pretrain")
+    codec, loaded_tokenizer = load_codec(model_config, torch.device("cpu"), objective)
     assert codec.memory_embeddings.shape == (2, 16)
     assert codec.memory_embeddings.dtype == torch.float32
     assert loaded_tokenizer.eos_token_id == 2
@@ -419,13 +420,23 @@ def test_load_codec_uses_a_local_tiny_pretrained_base_without_network(tmp_path):
     assert any(
         "lora_" in name and parameter.requires_grad for name, parameter in codec.named_parameters()
     )
-    plain, _ = load_codec(replace(model_config, gradient_checkpointing=False), torch.device("cpu"))
+    plain, _ = load_codec(
+        replace(model_config, gradient_checkpointing=False), torch.device("cpu"), objective
+    )
     assert not plain.language_model.get_base_model().is_gradient_checkpointing
     assert not plain.decoder.is_gradient_checkpointing
+    multi, _ = load_codec(
+        replace(model_config, memory_slots=5),
+        torch.device("cpu"),
+        ObjectiveConfig(method="icae_multi", icae_min_segments=3, icae_max_segments=5),
+    )
+    assert multi.memory_slots == 5
+    assert multi.write_slots == 2
+    assert multi.memory_embeddings.shape == (2, 16)
     tokenizer.eos_token = None
     tokenizer.save_pretrained(model_dir)
     with pytest.raises(ValueError, match="eos_token_id"):
-        load_codec(model_config, torch.device("cpu"))
+        load_codec(model_config, torch.device("cpu"), objective)
 
 
 def _distributed_training_worker(rank, rendezvous, output):
@@ -508,13 +519,13 @@ def test_pretraining_accepts_a_single_objective_after_actual_length_filtering(
         config,
         training=replace(config.training, dataset_dir=str(tmp_path), max_input_tokens=3),
     )
-    splits, _ = load_splits(config, tokenizer)
+    splits, _ = load_splits(config, tokenizer, 64)
     assert {row.task for row in splits["test"]} == {"ae"}
     restricted = replace(config, training=replace(config.training, max_input_tokens=2))
-    splits, _ = load_splits(restricted, tokenizer)
+    splits, _ = load_splits(restricted, tokenizer, 64)
     assert {row.task for row in splits[filtered_split]} == {"ae"}
     lm = replace(restricted, objective=ObjectiveConfig(method="autocompressors", stage="lm"))
-    splits, _ = load_splits(lm, tokenizer)
+    splits, _ = load_splits(lm, tokenizer, 64)
     assert {row.task for row in splits[filtered_split]} == {"ae"}
 
 
@@ -580,12 +591,12 @@ def test_sample_limits_keep_both_pretraining_tasks_and_full_test_source_identity
     tokenizer = pretraining_corpus(tmp_path)
     config = make_config(tmp_path / "output")
     config = replace(config, training=replace(config.training, dataset_dir=str(tmp_path)))
-    full, full_statistics = load_splits(config, tokenizer)
+    full, full_statistics = load_splits(config, tokenizer, 64)
     limited = replace(
         config,
         training=replace(config.training, max_train_samples=4, max_dev_samples=3),
     )
-    splits, statistics = load_splits(limited, tokenizer)
+    splits, statistics = load_splits(limited, tokenizer, 64)
 
     assert {name: len(rows) for name, rows in splits.items()} == {"train": 4, "dev": 3, "test": 12}
     assert statistics["splits"]["train"]["selected_by_task"] == {"ae": 3, "continuation": 1}
@@ -595,11 +606,11 @@ def test_sample_limits_keep_both_pretraining_tasks_and_full_test_source_identity
     assert statistics["splits"]["train"]["selected_input_tokens"] == 8
     assert statistics["source_data"] == full_statistics["source_data"]
     assert splits["test"] == full["test"]
-    assert load_splits(limited, tokenizer) == (splits, statistics)
+    assert load_splits(limited, tokenizer, 64) == (splits, statistics)
     other_method = replace(limited, objective=replace(limited.objective, method="information_loss"))
-    assert load_splits(other_method, tokenizer) == (splits, statistics)
+    assert load_splits(other_method, tokenizer, 64) == (splits, statistics)
     changed_seed = replace(limited, training=replace(limited.training, seed=999))
-    assert load_splits(changed_seed, tokenizer)[0]["train"] != splits["train"]
+    assert load_splits(changed_seed, tokenizer, 64)[0]["train"] != splits["train"]
     run = make_run(limited, splits, statistics, "cpu", 1)
     assert run["source_data"]["train"] == dataset_identity(full["train"])
     assert run["data"]["train"] == dataset_identity(splits["train"])
@@ -616,11 +627,11 @@ def test_pretraining_sample_limit_can_keep_one_source_without_forcing_both_objec
         config,
         training=replace(config.training, dataset_dir=str(tmp_path), **{name: 1}),
     )
-    splits, statistics = load_splits(config, tokenizer)
+    splits, statistics = load_splits(config, tokenizer, 64)
     split = "train" if name == "max_train_samples" else "dev"
     assert len(splits[split]) == statistics["splits"][split]["selected"] == 1
     assert sum(statistics["splits"][split]["selected_by_task"].values()) == 1
-    assert load_splits(config, tokenizer) == (splits, statistics)
+    assert load_splits(config, tokenizer, 64) == (splits, statistics)
 
 
 def test_selection_follows_full_canonical_validation(tmp_path):
@@ -634,7 +645,7 @@ def test_selection_follows_full_canonical_validation(tmp_path):
         training=replace(config.training, dataset_dir=str(tmp_path), max_train_samples=2),
     )
     with pytest.raises(ValueError, match="duplicate pretraining sample_id"):
-        load_splits(config, tokenizer)
+        load_splits(config, tokenizer, 64)
 
 
 def test_qa_selection_keeps_complete_trajectories_and_original_test_split(tmp_path, monkeypatch):
@@ -655,7 +666,7 @@ def test_qa_selection_keeps_complete_trajectories_and_original_test_split(tmp_pa
     config = replace(
         config, training=replace(config.training, max_train_samples=3, max_dev_samples=2)
     )
-    splits, statistics = load_splits(config, None)
+    splits, statistics = load_splits(config, None, 64)
     assert {name: len(rows) for name, rows in splits.items()} == {"train": 3, "dev": 2, "test": 8}
     assert splits["test"] is original["test"]
     for split in ("train", "dev"):
@@ -666,14 +677,16 @@ def test_qa_selection_keeps_complete_trajectories_and_original_test_split(tmp_pa
         )
         assert statistics["source_data"][split] == dataset_identity(original[split])
     changed = replace(config, objective=replace(config.objective, method="information_loss"))
-    assert load_splits(changed, None)[0] == splits
+    assert load_splits(changed, None, 64)[0] == splits
 
 
 def experiment_config(root, stage, identifier="trial", method="memory_change", init=None):
     config = make_config(root / stage)
     return replace(
         config,
-        objective=replace(config.objective, method=method, stage=stage),
+        objective=replace(
+            config.objective, method=method, stage=stage, icae_min_segments=2, icae_max_segments=2
+        ),
         training=replace(
             config.training,
             experiment_dir=str(root),

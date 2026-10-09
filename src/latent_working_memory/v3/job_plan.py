@@ -66,6 +66,8 @@ class TrainingJob:
 def resolve_level(args):
     level = dict(LEVELS[args.mode])
     for name in level:
+        if name == "train_samples":
+            continue
         value = getattr(args, name)
         if value is not None:
             level[name] = None if value == 0 else value
@@ -118,8 +120,11 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
             objective[name] = value
     if method in DYNAMIC_METHODS and args.append_slots is not None:
         objective["append_slots"] = args.append_slots
-    if method == "icae_multi" and stage == "pretrain" and args.icae_segment_ratio is not None:
-        objective["icae_segment_ratio"] = args.icae_segment_ratio
+    if method == "icae_multi":
+        for name in ("icae_min_segments", "icae_max_segments"):
+            value = getattr(args, name)
+            if value is not None:
+                objective[name] = value
     if method in DYNAMIC_METHODS and stage in {"warmup", "policy"} and args.bptt_steps is not None:
         objective["bptt_steps"] = args.bptt_steps or None
     is_pretrain = stage in {"pretrain", "lm"}
@@ -129,6 +134,12 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
     if args.mode != "full":
         method_directory += f"_{args.mode}"
     experiment_dir = directory / "train" / method_directory
+    stage_limit = getattr(args, f"{stage}_train_samples")
+    if stage_limit is None:
+        stage_limit = config.training.max_train_samples
+    elif stage_limit == 0:
+        stage_limit = None
+    limits = [limit for limit in (stage_limit, level["train_samples"]) if limit is not None]
     training = {
         "dataset_dir": str(dataset.resolve()),
         "experiment_dir": str(experiment_dir),
@@ -140,7 +151,7 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
         else config.training.init_checkpoint
         if initialize_from is None
         else None,
-        "max_train_samples": level["train_samples"],
+        "max_train_samples": min(limits) if limits else None,
         "max_dev_samples": level["dev_samples"],
         "eval_every": level["eval_every"],
         "save_every": level["save_every"],
@@ -151,7 +162,7 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
     if stage == "pretrain" and args.lm_ratio is not None:
         training["lm_ratio"] = args.lm_ratio
     if is_pretrain and args.max_input_tokens is not None:
-        training["max_input_tokens"] = args.max_input_tokens
+        training["max_input_tokens"] = args.max_input_tokens or None
     if is_pretrain and args.lm_target_tokens is not None:
         training["lm_target_tokens"] = args.lm_target_tokens
     # QA 阶段不使用预训练输入长度筛选；真实段界与题池保持原样。

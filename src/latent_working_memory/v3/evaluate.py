@@ -313,7 +313,7 @@ def main(argv=None):
     model_config = (
         replace(config.model, revision=revision) if revision is not None else config.model
     )
-    codec, tokenizer = load_codec(model_config, device)
+    codec, tokenizer = load_codec(model_config, device, config.objective)
     codec.load_trainable_state_dict(checkpoint["trainable"])
     task = TokenMemoryTask(codec, tokenizer, config.objective)
     trajectories = load_factqa(args.dataset_dir, tokenizer)[args.split]

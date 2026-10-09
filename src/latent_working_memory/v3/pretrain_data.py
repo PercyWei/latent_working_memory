@@ -1,4 +1,4 @@
-"""Tokenize canonical FineWeb AE/continuation samples for v3 pretraining."""
+"""加载完整 AE／LM 正文，按正文 token 长度过滤整条样本。"""
 
 from dataclasses import dataclass
 import json
@@ -21,29 +21,64 @@ class PretrainExample:
     target_ids: tuple[int, ...]
 
 
-def load_pretraining(
-    dataset_dir: str | Path, tokenizer, min_input_tokens: int, max_input_tokens: int
-) -> tuple[dict[str, tuple[PretrainExample, ...]], dict]:
-    """Filter whole inputs by current-tokenizer length; never crop source or targets."""
-    if (
-        type(min_input_tokens) is not int
-        or type(max_input_tokens) is not int
-        or not 1 <= min_input_tokens <= max_input_tokens
+def _limits(config, model_window):
+    if type(model_window) is not int or model_window < 1:
+        raise ValueError("model_window must be a positive integer")
+    requested = config.training.max_input_tokens
+    limit = model_window if requested is None else min(requested, model_window)
+    minimum = config.training.min_input_tokens
+    if config.objective.method == "icae_multi":
+        minimum = max(minimum, config.objective.icae_max_segments)
+    return minimum, limit
+
+
+def _counts():
+    return {
+        "read": 0,
+        "kept": 0,
+        "filtered_too_short": 0,
+        "filtered_too_long": 0,
+        "read_by_task": {"ae": 0, "continuation": 0},
+        "kept_by_task": {"ae": 0, "continuation": 0},
+    }
+
+
+def _length_statistics(values):
+    return {
+        "min": min(values) if values else None,
+        "max": max(values) if values else None,
+        "total": sum(values),
+    }
+
+
+def _keep(example, minimum, limit, counts):
+    if len(example.input_ids) < minimum:
+        counts["filtered_too_short"] += 1
+        return False
+    if len(example.input_ids) > limit:
+        counts["filtered_too_long"] += 1
+        return False
+    counts["kept"] += 1
+    counts["kept_by_task"][example.task] += 1
+    return True
+
+
+def _summarize(examples, counts):
+    for name, values in (
+        ("input_tokens", [len(row.input_ids) for row in examples]),
+        ("target_tokens", [len(row.target_ids) for row in examples]),
     ):
-        raise ValueError("input token interval requires positive integers with min <= max")
-    root = Path(dataset_dir)
+        counts[name] = _length_statistics(values)
+
+
+def load_pretraining(config, tokenizer, model_window):
+    """已有 TextSample 也保留完整输入与目标，使用同一正文长度上限。"""
+    minimum, limit = _limits(config, model_window)
+    root = Path(config.training.dataset_dir)
     seen_samples, document_sources, cluster_splits = set(), {}, {}
     splits, statistics = {}, {}
     for split in ("train", "dev", "test"):
-        examples = []
-        counts = {
-            "read": 0,
-            "kept": 0,
-            "filtered_too_short": 0,
-            "filtered_too_long": 0,
-            "read_by_task": {"ae": 0, "continuation": 0},
-            "kept_by_task": {"ae": 0, "continuation": 0},
-        }
+        examples, counts = [], _counts()
         path = root / f"{split}.jsonl"
         with path.open(encoding="utf-8") as stream:
             for line_number, line in enumerate(stream, 1):
@@ -67,150 +102,84 @@ def load_pretraining(
                     cluster_splits[sample.dedup_cluster] = split
                     counts["read"] += 1
                     counts["read_by_task"][sample.task] += 1
-                    input_ids = tuple(
-                        tokenizer.encode(sample.text, add_special_tokens=False, truncation=False)
-                    )
-                    if len(input_ids) < min_input_tokens:
-                        counts["filtered_too_short"] += 1
-                        continue
-                    if len(input_ids) > max_input_tokens:
-                        counts["filtered_too_long"] += 1
-                        continue
+                    input_ids = tuple(tokenizer.encode(sample.text, add_special_tokens=False))
                     target_ids = (
                         input_ids
                         if sample.task == "ae"
-                        else tuple(
-                            tokenizer.encode(
-                                sample.continuation, add_special_tokens=False, truncation=False
-                            )
-                        )
+                        else tuple(tokenizer.encode(sample.continuation, add_special_tokens=False))
                     )
                     if not target_ids:
                         raise ValueError("continuation tokenized to an empty target")
-                    examples.append(
-                        PretrainExample(
-                            sample.sample_id,
-                            sample.document_id,
-                            sample.dedup_cluster,
-                            sample.task,
-                            input_ids,
-                            target_ids,
-                        )
+                    example = PretrainExample(
+                        sample.sample_id,
+                        sample.document_id,
+                        sample.dedup_cluster,
+                        sample.task,
+                        input_ids,
+                        target_ids,
                     )
-                    counts["kept"] += 1
-                    counts["kept_by_task"][sample.task] += 1
+                    if _keep(example, minimum, limit, counts):
+                        examples.append(example)
                 except (ValueError, KeyError, TypeError) as error:
                     error.add_note(f"{path}:{line_number}")
                     raise
-        for name, field in (("input_tokens", "input_ids"), ("target_tokens", "target_ids")):
-            lengths = [len(getattr(example, field)) for example in examples]
-            counts[name] = {
-                "min": min(lengths) if lengths else None,
-                "max": max(lengths) if lengths else None,
-                "total": sum(lengths),
-            }
-        splits[split] = tuple(examples)
-        statistics[split] = counts
+        _summarize(examples, counts)
+        splits[split], statistics[split] = tuple(examples), counts
     return splits, {
-        "input_token_interval": [min_input_tokens, max_input_tokens],
+        "kind": "text_samples",
+        "view": "text_samples",
+        "input_token_interval": [minimum, limit],
         "splits": statistics,
     }
 
 
-def load_multisegment_pretraining(
-    dataset_dir: str | Path,
-    tokenizer,
-    min_input_tokens: int,
-    max_input_tokens: int,
-    view: str,
-    lm_only: bool = False,
-    seed: int = 20261004,
-    lm_ratio: float = 0.5,
-    lm_target_tokens: int = 512,
-) -> tuple[dict[str, tuple[PretrainExample, ...]], dict]:
-    """按轨迹独立抽取连续前缀与一个任务，加载后固定供各 epoch 复用。"""
-    if (
-        type(min_input_tokens) is not int
-        or type(max_input_tokens) is not int
-        or not 1 <= min_input_tokens <= max_input_tokens
-    ):
-        raise ValueError("input token interval requires positive integers with min <= max")
-    if view != "multisegment_random_prefix":
-        raise ValueError(f"unknown multisegment data view: {view}")
-    root = Path(dataset_dir)
+def load_multisegment_pretraining(config, tokenizer, model_window):
+    """完整正文只构造一个 AE 或 LM 样本；LM 续文来自正文后的 continuation。"""
+    minimum, limit = _limits(config, model_window)
+    training = config.training
+    root = Path(training.dataset_dir)
     metadata = json.loads((root / "preparation.json").read_text(encoding="utf-8"))
-    preparation_config = SegmentationConfig(**metadata["config"]["window"])
-    if preparation_config.continuation_tokens < 1:
+    window = SegmentationConfig(**metadata["config"]["window"])
+    if window.continuation_tokens < 1:
         raise ValueError("continuation_tokens must be a positive integer")
+    lm_only = config.objective.method == "autocompressors"
     seen_samples = set()
     source_windows = SourceWindowTracker()
-    splits, statistics = {}, {}
-    # Share token integers across samples without duplicating each source for AE/LM.
-    token_pool = {}
+    splits, statistics, token_pool = {}, {}, {}
     for split in ("train", "dev", "test"):
-        path = root / f"{split}.jsonl"
-        examples, original_lengths, actual_lengths = [], [], []
-        prefix_segments, available_segments = [], []
+        examples, segment_counts = [], []
         counts = {
-            "source_samples": 0,
-            "kept_source_samples": 0,
-            "cropped_source_samples": 0,
-            "cropped_source_tokens": 0,
-            "read": 0,
-            "kept": 0,
-            "filtered_too_short": 0,
+            **_counts(),
             "short_continuation_sources": 0,
             "lm_to_ae_sources": 0,
-            "read_by_task": {"ae": 0, "continuation": 0},
-            "kept_by_task": {"ae": 0, "continuation": 0},
         }
+        path = root / f"{split}.jsonl"
         with path.open(encoding="utf-8") as stream:
             for line_number, line in enumerate(stream, 1):
                 try:
                     record = json.loads(line)
                     sample = MultisegmentSample(**record)
-                    sample.validate_plan(preparation_config)
+                    sample.validate_plan(window)
                     if sample.split != split:
                         raise ValueError("record split differs from its JSONL split")
                     if sample.trajectory_id in seen_samples:
                         raise ValueError("duplicate pretraining trajectory_id")
                     source_windows.add(record, len(sample.continuation))
                     seen_samples.add(sample.trajectory_id)
-                    counts["source_samples"] += 1
                     counts["read"] += 1
-                    segment_ids = [
-                        tokenizer.encode(
-                            sample.text[slice(*segment["char_span"])],
-                            add_special_tokens=False,
-                            truncation=False,
-                        )
-                        for segment in sample.segments
-                    ]
-                    body_ids = [token for segment in segment_ids for token in segment]
-                    cuts, total = [], 0
-                    for segment in segment_ids:
-                        total += len(segment)
-                        if total > max_input_tokens:
-                            break
-                        cuts.append(total)
-                    rng = random.Random(f"{seed}:pretraining:{sample.trajectory_id}")
-                    count = rng.randint(1, len(cuts)) if cuts else 1
-                    original_cut = cuts[count - 1] if cuts else len(segment_ids[0])
-                    cut = min(original_cut, max_input_tokens)
-                    task = "continuation" if lm_only or rng.random() < lm_ratio else "ae"
+                    rng = random.Random(f"{training.seed}:pretraining:{sample.trajectory_id}")
+                    task = "continuation" if lm_only or rng.random() < training.lm_ratio else "ae"
                     counts["read_by_task"][task] += 1
-                    if cut < min_input_tokens:
-                        counts["filtered_too_short"] += 1
-                        continue
                     input_ids = tuple(
-                        token_pool.setdefault(token, token) for token in body_ids[:cut]
+                        token_pool.setdefault(token, token)
+                        for token in tokenizer.encode(sample.text, add_special_tokens=False)
                     )
                     target_ids = input_ids
                     if task == "continuation":
-                        remaining = body_ids[cut:] + tokenizer.encode(
-                            sample.continuation, add_special_tokens=False, truncation=False
+                        continuation = tokenizer.encode(
+                            sample.continuation, add_special_tokens=False
                         )
-                        if len(remaining) < lm_target_tokens:
+                        if len(continuation) < training.lm_target_tokens:
                             counts["short_continuation_sources"] += 1
                             if not lm_only:
                                 task = "ae"
@@ -218,52 +187,31 @@ def load_multisegment_pretraining(
                         if task == "continuation":
                             target_ids = tuple(
                                 token_pool.setdefault(token, token)
-                                for token in remaining[:lm_target_tokens]
+                                for token in continuation[: training.lm_target_tokens]
                             )
-                    examples.append(
-                        PretrainExample(
-                            f"{sample.trajectory_id}:{task}",
-                            sample.document_id,
-                            sample.dedup_cluster,
-                            task,
-                            input_ids,
-                            target_ids,
-                        )
+                    example = PretrainExample(
+                        f"{sample.trajectory_id}:{task}",
+                        sample.document_id,
+                        sample.dedup_cluster,
+                        task,
+                        input_ids,
+                        target_ids,
                     )
-                    original_lengths.append(original_cut)
-                    actual_lengths.append(cut)
-                    prefix_segments.append(count)
-                    available_segments.append(len(cuts))
-                    counts["kept_source_samples"] += 1
-                    counts["cropped_source_samples"] += int(cut < original_cut)
-                    counts["cropped_source_tokens"] += original_cut - cut
-                    counts["kept"] += 1
-                    counts["kept_by_task"][task] += 1
+                    if _keep(example, minimum, limit, counts):
+                        examples.append(example)
+                        segment_counts.append(len(sample.segments))
                 except (ValueError, KeyError, TypeError) as error:
                     error.add_note(f"{path}:{line_number}")
                     raise
-        # Each retained source contributes one prefix and one training objective.
-        for name, lengths in (
-            ("original_source_prefix_tokens", original_lengths),
-            ("actual_source_prefix_tokens", actual_lengths),
-            ("prefix_segments", prefix_segments),
-            ("available_prefix_segments", available_segments),
-            ("input_tokens", [len(example.input_ids) for example in examples]),
-            ("target_tokens", [len(example.target_ids) for example in examples]),
-        ):
-            counts[name] = {
-                "min": min(lengths) if lengths else None,
-                "max": max(lengths) if lengths else None,
-                "total": sum(lengths),
-            }
-        splits[split] = tuple(examples)
-        statistics[split] = counts
+        _summarize(examples, counts)
+        counts["source_segments"] = _length_statistics(segment_counts)
+        splits[split], statistics[split] = tuple(examples), counts
     return splits, {
         "kind": "multisegment_text",
-        "view": view,
-        "lm_target_tokens": lm_target_tokens,
-        "sampling_seed": seed,
-        "lm_ratio": 1.0 if lm_only else lm_ratio,
-        "input_token_interval": [min_input_tokens, max_input_tokens],
+        "view": training.pretrain_data_view,
+        "input_token_interval": [minimum, limit],
+        "sampling_seed": training.seed,
+        "lm_ratio": 1.0 if lm_only else training.lm_ratio,
+        "lm_target_tokens": training.lm_target_tokens,
         "splits": statistics,
     }

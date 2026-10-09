@@ -41,10 +41,13 @@
     "eval_every": 25,
     "save_every": 25,
     "min_input_tokens": 1,
-    "max_input_tokens": 8192,
     "init_checkpoint": null,
-    "pretrain_data_view": "multisegment_random_prefix",
+    "pretrain_data_view": "multisegment_full_text",
     "lm_ratio": 0.5,
-    "lm_target_tokens": 512
+    "lm_target_tokens": 512,
+    "stage_max_train_samples": {
+      "lm": 12800
+    },
+    "max_input_tokens": 12288
   }
 }

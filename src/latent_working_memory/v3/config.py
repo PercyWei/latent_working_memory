@@ -96,7 +96,8 @@ class ObjectiveConfig:
     stage: str = "pretrain"
     qa_batch_size: int = 8
     segment_tokens: int = 1024
-    icae_segment_ratio: int = 3
+    icae_min_segments: int = 3
+    icae_max_segments: int = 6
     ac_min_segment_tokens: int = 768
     ac_max_segment_tokens: int = 1024
     ac_bptt_steps: int = 2
@@ -130,13 +131,16 @@ class ObjectiveConfig:
         for name in (
             "qa_batch_size",
             "segment_tokens",
-            "icae_segment_ratio",
+            "icae_min_segments",
+            "icae_max_segments",
             "ac_min_segment_tokens",
             "ac_max_segment_tokens",
             "ac_bptt_steps",
             "append_slots",
         ):
             positive_integer(getattr(self, name), name)
+        if self.icae_min_segments > self.icae_max_segments:
+            raise ValueError("invalid ICAE-multi segment count interval")
         if self.ac_min_segment_tokens > self.ac_max_segment_tokens:
             raise ValueError("invalid AutoCompressors segment interval")
         if self.method == "autocompressors" and (
@@ -183,7 +187,7 @@ class TrainingConfig:
     lm_ratio: float = 0.5
     lm_target_tokens: int = 512
     min_input_tokens: int = 1
-    max_input_tokens: int = 8192
+    max_input_tokens: int | None = None
     max_train_samples: int | None = None
     max_dev_samples: int | None = None
     init_checkpoint: str | None = None
@@ -206,18 +210,17 @@ class TrainingConfig:
             "eval_every",
             "save_every",
             "min_input_tokens",
-            "max_input_tokens",
             "lm_target_tokens",
         ):
             positive_integer(getattr(self, name), name)
-        for name in ("max_train_samples", "max_dev_samples"):
+        for name in ("max_input_tokens", "max_train_samples", "max_dev_samples"):
             if getattr(self, name) is not None:
                 positive_integer(getattr(self, name), name)
-        if self.min_input_tokens > self.max_input_tokens:
-            raise ValueError("invalid pretraining length interval")
+        if self.max_input_tokens is not None and self.min_input_tokens > self.max_input_tokens:
+            raise ValueError("min_input_tokens must not exceed max_input_tokens")
         if self.pretrain_data_view not in {
             "text_samples",
-            "multisegment_random_prefix",
+            "multisegment_full_text",
         }:
             raise ValueError("unsupported pretrain_data_view")
         finite(self.lm_ratio, "lm_ratio")
@@ -254,6 +257,11 @@ class ExperimentConfig:
     training: TrainingConfig
 
     def __post_init__(self):
+        if (
+            self.objective.method == "icae_multi"
+            and self.objective.icae_max_segments > self.model.memory_slots
+        ):
+            raise ValueError("ICAE-multi icae_max_segments must not exceed memory_slots")
         if (
             self.objective.method in DYNAMIC_METHODS
             and self.objective.append_slots > self.model.memory_slots
@@ -300,8 +308,17 @@ def load_preset(path):
         raise ValueError("preset objective requires stages and must not contain stage")
     stages = validate_stage_sequence(objective["method"], objective.pop("stages"))
     model = ModelConfig(**raw["model"])
-    training = TrainingConfig(**raw["training"])
+    training = dict(raw["training"])
+    stage_limits = training.pop("stage_max_train_samples")
+    if not isinstance(stage_limits, dict) or set(stage_limits) != set(stages):
+        raise ValueError("stage_max_train_samples must specify each declared stage exactly once")
+    if "max_train_samples" in training:
+        raise ValueError("preset training requires stage_max_train_samples, not max_train_samples")
     return tuple(
-        ExperimentConfig(model, ObjectiveConfig(**objective, stage=stage), training)
+        ExperimentConfig(
+            model,
+            ObjectiveConfig(**objective, stage=stage),
+            TrainingConfig(**training, max_train_samples=stage_limits[stage]),
+        )
         for stage in stages
     )

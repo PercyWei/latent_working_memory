@@ -9,6 +9,7 @@ from latent_working_memory.v3.config import ObjectiveConfig
 from latent_working_memory.v3.data import FactQATrajectory, QA, Segment, StepUsage
 from latent_working_memory.v3.objective import TokenMemoryTask, damage_action, memory_change_score
 from latent_working_memory.v3.pretrain_data import PretrainExample
+from latent_working_memory.v3.segmentation import even_token_chunks, icae_multi_plan
 from .test_model import build_model
 
 
@@ -65,11 +66,19 @@ def trajectory(split="train", n=3):
     )
 
 
-def task(method, stage, **options):
+def task(method, stage, memory_slots=3, **options):
+    if method == "icae_multi":
+        options = {"icae_min_segments": 3, "icae_max_segments": 3, **options}
+    config = ObjectiveConfig(method=method, stage=stage, **{"append_slots": 3, **options})
     return TokenMemoryTask(
-        build_model(),
+        build_model(
+            memory_slots=memory_slots,
+            write_slots=(memory_slots + config.icae_min_segments - 1) // config.icae_min_segments
+            if method == "icae_multi"
+            else None,
+        ),
         TinyTokenizer(),
-        ObjectiveConfig(method=method, stage=stage, **{"append_slots": 3, **options}),
+        config,
     )
 
 
@@ -122,7 +131,7 @@ def test_damage_rule(values, expected):
     "method,expected_histories,expected_slots",
     [
         ("icae_single", [0], 3),
-        ("icae_multi", [0, 0, 0], 9),
+        ("icae_multi", [0, 0, 0], 3),
         ("autocompressors", [0, 1, 2], 9),
     ],
 )
@@ -272,7 +281,7 @@ def test_dynamic_initial_64_append_8_and_overwrite_preserves_last_block_size(
 )
 @pytest.mark.parametrize("kind", ["ae", "continuation"])
 def test_pretrain_ae_and_lm_backpropagate_from_frozen_reader(method, kind):
-    model = task(method, "pretrain", icae_segment_ratio=1)
+    model = task(method, "pretrain", icae_min_segments=2, icae_max_segments=2)
     calls = trace_writes(model)
     example = PretrainExample("s", "d", "c", kind, (3, 4, 5, 6, 7, 8), (9, 10))
     if kind == "ae":
@@ -285,16 +294,19 @@ def test_pretrain_ae_and_lm_backpropagate_from_frozen_reader(method, kind):
     assert len(calls) == (2 if method == "icae_multi" else 1)
     if method != "icae_multi":
         assert calls[0][0].tolist() == list(example.input_ids)
-    assert result["metrics"]["slots_final"] == model.codec.memory_slots * len(calls)
+    assert result["metrics"]["slots_final"] == model.codec.memory_slots
     assert result["metrics"]["target_tokens"] == len(example.target_ids) + 1
 
 
-@pytest.mark.parametrize("memory_slots,ratio", [(3, 1), (4, 1), (3, 2), (4, 2)])
-def test_icae_multi_pretrain_uses_slot_scaled_chunks_and_joint_reader(memory_slots, ratio):
+@pytest.mark.parametrize("total_slots,num_segments", [(4, 2), (5, 4), (6, 2), (8, 3)])
+def test_icae_multi_pretrain_uses_uniform_chunks_with_fixed_total_budget(total_slots, num_segments):
+    write_slots = (total_slots + num_segments - 1) // num_segments
     model = TokenMemoryTask(
-        build_model(memory_slots=memory_slots),
+        build_model(memory_slots=total_slots, write_slots=write_slots),
         TinyTokenizer(),
-        ObjectiveConfig(method="icae_multi", icae_segment_ratio=ratio),
+        ObjectiveConfig(
+            method="icae_multi", icae_min_segments=num_segments, icae_max_segments=num_segments
+        ),
     )
     writes = trace_writes(model)
     reads, original = [], model.codec.answer_nll
@@ -308,21 +320,33 @@ def test_icae_multi_pretrain_uses_slot_scaled_chunks_and_joint_reader(memory_slo
     example = PretrainExample("ae", "d", "c", "ae", tokens, tokens)
     result = model(example)
     result["loss"].backward()
-    chunk_length = memory_slots * ratio
-    expected = [tokens[i : i + chunk_length] for i in range(0, len(tokens), chunk_length)]
+    expected = even_token_chunks(tokens, num_segments)
     assert [tuple(tokens.tolist()) for tokens, _, _ in writes] == expected
-    assert len(expected[-1]) < chunk_length
+    assert len(writes) == num_segments
+    assert max(map(len, expected)) - min(map(len, expected)) <= 1
+    assert tuple(token for chunk in expected for token in chunk) == tokens
     assert all(not history for _, history, _ in writes)
-    assert all(len(memory) == memory_slots for _, _, memory in writes)
+    expected_slots, remainder = divmod(total_slots, num_segments)
+    assert [len(memory) for _, _, memory in writes] == [
+        expected_slots + (index < remainder) for index in range(num_segments)
+    ]
     assert all(memory.grad is not None and memory.grad.abs().sum() > 0 for _, _, memory in writes)
     assert len(reads) == 1 and len(reads[0]) == 1
     torch.testing.assert_close(reads[0][0], torch.cat([memory for _, _, memory in writes]))
-    assert result["metrics"]["slots_final"] == memory_slots * len(expected)
+    assert result["metrics"]["slots_final"] == total_slots
+    assert model.codec.memory_embeddings.shape[0] == write_slots
+    assert torch.all(model.codec.memory_embeddings.grad.abs().sum(dim=1) > 0)
 
 
-@pytest.mark.parametrize("ratio", [1, 3])
-def test_icae_multi_qa_preserves_variable_data_segments_independent_of_ratio(ratio):
-    model = task("icae_multi", "qa", icae_segment_ratio=ratio)
+@pytest.mark.parametrize("num_segments", [2, 4])
+def test_icae_multi_qa_rechunks_full_text_and_keeps_original_question_scopes(num_segments):
+    model = task(
+        "icae_multi",
+        "qa",
+        memory_slots=8,
+        icae_min_segments=num_segments,
+        icae_max_segments=num_segments,
+    )
     record = trajectory()
     segment_tokens = ((3, 4), tuple(range(5, 12)), (12, 13, 14, 15))
     record = replace(
@@ -334,11 +358,66 @@ def test_icae_multi_qa_preserves_variable_data_segments_independent_of_ratio(rat
         full_input_ids=tuple(token for tokens in segment_tokens for token in tokens),
     )
     writes = trace_writes(model)
+    requests, original = [], model._qa_losses_batch
+
+    def traced(values, events=None, timing_key="read_seconds"):
+        requests.extend(values)
+        return original(values, events, timing_key)
+
+    model._qa_losses_batch = traced
     result = model(record)
     result["loss"].backward()
-    assert [tuple(tokens.tolist()) for tokens, _, _ in writes] == list(segment_tokens)
+    assert [tuple(tokens.tolist()) for tokens, _, _ in writes] == even_token_chunks(
+        record.full_input_ids, num_segments
+    )
     assert all(not history for _, history, _ in writes)
-    assert result["metrics"]["slots_final"] == len(segment_tokens) * model.codec.memory_slots
+    assert result["metrics"]["slots_final"] == model.codec.memory_slots
+    assert len(requests) == 1
+    assert requests[0][2] == ("train2", "train0", "train1")
+    assert result["metrics"]["qa_new_count"] == 1
+    assert result["metrics"]["qa_old_count"] == 2
+    assert result["metrics"]["write_calls"] == num_segments
+
+
+@pytest.mark.parametrize("stage", ["pretrain", "qa"])
+def test_icae_multi_rejects_text_shorter_than_fixed_chunk_count(stage):
+    model = task("icae_multi", stage, memory_slots=4, icae_min_segments=4, icae_max_segments=4)
+    example = (
+        PretrainExample("short", "d", "c", "ae", (3, 4, 5), (3, 4, 5))
+        if stage == "pretrain"
+        else trajectory(n=1)
+    )
+    with pytest.raises(ValueError, match="as many tokens as sampled ICAE chunks"):
+        model(example)
+
+
+def test_icae_multi_sampled_count_and_capacity_are_reproducible_per_example():
+    tokens = tuple(range(3, 23))
+    plans = [icae_multi_plan(tokens, 512, 3, 6, 42, f"s{i}") for i in range(32)]
+    assert {len(chunks) for chunks, _ in plans} == {3, 4, 5, 6}
+    for index, (chunks, slots) in enumerate(plans):
+        assert (chunks, slots) == icae_multi_plan(tokens, 512, 3, 6, 42, f"s{index}")
+        assert sum(slots) == 512
+        assert max(slots) - min(slots) <= 1
+        assert max(map(len, chunks)) - min(map(len, chunks)) <= 1
+        assert tuple(token for chunk in chunks for token in chunk) == tokens
+    assert plans[0][1] == [86, 86, 85, 85, 85, 85]
+    assert plans[2][1] == [171, 171, 170]
+
+
+def test_icae_multi_keeps_sampled_chunks_across_epochs():
+    model = task(
+        "icae_multi", "qa", memory_slots=8, icae_min_segments=3, icae_max_segments=6, seed=42
+    )
+    record = replace(trajectory(n=3), trajectory_id="s0")
+    with torch.no_grad():
+        first, first_events = model.build_memory(record, epoch=0)
+        later, later_events = model.build_memory(record, epoch=10)
+    assert len(first) == len(later) == 6
+    assert sum(map(len, first)) == 8
+    torch.testing.assert_close(first, later, rtol=0, atol=0)
+    assert [event["step"] for event in first_events] == list(range(6))
+    assert all(event["segment_id"] is None for event in first_events + later_events)
 
 
 def test_ac_truncates_memory_at_two_segments_but_retains_writer_learning():
@@ -412,11 +491,19 @@ def test_ac_short_sources_retain_writer_and_memory_gradients(total_tokens):
     "method,stage,options",
     [
         ("icae_single", "pretrain", {}),
-        ("icae_multi", "pretrain", {"icae_segment_ratio": 1}),
+        (
+            "icae_multi",
+            "pretrain",
+            {"memory_slots": 8, "icae_min_segments": 3, "icae_max_segments": 6},
+        ),
         ("memory_change", "pretrain", {}),
         ("information_loss", "pretrain", {}),
         ("icae_single", "qa", {}),
-        ("icae_multi", "qa", {}),
+        (
+            "icae_multi",
+            "qa",
+            {"memory_slots": 8, "icae_min_segments": 3, "icae_max_segments": 6},
+        ),
         ("memory_change", "warmup", {"append_probability": 0.5}),
         ("information_loss", "warmup", {"append_probability": 0.5}),
         ("memory_change", "policy", {"threshold_i": 0.0}),

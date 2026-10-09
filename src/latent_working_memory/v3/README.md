@@ -10,15 +10,16 @@
 
 | 符号 | 含义与配置字段 | 默认值 |
 |---|---|---:|
-| `K` | 基线每块容量、动态首次写入容量；`model.memory_slots` | 512 slots |
+| `K` | ICAE 总容量、AutoCompressors 每块容量、动态首次写入容量；`model.memory_slots` | 512 slots |
 | `ΔK` | 动态方法每次追加的新块容量；`objective.append_slots` | 32 slots |
+| `n` | ICAE-multi 的压缩块数；`objective.icae_min_segments` 至 `icae_max_segments` | 3–6 块 |
 
 AE 表示重建输入，LM 表示预测后续文本，QA 表示问答训练。
 
 | 方法 | 记忆组织 | 默认训练流程 |
 |---|---|---|
 | `icae_single` | 完整历史一次压缩为 K slots | AE／LM → QA |
-| `icae_multi` | 各段独立压缩为 K slots，拼接全部块 | 多段 AE／LM → QA |
+| `icae_multi` | 完整历史均分为 n 块，独立压缩后拼接，总容量为 K slots | 多段 AE／LM → QA |
 | `autocompressors` | 新段与累计记忆共同压缩，每次追加 K slots | 随机分段 next-token LM |
 | `memory_change` | 覆盖末块或追加 ΔK slots，按记忆表示变化决定 | AE／LM → 动作预热 → 策略训练 |
 | `information_loss` | 同样的写入方式，按旧信息损失决定 | AE／LM → 动作预热 → 策略训练 |
@@ -32,6 +33,12 @@ AE 表示重建输入，LM 表示预测后续文本，QA 表示问答训练。
 | 可训练参数 | 编码 LoRA（rank 128、alpha 32，作用于 attention／MLP projections）及 gist embeddings；后者使用零均值、标准差 0.02 的高斯初始化 |
 | 读取 | 从相同基座复制独立冻结 Decoder，不安装 LoRA；读取损失仍向记忆及写入器反传 |
 | 执行 | verl `BaseEngine`、优化器与 DDP；默认使用 BF16、SDPA 和非重入逐层激活重计算 |
+
+ICAE-multi 的分块规则用于 AE／LM、QA 与评估：
+
+- 按 seed 和样本 ID 在范围内均匀采样 n，同一样本跨 epoch 保持不变。
+- 正文按 token 顺序均分，块长最多相差 1；容量按商与余数分配，总和严格为 K。例如 K=512、n=3 时为 **171／171／170 slots**。
+- 各块复用同一组 gist embeddings，仅分配 `ceil(K / icae_min_segments)` 行。FactQA 原始段界用于题目来源和 old／new 划分。
 
 ## 两种扩容规则
 
@@ -69,16 +76,25 @@ g = Lrw - Lapp      # 追加相对覆盖的收益
 |---|---|---|
 | FineWeb 多段文本 | `preparation.json`、`train/dev/test.jsonl`；每行是 `MultisegmentSample` | ICAE 和动态共享预训练的 AE／LM，以及 AutoCompressors 的 LM |
 | FactQA | `preparation.json`、`train/dev/test.jsonl`；保留原文、字符段界、QA 和 `usage` | ICAE QA、动态动作预热／策略训练及最终评估 |
-| 已有文本成品（可选） | `TextSample` 格式的 `train/dev/test.jsonl` | 通过 `pretrain_data_view=text_samples` 选择，按输入长度筛选 |
+| 已有文本成品（可选） | `TextSample` 格式的 `train/dev/test.jsonl` | 通过 `pretrain_data_view=text_samples` 选择，保留完整输入与目标 |
 
 数据构造见 [FineWeb 多段文本](../data_preparation/fineweb_multisegment/README.md) 和 [FactQA](../data_preparation/fineweb_factqa/README.md)。预训练与 QA 的来源文档及去重簇不得重叠；加载时校验划分、来源和题池隔离。
 
 **预训练输入与目标**
 
-- 默认 `multisegment_random_prefix`：按保存的字符段独立分词，在 `training.max_input_tokens` 上限内均匀随机选择连续前缀段数（默认 8192 tokens）；只有首段超限时裁剪首段。采样由 seed 和轨迹 ID 决定，加载后各 epoch 复用。
-- ICAE 与动态共享预训练为每条来源选择一个目标：`training.lm_ratio` 控制 LM 概率（默认 0.5）；AE 重建选中前缀，LM 预测其后紧邻的续文。续文目标长度由 `training.lm_target_tokens` 控制（默认 512 tokens），不足时转为 AE。
-- ICAE-single 与动态共享预训练一次将选中前缀压缩为 K slots。ICAE-multi 按 `K × objective.icae_segment_ratio` 分块（倍率默认 3），独立压缩后联合读取；例如 K=512、倍率为 3 时块长为 1536 tokens。QA 与评估使用 FactQA 保存的段界。
-- AutoCompressors 始终使用 LM：拼接选中前缀与可用续文，按 `objective.ac_min_segment_tokens` 至 `objective.ac_max_segment_tokens` 随机分段（默认 768–1024 tokens），短流及尾段允许更短。截断周期由 `objective.ac_bptt_steps` 控制（默认每两段），按目标 token 数平均损失。
+- 默认 `multisegment_full_text`：使用完整正文，超出 `training.max_input_tokens` 的样本整条过滤。该参数仅计算正文 tokens，不计记忆、提示和目标；`null` 使用模型窗口，预设为 12288（12k）。模型仍检查每次实际编码／解码的窗口长度。
+- ICAE 与动态共享预训练为每条来源选择一个目标：`training.lm_ratio` 控制 LM 概率（默认 0.5）；AE 重建全文，LM 预测保存的紧邻续文。LM 目标最多取 `training.lm_target_tokens`（默认 512）；续文不足时转为 AE。目标选择由 seed 和样本 ID 决定，跨 epoch 复用。
+- ICAE-single 与动态共享预训练一次将完整正文压缩为 K slots；ICAE-multi 按上述规则独立压缩后联合读取。
+- AutoCompressors 始终使用 LM：拼接完整正文与可用续文，按 `objective.ac_min_segment_tokens` 至 `objective.ac_max_segment_tokens` 随机分段（默认 768–1024 tokens），尾段允许更短。截断周期由 `objective.ac_bptt_steps` 控制（默认每两段），按目标 token 数平均损失。
+
+QA 保留完整轨迹与对应题池。训练数据上限由预设的 `training.stage_max_train_samples` 按阶段分别指定，过滤后以 seed 可复现地选取；`null` 表示不限：
+
+| 阶段 | 默认训练样本上限 |
+|---|---:|
+| ICAE／共享预训练 `pretrain`、AutoCompressors `lm` | 12800 |
+| ICAE `qa`、动态 `warmup`／`policy` | 全部 |
+
+各阶段可独立通过 CLI 覆盖；`smoke`／`pilot` 另受试跑档位上限约束，取较小值。预训练正文长度过滤不应用于 QA。
 
 **动态方法的三个阶段**
 

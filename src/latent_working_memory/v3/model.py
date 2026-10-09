@@ -25,6 +25,7 @@ class GistMemoryModel(nn.Module):
         lora_target_modules,
         lora_dropout=0.0,
         gradient_checkpointing=True,
+        write_slots=None,
     ):
         super().__init__()
         if base_model.config.model_type not in {"llama", "qwen2", "qwen3"}:
@@ -33,11 +34,16 @@ class GistMemoryModel(nn.Module):
             raise ValueError("gradient_checkpointing must be boolean")
         if type(memory_slots) is not int or memory_slots < 1:
             raise ValueError("memory_slots must be a positive integer")
+        write_slots = memory_slots if write_slots is None else write_slots
+        if type(write_slots) is not int or not 1 <= write_slots <= memory_slots:
+            raise ValueError("write_slots must be a positive integer no greater than memory_slots")
         if lora_dropout != 0.0:
             raise ValueError("the initial gist writer requires lora_dropout=0")
         self.width = base_model.config.hidden_size
         self.max_positions = base_model.config.max_position_embeddings
+        # 总容量 K 与单次写入可用的 gist embeddings 数可以不同。
         self.memory_slots = memory_slots
+        self.write_slots = write_slots
         base_model.requires_grad_(False)
         base_model.config.use_cache = False
         # 保持原有 dropout 关闭的语义，同时允许 train 模式触发原生逐层重算。
@@ -67,7 +73,7 @@ class GistMemoryModel(nn.Module):
                 backbone.gradient_checkpointing_disable()
         embedding = self.language_model.get_input_embeddings().weight
         self.memory_embeddings = nn.Parameter(
-            torch.empty(memory_slots, self.width, device=embedding.device, dtype=torch.float32)
+            torch.empty(write_slots, self.width, device=embedding.device, dtype=torch.float32)
         )
         nn.init.normal_(self.memory_embeddings, mean=0.0, std=0.02)
         self.train()
@@ -101,14 +107,14 @@ class GistMemoryModel(nn.Module):
         histories = [[] for _ in text_ids] if memory_blocks is None else memory_blocks
         if len(histories) != len(text_ids):
             raise ValueError("writer texts and memory histories must align")
-        slots = [self.memory_slots] * len(text_ids) if output_slots is None else output_slots
+        slots = [self.write_slots] * len(text_ids) if output_slots is None else output_slots
         if len(slots) != len(text_ids):
             raise ValueError("writer texts and output_slots must align")
         embed = self.language_model.get_input_embeddings()
         rows = []
         for tokens, blocks, count in zip(text_ids, histories, slots, strict=True):
-            if type(count) is not int or not 1 <= count <= self.memory_slots:
-                raise ValueError("output_slots must be integers between 1 and memory_slots")
+            if type(count) is not int or not 1 <= count <= self.write_slots:
+                raise ValueError("output_slots must be integers between 1 and write_slots")
             self._check_tokens(tokens)
             for memory in blocks:
                 self._check_memory(memory)

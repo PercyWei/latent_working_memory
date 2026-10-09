@@ -43,7 +43,10 @@
     "eval_every": 25,
     "save_every": 25,
     "min_input_tokens": 1,
-    "max_input_tokens": 32768,
-    "lm_target_tokens": 512
+    "lm_target_tokens": 512,
+    "stage_max_train_samples": {
+      "warmup": null,
+      "policy": null
+    }
   }
 }

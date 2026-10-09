@@ -51,6 +51,9 @@ def prepare_dataset_entries(args):
 def install_preset_stages(tmp_path, monkeypatch, filename, stages, initialization=None):
     preset = json.loads((Path("configs/v3") / filename).read_text())
     preset["objective"]["stages"] = list(stages)
+    preset["training"]["stage_max_train_samples"] = {
+        stage: preset["training"]["stage_max_train_samples"].get(stage, 512) for stage in stages
+    }
     if initialization is not None:
         preset["training"]["init_checkpoint"] = str(initialization)
     path = tmp_path / filename
@@ -66,6 +69,11 @@ def custom_preset_file(tmp_path, method, **sections):
     preset = json.loads((Path("configs/v3") / f"{method}.json").read_text())
     for section, values in sections.items():
         preset[section].update(values)
+    if "stages" in sections.get("objective", {}):
+        preset["training"]["stage_max_train_samples"] = {
+            stage: preset["training"]["stage_max_train_samples"][stage]
+            for stage in preset["objective"]["stages"]
+        }
     path = tmp_path / "custom experiment.json"
     path.write_text(json.dumps(preset))
     return path
@@ -199,7 +207,10 @@ def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode,
     )
     assert directory == args.output_root / "unit-job"
     for job in jobs:
-        assert job.config.training.max_train_samples == expected[0]
+        stage = job.config.objective.stage
+        assert job.config.training.max_train_samples == (
+            expected[0] if mode != "full" else 12800 if stage == "pretrain" else None
+        )
         assert job.config.training.max_dev_samples == expected[1]
         assert job.config.training.init_checkpoint is None
         assert job.config.training.swanlab_project == "latent-working-memory-v3"
@@ -426,6 +437,61 @@ def test_dynamic_qa_presets_default_to_full_bptt(tmp_path):
     assert all(job.config.objective.bptt_steps is None for job in jobs)
 
 
+def test_full_plan_preserves_each_stage_training_budget(tmp_path):
+    _, _, jobs = job_plan.build_jobs(arguments(tmp_path, "--method", "all", "--mode", "full"))
+    for job in jobs:
+        assert job.config.training.max_train_samples == (
+            12800 if job.config.objective.stage in {"pretrain", "lm"} else None
+        )
+
+
+@pytest.mark.parametrize("stage", ["pretrain", "lm", "qa", "warmup", "policy"])
+@pytest.mark.parametrize("limit", [0, 7])
+def test_stage_training_limit_overrides_only_selected_stage(tmp_path, stage, limit):
+    _, _, defaults = job_plan.build_jobs(arguments(tmp_path, "--method", "all", "--mode", "full"))
+    _, _, overridden = job_plan.build_jobs(
+        arguments(
+            tmp_path, "--method", "all", "--mode", "full", f"--{stage}-train-samples", str(limit)
+        )
+    )
+    for before, after in zip(defaults, overridden, strict=True):
+        assert after.config.training.max_train_samples == (
+            (limit or None)
+            if after.config.objective.stage == stage
+            else before.config.training.max_train_samples
+        )
+
+
+@pytest.mark.parametrize("mode,profile_limit", [("smoke", 16), ("pilot", 256)])
+@pytest.mark.parametrize("limit", [0, 7, 3000])
+def test_trial_profiles_cap_each_stage_independently(tmp_path, mode, profile_limit, limit):
+    _, _, jobs = job_plan.build_jobs(
+        arguments(tmp_path, "--mode", mode, "--warmup-train-samples", str(limit))
+    )
+    pretrain, warmup, policy = jobs
+    assert pretrain.config.training.max_train_samples == profile_limit
+    assert warmup.config.training.max_train_samples == min(limit or profile_limit, profile_limit)
+    assert policy.config.training.max_train_samples == profile_limit
+
+
+def test_zero_input_limit_selects_model_window_only_for_ae_lm(tmp_path):
+    _, _, defaults = job_plan.build_jobs(arguments(tmp_path, "--method", "all"))
+    _, _, overridden = job_plan.build_jobs(
+        arguments(tmp_path, "--method", "all", "--max-input-tokens", "0")
+    )
+    for before, after in zip(defaults, overridden, strict=True):
+        assert after.config.training.max_input_tokens == (
+            None
+            if after.config.objective.stage in {"pretrain", "lm"}
+            else before.config.training.max_input_tokens
+        )
+
+
+def test_removed_shared_training_limit_is_rejected():
+    with pytest.raises(SystemExit):
+        gpu_job.parse_args(["--train-samples", "10"])
+
+
 def test_default_pretraining_data_is_the_shared_multisegment_root():
     args = gpu_job.parse_args([])
     assert args.config is None
@@ -470,7 +536,12 @@ def test_custom_method_preset_preserves_parameters_and_launcher_overrides(
             "micro_batch_size_per_gpu": 3,
             "gradient_accumulation_steps": 5,
             "dataset_dir": "ignored/preset-data",
-            "max_train_samples": 999,
+            "stage_max_train_samples": {
+                stage: 999
+                for stage in json.loads((Path("configs/v3") / f"{method}.json").read_text())[
+                    "objective"
+                ]["stages"]
+            },
             "max_dev_samples": 888,
             "eval_every": 17,
             "save_every": 19,
@@ -920,9 +991,9 @@ def test_all_methods_build_a_complete_topologically_ordered_stage_graph(tmp_path
             assert Path(job.config.training.dataset_dir) == args.qa_data
         else:
             assert Path(job.config.training.dataset_dir) == args.pretrain_data
-            assert job.config.training.pretrain_data_view == "multisegment_random_prefix"
+            assert job.config.training.pretrain_data_view == "multisegment_full_text"
             assert job.config.training.min_input_tokens == 1
-            assert job.config.training.max_input_tokens == 8192
+            assert job.config.training.max_input_tokens == 12288
             assert job.config.training.lm_ratio == 0.5
     assert len({job.config.training.experiment_dir for job in jobs}) == 6
     for method in ("icae_single", "icae_multi"):
@@ -1159,9 +1230,12 @@ def test_pretraining_sampling_overrides_do_not_change_qa_or_autocompressors_task
     for job in jobs:
         stage = job.config.objective.stage
         assert job.config.training.lm_ratio == (0.75 if stage == "pretrain" else 0.5)
-        dynamic = job.config.objective.method in {"memory_change", "information_loss"}
         assert job.config.training.max_input_tokens == (
-            2048 if stage in {"pretrain", "lm"} else 32768 if dynamic else 8192
+            2048
+            if stage in {"pretrain", "lm"}
+            else None
+            if stage in {"warmup", "policy"}
+            else 12288
         )
         assert job.config.training.lm_target_tokens == (256 if stage in {"pretrain", "lm"} else 512)
     ac = next(job for job in jobs if job.config.objective.method == "autocompressors")
@@ -1172,19 +1246,18 @@ def test_pretraining_sampling_overrides_do_not_change_qa_or_autocompressors_task
     "method",
     ["all", "icae_multi", "icae_single", "memory_change", "information_loss", "autocompressors"],
 )
-def test_icae_segment_ratio_override_only_changes_multi_pretraining(tmp_path, method):
+def test_icae_segment_count_overrides_change_both_multi_stages(tmp_path, method):
     _, _, defaults = job_plan.build_jobs(arguments(tmp_path, "--method", method))
     _, _, overridden = job_plan.build_jobs(
-        arguments(tmp_path, "--method", method, "--icae-segment-ratio", "5")
+        arguments(
+            tmp_path, "--method", method, "--icae-min-segments", "2", "--icae-max-segments", "8"
+        )
     )
     for before, after in zip(defaults, overridden, strict=True):
-        multi_pretrain = (
-            after.config.objective.method == "icae_multi"
-            and after.config.objective.stage == "pretrain"
-        )
+        multi = after.config.objective.method == "icae_multi"
         expected = (
-            replace(before.config.objective, icae_segment_ratio=5)
-            if multi_pretrain
+            replace(before.config.objective, icae_min_segments=2, icae_max_segments=8)
+            if multi
             else before.config.objective
         )
         assert after.config.objective == expected
@@ -1192,16 +1265,22 @@ def test_icae_segment_ratio_override_only_changes_multi_pretraining(tmp_path, me
         assert after.config.model == before.config.model
 
 
-def test_icae_segment_ratio_default_preserves_the_preset(tmp_path, monkeypatch):
+def test_icae_segment_count_defaults_preserve_the_preset(tmp_path, monkeypatch):
     def preset(path):
         return tuple(
-            replace(config, objective=replace(config.objective, icae_segment_ratio=4))
+            replace(
+                config,
+                objective=replace(config.objective, icae_min_segments=2, icae_max_segments=8),
+            )
             for config in load_preset(path)
         )
 
     monkeypatch.setattr(job_plan, "load_preset", preset)
     _, _, jobs = job_plan.build_jobs(arguments(tmp_path, "--method", "icae_multi"))
-    assert all(job.config.objective.icae_segment_ratio == 4 for job in jobs)
+    assert all(
+        (job.config.objective.icae_min_segments, job.config.objective.icae_max_segments) == (2, 8)
+        for job in jobs
+    )
 
 
 def test_explicit_overrides_and_zero_remove_profile_limits(tmp_path):
@@ -1209,10 +1288,14 @@ def test_explicit_overrides_and_zero_remove_profile_limits(tmp_path):
         tmp_path,
         "--method",
         "memory_change",
+        "--mode",
+        "full",
         "--dry-run",
         "--init-checkpoint",
         "parent checkpoint.pt",
-        "--train-samples",
+        "--warmup-train-samples",
+        "0",
+        "--policy-train-samples",
         "0",
         "--dev-samples",
         "6",
@@ -1306,7 +1389,7 @@ def test_plan_derives_each_global_batch_from_selected_gpus_microbatch_and_accumu
         ["--gpus", "4,04"],
         ["--gpus", "4,"],
         ["--gpus", ""],
-        ["--train-samples", "-1"],
+        ["--pretrain-train-samples", "-1"],
         ["--epochs", "0"],
         ["--micro-batch-size-per-gpu", "0"],
         ["--micro-batch-size-per-gpu", "-1"],
@@ -1318,12 +1401,12 @@ def test_plan_derives_each_global_batch_from_selected_gpus_microbatch_and_accumu
         ["--lm-ratio", "1.1"],
         ["--lm-ratio", "nan"],
         ["--lm-ratio", "inf"],
-        ["--max-input-tokens", "0"],
+        ["--max-input-tokens", "-1"],
         ["--lm-target-tokens", "0"],
         ["--lm-target-tokens", "-1"],
-        ["--icae-segment-ratio", "0"],
-        ["--icae-segment-ratio", "-1"],
-        ["--icae-segment-ratio", "1.5"],
+        ["--icae-min-segments", "0"],
+        ["--icae-min-segments", "-1"],
+        ["--icae-max-segments", "1.5"],
         ["--bptt-steps", "-1"],
         ["--method", "icae_single", "--bptt-steps", "2"],
         ["--method", "icae_multi", "--bptt-steps", "2"],
@@ -1523,7 +1606,7 @@ def test_baselines_use_the_same_multisegment_root(tmp_path, monkeypatch, method)
 
     assert result["status"] == "finished"
     trained = [config for call in commands.calls for config in call.get("configs", [])]
-    assert trained[0].training.pretrain_data_view == "multisegment_random_prefix"
+    assert trained[0].training.pretrain_data_view == "multisegment_full_text"
     assert Path(trained[0].training.dataset_dir) == args.pretrain_data
 
 
@@ -1717,7 +1800,7 @@ def test_existing_owned_output_is_rejected_without_touching_it(tmp_path, monkeyp
     assert not commands.calls
 
 
-def test_full_execution_starts_a_new_unbounded_run_without_smoke_checkpoint(tmp_path, monkeypatch):
+def test_full_execution_uses_its_stage_budget_without_smoke_checkpoint(tmp_path, monkeypatch):
     smoke = arguments(tmp_path, "--method", "dynamic_pretrain")
     prepare_dataset_entries(smoke)
     commands = Commands()
@@ -1736,7 +1819,7 @@ def test_full_execution_starts_a_new_unbounded_run_without_smoke_checkpoint(tmp_
     full_call = commands.calls[-1]
     assert "--stop-after-steps" not in full_call["command"]
     assert full_call["configs"][0].training.init_checkpoint is None
-    assert full_call["configs"][0].training.max_train_samples is None
+    assert full_call["configs"][0].training.max_train_samples == 12800
     assert full_call["configs"][0].training.max_dev_samples is None
 
 

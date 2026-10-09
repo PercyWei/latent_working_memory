@@ -2,14 +2,13 @@
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-import hashlib
-import random
 from time import perf_counter
 
 import torch
 from torch import nn
 
 from latent_working_memory.v3.config import DYNAMIC_METHODS
+from latent_working_memory.v3.segmentation import ac_token_chunks, example_rng, icae_multi_plan
 
 
 @dataclass
@@ -33,11 +32,6 @@ def memory_change_score(old, rewritten, epsilon):
 def damage_action(l0, lrw, lapp, threshold_d, threshold_g, eta):
     damage, gain = lrw - l0, lrw - lapp
     return (gain > threshold_g) or (damage > threshold_d and gain > eta)
-
-
-def example_rng(seed, epoch, identifier):
-    value = hashlib.sha256(f"{seed}:{epoch}:{identifier}".encode()).digest()
-    return random.Random(int.from_bytes(value[:8], "big"))
 
 
 @contextmanager
@@ -114,10 +108,10 @@ class TokenMemoryTask(nn.Module):
         return results
 
     @staticmethod
-    def _event(trajectory, step):
+    def _event(step, segment_id):
         return {
             "step": step,
-            "segment_id": trajectory.segments[step].segment_id,
+            "segment_id": segment_id,
             "action": "initial",
             "slots": 0,
             "write_calls": 0,
@@ -128,6 +122,25 @@ class TokenMemoryTask(nn.Module):
             "scores": {},
         }
 
+    def _num_updates(self, trajectories):
+        if self.cfg.method == "icae_single":
+            return 1
+        if self.cfg.method == "icae_multi":
+            return max(
+                len(
+                    icae_multi_plan(
+                        row.full_input_ids,
+                        self.codec.memory_slots,
+                        self.cfg.icae_min_segments,
+                        self.cfg.icae_max_segments,
+                        self.cfg.seed,
+                        row.trajectory_id,
+                    )[0]
+                )
+                for row in trajectories
+            )
+        return max(len(row.segments) for row in trajectories)
+
     def _states_batch(
         self, trajectories, epoch=0, force_policy=False, blocks=None, rngs=None, start=0, stop=None
     ):
@@ -136,27 +149,42 @@ class TokenMemoryTask(nn.Module):
         if rngs is None:
             rngs = [example_rng(self.cfg.seed, epoch, row.trajectory_id) for row in trajectories]
         single = self.cfg.method == "icae_single"
-        steps = 1 if single else max(len(row.segments) for row in trajectories)
+        multi = self.cfg.method == "icae_multi"
+        if single:
+            chunks = [[row.full_input_ids] for row in trajectories]
+        elif multi:
+            plans = [
+                icae_multi_plan(
+                    row.full_input_ids,
+                    self.codec.memory_slots,
+                    self.cfg.icae_min_segments,
+                    self.cfg.icae_max_segments,
+                    self.cfg.seed,
+                    row.trajectory_id,
+                )
+                for row in trajectories
+            ]
+            chunks = [plan[0] for plan in plans]
+            slot_counts = [plan[1] for plan in plans]
+        else:
+            chunks = [[segment.input_ids for segment in row.segments] for row in trajectories]
+        steps = max(map(len, chunks))
         for step in range(start, steps if stop is None else min(stop, steps)):
-            active = [i for i, row in enumerate(trajectories) if step < len(row.segments)]
+            active = [i for i, row_chunks in enumerate(chunks) if step < len(row_chunks)]
             events = {
                 i: self._event(
-                    trajectories[i], len(trajectories[i].segments) - 1 if single else step
+                    len(trajectories[i].segments) - 1 if single else step,
+                    None if multi else trajectories[i].segments[-1 if single else step].segment_id,
                 )
                 for i in active
             }
 
             def write(indices, histories, output_slots=None):
                 return self._write_batch(
-                    [
-                        trajectories[i].full_input_ids
-                        if single
-                        else trajectories[i].segments[step].input_ids
-                        for i in indices
-                    ],
+                    [chunks[i][step] for i in indices],
                     histories,
                     [events[i] for i in indices],
-                    output_slots,
+                    [slot_counts[i][step] for i in indices] if multi else output_slots,
                 )
 
             if single or self.cfg.method in {"icae_multi", "autocompressors"} or step == 0:
@@ -312,11 +340,7 @@ class TokenMemoryTask(nn.Module):
             old_losses, new_losses = [[] for _ in trajectories], [[] for _ in trajectories]
             states = self._states_batch(trajectories, epoch)
         indices, requests, current_events, new_counts = [], [], [], []
-        updates = (
-            1
-            if self.cfg.method == "icae_single"
-            else max(len(row.segments) for row in trajectories)
-        )
+        updates = self._num_updates(trajectories)
         for update, current_states in enumerate(states):
             for i, blocks, event in current_states:
                 trajectory = trajectories[i]
@@ -324,7 +348,12 @@ class TokenMemoryTask(nn.Module):
                 if self.cfg.method in DYNAMIC_METHODS:
                     usage = trajectory.usage[event["step"]]
                     new_ids, old_ids = usage.new_qa_ids, usage.old_qa_ids
-                elif event["step"] == len(trajectory.segments) - 1:
+                # multi 在累计写满总 K 后监督，独立于数据原始段数。
+                elif (
+                    event["slots"] == self.codec.memory_slots
+                    if self.cfg.method == "icae_multi"
+                    else event["step"] == len(trajectory.segments) - 1
+                ):
                     last_segment = trajectory.segments[-1].segment_id
                     new_ids = tuple(
                         qid
@@ -383,25 +412,30 @@ class TokenMemoryTask(nn.Module):
         )
 
     def _pretrain_objective(self, examples):
-        chunk_tokens = (
-            self.codec.memory_slots * self.cfg.icae_segment_ratio
-            if self.cfg.method == "icae_multi"
-            else None
-        )
-        chunks = []
-        for example in examples:
-            chunks.append(
-                [
-                    example.input_ids[i : i + chunk_tokens]
-                    for i in range(0, len(example.input_ids), chunk_tokens)
-                ]
-                if self.cfg.method == "icae_multi"
-                else [example.input_ids]
-            )
+        multi = self.cfg.method == "icae_multi"
+        if multi:
+            plans = [
+                icae_multi_plan(
+                    example.input_ids,
+                    self.codec.memory_slots,
+                    self.cfg.icae_min_segments,
+                    self.cfg.icae_max_segments,
+                    self.cfg.seed,
+                    example.sample_id,
+                )
+                for example in examples
+            ]
+            chunks = [plan[0] for plan in plans]
+            slot_counts = [plan[1] for plan in plans]
+        else:
+            chunks = [[example.input_ids] for example in examples]
         blocks = [[] for _ in examples]
         for step in range(max(map(len, chunks))):
             indices = [i for i, values in enumerate(chunks) if step < len(values)]
-            candidates = self.codec.compress_batch([self.ids(chunks[i][step]) for i in indices])
+            candidates = self.codec.compress_batch(
+                [self.ids(chunks[i][step]) for i in indices],
+                output_slots=[slot_counts[i][step] for i in indices] if multi else None,
+            )
             for i, candidate in zip(indices, candidates, strict=True):
                 blocks[i].append(candidate)
         targets = [example.target_ids + (self.tokenizer.eos_token_id,) for example in examples]
@@ -441,21 +475,12 @@ class TokenMemoryTask(nn.Module):
                 if example.task == "ae"
                 else example.input_ids + example.target_ids
             )
-            if len(tokens) < 3:
-                raise ValueError(
-                    "AutoCompressors has no trainable next-token target in the second segment"
-                )
             rng = example_rng(self.cfg.seed, epoch, example.sample_id)
-            parts, offset = [], 0
-            while offset < len(tokens):
-                maximum = self.cfg.ac_max_segment_tokens
-                if offset == 0:
-                    # 短输入也保留第二段监督，使冻结 reader 的损失可经首段记忆反传。
-                    maximum = min(maximum, len(tokens) - 2)
-                size = rng.randint(min(self.cfg.ac_min_segment_tokens, maximum), maximum)
-                parts.append(tokens[offset : offset + size])
-                offset += size
-            segments.append(parts)
+            segments.append(
+                ac_token_chunks(
+                    tokens, self.cfg.ac_min_segment_tokens, self.cfg.ac_max_segment_tokens, rng
+                )
+            )
         blocks, losses = [[] for _ in examples], [[] for _ in examples]
         targets = [0 for _ in examples]
         for step in range(max(map(len, segments))):
