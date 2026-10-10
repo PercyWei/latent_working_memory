@@ -15,7 +15,7 @@ from latent_working_memory.v3.segmentation import (
     example_rng,
     icae_multi_plan,
 )
-from .test_model import build_model
+from .test_model import build_model, randomize_adapter
 
 
 class TinyTokenizer:
@@ -145,7 +145,7 @@ def test_damage_rule(values, expected):
     ],
 )
 def test_baselines_write_scopes(method, expected_histories, expected_slots):
-    model = task(method, "lm" if method == "autocompressors" else "qa")
+    model = task(method, "pretrain" if method == "autocompressors" else "qa")
     calls = trace_writes(model)
     blocks, events = model.build_memory(trajectory())
     assert [len(call[1]) for call in calls] == expected_histories
@@ -286,7 +286,7 @@ def test_dynamic_initial_64_append_8_and_overwrite_preserves_last_block_size(
 
 
 @pytest.mark.parametrize(
-    "method", ["icae_single", "icae_multi", "memory_change", "information_loss"]
+    "method", ["icae_single", "icae_multi", "dynamic", "memory_change", "information_loss"]
 )
 @pytest.mark.parametrize("kind", ["ae", "continuation"])
 def test_pretrain_ae_and_lm_backpropagate_from_frozen_reader(method, kind):
@@ -305,6 +305,66 @@ def test_pretrain_ae_and_lm_backpropagate_from_frozen_reader(method, kind):
         assert calls[0][0].tolist() == list(example.input_ids)
     assert result["metrics"]["slots_final"] == model.codec.memory_slots
     assert result["metrics"]["target_tokens"] == len(example.target_ids) + 1
+
+
+@pytest.mark.parametrize("legacy_method", ["memory_change", "information_loss"])
+def test_shared_dynamic_pretraining_matches_legacy_losses_and_gradients(legacy_method):
+    model = task("dynamic", "pretrain")
+    randomize_adapter(model.codec)
+    reference = deepcopy(model)
+    reference.cfg = replace(reference.cfg, method=legacy_method)
+    text = (3, 4, 5, 6, 7, 8)
+    examples = (
+        PretrainExample("ae", "d", "c", "ae", text, text),
+        PretrainExample("lm", "d2", "c2", "continuation", text[:4], (9, 10)),
+    )
+
+    actual = model(examples, batched=True)
+    expected = reference(examples, batched=True)
+    torch.testing.assert_close(actual["loss"], expected["loss"], rtol=0, atol=0)
+    actual["loss"].backward()
+    expected["loss"].backward()
+    reference_parameters = dict(reference.named_parameters())
+    for name, parameter in model.named_parameters():
+        other = reference_parameters[name]
+        if parameter.grad is None or other.grad is None:
+            assert parameter.grad is other.grad is None
+        else:
+            torch.testing.assert_close(parameter.grad, other.grad, rtol=0, atol=0)
+    for name, value in actual["metrics"].items():
+        if not name.endswith("_seconds"):
+            assert value == expected["metrics"][name]
+
+
+@pytest.mark.parametrize("bptt_steps", [None, 1, 2])
+@pytest.mark.parametrize("batched", [False, True])
+def test_autocompressors_pretrain_matches_legacy_lm_losses_and_gradients(bptt_steps, batched):
+    model = task("autocompressors", "pretrain", ac_num_segments=2, bptt_steps=bptt_steps)
+    randomize_adapter(model.codec)
+    reference = deepcopy(model)
+    reference.cfg = replace(reference.cfg, stage="lm")
+    examples = (
+        PretrainExample("first", "d", "c", "continuation", tuple(range(3, 12)), (15, 16)),
+        PretrainExample("second", "d2", "c2", "continuation", tuple(range(3, 10)), (17,)),
+    )
+    value = examples if batched else examples[0]
+
+    actual = model(value, epoch=3, batched=batched)
+    expected = reference(value, epoch=3, batched=batched)
+    torch.testing.assert_close(actual["loss"], expected["loss"], rtol=0, atol=0)
+    actual["loss"].backward()
+    expected["loss"].backward()
+    for parameter, other in zip(model.parameters(), reference.parameters(), strict=True):
+        if parameter.grad is None or other.grad is None:
+            assert parameter.grad is other.grad is None
+        else:
+            torch.testing.assert_close(parameter.grad, other.grad, rtol=0, atol=0)
+    assert model.codec.memory_embeddings.grad.abs().sum() > 0
+    for name, value in actual["metrics"].items():
+        if not name.endswith("_seconds"):
+            assert value == expected["metrics"][name]
+    assert actual["metrics"]["segments"] == 2
+    assert "ae_samples" not in actual["metrics"]
 
 
 @pytest.mark.parametrize("total_slots,num_segments", [(4, 2), (5, 4), (6, 2), (8, 3)])
@@ -435,7 +495,7 @@ def test_ac_truncates_memory_at_two_segments_but_retains_writer_learning(monkeyp
             return (low + high) // 2
 
     monkeypatch.setattr(objective, "example_rng", lambda *args: MiddleCuts())
-    model = task("autocompressors", "lm", memory_slots=9, ac_num_segments=4)
+    model = task("autocompressors", "pretrain", memory_slots=9, ac_num_segments=4)
     calls = trace_writes(model)
     source = tuple(range(3, 15))
     example = PretrainExample("s", "d", "c", "continuation", source, (18, 19))
@@ -482,7 +542,7 @@ def test_eval_forward_never_creates_gradient_graph():
 
 
 def test_ac_rejects_source_too_short_for_fixed_segment_count():
-    model = task("autocompressors", "lm", ac_num_segments=2)
+    model = task("autocompressors", "pretrain", ac_num_segments=2)
     example = PretrainExample("s", "d", "c", "continuation", (3, 4, 5), (6, 7))
     with pytest.raises(ValueError, match="at least two tokens per segment"):
         model(example)
@@ -490,7 +550,7 @@ def test_ac_rejects_source_too_short_for_fixed_segment_count():
 
 @pytest.mark.parametrize("total_tokens", [4, 5, 6])
 def test_ac_short_sources_retain_writer_and_memory_gradients(total_tokens):
-    model = task("autocompressors", "lm", ac_num_segments=2)
+    model = task("autocompressors", "pretrain", ac_num_segments=2)
     calls = trace_writes(model)
     example = PretrainExample(
         "short", "document", "cluster", "continuation", tuple(range(3, 3 + total_tokens)), (20, 21)
@@ -559,7 +619,7 @@ def test_ac_full_bptt_random_segments_match_one_window(num_segments):
 
 @pytest.mark.parametrize("bptt_steps", [4, 6])
 def test_ac_full_bptt_matches_large_window_losses_and_gradients(bptt_steps):
-    model = task("autocompressors", "lm", memory_slots=9, ac_num_segments=4, bptt_steps=None)
+    model = task("autocompressors", "pretrain", memory_slots=9, ac_num_segments=4, bptt_steps=None)
     reference = deepcopy(model)
     reference.cfg = replace(reference.cfg, bptt_steps=bptt_steps)
     calls = trace_writes(model)
@@ -580,7 +640,9 @@ def test_ac_full_bptt_matches_large_window_losses_and_gradients(bptt_steps):
 
 @pytest.mark.parametrize("bptt_steps", [None, 1, 2, 6])
 def test_ac_evaluation_evenly_splits_full_body_independent_of_factqa_segments(bptt_steps):
-    model = task("autocompressors", "lm", memory_slots=8, ac_num_segments=4, bptt_steps=bptt_steps)
+    model = task(
+        "autocompressors", "pretrain", memory_slots=8, ac_num_segments=4, bptt_steps=bptt_steps
+    )
     calls = trace_writes(model)
     record = trajectory(n=5)
     blocks, events = model.build_memory(record, epoch=7)
@@ -605,6 +667,7 @@ def test_ac_evaluation_evenly_splits_full_body_independent_of_factqa_segments(bp
         ),
         ("memory_change", "pretrain", {}),
         ("information_loss", "pretrain", {}),
+        ("dynamic", "pretrain", {}),
         ("icae_single", "qa", {}),
         (
             "icae_multi",
@@ -617,7 +680,7 @@ def test_ac_evaluation_evenly_splits_full_body_independent_of_factqa_segments(bp
         ("memory_change", "policy", {"threshold_i": 1e8}),
         ("information_loss", "policy", {"threshold_g": 1e-8, "eta": 0.0}),
         ("information_loss", "policy", {"threshold_d": 1e8, "threshold_g": 1e8}),
-        ("autocompressors", "lm", {"ac_num_segments": 3}),
+        ("autocompressors", "pretrain", {"ac_num_segments": 3}),
     ],
 )
 def test_batch_matches_individual_losses_gradients_and_metrics(method, stage, options):
@@ -629,7 +692,7 @@ def test_batch_matches_individual_losses_gradients_and_metrics(method, stage, op
             PretrainExample("ae", "d", "c", "ae", text, text),
             PretrainExample("lm", "d2", "c2", "continuation", text[:8], (17, 18, 19)),
         ]
-        if stage == "lm":
+        if method == "autocompressors":
             examples[0] = replace(examples[0], task="continuation", target_ids=(20, 21))
     else:
         examples = [trajectory(n=2), replace(trajectory(n=4), trajectory_id="other")]

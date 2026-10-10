@@ -108,7 +108,11 @@ def make_config(output, stage="pretrain", init=None):
             lora_rank=2,
             lora_alpha=2,
         ),
-        ObjectiveConfig(method="memory_change", stage=stage, append_slots=1),
+        ObjectiveConfig(
+            method="dynamic" if stage == "pretrain" else "memory_change",
+            stage=stage,
+            append_slots=1,
+        ),
         TrainingConfig(
             dataset_dir="data/unit-fixture",
             output_dir=str(output),
@@ -341,6 +345,7 @@ def test_checkpoint_requires_explicit_append_size_only_after_dynamic_pretraining
     result = train_loop(config, engine, splits, _run(config, engine, splits), stop_after_steps=1)
     saved = read_checkpoint(result["checkpoint"])
     saved["run"]["config"]["objective"]["stage"] = stage
+    saved["run"]["config"]["objective"]["method"] = "memory_change"
     del saved["run"]["config"]["objective"]["append_slots"]
     torch.save(saved, Path(result["checkpoint"]) / "state.pt")
     if stage == "pretrain":
@@ -416,6 +421,8 @@ def test_checkpoint_resume_matches_uninterrupted_rng_optimizer_and_tail_batch(
     resumed_records = [
         json.loads(line) for line in (tmp_path / "resumed/metrics.jsonl").read_text().splitlines()
     ]
+    assert [row["train/epoch"] for row in full_records] == [0.4, 0.8, 1.0, 1.4, 1.8, 2.0]
+    assert [row["epoch"] for row in full_records] == [1, 1, 1, 2, 2, 2]
     assert [
         {key: value for key, value in row.items() if not key.startswith("resources/")}
         for row in full_records
@@ -1017,13 +1024,13 @@ def test_factqa_train_length_filter_uses_real_model_window(
         assert statistics["source_data"][split] == dataset_identity(original[split])
 
 
-def experiment_config(root, stage, identifier="trial", method="memory_change", init=None):
+def experiment_config(root, stage, identifier="trial", method=None, init=None):
     config = make_config(root / stage)
     return replace(
         config,
         objective=replace(
             config.objective,
-            method=method,
+            method=method or ("dynamic" if stage == "pretrain" else "memory_change"),
             stage=stage,
             icae_min_segments=2,
             icae_max_segments=2,
@@ -1113,7 +1120,7 @@ def test_dynamic_stages_preserve_shared_source_and_accumulate_only_method_steps(
 
 def test_saved_pretraining_without_explicit_name_uses_its_directory_name(tmp_path):
     root = tmp_path / "shared-pretrain-k64_trial"
-    source = experiment_config(root, "pretrain")
+    source = experiment_config(root, "pretrain", method="memory_change")
     source_run = _run(source, make_engine(source), make_splits())
     source_run["config"]["training"].pop("experiment_name", None)
     target = experiment_config(tmp_path / "memory-change-k64", "warmup")

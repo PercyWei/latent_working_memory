@@ -110,6 +110,7 @@ def original_list_training(config, engine, splits):
                     "global_step": step,
                     "stage": config.objective.stage,
                     "epoch": epoch + 1,
+                    "train/epoch": visits / len(splits["train"]),
                     **{
                         f"train/{key}": value for key, value in metrics.items() if value is not None
                     },

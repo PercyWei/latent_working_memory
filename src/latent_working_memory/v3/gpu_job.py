@@ -49,7 +49,7 @@ def physical_gpus(value):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=job_plan.LEVELS, default="smoke")
+    parser.add_argument("--mode", choices=job_plan.LEVELS, default="full")
     parser.add_argument("--method", choices=(*METHODS, "dynamic_pretrain", "all"), default="all")
     parser.add_argument(
         "--config",
@@ -135,7 +135,7 @@ def parse_args(argv=None):
         type=positive_count,
         help="动态方法每次追加的 slots 数，默认沿用预设 32；首次写入为 512 slots",
     )
-    for stage in ("pretrain", "lm", "qa", "warmup", "policy"):
+    for stage in ("pretrain", "qa", "warmup", "policy"):
         parser.add_argument(
             f"--{stage}-train-samples",
             type=bounded_count,

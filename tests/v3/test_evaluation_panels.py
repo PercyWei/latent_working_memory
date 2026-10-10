@@ -12,11 +12,18 @@ from latent_working_memory.v3.tracking import (
 from .test_evaluate import Task, trajectory
 
 
-def test_dashboard_adds_only_five_panels_across_all_stages(tmp_path):
+def test_dashboard_adds_six_panels_including_epoch_across_all_stages(tmp_path):
     names = set()
     run = SimpleNamespace(define_metric=lambda name, **options: names.add(name))
-    for stage in ("pretrain", "lm", "qa", "warmup", "policy"):
-        configure_training_metrics(run, stage)
+    for method, stage in (
+        ("dynamic", "pretrain"),
+        ("autocompressors", "pretrain"),
+        ("autocompressors", "lm"),
+        ("icae_single", "qa"),
+        ("memory_change", "warmup"),
+        ("information_loss", "policy"),
+    ):
+        configure_training_metrics(run, method, stage)
     names.update(evaluation_media(evaluate(Task(), [trajectory()], tmp_path, "test", 8)))
     original = {
         "train/grad_norm",
@@ -36,6 +43,7 @@ def test_dashboard_adds_only_five_panels_across_all_stages(tmp_path):
     }
     assert names - original == {
         "train/stage",
+        "train/epoch",
         "dev/qa_old_nll",
         "dev/qa_new_nll",
         "evaluation/capacity",

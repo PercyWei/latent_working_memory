@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from latent_working_memory.v3.config import (
     DYNAMIC_METHODS,
+    DYNAMIC_PRETRAIN_METHODS,
     METHODS,
     ExperimentConfig,
     load_preset,
@@ -85,7 +86,10 @@ def resolve_experiment_id(args, init_checkpoint=None):
         if metadata.exists():
             source = json.loads(metadata.read_text(encoding="utf-8"))
             objective = source["config"]["objective"]
-            if objective["stage"] != "pretrain" or objective["method"] not in DYNAMIC_METHODS:
+            if (
+                objective["stage"] != "pretrain"
+                or objective["method"] not in DYNAMIC_PRETRAIN_METHODS
+            ):
                 raise ValueError(
                     f"initialization requires a shared dynamic pretraining run: {metadata}"
                 )
@@ -129,19 +133,23 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
         objective["ac_num_segments"] = args.ac_num_segments
     uses_bptt = (
         method == "autocompressors"
-        and stage == "lm"
+        and stage in {"pretrain", "lm"}
         or (method in DYNAMIC_METHODS and stage in {"warmup", "policy"})
     )
     if uses_bptt and args.bptt_steps is not None:
         objective["bptt_steps"] = args.bptt_steps or None
     is_pretrain = stage in {"pretrain", "lm"}
     dataset = args.pretrain_data if is_pretrain else args.qa_data
-    run_method = "dynamic_pretrain" if method in DYNAMIC_METHODS and stage == "pretrain" else method
+    run_method = (
+        "dynamic_pretrain"
+        if method in DYNAMIC_PRETRAIN_METHODS and stage == "pretrain"
+        else method
+    )
     method_directory = f"{run_method.replace('_', '-')}-k{config.model.memory_slots}"
     if args.mode != "full":
         method_directory += f"_{args.mode}"
     experiment_dir = directory / "train" / method_directory
-    stage_limit = getattr(args, f"{stage}_train_samples")
+    stage_limit = getattr(args, f"{'pretrain' if is_pretrain else stage}_train_samples")
     if stage_limit is None:
         stage_limit = config.training.max_train_samples
     elif stage_limit == 0:
@@ -166,7 +174,7 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
         "group": args.group or args.run_id,
         "tags": (f"study:{'main' if args.mode == 'full' else args.mode}",),
     }
-    if stage == "pretrain" and args.lm_ratio is not None:
+    if stage == "pretrain" and method != "autocompressors" and args.lm_ratio is not None:
         training["lm_ratio"] = args.lm_ratio
     if is_pretrain and args.max_input_tokens is not None:
         training["max_input_tokens"] = args.max_input_tokens or None
@@ -200,7 +208,8 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
         config=config,
         config_path=directory / "plan" / method_directory / f"{stage}.json",
         initialize_from=initialize_from,
-        evaluate=stage in {"qa", "policy", "lm"},
+        evaluate=stage in {"qa", "policy"}
+        or (method == "autocompressors" and is_pretrain),
     )
 
 
@@ -253,7 +262,7 @@ def build_jobs(args):
         )
         if (
             len(pretrain) != 1
-            or pretrain[0].objective.method not in DYNAMIC_METHODS
+            or pretrain[0].objective.method not in DYNAMIC_PRETRAIN_METHODS
             or pretrain[0].objective.stage != "pretrain"
         ):
             raise ValueError("dynamic_pretrain.json must declare only the pretrain stage")

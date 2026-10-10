@@ -18,6 +18,8 @@ from latent_working_memory.v3.config import (
 @pytest.mark.parametrize("filename", sorted(Path("configs/v3").glob("*.json")))
 def test_presets_use_requested_model_and_memory_size(filename):
     for config in load_preset(filename):
+        if filename.name == "dynamic_pretrain.json":
+            assert config.objective.method == "dynamic"
         assert "output_dir" not in json.loads(filename.read_text())["training"]
         assert config.training.output_dir is None
         assert config.training.init_checkpoint is None
@@ -52,12 +54,12 @@ def test_presets_use_requested_model_and_memory_size(filename):
             {"ac_num_segments"} if config.objective.method == "autocompressors" else set()
         )
         assert config.objective.ac_num_segments == 4
-        if config.objective.stage in {"pretrain", "lm"}:
+        if config.objective.stage == "pretrain":
             assert config.training.min_input_tokens == 1
             assert config.training.max_input_tokens == 12288
             assert config.training.lm_ratio == 0.5
         assert config.training.max_train_samples == (
-            12800 if config.objective.stage in {"pretrain", "lm"} else None
+            12800 if config.objective.stage == "pretrain" else None
         )
 
 
@@ -78,6 +80,11 @@ def test_presets_use_requested_model_and_memory_size(filename):
         {"method": "memory_change", "stage": "warmup", "bptt_steps": True},
         {"method": "memory_change", "stage": "policy", "bptt_steps": 1.5},
         {"method": "memory_change", "stage": "pretrain", "bptt_steps": 2},
+        {"method": "dynamic", "stage": "pretrain", "bptt_steps": 2},
+        {"method": "dynamic", "stage": "warmup"},
+        {"method": "dynamic", "stage": "policy"},
+        {"method": "dynamic", "stage": "qa"},
+        {"method": "dynamic", "stage": "lm"},
         {"method": "icae_single", "stage": "qa", "bptt_steps": 2},
         {"method": "icae_multi", "stage": "pretrain", "bptt_steps": 2},
     ],
@@ -124,11 +131,11 @@ def test_icae_multi_slot_budget_does_not_need_to_be_divisible_by_segment_count()
 @pytest.mark.parametrize("value", [0, -1, True, 1.5])
 def test_autocompressors_counts_require_positive_integers(name, value):
     with pytest.raises(ValueError, match=name):
-        ObjectiveConfig(method="autocompressors", stage="lm", **{name: value})
+        ObjectiveConfig(method="autocompressors", stage="pretrain", **{name: value})
 
 
 def test_autocompressors_runtime_default_is_full_bptt_and_preset_uses_two_steps():
-    config = ObjectiveConfig(method="autocompressors", stage="lm")
+    config = ObjectiveConfig(method="autocompressors", stage="pretrain")
     assert (config.ac_num_segments, config.bptt_steps) == (4, None)
     (preset,) = load_preset("configs/v3/autocompressors.json")
     assert preset.objective.bptt_steps == 2
@@ -142,7 +149,7 @@ def test_autocompressors_accepts_one_segment_and_bptt_windows_longer_than_the_do
         ModelConfig(memory_slots=7),
         ObjectiveConfig(
             method="autocompressors",
-            stage="lm",
+            stage="pretrain",
             ac_num_segments=segments,
             bptt_steps=bptt_steps,
         ),
@@ -155,7 +162,9 @@ def test_autocompressors_accepts_one_segment_and_bptt_windows_longer_than_the_do
 
 
 def test_autocompressors_segment_count_does_not_need_to_be_divisible_by_bptt_window():
-    config = ObjectiveConfig(method="autocompressors", stage="lm", ac_num_segments=5, bptt_steps=2)
+    config = ObjectiveConfig(
+        method="autocompressors", stage="pretrain", ac_num_segments=5, bptt_steps=2
+    )
     assert (config.ac_num_segments, config.bptt_steps) == (5, 2)
 
 
@@ -166,7 +175,8 @@ def test_autocompressors_segment_count_does_not_need_to_be_divisible_by_bptt_win
         ("icae_single", "qa"),
         ("icae_multi", "pretrain"),
         ("icae_multi", "qa"),
-        ("autocompressors", "lm"),
+        ("autocompressors", "pretrain"),
+        ("dynamic", "pretrain"),
         ("memory_change", "pretrain"),
         ("memory_change", "warmup"),
         ("memory_change", "policy"),
@@ -181,7 +191,7 @@ def test_full_bptt_is_valid_for_each_method_stage(method, stage):
 
 def test_removed_autocompressors_bptt_field_is_rejected(tmp_path):
     with pytest.raises(TypeError, match="ac_bptt_steps"):
-        ObjectiveConfig(method="autocompressors", stage="lm", ac_bptt_steps=2)
+        ObjectiveConfig(method="autocompressors", stage="pretrain", ac_bptt_steps=2)
     raw = json.loads(Path("configs/v3/autocompressors.json").read_text())
     raw["objective"]["ac_bptt_steps"] = raw["objective"].pop("bptt_steps")
     preset = tmp_path / "old-ac.json"
@@ -194,7 +204,7 @@ def test_autocompressors_allocates_a_positive_slot_count_to_every_segment():
     with pytest.raises(ValueError, match="ac_num_segments.*memory_slots"):
         ExperimentConfig(
             ModelConfig(memory_slots=3),
-            ObjectiveConfig(method="autocompressors", stage="lm"),
+            ObjectiveConfig(method="autocompressors", stage="pretrain"),
             TrainingConfig("data"),
         )
 
@@ -202,7 +212,7 @@ def test_autocompressors_allocates_a_positive_slot_count_to_every_segment():
 def test_autocompressors_slot_budget_does_not_need_to_be_divisible_by_segment_count():
     config = ExperimentConfig(
         ModelConfig(memory_slots=7),
-        ObjectiveConfig(method="autocompressors", stage="lm"),
+        ObjectiveConfig(method="autocompressors", stage="pretrain"),
         TrainingConfig("data"),
     )
     assert config.objective.ac_num_segments == 4
@@ -217,12 +227,12 @@ def test_dynamic_append_size_is_bounded_by_available_gist_embeddings():
     with pytest.raises(ValueError, match="append_slots"):
         ExperimentConfig(
             ModelConfig(memory_slots=4),
-            ObjectiveConfig(append_slots=8),
+            ObjectiveConfig(method="memory_change", append_slots=8),
             TrainingConfig("data", "output"),
         )
     config = ExperimentConfig(
         ModelConfig(memory_slots=64),
-        ObjectiveConfig(append_slots=8),
+        ObjectiveConfig(method="memory_change", append_slots=8),
         TrainingConfig("data", "output"),
     )
     assert config.to_dict()["objective"]["append_slots"] == 8
@@ -257,9 +267,13 @@ def test_stage_output_belongs_to_method_experiment(tmp_path):
     training = TrainingConfig(
         "data", str(root / "warmup"), experiment_dir=str(root), experiment_id="20261007-01"
     )
-    ExperimentConfig(ModelConfig(), ObjectiveConfig(stage="warmup"), training)
+    ExperimentConfig(
+        ModelConfig(), ObjectiveConfig(method="memory_change", stage="warmup"), training
+    )
     with pytest.raises(ValueError, match="output_dir"):
-        ExperimentConfig(ModelConfig(), ObjectiveConfig(stage="policy"), training)
+        ExperimentConfig(
+            ModelConfig(), ObjectiveConfig(method="memory_change", stage="policy"), training
+        )
 
 
 def test_output_can_be_unresolved_only_without_a_method_directory():
@@ -330,7 +344,7 @@ def test_presets_are_named_for_complete_method_flows():
         ("icae_single.json", ("pretrain", "qa")),
         ("icae_multi.json", ("pretrain", "qa")),
         ("dynamic_pretrain.json", ("pretrain",)),
-        ("autocompressors.json", ("lm",)),
+        ("autocompressors.json", ("pretrain",)),
         ("memory_change.json", ("warmup", "policy")),
         ("information_loss.json", ("warmup", "policy")),
     ],
@@ -405,14 +419,42 @@ def test_dynamic_accepts_qa_pipeline_subsets_and_separate_shared_pretraining(met
     assert validate_stage_sequence(method, stages) == tuple(stages)
 
 
-def test_stage_sequence_accepts_tuples_and_autocompressors_lm():
-    assert validate_stage_sequence("autocompressors", ("lm",)) == ("lm",)
+def test_shared_dynamic_pretraining_is_the_default_and_has_its_own_stage_sequence():
+    config = ObjectiveConfig()
+    assert (config.method, config.stage) == ("dynamic", "pretrain")
+    assert validate_stage_sequence("dynamic", ["pretrain"]) == ("pretrain",)
+
+
+@pytest.mark.parametrize("stage", ["pretrain", "lm"])
+def test_stage_sequence_accepts_autocompressors_pretraining_and_legacy_lm(stage):
+    assert validate_stage_sequence("autocompressors", (stage,)) == (stage,)
+
+
+@pytest.mark.parametrize("stage", ["pretrain", "lm"])
+@pytest.mark.parametrize("bptt_steps", [None, 1, 2])
+def test_autocompressors_stage_keeps_its_original_value_and_bptt_setting(stage, bptt_steps):
+    config = ObjectiveConfig(method="autocompressors", stage=stage, bptt_steps=bptt_steps)
+    assert config.stage == stage
+    assert config.bptt_steps == bptt_steps
+
+
+def test_legacy_autocompressors_preset_keeps_lm_stage_and_budget(tmp_path):
+    raw = json.loads(Path("configs/v3/autocompressors.json").read_text())
+    raw["objective"]["stages"] = ["lm"]
+    raw["training"]["stage_max_train_samples"] = {"lm": 11}
+    path = tmp_path / "legacy-ac.json"
+    path.write_text(json.dumps(raw))
+    (config,) = load_preset(path)
+    assert config.objective.stage == "lm"
+    assert config.training.max_train_samples == 11
 
 
 @pytest.mark.parametrize(
     "method,stages",
     [
         ("unknown", ["pretrain"]),
+        ("dynamic", ["warmup", "policy"]),
+        ("dynamic", ["pretrain", "warmup"]),
         ("icae_single", ["qa", "pretrain"]),
         ("icae_single", ["pretrain", "pretrain"]),
         ("icae_multi", ["pretrain", "policy"]),
@@ -423,7 +465,8 @@ def test_stage_sequence_accepts_tuples_and_autocompressors_lm():
         ("information_loss", ["pretrain", "warmup", "policy"]),
         ("information_loss", ["warmup", "qa", "policy"]),
         ("autocompressors", ["lm", "lm"]),
-        ("autocompressors", ["pretrain"]),
+        ("autocompressors", ["pretrain", "lm"]),
+        ("autocompressors", ["lm", "pretrain"]),
         ("icae_single", []),
         ("icae_single", ()),
         ("icae_single", "pretrain"),
@@ -489,6 +532,17 @@ def test_runtime_loader_rejects_preset_and_round_trips_saved_stage_configs(tmp_p
         saved = tmp_path / f"{config.objective.stage}.json"
         saved.write_text(json.dumps(config.to_dict()))
         assert load_experiment(saved) == config
+
+
+@pytest.mark.parametrize("method", ["dynamic", "memory_change", "information_loss"])
+def test_runtime_loader_preserves_shared_pretraining_method_in_saved_records(tmp_path, method):
+    (config,) = load_preset("configs/v3/dynamic_pretrain.json")
+    config = replace(config, objective=replace(config.objective, method=method))
+    saved = tmp_path / "pretrain.json"
+    saved.write_text(json.dumps(config.to_dict()))
+
+    assert load_experiment(saved) == config
+    assert load_experiment(saved).objective.method == method
 
 
 def test_runtime_loader_requires_an_explicit_stage(tmp_path):

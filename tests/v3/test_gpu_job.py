@@ -24,6 +24,8 @@ def explicit_test_credentials(monkeypatch):
 def arguments(tmp_path, *options, run_id="unit-job"):
     return gpu_job.parse_args(
         [
+            "--mode",
+            "smoke",
             "--method",
             "memory_change",
             *(["--run-id", run_id] if run_id is not None else []),
@@ -88,7 +90,7 @@ def config_paths(command):
 
 
 def external_checkpoint(
-    tmp_path, experiment_id="unit-job", method="memory_change", stage="pretrain"
+    tmp_path, experiment_id="unit-job", method="dynamic", stage="pretrain"
 ):
     root = tmp_path / "source" / f"dynamic-pretrain-k64_{experiment_id}"
     output = root / stage
@@ -466,11 +468,11 @@ def test_full_plan_preserves_each_stage_training_budget(tmp_path):
     _, _, jobs = job_plan.build_jobs(arguments(tmp_path, "--method", "all", "--mode", "full"))
     for job in jobs:
         assert job.config.training.max_train_samples == (
-            12800 if job.config.objective.stage in {"pretrain", "lm"} else None
+            12800 if job.config.objective.stage == "pretrain" else None
         )
 
 
-@pytest.mark.parametrize("stage", ["pretrain", "lm", "qa", "warmup", "policy"])
+@pytest.mark.parametrize("stage", ["pretrain", "qa", "warmup", "policy"])
 @pytest.mark.parametrize("limit", [0, 7])
 def test_stage_training_limit_overrides_only_selected_stage(tmp_path, stage, limit):
     _, _, defaults = job_plan.build_jobs(arguments(tmp_path, "--method", "all", "--mode", "full"))
@@ -507,7 +509,7 @@ def test_zero_input_limit_selects_model_window_only_for_ae_lm(tmp_path):
     for before, after in zip(defaults, overridden, strict=True):
         assert after.config.training.max_input_tokens == (
             None
-            if after.config.objective.stage in {"pretrain", "lm"}
+            if after.config.objective.stage == "pretrain"
             else before.config.training.max_input_tokens
         )
         assert (
@@ -638,7 +640,7 @@ def test_custom_method_preset_preserves_parameters_and_launcher_overrides(
         assert config.training.group == config.training.experiment_id == "unit-job"
         assert config.training.tags == ("study:smoke",)
         dataset = (
-            args.pretrain_data if config.objective.stage in {"pretrain", "lm"} else args.qa_data
+            args.pretrain_data if config.objective.stage == "pretrain" else args.qa_data
         )
         assert Path(config.training.dataset_dir) == dataset
         run_name = f"{method.replace('_', '-')}-k512_smoke"
@@ -652,7 +654,7 @@ def test_custom_method_preset_preserves_parameters_and_launcher_overrides(
     [
         ("icae_single", "pretrain", False),
         ("icae_multi", "qa", True),
-        ("autocompressors", "lm", True),
+        ("autocompressors", "pretrain", True),
         ("memory_change", "warmup", False),
         ("information_loss", "policy", True),
     ],
@@ -728,7 +730,7 @@ def test_cli_model_path_matches_custom_dynamic_and_shared_pretraining(tmp_path, 
     assert len({job.config.model for job in jobs}) == 1
 
 
-@pytest.mark.parametrize("objective_method", DYNAMIC_METHODS)
+@pytest.mark.parametrize("objective_method", ["dynamic", *DYNAMIC_METHODS])
 def test_custom_dynamic_pretraining_uses_its_requested_file(tmp_path, objective_method):
     path = custom_preset_file(
         tmp_path,
@@ -750,6 +752,34 @@ def test_custom_dynamic_pretraining_uses_its_requested_file(tmp_path, objective_
     assert job.config.training.epochs == 3 and job.config.training.learning_rate == 2e-4
     assert job.config_path == directory / "plan/dynamic-pretrain-k64_smoke/pretrain.json"
     assert job.initialize_from is None and not job.evaluate
+
+
+def test_saved_autocompressors_lm_preset_keeps_its_stage_and_uses_pretrain_budget(tmp_path):
+    raw = json.loads(Path("configs/v3/autocompressors.json").read_text())
+    raw["objective"]["stages"] = ["lm"]
+    raw["training"]["stage_max_train_samples"] = {"lm": 12800}
+    path = tmp_path / "original-autocompressors.json"
+    path.write_text(json.dumps(raw))
+    args = arguments(
+        tmp_path,
+        "--method",
+        "autocompressors",
+        "--config",
+        str(path),
+        "--mode",
+        "full",
+        "--pretrain-train-samples",
+        "7",
+    )
+
+    _, _, jobs = job_plan.build_jobs(args)
+
+    (job,) = jobs
+    assert job.config.objective.stage == "lm"
+    assert job.config.training.max_train_samples == 7
+    assert job.config_path.name == "lm.json"
+    assert Path(job.config.training.output_dir).name == "lm"
+    assert job.evaluate
 
 
 @pytest.mark.parametrize(
@@ -959,7 +989,7 @@ def test_cli_only_overrides_explicitly_supplied_preset_values(monkeypatch, overr
         else []
     )
     args = gpu_job.parse_args(options)
-    assert args.method == "all" and args.mode == "smoke"
+    assert args.method == "all" and args.mode == "full"
     _, _, jobs = job_plan.build_jobs(args)
     for job in jobs:
         assert job.config.training.micro_batch_size_per_gpu == (4 if override else 3)
@@ -1022,7 +1052,7 @@ def test_all_methods_build_a_complete_topologically_ordered_stage_graph(tmp_path
     } == {
         ("icae_single", "qa"),
         ("icae_multi", "qa"),
-        ("autocompressors", "lm"),
+        ("autocompressors", "pretrain"),
         ("memory_change", "policy"),
         ("information_loss", "policy"),
     }
@@ -1271,17 +1301,19 @@ def test_pretraining_sampling_overrides_do_not_change_qa_or_autocompressors_task
     _, _, jobs = job_plan.build_jobs(args)
     for job in jobs:
         stage = job.config.objective.stage
-        assert job.config.training.lm_ratio == (0.75 if stage == "pretrain" else 0.5)
+        assert job.config.training.lm_ratio == (
+            0.75 if stage == "pretrain" and job.method != "autocompressors" else 0.5
+        )
         assert job.config.training.max_input_tokens == (
             2048
-            if stage in {"pretrain", "lm"}
+            if stage == "pretrain"
             else None
             if stage in {"warmup", "policy"}
             else 12288
         )
-        assert job.config.training.lm_target_tokens == (256 if stage in {"pretrain", "lm"} else 512)
+        assert job.config.training.lm_target_tokens == (256 if stage == "pretrain" else 512)
     ac = next(job for job in jobs if job.config.objective.method == "autocompressors")
-    assert ac.config.objective.stage == "lm"
+    assert ac.config.objective.stage == "pretrain"
 
 
 @pytest.mark.parametrize(
@@ -1468,6 +1500,7 @@ def test_plan_derives_each_global_batch_from_selected_gpus_microbatch_and_accumu
         ["--gpus", "4,"],
         ["--gpus", ""],
         ["--pretrain-train-samples", "-1"],
+        ["--lm-train-samples", "10"],
         ["--epochs", "0"],
         ["--micro-batch-size-per-gpu", "0"],
         ["--micro-batch-size-per-gpu", "-1"],
@@ -1591,7 +1624,7 @@ def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
         ["dynamic-pretrain"],
         ["icae-single-pretrain", "icae-single-qa"],
         ["icae-multi-pretrain", "icae-multi-qa"],
-        ["autocompressors-lm"],
+        ["autocompressors-pretrain"],
         ["memory-change-warmup", "memory-change-policy"],
         ["information-loss-warmup", "information-loss-policy"],
     ]
@@ -1678,7 +1711,7 @@ def test_dynamic_pretraining_entry_requires_only_ae_lm_data(tmp_path, monkeypatc
     assert len(commands.calls) == 1
     assert result["summaries"] == []
     config = commands.calls[0]["configs"][0]
-    assert config.objective.stage == "pretrain"
+    assert (config.objective.method, config.objective.stage) == ("dynamic", "pretrain")
     assert config.training.experiment_id == "unit-job"
     assert Path(config.training.experiment_dir).name == "dynamic-pretrain-k512"
     assert config.training.experiment_name == "dynamic-pretrain-k512_unit-job"
@@ -2024,10 +2057,10 @@ def test_all_methods_execute_six_training_processes_with_ordered_stages(tmp_path
         [(config.objective.method, config.objective.stage) for config in call["configs"]]
         for call in training
     ] == [
-        [("memory_change", "pretrain")],
+        [("dynamic", "pretrain")],
         [("icae_single", "pretrain"), ("icae_single", "qa")],
         [("icae_multi", "pretrain"), ("icae_multi", "qa")],
-        [("autocompressors", "lm")],
+        [("autocompressors", "pretrain")],
         [("memory_change", "warmup"), ("memory_change", "policy")],
         [("information_loss", "warmup"), ("information_loss", "policy")],
     ]

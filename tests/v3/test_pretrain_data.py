@@ -42,7 +42,7 @@ def experiment(path, method="icae_single", **training):
         ModelConfig(memory_slots=4),
         ObjectiveConfig(
             method=method,
-            stage="lm" if method == "autocompressors" else "pretrain",
+            stage="pretrain",
             icae_min_segments=2,
             icae_max_segments=2,
             append_slots=2,
@@ -437,6 +437,19 @@ def test_multisegment_ac_receives_each_complete_source_once_and_ignores_lm_ratio
     assert example.input_ids + example.target_ids == (3, 4, 5, 6, 7)
     assert statistics["lm_ratio"] == 1.0
     assert statistics["splits"]["train"]["kept_by_task"] == {"ae": 0, "continuation": 1}
+
+
+def test_autocompressors_pretrain_and_legacy_lm_use_identical_data(tmp_path, tokenizer):
+    root = write_multisegment(
+        tmp_path,
+        train=[multisegment_row("first", "first-document", ("a b", "c"))],
+        dev=[multisegment_row("dev", "dev-document", ("a b", "c d"), split="dev")],
+        test=[multisegment_row("test", "test-document", ("a b", "c d"), split="test")],
+    )
+    config = experiment(root, method="autocompressors", lm_ratio=0.0)
+    assert config.objective.stage == "pretrain"
+    legacy = replace(config, objective=replace(config.objective, stage="lm"))
+    assert load_splits(config, tokenizer, 64) == load_splits(legacy, tokenizer, 64)
 
 
 @pytest.mark.parametrize("leak", ("document", "cluster", "trajectory_id"))

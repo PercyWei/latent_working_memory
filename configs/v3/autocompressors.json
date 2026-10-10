@@ -20,7 +20,7 @@
   },
   "objective": {
     "method": "autocompressors",
-    "stages": ["lm"],
+    "stages": ["pretrain"],
     "qa_batch_size": 8,
     "ac_num_segments": 4,
     "bptt_steps": 2,
@@ -42,7 +42,7 @@
     "init_checkpoint": null,
     "lm_target_tokens": 512,
     "stage_max_train_samples": {
-      "lm": 12800
+      "pretrain": 12800
     },
     "max_input_tokens": 12288
   }

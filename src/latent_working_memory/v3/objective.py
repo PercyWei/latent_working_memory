@@ -7,7 +7,7 @@ from time import perf_counter
 import torch
 from torch import nn
 
-from latent_working_memory.v3.config import DYNAMIC_METHODS
+from latent_working_memory.v3.config import DYNAMIC_METHODS, DYNAMIC_PRETRAIN_METHODS
 from latent_working_memory.v3.segmentation import ac_plan, example_rng, icae_multi_plan
 
 
@@ -146,6 +146,8 @@ class TokenMemoryTask(nn.Module):
     def _states_batch(
         self, trajectories, epoch=0, force_policy=False, blocks=None, rngs=None, start=0, stop=None
     ):
+        if self.cfg.method == "dynamic":
+            raise ValueError("shared dynamic pretraining has no FactQA memory policy")
         if blocks is None:
             blocks = [[] for _ in trajectories]
         if rngs is None:
@@ -594,10 +596,14 @@ class TokenMemoryTask(nn.Module):
         if not examples:
             raise ValueError("a microbatch must contain at least one example")
         with torch.set_grad_enabled(differentiable):
-            if self.cfg.stage == "pretrain":
-                losses, metrics = self._pretrain_objective(examples)
-            elif self.cfg.stage == "lm":
+            method, stage = self.cfg.method, self.cfg.stage
+            if method == "autocompressors" and stage in {"pretrain", "lm"}:
                 losses, metrics = self._ac_objective(examples, epoch)
+            elif (
+                method in ("icae_single", "icae_multi", *DYNAMIC_PRETRAIN_METHODS)
+                and stage == "pretrain"
+            ):
+                losses, metrics = self._pretrain_objective(examples)
             else:
                 losses, metrics, qa_state = self._qa_objective(
                     examples, epoch, window_steps, qa_state

@@ -1,6 +1,7 @@
 from copy import deepcopy
 from dataclasses import replace
 from datetime import timedelta
+import json
 import math
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from latent_working_memory.v3.config import (
     ModelConfig,
     ObjectiveConfig,
     TrainingConfig,
+    load_experiment,
 )
 from latent_working_memory.v3.checkpoint import TokenMemoryCheckpointHandler
 from latent_working_memory.v3.engine import TokenMemoryEngine
@@ -26,7 +28,7 @@ from latent_working_memory.v3.runtime import (
     read_checkpoint,
 )
 from latent_working_memory.v3.training_data import make_data_loader
-from .test_model import build_model
+from .test_model import build_model, randomize_adapter
 from .test_objective import TinyTokenizer, trajectory
 
 
@@ -115,7 +117,8 @@ def assert_writer_updated(model, before):
         ("icae_single", "qa"),
         ("icae_multi", "pretrain"),
         ("icae_multi", "qa"),
-        ("autocompressors", "lm"),
+        ("autocompressors", "pretrain"),
+        ("dynamic", "pretrain"),
         ("memory_change", "pretrain"),
         ("memory_change", "warmup"),
         ("memory_change", "policy"),
@@ -135,7 +138,7 @@ def test_actual_writer_reader_and_engine_train_every_method_stage(
         if stage in {"pretrain", "lm"}
         else (trajectory(n=2), replace(trajectory(n=3), trajectory_id="other"))
     )
-    if stage == "lm":
+    if method == "autocompressors":
         batch = (replace(batch[0], task="continuation", target_ids=(11, 12)), batch[1])
     frozen, writer = parameter_snapshot(model, False), parameter_snapshot(model, True)
 
@@ -183,7 +186,7 @@ def test_actual_writer_reader_and_engine_train_every_method_stage(
 @pytest.mark.parametrize("model_type", ["llama", "qwen3"])
 @pytest.mark.parametrize("micro_batch_size", [1, 2])
 def test_actual_autocompressors_full_bptt_engine_updates_writer(model_type, micro_batch_size):
-    model = tiny_task(model_type, "autocompressors", "lm", bptt_steps=None)
+    model = tiny_task(model_type, "autocompressors", "pretrain", bptt_steps=None)
     engine = TokenMemoryEngine(model, engine_config(micro_batch_size), "cpu")
     engine.initialize()
     batch = tuple(replace(row, task="continuation") for row in pretraining_examples())
@@ -276,7 +279,7 @@ def distributed_gist_worker(rank, rendezvous, method, bptt_steps=None):
     )
     try:
         if method == "autocompressors":
-            model = tiny_task("qwen3", method, "lm", bptt_steps=bptt_steps)
+            model = tiny_task("qwen3", method, "pretrain", bptt_steps=bptt_steps)
             batch = tuple(replace(row, task="continuation") for row in pretraining_examples())
         else:
             model, batch = calibrated_dynamic_batch(method)
@@ -371,8 +374,72 @@ def checkpoint_handler(engine, run, cursor, examples, resume=None):
     )
 
 
-def test_actual_writer_checkpoint_resume_and_pretrain_warmup_policy_chain(tmp_path):
-    model = tiny_task("qwen3", "memory_change", "pretrain")
+def test_actual_legacy_autocompressors_checkpoint_resumes_without_renaming_lm(tmp_path):
+    model = tiny_task("qwen3", "autocompressors", "lm")
+    randomize_adapter(model.codec)
+    config = experiment_config(model, tmp_path / "lm")
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config.to_dict()))
+    examples = tuple(
+        replace(pretraining_examples()[1], sample_id=f"example-{index}") for index in range(4)
+    )
+    splits = {"train": examples, "dev": (), "test": ()}
+    statistics = {"source_data": {name: dataset_identity(rows) for name, rows in splits.items()}}
+    run = make_run(config, splits, statistics, "cpu", 1, resolved_model_revision="tiny-fixture")
+    engine = TokenMemoryEngine(model, config.training, "cpu")
+    engine.initialize()
+    loader = make_data_loader(examples, engine.global_batch_size, config.training.seed)
+    iterator = iter(loader)
+    engine.step(next(iterator))
+    cursor = {"epoch": 0, "sample_offset": 2, "step": 1, "sample_visits": 2}
+    handler = TokenMemoryCheckpointHandler(engine, loader, tmp_path / "lm/checkpoints", run, cursor)
+    handler.save_checkpoint(1)
+    checkpoint = tmp_path / "lm/checkpoints/global_step_1"
+    assert set(read_checkpoint(checkpoint)) == {"run", "trainable", "optimizer", "cursor", "rng"}
+    assert (checkpoint / "data_0.pt").is_file()
+    saved_config = load_experiment(config_path)
+    assert saved_config.objective.stage == "lm"
+
+    resumed = tiny_task("qwen3", "autocompressors", saved_config.objective.stage)
+    resumed_engine = TokenMemoryEngine(resumed, saved_config.training, "cpu")
+    resumed_engine.initialize()
+    resumed_loader = make_data_loader(
+        examples, resumed_engine.global_batch_size, saved_config.training.seed
+    )
+    resumed_run = make_run(
+        saved_config, splits, statistics, "cpu", 1, resolved_model_revision="tiny-fixture"
+    )
+    resumed_cursor = {}
+    resumed_handler = TokenMemoryCheckpointHandler(
+        resumed_engine,
+        resumed_loader,
+        tmp_path / "lm/checkpoints",
+        resumed_run,
+        resumed_cursor,
+        resume_from_path=checkpoint,
+    )
+    assert resumed_handler.load_checkpoint() == 1
+    assert resumed_cursor == cursor
+    assert_same_writer(model, resumed)
+    expected_batch = next(iterator)
+    actual_batch = next(iter(resumed_loader))
+    assert [row.sample_id for row in actual_batch] == [row.sample_id for row in expected_batch]
+    expected = engine.step(expected_batch)
+    actual = resumed_engine.step(actual_batch)
+    assert actual["loss"] == pytest.approx(expected["loss"], rel=0, abs=0)
+    assert_same_writer(model, resumed)
+    resumed_cursor.update(sample_offset=4, step=2, sample_visits=4)
+    resumed_handler.save_checkpoint(2)
+    saved = read_checkpoint(tmp_path / "lm/checkpoints/global_step_2")
+    assert saved["run"]["config"]["objective"]["stage"] == "lm"
+    assert saved["cursor"]["step"] == 2
+
+
+@pytest.mark.parametrize("pretrain_method", ["dynamic", "memory_change", "information_loss"])
+def test_actual_writer_checkpoint_resume_and_pretrain_warmup_policy_chain(
+    tmp_path, pretrain_method
+):
+    model = tiny_task("qwen3", pretrain_method, "pretrain")
     config = experiment_config(model, tmp_path / "pretrain")
     engine = TokenMemoryEngine(model, config.training, "cpu")
     engine.initialize()
@@ -385,9 +452,11 @@ def test_actual_writer_checkpoint_resume_and_pretrain_warmup_policy_chain(tmp_pa
     cursor = {"epoch": 1, "sample_offset": 0, "step": 1, "sample_visits": 2}
     checkpoint_handler(engine, run, cursor, examples).save_checkpoint(1)
     saved = read_checkpoint(checkpoint)
+    assert set(saved) == {"run", "trainable", "optimizer", "cursor", "rng"}
     assert set(saved["trainable"]) == {"memory_embeddings", "adapter"}
+    assert saved["run"]["config"]["objective"]["method"] == pretrain_method
 
-    resumed = tiny_task("qwen3", "memory_change", "pretrain")
+    resumed = tiny_task("qwen3", pretrain_method, "pretrain")
     resumed_engine = TokenMemoryEngine(resumed, config.training, "cpu")
     resumed_engine.initialize()
     restored_cursor = {}
@@ -406,6 +475,9 @@ def test_actual_writer_checkpoint_resume_and_pretrain_warmup_policy_chain(tmp_pa
         config = experiment_config(current, tmp_path / stage, str(checkpoint))
         initialization = load_initialization(checkpoint, current, config)
         assert_same_writer(model, current)
+        assert initialization["method"] == (
+            pretrain_method if stage == "warmup" else "information_loss"
+        )
         assert initialization["stage"] == ("pretrain" if stage == "warmup" else "warmup")
         assert initialization["pretraining_sources"] == {
             "document_ids": ["pretrain-doc"],

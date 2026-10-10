@@ -9,11 +9,12 @@ import swanlab
 from swanlab.sdk.internal.run.components.config import Config as SwanLabConfig
 
 from latent_working_memory.v1.reporting import _shade
-from latent_working_memory.v3.config import DYNAMIC_METHODS
+from latent_working_memory.v3.config import DYNAMIC_PRETRAIN_METHODS
 from latent_working_memory.v4.checkpoint import capture_rng, restore_rng
 
 
 TRAINING_METRICS = (
+    "train/epoch",
     "train/grad_norm",
     "train/slots_final",
     "dev/slots_final",
@@ -43,7 +44,7 @@ def experiment_name(training):
 
 
 def tracking_method(config, previous=None):
-    if config.objective.method in DYNAMIC_METHODS and config.objective.stage == "pretrain":
+    if config.objective.method in DYNAMIC_PRETRAIN_METHODS and config.objective.stage == "pretrain":
         # 旧预训练会话继续沿用已保存的身份，不改名或改写云端配置。
         if previous is not None and previous["method"] == "shared-pretrain":
             return previous["method"]
@@ -221,32 +222,34 @@ def update_method_tracking(config, run, tracking):
     _save_record(record_path, combined)
 
 
-def _loss_name(stage):
-    return "ae_lm_loss" if stage == "pretrain" else "lm_loss" if stage == "lm" else "qa_loss"
+def _loss_name(method, stage):
+    if method == "autocompressors" and stage in {"pretrain", "lm"}:
+        return "lm_loss"
+    return "ae_lm_loss" if stage == "pretrain" else "qa_loss"
 
 
-def configure_training_metrics(tracking, stage):
+def configure_training_metrics(tracking, method, stage):
     """目标不同的损失分开展示，所有曲线沿用累计真实 optimizer step。"""
     if tracking is None:
         return
     names = (
         *TRAINING_METRICS,
         "train/stage",
-        f"train/{_loss_name(stage)}",
-        f"dev/{_loss_name(stage)}",
+        f"train/{_loss_name(method, stage)}",
+        f"dev/{_loss_name(method, stage)}",
         *(DEV_QA_METRICS if stage in {"qa", "warmup", "policy"} else ()),
     )
     for name in names:
         tracking.define_metric(name, x_axis="_step", section_name=name.split("/", 1)[0])
 
 
-def training_metrics(record):
+def training_metrics(record, method):
     """只上传当前实际计算的指标，warmup 与 policy 共享 QA 目标曲线。"""
     values = {name: record[name] for name in TRAINING_METRICS if record.get(name) is not None}
     values["train/stage"] = STAGE_NUMBERS[record["stage"]]
     for section in ("train", "dev"):
         if record.get(f"{section}/loss") is not None:
-            values[f"{section}/{_loss_name(record['stage'])}"] = record[f"{section}/loss"]
+            values[f"{section}/{_loss_name(method, record['stage'])}"] = record[f"{section}/loss"]
     if "resources/peak_memory_allocated_bytes" in record:
         values["resources/peak_memory_allocated_gib"] = (
             record["resources/peak_memory_allocated_bytes"] / 1024**3

@@ -35,7 +35,7 @@ def test_training_panels_are_registered_before_log_and_use_optimizer_steps():
             self.definitions.append((name, kwargs))
 
     run = Run()
-    configure_training_metrics(run, "pretrain")
+    configure_training_metrics(run, "dynamic", "pretrain")
     assert tuple(name for name, _ in run.definitions) == (
         *TRAINING_METRICS,
         "train/stage",
@@ -45,15 +45,16 @@ def test_training_panels_are_registered_before_log_and_use_optimizer_steps():
     assert all(options["x_axis"] == "_step" for _, options in run.definitions)
     assert all(options["section_name"] == name.split("/")[0] for name, options in run.definitions)
     assert not any("hidden" in options for _, options in run.definitions)
-    configure_training_metrics(run, "warmup")
+    configure_training_metrics(run, "memory_change", "warmup")
     assert tuple(name for name, _ in run.definitions[-2:]) == DEV_QA_METRICS
-    configure_training_metrics(None, "pretrain")
+    configure_training_metrics(None, "dynamic", "pretrain")
 
 
 def test_training_publishes_only_current_measured_core_values():
     record = {
         "step": 9,
         "stage": "warmup",
+        "train/epoch": 0.45,
         "train/loss": 2.1,
         "train/grad_norm": 0.5,
         "train/slots_final": 128,
@@ -64,15 +65,18 @@ def test_training_publishes_only_current_measured_core_values():
         "resources/peak_memory_allocated_bytes": 3 * 1024**3,
         "resources/optimizer_step_seconds": 4.2,
     }
-    assert training_metrics(record) == {
+    assert training_metrics(record, "memory_change") == {
         "train/stage": 2,
+        "train/epoch": 0.45,
         "train/qa_loss": 2.1,
         "train/grad_norm": 0.5,
         "train/slots_final": 128,
         "resources/peak_memory_allocated_gib": 3,
         "resources/optimizer_step_seconds": 4.2,
     }
-    assert "dev/loss" not in training_metrics({"stage": "warmup", "train/loss": 1})
+    assert "dev/loss" not in training_metrics(
+        {"stage": "warmup", "train/loss": 1}, "memory_change"
+    )
     assert record["train/qa_old_count"] == 8
 
 
@@ -84,33 +88,44 @@ def test_dev_qa_curves_skip_unmeasured_groups_and_keep_current_values():
         "dev/qa_new_nll": 1.5,
         "dev/qa_new_count": 4,
     }
-    assert training_metrics(record) == {"train/stage": 2, "dev/qa_new_nll": 1.5}
+    assert training_metrics(record, "memory_change") == {"train/stage": 2, "dev/qa_new_nll": 1.5}
     record.update({"stage": "policy", "dev/qa_old_nll": 0.75, "dev/qa_old_count": 8})
-    assert training_metrics(record) == {
+    assert training_metrics(record, "memory_change") == {
         "train/stage": 3,
         "dev/qa_old_nll": 0.75,
         "dev/qa_new_nll": 1.5,
     }
-    assert training_metrics({"stage": "policy"}) == {"train/stage": 3}
+    assert training_metrics({"stage": "policy"}, "memory_change") == {"train/stage": 3}
 
 
 @pytest.mark.parametrize(
-    "stage,metric",
+    "method,stage,metric",
     [
-        ("pretrain", "ae_lm_loss"),
-        ("lm", "lm_loss"),
-        ("warmup", "qa_loss"),
-        ("policy", "qa_loss"),
-        ("qa", "qa_loss"),
+        ("dynamic", "pretrain", "ae_lm_loss"),
+        ("icae_single", "pretrain", "ae_lm_loss"),
+        ("icae_multi", "pretrain", "ae_lm_loss"),
+        ("autocompressors", "pretrain", "lm_loss"),
+        ("autocompressors", "lm", "lm_loss"),
+        ("memory_change", "warmup", "qa_loss"),
+        ("information_loss", "policy", "qa_loss"),
+        ("icae_single", "qa", "qa_loss"),
     ],
 )
-def test_training_losses_are_separated_by_objective_without_empty_metrics(stage, metric):
-    values = training_metrics({"stage": stage, "train/loss": 2, "dev/loss": 3})
+def test_training_losses_are_separated_by_method_and_stage_without_empty_metrics(
+    method, stage, metric
+):
+    values = training_metrics({"stage": stage, "train/loss": 2, "dev/loss": 3}, method)
     assert values == {
         "train/stage": STAGE_NUMBERS[stage],
         f"train/{metric}": 2,
         f"dev/{metric}": 3,
     }
+    definitions = []
+    run = SimpleNamespace(define_metric=lambda name, **options: definitions.append(name))
+    configure_training_metrics(run, method, stage)
+    assert f"train/{metric}" in definitions
+    assert f"dev/{metric}" in definitions
+    assert not any(name.endswith("_loss") and name not in values for name in definitions)
 
 
 @pytest.fixture
@@ -188,7 +203,7 @@ def serialized_config(values):
     return dict(config)
 
 
-def online_config(root, stage, method="memory_change", init=None):
+def online_config(root, stage, method=None, init=None):
     config = experiment_config(root, stage, method=method, init=init)
     return replace(
         config,
@@ -269,6 +284,12 @@ def test_two_dynamic_methods_share_one_source_and_keep_one_run_per_method(
             (3, 3),
             (4, 3),
         ]
+        assert [(step, values["train/epoch"]) for step, values in cloud["logs"]] == [
+            (1, 0.4),
+            (2, 0.8),
+            (3, 0.4),
+            (4, 0.8),
+        ]
         assert all("train/stages" not in values for _, values in cloud["logs"])
         assert "pretraining_sources" not in json.dumps(dict(cloud["config"]))
         assert "pretrain-train-0" not in json.dumps(dict(cloud["config"]))
@@ -286,11 +307,12 @@ def test_two_dynamic_methods_share_one_source_and_keep_one_run_per_method(
     assert sources[0]["step"] == 2
 
 
+@pytest.mark.parametrize("source_method", ["memory_change", "information_loss"])
 def test_existing_shared_pretrain_identity_resumes_and_initializes_new_dynamic_method(
-    tmp_path, recorded_swanlab, monkeypatch
+    tmp_path, recorded_swanlab, monkeypatch, source_method
 ):
     root = tmp_path / "shared-pretrain-k64_trial"
-    source = online_config(root, "pretrain")
+    source = online_config(root, "pretrain", source_method)
     # 按改名前的实现生成真实 checkpoint、本地身份和同一云端记录。
     with monkeypatch.context() as legacy:
         legacy.setattr(tracking, "tracking_method", lambda config, previous=None: "shared-pretrain")
@@ -302,12 +324,25 @@ def test_existing_shared_pretrain_identity_resumes_and_initializes_new_dynamic_m
     cloud = recorded_swanlab.runs[identity["id"]]
     original_cloud_config = deepcopy(dict(cloud["config"]))
     assert original_cloud_config["method"] == "shared-pretrain"
+    assert (
+        original_cloud_config["stages"]["pretrain"]["config"]["objective"]["method"]
+        == source_method
+    )
     assert "method:shared-pretrain" in identity["tags"]
     checkpoint = runtime.read_checkpoint(result["checkpoint"])
     assert _training_run_directory(source, checkpoint["run"]) == root
 
-    with method_tracking_run(source, record, torch.device("cpu"), api_key="test-api-key"):
-        pass
+    engine, data = make_engine(source), make_splits("pretrain")
+    stage = prepare_training(
+        source, engine, data, record, resume=result["checkpoint"], stop_after_steps=3
+    )
+    with method_tracking_run(source, record, engine.device, api_key="test-api-key") as active:
+        resumed_result = train_loop(
+            source, engine, data, record, stage, stop_after_steps=3, tracking=active
+        )
+    assert resumed_result["global_step"] == 3
+    resumed_checkpoint = runtime.read_checkpoint(resumed_result["checkpoint"])
+    assert resumed_checkpoint["run"]["config"]["objective"]["method"] == source_method
     assert (root / "experiment.json").read_bytes() == original_manifest
     assert (root / "swanlab.json").read_bytes() == original_identity
     assert dict(cloud["config"]) == original_cloud_config

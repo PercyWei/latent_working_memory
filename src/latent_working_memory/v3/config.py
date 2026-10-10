@@ -10,6 +10,8 @@ import re
 
 METHODS = ("icae_single", "icae_multi", "autocompressors", "memory_change", "information_loss")
 DYNAMIC_METHODS = ("memory_change", "information_loss")
+# 已有预训练产物记录了策略名，读取和续训继续保留其原始配置。
+DYNAMIC_PRETRAIN_METHODS = ("dynamic", *DYNAMIC_METHODS)
 
 
 def validate_stage_sequence(method, stages):
@@ -17,9 +19,10 @@ def validate_stage_sequence(method, stages):
     if not isinstance(stages, (list, tuple)) or not stages:
         raise ValueError("stages must be a nonempty list or tuple")
     pipelines = {
+        "dynamic": ("pretrain",),
         "icae_single": ("pretrain", "qa"),
         "icae_multi": ("pretrain", "qa"),
-        "autocompressors": ("lm",),
+        "autocompressors": ("pretrain",),
         "memory_change": ("warmup", "policy"),
         "information_loss": ("warmup", "policy"),
     }
@@ -27,6 +30,9 @@ def validate_stage_sequence(method, stages):
         raise ValueError(f"unsupported method: {method}")
     stages = tuple(stages)
     if method in DYNAMIC_METHODS and stages == ("pretrain",):
+        return stages
+    # 已有 AutoCompressors 运行按原 lm 阶段恢复，不改写其保存配置。
+    if method == "autocompressors" and stages == ("lm",):
         return stages
     pipeline = pipelines[method]
     if not any(stages == pipeline[start : start + len(stages)] for start in range(len(pipeline))):
@@ -92,7 +98,7 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class ObjectiveConfig:
-    method: str = "memory_change"
+    method: str = "dynamic"
     stage: str = "pretrain"
     qa_batch_size: int = 8
     icae_min_segments: int = 3
@@ -113,9 +119,10 @@ class ObjectiveConfig:
 
     def __post_init__(self):
         allowed = {
+            "dynamic": {"pretrain"},
             "icae_single": {"pretrain", "qa"},
             "icae_multi": {"pretrain", "qa"},
-            "autocompressors": {"lm"},
+            "autocompressors": {"pretrain", "lm"},
             "memory_change": {"pretrain", "warmup", "policy"},
             "information_loss": {"pretrain", "warmup", "policy"},
         }
@@ -125,12 +132,12 @@ class ObjectiveConfig:
             positive_integer(self.bptt_steps, "bptt_steps")
             if not (
                 self.method == "autocompressors"
-                and self.stage == "lm"
+                and self.stage in {"pretrain", "lm"}
                 or self.method in DYNAMIC_METHODS
                 and self.stage in {"warmup", "policy"}
             ):
                 raise ValueError(
-                    "bptt_steps is only supported by AutoCompressors LM or dynamic warmup/policy"
+                    "bptt_steps is only supported by AutoCompressors pretraining or dynamic warmup/policy"
                 )
         for name in (
             "qa_batch_size",

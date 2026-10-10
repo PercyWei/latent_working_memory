@@ -19,7 +19,7 @@
     ]
   },
   "objective": {
-    "method": "memory_change",
+    "method": "dynamic",
     "stages": ["pretrain"]
   },
   "training": {

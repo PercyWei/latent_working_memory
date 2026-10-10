@@ -417,7 +417,7 @@ def train_loop(config, engine, splits, run, stage, stop_after_steps=None, tracki
         min(total_steps, stop_after_steps) if stop_after_steps is not None else total_steps
     )
     if tracking is not None:
-        configure_training_metrics(tracking, config.objective.stage)
+        configure_training_metrics(tracking, config.objective.method, config.objective.stage)
     for epoch in range(cursor["epoch"], settings.epochs):
         if stop_after_steps is not None and cursor["step"] >= stop_after_steps:
             break
@@ -454,6 +454,7 @@ def train_loop(config, engine, splits, run, stage, stop_after_steps=None, tracki
                 "global_step": run["step_offset"] + step,
                 "stage": config.objective.stage,
                 "epoch": epoch + 1,
+                "train/epoch": cursor["sample_visits"] / len(train),
                 **{f"train/{key}": value for key, value in metrics.items() if value is not None},
                 **{f"resources/{key}": value for key, value in resources.items()},
             }
@@ -481,7 +482,10 @@ def train_loop(config, engine, splits, run, stage, stop_after_steps=None, tracki
                     )
                 print(" | ".join(progress), flush=True)
                 if tracking is not None:
-                    tracking.log(training_metrics(record), step=record["global_step"])
+                    tracking.log(
+                        training_metrics(record, config.objective.method),
+                        step=record["global_step"],
+                    )
             if step % settings.save_every == 0 or epoch_end or stopping:
                 stage.checkpoint_handler.save_checkpoint(step)
                 stage.checkpoint_path = output / "checkpoints" / f"global_step_{step}"

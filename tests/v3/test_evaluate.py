@@ -97,7 +97,7 @@ class Task(nn.Module):
         super().__init__()
         self.codec = Codec()
         self.tokenizer = Tokenizer()
-        stage = {"icae_single": "qa", "icae_multi": "qa", "autocompressors": "lm"}.get(
+        stage = {"icae_single": "qa", "icae_multi": "qa", "autocompressors": "pretrain"}.get(
             method, "policy"
         )
         self.cfg = ObjectiveConfig(method=method, stage=stage)
@@ -370,7 +370,9 @@ def test_real_tiny_model_evaluates_all_methods_without_training_or_gate_leakage(
         def decode(self, values, skip_special_tokens):
             return " ".join(map(str, values))
 
-    stage = {"icae_single": "qa", "icae_multi": "qa", "autocompressors": "lm"}.get(method, "policy")
+    stage = {"icae_single": "qa", "icae_multi": "qa", "autocompressors": "pretrain"}.get(
+        method, "policy"
+    )
     task = TokenMemoryTask(
         build_model(),
         DecoderTokenizer(),
@@ -391,6 +393,15 @@ def test_real_tiny_model_evaluates_all_methods_without_training_or_gate_leakage(
     assert summary["costs"]["nll_qa_reads"] == 3
     assert summary["costs"]["gate_qa_reads"] == (6 if method == "information_loss" else 0)
     assert all(parameter.grad is None for parameter in task.parameters())
+
+
+def test_shared_dynamic_pretraining_cannot_fall_through_to_a_qa_policy(tmp_path):
+    task = TokenMemoryTask(build_model(), TinyTokenizer(), ObjectiveConfig())
+    directory = tmp_path / "evaluation"
+    with pytest.raises(ValueError, match="shared dynamic pretraining has no FactQA memory policy"):
+        evaluation.evaluate(task, [objective_trajectory(split="test")], directory, "test", 2)
+    assert not (directory / "trajectories.jsonl").exists()
+    assert not (directory / "summary.json").exists()
 
 
 def test_swanlab_append_requires_original_training_identity(tmp_path):
@@ -429,7 +440,7 @@ def test_evaluation_resolves_method_identity_but_verifies_stage_checkpoint(tmp_p
     stage_directory.mkdir(parents=True)
     config = ExperimentConfig(
         ModelConfig(),
-        ObjectiveConfig(stage="policy"),
+        ObjectiveConfig(method="memory_change", stage="policy"),
         TrainingConfig(
             dataset_dir="data",
             output_dir=str(stage_directory),
