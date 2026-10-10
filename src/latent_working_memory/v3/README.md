@@ -135,8 +135,7 @@
 | 阶段 | 默认每卡 microbatch | 默认梯度累积 |
 |---|---:|---:|
 | ICAE 和 AutoCompressors 完整流程 | 8 | 1 |
-| 动态共享预训练 | 4 | 2 |
-| 动态方法 `warmup` 和 `policy`| 4 | 2 |
+| 动态方法完整流程| 4 | 2 |
 
 全局 batch = GPU 数 × 每卡 microbatch × 梯度累积；双卡默认均为 **16**，尾批按实际样本数平均。
 
@@ -188,7 +187,7 @@ artifacts/v3/<run-id>/
 ```
 
 - **运行目录**：`run-id` 默认是上海时间 `YYYYMMDD-HHMMSS`，可用 `--run-id` 指定；父目录由 `--output-root` 控制。
-- **方法目录**：三个 baseline 和共享预训练使用 `<method>-k<K>`，两种动态方法使用 `<method>-k<K>+<ΔK>`；试跑添加 `_<mode>`。方法名中的 `_` 转为 `-`，共享预训练用 `dynamic-pretrain`。K 为 `model.memory_slots`，ΔK 为 `objective.append_slots`。
+- **方法目录**：三个 baseline 和动态方法预训练使用 `<method>-k<K>`，两种动态方法使用 `<method>-k<K>+<ΔK>`；试跑添加 `_<mode>`。方法名中的 `_` 转为 `-`，共享预训练用 `dynamic-pretrain`。K 为 `model.memory_slots`，ΔK 为 `objective.append_slots`。
 - **Checkpoint**：目录为 `checkpoints/global_step_<阶段step>/`。`state.pt` 保存新增权重、优化器及运行状态，`data_<rank>.pt` 保存各卡加载器状态；每阶段默认保留最近两个，初始化、恢复和评估均传入该目录。命名调整不改变 checkpoint 格式。
 - **结果与比较**：`summary.json` 汇总指标，`trajectories.jsonl` 保存动作、分数、计时与逐题结果。本次调用有至少两个评估结果时生成 `compare/` 产物。
 
@@ -198,7 +197,7 @@ artifacts/v3/<run-id>/
 - **名称**：使用 `<method-dir>_<run-id>`；两种动态方法与共享预训练保持相同后缀，关联共同来源，各自仍有独立的云端 ID。
 - **横轴**：训练／验证使用累计 optimizer step；动态后训练的 step 不包含共享预训练。
 - **曲线**：展示目标损失、旧／新 QA NLL、容量、梯度范数、耗时和训练步峰值显存。
-- **阶段与进度**：`train/stage` 中，1 = 预训练、2 = ICAE QA／动态动作预热、3 = 动态策略训练；`train/epoch` 以小数记录当前阶段累计处理样本数／训练集样本数，阶段切换时重新计数。
+- **阶段与进度**：`train/stage` 中，1 = pretrain、2 = ICAE QA／动态方法 warmup、3 = 动态方法 policy；`train/epoch` 以小数记录当前阶段累计处理样本数／训练集样本数，阶段切换时重新计数。
 - **最终柱状图**：NLL／EM／F1 各合并 all／old／new；另展示最终与平均 slots、每条轨迹的记忆构建耗时。
 - **完整记录**：统计与样例保存在本地，不上传表格；`--tracking disabled` 仅记录本地结果。
 
