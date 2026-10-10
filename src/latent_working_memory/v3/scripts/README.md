@@ -103,7 +103,9 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 
 - 默认连续执行动作预热、策略训练和最终评估，此时只需要 QA 数据。
 - 将方法改为 `information_loss` 并使用同一 checkpoint，可单独训练另一组。
+- 共享预训练不执行追加，可复用于不同追加容量的后训练。
 - 保留原预训练运行目录及路径，包括 `pretrain/run.json` 和在线运行生成的 `swanlab.json`。运行标识自动继承，模型配置须与预训练一致。
+- 已有预训练产物保留原路径与配置，无需改名，`--init-checkpoint` 仍传入其原 checkpoint 目录。
 
 ## 4. 调整参数
 
@@ -113,10 +115,10 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 |---|---|
 | `--config <文件路径>` | 替换所选单方法的 JSON 预设；未指定时读取 `configs/v3/` 中的默认文件 |
 | `--gpus 0,1` | 使用的物理 GPU；默认 `0,1`，最终评估使用第一张卡 |
-| `--micro-batch-size-per-gpu` | 每卡一次并行处理的样本／轨迹数；ICAE、AutoCompressors 和共享预训练默认 8，动态 warmup／policy 默认 4 |
-| `--gradient-accumulation-steps` | 每次更新累积的 microbatch 数；ICAE、AutoCompressors 和共享预训练默认 1，动态 warmup／policy 默认 2 |
+| `--micro-batch-size-per-gpu` | 每卡一次并行处理的样本／轨迹数；ICAE 和 AutoCompressors 默认 8，共享预训练及动态 warmup／policy 默认 4 |
+| `--gradient-accumulation-steps` | 每次更新累积的 microbatch 数；ICAE 和 AutoCompressors 默认 1，共享预训练及动态 warmup／policy 默认 2 |
 | `--qa-batch-size 8` | 每条轨迹一次读取的题数，默认 8 |
-| `--append-slots 32` | 动态方法每次追加的 slots 数，默认 32；首次为 512，覆盖保持末块大小 |
+| `--append-slots 32` | 仅用于动态 warmup／policy，每次追加的 slots 数，默认 32；首次容量为 K，覆盖保持末块大小 |
 | `--max-input-tokens 12288` | AE／LM 训练正文 token 上限；超限整条过滤，不计 memory／提示／目标；`0` 使用模型窗口 |
 | `--max-qa-input-tokens 12288` | FactQA 训练正文 token 上限；超限整条过滤，不计 memory／提示／目标；`0` 使用模型窗口 |
 | `--lm-ratio 0.5` | ICAE 与动态方法预训练选择 LM 的概率；AutoCompressors 保持 LM-only |
@@ -138,7 +140,7 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 | 方法／阶段 | 每卡 microbatch | 梯度累积 |
 |---|---:|---:|
 | ICAE-single／ICAE-multi：预训练、QA | 8 | 1 |
-| 动态共享预训练 | 8 | 1 |
+| 动态共享预训练 | 4 | 2 |
 | AutoCompressors | 8 | 1 |
 | 动态 warmup／policy | 4 | 2 |
 
@@ -173,7 +175,7 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 
 - 文件中的 `objective.method` 须与所选方法一致，阶段使用 `objective.stages`；`--method dynamic_pretrain` 的文件使用 `"method": "dynamic"`，并仅声明 `["pretrain"]`。
 - 显式超参数覆盖文件值；数据入口由 `--pretrain-data`／`--qa-data` 指定，阶段训练预算由配置及对应 CLI 参数决定，试跑档位再限制上限。产物与 SwanLab 身份由启动器生成。
-- `--config` 用于单方法，不与 `all` 组合。`dynamic_pretrain` 可传入自己的预训练文件；动态后训练的自定义文件只替换 warmup／policy，共享预训练仍读取默认文件。更换动态模型或 slots 时，先生成匹配的预训练 checkpoint，再通过 `--init-checkpoint` 使用。
+- `--config` 用于单方法，不与 `all` 组合。`dynamic_pretrain` 可传入自己的预训练文件；动态后训练的自定义文件只替换 warmup／policy，自动预训练仍读取独立的默认配置。更换动态模型或首次容量 K 时，先生成匹配的预训练 checkpoint，再通过 `--init-checkpoint` 使用。
 
 - 启动器按列表生成阶段配置；单元素列表如 `["pretrain"]` 只执行该阶段。正式实验保留默认完整流程。
 - 仅运行后训练时，首阶段可用 `training.init_checkpoint` 指定来源；动态方法也支持 `--init-checkpoint`，未指定时先执行共享预训练。后继阶段自动继承前一阶段，单独 `warmup` 不触发最终评估。
@@ -196,12 +198,12 @@ artifacts/v3/<run-id>/
 
 **`<method-dir>` 命名规则**
 
-| 运行模式 | 命名 |
-|---|---|
-| `full` | `<method>-k<K>` |
-| `smoke`、`pilot` | `<method>-k<K>_<mode>` |
+| 方法 | `full` | `smoke`、`pilot` |
+|---|---|---|
+| 三个 baseline 和共享预训练 | `<method>-k<K>` | `<method>-k<K>_<mode>` |
+| 两种动态方法 | `<method>-k<K>+<ΔK>` | `<method>-k<K>+<ΔK>_<mode>` |
 
-- 方法名将 `_` 转为 `-`，如 `memory-change`；共享预训练使用 `dynamic-pretrain`。K 为 `model.memory_slots`，动态方法表示首次容量。
+- 方法名将 `_` 转为 `-`，如 `memory-change`；共享预训练使用 `dynamic-pretrain`。K 为 `model.memory_slots`，ΔK 为 `objective.append_slots`，例如 `memory-change-k512+32`。
 - SwanLab 名称为 `<method-dir>_<run-id>`；两个动态方法与共享预训练使用相同后缀关联来源。
 
 | 方法 | 默认训练阶段 | 默认最终评估目录的阶段 |
@@ -218,6 +220,6 @@ artifacts/v3/<run-id>/
 3. **方法比较**：本次调用产出至少两个评估结果时，统一导出 `points.json` 和 `points.csv`；参与的结果路径与执行状态见 `compare/result.json`。
 4. **失败排查**：先看对应方法的 `plan/<method-dir>/result.json`，再看 `train.log` 或 `eval.log`；比较失败查看 `compare/result.json` 和同目录的 `compare.log`。
 
-各阶段的 `checkpoints/` 默认保留最近两个 `global_step_<阶段step>/` 目录（`training.save_total_limit=2`）。目录内包含 `state.pt` 和各卡的 `data_<rank>.pt`；`--init-checkpoint`、`--resume` 与评估的 `--checkpoint` 均传目录路径。
+各阶段的 `checkpoints/` 默认保留最近两个 `global_step_<阶段step>/` 目录（`training.save_total_limit=2`）。目录内包含 `state.pt` 和各卡的 `data_<rank>.pt`；`--init-checkpoint`、`--resume` 与评估的 `--checkpoint` 均传目录路径。命名调整不改变 checkpoint 格式，旧目录保持原名。
 
 已有产物不覆盖；独立试跑与正式运行使用不同 `run-id`，省略时自动生成。

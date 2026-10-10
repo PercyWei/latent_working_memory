@@ -134,61 +134,73 @@
 
 | 阶段 | 默认每卡 microbatch | 默认梯度累积 |
 |---|---:|---:|
-| ICAE 和 AutoCompressors 完整流程、动态方法 `pretrain` | 8 | 1 |
+| ICAE 和 AutoCompressors 完整流程 | 8 | 1 |
+| 动态共享预训练 | 4 | 2 |
 | 动态方法 `warmup` 和 `policy`| 4 | 2 |
 
 全局 batch = GPU 数 × 每卡 microbatch × 梯度累积；双卡默认均为 **16**，尾批按实际样本数平均。
 
 ## 四、运行
 
-先按[运行指南](scripts/README.md#1-准备环境模型与数据)准备环境、模型、数据和 SwanLab key，并修改 `run_gpu.sh` 中的仓库路径。以下命令在仓库根目录执行：
+### 4.1 启动与配置
+
+按[运行指南](scripts/README.md#1-准备环境模型与数据)准备环境、模型、数据和 SwanLab key，并设置 `run_gpu.sh` 中的仓库路径。在仓库根目录执行，例如运行 ICAE-single：
 
 ```bash
 bash src/latent_working_memory/v3/scripts/run_gpu.sh \
-    --mode full \
     --method icae_single \
-    --config configs/v3/icae_single.json \
     --gpus 0,1
 ```
 
-- `--method` 默认 `all`；也可选择表中的单个方法。`--mode` 默认 `full`，试跑时显式指定 `smoke` 或 `pilot`。
-- 默认配置位于 `configs/v3/`，`objective.stages` 声明阶段顺序；`--method <方法> --config <文件>` 可替换单方法配置，显式 CLI 超参数优先。参数及作用范围见[运行指南](scripts/README.md#4-调整参数)。
-- 同一方法的连续阶段复用模型和训练进程，切换阶段时重置优化器；共享预训练与不同方法分别启动。
-- 单独准备共享预训练使用 `--method dynamic_pretrain`。后续用 `--method memory_change` 或 `information_loss` 搭配同一个 `--init-checkpoint`，并继承预训练的 `run-id`。保留来源运行目录及身份文件。
-- 中断恢复使用阶段目录保存的 `config.json` 和 checkpoint，调用训练模块的 `--resume`。
+| 参数 | 用法 |
+|---|---|
+| `--method` | 默认 `all`，运行五种方法；或指定运行单方法 |
+| `--mode` | 默认 `full`；试跑指定 `smoke` 或 `pilot` |
+| `--config <文件>` | 替换所选单方法的默认配置；省略时读取 `configs/v3/` |
+
+- **配置覆盖**：`objective.stages` 声明阶段顺序，显式 CLI 超参数覆盖配置值；更多参数见[运行指南](scripts/README.md#4-调整参数)。
+- **阶段执行**：同一方法的连续阶段共用模型和训练进程，切换时重置优化器；不同方法分别启动。
+
+### 4.2 复用预训练与中断恢复
+
+- **共享预训练**：用 `--method dynamic_pretrain` 单独训练一次；随后分别运行 `memory_change` 和 `information_loss`，通过 `--init-checkpoint` 指向同一 checkpoint 目录。命令见[复用指南](scripts/README.md#3-复用共享预训练可选)。
+- **来源记录**：后训练自动沿用预训练的实验系列编号 `run-id`。保留来源目录中的 `pretrain/run.json`，以及在线运行生成的 `swanlab.json`。
+- **已有产物**：保留旧预训练的原路径与配置，可继续通过 `--init-checkpoint` 使用，不直接重命名旧目录。
+- **中断恢复**：使用阶段目录保存的 `config.json`，调用训练模块的 `--resume` 并传入 checkpoint 目录。
 
 ## 五、评估与产物
 
-默认评估最后一个 checkpoint，在同一批 FineWeb FactQA 轨迹的最终记忆上回答评估题，门控题不计入质量指标。记录答案 NLL、EM（精确匹配）和 F1，并按末段新事实、更早旧事实及段距离分层；生成使用 greedy decoding。
+### 5.1 评估方式与指标
+
+- **评估对象**：默认使用最后一个 checkpoint，在同一批 FineWeb FactQA 轨迹的最终记忆上回答评估题；门控题不计入质量指标。
+- **质量**：记录答案 NLL、EM（精确匹配）和 F1，生成使用 greedy decoding。按 all／old／new 及段距离统计；new 指末段事实，old 指更早事实，段距离按 FactQA 原始段界计算。
+- **容量**：记录最终 slots 与各更新点保存状态的平均 slots，再按轨迹平均；ICAE-single 只有一次压缩状态。
+- **成本**：记忆构建耗时包含候选写入及门控计算，不含最终 QA 读取与答案生成。
+
+### 5.2 本地产物
 
 ```text
 artifacts/v3/<run-id>/
-├── plan/<method-dir>/
-│       阶段配置、job.json、日志、result.json
-├── train/<method-dir>/<stage>/
-│       config.json、run.json、metrics.jsonl、checkpoints/
-├── eval/<method-dir>/<stage>/
-│       summary.json、trajectories.jsonl
-└── compare/
-        points.json、points.csv、compare.log、result.json
+├── plan/<method-dir>/           阶段配置、job.json、日志、result.json
+├── train/<method-dir>/<stage>/  config.json、run.json、metrics.jsonl、checkpoints/
+├── eval/<method-dir>/<stage>/   summary.json、trajectories.jsonl
+└── compare/                     points.json、points.csv、compare.log、result.json
 ```
 
-`<method-dir>` 正式运行使用 `<method>-k<K>`，试跑添加 `_<mode>`；方法名中的 `_` 转为 `-`，共享预训练使用 `dynamic-pretrain`，K 对应 `model.memory_slots`，追加容量 ΔK 单独记录在配置中。`run-id` 默认是上海时间 `YYYYMMDD-HHMMSS`，可用 `--run-id` 指定；父目录可用 `--output-root` 修改。
+- **运行目录**：`run-id` 默认是上海时间 `YYYYMMDD-HHMMSS`，可用 `--run-id` 指定；父目录由 `--output-root` 控制。
+- **方法目录**：三个 baseline 和共享预训练使用 `<method>-k<K>`，两种动态方法使用 `<method>-k<K>+<ΔK>`；试跑添加 `_<mode>`。方法名中的 `_` 转为 `-`，共享预训练用 `dynamic-pretrain`。K 为 `model.memory_slots`，ΔK 为 `objective.append_slots`。
+- **Checkpoint**：目录为 `checkpoints/global_step_<阶段step>/`。`state.pt` 保存新增权重、优化器及运行状态，`data_<rank>.pt` 保存各卡加载器状态；每阶段默认保留最近两个，初始化、恢复和评估均传入该目录。命名调整不改变 checkpoint 格式。
+- **结果与比较**：`summary.json` 汇总指标，`trajectories.jsonl` 保存动作、分数、计时与逐题结果。本次调用有至少两个评估结果时生成 `compare/` 产物。
 
-checkpoint 使用 verl 的目录形式：`checkpoints/global_step_<阶段step>/`，包含新增权重、优化器与运行状态的 `state.pt`，以及各卡加载器状态 `data_<rank>.pt`。每阶段默认保留最近两个；初始化、恢复和评估参数均传入该目录。
+### 5.3 SwanLab 组织与展示
 
-- **本地结果**：`summary.json` 汇总质量、容量与读写成本，`trajectories.jsonl` 保存动作、分数、计时及逐题结果。本次调用有至少两个评估结果时生成比较，不扫描既有运行。
-- **SwanLab 组织**：默认 project 为 `latent-working-memory-v3`，group 为 `run-id`。每个方法的训练、验证与最终评估共用一个 run；共享预训练独立，因此默认 `all` 共六个 run。
-- **运行名称**：`<method-dir>_<run-id>`。两种动态方法与共享预训练保持同一后缀，关联共同来源；连续阶段使用累计 optimizer step，动态后训练步数不包含共享预训练。
-
-| SwanLab 展示 | 内容 |
-|---|---|
-| 训练／验证曲线 | 目标损失、旧／新 QA NLL、容量、梯度范数、阶段、epoch、整步耗时和峰值显存 |
-| 阶段 `train/stage` | 1 = 预训练，2 = ICAE QA／动态动作预热，3 = 动态策略训练 |
-| 进度 `train/epoch` | 当前阶段累计处理样本数／训练集样本数，按小数记录；阶段切换重新计数 |
-| 最终评估柱状图 | NLL／EM／F1（各合并 all／old／new）、最终与平均 slots、每条轨迹构建记忆的耗时 |
-
-构建耗时包含所有候选写入及门控计算，不含最终 QA 读取与答案生成。平均容量取各更新点保存的 slots，ICAE-single 只有一次压缩状态；汇总容量按轨迹平均。完整统计与样例保存在本地，不上传表格。`--tracking disabled` 仅记录本地结果。
+- **组织**：默认 project 为 `latent-working-memory-v3`，group 为 `run-id`。同一方法的训练、验证和最终评估共用一个 run；从头运行 `all` 共六个 run，包含独立的共享预训练。
+- **名称**：使用 `<method-dir>_<run-id>`；两种动态方法与共享预训练保持相同后缀，关联共同来源，各自仍有独立的云端 ID。
+- **横轴**：训练／验证使用累计 optimizer step；动态后训练的 step 不包含共享预训练。
+- **曲线**：展示目标损失、旧／新 QA NLL、容量、梯度范数、耗时和训练步峰值显存。
+- **阶段与进度**：`train/stage` 中，1 = 预训练、2 = ICAE QA／动态动作预热、3 = 动态策略训练；`train/epoch` 以小数记录当前阶段累计处理样本数／训练集样本数，阶段切换时重新计数。
+- **最终柱状图**：NLL／EM／F1 各合并 all／old／new；另展示最终与平均 slots、每条轨迹的记忆构建耗时。
+- **完整记录**：统计与样例保存在本地，不上传表格；`--tracking disabled` 仅记录本地结果。
 
 ## 六、代码入口与验证
 
