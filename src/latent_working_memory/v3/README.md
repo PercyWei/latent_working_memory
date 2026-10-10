@@ -1,6 +1,6 @@
 # v3：token memory 容量分配对照
 
-比较三种基线与两种动态扩容方法，检验“按信息损失程度扩容”能否在相近容量下改善旧信息保留。当前动态方法采用局部写入：只在覆盖时将最后一个记忆块传入编码器。
+比较三种基线与两种动态扩容方法，检验“按信息损失程度扩容”能否在相近容量下改善旧信息保留。两种动态方法均支持四种写入方式，默认使用局部写入。
 
 [运行指南](scripts/README.md) · [实验配置](../../../configs/v3/) · [实验方案](../../../notes/v3/20260926_step1_damage_guided_capacity_experiment.md)
 
@@ -26,13 +26,28 @@
 | 读取 | 从相同基座复制独立冻结 Decoder |
 | 执行 | verl `BaseEngine`、优化器与 DDP；默认使用 BF16、SDPA 和非重入逐层激活重计算 |
 
-## 二、两种扩容规则
+## 二、动态写入与扩容规则
 
-令 $X_t$ 为新文本、$A$ 为最后一个记忆块：
+### 2.1 四种写入方式
 
-- **追加**：输入 $X_t$，输出 $\Delta K$ slots 的新块；所有旧块保持不变。
-- **覆盖**：输入 $[A, X_t]$，输出与 $A$ 等长的新块，替换 $A$。
-- 更早的块不参与写入；任务 QA 读取全部已保存的块。两种动作共享 LoRA 和 gist embeddings。
+令 $X_t$ 为新文本、$A$ 为最后一个记忆块、$P$ 为更早的记忆。`objective.writer_mode` 指定写入方式，CLI 使用 `--writer-mode`：
+
+| 值 | 追加写入 | 覆盖写入 | 动作区分 |
+|---|---|---|---|
+| `local`（默认） | 输入 $[X_t,S]$ | 输入 $[A,X_t,S]$ | 通过输入范围区分写入动作 |
+| `tag` | 输入 $[P,A,T_{\rm app},X_t,S]$ | 输入 $[P,A,T_{\rm rw},X_t,S]$ | 每种动作使用 m 个独立可训练标记向量 |
+| `mask` | 输入 $[P,A,X_t,S]$，$S$ 直接关注 $X_t$ | 输入 $[P,A,X_t,S]$，$S$ 直接关注 $A,X_t$ | 每层限制 gist 位置的 attention，历史仍可经文本表示间接传递 |
+| `dual_lora` | 输入 $[P,A,X_t,S]$，使用追加 LoRA | 输入 $[P,A,X_t,S]$，使用覆盖 LoRA | 两套 LoRA 分别训练，共享 gist embeddings 和冻结读取端 |
+
+- **容量与更新**：首段普通压缩为 K slots；随后追加输出 $\Delta K$ slots 并保留全部旧块，覆盖输出与 $A$ 等长的新块并替换 $A$。任务 QA 始终读取全部保存记忆。
+- **首次写入**：不使用动作标记或特殊 mask；`dual_lora` 使用追加 LoRA，其余版本使用同一套 LoRA。
+- **注意力限制**：`mask` 中 gist 还可关注自身及前序 gist，其余位置保持因果 attention；支持 `eager`／`sdpa`，不支持 `flash_attention_2`。
+- **动作标记**：`tag_embeddings` 形状为 $2\times m\times d$，追加／覆盖各用一组 m 个标记向量，分别记为 $T_{\rm app}$、$T_{\rm rw}$（d 为隐藏维度）。m 由 `objective.tag_tokens` 指定，默认 3，可用 `--tag-tokens` 覆盖。这些向量直接传入 `inputs_embeds`，不扩充词表、不占记忆 slots；原词 embedding 与独立 Decoder 保持冻结。
+- **参数与初始化**：`local`／`mask` 不因动作增加参数；`tag` 增加 $2md$ 个可训练参数，按均值 0、标准差 0.02 的高斯初始化；`dual_lora` 增加一套可训练 LoRA。每种版本内，追加／覆盖共享 gist embeddings；`local`／`tag`／`mask` 两种动作还共享一套 LoRA。
+
+所选版本贯穿动态方法的 `warmup`、`policy` 和评估；共享预训练仍使用 `local`。
+
+### 2.2 两种扩容规则
 
 | 方法 | 决策过程 |
 |---|---|
@@ -116,10 +131,11 @@
 |---|---|---|
 | `pretrain` | FineWeb Multisegment 完整正文一次压缩为 K slots，计算 AE 或 LM 损失 | 只训练一次，复用同一 checkpoint |
 | `warmup` | FineWeb FactQA 原始段界逐段压缩；首次写入 K slots，后续按 `objective.append_probability`（默认 0.5）选择追加或覆盖，计算任务 QA 损失 | 分别训练 |
-| `policy` | FineWeb FactQA 原始段界逐段压缩；首次写入 K slots，后续按各自固定规则追加或覆盖，沿选中路径计算任务 QA 损失，训练写入器的编码 LoRA 和 gist embeddings | 分别训练 |
+| `policy` | FineWeb FactQA 原始段界逐段压缩；首次写入 K slots，后续按各自固定规则追加或覆盖，沿选中路径计算任务 QA 损失，训练写入器的可训练参数 | 分别训练 |
 
 - 每个更新点读取全部已保存记忆，使用该点配置的 old／new 任务题池，按实际题数合并损失；再平均更新点，最终按轨迹平均。信息损失方法额外用固定门控 QA 决策，这些题不参与计算任务损失。
 - QA 阶段默认完整 BPTT，可用 `objective.bptt_steps` 设置截断窗口；例如设为 2 时每两轮截断，首次写入也计一轮。每个窗口反向并 detach 记忆，global batch 结束后更新一次参数。
+- 四种写入版本均可复用同一共享预训练 checkpoint。`tag` 继承 LoRA／gist，按 m 新初始化两组标记向量，随后与它们一起进行 warmup／policy QA 训练；阶段衔接、恢复与评估沿用保存的 m。`dual_lora` 复制两套 LoRA，分别接收对应动作路径的梯度。
 
 ### 3.6 训练预算与批处理
 
@@ -156,6 +172,8 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 | `--method` | 默认 `all`，运行五种方法；或指定运行单方法 |
 | `--mode` | 默认 `full`；试跑指定 `smoke` 或 `pilot` |
 | `--config <文件>` | 替换所选单方法的默认配置；省略时读取 `configs/v3/` |
+| `--writer-mode` | 动态后训练写入方式：`local`（默认）、`tag`、`mask`、`dual_lora` |
+| `--tag-tokens` | 每种动作的控制 token 数 m，默认 3；仅用于动态 `tag` 写入 |
 
 - **配置覆盖**：`objective.stages` 声明阶段顺序，显式 CLI 超参数覆盖配置值；更多参数见[运行指南](scripts/README.md#4-调整参数)。
 - **阶段执行**：同一方法的连续阶段共用模型和训练进程，切换时重置优化器；不同方法分别启动。
@@ -187,8 +205,8 @@ artifacts/v3/<run-id>/
 ```
 
 - **运行目录**：`run-id` 默认是上海时间 `YYYYMMDD-HHMMSS`，可用 `--run-id` 指定；父目录由 `--output-root` 控制。
-- **方法目录**：三个 baseline 和动态方法预训练使用 `<method>-k<K>`，两种动态方法使用 `<method>-k<K>+<ΔK>`；试跑添加 `_<mode>`。方法名中的 `_` 转为 `-`，共享预训练用 `dynamic-pretrain`。K 为 `model.memory_slots`，ΔK 为 `objective.append_slots`。
-- **Checkpoint**：目录为 `checkpoints/global_step_<阶段step>/`。`state.pt` 保存新增权重、优化器及运行状态，`data_<rank>.pt` 保存各卡加载器状态；每阶段默认保留最近两个，初始化、恢复和评估均传入该目录。命名调整不改变 checkpoint 格式。
+- **方法目录**：三个 baseline 和动态预训练使用 `<method>-k<K>`；动态后训练统一使用 `<method>-k<K>+<ΔK>-<writer>`，`<writer>` 为 `local`、`tag`、`mask` 或 `dual-lora`，试跑最后添加 `_<mode>`。例如 `memory-change-k512+32-local`、`memory-change-k512+32-tag_smoke`。方法名中的 `_` 转为 `-`，共享预训练用 `dynamic-pretrain`；K、ΔK 分别来自 `model.memory_slots`、`objective.append_slots`。
+- **Checkpoint**：目录为 `checkpoints/global_step_<阶段step>/`。`state.pt` 保存新增权重、优化器及运行状态，`data_<rank>.pt` 保存各卡加载器状态；每阶段默认保留最近两个，初始化、恢复和评估均传入该目录。外层结构及文件布局不变；原 adapter 字典中，`tag` 保存 $2\times m\times d$ 的 `tag_embeddings`，`dual_lora` 保存两套 LoRA。恢复与评估使用保存的写入方式和 m。
 - **结果与比较**：`summary.json` 汇总指标，`trajectories.jsonl` 保存动作、分数、计时与逐题结果。本次调用有至少两个评估结果时生成 `compare/` 产物。
 
 ### 5.3 SwanLab 组织与展示

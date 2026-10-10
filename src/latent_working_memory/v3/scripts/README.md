@@ -98,11 +98,14 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 ```bash
 bash src/latent_working_memory/v3/scripts/run_gpu.sh \
   --mode full --method memory_change --gpus 0,1 \
+  --writer-mode tag --tag-tokens 3 \
   --init-checkpoint artifacts/v3/capacity-comparison_20261007-01/train/dynamic-pretrain-k512/pretrain/checkpoints/global_step_N
 ```
 
 - 默认连续执行动作预热、策略训练和最终评估，此时只需要 QA 数据。
 - 将方法改为 `information_loss` 并使用同一 checkpoint，可单独训练另一组。
+- `--writer-mode` 选择 `local`、`tag`、`mask` 或 `dual_lora`；省略时沿用配置，默认 `local`。四种方式均可从同一共享预训练初始化，定义见 [动态写入](../README.md#21-四种写入方式)。
+- `tag` 继承预训练的 LoRA／gist，为追加／覆盖各新初始化 m 个标记向量，随后进行 warmup／policy QA 训练；m 默认 3，共享预训练不包含这些参数。
 - 共享预训练不执行追加，可复用于不同追加容量的后训练。
 - 保留原预训练运行目录及路径，包括 `pretrain/run.json` 和在线运行生成的 `swanlab.json`。运行标识自动继承，模型配置须与预训练一致。
 - 已有预训练产物保留原路径与配置，无需改名，`--init-checkpoint` 仍传入其原 checkpoint 目录。
@@ -119,6 +122,8 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 | `--gradient-accumulation-steps` | 每次更新累积的 microbatch 数；ICAE 和 AutoCompressors 默认 1，共享预训练及动态 warmup／policy 默认 2 |
 | `--qa-batch-size 8` | 每条轨迹一次读取的题数，默认 8 |
 | `--append-slots 32` | 仅用于动态 warmup／policy，每次追加的 slots 数，默认 32；首次容量为 K，覆盖保持末块大小 |
+| `--writer-mode local` | 两种动态方法的写入方式，作用于 warmup／policy 及评估；可选 `local`、`tag`、`mask`、`dual_lora`，共享预训练不变 |
+| `--tag-tokens 3` | 每种动作的控制 token 数 m，默认 3；仅用于动态 `tag`，不占记忆 slots |
 | `--max-input-tokens 12288` | AE／LM 训练正文 token 上限；超限整条过滤，不计 memory／提示／目标；`0` 使用模型窗口 |
 | `--max-qa-input-tokens 12288` | FactQA 训练正文 token 上限；超限整条过滤，不计 memory／提示／目标；`0` 使用模型窗口 |
 | `--lm-ratio 0.5` | ICAE 与动态方法预训练选择 LM 的概率；AutoCompressors 保持 LM-only |
@@ -184,6 +189,12 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 
 `--bptt-steps` 统一控制写入窗口，`0` 对应配置中的 `null`，表示完整 BPTT。动态方法默认完整展开；设为 2 时每两轮反向并 detach 记忆，首次写入也计一轮。AutoCompressors 默认 2，在窗口完成后继文本监督后截断；完整 BPTT 时将全部 n 段作为一个随机切分组。各方法均在 global batch 结束后更新参数。
 
+写入版本在配置中使用 `objective.writer_mode`，默认 `local`：
+
+- `tag` 的每种动作各使用 m 个可训练标记向量，配置字段为 `objective.tag_tokens`，默认 3。`tag_embeddings` 形状为 $2\times m\times d$（d 为隐藏维度），以均值 0、标准差 0.02 的高斯初始化，增加 $2md$ 个参数。每次将对应动作的 m 个向量插入历史与新文本之间，不扩充词表、不占记忆 slots；首次写入不加标记，原词 embedding 与读取端冻结。
+- `mask` 支持 `eager`／`sdpa`，不支持 `flash_attention_2`。
+- `dual_lora` 从预训练 LoRA 复制出两套动作参数，增加一套可训练 LoRA，gist embeddings 仍共享。
+
 ## 5. 查看结果
 
 各档位产物统一保存到 `artifacts/v3/<run-id>/`，父目录可用 `--output-root` 修改。
@@ -201,9 +212,10 @@ artifacts/v3/<run-id>/
 | 方法 | `full` | `smoke`、`pilot` |
 |---|---|---|
 | 三个 baseline 和共享预训练 | `<method>-k<K>` | `<method>-k<K>_<mode>` |
-| 两种动态方法 | `<method>-k<K>+<ΔK>` | `<method>-k<K>+<ΔK>_<mode>` |
+| 两种动态方法 | `<method>-k<K>+<ΔK>-<writer>` | `<method>-k<K>+<ΔK>-<writer>_<mode>` |
 
-- 方法名将 `_` 转为 `-`，如 `memory-change`；共享预训练使用 `dynamic-pretrain`。K 为 `model.memory_slots`，ΔK 为 `objective.append_slots`，例如 `memory-change-k512+32`。
+- 方法名将 `_` 转为 `-`，如 `memory-change`；共享预训练使用 `dynamic-pretrain`，不添加写入版本后缀。K 为 `model.memory_slots`，ΔK 为 `objective.append_slots`。
+- `<writer>` 为 `local`、`tag`、`mask` 或 `dual-lora`，例如 `memory-change-k512+32-local`、`memory-change-k512+32-tag_smoke`。
 - SwanLab 名称为 `<method-dir>_<run-id>`；两个动态方法与共享预训练使用相同后缀关联来源。
 
 | 方法 | 默认训练阶段 | 默认最终评估目录的阶段 |
@@ -220,6 +232,6 @@ artifacts/v3/<run-id>/
 3. **方法比较**：本次调用产出至少两个评估结果时，统一导出 `points.json` 和 `points.csv`；参与的结果路径与执行状态见 `compare/result.json`。
 4. **失败排查**：先看对应方法的 `plan/<method-dir>/result.json`，再看 `train.log` 或 `eval.log`；比较失败查看 `compare/result.json` 和同目录的 `compare.log`。
 
-各阶段的 `checkpoints/` 默认保留最近两个 `global_step_<阶段step>/` 目录（`training.save_total_limit=2`）。目录内包含 `state.pt` 和各卡的 `data_<rank>.pt`；`--init-checkpoint`、`--resume` 与评估的 `--checkpoint` 均传目录路径。命名调整不改变 checkpoint 格式，旧目录保持原名。
+各阶段的 `checkpoints/` 默认保留最近两个 `global_step_<阶段step>/` 目录（`training.save_total_limit=2`）。目录内包含 `state.pt` 和各卡的 `data_<rank>.pt`；`--init-checkpoint`、`--resume` 与评估的 `--checkpoint` 均传目录路径。原 adapter 字典中，`tag` 保存 $2\times m\times d$ 的 `tag_embeddings`，`dual_lora` 保存两套 LoRA；阶段衔接、恢复与评估沿用保存的写入版本和 m。旧共享预训练和 `local` checkpoint 继续使用，保留原目录与配置；其他写入版本重新后训练并保存各自产物。
 
 已有产物不覆盖；独立试跑与正式运行使用不同 `run-id`，省略时自动生成。
