@@ -86,6 +86,8 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 
 ## 3. 复用共享预训练（可选）
 
+共享预训练将完整正文按 $[X,S_K]$ 普通单次压缩，不输入历史记忆或动作标记，以 AE／LM 训练单套 LoRA 和 gist embeddings。四种 `writer_mode` 用于后训练中的记忆更新。
+
 需要分开调度动态方法时，先运行一次共享预训练：
 
 ```bash

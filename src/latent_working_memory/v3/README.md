@@ -45,7 +45,7 @@
 - **动作标记**：`tag_embeddings` 形状为 $2\times m\times d$，追加／覆盖各用一组 m 个标记向量，分别记为 $T_{\rm app}$、$T_{\rm rw}$（d 为隐藏维度）。m 由 `objective.tag_tokens` 指定，默认 3，可用 `--tag-tokens` 覆盖。这些向量直接传入 `inputs_embeds`，不扩充词表、不占记忆 slots；原词 embedding 与独立 Decoder 保持冻结。
 - **参数与初始化**：`local`／`mask` 不因动作增加参数；`tag` 增加 $2md$ 个可训练参数，按均值 0、标准差 0.02 的高斯初始化；`dual_lora` 增加一套可训练 LoRA。每种版本内，追加／覆盖共享 gist embeddings；`local`／`tag`／`mask` 两种动作还共享一套 LoRA。
 
-所选版本贯穿动态方法的 `warmup`、`policy` 和评估；共享预训练仍使用 `local`。
+四种方式描述后训练中的追加／覆盖，所选版本贯穿 `warmup`、`policy` 和评估。共享预训练采用普通单次压缩，见 [3.5 节](#35-两种动态方法共享预训练与轨迹-qa)。
 
 ### 2.2 两种扩容规则
 
@@ -126,6 +126,8 @@
 `memory_change` 与 `information_loss` 使用相同的数据与训练流程，仅 `policy` 阶段的扩容规则不同：
 
 共享预训练的 `objective.method` 为 `dynamic`，仅运行 `pretrain`；后训练分别使用两种方法的名称。
+
+共享预训练输入为 $[X,S_K]$，将完整正文一次压缩为 K slots，不输入历史记忆或追加／覆盖动作。AE／LM 损失只训练一套 LoRA 和 gist embeddings，使记忆能被冻结 Decoder 使用；它为四种更新方式提供共同基础，各自的写入行为在后训练中学习。
 
 | 阶段 | 数据与记忆更新 | 两组关系 |
 |---|---|---|
