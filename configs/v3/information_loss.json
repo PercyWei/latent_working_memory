@@ -20,6 +20,8 @@
   },
   "objective": {
     "method": "information_loss",
+    "writer_mode": "local",
+    "tag_tokens": 3,
     "stages": ["warmup", "policy"],
     "qa_batch_size": 8,
     "append_probability": 0.5,

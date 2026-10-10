@@ -645,6 +645,19 @@ def test_load_codec_uses_a_local_tiny_pretrained_base_without_network(tmp_path):
     assert ac.memory_slots == 5
     assert ac.write_slots == 2
     assert ac.memory_embeddings.shape == (2, 16)
+    tag, tag_tokenizer = load_codec(
+        model_config,
+        torch.device("cpu"),
+        ObjectiveConfig(method="memory_change", stage="warmup", writer_mode="tag", tag_tokens=5),
+    )
+    assert tag.tag_embeddings.shape == (2, 5, 16)
+    assert tag.tag_embeddings.dtype == torch.float32
+    assert tag.tag_embeddings.requires_grad
+    assert tag_tokenizer.get_vocab() == loaded_tokenizer.get_vocab()
+    tag_embedding = tag.language_model.get_input_embeddings().weight
+    torch.testing.assert_close(tag_embedding, writer_embedding)
+    assert not tag_embedding.requires_grad
+    assert all(not parameter.requires_grad for parameter in tag.decoder.parameters())
     tokenizer.eos_token = None
     tokenizer.save_pretrained(model_dir)
     with pytest.raises(ValueError, match="eos_token_id"):

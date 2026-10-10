@@ -18,6 +18,8 @@ def build_model(
     attention_implementation="eager",
     gradient_checkpointing=True,
     write_slots=None,
+    writer_mode="local",
+    tag_tokens=3,
 ):
     torch.manual_seed(93)
     config_type, model_class = {
@@ -48,6 +50,8 @@ def build_model(
         ("q_proj", "v_proj"),
         gradient_checkpointing=gradient_checkpointing,
         write_slots=write_slots,
+        writer_mode=writer_mode,
+        tag_tokens=tag_tokens,
     )
 
 
@@ -566,3 +570,367 @@ def test_writer_batch_rejects_invalid_contracts_before_transformer_forward():
     finally:
         hook.remove()
     assert not calls
+
+
+@pytest.mark.parametrize("model_type", ["llama", "qwen3"])
+@pytest.mark.parametrize("tag_tokens", [1, 3, 5])
+def test_tag_embeddings_follow_full_history_and_are_absent_from_initial_write(
+    model_type, tag_tokens
+):
+    model = build_model(model_type, writer_mode="tag", tag_tokens=tag_tokens)
+    history = [torch.randn(2, model.width), torch.randn(3, model.width)]
+    calls, states = [], []
+    base = model.language_model.get_base_model().model
+    hook = base.register_forward_pre_hook(
+        lambda module, args, kwargs: calls.append(kwargs), with_kwargs=True
+    )
+    after = base.register_forward_hook(
+        lambda module, args, output: states.append(output.last_hidden_state)
+    )
+    try:
+        written = model.compress_batch(
+            [ids(3, 4), ids(5), ids(6, 7)],
+            [history, history, []],
+            [3, 2, 3],
+            ["append", "overwrite", "initial"],
+        )
+    finally:
+        hook.remove()
+        after.remove()
+    assert len(calls) == 1 and calls[0]["attention_mask"] is None
+    inputs = calls[0]["inputs_embeds"]
+    embed = model.language_model.get_input_embeddings()
+    for i in range(2):
+        torch.testing.assert_close(inputs[i, :5], torch.cat(history))
+        torch.testing.assert_close(inputs[i, 5 : 5 + tag_tokens], model.tag_embeddings[i])
+    text_start = 5 + tag_tokens
+    torch.testing.assert_close(inputs[0, text_start : text_start + 2], embed(ids(3, 4)))
+    torch.testing.assert_close(inputs[1, text_start : text_start + 1], embed(ids(5)))
+    torch.testing.assert_close(inputs[2, :2], embed(ids(6, 7)))
+    torch.testing.assert_close(inputs[2, 2:5], model.memory_embeddings)
+    for index, (length, count) in enumerate(((10 + tag_tokens, 3), (8 + tag_tokens, 2), (5, 3))):
+        torch.testing.assert_close(written[index], states[0][index, length - count : length])
+
+
+@pytest.mark.parametrize("model_type", ["llama", "qwen3"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("tag_tokens", [1, 3, 5])
+def test_tag_rows_are_trained_by_qa_without_changing_frozen_word_embeddings(
+    model_type, dtype, tag_tokens
+):
+    model = build_model(
+        model_type,
+        writer_mode="tag",
+        dtype=dtype,
+        attention_implementation="sdpa",
+        tag_tokens=tag_tokens,
+    )
+    randomize_adapter(model)
+    assert model.tag_embeddings.shape == (2, tag_tokens, model.width)
+    assert model.tag_embeddings.dtype == torch.float32
+    encoder_words = model.language_model.get_input_embeddings().weight
+    decoder_words = model.decoder.get_input_embeddings().weight
+    original_words = encoder_words.detach().clone()
+    original_decoder_words = decoder_words.detach().clone()
+    original_tags = model.tag_embeddings.detach().clone()
+    history = [torch.randn(3, model.width), torch.randn(2, model.width)]
+    calls = []
+    hook = model.language_model.get_base_model().model.register_forward_pre_hook(
+        lambda module, args, kwargs: calls.append(kwargs), with_kwargs=True
+    )
+    try:
+        memories = model.compress_batch(
+            [ids(3, 4, 5), ids(3, 4, 5)],
+            [history, history],
+            [2, 2],
+            ["append", "overwrite"],
+        )
+    finally:
+        hook.remove()
+    assert not torch.allclose(memories[0], memories[1])
+    for row in calls[0]["inputs_embeds"]:
+        torch.testing.assert_close(row[-2:], model.memory_embeddings[:2].to(dtype))
+    optimizer = torch.optim.AdamW(
+        [parameter for parameter in model.parameters() if parameter.requires_grad], lr=0.01
+    )
+    loss = model.answer_nll(memories, [ids(6), ids(6)], [ids(7, 8), ids(7, 8)]).mean()
+    loss.backward()
+    assert model.tag_embeddings.grad is not None
+    assert torch.isfinite(model.tag_embeddings.grad).all()
+    assert torch.all(model.tag_embeddings.grad.abs().sum(dim=-1) > 0)
+    assert torch.all(model.memory_embeddings.grad[:2].abs().sum(dim=1) > 0)
+    assert not encoder_words.requires_grad and encoder_words.grad is None
+    assert not decoder_words.requires_grad and decoder_words.grad is None
+    assert all(
+        not parameter.requires_grad and parameter.grad is None
+        for parameter in model.decoder.parameters()
+    )
+    assert all(
+        not parameter.requires_grad and parameter.grad is None
+        for name, parameter in model.language_model.named_parameters()
+        if "lora_" not in name
+    )
+    optimizer.step()
+    assert torch.all((model.tag_embeddings - original_tags).abs().sum(dim=-1) > 0)
+    torch.testing.assert_close(encoder_words, original_words)
+    torch.testing.assert_close(decoder_words, original_decoder_words)
+
+
+@pytest.mark.parametrize("model_type", ["llama", "qwen3"])
+@pytest.mark.parametrize("tag_tokens", [1, 3, 5])
+def test_tag_gradient_checkpointing_matches_full_qa_backward(model_type, tag_tokens):
+    checked = build_model(
+        model_type, writer_mode="tag", attention_implementation="sdpa", tag_tokens=tag_tokens
+    )
+    randomize_adapter(checked)
+    plain = build_model(
+        model_type,
+        writer_mode="tag",
+        attention_implementation="sdpa",
+        gradient_checkpointing=False,
+        tag_tokens=tag_tokens,
+    )
+    plain.load_trainable_state_dict(checked.trainable_state_dict())
+
+    def loss(model):
+        first = model.compress(ids(3, 4), action="initial")
+        appended = model.compress(ids(5), [first], 1, "append")
+        overwritten = model.compress(ids(6, 7), [first, appended], 1, "overwrite")
+        return model.answer_nll(
+            [torch.cat((first, appended, overwritten))], [ids(8)], [ids(9, 10)]
+        ).mean()
+
+    checked_loss, plain_loss = loss(checked), loss(plain)
+    torch.testing.assert_close(checked_loss, plain_loss, rtol=1e-6, atol=1e-7)
+    checked_loss.backward()
+    plain_loss.backward()
+    for (name, actual), (expected_name, expected) in zip(
+        checked.named_parameters(), plain.named_parameters(), strict=True
+    ):
+        assert name == expected_name
+        if actual.requires_grad:
+            assert actual.grad is not None and expected.grad is not None
+            torch.testing.assert_close(actual.grad, expected.grad, rtol=1e-4, atol=1e-6)
+        else:
+            assert actual.grad is None and expected.grad is None
+
+
+@pytest.mark.parametrize("model_type", ["llama", "qwen3"])
+@pytest.mark.parametrize("tag_tokens", [1, 3, 5])
+def test_tag_checkpoint_initialization_and_strict_roundtrip(model_type, tag_tokens):
+    source = build_model(model_type)
+    randomize_adapter(source)
+    source_state = source.trainable_state_dict()
+    target = build_model(model_type, writer_mode="tag", tag_tokens=tag_tokens)
+    initial_tags = target.tag_embeddings.detach().clone()
+    # 标签参数在 gist 初始化后才创建，旧模式的随机初始化结果不变。
+    torch.testing.assert_close(source.memory_embeddings, target.memory_embeddings)
+    assert not hasattr(source, "tag_embeddings")
+    with pytest.raises(ValueError, match="adapter keys"):
+        target.load_trainable_state_dict(source_state)
+    target.load_trainable_state_dict(source_state, initialize=True)
+    torch.testing.assert_close(target.tag_embeddings, initial_tags)
+    torch.testing.assert_close(
+        target.compress(ids(3, 4), action="initial"), source.compress(ids(3, 4))
+    )
+    with torch.no_grad():
+        target.tag_embeddings.add_(torch.tensor([[[0.2]], [[-0.3]]]))
+    saved = target.trainable_state_dict()
+    assert set(saved) == {"memory_embeddings", "adapter"}
+    assert set(saved["adapter"]) == set(source_state["adapter"]) | {"tag_embeddings"}
+    torch.testing.assert_close(saved["adapter"]["tag_embeddings"], target.tag_embeddings)
+    restored = build_model(model_type, writer_mode="tag", tag_tokens=tag_tokens)
+    restored.load_trainable_state_dict(saved)
+    for action in ("initial", "append", "overwrite"):
+        torch.testing.assert_close(
+            restored.compress(ids(3, 4), action=action), target.compress(ids(3, 4), action=action)
+        )
+    with torch.no_grad():
+        target.tag_embeddings.zero_()
+    assert not torch.equal(saved["adapter"]["tag_embeddings"], target.tag_embeddings)
+    with pytest.raises(ValueError, match="adapter keys"):
+        source.load_trainable_state_dict(saved, initialize=True)
+    missing = copy.deepcopy(saved)
+    missing["adapter"].pop("tag_embeddings")
+    with pytest.raises(ValueError, match="adapter keys"):
+        restored.load_trainable_state_dict(missing)
+    invalid = copy.deepcopy(saved)
+    invalid["adapter"]["tag_embeddings"] = torch.zeros(1, target.width)
+    with pytest.raises(ValueError, match="adapter shape differs for tag_embeddings"):
+        restored.load_trainable_state_dict(invalid)
+    mismatched = build_model(model_type, writer_mode="tag", tag_tokens=tag_tokens + 1)
+    with pytest.raises(ValueError, match="adapter shape differs for tag_embeddings"):
+        mismatched.load_trainable_state_dict(saved)
+
+
+@pytest.mark.parametrize("model_type", ["llama", "qwen3"])
+@pytest.mark.parametrize("attention_implementation", ["eager", "sdpa"])
+def test_mask_writer_limits_only_gist_queries_at_every_layer(model_type, attention_implementation):
+    model = build_model(
+        model_type, writer_mode="mask", attention_implementation=attention_implementation
+    )
+    history = [torch.randn(2, model.width), torch.randn(3, model.width)]
+    observed = []
+    hooks = [
+        layer.register_forward_pre_hook(
+            lambda module, args, kwargs: observed.append(kwargs["attention_mask"]),
+            with_kwargs=True,
+        )
+        for layer in model.language_model.get_base_model().model.layers
+    ]
+    try:
+        outputs = model.compress_batch(
+            [ids(3, 4), ids(5, 6, 7), ids(8)],
+            [history, history, []],
+            [2, 1, 3],
+            ["append", "overwrite", "initial"],
+        )
+    finally:
+        for hook in hooks:
+            hook.remove()
+    assert [len(memory) for memory in outputs] == [2, 1, 3]
+    minimum = torch.finfo(torch.float32).min
+    causal = torch.full((9, 9), minimum).triu(1)
+    expected = causal[None, None].repeat(3, 1, 1, 1)
+    expected[0, :, 7:9, :5] = minimum
+    expected[1, :, 8:9, :2] = minimum
+    assert len(observed) == 2
+    for attention_mask in observed:
+        torch.testing.assert_close(attention_mask, expected)
+
+
+@pytest.mark.parametrize("model_type", ["llama", "qwen3"])
+def test_masked_history_has_an_indirect_gradient_through_new_text(model_type):
+    model = build_model(model_type, writer_mode="mask", attention_implementation="sdpa")
+    randomize_adapter(model)
+    history = [torch.randn(3, model.width, requires_grad=True)]
+    memory = model.compress(ids(3, 4, 5), history, action="append")
+    weights = torch.randn_like(memory)
+    gradient = torch.autograd.grad((memory * weights).sum(), history)[0]
+    # S 每层都屏蔽历史，但新文本第一层读历史，第二层 S 再读取新文本。
+    assert torch.isfinite(gradient).all() and gradient.abs().sum() > 0
+
+
+@pytest.mark.parametrize("model_type", ["llama", "qwen3"])
+@pytest.mark.parametrize(
+    "writer_mode,tag_tokens", [("tag", 1), ("tag", 3), ("tag", 5), ("mask", 3), ("dual_lora", 3)]
+)
+def test_new_writer_ragged_mixed_batch_matches_separate_writes(model_type, writer_mode, tag_tokens):
+    model = build_model(
+        model_type, writer_mode=writer_mode, attention_implementation="sdpa", tag_tokens=tag_tokens
+    )
+    randomize_adapter(model)
+    texts = [ids(3, 4, 5), ids(6), ids(7, 8)]
+    histories = [
+        [torch.randn(3, model.width), torch.randn(2, model.width)],
+        [torch.randn(3, model.width)],
+        [],
+    ]
+    actions, slots = ["overwrite", "append", "initial"], [2, 1, 3]
+    batch = model.compress_batch(texts, histories, slots, actions)
+    separate = [
+        model.compress(text, history, count, action)
+        for text, history, count, action in zip(texts, histories, slots, actions, strict=True)
+    ]
+    torch.testing.assert_close(batch, separate, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("model_type", ["llama", "qwen3"])
+def test_dual_lora_recomputes_each_original_action_and_keeps_all_parameters_trainable(model_type):
+    checked = build_model(model_type, writer_mode="dual_lora", attention_implementation="sdpa")
+    randomize_adapter(checked)
+    plain = build_model(
+        model_type,
+        writer_mode="dual_lora",
+        attention_implementation="sdpa",
+        gradient_checkpointing=False,
+    )
+    plain.load_trainable_state_dict(checked.trainable_state_dict())
+    history = [torch.randn(3, checked.width), torch.randn(2, checked.width)]
+
+    def loss(model):
+        initial = model.compress(ids(3, 4), action="initial")
+        appended = model.compress(ids(5, 6), history + [initial], 1, "append")
+        overwritten = model.compress(ids(7, 8, 9), history + [initial], 3, "overwrite")
+        # 两次 forward 后 active 恢复 default，反向仍需以 append 重算前两次。
+        assert model.language_model.active_adapter == "default"
+        assert all(
+            parameter.requires_grad
+            for name, parameter in model.language_model.named_parameters()
+            if "lora_" in name
+        )
+        return model.answer_nll(
+            [torch.cat((initial, appended)), overwritten],
+            [ids(10, 11), ids(12)],
+            [ids(13, 14), ids(15, 16)],
+        ).mean()
+
+    checked_loss, plain_loss = loss(checked), loss(plain)
+    torch.testing.assert_close(checked_loss, plain_loss, rtol=1e-6, atol=1e-7)
+    checked_loss.backward()
+    plain_loss.backward()
+    for (name, actual), (expected_name, expected) in zip(
+        checked.named_parameters(), plain.named_parameters(), strict=True
+    ):
+        assert name == expected_name
+        if actual.requires_grad:
+            assert actual.grad is not None and expected.grad is not None
+            torch.testing.assert_close(actual.grad, expected.grad, rtol=1e-4, atol=1e-6)
+        else:
+            assert actual.grad is None and expected.grad is None
+    assert checked.language_model.active_adapter == "default"
+
+
+@pytest.mark.parametrize("model_type", ["llama", "qwen3"])
+def test_dual_checkpoint_roundtrip_and_explicit_single_adapter_initialization(model_type):
+    source = build_model(model_type)
+    randomize_adapter(source)
+    state = source.trainable_state_dict()
+    dual = build_model(model_type, writer_mode="dual_lora")
+    with pytest.raises(ValueError, match="adapter keys"):
+        dual.load_trainable_state_dict(state)
+    dual.load_trainable_state_dict(state, initialize=True)
+    torch.testing.assert_close(dual.memory_embeddings, source.memory_embeddings)
+    expected = source.compress(ids(3, 4, 5))
+    for action in ("initial", "append", "overwrite"):
+        torch.testing.assert_close(dual.compress(ids(3, 4, 5), action=action), expected)
+    dual_state = dual.trainable_state_dict()
+    assert set(dual_state) == {"memory_embeddings", "adapter"}
+    assert set(state["adapter"]) < set(dual_state["adapter"])
+    assert len(dual_state["adapter"]) == 2 * len(state["adapter"])
+    for name, tensor in state["adapter"].items():
+        prefix, suffix = name.rsplit(".", 1)
+        torch.testing.assert_close(dual_state["adapter"][name], tensor)
+        torch.testing.assert_close(dual_state["adapter"][f"{prefix}.append.{suffix}"], tensor)
+    randomize_adapter(dual)
+    dual_state = dual.trainable_state_dict()
+    restored = build_model(model_type, writer_mode="dual_lora")
+    restored.load_trainable_state_dict(dual_state)
+    for action in ("initial", "append", "overwrite"):
+        torch.testing.assert_close(
+            restored.compress(ids(3, 4), action=action), dual.compress(ids(3, 4), action=action)
+        )
+    with pytest.raises(ValueError, match="adapter keys"):
+        source.load_trainable_state_dict(dual_state, initialize=True)
+
+
+def test_new_writer_mode_and_action_contracts_are_validated():
+    with pytest.raises(ValueError, match="writer_mode"):
+        build_model(writer_mode="other")
+    with pytest.raises(ValueError, match="writer_mode"):
+        build_model(writer_mode="action")
+    model = build_model(writer_mode="tag")
+    with pytest.raises(ValueError, match="actions must align"):
+        model.compress_batch([ids(3), ids(4)], actions=["append"])
+    with pytest.raises(ValueError, match="actions must align"):
+        model.compress(ids(3), action="other")
+    limited = build_model(max_positions=5, writer_mode="tag")
+    assert limited.compress(ids(3, 4), action="initial").shape == (3, limited.width)
+    with pytest.raises(ValueError, match="exceeds model window"):
+        limited.compress(ids(3, 4), action="append")
+
+
+@pytest.mark.parametrize("tag_tokens", [0, -1, 1.5, True])
+def test_invalid_tag_token_count_is_rejected(tag_tokens):
+    with pytest.raises(ValueError, match="tag_tokens must be a positive integer"):
+        build_model(writer_mode="tag", tag_tokens=tag_tokens)

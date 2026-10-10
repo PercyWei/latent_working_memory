@@ -1,6 +1,7 @@
 """同源独立编码器／解码器：gist 写入、冻结读取与逐层激活重计算。"""
 
 from copy import deepcopy
+from contextlib import contextmanager, nullcontext
 
 from peft import (
     LoraConfig,
@@ -26,6 +27,8 @@ class GistMemoryModel(nn.Module):
         lora_dropout=0.0,
         gradient_checkpointing=True,
         write_slots=None,
+        writer_mode="local",
+        tag_tokens=3,
     ):
         super().__init__()
         if base_model.config.model_type not in {"llama", "qwen2", "qwen3"}:
@@ -39,8 +42,13 @@ class GistMemoryModel(nn.Module):
             raise ValueError("write_slots must be a positive integer no greater than memory_slots")
         if lora_dropout != 0.0:
             raise ValueError("the initial gist writer requires lora_dropout=0")
+        if writer_mode not in {"local", "tag", "mask", "dual_lora"}:
+            raise ValueError("writer_mode must be local, tag, mask or dual_lora")
+        if type(tag_tokens) is not int or tag_tokens < 1:
+            raise ValueError("tag_tokens must be a positive integer")
         self.width = base_model.config.hidden_size
         self.max_positions = base_model.config.max_position_embeddings
+        self.writer_mode = writer_mode
         # 总容量 K 与单次写入可用的 gist embeddings 数可以不同。
         self.memory_slots = memory_slots
         self.write_slots = write_slots
@@ -66,16 +74,32 @@ class GistMemoryModel(nn.Module):
                 task_type="CAUSAL_LM",
             ),
         )
+        if writer_mode == "dual_lora":
+            self.language_model.add_adapter(
+                "append", deepcopy(self.language_model.peft_config["default"])
+            )
+            self._activate_adapter("default")
         for backbone in (self.language_model.get_base_model(), self.decoder):
             if gradient_checkpointing:
                 backbone.gradient_checkpointing_enable({"use_reentrant": False})
             else:
                 backbone.gradient_checkpointing_disable()
+        if writer_mode == "dual_lora" and gradient_checkpointing:
+            # 每次层重算捕获其原 forward 的 adapter，不读取后来写入动作的状态。
+            self.language_model.get_base_model()._set_gradient_checkpointing(
+                enable=True, gradient_checkpointing_func=self._writer_checkpoint
+            )
         embedding = self.language_model.get_input_embeddings().weight
         self.memory_embeddings = nn.Parameter(
             torch.empty(write_slots, self.width, device=embedding.device, dtype=torch.float32)
         )
         nn.init.normal_(self.memory_embeddings, mean=0.0, std=0.02)
+        if writer_mode == "tag":
+            # 两组分别表示 <APPEND> 与 <REWRITE>，不扩充冻结基座的词表。
+            self.tag_embeddings = nn.Parameter(
+                torch.empty(2, tag_tokens, self.width, device=embedding.device, dtype=torch.float32)
+            )
+            nn.init.normal_(self.tag_embeddings, mean=0.0, std=0.02)
         self.train()
 
     def _check_tokens(self, token_ids):
@@ -94,13 +118,39 @@ class GistMemoryModel(nn.Module):
         if length > self.max_positions:
             raise ValueError(f"sequence length {length} exceeds model window {self.max_positions}")
 
-    def compress(self, text_ids, memory_blocks=None, output_slots=None):
+    def _activate_adapter(self, adapter):
+        self.language_model.set_adapter(adapter)
+        # PEFT 默认冻结 inactive adapter；两套参数必须一直留在 optimizer/DDP 中。
+        for name, parameter in self.language_model.named_parameters():
+            if "lora_" in name:
+                parameter.requires_grad_(True)
+
+    @contextmanager
+    def _adapter_context(self, adapter):
+        previous = self.language_model.active_adapter
+        self._activate_adapter(adapter)
+        try:
+            yield
+        finally:
+            self._activate_adapter(previous)
+
+    def _writer_checkpoint(self, function, *args):
+        adapter = self.language_model.active_adapter
+        return checkpoint(
+            function,
+            *args,
+            use_reentrant=False,
+            context_fn=lambda: (nullcontext(), self._adapter_context(adapter)),
+        )
+
+    def compress(self, text_ids, memory_blocks=None, output_slots=None, action=None):
         """压缩新文本及指定历史块；调用方决定传入末块还是累计历史。"""
         histories = None if memory_blocks is None else [memory_blocks]
         slots = None if output_slots is None else [output_slots]
-        return self.compress_batch([text_ids], histories, slots)[0]
+        actions = None if action is None else [action]
+        return self.compress_batch([text_ids], histories, slots, actions)[0]
 
-    def compress_batch(self, text_ids, memory_blocks=None, output_slots=None):
+    def compress_batch(self, text_ids, memory_blocks=None, output_slots=None, actions=None):
         """一次 forward 写入独立样本，按各样本指定的 slots 数放置 gist tokens。"""
         if not text_ids:
             raise ValueError("writer text batch must be nonempty")
@@ -110,9 +160,37 @@ class GistMemoryModel(nn.Module):
         slots = [self.write_slots] * len(text_ids) if output_slots is None else output_slots
         if len(slots) != len(text_ids):
             raise ValueError("writer texts and output_slots must align")
+        actions = [None] * len(text_ids) if actions is None else actions
+        if len(actions) != len(text_ids) or any(
+            action not in {None, "initial", "append", "overwrite"} for action in actions
+        ):
+            raise ValueError("writer actions must align and be initial, append or overwrite")
+        if self.writer_mode == "dual_lora":
+            results = [None] * len(text_ids)
+            for adapter in ("default", "append"):
+                indices = [
+                    i
+                    for i, action in enumerate(actions)
+                    if ("append" if action in {"append", "initial"} else "default") == adapter
+                ]
+                if not indices:
+                    continue
+                with self._adapter_context(adapter):
+                    written = self._compress_batch(
+                        [text_ids[i] for i in indices],
+                        [histories[i] for i in indices],
+                        [slots[i] for i in indices],
+                        [actions[i] for i in indices],
+                    )
+                for i, memory in zip(indices, written, strict=True):
+                    results[i] = memory
+            return results
+        return self._compress_batch(text_ids, histories, slots, actions)
+
+    def _compress_batch(self, text_ids, histories, slots, actions):
         embed = self.language_model.get_input_embeddings()
-        rows = []
-        for tokens, blocks, count in zip(text_ids, histories, slots, strict=True):
+        rows, blocked_histories = [], []
+        for tokens, blocks, count, action in zip(text_ids, histories, slots, actions, strict=True):
             if type(count) is not int or not 1 <= count <= self.write_slots:
                 raise ValueError("output_slots must be integers between 1 and write_slots")
             self._check_tokens(tokens)
@@ -120,26 +198,59 @@ class GistMemoryModel(nn.Module):
                 self._check_memory(memory)
                 if not 1 <= len(memory) <= self.memory_slots:
                     raise ValueError("writer memory blocks must contain 1 to memory_slots vectors")
-            self._check_length(sum(len(memory) for memory in blocks) + len(tokens) + count)
             text = embed(tokens)
+            tag = text[:0]
+            if self.writer_mode == "tag" and action in {"append", "overwrite"}:
+                index = 0 if action == "append" else 1
+                tag = self.tag_embeddings[index].to(text.dtype)
+            self._check_length(
+                sum(len(memory) for memory in blocks) + len(tag) + len(tokens) + count
+            )
             rows.append(
                 torch.cat(
                     [
                         *(memory.to(text.dtype) for memory in blocks),
+                        tag,
                         text,
                         self.memory_embeddings[:count].to(text.dtype),
                     ]
                 )
             )
+            blocked_histories.append(
+                sum(len(memory) for memory in blocks)
+                if action == "append"
+                else sum(len(memory) for memory in blocks[:-1])
+                if action == "overwrite"
+                else 0
+            )
         inputs = pad_sequence(rows, batch_first=True)
         positions = torch.arange(inputs.shape[1], device=inputs.device)[None]
+        attention_mask = None
+        if self.writer_mode == "mask" and any(blocked_histories):
+            length = inputs.shape[1]
+            attention_mask = (
+                torch.full(
+                    (length, length),
+                    torch.finfo(inputs.dtype).min,
+                    dtype=inputs.dtype,
+                    device=inputs.device,
+                )
+                .triu(1)[None, None]
+                .repeat(len(rows), 1, 1, 1)
+            )
+            for i, (row, count, blocked) in enumerate(
+                zip(rows, slots, blocked_histories, strict=True)
+            ):
+                attention_mask[i, :, len(row) - count : len(row), :blocked] = torch.finfo(
+                    inputs.dtype
+                ).min
         # 只有右侧 padding，因果 attention 下有效前缀不会读到 padding。
-        # 不传四维 mask，也不重置 padding 的位置，保留 SDPA 的纯 causal 路径。
+        # 仅注意力限制版传四维 mask；其余写入保持 SDPA 的纯 causal 路径。
         hidden = (
             self.language_model.get_base_model()
             .model(
                 inputs_embeds=inputs,
-                attention_mask=None,
+                attention_mask=attention_mask,
                 position_ids=positions.expand(inputs.shape[:2]),
                 use_cache=False,
                 return_dict=True,
@@ -238,23 +349,53 @@ class GistMemoryModel(nn.Module):
             "memory_embeddings": self.memory_embeddings.detach().cpu().clone(),
             "adapter": {
                 name: tensor.detach().cpu().clone()
-                for name, tensor in get_peft_model_state_dict(
-                    self.language_model, save_embedding_layers=False
-                ).items()
+                for name, tensor in self._adapter_state_dict().items()
             },
         }
 
-    def load_trainable_state_dict(self, state):
+    def _adapter_state_dict(self):
+        state = get_peft_model_state_dict(self.language_model, save_embedding_layers=False)
+        if self.writer_mode == "tag":
+            state["tag_embeddings"] = self.tag_embeddings
+        if self.writer_mode == "dual_lora":
+            appended = get_peft_model_state_dict(
+                self.language_model, adapter_name="append", save_embedding_layers=False
+            )
+            for name, tensor in appended.items():
+                prefix, suffix = name.rsplit(".", 1)
+                state[f"{prefix}.append.{suffix}"] = tensor
+        return state
+
+    def load_trainable_state_dict(self, state, initialize=False):
         if not isinstance(state, dict) or set(state) != {"memory_embeddings", "adapter"}:
             raise ValueError("trainable state must contain exactly memory_embeddings and adapter")
         if state["memory_embeddings"].shape != self.memory_embeddings.shape:
             raise ValueError("checkpoint memory embedding shape differs from the model")
-        expected = get_peft_model_state_dict(self.language_model, save_embedding_layers=False)
-        if set(state["adapter"]) != set(expected):
+        expected = self._adapter_state_dict()
+        default = get_peft_model_state_dict(self.language_model, save_embedding_layers=False)
+        adapter = state["adapter"]
+        if initialize and self.writer_mode == "tag" and set(adapter) == set(default):
+            # 共享预训练没有动作标记；继承已有权重，保留新初始化的两组向量。
+            adapter = {**adapter, "tag_embeddings": self.tag_embeddings.detach()}
+        if initialize and self.writer_mode == "dual_lora" and set(adapter) == set(default):
+            # 共享预训练的一套 LoRA 显式复制给两种动作；恢复训练不走此路径。
+            adapter = dict(adapter)
+            for name, tensor in state["adapter"].items():
+                prefix, suffix = name.rsplit(".", 1)
+                adapter[f"{prefix}.append.{suffix}"] = tensor
+        if set(adapter) != set(expected):
             raise ValueError("checkpoint adapter keys differ from the model")
-        for name, tensor in state["adapter"].items():
+        for name, tensor in adapter.items():
             if tensor.shape != expected[name].shape:
                 raise ValueError(f"checkpoint adapter shape differs for {name}")
         with torch.no_grad():
             self.memory_embeddings.copy_(state["memory_embeddings"])
-        set_peft_model_state_dict(self.language_model, state["adapter"])
+            if self.writer_mode == "tag":
+                self.tag_embeddings.copy_(adapter["tag_embeddings"])
+        set_peft_model_state_dict(self.language_model, {name: adapter[name] for name in default})
+        if self.writer_mode == "dual_lora":
+            appended = {}
+            for name in default:
+                prefix, suffix = name.rsplit(".", 1)
+                appended[name] = adapter[f"{prefix}.append.{suffix}"]
+            set_peft_model_state_dict(self.language_model, appended, adapter_name="append")

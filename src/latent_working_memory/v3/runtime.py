@@ -66,6 +66,8 @@ def load_codec(model_config, device, objective_config):
         lora_alpha=model_config.lora_alpha,
         lora_target_modules=model_config.lora_target_modules,
         gradient_checkpointing=model_config.gradient_checkpointing,
+        writer_mode=objective_config.writer_mode,
+        tag_tokens=objective_config.tag_tokens,
     )
     return codec, tokenizer
 
@@ -220,7 +222,13 @@ def load_initialization(path, model, config):
     initialization = initialization_record(
         path, checkpoint["run"], checkpoint["cursor"]["step"], config
     )
-    model.load_trainable_state_dict(checkpoint["trainable"])
+    if (
+        config.objective.writer_mode in {"tag", "dual_lora"}
+        and initialization["stage"] == "pretrain"
+    ):
+        model.load_trainable_state_dict(checkpoint["trainable"], initialize=True)
+    else:
+        model.load_trainable_state_dict(checkpoint["trainable"])
     return initialization
 
 
@@ -242,6 +250,16 @@ def initialization_record(path, previous_run, step, config):
     stage = config.objective.stage
     if stage in required_stages and previous["objective"]["stage"] not in required_stages[stage]:
         raise ValueError(f"{stage} initialization requires {sorted(required_stages[stage])}")
+    if previous["objective"]["stage"] != "pretrain" and (
+        previous["objective"].get("writer_mode", "local") != config.objective.writer_mode
+    ):
+        raise ValueError("posttraining initialization requires the same writer_mode")
+    if (
+        previous["objective"]["stage"] != "pretrain"
+        and config.objective.writer_mode == "tag"
+        and previous["objective"]["tag_tokens"] != config.objective.tag_tokens
+    ):
+        raise ValueError("posttraining initialization requires the same tag_tokens")
     if config.objective.method == "icae_multi" and (
         previous["objective"]["method"] != "icae_multi"
         or any(

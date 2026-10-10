@@ -124,6 +124,12 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
             objective[name] = value
     if method in DYNAMIC_METHODS and stage != "pretrain" and args.append_slots is not None:
         objective["append_slots"] = args.append_slots
+    if method in DYNAMIC_METHODS and stage != "pretrain" and args.writer_mode is not None:
+        objective["writer_mode"] = args.writer_mode
+    if method in DYNAMIC_METHODS and stage != "pretrain" and args.tag_tokens is not None:
+        if objective.get("writer_mode", config.objective.writer_mode) != "tag":
+            raise ValueError("--tag-tokens requires writer_mode=tag")
+        objective["tag_tokens"] = args.tag_tokens
     if method == "icae_multi":
         for name in ("icae_min_segments", "icae_max_segments"):
             value = getattr(args, name)
@@ -142,13 +148,12 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
     is_pretrain = stage in {"pretrain", "lm"}
     dataset = args.pretrain_data if is_pretrain else args.qa_data
     run_method = (
-        "dynamic_pretrain"
-        if method in DYNAMIC_PRETRAIN_METHODS and stage == "pretrain"
-        else method
+        "dynamic_pretrain" if method in DYNAMIC_PRETRAIN_METHODS and stage == "pretrain" else method
     )
     method_directory = f"{run_method.replace('_', '-')}-k{config.model.memory_slots}"
     if run_method in DYNAMIC_METHODS:
         method_directory += f"+{resolved_objective.append_slots}"
+        method_directory += f"-{resolved_objective.writer_mode.replace('_', '-')}"
     if args.mode != "full":
         method_directory += f"_{args.mode}"
     experiment_dir = directory / "train" / method_directory
@@ -211,8 +216,7 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
         config=config,
         config_path=directory / "plan" / method_directory / f"{stage}.json",
         initialize_from=initialize_from,
-        evaluate=stage in {"qa", "policy"}
-        or (method == "autocompressors" and is_pretrain),
+        evaluate=stage in {"qa", "policy"} or (method == "autocompressors" and is_pretrain),
     )
 
 

@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 from latent_working_memory.v3 import job_plan
-from latent_working_memory.v3.config import DYNAMIC_METHODS, METHODS
+from latent_working_memory.v3.config import DYNAMIC_METHODS, METHODS, WRITER_MODES
 from latent_working_memory.v3.tracking_credentials import swanlab_api_key
 
 
@@ -131,6 +131,16 @@ def parse_args(argv=None):
         help="每个反传窗口的写入轮数，0 表示完整 BPTT；AutoCompressors 同时据此分组随机切分文本",
     )
     parser.add_argument(
+        "--writer-mode",
+        choices=WRITER_MODES,
+        help="动态后训练的写入方式：local、tag、mask 或 dual_lora；默认沿用配置",
+    )
+    parser.add_argument(
+        "--tag-tokens",
+        type=positive_count,
+        help="tag 写入每个动作的可训练控制 token 数，默认 3",
+    )
+    parser.add_argument(
         "--append-slots",
         type=positive_count,
         help="动态后训练每次追加的 slots 数，预设 32；首次写入为 K slots",
@@ -172,6 +182,10 @@ def parse_args(argv=None):
         parser.error("run-id must contain only letters, digits, '-' and '_'")
     if args.init_checkpoint is not None and args.method not in DYNAMIC_METHODS:
         parser.error("--init-checkpoint is only supported by dynamic methods")
+    if args.writer_mode is not None and args.method not in {*DYNAMIC_METHODS, "all"}:
+        parser.error("--writer-mode is only supported by dynamic posttraining methods")
+    if args.tag_tokens is not None and args.method not in {*DYNAMIC_METHODS, "all"}:
+        parser.error("--tag-tokens is only supported by dynamic tag posttraining")
     if args.append_slots is not None and args.method in {
         "icae_single",
         "icae_multi",

@@ -69,6 +69,11 @@ def training_configs(args):
             if (
                 config.model != first.model
                 or config.objective.method != first.objective.method
+                or config.objective.writer_mode != first.objective.writer_mode
+                or (
+                    first.objective.writer_mode == "tag"
+                    and config.objective.tag_tokens != first.objective.tag_tokens
+                )
                 or (
                     first.objective.method == "icae_multi"
                     and (

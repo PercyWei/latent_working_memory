@@ -76,6 +76,10 @@ def test_presets_use_requested_model_and_memory_size(filename):
         {"append_slots": 0},
         {"append_slots": True},
         {"append_slots": 1.5},
+        {"tag_tokens": 0},
+        {"tag_tokens": -1},
+        {"tag_tokens": True},
+        {"tag_tokens": 1.5},
         {"method": "memory_change", "stage": "warmup", "bptt_steps": 0},
         {"method": "memory_change", "stage": "warmup", "bptt_steps": True},
         {"method": "memory_change", "stage": "policy", "bptt_steps": 1.5},
@@ -540,7 +544,9 @@ def test_runtime_loader_preserves_shared_pretraining_method_in_saved_records(tmp
     config = replace(
         config,
         objective=replace(config.objective, method=method),
-        training=replace(config.training, micro_batch_size_per_gpu=8, gradient_accumulation_steps=1),
+        training=replace(
+            config.training, micro_batch_size_per_gpu=8, gradient_accumulation_steps=1
+        ),
     )
     saved = tmp_path / "pretrain.json"
     saved.write_text(json.dumps(config.to_dict()))

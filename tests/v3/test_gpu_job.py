@@ -232,7 +232,7 @@ def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode,
         assert job.config.training.group == "unit-job"
         root = Path(job.config.training.experiment_dir)
         assert Path(job.config.training.output_dir) == root / job.config.objective.stage
-        capacity = "-k512" if shared else "-k512+32"
+        capacity = "-k512" if shared else "-k512+32-local"
         assert root.name.endswith(capacity if mode == "full" else f"{capacity}_{mode}")
         assert job.config.training.experiment_name == f"{root.name}_unit-job"
         assert (
@@ -270,8 +270,8 @@ def test_all_methods_store_artifacts_under_one_run_directory(tmp_path, monkeypat
             "icae-single-k512": "icae_single",
             "icae-multi-k512": "icae_multi",
             "autocompressors-k512": "autocompressors",
-            "memory-change-k512+32": "memory_change",
-            "information-loss-k512+32": "information_loss",
+            "memory-change-k512+32-local": "memory_change",
+            "information-loss-k512+32-local": "information_loss",
         }.items()
     }
     assert train_names == set(methods)
@@ -372,7 +372,7 @@ def test_dynamic_capacity_names_use_cli_append_slots_in_every_mode(tmp_path, met
     suffix = "" if mode == "full" else f"_{mode}"
     for job in jobs:
         shared = job.method == "dynamic_pretrain"
-        capacity = "k512" if shared else "k512+16"
+        capacity = "k512" if shared else "k512+16-local"
         name = f"{job.method.replace('_', '-')}-{capacity}{suffix}"
         assert job.config.objective.append_slots == (8 if shared else 16)
         assert Path(job.config.training.experiment_dir) == directory / "train" / name
@@ -656,7 +656,7 @@ def test_custom_method_preset_preserves_parameters_and_launcher_overrides(
             args.pretrain_data if config.objective.stage == "pretrain" else args.qa_data
         )
         assert Path(config.training.dataset_dir) == dataset
-        capacity = "k512+32" if method in DYNAMIC_METHODS else "k512"
+        capacity = "k512+32-local" if method in DYNAMIC_METHODS else "k512"
         run_name = f"{method.replace('_', '-')}-{capacity}_smoke"
         assert Path(config.training.experiment_dir) == directory / "train" / run_name
         assert config.training.experiment_name == f"{run_name}_unit-job"
@@ -715,7 +715,8 @@ def test_custom_dynamic_posttraining_preserves_the_independent_shared_preset(tmp
     assert Path(jobs[0].config.training.experiment_dir).name == "dynamic-pretrain-k512_smoke"
     assert all(job.config.objective.append_slots == 16 for job in jobs[1:])
     assert all(
-        Path(job.config.training.experiment_dir).name == f"{method.replace('_', '-')}-k512+16_smoke"
+        Path(job.config.training.experiment_dir).name
+        == f"{method.replace('_', '-')}-k512+16-local_smoke"
         for job in jobs[1:]
     )
 
@@ -1021,7 +1022,7 @@ def test_cli_only_overrides_explicitly_supplied_preset_values(monkeypatch, overr
         dynamic = job.method in DYNAMIC_METHODS
         append_slots = 16 if override and dynamic else 12
         assert job.config.objective.append_slots == append_slots
-        capacity = f"k512+{append_slots}" if dynamic else "k512"
+        capacity = f"k512+{append_slots}-local" if dynamic else "k512"
         name = f"{job.method.replace('_', '-')}-{capacity}"
         assert Path(job.config.training.experiment_dir).name == name
         assert job.config.training.experiment_name == f"{name}_{args.run_id}"
@@ -1217,7 +1218,7 @@ def test_dynamic_preset_initialization_inherits_source_id_without_repeating_pret
     assert set(result["checkpoints"]) == {"memory-change-warmup", "memory-change-policy"}
     assert not args.pretrain_data.exists()
     assert {path.name for path in (args.output_root / "configured-source" / "plan").iterdir()} == {
-        "memory-change-k512+32_smoke"
+        "memory-change-k512+32-local_smoke"
     }
 
 
@@ -1752,7 +1753,7 @@ def test_new_capacity_names_reuse_old_pretraining_paths_and_preserve_source_iden
 
     assert args.run_id == result["experiment_id"] == "legacy-series"
     assert source_directory.parent.name == "dynamic-pretrain-k64_legacy-series"
-    name = f"{method.replace('_', '-')}-k512+16"
+    name = f"{method.replace('_', '-')}-k512+16-local"
     training, evaluation = commands.calls
     for config in training["configs"]:
         assert config.training.experiment_name == f"{name}_legacy-series"
@@ -1871,14 +1872,14 @@ def test_separate_methods_share_source_id_and_coexist_without_overwriting_series
     directory = shared.output_root / "unit-job"
     assert {path.name for path in (directory / "plan").iterdir()} == {
         "dynamic-pretrain-k512",
-        "memory-change-k512+32",
-        "information-loss-k512+32",
+        "memory-change-k512+32-local",
+        "information-loss-k512+32-local",
         "icae-single-k512",
     }
     assert {path.name for path in (directory / "train").iterdir()} == {
         "dynamic-pretrain-k512",
-        "memory-change-k512+32",
-        "information-loss-k512+32",
+        "memory-change-k512+32-local",
+        "information-loss-k512+32-local",
         "icae-single-k512",
     }
     assert source_metadata.read_bytes() == original_source
@@ -1927,8 +1928,8 @@ def test_separate_dynamic_methods_reuse_pretraining_without_changing_its_plan(
     }
     assert {path.name for path in (shared.output_root / "unit-job" / "plan").iterdir()} == {
         "dynamic-pretrain-k512",
-        "memory-change-k512+32",
-        "information-loss-k512+32",
+        "memory-change-k512+32-local",
+        "information-loss-k512+32-local",
     }
     assert {path.name: path.read_bytes() for path in shared_directory.iterdir()} == original_plan
     training = [call for call in commands.calls if "configs" in call]
@@ -2046,8 +2047,8 @@ def test_failed_training_or_evaluation_stops_the_remaining_graph(tmp_path, monke
         name: json.loads((directory / "plan" / name / "result.json").read_text())
         for name in (
             "dynamic-pretrain-k512_smoke",
-            "memory-change-k512+32_smoke",
-            "information-loss-k512+32_smoke",
+            "memory-change-k512+32-local_smoke",
+            "information-loss-k512+32-local_smoke",
         )
     }
     shared, memory, information = results.values()
@@ -2066,7 +2067,7 @@ def test_failed_training_or_evaluation_stops_the_remaining_graph(tmp_path, monke
         baseline = json.loads((directory / "plan" / f"{method}-k512_smoke/result.json").read_text())
         assert baseline["status"] == ("pending" if fail_at == 1 else "finished")
         assert len(baseline["summaries"]) == int(fail_at != 1)
-    pending_directory = directory / "plan/information-loss-k512+32_smoke"
+    pending_directory = directory / "plan/information-loss-k512+32-local_smoke"
     assert {path.name for path in pending_directory.iterdir()} == {
         "job.json",
         "result.json",
@@ -2086,7 +2087,9 @@ def test_second_stage_failure_preserves_first_stage_checkpoint_in_result(tmp_pat
 
     assert len(commands.calls) == 8
     directory, _, _ = job_plan.build_jobs(args)
-    failure = json.loads((directory / "plan/memory-change-k512+32_smoke/result.json").read_text())
+    failure = json.loads(
+        (directory / "plan/memory-change-k512+32-local_smoke/result.json").read_text()
+    )
     assert failure["status"] == "failed"
     assert set(failure["checkpoints"]) == {"memory-change-warmup"}
     assert failure["checkpoints"]["memory-change-warmup"] == str(
@@ -2100,7 +2103,7 @@ def test_second_stage_failure_preserves_first_stage_checkpoint_in_result(tmp_pat
         == "finished"
     )
     assert (
-        json.loads((directory / "plan/information-loss-k512+32_smoke/result.json").read_text())[
+        json.loads((directory / "plan/information-loss-k512+32-local_smoke/result.json").read_text())[
             "status"
         ]
         == "pending"

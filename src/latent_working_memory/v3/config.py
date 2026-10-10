@@ -12,6 +12,7 @@ METHODS = ("icae_single", "icae_multi", "autocompressors", "memory_change", "inf
 DYNAMIC_METHODS = ("memory_change", "information_loss")
 # 已有预训练产物记录了策略名，读取和续训继续保留其原始配置。
 DYNAMIC_PRETRAIN_METHODS = ("dynamic", *DYNAMIC_METHODS)
+WRITER_MODES = ("local", "tag", "mask", "dual_lora")
 
 
 def validate_stage_sequence(method, stages):
@@ -100,6 +101,8 @@ class ModelConfig:
 class ObjectiveConfig:
     method: str = "dynamic"
     stage: str = "pretrain"
+    writer_mode: str = "local"
+    tag_tokens: int = 3
     qa_batch_size: int = 8
     icae_min_segments: int = 3
     icae_max_segments: int = 6
@@ -128,6 +131,12 @@ class ObjectiveConfig:
         }
         if self.method not in allowed or self.stage not in allowed[self.method]:
             raise ValueError(f"unsupported method/stage: {self.method}/{self.stage}")
+        if self.writer_mode not in WRITER_MODES:
+            raise ValueError(f"unsupported writer_mode: {self.writer_mode}")
+        if self.writer_mode != "local" and not (
+            self.method in DYNAMIC_METHODS and self.stage in {"warmup", "policy"}
+        ):
+            raise ValueError("writer_mode is only supported by dynamic warmup/policy")
         if self.bptt_steps is not None:
             positive_integer(self.bptt_steps, "bptt_steps")
             if not (
@@ -140,6 +149,7 @@ class ObjectiveConfig:
                     "bptt_steps is only supported by AutoCompressors pretraining or dynamic warmup/policy"
                 )
         for name in (
+            "tag_tokens",
             "qa_batch_size",
             "icae_min_segments",
             "icae_max_segments",
@@ -260,6 +270,11 @@ class ExperimentConfig:
 
     def __post_init__(self):
         if (
+            self.objective.writer_mode == "mask"
+            and self.model.attention_implementation == "flash_attention_2"
+        ):
+            raise ValueError("mask writer requires eager or sdpa attention")
+        if (
             self.objective.method == "icae_multi"
             and self.objective.icae_max_segments > self.model.memory_slots
         ):
@@ -284,6 +299,11 @@ class ExperimentConfig:
 
     def to_dict(self):
         raw = json.loads(json.dumps(asdict(self)))
+        if self.objective.writer_mode == "local":
+            # 已保存的局部写入配置没有此字段，保留其续训身份。
+            del raw["objective"]["writer_mode"]
+        if self.objective.writer_mode != "tag":
+            del raw["objective"]["tag_tokens"]
         if self.training.experiment_name is None:
             del raw["training"]["experiment_name"]
         return raw

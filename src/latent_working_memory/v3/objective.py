@@ -96,12 +96,17 @@ class TokenMemoryTask(nn.Module):
                     events[index][timing_key] += timer[timing_key] / len(indices)
         return [torch.cat(values) for values in pieces]
 
-    def _write_batch(self, inputs, histories, events, output_slots=None):
+    def _write_batch(self, inputs, histories, events, output_slots=None, actions=None):
         timer = {"write_seconds": 0.0}
         with measured(self.device, timer, "write_seconds"):
-            results = self.codec.compress_batch(
-                [self.ids(ids) for ids in inputs], histories, output_slots
-            )
+            if self.cfg.writer_mode == "local":
+                results = self.codec.compress_batch(
+                    [self.ids(ids) for ids in inputs], histories, output_slots
+                )
+            else:
+                results = self.codec.compress_batch(
+                    [self.ids(ids) for ids in inputs], histories, output_slots, actions=actions
+                )
         for event in events:
             event["write_calls"] += 1
             event["write_seconds"] += timer["write_seconds"] / len(events)
@@ -199,19 +204,37 @@ class TokenMemoryTask(nn.Module):
                 for i in active
             }
 
-            def write(indices, histories, output_slots=None):
+            def write(indices, histories, output_slots=None, actions=None):
                 return self._write_batch(
                     [chunks[i][step] for i in indices],
                     histories,
                     [events[i] for i in indices],
                     [slot_counts[i][step] for i in indices] if multi or ac else output_slots,
+                    actions,
+                )
+
+            def write_updates(indices, append):
+                histories = [
+                    ([] if choice else [blocks[i][-1]])
+                    if self.cfg.writer_mode == "local"
+                    else blocks[i]
+                    for i, choice in zip(indices, append, strict=True)
+                ]
+                return write(
+                    indices,
+                    histories,
+                    [
+                        self.cfg.append_slots if choice else len(blocks[i][-1])
+                        for i, choice in zip(indices, append, strict=True)
+                    ],
+                    ["append" if choice else "overwrite" for choice in append],
                 )
 
             if single or self.cfg.method in {"icae_multi", "autocompressors"} or step == 0:
                 histories = [
                     blocks[i] if self.cfg.method == "autocompressors" else [] for i in active
                 ]
-                candidates = write(active, histories)
+                candidates = write(active, histories, actions=["initial"] * len(active))
                 for i, candidate in zip(active, candidates, strict=True):
                     blocks[i] = blocks[i] + [candidate]
                     events[i]["action"] = (
@@ -220,11 +243,7 @@ class TokenMemoryTask(nn.Module):
                 del candidates, candidate
             elif self.cfg.stage == "warmup" and not force_policy:
                 choices = {i: rngs[i].random() < self.cfg.append_probability for i in active}
-                candidates = write(
-                    active,
-                    [[] if choices[i] else [blocks[i][-1]] for i in active],
-                    [self.cfg.append_slots if choices[i] else len(blocks[i][-1]) for i in active],
-                )
+                candidates = write_updates(active, [choices[i] for i in active])
                 for i, candidate in zip(active, candidates, strict=True):
                     append = choices[i]
                     blocks[i] = blocks[i] + [candidate] if append else blocks[i][:-1] + [candidate]
@@ -232,9 +251,7 @@ class TokenMemoryTask(nn.Module):
                 del candidates, candidate
             else:
                 # 覆盖保留末块的原有大小，使新旧记忆始终可以逐 slot 比较。
-                rewritten = write(
-                    active, [[blocks[i][-1]] for i in active], [len(blocks[i][-1]) for i in active]
-                )
+                rewritten = write_updates(active, [False] * len(active))
                 if self.cfg.method == "memory_change":
                     timer = {"gate_seconds": 0.0}
                     with torch.no_grad(), measured(self.device, timer, "gate_seconds"):
@@ -256,11 +273,7 @@ class TokenMemoryTask(nn.Module):
                         dict(
                             zip(
                                 indices,
-                                write(
-                                    indices,
-                                    [[] for _ in indices],
-                                    [self.cfg.append_slots] * len(indices),
-                                ),
+                                write_updates(indices, [True] * len(indices)),
                                 strict=True,
                             )
                         )
@@ -271,9 +284,7 @@ class TokenMemoryTask(nn.Module):
                     appended = dict(
                         zip(
                             active,
-                            write(
-                                active, [[] for _ in active], [self.cfg.append_slots] * len(active)
-                            ),
+                            write_updates(active, [True] * len(active)),
                             strict=True,
                         )
                     )

@@ -289,6 +289,17 @@ def test_continuous_multi_stages_require_the_same_memory_embedding_shape(tmp_pat
         train.training_configs(arguments(paths))
 
 
+@pytest.mark.parametrize("method", ["memory_change", "information_loss"])
+def test_continuous_tag_stages_require_the_same_control_prefix_length(tmp_path, method):
+    paths = stage_configs(tmp_path, method)
+    for index, path in enumerate(paths):
+        raw = json.loads(path.read_text())
+        raw["objective"].update(writer_mode="tag", tag_tokens=3 + index)
+        path.write_text(json.dumps(raw))
+    with pytest.raises(ValueError, match="share their model"):
+        train.training_configs(arguments(paths))
+
+
 @pytest.mark.parametrize("method", ["icae_single", "icae_multi"])
 def test_worker_accepts_single_pretraining_stage(tmp_path, monkeypatch, method):
     loads, records = install_small_training(monkeypatch)

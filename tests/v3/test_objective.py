@@ -85,6 +85,8 @@ def task(method, stage, memory_slots=3, **options):
             else (memory_slots + config.ac_num_segments - 1) // config.ac_num_segments
             if method == "autocompressors"
             else None,
+            writer_mode=config.writer_mode,
+            tag_tokens=config.tag_tokens,
         ),
         TinyTokenizer(),
         config,
