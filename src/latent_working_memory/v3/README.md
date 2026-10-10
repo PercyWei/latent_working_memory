@@ -12,7 +12,7 @@
 |---|---|---|
 | `icae_single` | 完整历史一次压缩为 $K$ slots | AE／LM → QA |
 | `icae_multi` | 完整历史均分为 n 块，独立压缩后拼接，总容量为 $K$ slots | 多段 AE／LM → 多段 QA |
-| `autocompressors` | 新段与累计记忆共同压缩，n 次追加合计 $K$ slots | 多段 LM |
+| `autocompressors` | 新段与累计记忆共同压缩，n 次追加合计 $K$ slots | LM |
 | `memory_change` | 覆盖末块或追加 $\Delta K$ slots，按记忆表示变化决定 | AE／LM → 动作 warmup → 策略训练 |
 | `information_loss` | 同上的写入方式，按旧信息损失决定 | AE／LM → 动作 warmup → 策略训练 |
 
@@ -95,7 +95,7 @@
 
 | 阶段 | 数据使用与训练目标 |
 |---|---|
-| `lm` | FineWeb Multisegment 完整正文分段顺序压缩为 K slots，逐段计算正文的 LM 损失，最后以完整记忆预测独立续文 |
+| `pretrain` | FineWeb Multisegment 完整正文分段顺序压缩为 K slots，计算 LM 损失 |
 
 - 分段压缩逻辑：
     1. **确定段数**：由 `objective.ac_num_segments` 指定正文压缩段数 n（默认 4）；续文不计入段数。
@@ -109,6 +109,8 @@
 ### 3.5 两种动态方法：共享预训练与轨迹 QA
 
 `memory_change` 与 `information_loss` 使用相同的数据与训练流程，仅 `policy` 阶段的扩容规则不同：
+
+共享预训练的 `objective.method` 为 `dynamic`，仅运行 `pretrain`；后训练分别使用两种方法的名称。
 
 | 阶段 | 数据与记忆更新 | 两组关系 |
 |---|---|---|
@@ -125,7 +127,7 @@
 
 | 阶段 | 默认训练样本上限 |
 |---|---:|
-| ICAE／动态方法 `pretrain`、AutoCompressors `lm`（FineWeb Multisegment） | 12800 |
+| `pretrain`（FineWeb Multisegment） | 12800 |
 | ICAE `qa`、动态方法 `warmup` 和 `policy`（Fineweb FactQA） | 全部 |
 
 各阶段可独立通过 CLI 覆盖；`smoke`／`pilot` 另受试跑档位上限约束，取较小值。
@@ -144,13 +146,15 @@
 ```bash
 bash src/latent_working_memory/v3/scripts/run_gpu.sh \
     --mode full \
+    --method icae_single \
+    --config configs/v3/icae_single.json \
     --gpus 0,1
 ```
 
-- `--method` 默认 `all`；也可选择表中的单个方法。`smoke`、`pilot`、`full` 控制运行预算。
+- `--method` 默认 `all`；也可选择表中的单个方法。`--mode` 默认 `full`，试跑时显式指定 `smoke` 或 `pilot`。
 - 默认配置位于 `configs/v3/`，`objective.stages` 声明阶段顺序；`--method <方法> --config <文件>` 可替换单方法配置，显式 CLI 超参数优先。参数及作用范围见[运行指南](scripts/README.md#4-调整参数)。
 - 同一方法的连续阶段复用模型和训练进程，切换阶段时重置优化器；共享预训练与不同方法分别启动。
-- 单独准备共享预训练使用 `--method dynamic_pretrain`。后续用 `--method memory_change` 或 `information_loss` 搭配同一个 `--init-checkpoint`，默认连续执行 warmup → policy → 评估，并继承预训练的 `run-id`。保留来源运行目录及身份文件。
+- 单独准备共享预训练使用 `--method dynamic_pretrain`。后续用 `--method memory_change` 或 `information_loss` 搭配同一个 `--init-checkpoint`，并继承预训练的 `run-id`。保留来源运行目录及身份文件。
 - 中断恢复使用阶段目录保存的 `config.json` 和 checkpoint，调用训练模块的 `--resume`。
 
 ## 五、评估与产物
@@ -160,11 +164,11 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 ```text
 artifacts/v3/<run-id>/
 ├── plan/<method-dir>/
-├       阶段配置、job.json、日志、result.json
+│       阶段配置、job.json、日志、result.json
 ├── train/<method-dir>/<stage>/
-├       config.json、run.json、metrics.jsonl、checkpoints/
+│       config.json、run.json、metrics.jsonl、checkpoints/
 ├── eval/<method-dir>/<stage>/
-├       summary.json、trajectories.jsonl
+│       summary.json、trajectories.jsonl
 └── compare/
         points.json、points.csv、compare.log、result.json
 ```
@@ -179,8 +183,9 @@ checkpoint 使用 verl 的目录形式：`checkpoints/global_step_<阶段step>/`
 
 | SwanLab 展示 | 内容 |
 |---|---|
-| 训练／验证曲线 | 目标损失、旧／新 QA NLL、容量、梯度范数、阶段、整步耗时和峰值显存 |
-| 阶段 `train/stage` | 1 = 预训练／LM，2 = ICAE QA／动态动作预热，3 = 动态策略训练 |
+| 训练／验证曲线 | 目标损失、旧／新 QA NLL、容量、梯度范数、阶段、epoch、整步耗时和峰值显存 |
+| 阶段 `train/stage` | 1 = 预训练，2 = ICAE QA／动态动作预热，3 = 动态策略训练 |
+| 进度 `train/epoch` | 当前阶段累计处理样本数／训练集样本数，按小数记录；阶段切换重新计数 |
 | 最终评估柱状图 | NLL／EM／F1（各合并 all／old／new）、最终与平均 slots、每条轨迹构建记忆的耗时 |
 
 构建耗时包含所有候选写入及门控计算，不含最终 QA 读取与答案生成。平均容量取各更新点保存的 slots，ICAE-single 只有一次压缩状态；汇总容量按轨迹平均。完整统计与样例保存在本地，不上传表格。`--tracking disabled` 仅记录本地结果。

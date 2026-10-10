@@ -52,16 +52,16 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh --mode smoke --gpus 0,1
 
 # 五方法正式训练
 bash src/latent_working_memory/v3/scripts/run_gpu.sh \
-  --mode full --gpus 0,1 --run-id capacity-comparison_20261007-01
+  --gpus 0,1 --run-id capacity-comparison_20261007-01
 ```
 
 GPU 任务平台使用同一命令，将脚本位置替换为绝对路径即可。`--run-id` 可自定义；省略时按上海当前时间生成 `YYYYMMDD-HHMMSS`。
 
 | 档位 | 每阶段训练／开发集样本上限 | 每阶段 optimizer steps 上限 | 最终 QA 评估 |
 |---|---|---|---|
-| `smoke`（默认） | 16／4 | 2 | dev，最多 2 条轨迹 |
+| `smoke` | 16／4 | 2 | dev，最多 2 条轨迹 |
 | `pilot` | 256／32 | 20 | dev，最多 16 条轨迹 |
-| `full` | 按各阶段预设／全部开发集 | 按预设训练，默认 1 epoch | 完整 test |
+| `full`（默认） | 按各阶段预设／全部开发集 | 按预设训练，默认 1 epoch | 完整 test |
 
 各档默认执行完整方法流程。先用 `smoke` 检查显存、日志和 SwanLab，再用 `pilot` 检查更多样本，最后切换 `full` 重新训练。试跑阶段的样本数取阶段预算与档位上限的较小值。
 
@@ -119,14 +119,14 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 | `--append-slots 32` | 动态方法每次追加的 slots 数，默认 32；首次为 512，覆盖保持末块大小 |
 | `--max-input-tokens 12288` | AE／LM 训练正文 token 上限；超限整条过滤，不计 memory／提示／目标；`0` 使用模型窗口 |
 | `--max-qa-input-tokens 12288` | FactQA 训练正文 token 上限；超限整条过滤，不计 memory／提示／目标；`0` 使用模型窗口 |
-| `--lm-ratio 0.5` | ICAE 与动态共享预训练选择 LM 的概率；AutoCompressors 保持 LM-only |
-| `--lm-target-tokens 512` | 预训练 LM 的续文目标长度，由训练配置决定 |
+| `--lm-ratio 0.5` | ICAE 与动态方法预训练选择 LM 的概率；AutoCompressors 保持 LM-only |
+| `--lm-target-tokens 512` | 预训练 LM 的续文目标长度 |
 | `--icae-min-segments 3`、`--icae-max-segments 6` | ICAE-multi 的随机块数范围，两个训练阶段均应用；总容量固定为 K |
 | `--ac-num-segments 4` | AutoCompressors 的正文压缩段数；每段追加约 K/n slots，最终合计 K |
 | `--bptt-steps` | BPTT 写入窗口；AutoCompressors 默认 2，动态 warmup／policy 默认完整；`0` 表示完整 BPTT。AutoCompressors 还用该值组织随机分段 |
 | `--epochs` | 各阶段训练轮数 |
 | `--save-total-limit 2` | 每阶段保留最近成功保存的 checkpoint 数；默认 2 |
-| `--pretrain-train-samples`、`--lm-train-samples` | 分别覆盖预训练和 AutoCompressors LM 的训练样本上限，默认各 12800 |
+| `--pretrain-train-samples` | 覆盖所有方法预训练阶段的训练样本上限，默认 12800 |
 | `--qa-train-samples`、`--warmup-train-samples`、`--policy-train-samples` | 分别覆盖对应阶段的训练样本上限，默认不限 |
 | `--dev-samples`、`--max-steps`、`--eval-trajectories` | 覆盖档位的开发集、每阶段步数和最终评估轨迹上限，`0` 表示不限 |
 | `--threshold-i`、`--threshold-d`、`--threshold-g`、`--eta` | 动态策略阈值 |
@@ -151,7 +151,7 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 | `icae_single.json`、`icae_multi.json` | `["pretrain", "qa"]` |
 | `memory_change.json`、`information_loss.json` | `["warmup", "policy"]` |
 | `dynamic_pretrain.json` | `["pretrain"]` |
-| `autocompressors.json` | `["lm"]` |
+| `autocompressors.json` | `["pretrain"]` |
 
 例如 ICAE 配置默认使用：
 
@@ -171,7 +171,7 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
   --gpus 0,1 --micro-batch-size-per-gpu 4
 ```
 
-- 文件中的 `objective.method` 须与所选方法一致，阶段使用 `objective.stages`；`--method dynamic_pretrain` 的文件保留 `memory_change` 或 `information_loss`，并仅声明 `["pretrain"]`。
+- 文件中的 `objective.method` 须与所选方法一致，阶段使用 `objective.stages`；`--method dynamic_pretrain` 的文件使用 `"method": "dynamic"`，并仅声明 `["pretrain"]`。
 - 显式超参数覆盖文件值；数据入口由 `--pretrain-data`／`--qa-data` 指定，阶段训练预算由配置及对应 CLI 参数决定，试跑档位再限制上限。产物与 SwanLab 身份由启动器生成。
 - `--config` 用于单方法，不与 `all` 组合。`dynamic_pretrain` 可传入自己的预训练文件；动态后训练的自定义文件只替换 warmup／policy，共享预训练仍读取默认文件。更换动态模型或 slots 时，先生成匹配的预训练 checkpoint，再通过 `--init-checkpoint` 使用。
 
@@ -209,12 +209,12 @@ artifacts/v3/<run-id>/
 | ICAE | `pretrain` → `qa` | `qa` |
 | 动态方法 | `warmup` → `policy` | `policy` |
 | 共享预训练 | `pretrain` | 无 |
-| AutoCompressors | `lm` | `lm` |
+| AutoCompressors | `pretrain` | `pretrain` |
 
 **查看步骤**
 
 1. **训练进度**：终端每个 optimizer step 打印一行摘要；完整指标查看阶段目录的 `metrics.jsonl`。
-2. **SwanLab**：每个方法的训练、验证、评估共用一个 run；共享预训练独立记录，默认 `all` 共六个。阶段看 `train/stage`，最终质量与容量看柱状图；指标含义见 [v3 说明](../README.md#评估与产物)。
+2. **SwanLab**：每个方法的训练、验证、评估共用一个 run；共享预训练独立记录，默认 `all` 共六个。阶段看 `train/stage`，阶段内进度看 `train/epoch`，最终质量与容量看柱状图；指标含义见 [v3 说明](../README.md#评估与产物)。
 3. **方法比较**：本次调用产出至少两个评估结果时，统一导出 `points.json` 和 `points.csv`；参与的结果路径与执行状态见 `compare/result.json`。
 4. **失败排查**：先看对应方法的 `plan/<method-dir>/result.json`，再看 `train.log` 或 `eval.log`；比较失败查看 `compare/result.json` 和同目录的 `compare.log`。
 
