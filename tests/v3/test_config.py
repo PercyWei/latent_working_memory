@@ -27,10 +27,10 @@ def test_presets_use_requested_model_and_memory_size(filename):
         assert config.model.memory_slots == 512
         assert config.model.gradient_checkpointing is True
         dynamic = config.objective.method in {"memory_change", "information_loss"}
-        assert config.objective.append_slots == (
-            32 if dynamic and config.objective.stage != "pretrain" else 8
-        )
-        large_microbatch = filename.name == "dynamic_pretrain.json" or config.objective.method in {
+        assert config.objective.append_slots == (32 if dynamic else 8)
+        if filename.name == "dynamic_pretrain.json":
+            assert "append_slots" not in json.loads(filename.read_text())["objective"]
+        large_microbatch = config.objective.method in {
             "icae_single",
             "icae_multi",
             "autocompressors",
@@ -537,12 +537,18 @@ def test_runtime_loader_rejects_preset_and_round_trips_saved_stage_configs(tmp_p
 @pytest.mark.parametrize("method", ["dynamic", "memory_change", "information_loss"])
 def test_runtime_loader_preserves_shared_pretraining_method_in_saved_records(tmp_path, method):
     (config,) = load_preset("configs/v3/dynamic_pretrain.json")
-    config = replace(config, objective=replace(config.objective, method=method))
+    config = replace(
+        config,
+        objective=replace(config.objective, method=method),
+        training=replace(config.training, micro_batch_size_per_gpu=8, gradient_accumulation_steps=1),
+    )
     saved = tmp_path / "pretrain.json"
     saved.write_text(json.dumps(config.to_dict()))
 
     assert load_experiment(saved) == config
     assert load_experiment(saved).objective.method == method
+    assert load_experiment(saved).training.micro_batch_size_per_gpu == 8
+    assert load_experiment(saved).training.gradient_accumulation_steps == 1
 
 
 def test_runtime_loader_requires_an_explicit_stage(tmp_path):

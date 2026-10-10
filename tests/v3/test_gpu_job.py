@@ -222,8 +222,8 @@ def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode,
         assert job.config.training.swanlab_project == "latent-working-memory-v3"
         assert job.config.training.tags == (f"study:{'main' if mode == 'full' else mode}",)
         shared = job.config.objective.stage == "pretrain"
-        assert job.config.training.micro_batch_size_per_gpu == (8 if shared else 4)
-        assert job.config.training.gradient_accumulation_steps == (1 if shared else 2)
+        assert job.config.training.micro_batch_size_per_gpu == 4
+        assert job.config.training.gradient_accumulation_steps == 2
         assert job.config.training.global_batch_size(2) == 16
         assert job.config.training.global_batch_size(4) == 32
         assert job.config.model.memory_slots == 512
@@ -232,7 +232,8 @@ def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode,
         assert job.config.training.group == "unit-job"
         root = Path(job.config.training.experiment_dir)
         assert Path(job.config.training.output_dir) == root / job.config.objective.stage
-        assert root.name.endswith("-k512" if mode == "full" else f"-k512_{mode}")
+        capacity = "-k512" if shared else "-k512+32"
+        assert root.name.endswith(capacity if mode == "full" else f"{capacity}_{mode}")
         assert job.config.training.experiment_name == f"{root.name}_unit-job"
         assert (
             job.config_path == directory / "plan" / root.name / f"{job.config.objective.stage}.json"
@@ -262,33 +263,23 @@ def test_all_methods_store_artifacts_under_one_run_directory(tmp_path, monkeypat
     train_names = {path.name for path in (root / "train").iterdir()}
     eval_names = {path.name for path in (root / "eval").iterdir()}
     suffix = "" if mode == "full" else f"_{mode}"
-    assert train_names == {
-        f"{method}-k512{suffix}"
-        for method in (
-            "dynamic-pretrain",
-            "icae-single",
-            "icae-multi",
-            "autocompressors",
-            "memory-change",
-            "information-loss",
-        )
+    methods = {
+        f"{name}{suffix}": method
+        for name, method in {
+            "dynamic-pretrain-k512": "dynamic_pretrain",
+            "icae-single-k512": "icae_single",
+            "icae-multi-k512": "icae_multi",
+            "autocompressors-k512": "autocompressors",
+            "memory-change-k512+32": "memory_change",
+            "information-loss-k512+32": "information_loss",
+        }.items()
     }
+    assert train_names == set(methods)
     assert eval_names == train_names - {f"dynamic-pretrain-k512{suffix}"}
     assert {path.name for path in (root / "plan").iterdir()} == train_names
     assert (root / "compare").is_dir()
     assert (root / "compare/result.json").is_file()
     method_checkpoints, method_summaries = {}, []
-    methods = {
-        f"{method.replace('_', '-')}-k512{suffix}": method
-        for method in (
-            "dynamic_pretrain",
-            "icae_single",
-            "icae_multi",
-            "autocompressors",
-            "memory_change",
-            "information_loss",
-        )
-    }
     for name in train_names:
         plan_directory = root / "plan" / name
         plan = json.loads((plan_directory / "job.json").read_text())
@@ -369,6 +360,28 @@ def test_dynamic_methods_share_only_pretraining_and_have_independent_warmup_poli
     assert jobs[3].config.training.experiment_dir == jobs[4].config.training.experiment_dir
     assert len({job.config.training.seed for job in jobs}) == 1
     assert len({job.config.training.group for job in jobs}) == 1
+
+
+@pytest.mark.parametrize("method", DYNAMIC_METHODS)
+@pytest.mark.parametrize("mode", ["full", "smoke", "pilot"])
+def test_dynamic_capacity_names_use_cli_append_slots_in_every_mode(tmp_path, method, mode):
+    args = arguments(tmp_path, "--method", method, "--mode", mode, "--append-slots", "16")
+
+    directory, _, jobs = job_plan.build_jobs(args)
+
+    suffix = "" if mode == "full" else f"_{mode}"
+    for job in jobs:
+        shared = job.method == "dynamic_pretrain"
+        capacity = "k512" if shared else "k512+16"
+        name = f"{job.method.replace('_', '-')}-{capacity}{suffix}"
+        assert job.config.objective.append_slots == (8 if shared else 16)
+        assert Path(job.config.training.experiment_dir) == directory / "train" / name
+        assert job.config.training.output_dir == str(
+            directory / "train" / name / job.config.objective.stage
+        )
+        assert job.config_path == directory / "plan" / name / f"{job.config.objective.stage}.json"
+        assert job.config.training.experiment_name == f"{name}_unit-job"
+        assert job.config.training.group == job.config.training.experiment_id == "unit-job"
 
 
 def test_dynamic_stage_training_parameters_come_from_their_own_presets(tmp_path, monkeypatch):
@@ -643,7 +656,8 @@ def test_custom_method_preset_preserves_parameters_and_launcher_overrides(
             args.pretrain_data if config.objective.stage == "pretrain" else args.qa_data
         )
         assert Path(config.training.dataset_dir) == dataset
-        run_name = f"{method.replace('_', '-')}-k512_smoke"
+        capacity = "k512+32" if method in DYNAMIC_METHODS else "k512"
+        run_name = f"{method.replace('_', '-')}-{capacity}_smoke"
         assert Path(config.training.experiment_dir) == directory / "train" / run_name
         assert config.training.experiment_name == f"{run_name}_unit-job"
         assert job.config_path == directory / "plan" / run_name / f"{config.objective.stage}.json"
@@ -697,6 +711,13 @@ def test_custom_dynamic_posttraining_preserves_the_independent_shared_preset(tmp
     assert all(job.config.training.learning_rate == 2e-4 for job in jobs[1:])
     assert jobs[0].config.model.gradient_checkpointing
     assert all(not job.config.model.gradient_checkpointing for job in jobs[1:])
+    assert jobs[0].config.objective.append_slots == 8
+    assert Path(jobs[0].config.training.experiment_dir).name == "dynamic-pretrain-k512_smoke"
+    assert all(job.config.objective.append_slots == 16 for job in jobs[1:])
+    assert all(
+        Path(job.config.training.experiment_dir).name == f"{method.replace('_', '-')}-k512+16_smoke"
+        for job in jobs[1:]
+    )
 
 
 @pytest.mark.parametrize("method", DYNAMIC_METHODS)
@@ -736,7 +757,7 @@ def test_custom_dynamic_pretraining_uses_its_requested_file(tmp_path, objective_
         tmp_path,
         "dynamic_pretrain",
         model={"memory_slots": 64, "lora_rank": 16},
-        objective={"method": objective_method},
+        objective={"method": objective_method, "append_slots": 16},
         training={"epochs": 3, "learning_rate": 2e-4},
     )
     args = arguments(tmp_path, "--method", "dynamic_pretrain", "--config", str(path))
@@ -750,7 +771,9 @@ def test_custom_dynamic_pretraining_uses_its_requested_file(tmp_path, objective_
     assert job.config.objective.stage == "pretrain"
     assert job.config.model.memory_slots == 64 and job.config.model.lora_rank == 16
     assert job.config.training.epochs == 3 and job.config.training.learning_rate == 2e-4
+    assert job.config.objective.append_slots == 16
     assert job.config_path == directory / "plan/dynamic-pretrain-k64_smoke/pretrain.json"
+    assert job.config.training.experiment_name == "dynamic-pretrain-k64_smoke_unit-job"
     assert job.initialize_from is None and not job.evaluate
 
 
@@ -949,7 +972,7 @@ def test_minimal_command_builds_all_methods_with_preset_batch_settings(mode):
         assert job.config.model.model_name_or_path == str(
             Path.home() / "models/Qwen3-4B-Instruct-2507"
         )
-        batch_eight = job.key == "dynamic-pretrain" or job.config.objective.method in {
+        batch_eight = job.config.objective.method in {
             "icae_single",
             "icae_multi",
             "autocompressors",
@@ -995,8 +1018,13 @@ def test_cli_only_overrides_explicitly_supplied_preset_values(monkeypatch, overr
         assert job.config.training.micro_batch_size_per_gpu == (4 if override else 3)
         assert job.config.training.gradient_accumulation_steps == 5
         assert job.config.objective.qa_batch_size == 5
-        dynamic = job.config.objective.method in {"memory_change", "information_loss"}
-        assert job.config.objective.append_slots == (16 if override and dynamic else 12)
+        dynamic = job.method in DYNAMIC_METHODS
+        append_slots = 16 if override and dynamic else 12
+        assert job.config.objective.append_slots == append_slots
+        capacity = f"k512+{append_slots}" if dynamic else "k512"
+        name = f"{job.method.replace('_', '-')}-{capacity}"
+        assert Path(job.config.training.experiment_dir).name == name
+        assert job.config.training.experiment_name == f"{name}_{args.run_id}"
         assert job.config.model.memory_slots == 512
         assert job.config.model.model_name_or_path == (
             str(Path.home() / "models/override-model") if override else "local/preset-model"
@@ -1189,7 +1217,7 @@ def test_dynamic_preset_initialization_inherits_source_id_without_repeating_pret
     assert set(result["checkpoints"]) == {"memory-change-warmup", "memory-change-policy"}
     assert not args.pretrain_data.exists()
     assert {path.name for path in (args.output_root / "configured-source" / "plan").iterdir()} == {
-        "memory-change-k512_smoke"
+        "memory-change-k512+32_smoke"
     }
 
 
@@ -1539,6 +1567,7 @@ def test_plan_derives_each_global_batch_from_selected_gpus_microbatch_and_accumu
         ["--method", "icae_single", "--append-slots", "8"],
         ["--method", "icae_multi", "--append-slots", "8"],
         ["--method", "autocompressors", "--append-slots", "8"],
+        ["--method", "dynamic_pretrain", "--append-slots", "16"],
         ["--global-batch-size", "8"],
         ["--long-pretrain-data", "old-data"],
         ["--run-id", "../escape"],
@@ -1630,7 +1659,7 @@ def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
     ]
     world_size = len(gpus.split(","))
     for job in (job for plan in plans for job in plan["jobs"]):
-        batch_eight = job["key"] == "dynamic-pretrain" or job["config"]["objective"]["method"] in {
+        batch_eight = job["config"]["objective"]["method"] in {
             "icae_single",
             "icae_multi",
             "autocompressors",
@@ -1679,6 +1708,62 @@ def test_auto_from_external_checkpoint_needs_only_qa_and_chains_warmup_into_poli
     assert result["checkpoints"][f"{prefix}-policy"] == str(training["checkpoints"][1])
     assert len(result["summaries"]) == 1
     assert "dynamic-pretrain" not in result["checkpoints"]
+
+
+@pytest.mark.parametrize("method", DYNAMIC_METHODS)
+def test_new_capacity_names_reuse_old_pretraining_paths_and_preserve_source_identity(
+    tmp_path, monkeypatch, method
+):
+    checkpoint = external_checkpoint(tmp_path, experiment_id="legacy-series")
+    source_directory = checkpoint.parent.parent
+    identity_path = source_directory.parent / "swanlab.json"
+    identity_path.write_text(
+        json.dumps(
+            {
+                "id": "old-cloud-id",
+                "url": "https://swanlab.cn/@test-user/latent-working-memory-v3/runs/old-cloud-id",
+                "project": "latent-working-memory-v3",
+                "group": "legacy-series",
+                "name": "dynamic-pretrain-k64_legacy-series",
+            }
+        )
+    )
+    original_files = {
+        path: path.read_bytes()
+        for path in (checkpoint / "state.pt", source_directory / "run.json", identity_path)
+    }
+    args = arguments(
+        tmp_path,
+        "--method",
+        method,
+        "--mode",
+        "full",
+        "--append-slots",
+        "16",
+        "--init-checkpoint",
+        str(checkpoint),
+        run_id=None,
+    )
+    prepare_dataset_entries(args)
+    commands = Commands()
+    monkeypatch.setattr(gpu_job, "execute", commands)
+
+    result = gpu_job.run_job(args)
+
+    assert args.run_id == result["experiment_id"] == "legacy-series"
+    assert source_directory.parent.name == "dynamic-pretrain-k64_legacy-series"
+    name = f"{method.replace('_', '-')}-k512+16"
+    training, evaluation = commands.calls
+    for config in training["configs"]:
+        assert config.training.experiment_name == f"{name}_legacy-series"
+        assert config.training.experiment_dir == str(
+            args.output_root / "legacy-series" / "train" / name
+        )
+        assert config.training.group == "legacy-series"
+    assert training["configs"][0].training.init_checkpoint == str(checkpoint.resolve())
+    assert Path(value(evaluation["command"], "--output-dir")).parent.name == name
+    assert "dynamic-pretrain" not in result["checkpoints"]
+    assert {path: path.read_bytes() for path in original_files} == original_files
 
 
 def test_auto_from_missing_checkpoint_fails_before_starting_training(tmp_path, monkeypatch):
@@ -1786,14 +1871,14 @@ def test_separate_methods_share_source_id_and_coexist_without_overwriting_series
     directory = shared.output_root / "unit-job"
     assert {path.name for path in (directory / "plan").iterdir()} == {
         "dynamic-pretrain-k512",
-        "memory-change-k512",
-        "information-loss-k512",
+        "memory-change-k512+32",
+        "information-loss-k512+32",
         "icae-single-k512",
     }
     assert {path.name for path in (directory / "train").iterdir()} == {
         "dynamic-pretrain-k512",
-        "memory-change-k512",
-        "information-loss-k512",
+        "memory-change-k512+32",
+        "information-loss-k512+32",
         "icae-single-k512",
     }
     assert source_metadata.read_bytes() == original_source
@@ -1842,8 +1927,8 @@ def test_separate_dynamic_methods_reuse_pretraining_without_changing_its_plan(
     }
     assert {path.name for path in (shared.output_root / "unit-job" / "plan").iterdir()} == {
         "dynamic-pretrain-k512",
-        "memory-change-k512",
-        "information-loss-k512",
+        "memory-change-k512+32",
+        "information-loss-k512+32",
     }
     assert {path.name: path.read_bytes() for path in shared_directory.iterdir()} == original_plan
     training = [call for call in commands.calls if "configs" in call]
@@ -1961,8 +2046,8 @@ def test_failed_training_or_evaluation_stops_the_remaining_graph(tmp_path, monke
         name: json.loads((directory / "plan" / name / "result.json").read_text())
         for name in (
             "dynamic-pretrain-k512_smoke",
-            "memory-change-k512_smoke",
-            "information-loss-k512_smoke",
+            "memory-change-k512+32_smoke",
+            "information-loss-k512+32_smoke",
         )
     }
     shared, memory, information = results.values()
@@ -1981,7 +2066,7 @@ def test_failed_training_or_evaluation_stops_the_remaining_graph(tmp_path, monke
         baseline = json.loads((directory / "plan" / f"{method}-k512_smoke/result.json").read_text())
         assert baseline["status"] == ("pending" if fail_at == 1 else "finished")
         assert len(baseline["summaries"]) == int(fail_at != 1)
-    pending_directory = directory / "plan/information-loss-k512_smoke"
+    pending_directory = directory / "plan/information-loss-k512+32_smoke"
     assert {path.name for path in pending_directory.iterdir()} == {
         "job.json",
         "result.json",
@@ -2001,7 +2086,7 @@ def test_second_stage_failure_preserves_first_stage_checkpoint_in_result(tmp_pat
 
     assert len(commands.calls) == 8
     directory, _, _ = job_plan.build_jobs(args)
-    failure = json.loads((directory / "plan/memory-change-k512_smoke/result.json").read_text())
+    failure = json.loads((directory / "plan/memory-change-k512+32_smoke/result.json").read_text())
     assert failure["status"] == "failed"
     assert set(failure["checkpoints"]) == {"memory-change-warmup"}
     assert failure["checkpoints"]["memory-change-warmup"] == str(
@@ -2015,7 +2100,7 @@ def test_second_stage_failure_preserves_first_stage_checkpoint_in_result(tmp_pat
         == "finished"
     )
     assert (
-        json.loads((directory / "plan/information-loss-k512_smoke/result.json").read_text())[
+        json.loads((directory / "plan/information-loss-k512+32_smoke/result.json").read_text())[
             "status"
         ]
         == "pending"

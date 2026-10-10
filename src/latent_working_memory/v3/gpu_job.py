@@ -133,7 +133,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--append-slots",
         type=positive_count,
-        help="动态方法每次追加的 slots 数，默认沿用预设 32；首次写入为 512 slots",
+        help="动态后训练每次追加的 slots 数，预设 32；首次写入为 K slots",
     )
     for stage in ("pretrain", "qa", "warmup", "policy"):
         parser.add_argument(
@@ -176,8 +176,9 @@ def parse_args(argv=None):
         "icae_single",
         "icae_multi",
         "autocompressors",
+        "dynamic_pretrain",
     }:
-        parser.error("--append-slots is only supported by dynamic methods")
+        parser.error("--append-slots is only supported by dynamic posttraining methods")
     if args.bptt_steps is not None and args.method not in (
         "autocompressors",
         *DYNAMIC_METHODS,

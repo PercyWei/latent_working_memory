@@ -122,7 +122,7 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
         value = getattr(args, name)
         if value is not None:
             objective[name] = value
-    if method in DYNAMIC_METHODS and args.append_slots is not None:
+    if method in DYNAMIC_METHODS and stage != "pretrain" and args.append_slots is not None:
         objective["append_slots"] = args.append_slots
     if method == "icae_multi":
         for name in ("icae_min_segments", "icae_max_segments"):
@@ -138,6 +138,7 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
     )
     if uses_bptt and args.bptt_steps is not None:
         objective["bptt_steps"] = args.bptt_steps or None
+    resolved_objective = replace(config.objective, **objective)
     is_pretrain = stage in {"pretrain", "lm"}
     dataset = args.pretrain_data if is_pretrain else args.qa_data
     run_method = (
@@ -146,6 +147,8 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
         else method
     )
     method_directory = f"{run_method.replace('_', '-')}-k{config.model.memory_slots}"
+    if run_method in DYNAMIC_METHODS:
+        method_directory += f"+{resolved_objective.append_slots}"
     if args.mode != "full":
         method_directory += f"_{args.mode}"
     experiment_dir = directory / "train" / method_directory
@@ -199,7 +202,7 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
     config = replace(
         config,
         model=model,
-        objective=replace(config.objective, **objective),
+        objective=resolved_objective,
         training=replace(config.training, **training),
     )
     return TrainingJob(
