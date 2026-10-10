@@ -2,14 +2,16 @@
 
 from contextlib import contextmanager
 from copy import deepcopy
+import fcntl
 import json
 from pathlib import Path
+import secrets
 
 import swanlab
 from swanlab.sdk.internal.run.components.config import Config as SwanLabConfig
 
 from latent_working_memory.v1.reporting import _shade
-from latent_working_memory.v3.config import DYNAMIC_PRETRAIN_METHODS
+from latent_working_memory.v3.config import DYNAMIC_METHODS, DYNAMIC_PRETRAIN_METHODS
 from latent_working_memory.v4.checkpoint import capture_rng, restore_rng
 
 
@@ -31,6 +33,7 @@ METHOD_COLORS = {
 QUALITY_GROUPS = ("all", "old", "new")
 STAGE_NUMBERS = {"pretrain": 1, "lm": 1, "qa": 2, "warmup": 2, "policy": 3}
 DEV_QA_METRICS = ("dev/qa_old_nll", "dev/qa_new_nll")
+APPEND_RATIO_METRICS = ("train/append_ratio", "dev/append_ratio")
 
 
 def experiment_directory(training):
@@ -103,6 +106,66 @@ def _save_record(path, value):
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     temporary.replace(path)
+
+
+def _configure_append_ratio_panel(tracking, root, method, name, api_key):
+    """在当前默认视图中合并训练／验证追加比例，保留其他 runs 的配色。"""
+    with (root.parent / ".swanlab-panels.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        api = swanlab.Api(api_key=api_key)
+        project_path = tracking.url.split("/@", 1)[1].split("/runs/", 1)[0]
+        remote = api.run(f"{project_path}/{tracking.id}")
+
+        def checked(response):
+            if not response.ok:
+                raise RuntimeError(response.errmsg)
+            return response.data
+
+        project = checked(api._get(f"/project/{project_path}"))
+        view = project["viewIndex"][0]
+        sections_path = f"/sections/{project_path}/{view}"
+        sections = checked(api._get(sections_path, params={"size": 100}))
+        section = next((row for row in sections if row["name"] == "train"), None)
+        if section is None:
+            section = checked(
+                api._post(
+                    sections_path,
+                    data={"name": "train", "index": secrets.token_hex(3), "position": "above"},
+                )
+            )
+            section["chartIndex"] = []
+        charts_path = f"/charts/{project_path}/{view}"
+        charts = [
+            checked(api._get(f"{charts_path}/xxxxxx/{index}")) for index in section["chartIndex"]
+        ]
+        title = "train/append_ratio"
+        existing = next(
+            (chart for chart in charts if chart["title"] == title and chart["type"] == "LINE"), None
+        )
+        custom = dict((existing or {}).get("custom") or {})
+        for index, metric in enumerate(APPEND_RATIO_METRICS):
+            color = _shade(METHOD_COLORS[method], index, len(APPEND_RATIO_METRICS))
+            custom[f"{remote.run_id}-{metric}"] = {
+                "name": f"{name}/{metric.split('/')[0]}",
+                "colors": [color, color],
+            }
+        body = {
+            "type": "LINE",
+            "title": title,
+            "custom": custom,
+            "config": {
+                "xAxis": {"key": "step", "type": "SYSTEM", "class": "SCALAR"},
+                "yAxis": [
+                    {"key": metric, "type": "FLOAT", "class": "SCALAR"}
+                    for metric in APPEND_RATIO_METRICS
+                ],
+                "yRange": [0, 1],
+            },
+        }
+        if existing:
+            checked(api._put(f"{charts_path}/xxxxxx/{existing['index']}", data=body))
+        else:
+            checked(api._post(f"{charts_path}/{section['index']}", data=body))
 
 
 @contextmanager
@@ -209,6 +272,14 @@ def method_tracking_run(config, run, device, api_key=None):
                 identity_path, {**expected_identity, "id": tracking.id, "url": tracking.url}
             )
         _save_record(record_path, combined)
+        if method in DYNAMIC_METHODS and config.objective.stage in {"warmup", "policy"}:
+            rng = capture_rng(device)
+            try:
+                _configure_append_ratio_panel(
+                    tracking, root, method, experiment_name(config.training), api_key
+                )
+            finally:
+                restore_rng(rng, device)
         yield tracking
 
 
@@ -258,6 +329,13 @@ def training_metrics(record, method):
         name = f"dev/qa_{age}_nll"
         if record.get(name) is not None and record[f"dev/qa_{age}_count"] > 0:
             values[name] = record[name]
+    if method in DYNAMIC_METHODS and record["stage"] in {"warmup", "policy"}:
+        for section in ("train", "dev"):
+            if f"{section}/appends" in record:
+                appends = record[f"{section}/appends"]
+                decisions = appends + record[f"{section}/overwrites"]
+                if decisions > 0:
+                    values[f"{section}/append_ratio"] = appends / decisions
     return values
 
 

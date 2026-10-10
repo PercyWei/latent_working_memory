@@ -217,6 +217,7 @@ artifacts/v3/<run-id>/
 - **名称**：使用 `<method-dir>_<run-id>`；两种动态方法与共享预训练保持相同后缀，关联共同来源，各自仍有独立的云端 ID。
 - **横轴**：训练／验证使用累计 optimizer step；动态后训练的 step 不包含共享预训练。
 - **曲线**：展示目标损失、旧／新 QA NLL、容量、梯度范数、耗时和训练步峰值显存。
+- **追加比例**：动态 warmup／policy 将 `train/append_ratio` 与 `dev/append_ratio` 合并为一张原生折线图，横轴为累计 optimizer step。比例为追加次数／（追加次数＋覆盖次数），不计首次写入；仅记录有决策的训练步与实际验证点。
 - **阶段与进度**：`train/stage` 中，1 = pretrain、2 = ICAE QA／动态方法 warmup、3 = 动态方法 policy；`train/epoch` 以小数记录当前阶段累计处理样本数／训练集样本数，阶段切换时重新计数。
 - **最终柱状图**：NLL／EM／F1 各合并 all／old／new；另展示最终与平均 slots、每条轨迹的记忆构建耗时。
 - **完整记录**：统计与样例保存在本地，不上传表格；`--tracking disabled` 仅记录本地结果。

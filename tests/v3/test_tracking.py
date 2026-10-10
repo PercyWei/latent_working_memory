@@ -20,6 +20,7 @@ from swanlab.sdk.internal.run.components.config import Config as SwanLabConfig
 from latent_working_memory.v3.tracking import (
     TRAINING_METRICS,
     DEV_QA_METRICS,
+    APPEND_RATIO_METRICS,
     STAGE_NUMBERS,
     configure_training_metrics,
     training_metrics,
@@ -74,9 +75,7 @@ def test_training_publishes_only_current_measured_core_values():
         "resources/peak_memory_allocated_gib": 3,
         "resources/optimizer_step_seconds": 4.2,
     }
-    assert "dev/loss" not in training_metrics(
-        {"stage": "warmup", "train/loss": 1}, "memory_change"
-    )
+    assert "dev/loss" not in training_metrics({"stage": "warmup", "train/loss": 1}, "memory_change")
     assert record["train/qa_old_count"] == 8
 
 
@@ -96,6 +95,54 @@ def test_dev_qa_curves_skip_unmeasured_groups_and_keep_current_values():
         "dev/qa_new_nll": 1.5,
     }
     assert training_metrics({"stage": "policy"}, "memory_change") == {"train/stage": 3}
+
+
+@pytest.mark.parametrize("method", ["memory_change", "information_loss"])
+@pytest.mark.parametrize("stage", ["warmup", "policy"])
+def test_append_ratio_uses_current_mean_counts_and_preserves_local_statistics(method, stage):
+    record = {
+        "stage": stage,
+        "train/appends": 1.5,
+        "train/overwrites": 4.5,
+        "dev/appends": 2.0,
+        "dev/overwrites": 3.0,
+    }
+    before = deepcopy(record)
+    assert training_metrics(record, method) == {
+        "train/stage": STAGE_NUMBERS[stage],
+        "train/append_ratio": 0.25,
+        "dev/append_ratio": 0.4,
+    }
+    assert record == before
+
+
+@pytest.mark.parametrize("method", ["memory_change", "information_loss"])
+def test_append_ratio_skips_unmeasured_and_zero_decisions_but_retains_real_zero(method):
+    record = {
+        "stage": "policy",
+        "train/appends": 0,
+        "train/overwrites": 4,
+        "dev/appends": 0,
+        "dev/overwrites": 0,
+    }
+    assert training_metrics(record, method) == {"train/stage": 3, "train/append_ratio": 0.0}
+    assert training_metrics({"stage": "policy"}, method) == {"train/stage": 3}
+    record.update({"train/overwrites": 0, "dev/appends": 4})
+    assert training_metrics(record, method) == {"train/stage": 3, "dev/append_ratio": 1.0}
+
+
+@pytest.mark.parametrize(
+    "method,stage",
+    [
+        ("dynamic", "pretrain"),
+        ("memory_change", "pretrain"),
+        ("icae_single", "qa"),
+        ("autocompressors", "pretrain"),
+    ],
+)
+def test_append_ratio_is_reserved_for_dynamic_posttraining(method, stage):
+    values = training_metrics({"stage": stage, "train/appends": 2, "train/overwrites": 3}, method)
+    assert not any("append" in name or "overwrite" in name for name in values)
 
 
 @pytest.mark.parametrize(
@@ -154,6 +201,8 @@ def recorded_swanlab(monkeypatch):
             self.runs = {}
             self.initializations = []
             self.api_reads = []
+            self.api_requests = []
+            self.projects = {}
 
         def init(self, **settings):
             self.initializations.append(deepcopy(settings))
@@ -177,12 +226,59 @@ def recorded_swanlab(monkeypatch):
 
         def api(self, api_key):
             assert api_key == "test-api-key"
-            return SimpleNamespace(run=self.remote)
+            return SimpleNamespace(run=self.remote, _get=self.get, _post=self.post, _put=self.put)
+
+        def project(self, path):
+            parts = path.strip("/").split("/")
+            project_path = "/".join(parts[1:3])
+            if project_path not in self.projects:
+                self.projects[project_path] = {
+                    "viewIndex": ["default-view"],
+                    "sections": [],
+                    "charts": {},
+                }
+            return parts, self.projects[project_path]
+
+        def response(self, value):
+            return SimpleNamespace(ok=True, data=deepcopy(value))
+
+        def get(self, path, params=None):
+            self.api_requests.append(("GET", path, deepcopy(params)))
+            parts, project = self.project(path)
+            if parts[0] == "project":
+                return self.response({"viewIndex": project["viewIndex"]})
+            if parts[0] == "sections":
+                return self.response(project["sections"])
+            assert parts[0] == "charts"
+            return self.response(project["charts"][parts[-1]])
+
+        def post(self, path, data):
+            self.api_requests.append(("POST", path, deepcopy(data)))
+            parts, project = self.project(path)
+            if parts[0] == "sections":
+                section = {**deepcopy(data), "chartIndex": []}
+                project["sections"].append(section)
+                return self.response(section)
+            assert parts[0] == "charts"
+            chart = {**deepcopy(data), "index": f"chart-{len(project['charts']) + 1}"}
+            project["charts"][chart["index"]] = chart
+            section = next(row for row in project["sections"] if row["index"] == parts[-1])
+            section["chartIndex"].append(chart["index"])
+            return self.response(chart)
+
+        def put(self, path, data):
+            self.api_requests.append(("PUT", path, deepcopy(data)))
+            parts, project = self.project(path)
+            assert parts[0] == "charts" and parts[-1] in project["charts"]
+            chart = {**deepcopy(data), "index": parts[-1]}
+            project["charts"][parts[-1]] = chart
+            return self.response(chart)
 
         def remote(self, path):
             self.api_reads.append(path)
             record = self.runs[path.rsplit("/", 1)[1]]
             return SimpleNamespace(
+                run_id=f"server-{record['id']}",
                 state=record["state"],
                 profile={
                     "config": {name: {"value": value} for name, value in record["config"].items()}
@@ -235,8 +331,28 @@ def run_stage(config, steps, prefix="qa"):
 
 @pytest.mark.parametrize("explicit_name", [False, True])
 def test_two_dynamic_methods_share_one_source_and_keep_one_run_per_method(
-    tmp_path, recorded_swanlab, explicit_name
+    tmp_path, recorded_swanlab, explicit_name, monkeypatch
 ):
+    original_make_engine = make_engine
+
+    def engine_with_action_statistics(config):
+        engine = original_make_engine(config)
+        if config.objective.stage not in {"warmup", "policy"}:
+            return engine
+        engine.model.cfg = config.objective
+        forward = engine.model.forward
+
+        def recorded_forward(example, epoch=0, differentiable=True, batched=False):
+            output = forward(example, epoch, differentiable, batched)
+            # 小训练器提供真实记录路径所需的动作次数，QA 数值仍正常训练。
+            appends = (1 if config.objective.stage == "warmup" else 3) if differentiable else 2
+            output["metrics"].update({"appends": appends, "overwrites": 4 - appends})
+            return output
+
+        engine.model.forward = recorded_forward
+        return engine
+
+    monkeypatch.setattr(__name__ + ".make_engine", engine_with_action_statistics)
     source_root = tmp_path / (
         "dynamic-pretrain-k64" if explicit_name else "dynamic-pretrain-k64_trial"
     )
@@ -250,12 +366,13 @@ def test_two_dynamic_methods_share_one_source_and_keep_one_run_per_method(
     source_identity = json.loads((source_root / "swanlab.json").read_text())
     assert "method:dynamic-pretrain" in source_identity["tags"]
     assert recorded_swanlab.runs[source_identity["id"]]["name"] == "dynamic-pretrain-k64_trial"
-    sources = []
+    sources, custom_by_method = [], {}
     for method in ("memory_change", "information_loss"):
         method_name = method.replace("_", "-") if explicit_name else method
         root = tmp_path / (f"{method_name}-k64" if explicit_name else f"{method_name}-k64_trial")
         cloud_name = f"{method_name}-k64_trial"
         warmup = online_config(root, "warmup", method, source_result["checkpoint"])
+        warmup = replace(warmup, training=replace(warmup.training, eval_every=2))
         if explicit_name:
             warmup = replace(warmup, training=replace(warmup.training, experiment_name=cloud_name))
         warmup_result, warmup_run = run_stage(warmup, 2)
@@ -263,6 +380,7 @@ def test_two_dynamic_methods_share_one_source_and_keep_one_run_per_method(
         identity = json.loads(identity_bytes)
         before = json.loads((root / "experiment.json").read_text())
         policy = online_config(root, "policy", method, warmup_result["checkpoint"])
+        policy = replace(policy, training=replace(policy.training, eval_every=2))
         if explicit_name:
             policy = replace(policy, training=replace(policy.training, experiment_name=cloud_name))
         policy_result, policy_run = run_stage(policy, 2)
@@ -291,6 +409,55 @@ def test_two_dynamic_methods_share_one_source_and_keep_one_run_per_method(
             (4, 0.8),
         ]
         assert all("train/stages" not in values for _, values in cloud["logs"])
+        assert [(step, values["train/append_ratio"]) for step, values in cloud["logs"]] == [
+            (1, 0.25),
+            (2, 0.25),
+            (3, 0.75),
+            (4, 0.75),
+        ]
+        assert [
+            (step, values["dev/append_ratio"])
+            for step, values in cloud["logs"]
+            if "dev/append_ratio" in values
+        ] == [(2, 0.5), (4, 0.5)]
+        for stage in ("warmup", "policy"):
+            local = [
+                json.loads(line)
+                for line in (root / stage / "metrics.jsonl").read_text().splitlines()
+            ]
+            for record in local:
+                step = record["global_step"]
+                posted = next(values for cloud_step, values in cloud["logs"] if cloud_step == step)
+                for section in ("train", "dev"):
+                    if f"{section}/appends" in record:
+                        assert f"{section}/overwrites" in record
+                        assert posted[f"{section}/append_ratio"] == (
+                            record[f"{section}/appends"]
+                            / (record[f"{section}/appends"] + record[f"{section}/overwrites"])
+                        )
+                    assert f"{section}/appends" not in posted
+                    assert f"{section}/overwrites" not in posted
+        project = recorded_swanlab.projects["owner/test-project"]
+        assert len(project["charts"]) == 1
+        assert len(project["sections"]) == 1
+        panel = next(iter(project["charts"].values()))
+        assert panel["type"] == "LINE" and panel["title"] == "train/append_ratio"
+        assert project["sections"][0]["name"] == "train"
+        assert project["sections"][0]["chartIndex"] == [panel["index"]]
+        assert [axis["key"] for axis in panel["config"]["yAxis"]] == list(APPEND_RATIO_METRICS)
+        assert panel["config"]["xAxis"] == {"key": "step", "type": "SYSTEM", "class": "SCALAR"}
+        assert panel["config"]["yRange"] == [0, 1]
+        for key, value in custom_by_method.items():
+            assert panel["custom"][key] == value
+        current_keys = [f"server-{identity['id']}-{metric}" for metric in APPEND_RATIO_METRICS]
+        assert [panel["custom"][key]["name"] for key in current_keys] == [
+            f"{cloud_name}/train",
+            f"{cloud_name}/dev",
+        ]
+        assert (
+            panel["custom"][current_keys[0]]["colors"] != panel["custom"][current_keys[1]]["colors"]
+        )
+        custom_by_method.update({key: deepcopy(panel["custom"][key]) for key in current_keys})
         assert "pretraining_sources" not in json.dumps(dict(cloud["config"]))
         assert "pretrain-train-0" not in json.dumps(dict(cloud["config"]))
         assert "test-api-key" not in json.dumps(dict(cloud["config"]))
@@ -299,12 +466,54 @@ def test_two_dynamic_methods_share_one_source_and_keep_one_run_per_method(
         sources.append(policy_run["pretraining"])
     assert len(recorded_swanlab.runs) == 3
     assert len(recorded_swanlab.initializations) == 5
+    project = recorded_swanlab.projects["owner/test-project"]
+    assert len(next(iter(project["charts"].values()))["custom"]) == 4
+    assert len({tuple(value["colors"]) for value in custom_by_method.values()}) == 4
+    assert [
+        kind for kind, path, _ in recorded_swanlab.api_requests if path.startswith("/charts/")
+    ].count("POST") == 1
     assert sources[0] == sources[1]
     assert sources[0]["run_id"] == source_identity["id"]
     assert sources[0]["run_url"] == source_identity["url"]
     assert sources[0]["run_name"] == "dynamic-pretrain-k64_trial"
     assert sources[0]["run_dir"] == str(source_root.resolve())
     assert sources[0]["step"] == 2
+
+
+def test_append_ratio_panel_failure_stops_before_training_and_restores_random_state(
+    tmp_path, recorded_swanlab, monkeypatch
+):
+    source = online_config(tmp_path / "dynamic-pretrain-k64_trial", "pretrain")
+    source_result, _ = run_stage(source, 1, "pretrain")
+    root = tmp_path / "memory-change-k64_trial"
+    config = online_config(root, "warmup", init=source_result["checkpoint"])
+    engine, data = make_engine(config), make_splits("qa")
+    initialization = load_initialization(source_result["checkpoint"], engine.model, config)
+    run = _run(config, engine, data, initialization)
+    prepare_training(config, engine, data, run, stop_after_steps=1)
+    original_post = recorded_swanlab.post
+
+    def reject_chart(path, data):
+        random.random()
+        np.random.random()
+        torch.rand(())
+        if path.startswith("/charts/"):
+            return SimpleNamespace(ok=False, errmsg="panel denied")
+        return original_post(path, data)
+
+    monkeypatch.setattr(recorded_swanlab, "post", reject_chart)
+    before = capture_rng(torch.device("cpu"))
+    entered = False
+    with pytest.raises(RuntimeError, match="panel denied"):
+        with method_tracking_run(config, run, engine.device, api_key="test-api-key"):
+            entered = True
+    assert not entered
+    assert (root / "warmup/metrics.jsonl").read_text() == ""
+    identity = json.loads((root / "swanlab.json").read_text())
+    assert recorded_swanlab.runs[identity["id"]]["state"] == "CRASHED"
+    assert random.getstate() == before["python"]
+    assert np.array_equal(np.random.get_state()[1], before["numpy"][1])
+    assert torch.equal(torch.get_rng_state(), before["torch"])
 
 
 @pytest.mark.parametrize("source_method", ["memory_change", "information_loss"])
