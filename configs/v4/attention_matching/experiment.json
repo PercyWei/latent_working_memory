@@ -2,7 +2,9 @@
   "model": {
     "model_name_or_path": "Qwen/Qwen3-0.6B",
     "revision": null,
-    "backbone_dtype": "float32",
+    "backbone_dtype": "bfloat16",
+    "attention_implementation": "sdpa",
+    "loss_chunk_size": 256,
     "pending_size": 256,
     "recent_size": 128,
     "num_slots": 32,
@@ -21,15 +23,21 @@
   "training": {
     "train_file": "../../../data/attention-matching/train.jsonl",
     "dev_file": "../../../data/attention-matching/dev.jsonl",
-    "output_dir": "../../../artifacts/v4/attention-matching_20261003/train/qwen3-0.6b_conditioned_20261003",
+    "output_dir": "../../../artifacts/v4/attention-matching_20261011/train/qwen3-0.6b_conditioned_20261011",
     "epochs": 1,
     "global_batch_size": 8,
+    "micro_batch_size_per_gpu": 2,
     "learning_rate": 0.0001,
     "weight_decay": 0.01,
     "gradient_clip": 1.0,
     "seed": 42,
-    "max_seq_length": 4096,
+    "max_seq_length": 8192,
     "eval_every": 50,
-    "save_every": 50
+    "save_every": 50,
+    "save_total_limit": 2,
+    "swanlab_project": null,
+    "group": null,
+    "run_name": null,
+    "tags": []
   }
 }
