@@ -12,7 +12,7 @@ from swanlab.sdk.internal.run.components.config import Config as SwanLabConfig
 
 from latent_working_memory.v1.reporting import _shade
 from latent_working_memory.v3.config import DYNAMIC_METHODS, DYNAMIC_PRETRAIN_METHODS
-from latent_working_memory.v4.checkpoint import capture_rng, restore_rng
+from latent_working_memory.runtime import capture_rng, restore_rng
 
 
 TRAINING_METRICS = (

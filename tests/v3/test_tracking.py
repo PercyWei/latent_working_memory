@@ -10,7 +10,7 @@ from latent_working_memory.v3 import runtime, tracking
 from latent_working_memory.v3.evaluate import _training_run_directory
 from latent_working_memory.v3.runtime import load_initialization, prepare_training, train_loop
 from latent_working_memory.v3.tracking import method_tracking_run, update_method_tracking
-from latent_working_memory.v4.checkpoint import capture_rng
+from latent_working_memory.runtime import capture_rng
 from .test_runtime import experiment_config, make_engine, make_splits, _run
 import json
 

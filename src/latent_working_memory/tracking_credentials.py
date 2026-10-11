@@ -1,4 +1,4 @@
-"""v3 仅使用项目或终端显式提供的凭据，避免共享账号的登录状态。"""
+"""训练仅使用项目或终端显式提供的 SwanLab 凭据。"""
 
 import os
 from pathlib import Path

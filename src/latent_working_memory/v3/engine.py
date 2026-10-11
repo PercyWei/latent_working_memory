@@ -13,7 +13,7 @@ from verl.workers.engine import BaseEngine, EngineRegistry
 
 from latent_working_memory.v3.config import DYNAMIC_METHODS
 from latent_working_memory.v3.pretrain_data import PretrainExample
-from latent_working_memory.v4.engine import initialize_device
+from latent_working_memory.runtime import initialize_device
 
 
 @EngineRegistry.register(model_type="lwm_v3_token", backend="replicated", device=["cpu", "cuda"])

@@ -23,7 +23,7 @@ from latent_working_memory.v3.tracking import (
     method_tracking_run,
     training_metrics,
 )
-from latent_working_memory.v3.tracking_credentials import swanlab_api_key
+from latent_working_memory.tracking_credentials import swanlab_api_key
 from latent_working_memory.v3.training_data import TrainingDataLoader, make_data_loader
 
 

@@ -14,7 +14,7 @@ import sys
 
 from latent_working_memory.v3 import job_plan
 from latent_working_memory.v3.config import DYNAMIC_METHODS, METHODS, WRITER_MODES
-from latent_working_memory.v3.tracking_credentials import swanlab_api_key
+from latent_working_memory.tracking_credentials import swanlab_api_key
 
 
 def bounded_count(value):

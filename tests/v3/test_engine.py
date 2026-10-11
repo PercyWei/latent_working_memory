@@ -10,19 +10,19 @@ import torch.multiprocessing as mp
 from latent_working_memory.v3.engine import TokenMemoryEngine, initialize_device
 from latent_working_memory.v3.config import ObjectiveConfig, TrainingConfig
 from latent_working_memory.v3.pretrain_data import PretrainExample
-from latent_working_memory.v4 import engine as engine_module
+from latent_working_memory import runtime as runtime_module
 
 
-@pytest.mark.parametrize("rank", range(4))
-def test_four_gpu_local_rank_maps_to_logical_cuda_device(monkeypatch, rank):
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,5,6,7")
+@pytest.mark.parametrize("rank", range(2))
+def test_two_gpu_local_rank_maps_to_logical_cuda_device(monkeypatch, rank):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
     monkeypatch.setenv("LOCAL_RANK", str(rank))
-    monkeypatch.setenv("WORLD_SIZE", "4")
+    monkeypatch.setenv("WORLD_SIZE", "2")
     devices, groups = [], []
     monkeypatch.setattr(torch.cuda, "set_device", devices.append)
     monkeypatch.setattr(dist, "is_initialized", lambda: False)
     monkeypatch.setattr(
-        engine_module,
+        runtime_module,
         "initialize_global_process_group",
         lambda **kwargs: groups.append(kwargs),
     )
@@ -32,7 +32,7 @@ def test_four_gpu_local_rank_maps_to_logical_cuda_device(monkeypatch, rank):
     assert groups == [{"timeout_second": 7200}]
 
 
-@pytest.mark.parametrize("visible,requested", [("2,4", "cuda:1"), ("7,4", "cuda:1"), ("6", "cuda")])
+@pytest.mark.parametrize("visible,requested", [("0,1", "cuda:1"), ("1,0", "cuda:1"), ("1", "cuda")])
 def test_gpu_subset_uses_logical_indices_without_torchrun(monkeypatch, visible, requested):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
     monkeypatch.delenv("LOCAL_RANK", raising=False)
@@ -45,15 +45,15 @@ def test_gpu_subset_uses_logical_indices_without_torchrun(monkeypatch, visible, 
     assert devices == [result]
 
 
-@pytest.mark.parametrize("visible", ["", "-1", "4,4", "4,04", "4,other", "4,"])
+@pytest.mark.parametrize("visible", ["", "-1", "0,0", "0,00", "0,other", "0,"])
 def test_device_initialization_rejects_invalid_or_duplicate_gpus(monkeypatch, visible):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
-    with pytest.raises(RuntimeError, match="distinct non-negative physical GPU indices"):
+    with pytest.raises(RuntimeError, match="physical GPUs 0/1"):
         initialize_device("cuda")
 
 
 def test_device_initialization_rejects_a_rank_outside_visible_subset(monkeypatch):
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,7")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
     monkeypatch.setenv("LOCAL_RANK", "2")
     with pytest.raises(ValueError, match="logical CUDA device"):
         initialize_device("cuda")

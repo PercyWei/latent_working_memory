@@ -2,7 +2,7 @@
 
 import pytest
 
-from latent_working_memory.v3.tracking_credentials import swanlab_api_key
+from latent_working_memory.tracking_credentials import swanlab_api_key
 
 
 @pytest.mark.parametrize(

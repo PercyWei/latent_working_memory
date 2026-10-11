@@ -38,7 +38,7 @@ from latent_working_memory.v3.runtime import (
     validate_cursor,
 )
 from latent_working_memory.v3.training_data import make_data_loader
-from latent_working_memory.v4.checkpoint import capture_rng
+from latent_working_memory.runtime import capture_rng
 from .test_objective import trajectory
 
 

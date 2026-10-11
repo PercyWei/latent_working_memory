@@ -10,7 +10,7 @@ from verl.utils.checkpoint.checkpoint_handler import CheckpointHandler, Orchestr
 from verl.utils.checkpoint.checkpoint_manager import BaseCheckpointManager
 
 from latent_working_memory.v3.config import DYNAMIC_METHODS
-from latent_working_memory.v4.checkpoint import capture_rng, restore_rng
+from latent_working_memory.runtime import capture_rng, restore_rng
 
 
 def read_checkpoint(path):
