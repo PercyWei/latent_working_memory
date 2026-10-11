@@ -95,7 +95,7 @@ def test_positions_and_retained_cache_at_write_boundaries(model_factory, monkeyp
             assert torch.equal(layer.values, expected_values)
 
     monkeypatch.setattr(model, "_write", capture_write)
-    hook = model.backbone.register_forward_pre_hook(capture_positions, with_kwargs=True)
+    hook = model.backbone.model.register_forward_pre_hook(capture_positions, with_kwargs=True)
     _, state = model.consume(tokens(17))
     hook.remove()
     torch.testing.assert_close(torch.cat(absolute_positions), torch.arange(17))

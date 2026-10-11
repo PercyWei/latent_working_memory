@@ -8,21 +8,22 @@ from pathlib import Path
 import torch
 from transformers import AutoTokenizer
 
+from latent_working_memory.runtime import initialize_device
+from latent_working_memory.v4.checkpoint import read_checkpoint
 from latent_working_memory.v4.config import ModelConfig
-from latent_working_memory.v4.engine import initialize_device
 from latent_working_memory.v4.model import StreamingMemoryLM
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--checkpoint", type=Path, required=True, help="global_step_<step> 目录")
     parser.add_argument("--prompt-file", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--device", default="cpu")
     args = parser.parse_args()
     device = initialize_device(args.device)
-    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    checkpoint = read_checkpoint(args.checkpoint)
     config = ModelConfig(**checkpoint["run"]["model"])
     config = replace(
         config, revision=checkpoint["run"]["resolved_model_revision"] or config.revision

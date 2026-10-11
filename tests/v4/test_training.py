@@ -20,13 +20,15 @@ from transformers import (
     set_seed,
 )
 
-from latent_working_memory.v4.checkpoint import capture_rng, load_checkpoint, save_checkpoint
+from latent_working_memory.runtime import capture_rng, initialize_device
+from latent_working_memory.v4.checkpoint import MetaMemoryCheckpointHandler, read_checkpoint
 from latent_working_memory.v4.config import ModelConfig, TrainingConfig
 from latent_working_memory.v4.data import TokenizedEpisode
-from latent_working_memory.v4.engine import MetaLearningEngine, initialize_device
+from latent_working_memory.v4.engine import MetaLearningEngine
 from latent_working_memory.v4.inference import main as inference_main
 from latent_working_memory.v4.model import StreamingMemoryLM
 from latent_working_memory.v4.train import run_training
+from latent_working_memory.v4.training_data import make_data_loader
 
 
 @pytest.fixture(scope="module")
@@ -215,15 +217,29 @@ def test_training_resume_is_exact_and_checkpoint_excludes_frozen_backbone(tiny_b
     assert resumed["completed_steps"] == 4
     assert resumed["sample_visits"] == 8
     assert resumed["target_tokens"] == 20
-    full = torch.load(complete["checkpoint"], weights_only=False)
-    restored = torch.load(resumed["checkpoint"], weights_only=False)
+    full = read_checkpoint(complete["checkpoint"])
+    restored = read_checkpoint(resumed["checkpoint"])
     assert set(restored) == {"run", "memory", "optimizer", "cursor", "rng"}
     assert not any("backbone" in name for name in restored["memory"])
     assert restored["run"]["resolved_model_revision"] is None
     for key in ("memory", "optimizer", "cursor", "rng"):
         assert_nested_equal(full[key], restored[key])
-    full_metrics = (full_path.parent / "output" / "metrics.jsonl").read_text()
-    resumed_metrics = (resumed_path.parent / "output" / "metrics.jsonl").read_text()
+    full_metrics = [
+        {
+            key: value
+            for key, value in json.loads(line).items()
+            if not key.startswith("resources/")
+        }
+        for line in (full_path.parent / "output" / "metrics.jsonl").read_text().splitlines()
+    ]
+    resumed_metrics = [
+        {
+            key: value
+            for key, value in json.loads(line).items()
+            if not key.startswith("resources/")
+        }
+        for line in (resumed_path.parent / "output" / "metrics.jsonl").read_text().splitlines()
+    ]
     assert full_metrics == resumed_metrics
     assert (resumed_path.parent / "output" / "tokenizer" / "tokenizer.json").is_file()
 
@@ -265,7 +281,7 @@ def test_trained_checkpoint_runs_inference_cli(tiny_base, tmp_path, monkeypatch)
     generated = json.loads(output_path.read_text())
     assert generated["prompt"] == prompt
     assert 1 <= len(generated["generated_token_ids"]) <= 3
-    checkpoint = torch.load(result["checkpoint"], weights_only=False)
+    checkpoint = read_checkpoint(result["checkpoint"])
     model = StreamingMemoryLM(ModelConfig(**checkpoint["run"]["model"])).eval()
     model.load_trainable_state_dict(checkpoint["memory"])
     tokenizer = AutoTokenizer.from_pretrained(tmp_path / "output" / "tokenizer")
@@ -301,20 +317,30 @@ def distributed_engine_worker(rank, base, output, rendezvous):
     dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=2)
     try:
         engine = make_engine(base, output)
-        first = engine.step(episodes()[:3])
+        loader = make_data_loader(episodes(), 3, 42, shuffle=False)
+        iterator = iter(loader)
+        first = engine.step(next(iterator))
         # 各 rank 故意留下不同 RNG 状态，验证恢复的是自己的状态。
         torch.rand(rank + 1)
-        checkpoint = Path(output) / "distributed.pt"
+        directory = Path(output) / "checkpoints"
+        checkpoint = directory / "global_step_1"
         run_config = {"model": asdict(engine.model.config), "training": asdict(engine.config)}
         cursor = {"epoch": 0, "sample_offset": 3, "step": 1, "sample_visits": 3, "target_tokens": 8}
+        handler = MetaMemoryCheckpointHandler(engine, loader, directory, run_config, cursor)
         rng = capture_rng(engine.device)
-        save_checkpoint(checkpoint, engine, run_config, cursor)
-        second = engine.step(episodes()[3:])
+        handler.save_checkpoint(1)
+        second = engine.step(next(iterator))
         evaluation = engine.eval_batch(episodes()[3:])
         restored = make_engine(base, output)
-        assert load_checkpoint(checkpoint, restored, run_config) == cursor
+        restored_loader = make_data_loader(episodes(), 3, 42, shuffle=False)
+        restored_cursor = {}
+        restored_handler = MetaMemoryCheckpointHandler(
+            restored, restored_loader, directory, run_config, restored_cursor, checkpoint
+        )
+        assert restored_handler.load_checkpoint() == 1
+        assert restored_cursor == cursor
         assert_nested_equal(capture_rng(restored.device), rng)
-        assert_nested_equal(restored.step(episodes()[3:]), second)
+        assert_nested_equal(restored.step(next(iter(restored_loader))), second)
         assert_nested_equal(
             restored.model.trainable_state_dict(), engine.model.trainable_state_dict()
         )

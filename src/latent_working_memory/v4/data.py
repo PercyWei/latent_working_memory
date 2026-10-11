@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
-import random
 
 
 @dataclass(frozen=True)
@@ -43,12 +42,6 @@ def load_tokenized_episodes(path, tokenizer, min_length, max_seq_length):
     if not episodes:
         raise ValueError(f"{path}: dataset must contain at least one episode")
     return tuple(episodes)
-
-
-def episode_order(episodes, seed, epoch):
-    indices = list(range(len(episodes)))
-    random.Random(f"{seed}:v4:{epoch}").shuffle(indices)
-    return tuple(episodes[index] for index in indices)
 
 
 def dataset_identity(episodes):

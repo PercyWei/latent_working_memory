@@ -1,45 +1,15 @@
 """verl BaseEngine＋replicated DDP；局部写入使用精确二阶 meta-gradient。"""
 
 from contextlib import contextmanager, nullcontext
-from datetime import timedelta
-import os
-import re
 
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from tensordict import TensorDict
-from verl.utils.distributed import initialize_global_process_group
 from verl.utils.tensordict_utils import assign_non_tensor, get_non_tensor_data
 from verl.workers.config import FSDPOptimizerConfig
 from verl.workers.config.optimizer import build_optimizer
 from verl.workers.engine import BaseEngine, EngineRegistry
-
-
-def initialize_device(device):
-    device = torch.device(device)
-    if device.type not in {"cpu", "cuda"}:
-        raise ValueError("training supports CPU and CUDA")
-    if device.type == "cuda":
-        visible = [value.strip() for value in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")]
-        if any(re.fullmatch(r"[0-9]+", value) is None for value in visible) or len(
-            {int(value) for value in visible}
-        ) != len(visible):
-            raise RuntimeError(
-                "CUDA_VISIBLE_DEVICES must explicitly select distinct non-negative physical GPU indices"
-            )
-        index = int(os.environ.get("LOCAL_RANK", device.index or 0))
-        if not 0 <= index < len(visible):
-            raise ValueError("the requested logical CUDA device is not visible")
-        device = torch.device("cuda", index)
-        torch.cuda.set_device(device)
-    if int(os.environ.get("WORLD_SIZE", "1")) > 1 and not dist.is_initialized():
-        if device.type == "cuda":
-            initialize_global_process_group(timeout_second=7200)
-        else:
-            dist.init_process_group("gloo", timeout=timedelta(hours=2))
-    return device
-
 
 @EngineRegistry.register(model_type="lwm_v4_meta", backend="replicated", device=["cpu", "cuda"])
 class MetaLearningEngine(BaseEngine):
@@ -104,6 +74,21 @@ class MetaLearningEngine(BaseEngine):
     def optimizer_zero_grad(self):
         self.optimizer.zero_grad(set_to_none=True)
 
+    def save_checkpoint(
+        self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None, **kwargs
+    ):
+        self.checkpoint_manager.save_checkpoint(
+            local_path,
+            hdfs_path=hdfs_path,
+            global_step=global_step,
+            max_ckpt_to_keep=max_ckpt_to_keep,
+        )
+
+    def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False, **kwargs):
+        self.checkpoint_manager.load_checkpoint(
+            local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load
+        )
+
     def optimizer_step(self):
         # Each rank uses the global target-token denominator; undo DDP averaging.
         for parameter in self.parameters:
@@ -123,10 +108,15 @@ class MetaLearningEngine(BaseEngine):
         if not episodes or min(token_counts) < 1:
             raise ValueError("each episode must have a next-token target after its first write")
         local = list(range(self.rank, len(episodes), self.world_size))
+        local.sort(key=lambda index: len(episodes[index].input_ids), reverse=True)
+        size = self.config.micro_batch_size_per_gpu
         # Empty tail ranks still enter a real DDP forward and zero-weight backward.
-        work = local or ([0] if not forward_only else [])
+        work = [local[start : start + size] for start in range(0, len(local), size)]
+        if not work and not forward_only:
+            work = [[0]]
         totals = torch.zeros(5, dtype=torch.float64, device=self.device)
-        for position, index in enumerate(work):
+        for position, indices in enumerate(work):
+            expected_tokens = sum(token_counts[index] for index in indices)
             sync = (
                 self.module.no_sync()
                 if not forward_only and self.world_size > 1 and position + 1 < len(work)
@@ -135,20 +125,24 @@ class MetaLearningEngine(BaseEngine):
             with sync:
                 # No outer autocast: the model controls backbone dtype; fast state is fp32.
                 output = self.module(
-                    torch.tensor(episodes[index].input_ids, dtype=torch.long, device=self.device),
+                    [
+                        torch.tensor(episodes[index].input_ids, dtype=torch.long, device=self.device)
+                        for index in indices
+                    ],
                     differentiable=not forward_only,
                 )
-                if output["target_tokens"] != token_counts[index]:
+                if output["target_tokens"] != expected_tokens:
                     raise ValueError("model target count does not match the streaming boundary")
                 if not forward_only:
-                    loss = output["loss"] * (token_counts[index] if local else 0) / total_tokens
+                    loss = output["loss"] * (expected_tokens if local else 0) / total_tokens
                     loss.backward()
+                    del loss
             if local:
                 totals += torch.tensor(
                     [
-                        float(output["loss"].detach()) * token_counts[index],
-                        token_counts[index],
-                        1,
+                        float(output["loss"].detach()) * expected_tokens,
+                        expected_tokens,
+                        len(indices),
                         output["write_events"],
                         float(output["write_loss"]) * output["write_events"],
                     ],

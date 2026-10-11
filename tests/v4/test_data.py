@@ -6,9 +6,9 @@ import pytest
 from latent_working_memory.v4.data import (
     TokenizedEpisode,
     dataset_identity,
-    episode_order,
     load_tokenized_episodes,
 )
+from latent_working_memory.v4.training_data import EpochSampler
 
 
 class IntegerTokenizer:
@@ -65,12 +65,14 @@ def test_canonical_jsonl_contract(tmp_path, rows, message):
 
 def test_epoch_order_is_reproducible_without_consuming_global_rng():
     episodes = tuple(TokenizedEpisode(str(index), (index,)) for index in range(12))
+    sampler = EpochSampler(episodes, 42, shuffle=True)
     before = random.getstate()
-    order = episode_order(episodes, 42, 0)
+    order = list(sampler)
     assert random.getstate() == before
-    assert order == episode_order(episodes, 42, 0)
-    assert order != episode_order(episodes, 42, 1)
-    assert set(order) == set(episodes)
+    assert order == list(sampler)
+    sampler.set_epoch(1)
+    assert order != list(sampler)
+    assert set(order) == set(range(len(episodes)))
 
 
 def test_resume_identity_covers_ids_order_and_tokenized_content():

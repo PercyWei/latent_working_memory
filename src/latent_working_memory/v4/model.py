@@ -10,6 +10,8 @@ from functools import partial
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch.nn.utils.rnn import pad_sequence
+from torch.utils.checkpoint import checkpoint
 from transformers import AutoModelForCausalLM, DynamicCache
 
 from latent_working_memory.v4.memory import LayerMemory
@@ -37,7 +39,7 @@ class StreamingMemoryLM(nn.Module):
                 config.model_name_or_path,
                 revision=config.revision,
                 dtype=getattr(torch, config.backbone_dtype),
-                attn_implementation="eager",
+                attn_implementation=config.attention_implementation,
             )
         )
         base = self.backbone.config
@@ -49,7 +51,7 @@ class StreamingMemoryLM(nn.Module):
             raise ValueError("native sliding/hybrid attention is not supported by the v4 cache")
         if config.pending_size + config.recent_size >= base.max_position_embeddings:
             raise ValueError("the first write must occur before the backbone position limit")
-        self.backbone.set_attn_implementation("eager")
+        self.backbone.set_attn_implementation(config.attention_implementation)
         self.backbone.requires_grad_(False)
         self.backbone.eval()
         self.memory_layers = nn.ModuleList(
@@ -97,43 +99,55 @@ class StreamingMemoryLM(nn.Module):
             return output + self._corrections[index][1]
         return output
 
-    def initial_state(self, differentiable=False):
+    def initial_state(self, differentiable=False, batch_size=1):
         return StreamState(
-            memories=[m.initial_state(1, differentiable) for m in self.memory_layers],
+            memories=[m.initial_state(batch_size, differentiable) for m in self.memory_layers],
             sources=[None] * len(self.memory_layers),
             cache=DynamicCache(),
         )
 
-    def _write(self, state, differentiable):
+    def _write(self, state, differentiable, active_rows=None):
         count = self.config.pending_size
+        rows = (
+            None
+            if active_rows is None
+            else torch.tensor(active_rows, dtype=torch.long, device=state.memories[0].device)
+        )
+        num_events = state.memories[0].shape[0] if rows is None else len(active_rows)
         losses = []
         for index, memory in enumerate(self.memory_layers):
             source = state.sources[index]
             updated, metrics = memory.write(
-                state.memories[index], source[:, :count], differentiable
+                state.memories[index] if rows is None else state.memories[index][rows],
+                source[:, :count] if rows is None else source[rows, :count],
+                differentiable,
             )
-            state.memories[index] = updated
-            # Own the retained storage so inference can release the evicted prefix.
-            state.sources[index] = source[:, count:].contiguous()
+            state.memories[index] = (
+                updated if rows is None else state.memories[index].index_copy(0, rows, updated)
+            )
+            # clone also owns storage when a batch-one slice is already contiguous.
+            state.sources[index] = source[:, count:].clone(memory_format=torch.contiguous_format)
             losses.append(metrics["write_loss_after"])
         for layer in state.cache.layers:
-            layer.keys = layer.keys[..., count:, :].contiguous()
-            layer.values = layer.values[..., count:, :].contiguous()
-        state.write_events += 1
-        state.write_loss_sum += sum(losses) / len(losses)
+            layer.keys = layer.keys[..., count:, :].clone(memory_format=torch.contiguous_format)
+            layer.values = layer.values[..., count:, :].clone(memory_format=torch.contiguous_format)
+        state.write_events += num_events
+        state.write_loss_sum += sum(losses) / len(losses) * num_events
 
-    def _chunks(self, input_ids, state, differentiable):
-        if input_ids.ndim != 1 or input_ids.dtype != torch.long or input_ids.numel() == 0:
-            raise ValueError("input_ids must be a nonempty one-dimensional torch.long tensor")
-        if state.position + len(input_ids) > self.backbone.config.max_position_embeddings:
+    def _chunks(self, input_ids, state, differentiable, lengths):
+        """Advance right-padded rows together; lengths exclude padding in this call."""
+        batch_size, total_length = input_ids.shape
+        end_positions = [state.position + length for length in lengths]
+        ends = torch.tensor(end_positions, device=input_ids.device)
+        if state.position + total_length > self.backbone.config.max_position_embeddings:
             raise ValueError("stream exceeds the backbone absolute position limit")
         if torch.is_inference_mode_enabled():
             raise RuntimeError("TTT requires autograd; use torch.no_grad(), not inference_mode()")
         start = 0
-        while start < len(input_ids):
+        while start < total_length:
             live = state.cache.get_seq_length()
             length = min(
-                len(input_ids) - start,
+                total_length - start,
                 self.config.pending_size + self.config.recent_size - live,
             )
             was_written = state.write_events > 0
@@ -145,12 +159,17 @@ class StreamingMemoryLM(nn.Module):
             self._corrections = {}
             try:
                 with torch.set_grad_enabled(differentiable):
-                    output = self.backbone(
-                        input_ids=input_ids[start : start + length].unsqueeze(0),
-                        position_ids=positions.unsqueeze(0),
+                    output = self.backbone.model(
+                        input_ids=input_ids[:, start : start + length],
+                        position_ids=positions.unsqueeze(0).expand(batch_size, -1),
                         cache_position=torch.arange(live, live + length, device=input_ids.device),
-                        attention_mask=torch.ones(
-                            (1, live + length), dtype=torch.long, device=input_ids.device
+                        attention_mask=(
+                            torch.arange(
+                                state.position - live,
+                                state.position + length,
+                                device=input_ids.device,
+                            )[None]
+                            < ends[:, None]
                         ),
                         past_key_values=state.cache,
                         use_cache=True,
@@ -168,37 +187,80 @@ class StreamingMemoryLM(nn.Module):
             state.position += length
             state.peak_live_tokens = max(state.peak_live_tokens, live + length)
             if live + length == self.config.pending_size + self.config.recent_size:
-                self._write(state, differentiable)
-            yield start, output.logits[0], was_written
+                active_rows = [i for i, end in enumerate(end_positions) if end >= state.position]
+                if len(active_rows) == batch_size:
+                    self._write(state, differentiable)
+                else:
+                    self._write(state, differentiable, active_rows)
+            yield start, output.last_hidden_state, was_written
             start += length
 
-    def consume(self, input_ids, state=None, differentiable=False):
-        """推进一条流；调用者可在下一次调用继续传入返回的 state。"""
+    def consume(self, input_ids, state=None, differentiable=False, last_only=False):
+        """推进一条流；last_only 只计算最后位置的 logits，用于生成。"""
+        if input_ids.ndim != 1 or input_ids.dtype != torch.long or input_ids.numel() == 0:
+            raise ValueError("input_ids must be a nonempty one-dimensional torch.long tensor")
         if state is None:
             state = self.initial_state(differentiable)
-        logits = [value for _, value, _ in self._chunks(input_ids, state, differentiable)]
-        return torch.cat(logits), state
+        pieces = []
+        for _, hidden, _ in self._chunks(
+            input_ids.unsqueeze(0), state, differentiable, [len(input_ids)]
+        ):
+            if not last_only:
+                with torch.set_grad_enabled(differentiable):
+                    pieces.append(self.backbone.get_output_embeddings()(hidden[0]))
+        with torch.set_grad_enabled(differentiable):
+            logits = (
+                self.backbone.get_output_embeddings()(hidden[0, -1:])
+                if last_only
+                else torch.cat(pieces)
+            )
+        return logits, state
+
+    def _token_loss(self, hidden, targets):
+        logits = self.backbone.get_output_embeddings()(hidden)
+        scores = logits.float() if logits.dtype in {torch.float16, torch.bfloat16} else logits
+        return F.cross_entropy(scores, targets, reduction="sum")
 
     def forward(self, input_ids, differentiable=True):
-        """外层 LM 目标只使用写入生效后产生的 logits；不加写入损失。"""
+        """真实 microbatch；仅监督写入后的有效位置，按有效 target tokens 平均。"""
+        rows = [input_ids] if isinstance(input_ids, torch.Tensor) else input_ids
+        if not isinstance(rows, list) or not rows:
+            raise ValueError("input_ids must be a tensor or a nonempty list of tensors")
         minimum = self.config.pending_size + self.config.recent_size + 2
-        if len(input_ids) < minimum:
-            raise ValueError(f"a training episode needs at least {minimum} tokens")
-        state = self.initial_state(differentiable)
+        for row in rows:
+            if not isinstance(row, torch.Tensor) or row.ndim != 1 or row.dtype != torch.long:
+                raise ValueError("each input row must be a one-dimensional torch.long tensor")
+            if len(row) < minimum:
+                raise ValueError(f"a training episode needs at least {minimum} tokens")
+        padded = pad_sequence(rows, batch_first=True, padding_value=0)
+        lengths = [len(row) - 1 for row in rows]
+        valid_lengths = torch.tensor(lengths, device=padded.device)
+        state = self.initial_state(differentiable, len(rows))
         losses = []
         target_tokens = 0
-        for start, logits, was_written in self._chunks(input_ids[:-1], state, differentiable):
+        for start, hidden, was_written in self._chunks(
+            padded[:, :-1], state, differentiable, lengths
+        ):
             if was_written:
-                targets = input_ids[start + 1 : start + 1 + len(logits)]
+                length = hidden.shape[1]
+                valid = (
+                    torch.arange(start, start + length, device=padded.device)[None]
+                    < valid_lengths[:, None]
+                )
                 with torch.set_grad_enabled(differentiable):
-                    scores = (
-                        logits.float()
-                        if logits.dtype in {torch.float16, torch.bfloat16}
-                        else logits
-                    )
-                    losses.append(F.cross_entropy(scores, targets, reduction="sum"))
+                    selected = hidden[valid]
+                    targets = padded[:, start + 1 : start + 1 + length][valid]
+                    for offset in range(0, len(targets), self.config.loss_chunk_size):
+                        chunk = selected[offset : offset + self.config.loss_chunk_size]
+                        target = targets[offset : offset + self.config.loss_chunk_size]
+                        losses.append(
+                            checkpoint(self._token_loss, chunk, target, use_reentrant=False)
+                            if differentiable and chunk.requires_grad
+                            else self._token_loss(chunk, target)
+                        )
                 target_tokens += len(targets)
-        loss = torch.stack(losses).sum() / target_tokens
+        with torch.set_grad_enabled(differentiable):
+            loss = torch.stack(losses).sum() / target_tokens
         return {
             "loss": loss,
             "target_tokens": target_tokens,
@@ -213,14 +275,14 @@ class StreamingMemoryLM(nn.Module):
             raise ValueError("max_new_tokens must be a positive integer")
         if len(input_ids) + max_new_tokens > self.backbone.config.max_position_embeddings:
             raise ValueError("generation exceeds the backbone absolute position limit")
-        logits, state = self.consume(input_ids)
+        logits, state = self.consume(input_ids, last_only=True)
         generated = []
         for step in range(max_new_tokens):
             token = logits[-1].argmax().reshape(1)
             generated.append(token)
             if token.item() == eos_token_id or step + 1 == max_new_tokens:
                 break
-            logits, state = self.consume(token, state)
+            logits, state = self.consume(token, state, last_only=True)
         return torch.cat((input_ids, *generated))
 
     def trainable_state_dict(self):

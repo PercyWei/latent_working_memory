@@ -29,6 +29,8 @@ class ModelConfig:
     model_name_or_path: str
     revision: str | None = None
     backbone_dtype: str = "float32"
+    attention_implementation: str = "sdpa"
+    loss_chunk_size: int = 256
     pending_size: int = 256
     recent_size: int = 128
     num_slots: int = 32
@@ -53,6 +55,8 @@ class ModelConfig:
             raise ValueError("revision must be null or a nonempty string")
         if self.backbone_dtype not in {"float32", "bfloat16"}:
             raise ValueError("backbone_dtype must be float32 or bfloat16")
+        if self.attention_implementation not in {"eager", "sdpa"}:
+            raise ValueError("attention_implementation must be eager or sdpa")
         positive_ints(self, [field.name for field in fields(self) if field.type is int])
         if self.query_mode not in {"fixed", "conditioned"}:
             raise ValueError("query_mode must be fixed or conditioned")
@@ -73,6 +77,7 @@ class TrainingConfig:
     output_dir: str
     epochs: int = 1
     global_batch_size: int = 8
+    micro_batch_size_per_gpu: int = 2
     learning_rate: float = 1e-4
     weight_decay: float = 0.01
     gradient_clip: float = 1.0
@@ -80,6 +85,11 @@ class TrainingConfig:
     max_seq_length: int = 4096
     eval_every: int = 50
     save_every: int = 50
+    save_total_limit: int = 2
+    swanlab_project: str | None = None
+    group: str | None = None
+    run_name: str | None = None
+    tags: tuple[str, ...] = ()
 
     def __post_init__(self):
         for name in ("train_file", "dev_file", "output_dir"):
@@ -94,6 +104,18 @@ class TrainingConfig:
         finite_number(self.learning_rate, "learning_rate")
         finite_number(self.weight_decay, "weight_decay", inclusive=True)
         finite_number(self.gradient_clip, "gradient_clip")
+        for name in ("swanlab_project", "group", "run_name"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"{name} must be null or a nonempty string")
+        if self.swanlab_project is not None and self.group is None:
+            raise ValueError("online tracking requires an explicit group")
+        if not isinstance(self.tags, (list, tuple)) or any(
+            not isinstance(tag, str) or ":" not in tag or not all(tag.split(":", 1))
+            for tag in self.tags
+        ):
+            raise ValueError("tags must be namespaced strings, for example study:query-generation")
+        object.__setattr__(self, "tags", tuple(self.tags))
 
 
 def load_experiment(path):

@@ -1,29 +1,37 @@
 """python -m latent_working_memory.v4.train --config experiment.json --device cpu"""
 
 import argparse
-from dataclasses import asdict
+from contextlib import ExitStack, nullcontext
+from dataclasses import asdict, replace
 import json
 import math
 from pathlib import Path
+import time
 
+import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer, set_seed
 
-from latent_working_memory.v4.checkpoint import load_checkpoint, save_checkpoint
+from latent_working_memory.runtime import initialize_device
+from latent_working_memory.v4.checkpoint import MetaMemoryCheckpointHandler, read_checkpoint
 from latent_working_memory.v4.config import load_experiment
 from latent_working_memory.v4.data import (
     dataset_identity,
-    episode_order,
     load_tokenized_episodes,
 )
-from latent_working_memory.v4.engine import EngineRegistry, initialize_device
+from latent_working_memory.v4.engine import EngineRegistry
 from latent_working_memory.v4.model import StreamingMemoryLM
+from latent_working_memory.v4.tracking import configure_metrics, log_metrics, training_tracking
+from latent_working_memory.v4.training_data import make_data_loader
 
 
 def write_json(path, value):
-    Path(path).write_text(
+    path = Path(path)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
         json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8"
     )
+    temporary.replace(path)
 
 
 def validate_cursor(cursor, config, samples):
@@ -68,8 +76,11 @@ def rewind_metrics(path, step):
 def evaluate(engine, episodes):
     totals = {"target_tokens": 0, "samples": 0, "source_tokens": 0, "write_events": 0}
     nll, write_loss = 0.0, 0.0
-    for start in range(0, len(episodes), engine.config.global_batch_size):
-        metrics = engine.eval_batch(episodes[start : start + engine.config.global_batch_size])
+    loader = make_data_loader(
+        episodes, engine.config.global_batch_size, engine.config.seed, shuffle=False
+    )
+    for batch in loader:
+        metrics = engine.eval_batch(batch)
         nll += metrics["loss"] * metrics["target_tokens"]
         write_loss += metrics["write_loss"] * metrics["write_events"]
         for name in totals:
@@ -93,17 +104,34 @@ def run_training(args):
     if resume is not None:
         if resume.parent != output / "checkpoints":
             raise ValueError("resume checkpoint must belong to output_dir/checkpoints")
-    elif output.exists() and any(output.iterdir()):
-        raise ValueError("new training requires an empty output directory")
+    else:
+        error = None
+        if rank == 0 and output.exists() and any(output.iterdir()):
+            error = "new training requires an empty output directory"
+        if world_size > 1:
+            status = [error]
+            dist.broadcast_object_list(status, src=0)
+            error = status[0]
+        if error is not None:
+            raise ValueError(error)
 
     set_seed(config.seed)
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_config.model_name_or_path, revision=model_config.revision
-    )
+    load_model_config = model_config
+    if resume is not None:
+        previous = read_checkpoint(resume)
+        resolved = previous["run"]["resolved_model_revision"]
+        if resolved is not None:
+            load_model_config = replace(model_config, revision=resolved)
+        tokenizer = AutoTokenizer.from_pretrained(output / "tokenizer")
+        del previous
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_config.model_name_or_path, revision=model_config.revision
+        )
     min_length = model_config.pending_size + model_config.recent_size + 2
     train = load_tokenized_episodes(config.train_file, tokenizer, min_length, config.max_seq_length)
     dev = load_tokenized_episodes(config.dev_file, tokenizer, min_length, config.max_seq_length)
-    model = StreamingMemoryLM(model_config).to(device)
+    model = StreamingMemoryLM(load_model_config).to(device)
     position_limit = model.backbone.config.max_position_embeddings
     if any(len(episode.input_ids) > position_limit for episode in (*train, *dev)):
         raise ValueError("training/dev episode exceeds the backbone max_position_embeddings")
@@ -114,18 +142,24 @@ def run_training(args):
     run = {
         "model": asdict(model_config),
         "resolved_model_revision": getattr(model.backbone.config, "_commit_hash", None),
-        "training": asdict(config),
+        "training": {**asdict(config), "tags": list(config.tags)},
         "data": {"train": dataset_identity(train), "dev": dataset_identity(dev)},
         "world_size": world_size,
         "device_type": device.type,
     }
     cursor = {"epoch": 0, "sample_offset": 0, "step": 0, "sample_visits": 0, "target_tokens": 0}
     metrics_path = output / "metrics.jsonl"
+    loader = make_data_loader(train, config.global_batch_size, config.seed)
+    handler = MetaMemoryCheckpointHandler(
+        engine, loader, output / "checkpoints", run, cursor, resume_from_path=resume
+    )
     if resume is not None:
         if json.loads((output / "run.json").read_text(encoding="utf-8")) != run:
             raise ValueError("saved run does not match the resume configuration or tokenized data")
-        cursor = load_checkpoint(resume, engine, run)
+        restored_step = handler.load_checkpoint()
         validate_cursor(cursor, config, len(train))
+        if restored_step != cursor["step"]:
+            raise ValueError("checkpoint directory step differs from its saved cursor")
         if rank == 0:
             rewind_metrics(metrics_path, cursor["step"])
     elif rank == 0:
@@ -136,38 +170,89 @@ def run_training(args):
     if world_size > 1:
         dist.barrier()
 
+    with ExitStack() as stack:
+        context = (
+            training_tracking(config, run, device, resume=resume is not None)
+            if rank == 0
+            else nullcontext(None)
+        )
+        tracking, error = None, None
+        try:
+            tracking = stack.enter_context(context)
+            if tracking is not None:
+                configure_metrics(tracking, device)
+        except Exception as exception:
+            error = f"tracking initialization failed: {exception}"
+        if world_size > 1:
+            status = [error]
+            dist.broadcast_object_list(status, src=0)
+            error = status[0]
+        if error is not None:
+            raise RuntimeError(error)
+        return train_loop(
+            engine, config, train, dev, loader, handler, cursor, resume,
+            args.stop_after_steps, tracking,
+        )
+
+
+def train_loop(engine, config, train, dev, loader, handler, cursor, checkpoint_path, stop, tracking):
+    output = Path(config.output_dir)
+    metrics_path = output / "metrics.jsonl"
     total_steps = config.epochs * math.ceil(len(train) / config.global_batch_size)
-    checkpoint_path = resume
-    stop = args.stop_after_steps
     for epoch in range(cursor["epoch"], config.epochs):
-        ordered = episode_order(train, config.seed, epoch)
-        for start in range(cursor["sample_offset"], len(ordered), config.global_batch_size):
-            if stop is not None and cursor["step"] >= stop:
-                break
-            batch = ordered[start : start + config.global_batch_size]
+        if stop is not None and cursor["step"] >= stop:
+            break
+        loader.sampler.set_epoch(epoch)
+        for batch in loader:
+            if engine.device.type == "cuda":
+                torch.cuda.synchronize(engine.device)
+                torch.cuda.reset_peak_memory_stats(engine.device)
+            started = time.perf_counter()
             metrics = engine.step(batch)
+            if engine.device.type == "cuda":
+                torch.cuda.synchronize(engine.device)
+            resources = {"optimizer_step_seconds": time.perf_counter() - started}
+            if engine.device.type == "cuda":
+                resources["peak_memory_allocated_bytes"] = torch.cuda.max_memory_allocated(
+                    engine.device
+                )
+            if engine.world_size > 1:
+                maximum = torch.tensor(
+                    list(resources.values()), device=engine.device, dtype=torch.float64
+                )
+                dist.all_reduce(maximum, op=dist.ReduceOp.MAX)
+                resources = dict(zip(resources, maximum.tolist(), strict=True))
             cursor["step"] += 1
             cursor["sample_visits"] += len(batch)
             cursor["target_tokens"] += metrics["target_tokens"]
-            epoch_end = start + len(batch) == len(ordered)
+            consumed = cursor["sample_offset"] + len(batch)
+            epoch_end = consumed == len(train)
             cursor["epoch"] = epoch + int(epoch_end)
-            cursor["sample_offset"] = 0 if epoch_end else start + len(batch)
+            cursor["sample_offset"] = 0 if epoch_end else consumed
             step = cursor["step"]
-            records = [
-                {"step": step, "epoch": epoch + 1, **{f"train/{k}": v for k, v in metrics.items()}}
-            ]
-            if step % config.eval_every == 0 or epoch_end:
+            stopping = stop is not None and step >= stop
+            record = {
+                "step": step,
+                "epoch": epoch + 1,
+                "train/epoch": cursor["sample_visits"] / len(train),
+                **{f"train/{k}": v for k, v in metrics.items()},
+                **{f"resources/{k}": v for k, v in resources.items()},
+            }
+            if step % config.eval_every == 0 or epoch_end or stopping:
                 development = evaluate(engine, dev)
-                records.append({"step": step, **{f"dev/{k}": v for k, v in development.items()}})
-            if rank == 0:
+                record.update({f"dev/{k}": v for k, v in development.items()})
+            if engine.rank == 0:
                 with metrics_path.open("a", encoding="utf-8") as stream:
-                    for record in records:
-                        text = json.dumps(record, ensure_ascii=False, allow_nan=False)
-                        stream.write(text + "\n")
-                        print(text, flush=True)
-            if step % config.save_every == 0 or epoch_end or (stop is not None and step >= stop):
-                checkpoint_path = output / "checkpoints" / f"step-{step:06d}.pt"
-                save_checkpoint(checkpoint_path, engine, run, cursor)
+                    text = json.dumps(record, ensure_ascii=False, allow_nan=False)
+                    stream.write(text + "\n")
+                    print(text, flush=True)
+                if tracking is not None:
+                    log_metrics(tracking, record)
+            if step % config.save_every == 0 or epoch_end or stopping:
+                handler.save_checkpoint(step)
+                checkpoint_path = output / "checkpoints" / f"global_step_{step}"
+            if stopping:
+                break
         if stop is not None and cursor["step"] >= stop:
             break
     result = {
@@ -179,7 +264,7 @@ def run_training(args):
         "target_tokens": cursor["target_tokens"],
         "checkpoint": str(checkpoint_path),
     }
-    if rank == 0:
+    if engine.rank == 0:
         write_json(output / "training-result.json", result)
     return result
 
