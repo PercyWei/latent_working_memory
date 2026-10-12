@@ -33,15 +33,6 @@ LEVELS = {
         "save_every": 1,
         "eval_split": "dev",
     },
-    "pilot": {
-        "train_samples": 256,
-        "dev_samples": 32,
-        "max_steps": 20,
-        "eval_trajectories": 16,
-        "eval_every": 5,
-        "save_every": 5,
-        "eval_split": "dev",
-    },
     "full": {
         "train_samples": None,
         "dev_samples": None,

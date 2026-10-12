@@ -190,7 +190,6 @@ class Commands:
     "mode,expected",
     [
         ("smoke", (16, 4, 2, 2, "dev")),
-        ("pilot", (256, 32, 20, 16, "dev")),
         ("full", (None, None, None, None, "test")),
     ],
 )
@@ -248,7 +247,7 @@ def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode,
     assert "--log-to-swanlab" in evaluation
 
 
-@pytest.mark.parametrize("mode", ["full", "smoke", "pilot"])
+@pytest.mark.parametrize("mode", ["full", "smoke"])
 def test_all_methods_store_artifacts_under_one_run_directory(tmp_path, monkeypatch, mode):
     args = arguments(tmp_path, "--method", "all", "--mode", mode)
     prepare_dataset_entries(args)
@@ -363,7 +362,7 @@ def test_dynamic_methods_share_only_pretraining_and_have_independent_warmup_poli
 
 
 @pytest.mark.parametrize("method", DYNAMIC_METHODS)
-@pytest.mark.parametrize("mode", ["full", "smoke", "pilot"])
+@pytest.mark.parametrize("mode", ["full", "smoke"])
 def test_dynamic_capacity_names_use_cli_append_slots_in_every_mode(tmp_path, method, mode):
     args = arguments(tmp_path, "--method", method, "--mode", mode, "--append-slots", "16")
 
@@ -502,7 +501,7 @@ def test_stage_training_limit_overrides_only_selected_stage(tmp_path, stage, lim
         )
 
 
-@pytest.mark.parametrize("mode,profile_limit", [("smoke", 16), ("pilot", 256)])
+@pytest.mark.parametrize("mode,profile_limit", [("smoke", 16)])
 @pytest.mark.parametrize("limit", [0, 7, 3000])
 def test_trial_profiles_cap_each_stage_independently(tmp_path, mode, profile_limit, limit):
     _, _, jobs = job_plan.build_jobs(
@@ -924,7 +923,7 @@ def test_custom_preset_execution_records_resolved_configs_and_evaluates_final_st
         tmp_path, "icae_single", objective={"qa_batch_size": 5}, training={"learning_rate": 2e-4}
     )
     original = path.read_bytes()
-    args = arguments(tmp_path, "--method", "icae_single", "--config", str(path), "--mode", "pilot")
+    args = arguments(tmp_path, "--method", "icae_single", "--config", str(path), "--mode", "smoke")
     prepare_dataset_entries(args)
     commands = Commands()
     monkeypatch.setattr(gpu_job, "execute", commands)
@@ -934,10 +933,10 @@ def test_custom_preset_execution_records_resolved_configs_and_evaluates_final_st
     assert result["status"] == "finished"
     training, evaluation = commands.calls
     assert [config.objective.stage for config in training["configs"]] == ["pretrain", "qa"]
-    assert value(training["command"], "--stop-after-steps") == "20"
+    assert value(training["command"], "--stop-after-steps") == "2"
     assert training["configs"][1].training.init_checkpoint == str(training["checkpoints"][0])
     assert value(evaluation["command"], "--checkpoint") == str(training["checkpoints"][-1])
-    plan_directory = args.output_root / "unit-job/plan/icae-single-k512_pilot"
+    plan_directory = args.output_root / "unit-job/plan/icae-single-k512_smoke"
     plan = json.loads((plan_directory / "job.json").read_text())
     assert plan["method"] == "icae_single"
     assert plan["training_runs"][0]["command"] == training["command"]
@@ -950,9 +949,9 @@ def test_custom_preset_execution_records_resolved_configs_and_evaluates_final_st
         assert job["config"]["objective"]["qa_batch_size"] == 5
         assert config.training.learning_rate == 2e-4
         assert config.objective.qa_batch_size == 5
-        assert config.training.max_train_samples == 256
-        assert config.training.max_dev_samples == 32
-        assert config.training.eval_every == config.training.save_every == 5
+        assert config.training.max_train_samples == 16
+        assert config.training.max_dev_samples == 4
+        assert config.training.eval_every == config.training.save_every == 1
     assert json.loads((plan_directory / "result.json").read_text()) == result
     assert path.read_bytes() == original
 

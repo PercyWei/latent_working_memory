@@ -149,7 +149,7 @@ def parse_args(argv=None):
         parser.add_argument(
             f"--{stage}-train-samples",
             type=bounded_count,
-            help=f"{stage} 阶段训练样本上限，0 表示不限；smoke/pilot 另受档位上限约束",
+            help=f"{stage} 阶段训练样本上限，0 表示不限；smoke 另受档位上限约束",
         )
     for name in ("dev-samples", "max-steps", "eval-trajectories"):
         parser.add_argument(f"--{name}", type=bounded_count, help="覆盖运行档位，0 表示不限")

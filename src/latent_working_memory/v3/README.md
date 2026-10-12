@@ -148,7 +148,7 @@
 | `pretrain`（FineWeb Multisegment） | 12800 |
 | ICAE `qa`、动态方法 `warmup` 和 `policy`（Fineweb FactQA） | 全部 |
 
-各阶段可独立通过 CLI 覆盖；`smoke`／`pilot` 另受试跑档位上限约束，取较小值。
+各阶段可独立通过 CLI 覆盖；`smoke` 另受试跑档位上限约束，取较小值。
 
 | 阶段 | 默认每卡 microbatch | 默认梯度累积 |
 |---|---:|---:|
@@ -172,7 +172,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | 参数 | 用法 |
 |---|---|
 | `--method` | 默认 `all`，运行五种方法；或指定运行单方法 |
-| `--mode` | 默认 `full`；试跑指定 `smoke` 或 `pilot` |
+| `--mode` | 默认 `full`；试跑指定 `smoke` |
 | `--config <文件>` | 替换所选单方法的默认配置；省略时读取 `configs/v3/` |
 | `--writer-mode` | 动态后训练写入方式：`local`（默认）、`tag`、`mask`、`dual_lora` |
 | `--tag-tokens` | 每种动作的控制 token 数 m，默认 3；仅用于动态 `tag` 写入 |
