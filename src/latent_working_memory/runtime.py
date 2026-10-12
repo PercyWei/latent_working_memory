@@ -3,6 +3,7 @@
 from datetime import timedelta
 import os
 import random
+import re
 
 import numpy as np
 import torch
@@ -17,11 +18,11 @@ def initialize_device(device):
     if device.type == "cuda":
         visible = [value.strip() for value in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")]
         if (
-            any(value not in {"0", "1"} for value in visible)
-            or len(set(visible)) != len(visible)
+            any(re.fullmatch(r"[0-9]+", value) is None for value in visible)
+            or len({int(value) for value in visible}) != len(visible)
         ):
             raise RuntimeError(
-                "CUDA_VISIBLE_DEVICES must explicitly select distinct physical GPUs 0/1"
+                "CUDA_VISIBLE_DEVICES must explicitly select distinct non-negative physical GPU indices"
             )
         index = int(os.environ.get("LOCAL_RANK", device.index or 0))
         if not 0 <= index < len(visible):

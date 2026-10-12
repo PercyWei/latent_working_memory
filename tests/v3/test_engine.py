@@ -15,7 +15,7 @@ from latent_working_memory import runtime as runtime_module
 
 @pytest.mark.parametrize("rank", range(2))
 def test_two_gpu_local_rank_maps_to_logical_cuda_device(monkeypatch, rank):
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,5")
     monkeypatch.setenv("LOCAL_RANK", str(rank))
     monkeypatch.setenv("WORLD_SIZE", "2")
     devices, groups = [], []
@@ -48,7 +48,7 @@ def test_gpu_subset_uses_logical_indices_without_torchrun(monkeypatch, visible, 
 @pytest.mark.parametrize("visible", ["", "-1", "0,0", "0,00", "0,other", "0,"])
 def test_device_initialization_rejects_invalid_or_duplicate_gpus(monkeypatch, visible):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
-    with pytest.raises(RuntimeError, match="physical GPUs 0/1"):
+    with pytest.raises(RuntimeError, match="distinct non-negative physical GPU indices"):
         initialize_device("cuda")
 
 
