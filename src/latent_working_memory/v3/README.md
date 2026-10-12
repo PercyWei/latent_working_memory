@@ -183,7 +183,8 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 ### 4.2 复用预训练与中断恢复
 
 - **共享预训练**：用 `--method dynamic_pretrain` 单独训练一次；随后分别运行 `memory_change` 和 `information_loss`，通过 `--init-checkpoint` 指向同一 checkpoint 目录。命令见[复用指南](scripts/README.md#3-复用共享预训练可选)。
-- **来源记录**：后训练自动沿用预训练的实验系列编号 `run-id`。保留来源目录中的 `pretrain/run.json`，以及在线运行生成的 `swanlab.json`。
+- **实验系列**：同系列后训练省略 `--run-id` 时继承来源编号；跨系列复用时显式指定新的 `--run-id`。
+- **来源记录**：SwanLab 的 `pretraining` 配置与本地 `run.json` 记录来源编号、名称、URL、checkpoint 和 step。保留来源目录中的 `pretrain/run.json`，以及在线运行生成的 `swanlab.json`。
 - **已有产物**：保留旧预训练的原路径与配置，可继续通过 `--init-checkpoint` 使用，不直接重命名旧目录。
 - **中断恢复**：使用阶段目录保存的 `config.json`，调用训练模块的 `--resume` 并传入 checkpoint 目录。
 
@@ -206,15 +207,15 @@ artifacts/v3/<run-id>/
 └── compare/                     points.json、points.csv、compare.log、result.json
 ```
 
-- **运行目录**：`run-id` 默认是上海时间 `YYYYMMDD-HHMMSS`，可用 `--run-id` 指定；父目录由 `--output-root` 控制。
+- **运行目录**：`run-id` 可用 `--run-id` 指定；复用共享预训练且省略时继承来源编号，其余情况按上海时间生成 `YYYYMMDD-HHMMSS`。父目录由 `--output-root` 控制。
 - **方法目录**：三个 baseline 和动态预训练使用 `<method>-k<K>`；动态后训练统一使用 `<method>-k<K>+<ΔK>-<writer>`，`<writer>` 为 `local`、`tag`、`mask` 或 `dual-lora`，试跑最后添加 `_<mode>`。例如 `memory-change-k512+32-local`、`memory-change-k512+32-tag_smoke`。方法名中的 `_` 转为 `-`，共享预训练用 `dynamic-pretrain`；K、ΔK 分别来自 `model.memory_slots`、`objective.append_slots`。
 - **Checkpoint**：目录为 `checkpoints/global_step_<阶段step>/`。`state.pt` 保存新增权重、优化器及运行状态，`data_<rank>.pt` 保存各卡加载器状态；每阶段默认保留最近两个，初始化、恢复和评估均传入该目录。外层结构及文件布局不变；原 adapter 字典中，`tag` 保存 $2\times m\times d$ 的 `tag_embeddings`，`dual_lora` 保存两套 LoRA。恢复与评估使用保存的写入方式和 m。
 - **结果与比较**：`summary.json` 汇总指标，`trajectories.jsonl` 保存动作、分数、计时与逐题结果。本次调用有至少两个评估结果时生成 `compare/` 产物。
 
 ### 5.3 SwanLab 组织与展示
 
-- **组织**：默认 project 为 `latent-working-memory-v3`，group 为 `run-id`。同一方法的训练、验证和最终评估共用一个 run；从头运行 `all` 共六个 run，包含独立的共享预训练。
-- **名称**：使用 `<method-dir>_<run-id>`；两种动态方法与共享预训练保持相同后缀，关联共同来源，各自仍有独立的云端 ID。
+- **组织**：默认 project 为 `latent-working-memory-v3`；`--group` 独立指定，默认采用当前 `run-id`。同一方法的训练、验证和最终评估共用一个 run；从头运行 `all` 共六个 run，包含独立的共享预训练。
+- **名称**：使用 `<method-dir>_<run-id>`，各方法有独立的云端 ID；跨系列复用使用当前系列编号，预训练来源通过 `pretraining` 配置追溯。
 - **横轴**：训练／验证使用累计 optimizer step；动态后训练的 step 不包含共享预训练。
 - **曲线**：展示目标损失、旧／新 QA NLL、容量、梯度范数、耗时和训练步峰值显存。
 - **追加比例**：动态 warmup／policy 将 `train/append_ratio` 与 `dev/append_ratio` 合并为一张原生折线图，横轴为累计 optimizer step。比例为追加次数／（追加次数＋覆盖次数），不计首次写入；仅记录有决策的训练步与实际验证点。

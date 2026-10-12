@@ -1059,8 +1059,9 @@ def experiment_config(root, stage, identifier="trial", method=None, init=None):
 
 
 @pytest.mark.parametrize("explicit_name", [False, True])
+@pytest.mark.parametrize("target_id", ["trial", "new-trial"])
 def test_dynamic_stages_preserve_shared_source_and_accumulate_only_method_steps(
-    tmp_path, explicit_name
+    tmp_path, explicit_name, target_id
 ):
     source_root = tmp_path / ("dynamic-pretrain" if explicit_name else "dynamic-pretrain_trial")
     source_config = experiment_config(source_root, "pretrain")
@@ -1079,24 +1080,33 @@ def test_dynamic_stages_preserve_shared_source_and_accumulate_only_method_steps(
         stop_after_steps=2,
     )
     assert source_result["global_step"] == 2
+    source_files = {path: path.read_bytes() for path in source_root.rglob("*") if path.is_file()}
     qa = make_splits("qa")
     sources = []
     for method in ("memory_change", "information_loss"):
-        root = tmp_path / f"{method}_trial"
-        config = experiment_config(root, "warmup", method=method, init=source_result["checkpoint"])
+        root = tmp_path / f"{method}_{target_id}"
+        config = experiment_config(
+            root, "warmup", identifier=target_id, method=method, init=source_result["checkpoint"]
+        )
         engine = make_engine(config)
         initialization = load_initialization(source_result["checkpoint"], engine.model, config)
+        assert initialization["experiment_id"] == "trial"
         sources.append(initialization["pretraining"])
         run = _run(config, engine, qa, initialization)
+        assert run["config"]["training"]["experiment_id"] == target_id
         assert run["step_offset"] == 0
         result = train_loop(config, engine, qa, run, stop_after_steps=2)
         assert result["global_step"] == result["completed_steps"] == 2
-        config = experiment_config(root, "policy", method=method, init=result["checkpoint"])
+        config = experiment_config(
+            root, "policy", identifier=target_id, method=method, init=result["checkpoint"]
+        )
         engine = make_engine(config)
         initialization = load_initialization(result["checkpoint"], engine.model, config)
         assert initialization["stage"] == "warmup"
+        assert initialization["experiment_id"] == target_id
         assert initialization["pretraining"] == sources[-1]
         run = _run(config, engine, qa, initialization)
+        assert run["config"]["training"]["experiment_id"] == target_id
         assert run["step_offset"] == 2
         result = train_loop(config, engine, qa, run, stop_after_steps=1)
         assert result["global_step"] == 3 and result["completed_steps"] == 1
@@ -1104,6 +1114,17 @@ def test_dynamic_stages_preserve_shared_source_and_accumulate_only_method_steps(
         assert checkpoint["run"]["pretraining"] == sources[-1]
         assert checkpoint["run"]["step_offset"] == 2
         restored = make_engine(config)
+        renamed = replace(
+            config, training=replace(config.training, experiment_id=f"{target_id}-renamed")
+        )
+        with pytest.raises(ValueError, match="saved run differs"):
+            runtime.prepare_training(
+                renamed,
+                restored,
+                qa,
+                _run(renamed, restored, qa, initialization),
+                resume=result["checkpoint"],
+            )
         result = train_loop(
             config,
             restored,
@@ -1120,6 +1141,7 @@ def test_dynamic_stages_preserve_shared_source_and_accumulate_only_method_steps(
         assert [row["step"] for row in records] == [1, 2]
         assert all(row["stage"] == "policy" for row in records)
         manifest = json.loads((root / "experiment.json").read_text())
+        assert manifest["experiment_id"] == target_id
         assert list(manifest["stages"]) == ["warmup", "policy"]
         assert manifest["pretraining"] == sources[-1]
         assert "pretraining_sources" not in json.dumps(manifest)
@@ -1127,8 +1149,10 @@ def test_dynamic_stages_preserve_shared_source_and_accumulate_only_method_steps(
     assert sources[0]["experiment_id"] == "trial"
     assert sources[0]["run_name"] == "dynamic-pretrain_trial"
     assert sources[0]["run_dir"] == str(source_root.resolve())
+    assert sources[0]["checkpoint"] == source_result["checkpoint"]
     assert sources[0]["step"] == 2
     assert sources[0]["run_id"] is sources[0]["run_url"] is None
+    assert {path: path.read_bytes() for path in source_root.rglob("*") if path.is_file()} == source_files
 
 
 def test_saved_pretraining_without_explicit_name_uses_its_directory_name(tmp_path):
@@ -1163,20 +1187,15 @@ def test_icae_qa_offset_includes_pretraining_in_same_method_run(tmp_path):
     assert manifest["method"] == "icae_single"
 
 
-@pytest.mark.parametrize("source_id", [None, "other-trial"])
-def test_dynamic_source_experiment_identity_must_match_before_loading_weights(tmp_path, source_id):
-    source = (
-        make_config(tmp_path / "legacy-source")
-        if source_id is None
-        else experiment_config(tmp_path / "source", "pretrain", identifier=source_id)
-    )
+def test_dynamic_source_requires_experiment_identity_before_loading_weights(tmp_path):
+    source = make_config(tmp_path / "legacy-source")
     engine = make_engine(source)
     data = make_splits()
     result = train_loop(source, engine, data, _run(source, engine, data), stop_after_steps=1)
     target = experiment_config(tmp_path / "method_trial", "warmup", init=result["checkpoint"])
     model = TinyTask()
     before = model.weight.detach().clone()
-    with pytest.raises(ValueError, match="pretraining experiment_id|original pretraining source"):
+    with pytest.raises(ValueError, match="pretraining experiment_id"):
         load_initialization(result["checkpoint"], model, target)
     torch.testing.assert_close(model.weight, before)
     assert not (tmp_path / "method_trial").exists()

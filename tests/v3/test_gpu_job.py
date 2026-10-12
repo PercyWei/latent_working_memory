@@ -1218,8 +1218,9 @@ def test_dynamic_preset_initialization_inherits_source_id_without_repeating_pret
 
 
 @pytest.mark.parametrize("same_identity", [False, True])
+@pytest.mark.parametrize("run_id", [None, "new-series"])
 def test_all_methods_keep_dynamic_preset_initialization_out_of_baselines(
-    tmp_path, monkeypatch, same_identity
+    tmp_path, monkeypatch, same_identity, run_id
 ):
     sources = {
         "memory_change.json": external_checkpoint(tmp_path / "first", experiment_id="source-id"),
@@ -1240,16 +1241,16 @@ def test_all_methods_keep_dynamic_preset_initialization_out_of_baselines(
         )
 
     monkeypatch.setattr(job_plan, "load_preset", preset)
-    args = arguments(tmp_path, "--method", "all", "--dry-run", run_id=None)
+    args = arguments(tmp_path, "--method", "all", "--dry-run", run_id=run_id)
     commands = Commands()
     monkeypatch.setattr(gpu_job, "execute", commands)
 
-    if not same_identity:
-        with pytest.raises(ValueError, match="share one experiment_id"):
+    if not same_identity and run_id is None:
+        with pytest.raises(ValueError, match="different experiment_ids; specify --run-id"):
             gpu_job.run_job(args)
     else:
         plan = gpu_job.run_job(args)
-        assert args.run_id == plan["experiment_id"] == "source-id"
+        assert args.run_id == plan["experiment_id"] == (run_id or "source-id")
         assert len(plan["jobs"]) == 9
         assert all(job["key"] != "dynamic-pretrain" for job in plan["jobs"])
         for job in plan["jobs"]:
@@ -1258,7 +1259,7 @@ def test_all_methods_keep_dynamic_preset_initialization_out_of_baselines(
             method, stage = objective["method"], objective["stage"]
             expected = str(sources[f"{method}.json"]) if stage == "warmup" else None
             assert training["init_checkpoint"] == expected
-            assert training["experiment_id"] == "source-id"
+            assert training["experiment_id"] == args.run_id
         assert args.init_checkpoint is None
 
     assert not commands.calls
@@ -1932,17 +1933,65 @@ def test_separate_dynamic_methods_reuse_pretraining_without_changing_its_plan(
 
 
 @pytest.mark.parametrize("dry_run", [False, True])
-def test_explicit_id_cannot_disagree_with_pretraining_source(tmp_path, monkeypatch, dry_run):
+@pytest.mark.parametrize("method", DYNAMIC_METHODS)
+@pytest.mark.parametrize("writer_mode", ["local", "tag", "mask", "dual_lora"])
+def test_explicit_id_reuses_pretraining_in_a_new_series(
+    tmp_path, monkeypatch, dry_run, method, writer_mode
+):
     checkpoint = external_checkpoint(tmp_path, experiment_id="original-id")
+    source_paths = (checkpoint / "state.pt", checkpoint.parent.parent / "run.json")
+    original_source = {path: path.read_bytes() for path in source_paths}
     args = arguments(
-        tmp_path, "--init-checkpoint", str(checkpoint), *(["--dry-run"] if dry_run else [])
+        tmp_path,
+        "--method",
+        method,
+        "--writer-mode",
+        writer_mode,
+        "--init-checkpoint",
+        str(checkpoint),
+        *(["--dry-run"] if dry_run else []),
+        run_id="writer-mode-comparison",
     )
+    if not dry_run:
+        args.qa_data.mkdir()
+        for name in ("train.jsonl", "dev.jsonl", "test.jsonl", "preparation.json"):
+            (args.qa_data / name).write_text("")
     commands = Commands()
     monkeypatch.setattr(gpu_job, "execute", commands)
-    with pytest.raises(ValueError, match="differs from source experiment_id"):
-        gpu_job.run_job(args)
-    assert not commands.calls
-    assert not args.output_root.exists()
+
+    result = gpu_job.run_job(args)
+
+    assert result["experiment_id"] == args.run_id == "writer-mode-comparison"
+    method_directory = (
+        f"{method.replace('_', '-')}-k512+32-{writer_mode.replace('_', '-')}_smoke"
+    )
+    if dry_run:
+        assert len(result["jobs"]) == 2
+        for job in result["jobs"]:
+            training = job["config"]["training"]
+            assert training["experiment_id"] == args.run_id
+            assert training["group"] == args.run_id
+            assert training["experiment_name"] == f"{method_directory}_{args.run_id}"
+        assert result["jobs"][0]["config"]["training"]["init_checkpoint"] == str(checkpoint)
+        assert not commands.calls
+        assert not args.output_root.exists()
+    else:
+        assert result["status"] == "finished"
+        training, evaluation = commands.calls
+        warmup, policy = training["configs"]
+        for config in (warmup, policy):
+            assert config.training.experiment_id == args.run_id
+            assert config.training.group == args.run_id
+            assert config.training.experiment_name == f"{method_directory}_{args.run_id}"
+            assert config.training.experiment_dir == str(
+                args.output_root / args.run_id / "train" / method_directory
+            )
+        assert warmup.training.init_checkpoint == str(checkpoint)
+        assert policy.training.init_checkpoint == str(training["checkpoints"][0])
+        assert value(evaluation["command"], "--checkpoint") == str(training["checkpoints"][1])
+        assert not (args.output_root / "original-id").exists()
+    assert not args.pretrain_data.exists()
+    assert {path: path.read_bytes() for path in source_paths} == original_source
 
 
 @pytest.mark.parametrize(

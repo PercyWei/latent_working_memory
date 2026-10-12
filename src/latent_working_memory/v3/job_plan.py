@@ -76,7 +76,7 @@ def resolve_level(args):
 
 
 def resolve_experiment_id(args, init_checkpoint=None):
-    """只读来源 run.json 获取身份；预览不加载 checkpoint 权重。"""
+    """校验初始化来源；优先使用显式 run-id，否则沿用来源编号。"""
     source = init_checkpoint if init_checkpoint is not None else args.init_checkpoint
     if source is not None:
         checkpoint = source.resolve()
@@ -98,11 +98,7 @@ def resolve_experiment_id(args, init_checkpoint=None):
                 r"[A-Za-z0-9][A-Za-z0-9_-]*", identity
             ):
                 raise ValueError(f"source run.json has no valid experiment_id: {metadata}")
-            if args.run_id is not None and args.run_id != identity:
-                raise ValueError(
-                    f"--run-id {args.run_id!r} differs from source experiment_id {identity!r}"
-                )
-            return identity
+            return args.run_id or identity
         if not args.dry_run:
             raise FileNotFoundError(
                 f"source run.json required for checkpoint {checkpoint}: {metadata}"
@@ -248,7 +244,7 @@ def build_jobs(args):
         resolve_experiment_id(args, checkpoint) for checkpoint in dict.fromkeys(initializations)
     }
     if len(identities) > 1:
-        raise ValueError("dynamic initialization checkpoints must share one experiment_id")
+        raise ValueError("initialization checkpoints have different experiment_ids; specify --run-id")
     args.run_id = next(iter(identities)) if identities else resolve_experiment_id(args)
     directory = args.output_root.resolve() / args.run_id
     jobs = []

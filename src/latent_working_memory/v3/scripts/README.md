@@ -35,7 +35,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 
 - `--method all` 默认运行三组 baseline、一次共享预训练和两组动态后训练；分别启动见下节。
 - 加 `--dry-run` 只预览计划，不加载模型、数据或连接 SwanLab。
-- `--run-id` 可自定义；省略时按上海当前时间生成 `YYYYMMDD-HHMMSS`。
+- `--run-id` 可自定义；复用共享预训练且省略时继承来源编号，其余情况按上海当前时间生成 `YYYYMMDD-HHMMSS`。
 
 | 档位 | 每阶段训练／开发集样本上限 | 每阶段 steps 上限 | 最终评估 |
 |---|---|---|---|
@@ -84,7 +84,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 
 将后训练的 `--method` 分别设为 `memory_change`、`information_loss`，执行两次。两组复用同一 checkpoint，独立训练，各自连续完成 warmup → policy → test 评估。
 
-- 后训练的 `run-id` 必须与来源预训练一致；已完成预训练时直接使用其原 `run-id` 和 checkpoint。
+- 同系列后训练可省略 `--run-id`，自动继承来源编号；跨系列复用见下节。
 - `--writer-mode` 仅用于后训练，可选 `local`、`tag`、`mask`、`dual_lora`；使用 `tag` 时可加 `--tag-tokens 3`。共享预训练不传此参数。
 - 上述双卡设置的 global batch 均为 16；更多可调参数见[第四节](#4-调整参数)。
 
@@ -92,10 +92,19 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 
 四种动态写入方式均可复用同一基础预训练；命令见[第 2.1 节](#21-六次运行的指令)。复用后仅需 QA 数据。
 
-- **标识**：后训练自动继承来源 `run-id`；显式指定时必须与来源一致。
+- **标识**：同系列后训练省略 `--run-id` 时继承来源编号；跨系列复用时显式指定新的 `--run-id`。`--group` 独立指定，默认采用当前 `run-id`。
 - **模型**：模型配置须与预训练一致。更换基座或首次容量 K 时，先准备匹配的 checkpoint。
-- **来源**：保留原预训练路径、`pretrain/run.json` 及在线运行的 `swanlab.json`，已有产物无需改名。
+- **来源**：SwanLab 的 `pretraining` 配置与本地 `run.json` 记录来源编号、名称、URL、checkpoint 和 step；保留原预训练路径、`pretrain/run.json` 及在线运行的 `swanlab.json`。
 - **使用范围**：同一预训练可用于不同追加容量和写入方式的独立后训练；共享预训练本身不执行追加／覆盖。
+
+例如，在新的写入方式对比系列中复用容量对比系列的 checkpoint，仍按第 2.1 节取得实际 `global_step_N`：
+
+```bash
+bash src/latent_working_memory/v3/scripts/run.sh \
+  --method information_loss --gpus 0,1 --writer-mode tag \
+  --run-id writer-mode-comparison_20261012 \
+  --init-checkpoint artifacts/v3/capacity-comparison_20261011-01/train/dynamic-pretrain-k512/pretrain/checkpoints/global_step_N
+```
 
 ## 4. 调整参数
 
@@ -136,7 +145,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | `--qa-train-samples`、`--warmup-train-samples`、`--policy-train-samples` | 对应阶段的独立样本上限，默认全部 |
 | `--dev-samples`、`--max-steps`、`--eval-trajectories` | 开发集、每阶段步数和最终评估轨迹上限 |
 | `--save-total-limit 2` | 每阶段 checkpoint 保留数 |
-| `--group`、`--output-root` | SwanLab group 默认 `run-id`，产物父目录默认 `artifacts/v3` |
+| `--group`、`--output-root` | SwanLab group 可独立指定，默认当前 `run-id`；产物父目录默认 `artifacts/v3` |
 
 - **长度**：只过滤训练集，超限整条排除；上限仅计正文，不含记忆、提示和目标。`0`（配置 `null`）使用模型窗口；dev／test 不按该上限过滤。
 - **数量**：各阶段独立按 seed 选择样本。阶段样本参数的 `0` 解除阶段预算，试跑仍受档位上限限制；`--dev-samples`／`--max-steps`／`--eval-trajectories` 的 `0` 解除对应档位上限。
@@ -158,11 +167,11 @@ artifacts/v3/<run-id>/
 | 三个 baseline 和共享预训练 | `<method>-k<K>` |
 | 动态后训练 | `<method>-k<K>+<ΔK>-<writer>` |
 
-方法名将 `_` 转为 `-`；共享预训练用 `dynamic-pretrain`，writer 为 `local`、`tag`、`mask` 或 `dual-lora`。试跑在末尾添加 `_<mode>`。SwanLab 名称为 `<method-dir>_<run-id>`，共享预训练与后训练保持相同 `run-id` 后缀。
+方法名将 `_` 转为 `-`；共享预训练用 `dynamic-pretrain`，writer 为 `local`、`tag`、`mask` 或 `dual-lora`。试跑在末尾添加 `_<mode>`。SwanLab 名称为 `<method-dir>_<run-id>`；跨系列复用使用当前系列编号，预训练来源通过 `pretraining` 配置追溯。
 
 - **进度**：终端每 step 一行摘要，完整指标见 `train/` 下的 `metrics.jsonl`。SwanLab 同一方法的训练、验证、评估共用一个 run；阶段与进度看 `train/stage`、`train/epoch`，最终结果看柱状图。
 - **评估与比较**：逐条结果见 `eval/`；同一次调用至少产生两个评估结果时导出 `compare/`，六次独立调用不自动汇总。指标含义见 [v3 说明](../README.md#五评估与产物)。
 - **错误**：先看对应方法 `plan/` 下的 `result.json`，再看 `train.log`／`eval.log`；比较错误查看 `compare/result.json` 和 `compare.log`。
 - **Checkpoint 与恢复**：每阶段默认保留最近两个 `checkpoints/global_step_<阶段step>/` 目录；初始化、恢复和评估均传目录路径。中断恢复调用 `latent_working_memory.v3.train`，传入保存的 `--config` 和 `--resume` 目录。
 
-新试跑与正式训练使用不同 `run-id`；复用预训练时沿用来源标识。已有运行目录不覆盖。
+新试跑与正式训练使用不同 `run-id`；复用预训练时可继承来源编号，或显式指定新系列编号。已有运行目录不覆盖。

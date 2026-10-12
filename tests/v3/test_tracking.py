@@ -517,8 +517,9 @@ def test_append_ratio_panel_failure_stops_before_training_and_restores_random_st
 
 
 @pytest.mark.parametrize("source_method", ["memory_change", "information_loss"])
+@pytest.mark.parametrize("target_id", ["trial", "new-trial"])
 def test_existing_shared_pretrain_identity_resumes_and_initializes_new_dynamic_method(
-    tmp_path, recorded_swanlab, monkeypatch, source_method
+    tmp_path, recorded_swanlab, monkeypatch, source_method, target_id
 ):
     root = tmp_path / "shared-pretrain-k64_trial"
     source = online_config(root, "pretrain", source_method)
@@ -562,18 +563,31 @@ def test_existing_shared_pretrain_identity_resumes_and_initializes_new_dynamic_m
     assert resumed["tags"] == identity["tags"]
     assert len(recorded_swanlab.runs) == 1
 
-    target = online_config(tmp_path / "memory-change-k64", "warmup", init=result["checkpoint"])
+    target_root = tmp_path / "memory-change-k64"
+    target = online_config(target_root, "warmup", init=result["checkpoint"])
     target = replace(
         target,
-        training=replace(target.training, experiment_name="memory-change-k64_trial"),
+        training=replace(
+            target.training,
+            experiment_id=target_id,
+            experiment_name=f"memory-change-k64_{target_id}",
+            group=target_id,
+        ),
     )
     _, target_record = run_stage(target, 1)
     provenance = target_record["pretraining"]
+    assert target_record["config"]["training"]["experiment_id"] == target_id
+    assert target_record["step_offset"] == 0
+    assert provenance["experiment_id"] == "trial"
     assert provenance["run_name"] == "shared-pretrain-k64_trial"
     assert provenance["run_dir"] == str(root.resolve())
     assert provenance["run_id"] == identity["id"]
     assert provenance["run_url"] == identity["url"]
     assert provenance["checkpoint"] == result["checkpoint"]
+    target_identity = json.loads((target_root / "swanlab.json").read_text())
+    assert target_identity["id"] != identity["id"]
+    assert target_identity["group"] == target_id
+    assert recorded_swanlab.runs[target_identity["id"]]["name"] == f"memory-change-k64_{target_id}"
     assert (root / "experiment.json").read_bytes() == original_manifest
     assert (root / "swanlab.json").read_bytes() == original_identity
     assert dict(cloud["config"]) == original_cloud_config

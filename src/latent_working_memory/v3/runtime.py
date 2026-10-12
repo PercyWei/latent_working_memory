@@ -158,8 +158,6 @@ def _validate_pretraining_identity(config, pretraining):
     ):
         if pretraining is None or pretraining["experiment_id"] is None:
             raise ValueError("dynamic experiment requires an explicit pretraining experiment_id")
-        if pretraining["experiment_id"] != config.training.experiment_id:
-            raise ValueError("dynamic experiment_id differs from its original pretraining source")
 
 
 def make_run(

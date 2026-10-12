@@ -169,7 +169,7 @@ def parse_args(argv=None):
     parser.add_argument("--group", help="显式实验系列 group；默认使用本次运行标识")
     parser.add_argument(
         "--run-id",
-        help="产物目录名和默认 group；默认上海时间 YYYYMMDD-HHMMSS，动态后训练继承预训练标识",
+        help="产物目录名和默认 group；默认上海时间 YYYYMMDD-HHMMSS，动态后训练未指定时继承预训练标识",
     )
     parser.add_argument("--output-root", type=Path, default=Path("artifacts/v3"))
     parser.add_argument(
