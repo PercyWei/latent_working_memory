@@ -71,33 +71,28 @@ def resolve_experiment_id(args, init_checkpoint=None):
     source = init_checkpoint if init_checkpoint is not None else args.init_checkpoint
     if source is not None:
         checkpoint = source.resolve()
-        if not args.dry_run and not (checkpoint / "state.pt").is_file():
+        if not (checkpoint / "state.pt").is_file():
             raise FileNotFoundError(checkpoint)
         metadata = checkpoint.parent.parent / "run.json"
-        if metadata.exists():
-            source = json.loads(metadata.read_text(encoding="utf-8"))
-            objective = source["config"]["objective"]
-            if (
-                objective["stage"] != "pretrain"
-                or objective["method"] not in DYNAMIC_PRETRAIN_METHODS
-            ):
-                raise ValueError(
-                    f"initialization requires a shared dynamic pretraining run: {metadata}"
-                )
-            identity = source["config"]["training"].get("experiment_id")
-            if not isinstance(identity, str) or not re.fullmatch(
-                r"[A-Za-z0-9][A-Za-z0-9_-]*", identity
-            ):
-                raise ValueError(f"source run.json has no valid experiment_id: {metadata}")
-            return args.run_id or identity
-        if not args.dry_run:
+        if not metadata.exists():
             raise FileNotFoundError(
                 f"source run.json required for checkpoint {checkpoint}: {metadata}"
             )
-        if args.run_id is None:
+        source = json.loads(metadata.read_text(encoding="utf-8"))
+        objective = source["config"]["objective"]
+        if (
+            objective["stage"] != "pretrain"
+            or objective["method"] not in DYNAMIC_PRETRAIN_METHODS
+        ):
             raise ValueError(
-                "preview requires explicit --run-id when source run.json is unavailable"
+                f"initialization requires a shared dynamic pretraining run: {metadata}"
             )
+        identity = source["config"]["training"].get("experiment_id")
+        if not isinstance(identity, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_-]*", identity
+        ):
+            raise ValueError(f"source run.json has no valid experiment_id: {metadata}")
+        return args.run_id or identity
     return args.run_id or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M%S")
 
 

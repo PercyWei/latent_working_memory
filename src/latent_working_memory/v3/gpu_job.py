@@ -172,9 +172,6 @@ def parse_args(argv=None):
         help="产物目录名和默认 group；默认上海时间 YYYYMMDD-HHMMSS，动态后训练未指定时继承预训练标识",
     )
     parser.add_argument("--output-root", type=Path, default=Path("artifacts/v3"))
-    parser.add_argument(
-        "--dry-run", action="store_true", help="只打印解析后的计划，不加载数据/模型，不连接 SwanLab"
-    )
     args = parser.parse_args(argv)
     if args.config is not None and args.method == "all":
         parser.error("--config requires a single --method; all uses default presets")
@@ -325,9 +322,6 @@ def run_job(args):
             for stages in training_runs
         ],
     }
-    if args.dry_run:
-        print(json.dumps(plan, ensure_ascii=False, indent=2), flush=True)
-        return plan
     targets = [stages[0].config_path.parent for stages in training_runs]
     targets.extend(Path(stages[0].config.training.experiment_dir) for stages in training_runs)
     targets.extend(path.parent for path in evaluation_directories.values())

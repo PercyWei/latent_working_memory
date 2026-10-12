@@ -660,7 +660,6 @@ def test_cli_selects_only_dynamic_writers_and_gives_each_variant_its_own_directo
             str(tmp_path),
             "--tracking",
             "disabled",
-            "--dry-run",
         ]
     )
     _, _, jobs = job_plan.build_jobs(args)
@@ -698,7 +697,6 @@ def test_custom_tag_count_cli_does_not_modify_pretraining_or_baselines(tmp_path)
             str(tmp_path),
             "--tracking",
             "disabled",
-            "--dry-run",
         ]
     )
     _, _, jobs = job_plan.build_jobs(args)
@@ -728,7 +726,6 @@ def test_tag_count_cli_requires_tag_writer(tmp_path, mode):
             str(tmp_path),
             "--tracking",
             "disabled",
-            "--dry-run",
         ]
     )
     with pytest.raises(ValueError, match="tag-tokens.*tag"):

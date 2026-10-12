@@ -34,7 +34,6 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 ```
 
 - `--method all` 默认运行三组 baseline、一次共享预训练和两组动态后训练；分别启动见下节。
-- 加 `--dry-run` 只预览计划，不加载模型、数据或连接 SwanLab。
 - `--run-id` 可自定义；复用共享预训练且省略时继承来源编号，其余情况按上海当前时间生成 `YYYYMMDD-HHMMSS`。
 
 | 档位 | 每阶段训练／开发集样本上限 | 每阶段 steps 上限 | 最终评估 |
