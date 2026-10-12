@@ -4,14 +4,7 @@
 
 ## 1. 准备环境、模型与数据
 
-项目通过 uv 管理环境，使用 Python 3.11、PyTorch 2.6.0。先执行 `uv sync`，再参考 [.env.example](../../../../.env.example) 完善各服务器的 `.env`：
-
-```dotenv
-SWANLAB_API_KEY=你的_API_Key
-MODELSCOPE_API_TOKEN=你的_ModelScope_Token
-```
-
-ModelScope token 按需填写。
+项目通过 uv 管理环境，使用 Python 3.11、PyTorch 2.6.0。先执行 `uv sync`，再参考 [.env.example](../../../../.env.example) 完善各服务器的 `.env`。
 
 | 内容 | 默认位置 | 覆盖参数 |
 |---|---|---|
@@ -19,9 +12,9 @@ ModelScope token 按需填写。
 | AE／LM 数据 | `data/fineweb-multisegment-k512-seg1to3x_train32k_20261008/` | `--pretrain-data` |
 | QA 数据 | `data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008/` | `--qa-data` |
 
-数据目录须保留 `preparation.json` 与 `train/dev/test.jsonl`。可从 [ModelScope](https://modelscope.cn/datasets/percyWeeei/latent-working-memory/files) 下载；格式见 [Fineweb Multisegment](../../data_preparation/fineweb_multisegment/README.md) 和 [Fineweb FactQA](../../data_preparation/fineweb_factqa/README.md)。
+数据目录须保留 `preparation.json` 与 `train/dev/test.jsonl`。数据集详细格式见 [Fineweb Multisegment](../../data_preparation/fineweb_multisegment/README.md) 和 [Fineweb FactQA](../../data_preparation/fineweb_factqa/README.md)，均可从 [ModelScope](https://modelscope.cn/datasets/percyWeeei/latent-working-memory/files) 下载；
 
-默认记录到 SwanLab 项目 `latent-working-memory-v3`，使用项目 `.env` 中的 key，不读取账号保存的登录凭据。加 `--tracking disabled` 仅保存本地产物，无需 SwanLab key。
+默认记录到 SwanLab 项目 `latent-working-memory-v3`，使用项目 `.env` 中的 key。加 `--tracking disabled` 仅保存本地产物，无需 SwanLab key。
 
 ## 2. 试跑与正式运行
 
@@ -30,79 +23,81 @@ GPU 编号按实际分配修改；最终评估使用第一张卡。一次完成�
 ```bash
 bash src/latent_working_memory/v3/scripts/run.sh \
   --mode full --method all --gpus 0,1 \
-  --run-id capacity-comparison_20261011-01
+  --run-id capacity-comparison_20261010-01
 ```
 
-- `--method all` 默认运行三组 baseline、一次共享预训练和两组动态后训练；分别启动见下节。
-- `--run-id` 可自定义；复用共享预训练且省略时继承来源编号，其余情况按上海当前时间生成 `YYYYMMDD-HHMMSS`。
+- `--method all` 默认运行三组 baseline、一次动态预训练和两组动态后训练，支持方法单独运行。
+- `--run-id` 默认使用格式为 `YYYYMMDD-HHMMSS` 的当前时间，动态后训练在省略该参数时使用 checkpoint 来源（动态预训练）的编号。
 
 | 档位 | 每阶段训练／开发集样本上限 | 每阶段 steps 上限 | 最终评估 |
 |---|---|---|---|
 | `smoke` | 16／4 | 2 | dev，最多 2 条轨迹 |
 | `full`（默认） | 按阶段配置／全部开发集 | 默认 1 epoch | 完整 test |
 
-先用 `--mode smoke` 检查显存、日志和 SwanLab，再用 `full` 正式训练。各档均按配置完成该方法的阶段流程；同一方法的连续阶段共用模型，切换时重置优化器。
+先用 `--mode smoke` 检查显存、日志和 SwanLab，再用 `full` 正式训练。
 
-### 2.1 六次运行的指令
-
-分别调度时，用同一个 `run-id` 启动三组 baseline、一次共享预训练和两组动态后训练。microbatch 与梯度累积可按显存调整。
+### 2.1 常用指令
 
 #### 1）Baseline
 
 ```bash
 bash src/latent_working_memory/v3/scripts/run.sh \
   --mode full --method icae_single --gpus 0,1 \
-  --run-id capacity-comparison_20261011-01 \
-  --micro-batch-size-per-gpu 4 --gradient-accumulation-steps 2
+  --run-id capacity-comparison_20261010-01 \
+  --micro-batch-size-per-gpu 4 \
+  --gradient-accumulation-steps 2
 ```
 
-将 `--method` 分别设为 `icae_single`、`icae_multi`、`autocompressors`，执行三次；每次完成该方法的训练流程和 test 评估。
+`--method` 可以设为 `icae_single`、`icae_multi`、`autocompressors`。
 
 #### 2）动态方法
 
-先运行一次共享预训练：
+先运行一次动态预训练：
 
 ```bash
 bash src/latent_working_memory/v3/scripts/run.sh \
   --mode full --method dynamic_pretrain --gpus 0,1 \
-  --run-id capacity-comparison_20261011-01 \
-  --micro-batch-size-per-gpu 4 --gradient-accumulation-steps 2
+  --run-id capacity-comparison_20261010-01 \
+  --micro-batch-size-per-gpu 4 \
+  --gradient-accumulation-steps 2
 ```
 
-完成后，从 `artifacts/v3/capacity-comparison_20261011-01/train/dynamic-pretrain-k512/pretrain/training-result.json` 的 `checkpoint` 字段取得实际目录，替换下例的 `global_step_N`：
+完成后，从 `artifacts/v3/capacity-comparison_20261010-01/train/dynamic-pretrain-k512/pretrain/training-result.json` 的 `checkpoint` 字段取得实际目录，替换下例的 `global_step_N`：
 
 ```bash
 bash src/latent_working_memory/v3/scripts/run.sh \
   --mode full --method memory_change --gpus 0,1 \
-  --run-id capacity-comparison_20261011-01 \
-  --micro-batch-size-per-gpu 4 --gradient-accumulation-steps 2 \
+  --run-id capacity-comparison_20261010-01 \
+  --micro-batch-size-per-gpu 4 \
+  --gradient-accumulation-steps 2 \
   --writer-mode local \
-  --init-checkpoint artifacts/v3/capacity-comparison_20261011-01/train/dynamic-pretrain-k512/pretrain/checkpoints/global_step_N
+  --init-checkpoint artifacts/v3/capacity-comparison_20261010-01/train/dynamic-pretrain-k512/pretrain/checkpoints/global_step_N
 ```
 
-将后训练的 `--method` 分别设为 `memory_change`、`information_loss`，执行两次。两组复用同一 checkpoint，独立训练，各自连续完成 warmup → policy → test 评估。
+- `--method` 可以设为 `memory_change`、`information_loss`。
+- `--writer-mode` 仅用于动态后训练，可选 `local`、`tag`、`mask`、`dual_lora`；使用 `tag` 时可加 `--tag-tokens 3`。动态预训练不使用此参数。
+- 同系列后训练可省略 `--run-id`，自动继承 checkpoint 来源预训练的编号。
 
-- 同系列后训练可省略 `--run-id`，自动继承来源编号；跨系列复用见下节。
-- `--writer-mode` 仅用于后训练，可选 `local`、`tag`、`mask`、`dual_lora`；使用 `tag` 时可加 `--tag-tokens 3`。共享预训练不传此参数。
-- 上述双卡设置的 global batch 均为 16；更多可调参数见[第四节](#4-调整参数)。
+### 2.2 单独补跑评估
 
-## 3. 复用共享预训练（可选）
-
-四种动态写入方式均可复用同一基础预训练；命令见[第 2.1 节](#21-六次运行的指令)。复用后仅需 QA 数据。
-
-- **标识**：同系列后训练省略 `--run-id` 时继承来源编号；跨系列复用时显式指定新的 `--run-id`。`--group` 独立指定，默认采用当前 `run-id`。
-- **模型**：模型配置须与预训练一致。更换基座或首次容量 K 时，先准备匹配的 checkpoint。
-- **来源**：SwanLab 的 `pretraining` 配置与本地 `run.json` 记录来源编号、名称、URL、checkpoint 和 step；保留原预训练路径、`pretrain/run.json` 及在线运行的 `swanlab.json`。
-- **使用范围**：同一预训练可用于不同追加容量和写入方式的独立后训练；共享预训练本身不执行追加／覆盖。
-
-例如，在新的写入方式对比系列中复用容量对比系列的 checkpoint，仍按第 2.1 节取得实际 `global_step_N`：
+从最终训练阶段的 `training-result.json` 中取得 `checkpoint` 目录：
 
 ```bash
 bash src/latent_working_memory/v3/scripts/run.sh \
-  --method information_loss --gpus 0,1 --writer-mode tag \
-  --run-id writer-mode-comparison_20261012 \
-  --init-checkpoint artifacts/v3/capacity-comparison_20261011-01/train/dynamic-pretrain-k512/pretrain/checkpoints/global_step_N
+  --evaluate-only --gpus 0 \
+  --checkpoint artifacts/v3/capacity-comparison_20261010-01/train/information-loss-k512+32-local/policy/checkpoints/global_step_N
 ```
+
+- 模型、方法和写入配置从 checkpoint 读取；只需 QA 数据，位置不同时传 `--qa-data <目录>`。
+- 默认评估完整 `test`，不受 `--mode` 影响；可用 `--eval-split dev`、`--eval-trajectories <数量>`、`--max-new-tokens <数量>` 调整。
+- 使用原规范目录下的 checkpoint，更新原系列的 `eval/<method-dir>/<stage>/` 结果与 `plan/<method-dir>/eval.log`。
+- 默认追加到原训练 SwanLab run，须保留原训练目录与身份文件且云端 run 状态为 `FINISHED`；加 `--tracking disabled` 仅保存本地结果。
+
+## 3. 复用动态预训练
+
+- **标识**：同系列后训练省略 `--run-id` 时继承 checkpoint 来源预训练的编号，跨系列复用时显式指定新的 `--run-id`。`--group` 独立指定，默认采用当前 `run-id`。
+- **来源**：SwanLab 的 `pretraining` 配置与本地 `run.json` 记录来源编号、名称、URL、checkpoint 和 step；保留原预训练路径、`pretrain/run.json` 及在线运行的 `swanlab.json`。
+- **使用范围**：动态预训练本身不执行追加／覆盖，因此同一预训练 checkpoint 可用于不同 **追加容量**、**写入方式** 或 **扩容方式** 的后训练。更换 **基座模型** 或 **首次容量 K** 时则需要重新进行预训练。
 
 ## 4. 调整参数
 
@@ -110,7 +105,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 
 - 未指定 `--config` 时读取 `configs/v3/`；`--config <文件>` 仅用于单方法，不能与 `--method all` 组合。
 - 文件中的 `objective.method` 须与方法一致，`objective.stages` 声明阶段顺序。`dynamic_pretrain` 使用 `"method": "dynamic"` 和 `["pretrain"]`。
-- 显式 CLI 参数覆盖文件值；动态自定义配置只替换后训练，自动预训练仍读取独立配置。数据路径参数见第一节。
+- 显式 CLI 参数覆盖文件值；动态自定义配置只替换后训练，自动预训练仍读取独立配置。
 - `training.stage_max_train_samples` 分阶段保存预算；启动器展开后在 `plan/` 保存各阶段配置。训练与方法细节见 [v3 说明](../README.md)。
 
 完整参数通过 `bash src/latent_working_memory/v3/scripts/run.sh --help` 查看。

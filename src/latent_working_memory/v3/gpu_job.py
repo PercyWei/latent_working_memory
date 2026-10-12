@@ -1,4 +1,4 @@
-"""GPU 实验入口与公共执行：启动连续训练、评估并收集结果。"""
+"""GPU 实验入口：连续训练与评估，或从已有 checkpoint 单独补跑评估。"""
 
 import argparse
 from dataclasses import replace
@@ -49,6 +49,12 @@ def physical_gpus(value):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--evaluate-only", action="store_true", help="只评估已有 checkpoint，不启动训练"
+    )
+    parser.add_argument(
+        "--checkpoint", type=Path, help="单独评估的 checkpoint 目录，配合 --evaluate-only"
+    )
     parser.add_argument("--mode", choices=job_plan.LEVELS, default="full")
     parser.add_argument("--method", choices=(*METHODS, "dynamic_pretrain", "all"), default="all")
     parser.add_argument(
@@ -160,7 +166,9 @@ def parse_args(argv=None):
         type=positive_count,
         help="每阶段保留最近成功保存的 checkpoint 数，默认 2",
     )
-    parser.add_argument("--eval-split", choices=("dev", "test"))
+    parser.add_argument(
+        "--eval-split", choices=("dev", "test"), help="单独评估默认 test；训练时默认随档位"
+    )
     parser.add_argument("--max-new-tokens", type=positive_count, default=64)
     for name in ("threshold-i", "threshold-d", "threshold-g", "eta"):
         parser.add_argument(f"--{name}", type=float)
@@ -173,6 +181,8 @@ def parse_args(argv=None):
     )
     parser.add_argument("--output-root", type=Path, default=Path("artifacts/v3"))
     args = parser.parse_args(argv)
+    if args.evaluate_only != (args.checkpoint is not None):
+        parser.error("--evaluate-only and --checkpoint must be supplied together")
     if args.config is not None and args.method == "all":
         parser.error("--config requires a single --method; all uses default presets")
     if args.run_id is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.run_id):
@@ -271,7 +281,55 @@ def execute(command, environment, log_path):
         raise subprocess.CalledProcessError(code, command)
 
 
+def execution_environment(args):
+    environment = dict(
+        os.environ,
+        CUDA_DEVICE_ORDER="PCI_BUS_ID",
+        CUDA_VISIBLE_DEVICES=args.gpus,
+        PYTHONUNBUFFERED="1",
+        TOKENIZERS_PARALLELISM="false",
+    )
+    if args.tracking == "online":
+        environment["SWANLAB_API_KEY"] = swanlab_api_key()
+    return environment
+
+
+def run_evaluation(args):
+    checkpoint = args.checkpoint.resolve()
+    if not (checkpoint / "state.pt").is_file():
+        raise FileNotFoundError(checkpoint / "state.pt")
+    # 规范目录：<系列>/train/<方法>/<阶段>/checkpoints/global_step_<step>。
+    stage_directory = checkpoint.parent.parent
+    method_directory = stage_directory.parent
+    if (
+        re.fullmatch(r"global_step_[0-9]+", checkpoint.name) is None
+        or checkpoint.parent.name != "checkpoints"
+        or method_directory.parent.name != "train"
+    ):
+        raise ValueError(
+            "--checkpoint requires <series>/train/<method>/<stage>/checkpoints/global_step_<step>"
+        )
+    directory = method_directory.parent.parent
+    output = directory / "eval" / method_directory.name / stage_directory.name
+    plan_directory = directory / "plan" / method_directory.name
+    level = {
+        "eval_split": args.eval_split or "test",
+        "eval_trajectories": args.eval_trajectories or None,
+    }
+    environment = execution_environment(args)
+    environment["CUDA_VISIBLE_DEVICES"] = args.gpus.split(",")[0]
+    plan_directory.mkdir(parents=True, exist_ok=True)
+    execute(
+        evaluation_command(args, level, checkpoint, output),
+        environment,
+        plan_directory / "eval.log",
+    )
+    return {"status": "finished", "summaries": [str(output / "summary.json")]}
+
+
 def run_job(args):
+    if args.evaluate_only:
+        return run_evaluation(args)
     directory, level, jobs = job_plan.build_jobs(args)
     training_runs = [
         list(stages)
@@ -330,15 +388,7 @@ def run_job(args):
     for path in targets:
         if path.exists():
             raise ValueError(f"job output already exists: {path}; refusing to overwrite")
-    environment = dict(
-        os.environ,
-        CUDA_DEVICE_ORDER="PCI_BUS_ID",
-        CUDA_VISIBLE_DEVICES=args.gpus,
-        PYTHONUNBUFFERED="1",
-        TOKENIZERS_PARALLELISM="false",
-    )
-    if args.tracking == "online":
-        environment["SWANLAB_API_KEY"] = swanlab_api_key()
+    environment = execution_environment(args)
     # 只检查本任务使用的规范数据入口；不扫描下载分片或创建派生数据副本。
     required_files = set()
     for job in jobs:
