@@ -49,11 +49,15 @@ def physical_gpus(value):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument(
         "--evaluate-only", action="store_true", help="只评估已有 checkpoint，不启动训练"
     )
+    actions.add_argument(
+        "--resume", action="store_true", help="恢复原阶段，并完成该方法的剩余训练与评估"
+    )
     parser.add_argument(
-        "--checkpoint", type=Path, help="单独评估的 checkpoint 目录，配合 --evaluate-only"
+        "--checkpoint", type=Path, help="初始化、单独评估或断点恢复所用的 checkpoint 目录"
     )
     parser.add_argument("--mode", choices=job_plan.LEVELS, default="full")
     parser.add_argument("--method", choices=(*METHODS, "dynamic_pretrain", "all"), default="all")
@@ -72,11 +76,6 @@ def parse_args(argv=None):
         "--qa-data",
         type=Path,
         default=Path("data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008"),
-    )
-    parser.add_argument(
-        "--init-checkpoint",
-        type=Path,
-        help="动态方法使用共享预训练 checkpoint，连续执行 warmup/policy 与最终评估",
     )
     parser.add_argument(
         "--model-path", help="覆盖预设模型位置，当前预设为 ~/models/Qwen3-4B-Instruct-2507"
@@ -181,14 +180,16 @@ def parse_args(argv=None):
     )
     parser.add_argument("--output-root", type=Path, default=Path("artifacts/v3"))
     args = parser.parse_args(argv)
-    if args.evaluate_only != (args.checkpoint is not None):
-        parser.error("--evaluate-only and --checkpoint must be supplied together")
+    if args.evaluate_only or args.resume:
+        if args.checkpoint is None:
+            parser.error("--evaluate-only and --resume require --checkpoint")
+        return args
     if args.config is not None and args.method == "all":
         parser.error("--config requires a single --method; all uses default presets")
     if args.run_id is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.run_id):
         parser.error("run-id must contain only letters, digits, '-' and '_'")
-    if args.init_checkpoint is not None and args.method not in DYNAMIC_METHODS:
-        parser.error("--init-checkpoint is only supported by dynamic methods")
+    if args.checkpoint is not None and args.method not in DYNAMIC_METHODS:
+        parser.error("checkpoint initialization is only supported by dynamic methods")
     if args.writer_mode is not None and args.method not in {*DYNAMIC_METHODS, "all"}:
         parser.error("--writer-mode is only supported by dynamic posttraining methods")
     if args.tag_tokens is not None and args.method not in {*DYNAMIC_METHODS, "all"}:
@@ -211,7 +212,7 @@ def parse_args(argv=None):
     return args
 
 
-def training_command(jobs, gpu_count, max_steps):
+def training_command(jobs, gpu_count, max_steps, resume=None):
     command = [
         sys.executable,
         "-m",
@@ -227,6 +228,8 @@ def training_command(jobs, gpu_count, max_steps):
     ]
     if max_steps is not None:
         command.extend(("--stop-after-steps", str(max_steps)))
+    if resume is not None:
+        command.extend(("--resume", str(resume)))
     return command
 
 
@@ -296,19 +299,8 @@ def execution_environment(args):
 
 def run_evaluation(args):
     checkpoint = args.checkpoint.resolve()
-    if not (checkpoint / "state.pt").is_file():
-        raise FileNotFoundError(checkpoint / "state.pt")
-    # 规范目录：<系列>/train/<方法>/<阶段>/checkpoints/global_step_<step>。
-    stage_directory = checkpoint.parent.parent
+    stage_directory = job_plan.checkpoint_stage_directory(checkpoint)
     method_directory = stage_directory.parent
-    if (
-        re.fullmatch(r"global_step_[0-9]+", checkpoint.name) is None
-        or checkpoint.parent.name != "checkpoints"
-        or method_directory.parent.name != "train"
-    ):
-        raise ValueError(
-            "--checkpoint requires <series>/train/<method>/<stage>/checkpoints/global_step_<step>"
-        )
     directory = method_directory.parent.parent
     output = directory / "eval" / method_directory.name / stage_directory.name
     plan_directory = directory / "plan" / method_directory.name
@@ -327,9 +319,83 @@ def run_evaluation(args):
     return {"status": "finished", "summaries": [str(output / "summary.json")]}
 
 
+def collect_training_result(job):
+    output = Path(job.config.training.output_dir)
+    result = json.loads((output / "training-result.json").read_text(encoding="utf-8"))
+    checkpoint = Path(result["checkpoint"])
+    if not (checkpoint / "state.pt").is_file():
+        raise FileNotFoundError(f"training did not save its reported checkpoint: {checkpoint}")
+    save_json(job.config_path, json.loads((output / "config.json").read_text(encoding="utf-8")))
+    return checkpoint
+
+
+def run_resume(args):
+    directory, level, jobs = job_plan.build_resume_jobs(args)
+    plan_directory = jobs[0].config_path.parent
+    result_path = plan_directory / "result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["checkpoints"][jobs[0].key] = str(args.checkpoint.resolve())
+
+    def save_result(status, error=None):
+        result["status"] = status
+        result.pop("error", None)
+        if error is not None:
+            result["error"] = str(error)
+        save_json(result_path, result)
+
+    environment = execution_environment(args)
+    evaluation_environment = dict(environment, CUDA_VISIBLE_DEVICES=args.gpus.split(",")[0])
+    for job in jobs:
+        save_json(job.config_path, job.config.to_dict())
+    save_result("running")
+    try:
+        execute(
+            training_command(jobs, len(args.gpus.split(",")), level["max_steps"], args.checkpoint),
+            environment,
+            plan_directory / "train.log",
+        )
+        for job in jobs:
+            checkpoint = collect_training_result(job)
+            result["checkpoints"][job.key] = str(checkpoint)
+            if job.evaluate:
+                output = directory / "eval" / plan_directory.name / job.config.objective.stage
+                execute(
+                    evaluation_command(args, level, checkpoint, output),
+                    evaluation_environment,
+                    plan_directory / "eval.log",
+                )
+                summary = str(output / "summary.json")
+                if summary not in result["summaries"]:
+                    result["summaries"].append(summary)
+        save_result("finished")
+    except Exception as error:
+        for job in jobs:
+            report = Path(job.config.training.output_dir) / "training-result.json"
+            if report.is_file():
+                checkpoint = Path(json.loads(report.read_text(encoding="utf-8"))["checkpoint"])
+                if (checkpoint / "state.pt").is_file():
+                    result["checkpoints"][job.key] = str(collect_training_result(job))
+        result["checkpoints"] = {
+            key: path
+            for key, path in result["checkpoints"].items()
+            if (Path(path) / "state.pt").is_file()
+        }
+        save_result("failed", error)
+        raise
+    print(
+        f"[finished] method={args.method} mode={args.mode} "
+        f"checkpoints={len(result['checkpoints'])} evaluations={len(result['summaries'])} "
+        f"plan={plan_directory}",
+        flush=True,
+    )
+    return result
+
+
 def run_job(args):
     if args.evaluate_only:
         return run_evaluation(args)
+    if args.resume:
+        return run_resume(args)
     directory, level, jobs = job_plan.build_jobs(args)
     training_runs = [
         list(stages)
@@ -468,18 +534,7 @@ def run_job(args):
                 Path(training_run["log_path"]),
             )
             for job in stages:
-                result = json.loads(
-                    (Path(job.config.training.output_dir) / "training-result.json").read_text()
-                )
-                checkpoint = Path(result["checkpoint"])
-                if not (checkpoint / "state.pt").is_file():
-                    raise FileNotFoundError(
-                        f"training did not save its reported checkpoint: {checkpoint}"
-                    )
-                save_json(
-                    job.config_path,
-                    json.loads((Path(job.config.training.output_dir) / "config.json").read_text()),
-                )
+                checkpoint = collect_training_result(job)
                 checkpoints[job.key] = checkpoint
                 if job.evaluate:
                     output = evaluation_directories[job.key]

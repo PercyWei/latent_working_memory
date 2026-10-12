@@ -182,11 +182,11 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 
 ### 4.2 复用预训练与中断恢复
 
-- **共享预训练**：用 `--method dynamic_pretrain` 单独训练一次；随后分别运行 `memory_change` 和 `information_loss`，通过 `--init-checkpoint` 指向同一 checkpoint 目录。命令见[复用指南](scripts/README.md#3-复用共享预训练可选)。
+- **共享预训练**：用 `--method dynamic_pretrain` 单独训练一次；随后分别运行 `memory_change` 和 `information_loss`，通过 `--checkpoint` 指向同一 checkpoint 目录。命令见[复用指南](scripts/README.md#3-复用动态预训练)。
 - **实验系列**：同系列后训练省略 `--run-id` 时继承来源编号；跨系列复用时显式指定新的 `--run-id`。
 - **来源记录**：SwanLab 的 `pretraining` 配置与本地 `run.json` 记录来源编号、名称、URL、checkpoint 和 step。保留来源目录中的 `pretrain/run.json`，以及在线运行生成的 `swanlab.json`。
-- **已有产物**：保留旧预训练的原路径与配置，可继续通过 `--init-checkpoint` 使用，不直接重命名旧目录。
-- **中断恢复**：使用阶段目录保存的 `config.json`，调用训练模块的 `--resume` 并传入 checkpoint 目录。
+- **已有产物**：保留旧预训练的原路径与配置，可继续通过 `--checkpoint` 使用，不直接重命名旧目录。
+- **中断恢复**：使用 `--resume --checkpoint <目录>`，沿用保存配置恢复当前阶段，再完成该方法的剩余阶段。命令见[恢复指南](scripts/README.md#23-中断恢复)。
 
 ## 五、评估与产物
 

@@ -71,7 +71,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
   --micro-batch-size-per-gpu 4 \
   --gradient-accumulation-steps 2 \
   --writer-mode local \
-  --init-checkpoint artifacts/v3/capacity-comparison_20261010-01/train/dynamic-pretrain-k512/pretrain/checkpoints/global_step_N
+  --checkpoint artifacts/v3/capacity-comparison_20261010-01/train/dynamic-pretrain-k512/pretrain/checkpoints/global_step_N
 ```
 
 - `--method` 可以设为 `memory_change`、`information_loss`。
@@ -92,6 +92,20 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 - 默认评估完整 `test`，不受 `--mode` 影响；可用 `--eval-split dev`、`--eval-trajectories <数量>`、`--max-new-tokens <数量>` 调整。
 - 使用原规范目录下的 checkpoint，更新原系列的 `eval/<method-dir>/<stage>/` 结果与 `plan/<method-dir>/eval.log`。
 - 默认追加到原训练 SwanLab run，须保留原训练目录与身份文件且云端 run 状态为 `FINISHED`；加 `--tracking disabled` 仅保存本地结果。
+
+### 2.3 中断恢复
+
+从中断阶段的 checkpoint 恢复当前方法，随后完成未启动的后续阶段和最终评估；动态预训练仅完成预训练：
+
+```bash
+bash src/latent_working_memory/v3/scripts/run.sh \
+  --resume --gpus 0,1 \
+  --checkpoint artifacts/v3/capacity-comparison_20261010-01/train/information-loss-k512+32-local/warmup/checkpoints/global_step_N
+```
+
+- 保留原 `plan/<method-dir>/job.json` 和阶段 `config.json`；恢复沿用原 `run-id`、训练配置、预算与 SwanLab 身份，不应用 CLI 训练超参数覆盖。
+- 可重新选择物理 GPU，卡数须与原任务一致。恢复 AutoCompressors 时，`--qa-data` 须指向原 QA 目录；使用默认目录时可省略。
+- `--resume` 与 `--evaluate-only` 互斥，两者均须传入 `--checkpoint`。
 
 ## 3. 复用动态预训练
 
@@ -165,6 +179,6 @@ artifacts/v3/<run-id>/
 - **进度**：终端每 step 一行摘要，完整指标见 `train/` 下的 `metrics.jsonl`。SwanLab 同一方法的训练、验证、评估共用一个 run；阶段与进度看 `train/stage`、`train/epoch`，最终结果看柱状图。
 - **评估与比较**：逐条结果见 `eval/`；同一次调用至少产生两个评估结果时导出 `compare/`，六次独立调用不自动汇总。指标含义见 [v3 说明](../README.md#五评估与产物)。
 - **错误**：先看对应方法 `plan/` 下的 `result.json`，再看 `train.log`／`eval.log`；比较错误查看 `compare/result.json` 和 `compare.log`。
-- **Checkpoint 与恢复**：每阶段默认保留最近两个 `checkpoints/global_step_<阶段step>/` 目录；初始化、恢复和评估均传目录路径。中断恢复调用 `latent_working_memory.v3.train`，传入保存的 `--config` 和 `--resume` 目录。
+- **Checkpoint 与恢复**：每阶段默认保留最近两个 `checkpoints/global_step_<阶段step>/` 目录；初始化、恢复和评估均通过 `--checkpoint` 传目录路径。中断恢复见[第 2.3 节](#23-中断恢复)。
 
 新试跑与正式训练使用不同 `run-id`；复用预训练时可继承来源编号，或显式指定新系列编号。已有运行目录不覆盖。

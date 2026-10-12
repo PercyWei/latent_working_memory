@@ -12,6 +12,7 @@ from latent_working_memory.v3.config import (
     DYNAMIC_PRETRAIN_METHODS,
     METHODS,
     ExperimentConfig,
+    load_experiment,
     load_preset,
 )
 
@@ -68,7 +69,7 @@ def resolve_level(args):
 
 def resolve_experiment_id(args, init_checkpoint=None):
     """校验初始化来源；优先使用显式 run-id，否则沿用来源编号。"""
-    source = init_checkpoint if init_checkpoint is not None else args.init_checkpoint
+    source = init_checkpoint if init_checkpoint is not None else args.checkpoint
     if source is not None:
         checkpoint = source.resolve()
         if not (checkpoint / "state.pt").is_file():
@@ -151,8 +152,8 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
         "experiment_id": args.run_id,
         "experiment_name": f"{method_directory}_{args.run_id}",
         "output_dir": str(experiment_dir / stage),
-        "init_checkpoint": str(args.init_checkpoint.resolve())
-        if args.init_checkpoint is not None and initialize_from is None
+        "init_checkpoint": str(args.checkpoint.resolve())
+        if args.checkpoint is not None and initialize_from is None
         else config.training.init_checkpoint
         if initialize_from is None
         else None,
@@ -218,8 +219,8 @@ def build_jobs(args):
         ):
             raise ValueError("dynamic pretraining must be declared in dynamic_pretrain.json")
     initializations = (
-        [args.init_checkpoint]
-        if args.init_checkpoint is not None
+        [args.checkpoint]
+        if args.checkpoint is not None
         else [
             Path(configs[0].training.init_checkpoint)
             for method, configs in presets.items()
@@ -237,7 +238,7 @@ def build_jobs(args):
 
     shared = None
     needs_pretrain = args.method == "dynamic_pretrain" or (
-        args.init_checkpoint is None
+        args.checkpoint is None
         and any(
             method in DYNAMIC_METHODS and configs[0].training.init_checkpoint is None
             for method, configs in presets.items()
@@ -276,8 +277,66 @@ def build_jobs(args):
                     raise ValueError(
                         "dynamic model differs from automatic shared pretraining; "
                         "prepare a matching checkpoint with --method dynamic_pretrain --config "
-                        "and pass --init-checkpoint"
+                        "and pass --checkpoint"
                     )
             jobs.append(job)
             initialize_from = job.key
     return directory, level, jobs
+
+
+def checkpoint_stage_directory(checkpoint):
+    checkpoint = Path(checkpoint).resolve()
+    if not (checkpoint / "state.pt").is_file():
+        raise FileNotFoundError(checkpoint / "state.pt")
+    stage_directory = checkpoint.parent.parent
+    if (
+        re.fullmatch(r"global_step_[0-9]+", checkpoint.name) is None
+        or checkpoint.parent.name != "checkpoints"
+        or stage_directory.parent.parent.name != "train"
+    ):
+        raise ValueError(
+            "--checkpoint requires <series>/train/<method>/<stage>/checkpoints/global_step_<step>"
+        )
+    return stage_directory
+
+
+def build_resume_jobs(args):
+    """沿用原计划，恢复当前阶段并衔接尚未启动的后续阶段。"""
+    stage_directory = checkpoint_stage_directory(args.checkpoint)
+    method_directory = stage_directory.parent
+    directory = method_directory.parent.parent
+    plan_directory = directory / "plan" / method_directory.name
+    plan = json.loads((plan_directory / "job.json").read_text(encoding="utf-8"))
+    config = load_experiment(stage_directory / "config.json")
+    experiment = json.loads((method_directory / "experiment.json").read_text(encoding="utf-8"))
+    if next(reversed(experiment["stages"])) != config.objective.stage:
+        raise ValueError("cannot resume an earlier stage after a successor has started")
+    first = next(
+        index
+        for index, item in enumerate(plan["jobs"])
+        if item["config"]["objective"]["stage"] == config.objective.stage
+    )
+    jobs = []
+    for index, item in enumerate(plan["jobs"][first:]):
+        path = Path(item["config_path"])
+        current = config if index == 0 else load_experiment(path)
+        if index > 0 and Path(current.training.output_dir).exists():
+            raise ValueError("cannot resume while a later stage output already exists")
+        jobs.append(
+            TrainingJob(
+                key=item["key"],
+                method=plan["method"],
+                config=current,
+                config_path=path,
+                initialize_from=None if index == 0 else item["initialize_from"],
+                evaluate=item["evaluate"],
+            )
+        )
+    args.method = plan["method"]
+    args.mode = plan["mode"]
+    args.run_id = config.training.experiment_id
+    args.tracking = "online" if config.training.swanlab_project is not None else "disabled"
+    args.max_new_tokens = plan["max_new_tokens"]
+    if jobs[-1].config.objective.stage in {"qa", "policy"}:
+        args.qa_data = Path(jobs[-1].config.training.dataset_dir)
+    return directory, plan["limits"], jobs

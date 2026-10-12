@@ -562,7 +562,7 @@ def test_custom_config_requires_an_explicit_single_method(options):
 
 @pytest.mark.parametrize(
     "options",
-    [[], ["--config", "custom.json"], ["--init-checkpoint", "parent.pt"], ["--bptt-steps", "2"]],
+    [[], ["--config", "custom.json"], ["--checkpoint", "parent.pt"], ["--bptt-steps", "2"]],
 )
 def test_removed_dynamic_method_is_rejected(options):
     with pytest.raises(SystemExit):
@@ -1006,7 +1006,7 @@ def test_cli_only_overrides_explicitly_supplied_preset_values(monkeypatch, overr
 @pytest.mark.parametrize("method", DYNAMIC_METHODS)
 def test_auto_from_external_pretraining_checkpoint_skips_pretraining_in_plan(tmp_path, method):
     checkpoint = external_checkpoint(tmp_path)
-    args = arguments(tmp_path, "--method", method, "--init-checkpoint", str(checkpoint))
+    args = arguments(tmp_path, "--method", method, "--checkpoint", str(checkpoint))
 
     _, _, jobs = job_plan.build_jobs(args)
 
@@ -1134,7 +1134,7 @@ def test_dynamic_single_stage_preset_executes_only_declared_stage(
         tmp_path,
         "--method",
         method,
-        *(["--init-checkpoint", str(checkpoint)] if external else []),
+        *(["--checkpoint", str(checkpoint)] if external else []),
     )
     prepare_dataset_entries(args)
     commands = Commands()
@@ -1176,7 +1176,7 @@ def test_dynamic_preset_initialization_inherits_source_id_without_repeating_pret
     result = gpu_job.run_job(args)
 
     assert args.run_id == result["experiment_id"] == "configured-source"
-    assert args.init_checkpoint is None
+    assert args.checkpoint is None
     assert len(commands.calls) == 2
     assert [config.objective.stage for config in commands.calls[0]["configs"]] == [
         "warmup",
@@ -1230,7 +1230,7 @@ def test_all_methods_keep_dynamic_preset_initialization_out_of_baselines(
             expected = str(sources[f"{method}.json"]) if stage == "warmup" else None
             assert training.init_checkpoint == expected
             assert training.experiment_id == args.run_id
-        assert args.init_checkpoint is None
+        assert args.checkpoint is None
 
     assert not args.output_root.exists()
 
@@ -1392,7 +1392,7 @@ def test_explicit_overrides_and_zero_remove_profile_limits(tmp_path):
         "memory_change",
         "--mode",
         "full",
-        "--init-checkpoint",
+        "--checkpoint",
         str(checkpoint),
         "--warmup-train-samples",
         "0",
@@ -1535,12 +1535,12 @@ def test_plan_derives_each_global_batch_from_selected_gpus_microbatch_and_accumu
         ["--stage", "auto"],
         ["--stage", "warmup"],
         ["--method", "memory_change", "--stage", "policy"],
-        ["--method", "icae_single", "--init-checkpoint", "parent.pt"],
-        ["--method", "icae_multi", "--init-checkpoint", "parent.pt"],
-        ["--method", "autocompressors", "--init-checkpoint", "parent.pt"],
-        ["--method", "all", "--init-checkpoint", "parent.pt"],
-        ["--method", "dynamic_pretrain", "--init-checkpoint", "parent.pt"],
-        ["--method", "memory_change", "--stage", "pretrain", "--init-checkpoint", "parent.pt"],
+        ["--method", "icae_single", "--checkpoint", "parent.pt"],
+        ["--method", "icae_multi", "--checkpoint", "parent.pt"],
+        ["--method", "autocompressors", "--checkpoint", "parent.pt"],
+        ["--method", "all", "--checkpoint", "parent.pt"],
+        ["--method", "dynamic_pretrain", "--checkpoint", "parent.pt"],
+        ["--method", "memory_change", "--stage", "pretrain", "--checkpoint", "parent.pt"],
     ],
 )
 def test_invalid_gpu_scope_or_stage_arguments_are_rejected(tmp_path, options):
@@ -1636,7 +1636,7 @@ def test_auto_from_external_checkpoint_needs_only_qa_and_chains_warmup_into_poli
     tmp_path, monkeypatch, method
 ):
     checkpoint = external_checkpoint(tmp_path)
-    args = arguments(tmp_path, "--method", method, "--init-checkpoint", str(checkpoint))
+    args = arguments(tmp_path, "--method", method, "--checkpoint", str(checkpoint))
     args.qa_data.mkdir()
     for filename in ("train.jsonl", "dev.jsonl", "test.jsonl", "preparation.json"):
         (args.qa_data / filename).write_text("")
@@ -1696,7 +1696,7 @@ def test_new_capacity_names_reuse_old_pretraining_paths_and_preserve_source_iden
         "full",
         "--append-slots",
         "16",
-        "--init-checkpoint",
+        "--checkpoint",
         str(checkpoint),
         run_id=None,
     )
@@ -1723,7 +1723,7 @@ def test_new_capacity_names_reuse_old_pretraining_paths_and_preserve_source_iden
 
 
 def test_auto_from_missing_checkpoint_fails_before_starting_training(tmp_path, monkeypatch):
-    args = arguments(tmp_path, "--init-checkpoint", str(tmp_path / "missing.pt"))
+    args = arguments(tmp_path, "--checkpoint", str(tmp_path / "missing.pt"))
     args.qa_data.mkdir()
     for filename in ("train.jsonl", "dev.jsonl", "test.jsonl", "preparation.json"):
         (args.qa_data / filename).write_text("")
@@ -1813,7 +1813,7 @@ def test_separate_methods_share_source_id_and_coexist_without_overwriting_series
             "full",
             "--method",
             method,
-            "--init-checkpoint",
+            "--checkpoint",
             source_checkpoint,
             run_id=None,
         )
@@ -1870,7 +1870,7 @@ def test_separate_dynamic_methods_reuse_pretraining_without_changing_its_plan(
     results = []
     for method in DYNAMIC_METHODS:
         args = arguments(
-            tmp_path, "--mode", "full", "--method", method, "--init-checkpoint", source_checkpoint
+            tmp_path, "--mode", "full", "--method", method, "--checkpoint", source_checkpoint
         )
         results.append(gpu_job.run_job(args))
 
@@ -1910,7 +1910,7 @@ def test_explicit_id_reuses_pretraining_in_a_new_series(
         method,
         "--writer-mode",
         writer_mode,
-        "--init-checkpoint",
+        "--checkpoint",
         str(checkpoint),
         run_id="writer-mode-comparison",
     )
@@ -1950,7 +1950,7 @@ def test_explicit_id_reuses_pretraining_in_a_new_series(
 )
 def test_initialization_must_come_from_shared_dynamic_pretraining(tmp_path, method, stage):
     checkpoint = external_checkpoint(tmp_path, method=method, stage=stage)
-    args = arguments(tmp_path, "--init-checkpoint", str(checkpoint))
+    args = arguments(tmp_path, "--checkpoint", str(checkpoint))
     with pytest.raises(ValueError, match="requires a shared dynamic pretraining run"):
         gpu_job.run_job(args)
     assert not args.output_root.exists()
@@ -1959,7 +1959,7 @@ def test_initialization_must_come_from_shared_dynamic_pretraining(tmp_path, meth
 def test_real_initialization_requires_source_sidecar_even_with_explicit_id(tmp_path):
     checkpoint = external_checkpoint(tmp_path)
     (checkpoint.parent.parent / "run.json").unlink()
-    args = arguments(tmp_path, "--init-checkpoint", str(checkpoint))
+    args = arguments(tmp_path, "--checkpoint", str(checkpoint))
     with pytest.raises(FileNotFoundError, match="source run.json required"):
         gpu_job.run_job(args)
     assert not args.output_root.exists()
@@ -1968,7 +1968,7 @@ def test_real_initialization_requires_source_sidecar_even_with_explicit_id(tmp_p
 @pytest.mark.parametrize("identity", [None, "../invalid"])
 def test_initialization_requires_valid_source_experiment_id(tmp_path, identity):
     checkpoint = external_checkpoint(tmp_path, experiment_id=identity)
-    args = arguments(tmp_path, "--init-checkpoint", str(checkpoint))
+    args = arguments(tmp_path, "--checkpoint", str(checkpoint))
     with pytest.raises(ValueError, match="no valid experiment_id"):
         gpu_job.run_job(args)
     assert not args.output_root.exists()
