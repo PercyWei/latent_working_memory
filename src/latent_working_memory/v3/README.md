@@ -161,7 +161,7 @@
 
 ### 4.1 启动与配置
 
-按[运行指南](scripts/README.md#1-准备环境模型与数据)准备环境、模型、数据和 SwanLab key，并设置 `run_gpu.sh` 中的仓库路径。在仓库根目录执行，例如运行 ICAE-single：
+按[运行指南](scripts/README.md#1-准备环境模型与数据)准备环境、模型和数据，并在项目 `.env` 中配置仓库路径及 SwanLab key。在仓库根目录执行，例如运行 ICAE-single：
 
 ```bash
 bash src/latent_working_memory/v3/scripts/run_gpu.sh \

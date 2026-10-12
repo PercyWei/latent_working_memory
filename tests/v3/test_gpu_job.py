@@ -11,7 +11,8 @@ import sys
 
 import pytest
 
-from latent_working_memory.v3 import gpu_job, job_plan, tracking_credentials
+from latent_working_memory import tracking_credentials
+from latent_working_memory.v3 import gpu_job, job_plan
 from latent_working_memory.v3.config import DYNAMIC_METHODS, load_experiment, load_preset
 
 
@@ -2329,16 +2330,11 @@ def test_missing_key_stops_online_job_before_creating_artifacts(
 def test_shell_uses_configured_repo_preserves_arguments_and_returns_process_status(
     tmp_path, exit_code
 ):
-    source = Path("src/latent_working_memory/v3/scripts/run_gpu.sh").read_text()
-    repository = tmp_path / "repository with spaces"
+    script, launcher_root = copied_shell_launcher(tmp_path)
+    repository = tmp_path / "repository with spaces ${LWM_LITERAL} $(touch injected-marker)"
     repository.mkdir()
-    script = tmp_path / "run_gpu.sh"
-    script.write_text(
-        source.replace(
-            'LWM_REPO_DIR="/data/zhangdw12/percyw/latent_working_memory"',
-            f"LWM_REPO_DIR={shlex.quote(str(repository))}",
-            1,
-        )
+    (launcher_root / ".env").write_text(
+        f'LWM_REPO_DIR="{repository}"\nLWM_ENV_MUST_NOT_BE_EXPORTED="$(touch source-marker)"\n'
     )
     binaries = tmp_path / "fake bin"
     binaries.mkdir()
@@ -2348,7 +2344,8 @@ def test_shell_uses_configured_repo_preserves_arguments_and_returns_process_stat
         "import json, os, sys\n"
         "print(json.dumps({'cwd': os.getcwd(), 'args': sys.argv[1:], "
         "'unbuffered': os.environ['PYTHONUNBUFFERED'], "
-        "'tokenizers': os.environ['TOKENIZERS_PARALLELISM']}))\n"
+        "'tokenizers': os.environ['TOKENIZERS_PARALLELISM'], "
+        "'dotenv_extra': os.environ.get('LWM_ENV_MUST_NOT_BE_EXPORTED')}))\n"
         f"sys.exit({exit_code})\n"
     )
     fake_uv.chmod(0o755)
@@ -2362,9 +2359,11 @@ def test_shell_uses_configured_repo_preserves_arguments_and_returns_process_stat
     ]
     environment = dict(os.environ, PATH=f"{binaries}:{os.environ['PATH']}")
     environment["LWM_REPO_DIR"] = str(tmp_path / "ignored environment path")
+    environment["LWM_LITERAL"] = "must-not-expand"
+    environment.pop("LWM_ENV_MUST_NOT_BE_EXPORTED", None)
     result = subprocess.run(
         ["bash", str(script), *options],
-        cwd=tmp_path,
+        cwd=launcher_root,
         env=environment,
         capture_output=True,
         text=True,
@@ -2382,7 +2381,45 @@ def test_shell_uses_configured_repo_preserves_arguments_and_returns_process_stat
     ]
     assert recorded["unbuffered"] == "1"
     assert recorded["tokenizers"] == "false"
+    assert recorded["dotenv_extra"] is None
     assert list(repository.iterdir()) == []
+    assert not (launcher_root / "injected-marker").exists()
+    assert not (launcher_root / "source-marker").exists()
+
+
+def copied_shell_launcher(tmp_path):
+    """按源码布局复制原脚本，Python 替身仍使用本项目的真实虚拟环境。"""
+    root = tmp_path / "launcher checkout"
+    script = root / "src/latent_working_memory/v3/scripts/run_gpu.sh"
+    script.parent.mkdir(parents=True)
+    script.write_bytes(Path("src/latent_working_memory/v3/scripts/run_gpu.sh").read_bytes())
+    python = root / ".venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text(f'#!/bin/bash\nexec {shlex.quote(sys.executable)} "$@"\n')
+    python.chmod(0o755)
+    return script, root
+
+
+@pytest.mark.parametrize("dotenv", [None, "LWM_REPO_DIR=\n", "LWM_REPO_DIR=relative/repo\n"])
+def test_shell_rejects_missing_empty_or_relative_repository_before_running_uv(tmp_path, dotenv):
+    script, launcher_root = copied_shell_launcher(tmp_path)
+    if dotenv is not None:
+        (launcher_root / ".env").write_text(dotenv)
+    binaries = tmp_path / "fake bin"
+    binaries.mkdir()
+    called = tmp_path / "uv-was-called"
+    fake_uv = binaries / "uv"
+    fake_uv.write_text(f"#!/bin/bash\ntouch {shlex.quote(str(called))}\n")
+    fake_uv.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=launcher_root,
+        env=dict(os.environ, PATH=f"{binaries}:{os.environ['PATH']}", LWM_REPO_DIR=str(tmp_path)),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert not called.exists()
 
 
 def test_execute_propagates_real_child_failure_and_keeps_the_log(tmp_path):
