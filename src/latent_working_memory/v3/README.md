@@ -12,7 +12,7 @@
 |---|---|---|
 | `icae_single` | 完整历史一次压缩为 $K$ slots | AE／LM → QA |
 | `icae_multi` | 完整历史均分为 n 块，独立压缩后拼接，总容量为 $K$ slots | 多段 AE／LM → 多段 QA |
-| `autocompressors` | 新段与累计记忆共同压缩，n 次追加合计 $K$ slots | LM |
+| `autocompressors` | 新段与累计记忆共同压缩，n 次追加合计 $K$ slots | 多段 LM |
 | `memory_change` | 覆盖末块或追加 $\Delta K$ slots，按记忆表示变化决定 | AE／LM →  warmup → policy  |
 | `information_loss` | 同上的写入方式，按旧信息损失决定 | AE／LM → warmup → policy   |
 
@@ -152,7 +152,7 @@
 
 | 阶段 | 默认每卡 microbatch | 默认梯度累积 |
 |---|---:|---:|
-| ICAE 和 AutoCompressors 完整流程 | 8 | 1 |
+| ICAE 和 AutoCompressors 完整流程 | 4 | 2 |
 | 动态方法完整流程| 4 | 2 |
 
 全局 batch = GPU 数 × 每卡 microbatch × 梯度累积；双卡默认均为 **16**，尾批按实际样本数平均。

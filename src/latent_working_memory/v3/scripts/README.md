@@ -56,7 +56,7 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 bash src/latent_working_memory/v3/scripts/run_gpu.sh \
   --mode full --method icae_single --gpus 0,1 \
   --run-id capacity-comparison_20261011-01 \
-  --micro-batch-size-per-gpu 8 --gradient-accumulation-steps 1
+  --micro-batch-size-per-gpu 4 --gradient-accumulation-steps 2
 ```
 
 将 `--method` 分别设为 `icae_single`、`icae_multi`、`autocompressors`，执行三次；每次完成该方法的训练流程和 test 评估。
@@ -113,7 +113,7 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 
 | 参数 | 用途／默认值 |
 |---|---|
-| `--micro-batch-size-per-gpu`、`--gradient-accumulation-steps` | 每卡并行样本数、梯度累积次数；默认 baseline 8／1，动态预训练与后训练 4／2 |
+| `--micro-batch-size-per-gpu`、`--gradient-accumulation-steps` | 每卡并行样本数、梯度累积次数；默认均为 4／2 |
 | `--qa-batch-size 8` | 每条轨迹一次读取的题数 |
 | `--epochs` | 各阶段训练轮数，默认 1 |
 | `--lm-ratio 0.5`、`--lm-target-tokens 512` | AE／LM 预训练选择 LM 的概率、各预训练方法的续文目标长度；AutoCompressors 使用 LM |

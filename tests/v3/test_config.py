@@ -30,13 +30,8 @@ def test_presets_use_requested_model_and_memory_size(filename):
         assert config.objective.append_slots == (32 if dynamic else 8)
         if filename.name == "dynamic_pretrain.json":
             assert "append_slots" not in json.loads(filename.read_text())["objective"]
-        large_microbatch = config.objective.method in {
-            "icae_single",
-            "icae_multi",
-            "autocompressors",
-        }
-        assert config.training.micro_batch_size_per_gpu == (8 if large_microbatch else 4)
-        assert config.training.gradient_accumulation_steps == (1 if large_microbatch else 2)
+        assert config.training.micro_batch_size_per_gpu == 4
+        assert config.training.gradient_accumulation_steps == 2
         assert config.training.global_batch_size(2) == 16
         assert config.training.save_total_limit == 2
         assert config.training.swanlab_project is None

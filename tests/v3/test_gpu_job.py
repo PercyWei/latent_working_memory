@@ -974,13 +974,8 @@ def test_minimal_command_builds_all_methods_with_preset_batch_settings(mode):
         assert job.config.model.model_name_or_path == str(
             Path.home() / "models/Qwen3-4B-Instruct-2507"
         )
-        batch_eight = job.config.objective.method in {
-            "icae_single",
-            "icae_multi",
-            "autocompressors",
-        }
-        assert job.config.training.micro_batch_size_per_gpu == (8 if batch_eight else 4)
-        assert job.config.training.gradient_accumulation_steps == (1 if batch_eight else 2)
+        assert job.config.training.micro_batch_size_per_gpu == 4
+        assert job.config.training.gradient_accumulation_steps == 2
         assert job.config.training.global_batch_size(2) == 16
         assert job.config.objective.qa_batch_size == 8
 
@@ -1661,15 +1656,10 @@ def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
     ]
     world_size = len(gpus.split(","))
     for job in (job for plan in plans for job in plan["jobs"]):
-        batch_eight = job["config"]["objective"]["method"] in {
-            "icae_single",
-            "icae_multi",
-            "autocompressors",
-        }
         assert job["batching"] == {
             "world_size": world_size,
-            "micro_batch_size_per_gpu": 8 if batch_eight else 4,
-            "gradient_accumulation_steps": 1 if batch_eight else 2,
+            "micro_batch_size_per_gpu": 4,
+            "gradient_accumulation_steps": 2,
             "global_batch_size": world_size * 8,
         }
         assert "global_batch_size" not in job["config"]["training"]
