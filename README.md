@@ -1,12 +1,12 @@
 # 20260912_latent_working_memory
 
-最后修订时间：20261012 10:46:00 UTC+08:00
+最后修订时间：20261012 11:12:34 UTC+08:00
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理；ICAE v1 和 C-DIC 分别位于 `reproductions/icae/` 与 `reproductions/cdic/`，各自使用独立的 `uv` 环境。
 
 ## 主环境与开发
 
-所有启动命令均在项目根目录执行，命令中的相对路径以项目根目录为基准。
+文档中的命令默认从项目根目录执行，命令中的相对路径以项目根目录为基准。
 
 通用执行约定见项目 `AGENTS.md`；命名、SwanLab、实验产物及研究笔记规则见 [项目规范索引](docs/README.md)。
 

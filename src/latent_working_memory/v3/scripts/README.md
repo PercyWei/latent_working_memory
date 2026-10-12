@@ -1,18 +1,17 @@
 # 运行 v3 实验
 
-使用 [run_gpu.sh](run_gpu.sh) 完成训练、评估与方法比较。默认 Qwen3-4B、K=512、ΔK=32；K 为 baseline 总容量或动态方法首次容量，ΔK 为动态追加容量。方法与训练细节见 [v3 说明](../README.md)，默认配置位于 [configs/v3](../../../../configs/v3/)。
+使用 [run.sh](run.sh) 完成训练、评估与方法比较。默认 Qwen3-4B、K=512、ΔK=32；K 为 baseline 总容量或动态方法首次容量，ΔK 为动态追加容量。方法与训练细节见 [v3 说明](../README.md)，默认配置位于 [configs/v3](../../../../configs/v3/)。
 
 ## 1. 准备环境、模型与数据
 
 项目通过 uv 管理环境，使用 Python 3.11、PyTorch 2.6.0。先执行 `uv sync`，再参考 [.env.example](../../../../.env.example) 完善各服务器的 `.env`：
 
 ```dotenv
-LWM_REPO_DIR="/path/to/latent_working_memory"
 SWANLAB_API_KEY=你的_API_Key
 MODELSCOPE_API_TOKEN=你的_ModelScope_Token
 ```
 
-`LWM_REPO_DIR` 使用仓库绝对路径。脚本直接读取当前目录的 `.env`；ModelScope token 按需填写。
+ModelScope token 按需填写。
 
 | 内容 | 默认位置 | 覆盖参数 |
 |---|---|---|
@@ -29,7 +28,7 @@ MODELSCOPE_API_TOKEN=你的_ModelScope_Token
 GPU 编号按实际分配修改；最终评估使用第一张卡。一次完成五种方法：
 
 ```bash
-bash src/latent_working_memory/v3/scripts/run_gpu.sh \
+bash src/latent_working_memory/v3/scripts/run.sh \
   --mode full --method all --gpus 0,1 \
   --run-id capacity-comparison_20261011-01
 ```
@@ -53,7 +52,7 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 #### 1）Baseline
 
 ```bash
-bash src/latent_working_memory/v3/scripts/run_gpu.sh \
+bash src/latent_working_memory/v3/scripts/run.sh \
   --mode full --method icae_single --gpus 0,1 \
   --run-id capacity-comparison_20261011-01 \
   --micro-batch-size-per-gpu 4 --gradient-accumulation-steps 2
@@ -66,7 +65,7 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 先运行一次共享预训练：
 
 ```bash
-bash src/latent_working_memory/v3/scripts/run_gpu.sh \
+bash src/latent_working_memory/v3/scripts/run.sh \
   --mode full --method dynamic_pretrain --gpus 0,1 \
   --run-id capacity-comparison_20261011-01 \
   --micro-batch-size-per-gpu 4 --gradient-accumulation-steps 2
@@ -75,7 +74,7 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 完成后，从 `artifacts/v3/capacity-comparison_20261011-01/train/dynamic-pretrain-k512/pretrain/training-result.json` 的 `checkpoint` 字段取得实际目录，替换下例的 `global_step_N`：
 
 ```bash
-bash src/latent_working_memory/v3/scripts/run_gpu.sh \
+bash src/latent_working_memory/v3/scripts/run.sh \
   --mode full --method memory_change --gpus 0,1 \
   --run-id capacity-comparison_20261011-01 \
   --micro-batch-size-per-gpu 4 --gradient-accumulation-steps 2 \
@@ -107,7 +106,7 @@ bash src/latent_working_memory/v3/scripts/run_gpu.sh \
 - 显式 CLI 参数覆盖文件值；动态自定义配置只替换后训练，自动预训练仍读取独立配置。数据路径参数见第一节。
 - `training.stage_max_train_samples` 分阶段保存预算；启动器展开后在 `plan/` 保存各阶段配置。训练与方法细节见 [v3 说明](../README.md)。
 
-完整参数通过 `bash src/latent_working_memory/v3/scripts/run_gpu.sh --help` 查看。
+完整参数通过 `bash src/latent_working_memory/v3/scripts/run.sh --help` 查看。
 
 ### 4.2 批处理、目标与动态写入
 
