@@ -112,6 +112,23 @@ class TokenMemoryTask(nn.Module):
             event["write_seconds"] += timer["write_seconds"] / len(events)
         return results
 
+    def _write_updates_batch(self, inputs, blocks, append, events):
+        """正式策略与反事实诊断共用候选写入，覆盖始终保留末块大小。"""
+        histories = [
+            ([] if choice else [state[-1]]) if self.cfg.writer_mode == "local" else state
+            for state, choice in zip(blocks, append, strict=True)
+        ]
+        return self._write_batch(
+            inputs,
+            histories,
+            events,
+            [
+                self.cfg.append_slots if choice else len(state[-1])
+                for state, choice in zip(blocks, append, strict=True)
+            ],
+            ["append" if choice else "overwrite" for choice in append],
+        )
+
     @staticmethod
     def _event(step, segment_id):
         return {
@@ -214,20 +231,11 @@ class TokenMemoryTask(nn.Module):
                 )
 
             def write_updates(indices, append):
-                histories = [
-                    ([] if choice else [blocks[i][-1]])
-                    if self.cfg.writer_mode == "local"
-                    else blocks[i]
-                    for i, choice in zip(indices, append, strict=True)
-                ]
-                return write(
-                    indices,
-                    histories,
-                    [
-                        self.cfg.append_slots if choice else len(blocks[i][-1])
-                        for i, choice in zip(indices, append, strict=True)
-                    ],
-                    ["append" if choice else "overwrite" for choice in append],
+                return self._write_updates_batch(
+                    [chunks[i][step] for i in indices],
+                    [blocks[i] for i in indices],
+                    append,
+                    [events[i] for i in indices],
                 )
 
             if single or self.cfg.method in {"icae_multi", "autocompressors"} or step == 0:
