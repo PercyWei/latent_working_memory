@@ -26,21 +26,28 @@ METRICS = (
 )
 
 
+def training_identity(training):
+    """训练、恢复与评估共用的运行身份；名称由方法目录和 run-id 派生。"""
+    root = Path(training["output_dir"])
+    return {
+        "project": training["swanlab_project"],
+        "group": training["group"],
+        "name": f"{root.name}_{root.parent.parent.name}",
+        "job_type": "train",
+        "tags": sorted({"scope:main", "method:attention-matching", *training["tags"]}),
+    }
+
+
 @contextmanager
 def training_tracking(config, run, device, resume=False):
     if config.swanlab_project is None:
         yield None
         return
+    if config.group is None:
+        raise ValueError("online tracking requires an explicit group")
     root = Path(config.output_dir)
     identity_path = root / "swanlab.json"
-    tags = sorted({"scope:main", "method:attention-matching", *config.tags})
-    expected = {
-        "project": config.swanlab_project,
-        "group": config.group,
-        "name": config.run_name or root.name,
-        "job_type": "train",
-        "tags": tags,
-    }
+    expected = training_identity(run["training"])
     identity = None
     if resume:
         identity = json.loads(identity_path.read_text(encoding="utf-8"))
@@ -70,7 +77,7 @@ def training_tracking(config, run, device, resume=False):
             public=False,
             job_type="train",
             group=config.group,
-            tags=tags,
+            tags=expected["tags"],
             log_dir=str(root / "swanlab"),
             id=identity["id"] if identity is not None else None,
             resume="must" if identity is not None else "never",
@@ -111,17 +118,16 @@ def log_metrics(tracking, record):
 def evaluation_media(summary):
     """最终 checkpoint 的质量和写入诊断；样本、容量及资源明细留在本地。"""
     metrics = summary["metrics"]
-    panels = [("nll", ["答案 NLL"], [metrics["nll"]], "NLL")]
-    if "em" in metrics:
-        panels.append(("em_f1", ["EM", "F1"], [metrics["em"], metrics["f1"]], "score"))
-    panels.append(
+    panels = [
+        ("nll", ["答案 NLL"], [metrics["nll"]], "NLL"),
+        ("em_f1", ["EM", "F1"], [metrics["em"], metrics["f1"]], "score"),
         (
             "write_loss",
             ["写入前", "写入后"],
             [metrics["write_loss_before"], metrics["write_loss"]],
             "Attention Matching loss",
         )
-    )
+    ]
     values = {}
     for name, labels, measurements, unit in panels:
         chart = swanlab.echarts.Bar().add_xaxis(labels)
@@ -157,13 +163,7 @@ def validate_evaluation_publication(run, checkpoint_path, step):
     ):
         raise ValueError("publication requires the completed training run's final checkpoint")
     identity = json.loads((root / "swanlab.json").read_text(encoding="utf-8"))
-    expected = {
-        "project": training["swanlab_project"],
-        "group": training["group"],
-        "name": training["run_name"] or root.name,
-        "job_type": "train",
-        "tags": sorted({"scope:main", "method:attention-matching", *training["tags"]}),
-    }
+    expected = training_identity(training)
     if any(identity[name] != value for name, value in expected.items()):
         raise ValueError("SwanLab identity differs from the original training run")
     project_path = identity["url"].split("/@", 1)[1].split("/runs/", 1)[0]

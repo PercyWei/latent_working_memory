@@ -79,7 +79,7 @@ def _check_test_split(statistics, run):
 
 
 def evaluate(
-    checkpoint_path, test_file, output_dir, max_new_tokens=128, device="cuda", tracking=None
+    checkpoint_path, output_dir, dataset_dir=None, max_new_tokens=128, device="cuda", tracking=None
 ):
     if type(max_new_tokens) is not int or max_new_tokens < 1:
         raise ValueError("max_new_tokens must be a positive integer")
@@ -87,12 +87,16 @@ def evaluate(
         raise ValueError("tracking must be online or disabled")
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         raise ValueError("v4 evaluation runs in one process; do not launch it with torchrun")
-    output_dir = Path(output_dir).resolve()
+    output_dir = Path(output_dir).expanduser().resolve()
     if output_dir.exists():
         raise FileExistsError(f"evaluation output directory already exists: {output_dir}")
-    checkpoint_path = Path(checkpoint_path).resolve()
+    checkpoint_path = Path(checkpoint_path).expanduser().resolve()
     checkpoint = read_checkpoint(checkpoint_path)
     run, step = checkpoint["run"], checkpoint["cursor"]["step"]
+    dataset_dir = Path(
+        run["training"]["dataset_dir"] if dataset_dir is None else dataset_dir
+    ).expanduser().resolve()
+    test_file = dataset_dir / "test.jsonl"
     if tracking is None:
         tracking = "online" if run["training"]["swanlab_project"] is not None else "disabled"
     if tracking == "online":
@@ -101,7 +105,8 @@ def evaluate(
     device = initialize_device(device)
     config = ModelConfig(**run["model"])
     config = replace(config, revision=run["resolved_model_revision"] or config.revision)
-    tokenizer_path = Path(run["training"]["output_dir"]) / "tokenizer"
+    training_dir = Path(run["training"]["output_dir"]).expanduser().resolve()
+    tokenizer_path = training_dir / "tokenizer"
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     model = TimedStreamingMemoryLM(config).to(device).eval()
     model.load_trainable_state_dict(checkpoint["memory"])
@@ -120,11 +125,11 @@ def evaluate(
         "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "split": "test",
         "checkpoint": {"path": str(checkpoint_path), "step": step},
-        "training_run": str(Path(run["training"]["output_dir"]).resolve()),
+        "training_run": str(training_dir),
         "model": asdict(config),
         "resolved_model_revision": getattr(model.backbone.config, "_commit_hash", None),
-        "tokenizer": str(tokenizer_path.resolve()),
-        "test_file": str(Path(test_file).resolve()),
+        "tokenizer": str(tokenizer_path),
+        "test_file": str(test_file),
         "dataset": dataset_identity(episodes),
         "device": str(device),
         "tracking": tracking,
@@ -150,7 +155,6 @@ def evaluate(
         },
     }
     output_dir.mkdir(parents=True)
-    write_json(output_dir / "evaluation.json", evaluation_config)
     write_json(output_dir / "data-statistics.json", statistics)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -275,7 +279,7 @@ def evaluate(
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True, help="global_step_<step> 目录")
-    parser.add_argument("--test-file", type=Path, required=True)
+    parser.add_argument("--data-dir", type=Path, help="默认沿用训练数据目录，读取 test.jsonl")
     parser.add_argument("--output-dir", type=Path, required=True, help="新的评估产物目录")
     parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--device", default="cuda")
@@ -283,8 +287,8 @@ def main():
     args = parser.parse_args()
     evaluate(
         args.checkpoint,
-        args.test_file,
         args.output_dir,
+        args.data_dir,
         args.max_new_tokens,
         args.device,
         args.tracking,

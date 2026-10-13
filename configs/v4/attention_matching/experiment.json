@@ -1,6 +1,6 @@
 {
   "model": {
-    "model_name_or_path": "Qwen/Qwen3-0.6B",
+    "model_name_or_path": "~/models/Qwen3-4B-Instruct-2507",
     "revision": null,
     "backbone_dtype": "bfloat16",
     "attention_implementation": "sdpa",
@@ -21,9 +21,7 @@
     "correction_scale": 0.1
   },
   "training": {
-    "train_file": "../../../data/delta-mem-qasper/train.jsonl",
-    "dev_file": "../../../data/delta-mem-qasper/dev.jsonl",
-    "output_dir": "../../../artifacts/v4/attention-matching_20261011/train/qwen3-0.6b_conditioned_20261011",
+    "dataset_dir": "data/delta-mem-qasper",
     "epochs": 1,
     "global_batch_size": 8,
     "micro_batch_size_per_gpu": 2,
@@ -37,7 +35,8 @@
     "save_total_limit": 2,
     "swanlab_project": null,
     "group": null,
-    "run_name": null,
-    "tags": ["data:qasper"]
+    "tags": [
+      "data:qasper"
+    ]
   }
 }

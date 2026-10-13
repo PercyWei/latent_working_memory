@@ -2,7 +2,7 @@
 
 创建时间：20261003 21:51:43 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261013 23:35:31 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261013 23:46:24 Asia/Shanghai（UTC+08:00）
 
 冻结基座，在每层维护 latent memory，通过 Attention Matching 局部更新记忆，并由答案 CE 学习如何生成压缩查询和读写记忆。
 
@@ -84,7 +84,7 @@ $R$ 为压缩查询数；每次写入固定执行 `inner_steps` 步，查询与�
 ## 三、配置与执行
 
 - [experiment.json](../../../configs/v4/attention_matching/experiment.json) 是默认配置及格式示例，可通过 `--config` 指定其他文件。
-- JSON 顶层使用 `model` 和 `training`。配置中的数据、输出路径相对于配置文件解析；模型使用 HF repo ID 或绝对本地路径，`revision` 可固定模型版本。
+- JSON 顶层使用 `model` 和 `training`。本地路径支持 `~`；相对数据、输出路径以运行目录为基准，`run.sh` 统一从项目根目录执行。模型也支持 HF repo ID，`revision` 可固定模型版本。
 - 下表为仓库预设；CLI 参数、覆盖规则和运行目录见[运行指南](scripts/README.md)。
 
 **记忆与局部更新（`model`）**
@@ -103,6 +103,8 @@ $R$ 为压缩查询数；每次写入固定执行 `inner_steps` 步，查询与�
 
 | 参数 | 预设与含义 |
 |---|---|
+| `model.model_name_or_path` | `~/models/Qwen3-4B-Instruct-2507` |
+| `training.dataset_dir` | `data/delta-mem-qasper`；固定读取 `train.jsonl`、`dev.jsonl`、`test.jsonl` |
 | `model.backbone_dtype` | GPU 预设 `bfloat16`；类默认 `float32`，新增模块与 slots 始终 FP32 |
 | `model.attention_implementation` | 主干 `sdpa`，可选 `eager`；局部 reader 使用显式计算 |
 | `model.loss_chunk_size` | 256；有效答案位置的 LM head／CE 分块重计算 |
@@ -121,8 +123,7 @@ $R$ 为压缩查询数；每次写入固定执行 `inner_steps` 步，查询与�
 
 ```bash
 bash src/latent_working_memory/v4/scripts/run.sh \
-  --gpus 0,1 --run-id am-query_20261013 \
-  --run-name qwen3-0.6b_conditioned-m32
+  --gpus 0,1 --run-id am-query_20261013
 ```
 
 ## 四、评估与记录
@@ -143,14 +144,15 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 ### 4.2 SwanLab 与本地产物
 
 - 默认仅本地记录。在线训练显式指定已有 project；相关 runs 通过 `group` 关联，`job_type=train`，固定 tags 为 `scope:main`、`method:attention-matching`，数据和研究标签通过配置补充。
+- `--run-id` 标识实验系列；方法目录由 `query_mode` 与 `num_slots` 自动生成，例如 `conditioned-m32`。SwanLab 名称为 `<method-dir>_<run-id>`。
 - train/dev 在同一 run 中按真实 optimizer step 追加原生曲线。`write_loss` 表示更新后的 AM loss，`write_loss_before` 表示更新前；均先按层、再按写入事件平均。
 - 最终评估可追加到原训练 run 的 `evaluation/*`，保留原配置和身份；不创建新 project 或 run。辅助计数与逐题结果保存在本地。
 
 | 位置 | 主要产物 |
 |---|---|
-| `plan/<run-name>/` | 配置快照、命令、运行状态和执行日志 |
-| `train/<run-name>/` | `run.json`、`tokenizer/`、`data-statistics.json`、`metrics.jsonl`、checkpoint 与训练结果 |
-| `eval/<run-name>/test/` | `summary.json`、`predictions.jsonl`、评估统计，以及在线发布时的 `publication.json` |
+| `plan/<method-dir>/` | 配置快照、命令、运行状态和执行日志 |
+| `train/<method-dir>/` | `run.json`、`tokenizer/`、`data-statistics.json`、`metrics.jsonl`、checkpoint 与训练结果 |
+| `eval/<method-dir>/test/` | 含评估配置的 `summary.json`、`predictions.jsonl`、筛选统计，以及在线发布时的 `publication.json` |
 
 共同父目录为 `artifacts/v4/<run-id>/`。详细文件和命令见[运行指南](scripts/README.md)。当前没有独立跨运行比较入口。
 

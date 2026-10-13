@@ -1,8 +1,9 @@
-"""v4 的单一实验配置；相对数据与产物路径以配置文件目录为基准。"""
+"""v4 实验配置；相对路径以项目运行目录为基准。"""
 
 from dataclasses import dataclass, fields, replace
 import json
 import math
+import os
 from pathlib import Path
 
 
@@ -26,7 +27,7 @@ def finite_number(value, name, minimum=0, inclusive=False):
 
 @dataclass(frozen=True)
 class ModelConfig:
-    model_name_or_path: str
+    model_name_or_path: str = "~/models/Qwen3-4B-Instruct-2507"
     revision: str | None = None
     backbone_dtype: str = "float32"
     attention_implementation: str = "sdpa"
@@ -49,6 +50,7 @@ class ModelConfig:
     def __post_init__(self):
         if not isinstance(self.model_name_or_path, str) or not self.model_name_or_path.strip():
             raise ValueError("model_name_or_path must be a nonempty string")
+        object.__setattr__(self, "model_name_or_path", os.path.expanduser(self.model_name_or_path))
         if self.revision is not None and (
             not isinstance(self.revision, str) or not self.revision.strip()
         ):
@@ -72,9 +74,8 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    train_file: str
-    dev_file: str
-    output_dir: str
+    dataset_dir: str
+    output_dir: str | None = None
     epochs: int = 1
     global_batch_size: int = 8
     micro_batch_size_per_gpu: int = 2
@@ -88,13 +89,15 @@ class TrainingConfig:
     save_total_limit: int = 2
     swanlab_project: str | None = None
     group: str | None = None
-    run_name: str | None = None
     tags: tuple[str, ...] = ()
 
     def __post_init__(self):
-        for name in ("train_file", "dev_file", "output_dir"):
-            if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
-                raise ValueError(f"{name} must be a nonempty path string")
+        if not isinstance(self.dataset_dir, str) or not self.dataset_dir.strip():
+            raise ValueError("dataset_dir must be a nonempty path string")
+        if self.output_dir is not None and (
+            not isinstance(self.output_dir, str) or not self.output_dir.strip()
+        ):
+            raise ValueError("output_dir must be null or a nonempty path string")
         positive_ints(
             self,
             [field.name for field in fields(self) if field.type is int and field.name != "seed"],
@@ -112,12 +115,10 @@ class TrainingConfig:
         finite_number(self.learning_rate, "learning_rate")
         finite_number(self.weight_decay, "weight_decay", inclusive=True)
         finite_number(self.gradient_clip, "gradient_clip")
-        for name in ("swanlab_project", "group", "run_name"):
+        for name in ("swanlab_project", "group"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value.strip()):
                 raise ValueError(f"{name} must be null or a nonempty string")
-        if self.swanlab_project is not None and self.group is None:
-            raise ValueError("online tracking requires an explicit group")
         if not isinstance(self.tags, (list, tuple)) or any(
             not isinstance(tag, str) or ":" not in tag or not all(tag.split(":", 1))
             for tag in self.tags
@@ -134,8 +135,8 @@ def validate_experiment(model, training):
 
 
 def load_experiment(path):
-    path = Path(path).resolve()
-    raw = json.loads(path.read_text())
+    path = Path(path).expanduser().resolve()
+    raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict) or set(raw) != {"model", "training"}:
         raise ValueError("experiment must contain exactly model and training objects")
     model = ModelConfig(**raw["model"])
@@ -143,8 +144,9 @@ def load_experiment(path):
     training = replace(
         training,
         **{
-            name: str((path.parent / getattr(training, name)).resolve())
-            for name in ("train_file", "dev_file", "output_dir")
+            name: str(Path(getattr(training, name)).expanduser().resolve())
+            for name in ("dataset_dir", "output_dir")
+            if getattr(training, name) is not None
         },
     )
     validate_experiment(model, training)

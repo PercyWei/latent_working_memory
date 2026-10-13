@@ -7,15 +7,17 @@ import pytest
 from latent_working_memory.v4.config import ModelConfig, TrainingConfig, load_experiment
 
 
-def test_canonical_config_resolves_paths_and_rejects_unknown_fields(tmp_path):
+def test_canonical_config_resolves_paths_and_rejects_unknown_fields(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     model = ModelConfig("local-model", pending_size=4, recent_size=2)
-    training = TrainingConfig("train.jsonl", "dev.jsonl", "output", max_seq_length=16)
+    training = TrainingConfig("data", "output", max_seq_length=16)
     value = {"model": asdict(model), "training": asdict(training)}
-    path = tmp_path / "experiment.json"
+    path = tmp_path / "configs" / "experiment.json"
+    path.parent.mkdir()
     path.write_text(json.dumps(value))
     loaded_model, loaded_training = load_experiment(path)
     assert loaded_model == model
-    assert loaded_training.train_file == str(tmp_path / "train.jsonl")
+    assert loaded_training.dataset_dir == str(tmp_path / "data")
     assert loaded_training.output_dir == str(tmp_path / "output")
     value["model"]["capacity_growth"] = True
     path.write_text(json.dumps(value))
@@ -51,8 +53,7 @@ def test_config_requires_sequence_limit_above_prompt_minimum(tmp_path):
             {
                 "model": {"model_name_or_path": "tiny", "pending_size": 4, "recent_size": 2},
                 "training": {
-                    "train_file": "train.jsonl",
-                    "dev_file": "dev.jsonl",
+                    "dataset_dir": "data",
                     "output_dir": "out",
                     "max_seq_length": 7,
                 },

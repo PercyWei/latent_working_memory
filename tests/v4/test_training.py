@@ -85,10 +85,9 @@ def model_config(base, query_mode="conditioned"):
     )
 
 
-def training_config(output):
+def training_config(output, dataset_dir):
     return TrainingConfig(
-        train_file="train.jsonl",
-        dev_file="dev.jsonl",
+        dataset_dir=str(dataset_dir),
         output_dir=str(output),
         epochs=2,
         global_batch_size=3,
@@ -112,7 +111,7 @@ def episodes():
 def make_engine(base, output, query_mode="conditioned"):
     set_seed(42)
     model = StreamingMemoryLM(model_config(base, query_mode))
-    engine = MetaLearningEngine(model, training_config(output), "cpu")
+    engine = MetaLearningEngine(model, training_config(output, output), "cpu")
     engine.initialize()
     return engine
 
@@ -213,7 +212,7 @@ def write_experiment(directory, base, output):
         json.dumps(
             {
                 "model": asdict(model_config(base)),
-                "training": asdict(training_config(output)),
+                "training": asdict(training_config(directory / output, directory)),
             }
         )
     )

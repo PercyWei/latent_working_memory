@@ -88,13 +88,15 @@ def evaluate(engine, episodes):
 
 def run_training(args):
     model_config, config = load_experiment(args.config)
+    if config.output_dir is None:
+        raise ValueError("training requires output_dir; launch the preset through scripts/run.sh")
     if args.stop_after_steps is not None and args.stop_after_steps < 1:
         raise ValueError("stop_after_steps must be positive")
     device = initialize_device(args.device)
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     output = Path(config.output_dir)
-    resume = Path(args.resume).resolve() if args.resume is not None else None
+    resume = Path(args.resume).expanduser().resolve() if args.resume is not None else None
     if resume is not None:
         if resume.parent != output / "checkpoints":
             raise ValueError("resume checkpoint must belong to output_dir/checkpoints")
@@ -125,9 +127,10 @@ def run_training(args):
     model = StreamingMemoryLM(load_model_config).to(device)
     position_limit = model.backbone.config.max_position_embeddings
     min_prompt_length = model_config.pending_size + model_config.recent_size + 1
+    dataset_dir = Path(config.dataset_dir)
     train, dev, data_statistics = load_episode_splits(
-        config.train_file,
-        config.dev_file,
+        dataset_dir / "train.jsonl",
+        dataset_dir / "dev.jsonl",
         tokenizer,
         min_prompt_length,
         config.max_seq_length,

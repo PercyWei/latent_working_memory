@@ -20,11 +20,9 @@ DEFAULT_CONFIG = Path("configs/v4/attention_matching/experiment.json")
 TRAINING_OPTIONS = (
     "config",
     "run_id",
-    "run_name",
     "output_root",
     "model_path",
-    "train_file",
-    "dev_file",
+    "data_dir",
     "global_batch_size",
     "micro_batch_size_per_gpu",
     "epochs",
@@ -63,6 +61,10 @@ def nonnegative_count(value):
     return number
 
 
+def optional_positive_count(value):
+    return None if value == "null" else positive_count(value)
+
+
 def save_frequency(value):
     return value if value == "after_each_epoch" else positive_count(value)
 
@@ -77,11 +79,9 @@ def parse_args(argv=None):
     parser.add_argument("--config", type=Path, help=f"训练预设，默认 {DEFAULT_CONFIG}")
     parser.add_argument("--gpus", type=physical_gpus, default="0,1", help="物理 GPU 编号，默认 0,1")
     parser.add_argument("--run-id", help="实验系列目录，默认上海时间 YYYYMMDD-HHMMSS")
-    parser.add_argument("--run-name", help="训练目录和展示名，默认模型名_query模式-m容量")
     parser.add_argument("--output-root", type=Path, help="产物父目录，默认 artifacts/v4")
     parser.add_argument("--model-path", type=Path, help="覆盖预设中的本地基座模型位置")
-    parser.add_argument("--train-file", type=Path, help="训练 JSONL 文件")
-    parser.add_argument("--dev-file", type=Path, help="开发 JSONL 文件")
+    parser.add_argument("--data-dir", type=Path, help="含 train/dev/test.jsonl 的数据目录")
     for name in (
         "global-batch-size",
         "micro-batch-size-per-gpu",
@@ -98,8 +98,9 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--max-seq-length",
-        type=nonnegative_count,
-        help="训练完整输入的人为上限；0 关闭；模型窗口始终强制过滤",
+        type=optional_positive_count,
+        default=argparse.SUPPRESS,
+        help="训练完整输入的人为上限；null 关闭；模型窗口始终强制过滤",
     )
     parser.add_argument(
         "--stop-after-steps", type=positive_count, help="停止于指定全局 optimizer step，不修改预算"
@@ -110,9 +111,8 @@ def parse_args(argv=None):
     parser.add_argument("--tag", action="append", help="追加命名空间标签，可重复指定")
     parser.add_argument("--prompt-file", type=Path, help="生成使用的纯文本 prompt")
     parser.add_argument("--output", type=Path, help="生成结果 JSON 的保存路径")
-    parser.add_argument("--test-file", type=Path, help="独立评估使用的 QA JSONL")
     parser.add_argument(
-        "--output-dir", type=Path, help="评估结果目录，默认 <series>/eval/<run-name>/test"
+        "--output-dir", type=Path, help="评估结果目录，默认 <series>/eval/<method-dir>/test"
     )
     parser.add_argument("--max-new-tokens", type=positive_count, help="生成 token 上限，默认 128")
     args = parser.parse_args(argv)
@@ -122,7 +122,11 @@ def parse_args(argv=None):
         supplied = [
             name
             for name in TRAINING_OPTIONS
-            if getattr(args, name) is not None and not (args.evaluate_only and name == "tracking")
+            if (
+                getattr(args, name, None) is not None
+                or (name == "max_seq_length" and hasattr(args, name))
+            )
+            and not (args.evaluate_only and name in {"tracking", "data_dir"})
         ]
         if supplied:
             parser.error(
@@ -135,11 +139,8 @@ def parse_args(argv=None):
             parser.error("--generate-only requires --prompt-file")
     elif args.prompt_file is not None or args.output is not None:
         parser.error("--prompt-file and --output require --generate-only")
-    if args.evaluate_only:
-        if args.test_file is None:
-            parser.error("--evaluate-only requires --test-file")
-    elif args.test_file is not None or args.output_dir is not None:
-        parser.error("--test-file and --output-dir require --evaluate-only")
+    if not args.evaluate_only and args.output_dir is not None:
+        parser.error("--output-dir requires --evaluate-only")
     if args.generate_only or args.evaluate_only:
         if len(args.gpus.split(",")) != 1:
             parser.error("generation/evaluation uses one GPU; select --gpus 0 or --gpus 1")
@@ -155,42 +156,31 @@ def prepare_training(args):
     if args.model_path is not None:
         model = replace(model, model_name_or_path=str(args.model_path.expanduser().resolve()))
     overrides = {
-        name: str(getattr(args, name).expanduser().resolve())
-        for name in ("train_file", "dev_file")
+        name: getattr(args, name)
+        for name in (
+            "global_batch_size",
+            "micro_batch_size_per_gpu",
+            "epochs",
+            "seed",
+            "eval_every",
+            "save_every",
+            "save_total_limit",
+        )
         if getattr(args, name) is not None
     }
-    overrides.update(
-        {
-            name: getattr(args, name)
-            for name in (
-                "global_batch_size",
-                "micro_batch_size_per_gpu",
-                "max_seq_length",
-                "epochs",
-                "seed",
-                "eval_every",
-                "save_every",
-                "save_total_limit",
-            )
-            if getattr(args, name) is not None
-        }
-    )
-    if args.max_seq_length == 0:
-        overrides["max_seq_length"] = None
+    if args.data_dir is not None:
+        overrides["dataset_dir"] = str(args.data_dir.expanduser().resolve())
+    if hasattr(args, "max_seq_length"):
+        overrides["max_seq_length"] = args.max_seq_length
     run_id = args.run_id or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M%S")
-    run_name = (
-        args.run_name
-        or training.run_name
-        or (f"{Path(model.model_name_or_path).name.lower()}_{model.query_mode}-m{model.num_slots}")
-    )
-    for name, value in (("run-id", run_id), ("run-name", run_name)):
-        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value) is None:
-            raise ValueError(f"{name} must contain only letters, digits, '.', '-' and '_'")
+    method_dir = f"{model.query_mode}-m{model.num_slots}"
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", run_id) is None:
+        raise ValueError("run-id must contain only letters, digits, '-' and '_'")
     directory = (args.output_root or Path("artifacts/v4")).expanduser().resolve() / run_id
-    output = directory / "train" / run_name
-    plan = directory / "plan" / run_name
+    output = directory / "train" / method_dir
+    plan = directory / "plan" / method_dir
     if output.exists() or plan.exists():
-        raise ValueError(f"run already exists: {output}; use a new run-id/run-name or --resume")
+        raise ValueError(f"run already exists: {output}; use a new run-id or --resume")
     project = args.swanlab_project if args.swanlab_project is not None else training.swanlab_project
     if args.tracking == "disabled":
         project = None
@@ -200,7 +190,6 @@ def prepare_training(args):
         training,
         **overrides,
         output_dir=str(output),
-        run_name=run_name,
         swanlab_project=project,
         group=args.group or training.group or run_id,
         tags=tuple(sorted(set(training.tags) | set(args.tag or []))),
@@ -248,7 +237,7 @@ def run_job(args):
     else:
         output = checkpoint.parent.parent
         if output.parent.name != "train" or checkpoint.parent.name != "checkpoints":
-            raise ValueError("checkpoint must belong to <series>/train/<run-name>/checkpoints")
+            raise ValueError("checkpoint must belong to <series>/train/<method-dir>/checkpoints")
         if re.fullmatch(r"global_step_[0-9]+", checkpoint.name) is None or not checkpoint.is_dir():
             raise ValueError("checkpoint must be an existing global_step_<step> directory")
         run = json.loads((output / "run.json").read_text(encoding="utf-8"))
@@ -256,11 +245,10 @@ def run_job(args):
             raise ValueError("checkpoint directory differs from the saved run output_dir")
         plan = output.parent.parent / "plan" / output.name
         plan.mkdir(parents=True, exist_ok=True)
-        config_path = plan / "resume-config.json"
+        config_path = plan / "config.json"
         if args.resume:
             if len(args.gpus.split(",")) != run["world_size"]:
                 raise ValueError("resume must retain the original GPU count")
-            write_json(config_path, {"model": run["model"], "training": run["training"]})
 
     environment = dict(
         os.environ,
@@ -271,11 +259,11 @@ def run_job(args):
     )
     command = [sys.executable]
     action = "resume" if args.resume else "train"
-    job_path, result_path, log_path = plan / "job.json", plan / "result.json", plan / "train.log"
+    result_path, log_path = plan / "result.json", plan / "train.log"
     destination = None
     if args.generate_only:
         action = "generate"
-        job_path, result_path = plan / "generate-job.json", plan / "generate-result.json"
+        result_path = plan / "generate-result.json"
         log_path = plan / "generate.log"
         destination = (
             args.output.expanduser().resolve()
@@ -298,7 +286,7 @@ def run_job(args):
         ]
     elif args.evaluate_only:
         action = "evaluate"
-        job_path, result_path = plan / "evaluation-job.json", plan / "evaluation-result.json"
+        result_path = plan / "evaluation-result.json"
         log_path = plan / "evaluation.log"
         destination = (
             args.output_dir.expanduser().resolve()
@@ -310,8 +298,6 @@ def run_job(args):
             "latent_working_memory.v4.evaluate",
             "--checkpoint",
             str(checkpoint),
-            "--test-file",
-            str(args.test_file.expanduser().resolve()),
             "--output-dir",
             str(destination),
             "--max-new-tokens",
@@ -319,6 +305,8 @@ def run_job(args):
             "--device",
             "cuda",
         ]
+        if args.data_dir is not None:
+            command += ["--data-dir", str(args.data_dir.expanduser().resolve())]
         if args.tracking is not None:
             command += ["--tracking", args.tracking]
     else:
@@ -348,7 +336,6 @@ def run_job(args):
         "command": command,
         "started_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
     }
-    write_json(job_path, job)
     write_json(result_path, {**job, "status": "running"})
     try:
         execute(command, environment, log_path)
