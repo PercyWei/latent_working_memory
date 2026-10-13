@@ -40,7 +40,7 @@ LEVELS = {
         "max_steps": None,
         "eval_trajectories": None,
         "eval_every": 25,
-        "save_every": 25,
+        "save_every": None,
         "eval_split": "test",
     },
 }
@@ -161,7 +161,9 @@ def _training_job(config, args, directory, level, method_directory, initialize_f
         "max_train_samples": min(limits) if limits else None,
         "max_dev_samples": level["dev_samples"],
         "eval_every": level["eval_every"],
-        "save_every": level["save_every"],
+        "save_every": config.training.save_every
+        if level["save_every"] is None
+        else level["save_every"],
         "swanlab_project": args.swanlab_project if args.tracking == "online" else None,
         "group": args.group or args.run_id,
         "tags": (f"study:{'main' if args.mode == 'full' else args.mode}",),

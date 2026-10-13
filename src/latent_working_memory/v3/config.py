@@ -206,7 +206,7 @@ class TrainingConfig:
     gradient_clip: float = 1.0
     seed: int = 20261004
     eval_every: int = 25
-    save_every: int = 25
+    save_every: int | str = 25
     save_total_limit: int = 2
     lm_ratio: float = 0.5
     lm_target_tokens: int = 512
@@ -233,12 +233,13 @@ class TrainingConfig:
             "micro_batch_size_per_gpu",
             "gradient_accumulation_steps",
             "eval_every",
-            "save_every",
             "save_total_limit",
             "min_input_tokens",
             "lm_target_tokens",
         ):
             positive_integer(getattr(self, name), name)
+        if self.save_every != "after_each_epoch":
+            positive_integer(self.save_every, "save_every")
         for name in (
             "max_input_tokens",
             "max_qa_input_tokens",

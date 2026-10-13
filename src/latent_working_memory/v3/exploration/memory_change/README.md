@@ -2,7 +2,7 @@
 
 创建时间：20261012 15:01:54 Asia/Shanghai
 
-最后修订时间：20261013 12:46:10 Asia/Shanghai
+最后修订时间：20261013 16:09:17 Asia/Shanghai
 
 本阶段回答两个问题：原阈值是否与 `I` 的实际尺度不匹配，以及 `I` 能否反映覆盖相对追加造成的 QA 损失。先固定 warmup checkpoint，完成诊断和完整轨迹扫描，再决定修改阈值还是训练目标。
 
@@ -64,25 +64,20 @@ CUDA_VISIBLE_DEVICES=0 uv run --frozen python -m "$MC_MODULE.sweep" \
 
 训练中的 dev 验证固定使用采样 epoch 0，跨 epoch 保持相同的随机动作和分段；训练仍按当前 epoch 采样。固定的是评估条件，NLL 仍随模型权重变化。
 
-代码通过 GitHub 同步到服务器后，在项目根目录执行。原实验的模型位置和动态预训练 checkpoint 已记录在诊断结果中：
+代码通过 GitHub 同步到服务器后，在项目根目录执行。复用原动态预训练 checkpoint，模型、数据、batch 和 writer 等沿用预设与入口默认值：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 uv run --frozen python -m latent_working_memory.v3.gpu_job \
-  --train-only --mode full --method memory_change --gpus 0,1 \
+CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3/scripts/run.sh \
+  --train-only --method memory_change \
   --run-id memory-change-3ep-threshold04_20261013-01 \
-  --group memory-change-3ep-threshold04_20261013-01 \
   --checkpoint artifacts/v3/capacity-comparison_20261010-01/train/dynamic-pretrain-k512/pretrain/checkpoints/global_step_800 \
-  --model-path /home/zhangdw12/models/Qwen3-4B-Instruct-2507 \
-  --qa-data data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008 \
-  --writer-mode local --append-slots 32 \
-  --micro-batch-size-per-gpu 4 --gradient-accumulation-steps 2 \
   --epochs 3 --threshold-i 0.4 \
-  --eval-every 25 --save-every 63 --save-total-limit 3
+  --save-every after_each_epoch --save-total-limit 3
 ```
 
 `--train-only` 保留训练中的 dev NLL 验证，跳过最终生成评估。`--epochs 3` 同时应用于 warmup 和 policy，阈值 0.4 只影响 policy 的动作选择；warmup 仍以 50% 概率追加。
 
-每个 epoch 结束时已有自动保存逻辑，目录清理复用 verl 的最近 N 个规则。当前实际训练样本为 1006，全局 batch 为 16，每 epoch 为 63 个 optimizer step。warmup 和 policy 分别保留各自的 `global_step_63`、`global_step_126`、`global_step_189`，无需增加自定义保留规则。若数据数量或全局 batch 改变，`--save-every` 相应改为 `ceil(训练样本数 / 全局 batch)`。额外保存的 epoch 中间 checkpoint 也计入保留数量。
+`after_each_epoch` 按实际训练 dataloader 长度确定保存间隔，无需在启动前计算每 epoch 的 optimizer step 数。目录清理复用 verl 的最近 N 个规则；当前实际训练样本为 1006、全局 batch 为 16 时，warmup 和 policy 正常完成后分别保留 `global_step_63`、`global_step_126`、`global_step_189`。数据数量或 batch 改变后，目录中的步数相应变化，启动参数无需修改。主动停止保存的 epoch 中间 checkpoint 也计入保留数量。
 
 在 SwanLab 观察 `dev/qa_loss`、`dev/qa_old_nll`、`dev/qa_new_nll` 是否随 epoch 改善，以及 train 持续改善而 dev 恶化的情况。warmup 的 `append_ratio` 应约为 0.5，固定 dev 的值跨 epoch 相同是预期；policy 重点结合 `append_ratio`、`slots_final` 与 NLL，判断是否重新趋向全追加，容量增长是否带来质量改善。`gate_I` 当前只记录在各阶段 `metrics.jsonl`，使用 `train/gate_I`、`dev/gate_I` 查看。
 

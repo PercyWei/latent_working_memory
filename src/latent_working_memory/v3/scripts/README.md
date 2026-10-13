@@ -34,9 +34,8 @@ bash src/latent_working_memory/v3/scripts/run.sh \
   | `smoke` | 16／4 | 2 | dev，最多 2 条轨迹 |
   | `full`（默认） | 按阶段配置／全部开发集 | 默认 1 epoch | 完整 test |
 
-- 普通训练必须显式传入 `--method`，每次只运行一种方法；续训和补评估可省略 `--method`，但必须提供 `--checkpoint`。
-- 新训练加 `--train-only` 时，保留训练中的 dev NLL 验证，跳过训练结束后的生成评估；该参数不能与 `--resume` 或 `--evaluate-only` 同用。
-- `--run-id` 默认使用格式为 `YYYYMMDD-HHMMSS` 的当前时间；动态后训练复用预训练 checkpoint 时，省略该参数则继承来源编号。
+- 新训练加 `--train-only` 时，保留训练中的 dev NLL 验证，跳过训练结束后的生成评估。该参数不能与 `--resume` 或 `--evaluate-only` 同用。
+- `--run-id` 默认使用格式为 `YYYYMMDD-HHMMSS` 的当前时间。动态后训练复用预训练 checkpoint 时，省略该参数则继承来源编号。
 
 ### 2.1 完整运行
 
@@ -79,8 +78,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 - `--method` 可以设为 `memory_change`、`information_loss`。
 - `--writer-mode` 仅用于动态后训练，可选 `local`、`tag`、`mask`、`dual_lora`；使用 `tag` 时可加 `--tag-tokens 3`。动态预训练不使用此参数。
 - 同系列后训练可省略 `--run-id`，自动继承 checkpoint 来源预训练的编号。
-
-若要从基座模型执行完整动态流程，在该方法的自定义 JSON 中声明 `"stages": ["pretrain", "warmup", "policy"]`，并为 `training.stage_max_train_samples` 增加 `"pretrain": 12800`，然后通过 `--config` 启动。各阶段均使用该 JSON；写入方式、控制 token 和动态 BPTT 设置仅用于后训练。此时普通 `--checkpoint` 会提示忽略，且不参与 `run-id` 继承。
+- 若要执行完整训练流程，应该在配置中声明 `"stages": ["pretrain", "warmup", "policy"]`，并为 `training.stage_max_train_samples` 增加 `"pretrain": 12800`，然后通过 `--config` 启动。
 
 ### 2.2 单独评估
 
@@ -132,7 +130,6 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | `--qa-data` | QA 训练数据目录，默认位置见[第 1 节](#1-准备环境模型与数据) |
 
 - 配置文件中的 `objective.method` 对应所选方法，`objective.stages` 指定训练阶段顺序，`training.stage_max_train_samples` 指定各阶段样本上限。需要注意的是，动态预训练（`--method dynamic_pretrain`）配置中的 method／stages 应分别为 `dynamic`／`["pretrain"]`。
-- 首次训练时，显式 CLI 参数覆盖配置值，阶段严格按所选 JSON 的 `objective.stages` 执行；动态方法的启动方式见[第 2.1 节](#21-完整运行)。
 - 完整参数见 `bash src/latent_working_memory/v3/scripts/run.sh --help`。
 
 ### 4.2 批处理、目标与动态写入
@@ -176,6 +173,8 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | `--qa-train-samples`、`--warmup-train-samples`、`--policy-train-samples` | 对应后训练阶段的独立样本上限，默认全部 |
 | `--dev-samples` | 每阶段 dev 样本上限；`full` 默认全部，`smoke` 默认 4 |
 | `--max-steps` | 每阶段优化器更新步数上限；`full` 默认不限，`smoke` 默认 2 |
+| `--eval-every` | dev 验证的 optimizer step 间隔，`full` 默认 25，`smoke` 默认 1；epoch 末也验证 |
+| `--save-every` | 正整数 optimizer step 保存间隔或 `after_each_epoch`；`full` 沿用配置（预设 25），`smoke` 默认 1；epoch 末也保存 |
 | `--save-total-limit` | 每阶段 checkpoint 保留数，默认 2 |
 | `--group` | SwanLab 实验分组，默认当前 `run-id` |
 | `--output-root` | 产物父目录，默认 `artifacts/v3` |
@@ -188,6 +187,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 
 - **长度限制**：仅过滤 train，超限样本整条排除；长度只计正文，不含记忆、提示和目标。设为 `0`（配置中为 `null`）时使用模型窗口上限，dev／test 不按训练长度上限过滤。
 - **样本与步数限制**：各训练阶段按训练 seed 独立选择样本。阶段样本参数设为 `0` 时解除该阶段预算，但 `smoke` 仍保留档位上限；`--dev-samples`、`--max-steps` 设为 `0` 时解除各自的档位上限。`--eval-trajectories 0` 表示评估完整 split。
+- **按 epoch 保存**：使用 `--save-every after_each_epoch`，或在 JSON 的 `training` 中设置 `"save_every": "after_each_epoch"`。训练数据完成过滤、抽样和 batch 划分后，按真实 dataloader 长度确定保存间隔，与 verl 的 `save_freq: after_each_epoch` 语义相同。若训练 3 epochs 并保留每轮末的 checkpoint，使用 `--epochs 3 --save-every after_each_epoch --save-total-limit 3`。`--max-steps` 主动停止时也会保存，其产物同样计入保留数量。
 
 ## 5. 查看结果
 

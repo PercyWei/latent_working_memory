@@ -463,6 +463,9 @@ def train_loop(config, engine, splits, run, stage, stop_after_steps=None, tracki
     output = Path(settings.output_dir)
     metrics_path = output / "metrics.jsonl"
     cursor = stage.cursor
+    save_every = settings.save_every
+    if save_every == "after_each_epoch":
+        save_every = len(stage.data_loader)
     total_steps = settings.epochs * math.ceil(len(train) / engine.global_batch_size)
     planned_steps = (
         min(total_steps, stop_after_steps) if stop_after_steps is not None else total_steps
@@ -556,7 +559,7 @@ def train_loop(config, engine, splits, run, stage, stop_after_steps=None, tracki
                         training_metrics(record, config.objective.method),
                         step=record["global_step"],
                     )
-            if step % settings.save_every == 0 or epoch_end or stopping:
+            if step % save_every == 0 or epoch_end or stopping:
                 stage.checkpoint_handler.save_checkpoint(step)
                 stage.checkpoint_path = output / "checkpoints" / f"global_step_{step}"
             if stopping:

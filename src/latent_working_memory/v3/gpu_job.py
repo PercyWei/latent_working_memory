@@ -36,6 +36,12 @@ def positive_count(value):
     return number
 
 
+def save_frequency(value):
+    if value == "after_each_epoch":
+        return value
+    return positive_count(value)
+
+
 def probability(value):
     number = float(value)
     if not math.isfinite(number) or not 0 <= number <= 1:
@@ -185,8 +191,14 @@ def parse_args(argv=None):
         )
     for name in ("dev-samples", "max-steps", "eval-trajectories"):
         parser.add_argument(f"--{name}", type=bounded_count, help="覆盖运行档位，0 表示不限")
-    for name in ("eval-every", "save-every"):
-        parser.add_argument(f"--{name}", type=positive_count)
+    parser.add_argument(
+        "--eval-every", type=positive_count, help="每隔多少 optimizer step 验证 dev"
+    )
+    parser.add_argument(
+        "--save-every",
+        type=save_frequency,
+        help="保存间隔：正整数 optimizer step 数或 after_each_epoch；full 沿用配置，smoke 默认 1",
+    )
     parser.add_argument(
         "--save-total-limit",
         type=positive_count,

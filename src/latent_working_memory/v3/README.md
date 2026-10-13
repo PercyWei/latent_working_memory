@@ -162,7 +162,7 @@ FactQA 不保存逐步 `usage`。运行时按原始段和角色建立题池，`t
 全局 batch = GPU 数 × 每卡 microbatch × 梯度累积；双卡默认均为 **16**，尾批按实际样本数平均。
 
 dev 验证固定使用采样 epoch 0，跨训练 epoch 保持相同的选题、随机动作和分段；训练仍按当前 epoch 采样。动态 warmup 的 dev 沿用固定随机动作，policy 的 dev 与最终评估使用策略决策。每次 QA dev 验证的逐题 NLL 写入 `dev-qa.jsonl`，云端只追加当前 optimizer step 的原生指标，不上传累计图表。
-每个 epoch 结束时自动保存 checkpoint，目录保留使用 verl 的最近 N 个规则，`save_total_limit` 限制全部 checkpoint 的数量。若要保留三轮的 epoch 末 checkpoint，可将 `save_every` 设为每 epoch 的 optimizer step 数，`save_total_limit` 设为 3。
+`save_every` 支持正整数 optimizer step 间隔或 `"after_each_epoch"`。后者按实际训练 dataloader 长度解析，与 verl 的 `save_freq: after_each_epoch` 语义相同，无需提前计算每 epoch 步数。每个 epoch 末和主动停止时均会保存 checkpoint；目录保留使用 verl 的最近 N 个规则，`save_total_limit` 限制全部 checkpoint 的数量。保留三轮的 epoch 末 checkpoint 使用 `save_every="after_each_epoch"`、`save_total_limit=3`。
 
 ## 四、运行
 
