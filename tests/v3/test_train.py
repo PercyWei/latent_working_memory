@@ -90,7 +90,12 @@ def install_small_training(monkeypatch):
         else:
             segments = 1
         slots = (config.memory_slots + segments - 1) // segments
-        codec = build_model(memory_slots=config.memory_slots, write_slots=slots)
+        codec = build_model(
+            memory_slots=config.memory_slots,
+            write_slots=slots,
+            writer_mode=objective.writer_mode,
+            tag_tokens=objective.tag_tokens,
+        )
         loads.append(codec)
         return codec, TinyTokenizer()
 
@@ -126,42 +131,61 @@ def arguments(paths, *options):
 
 
 @pytest.mark.parametrize(
-    "method", ["icae_single", "icae_multi", "memory_change", "information_loss"]
+    "method,writer_mode",
+    [("icae_single", "local"), ("icae_multi", "local")]
+    + [
+        (method, mode)
+        for method in ("memory_change", "information_loss")
+        for mode in ("local", "tag", "mask", "dual_lora")
+    ],
 )
-def test_method_loads_once_and_inherits_weights_with_fresh_stage_optimizer(
-    tmp_path, monkeypatch, method
+def test_method_inherits_weights_across_stages_with_fresh_stage_optimizer(
+    tmp_path, monkeypatch, method, writer_mode
 ):
     loads, records = install_small_training(monkeypatch)
-    source = None
-    if method in {"memory_change", "information_loss"}:
-        config = experiment_config(tmp_path / "shared", "pretrain")
-        path = tmp_path / "source.json"
-        path.write_text(json.dumps(config.to_dict()))
-        source = train.run_training(arguments([path]))["checkpoint"]
-        loads.clear()
-        records.clear()
-    paths = stage_configs(tmp_path, method, source)
+    dynamic = method in {"memory_change", "information_loss"}
+    paths = stage_configs(
+        tmp_path, method, stages=("pretrain", "warmup", "policy") if dynamic else None
+    )
+    if dynamic:
+        for path in paths[1:]:
+            raw = json.loads(path.read_text())
+            raw["objective"].update(writer_mode=writer_mode)
+            path.write_text(json.dumps(raw))
     result = train.run_training(arguments(paths))
-    assert len(loads) == 1
-    first, second = records
-    assert first["model"] is second["model"]
-    assert first["module"] is second["module"]
+    assert len(loads) == (1 if writer_mode == "local" else 2)
+    first, second = records[:2]
+    assert (first["model"] is second["model"]) == (writer_mode == "local")
+    assert (first["module"] is second["module"]) == (writer_mode == "local")
     assert first["optimizer"] is not second["optimizer"]
-    torch.testing.assert_close(first["final"], second["initial"], rtol=0, atol=0)
+    torch.testing.assert_close(
+        first["final"]["memory_embeddings"], second["initial"]["memory_embeddings"], rtol=0, atol=0
+    )
+    for name, value in first["final"]["adapter"].items():
+        torch.testing.assert_close(value, second["initial"]["adapter"][name], rtol=0, atol=0)
+        if writer_mode == "dual_lora":
+            prefix, suffix = name.rsplit(".", 1)
+            torch.testing.assert_close(
+                value, second["initial"]["adapter"][f"{prefix}.append.{suffix}"], rtol=0, atol=0
+            )
     assert second["optimizer_initially_empty"] and second["gradients_initially_clear"]
-    assert [row["global_batch"] for row in records] == [1, 2]
+    assert [row["global_batch"] for row in records] == list(range(1, len(records) + 1))
     assert second["optimizer"].param_groups[0]["lr"] == 0.02
     assert all(state["step"] == 1 for state in second["optimizer"].state.values())
-    assert result["global_step"] == 2 and result["completed_steps"] == 1
+    assert result["global_step"] == len(records) and result["completed_steps"] == 1
     resolved = json.loads((tmp_path / method / second["stage"] / "config.json").read_text())
     assert resolved["training"]["init_checkpoint"] == first["result"]["checkpoint"]
     assert json.loads(paths[1].read_text())["training"]["init_checkpoint"] is None
     checkpoint = read_checkpoint(result["checkpoint"])
-    assert checkpoint["run"]["step_offset"] == 1
-    assert checkpoint["run"]["initialization"]["checkpoint"] == first["result"]["checkpoint"]
-    if source is not None:
-        assert checkpoint["run"]["pretraining"]["checkpoint"] == source
+    assert checkpoint["run"]["step_offset"] == len(records) - 1
+    assert checkpoint["run"]["initialization"]["checkpoint"] == records[-2]["result"]["checkpoint"]
+    if dynamic:
+        assert checkpoint["run"]["pretraining"]["checkpoint"] == first["result"]["checkpoint"]
+        assert second["model"] is records[2]["model"]
+        assert second["module"] is records[2]["module"]
+        torch.testing.assert_close(second["final"], records[2]["initial"], rtol=0, atol=0)
     manifest = json.loads((tmp_path / method / "experiment.json").read_text())
+    assert manifest["method"] == method
     assert list(manifest["stages"]) == [row["stage"] for row in records]
 
 
@@ -376,13 +400,29 @@ def _distributed_stages(rank, rendezvous, paths):
         with pytest.MonkeyPatch.context() as monkeypatch:
             loads, records = install_small_training(monkeypatch)
             result = train.run_training(arguments(paths))
-            assert len(loads) == 1
-            assert records[0]["module"] is records[1]["module"]
-            assert isinstance(records[1]["module"], torch.nn.parallel.DistributedDataParallel)
-            assert [record["global_batch"] for record in records] == [2, 4]
-            assert result["global_step"] == 2
-            torch.testing.assert_close(records[0]["final"], records[1]["initial"], rtol=0, atol=0)
-            weights = records[1]["model"].codec.memory_embeddings.detach()
+            changed_writer = records[0]["model"].codec.writer_mode != (
+                records[-1]["model"].codec.writer_mode
+            )
+            assert len(loads) == (2 if changed_writer else 1)
+            assert (records[0]["module"] is records[1]["module"]) == (not changed_writer)
+            assert records[-2]["module"] is records[-1]["module"]
+            assert isinstance(records[-1]["module"], torch.nn.parallel.DistributedDataParallel)
+            assert [record["global_batch"] for record in records] == [
+                2 * (index + 1) for index in range(len(records))
+            ]
+            assert result["global_step"] == len(records)
+            for previous, current in zip(records[:-1], records[1:], strict=True):
+                torch.testing.assert_close(
+                    previous["final"]["memory_embeddings"],
+                    current["initial"]["memory_embeddings"],
+                    rtol=0,
+                    atol=0,
+                )
+                if previous["model"] is current["model"]:
+                    torch.testing.assert_close(
+                        previous["final"], current["initial"], rtol=0, atol=0
+                    )
+            weights = records[-1]["model"].codec.memory_embeddings.detach()
             replicas = [torch.empty_like(weights) for _ in range(2)]
             dist.all_gather(replicas, weights)
             torch.testing.assert_close(replicas[0], replicas[1], rtol=0, atol=0)
@@ -390,6 +430,19 @@ def _distributed_stages(rank, rendezvous, paths):
         dist.destroy_process_group()
 
 
-def test_two_rank_training_reuses_ddp_across_stages(tmp_path):
-    paths = stage_configs(tmp_path)
+@pytest.mark.parametrize(
+    "method,writer_mode",
+    [("icae_single", "local")] + [("memory_change", mode) for mode in ("tag", "mask", "dual_lora")],
+)
+def test_two_rank_training_reuses_ddp_until_writer_changes(tmp_path, method, writer_mode):
+    paths = stage_configs(
+        tmp_path,
+        method,
+        stages=("pretrain", "warmup", "policy") if method == "memory_change" else None,
+    )
+    if method == "memory_change":
+        for path in paths[1:]:
+            raw = json.loads(path.read_text())
+            raw["objective"]["writer_mode"] = writer_mode
+            path.write_text(json.dumps(raw))
     mp.spawn(_distributed_stages, args=(str(tmp_path / "rendezvous"), paths), nprocs=2, join=True)

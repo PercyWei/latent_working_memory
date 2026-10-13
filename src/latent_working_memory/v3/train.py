@@ -3,6 +3,7 @@
 import argparse
 from contextlib import ExitStack
 from dataclasses import replace
+import gc
 from pathlib import Path
 
 import torch.distributed as dist
@@ -22,7 +23,12 @@ from latent_working_memory.v3.runtime import (
     read_checkpoint,
     train_loop,
 )
-from latent_working_memory.v3.tracking import experiment_directory, update_method_tracking
+from latent_working_memory.v3.tracking import (
+    configure_posttraining_panel,
+    experiment_directory,
+    update_method_tracking,
+)
+from latent_working_memory.tracking_credentials import swanlab_api_key
 
 
 def training_configs(args):
@@ -65,14 +71,18 @@ def training_configs(args):
     first = configs[0]
     validate_stage_sequence(first.objective.method, [config.objective.stage for config in configs])
     if len(configs) > 1:
-        for config in configs[1:]:
+        for previous, config in zip(configs[:-1], configs[1:], strict=True):
             if (
                 config.model != first.model
                 or config.objective.method != first.objective.method
-                or config.objective.writer_mode != first.objective.writer_mode
                 or (
-                    first.objective.writer_mode == "tag"
-                    and config.objective.tag_tokens != first.objective.tag_tokens
+                    previous.objective.stage != "pretrain"
+                    and config.objective.writer_mode != previous.objective.writer_mode
+                )
+                or (
+                    previous.objective.stage != "pretrain"
+                    and previous.objective.writer_mode == "tag"
+                    and config.objective.tag_tokens != previous.objective.tag_tokens
                 )
                 or (
                     first.objective.method == "icae_multi"
@@ -126,7 +136,7 @@ def run_training(args):
     model = TokenMemoryTask(codec, tokenizer, config.objective)
     engine = TokenMemoryEngine(model, config.training, device)
     engine.initialize()
-    result, run = None, None
+    result, run, tracking = None, None, None
     with ExitStack() as stack:
         for index, config in enumerate(configs):
             if index:
@@ -134,13 +144,27 @@ def run_training(args):
                     config,
                     training=replace(config.training, init_checkpoint=result["checkpoint"]),
                 )
-                initialization = initialization_record(
-                    result["checkpoint"], run, result["completed_steps"], config
-                )
-                # 各阶段使用自身 seed；不再通过重建模型间接消耗随机数。
                 set_seed(config.training.seed)
-                model.cfg = config.objective
-                engine.reset_optimizer(config.training)
+                if config.objective.writer_mode != model.cfg.writer_mode:
+                    # 写入器会改变参数和 attention 结构，按已有初始化契约重建一次。
+                    model_config = config.model
+                    if model_config.revision is None and run["resolved_model_revision"] is not None:
+                        model_config = replace(
+                            model_config, revision=run["resolved_model_revision"]
+                        )
+                    del engine, model, codec, tokenizer
+                    gc.collect()
+                    codec, tokenizer = load_codec(model_config, device, config.objective)
+                    initialization = load_initialization(result["checkpoint"], codec, config)
+                    model = TokenMemoryTask(codec, tokenizer, config.objective)
+                    engine = TokenMemoryEngine(model, config.training, device)
+                    engine.initialize()
+                else:
+                    initialization = initialization_record(
+                        result["checkpoint"], run, result["completed_steps"], config
+                    )
+                    model.cfg = config.objective
+                    engine.reset_optimizer(config.training)
             splits, statistics = load_splits(config, tokenizer, codec.max_positions)
             run = make_run(
                 config,
@@ -153,6 +177,13 @@ def run_training(args):
                 ),
                 initialization=initialization,
             )
+            if (
+                index
+                and engine.rank == 0
+                and tracking is not None
+                and initialization["stage"] == "pretrain"
+            ):
+                configure_posttraining_panel(config, tracking, device, swanlab_api_key())
             stage = prepare_training(
                 config,
                 engine,
@@ -179,7 +210,7 @@ def run_training(args):
             # 下一阶段读取来源记录前，确保 rank 0 已写完结果与阶段指标。
             if engine.world_size > 1:
                 dist.barrier()
-            del splits, statistics
+            del splits, statistics, stage
     return result
 
 

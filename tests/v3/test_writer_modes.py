@@ -32,6 +32,7 @@ from latent_working_memory.v3.segmentation import example_rng
 from latent_working_memory.v3.training_data import make_data_loader
 from .test_model import build_model, randomize_adapter
 from .test_objective import TinyTokenizer, task, trajectory
+from .test_runtime import experiment_config
 
 
 MODES = ("tag", "mask", "dual_lora")
@@ -646,23 +647,33 @@ def test_mask_writer_rejects_flash_attention_at_configuration_boundary(tmp_path)
 
 @pytest.mark.parametrize("mode", ("local", *MODES))
 def test_cli_selects_only_dynamic_writers_and_gives_each_variant_its_own_directory(tmp_path, mode):
-    args = gpu_job.parse_args(
-        [
-            "--method",
-            "all",
-            "--writer-mode",
-            mode,
-            "--run-id",
-            "writers",
-            "--mode",
-            "smoke",
-            "--output-root",
-            str(tmp_path),
-            "--tracking",
-            "disabled",
-        ]
+    source = experiment_config(tmp_path / "source", "pretrain")
+    checkpoint, source_run = save_source_checkpoint(
+        tmp_path / "source/pretrain", build_model(), source
     )
-    _, _, jobs = job_plan.build_jobs(args)
+    (tmp_path / "source/pretrain/run.json").write_text(json.dumps(source_run))
+    jobs = []
+    for method in ("memory_change", "information_loss"):
+        args = gpu_job.parse_args(
+            [
+                "--method",
+                method,
+                "--checkpoint",
+                str(checkpoint),
+                "--writer-mode",
+                mode,
+                "--run-id",
+                "writers",
+                "--mode",
+                "smoke",
+                "--output-root",
+                str(tmp_path),
+                "--tracking",
+                "disabled",
+            ]
+        )
+        _, _, method_jobs = job_plan.build_jobs(args)
+        jobs.extend(method_jobs)
     for job in jobs:
         config = job.config
         if (
@@ -681,25 +692,35 @@ def test_cli_selects_only_dynamic_writers_and_gives_each_variant_its_own_directo
 
 
 def test_custom_tag_count_cli_does_not_modify_pretraining_or_baselines(tmp_path):
-    args = gpu_job.parse_args(
-        [
-            "--method",
-            "all",
-            "--writer-mode",
-            "tag",
-            "--tag-tokens",
-            "5",
-            "--run-id",
-            "tag-count",
-            "--mode",
-            "smoke",
-            "--output-root",
-            str(tmp_path),
-            "--tracking",
-            "disabled",
-        ]
+    source = experiment_config(tmp_path / "source", "pretrain")
+    checkpoint, source_run = save_source_checkpoint(
+        tmp_path / "source/pretrain", build_model(), source
     )
-    _, _, jobs = job_plan.build_jobs(args)
+    (tmp_path / "source/pretrain/run.json").write_text(json.dumps(source_run))
+    jobs = []
+    for method in ("memory_change", "information_loss"):
+        args = gpu_job.parse_args(
+            [
+                "--method",
+                method,
+                "--checkpoint",
+                str(checkpoint),
+                "--writer-mode",
+                "tag",
+                "--tag-tokens",
+                "5",
+                "--run-id",
+                "tag-count",
+                "--mode",
+                "smoke",
+                "--output-root",
+                str(tmp_path),
+                "--tracking",
+                "disabled",
+            ]
+        )
+        _, _, method_jobs = job_plan.build_jobs(args)
+        jobs.extend(method_jobs)
     for job in jobs:
         if job.config.objective.writer_mode == "tag":
             assert job.config.objective.tag_tokens == 5
@@ -710,10 +731,17 @@ def test_custom_tag_count_cli_does_not_modify_pretraining_or_baselines(tmp_path)
 
 @pytest.mark.parametrize("mode", ["local", "mask", "dual_lora"])
 def test_tag_count_cli_requires_tag_writer(tmp_path, mode):
+    source = experiment_config(tmp_path / "source", "pretrain")
+    checkpoint, source_run = save_source_checkpoint(
+        tmp_path / "source/pretrain", build_model(), source
+    )
+    (tmp_path / "source/pretrain/run.json").write_text(json.dumps(source_run))
     args = gpu_job.parse_args(
         [
             "--method",
             "memory_change",
+            "--checkpoint",
+            str(checkpoint),
             "--writer-mode",
             mode,
             "--tag-tokens",

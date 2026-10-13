@@ -10,7 +10,6 @@ from zoneinfo import ZoneInfo
 from latent_working_memory.v3.config import (
     DYNAMIC_METHODS,
     DYNAMIC_PRETRAIN_METHODS,
-    METHODS,
     ExperimentConfig,
     load_experiment,
     load_preset,
@@ -23,6 +22,7 @@ PRESETS = {
     "autocompressors": "autocompressors.json",
     "memory_change": "memory_change.json",
     "information_loss": "information_loss.json",
+    "dynamic_pretrain": "dynamic_pretrain.json",
 }
 LEVELS = {
     "smoke": {
@@ -67,9 +67,9 @@ def resolve_level(args):
     return level
 
 
-def resolve_experiment_id(args, init_checkpoint=None):
+def resolve_experiment_id(args):
     """校验初始化来源；优先使用显式 run-id，否则沿用来源编号。"""
-    source = init_checkpoint if init_checkpoint is not None else args.checkpoint
+    source = args.checkpoint
     if source is not None:
         checkpoint = source.resolve()
         if not (checkpoint / "state.pt").is_file():
@@ -81,10 +81,7 @@ def resolve_experiment_id(args, init_checkpoint=None):
             )
         source = json.loads(metadata.read_text(encoding="utf-8"))
         objective = source["config"]["objective"]
-        if (
-            objective["stage"] != "pretrain"
-            or objective["method"] not in DYNAMIC_PRETRAIN_METHODS
-        ):
+        if objective["stage"] != "pretrain" or objective["method"] not in DYNAMIC_PRETRAIN_METHODS:
             raise ValueError(
                 f"initialization requires a shared dynamic pretraining run: {metadata}"
             )
@@ -97,9 +94,13 @@ def resolve_experiment_id(args, init_checkpoint=None):
     return args.run_id or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M%S")
 
 
-def _training_job(config, args, directory, level, initialize_from=None, key=None):
+def _training_job(config, args, directory, level, method_directory, initialize_from=None):
     method, stage = config.objective.method, config.objective.stage
-    key = key or f"{method.replace('_', '-')}-{stage}"
+    key = (
+        "dynamic-pretrain"
+        if args.method == "dynamic_pretrain"
+        else f"{method.replace('_', '-')}-{stage}"
+    )
     objective = {}
     for name in ("qa_batch_size", "threshold_i", "threshold_d", "threshold_g", "eta"):
         value = getattr(args, name)
@@ -130,15 +131,6 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
     resolved_objective = replace(config.objective, **objective)
     is_pretrain = stage in {"pretrain", "lm"}
     dataset = args.pretrain_data if is_pretrain else args.qa_data
-    run_method = (
-        "dynamic_pretrain" if method in DYNAMIC_PRETRAIN_METHODS and stage == "pretrain" else method
-    )
-    method_directory = f"{run_method.replace('_', '-')}-k{config.model.memory_slots}"
-    if run_method in DYNAMIC_METHODS:
-        method_directory += f"+{resolved_objective.append_slots}"
-        method_directory += f"-{resolved_objective.writer_mode.replace('_', '-')}"
-    if args.mode != "full":
-        method_directory += f"_{args.mode}"
     experiment_dir = directory / "train" / method_directory
     stage_limit = getattr(args, f"{'pretrain' if is_pretrain else stage}_train_samples")
     if stage_limit is None:
@@ -195,7 +187,7 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
     )
     return TrainingJob(
         key=key,
-        method=run_method,
+        method=args.method,
         config=config,
         config_path=directory / "plan" / method_directory / f"{stage}.json",
         initialize_from=initialize_from,
@@ -205,82 +197,51 @@ def _training_job(config, args, directory, level, initialize_from=None, key=None
 
 def build_jobs(args):
     level = resolve_level(args)
-    methods = METHODS if args.method == "all" else (args.method,)
-    presets = {
-        method: load_preset(args.config or Path("configs/v3") / PRESETS[method])
-        for method in methods
-        if method != "dynamic_pretrain"
-    }
-    for method, configs in presets.items():
-        if any(config.objective.method != method for config in configs):
-            raise ValueError(f"preset method differs from requested method: {method}")
-        if method in DYNAMIC_METHODS and any(
-            config.objective.stage == "pretrain" for config in configs
-        ):
-            raise ValueError("dynamic pretraining must be declared in dynamic_pretrain.json")
-    initializations = (
-        [args.checkpoint]
-        if args.checkpoint is not None
-        else [
-            Path(configs[0].training.init_checkpoint)
-            for method, configs in presets.items()
-            if method in DYNAMIC_METHODS and configs[0].training.init_checkpoint is not None
-        ]
-    )
-    identities = {
-        resolve_experiment_id(args, checkpoint) for checkpoint in dict.fromkeys(initializations)
-    }
-    if len(identities) > 1:
-        raise ValueError("initialization checkpoints have different experiment_ids; specify --run-id")
-    args.run_id = next(iter(identities)) if identities else resolve_experiment_id(args)
-    directory = args.output_root.resolve() / args.run_id
-    jobs = []
-
-    shared = None
-    needs_pretrain = args.method == "dynamic_pretrain" or (
-        args.checkpoint is None
-        and any(
-            method in DYNAMIC_METHODS and configs[0].training.init_checkpoint is None
-            for method, configs in presets.items()
-        )
-    )
-    if needs_pretrain:
-        pretrain = load_preset(
-            args.config
-            if args.method == "dynamic_pretrain" and args.config is not None
-            else Path("configs/v3/dynamic_pretrain.json")
-        )
-        if (
-            len(pretrain) != 1
-            or pretrain[0].objective.method not in DYNAMIC_PRETRAIN_METHODS
-            or pretrain[0].objective.stage != "pretrain"
-        ):
-            raise ValueError("dynamic_pretrain.json must declare only the pretrain stage")
-        pretrain_job = _training_job(pretrain[0], args, directory, level, key="dynamic-pretrain")
-        jobs.append(pretrain_job)
-        shared = pretrain_job.key
-    for method, configs in presets.items():
-        initialize_from = (
-            shared
-            if method in DYNAMIC_METHODS and configs[0].training.init_checkpoint is None
-            else None
-        )
-        for config in configs:
-            job = _training_job(config, args, directory, level, initialize_from)
-            if shared is not None and initialize_from == shared:
-                # 与运行时初始化保持相同契约；激活重算不影响已有权重。
-                source_model = replace(
-                    pretrain_job.config.model,
-                    gradient_checkpointing=job.config.model.gradient_checkpointing,
+    configs = load_preset(args.config or Path("configs/v3") / PRESETS[args.method])
+    expected_method = "dynamic" if args.method == "dynamic_pretrain" else args.method
+    if any(config.objective.method != expected_method for config in configs):
+        raise ValueError(f"preset method differs from requested method: {args.method}")
+    if args.method == "dynamic_pretrain" and (
+        len(configs) != 1 or configs[0].objective.stage != "pretrain"
+    ):
+        raise ValueError("dynamic_pretrain requires only the pretrain stage")
+    if args.method in (*DYNAMIC_METHODS, "dynamic_pretrain"):
+        if configs[0].objective.stage == "pretrain":
+            if args.checkpoint is not None:
+                print(
+                    "[ignored] --checkpoint is ignored because stages include pretrain", flush=True
                 )
-                if source_model != job.config.model:
-                    raise ValueError(
-                        "dynamic model differs from automatic shared pretraining; "
-                        "prepare a matching checkpoint with --method dynamic_pretrain --config "
-                        "and pass --checkpoint"
-                    )
-            jobs.append(job)
-            initialize_from = job.key
+            args.checkpoint = None
+            configs = (
+                replace(configs[0], training=replace(configs[0].training, init_checkpoint=None)),
+                *configs[1:],
+            )
+        elif args.checkpoint is None:
+            raise ValueError("dynamic stages without pretrain require --checkpoint")
+    args.run_id = resolve_experiment_id(args)
+    directory = args.output_root.resolve() / args.run_id
+    method_directory = f"{args.method.replace('_', '-')}-k{configs[0].model.memory_slots}"
+    if args.method in DYNAMIC_METHODS:
+        objective = configs[-1].objective
+        posttraining = objective.stage != "pretrain"
+        append_slots = (
+            args.append_slots
+            if posttraining and args.append_slots is not None
+            else objective.append_slots
+        )
+        writer_mode = (
+            args.writer_mode
+            if posttraining and args.writer_mode is not None
+            else objective.writer_mode
+        )
+        method_directory += f"+{append_slots}-{writer_mode.replace('_', '-')}"
+    if args.mode != "full":
+        method_directory += f"_{args.mode}"
+    jobs, initialize_from = [], None
+    for config in configs:
+        job = _training_job(config, args, directory, level, method_directory, initialize_from)
+        jobs.append(job)
+        initialize_from = job.key
     return directory, level, jobs
 
 
@@ -336,7 +297,4 @@ def build_resume_jobs(args):
     args.mode = plan["mode"]
     args.run_id = config.training.experiment_id
     args.tracking = "online" if config.training.swanlab_project is not None else "disabled"
-    args.max_new_tokens = plan["max_new_tokens"]
-    if jobs[-1].config.objective.stage in {"qa", "policy"}:
-        args.qa_data = Path(jobs[-1].config.training.dataset_dir)
     return directory, plan["limits"], jobs

@@ -5,10 +5,12 @@ from pathlib import Path
 import pytest
 
 from latent_working_memory.v3.config import (
+    EvaluationConfig,
     ExperimentConfig,
     ModelConfig,
     ObjectiveConfig,
     TrainingConfig,
+    load_evaluation,
     load_experiment,
     load_preset,
     validate_stage_sequence,
@@ -368,14 +370,28 @@ def test_presets_expand_explicit_stage_sequences_without_changing_other_options(
         assert "stage_max_train_samples" not in config.to_dict()["training"]
 
 
-def test_preset_expands_independent_stage_budgets(tmp_path):
-    raw = json.loads(Path("configs/v3/icae_single.json").read_text())
-    raw["training"]["stage_max_train_samples"] = {"pretrain": 37, "qa": None}
+@pytest.mark.parametrize("method", ["icae_single", "memory_change", "information_loss"])
+def test_preset_expands_independent_stage_budgets(tmp_path, method):
+    raw = json.loads((Path("configs/v3") / f"{method}.json").read_text())
+    dynamic = method in {"memory_change", "information_loss"}
+    stages = ["pretrain", "warmup", "policy"] if dynamic else ["pretrain", "qa"]
+    raw["objective"]["stages"] = stages
+    if dynamic:
+        raw["objective"].update(writer_mode="tag", tag_tokens=5, bptt_steps=2)
+    raw["training"]["stage_max_train_samples"] = {
+        stage: 37 if stage == "pretrain" else None for stage in stages
+    }
     path = tmp_path / "preset.json"
     path.write_text(json.dumps(raw))
-    pretrain, qa = load_preset(path)
-    assert pretrain.training.max_train_samples == 37
-    assert qa.training.max_train_samples is None
+    configs = load_preset(path)
+    assert configs[0].training.max_train_samples == 37
+    assert all(config.training.max_train_samples is None for config in configs[1:])
+    if dynamic:
+        assert configs[0].objective.writer_mode == "local"
+        assert configs[0].objective.bptt_steps is None
+        assert all(config.objective.writer_mode == "tag" for config in configs[1:])
+        assert all(config.objective.tag_tokens == 5 for config in configs[1:])
+        assert all(config.objective.bptt_steps == 2 for config in configs[1:])
 
 
 @pytest.mark.parametrize(
@@ -413,8 +429,18 @@ def test_icae_accepts_full_pipeline_and_single_stage_presets(method, stages):
 
 
 @pytest.mark.parametrize("method", ["memory_change", "information_loss"])
-@pytest.mark.parametrize("stages", [["warmup", "policy"], ["warmup"], ["policy"], ["pretrain"]])
-def test_dynamic_accepts_qa_pipeline_subsets_and_separate_shared_pretraining(method, stages):
+@pytest.mark.parametrize(
+    "stages",
+    [
+        ["pretrain", "warmup", "policy"],
+        ["pretrain", "warmup"],
+        ["warmup", "policy"],
+        ["warmup"],
+        ["policy"],
+        ["pretrain"],
+    ],
+)
+def test_dynamic_accepts_continuous_pipeline_subsets(method, stages):
     assert validate_stage_sequence(method, stages) == tuple(stages)
 
 
@@ -459,9 +485,7 @@ def test_legacy_autocompressors_preset_keeps_lm_stage_and_budget(tmp_path):
         ("icae_multi", ["pretrain", "policy"]),
         ("memory_change", ["policy", "warmup"]),
         ("memory_change", ["warmup", "warmup"]),
-        ("memory_change", ["pretrain", "warmup"]),
         ("memory_change", ["pretrain", "policy"]),
-        ("information_loss", ["pretrain", "warmup", "policy"]),
         ("information_loss", ["warmup", "qa", "policy"]),
         ("autocompressors", ["lm", "lm"]),
         ("autocompressors", ["pretrain", "lm"]),
@@ -523,7 +547,7 @@ def test_preset_validates_each_expanded_objective(tmp_path):
         load_preset(preset)
 
 
-def test_runtime_loader_rejects_preset_and_round_trips_saved_stage_configs(tmp_path):
+def test_runtime_loaders_reject_presets_and_round_trip_stage_and_evaluation_configs(tmp_path):
     preset = Path("configs/v3/icae_single.json")
     with pytest.raises(ValueError, match="use load_preset"):
         load_experiment(preset)
@@ -531,6 +555,12 @@ def test_runtime_loader_rejects_preset_and_round_trips_saved_stage_configs(tmp_p
         saved = tmp_path / f"{config.objective.stage}.json"
         saved.write_text(json.dumps(config.to_dict()))
         assert load_experiment(saved) == config
+    saved = tmp_path / "eval.json"
+    saved.write_text(json.dumps({"dataset_dir": "independent-factqa"}))
+    assert load_evaluation(saved) == EvaluationConfig("independent-factqa")
+    assert load_evaluation(saved).split == "test"
+    assert load_evaluation(saved).seed == 20261004
+    assert load_evaluation(saved).max_new_tokens == 64
 
 
 @pytest.mark.parametrize("method", ["dynamic", "memory_change", "information_loss"])

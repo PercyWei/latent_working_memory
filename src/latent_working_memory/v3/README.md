@@ -13,8 +13,8 @@
 | `icae_single` | 完整历史一次压缩为 $K$ slots | AE／LM → QA |
 | `icae_multi` | 完整历史均分为 n 块，独立压缩后拼接，总容量为 $K$ slots | 多段 AE／LM → 多段 QA |
 | `autocompressors` | 新段与累计记忆共同压缩，n 次追加合计 $K$ slots | 多段 LM |
-| `memory_change` | 覆盖末块或追加 $\Delta K$ slots，按记忆表示变化决定 | AE／LM →  warmup → policy  |
-| `information_loss` | 同上的写入方式，按旧信息损失决定 | AE／LM → warmup → policy   |
+| `memory_change` | 覆盖末块或追加 $\Delta K$ slots，按记忆表示变化决定 | 复用 AE／LM → warmup → policy |
+| `information_loss` | 同上的写入方式，按旧信息损失决定 | 复用 AE／LM → warmup → policy |
 
 五组使用相同的模型设置，各自采用表中的记忆组织和训练目标：
 
@@ -125,13 +125,13 @@
 
 `memory_change` 与 `information_loss` 使用相同的数据与训练流程，仅 `policy` 阶段的扩容规则不同：
 
-共享预训练的 `objective.method` 为 `dynamic`，仅运行 `pretrain`；后训练分别使用两种方法的名称。
+默认后训练配置声明 `warmup → policy`，通过 `--checkpoint` 复用预训练。单独的共享预训练使用 `objective.method="dynamic"` 和 `stages=["pretrain"]`；也可在任一动态方法的自定义配置中显式声明 `pretrain → warmup → policy`，从基座模型运行完整流程。
 
 共享预训练输入为 $[X,S_K]$，将完整正文一次压缩为 K slots，不输入历史记忆或追加／覆盖动作。AE／LM 损失只训练一套 LoRA 和 gist embeddings，使记忆能被冻结 Decoder 使用；它为四种更新方式提供共同基础，各自的写入行为在后训练中学习。
 
 | 阶段 | 数据与记忆更新 | 两组关系 |
 |---|---|---|
-| `pretrain` | FineWeb Multisegment 完整正文一次压缩为 K slots，计算 AE 或 LM 损失 | 只训练一次，复用同一 checkpoint |
+| `pretrain` | FineWeb Multisegment 完整正文一次压缩为 K slots，计算 AE 或 LM 损失 | 默认单独训练一次并复用；完整流程也可显式声明 |
 | `warmup` | FineWeb FactQA 原始段界逐段压缩；首次写入 K slots，后续按 `objective.append_probability`（默认 0.5）选择追加或覆盖，计算任务 QA 损失 | 分别训练 |
 | `policy` | FineWeb FactQA 原始段界逐段压缩；首次写入 K slots，后续按各自固定规则追加或覆盖，沿选中路径计算任务 QA 损失，训练写入器的可训练参数 | 分别训练 |
 
@@ -171,28 +171,33 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 
 | 参数 | 用法 |
 |---|---|
-| `--method` | 默认 `all`，运行五种方法；或指定运行单方法 |
+| `--method` | 普通训练必须显式指定，每次运行一种方法；恢复与单独评估可省略 |
 | `--mode` | 默认 `full`；试跑指定 `smoke` |
 | `--config <文件>` | 替换所选单方法的默认配置；省略时读取 `configs/v3/` |
 | `--writer-mode` | 动态后训练写入方式：`local`（默认）、`tag`、`mask`、`dual_lora` |
 | `--tag-tokens` | 每种动作的控制 token 数 m，默认 3；仅用于动态 `tag` 写入 |
+| `--eval-data`、`--eval-seed` | 仅控制最终评估的数据与抽样 seed，独立于训练设置 |
 
 - **配置覆盖**：`objective.stages` 声明阶段顺序，显式 CLI 超参数覆盖配置值；更多参数见[运行指南](scripts/README.md#4-调整参数)。
-- **阶段执行**：同一方法的连续阶段共用模型和训练进程，切换时重置优化器；不同方法分别启动。
+- **阶段执行**：同一方法的连续阶段在同一训练进程执行，切换时重置优化器；不同方法分别启动。
 
 ### 4.2 复用预训练与中断恢复
 
 - **共享预训练**：用 `--method dynamic_pretrain` 单独训练一次；随后分别运行 `memory_change` 和 `information_loss`，通过 `--checkpoint` 指向同一 checkpoint 目录。命令见[复用指南](scripts/README.md#3-复用动态预训练)。
-- **实验系列**：同系列后训练省略 `--run-id` 时继承来源编号；跨系列复用时显式指定新的 `--run-id`。
+- **完整流程**：动态方法的自定义配置包含 `pretrain` 时，按该 JSON 从基座模型执行已声明阶段；传入的普通 `--checkpoint` 会提示忽略，也不用于继承 `run-id`。未声明 `pretrain` 时必须提供预训练 checkpoint，启动器不自动补充阶段。
+- **实验系列**：复用共享预训练时，同系列后训练省略 `--run-id` 则继承来源编号；跨系列复用时显式指定新的 `--run-id`。
 - **来源记录**：SwanLab 的 `pretraining` 配置与本地 `run.json` 记录来源编号、名称、URL、checkpoint 和 step。保留来源目录中的 `pretrain/run.json`，以及在线运行生成的 `swanlab.json`。
 - **已有产物**：保留旧预训练的原路径与配置，可继续通过 `--checkpoint` 使用，不直接重命名旧目录。
-- **中断恢复**：使用 `--resume --checkpoint <目录>`，沿用保存配置恢复当前阶段，再完成该方法的剩余阶段。命令见[恢复指南](scripts/README.md#23-中断恢复)。
+- **中断恢复**：使用 `--resume --checkpoint <目录>`，沿用保存的训练配置恢复当前阶段，再完成该方法的剩余阶段；最终评估配置可独立调整。命令见[恢复指南](scripts/README.md#23-中断恢复)。
 
 ## 五、评估与产物
 
 ### 5.1 评估方式与指标
 
 - **评估对象**：默认使用最后一个 checkpoint，在同一批 FineWeb FactQA 轨迹的最终记忆上回答评估题；门控题不计入质量指标。
+- **评估配置**：有最终 QA 评估的五种方法在训练前保存 `plan/<method-dir>/eval.json`，由 `job.json` 引用其路径，字段为 `dataset_dir`、`split`、`seed`、`max_trajectories`、`max_new_tokens`。正常训练、续训与补评估共用该配置。
+- **独立设置**：初次省略 `--eval-data` 时采用 `--qa-data`，存档后按评估配置读取；`--eval-seed` 独立于训练 seed，默认 `20261004`。补评估沿用存档设置，显式评估参数更新该配置；命令见[评估指南](scripts/README.md#22-单独评估)。
+- **数据选择**：`--eval-data` 可指定不同于 QA 训练的数据集；最终评估仍检查所选轨迹与 checkpoint 预训练来源的隔离。已有 `eval.json` 时，`--qa-data` 不影响最终评估。
 - **质量**：记录答案 NLL、EM（精确匹配）和 F1，生成使用 greedy decoding。按 all／old／new 及段距离统计；new 指末段事实，old 指更早事实，段距离按 FactQA 原始段界计算。
 - **容量**：记录最终 slots 与各更新点保存状态的平均 slots，再按轨迹平均；ICAE-single 只有一次压缩状态。
 - **成本**：记忆构建耗时包含候选写入及门控计算，不含最终 QA 读取与答案生成。
@@ -201,22 +206,22 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 
 ```text
 artifacts/v3/<run-id>/
-├── plan/<method-dir>/           阶段配置、job.json、日志、result.json
+├── plan/<method-dir>/           阶段配置、eval.json、job.json、日志、result.json
 ├── train/<method-dir>/<stage>/  config.json、run.json、metrics.jsonl、checkpoints/
 ├── eval/<method-dir>/<stage>/   summary.json、trajectories.jsonl
-└── compare/                     points.json、points.csv、compare.log、result.json
+└── compare/                     独立比较生成的 points.json、points.csv
 ```
 
 - **运行目录**：`run-id` 可用 `--run-id` 指定；复用共享预训练且省略时继承来源编号，其余情况按上海时间生成 `YYYYMMDD-HHMMSS`。父目录由 `--output-root` 控制。
-- **方法目录**：三个 baseline 和动态预训练使用 `<method>-k<K>`；动态后训练统一使用 `<method>-k<K>+<ΔK>-<writer>`，`<writer>` 为 `local`、`tag`、`mask` 或 `dual-lora`，试跑最后添加 `_<mode>`。例如 `memory-change-k512+32-local`、`memory-change-k512+32-tag_smoke`。方法名中的 `_` 转为 `-`，共享预训练用 `dynamic-pretrain`；K、ΔK 分别来自 `model.memory_slots`、`objective.append_slots`。
+- **方法目录**：三个 baseline 和独立动态预训练使用 `<method>-k<K>`；两种动态方法统一使用 `<method>-k<K>+<ΔK>-<writer>`，显式完整流程的 `pretrain` 也保存在该方法目录内。`<writer>` 为 `local`、`tag`、`mask` 或 `dual-lora`，试跑最后添加 `_<mode>`。例如 `memory-change-k512+32-local`、`memory-change-k512+32-tag_smoke`。方法名中的 `_` 转为 `-`，共享预训练用 `dynamic-pretrain`；K、ΔK 分别来自 `model.memory_slots`、`objective.append_slots`。
 - **Checkpoint**：目录为 `checkpoints/global_step_<阶段step>/`。`state.pt` 保存新增权重、优化器及运行状态，`data_<rank>.pt` 保存各卡加载器状态；每阶段默认保留最近两个，初始化、恢复和评估均传入该目录。外层结构及文件布局不变；原 adapter 字典中，`tag` 保存 $2\times m\times d$ 的 `tag_embeddings`，`dual_lora` 保存两套 LoRA。恢复与评估使用保存的写入方式和 m。
-- **结果与比较**：`summary.json` 汇总指标，`trajectories.jsonl` 保存动作、分数、计时与逐题结果。本次调用有至少两个评估结果时生成 `compare/` 产物。
+- **结果与比较**：`summary.json` 汇总指标，`trajectories.jsonl` 保存动作、分数、计时与逐题结果。比较单独调用 [compare.py](compare.py)，导出 `points.json` 与 `points.csv`；命令见[运行指南](scripts/README.md#5-查看结果)。比较要求 split、实际选中的轨迹与题池签名、QA prompt 和生成 token 上限一致；各方法的训练数据与训练配置可不同。
 
 ### 5.3 SwanLab 组织与展示
 
-- **组织**：默认 project 为 `latent-working-memory-v3`；`--group` 独立指定，默认采用当前 `run-id`。同一方法的训练、验证和最终评估共用一个 run；从头运行 `all` 共六个 run，包含独立的共享预训练。
+- **组织**：默认 project 为 `latent-working-memory-v3`；`--group` 独立指定，默认采用当前 `run-id`。同一方法的训练、验证和最终评估共用一个 run；独立共享预训练有自己的 run。
 - **名称**：使用 `<method-dir>_<run-id>`，各方法有独立的云端 ID；跨系列复用使用当前系列编号，预训练来源通过 `pretraining` 配置追溯。
-- **横轴**：训练／验证使用累计 optimizer step；动态后训练的 step 不包含共享预训练。
+- **横轴**：训练／验证使用本次连续阶段的累计 optimizer step；复用外部共享预训练 checkpoint 时，不计来源预训练 step。
 - **曲线**：展示目标损失、旧／新 QA NLL、容量、梯度范数、耗时和训练步峰值显存。
 - **追加比例**：动态 warmup／policy 将 `train/append_ratio` 与 `dev/append_ratio` 合并为一张原生折线图，横轴为累计 optimizer step。比例为追加次数／（追加次数＋覆盖次数），不计首次写入；仅记录有决策的训练步与实际验证点。
 - **阶段与进度**：`train/stage` 中，1 = pretrain、2 = ICAE QA／动态方法 warmup、3 = 动态方法 policy；`train/epoch` 以小数记录当前阶段累计处理样本数／训练集样本数，阶段切换时重新计数。

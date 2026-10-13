@@ -18,6 +18,7 @@ from latent_working_memory.v3.config import (
     ModelConfig,
     ObjectiveConfig,
     TrainingConfig,
+    load_evaluation,
 )
 from latent_working_memory.v3.data import load_factqa
 from latent_working_memory.v3.engine import initialize_device
@@ -268,26 +269,12 @@ def evaluate(task, trajectories, output_dir, split, max_new_tokens, metadata=Non
     return summary
 
 
-def _positive_integer(value):
-    integer = int(value)
-    if integer < 1:
-        raise argparse.ArgumentTypeError("must be a positive integer")
-    return integer
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", required=True)
     parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--dataset-dir", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--split", required=True, choices=("dev", "test"))
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--max-new-tokens", type=_positive_integer, default=64)
-    parser.add_argument(
-        "--max-trajectories",
-        type=_positive_integer,
-        help="使用训练 seed 确定性选择完整评估轨迹；省略时评估完整 split",
-    )
     parser.add_argument(
         "--log-to-swanlab", action="store_true", help="追加到原训练 run，保留训练配置"
     )
@@ -298,6 +285,7 @@ def main(argv=None):
         raise ValueError(
             "final QA evaluation supports a single process; do not launch with torchrun"
         )
+    evaluation_config = load_evaluation(args.config)
     device = initialize_device(args.device)
     checkpoint = read_checkpoint(args.checkpoint)
     raw = checkpoint["run"]["config"]
@@ -316,25 +304,29 @@ def main(argv=None):
     codec, tokenizer = load_codec(model_config, device, config.objective)
     codec.load_trainable_state_dict(checkpoint["trainable"])
     task = TokenMemoryTask(codec, tokenizer, config.objective)
-    trajectories = load_factqa(args.dataset_dir, tokenizer)[args.split]
+    trajectories = load_factqa(evaluation_config.dataset_dir, tokenizer)[evaluation_config.split]
     _check_qa_sources(trajectories, checkpoint["run"]["pretraining_sources"])
-    if config.objective.stage in {"qa", "warmup", "policy"}:
-        if dataset_identity(trajectories) != checkpoint["run"]["source_data"][args.split]:
-            raise ValueError("evaluation FactQA split differs from the checkpoint's original split")
+    source_data = dataset_identity(trajectories)
     total_trajectories = len(trajectories)
     trajectories = select_examples(
-        trajectories, args.max_trajectories, config.training.seed, args.split, pretraining=False
+        trajectories,
+        evaluation_config.max_trajectories,
+        evaluation_config.seed,
+        evaluation_config.split,
+        pretraining=False,
     )
     summary = evaluate(
         task,
         trajectories,
         args.output_dir,
-        args.split,
-        args.max_new_tokens,
+        evaluation_config.split,
+        evaluation_config.max_new_tokens,
         metadata={
             "checkpoint": str(Path(args.checkpoint).resolve()),
-            "dataset_dir": str(Path(args.dataset_dir).resolve()),
+            "dataset_dir": str(Path(evaluation_config.dataset_dir).resolve()),
             "config": config.to_dict(),
+            "evaluation_config": asdict(evaluation_config),
+            "source_data": source_data,
             "resolved_model_revision": revision,
             "device": args.device,
             "autocast_dtype": "bfloat16" if device.type == "cuda" else None,
@@ -343,8 +335,8 @@ def main(argv=None):
             "selection": {
                 "total": total_trajectories,
                 "selected": len(trajectories),
-                "limit": args.max_trajectories,
-                "seed": config.training.seed,
+                "limit": evaluation_config.max_trajectories,
+                "seed": evaluation_config.seed,
             },
         },
     )
@@ -357,7 +349,7 @@ def main(argv=None):
         )
     quality = summary["quality"]["all"]
     print(
-        f"[evaluation] method={summary['method']} split={args.split} "
+        f"[evaluation] method={summary['method']} split={evaluation_config.split} "
         f"trajectories={summary['trajectories']} nll={quality['nll']:.4f} "
         f"em={quality['em']:.4f} f1={quality['f1']:.4f} "
         f"summary={Path(args.output_dir) / 'summary.json'}",

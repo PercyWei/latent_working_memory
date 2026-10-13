@@ -49,9 +49,10 @@ def experiment_name(training):
 def tracking_method(config, previous=None):
     if config.objective.method in DYNAMIC_PRETRAIN_METHODS and config.objective.stage == "pretrain":
         # 旧预训练会话继续沿用已保存的身份，不改名或改写云端配置。
-        if previous is not None and previous["method"] == "shared-pretrain":
+        if previous is not None and previous["method"] in {"shared-pretrain", "dynamic-pretrain"}:
             return previous["method"]
-        return "dynamic-pretrain"
+        if config.objective.method == "dynamic":
+            return "dynamic-pretrain"
     return config.objective.method
 
 
@@ -187,6 +188,8 @@ def method_tracking_run(config, run, device, api_key=None):
         else (
             ("fineweb", "fineweb-factqa")
             if method in {"icae_single", "icae_multi"}
+            or method in DYNAMIC_METHODS
+            and "pretrain" in combined["stages"]
             else ("fineweb-factqa",)
         )
     )
@@ -272,15 +275,28 @@ def method_tracking_run(config, run, device, api_key=None):
                 identity_path, {**expected_identity, "id": tracking.id, "url": tracking.url}
             )
         _save_record(record_path, combined)
-        if method in DYNAMIC_METHODS and config.objective.stage in {"warmup", "policy"}:
-            rng = capture_rng(device)
-            try:
-                _configure_append_ratio_panel(
-                    tracking, root, method, experiment_name(config.training), api_key
-                )
-            finally:
-                restore_rng(rng, device)
+        configure_posttraining_panel(config, tracking, device, api_key)
         yield tracking
+
+
+def configure_posttraining_panel(config, tracking, device, api_key):
+    """进入动态后训练前配置追加比例面板，保留训练随机状态。"""
+    if config.objective.method not in DYNAMIC_METHODS or config.objective.stage not in {
+        "warmup",
+        "policy",
+    }:
+        return
+    rng = capture_rng(device)
+    try:
+        _configure_append_ratio_panel(
+            tracking,
+            experiment_directory(config.training),
+            config.objective.method,
+            experiment_name(config.training),
+            api_key,
+        )
+    finally:
+        restore_rng(rng, device)
 
 
 def update_method_tracking(config, run, tracking):

@@ -301,26 +301,27 @@ def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
     published = []
     monkeypatch.setattr(evaluation, "_training_run_directory", lambda *args: tmp_path)
     monkeypatch.setattr(evaluation, "_append_evaluation", lambda *args: published.append(args))
+    evaluation_config = {
+        "dataset_dir": "evaluation-data",
+        "split": "test",
+        "seed": 42,
+        "max_trajectories": None,
+        "max_new_tokens": 8,
+    }
+    evaluation_path = tmp_path / "eval.json"
+    evaluation_path.write_text(json.dumps(evaluation_config))
     arguments = [
+        "--config",
+        str(evaluation_path),
         "--checkpoint",
         str(path),
-        "--dataset-dir",
-        "evaluation-data",
         "--output-dir",
         str(tmp_path / "evaluation"),
-        "--split",
-        "test",
         "--device",
         "cpu",
-        "--max-new-tokens",
-        "8",
     ]
     if log_to_swanlab:
         arguments.append("--log-to-swanlab")
-    if changed_split:
-        with pytest.raises(ValueError, match="checkpoint's original split"):
-            evaluation.main(arguments)
-        return
     evaluation.main(arguments)
     summary = json.loads((tmp_path / "evaluation" / "summary.json").read_text())
     assert loaded[0][0].revision == "resolved-commit"
@@ -329,6 +330,10 @@ def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
     assert summary["metadata"]["resolved_model_revision"] == "resolved-commit"
     assert summary["metadata"]["global_step"] == 27
     assert summary["metadata"]["config"]["model"]["revision"] is None
+    assert summary["metadata"]["evaluation_config"] == evaluation_config
+    assert summary["metadata"]["source_data"] == evaluation.dataset_identity([trajectory()])
+    assert summary["metadata"]["selection"]["seed"] == 42
+    assert summary["max_new_tokens"] == 8
     assert [entry[-1] for entry in published] == ([27] if log_to_swanlab else [])
 
 
@@ -348,14 +353,12 @@ def test_cli_rejects_distributed_launch_before_loading_or_writing(monkeypatch):
     with pytest.raises(ValueError, match="single process"):
         evaluation.main(
             [
+                "--config",
+                "unused.json",
                 "--checkpoint",
                 "unused.pt",
-                "--dataset-dir",
-                "unused",
                 "--output-dir",
                 "unused",
-                "--split",
-                "test",
                 "--device",
                 "cpu",
             ]
@@ -542,7 +545,7 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
     config = ExperimentConfig(
         ModelConfig(model_name_or_path="local-tiny"),
         ObjectiveConfig(method="icae_single", stage="qa"),
-        TrainingConfig(dataset_dir="train-data", output_dir="training", seed=42),
+        TrainingConfig(dataset_dir="train-data", output_dir="training", seed=7),
     )
     selected = evaluation.select_examples(examples, 2, 42, "dev", pretraining=False)
     unselected = next(row for row in examples if row not in selected)
@@ -553,7 +556,7 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
             "step_offset": 0,
             "pretraining": None,
             "pretraining_sources": {"document_ids": [], "dedup_clusters": []},
-            # 小规模训练的 dev 子集与完整源分别记录，评估校验完整源。
+            # 训练数据记录与独立评估配置可以不同。
             "data": {"dev": evaluation.dataset_identity(selected)},
             "source_data": {"dev": evaluation.dataset_identity(examples)},
         },
@@ -578,25 +581,27 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
             for name in ("train", "dev", "test")
         },
     )
+    evaluation_config = {
+        "dataset_dir": "data",
+        "split": "dev",
+        "seed": 42,
+        "max_trajectories": 2,
+        "max_new_tokens": 64,
+    }
+    evaluation_path = tmp_path / "eval.json"
+    evaluation_path.write_text(json.dumps(evaluation_config))
     arguments = [
+        "--config",
+        str(evaluation_path),
         "--checkpoint",
         "unused.pt",
-        "--dataset-dir",
-        "data",
         "--output-dir",
         str(tmp_path),
-        "--split",
-        "dev",
         "--device",
         "cpu",
-        "--max-trajectories",
-        "2",
     ]
-    if problem is not None:
-        message = (
-            "checkpoint's original split" if problem == "source_changed" else "overlap pretraining"
-        )
-        with pytest.raises(ValueError, match=message):
+    if problem == "pretraining_overlap":
+        with pytest.raises(ValueError, match="overlap pretraining"):
             evaluation.main(arguments)
         assert not (tmp_path / "summary.json").exists()
         assert not task.codec.generated
@@ -605,6 +610,9 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
     summary = json.loads((tmp_path / "summary.json").read_text())
     assert summary["dataset_signature"] == evaluation.dataset_identity(selected)["fingerprint"]
     assert summary["metadata"]["selection"] == {"total": 6, "selected": 2, "limit": 2, "seed": 42}
+    assert summary["metadata"]["evaluation_config"] == evaluation_config
+    assert summary["metadata"]["source_data"] == evaluation.dataset_identity(examples)
+    assert summary["metadata"]["config"]["training"]["seed"] == 7
     assert summary["quality"]["all"]["questions"] == 4
     records = [
         json.loads(line) for line in (tmp_path / "trajectories.jsonl").read_text().splitlines()
@@ -636,7 +644,7 @@ def test_cli_ignores_training_length_limits_and_selects_from_complete_factqa_spl
             output_dir="training",
             max_input_tokens=1,
             max_qa_input_tokens=max_qa_input_tokens,
-            seed=42,
+            seed=7,
         ),
     )
     checkpoint = {
@@ -668,24 +676,32 @@ def test_cli_ignores_training_length_limits_and_selects_from_complete_factqa_spl
             for name in ("train", "dev", "test")
         },
     )
+    evaluation_config = {
+        "dataset_dir": "data",
+        "split": "test",
+        "seed": 42,
+        "max_trajectories": max_trajectories,
+        "max_new_tokens": 64,
+    }
+    evaluation_path = tmp_path / "eval.json"
+    evaluation_path.write_text(json.dumps(evaluation_config))
     arguments = [
+        "--config",
+        str(evaluation_path),
         "--checkpoint",
         "unused.pt",
-        "--dataset-dir",
-        "data",
         "--output-dir",
         str(tmp_path),
-        "--split",
-        "test",
         "--device",
         "cpu",
     ]
-    if max_trajectories is not None:
-        arguments.extend(["--max-trajectories", str(max_trajectories)])
     evaluation.main(arguments)
     summary = json.loads((tmp_path / "summary.json").read_text())
     assert summary["dataset_signature"] == evaluation.dataset_identity(selected)["fingerprint"]
     assert summary["metadata"]["config"]["training"]["max_input_tokens"] == 1
+    assert summary["metadata"]["config"]["training"]["seed"] == 7
+    assert summary["metadata"]["evaluation_config"] == evaluation_config
+    assert summary["metadata"]["source_data"] == evaluation.dataset_identity(examples)
     assert summary["metadata"]["selection"] == {
         "total": 3,
         "selected": len(selected),
@@ -706,25 +722,32 @@ def test_cli_ignores_training_length_limits_and_selects_from_complete_factqa_spl
 
 
 @pytest.mark.parametrize("limit", ["0", "-1", "1.5"])
-def test_cli_rejects_invalid_trajectory_limits_before_model_load(monkeypatch, limit):
+def test_cli_rejects_invalid_trajectory_limits_before_model_load(tmp_path, monkeypatch, limit):
     def unexpected_load(path):
-        raise AssertionError("invalid CLI argument must not load a checkpoint")
+        raise AssertionError("invalid evaluation config must not load a checkpoint")
 
     monkeypatch.setattr(evaluation, "read_checkpoint", unexpected_load)
-    with pytest.raises(SystemExit):
+    evaluation_path = tmp_path / "eval.json"
+    evaluation_path.write_text(
+        json.dumps(
+            {
+                "dataset_dir": "unused",
+                "split": "dev",
+                "seed": 42,
+                "max_trajectories": json.loads(limit),
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="max_trajectories"):
         evaluation.main(
             [
+                "--config",
+                str(evaluation_path),
                 "--checkpoint",
-                "unused",
-                "--dataset-dir",
                 "unused",
                 "--output-dir",
                 "unused",
-                "--split",
-                "dev",
                 "--device",
                 "cpu",
-                "--max-trajectories",
-                limit,
             ]
         )

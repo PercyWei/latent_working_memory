@@ -1,8 +1,7 @@
 """GPU 实验入口：连续训练与评估，或从已有 checkpoint 单独补跑评估。"""
 
 import argparse
-from dataclasses import replace
-from itertools import groupby
+from dataclasses import asdict, replace
 import json
 import math
 import os
@@ -13,7 +12,13 @@ import subprocess
 import sys
 
 from latent_working_memory.v3 import job_plan
-from latent_working_memory.v3.config import DYNAMIC_METHODS, METHODS, WRITER_MODES
+from latent_working_memory.v3.config import (
+    DYNAMIC_METHODS,
+    METHODS,
+    WRITER_MODES,
+    EvaluationConfig,
+    load_evaluation,
+)
 from latent_working_memory.tracking_credentials import swanlab_api_key
 
 
@@ -60,7 +65,7 @@ def parse_args(argv=None):
         "--checkpoint", type=Path, help="初始化、单独评估或断点恢复所用的 checkpoint 目录"
     )
     parser.add_argument("--mode", choices=job_plan.LEVELS, default="full")
-    parser.add_argument("--method", choices=(*METHODS, "dynamic_pretrain", "all"), default="all")
+    parser.add_argument("--method", choices=(*METHODS, "dynamic_pretrain"), help="本次训练的方法")
     parser.add_argument(
         "--config",
         type=Path,
@@ -76,6 +81,11 @@ def parse_args(argv=None):
         "--qa-data",
         type=Path,
         default=Path("data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008"),
+        help="QA 训练数据目录；首次创建评估配置时默认共用此目录",
+    )
+    parser.add_argument("--eval-data", type=Path, help="独立的最终 QA 评估数据目录")
+    parser.add_argument(
+        "--eval-seed", type=bounded_count, help="最终评估抽样 seed，初次默认 20261004"
     )
     parser.add_argument(
         "--model-path", help="覆盖预设模型位置，当前预设为 ~/models/Qwen3-4B-Instruct-2507"
@@ -166,9 +176,13 @@ def parse_args(argv=None):
         help="每阶段保留最近成功保存的 checkpoint 数，默认 2",
     )
     parser.add_argument(
-        "--eval-split", choices=("dev", "test"), help="单独评估默认 test；训练时默认随档位"
+        "--eval-split",
+        choices=("dev", "test"),
+        help="首次训练默认随档位；续训和补评估沿用 eval.json",
     )
-    parser.add_argument("--max-new-tokens", type=positive_count, default=64)
+    parser.add_argument(
+        "--max-new-tokens", type=positive_count, help="最终评估生成上限，初次默认 64"
+    )
     for name in ("threshold-i", "threshold-d", "threshold-g", "eta"):
         parser.add_argument(f"--{name}", type=float)
     parser.add_argument("--tracking", choices=("online", "disabled"), default="online")
@@ -184,15 +198,15 @@ def parse_args(argv=None):
         if args.checkpoint is None:
             parser.error("--evaluate-only and --resume require --checkpoint")
         return args
-    if args.config is not None and args.method == "all":
-        parser.error("--config requires a single --method; all uses default presets")
+    if args.method is None:
+        parser.error("training requires --method")
     if args.run_id is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.run_id):
         parser.error("run-id must contain only letters, digits, '-' and '_'")
-    if args.checkpoint is not None and args.method not in DYNAMIC_METHODS:
+    if args.checkpoint is not None and args.method not in (*DYNAMIC_METHODS, "dynamic_pretrain"):
         parser.error("checkpoint initialization is only supported by dynamic methods")
-    if args.writer_mode is not None and args.method not in {*DYNAMIC_METHODS, "all"}:
+    if args.writer_mode is not None and args.method not in DYNAMIC_METHODS:
         parser.error("--writer-mode is only supported by dynamic posttraining methods")
-    if args.tag_tokens is not None and args.method not in {*DYNAMIC_METHODS, "all"}:
+    if args.tag_tokens is not None and args.method not in DYNAMIC_METHODS:
         parser.error("--tag-tokens is only supported by dynamic tag posttraining")
     if args.append_slots is not None and args.method in {
         "icae_single",
@@ -204,10 +218,9 @@ def parse_args(argv=None):
     if args.bptt_steps is not None and args.method not in (
         "autocompressors",
         *DYNAMIC_METHODS,
-        "all",
     ):
         parser.error("--bptt-steps is only supported by AutoCompressors or dynamic methods")
-    if args.ac_num_segments is not None and args.method not in {"autocompressors", "all"}:
+    if args.ac_num_segments is not None and args.method != "autocompressors":
         parser.error("--ac-num-segments is only supported by AutoCompressors")
     return args
 
@@ -233,26 +246,20 @@ def training_command(jobs, gpu_count, max_steps, resume=None):
     return command
 
 
-def evaluation_command(args, level, checkpoint, output):
+def evaluation_command(args, config_path, checkpoint, output):
     command = [
         sys.executable,
         "-m",
         "latent_working_memory.v3.evaluate",
+        "--config",
+        str(config_path),
         "--checkpoint",
         str(checkpoint),
-        "--dataset-dir",
-        str(args.qa_data.resolve()),
         "--output-dir",
         str(output),
-        "--split",
-        level["eval_split"],
         "--device",
         "cuda",
-        "--max-new-tokens",
-        str(args.max_new_tokens),
     ]
-    if level["eval_trajectories"] is not None:
-        command.extend(("--max-trajectories", str(level["eval_trajectories"])))
     if args.tracking == "online":
         command.append("--log-to-swanlab")
     return command
@@ -262,6 +269,57 @@ def save_json(path, value):
     path.write_text(
         json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8"
     )
+
+
+def resolve_evaluation_config(args, config_path, level=None):
+    """沿用独立评估设置，只应用显式评估参数；旧产物须明确指定数据入口。"""
+    if config_path.is_file():
+        config = load_evaluation(config_path)
+    else:
+        if level is None and args.eval_data is None:
+            raise ValueError(f"{config_path} is missing; specify --eval-data to create it")
+        config = EvaluationConfig(
+            dataset_dir=str((args.eval_data or args.qa_data).resolve()),
+            split=level["eval_split"] if level is not None else "test",
+            max_trajectories=level["eval_trajectories"] if level is not None else None,
+        )
+    updates = {}
+    for argument, field in (
+        ("eval_data", "dataset_dir"),
+        ("eval_split", "split"),
+        ("eval_seed", "seed"),
+        ("eval_trajectories", "max_trajectories"),
+        ("max_new_tokens", "max_new_tokens"),
+    ):
+        value = getattr(args, argument)
+        if value is not None:
+            if argument == "eval_data":
+                value = str(value.resolve())
+            elif argument == "eval_trajectories" and value == 0:
+                value = None
+            updates[field] = value
+    return replace(config, **updates)
+
+
+def save_evaluation_config(config_path, config):
+    save_json(config_path, asdict(config))
+    plan_path = config_path.parent / "job.json"
+    if plan_path.is_file():
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan["evaluation_config_path"] = str(config_path)
+        save_json(plan_path, plan)
+
+
+def require_dataset_entries(directories):
+    """检查规范数据入口，不扫描下载分片或校验资源完整性。"""
+    files = {
+        Path(directory) / name
+        for directory in directories
+        for name in ("preparation.json", "train.jsonl", "dev.jsonl", "test.jsonl")
+    }
+    for path in sorted(files):
+        if not path.is_file():
+            raise FileNotFoundError(f"required dataset entry is missing: {path}")
 
 
 def execute(command, environment, log_path):
@@ -304,15 +362,15 @@ def run_evaluation(args):
     directory = method_directory.parent.parent
     output = directory / "eval" / method_directory.name / stage_directory.name
     plan_directory = directory / "plan" / method_directory.name
-    level = {
-        "eval_split": args.eval_split or "test",
-        "eval_trajectories": args.eval_trajectories or None,
-    }
+    config_path = plan_directory / "eval.json"
+    config = resolve_evaluation_config(args, config_path)
+    require_dataset_entries([config.dataset_dir])
     environment = execution_environment(args)
     environment["CUDA_VISIBLE_DEVICES"] = args.gpus.split(",")[0]
     plan_directory.mkdir(parents=True, exist_ok=True)
+    save_evaluation_config(config_path, config)
     execute(
-        evaluation_command(args, level, checkpoint, output),
+        evaluation_command(args, config_path, checkpoint, output),
         environment,
         plan_directory / "eval.log",
     )
@@ -335,6 +393,14 @@ def run_resume(args):
     result_path = plan_directory / "result.json"
     result = json.loads(result_path.read_text(encoding="utf-8"))
     result["checkpoints"][jobs[0].key] = str(args.checkpoint.resolve())
+    evaluation_path = plan_directory / "eval.json"
+    evaluation_config = (
+        resolve_evaluation_config(args, evaluation_path)
+        if any(job.evaluate for job in jobs)
+        else None
+    )
+    if evaluation_config is not None:
+        require_dataset_entries([evaluation_config.dataset_dir])
 
     def save_result(status, error=None):
         result["status"] = status
@@ -347,6 +413,8 @@ def run_resume(args):
     evaluation_environment = dict(environment, CUDA_VISIBLE_DEVICES=args.gpus.split(",")[0])
     for job in jobs:
         save_json(job.config_path, job.config.to_dict())
+    if evaluation_config is not None:
+        save_evaluation_config(evaluation_path, evaluation_config)
     save_result("running")
     try:
         execute(
@@ -360,7 +428,7 @@ def run_resume(args):
             if job.evaluate:
                 output = directory / "eval" / plan_directory.name / job.config.objective.stage
                 execute(
-                    evaluation_command(args, level, checkpoint, output),
+                    evaluation_command(args, evaluation_path, checkpoint, output),
                     evaluation_environment,
                     plan_directory / "eval.log",
                 )
@@ -397,20 +465,22 @@ def run_job(args):
     if args.resume:
         return run_resume(args)
     directory, level, jobs = job_plan.build_jobs(args)
-    training_runs = [
-        list(stages)
-        for _, stages in groupby(jobs, key=lambda job: job.config.training.experiment_dir)
-    ]
+    first = jobs[0]
+    plan_directory = first.config_path.parent
     gpu_count = len(args.gpus.split(","))
-    plan_directory = directory / "plan"
-    compare_directory = directory / "compare"
     evaluation_directories = {
-        job.key: directory
-        / "eval"
-        / Path(job.config.training.experiment_dir).name
-        / job.config.objective.stage
+        job.key: directory / "eval" / plan_directory.name / job.config.objective.stage
         for job in jobs
         if job.evaluate
+    }
+    evaluation_path = plan_directory / "eval.json"
+    evaluation_config = (
+        resolve_evaluation_config(args, evaluation_path, level) if evaluation_directories else None
+    )
+    training_run = {
+        "stages": [job.key for job in jobs],
+        "command": training_command(jobs, gpu_count, level["max_steps"]),
+        "log_path": str(plan_directory / "train.log"),
     }
     plan = {
         "mode": args.mode,
@@ -420,7 +490,6 @@ def run_job(args):
         "plan_directory": str(plan_directory),
         "gpus": args.gpus,
         "limits": level,
-        "max_new_tokens": args.max_new_tokens,
         "jobs": [
             {
                 "key": job.key,
@@ -437,174 +506,74 @@ def run_job(args):
             }
             for job in jobs
         ],
-        "training_runs": [
-            {
-                "stages": [job.key for job in stages],
-                "command": training_command(stages, gpu_count, level["max_steps"]),
-                "log_path": str(stages[0].config_path.parent / "train.log"),
-            }
-            for stages in training_runs
-        ],
+        "training_runs": [training_run],
+        "evaluation_config_path": str(evaluation_path) if evaluation_config is not None else None,
     }
-    targets = [stages[0].config_path.parent for stages in training_runs]
-    targets.extend(Path(stages[0].config.training.experiment_dir) for stages in training_runs)
-    targets.extend(path.parent for path in evaluation_directories.values())
-    if len(evaluation_directories) > 1:
-        targets.append(compare_directory)
-    for path in targets:
+    targets = {plan_directory, Path(first.config.training.experiment_dir)}
+    targets.update(path.parent for path in evaluation_directories.values())
+    for path in sorted(targets):
         if path.exists():
             raise ValueError(f"job output already exists: {path}; refusing to overwrite")
     environment = execution_environment(args)
-    # 只检查本任务使用的规范数据入口；不扫描下载分片或创建派生数据副本。
-    required_files = set()
-    for job in jobs:
-        dataset = Path(job.config.training.dataset_dir)
-        required_files.update(
-            dataset / name
-            for name in ("preparation.json", "train.jsonl", "dev.jsonl", "test.jsonl")
-        )
-    if any(job.evaluate for job in jobs):
-        required_files.update(
-            args.qa_data.resolve() / name
-            for name in ("train.jsonl", "dev.jsonl", "test.jsonl", "preparation.json")
-        )
-    for path in sorted(required_files):
-        if not path.is_file():
-            raise FileNotFoundError(f"required dataset entry is missing: {path}")
+    require_dataset_entries(
+        [job.config.training.dataset_dir for job in jobs]
+        + ([evaluation_config.dataset_dir] if evaluation_config is not None else [])
+    )
     checkpoints, summaries = {}, []
+    result = {
+        "status": "pending",
+        "mode": args.mode,
+        "experiment_id": args.run_id,
+        "checkpoints": checkpoints,
+        "summaries": summaries,
+    }
 
-    def save_method_result(stages, status, error=None):
-        keys = {job.key for job in stages}
-        outputs = {
-            evaluation_directories[job.key] / "summary.json" for job in stages if job.evaluate
-        }
-        record = {
-            "status": status,
-            "mode": args.mode,
-            "experiment_id": args.run_id,
-            "checkpoints": {key: str(value) for key, value in checkpoints.items() if key in keys},
-            "summaries": [str(path) for path in summaries if path in outputs],
-        }
+    def save_result(status, error=None):
+        result["status"] = status
         if error is not None:
-            record["error"] = str(error)
-        save_json(stages[0].config_path.parent / "result.json", record)
+            result["error"] = str(error)
+        save_json(plan_directory / "result.json", result)
 
-    for stages, training_run in zip(training_runs, plan["training_runs"], strict=True):
-        first = stages[0]
-        keys = {job.key for job in stages}
-        first.config_path.parent.mkdir(parents=True)
-        save_json(
-            first.config_path.parent / "job.json",
-            {
-                **plan,
-                "method": first.method,
-                "plan_directory": str(first.config_path.parent),
-                "jobs": [job for job in plan["jobs"] if job["key"] in keys],
-                "training_runs": [training_run],
-            },
-        )
-        for job in stages:
-            save_json(job.config_path, job.config.to_dict())
-        save_method_result(stages, "pending")
+    plan_directory.mkdir(parents=True)
+    save_json(plan_directory / "job.json", plan)
+    if evaluation_config is not None:
+        save_json(evaluation_path, asdict(evaluation_config))
+    for job in jobs:
+        save_json(job.config_path, job.config.to_dict())
+    save_result("running")
     print(
-        f"[start] method={args.method} mode={args.mode} runs={len(training_runs)} "
-        f"stages={len(jobs)} gpus={args.gpus} plan={plan_directory}",
+        f"[start] method={args.method} mode={args.mode} stages={len(jobs)} "
+        f"gpus={args.gpus} plan={plan_directory}",
         flush=True,
     )
     evaluation_environment = dict(environment, CUDA_VISIBLE_DEVICES=args.gpus.split(",")[0])
-    active_stages, comparing = None, False
     try:
-        for stages, training_run in zip(training_runs, plan["training_runs"], strict=True):
-            active_stages = stages
-            save_method_result(stages, "running")
-            first = stages[0]
-            if first.initialize_from is not None:
-                first.config = replace(
-                    first.config,
-                    training=replace(
-                        first.config.training,
-                        init_checkpoint=str(checkpoints[first.initialize_from]),
-                    ),
+        execute(training_run["command"], environment, Path(training_run["log_path"]))
+        for job in jobs:
+            checkpoint = collect_training_result(job)
+            checkpoints[job.key] = str(checkpoint)
+            if job.evaluate:
+                output = evaluation_directories[job.key]
+                execute(
+                    evaluation_command(args, evaluation_path, checkpoint, output),
+                    evaluation_environment,
+                    plan_directory / "eval.log",
                 )
-            for job in stages:
-                save_json(job.config_path, job.config.to_dict())
-            execute(
-                training_run["command"],
-                environment,
-                Path(training_run["log_path"]),
-            )
-            for job in stages:
-                checkpoint = collect_training_result(job)
-                checkpoints[job.key] = checkpoint
-                if job.evaluate:
-                    output = evaluation_directories[job.key]
-                    execute(
-                        evaluation_command(args, level, checkpoint, output),
-                        evaluation_environment,
-                        job.config_path.parent / "eval.log",
-                    )
-                    summaries.append(output / "summary.json")
-            save_method_result(stages, "finished")
-            active_stages = None
-        if len(summaries) > 1:
-            comparing = True
-            compare_directory.mkdir(parents=True)
-            save_json(
-                compare_directory / "result.json",
-                {"status": "running", "summaries": [str(path) for path in summaries]},
-            )
-            execute(
-                [
-                    sys.executable,
-                    "-m",
-                    "latent_working_memory.v3.compare",
-                    *(str(path) for path in summaries),
-                    "--output-dir",
-                    str(compare_directory),
-                ],
-                environment,
-                compare_directory / "compare.log",
-            )
-            save_json(
-                compare_directory / "result.json",
-                {"status": "finished", "summaries": [str(path) for path in summaries]},
-            )
-            comparing = False
+                summaries.append(str(output / "summary.json"))
+        save_result("finished")
     except Exception as error:
-        if active_stages is not None:
-            # 当前训练组可能在后续阶段失败，保留它已经完成的阶段产物。
-            for job in active_stages:
-                result_path = Path(job.config.training.output_dir) / "training-result.json"
-                if job.key not in checkpoints and result_path.is_file():
-                    checkpoint = Path(json.loads(result_path.read_text())["checkpoint"])
-                    if (checkpoint / "state.pt").is_file():
-                        save_json(
-                            job.config_path,
-                            json.loads((result_path.parent / "config.json").read_text()),
-                        )
-                        checkpoints[job.key] = checkpoint
-            save_method_result(active_stages, "failed", error)
-        if comparing:
-            save_json(
-                compare_directory / "result.json",
-                {
-                    "status": "failed",
-                    "error": str(error),
-                    "summaries": [str(path) for path in summaries],
-                },
-            )
+        # 后续阶段失败时，保留已经完成阶段的配置与 checkpoint。
+        for job in jobs:
+            report = Path(job.config.training.output_dir) / "training-result.json"
+            if job.key not in checkpoints and report.is_file():
+                checkpoint = Path(json.loads(report.read_text(encoding="utf-8"))["checkpoint"])
+                if (checkpoint / "state.pt").is_file():
+                    checkpoints[job.key] = str(collect_training_result(job))
+        save_result("failed", error)
         raise
-    result = {
-        "status": "finished",
-        "mode": args.mode,
-        "experiment_id": args.run_id,
-        "checkpoints": {key: str(value) for key, value in checkpoints.items()},
-        "summaries": [str(value) for value in summaries],
-    }
     print(
         f"[finished] method={args.method} mode={args.mode} "
-        f"checkpoints={len(checkpoints)} evaluations={len(summaries)} "
-        f"plan={plan_directory}",
+        f"checkpoints={len(checkpoints)} evaluations={len(summaries)} plan={plan_directory}",
         flush=True,
     )
     return result

@@ -9,7 +9,11 @@ import torch
 from latent_working_memory.v3 import runtime, tracking
 from latent_working_memory.v3.evaluate import _training_run_directory
 from latent_working_memory.v3.runtime import load_initialization, prepare_training, train_loop
-from latent_working_memory.v3.tracking import method_tracking_run, update_method_tracking
+from latent_working_memory.v3.tracking import (
+    configure_posttraining_panel,
+    method_tracking_run,
+    update_method_tracking,
+)
 from latent_working_memory.runtime import capture_rng
 from .test_runtime import experiment_config, make_engine, make_splits, _run
 import json
@@ -480,17 +484,14 @@ def test_two_dynamic_methods_share_one_source_and_keep_one_run_per_method(
     assert sources[0]["step"] == 2
 
 
-def test_append_ratio_panel_failure_stops_before_training_and_restores_random_state(
+def test_append_ratio_panel_failure_preserves_previous_stage_and_restores_random_state(
     tmp_path, recorded_swanlab, monkeypatch
 ):
-    source = online_config(tmp_path / "dynamic-pretrain-k64_trial", "pretrain")
-    source_result, _ = run_stage(source, 1, "pretrain")
     root = tmp_path / "memory-change-k64_trial"
-    config = online_config(root, "warmup", init=source_result["checkpoint"])
-    engine, data = make_engine(config), make_splits("qa")
-    initialization = load_initialization(source_result["checkpoint"], engine.model, config)
-    run = _run(config, engine, data, initialization)
-    prepare_training(config, engine, data, run, stop_after_steps=1)
+    config = online_config(root, "pretrain", "memory_change")
+    engine, data = make_engine(config), make_splits("pretrain")
+    run = _run(config, engine, data)
+    stage = prepare_training(config, engine, data, run, stop_after_steps=1)
     original_post = recorded_swanlab.post
 
     def reject_chart(path, data):
@@ -502,13 +503,24 @@ def test_append_ratio_panel_failure_stops_before_training_and_restores_random_st
         return original_post(path, data)
 
     monkeypatch.setattr(recorded_swanlab, "post", reject_chart)
-    before = capture_rng(torch.device("cpu"))
     entered = False
     with pytest.raises(RuntimeError, match="panel denied"):
-        with method_tracking_run(config, run, engine.device, api_key="test-api-key"):
+        with method_tracking_run(config, run, engine.device, api_key="test-api-key") as active:
+            result = train_loop(
+                config, engine, data, run, stage, stop_after_steps=1, tracking=active
+            )
+            target = online_config(root, "warmup", "memory_change", result["checkpoint"])
+            initialization = load_initialization(result["checkpoint"], engine.model, target)
+            next_run = _run(target, engine, make_splits("qa"), initialization)
+            original_manifest = (root / "experiment.json").read_bytes()
+            before = capture_rng(engine.device)
+            configure_posttraining_panel(target, active, engine.device, "test-api-key")
+            prepare_training(target, engine, make_splits("qa"), next_run, stop_after_steps=1)
             entered = True
     assert not entered
-    assert (root / "warmup/metrics.jsonl").read_text() == ""
+    assert not (root / "warmup").exists()
+    assert (root / "experiment.json").read_bytes() == original_manifest
+    assert (root / "pretrain/checkpoints/global_step_1/state.pt").is_file()
     identity = json.loads((root / "swanlab.json").read_text())
     assert recorded_swanlab.runs[identity["id"]]["state"] == "CRASHED"
     assert random.getstate() == before["python"]
@@ -594,11 +606,12 @@ def test_existing_shared_pretrain_identity_resumes_and_initializes_new_dynamic_m
 
 
 @pytest.mark.parametrize("online", [False, True])
+@pytest.mark.parametrize("method", ["icae_single", "memory_change", "information_loss"])
 def test_live_method_run_continues_two_stages_without_reinitializing(
-    tmp_path, recorded_swanlab, online
+    tmp_path, recorded_swanlab, online, method
 ):
-    root = tmp_path / "icae-single-k64_trial"
-    config = online_config(root, "pretrain", "icae_single")
+    root = tmp_path / f"{method}-k64_trial"
+    config = online_config(root, "pretrain", method)
     if not online:
         config = replace(config, training=replace(config.training, swanlab_project=None))
     engine = make_engine(config)
@@ -616,18 +629,22 @@ def test_live_method_run_continues_two_stages_without_reinitializing(
             tracking=active,
         )
         before = json.loads((root / "experiment.json").read_text())
-        target = online_config(root, "qa", "icae_single", result["checkpoint"])
+        next_stage = "qa" if method == "icae_single" else "warmup"
+        target = online_config(root, next_stage, method, result["checkpoint"])
         if not online:
             target = replace(target, training=replace(target.training, swanlab_project=None))
         qa_data = make_splits("qa")
         initialization = load_initialization(result["checkpoint"], engine.model, target)
         qa_run = _run(target, engine, qa_data, initialization)
+        if active is not None:
+            configure_posttraining_panel(target, active, engine.device, "test-api-key")
         stage = prepare_training(target, engine, qa_data, qa_run, stop_after_steps=2)
         update_method_tracking(target, qa_run, active)
         combined = json.loads((root / "experiment.json").read_text())
-        assert list(combined["stages"]) == ["pretrain", "qa"]
+        assert list(combined["stages"]) == ["pretrain", next_stage]
+        assert combined["method"] == method
         assert combined["stages"]["pretrain"] == before["stages"]["pretrain"]
-        assert recorded_swanlab.api_reads == []
+        assert len(recorded_swanlab.api_reads) == int(online and method != "icae_single")
         assert len(recorded_swanlab.initializations) == int(online)
         if online:
             assert active.record["state"] == "RUNNING"

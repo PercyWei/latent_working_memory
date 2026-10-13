@@ -1,4 +1,4 @@
-"""v3 预设阶段序列与单阶段运行配置；相对路径以项目运行目录为基准。"""
+"""v3 训练预设、单阶段运行与独立评估配置；相对路径以项目运行目录为基准。"""
 
 from dataclasses import asdict, dataclass
 import json
@@ -16,7 +16,7 @@ WRITER_MODES = ("local", "tag", "mask", "dual_lora")
 
 
 def validate_stage_sequence(method, stages):
-    """阶段必须是方法流程中的连续有序片段；共享预训练单独运行。"""
+    """阶段必须是方法流程中的连续有序片段。"""
     if not isinstance(stages, (list, tuple)) or not stages:
         raise ValueError("stages must be a nonempty list or tuple")
     pipelines = {
@@ -24,14 +24,12 @@ def validate_stage_sequence(method, stages):
         "icae_single": ("pretrain", "qa"),
         "icae_multi": ("pretrain", "qa"),
         "autocompressors": ("pretrain",),
-        "memory_change": ("warmup", "policy"),
-        "information_loss": ("warmup", "policy"),
+        "memory_change": ("pretrain", "warmup", "policy"),
+        "information_loss": ("pretrain", "warmup", "policy"),
     }
     if method not in pipelines:
         raise ValueError(f"unsupported method: {method}")
     stages = tuple(stages)
-    if method in DYNAMIC_METHODS and stages == ("pretrain",):
-        return stages
     # 已有 AutoCompressors 运行按原 lm 阶段恢复，不改写其保存配置。
     if method == "autocompressors" and stages == ("lm",):
         return stages
@@ -263,6 +261,26 @@ class TrainingConfig:
 
 
 @dataclass(frozen=True)
+class EvaluationConfig:
+    dataset_dir: str
+    split: str = "test"
+    seed: int = 20261004
+    max_trajectories: int | None = None
+    max_new_tokens: int = 64
+
+    def __post_init__(self):
+        if not isinstance(self.dataset_dir, str) or not self.dataset_dir:
+            raise ValueError("dataset_dir must be a nonempty path")
+        if self.split not in {"dev", "test"}:
+            raise ValueError("QA evaluation requires the dev or test split")
+        if type(self.seed) is not int or self.seed < 0:
+            raise ValueError("seed must be a nonnegative integer")
+        if self.max_trajectories is not None:
+            positive_integer(self.max_trajectories, "max_trajectories")
+        positive_integer(self.max_new_tokens, "max_new_tokens")
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     model: ModelConfig
     objective: ObjectiveConfig
@@ -309,6 +327,12 @@ class ExperimentConfig:
         return raw
 
 
+def load_evaluation(path):
+    """读取独立评估配置，不从训练 checkpoint 推断评估数据与选样设置。"""
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    return EvaluationConfig(**raw)
+
+
 def load_experiment(path):
     """读取已展开的单阶段运行配置，拒绝方法预设。"""
     raw = json.loads(Path(path).read_text())
@@ -341,11 +365,16 @@ def load_preset(path):
         raise ValueError("stage_max_train_samples must specify each declared stage exactly once")
     if "max_train_samples" in training:
         raise ValueError("preset training requires stage_max_train_samples, not max_train_samples")
-    return tuple(
-        ExperimentConfig(
-            model,
-            ObjectiveConfig(**objective, stage=stage),
-            TrainingConfig(**training, max_train_samples=stage_limits[stage]),
+    configs = []
+    for stage in stages:
+        stage_objective = {**objective, "stage": stage}
+        if objective["method"] in DYNAMIC_METHODS and stage == "pretrain":
+            stage_objective.update(writer_mode="local", bptt_steps=None)
+        configs.append(
+            ExperimentConfig(
+                model,
+                ObjectiveConfig(**stage_objective),
+                TrainingConfig(**training, max_train_samples=stage_limits[stage]),
+            )
         )
-        for stage in stages
-    )
+    return tuple(configs)
