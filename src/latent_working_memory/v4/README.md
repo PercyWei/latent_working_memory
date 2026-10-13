@@ -2,9 +2,9 @@
 
 创建时间：20261003 21:51:43 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261011 15:48:10 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261013 10:19:46 Asia/Shanghai（UTC+08:00）
 
-本目录提供独立的流式 memory meta-training 入口：冻结 HF Llama／Qwen2／Qwen3，每层使用固定数量的 latent slots，达到 pending 阈值时以 attention matching 执行局部 SGD，外层根据写入后的 next-token CE 学习新增模块。完整结构见[框架笔记](../../../../notes/v4/20261003_attention_matching_meta_memory.md)。
+本目录提供独立的流式 memory meta-training 入口：冻结 HF Llama／Qwen2／Qwen3，每层使用固定数量的 latent slots，达到 pending 阈值时以 attention matching 执行局部 SGD，外层根据写入后的 next-token CE 学习新增模块。完整结构见[框架笔记](../../../notes/v4/20261003_attention_matching_meta_memory.md)。
 
 ## 数据与配置
 
@@ -16,7 +16,7 @@
 
 分词采用 `add_special_tokens=False`，不插入 BOS/EOS，不截断、不打包多个文档，也不自动过滤长度。每条文本 token 数必须在 `[pending_size + recent_size + 2, max_seq_length]` 内，不满足时明确报错。样例配置对应 386～8192 tokens；上面的短 JSON 仅说明格式。分词结果留在内存，各 epoch 复用，不保存派生 token 数据副本。
 
-[配置样例](../../../../configs/v4/attention_matching/experiment.json) 是唯一配置入口，顶层只有 `model` 和 `training`。`train_file`、`dev_file`、`output_dir` 都相对于配置文件所在目录解析；模型使用 HF repo ID，或显式绝对本地路径。样例中的数据路径尚未创建，运行前应替换成实际 canonical JSONL 路径。`revision` 可指定固定模型 revision。
+[配置样例](../../../configs/v4/attention_matching/experiment.json) 是唯一配置入口，顶层只有 `model` 和 `training`。`train_file`、`dev_file`、`output_dir` 都相对于配置文件所在目录解析；模型使用 HF repo ID，或显式绝对本地路径。样例中的数据路径尚未创建，运行前应替换成实际 canonical JSONL 路径。`revision` 可指定固定模型 revision。
 
 | 设置 | 样例值与语义 |
 |---|---|
@@ -40,6 +40,8 @@
 配置是开发起点，尚未由正式实验确认有效性或显存预算。改变查询生成或归一化设置时应使用新的输出目录和独立初始化；同一 run 的恢复要求配置、分词后数据、设备类型和 world size 一致。
 
 ## 运行
+
+统一入口与新训练、恢复训练、单条生成指令见[运行指南](scripts/README.md)。
 
 使用 v3 相同的根 `.venv/`：默认依赖组为 `cuda124`，PyTorch 2.6.0、Transformers 4.57.6、verl 0.8.0。以下命令仅是操作说明；实际数据路径需先准备。
 
