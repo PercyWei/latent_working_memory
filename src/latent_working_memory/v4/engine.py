@@ -11,6 +11,7 @@ from verl.workers.config import FSDPOptimizerConfig
 from verl.workers.config.optimizer import build_optimizer
 from verl.workers.engine import BaseEngine, EngineRegistry
 
+
 @EngineRegistry.register(model_type="lwm_v4_meta", backend="replicated", device=["cpu", "cuda"])
 class MetaLearningEngine(BaseEngine):
     def __init__(self, model, config, device):
@@ -103,12 +104,20 @@ class MetaLearningEngine(BaseEngine):
     def forward_backward_batch(self, data, loss_function, forward_only=False):
         episodes = get_non_tensor_data(data, "episodes", None)
         boundary = self.model.config.pending_size + self.model.config.recent_size
-        token_counts = [len(episode.input_ids) - boundary - 1 for episode in episodes]
+        token_counts = [
+            len(episode.prompt_ids)
+            + len(episode.target_ids)
+            - max(len(episode.prompt_ids), boundary + 1)
+            for episode in episodes
+        ]
         total_tokens = sum(token_counts)
         if not episodes or min(token_counts) < 1:
             raise ValueError("each episode must have a next-token target after its first write")
         local = list(range(self.rank, len(episodes), self.world_size))
-        local.sort(key=lambda index: len(episodes[index].input_ids), reverse=True)
+        local.sort(
+            key=lambda index: len(episodes[index].prompt_ids) + len(episodes[index].target_ids),
+            reverse=True,
+        )
         size = self.config.micro_batch_size_per_gpu
         # Empty tail ranks still enter a real DDP forward and zero-weight backward.
         work = [local[start : start + size] for start in range(0, len(local), size)]
@@ -126,13 +135,18 @@ class MetaLearningEngine(BaseEngine):
                 # No outer autocast: the model controls backbone dtype; fast state is fp32.
                 output = self.module(
                     [
-                        torch.tensor(episodes[index].input_ids, dtype=torch.long, device=self.device)
+                        torch.tensor(
+                            episodes[index].prompt_ids + episodes[index].target_ids,
+                            dtype=torch.long,
+                            device=self.device,
+                        )
                         for index in indices
                     ],
                     differentiable=not forward_only,
+                    target_starts=[len(episodes[index].prompt_ids) for index in indices],
                 )
                 if output["target_tokens"] != expected_tokens:
-                    raise ValueError("model target count does not match the streaming boundary")
+                    raise ValueError("model target count does not match the episode supervision")
                 if not forward_only:
                     loss = output["loss"] * (expected_tokens if local else 0) / total_tokens
                     loss.backward()
@@ -158,7 +172,9 @@ class MetaLearningEngine(BaseEngine):
                 "loss": nll / targets,
                 "target_tokens": int(targets),
                 "samples": int(samples),
-                "source_tokens": sum(len(episode.input_ids) for episode in episodes),
+                "source_tokens": sum(
+                    len(episode.prompt_ids) + len(episode.target_ids) for episode in episodes
+                ),
                 "write_events": int(writes),
                 "write_loss": write_loss / writes,
             }

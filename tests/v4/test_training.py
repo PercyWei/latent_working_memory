@@ -60,6 +60,11 @@ def tiny_base(tmp_path_factory):
         pad_token="[PAD]",
         unk_token="[UNK]",
     )
+    fast.chat_template = (
+        "{% for message in messages %}{% if message['role'] != 'system' %}"
+        "{{ message['content'].replace('Document:\\n', '').replace('\\n\\nQuestion:\\n', ' ') }} "
+        "{% endif %}{% endfor %}"
+    )
     fast.save_pretrained(directory)
     return directory
 
@@ -97,10 +102,10 @@ def training_config(output):
 
 def episodes():
     return (
-        TokenizedEpisode("a", (4, 6, 4, 7, 5, 4)),
-        TokenizedEpisode("b", (4, 6, 7, 5, 4, 6, 7, 5)),
-        TokenizedEpisode("c", (7, 5, 4, 6, 7, 5, 4, 6, 7)),
-        TokenizedEpisode("d", (5, 6, 4, 7, 5, 4, 7)),
+        TokenizedEpisode("a", (4, 6, 4, 7, 5), (4,)),
+        TokenizedEpisode("b", (4, 6, 7, 5, 4), (6, 7, 5)),
+        TokenizedEpisode("c", (7, 5, 4, 6, 7), (5, 4, 6, 7)),
+        TokenizedEpisode("d", (5, 6, 4, 7, 5), (4, 7)),
     )
 
 
@@ -140,7 +145,13 @@ def test_engine_matches_global_token_weighted_meta_gradient(tiny_base, tmp_path,
         name: value.clone() for name, value in engine.model.backbone.state_dict().items()
     }
     initial_memory = engine.model.trainable_state_dict()
-    outputs = [reference.model(torch.tensor(episode.input_ids)) for episode in batch]
+    outputs = [
+        reference.model(
+            torch.tensor(episode.prompt_ids + episode.target_ids),
+            target_starts=[len(episode.prompt_ids)],
+        )
+        for episode in batch
+    ]
     count = sum(output["target_tokens"] for output in outputs)
     loss = sum(output["loss"] * output["target_tokens"] for output in outputs) / count
     reference.optimizer_zero_grad()
@@ -177,14 +188,23 @@ def test_eval_runs_inner_update_without_mutating_outer_weights_or_gradients(tiny
     assert not engine.model.backbone.training
 
 
+def document_record(words):
+    return {
+        "text": " ".join(words[:4]),
+        "qas": [{"question": words[4], "answer": " ".join(words[5:])}],
+    }
+
+
 def write_experiment(directory, base, output):
     directory.mkdir(parents=True, exist_ok=True)
     words = {4: "red", 5: "blue", 6: "sky", 7: "water"}
-    records = [
-        {"id": episode.id, "text": " ".join(words[token] for token in episode.input_ids)}
-        for episode in episodes()
-    ]
-    for name, rows in (("train", records), ("dev", records[:2])):
+    for name, split_episodes in (("train", episodes()), ("dev", episodes()[:2])):
+        rows = []
+        for episode in split_episodes:
+            tokens = episode.prompt_ids + episode.target_ids
+            if name == "dev":
+                tokens = tokens[:4][::-1] + tokens[4:]
+            rows.append(document_record([words[token] for token in tokens]))
         (directory / f"{name}.jsonl").write_text(
             "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
         )
@@ -225,19 +245,11 @@ def test_training_resume_is_exact_and_checkpoint_excludes_frozen_backbone(tiny_b
     for key in ("memory", "optimizer", "cursor", "rng"):
         assert_nested_equal(full[key], restored[key])
     full_metrics = [
-        {
-            key: value
-            for key, value in json.loads(line).items()
-            if not key.startswith("resources/")
-        }
+        {key: value for key, value in json.loads(line).items() if not key.startswith("resources/")}
         for line in (full_path.parent / "output" / "metrics.jsonl").read_text().splitlines()
     ]
     resumed_metrics = [
-        {
-            key: value
-            for key, value in json.loads(line).items()
-            if not key.startswith("resources/")
-        }
+        {key: value for key, value in json.loads(line).items() if not key.startswith("resources/")}
         for line in (resumed_path.parent / "output" / "metrics.jsonl").read_text().splitlines()
     ]
     assert full_metrics == resumed_metrics
@@ -296,8 +308,8 @@ def test_backbone_position_limit_is_checked_before_training(tiny_base, tmp_path)
     raw = json.loads(config.read_text())
     raw["training"]["max_seq_length"] = 100
     config.write_text(json.dumps(raw))
-    (tmp_path / "train.jsonl").write_text(json.dumps({"id": "long", "text": "red " * 65}))
-    with pytest.raises(ValueError, match="max_position_embeddings"):
+    (tmp_path / "train.jsonl").write_text(json.dumps(document_record(["red"] * 65)))
+    with pytest.raises(ValueError, match="no episodes remain"):
         run(config)
     assert not (tmp_path / "output").exists()
 

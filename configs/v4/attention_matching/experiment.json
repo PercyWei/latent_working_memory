@@ -21,8 +21,8 @@
     "correction_scale": 0.1
   },
   "training": {
-    "train_file": "../../../data/attention-matching/train.jsonl",
-    "dev_file": "../../../data/attention-matching/dev.jsonl",
+    "train_file": "../../../data/delta-mem-qasper/train.jsonl",
+    "dev_file": "../../../data/delta-mem-qasper/dev.jsonl",
     "output_dir": "../../../artifacts/v4/attention-matching_20261011/train/qwen3-0.6b_conditioned_20261011",
     "epochs": 1,
     "global_batch_size": 8,
@@ -31,13 +31,13 @@
     "weight_decay": 0.01,
     "gradient_clip": 1.0,
     "seed": 42,
-    "max_seq_length": 8192,
+    "max_seq_length": 12288,
     "eval_every": 50,
     "save_every": 50,
     "save_total_limit": 2,
     "swanlab_project": null,
     "group": null,
     "run_name": null,
-    "tags": []
+    "tags": ["data:qasper"]
   }
 }

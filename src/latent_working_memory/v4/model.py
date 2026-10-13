@@ -221,20 +221,27 @@ class StreamingMemoryLM(nn.Module):
         scores = logits.float() if logits.dtype in {torch.float16, torch.bfloat16} else logits
         return F.cross_entropy(scores, targets, reduction="sum")
 
-    def forward(self, input_ids, differentiable=True):
-        """真实 microbatch；仅监督写入后的有效位置，按有效 target tokens 平均。"""
+    def forward(self, input_ids, differentiable=True, target_starts=None):
+        """真实 microbatch；监督起点与写入后有效位置相交，按 target tokens 平均。"""
         rows = [input_ids] if isinstance(input_ids, torch.Tensor) else input_ids
         if not isinstance(rows, list) or not rows:
             raise ValueError("input_ids must be a tensor or a nonempty list of tensors")
         minimum = self.config.pending_size + self.config.recent_size + 2
-        for row in rows:
+        if target_starts is None:
+            target_starts = [0] * len(rows)
+        if len(target_starts) != len(rows):
+            raise ValueError("target_starts must contain one supervision start per input row")
+        for row, target_start in zip(rows, target_starts, strict=True):
             if not isinstance(row, torch.Tensor) or row.ndim != 1 or row.dtype != torch.long:
                 raise ValueError("each input row must be a one-dimensional torch.long tensor")
             if len(row) < minimum:
                 raise ValueError(f"a training episode needs at least {minimum} tokens")
+            if type(target_start) is not int or not 0 <= target_start < len(row):
+                raise ValueError("target_start must be a token index within its episode")
         padded = pad_sequence(rows, batch_first=True, padding_value=0)
         lengths = [len(row) - 1 for row in rows]
         valid_lengths = torch.tensor(lengths, device=padded.device)
+        supervision_starts = torch.tensor(target_starts, device=padded.device)
         state = self.initial_state(differentiable, len(rows))
         losses = []
         target_tokens = 0
@@ -246,6 +253,10 @@ class StreamingMemoryLM(nn.Module):
                 valid = (
                     torch.arange(start, start + length, device=padded.device)[None]
                     < valid_lengths[:, None]
+                )
+                valid &= (
+                    torch.arange(start + 1, start + 1 + length, device=padded.device)[None]
+                    >= supervision_starts[:, None]
                 )
                 with torch.set_grad_enabled(differentiable):
                     selected = hidden[valid]

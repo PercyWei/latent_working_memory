@@ -82,7 +82,7 @@ class TrainingConfig:
     weight_decay: float = 0.01
     gradient_clip: float = 1.0
     seed: int = 42
-    max_seq_length: int = 4096
+    max_seq_length: int | None = None
     eval_every: int = 50
     save_every: int = 50
     save_total_limit: int = 2
@@ -99,6 +99,10 @@ class TrainingConfig:
             self,
             [field.name for field in fields(self) if field.type is int and field.name != "seed"],
         )
+        if self.max_seq_length is not None and (
+            type(self.max_seq_length) is not int or self.max_seq_length < 1
+        ):
+            raise ValueError("max_seq_length must be null or a positive integer")
         if type(self.seed) is not int or self.seed < 0:
             raise ValueError("seed must be a nonnegative integer")
         finite_number(self.learning_rate, "learning_rate")
@@ -132,6 +136,9 @@ def load_experiment(path):
             for name in ("train_file", "dev_file", "output_dir")
         },
     )
-    if training.max_seq_length < model.pending_size + model.recent_size + 2:
+    if (
+        training.max_seq_length is not None
+        and training.max_seq_length < model.pending_size + model.recent_size + 2
+    ):
         raise ValueError("max_seq_length must allow a next-token target after the first write")
     return model, training

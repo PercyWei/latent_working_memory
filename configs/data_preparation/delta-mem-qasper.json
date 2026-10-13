@@ -1,0 +1,9 @@
+{
+  "input_file": "../../data/raw/delta-mem-qasper/agent_memory_qasper_ctx8192_episode_safe_seed42.jsonl",
+  "output_dir": "../../data/delta-mem-qasper",
+  "source_repo": "huaXiaKyrie/delta-mem-qasper-data",
+  "upstream_revision": "4ba09f5da0ca489ca1303460bab0e5bd0cb2098c",
+  "seed": 42,
+  "dev_fraction": 0.1,
+  "test_fraction": 0.1
+}

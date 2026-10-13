@@ -17,7 +17,7 @@ from latent_working_memory.v4.checkpoint import MetaMemoryCheckpointHandler, rea
 from latent_working_memory.v4.config import load_experiment
 from latent_working_memory.v4.data import (
     dataset_identity,
-    load_tokenized_episodes,
+    load_episode_splits,
 )
 from latent_working_memory.v4.engine import EngineRegistry
 from latent_working_memory.v4.model import StreamingMemoryLM
@@ -128,13 +128,17 @@ def run_training(args):
         tokenizer = AutoTokenizer.from_pretrained(
             model_config.model_name_or_path, revision=model_config.revision
         )
-    min_length = model_config.pending_size + model_config.recent_size + 2
-    train = load_tokenized_episodes(config.train_file, tokenizer, min_length, config.max_seq_length)
-    dev = load_tokenized_episodes(config.dev_file, tokenizer, min_length, config.max_seq_length)
     model = StreamingMemoryLM(load_model_config).to(device)
     position_limit = model.backbone.config.max_position_embeddings
-    if any(len(episode.input_ids) > position_limit for episode in (*train, *dev)):
-        raise ValueError("training/dev episode exceeds the backbone max_position_embeddings")
+    min_length = model_config.pending_size + model_config.recent_size + 2
+    train, dev, data_statistics = load_episode_splits(
+        config.train_file,
+        config.dev_file,
+        tokenizer,
+        min_length,
+        config.max_seq_length,
+        position_limit,
+    )
     engine = EngineRegistry.new(
         model_type="lwm_v4_meta", backend="replicated", model=model, config=config, device=device
     )
@@ -143,7 +147,11 @@ def run_training(args):
         "model": asdict(model_config),
         "resolved_model_revision": getattr(model.backbone.config, "_commit_hash", None),
         "training": {**asdict(config), "tags": list(config.tags)},
-        "data": {"train": dataset_identity(train), "dev": dataset_identity(dev)},
+        "data": {
+            "train": dataset_identity(train),
+            "dev": dataset_identity(dev),
+            "selection": data_statistics,
+        },
         "world_size": world_size,
         "device_type": device.type,
     }
@@ -165,6 +173,7 @@ def run_training(args):
     elif rank == 0:
         output.mkdir(parents=True, exist_ok=True)
         write_json(output / "run.json", run)
+        write_json(output / "data-statistics.json", data_statistics)
         tokenizer.save_pretrained(output / "tokenizer")
         metrics_path.touch()
     if world_size > 1:
@@ -190,12 +199,22 @@ def run_training(args):
         if error is not None:
             raise RuntimeError(error)
         return train_loop(
-            engine, config, train, dev, loader, handler, cursor, resume,
-            args.stop_after_steps, tracking,
+            engine,
+            config,
+            train,
+            dev,
+            loader,
+            handler,
+            cursor,
+            resume,
+            args.stop_after_steps,
+            tracking,
         )
 
 
-def train_loop(engine, config, train, dev, loader, handler, cursor, checkpoint_path, stop, tracking):
+def train_loop(
+    engine, config, train, dev, loader, handler, cursor, checkpoint_path, stop, tracking
+):
     output = Path(config.output_dir)
     metrics_path = output / "metrics.jsonl"
     total_steps = config.epochs * math.ceil(len(train) / config.global_batch_size)

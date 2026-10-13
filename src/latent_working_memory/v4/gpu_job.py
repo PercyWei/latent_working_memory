@@ -52,6 +52,13 @@ def positive_count(value):
     return number
 
 
+def token_limit(value):
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be non-negative; 0 disables the training limit")
+    return number
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_mutually_exclusive_group()
@@ -66,8 +73,13 @@ def parse_args(argv=None):
     parser.add_argument("--model-path", type=Path, help="覆盖预设中的本地基座模型位置")
     parser.add_argument("--train-file", type=Path, help="训练 JSONL 文件")
     parser.add_argument("--dev-file", type=Path, help="开发 JSONL 文件")
-    for name in ("global-batch-size", "micro-batch-size-per-gpu", "max-seq-length"):
+    for name in ("global-batch-size", "micro-batch-size-per-gpu"):
         parser.add_argument(f"--{name}", type=positive_count)
+    parser.add_argument(
+        "--max-seq-length",
+        type=token_limit,
+        help="训练完整输入的人为上限；0 关闭；模型窗口始终强制过滤",
+    )
     parser.add_argument(
         "--stop-after-steps", type=positive_count, help="停止于指定全局 optimizer step，不修改预算"
     )
@@ -115,10 +127,16 @@ def prepare_training(args):
     overrides.update(
         {
             name: getattr(args, name)
-            for name in ("global_batch_size", "micro_batch_size_per_gpu", "max_seq_length")
+            for name in (
+                "global_batch_size",
+                "micro_batch_size_per_gpu",
+                "max_seq_length",
+            )
             if getattr(args, name) is not None
         }
     )
+    if args.max_seq_length == 0:
+        overrides["max_seq_length"] = None
     run_id = args.run_id or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M%S")
     run_name = (
         args.run_name
@@ -147,7 +165,10 @@ def prepare_training(args):
         group=args.group or training.group or run_id,
         tags=tuple(sorted(set(training.tags) | set(args.tag or []))),
     )
-    if training.max_seq_length < model.pending_size + model.recent_size + 2:
+    if (
+        training.max_seq_length is not None
+        and training.max_seq_length < model.pending_size + model.recent_size + 2
+    ):
         raise ValueError("max-seq-length must allow a target after the first memory write")
     plan.mkdir(parents=True)
     config_path = plan / "config.json"
