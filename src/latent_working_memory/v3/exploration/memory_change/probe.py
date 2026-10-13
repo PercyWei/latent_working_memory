@@ -138,16 +138,16 @@ def probe(task, trajectories, output_dir, metadata, append_probability):
                 change = float(memory_change_score(blocks[-1], rewritten, task.cfg.rms_epsilon))
                 overwrite_state = blocks[:-1] + [rewritten]
                 append_state = blocks + [appended]
-                # 仅使用已读到的 evaluation 题，gate 题和未来段的问题不参与质量诊断。
+                # 仅使用已读到的 task 题，gate 题和未来段的问题不参与质量诊断。
                 old_ids = [
                     qa.qa_id
                     for qa in trajectory.qas.values()
-                    if qa.role == "evaluation" and positions[qa.segment_id] < step
+                    if qa.role == "task" and positions[qa.segment_id] < step
                 ]
                 new_ids = [
                     qa.qa_id
                     for qa in trajectory.qas.values()
-                    if qa.role == "evaluation" and positions[qa.segment_id] == step
+                    if qa.role == "task" and positions[qa.segment_id] == step
                 ]
                 qa_ids = old_ids + new_ids
                 l0 = task.qa_losses(blocks, trajectory, old_ids).cpu().tolist()

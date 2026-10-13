@@ -149,8 +149,7 @@ def test_tokenization_preserves_variable_segments_roles_and_complete_pools(
     assert len(trajectory.segments) == len(trajectory.task_qa_ids) == segment_count
     assert len(trajectory.gate_qa_ids) == segment_count
     assert len(trajectory.qas) == 8 * segment_count
-    task_role = "train" if split == "train" else "evaluation"
-    assert sum(q.role == task_role for q in trajectory.qas.values()) == 4 * segment_count
+    assert sum(q.role == "task" for q in trajectory.qas.values()) == 4 * segment_count
     assert sum(q.role == "gate" for q in trajectory.qas.values()) == 4 * segment_count
     _, task_counts, gate_counts = qa_quotas(segment_count)
     config = ObjectiveConfig(method="information_loss", stage="policy")
@@ -162,7 +161,7 @@ def test_tokenization_preserves_variable_segments_roles_and_complete_pools(
         assert task_ids == tuple(
             qa["qa_id"]
             for qa in record["qas"]
-            if qa["segment_id"] == segment.segment_id and qa["role"] == task_role
+            if qa["segment_id"] == segment.segment_id and qa["role"] == "task"
         )
         assert gate_ids == tuple(
             qa["qa_id"]
@@ -172,7 +171,7 @@ def test_tokenization_preserves_variable_segments_roles_and_complete_pools(
         assert len(task_ids) == task_counts[index]
         assert len(gate_ids) == gate_counts[index]
         for qa_id in task_ids:
-            assert trajectory.qas[qa_id].role == task_role
+            assert trajectory.qas[qa_id].role == "task"
         for qa_id in gate_ids:
             assert trajectory.qas[qa_id].role == "gate"
         for qa_id in task_ids + gate_ids:
@@ -375,7 +374,7 @@ def test_invalid_evidence_fact_pools_and_fields_are_rejected(tokenizer, change, 
     if change == "wrong_segment":
         record["qas"][0]["segment_id"] = "seg1"
     elif change == "gate_as_task":
-        record["qas"][4]["role"] = "train"
+        record["qas"][4]["role"] = "task"
     elif change == "duplicate_fact":
         record["qas"][4]["fact_group_id"] = record["qas"][0]["fact_group_id"]
     elif change == "future_evidence":

@@ -213,7 +213,7 @@ def test_actual_writer_reader_and_engine_train_every_method_stage(
             )
             assert {entry["read_step"] for entry in seen} == expected_steps
             for entry in seen:
-                assert entry["introduced_at"] == int(entry["qa_id"].removeprefix("evaluation")) + 1
+                assert entry["introduced_at"] == int(entry["qa_id"].removeprefix("task")) + 1
                 assert entry["age"] == entry["read_step"] - entry["introduced_at"]
                 assert math.isfinite(entry["nll"])
     assert model.training and model.codec.language_model.training and model.codec.decoder.training

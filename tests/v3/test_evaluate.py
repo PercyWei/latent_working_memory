@@ -26,12 +26,12 @@ def trajectory(identifier="doc1", split="test", extra_question=False):
     segments = tuple(Segment(f"s{i + 1}", (i * 6, (i + 1) * 6), (i + 3,)) for i in range(3))
     qas = {}
     rows = [
-        ("old", "s1", "What animal?", "blue whale", "evaluation", (10, 11)),
-        ("new", "s3", "What fish?", "red fish", "evaluation", (12, 13)),
+        ("old", "s1", "What animal?", "blue whale", "task", (10, 11)),
+        ("new", "s3", "What fish?", "red fish", "task", (12, 13)),
         ("gate", "s1", "Hidden gate question?", "gate answer", "gate", (14,)),
     ]
     if extra_question:
-        rows.append(("extra", "s2", "What place?", "Paris", "evaluation", (15,)))
+        rows.append(("extra", "s2", "What place?", "Paris", "task", (15,)))
     for name, segment, question, answer, role, answer_ids in rows:
         qid = f"{identifier}:{name}"
         qas[qid] = QA(
@@ -61,7 +61,7 @@ def trajectory(identifier="doc1", split="test", extra_question=False):
             tuple(
                 qid
                 for qid, qa in qas.items()
-                if qa.role == "evaluation" and qa.segment_id == segment.segment_id
+                if qa.role == "task" and qa.segment_id == segment.segment_id
             )
             for segment in segments
         ),

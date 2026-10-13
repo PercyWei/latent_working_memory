@@ -27,6 +27,7 @@ def compare(summary_paths, output_dir):
                 "comparison requires the same split, evaluation dataset, QA prompt and generation limit, with the same selected gate QA protocol"
             )
         objective = summary["objective"]
+        quality_metrics = ("nll", "em", "f1") if summary["split"] == "test" else ("nll",)
         point = {
             "summary_path": str(Path(path).resolve()),
             "method": summary["method"],
@@ -35,7 +36,7 @@ def compare(summary_paths, output_dir):
             "split": summary["split"],
             "trajectories": summary["trajectories"],
             "questions": summary["quality"]["all"]["questions"],
-            **{name: summary["quality"]["all"][name] for name in ("nll", "em", "f1")},
+            **{name: summary["quality"]["all"][name] for name in quality_metrics},
             "gate_signature": summary["qa_sampling"]["gate_signature"],
             **summary["capacity"],
             **summary["costs"],
@@ -54,7 +55,9 @@ def compare(summary_paths, output_dir):
         json.dumps(points, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     with (directory / "points.csv").open("w", encoding="utf-8", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(points[0]))
+        writer = csv.DictWriter(
+            stream, fieldnames=list(dict.fromkeys(name for point in points for name in point))
+        )
         writer.writeheader()
         writer.writerows(points)
     return points

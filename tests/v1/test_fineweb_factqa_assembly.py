@@ -77,7 +77,7 @@ def test_complete_trajectory_has_fixed_quota_and_full_gate_pool():
     assert result["ok"] and not result["shortfalls"]
     trajectory = result["trajectory"]
     assert len(trajectory["qas"]) == 64
-    assert sum(qa["role"] == "train" for qa in trajectory["qas"]) == 32
+    assert sum(qa["role"] == "task" for qa in trajectory["qas"]) == 32
     assert sum(qa["role"] == "gate" for qa in trajectory["qas"]) == 32
     assert trajectory["estimated_tokens"] == len(document["text"]) / 4
     assert trajectory["text_char_length"] == len(document["text"])
@@ -89,7 +89,7 @@ def test_complete_trajectory_has_fixed_quota_and_full_gate_pool():
         trajectory["segments"], task_counts, gate_counts, strict=True
     ):
         qas = [qa for qa in trajectory["qas"] if qa["segment_id"] == segment["segment_id"]]
-        assert [qa["role"] for qa in qas] == ["train"] * task_count + ["gate"] * gate_count
+        assert [qa["role"] for qa in qas] == ["task"] * task_count + ["gate"] * gate_count
     validate_trajectory(trajectory, QA_CONFIG)
 
 
@@ -156,7 +156,7 @@ def test_review_must_cover_every_qa_and_accepted_facts_need_groups():
     "change,error",
     [
         (
-            lambda trajectory: trajectory["qas"][4].__setitem__("role", "train"),
+            lambda trajectory: trajectory["qas"][4].__setitem__("role", "task"),
             "task QA quota",
         ),
         (
@@ -222,8 +222,7 @@ def test_variable_length_roles_and_complete_segment_pools(segment_count, split):
     ]
     validate_trajectory(trajectory, dict(QA_CONFIG, role_seed=17))
     assert len(trajectory["qas"]) == 8 * segment_count
-    role = "train" if split == "train" else "evaluation"
-    assert sum(q["role"] == role for q in trajectory["qas"]) == 4 * segment_count
+    assert sum(q["role"] == "task" for q in trajectory["qas"]) == 4 * segment_count
     assert sum(q["role"] == "gate" for q in trajectory["qas"]) == 4 * segment_count
     assert "usage" not in trajectory
     _, task_counts, gate_counts = qa_quotas(segment_count)
@@ -231,4 +230,4 @@ def test_variable_length_roles_and_complete_segment_pools(segment_count, split):
         trajectory["segments"], task_counts, gate_counts, strict=True
     ):
         qas = [qa for qa in trajectory["qas"] if qa["segment_id"] == segment["segment_id"]]
-        assert [qa["role"] for qa in qas] == [role] * task_count + ["gate"] * gate_count
+        assert [qa["role"] for qa in qas] == ["task"] * task_count + ["gate"] * gate_count

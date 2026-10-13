@@ -65,7 +65,7 @@ def _nll_quality(rows):
 
 @torch.no_grad()
 def evaluate_nll(task, trajectories, directory, metadata):
-    """与正式 evaluate 使用相同的最终 evaluation QA、按题平均和容量口径。"""
+    """与正式 evaluate 使用相同的最终 task QA、按题平均和容量口径。"""
     all_questions, capacities, costs = [], [], []
     task.eval()
     precision = (
@@ -76,10 +76,10 @@ def evaluate_nll(task, trajectories, directory, metadata):
     temporary = directory / "trajectories.jsonl.tmp"
     with precision, temporary.open("w", encoding="utf-8") as stream:
         for trajectory in trajectories:
-            qa_ids = [qa.qa_id for qa in trajectory.qas.values() if qa.role == "evaluation"]
+            qa_ids = [qa.qa_id for qa in trajectory.qas.values() if qa.role == "task"]
             if not qa_ids:
                 raise ValueError(
-                    f"trajectory {trajectory.trajectory_id} has no evaluation questions"
+                    f"trajectory {trajectory.trajectory_id} has no task questions"
                 )
             positions = {
                 segment.segment_id: index for index, segment in enumerate(trajectory.segments)

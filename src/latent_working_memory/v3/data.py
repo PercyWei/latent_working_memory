@@ -130,12 +130,11 @@ def tokenize_trajectory(
         )
         for index, qa in enumerate(record["qas"])
     }
-    task_role = "train" if record["split"] == "train" else "evaluation"
     task_qa_ids = tuple(
         tuple(
             qa.qa_id
             for qa in qas.values()
-            if qa.segment_id == segment.segment_id and qa.role == task_role
+            if qa.segment_id == segment.segment_id and qa.role == "task"
         )
         for segment in segments
     )

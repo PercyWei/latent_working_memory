@@ -33,7 +33,7 @@ def trajectory(split="train", n=3):
     )
     qas = {}
     for i in range(n):
-        for role in ("gate", "train" if split == "train" else "evaluation"):
+        for role in ("gate", "task"):
             qid = f"{role}{i}"
             qas[qid] = QA(
                 qid,
@@ -58,7 +58,7 @@ def trajectory(split="train", n=3):
         (0, 3 * n),
         segments,
         qas,
-        tuple((f"{'train' if split == 'train' else 'evaluation'}{i}",) for i in range(n)),
+        tuple((f"task{i}",) for i in range(n)),
         tuple((f"gate{i}",) for i in range(n)),
         tuple(range(3, 3 + 3 * n)),
     )
@@ -753,7 +753,7 @@ def test_batch_qa_preserves_question_then_update_then_trajectory_weights():
     def controlled(requests, events=None, timing_key="read_seconds"):
         return [
             torch.stack(
-                [blocks[-1].sum() * 0 + float(qid.removeprefix("train")) + 1 for qid in ids]
+                [blocks[-1].sum() * 0 + float(qid.removeprefix("task")) + 1 for qid in ids]
             )
             for blocks, _, ids in requests
         ]
@@ -766,7 +766,7 @@ def test_batch_qa_preserves_question_then_update_then_trajectory_weights():
         for step in range(len(record.segments)):
             selected = select_step_qas(record, step, model.cfg, seed=model.qa_seed)
             ids = selected.new_qa_ids + selected.old_qa_ids
-            step_losses.append(sum(float(qid.removeprefix("train")) + 1 for qid in ids) / len(ids))
+            step_losses.append(sum(float(qid.removeprefix("task")) + 1 for qid in ids) / len(ids))
         expected.append(sum(step_losses) / len(step_losses))
     torch.testing.assert_close(result["loss"], torch.tensor(sum(expected) / len(expected)))
     assert result["metrics"]["task_qa_reads"] == 5

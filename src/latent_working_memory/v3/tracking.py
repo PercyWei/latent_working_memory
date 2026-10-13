@@ -323,13 +323,13 @@ def configure_training_metrics(tracking, method, stage):
         "train/stage",
         f"train/{_loss_name(method, stage)}",
         f"dev/{_loss_name(method, stage)}",
-        *(DEV_QA_METRICS if stage in {"qa", "warmup", "policy"} else ()),
+        *(DEV_QA_METRICS if method in DYNAMIC_METHODS and stage in {"warmup", "policy"} else ()),
     )
     for name in names:
         tracking.define_metric(name, x_axis="_step", section_name=name.split("/", 1)[0])
 
 
-def training_metrics(record, method):
+def training_metrics(record, method, qa_observations=None):
     """只上传当前实际计算的指标，warmup 与 policy 共享 QA 目标曲线。"""
     values = {name: record[name] for name in TRAINING_METRICS if record.get(name) is not None}
     values["train/stage"] = STAGE_NUMBERS[record["stage"]]
@@ -340,10 +340,20 @@ def training_metrics(record, method):
         values["resources/peak_memory_allocated_gib"] = (
             record["resources/peak_memory_allocated_bytes"] / 1024**3
         )
-    for age in ("old", "new"):
-        name = f"dev/qa_{age}_nll"
-        if record.get(name) is not None and record[f"dev/qa_{age}_count"] > 0:
-            values[name] = record[name]
+    if method in DYNAMIC_METHODS:
+        for age in ("old", "new"):
+            name = f"dev/qa_{age}_nll"
+            if record.get(name) is not None and record[f"dev/qa_{age}_count"] > 0:
+                values[name] = record[name]
+    elif qa_observations:
+        groups = {}
+        for observation in qa_observations:
+            groups.setdefault(observation["introduced_at"], []).append(observation["nll"])
+        values["dev/nll"] = _introduction_nll_chart(
+            method,
+            {step: sum(losses) / len(losses) for step, losses in groups.items()},
+            sum(row["nll"] for row in qa_observations) / len(qa_observations),
+        )
     if method in DYNAMIC_METHODS and record["stage"] in {"warmup", "policy"}:
         for section in ("train", "dev"):
             if f"{section}/appends" in record:
@@ -354,80 +364,98 @@ def training_metrics(record, method):
     return values
 
 
+def _introduction_nll_chart(method, introduction, overall):
+    steps = sorted(introduction, key=int)
+    chart = swanlab.echarts.Bar().add_xaxis([str(step) for step in steps] + ["总体"])
+    chart.add_yaxis(
+        method,
+        [introduction[step] for step in steps] + [overall],
+        label_opts={"show": False},
+        itemstyle_opts={"color": METHOD_COLORS[method]},
+    )
+    chart.set_global_opts(
+        tooltip_opts={"trigger": "axis"},
+        xaxis_opts={"name": "QA 首次引入段"},
+        yaxis_opts={"name": "NLL", "min": 0},
+    )
+    return chart
+
+
 def evaluation_media(summary):
     """汇总质量、容量与每条轨迹的构建耗时；明细保留在本地产物中。"""
     method = summary["method"]
     color = METHOD_COLORS[method]
     introduction = summary["quality"]["by_introduction"]
     steps = sorted(introduction, key=int)
-    labels = [f"第{step}段引入" for step in steps] + ["overall"]
+    labels = [str(step) for step in steps] + ["总体"]
     rows = [introduction[step] for step in steps] + [summary["quality"]["all"]]
-    values = {}
-    chart = swanlab.echarts.Bar().add_xaxis(labels)
-    for index, metric in enumerate(("em", "f1")):
-        chart.add_yaxis(
-            metric.upper(),
-            [row[metric] for row in rows],
-            yaxis_index=index,
-            label_opts={"show": False},
-            itemstyle_opts={"color": _shade(color, index, 2)},
+    section = "dev" if summary["split"] == "dev" else "evaluation"
+    values = {
+        f"{section}/nll": _introduction_nll_chart(
+            method,
+            {step: row["nll"] for step, row in introduction.items()},
+            summary["quality"]["all"]["nll"],
         )
-    chart.set_global_opts(
-        tooltip_opts={"trigger": "axis"},
-        legend_opts={"top": 0},
-        yaxis_opts={"name": "EM", "min": 0, "max": 1},
-    )
-    chart.extend_axis(yaxis={"name": "F1", "position": "right", "min": 0, "max": 1})
-    values["evaluation/em_f1"] = chart
-    chart = swanlab.echarts.Bar().add_xaxis(labels)
-    chart.add_yaxis(
-        method,
-        [{"value": row["nll"]} for row in rows],
-        label_opts={"show": False},
-        itemstyle_opts={"color": color},
-    )
-    chart.set_global_opts(tooltip_opts={"trigger": "axis"}, yaxis_opts={"name": "NLL", "min": 0})
-    values["evaluation/nll"] = chart
-    retention = summary["nll_retention"]
-    count = max(cell["read_step"] for cell in retention["cells"])
-    axis = [str(step) for step in range(1, count + 1)]
-    chart = swanlab.echarts.HeatMap().add_xaxis(axis)
-    chart.add_yaxis(
-        method,
-        axis,
-        [
-            [cell["read_step"] - 1, cell["introduced_at"] - 1, cell["nll"]]
-            for cell in retention["cells"]
-        ],
-        label_opts={"show": False},
-    )
-    chart.set_global_opts(
-        xaxis_opts={"name": "已读来源段", "type": "category"},
-        yaxis_opts={"name": "问题引入段", "type": "category"},
-        visualmap_opts={
-            "min": 0,
-            "max": max(cell["nll"] for cell in retention["cells"]),
-            "orient": "horizontal",
-            "bottom": 0,
-            "inRange": {"color": [_shade(color, 1, 2), color]},
-        },
-    )
-    values["evaluation/nll_retention"] = chart
-    ages = sorted(retention["by_age"], key=int)
-    chart = swanlab.echarts.Line().add_xaxis(ages)
-    chart.add_yaxis(
-        method,
-        [retention["by_age"][age]["delta_nll"] for age in ages],
-        label_opts={"show": False},
-        linestyle_opts={"color": color},
-        itemstyle_opts={"color": color},
-    )
-    chart.set_global_opts(
-        tooltip_opts={"trigger": "axis"},
-        xaxis_opts={"name": "age"},
-        yaxis_opts={"name": "NLL − 首次NLL"},
-    )
-    values["evaluation/nll_delta_by_age"] = chart
+    }
+    if summary["split"] == "test":
+        chart = swanlab.echarts.Bar().add_xaxis(labels)
+        for index, metric in enumerate(("em", "f1")):
+            chart.add_yaxis(
+                metric.upper(),
+                [row[metric] for row in rows],
+                yaxis_index=index,
+                label_opts={"show": False},
+                itemstyle_opts={"color": _shade(color, index, 2)},
+            )
+        chart.set_global_opts(
+            tooltip_opts={"trigger": "axis"},
+            legend_opts={"top": 0},
+            xaxis_opts={"name": "QA 首次引入段"},
+            yaxis_opts={"name": "EM", "min": 0, "max": 1},
+        )
+        chart.extend_axis(yaxis={"name": "F1", "position": "right", "min": 0, "max": 1})
+        values[f"{section}/em_f1"] = chart
+    if method in DYNAMIC_METHODS:
+        retention = summary["nll_retention"]
+        count = max(cell["read_step"] for cell in retention["cells"])
+        axis = [str(step) for step in range(1, count + 1)]
+        chart = swanlab.echarts.HeatMap().add_xaxis(axis)
+        chart.add_yaxis(
+            method,
+            axis,
+            [
+                [cell["read_step"] - 1, cell["introduced_at"] - 1, cell["nll"]]
+                for cell in retention["cells"]
+            ],
+            label_opts={"show": False},
+        )
+        chart.set_global_opts(
+            xaxis_opts={"name": "已读来源段", "type": "category"},
+            yaxis_opts={"name": "问题引入段", "type": "category"},
+            visualmap_opts={
+                "min": 0,
+                "max": max(cell["nll"] for cell in retention["cells"]),
+                "orient": "horizontal",
+                "bottom": 0,
+                "inRange": {"color": [_shade(color, 1, 2), color]},
+            },
+        )
+        values[f"{section}/nll_retention"] = chart
+        ages = sorted(retention["by_age"], key=int)
+        chart = swanlab.echarts.Line().add_xaxis(ages)
+        chart.add_yaxis(
+            method,
+            [retention["by_age"][age]["delta_nll"] for age in ages],
+            label_opts={"show": False},
+            linestyle_opts={"color": color},
+            itemstyle_opts={"color": color},
+        )
+        chart.set_global_opts(
+            tooltip_opts={"trigger": "axis"},
+            xaxis_opts={"name": "age"},
+            yaxis_opts={"name": "NLL − 首次NLL"},
+        )
+        values[f"{section}/nll_delta_by_age"] = chart
     summaries = (
         (
             "capacity",
@@ -461,5 +489,5 @@ def evaluation_media(summary):
             legend_opts={"type": "scroll", "top": 0},
             yaxis_opts={"name": unit, "min": 0},
         )
-        values[f"evaluation/{name}"] = chart
+        values[f"{section}/{name}"] = chart
     return values

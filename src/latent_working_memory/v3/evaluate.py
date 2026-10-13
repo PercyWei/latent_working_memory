@@ -40,13 +40,13 @@ from latent_working_memory.v3.tracking import (
 from latent_working_memory.tracking_credentials import swanlab_api_key
 
 
-def _quality(rows):
+def _quality(rows, metrics):
     def average(selected):
         return {
             "questions": len(selected),
             **{
                 name: sum(row[name] for row in selected) / len(selected) if selected else None
-                for name in ("nll", "em", "f1")
+                for name in metrics
             },
         }
 
@@ -208,6 +208,9 @@ def evaluate(task, trajectories, output_dir, split, max_new_tokens, metadata=Non
         raise ValueError("evaluation requires nonempty trajectories from the requested split")
     if type(max_new_tokens) is not int or max_new_tokens < 1:
         raise ValueError("max_new_tokens must be a positive integer")
+    dynamic = task.cfg.method in DYNAMIC_METHODS
+    generate_answers = split == "test"
+    quality_metrics = ("nll", "em", "f1") if generate_answers else ("nll",)
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
     temporary = directory / "trajectories.jsonl.tmp"
@@ -231,47 +234,30 @@ def evaluate(task, trajectories, output_dir, split, max_new_tokens, metadata=Non
                 segment_positions = {
                     segment.segment_id: index for index, segment in enumerate(trajectory.segments)
                 }
-                nll_by_qa = {qid: [] for qid in qa_ids}
+                nll_by_qa = {qid: [] for qid in qa_ids} if dynamic else None
+                final_nll = {}
                 events, build_seconds = [], 0.0
-                prefix_build_seconds, prefix_write_calls = 0.0, 0
                 prefix_nll_seconds, prefix_nll_reads = 0.0, 0
-                dynamic = task.cfg.method in DYNAMIC_METHODS
                 states = (
                     iter(task._states(trajectory, epoch=0, force_policy=True)) if dynamic else None
                 )
-                for step in range(len(trajectory.segments)):
+                read_steps = (
+                    range(len(trajectory.segments))
+                    if dynamic
+                    else (len(trajectory.segments) - 1,)
+                )
+                for step in read_steps:
                     _synchronize(task)
                     started = time.perf_counter()
                     if dynamic:
                         blocks, event = next(states)
                         events.append(event)
                     else:
-                        prefix = (
-                            trajectory
-                            if step == len(trajectory.segments) - 1
-                            else replace(
-                                trajectory,
-                                segments=trajectory.segments[: step + 1],
-                                task_qa_ids=trajectory.task_qa_ids[: step + 1],
-                                gate_qa_ids=trajectory.gate_qa_ids[: step + 1],
-                                full_input_ids=trajectory.prefix_ids(step, task.tokenizer),
-                            )
+                        blocks, events = task.build_memory(
+                            trajectory, epoch=0, force_policy=True
                         )
-                        blocks, current_events = task.build_memory(
-                            prefix, epoch=0, force_policy=True
-                        )
-                        if step == len(trajectory.segments) - 1:
-                            events = current_events
-                        else:
-                            prefix_write_calls += sum(
-                                event["write_calls"] for event in current_events
-                            )
                     _synchronize(task)
-                    elapsed = time.perf_counter() - started
-                    if dynamic or step == len(trajectory.segments) - 1:
-                        build_seconds += elapsed
-                    else:
-                        prefix_build_seconds += elapsed
+                    build_seconds += time.perf_counter() - started
                     current_ids = [qid for ids in trajectory.task_qa_ids[: step + 1] for qid in ids]
                     if not current_ids:
                         continue
@@ -281,50 +267,57 @@ def evaluate(task, trajectories, output_dir, split, max_new_tokens, metadata=Non
                     elapsed = time.perf_counter() - started
                     if step == len(trajectory.segments) - 1:
                         nll_seconds = elapsed
+                        final_nll = dict(zip(current_ids, losses, strict=True))
                     else:
                         prefix_nll_seconds += elapsed
                         prefix_nll_reads += len(current_ids)
-                    for qid, loss in zip(current_ids, losses, strict=True):
-                        nll_by_qa[qid].append(
-                            {
-                                "read_step": step + 1,
-                                "age": step - segment_positions[trajectory.qas[qid].segment_id],
-                                "nll": loss,
-                            }
-                        )
+                    if dynamic:
+                        for qid, loss in zip(current_ids, losses, strict=True):
+                            nll_by_qa[qid].append(
+                                {
+                                    "read_step": step + 1,
+                                    "age": step - segment_positions[trajectory.qas[qid].segment_id],
+                                    "nll": loss,
+                                }
+                            )
                 memory = torch.cat(blocks)
                 questions = []
+                _synchronize(task)
                 started = time.perf_counter()
                 for qa_id in qa_ids:
-                    nll = nll_by_qa[qa_id][-1]["nll"]
                     qa = trajectory.qas[qa_id]
-                    generated = task.codec.generate(
-                        memory,
-                        task.prompt_ids(qa.question),
-                        max_new_tokens,
-                        eos_token_id=task.tokenizer.eos_token_id,
-                        pad_token_id=task.tokenizer.pad_token_id,
-                    )
-                    generated_ids = generated.cpu().tolist()
-                    prediction = task.tokenizer.decode(generated_ids, skip_special_tokens=True)
-                    questions.append(
-                        {
-                            "qa_id": qa_id,
-                            "segment_id": qa.segment_id,
-                            "introduced_at": segment_positions[qa.segment_id] + 1,
-                            "nll_by_step": nll_by_qa[qa_id],
-                            "age": len(trajectory.segments) - 1 - segment_positions[qa.segment_id],
-                            "question": qa.question,
-                            "answer": qa.answer,
-                            "prediction": prediction,
-                            "generated_ids": generated_ids,
-                            "answer_tokens": len(qa.answer_ids),
-                            "nll": nll,
+                    question = {
+                        "qa_id": qa_id,
+                        "segment_id": qa.segment_id,
+                        "introduced_at": segment_positions[qa.segment_id] + 1,
+                        "question": qa.question,
+                        "answer": qa.answer,
+                        "answer_tokens": len(qa.answer_ids),
+                        "nll": final_nll[qa_id],
+                    }
+                    if dynamic:
+                        question.update(
+                            nll_by_step=nll_by_qa[qa_id],
+                            age=len(trajectory.segments) - 1 - segment_positions[qa.segment_id],
+                        )
+                    if generate_answers:
+                        generated = task.codec.generate(
+                            memory,
+                            task.prompt_ids(qa.question),
+                            max_new_tokens,
+                            eos_token_id=task.tokenizer.eos_token_id,
+                            pad_token_id=task.tokenizer.pad_token_id,
+                        )
+                        generated_ids = generated.cpu().tolist()
+                        prediction = task.tokenizer.decode(generated_ids, skip_special_tokens=True)
+                        question.update(
+                            prediction=prediction,
+                            generated_ids=generated_ids,
                             **scores(prediction, qa.answer),
-                        }
-                    )
+                        )
+                    questions.append(question)
                 _synchronize(task)
-                generation_seconds = time.perf_counter() - started
+                generation_seconds = time.perf_counter() - started if generate_answers else 0.0
                 capacity = {
                     "final_slots": len(memory),
                     "mean_slots": sum(event["slots"] for event in events) / len(events),
@@ -339,14 +332,19 @@ def evaluate(task, trajectories, output_dir, split, max_new_tokens, metadata=Non
                     build_seconds=build_seconds,
                     nll_seconds=nll_seconds,
                     generation_seconds=generation_seconds,
-                    prefix_build_seconds=prefix_build_seconds,
-                    prefix_write_calls=prefix_write_calls,
-                    prefix_nll_seconds=prefix_nll_seconds,
-                    prefix_nll_qa_reads=prefix_nll_reads,
                     nll_qa_reads=len(questions),
-                    generation_qa_reads=len(questions),
-                    generated_tokens=sum(len(qa["generated_ids"]) for qa in questions),
+                    generation_qa_reads=len(questions) if generate_answers else 0,
+                    generated_tokens=(
+                        sum(len(qa["generated_ids"]) for qa in questions)
+                        if generate_answers
+                        else 0
+                    ),
                 )
+                if dynamic:
+                    cost.update(
+                        prefix_nll_seconds=prefix_nll_seconds,
+                        prefix_nll_qa_reads=prefix_nll_reads,
+                    )
                 record = {
                     "trajectory_id": trajectory.trajectory_id,
                     "document_id": trajectory.document_id,
@@ -355,7 +353,7 @@ def evaluate(task, trajectories, output_dir, split, max_new_tokens, metadata=Non
                     "capacity": capacity,
                     "costs": cost,
                     "events": events,
-                    "quality": _quality(questions),
+                    "quality": _quality(questions, quality_metrics),
                     "questions": questions,
                 }
                 stream.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -367,8 +365,9 @@ def evaluate(task, trajectories, output_dir, split, max_new_tokens, metadata=Non
                         "trajectory_id": trajectory.trajectory_id,
                         **{
                             name: qa[name]
-                            for name in ("introduced_at", "nll_by_step", "nll", "em", "f1")
+                            for name in ("introduced_at", *quality_metrics)
                         },
+                        **({"nll_by_step": qa["nll_by_step"]} if dynamic else {}),
                     }
                     for qa in questions
                 )
@@ -382,9 +381,9 @@ def evaluate(task, trajectories, output_dir, split, max_new_tokens, metadata=Non
         "split": split,
         "dataset_signature": signature,
         "trajectories": len(trajectories),
-        "max_new_tokens": max_new_tokens,
-        "quality": _quality(all_questions),
-        "nll_retention": _nll_retention(all_questions),
+        "max_new_tokens": max_new_tokens if generate_answers else None,
+        "quality": _quality(all_questions, quality_metrics),
+        **({"nll_retention": _nll_retention(all_questions)} if dynamic else {}),
         "qa_sampling": qa_protocol,
         "capacity": {
             name: sum(row[name] for row in capacities) / len(capacities) for name in capacities[0]
@@ -392,13 +391,19 @@ def evaluate(task, trajectories, output_dir, split, max_new_tokens, metadata=Non
         "costs": {name: sum(row[name] for row in costs) for name in costs[0]},
         "aggregation": {
             "quality": "question_mean",
-            "retention": "trajectory_mean",
             "capacity": "trajectory_mean",
             "mean_slots": "mean over observed memory states; single compression has one state",
             "costs": "sum",
-            "age": "number of source segments after the evidence segment",
             "introduction": "one-based source segment containing the evidence",
-            "prefix_costs": "earlier-prefix diagnostic compression and NLL; final costs remain separate",
+            **(
+                {
+                    "retention": "trajectory_mean",
+                    "age": "number of source segments after the evidence segment",
+                    "prefix_costs": "NLL reads before the final memory state; final reads remain separate",
+                }
+                if dynamic
+                else {}
+            ),
         },
         "objective": asdict(task.cfg),
         "metadata": {} if metadata is None else metadata,
@@ -494,10 +499,12 @@ def main(argv=None):
             checkpoint["run"]["step_offset"] + checkpoint["cursor"]["step"],
         )
     quality = summary["quality"]["all"]
+    quality_text = " ".join(
+        f"{name}={quality[name]:.4f}" for name in quality if name != "questions"
+    )
     print(
         f"[evaluation] method={summary['method']} split={evaluation_config.split} "
-        f"trajectories={summary['trajectories']} nll={quality['nll']:.4f} "
-        f"em={quality['em']:.4f} f1={quality['f1']:.4f} "
+        f"trajectories={summary['trajectories']} {quality_text} "
         f"summary={Path(args.output_dir) / 'summary.json'}",
         flush=True,
     )

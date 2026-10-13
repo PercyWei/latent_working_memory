@@ -415,17 +415,21 @@ class TokenMemoryTask(nn.Module):
                 events[i].append(event)
                 if self.cfg.method in DYNAMIC_METHODS:
                     new_ids, old_ids = event["task_new_qa_ids"], event["task_old_qa_ids"]
-                # multi 在累计写满总 K 后监督，独立于数据原始段数。
+                # Baseline 在全文写满总 K 后读取，独立于数据原始段数。
                 elif (
                     event["slots"] == self.codec.memory_slots
                     if self.cfg.method in {"icae_multi", "autocompressors"}
                     else event["step"] == len(trajectory.segments) - 1
                 ):
-                    selected = select_step_qas(
-                        trajectory, len(trajectory.segments) - 1, self.cfg, epoch, self.qa_seed
-                    )
-                    new_ids, old_ids = selected.new_qa_ids, selected.old_qa_ids
-                    event["task_new_qa_ids"], event["task_old_qa_ids"] = new_ids, old_ids
+                    if collect_observations:
+                        new_ids = tuple(qid for pool in trajectory.task_qa_ids for qid in pool)
+                        old_ids = ()
+                    else:
+                        selected = select_step_qas(
+                            trajectory, len(trajectory.segments) - 1, self.cfg, epoch, self.qa_seed
+                        )
+                        new_ids, old_ids = selected.new_qa_ids, selected.old_qa_ids
+                    event["task_qa_ids"] = new_ids + old_ids
                 else:
                     continue
                 indices.append(i)
@@ -470,12 +474,24 @@ class TokenMemoryTask(nn.Module):
                 {
                     "task_qa_reads": float(len(new) + len(old)),
                     "read_seconds": sum(event["read_seconds"] for event in row_events),
-                    "qa_new_nll": sum(new) / len(new),
-                    "qa_old_nll": sum(old) / len(old) if old else 0.0,
-                    "qa_new_count": float(len(new)),
-                    "qa_old_count": float(len(old)),
                 }
             )
+            if self.cfg.method in DYNAMIC_METHODS:
+                row.update(
+                    {
+                        "qa_new_nll": sum(new) / len(new),
+                        "qa_old_nll": sum(old) / len(old) if old else 0.0,
+                        "qa_new_count": float(len(new)),
+                        "qa_old_count": float(len(old)),
+                    }
+                )
+            else:
+                row.update(
+                    {
+                        "qa_nll": (sum(new) + sum(old)) / (len(new) + len(old)),
+                        "qa_count": float(len(new) + len(old)),
+                    }
+                )
             metrics.append(row)
         if window_steps is None:
             return [torch.stack(values).mean() for values in losses], metrics, None, observations

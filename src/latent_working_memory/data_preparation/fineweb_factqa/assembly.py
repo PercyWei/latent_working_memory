@@ -100,7 +100,6 @@ def assemble_document(
     document_id, layout = validate_text_layout(document)
     segment_ids = tuple(layout)
     _, task_counts, gate_counts = qa_quotas(len(segment_ids))
-    task_role = "train" if document["split"] == "train" else "evaluation"
     text = document["text"]
     canonical = [
         _candidate_qa(qa, text, layout, qa_config["max_answer_chars"]) for qa in candidates
@@ -146,18 +145,18 @@ def assemble_document(
     shortfalls = []
     for index, segment_id in enumerate(segment_ids):
         available = len(by_segment[segment_id])
-        train_needed = task_counts[index]
+        task_needed = task_counts[index]
         gate_needed = gate_counts[index]
-        missing = max(0, train_needed + gate_needed - available)
+        missing = max(0, task_needed + gate_needed - available)
         if missing:
             shortfalls.append(
                 {
                     "segment_id": segment_id,
                     "available": available,
-                    "required_task": train_needed,
+                    "required_task": task_needed,
                     "required_gate": gate_needed,
-                    "task_missing": max(0, train_needed - available),
-                    "gate_missing": max(0, gate_needed - max(0, available - train_needed)),
+                    "task_missing": max(0, task_needed - available),
+                    "gate_missing": max(0, gate_needed - max(0, available - task_needed)),
                     "missing_total": missing,
                 }
             )
@@ -183,9 +182,9 @@ def assemble_document(
     qas = []
     for index, segment_id in enumerate(segment_ids):
         ordered = by_segment[segment_id]
-        train = ordered[: task_counts[index]]
+        task = ordered[: task_counts[index]]
         gate = ordered[task_counts[index] : task_counts[index] + gate_counts[index]]
-        qas.extend(dict(qa, role=task_role) for qa in train)
+        qas.extend(dict(qa, role="task") for qa in task)
         qas.extend(dict(qa, role="gate") for qa in gate)
     trajectory = {
         "trajectory_id": document["trajectory_id"],
@@ -224,7 +223,6 @@ def validate_trajectory(trajectory: dict, qa_config: dict) -> None:
     document_id, layout = validate_text_layout(trajectory)
     segment_ids = tuple(layout)
     _, task_counts, gate_counts = qa_quotas(len(segment_ids))
-    task_role = "train" if trajectory["split"] == "train" else "evaluation"
     text = trajectory["text"]
     if trajectory["text_char_length"] != len(text):
         raise ValueError("text_char_length does not match text")
@@ -236,7 +234,7 @@ def validate_trajectory(trajectory: dict, qa_config: dict) -> None:
     if not isinstance(qas, list) or len(qas) != sum(task_counts) + sum(gate_counts):
         raise ValueError("trajectory must contain 8N QAs")
     seen_ids, seen_facts = set(), set()
-    train_ids, gate_ids = [], []
+    task_ids, gate_ids = [], []
     expected_order = []
     for index, segment_id in enumerate(segment_ids):
         segment_qas = [qa for qa in qas if qa["segment_id"] == segment_id]
@@ -249,13 +247,13 @@ def validate_trajectory(trajectory: dict, qa_config: dict) -> None:
         if segment_qas != sorted_qas:
             raise ValueError(f"QA role order differs from the fixed seed for {segment_id}")
         expected_order.extend(qa["qa_id"] for qa in segment_qas)
-        train_ids.append([qa["qa_id"] for qa in segment_qas if qa["role"] == task_role])
+        task_ids.append([qa["qa_id"] for qa in segment_qas if qa["role"] == "task"])
         gate_ids.append([qa["qa_id"] for qa in segment_qas if qa["role"] == "gate"])
-        if len(train_ids[-1]) != task_counts[index]:
+        if len(task_ids[-1]) != task_counts[index]:
             raise ValueError(f"task QA quota is wrong for {segment_id}")
         if len(gate_ids[-1]) != gate_counts[index]:
             raise ValueError(f"gate QA quota is wrong for {segment_id}")
-        if [qa["role"] for qa in segment_qas] != [task_role] * len(train_ids[-1]) + ["gate"] * len(
+        if [qa["role"] for qa in segment_qas] != ["task"] * len(task_ids[-1]) + ["gate"] * len(
             gate_ids[-1]
         ):
             raise ValueError(f"QA roles are interleaved for {segment_id}")

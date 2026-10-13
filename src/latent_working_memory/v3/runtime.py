@@ -556,7 +556,11 @@ def train_loop(config, engine, splits, run, stage, stop_after_steps=None, tracki
                 print(" | ".join(progress), flush=True)
                 if tracking is not None:
                     tracking.log(
-                        training_metrics(record, config.objective.method),
+                        training_metrics(
+                            record,
+                            config.objective.method,
+                            qa_observations=development_observations,
+                        ),
                         step=record["global_step"],
                     )
             if step % save_every == 0 or epoch_end or stopping:
