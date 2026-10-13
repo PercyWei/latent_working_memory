@@ -1,4 +1,5 @@
 import copy
+from dataclasses import replace
 import json
 import string
 
@@ -11,6 +12,8 @@ from latent_working_memory.data_preparation.fineweb_factqa.assembly import (
     qa_quotas,
 )
 from latent_working_memory.v3.data import filter_factqa, load_factqa, tokenize_trajectory
+from latent_working_memory.v3.config import ObjectiveConfig
+from latent_working_memory.v3.qa_selection import filter_qa_budget, select_step_qas
 
 
 ROLE_SEED = 17
@@ -135,7 +138,7 @@ def write_dataset(directory, records, qa_config=None):
 
 @pytest.mark.parametrize("segment_count", range(6, 11))
 @pytest.mark.parametrize("split", ("train", "dev", "test"))
-def test_tokenization_preserves_variable_segments_roles_and_actual_usage(
+def test_tokenization_preserves_variable_segments_roles_and_complete_pools(
     tokenizer, segment_count, split
 ):
     record = make_record(segment_count, split)
@@ -143,27 +146,53 @@ def test_tokenization_preserves_variable_segments_roles_and_actual_usage(
     assert trajectory.text == record["text"]
     assert trajectory.source == record["source"]
     assert trajectory.window_char_span == tuple(record["window_char_span"])
-    assert len(trajectory.segments) == len(trajectory.usage) == segment_count
+    assert len(trajectory.segments) == len(trajectory.task_qa_ids) == segment_count
+    assert len(trajectory.gate_qa_ids) == segment_count
     assert len(trajectory.qas) == 8 * segment_count
     task_role = "train" if split == "train" else "evaluation"
     assert sum(q.role == task_role for q in trajectory.qas.values()) == 4 * segment_count
     assert sum(q.role == "gate" for q in trajectory.qas.values()) == 4 * segment_count
-    for index, (segment, step) in enumerate(
-        zip(trajectory.segments, trajectory.usage, strict=True)
+    _, task_counts, gate_counts = qa_quotas(segment_count)
+    config = ObjectiveConfig(method="information_loss", stage="policy")
+    for index, (segment, task_ids, gate_ids) in enumerate(
+        zip(trajectory.segments, trajectory.task_qa_ids, trajectory.gate_qa_ids, strict=True)
     ):
         source = record["text"][slice(*segment.char_span)]
         assert segment.input_ids == tuple(tokenizer.encode(source, add_special_tokens=False))
-        assert step.new_qa_ids == tuple(record["usage"][index]["task_new_qa_ids"])
-        assert step.old_qa_ids == tuple(record["usage"][index]["task_old_qa_ids"])
-        assert step.gate_qa_ids == tuple(record["usage"][index]["gate_qa_ids"])
-        assert len(step.old_qa_ids) == ((4 if index else 0) if split == "train" else 4 * index)
-        assert len(step.gate_qa_ids) == (8 if index else 0)
-        for qa_id in step.new_qa_ids + step.old_qa_ids:
+        assert task_ids == tuple(
+            qa["qa_id"]
+            for qa in record["qas"]
+            if qa["segment_id"] == segment.segment_id and qa["role"] == task_role
+        )
+        assert gate_ids == tuple(
+            qa["qa_id"]
+            for qa in record["qas"]
+            if qa["segment_id"] == segment.segment_id and qa["role"] == "gate"
+        )
+        assert len(task_ids) == task_counts[index]
+        assert len(gate_ids) == gate_counts[index]
+        for qa_id in task_ids:
             assert trajectory.qas[qa_id].role == task_role
-        for qa_id in step.gate_qa_ids:
+        for qa_id in gate_ids:
             assert trajectory.qas[qa_id].role == "gate"
-        for qa_id in step.old_qa_ids + step.gate_qa_ids:
+        for qa_id in task_ids + gate_ids:
+            start, end = trajectory.qas[qa_id].evidence_char_span
+            assert segment.char_span[0] <= start < end <= segment.char_span[1]
+        selected = select_step_qas(trajectory, index, config, epoch=0)
+        assert selected == select_step_qas(trajectory, index, config, epoch=0)
+        assert selected.new_qa_ids == (tuple(sorted(task_ids)) if split == "train" else task_ids)
+        assert len(selected.old_qa_ids) == ((4 if index else 0) if split == "train" else 4 * index)
+        assert len(selected.gate_qa_ids) == (8 if index else 0)
+        selected_ids = selected.new_qa_ids + selected.old_qa_ids + selected.gate_qa_ids
+        assert len(selected_ids) == len(set(selected_ids))
+        for qa_id in selected.old_qa_ids + selected.gate_qa_ids:
             assert trajectory.qas[qa_id].evidence_char_span[1] <= segment.char_span[0]
+        if split != "train":
+            assert selected == select_step_qas(trajectory, index, config, epoch=9)
+    if split == "train":
+        selections = [select_step_qas(trajectory, 2, config, epoch=epoch) for epoch in range(8)]
+        assert len({selection.old_qa_ids for selection in selections}) > 1
+        assert len({selection.gate_qa_ids for selection in selections}) > 1
     for raw in record["qas"]:
         qa = trajectory.qas[raw["qa_id"]]
         assert (qa.question, qa.answer) == (raw["question"], raw["answer"])
@@ -193,17 +222,65 @@ def test_prefix_encoding_uses_original_text_without_special_tokens_or_truncation
             trajectory.prefix_ids(step, tokenizer)
 
 
-def test_load_preserves_all_splits_and_usage(tmp_path, tokenizer):
+@pytest.mark.parametrize(
+    "split,failure,expected_kept",
+    [("train", failure, count) for failure in ("task_new", "task_old", "gate") for count in (3, 4)]
+    + [(split, "gate", count) for split in ("dev", "test") for count in (3, 4)]
+    + [(split, "task_ignored", 5) for split in ("dev", "test")],
+)
+def test_load_preserves_complete_pools_and_strict_budget_filter(
+    tmp_path, tokenizer, split, failure, expected_kept
+):
     records = [make_record(6, "train"), make_record(9, "dev"), make_record(10, "test")]
     write_dataset(tmp_path, records)
     dataset = load_factqa(tmp_path, tokenizer)
     assert set(dataset) == {"train", "dev", "test"}
     assert all(isinstance(rows, tuple) for rows in dataset.values())
     assert [len(dataset[s][0].segments) for s in dataset] == [6, 9, 10]
-    for split in ("dev", "test"):
-        trajectory = dataset[split][0]
-        final = trajectory.usage[-1]
-        assert len(final.new_qa_ids + final.old_qa_ids) == 4 * len(trajectory.segments)
+    for evaluation_split in ("dev", "test"):
+        trajectory = dataset[evaluation_split][0]
+        task_ids = sum(trajectory.task_qa_ids, ())
+        gate_ids = sum(trajectory.gate_qa_ids, ())
+        assert len(task_ids) == len(gate_ids) == 4 * len(trajectory.segments)
+        assert set(task_ids).isdisjoint(gate_ids)
+        assert set(task_ids + gate_ids) == set(trajectory.qas)
+    config = ObjectiveConfig(
+        method="information_loss",
+        stage="policy",
+        task_qa_count=4 if failure == "task_old" else 16 if split != "train" else 8,
+        task_new_ratio=0.25 if failure == "task_old" else 0.5,
+    )
+    trajectory = dataset[split][0]
+    rows = [replace(trajectory, trajectory_id=f"budget-{index}") for index in range(5)]
+    for index in range(5 - expected_kept):
+        current = rows[index]
+        if failure == "task_new":
+            rows[index] = replace(
+                current, task_qa_ids=(*current.task_qa_ids[:-1], current.task_qa_ids[-1][:3])
+            )
+        elif failure == "task_old":
+            rows[index] = replace(
+                current, task_qa_ids=(current.task_qa_ids[0][:2], *current.task_qa_ids[1:])
+            )
+        elif failure == "gate":
+            rows[index] = replace(
+                current, gate_qa_ids=(current.gate_qa_ids[0][:7], *current.gate_qa_ids[1:])
+            )
+    if expected_kept < 4:
+        with pytest.raises(ValueError, match=f"{split} retains 3/5.*below 80%"):
+            filter_qa_budget({split: tuple(rows)}, config)
+    else:
+        kept, statistics = filter_qa_budget({split: tuple(rows)}, config)
+        assert kept[split] == tuple(rows[5 - expected_kept :])
+        insufficient = {"task_new": 0, "task_old": 0, "gate": 0}
+        if failure != "task_ignored":
+            insufficient[failure] = 5 - expected_kept
+        assert statistics[split] == {
+            "read": 5,
+            "kept": expected_kept,
+            "filtered_insufficient_qas": 5 - expected_kept,
+            "insufficient_pools": insufficient,
+        }
 
 
 @pytest.mark.parametrize("error_type", (ValueError, KeyError, TypeError))
@@ -282,26 +359,23 @@ def test_loader_uses_saved_segment_count(tmp_path, tokenizer, segment_count):
 @pytest.mark.parametrize(
     ("change", "error"),
     [
-        ("future_task", "usage schedule"),
-        ("gate_as_task", "usage schedule"),
-        ("duplicate_usage", "usage schedule"),
+        ("wrong_segment", "QA quota is wrong"),
+        ("gate_as_task", "task QA quota is wrong"),
         ("duplicate_fact", "fact group appears"),
         ("future_evidence", "evidence is outside"),
         ("answer_span", "answer span does not match"),
         ("segment_gap", "consecutively cover"),
         ("quote_field", "QA fields are not canonical"),
-        ("legacy_usage", "usage schedule"),
+        ("legacy_usage", "requires exactly"),
         ("extra_trajectory", "requires exactly"),
     ],
 )
-def test_invalid_evidence_fact_pools_and_schedules_are_rejected(tokenizer, change, error):
+def test_invalid_evidence_fact_pools_and_fields_are_rejected(tokenizer, change, error):
     record = make_record(6)
-    if change == "future_task":
-        record["usage"][1]["task_old_qa_ids"][0] = record["usage"][2]["task_new_qa_ids"][0]
+    if change == "wrong_segment":
+        record["qas"][0]["segment_id"] = "seg1"
     elif change == "gate_as_task":
-        record["usage"][1]["task_old_qa_ids"][0] = record["usage"][1]["gate_qa_ids"][0]
-    elif change == "duplicate_usage":
-        record["usage"][1]["gate_qa_ids"][1] = record["usage"][1]["gate_qa_ids"][0]
+        record["qas"][4]["role"] = "train"
     elif change == "duplicate_fact":
         record["qas"][4]["fact_group_id"] = record["qas"][0]["fact_group_id"]
     elif change == "future_evidence":
@@ -313,8 +387,7 @@ def test_invalid_evidence_fact_pools_and_schedules_are_rejected(tokenizer, chang
     elif change == "quote_field":
         record["qas"][0]["evidence_quote"] = "old schema"
     elif change == "legacy_usage":
-        step = record["usage"][0]
-        step["train_new_qa_ids"] = step.pop("task_new_qa_ids")
+        record["usage"] = []
     else:
         record["unexpected"] = True
     with pytest.raises(ValueError, match=error):
@@ -426,7 +499,8 @@ def test_factqa_length_filter_preserves_exact_boundary_and_complete_qa(tmp_path,
     assert retained["train"] == (trajectory,)
     assert retained["train"][0] is trajectory
     assert retained["train"][0].qas is trajectory.qas
-    assert retained["train"][0].usage is trajectory.usage
+    assert retained["train"][0].task_qa_ids is trajectory.task_qa_ids
+    assert retained["train"][0].gate_qa_ids is trajectory.gate_qa_ids
     assert retained["train"][0].segments is trajectory.segments
     assert original["train"] == (trajectory,)
     assert statistics == {

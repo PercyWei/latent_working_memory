@@ -52,7 +52,7 @@
 | 方法 | 决策过程 |
 |---|---|
 | `memory_change` | 先生成覆盖候选；对候选与旧末块逐 slot 做 RMS（均方根）归一化，计算相对 Frobenius 距离 $I$。$I >= threshold_i$ 时另生成追加块，否则保存覆盖候选。归一化仅用于评分。 |
-| `information_loss` | 分别生成覆盖与追加候选，用固定的历史门控 QA 比较更新前、覆盖后、追加后的可读性。 |
+| `information_loss` | 分别生成覆盖与追加候选，用同一组历史门控 QA 比较更新前、覆盖后、追加后的可读性。 |
 
 两种门控均为固定规则，不含可训练参数；评分与动作选择不参与反向传播。
 
@@ -74,9 +74,13 @@
 | 数据输入 | 目录格式 | 用途 |
 |---|---|---|
 | FineWeb Multisegment | `preparation.json`、`train/dev/test.jsonl`；每行是 `MultisegmentSample` | ICAE 和动态方法的 AE／LM，以及 AutoCompressors 的 LM |
-| FineWeb FactQA | `preparation.json`、`train/dev/test.jsonl`；保留原文、字符段界、QA 和 `usage` | ICAE QA、动态方法的动作 warmup 和策略训练及最终评估 |
+| FineWeb FactQA | `preparation.json`、`train/dev/test.jsonl`；保留原文、字符段界和完整 QA 题池 | ICAE QA、动态方法的动作 warmup 和策略训练及最终评估 |
 
 数据构造见 [FineWeb Multisegment](../data_preparation/fineweb_multisegment/README.md) 和 [FineWeb FactQA](../data_preparation/fineweb_factqa/README.md)。加载时校验各数据集的划分与来源，以及 FactQA 的题池隔离；QA 阶段启动时，将实际选用的 FactQA 来源与 checkpoint 记录的预训练来源对照，检查文档及去重簇是否重叠。最终评估再次检查来源隔离。
+
+FactQA 不保存逐步 `usage`。运行时按原始段和角色建立题池，`task_qa_count`（默认 8）、`task_new_ratio`（默认 0.5）决定训练的新／旧题数；乘积须为正整数。首段只监督新题，后续新题从当前段抽取、旧题从全部历史段抽取。`gate_qa_count`（默认 8）从历史 gate 池抽取，首段不执行门控。每次抽样不放回，已抽题仍可在后续段再次使用；task 与 gate 的随机流独立于 warmup 动作，训练随 epoch 重采样，dev/test 固定，并使用全部已读 task QA。
+
+训练集检查每段 task 数是否足够新题、首段 task 数是否足够旧题；各 split 检查首段 gate 数是否足够门控。任一不足则排除整条轨迹；每个 split 保留不足原规模的 80% 时报错，再进行长度过滤和样本上限选择。当前数据每段 task 为 4、首段 gate 为 8，因此训练总题数 8 时新题比例只能为 0.5，gate 题数不能超过 8。旧 QA 运行的恢复身份包含已保存的使用安排；迁移后不改写旧 checkpoint 或 `run.json`，复现旧运行须保留对应代码和数据。
 
 - **FineWeb Multisegment**：使用完整正文，训练时超出 `training.max_input_tokens` 的样本整条过滤。默认 12288，`null` 使用模型窗口。每次实际编码／解码另行检查窗口长度。
 - **FineWeb FactQA**：使用完整正文，训练时超出 `training.max_qa_input_tokens` 的样本整条过滤。默认 12288，`null` 使用模型窗口。原始段界用于确定题目来源及 old／new 分类；各方法的压缩分段见下文。
@@ -88,7 +92,7 @@
 | 阶段 | 数据使用与训练目标 |
 |---|---|
 | `pretrain` | FineWeb Multisegment 完整正文一次压缩为 K slots，读取记忆计算 AE 或 LM 损失 |
-| `qa` | FineWeb FactQA 完整正文一次压缩为 K slots，读取记忆计算全部训练任务题 |
+| `qa` | FineWeb FactQA 完整正文一次压缩为 K slots，以末段为新题来源，按训练题数和比例计算任务损失 |
 
 - 对于 FineWeb Multisegment，每条样本的训练目标（LM 或 AE）通过 `training.lm_ratio` 进行选择（默认概率 0.5）；LM 取 `training.lm_target_tokens` 个续文 tokens（默认 512），不足时改用 AE；选择由 seed 和样本 ID 决定，跨 epoch 保持不变。
 
@@ -97,7 +101,7 @@
 | 阶段 | 数据使用与训练目标 |
 |---|---|
 | `pretrain` | FineWeb Multisegment 完整正文分段独立压缩，最后拼接为 K slots，读取该记忆计算 AE 或 LM 损失 |
-| `qa` | FineWeb FactQA 完整正文分段独立压缩，最后拼接为 K slots，读取该记忆计算全部训练任务题 |
+| `qa` | FineWeb FactQA 完整正文分段独立压缩，最后拼接为 K slots，以末段为新题来源，按训练题数和比例计算任务损失 |
 
 - 分段压缩逻辑：
     1. **选择段数**：由 `objective.icae_min_segments`／`icae_max_segments` 指定范围（默认 3–6），从中均匀采样 n。采样由 seed 和样本 ID 决定，同一样本跨 epoch 使用相同的 n。
@@ -135,7 +139,7 @@
 | `warmup` | FineWeb FactQA 原始段界逐段压缩；首次写入 K slots，后续按 `objective.append_probability`（默认 0.5）选择追加或覆盖，计算任务 QA 损失 | 分别训练 |
 | `policy` | FineWeb FactQA 原始段界逐段压缩；首次写入 K slots，后续按各自固定规则追加或覆盖，沿选中路径计算任务 QA 损失，训练写入器的可训练参数 | 分别训练 |
 
-- 每个更新点读取全部已保存记忆，使用该点配置的 old／new 任务题池，按实际题数合并损失；再平均更新点，最终按轨迹平均。信息损失方法额外用固定门控 QA 决策，这些题不参与计算任务损失。
+- 每个更新点读取全部已保存记忆，使用运行时选出的 old／new 任务题，按实际题数合并损失；再平均更新点，最终按轨迹平均。信息损失方法额外用历史门控 QA 决策，同一步三种候选状态共用题目，gate 不参与任务损失。
 - QA 阶段默认完整 BPTT，可用 `objective.bptt_steps` 设置截断窗口；例如设为 2 时每两轮截断，首次写入也计一轮。每个窗口反向并 detach 记忆，global batch 结束后更新一次参数。
 - 四种写入版本均可复用同一共享预训练 checkpoint。`tag` 继承 LoRA／gist，按 m 新初始化两组标记向量，随后与它们一起进行 warmup／policy QA 训练；阶段衔接、恢复与评估沿用保存的 m。`dual_lora` 复制两套 LoRA，分别接收对应动作路径的梯度。
 
@@ -157,7 +161,7 @@
 
 全局 batch = GPU 数 × 每卡 microbatch × 梯度累积；双卡默认均为 **16**，尾批按实际样本数平均。
 
-dev 验证固定使用采样 epoch 0，跨训练 epoch 保持相同的随机动作和分段；训练仍按当前 epoch 采样。
+dev 验证固定使用采样 epoch 0，跨训练 epoch 保持相同的选题、随机动作和分段；训练仍按当前 epoch 采样。动态 warmup 的 dev 沿用固定随机动作，policy 的 dev 与最终评估使用策略决策。每次 QA dev 验证的逐题 NLL 写入 `dev-qa.jsonl`，云端只追加当前 optimizer step 的原生指标，不上传累计图表。
 每个 epoch 结束时自动保存 checkpoint，目录保留使用 verl 的最近 N 个规则，`save_total_limit` 限制全部 checkpoint 的数量。若要保留三轮的 epoch 末 checkpoint，可将 `save_every` 设为每 epoch 的 optimizer step 数，`save_total_limit` 设为 3。
 
 ## 四、运行
@@ -179,7 +183,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | `--config <文件>` | 替换所选单方法的默认配置；省略时读取 `configs/v3/` |
 | `--writer-mode` | 动态后训练写入方式：`local`（默认）、`tag`、`mask`、`dual_lora` |
 | `--tag-tokens` | 每种动作的控制 token 数 m，默认 3；仅用于动态 `tag` 写入 |
-| `--eval-data`、`--eval-seed` | 仅控制最终评估的数据与抽样 seed，独立于训练设置 |
+| `--eval-data`、`--eval-seed` | 仅控制最终评估的数据及轨迹／gate 选题 seed，独立于训练设置 |
 
 - **配置覆盖**：`objective.stages` 声明阶段顺序，显式 CLI 超参数覆盖配置值；更多参数见[运行指南](scripts/README.md#4-调整参数)。
 - **阶段执行**：同一方法的连续阶段在同一训练进程执行，切换时重置优化器；不同方法分别启动。
@@ -198,10 +202,11 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 ### 5.1 评估方式与指标
 
 - **评估对象**：默认使用最后一个 checkpoint，在同一批 FineWeb FactQA 轨迹的最终记忆上回答评估题；门控题不计入质量指标。
-- **评估配置**：有最终 QA 评估的五种方法在训练前保存 `plan/<method-dir>/eval.json`，由 `job.json` 引用其路径，字段为 `dataset_dir`、`split`、`seed`、`max_trajectories`、`max_new_tokens`。正常训练、续训与补评估共用该配置。
-- **独立设置**：初次省略 `--eval-data` 时采用 `--qa-data`，存档后按评估配置读取；`--eval-seed` 独立于训练 seed，默认 `20261004`。补评估沿用存档设置，显式评估参数更新该配置；命令见[评估指南](scripts/README.md#22-单独评估)。
+- **评估配置**：有最终 QA 评估的五种方法在训练前保存 `plan/<method-dir>/eval.json`，字段为 `dataset_dir`、`split`、`seed`、`max_trajectories`、`max_new_tokens`、`gate_qa_count`。正常训练、续训与补评估共用该配置。
+- **独立设置**：新训练初次省略 `--eval-data` 时采用 `--qa-data`，seed 默认 `20261004`，gate 题数沿用训练配置。已有 `eval.json` 时复用其 seed 和题数；单独补评估且缺少该文件时，需指定数据入口，gate 默认 8。显式评估参数更新该配置，`--eval-seed` 同时控制轨迹与 gate 选择。命令见[评估指南](scripts/README.md#22-单独评估)。
 - **数据选择**：`--eval-data` 可指定不同于 QA 训练的数据集；最终评估仍检查所选轨迹与 checkpoint 预训练来源的隔离。已有 `eval.json` 时，`--qa-data` 不影响最终评估。
-- **质量**：记录答案 NLL、EM（精确匹配）和 F1，生成使用 greedy decoding。按 all／old／new 及段距离统计；new 指末段事实，old 指更早事实，段距离按 FactQA 原始段界计算。
+- **质量**：所有 task QA 在最终记忆上计算 EM（精确匹配）和 F1，使用 greedy decoding；按问题首次引入的原始段分组，另记录全部题目的总体均值。训练与训练中 dev 不生成答案。
+- **逐段 NLL**：同一道 task QA 从引入后追踪到最后一段，记录每题每段的 NLL；最终汇总为“引入段 × 已读段”三角热图与按 age 对齐的相对首次 NLL 变化。基线为诊断单独重压缩原文前缀，额外构建和读取成本分别记录；部署成本仍按最终记忆计算。
 - **容量**：记录最终 slots 与各更新点保存状态的平均 slots，再按轨迹平均；ICAE-single 只有一次压缩状态。
 - **成本**：记忆构建耗时包含候选写入及门控计算，不含最终 QA 读取与答案生成。
 
@@ -210,7 +215,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 ```text
 artifacts/v3/<run-id>/
 ├── plan/<method-dir>/           阶段配置、eval.json、job.json、日志、result.json
-├── train/<method-dir>/<stage>/  config.json、run.json、metrics.jsonl、checkpoints/
+├── train/<method-dir>/<stage>/  config.json、run.json、metrics.jsonl、dev-qa.jsonl、checkpoints/
 ├── eval/<method-dir>/<stage>/   summary.json、trajectories.jsonl
 └── compare/                     独立比较生成的 points.json、points.csv
 ```
@@ -218,7 +223,7 @@ artifacts/v3/<run-id>/
 - **运行目录**：`run-id` 可用 `--run-id` 指定；复用共享预训练且省略时继承来源编号，其余情况按上海时间生成 `YYYYMMDD-HHMMSS`。父目录由 `--output-root` 控制。
 - **方法目录**：三个 baseline 和独立动态预训练使用 `<method>-k<K>`；两种动态方法统一使用 `<method>-k<K>+<ΔK>-<writer>`，显式完整流程的 `pretrain` 也保存在该方法目录内。`<writer>` 为 `local`、`tag`、`mask` 或 `dual-lora`，试跑最后添加 `_<mode>`。例如 `memory-change-k512+32-local`、`memory-change-k512+32-tag_smoke`。方法名中的 `_` 转为 `-`，共享预训练用 `dynamic-pretrain`；K、ΔK 分别来自 `model.memory_slots`、`objective.append_slots`。
 - **Checkpoint**：目录为 `checkpoints/global_step_<阶段step>/`。`state.pt` 保存新增权重、优化器及运行状态，`data_<rank>.pt` 保存各卡加载器状态；每阶段默认保留最近两个，初始化、恢复和评估均传入该目录。外层结构及文件布局不变；原 adapter 字典中，`tag` 保存 $2\times m\times d$ 的 `tag_embeddings`，`dual_lora` 保存两套 LoRA。恢复与评估使用保存的写入方式和 m。
-- **结果与比较**：`summary.json` 汇总指标，`trajectories.jsonl` 保存动作、分数、计时与逐题结果。比较单独调用 [compare.py](compare.py)，导出 `points.json` 与 `points.csv`；命令见[运行指南](scripts/README.md#5-查看结果)。比较要求 split、实际选中的轨迹与题池签名、QA prompt 和生成 token 上限一致；各方法的训练数据与训练配置可不同。
+- **结果与比较**：`summary.json` 汇总指标，`trajectories.jsonl` 保存动作、分数、计时与逐题结果。比较单独调用 [compare.py](compare.py)，导出 `points.json` 与 `points.csv`；命令见[运行指南](scripts/README.md#5-查看结果)。比较要求 split、实际 task 题池、各段选中的 gate QA 签名、QA prompt 和生成 token 上限一致；seed 不同但实际选题相同仍可比较，各方法的训练数据与训练配置可不同。
 
 ### 5.3 SwanLab 组织与展示
 
@@ -228,7 +233,7 @@ artifacts/v3/<run-id>/
 - **曲线**：展示目标损失、旧／新 QA NLL、容量、梯度范数、耗时和训练步峰值显存。
 - **追加比例**：动态 warmup／policy 将 `train/append_ratio` 与 `dev/append_ratio` 合并为一张原生折线图，横轴为累计 optimizer step。比例为追加次数／（追加次数＋覆盖次数），不计首次写入；仅记录有决策的训练步与实际验证点。
 - **阶段与进度**：`train/stage` 中，1 = pretrain、2 = ICAE QA／动态方法 warmup、3 = 动态方法 policy；`train/epoch` 以小数记录当前阶段累计处理样本数／训练集样本数，阶段切换时重新计数。
-- **最终柱状图**：NLL／EM／F1 各合并 all／old／new；另展示最终与平均 slots、每条轨迹的记忆构建耗时。
+- **最终图表**：NLL 按引入段与总体汇总；EM／F1 合并为双纵轴分组柱状图，两轴均为 `[0,1]`。另展示 NLL 保持热图、相对首次变化、最终与平均 slots，以及每条轨迹的记忆构建耗时。各段的有效题数与完整逐题记录保存在本地。
 - **完整记录**：统计与样例保存在本地，不上传表格；`--tracking disabled` 仅记录本地结果。
 
 ## 六、代码入口与验证
@@ -237,7 +242,7 @@ artifacts/v3/<run-id>/
 |---|---|
 | 配置与运行计划 | [config.py](config.py)、[job_plan.py](job_plan.py) |
 | 启动与调度 | [gpu_job.py](gpu_job.py)、[train.py](train.py) |
-| 数据加载 | [data.py](data.py)、[pretrain_data.py](pretrain_data.py) |
+| 数据加载与选题 | [data.py](data.py)、[pretrain_data.py](pretrain_data.py)、[qa_selection.py](qa_selection.py) |
 | 模型、写入与目标 | [model.py](model.py)、[objective.py](objective.py) |
 | 训练、恢复与记录 | [engine.py](engine.py)、[runtime.py](runtime.py)、[tracking.py](tracking.py) |
 | 评估与比较 | [evaluate.py](evaluate.py)、[compare.py](compare.py) |

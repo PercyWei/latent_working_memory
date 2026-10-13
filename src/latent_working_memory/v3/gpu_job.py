@@ -90,7 +90,10 @@ def parse_args(argv=None):
     )
     parser.add_argument("--eval-data", type=Path, help="独立的最终 QA 评估数据目录")
     parser.add_argument(
-        "--eval-seed", type=bounded_count, help="最终评估抽样 seed，初次默认 20261004"
+        "--eval-seed", type=bounded_count, help="最终评估轨迹及 gate 选题 seed，默认复用 eval.json"
+    )
+    parser.add_argument(
+        "--eval-gate-qa-count", type=positive_count, help="最终评估每次门控的题数，初次沿用训练配置"
     )
     parser.add_argument(
         "--model-path", help="覆盖预设模型位置，当前预设为 ~/models/Qwen3-4B-Instruct-2507"
@@ -110,6 +113,15 @@ def parse_args(argv=None):
         help="每次优化器更新前累积的 microbatch 数",
     )
     parser.add_argument("--qa-batch-size", type=positive_count)
+    parser.add_argument(
+        "--task-qa-count", type=positive_count, help="每段训练 task QA 总题数，默认 8；首段只用新题"
+    )
+    parser.add_argument(
+        "--gate-qa-count", type=positive_count, help="训练和 dev 每次门控的历史 QA 数，默认 8"
+    )
+    parser.add_argument(
+        "--task-new-ratio", type=probability, help="训练 task 新题比例，默认 0.5；新题数须为正整数"
+    )
     parser.add_argument(
         "--lm-ratio",
         type=probability,
@@ -276,7 +288,7 @@ def save_json(path, value):
     )
 
 
-def resolve_evaluation_config(args, config_path, level=None):
+def resolve_evaluation_config(args, config_path, level=None, gate_qa_count=8):
     """沿用独立评估设置，只应用显式评估参数；旧产物须明确指定数据入口。"""
     if config_path.is_file():
         config = load_evaluation(config_path)
@@ -287,12 +299,14 @@ def resolve_evaluation_config(args, config_path, level=None):
             dataset_dir=str((args.eval_data or args.qa_data).resolve()),
             split=level["eval_split"] if level is not None else "test",
             max_trajectories=level["eval_trajectories"] if level is not None else None,
+            gate_qa_count=gate_qa_count,
         )
     updates = {}
     for argument, field in (
         ("eval_data", "dataset_dir"),
         ("eval_split", "split"),
         ("eval_seed", "seed"),
+        ("eval_gate_qa_count", "gate_qa_count"),
         ("eval_trajectories", "max_trajectories"),
         ("max_new_tokens", "max_new_tokens"),
     ):
@@ -400,7 +414,9 @@ def run_resume(args):
     result["checkpoints"][jobs[0].key] = str(args.checkpoint.resolve())
     evaluation_path = plan_directory / "eval.json"
     evaluation_config = (
-        resolve_evaluation_config(args, evaluation_path)
+        resolve_evaluation_config(
+            args, evaluation_path, gate_qa_count=jobs[-1].config.objective.gate_qa_count
+        )
         if any(job.evaluate for job in jobs)
         else None
     )
@@ -480,7 +496,11 @@ def run_job(args):
     }
     evaluation_path = plan_directory / "eval.json"
     evaluation_config = (
-        resolve_evaluation_config(args, evaluation_path, level) if evaluation_directories else None
+        resolve_evaluation_config(
+            args, evaluation_path, level, jobs[-1].config.objective.gate_qa_count
+        )
+        if evaluation_directories
+        else None
     )
     training_run = {
         "stages": [job.key for job in jobs],

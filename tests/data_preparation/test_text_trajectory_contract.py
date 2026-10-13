@@ -89,10 +89,9 @@ def test_multisegment_text_layout_is_preserved_by_factqa_assembly():
     )
     assert result["ok"] and result["shortfalls"] == []
     factqa = result["trajectory"]
-    assert set(factqa) == shared_fields | {"qas", "usage"}
+    assert set(factqa) == shared_fields | {"qas"}
     assert {key: factqa[key] for key in shared_fields} == common_document
     assert len(factqa["qas"]) == sum(task_counts) + sum(gate_counts)
-    assert len(factqa["usage"]) == len(sample.segments)
 
     start, end = sample.window_char_span
     candidate_end = end + config.window.continuation_chars

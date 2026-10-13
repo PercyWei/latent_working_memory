@@ -1,4 +1,4 @@
-"""Read canonical FactQA trajectories without changing their text or QA schedule."""
+"""Read canonical FactQA trajectories and index complete per-segment QA pools."""
 
 from dataclasses import dataclass
 import json
@@ -31,14 +31,6 @@ class QA:
 
 
 @dataclass(frozen=True, slots=True)
-class StepUsage:
-    segment_id: str
-    new_qa_ids: tuple[str, ...]
-    old_qa_ids: tuple[str, ...]
-    gate_qa_ids: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class FactQATrajectory:
     trajectory_id: str
     document_id: str
@@ -49,7 +41,8 @@ class FactQATrajectory:
     window_char_span: tuple[int, int]
     segments: tuple[Segment, ...]
     qas: dict[str, QA]
-    usage: tuple[StepUsage, ...]
+    task_qa_ids: tuple[tuple[str, ...], ...]
+    gate_qa_ids: tuple[tuple[str, ...], ...]
     full_input_ids: tuple[int, ...]
 
     def prefix_ids(self, step: int, tokenizer) -> tuple[int, ...]:
@@ -96,7 +89,6 @@ def tokenize_trajectory(
             "text",
             "segments",
             "qas",
-            "usage",
             "text_char_length",
             "estimated_tokens",
             "estimated_tokens_rule",
@@ -105,8 +97,7 @@ def tokenize_trajectory(
     )
     if expected_split not in ("train", "dev", "test") or record["split"] != expected_split:
         raise ValueError("trajectory split differs from the requested dataset split")
-    # Reuse the writer's contract: fact isolation, source spans, role quotas and
-    # the exact fixed usage schedule, including all historical dev/test tasks.
+    # Reuse the writer's contract: fact isolation, source spans and role quotas.
     validate_trajectory(record, qa_config)
     for segment in record["segments"]:
         _exact_fields(segment, {"segment_id", "char_span"}, "segment")
@@ -139,14 +130,22 @@ def tokenize_trajectory(
         )
         for index, qa in enumerate(record["qas"])
     }
-    usage = tuple(
-        StepUsage(
-            step["segment_id"],
-            tuple(step["task_new_qa_ids"]),
-            tuple(step["task_old_qa_ids"]),
-            tuple(step["gate_qa_ids"]),
+    task_role = "train" if record["split"] == "train" else "evaluation"
+    task_qa_ids = tuple(
+        tuple(
+            qa.qa_id
+            for qa in qas.values()
+            if qa.segment_id == segment.segment_id and qa.role == task_role
         )
-        for step in record["usage"]
+        for segment in segments
+    )
+    gate_qa_ids = tuple(
+        tuple(
+            qa.qa_id
+            for qa in qas.values()
+            if qa.segment_id == segment.segment_id and qa.role == "gate"
+        )
+        for segment in segments
     )
     return FactQATrajectory(
         trajectory_id=record["trajectory_id"],
@@ -158,13 +157,14 @@ def tokenize_trajectory(
         window_char_span=tuple(record["window_char_span"]),
         segments=segments,
         qas=qas,
-        usage=usage,
+        task_qa_ids=task_qa_ids,
+        gate_qa_ids=gate_qa_ids,
         full_input_ids=encoded[0],
     )
 
 
 def load_factqa(dataset_dir: str | Path, tokenizer) -> dict[str, tuple[FactQATrajectory, ...]]:
-    """Load published JSONL using its saved character spans, QA schedule and splits."""
+    """Load published JSONL using its saved character spans, complete QAs and splits."""
     root = Path(dataset_dir)
     with (root / "preparation.json").open(encoding="utf-8") as stream:
         preparation = json.load(stream)

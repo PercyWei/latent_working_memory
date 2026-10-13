@@ -112,6 +112,8 @@ def make_config(output, stage="pretrain", init=None):
             method="dynamic" if stage == "pretrain" else "memory_change",
             stage=stage,
             append_slots=1,
+            task_qa_count=2,
+            gate_qa_count=1,
         ),
         TrainingConfig(
             dataset_dir="data/unit-fixture",
@@ -1003,7 +1005,7 @@ def test_factqa_train_length_filter_precedes_selection_and_preserves_dev_test_so
             assert any(selected is row for row in filtered)
             assert len(selected.segments) == 3
             assert len(selected.qas) == 6
-            assert len(selected.usage) == 3
+            assert len(selected.task_qa_ids) == len(selected.gate_qa_ids) == 3
     changed = replace(config, training=replace(config.training, max_input_tokens=64))
     assert load_splits(changed, None, 64) == (splits, statistics)
     run = make_run(config, splits, statistics, "cpu", 1)
@@ -1152,7 +1154,9 @@ def test_dynamic_stages_preserve_shared_source_and_accumulate_only_method_steps(
     assert sources[0]["checkpoint"] == source_result["checkpoint"]
     assert sources[0]["step"] == 2
     assert sources[0]["run_id"] is sources[0]["run_url"] is None
-    assert {path: path.read_bytes() for path in source_root.rglob("*") if path.is_file()} == source_files
+    assert {
+        path: path.read_bytes() for path in source_root.rglob("*") if path.is_file()
+    } == source_files
 
 
 def test_saved_pretraining_without_explicit_name_uses_its_directory_name(tmp_path):

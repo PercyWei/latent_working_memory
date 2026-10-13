@@ -17,6 +17,7 @@ from latent_working_memory.v3.config import DYNAMIC_METHODS, ModelConfig
 from latent_working_memory.v3.data import filter_factqa, load_factqa
 from latent_working_memory.v3.model import GistMemoryModel
 from latent_working_memory.v3.pretrain_data import load_pretraining
+from latent_working_memory.v3.qa_selection import filter_qa_budget
 from latent_working_memory.v3.tracking import (
     configure_training_metrics,
     experiment_directory,
@@ -78,11 +79,24 @@ def load_splits(config, tokenizer, model_window):
     if pretraining:
         splits, statistics = load_pretraining(config, tokenizer, model_window)
     else:
+        qa_splits, qa_statistics = filter_qa_budget(
+            load_factqa(training.dataset_dir, tokenizer), config.objective
+        )
         splits, statistics = filter_factqa(
-            load_factqa(training.dataset_dir, tokenizer),
+            qa_splits,
             training.max_qa_input_tokens,
             model_window,
         )
+        statistics["qa_budget_filter"] = qa_statistics
+        statistics["qa_selection"] = {
+            "task_qa_count": config.objective.task_qa_count,
+            "task_new_ratio": config.objective.task_new_ratio,
+            "gate_qa_count": config.objective.gate_qa_count,
+            "seed": config.objective.seed,
+            "train": "deterministic_per_epoch",
+            "dev_test": "all_read_tasks_and_fixed_gate",
+            "historical_pool": "all_previous_segments",
+        }
     statistics["source_data"] = {name: dataset_identity(rows) for name, rows in splits.items()}
     statistics["selection"] = {
         "seed": training.seed,
@@ -138,7 +152,7 @@ def select_examples(rows, limit, seed, split, pretraining):
 
 
 def dataset_identity(rows):
-    """绑定实际分词结果、问题与使用安排，防止续训时替换数据。"""
+    """绑定实际分词结果与完整题池；运行时选题规则单独保存在配置中。"""
     digest = hashlib.blake2b(digest_size=32)
     for example in rows:
         digest.update(
@@ -322,10 +336,12 @@ def validate_cursor(cursor, config, samples, world_size):
 
 def evaluate_split(engine, examples):
     """验证固定使用采样 epoch 0，跨训练 epoch 保持相同的动作和分段。"""
-    totals, samples = {}, 0
+    totals, samples, observations = {}, 0, []
     loader = make_data_loader(examples, engine.global_batch_size, engine.config.seed, shuffle=False)
     for batch in loader:
         metrics = engine.eval_batch(batch, epoch=0)
+        if "qa_observations" in metrics:
+            observations.extend(metrics.pop("qa_observations"))
         weight = metrics["samples"]
         for name, value in metrics.items():
             if name != "samples" and value is not None:
@@ -333,7 +349,10 @@ def evaluate_split(engine, examples):
         samples += weight
     if not samples:
         raise ValueError("evaluation split must contain at least one example")
-    return {"samples": samples, **{name: value / samples for name, value in totals.items()}}
+    result = {"samples": samples, **{name: value / samples for name, value in totals.items()}}
+    if observations:
+        result["qa_observations"] = observations
+    return result
 
 
 def _rewind_metrics(path, step):
@@ -350,6 +369,21 @@ def _rewind_metrics(path, step):
             encoding="utf-8",
         )
         temporary.replace(path)
+    observations_path = path.with_name("dev-qa.jsonl")
+    if observations_path.is_file():
+        observations = [
+            json.loads(line) for line in observations_path.read_text(encoding="utf-8").splitlines()
+        ]
+        retained = [row for row in observations if row["step"] <= step]
+        if len(retained) != len(observations):
+            temporary = observations_path.with_suffix(".tmp")
+            temporary.write_text(
+                "".join(
+                    json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n" for row in retained
+                ),
+                encoding="utf-8",
+            )
+            temporary.replace(observations_path)
 
 
 def _tracking_context(config, engine, run):
@@ -475,10 +509,29 @@ def train_loop(config, engine, splits, run, stage, stop_after_steps=None, tracki
                 **{f"train/{key}": value for key, value in metrics.items() if value is not None},
                 **{f"resources/{key}": value for key, value in resources.items()},
             }
+            development_observations = []
             if step % settings.eval_every == 0 or epoch_end or stopping:
                 development = evaluate_split(engine, dev)
+                if "qa_observations" in development:
+                    development_observations = development.pop("qa_observations")
                 record.update({f"dev/{key}": value for key, value in development.items()})
             if engine.rank == 0:
+                if development_observations:
+                    with (output / "dev-qa.jsonl").open("a", encoding="utf-8") as stream:
+                        stream.write(
+                            json.dumps(
+                                {
+                                    "step": step,
+                                    "global_step": record["global_step"],
+                                    "stage": config.objective.stage,
+                                    "qa_seed": config.objective.seed,
+                                    "observations": development_observations,
+                                },
+                                ensure_ascii=False,
+                                allow_nan=False,
+                            )
+                            + "\n"
+                        )
                 with metrics_path.open("a", encoding="utf-8") as stream:
                     text = json.dumps(record, ensure_ascii=False, allow_nan=False)
                     stream.write(text + "\n")

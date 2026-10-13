@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from latent_working_memory.v3.config import DYNAMIC_METHODS, DYNAMIC_PRETRAIN_METHODS
+from latent_working_memory.v3.qa_selection import select_step_qas
 from latent_working_memory.v3.segmentation import ac_plan, example_rng, icae_multi_plan
 
 
@@ -48,9 +49,10 @@ def measured(device, event, key):
 
 
 class TokenMemoryTask(nn.Module):
-    def __init__(self, codec, tokenizer, config):
+    def __init__(self, codec, tokenizer, config, qa_seed=None):
         super().__init__()
         self.codec, self.tokenizer, self.cfg = codec, tokenizer, config
+        self.qa_seed = config.seed if qa_seed is None else qa_seed
 
     @property
     def device(self):
@@ -142,6 +144,9 @@ class TokenMemoryTask(nn.Module):
             "gate_seconds": 0.0,
             "read_seconds": 0.0,
             "scores": {},
+            "task_new_qa_ids": (),
+            "task_old_qa_ids": (),
+            "gate_qa_ids": (),
         }
 
     def _num_updates(self, trajectories):
@@ -211,6 +216,14 @@ class TokenMemoryTask(nn.Module):
         steps = max(map(len, chunks))
         for step in range(start, steps if stop is None else min(stop, steps)):
             active = [i for i, row_chunks in enumerate(chunks) if step < len(row_chunks)]
+            selected_qas = (
+                {
+                    i: select_step_qas(trajectories[i], step, self.cfg, epoch, self.qa_seed)
+                    for i in active
+                }
+                if self.cfg.method in DYNAMIC_METHODS
+                else {}
+            )
             events = {
                 i: self._event(
                     len(trajectories[i].segments) - 1 if single else step,
@@ -220,6 +233,9 @@ class TokenMemoryTask(nn.Module):
                 )
                 for i in active
             }
+            for i, selected in selected_qas.items():
+                events[i]["task_new_qa_ids"] = selected.new_qa_ids
+                events[i]["task_old_qa_ids"] = selected.old_qa_ids
 
             def write(indices, histories, output_slots=None, actions=None):
                 return self._write_batch(
@@ -296,7 +312,9 @@ class TokenMemoryTask(nn.Module):
                             strict=True,
                         )
                     )
-                    gate_ids = [trajectories[i].usage[step].gate_qa_ids for i in active]
+                    gate_ids = [selected_qas[i].gate_qa_ids for i in active]
+                    for i, ids in zip(active, gate_ids, strict=True):
+                        events[i]["gate_qa_ids"] = ids
                     with torch.no_grad():
                         losses = []
                         for states in (
@@ -353,8 +371,19 @@ class TokenMemoryTask(nn.Module):
             events.append(event)
         return blocks, events
 
-    def _qa_objective(self, trajectories, epoch, window_steps=None, state=None):
+    def _qa_objective(
+        self, trajectories, epoch, window_steps=None, state=None, collect_observations=False
+    ):
         losses = [[] for _ in trajectories]
+        observations = []
+        introduced_at = (
+            [
+                {segment.segment_id: step + 1 for step, segment in enumerate(row.segments)}
+                for row in trajectories
+            ]
+            if collect_observations
+            else None
+        )
         if window_steps is not None:
             if state is None:
                 state = QAWindowState(
@@ -385,25 +414,18 @@ class TokenMemoryTask(nn.Module):
                 trajectory = trajectories[i]
                 events[i].append(event)
                 if self.cfg.method in DYNAMIC_METHODS:
-                    usage = trajectory.usage[event["step"]]
-                    new_ids, old_ids = usage.new_qa_ids, usage.old_qa_ids
+                    new_ids, old_ids = event["task_new_qa_ids"], event["task_old_qa_ids"]
                 # multi 在累计写满总 K 后监督，独立于数据原始段数。
                 elif (
                     event["slots"] == self.codec.memory_slots
                     if self.cfg.method in {"icae_multi", "autocompressors"}
                     else event["step"] == len(trajectory.segments) - 1
                 ):
-                    last_segment = trajectory.segments[-1].segment_id
-                    new_ids = tuple(
-                        qid
-                        for qid, qa in trajectory.qas.items()
-                        if qa.role != "gate" and qa.segment_id == last_segment
+                    selected = select_step_qas(
+                        trajectory, len(trajectory.segments) - 1, self.cfg, epoch, self.qa_seed
                     )
-                    old_ids = tuple(
-                        qid
-                        for qid, qa in trajectory.qas.items()
-                        if qa.role != "gate" and qa.segment_id != last_segment
-                    )
+                    new_ids, old_ids = selected.new_qa_ids, selected.old_qa_ids
+                    event["task_new_qa_ids"], event["task_old_qa_ids"] = new_ids, old_ids
                 else:
                     continue
                 indices.append(i)
@@ -414,11 +436,32 @@ class TokenMemoryTask(nn.Module):
             if not requests or (self.cfg.method not in DYNAMIC_METHODS and update + 1 < updates):
                 continue
             values = self._qa_losses_batch(requests, current_events)
-            for i, value, count in zip(indices, values, new_counts, strict=True):
+            for i, value, count, request, event in zip(
+                indices, values, new_counts, requests, current_events, strict=True
+            ):
                 # 每题先平均答案 token，再以实际题数平均；最后平均更新点。
                 losses[i].append(value.mean())
-                new_losses[i].extend(value[:count].detach().tolist())
-                old_losses[i].extend(value[count:].detach().tolist())
+                per_qa = value.detach().tolist()
+                new_losses[i].extend(per_qa[:count])
+                old_losses[i].extend(per_qa[count:])
+                if collect_observations:
+                    _, trajectory, qa_ids = request
+                    read_step = (
+                        event["step"] + 1
+                        if self.cfg.method in DYNAMIC_METHODS
+                        else len(trajectory.segments)
+                    )
+                    observations.extend(
+                        {
+                            "trajectory_id": trajectory.trajectory_id,
+                            "qa_id": qa_id,
+                            "introduced_at": introduced_at[i][trajectory.qas[qa_id].segment_id],
+                            "read_step": read_step,
+                            "age": read_step - introduced_at[i][trajectory.qas[qa_id].segment_id],
+                            "nll": nll,
+                        }
+                        for qa_id, nll in zip(qa_ids, per_qa, strict=True)
+                    )
             indices, requests, current_events, new_counts = [], [], [], []
         metrics = []
         for row_events, new, old in zip(events, new_losses, old_losses, strict=True):
@@ -435,7 +478,7 @@ class TokenMemoryTask(nn.Module):
             )
             metrics.append(row)
         if window_steps is None:
-            return [torch.stack(values).mean() for values in losses], metrics, None
+            return [torch.stack(values).mean() for values in losses], metrics, None, observations
         state.step = min(state.step + window_steps, updates)
         # 只把记忆数值交给下一窗口；当前 loss 持有本窗口的图供 engine 立即反传。
         state.blocks = [[block.detach() for block in blocks] for blocks in state.blocks]
@@ -448,6 +491,7 @@ class TokenMemoryTask(nn.Module):
             ],
             metrics,
             state,
+            observations,
         )
 
     def _pretrain_objective(self, examples):
@@ -614,6 +658,7 @@ class TokenMemoryTask(nn.Module):
         examples = list(example) if batched else [example]
         if not examples:
             raise ValueError("a microbatch must contain at least one example")
+        observations = []
         with torch.set_grad_enabled(differentiable):
             method, stage = self.cfg.method, self.cfg.stage
             if method == "autocompressors" and stage in {"pretrain", "lm"}:
@@ -624,8 +669,8 @@ class TokenMemoryTask(nn.Module):
             ):
                 losses, metrics = self._pretrain_objective(examples)
             else:
-                losses, metrics, qa_state = self._qa_objective(
-                    examples, epoch, window_steps, qa_state
+                losses, metrics, qa_state, observations = self._qa_objective(
+                    examples, epoch, window_steps, qa_state, collect_observations=not differentiable
                 )
             loss = torch.stack(losses).mean()
         names = metrics[0].keys()
@@ -635,6 +680,8 @@ class TokenMemoryTask(nn.Module):
         }
         if window_steps is not None:
             output["qa_state"] = qa_state
+        if observations:
+            output["qa_observations"] = observations
         return output
 
     def trainable_state_dict(self):

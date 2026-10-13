@@ -82,7 +82,8 @@ def config_with_batch(output, microbatch, accumulation):
 def original_list_development(engine, rows, epoch):
     totals, samples = {}, 0
     for start in range(0, len(rows), engine.global_batch_size):
-        metrics = engine.eval_batch(rows[start : start + engine.global_batch_size], epoch=epoch)
+        # 验证固定使用 epoch 0，与实际数据管线的开发集协议一致。
+        metrics = engine.eval_batch(rows[start : start + engine.global_batch_size], epoch=0)
         weight = metrics["samples"]
         for name, value in metrics.items():
             if name != "samples" and value is not None:

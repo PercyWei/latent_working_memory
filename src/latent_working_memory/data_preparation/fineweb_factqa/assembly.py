@@ -88,45 +88,6 @@ def _role_rank(seed: int, document_id: str, segment_id: str, qa_id: str) -> byte
     return hashlib.sha256(identity.encode()).digest()
 
 
-def _older_ids(pools: list[list[str]], step: int, count: int, state: dict) -> list[str]:
-    """Rotate source segments, then rotate each source's fixed QA order."""
-    selected = []
-    for _ in range(count):
-        source_index = state["source_cursor"] % (step - 1)
-        state["source_cursor"] += 1
-        source = pools[source_index]
-        position = state["item_cursors"][source_index] % len(source)
-        state["item_cursors"][source_index] += 1
-        selected.append(source[position])
-    return selected
-
-
-def _usage(train_ids: list[list[str]], gate_ids: list[list[str]], split: str) -> list[dict]:
-    train_state = {"source_cursor": 0, "item_cursors": [0] * len(train_ids)}
-    gate_state = {"source_cursor": 0, "item_cursors": [0] * len(train_ids)}
-    usage = []
-    for step in range(len(train_ids)):
-        segment_id = f"seg{step}"
-        if step == 0:
-            old, gates = [], []
-        elif step == 1:
-            old, gates = train_ids[0].copy(), gate_ids[0].copy()
-        else:
-            old = train_ids[step - 1][:2] + _older_ids(train_ids, step, 2, train_state)
-            gates = gate_ids[step - 1].copy() + _older_ids(gate_ids, step, 4, gate_state)
-        if split != "train":
-            old = [qa_id for pool in train_ids[:step] for qa_id in pool]
-        usage.append(
-            {
-                "segment_id": segment_id,
-                "task_new_qa_ids": train_ids[step].copy(),
-                "task_old_qa_ids": old,
-                "gate_qa_ids": gates,
-            }
-        )
-    return usage
-
-
 def assemble_document(
     document: dict, candidates: list[dict], review_decisions: list[dict], qa_config: dict
 ) -> dict:
@@ -219,13 +180,11 @@ def assemble_document(
             "statistics": statistics,
         }
 
-    train_ids, gate_ids, qas = [], [], []
+    qas = []
     for index, segment_id in enumerate(segment_ids):
         ordered = by_segment[segment_id]
         train = ordered[: task_counts[index]]
         gate = ordered[task_counts[index] : task_counts[index] + gate_counts[index]]
-        train_ids.append([qa["qa_id"] for qa in train])
-        gate_ids.append([qa["qa_id"] for qa in gate])
         qas.extend(dict(qa, role=task_role) for qa in train)
         qas.extend(dict(qa, role="gate") for qa in gate)
     trajectory = {
@@ -245,7 +204,6 @@ def assemble_document(
             for segment in document["segments"]
         ],
         "qas": qas,
-        "usage": _usage(train_ids, gate_ids, document["split"]),
         "text_char_length": len(text),
         "estimated_tokens": len(text) / 4,
         "estimated_tokens_rule": TOKEN_ESTIMATION_RULE,
@@ -261,7 +219,7 @@ def assemble_document(
 
 
 def validate_trajectory(trajectory: dict, qa_config: dict) -> None:
-    """Reject a trajectory that violates offsets, fact isolation or the fixed schedule."""
+    """Reject a trajectory that violates offsets, fact isolation or role quotas."""
     seed = _nonnegative_integer(qa_config["role_seed"], "role_seed")
     document_id, layout = validate_text_layout(trajectory)
     segment_ids = tuple(layout)
@@ -316,5 +274,3 @@ def validate_trajectory(trajectory: dict, qa_config: dict) -> None:
             seen_facts.add(qa["fact_group_id"])
     if [qa["qa_id"] for qa in qas] != expected_order:
         raise ValueError("QAs are not ordered by source segment")
-    if trajectory["usage"] != _usage(train_ids, gate_ids, trajectory["split"]):
-        raise ValueError("usage schedule differs from the fixed update and gate schedule")

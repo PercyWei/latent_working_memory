@@ -301,7 +301,14 @@ def experiment(output, mode="local", stage="warmup", method="memory_change", tag
             lora_target_modules=("q_proj", "v_proj"),
         ),
         ObjectiveConfig(
-            method=method, stage=stage, writer_mode=mode, append_slots=2, tag_tokens=tag_tokens
+            method=method,
+            stage=stage,
+            writer_mode=mode,
+            append_slots=2,
+            tag_tokens=tag_tokens,
+            task_qa_count=2,
+            gate_qa_count=1,
+            task_new_ratio=0.5,
         ),
         TrainingConfig(dataset_dir="unused", output_dir=str(output)),
     )

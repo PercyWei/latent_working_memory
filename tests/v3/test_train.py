@@ -187,12 +187,32 @@ def test_method_inherits_weights_across_stages_with_fresh_stage_optimizer(
     manifest = json.loads((tmp_path / method / "experiment.json").read_text())
     assert manifest["method"] == method
     assert list(manifest["stages"]) == [row["stage"] for row in records]
+    assert not (tmp_path / method / "pretrain/dev-qa.jsonl").exists()
+    for stage_record in records[1:]:
+        observed = [
+            json.loads(line)
+            for line in (tmp_path / method / stage_record["stage"] / "dev-qa.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        assert [row["global_step"] for row in observed] == [stage_record["result"]["global_step"]]
+        rows = observed[0]["observations"]
+        assert len(rows) == (12 if dynamic else 8)
+        assert len({(row["trajectory_id"], row["qa_id"], row["read_step"]) for row in rows}) == len(
+            rows
+        )
+        assert all(row["introduced_at"] <= row["read_step"] <= 2 for row in rows)
+        assert all(not row["qa_id"].startswith("gate") for row in rows)
 
 
 def test_second_stage_can_resume_from_its_saved_checkpoint(tmp_path, monkeypatch):
     install_small_training(monkeypatch)
     paths = stage_configs(tmp_path)
     partial = train.run_training(arguments(paths))
+    observations_path = tmp_path / "icae_single/qa/dev-qa.jsonl"
+    observations = [json.loads(line) for line in observations_path.read_text().splitlines()]
+    with observations_path.open("a") as stream:
+        stream.write(json.dumps({**observations[-1], "step": 99, "global_step": 999}) + "\n")
     resumed = train.run_training(
         arguments(
             [tmp_path / "icae_single/qa/config.json"],
@@ -209,6 +229,9 @@ def test_second_stage_can_resume_from_its_saved_checkpoint(tmp_path, monkeypatch
         for row in (tmp_path / "icae_single/qa/metrics.jsonl").read_text().splitlines()
     ]
     assert [row["global_step"] for row in records] == [2, 3]
+    observations = [json.loads(line) for line in observations_path.read_text().splitlines()]
+    assert [row["step"] for row in observations] == [1, 2]
+    assert [row["global_step"] for row in observations] == [2, 3]
 
 
 @pytest.mark.parametrize("bptt_steps", [None, 1, 2, 3])

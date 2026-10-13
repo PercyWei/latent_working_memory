@@ -54,6 +54,9 @@ def engine_config(micro_batch_size=1):
 
 def tiny_task(model_type, method, stage, **options):
     options.setdefault("bptt_steps", 2 if method == "autocompressors" else None)
+    options.setdefault("task_qa_count", 2)
+    options.setdefault("gate_qa_count", 1)
+    options.setdefault("task_new_ratio", 0.5)
     config = ObjectiveConfig(
         method=method,
         stage=stage,
@@ -171,12 +174,48 @@ def test_actual_writer_reader_and_engine_train_every_method_stage(
         assert metrics["slots_final"] == 3
     assert math.isfinite(metrics["loss"]) and metrics["loss"] > 0
     assert math.isfinite(metrics["grad_norm"]) and metrics["grad_norm"] > 0
+    assert "qa_observations" not in metrics
     assert_writer_updated(model, writer)
     assert_frozen(model, frozen)
     after_training = parameter_snapshot(model, True)
-    evaluation = engine.eval_batch(batch, epoch=1)
+    development = (
+        tuple(
+            replace(trajectory(split="dev", n=len(row.segments)), trajectory_id=row.trajectory_id)
+            for row in batch
+        )
+        if stage not in {"pretrain", "lm"}
+        else batch
+    )
+    evaluation = engine.eval_batch(development, epoch=1)
     assert math.isfinite(evaluation["loss"])
     assert evaluation["grad_norm"] is None
+    if stage in {"pretrain", "lm"}:
+        assert "qa_observations" not in evaluation
+    else:
+        observations = evaluation["qa_observations"]
+        assert len(observations) == evaluation["task_qa_reads"] * evaluation["samples"]
+        assert all(row["qa_id"].startswith("evaluation") for row in observations)
+        assert observations == sorted(
+            observations,
+            key=lambda row: (
+                row["trajectory_id"],
+                row["read_step"],
+                row["introduced_at"],
+                row["qa_id"],
+            ),
+        )
+        for row in development:
+            seen = [entry for entry in observations if entry["trajectory_id"] == row.trajectory_id]
+            expected_steps = (
+                set(range(1, len(row.segments) + 1))
+                if method in {"memory_change", "information_loss"}
+                else {len(row.segments)}
+            )
+            assert {entry["read_step"] for entry in seen} == expected_steps
+            for entry in seen:
+                assert entry["introduced_at"] == int(entry["qa_id"].removeprefix("evaluation")) + 1
+                assert entry["age"] == entry["read_step"] - entry["introduced_at"]
+                assert math.isfinite(entry["nll"])
     assert model.training and model.codec.language_model.training and model.codec.decoder.training
     for name, value in parameter_snapshot(model, True).items():
         torch.testing.assert_close(value, after_training[name], rtol=0, atol=0)
@@ -305,6 +344,33 @@ def distributed_gist_worker(rank, rendezvous, method, bptt_steps=None):
             for actual, expected in zip(model.parameters(), reference.parameters(), strict=True):
                 torch.testing.assert_close(actual, expected, rtol=1e-4, atol=2e-6)
             assert_frozen(model, frozen)
+            evaluation = engine.eval_batch(rows, epoch=2)
+            if method == "autocompressors":
+                assert "qa_observations" not in evaluation
+            else:
+                expected_observations = [
+                    observation
+                    for row in rows
+                    for observation in reference(row, epoch=2, differentiable=False)[
+                        "qa_observations"
+                    ]
+                ]
+                expected_observations.sort(
+                    key=lambda row: (
+                        row["trajectory_id"],
+                        row["read_step"],
+                        row["introduced_at"],
+                        row["qa_id"],
+                    )
+                )
+                assert len(evaluation["qa_observations"]) == len(expected_observations)
+                for actual, expected in zip(
+                    evaluation["qa_observations"], expected_observations, strict=True
+                ):
+                    assert {key: value for key, value in actual.items() if key != "nll"} == {
+                        key: value for key, value in expected.items() if key != "nll"
+                    }
+                    assert actual["nll"] == pytest.approx(expected["nll"], rel=1e-5, abs=1e-6)
     finally:
         dist.destroy_process_group()
 

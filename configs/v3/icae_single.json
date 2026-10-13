@@ -21,7 +21,10 @@
   "objective": {
     "method": "icae_single",
     "stages": ["pretrain", "qa"],
-    "qa_batch_size": 8
+    "qa_batch_size": 8,
+    "task_qa_count": 8,
+    "gate_qa_count": 8,
+    "task_new_ratio": 0.5
   },
   "training": {
     "dataset_dir": "data/fineweb-multisegment-k512-seg1to3x_train32k_20261008",

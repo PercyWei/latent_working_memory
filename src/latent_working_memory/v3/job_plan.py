@@ -102,7 +102,16 @@ def _training_job(config, args, directory, level, method_directory, initialize_f
         else f"{method.replace('_', '-')}-{stage}"
     )
     objective = {}
-    for name in ("qa_batch_size", "threshold_i", "threshold_d", "threshold_g", "eta"):
+    for name in (
+        "qa_batch_size",
+        "task_qa_count",
+        "gate_qa_count",
+        "task_new_ratio",
+        "threshold_i",
+        "threshold_d",
+        "threshold_g",
+        "eta",
+    ):
         value = getattr(args, name)
         if value is not None:
             objective[name] = value

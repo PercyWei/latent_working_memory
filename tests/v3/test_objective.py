@@ -6,9 +6,10 @@ import torch
 
 from latent_working_memory.v3 import objective
 from latent_working_memory.v3.config import ObjectiveConfig
-from latent_working_memory.v3.data import FactQATrajectory, QA, Segment, StepUsage
+from latent_working_memory.v3.data import FactQATrajectory, QA, Segment
 from latent_working_memory.v3.objective import TokenMemoryTask, damage_action, memory_change_score
 from latent_working_memory.v3.pretrain_data import PretrainExample
+from latent_working_memory.v3.qa_selection import select_step_qas
 from latent_working_memory.v3.segmentation import (
     ac_plan,
     even_token_chunks,
@@ -47,15 +48,6 @@ def trajectory(split="train", n=3):
                 (7,),
                 tuple(range(8, 9 + i)),
             )
-    usages = tuple(
-        StepUsage(
-            f"seg{i}",
-            (f"train{i}",),
-            tuple(f"train{j}" for j in range(i)),
-            (f"gate{i - 1}",) if i else (),
-        )
-        for i in range(n)
-    )
     return FactQATrajectory(
         "t",
         "d",
@@ -66,7 +58,8 @@ def trajectory(split="train", n=3):
         (0, 3 * n),
         segments,
         qas,
-        usages,
+        tuple((f"{'train' if split == 'train' else 'evaluation'}{i}",) for i in range(n)),
+        tuple((f"gate{i}",) for i in range(n)),
         tuple(range(3, 3 + 3 * n)),
     )
 
@@ -76,7 +69,17 @@ def task(method, stage, memory_slots=3, **options):
         options = {"icae_min_segments": 3, "icae_max_segments": 3, **options}
     elif method == "autocompressors":
         options = {"ac_num_segments": 3, "bptt_steps": 2, **options}
-    config = ObjectiveConfig(method=method, stage=stage, **{"append_slots": 3, **options})
+    config = ObjectiveConfig(
+        method=method,
+        stage=stage,
+        **{
+            "append_slots": 3,
+            "task_qa_count": 2,
+            "gate_qa_count": 1,
+            "task_new_ratio": 0.5,
+            **options,
+        },
+    )
     return TokenMemoryTask(
         build_model(
             memory_slots=memory_slots,
@@ -196,8 +199,13 @@ def test_damage_gates_are_no_grad_and_excluded_from_task_loss(append):
     result = model(trajectory())
     result["loss"].backward()
     assert len(gate_calls) == 6
+    assert gate_calls == [
+        select_step_qas(trajectory(), step, model.cfg, seed=model.qa_seed).gate_qa_ids
+        for step in (1, 2)
+        for _ in range(3)
+    ]
     assert result["metrics"]["gate_qa_reads"] == 6
-    assert result["metrics"]["task_qa_reads"] == 6
+    assert result["metrics"]["task_qa_reads"] == 5
     assert result["metrics"]["slots_final"] == (9 if append else 3)
     for index in (1, 3) if append else (2, 4):
         assert calls[index][2].grad is None
@@ -213,10 +221,21 @@ def test_dynamic_qa_is_actual_question_mean_then_step_mean():
         for blocks, record, ids in requests
     ]
     output = model(record)
-    # step means 1, (2+1)/2, (3+1+2)/3; fixed half old/new would differ at step 3.
-    torch.testing.assert_close(output["loss"], torch.tensor(1.5))
+    selected = [
+        select_step_qas(record, step, model.cfg, seed=model.qa_seed)
+        for step in range(len(record.segments))
+    ]
+    expected = torch.tensor(
+        [
+            sum(per_id[qid] for qid in ids.new_qa_ids + ids.old_qa_ids)
+            / len(ids.new_qa_ids + ids.old_qa_ids)
+            for ids in selected
+        ]
+    ).mean()
+    torch.testing.assert_close(output["loss"], expected)
     assert output["metrics"]["qa_new_nll"] == 2
-    assert output["metrics"]["qa_old_nll"] == pytest.approx(4 / 3)
+    old = [per_id[qid] for ids in selected for qid in ids.old_qa_ids]
+    assert output["metrics"]["qa_old_nll"] == pytest.approx(sum(old) / len(old))
 
 
 def test_warmup_actions_are_matched_between_methods_and_eval_uses_policy():
@@ -239,7 +258,14 @@ def test_dynamic_initial_64_append_8_and_overwrite_preserves_last_block_size(
     model = TokenMemoryTask(
         build_model(memory_slots=64, max_positions=256),
         TinyTokenizer(),
-        ObjectiveConfig(method=method, stage=stage, append_slots=8, threshold_i=0.5),
+        ObjectiveConfig(
+            method=method,
+            stage=stage,
+            append_slots=8,
+            threshold_i=0.5,
+            task_qa_count=2,
+            gate_qa_count=1,
+        ),
     )
     choices = iter([False, True, False, True])
     compared_sizes = []
@@ -444,9 +470,10 @@ def test_icae_multi_qa_rechunks_full_text_and_keeps_original_question_scopes(num
     assert all(not history for _, history, _ in writes)
     assert result["metrics"]["slots_final"] == model.codec.memory_slots
     assert len(requests) == 1
-    assert requests[0][2] == ("train2", "train0", "train1")
+    selected = select_step_qas(record, 2, model.cfg, seed=model.qa_seed)
+    assert requests[0][2] == selected.new_qa_ids + selected.old_qa_ids
     assert result["metrics"]["qa_new_count"] == 1
-    assert result["metrics"]["qa_old_count"] == 2
+    assert result["metrics"]["qa_old_count"] == 1
     assert result["metrics"]["write_calls"] == num_segments
 
 
@@ -733,9 +760,16 @@ def test_batch_qa_preserves_question_then_update_then_trajectory_weights():
 
     model._qa_losses_batch = controlled
     result = model(records, batched=True)
-    # 两条轨迹分别为 mean(1, 1.5)=1.25 和 mean(1, 1.5, 2, 2.5)=1.75。
-    torch.testing.assert_close(result["loss"], torch.tensor(1.5))
-    assert result["metrics"]["task_qa_reads"] == 6.5
+    expected = []
+    for record in records:
+        step_losses = []
+        for step in range(len(record.segments)):
+            selected = select_step_qas(record, step, model.cfg, seed=model.qa_seed)
+            ids = selected.new_qa_ids + selected.old_qa_ids
+            step_losses.append(sum(float(qid.removeprefix("train")) + 1 for qid in ids) / len(ids))
+        expected.append(sum(step_losses) / len(step_losses))
+    torch.testing.assert_close(result["loss"], torch.tensor(sum(expected) / len(expected)))
+    assert result["metrics"]["task_qa_reads"] == 5
     assert result["metrics"]["qa_new_count"] == 3
     result["loss"].backward()
 
@@ -747,9 +781,9 @@ def test_batch_shared_timing_is_charged_once_per_model_call(monkeypatch):
     model = task("memory_change", "warmup", append_probability=0.0, qa_batch_size=2)
     records = [trajectory(n=2), replace(trajectory(n=3), trajectory_id="other")]
     result = model(records, batched=True)
-    # writer共3次；reader在更新点0/1/2分别1/1/2次。
+    # writer共3次；每个更新点按每轨迹最多2题，各读取1次。
     assert result["metrics"]["write_seconds"] * len(records) == 3
-    assert result["metrics"]["read_seconds"] * len(records) == 4
+    assert result["metrics"]["read_seconds"] * len(records) == 3
 
 
 def test_batch_warmup_rng_and_actions_are_independent_of_batch_order():
@@ -761,6 +795,12 @@ def test_batch_warmup_rng_and_actions_are_independent_of_batch_order():
         with torch.no_grad():
             for states in model._states_batch(rows, epoch=7):
                 for i, _, event in states:
+                    selected = select_step_qas(
+                        rows[i], event["step"], model.cfg, epoch=7, seed=model.qa_seed
+                    )
+                    assert event["task_new_qa_ids"] == selected.new_qa_ids
+                    assert event["task_old_qa_ids"] == selected.old_qa_ids
+                    assert event["gate_qa_ids"] == ()
                     result[i].append(event["action"])
         return result
 
@@ -778,6 +818,8 @@ def test_batch_warmup_rng_and_actions_are_independent_of_batch_order():
     assert all(len(histories) == len(records) for histories in writes)
     assert any(set(histories) == {0, 1} for histories in writes)
     assert actions(records[::-1]) == expected[::-1]
+    model.qa_seed = 42
+    assert actions(records) == expected
 
 
 def test_empty_microbatch_is_rejected():
@@ -853,6 +895,11 @@ def test_two_step_bptt_preserves_values_actions_and_full_trajectory_tail_weights
         ["initial", wanted_action],
         ["initial", *([wanted_action] * 4)],
     ]
+    for row, events in zip(rows, state.events, strict=True):
+        for event in events:
+            selected = select_step_qas(row, event["step"], model.cfg, epoch=4, seed=model.qa_seed)
+            assert event["task_new_qa_ids"] == selected.new_qa_ids
+            assert event["task_old_qa_ids"] == selected.old_qa_ids
     assert not torch.allclose(
         model.codec.memory_embeddings.grad, reference.codec.memory_embeddings.grad
     )
@@ -890,7 +937,8 @@ def test_batch_damage_gates_discard_each_unselected_candidate_without_gradient()
     assert result["metrics"]["appends"] == 0.5
     assert result["metrics"]["overwrites"] == 1
     assert result["metrics"]["slots_final"] == 4.5
-    assert result["metrics"]["task_qa_reads"] == result["metrics"]["gate_qa_reads"] == 4.5
+    assert result["metrics"]["task_qa_reads"] == 4
+    assert result["metrics"]["gate_qa_reads"] == 4.5
     assert len(calls) == 8
     for index, (_, _, memory) in enumerate(calls):
         if index in (2, 5, 7):

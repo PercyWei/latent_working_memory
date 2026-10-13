@@ -1,6 +1,8 @@
+import json
+from types import SimpleNamespace
+
 import pytest
 import swanlab
-from types import SimpleNamespace
 
 from latent_working_memory.v3.evaluate import evaluate
 from latent_working_memory.v3.tracking import (
@@ -12,7 +14,7 @@ from latent_working_memory.v3.tracking import (
 from .test_evaluate import Task, trajectory
 
 
-def test_dashboard_adds_six_panels_including_epoch_across_all_stages(tmp_path):
+def test_dashboard_registers_training_curves_and_six_evaluation_panels(tmp_path):
     names = set()
     run = SimpleNamespace(define_metric=lambda name, **options: names.add(name))
     for method, stage in (
@@ -38,20 +40,21 @@ def test_dashboard_adds_six_panels_including_epoch_across_all_stages(tmp_path):
         "train/qa_loss",
         "dev/qa_loss",
         "evaluation/nll",
-        "evaluation/em",
-        "evaluation/f1",
     }
     assert names - original == {
         "train/stage",
         "train/epoch",
         "dev/qa_old_nll",
         "dev/qa_new_nll",
+        "evaluation/em_f1",
+        "evaluation/nll_retention",
+        "evaluation/nll_delta_by_age",
         "evaluation/capacity",
         "evaluation/build_seconds_per_trajectory",
     }
 
 
-def test_evaluation_merges_quality_and_capacity_without_table_panels(tmp_path):
+def test_evaluation_merges_generation_quality_and_keeps_retention_counts_local(tmp_path):
     summary = evaluate(Task(), [trajectory()], tmp_path, "test", 8)
     originals = {
         name: (tmp_path / name).read_bytes() for name in ("summary.json", "trajectories.jsonl")
@@ -59,19 +62,50 @@ def test_evaluation_merges_quality_and_capacity_without_table_panels(tmp_path):
     media = evaluation_media(summary)
     assert set(media) == {
         "evaluation/nll",
-        "evaluation/em",
-        "evaluation/f1",
+        "evaluation/em_f1",
+        "evaluation/nll_retention",
+        "evaluation/nll_delta_by_age",
         "evaluation/capacity",
         "evaluation/build_seconds_per_trajectory",
     }
-    assert all(isinstance(chart, swanlab.echarts.Bar) for chart in media.values())
-    for metric in ("nll", "em", "f1"):
-        chart = media[f"evaluation/{metric}"]
-        assert chart.options["xAxis"][0]["data"] == ["all", "old", "new"]
-        assert len(chart.options["series"]) == 1
-        assert [point["value"] for point in chart.options["series"][0]["data"]] == pytest.approx(
-            [summary["quality"][group][metric] for group in ("all", "old", "new")]
-        )
+    assert isinstance(media["evaluation/em_f1"], swanlab.echarts.Bar)
+    assert isinstance(media["evaluation/nll_retention"], swanlab.echarts.HeatMap)
+    assert isinstance(media["evaluation/nll_delta_by_age"], swanlab.echarts.Line)
+    labels = ["第1段引入", "第3段引入", "overall"]
+    rows = [summary["quality"]["by_introduction"][step] for step in ("1", "3")]
+    rows.append(summary["quality"]["all"])
+    quality = media["evaluation/em_f1"].options
+    assert quality["xAxis"][0]["data"] == labels
+    assert [series["name"] for series in quality["series"]] == ["EM", "F1"]
+    assert [series["yAxisIndex"] for series in quality["series"]] == [0, 1]
+    assert [(axis["min"], axis["max"]) for axis in quality["yAxis"]] == [(0, 1), (0, 1)]
+    for series, metric in zip(quality["series"], ("em", "f1"), strict=True):
+        assert series["data"] == pytest.approx([row[metric] for row in rows])
+    nll = media["evaluation/nll"].options
+    assert nll["xAxis"][0]["data"] == labels
+    assert [point["value"] for point in nll["series"][0]["data"]] == pytest.approx(
+        [row["nll"] for row in rows]
+    )
+    heatmap = media["evaluation/nll_retention"].options
+    assert heatmap["xAxis"][0]["data"] == ["1", "2", "3"]
+    assert heatmap["yAxis"][0]["data"] == ["1", "2", "3"]
+    assert heatmap["series"][0]["data"] == [[0, 0, 1], [1, 0, 1], [2, 0, 1], [2, 2, 3]]
+    ages = media["evaluation/nll_delta_by_age"].options
+    assert ages["xAxis"][0]["data"] == ["0", "1", "2"]
+    assert ages["series"][0]["data"] == [["0", 0.0], ["1", 0.0], ["2", 0.0]]
+    local = json.loads((tmp_path / "summary.json").read_text())
+    assert [row["questions"] for row in rows] == [1, 1, 2]
+    assert local["aggregation"]["retention"] == "trajectory_mean"
+    assert [
+        (cell["questions"], cell["trajectories"]) for cell in local["nll_retention"]["cells"]
+    ] == [(1, 1)] * 4
+    assert local["nll_retention"]["by_age"]["0"] == {
+        "questions": 2,
+        "trajectories": 1,
+        "delta_nll": 0,
+    }
+    record = json.loads((tmp_path / "trajectories.jsonl").read_text())
+    assert [len(qa["nll_by_step"]) for qa in record["questions"]] == [3, 1]
     capacity = media["evaluation/capacity"]
     assert capacity.options["xAxis"][0]["data"] == ["final_slots", "mean_slots"]
     assert [point["value"] for point in capacity.options["series"][0]["data"]] == pytest.approx(
@@ -103,12 +137,32 @@ def test_evaluation_build_cost_is_per_trajectory_and_capacity_is_already_a_mean(
 
 
 @pytest.mark.parametrize("method", list(METHOD_COLORS))
-def test_final_panels_keep_method_colors_and_skip_unmeasured_quality_groups(tmp_path, method):
+def test_final_panels_keep_method_colors_and_measured_introduction_groups(tmp_path, method):
     summary = evaluate(Task(method), [trajectory()], tmp_path, "test", 8)
-    summary["quality"]["old"] = {"questions": 0, "nll": None, "em": None, "f1": None}
     media = evaluation_media(summary)
-    for name, chart in media.items():
-        assert chart.options["series"][0]["name"] == method
-        assert chart.options["series"][0]["itemStyle"]["color"] == METHOD_COLORS[method]
-        if name in {"evaluation/nll", "evaluation/em", "evaluation/f1"}:
-            assert chart.options["xAxis"][0]["data"] == ["all", "new"]
+    color = METHOD_COLORS[method]
+    assert set(summary["quality"]) == {"all", "by_introduction"}
+    for name in (
+        "evaluation/nll",
+        "evaluation/capacity",
+        "evaluation/build_seconds_per_trajectory",
+        "evaluation/nll_delta_by_age",
+    ):
+        series = media[name].options["series"][0]
+        assert series["name"] == method
+        assert series["itemStyle"]["color"] == color
+    quality = media["evaluation/em_f1"].options
+    em, f1 = quality["series"]
+    assert em["itemStyle"]["color"].lower() == color.lower()
+    assert f1["itemStyle"]["color"] != em["itemStyle"]["color"]
+    assert all(
+        int(f1["itemStyle"]["color"][index : index + 2], 16) >= int(color[index : index + 2], 16)
+        for index in (1, 3, 5)
+    )
+    assert [(axis["min"], axis["max"]) for axis in quality["yAxis"]] == [(0, 1), (0, 1)]
+    assert quality["xAxis"][0]["data"] == ["第1段引入", "第3段引入", "overall"]
+    assert media["evaluation/nll"].options["xAxis"][0]["data"] == quality["xAxis"][0]["data"]
+    heatmap = media["evaluation/nll_retention"].options
+    assert heatmap["series"][0]["name"] == method
+    assert heatmap["visualMap"]["inRange"]["color"][-1] == color
+    assert heatmap["visualMap"]["inRange"]["color"][0] == f1["itemStyle"]["color"]

@@ -12,6 +12,7 @@ from latent_working_memory.v3.engine import TokenMemoryEngine
 from latent_working_memory.v3.objective import TokenMemoryTask, example_rng
 from latent_working_memory.v3 import objective
 from latent_working_memory.v3.pretrain_data import PretrainExample
+from latent_working_memory.v3.qa_selection import select_step_qas
 from latent_working_memory.v3.segmentation import even_token_chunks
 from .test_objective import TinyTokenizer, trajectory
 
@@ -60,6 +61,9 @@ def make_model(stage="warmup", bptt_steps=2):
             append_probability=0.5,
             threshold_i=1e8,
             bptt_steps=bptt_steps,
+            task_qa_count=2,
+            gate_qa_count=1,
+            task_new_ratio=0.5,
         ),
     )
 
@@ -111,9 +115,9 @@ def reference_step(model, optimizer, batch, epoch):
                 [1],
             )[0]
             blocks = blocks + [candidate] if step == 0 or append else blocks[:-1] + [candidate]
-            usage = record.usage[step]
+            selected = select_step_qas(record, step, model.cfg, epoch, model.qa_seed)
             losses.append(
-                model.qa_losses(blocks, record, usage.new_qa_ids + usage.old_qa_ids).mean()
+                model.qa_losses(blocks, record, selected.new_qa_ids + selected.old_qa_ids).mean()
             )
             if (step + 1) % model.cfg.bptt_steps == 0 or step + 1 == len(record.segments):
                 loss = torch.stack(losses).sum() / len(record.segments) / len(batch)

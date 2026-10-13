@@ -491,7 +491,12 @@ def test_custom_method_preset_preserves_parameters_and_launcher_overrides(
         tmp_path,
         method,
         model=model,
-        objective={"qa_batch_size": 5},
+        objective={
+            "qa_batch_size": 5,
+            "task_qa_count": 6,
+            "gate_qa_count": 4,
+            "task_new_ratio": 0.5,
+        },
         training={
             "epochs": 3,
             "learning_rate": 2e-4,
@@ -522,6 +527,12 @@ def test_custom_method_preset_preserves_parameters_and_launcher_overrides(
             "3",
             "--qa-batch-size",
             "7",
+            "--task-qa-count",
+            "4",
+            "--gate-qa-count",
+            "2",
+            "--task-new-ratio",
+            "0.75",
             "--model-path",
             "models/CLI model",
         ]
@@ -547,6 +558,9 @@ def test_custom_method_preset_preserves_parameters_and_launcher_overrides(
         assert config.model.model_name_or_path == ("models/CLI model" if override else preset_model)
         assert config.model.lora_rank == (128 if method in DYNAMIC_METHODS else 16)
         assert config.objective.qa_batch_size == (7 if override else 5)
+        assert config.objective.task_qa_count == (4 if override else 6)
+        assert config.objective.gate_qa_count == (2 if override else 4)
+        assert config.objective.task_new_ratio == (0.75 if override else 0.5)
         assert config.training.epochs == (4 if override else 3)
         assert config.training.learning_rate == 2e-4
         assert config.training.micro_batch_size_per_gpu == (2 if override else 3)

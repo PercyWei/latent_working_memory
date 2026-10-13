@@ -30,7 +30,6 @@ METHOD_COLORS = {
     "memory_change": "#B45B18",
     "information_loss": "#A53651",
 }
-QUALITY_GROUPS = ("all", "old", "new")
 STAGE_NUMBERS = {"pretrain": 1, "lm": 1, "qa": 2, "warmup": 2, "policy": 3}
 DEV_QA_METRICS = ("dev/qa_old_nll", "dev/qa_new_nll")
 APPEND_RATIO_METRICS = ("train/append_ratio", "dev/append_ratio")
@@ -359,28 +358,76 @@ def evaluation_media(summary):
     """汇总质量、容量与每条轨迹的构建耗时；明细保留在本地产物中。"""
     method = summary["method"]
     color = METHOD_COLORS[method]
-    groups = [name for name in QUALITY_GROUPS if summary["quality"][name]["questions"]]
+    introduction = summary["quality"]["by_introduction"]
+    steps = sorted(introduction, key=int)
+    labels = [f"第{step}段引入" for step in steps] + ["overall"]
+    rows = [introduction[step] for step in steps] + [summary["quality"]["all"]]
     values = {}
-    for metric in ("nll", "em", "f1"):
-        chart = swanlab.echarts.Bar().add_xaxis(groups)
+    chart = swanlab.echarts.Bar().add_xaxis(labels)
+    for index, metric in enumerate(("em", "f1")):
         chart.add_yaxis(
-            method,
-            [
-                {
-                    "value": summary["quality"][group][metric],
-                    "itemStyle": {"color": _shade(color, index, len(groups))},
-                }
-                for index, group in enumerate(groups)
-            ],
+            metric.upper(),
+            [row[metric] for row in rows],
+            yaxis_index=index,
             label_opts={"show": False},
-            itemstyle_opts={"color": color},
+            itemstyle_opts={"color": _shade(color, index, 2)},
         )
-        chart.set_global_opts(
-            tooltip_opts={"trigger": "axis"},
-            legend_opts={"type": "scroll", "top": 0},
-            yaxis_opts={"name": metric, **({"min": 0, "max": 1} if metric != "nll" else {})},
-        )
-        values[f"evaluation/{metric}"] = chart
+    chart.set_global_opts(
+        tooltip_opts={"trigger": "axis"},
+        legend_opts={"top": 0},
+        yaxis_opts={"name": "EM", "min": 0, "max": 1},
+    )
+    chart.extend_axis(yaxis={"name": "F1", "position": "right", "min": 0, "max": 1})
+    values["evaluation/em_f1"] = chart
+    chart = swanlab.echarts.Bar().add_xaxis(labels)
+    chart.add_yaxis(
+        method,
+        [{"value": row["nll"]} for row in rows],
+        label_opts={"show": False},
+        itemstyle_opts={"color": color},
+    )
+    chart.set_global_opts(tooltip_opts={"trigger": "axis"}, yaxis_opts={"name": "NLL", "min": 0})
+    values["evaluation/nll"] = chart
+    retention = summary["nll_retention"]
+    count = max(cell["read_step"] for cell in retention["cells"])
+    axis = [str(step) for step in range(1, count + 1)]
+    chart = swanlab.echarts.HeatMap().add_xaxis(axis)
+    chart.add_yaxis(
+        method,
+        axis,
+        [
+            [cell["read_step"] - 1, cell["introduced_at"] - 1, cell["nll"]]
+            for cell in retention["cells"]
+        ],
+        label_opts={"show": False},
+    )
+    chart.set_global_opts(
+        xaxis_opts={"name": "已读来源段", "type": "category"},
+        yaxis_opts={"name": "问题引入段", "type": "category"},
+        visualmap_opts={
+            "min": 0,
+            "max": max(cell["nll"] for cell in retention["cells"]),
+            "orient": "horizontal",
+            "bottom": 0,
+            "inRange": {"color": [_shade(color, 1, 2), color]},
+        },
+    )
+    values["evaluation/nll_retention"] = chart
+    ages = sorted(retention["by_age"], key=int)
+    chart = swanlab.echarts.Line().add_xaxis(ages)
+    chart.add_yaxis(
+        method,
+        [retention["by_age"][age]["delta_nll"] for age in ages],
+        label_opts={"show": False},
+        linestyle_opts={"color": color},
+        itemstyle_opts={"color": color},
+    )
+    chart.set_global_opts(
+        tooltip_opts={"trigger": "axis"},
+        xaxis_opts={"name": "age"},
+        yaxis_opts={"name": "NLL − 首次NLL"},
+    )
+    values["evaluation/nll_delta_by_age"] = chart
     summaries = (
         (
             "capacity",

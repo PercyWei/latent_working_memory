@@ -1,6 +1,7 @@
 """v3 训练预设、单阶段运行与独立评估配置；相对路径以项目运行目录为基准。"""
 
 from dataclasses import asdict, dataclass
+from decimal import Decimal
 import json
 import math
 import os
@@ -102,6 +103,9 @@ class ObjectiveConfig:
     writer_mode: str = "local"
     tag_tokens: int = 3
     qa_batch_size: int = 8
+    task_qa_count: int = 8
+    gate_qa_count: int = 8
+    task_new_ratio: float = 0.5
     icae_min_segments: int = 3
     icae_max_segments: int = 6
     ac_num_segments: int = 4
@@ -149,6 +153,8 @@ class ObjectiveConfig:
         for name in (
             "tag_tokens",
             "qa_batch_size",
+            "task_qa_count",
+            "gate_qa_count",
             "icae_min_segments",
             "icae_max_segments",
             "ac_num_segments",
@@ -164,18 +170,28 @@ class ObjectiveConfig:
             "eta",
             "rms_epsilon",
             "append_probability",
+            "task_new_ratio",
         ):
             finite(getattr(self, name), name)
         if not 0 <= self.eta < self.threshold_g or self.rms_epsilon == 0:
             raise ValueError("require 0 <= eta < threshold_g and rms_epsilon > 0")
         if self.append_probability > 1 or type(self.seed) is not int or self.seed < 0:
             raise ValueError("invalid warmup probability or seed")
+        if not 0 < self.task_new_ratio <= 1:
+            raise ValueError("task_new_ratio must be in (0, 1]")
+        new_count = Decimal(str(self.task_new_ratio)) * self.task_qa_count
+        if new_count != new_count.to_integral_value():
+            raise ValueError("task_qa_count * task_new_ratio must be an integer")
         if self.qa_prompt.count("{question}") != 1 or not self.ae_prompt or not self.lm_prompt:
             raise ValueError("prompts must be nonempty; qa_prompt needs one {question}")
         try:
             self.qa_prompt.format(question="example")
         except (KeyError, ValueError, IndexError) as error:
             raise ValueError("qa_prompt only supports the {question} placeholder") from error
+
+    @property
+    def task_new_qa_count(self):
+        return int(Decimal(str(self.task_new_ratio)) * self.task_qa_count)
 
 
 @dataclass(frozen=True)
@@ -267,6 +283,7 @@ class EvaluationConfig:
     seed: int = 20261004
     max_trajectories: int | None = None
     max_new_tokens: int = 64
+    gate_qa_count: int = 8
 
     def __post_init__(self):
         if not isinstance(self.dataset_dir, str) or not self.dataset_dir:
@@ -278,6 +295,7 @@ class EvaluationConfig:
         if self.max_trajectories is not None:
             positive_integer(self.max_trajectories, "max_trajectories")
         positive_integer(self.max_new_tokens, "max_new_tokens")
+        positive_integer(self.gate_qa_count, "gate_qa_count")
 
 
 @dataclass(frozen=True)

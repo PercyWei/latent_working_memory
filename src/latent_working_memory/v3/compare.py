@@ -18,12 +18,13 @@ def compare(summary_paths, output_dir):
             summary["dataset_signature"],
             summary["max_new_tokens"],
             summary["objective"]["qa_prompt"],
+            summary["qa_sampling"]["gate_signature"],
         )
         if evaluation_key is None:
             evaluation_key = key
         elif key != evaluation_key:
             raise ValueError(
-                "comparison requires the same split, evaluation dataset, QA prompt and generation limit"
+                "comparison requires the same split, evaluation dataset, QA prompt and generation limit, with the same selected gate QA protocol"
             )
         objective = summary["objective"]
         point = {
@@ -35,11 +36,7 @@ def compare(summary_paths, output_dir):
             "trajectories": summary["trajectories"],
             "questions": summary["quality"]["all"]["questions"],
             **{name: summary["quality"]["all"][name] for name in ("nll", "em", "f1")},
-            **{
-                f"{group}_{name}": summary["quality"][group][name]
-                for group in ("old", "new")
-                for name in ("nll", "em", "f1")
-            },
+            "gate_signature": summary["qa_sampling"]["gate_signature"],
             **summary["capacity"],
             **summary["costs"],
             "threshold_i": objective["threshold_i"]

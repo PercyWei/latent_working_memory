@@ -15,7 +15,7 @@ from latent_working_memory.v3.config import (
     ObjectiveConfig,
     TrainingConfig,
 )
-from latent_working_memory.v3.data import FactQATrajectory, QA, Segment, StepUsage
+from latent_working_memory.v3.data import FactQATrajectory, QA, Segment
 from latent_working_memory.v3.objective import TokenMemoryTask
 from .test_model import build_model
 from .test_objective import TinyTokenizer, trajectory as objective_trajectory
@@ -58,7 +58,20 @@ def trajectory(identifier="doc1", split="test", extra_question=False):
         segments,
         qas,
         tuple(
-            StepUsage(segment.segment_id, (), (), (f"{identifier}:gate",)) for segment in segments
+            tuple(
+                qid
+                for qid, qa in qas.items()
+                if qa.role == "evaluation" and qa.segment_id == segment.segment_id
+            )
+            for segment in segments
+        ),
+        tuple(
+            tuple(
+                qid
+                for qid, qa in qas.items()
+                if qa.role == "gate" and qa.segment_id == segment.segment_id
+            )
+            for segment in segments
         ),
         (3, 4, 5),
     )
@@ -67,6 +80,9 @@ def trajectory(identifier="doc1", split="test", extra_question=False):
 class Tokenizer:
     eos_token_id = 2
     pad_token_id = 0
+
+    def __call__(self, texts, **kwargs):
+        return {"input_ids": [[3] * min(len(text), 3) for text in texts]}
 
     def decode(self, values, skip_special_tokens):
         assert skip_special_tokens
@@ -100,8 +116,13 @@ class Task(nn.Module):
         stage = {"icae_single": "qa", "icae_multi": "qa", "autocompressors": "pretrain"}.get(
             method, "policy"
         )
-        self.cfg = ObjectiveConfig(method=method, stage=stage)
+        self.cfg = ObjectiveConfig(method=method, stage=stage, task_qa_count=2, gate_qa_count=1)
+        self.qa_seed = self.cfg.seed
         self.loss_queries = []
+
+    def configure(self, config, qa_seed):
+        self.cfg, self.qa_seed = config, qa_seed
+        return self
 
     def build_memory(self, example, epoch, force_policy):
         assert epoch == 0 and force_policy
@@ -125,6 +146,11 @@ class Task(nn.Module):
         ]
         return [torch.zeros(2, 3) for _ in range(states[-1][1] // 2)], events
 
+    def _states(self, example, epoch, force_policy):
+        _, events = self.build_memory(example, epoch, force_policy)
+        for event in events:
+            yield [torch.zeros(2, 3) for _ in range(event["slots"] // 2)], event
+
     def qa_losses(self, blocks, example, qa_ids):
         assert not torch.is_grad_enabled()
         self.loss_queries.append(list(qa_ids))
@@ -146,10 +172,54 @@ def test_evaluation_excludes_gate_and_aggregates_final_quality_capacity_and_cost
     assert summary["quality"]["all"]["nll"] == pytest.approx(13 / 5)
     assert summary["quality"]["all"]["em"] == pytest.approx(3 / 5)
     assert summary["quality"]["all"]["f1"] == pytest.approx((3 + 4 / 3) / 5)
-    assert summary["quality"]["new"]["questions"] == 2
-    assert summary["quality"]["old"]["questions"] == 3
-    assert summary["quality"]["by_age"]["2"]["nll"] == 1
-    assert summary["quality"]["by_age"]["1"]["nll"] == 5
+    assert summary["quality"]["by_introduction"]["1"]["questions"] == 2
+    assert summary["quality"]["by_introduction"]["3"]["questions"] == 2
+    assert summary["quality"]["by_introduction"]["1"]["nll"] == 1
+    assert summary["quality"]["by_introduction"]["2"]["nll"] == 5
+    assert summary["costs"]["prefix_nll_qa_reads"] == 5
+    assert summary["costs"]["prefix_write_calls"] == 0
+    assert len(summary["nll_retention"]["cells"]) == 6
+    # 两条不等长轨迹的题数也不同：轨迹A两题、B一题，按题池化会得到4，轨迹宏平均应为5.5。
+    retention_rows = [
+        {
+            "trajectory_id": "a",
+            "introduced_at": 1,
+            "nll_by_step": [
+                {"read_step": 1, "age": 0, "nll": 0.0},
+                {"read_step": 2, "age": 1, "nll": 1.0},
+                {"read_step": 3, "age": 2, "nll": 2.0},
+            ],
+        },
+        {
+            "trajectory_id": "a",
+            "introduced_at": 1,
+            "nll_by_step": [
+                {"read_step": 1, "age": 0, "nll": 0.0},
+                {"read_step": 2, "age": 1, "nll": 1.0},
+                {"read_step": 3, "age": 2, "nll": 2.0},
+            ],
+        },
+        {
+            "trajectory_id": "b",
+            "introduced_at": 1,
+            "nll_by_step": [
+                {"read_step": 1, "age": 0, "nll": 0.0},
+                {"read_step": 2, "age": 1, "nll": 10.0},
+            ],
+        },
+    ]
+    retention = evaluation._nll_retention(retention_rows)
+    assert retention["cells"][1] == {
+        "introduced_at": 1,
+        "read_step": 2,
+        "questions": 3,
+        "trajectories": 2,
+        "nll": 5.5,
+    }
+    assert retention["by_age"]["1"] == {"questions": 3, "trajectories": 2, "delta_nll": 5.5}
+    assert retention["by_age"]["2"] == {"questions": 2, "trajectories": 1, "delta_nll": 2.0}
+    assert summary["aggregation"]["retention"] == "trajectory_mean"
+    assert summary["aggregation"]["quality"] == "question_mean"
     assert summary["capacity"] == {
         "final_slots": 4,
         "mean_slots": pytest.approx(10 / 3),
@@ -180,7 +250,14 @@ def test_evaluation_excludes_gate_and_aggregates_final_quality_capacity_and_cost
 def test_all_five_methods_evaluate_the_same_final_question_panel(tmp_path, method):
     task = Task(method)
     summary = evaluation.evaluate(task, [trajectory()], tmp_path / method, "test", 8)
-    assert task.loss_queries == [["doc1:old", "doc1:new"]]
+    assert task.loss_queries == [["doc1:old"], ["doc1:old"], ["doc1:old", "doc1:new"]]
+    assert summary["costs"]["generation_qa_reads"] == 2
+    assert summary["costs"]["prefix_nll_qa_reads"] == 2
+    assert (
+        summary["costs"]["prefix_write_calls"] > 0
+        if method not in {"memory_change", "information_loss"}
+        else summary["costs"]["prefix_write_calls"] == 0
+    )
     assert summary["quality"]["all"]["questions"] == 2
     assert summary["offline_oracle"] == (method == "information_loss")
     if method == "icae_single":
@@ -200,7 +277,9 @@ def test_split_contract_and_training_state_restore_on_failure(tmp_path):
         evaluation.evaluate(task, [trajectory(split="dev")], tmp_path, "test", 8)
     example = trajectory()
     example = replace(
-        example, qas={qid: qa for qid, qa in example.qas.items() if qa.role == "gate"}
+        example,
+        qas={qid: qa for qid, qa in example.qas.items() if qa.role == "gate"},
+        task_qa_ids=((), (), ()),
     )
     with pytest.raises(ValueError, match="no evaluation questions"):
         evaluation.evaluate(task, [example], tmp_path, "test", 8)
@@ -208,10 +287,14 @@ def test_split_contract_and_training_state_restore_on_failure(tmp_path):
     assert not (tmp_path / "summary.json").exists()
 
 
-def test_comparison_keeps_unequal_capacity_and_exports_json_csv(tmp_path):
+@pytest.mark.parametrize("qa_seed", [20261004, 42])
+def test_comparison_keeps_unequal_capacity_and_exports_json_csv(tmp_path, qa_seed):
     example = trajectory()
     for method in ("icae_single", "information_loss"):
-        evaluation.evaluate(Task(method), [example], tmp_path / method, "test", 8)
+        task = Task(method)
+        if method == "information_loss":
+            task.qa_seed = qa_seed
+        evaluation.evaluate(task, [example], tmp_path / method, "test", 8)
     paths = [tmp_path / method / "summary.json" for method in ("icae_single", "information_loss")]
     points = compare(paths, tmp_path / "comparison")
     assert [point["final_slots"] for point in points] == [2, 4]
@@ -290,7 +373,11 @@ def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
         return task.codec, task.tokenizer
 
     monkeypatch.setattr(evaluation, "load_codec", load_codec)
-    monkeypatch.setattr(evaluation, "TokenMemoryTask", lambda codec, tokenizer, objective: task)
+    monkeypatch.setattr(
+        evaluation,
+        "TokenMemoryTask",
+        lambda codec, tokenizer, objective, qa_seed: task.configure(objective, qa_seed),
+    )
     monkeypatch.setattr(
         evaluation,
         "load_factqa",
@@ -305,6 +392,7 @@ def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
         "dataset_dir": "evaluation-data",
         "split": "test",
         "seed": 42,
+        "gate_qa_count": 1,
         "max_trajectories": None,
         "max_new_tokens": 8,
     }
@@ -330,6 +418,9 @@ def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
     assert summary["metadata"]["resolved_model_revision"] == "resolved-commit"
     assert summary["metadata"]["global_step"] == 27
     assert summary["metadata"]["config"]["model"]["revision"] is None
+    assert summary["qa_sampling"]["seed"] == 42
+    assert summary["qa_sampling"]["gate_qa_count"] == 1
+    assert summary["objective"]["seed"] == config.objective.seed
     assert summary["metadata"]["evaluation_config"] == evaluation_config
     assert summary["metadata"]["source_data"] == evaluation.dataset_identity([trajectory()])
     assert summary["metadata"]["selection"]["seed"] == 42
@@ -370,6 +461,9 @@ def test_cli_rejects_distributed_launch_before_loading_or_writing(monkeypatch):
 )
 def test_real_tiny_model_evaluates_all_methods_without_training_or_gate_leakage(tmp_path, method):
     class DecoderTokenizer(TinyTokenizer):
+        def __call__(self, texts, **kwargs):
+            return {"input_ids": [self.encode(text) + [3] for text in texts]}
+
         def decode(self, values, skip_special_tokens):
             return " ".join(map(str, values))
 
@@ -383,6 +477,8 @@ def test_real_tiny_model_evaluates_all_methods_without_training_or_gate_leakage(
             method=method,
             stage=stage,
             append_slots=1,
+            task_qa_count=2,
+            gate_qa_count=1,
             icae_min_segments=2,
             icae_max_segments=2,
             ac_num_segments=2,
@@ -391,15 +487,19 @@ def test_real_tiny_model_evaluates_all_methods_without_training_or_gate_leakage(
     example = objective_trajectory(split="test")
     summary = evaluation.evaluate(task, [example], tmp_path / method, "test", 2)
     assert summary["quality"]["all"]["questions"] == 3
-    assert summary["quality"]["old"]["questions"] == 2
+    assert summary["quality"]["by_introduction"]["1"]["questions"] == 1
+    assert summary["quality"]["by_introduction"]["2"]["questions"] == 1
     assert summary["quality"]["all"]["nll"] > 0
     assert summary["costs"]["nll_qa_reads"] == 3
+    assert summary["costs"]["prefix_nll_qa_reads"] == 3
     assert summary["costs"]["gate_qa_reads"] == (6 if method == "information_loss" else 0)
     assert all(parameter.grad is None for parameter in task.parameters())
 
 
 def test_shared_dynamic_pretraining_cannot_fall_through_to_a_qa_policy(tmp_path):
-    task = TokenMemoryTask(build_model(), TinyTokenizer(), ObjectiveConfig())
+    task = TokenMemoryTask(
+        build_model(), TinyTokenizer(), ObjectiveConfig(task_qa_count=2, gate_qa_count=1)
+    )
     directory = tmp_path / "evaluation"
     with pytest.raises(ValueError, match="shared dynamic pretraining has no FactQA memory policy"):
         evaluation.evaluate(task, [objective_trajectory(split="test")], directory, "test", 2)
@@ -515,7 +615,11 @@ def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_pat
     }
     evaluation._append_evaluation(summary, training_dir, tmp_path / "evaluation", 37)
     assert len(publications) == 1 and publications[0][1] == 37
-    assert publications[0][0]["evaluation/nll"].options["series"][0]["data"][0]["value"] == 2
+    assert publications[0][0]["evaluation/nll"].options["series"][0]["data"][-1]["value"] == 2
+    em_f1 = publications[0][0]["evaluation/em_f1"].options
+    assert [axis["max"] for axis in em_f1["yAxis"]] == [1, 1]
+    assert [series["yAxisIndex"] for series in em_f1["series"]] == [0, 1]
+    assert em_f1["xAxis"][0]["data"] == ["第1段引入", "第3段引入", "overall"]
     assert publications[0][0]["evaluation/capacity"].options["xAxis"][0]["data"] == [
         "final_slots",
         "mean_slots",
@@ -537,7 +641,10 @@ def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_pat
     assert set(record["panels"]) == set(publications[0][0])
 
 
-@pytest.mark.parametrize("problem", [None, "source_changed", "pretraining_overlap"])
+@pytest.mark.parametrize(
+    "problem",
+    [None, "source_changed", "pretraining_overlap", "filtered_gate", "below_gate_threshold"],
+)
 def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
     tmp_path, monkeypatch, problem
 ):
@@ -569,10 +676,26 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
         checkpoint["run"]["source_data"]["dev"]["fingerprint"] = "changed-unselected-record"
     elif problem == "pretraining_overlap":
         checkpoint["run"]["pretraining_sources"]["document_ids"] = [unselected.document_id]
+    if problem in {"filtered_gate", "below_gate_threshold"}:
+        invalid = (
+            {unselected.trajectory_id}
+            if problem == "filtered_gate"
+            else {row.trajectory_id for row in examples[:2]}
+        )
+        examples = tuple(
+            replace(row, gate_qa_ids=((), *row.gate_qa_ids[1:]))
+            if row.trajectory_id in invalid
+            else row
+            for row in examples
+        )
     task = Task("icae_single")
     monkeypatch.setattr(evaluation, "read_checkpoint", lambda path: checkpoint)
     monkeypatch.setattr(evaluation, "load_codec", lambda *args: (task.codec, task.tokenizer))
-    monkeypatch.setattr(evaluation, "TokenMemoryTask", lambda *args: task)
+    monkeypatch.setattr(
+        evaluation,
+        "TokenMemoryTask",
+        lambda *args, **kwargs: task.configure(args[2], kwargs["qa_seed"]),
+    )
     monkeypatch.setattr(
         evaluation,
         "load_factqa",
@@ -585,6 +708,7 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
         "dataset_dir": "data",
         "split": "dev",
         "seed": 42,
+        "gate_qa_count": 1,
         "max_trajectories": 2,
         "max_new_tokens": 64,
     }
@@ -600,16 +724,27 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
         "--device",
         "cpu",
     ]
-    if problem == "pretraining_overlap":
-        with pytest.raises(ValueError, match="overlap pretraining"):
+    if problem in {"pretraining_overlap", "below_gate_threshold"}:
+        with pytest.raises(
+            ValueError,
+            match="overlap pretraining" if problem == "pretraining_overlap" else "below 80%",
+        ):
             evaluation.main(arguments)
         assert not (tmp_path / "summary.json").exists()
         assert not task.codec.generated
         return
     evaluation.main(arguments)
     summary = json.loads((tmp_path / "summary.json").read_text())
-    assert summary["dataset_signature"] == evaluation.dataset_identity(selected)["fingerprint"]
-    assert summary["metadata"]["selection"] == {"total": 6, "selected": 2, "limit": 2, "seed": 42}
+    assert summary["dataset_signature"] == evaluation._qa_protocol(task, selected)[0]
+    assert summary["metadata"]["selection"]["total"] == 6
+    assert summary["metadata"]["selection"]["retained"] == (5 if problem == "filtered_gate" else 6)
+    assert summary["metadata"]["selection"]["selected"] == 2
+    assert summary["metadata"]["selection"]["qa_budget"]["kept"] == (
+        5 if problem == "filtered_gate" else 6
+    )
+    assert summary["qa_sampling"]["seed"] == 42
+    assert summary["qa_sampling"]["gate_qa_count"] == 1
+    assert summary["objective"]["seed"] == config.objective.seed
     assert summary["metadata"]["evaluation_config"] == evaluation_config
     assert summary["metadata"]["source_data"] == evaluation.dataset_identity(examples)
     assert summary["metadata"]["config"]["training"]["seed"] == 7
@@ -667,7 +802,11 @@ def test_cli_ignores_training_length_limits_and_selects_from_complete_factqa_spl
     }
     monkeypatch.setattr(evaluation, "read_checkpoint", lambda path: checkpoint)
     monkeypatch.setattr(evaluation, "load_codec", lambda *args: (task.codec, task.tokenizer))
-    monkeypatch.setattr(evaluation, "TokenMemoryTask", lambda *args: task)
+    monkeypatch.setattr(
+        evaluation,
+        "TokenMemoryTask",
+        lambda *args, **kwargs: task.configure(args[2], kwargs["qa_seed"]),
+    )
     monkeypatch.setattr(
         evaluation,
         "load_factqa",
@@ -680,6 +819,7 @@ def test_cli_ignores_training_length_limits_and_selects_from_complete_factqa_spl
         "dataset_dir": "data",
         "split": "test",
         "seed": 42,
+        "gate_qa_count": 1,
         "max_trajectories": max_trajectories,
         "max_new_tokens": 64,
     }
@@ -697,17 +837,19 @@ def test_cli_ignores_training_length_limits_and_selects_from_complete_factqa_spl
     ]
     evaluation.main(arguments)
     summary = json.loads((tmp_path / "summary.json").read_text())
-    assert summary["dataset_signature"] == evaluation.dataset_identity(selected)["fingerprint"]
+    assert summary["dataset_signature"] == evaluation._qa_protocol(task, selected)[0]
     assert summary["metadata"]["config"]["training"]["max_input_tokens"] == 1
     assert summary["metadata"]["config"]["training"]["seed"] == 7
+    assert summary["qa_sampling"]["seed"] == 42
+    assert summary["qa_sampling"]["gate_qa_count"] == 1
+    assert summary["objective"]["seed"] == config.objective.seed
     assert summary["metadata"]["evaluation_config"] == evaluation_config
     assert summary["metadata"]["source_data"] == evaluation.dataset_identity(examples)
-    assert summary["metadata"]["selection"] == {
-        "total": 3,
-        "selected": len(selected),
-        "limit": max_trajectories,
-        "seed": 42,
-    }
+    assert summary["metadata"]["selection"]["total"] == 3
+    assert summary["metadata"]["selection"]["retained"] == 3
+    assert summary["metadata"]["selection"]["selected"] == len(selected)
+    assert summary["metadata"]["selection"]["limit"] == max_trajectories
+    assert summary["metadata"]["selection"]["qa_budget"]["kept"] == 3
     records = [
         json.loads(line) for line in (tmp_path / "trajectories.jsonl").read_text().splitlines()
     ]
@@ -717,8 +859,8 @@ def test_cli_ignores_training_length_limits_and_selects_from_complete_factqa_spl
     ]
     assert all(row["segments"] == 3 for row in records)
     assert all([qa["age"] for qa in row["questions"]] == [2, 0] for row in records)
-    assert summary["quality"]["old"]["questions"] == len(selected)
-    assert summary["quality"]["new"]["questions"] == len(selected)
+    assert summary["quality"]["by_introduction"]["1"]["questions"] == len(selected)
+    assert summary["quality"]["by_introduction"]["3"]["questions"] == len(selected)
 
 
 @pytest.mark.parametrize("limit", ["0", "-1", "1.5"])

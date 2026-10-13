@@ -147,6 +147,7 @@ class TokenMemoryEngine(BaseEngine):
             work += [[0]] * (microbatches - len(work))
         used_parameters = [False] * len(self.parameters)
         metric_names, totals = None, None
+        qa_observations, has_qa_observations = [], False
         for position, indices in enumerate(work):
             count = min(size, max(0, len(local) - position * size))
             windows = 1
@@ -202,6 +203,10 @@ class TokenMemoryEngine(BaseEngine):
                             ]
                 row_loss += float(output["loss"].detach())
                 metrics = output["metrics"]
+                if forward_only and "qa_observations" in output:
+                    has_qa_observations = True
+                    if count:
+                        qa_observations.extend(output["qa_observations"])
                 if window_steps is not None:
                     qa_state = output["qa_state"]
                 # 下一窗口 forward 前释放 loss 持有的图，状态中仅保存 detach 后的记忆。
@@ -237,14 +242,29 @@ class TokenMemoryEngine(BaseEngine):
                     parameter.grad = None
         if self.world_size > 1:
             dist.all_reduce(totals)
+            if has_qa_observations:
+                gathered = [None] * self.world_size
+                dist.all_gather_object(gathered, qa_observations)
+                qa_observations = [row for observations in gathered for row in observations]
         total_loss, samples, *values = totals.tolist()
-        return {
+        result = {
             "metrics": {
                 "loss": total_loss / samples,
                 "samples": int(samples),
                 **{name: value / samples for name, value in zip(metric_names, values, strict=True)},
             }
         }
+        if qa_observations:
+            result["metrics"]["qa_observations"] = sorted(
+                qa_observations,
+                key=lambda row: (
+                    row["trajectory_id"],
+                    row["read_step"],
+                    row["introduced_at"],
+                    row["qa_id"],
+                ),
+            )
+        return result
 
     def step(self, examples, epoch=0):
         data = TensorDict({}, batch_size=[])

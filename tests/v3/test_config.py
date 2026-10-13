@@ -70,6 +70,15 @@ def test_presets_use_requested_model_and_memory_size(filename):
         {"append_probability": 1.1},
         {"qa_prompt": "{question}: {answer}"},
         {"qa_batch_size": True},
+        {"task_qa_count": 0},
+        {"task_qa_count": True},
+        {"gate_qa_count": 0},
+        {"gate_qa_count": 1.5},
+        {"task_new_ratio": 0},
+        {"task_new_ratio": 1.1},
+        {"task_new_ratio": True},
+        {"task_new_ratio": float("nan")},
+        {"task_qa_count": 7, "task_new_ratio": 0.5},
         {"append_slots": 0},
         {"append_slots": True},
         {"append_slots": 1.5},
@@ -447,6 +456,9 @@ def test_dynamic_accepts_continuous_pipeline_subsets(method, stages):
 def test_shared_dynamic_pretraining_is_the_default_and_has_its_own_stage_sequence():
     config = ObjectiveConfig()
     assert (config.method, config.stage) == ("dynamic", "pretrain")
+    assert (config.task_qa_count, config.gate_qa_count, config.task_new_ratio) == (8, 8, 0.5)
+    assert config.task_new_qa_count == 4
+    assert ObjectiveConfig(task_qa_count=100, task_new_ratio=0.29).task_new_qa_count == 29
     assert validate_stage_sequence("dynamic", ["pretrain"]) == ("pretrain",)
 
 
@@ -561,6 +573,16 @@ def test_runtime_loaders_reject_presets_and_round_trip_stage_and_evaluation_conf
     assert load_evaluation(saved).split == "test"
     assert load_evaluation(saved).seed == 20261004
     assert load_evaluation(saved).max_new_tokens == 64
+    assert load_evaluation(saved).gate_qa_count == 8
+    saved.write_text(
+        json.dumps({"dataset_dir": "independent-factqa", "seed": 91, "gate_qa_count": 3})
+    )
+    assert load_evaluation(saved) == EvaluationConfig(
+        "independent-factqa", seed=91, gate_qa_count=3
+    )
+    for count in (0, -1, True, 1.5):
+        with pytest.raises(ValueError, match="gate_qa_count"):
+            EvaluationConfig("independent-factqa", gate_qa_count=count)
 
 
 @pytest.mark.parametrize("method", ["dynamic", "memory_change", "information_loss"])

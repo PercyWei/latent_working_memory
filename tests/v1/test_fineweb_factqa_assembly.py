@@ -71,7 +71,7 @@ def example_document(
     return document, candidates, decisions
 
 
-def test_complete_trajectory_has_fixed_quota_and_first_gate():
+def test_complete_trajectory_has_fixed_quota_and_full_gate_pool():
     document, candidates, decisions = example_document()
     result = assemble_document(document, candidates, decisions, QA_CONFIG)
     assert result["ok"] and not result["shortfalls"]
@@ -83,25 +83,13 @@ def test_complete_trajectory_has_fixed_quota_and_first_gate():
     assert trajectory["text_char_length"] == len(document["text"])
     assert all("evidence_quote" not in qa for qa in trajectory["qas"])
 
-    usage = trajectory["usage"]
-    by_id = {qa["qa_id"]: qa for qa in trajectory["qas"]}
-    assert usage[0]["gate_qa_ids"] == []
-    assert usage[0]["task_old_qa_ids"] == []
-    assert len(usage[0]["task_new_qa_ids"]) == 4
-    assert len(usage[1]["gate_qa_ids"]) == 8
-    assert {by_id[qa_id]["segment_id"] for qa_id in usage[1]["gate_qa_ids"]} == {"seg0"}
-    assert len(usage[1]["task_old_qa_ids"]) == 4
-    for step, row in enumerate(usage):
-        assert len(row["task_new_qa_ids"]) == 4
-        assert len(row["task_old_qa_ids"]) == (0 if step == 0 else 4)
-        assert len(row["gate_qa_ids"]) == (0 if step == 0 else 8)
-        all_ids = row["task_new_qa_ids"] + row["task_old_qa_ids"] + row["gate_qa_ids"]
-        assert len(all_ids) == len(set(all_ids))
-        assert all(by_id[qa_id]["segment_id"] == f"seg{step}" for qa_id in row["task_new_qa_ids"])
-        assert all(
-            int(by_id[qa_id]["segment_id"][3:]) < step
-            for qa_id in row["task_old_qa_ids"] + row["gate_qa_ids"]
-        )
+    assert "usage" not in trajectory
+    _, task_counts, gate_counts = qa_quotas(len(trajectory["segments"]))
+    for segment, task_count, gate_count in zip(
+        trajectory["segments"], task_counts, gate_counts, strict=True
+    ):
+        qas = [qa for qa in trajectory["qas"] if qa["segment_id"] == segment["segment_id"]]
+        assert [qa["role"] for qa in qas] == ["train"] * task_count + ["gate"] * gate_count
     validate_trajectory(trajectory, QA_CONFIG)
 
 
@@ -168,10 +156,8 @@ def test_review_must_cover_every_qa_and_accepted_facts_need_groups():
     "change,error",
     [
         (
-            lambda trajectory: trajectory["usage"][1]["gate_qa_ids"].__setitem__(
-                0, trajectory["usage"][2]["task_new_qa_ids"][0]
-            ),
-            "usage schedule",
+            lambda trajectory: trajectory["qas"][4].__setitem__("role", "train"),
+            "task QA quota",
         ),
         (
             lambda trajectory: trajectory["qas"][-1].__setitem__(
@@ -189,7 +175,7 @@ def test_review_must_cover_every_qa_and_accepted_facts_need_groups():
         ),
     ],
 )
-def test_validation_rejects_schedule_fact_and_offset_corruption(change, error):
+def test_validation_rejects_role_fact_and_offset_corruption(change, error):
     document, candidates, decisions = example_document()
     trajectory = assemble_document(document, candidates, decisions, QA_CONFIG)["trajectory"]
     change(trajectory)
@@ -201,8 +187,7 @@ def test_role_order_is_stable_when_candidate_listing_is_reordered():
     document, candidates, decisions = example_document({0: 2, 3: 2})
     first = assemble_document(document, candidates, decisions, QA_CONFIG)
     second = assemble_document(document, list(reversed(candidates)), decisions, QA_CONFIG)
-    assert first["trajectory"]["qas"] == second["trajectory"]["qas"]
-    assert first["trajectory"]["usage"] == second["trajectory"]["usage"]
+    assert first["trajectory"] == second["trajectory"]
 
 
 @pytest.mark.parametrize("answer_suffix,limit", [("", 16), ("x" * 140, 192)])
@@ -230,7 +215,7 @@ def test_config_and_segment_contract_is_fixed():
 
 @pytest.mark.parametrize("segment_count", range(6, 11))
 @pytest.mark.parametrize("split", ["train", "dev", "test"])
-def test_variable_length_roles_and_all_prefix_evaluation(segment_count, split):
+def test_variable_length_roles_and_complete_segment_pools(segment_count, split):
     document, candidates, decisions = example_document(segment_count=segment_count, split=split)
     trajectory = assemble_document(document, candidates, decisions, dict(QA_CONFIG, role_seed=17))[
         "trajectory"
@@ -240,15 +225,10 @@ def test_variable_length_roles_and_all_prefix_evaluation(segment_count, split):
     role = "train" if split == "train" else "evaluation"
     assert sum(q["role"] == role for q in trajectory["qas"]) == 4 * segment_count
     assert sum(q["role"] == "gate" for q in trajectory["qas"]) == 4 * segment_count
-    by_id = {q["qa_id"]: q for q in trajectory["qas"]}
-    for i, step in enumerate(trajectory["usage"]):
-        assert len(step["gate_qa_ids"]) == (8 if i else 0)
-        assert len(step["task_new_qa_ids"]) == 4
-        assert len(step["task_old_qa_ids"]) == ((4 if i else 0) if split == "train" else i * 4)
-        assert all(
-            int(by_id[q]["segment_id"][3:]) < i
-            for q in step["gate_qa_ids"] + step["task_old_qa_ids"]
-        )
-    if split != "train":
-        last = trajectory["usage"][-1]
-        assert len(last["task_new_qa_ids"] + last["task_old_qa_ids"]) == 4 * segment_count
+    assert "usage" not in trajectory
+    _, task_counts, gate_counts = qa_quotas(segment_count)
+    for segment, task_count, gate_count in zip(
+        trajectory["segments"], task_counts, gate_counts, strict=True
+    ):
+        qas = [qa for qa in trajectory["qas"] if qa["segment_id"] == segment["segment_id"]]
+        assert [qa["role"] for qa in qas] == [role] * task_count + ["gate"] * gate_count
