@@ -45,7 +45,7 @@ def test_data_keeps_exact_tokens_and_accepts_inclusive_length_bounds(tmp_path):
         )
         + "\n"
     )
-    episodes = load_tokenized_episodes(path, IntegerTokenizer(), 6, 8, model_window=8)
+    episodes = load_tokenized_episodes(path, IntegerTokenizer(), 5, 8, model_window=8)
     short_group = hashlib.blake2b(b"1 2 3 4", digest_size=16).hexdigest()
     long_group = hashlib.blake2b(b"1 2 3 4 5 6", digest_size=16).hexdigest()
     assert episodes == (
@@ -59,7 +59,7 @@ def test_invalid_lengths_fail_without_truncating(tmp_path, text):
     path = tmp_path / "episodes.jsonl"
     path.write_text(json.dumps(document_row(text)) + "\n")
     with pytest.raises(ValueError, match="no episodes remain"):
-        load_tokenized_episodes(path, IntegerTokenizer(), 6, 8, model_window=8)
+        load_tokenized_episodes(path, IntegerTokenizer(), 5, 8, model_window=8)
 
 
 @pytest.mark.parametrize(
@@ -74,7 +74,7 @@ def test_canonical_jsonl_contract(tmp_path, rows, message):
     path = tmp_path / "episodes.jsonl"
     path.write_text(rows)
     with pytest.raises(ValueError, match=message):
-        load_tokenized_episodes(path, IntegerTokenizer(), 2, 8, model_window=8)
+        load_tokenized_episodes(path, IntegerTokenizer(), 1, 8, model_window=8)
 
 
 def test_epoch_order_is_reproducible_without_consuming_global_rng():

@@ -1,4 +1,4 @@
-"""读取 text/qas 文档，展开独立问答样本并按训练约束过滤。"""
+"""读取 text/qas 文档，展开独立问答样本并按长度上下限过滤。"""
 
 import hashlib
 import json
@@ -14,19 +14,14 @@ QA_SYSTEM_PROMPT = (
 )
 
 
-def _episode_statistics(episodes, min_length):
+def _episode_statistics(episodes):
     lengths = [len(episode.prompt_ids) + len(episode.target_ids) for episode in episodes]
     groups = {episode.group_id for episode in episodes if episode.group_id is not None}
     return {
         "episodes": len(episodes),
         "groups": len(groups),
         "tokens": sum(lengths),
-        "target_tokens": sum(
-            len(episode.prompt_ids)
-            + len(episode.target_ids)
-            - max(len(episode.prompt_ids), min_length - 1)
-            for episode in episodes
-        ),
+        "target_tokens": sum(len(episode.target_ids) for episode in episodes),
         "length": {
             "min": min(lengths),
             "max": max(lengths),
@@ -35,13 +30,13 @@ def _episode_statistics(episodes, min_length):
     }
 
 
-def _validate_lengths(min_length, max_seq_length, model_window):
-    if type(min_length) is not int or min_length < 2:
-        raise ValueError("min_length must be an integer >= 2")
+def _validate_lengths(min_prompt_length, max_seq_length, model_window):
+    if type(min_prompt_length) is not int or min_prompt_length < 1:
+        raise ValueError("min_prompt_length must be a positive integer")
     if max_seq_length is not None and (type(max_seq_length) is not int or max_seq_length < 1):
         raise ValueError("max_seq_length must be null or a positive integer")
-    if type(model_window) is not int or model_window < min_length:
-        raise ValueError("model_window must be an integer >= min_length")
+    if type(model_window) is not int or model_window <= min_prompt_length:
+        raise ValueError("model_window must be an integer > min_prompt_length")
 
 
 def _tokenize_qa(text, qa, tokenizer, group_id, qa_index, location):
@@ -79,7 +74,7 @@ def _tokenize_qa(text, qa, tokenizer, group_id, qa_index, location):
 def _load_raw_episodes(path, tokenizer):
     """验证统一格式并展开所有 QA；保留过滤前的完整文档集合。"""
     path = Path(path).resolve()
-    episodes, document_ids = [], set()
+    episodes, document_ids, references = [], set(), {}
     with path.open(encoding="utf-8") as stream:
         for line_number, line in enumerate(stream, 1):
             location = f"{path}:{line_number}"
@@ -106,19 +101,19 @@ def _load_raw_episodes(path, tokenizer):
                 for name in ("question", "answer"):
                     if not isinstance(qa[name], str) or not qa[name].strip():
                         raise ValueError(f"{qa_location}: {name} must be a nonempty string")
-                episodes.append(
-                    _tokenize_qa(row["text"], qa, tokenizer, group_id, qa_index, qa_location)
-                )
+                episode = _tokenize_qa(row["text"], qa, tokenizer, group_id, qa_index, qa_location)
+                episodes.append(episode)
+                references[episode.id] = qa
     if not episodes:
         raise ValueError(f"{path}: dataset must contain at least one document")
-    return tuple(episodes), {
-        "file": str(path),
-        "documents": len(document_ids),
-        "qas": len(episodes),
-    }
+    return (
+        tuple(episodes),
+        {"file": str(path), "documents": len(document_ids), "qas": len(episodes)},
+        references,
+    )
 
 
-def _filter_split(episodes, min_length, max_seq_length, model_window, split):
+def _filter_split(episodes, min_prompt_length, max_seq_length, model_window, split):
     raw_groups = sorted({episode.group_id for episode in episodes if episode.group_id is not None})
     raw = {
         "documents": len(raw_groups),
@@ -126,22 +121,31 @@ def _filter_split(episodes, min_length, max_seq_length, model_window, split):
         "group_ids": raw_groups,
         "episode_ids": [episode.id for episode in episodes],
     }
+    after_prompt_minimum = tuple(
+        episode for episode in episodes if len(episode.prompt_ids) >= min_prompt_length
+    )
+    prompt_minimum = {
+        "min_prompt_length": min_prompt_length,
+        "read": len(episodes),
+        "kept": len(after_prompt_minimum),
+        "filtered_too_short": len(episodes) - len(after_prompt_minimum),
+    }
     train_limit = max_seq_length if split == "train" else None
     after_train_limit = (
         tuple(
             episode
-            for episode in episodes
+            for episode in after_prompt_minimum
             if len(episode.prompt_ids) + len(episode.target_ids) <= train_limit
         )
         if train_limit is not None
-        else episodes
+        else after_prompt_minimum
     )
     training_limit = {
         "applied": train_limit is not None,
         "max_seq_length": train_limit,
-        "read": len(episodes),
+        "read": len(after_prompt_minimum),
         "kept": len(after_train_limit),
-        "filtered_too_long": len(episodes) - len(after_train_limit),
+        "filtered_too_long": len(after_prompt_minimum) - len(after_train_limit),
     }
     after_model_window = tuple(
         episode
@@ -154,66 +158,68 @@ def _filter_split(episodes, min_length, max_seq_length, model_window, split):
         "kept": len(after_model_window),
         "filtered_too_long": len(after_train_limit) - len(after_model_window),
     }
-    retained = []
-    supervision = {
-        "min_seq_length": min_length,
-        "read": len(after_model_window),
-        "filtered_too_short": 0,
-        "filtered_prompt_before_first_write": 0,
-    }
-    for episode in after_model_window:
-        if len(episode.prompt_ids) + len(episode.target_ids) < min_length:
-            supervision["filtered_too_short"] += 1
-        elif len(episode.prompt_ids) < min_length - 1:
-            supervision["filtered_prompt_before_first_write"] += 1
-        else:
-            retained.append(episode)
-    supervision["kept"] = len(retained)
-    if not retained:
-        raise ValueError(f"{split}: no episodes remain after length and supervision filtering")
-    result = tuple(retained)
+    if not after_model_window:
+        raise ValueError(f"{split}: no episodes remain after length filtering")
     statistics = {
-        **_episode_statistics(result, min_length),
+        **_episode_statistics(after_model_window),
         "raw": raw,
         "filtering": {
+            "prompt_minimum": prompt_minimum,
             "training_limit": training_limit,
             "model_window": model_limit,
-            "supervision": supervision,
         },
     }
-    return result, statistics
+    return after_model_window, statistics
 
 
-def load_tokenized_episodes(path, tokenizer, min_length, max_seq_length, model_window):
-    """加载单个训练文件；显式模型窗口并应用与 train split 一致的过滤。"""
-    _validate_lengths(min_length, max_seq_length, model_window)
-    episodes, _ = _load_raw_episodes(path, tokenizer)
-    retained, _ = _filter_split(episodes, min_length, max_seq_length, model_window, split="train")
+def load_tokenized_episodes(path, tokenizer, min_prompt_length, max_seq_length, model_window):
+    """加载单个训练文件，按 prompt 下限与完整序列上限过滤。"""
+    _validate_lengths(min_prompt_length, max_seq_length, model_window)
+    episodes, _, _ = _load_raw_episodes(path, tokenizer)
+    retained, _ = _filter_split(
+        episodes, min_prompt_length, max_seq_length, model_window, split="train"
+    )
     return retained
+
+
+def load_evaluation_episodes(path, tokenizer, min_prompt_length, model_window):
+    """加载测试集并保留原始问答；仅应用固定 prompt 下限和模型窗口上限。"""
+    _validate_lengths(min_prompt_length, None, model_window)
+    episodes, source, references = _load_raw_episodes(path, tokenizer)
+    retained, statistics = _filter_split(
+        episodes, min_prompt_length, None, model_window, split="test"
+    )
+    return (
+        retained,
+        {episode.id: references[episode.id] for episode in retained},
+        {"source": source, **statistics},
+    )
 
 
 def load_episode_splits(
     train_file,
     dev_file,
     tokenizer,
-    min_length,
+    min_prompt_length,
     max_seq_length,
     model_window,
 ):
-    _validate_lengths(min_length, max_seq_length, model_window)
+    _validate_lengths(min_prompt_length, max_seq_length, model_window)
     train_path, dev_path = Path(train_file).resolve(), Path(dev_file).resolve()
-    train, train_source = _load_raw_episodes(train_path, tokenizer)
-    dev, dev_source = _load_raw_episodes(dev_path, tokenizer)
+    train, train_source, _ = _load_raw_episodes(train_path, tokenizer)
+    dev, dev_source, _ = _load_raw_episodes(dev_path, tokenizer)
     train_groups = {episode.group_id for episode in train if episode.group_id is not None}
     dev_groups = {episode.group_id for episode in dev if episode.group_id is not None}
     if train_groups & dev_groups:
         raise ValueError("raw train and dev files contain overlapping text documents")
     train, train_statistics = _filter_split(
-        train, min_length, max_seq_length, model_window, split="train"
+        train, min_prompt_length, max_seq_length, model_window, split="train"
     )
-    dev, dev_statistics = _filter_split(dev, min_length, max_seq_length, model_window, split="dev")
+    dev, dev_statistics = _filter_split(
+        dev, min_prompt_length, max_seq_length, model_window, split="dev"
+    )
     statistics = {
-        "min_seq_length": min_length,
+        "min_prompt_length": min_prompt_length,
         "max_seq_length": max_seq_length,
         "model_window": model_window,
         "training_limit_split": "train",

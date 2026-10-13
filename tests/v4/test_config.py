@@ -44,7 +44,7 @@ def test_model_config_rejects_invalid_contract(values):
         ModelConfig("tiny", **values)
 
 
-def test_config_requires_post_write_target(tmp_path):
+def test_config_requires_sequence_limit_above_prompt_minimum(tmp_path):
     path = tmp_path / "experiment.json"
     path.write_text(
         json.dumps(
@@ -59,7 +59,7 @@ def test_config_requires_post_write_target(tmp_path):
             }
         )
     )
-    with pytest.raises(ValueError, match="next-token"):
+    with pytest.raises(ValueError, match="max_seq_length must exceed min_prompt_length"):
         load_experiment(path)
 
 

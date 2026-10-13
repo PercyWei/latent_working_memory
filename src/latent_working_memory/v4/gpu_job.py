@@ -1,4 +1,4 @@
-"""v4 GPU 入口：创建训练运行、恢复 checkpoint 或执行单条生成。"""
+"""v4 GPU 入口：训练、恢复、单条生成和独立评估。"""
 
 import argparse
 from dataclasses import asdict, replace
@@ -12,9 +12,8 @@ import subprocess
 import sys
 from zoneinfo import ZoneInfo
 
-from latent_working_memory.v4.checkpoint import read_checkpoint
-from latent_working_memory.v4.config import load_experiment
-from latent_working_memory.v4.train import write_json
+from latent_working_memory.v4.config import load_experiment, validate_experiment
+from latent_working_memory.v4.io import write_json
 
 
 DEFAULT_CONFIG = Path("configs/v4/attention_matching/experiment.json")
@@ -28,6 +27,11 @@ TRAINING_OPTIONS = (
     "dev_file",
     "global_batch_size",
     "micro_batch_size_per_gpu",
+    "epochs",
+    "seed",
+    "eval_every",
+    "save_every",
+    "save_total_limit",
     "max_seq_length",
     "tracking",
     "swanlab_project",
@@ -52,11 +56,15 @@ def positive_count(value):
     return number
 
 
-def token_limit(value):
+def nonnegative_count(value):
     number = int(value)
     if number < 0:
-        raise argparse.ArgumentTypeError("must be non-negative; 0 disables the training limit")
+        raise argparse.ArgumentTypeError("must be non-negative")
     return number
+
+
+def save_frequency(value):
+    return value if value == "after_each_epoch" else positive_count(value)
 
 
 def parse_args(argv=None):
@@ -64,6 +72,7 @@ def parse_args(argv=None):
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument("--resume", action="store_true", help="按原配置恢复训练")
     actions.add_argument("--generate-only", action="store_true", help="从 checkpoint 生成单条文本")
+    actions.add_argument("--evaluate-only", action="store_true", help="从 checkpoint 评估 test")
     parser.add_argument("--checkpoint", type=Path, help="global_step_<step> 目录")
     parser.add_argument("--config", type=Path, help=f"训练预设，默认 {DEFAULT_CONFIG}")
     parser.add_argument("--gpus", type=physical_gpus, default="0,1", help="物理 GPU 编号，默认 0,1")
@@ -73,11 +82,23 @@ def parse_args(argv=None):
     parser.add_argument("--model-path", type=Path, help="覆盖预设中的本地基座模型位置")
     parser.add_argument("--train-file", type=Path, help="训练 JSONL 文件")
     parser.add_argument("--dev-file", type=Path, help="开发 JSONL 文件")
-    for name in ("global-batch-size", "micro-batch-size-per-gpu"):
+    for name in (
+        "global-batch-size",
+        "micro-batch-size-per-gpu",
+        "epochs",
+        "eval-every",
+        "save-total-limit",
+    ):
         parser.add_argument(f"--{name}", type=positive_count)
+    parser.add_argument("--seed", type=nonnegative_count)
+    parser.add_argument(
+        "--save-every",
+        type=save_frequency,
+        help="保存间隔：正整数 optimizer steps 或 after_each_epoch",
+    )
     parser.add_argument(
         "--max-seq-length",
-        type=token_limit,
+        type=nonnegative_count,
         help="训练完整输入的人为上限；0 关闭；模型窗口始终强制过滤",
     )
     parser.add_argument(
@@ -89,29 +110,43 @@ def parse_args(argv=None):
     parser.add_argument("--tag", action="append", help="追加命名空间标签，可重复指定")
     parser.add_argument("--prompt-file", type=Path, help="生成使用的纯文本 prompt")
     parser.add_argument("--output", type=Path, help="生成结果 JSON 的保存路径")
+    parser.add_argument("--test-file", type=Path, help="独立评估使用的 QA JSONL")
+    parser.add_argument(
+        "--output-dir", type=Path, help="评估结果目录，默认 <series>/eval/<run-name>/test"
+    )
     parser.add_argument("--max-new-tokens", type=positive_count, help="生成 token 上限，默认 128")
     args = parser.parse_args(argv)
-    if args.resume or args.generate_only:
+    if args.resume or args.generate_only or args.evaluate_only:
         if args.checkpoint is None:
-            parser.error("--resume and --generate-only require --checkpoint")
-        supplied = [name for name in TRAINING_OPTIONS if getattr(args, name) is not None]
+            parser.error("--resume, --generate-only and --evaluate-only require --checkpoint")
+        supplied = [
+            name
+            for name in TRAINING_OPTIONS
+            if getattr(args, name) is not None and not (args.evaluate_only and name == "tracking")
+        ]
         if supplied:
             parser.error(
                 "checkpoint actions retain the original configuration: " + ", ".join(supplied)
             )
     elif args.checkpoint is not None:
-        parser.error("--checkpoint requires --resume or --generate-only")
+        parser.error("--checkpoint requires --resume, --generate-only or --evaluate-only")
     if args.generate_only:
         if args.prompt_file is None:
             parser.error("--generate-only requires --prompt-file")
+    elif args.prompt_file is not None or args.output is not None:
+        parser.error("--prompt-file and --output require --generate-only")
+    if args.evaluate_only:
+        if args.test_file is None:
+            parser.error("--evaluate-only requires --test-file")
+    elif args.test_file is not None or args.output_dir is not None:
+        parser.error("--test-file and --output-dir require --evaluate-only")
+    if args.generate_only or args.evaluate_only:
         if len(args.gpus.split(",")) != 1:
-            parser.error("generation uses one GPU; explicitly select --gpus 0 or --gpus 1")
+            parser.error("generation/evaluation uses one GPU; select --gpus 0 or --gpus 1")
         if args.stop_after_steps is not None:
             parser.error("--stop-after-steps applies to training")
-    elif any(
-        getattr(args, name) is not None for name in ("prompt_file", "output", "max_new_tokens")
-    ):
-        parser.error("prompt/output/max-new-tokens require --generate-only")
+    elif args.max_new_tokens is not None:
+        parser.error("--max-new-tokens requires --generate-only or --evaluate-only")
     return args
 
 
@@ -131,6 +166,11 @@ def prepare_training(args):
                 "global_batch_size",
                 "micro_batch_size_per_gpu",
                 "max_seq_length",
+                "epochs",
+                "seed",
+                "eval_every",
+                "save_every",
+                "save_total_limit",
             )
             if getattr(args, name) is not None
         }
@@ -165,11 +205,7 @@ def prepare_training(args):
         group=args.group or training.group or run_id,
         tags=tuple(sorted(set(training.tags) | set(args.tag or []))),
     )
-    if (
-        training.max_seq_length is not None
-        and training.max_seq_length < model.pending_size + model.recent_size + 2
-    ):
-        raise ValueError("max-seq-length must allow a target after the first memory write")
+    validate_experiment(model, training)
     plan.mkdir(parents=True)
     config_path = plan / "config.json"
     write_json(config_path, {"model": asdict(model), "training": asdict(training)})
@@ -191,11 +227,16 @@ def execute(command, environment, log_path):
             encoding="utf-8",
             bufsize=1,
         ) as process:
-            for line in process.stdout:
-                print(line, end="", flush=True)
-                log.write(line)
-                log.flush()
-            code = process.wait()
+            try:
+                for line in process.stdout:
+                    print(line, end="", flush=True)
+                    log.write(line)
+                    log.flush()
+                code = process.wait()
+            except BaseException:
+                process.terminate()
+                process.wait()
+                raise
     if code != 0:
         raise subprocess.CalledProcessError(code, command)
 
@@ -205,10 +246,14 @@ def run_job(args):
     if checkpoint is None:
         output, plan, config_path = prepare_training(args)
     else:
-        run = read_checkpoint(checkpoint)["run"]
-        output = Path(run["training"]["output_dir"])
-        if output.parent.name != "train" or checkpoint.parent != output / "checkpoints":
+        output = checkpoint.parent.parent
+        if output.parent.name != "train" or checkpoint.parent.name != "checkpoints":
             raise ValueError("checkpoint must belong to <series>/train/<run-name>/checkpoints")
+        if re.fullmatch(r"global_step_[0-9]+", checkpoint.name) is None or not checkpoint.is_dir():
+            raise ValueError("checkpoint must be an existing global_step_<step> directory")
+        run = json.loads((output / "run.json").read_text(encoding="utf-8"))
+        if Path(run["training"]["output_dir"]).resolve() != output:
+            raise ValueError("checkpoint directory differs from the saved run output_dir")
         plan = output.parent.parent / "plan" / output.name
         plan.mkdir(parents=True, exist_ok=True)
         config_path = plan / "resume-config.json"
@@ -225,7 +270,13 @@ def run_job(args):
         TOKENIZERS_PARALLELISM="false",
     )
     command = [sys.executable]
+    action = "resume" if args.resume else "train"
+    job_path, result_path, log_path = plan / "job.json", plan / "result.json", plan / "train.log"
+    destination = None
     if args.generate_only:
+        action = "generate"
+        job_path, result_path = plan / "generate-job.json", plan / "generate-result.json"
+        log_path = plan / "generate.log"
         destination = (
             args.output.expanduser().resolve()
             if args.output is not None
@@ -245,35 +296,98 @@ def run_job(args):
             "--device",
             "cuda",
         ]
-        execute(command, environment, plan / "generate.log")
-        return
-    gpu_count = len(args.gpus.split(","))
-    if gpu_count > 1:
-        command += ["-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={gpu_count}"]
-    command += [
-        "-m",
-        "latent_working_memory.v4.train",
-        "--config",
-        str(config_path),
-        "--device",
-        "cuda",
-    ]
-    if args.resume:
-        command += ["--resume", str(checkpoint)]
-    if args.stop_after_steps is not None:
-        command += ["--stop-after-steps", str(args.stop_after_steps)]
-    write_json(
-        plan / "job.json",
-        {"action": "resume" if args.resume else "train", "gpus": args.gpus, "command": command},
-    )
+    elif args.evaluate_only:
+        action = "evaluate"
+        job_path, result_path = plan / "evaluation-job.json", plan / "evaluation-result.json"
+        log_path = plan / "evaluation.log"
+        destination = (
+            args.output_dir.expanduser().resolve()
+            if args.output_dir is not None
+            else output.parent.parent / "eval" / output.name / "test"
+        )
+        command += [
+            "-m",
+            "latent_working_memory.v4.evaluate",
+            "--checkpoint",
+            str(checkpoint),
+            "--test-file",
+            str(args.test_file.expanduser().resolve()),
+            "--output-dir",
+            str(destination),
+            "--max-new-tokens",
+            str(args.max_new_tokens or 128),
+            "--device",
+            "cuda",
+        ]
+        if args.tracking is not None:
+            command += ["--tracking", args.tracking]
+    else:
+        gpu_count = len(args.gpus.split(","))
+        if gpu_count > 1:
+            command += [
+                "-m",
+                "torch.distributed.run",
+                "--standalone",
+                f"--nproc_per_node={gpu_count}",
+            ]
+        command += [
+            "-m",
+            "latent_working_memory.v4.train",
+            "--config",
+            str(config_path),
+            "--device",
+            "cuda",
+        ]
+        if args.resume:
+            command += ["--resume", str(checkpoint)]
+        if args.stop_after_steps is not None:
+            command += ["--stop-after-steps", str(args.stop_after_steps)]
+    job = {
+        "action": action,
+        "gpus": args.gpus,
+        "command": command,
+        "started_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+    }
+    write_json(job_path, job)
+    write_json(result_path, {**job, "status": "running"})
     try:
-        execute(command, environment, plan / "train.log")
-    except subprocess.CalledProcessError as error:
-        write_json(plan / "result.json", {"status": "failed", "return_code": error.returncode})
+        execute(command, environment, log_path)
+        if args.generate_only or args.evaluate_only:
+            result = {
+                "status": "finished",
+                "output" if args.generate_only else "output_dir": str(destination),
+            }
+        else:
+            result = json.loads((output / "training-result.json").read_text(encoding="utf-8"))
+            result = {**result, "status": "finished" if result["complete"] else "stopped"}
+    except (Exception, KeyboardInterrupt) as error:
+        write_json(
+            result_path,
+            {
+                **job,
+                "status": "stopped" if isinstance(error, KeyboardInterrupt) else "failed",
+                "return_code": (
+                    error.returncode
+                    if isinstance(error, subprocess.CalledProcessError)
+                    else 130
+                    if isinstance(error, KeyboardInterrupt)
+                    else None
+                ),
+                "error": f"{type(error).__name__}: {error}",
+                "finished_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(
+                    timespec="seconds"
+                ),
+            },
+        )
         raise
-    result = json.loads((output / "training-result.json").read_text(encoding="utf-8"))
     write_json(
-        plan / "result.json", {"status": "finished" if result["complete"] else "stopped", **result}
+        result_path,
+        {
+            **job,
+            **result,
+            "return_code": 0,
+            "finished_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+        },
     )
 
 
@@ -283,6 +397,8 @@ def main(argv=None):
         run_job(args)
     except subprocess.CalledProcessError as error:
         raise SystemExit(error.returncode) from error
+    except KeyboardInterrupt as error:
+        raise SystemExit(130) from error
 
 
 if __name__ == "__main__":

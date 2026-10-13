@@ -123,7 +123,7 @@ class MetaLearningEngine(BaseEngine):
         work = [local[start : start + size] for start in range(0, len(local), size)]
         if not work and not forward_only:
             work = [[0]]
-        totals = torch.zeros(5, dtype=torch.float64, device=self.device)
+        totals = torch.zeros(6, dtype=torch.float64, device=self.device)
         for position, indices in enumerate(work):
             expected_tokens = sum(token_counts[index] for index in indices)
             sync = (
@@ -158,6 +158,7 @@ class MetaLearningEngine(BaseEngine):
                         expected_tokens,
                         len(indices),
                         output["write_events"],
+                        float(output["write_loss_before"]) * output["write_events"],
                         float(output["write_loss"]) * output["write_events"],
                     ],
                     dtype=torch.float64,
@@ -166,7 +167,7 @@ class MetaLearningEngine(BaseEngine):
             del output
         if self.world_size > 1:
             dist.all_reduce(totals)
-        nll, targets, samples, writes, write_loss = totals.tolist()
+        nll, targets, samples, writes, write_loss_before, write_loss = totals.tolist()
         return {
             "metrics": {
                 "loss": nll / targets,
@@ -176,6 +177,7 @@ class MetaLearningEngine(BaseEngine):
                     len(episode.prompt_ids) + len(episode.target_ids) for episode in episodes
                 ),
                 "write_events": int(writes),
+                "write_loss_before": write_loss_before / writes,
                 "write_loss": write_loss / writes,
             }
         }

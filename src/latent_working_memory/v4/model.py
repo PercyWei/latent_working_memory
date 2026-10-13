@@ -24,6 +24,7 @@ class StreamState:
     cache: DynamicCache
     position: int = 0
     write_events: int = 0
+    write_loss_before_sum: torch.Tensor | float = 0.0
     write_loss_sum: torch.Tensor | float = 0.0
     peak_live_tokens: int = 0
 
@@ -114,7 +115,7 @@ class StreamingMemoryLM(nn.Module):
             else torch.tensor(active_rows, dtype=torch.long, device=state.memories[0].device)
         )
         num_events = state.memories[0].shape[0] if rows is None else len(active_rows)
-        losses = []
+        losses, losses_before = [], []
         for index, memory in enumerate(self.memory_layers):
             source = state.sources[index]
             updated, metrics = memory.write(
@@ -128,10 +129,12 @@ class StreamingMemoryLM(nn.Module):
             # clone also owns storage when a batch-one slice is already contiguous.
             state.sources[index] = source[:, count:].clone(memory_format=torch.contiguous_format)
             losses.append(metrics["write_loss_after"])
+            losses_before.append(metrics["write_loss_before"])
         for layer in state.cache.layers:
             layer.keys = layer.keys[..., count:, :].clone(memory_format=torch.contiguous_format)
             layer.values = layer.values[..., count:, :].clone(memory_format=torch.contiguous_format)
         state.write_events += num_events
+        state.write_loss_before_sum += sum(losses_before) / len(losses_before) * num_events
         state.write_loss_sum += sum(losses) / len(losses) * num_events
 
     def _chunks(self, input_ids, state, differentiable, lengths):
@@ -276,6 +279,7 @@ class StreamingMemoryLM(nn.Module):
             "loss": loss,
             "target_tokens": target_tokens,
             "write_events": state.write_events,
+            "write_loss_before": float(state.write_loss_before_sum / state.write_events),
             "write_loss": float(state.write_loss_sum / state.write_events),
             "peak_live_tokens": state.peak_live_tokens,
         }

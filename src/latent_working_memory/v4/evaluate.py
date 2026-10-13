@@ -1,0 +1,295 @@
+"""独立评估 QA 答案 NLL 与 greedy 生成；逐题重新初始化记忆并执行局部 TTT。"""
+
+import argparse
+from collections import Counter
+from dataclasses import asdict, replace
+from datetime import datetime
+import json
+import os
+from pathlib import Path
+import time
+
+import torch
+from transformers import AutoTokenizer
+
+from latent_working_memory.data_preparation.personamem.audit import scores
+from latent_working_memory.runtime import initialize_device
+from latent_working_memory.v4.checkpoint import read_checkpoint
+from latent_working_memory.v4.config import ModelConfig
+from latent_working_memory.v4.data import dataset_identity, load_evaluation_episodes
+from latent_working_memory.v4.io import write_json
+from latent_working_memory.v4.model import StreamingMemoryLM
+from latent_working_memory.v4.tracking import (
+    append_evaluation,
+    validate_evaluation_publication,
+)
+
+
+class TimedStreamingMemoryLM(StreamingMemoryLM):
+    """只在独立评估计量边界写入；CUDA events 在整次评估同步后统一结算。"""
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.evaluation_phase = "nll"
+        self.write_measurements = []
+
+    def _write(self, state, differentiable, active_rows=None):
+        before = state.write_events
+        use_cuda = state.memories[0].device.type == "cuda"
+        if use_cuda:
+            started = torch.cuda.Event(enable_timing=True)
+            ended = torch.cuda.Event(enable_timing=True)
+            started.record()
+        else:
+            started = time.perf_counter()
+        super()._write(state, differentiable, active_rows)
+        if use_cuda:
+            ended.record()
+        else:
+            ended = time.perf_counter()
+        self.write_measurements.append(
+            (self.evaluation_phase, started, ended, state.write_events - before)
+        )
+
+    def write_timing(self, device):
+        phases = {name: {"write_seconds": 0.0, "write_events": 0} for name in ("nll", "generation")}
+        for phase, started, ended, events in self.write_measurements:
+            elapsed = (
+                started.elapsed_time(ended) / 1000 if device.type == "cuda" else ended - started
+            )
+            phases[phase]["write_seconds"] += elapsed
+            phases[phase]["write_events"] += events
+        return {
+            **phases,
+            "total": {
+                name: sum(phase[name] for phase in phases.values())
+                for name in ("write_seconds", "write_events")
+            },
+            "measurement": "CUDA events" if device.type == "cuda" else "CPU wall time",
+            "scope": "boundary writes: reader targets, local SGD and cache trimming",
+        }
+
+
+def _check_test_split(statistics, run):
+    documents = set(statistics["raw"]["group_ids"])
+    selection = run["data"]["selection"]
+    for split in ("train", "dev"):
+        if documents.intersection(selection[split]["raw"]["group_ids"]):
+            raise ValueError(f"raw test documents overlap the training run's {split} split")
+
+
+def evaluate(
+    checkpoint_path, test_file, output_dir, max_new_tokens=128, device="cuda", tracking=None
+):
+    if type(max_new_tokens) is not int or max_new_tokens < 1:
+        raise ValueError("max_new_tokens must be a positive integer")
+    if tracking not in {None, "online", "disabled"}:
+        raise ValueError("tracking must be online or disabled")
+    if int(os.environ.get("WORLD_SIZE", "1")) != 1:
+        raise ValueError("v4 evaluation runs in one process; do not launch it with torchrun")
+    output_dir = Path(output_dir).resolve()
+    if output_dir.exists():
+        raise FileExistsError(f"evaluation output directory already exists: {output_dir}")
+    checkpoint_path = Path(checkpoint_path).resolve()
+    checkpoint = read_checkpoint(checkpoint_path)
+    run, step = checkpoint["run"], checkpoint["cursor"]["step"]
+    if tracking is None:
+        tracking = "online" if run["training"]["swanlab_project"] is not None else "disabled"
+    if tracking == "online":
+        validate_evaluation_publication(run, checkpoint_path, step)
+
+    device = initialize_device(device)
+    config = ModelConfig(**run["model"])
+    config = replace(config, revision=run["resolved_model_revision"] or config.revision)
+    tokenizer_path = Path(run["training"]["output_dir"]) / "tokenizer"
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    model = TimedStreamingMemoryLM(config).to(device).eval()
+    model.load_trainable_state_dict(checkpoint["memory"])
+    del checkpoint
+    model_window = model.backbone.config.max_position_embeddings
+    episodes, references, statistics = load_evaluation_episodes(
+        test_file,
+        tokenizer,
+        config.pending_size + config.recent_size + 1,
+        model_window,
+    )
+    _check_test_split(statistics, run)
+
+    slots = [layer.initial_slots for layer in model.memory_layers]
+    evaluation_config = {
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "split": "test",
+        "checkpoint": {"path": str(checkpoint_path), "step": step},
+        "training_run": str(Path(run["training"]["output_dir"]).resolve()),
+        "model": asdict(config),
+        "resolved_model_revision": getattr(model.backbone.config, "_commit_hash", None),
+        "tokenizer": str(tokenizer_path.resolve()),
+        "test_file": str(Path(test_file).resolve()),
+        "dataset": dataset_identity(episodes),
+        "device": str(device),
+        "tracking": tracking,
+        "model_window": model_window,
+        "max_new_tokens": max_new_tokens,
+        "eos_token_id": tokenizer.eos_token_id,
+        "protocol": {
+            "nll": "answer-token weighted; includes assistant template ending tokens",
+            "generation": "greedy; each NLL and generation call starts with independent memory",
+            "em_f1": "single-reference QA mean; lowercase, remove ASCII punctuation and English "
+            "articles a/an/the, collapse whitespace; token-overlap F1",
+            "benchmark": "document-QA evaluation, not official QASPER multi-reference scoring",
+            "write_loss": "teacher-forced path only; average across layers and write events",
+        },
+        "memory": {
+            "layers": len(slots),
+            "slots_per_layer": config.num_slots,
+            "dimension": config.memory_dim,
+            "total_slots": len(slots) * config.num_slots,
+            "elements": sum(value.numel() for value in slots),
+            "bytes": sum(value.numel() * value.element_size() for value in slots),
+            "dtype": str(slots[0].dtype),
+        },
+    }
+    output_dir.mkdir(parents=True)
+    write_json(output_dir / "evaluation.json", evaluation_config)
+    write_json(output_dir / "data-statistics.json", statistics)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+        torch.cuda.reset_peak_memory_stats(device)
+    started = time.perf_counter()
+    nll_sum, target_tokens, em_sum, f1_sum = 0.0, 0, 0.0, 0.0
+    writes, write_loss_before, write_loss = 0, 0.0, 0.0
+    generated_tokens, capped_budgets = 0, 0
+    budgets, endings = [], Counter()
+
+    with (output_dir / "predictions.jsonl").open("w", encoding="utf-8") as stream:
+        for index, episode in enumerate(episodes, 1):
+            prompt_length = len(episode.prompt_ids)
+            budget = min(max_new_tokens, model_window - prompt_length)
+            # 两次调用各自创建 initial_state；生成路径从未接收参考答案。
+            with torch.no_grad():
+                model.evaluation_phase = "nll"
+                output = model(
+                    torch.tensor(
+                        episode.prompt_ids + episode.target_ids, dtype=torch.long, device=device
+                    ),
+                    differentiable=False,
+                    target_starts=[prompt_length],
+                )
+                if output["target_tokens"] != len(episode.target_ids):
+                    raise ValueError("model target count differs from the reference answer tokens")
+                nll = float(output["loss"])
+                model.evaluation_phase = "generation"
+                generated = model.generate(
+                    torch.tensor(episode.prompt_ids, dtype=torch.long, device=device),
+                    budget,
+                    tokenizer.eos_token_id,
+                )[prompt_length:].tolist()
+            prediction = tokenizer.decode(generated, skip_special_tokens=True)
+            reference = references[episode.id]
+            quality = scores(prediction, reference["answer"])
+            finish_reason = (
+                "eos"
+                if generated[-1] == tokenizer.eos_token_id
+                else "model_window"
+                if budget < max_new_tokens
+                else "max_new_tokens"
+            )
+            record = {
+                "id": episode.id,
+                "group_id": episode.group_id,
+                "question": reference["question"],
+                "reference": reference["answer"],
+                "prediction": prediction,
+                "prompt_tokens": prompt_length,
+                "target_tokens": output["target_tokens"],
+                "generated_tokens": len(generated),
+                "generated_token_ids": generated,
+                "generation_budget": budget,
+                "finish_reason": finish_reason,
+                "nll": nll,
+                **quality,
+                "write_events": output["write_events"],
+                "write_loss_before": output["write_loss_before"],
+                "write_loss": output["write_loss"],
+            }
+            stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+            stream.flush()
+            nll_sum += nll * output["target_tokens"]
+            target_tokens += output["target_tokens"]
+            em_sum += quality["em"]
+            f1_sum += quality["f1"]
+            writes += output["write_events"]
+            write_loss_before += output["write_loss_before"] * output["write_events"]
+            write_loss += output["write_loss"] * output["write_events"]
+            generated_tokens += len(generated)
+            capped_budgets += int(budget < max_new_tokens)
+            budgets.append(budget)
+            endings[finish_reason] += 1
+            print(
+                f"test {index}/{len(episodes)} | NLL {nll_sum / target_tokens:.4f} | "
+                f"EM {em_sum / index:.4f} | F1 {f1_sum / index:.4f} | "
+                f"elapsed {time.perf_counter() - started:.1f}s",
+                flush=True,
+            )
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    resources = {
+        "evaluation_seconds": time.perf_counter() - started,
+        "scope": "NLL and generation loop; excludes model and data loading",
+        "write_timing": model.write_timing(device),
+    }
+    if device.type == "cuda":
+        resources.update(
+            peak_memory_allocated_bytes=torch.cuda.max_memory_allocated(device),
+            peak_memory_reserved_bytes=torch.cuda.max_memory_reserved(device),
+        )
+    summary = {
+        **evaluation_config,
+        "samples": len(episodes),
+        "documents": statistics["groups"],
+        "target_tokens": target_tokens,
+        "metrics": {
+            "nll": nll_sum / target_tokens,
+            "em": em_sum / len(episodes),
+            "f1": f1_sum / len(episodes),
+            "write_loss_before": write_loss_before / writes,
+            "write_loss": write_loss / writes,
+        },
+        "write_events": writes,
+        "generation": {
+            "max_new_tokens": max_new_tokens,
+            "budget_min": min(budgets),
+            "budget_max": max(budgets),
+            "model_window_capped_samples": capped_budgets,
+            "generated_tokens": generated_tokens,
+            "finish_reasons": dict(endings),
+        },
+        "resources": resources,
+    }
+    write_json(output_dir / "summary.json", summary)
+    if tracking == "online":
+        append_evaluation(run, checkpoint_path, summary, output_dir)
+    return summary
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkpoint", type=Path, required=True, help="global_step_<step> 目录")
+    parser.add_argument("--test-file", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True, help="新的评估产物目录")
+    parser.add_argument("--max-new-tokens", type=int, default=128)
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--tracking", choices=("online", "disabled"))
+    args = parser.parse_args()
+    evaluate(
+        args.checkpoint,
+        args.test_file,
+        args.output_dir,
+        args.max_new_tokens,
+        args.device,
+        args.tracking,
+    )
+
+
+if __name__ == "__main__":
+    main()

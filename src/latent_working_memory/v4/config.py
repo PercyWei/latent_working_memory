@@ -84,7 +84,7 @@ class TrainingConfig:
     seed: int = 42
     max_seq_length: int | None = None
     eval_every: int = 50
-    save_every: int = 50
+    save_every: int | str = 50
     save_total_limit: int = 2
     swanlab_project: str | None = None
     group: str | None = None
@@ -99,6 +99,10 @@ class TrainingConfig:
             self,
             [field.name for field in fields(self) if field.type is int and field.name != "seed"],
         )
+        if self.save_every != "after_each_epoch" and (
+            type(self.save_every) is not int or self.save_every < 1
+        ):
+            raise ValueError("save_every must be a positive integer or after_each_epoch")
         if self.max_seq_length is not None and (
             type(self.max_seq_length) is not int or self.max_seq_length < 1
         ):
@@ -122,6 +126,13 @@ class TrainingConfig:
         object.__setattr__(self, "tags", tuple(self.tags))
 
 
+def validate_experiment(model, training):
+    """检查模型与训练配置共同决定的约束。"""
+    min_prompt_length = model.pending_size + model.recent_size + 1
+    if training.max_seq_length is not None and training.max_seq_length <= min_prompt_length:
+        raise ValueError(f"max_seq_length must exceed min_prompt_length ({min_prompt_length})")
+
+
 def load_experiment(path):
     path = Path(path).resolve()
     raw = json.loads(path.read_text())
@@ -136,9 +147,5 @@ def load_experiment(path):
             for name in ("train_file", "dev_file", "output_dir")
         },
     )
-    if (
-        training.max_seq_length is not None
-        and training.max_seq_length < model.pending_size + model.recent_size + 2
-    ):
-        raise ValueError("max_seq_length must allow a next-token target after the first write")
+    validate_experiment(model, training)
     return model, training

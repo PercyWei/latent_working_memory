@@ -20,18 +20,10 @@ from latent_working_memory.v4.data import (
     load_episode_splits,
 )
 from latent_working_memory.v4.engine import EngineRegistry
+from latent_working_memory.v4.io import write_json
 from latent_working_memory.v4.model import StreamingMemoryLM
 from latent_working_memory.v4.tracking import configure_metrics, log_metrics, training_tracking
 from latent_working_memory.v4.training_data import make_data_loader
-
-
-def write_json(path, value):
-    path = Path(path)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8"
-    )
-    temporary.replace(path)
 
 
 def validate_cursor(cursor, config, samples):
@@ -75,19 +67,21 @@ def rewind_metrics(path, step):
 
 def evaluate(engine, episodes):
     totals = {"target_tokens": 0, "samples": 0, "source_tokens": 0, "write_events": 0}
-    nll, write_loss = 0.0, 0.0
+    nll, write_loss_before, write_loss = 0.0, 0.0, 0.0
     loader = make_data_loader(
         episodes, engine.config.global_batch_size, engine.config.seed, shuffle=False
     )
     for batch in loader:
         metrics = engine.eval_batch(batch)
         nll += metrics["loss"] * metrics["target_tokens"]
+        write_loss_before += metrics["write_loss_before"] * metrics["write_events"]
         write_loss += metrics["write_loss"] * metrics["write_events"]
         for name in totals:
             totals[name] += metrics[name]
     return {
         **totals,
         "loss": nll / totals["target_tokens"],
+        "write_loss_before": write_loss_before / totals["write_events"],
         "write_loss": write_loss / totals["write_events"],
     }
 
@@ -130,12 +124,12 @@ def run_training(args):
         )
     model = StreamingMemoryLM(load_model_config).to(device)
     position_limit = model.backbone.config.max_position_embeddings
-    min_length = model_config.pending_size + model_config.recent_size + 2
+    min_prompt_length = model_config.pending_size + model_config.recent_size + 1
     train, dev, data_statistics = load_episode_splits(
         config.train_file,
         config.dev_file,
         tokenizer,
-        min_length,
+        min_prompt_length,
         config.max_seq_length,
         position_limit,
     )
@@ -264,10 +258,24 @@ def train_loop(
                 with metrics_path.open("a", encoding="utf-8") as stream:
                     text = json.dumps(record, ensure_ascii=False, allow_nan=False)
                     stream.write(text + "\n")
-                    print(text, flush=True)
+                progress = [
+                    "attention-matching",
+                    f"epoch={epoch + 1}",
+                    f"step={step}/{total_steps}",
+                    f"loss={metrics['loss']:.4f}",
+                ]
+                if "dev/loss" in record:
+                    progress.append(f"dev_loss={record['dev/loss']:.4f}")
+                progress.append(f"{resources['optimizer_step_seconds']:.2f}s/step")
+                if "peak_memory_allocated_bytes" in resources:
+                    progress.append(
+                        f"peak={resources['peak_memory_allocated_bytes'] / 1024**3:.1f}GiB"
+                    )
+                print(" | ".join(progress), flush=True)
                 if tracking is not None:
                     log_metrics(tracking, record)
-            if step % config.save_every == 0 or epoch_end or stopping:
+            save_by_step = isinstance(config.save_every, int) and step % config.save_every == 0
+            if save_by_step or epoch_end or stopping:
                 handler.save_checkpoint(step)
                 checkpoint_path = output / "checkpoints" / f"global_step_{step}"
             if stopping:

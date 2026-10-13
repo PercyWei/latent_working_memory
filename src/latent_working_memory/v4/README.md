@@ -2,141 +2,170 @@
 
 创建时间：20261003 21:51:43 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261013 17:23:57 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261013 23:35:31 Asia/Shanghai（UTC+08:00）
 
-本目录提供独立的流式 memory meta-training 入口：冻结 HF Llama／Qwen2／Qwen3，每层使用固定数量的 latent slots，达到 pending 阈值时以 attention matching 执行局部 SGD，外层根据写入后的监督 token CE 学习新增模块。完整结构见[框架笔记](../../../notes/v4/20261003_attention_matching_meta_memory.md)。
+冻结基座，在每层维护 latent memory，通过 Attention Matching 局部更新记忆，并由答案 CE 学习如何生成压缩查询和读写记忆。
 
-## 数据
+[运行指南](scripts/README.md) · [默认配置](../../../configs/v4/attention_matching/experiment.json) · [框架笔记](../../../notes/v4/20261003_attention_matching_meta_memory.md)
 
-### 格式约定
+## 一、模型与训练
+
+### 1.1 记忆组织与读取
+
+| 部分 | 当前实现 |
+|---|---|
+| 基座 | 冻结的 full-attention Llama／Qwen2／Qwen3；使用一份模型权重 |
+| 序列 | 已压缩历史、待压缩 pending、最新 recent 三部分；后两部分保留原始 KV |
+| 记忆 | 每层独立保存固定数量的 latent slots，每条 QA 样本独立初始化 |
+| 读取 | 由当前隐藏状态生成读取 query，读出 memory 响应，分别修正 attention 的 Q projection 与 output projection |
+| 写入 | 原始缓存达到 `pending_size + recent_size` 时压缩最早的 pending，移除对应 KV，保留 recent |
+
+- pending 的逐层输入经投影得到源表示，保存在独立源缓存中；首次写入前不启用记忆读取修正。
+- 写入后的 memory 用于后续前向；保留的 recent KV 不重算，绝对位置不重置。
+- `query_mode` 可选 `fixed`（可学习、输入无关的查询）或 `conditioned`（根据当前 pending 生成查询）。
+- `query_normalization` 与生成方式独立，可选 `none` 或 `fixed_norm`；后者约束读取查询，以及压缩生成器的初始查询和最终输出范数。
+
+### 1.2 局部更新与外层训练
+
+对任意一层，记 pending 源表示为 $S$、当前记忆为 $M$、压缩查询为 $Q=G_\theta(S)$。源表示与记忆使用同一个局部 reader：
+
+$$
+\mathcal L_{\mathrm{write}}
+=\frac{1}{2R}\sum_{r=1}^{R}
+\left\|\operatorname{Read}_\theta(Q_r,M)-\operatorname{Read}_\theta(Q_r,S)\right\|_2^2,
+\qquad
+M^{j+1}=M^j-\eta\nabla_{M^j}\mathcal L_{\mathrm{write}}.
+$$
+
+$R$ 为压缩查询数；每次写入固定执行 `inner_steps` 步，查询与源响应在该次内循环中固定。
+
+| 阶段 | 更新对象与目标 |
+|---|---|
+| Inner loop | 只更新当前样本的 slots，最小化局部 Attention Matching 损失 |
+| Outer loop | 用答案 token CE 学习初始 slots、查询生成器、投影、共享 reader 及 Q/O 修正模块；基座冻结 |
+| 验证／推理 | 学到的模块参数固定，仍执行相同的局部记忆更新 |
+
+- 外层 CE 按全局有效答案 token 数平均；训练保留 teacher、query generator 和跨写入边界的完整 meta-gradient。
+- 每层 memory 与局部计算使用 FP32，显式 attention reader 支持二阶梯度；不使用一阶近似或截断 BPTT。
+- 验证／生成关闭外层梯度，但局部 TTT 仍需 autograd，不能使用 `torch.inference_mode()`。
+- 当前不包含独立历史约束、自适应扩容或 query generator 自身的 TTT。
+
+## 二、数据
+
+### 2.1 格式约定
 
 - UTF-8 JSONL，每行一篇完整正文及其 QA；同一文件内正文唯一。
-- 顶层仅包含 `text`、`qas`，每个 QA 仅包含 `question`、`answer`；文本字段均为非空字符串，`qas` 为非空列表。
-- QA 关联完整正文，不要求与段落或压缩窗口对齐。来源专属转换在数据准备阶段完成。
+- 包含 `text` 和 `qas`，每个 QA 包含 `question` 和 `answer`，其中文本字段均为非空字符串，`qas` 为非空列表。
 
 ```json
-{"text": "完整正文", "qas": [{"question": "问题一", "answer": "答案一"}, {"question": "问题二", "answer": "答案二"}]}
+{
+  "text": "完整正文",
+  "qas": [
+    {"question": "问题一", "answer": "答案一"},
+    {"question": "问题二", "answer": "答案二"}
+  ]
+}
 ```
 
-### 读取与监督
+### 2.2 读取与监督
 
-- [data.py](data.py) 统一读取并将每个 QA 展开为独立 episode，重复使用正文，各自初始化记忆；外层只计算当前答案的 CE，局部 Attention Matching 目标由模型内部生成。
-- 提示使用统一短答 system 指令；user 消息包含 `Document:` 正文与 `Question:` 问题，assistant 消息为参考答案。按基座 chat template 分词，设置 `enable_thinking=False`。
-- [TokenizedEpisode](data_types.py) 分别保存 `prompt_ids`、`target_ids`，后者包含模板结束 token；`id` 标识 QA，`group_id` 根据正文内容生成。engine 在前向时拼接 token，并由 prompt 长度确定监督起点。
-- 先检查原始 train/dev 正文无重叠，再依次过滤展开后的 episode：
-  1. **人为上限**：仅作用于 train；`max_seq_length` 省略、设为 `null` 或 CLI `--max-seq-length 0` 时关闭。
-  2. **模型窗口**：train/dev 均强制受基座 `max_position_embeddings` 限制。
-  3. **有效监督**：完整输入至少为 `pending_size + recent_size + 2` tokens，答案须从首次 memory 写入后的有效目标位置开始。
-- 计长包含正文、问题、答案及模板 token；不截断、不打包多个文档，不符合条件时整条过滤。分词结果在内存中供各 epoch 复用，文档数、QA 数与过滤统计写入 `data-statistics.json`。
+- **样本组织**：遵循 δ-Mem 的组织形式，完整正文配上一条 QA 作为独立样本，这意味着一条包含若干不同问题的数据可以构造出多条训练/评估样本。
+- **监督目标**：正文与问题作为输入，在 outer loop 计算答案 CE。
+- **长度下限**：所有划分的样本均要求答案前的 prompt（含正文、问题及模板）至少为 `pending_size + recent_size + 1` tokens，低于下限时整条过滤。
+- **长度上限**：正文、问题、答案及模板的总 token 数不得超过模型窗口；train 允许另设人为上限。超限样本整条过滤，不截断。
 
-### 当前数据：δ-Mem QASPER
+### 2.3 当前数据：δ-Mem QASPER
 
 - **来源与转换**：[δ-Mem 发布集](https://huggingface.co/datasets/huaXiaKyrie/delta-mem-qasper-data) 的原始文件保存在 `data/raw/delta-mem-qasper/`。去除对话编号及固定提问包装，按原顺序拼接正文，并将同一论文的全部 QA 聚合为一行。
 - **固定划分**：`data/delta-mem-qasper/` 保存 `train.jsonl`、`dev.jsonl`、`test.jsonl`，按原始论文划分，保存时不做长度过滤；来源 ID 与转换规则记录在 `preparation.json`。
 - **实验预设**：train 人为上限 12288 tokens；dev 计算答案 CE，test 留作独立评估。dev/test 均为本实验留出集。
 - **构造与使用**：见[数据说明](../../../data/delta-mem-qasper/README.md)与[构造入口](../data_preparation/delta_mem_qasper/README.md)。
 
-## 配置
+## 三、配置与执行
 
-- [配置样例](../../../configs/v4/attention_matching/experiment.json) 是唯一配置入口，顶层只有 `model` 和 `training`。
-- `training.train_file`、`dev_file`、`output_dir` 相对于配置文件所在目录解析；预设读取上述 QASPER train/dev 划分，数据来源通过 `tags` 标记。
-- 模型使用 HF repo ID 或显式绝对本地路径，`revision` 可指定固定模型 revision。
+- [experiment.json](../../../configs/v4/attention_matching/experiment.json) 是默认配置及格式示例，可通过 `--config` 指定其他文件。
+- JSON 顶层使用 `model` 和 `training`。配置中的数据、输出路径相对于配置文件解析；模型使用 HF repo ID 或绝对本地路径，`revision` 可固定模型版本。
+- 下表为仓库预设；CLI 参数、覆盖规则和运行目录见[运行指南](scripts/README.md)。
 
-| 设置 | 样例值与语义 |
+**记忆与局部更新（`model`）**
+
+| 参数 | 预设与含义 |
 |---|---|
-| `max_seq_length` | train 的人为上限，预设 12288，省略或 `null` 关闭；完整输入包含正文、问题、答案和 chat template |
-| `pending_size`／`recent_size` | 256／128；首次边界在第 384 个 token 处理完后 |
-| `num_slots`／`memory_dim` | 每层 32 个 slots，每个 128 维 |
+| `pending_size`／`recent_size` | 256／128；首次写入发生在处理完 384 tokens 后 |
+| `num_slots`／`memory_dim` | 每层 32 slots，每个 128 维 |
 | `query_dim`／`value_dim`／`num_probes` | 64／128／16 |
-| `query_mode` | `conditioned`：仅根据 pending 生成压缩查询；`fixed`：输入无关的可学习查询对照 |
-| `query_normalization` | 默认 `none`：不归一化；`fixed_norm`：固定查询范数，与 `query_mode` 独立 |
-| `read_query_norm`／`compression_query_norm` | 固定范数模式的读取／压缩查询目标范数；正数，省略或 `null` 时均取 `sqrt(query_dim)`，样例维度对应 8 |
-| `inner_steps`／`inner_lr` | 1／0.1；测试时也使用同一局部更新 |
-| `correction_scale` | 0.1；共享的固定 Q/O 修正尺度 |
-| `backbone_dtype` | 默认 `float32`；GPU 样例为 `bfloat16`，新增模块与 slots 为 FP32 |
-| `attention_implementation` | 默认 `sdpa`，可选 `eager`；局部 memory reader 始终使用支持二阶反传的显式计算 |
-| `loss_chunk_size` | 256；仅为有效监督位置计算 LM head／CE，按块使用非重入重计算 |
-| `global_batch_size`／`micro_batch_size_per_gpu` | 8／2；每卡并行处理变长轨迹，在全局 batch 内累积梯度；双卡完整 batch 对应每卡两次 microbatch |
-| `save_total_limit` | 2；保留最近成功保存的两个 checkpoint 目录 |
-| `swanlab_project`／`group`／`run_name`／`tags` | 默认仅本地记录；在线跟踪显式指定已有 project 和 group，run 名称可指定，tags 使用命名空间 |
+| `query_mode`／`query_normalization` | `conditioned`／`none`，选择见 1.1 节 |
+| `read_query_norm`／`compression_query_norm` | `fixed_norm` 模式的固定范数；省略或 `null` 时为 `sqrt(query_dim)`，此处为 8 |
+| `inner_steps`／`inner_lr` | 1／0.1；训练与推理采用相同更新规则 |
+| `correction_scale` | Q/O 修正尺度 0.1 |
 
-固定范数模式对读取查询，以及压缩生成器的初始查询和最终输出施加归一化；两个范数为固定超参数，不是可学习参数。默认模式直接使用这些查询，不施加范数约束。配置解析后将实际范数数值写入 run/checkpoint；`none` 模式下这两个数值不参与计算。
+**外层训练与执行**
 
-配置是开发起点，尚未由正式实验确认有效性或显存预算。改变查询生成或归一化设置时应使用新的输出目录和独立初始化；同一 run 的恢复要求配置、分词后数据、设备类型和 world size 一致。
-
-## 运行
-
-统一入口与新训练、恢复训练、单条生成指令见[运行指南](scripts/README.md)。
-
-依赖 `cuda124`，PyTorch 2.6.0、Transformers 4.57.6、verl 0.8.0。
-
-```bash
-CUDA_VISIBLE_DEVICES=0,1 uv run --frozen python -m torch.distributed.run \
-  --standalone --nproc_per_node=2 -m latent_working_memory.v4.train \
-  --config configs/v4/attention_matching/experiment.json --device cuda
-```
-
-单卡执行使用 `CUDA_VISIBLE_DEVICES=0`，直接调用相同模块；CPU 工程验证使用 `--device cpu`：
-
-```bash
-CUDA_VISIBLE_DEVICES=0 uv run --frozen python -m latent_working_memory.v4.train \
-  --config configs/v4/attention_matching/experiment.json --device cuda
-```
-
-`--stop-after-steps N` 停止于全局 optimizer step `N`，用于显式缩短本次执行，不修改 epoch 预算。新 run 要求输出目录不存在或为空。恢复时沿用同一配置、输出目录和启动方式，增加：
-
-```text
---resume artifacts/v4/attention-matching_20261011/train/qwen3-0.6b_conditioned_20261011/checkpoints/global_step_50
-```
-
-数据调度使用 verl 的 collator 和 StatefulDataLoader。恢复读取新增权重、optimizer、加载器状态、epoch／样本游标及各 rank RNG；先固定原 run 的 `resolved_model_revision`，再加载冻结基座，并复用输出目录的 `tokenizer/`。Checkpoint 不包含正在进行的文本流状态，保存点位于完成一个全局 batch 后。局部 slots 在每条 QA episode 开始时重新初始化。
-
-开发集在 `eval_every` 间隔、epoch 结束及主动停止点评估，仍执行相同边界写入，但不保留外层训练图。QASPER 的 dev 指标为答案 token CE，不等于生成 EM/F1。
-
-在线跟踪只接受已有 SwanLab project，要求显式设置 `group`。凭据使用项目 `.env` 或终端中的 `SWANLAB_API_KEY`，每次恢复沿用本地 `swanlab.json` 的 run 身份。训练与验证只追加当前真实 optimizer step 的原生指标；不上传累计曲线快照，也不自动创建 project。
-
-单条流式 greedy 生成读取纯文本 prompt，从 checkpoint 恢复新增权重，并使用 run 中记录的模型 revision 与 tokenizer。输出 JSON 包含 prompt、生成文本及 token IDs：
-
-```bash
-CUDA_VISIBLE_DEVICES=0 uv run --frozen python -m latent_working_memory.v4.inference \
-  --checkpoint artifacts/v4/attention-matching_20261011/train/qwen3-0.6b_conditioned_20261011/checkpoints/global_step_50 \
-  --prompt-file data/attention-matching/prompt.txt \
-  --output artifacts/v4/attention-matching_20261011/eval/greedy-sample.json \
-  --max-new-tokens 128 --device cuda
-```
-
-这里的 prompt 路径与 checkpoint 需替换为实际文件。生成中继续执行相同的局部 TTT；prompt 与新增 tokens 的总长度不能超过基座绝对位置上限。当前没有正式 benchmark 评估管线。
-
-| 产物 | 内容 |
+| 参数 | 预设与含义 |
 |---|---|
-| `run.json` | 解析后的配置、实际模型 revision、数据身份、设备类型与 world size |
-| `data-statistics.json` | 实际长度过滤、分组划分、样本数和有效监督 token 数 |
-| `tokenizer/` | 本次运行保存的 tokenizer，供后续推理复用 |
-| `metrics.jsonl` | 真实 step 对应的 `train/*`、`dev/*`、step 耗时与峰值显存；资源量取各 rank 最大值 |
-| `checkpoints/global_step_N/state.pt` | 新增权重、optimizer、进度与各 rank RNG；作为完整保存成功的标记 |
-| `checkpoints/global_step_N/data_<rank>.pt` | StatefulDataLoader 状态；checkpoint tracker 和保留数量由 verl 管理 |
-| `swanlab.json` | 启用在线跟踪时保存 project／group／run 身份 |
-| `training-result.json` | 完成状态、累计 steps／样本访问数／目标 token 数与最后 checkpoint |
+| `model.backbone_dtype` | GPU 预设 `bfloat16`；类默认 `float32`，新增模块与 slots 始终 FP32 |
+| `model.attention_implementation` | 主干 `sdpa`，可选 `eager`；局部 reader 使用显式计算 |
+| `model.loss_chunk_size` | 256；有效答案位置的 LM head／CE 分块重计算 |
+| `training.epochs`／`learning_rate` | 1／0.0001 |
+| `training.global_batch_size`／`micro_batch_size_per_gpu` | 8／2；双卡完整 batch 对应每卡累积两次 microbatch |
+| `training.max_seq_length` | train 完整序列的人为上限 12288；省略或 `null` 关闭 |
+| `training.eval_every` | 每 50 个 optimizer steps 验证；epoch 结束和主动停止时也验证 |
+| `training.save_every`／`save_total_limit` | 每 50 steps 保存、保留最近 2 个；支持 `after_each_epoch`，epoch 结束和主动停止时始终保存 |
 
-## 实现契约与验证
+- 全局 batch 与每卡 microbatch 分别控制优化器更新规模和单次前向规模；尾批按实际有效答案 token 数归一化。
+- 使用 verl Engine、optimizer、DDP、collator、StatefulDataLoader 和 checkpoint 管理；恢复保留配置、加载器游标、各 rank RNG 和原运行身份。
+- 同一 run 恢复要求配置、分词后数据、设备类型及 GPU 数一致。更改方法设置时使用新 run。
+- 主干尚未采用带可变 KV／hook 状态的激活重计算；推理缓存有界不代表完整 meta-training 显存有界。
 
-`data_preparation/delta_mem_qasper/` 将源数据构造成文档 QA 格式并按论文划分，`data.py` 统一读取、展开 QA 并筛选，`data_types.py` 定义 prompt／target 分离的 episode；`memory.py` 定义 source projection、共享 reader、查询生成与可微局部写入；`model.py` 管理 Q/O hooks、原始 KV、源缓存、变长 microbatch 和分块 CE；`engine.py` 使用 verl `BaseEngine` 的 replicated/DDP 执行外层优化；`training_data.py`、`checkpoint.py` 和 `tracking.py` 分别接入加载器、checkpoint 生命周期和增量指标。设备、RNG 与凭据 helper 位于项目公共模块，v3／v4 共用。
+从项目根目录启动：
 
-- 仅 pending 的逐层源表示进入局部目标。源缓存每层最多包含 `B+W` 个表示；基座的原始 KV 不能替代这份缓存。
-- 首次写入前禁用 memory 读取修正，但可学习初始 slots 参与第一次写入。边界更新之后，新 memory 影响后续前向；保留的 recent KV 不重算，绝对 position 不重置。
-- 局部损失对 value 维求和、对压缩查询平均，再乘 0.5。内循环只求 slots 的偏导；训练时保留 teacher、generator 与跨边界状态的完整 meta-gradient。
-- 外层仅统计首次写入后产生且 target 位于 episode 监督后缀的 logits，按全局有效目标 token 数归一化。边界前最后一个 logit 不计入写后监督，即使其 target 位于边界之后。
-- 主干可以使用 SDPA；局部 reader 保留显式 matmul／softmax 及精确二阶梯度。主干使用一份冻结权重，不复制 encoder／decoder。
-- microbatch 在共同边界推进，padding 不参与监督，只有完整到达写入边界的样本更新各自 memory。生成 prefill 仅计算最后位置 logits。
-- LM head／CE 使用无状态的局部重计算；尚未启用带可变 KV／hook 状态的主干重计算，也没有跨边界截断或一阶 meta-gradient 近似。推理缓存有界不代表精确 meta-training 的显存有界。
+```bash
+bash src/latent_working_memory/v4/scripts/run.sh \
+  --gpus 0,1 --run-id am-query_20261013 \
+  --run-name qwen3-0.6b_conditioned-m32
+```
 
-工程测试入口：
+## 四、评估与记录
+
+### 4.1 评估方式
+
+| 场景 | 计算内容 |
+|---|---|
+| 训练中 dev | 答案 token CE，以及局部写入前／后的 AM loss |
+| 独立 test 评估 | 从 checkpoint 计算答案 NLL、greedy 生成的 EM／F1，保存逐题结果及汇总 |
+| 单条生成 | 从纯文本 prompt 生成，用于查看模型输出，不计算 QA 指标 |
+
+- NLL 按答案 token 加权，EM／F1 按 QA 平均；EM／F1 使用小写化、去标点及英文冠词、合并空白后的短答评分。这是当前单参考答案协议，不是官方 QASPER 多参考评测。
+- NLL 与生成各自初始化记忆；生成仅接收 prompt，参考答案不进入生成路径。
+- test 沿用固定 prompt 下限及模型窗口上限；生成预算超过剩余窗口时缩至可用长度，记录实际预算，不改变样本筛选。
+- 汇总包含模型各层 slots、维度、总 latent 元素及字节数，以及评估耗时、局部写入耗时和峰值显存。计量范围随结果保存，不将 latent 状态大小视为整个模型显存。
+
+### 4.2 SwanLab 与本地产物
+
+- 默认仅本地记录。在线训练显式指定已有 project；相关 runs 通过 `group` 关联，`job_type=train`，固定 tags 为 `scope:main`、`method:attention-matching`，数据和研究标签通过配置补充。
+- train/dev 在同一 run 中按真实 optimizer step 追加原生曲线。`write_loss` 表示更新后的 AM loss，`write_loss_before` 表示更新前；均先按层、再按写入事件平均。
+- 最终评估可追加到原训练 run 的 `evaluation/*`，保留原配置和身份；不创建新 project 或 run。辅助计数与逐题结果保存在本地。
+
+| 位置 | 主要产物 |
+|---|---|
+| `plan/<run-name>/` | 配置快照、命令、运行状态和执行日志 |
+| `train/<run-name>/` | `run.json`、`tokenizer/`、`data-statistics.json`、`metrics.jsonl`、checkpoint 与训练结果 |
+| `eval/<run-name>/test/` | `summary.json`、`predictions.jsonl`、评估统计，以及在线发布时的 `publication.json` |
+
+共同父目录为 `artifacts/v4/<run-id>/`。详细文件和命令见[运行指南](scripts/README.md)。当前没有独立跨运行比较入口。
+
+## 五、代码职责
+
+| 职责 | 文件 |
+|---|---|
+| 配置、JSON 持久化与启动 | [config.py](config.py)、[io.py](io.py)、[gpu_job.py](gpu_job.py) |
+| 数据读取与样本表示 | [data.py](data.py)、[data_types.py](data_types.py) |
+| 逐层记忆与流式主干 | [memory.py](memory.py)、[model.py](model.py) |
+| 外层训练与批处理 | [train.py](train.py)、[engine.py](engine.py)、[training_data.py](training_data.py) |
+| 保存恢复与实验记录 | [checkpoint.py](checkpoint.py)、[tracking.py](tracking.py) |
+| 独立评估与生成 | [evaluate.py](evaluate.py)、[inference.py](inference.py) |
 
 ```bash
 uv run --frozen python -m compileall -q src/latent_working_memory/v4
 uv run --frozen ruff check src/latent_working_memory/v4
 ```
-
-已有检查覆盖边界、meta-gradient、续训和 DDP；真实 GPU 长文本的质量、显存与吞吐需通过实验测量。
-
-首个实现不包含独立历史约束、自适应扩容或 generator 自身的 TTT；generator 仅在离线外循环学习，部署参数冻结。当前目标只匹配新 pending 的读取行为，不能据此保证旧历史不会退化；该性质需要后续任务实验验证。
