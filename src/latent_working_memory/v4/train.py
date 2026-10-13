@@ -26,7 +26,8 @@ from latent_working_memory.v4.tracking import configure_metrics, log_metrics, tr
 from latent_working_memory.v4.training_data import make_data_loader
 
 
-def validate_cursor(cursor, config, samples):
+def validate_cursor(cursor, config, samples, world_size):
+    batch_size = config.global_batch_size(world_size)
     names = {"epoch", "sample_offset", "step", "sample_visits", "target_tokens"}
     if set(cursor) != names or any(
         type(value) is not int or value < 0 for value in cursor.values()
@@ -36,11 +37,10 @@ def validate_cursor(cursor, config, samples):
     if (
         epoch > config.epochs
         or offset >= samples
-        or offset % config.global_batch_size
+        or offset % batch_size
         or (epoch == config.epochs and offset != 0)
         or cursor["step"]
-        != epoch * math.ceil(samples / config.global_batch_size)
-        + offset // config.global_batch_size
+        != epoch * math.ceil(samples / batch_size) + offset // batch_size
         or cursor["sample_visits"] != epoch * samples + offset
     ):
         raise ValueError("checkpoint cursor does not match the epoch/batch schedule")
@@ -69,7 +69,7 @@ def evaluate(engine, episodes):
     totals = {"target_tokens": 0, "samples": 0, "source_tokens": 0, "write_events": 0}
     nll, write_loss_before, write_loss = 0.0, 0.0, 0.0
     loader = make_data_loader(
-        episodes, engine.config.global_batch_size, engine.config.seed, shuffle=False
+        episodes, engine.global_batch_size, engine.config.seed, shuffle=False
     )
     for batch in loader:
         metrics = engine.eval_batch(batch)
@@ -150,11 +150,12 @@ def run_training(args):
             "selection": data_statistics,
         },
         "world_size": world_size,
+        "global_batch_size": engine.global_batch_size,
         "device_type": device.type,
     }
     cursor = {"epoch": 0, "sample_offset": 0, "step": 0, "sample_visits": 0, "target_tokens": 0}
     metrics_path = output / "metrics.jsonl"
-    loader = make_data_loader(train, config.global_batch_size, config.seed)
+    loader = make_data_loader(train, engine.global_batch_size, config.seed)
     handler = MetaMemoryCheckpointHandler(
         engine, loader, output / "checkpoints", run, cursor, resume_from_path=resume
     )
@@ -162,7 +163,7 @@ def run_training(args):
         if json.loads((output / "run.json").read_text(encoding="utf-8")) != run:
             raise ValueError("saved run does not match the resume configuration or tokenized data")
         restored_step = handler.load_checkpoint()
-        validate_cursor(cursor, config, len(train))
+        validate_cursor(cursor, config, len(train), world_size)
         if restored_step != cursor["step"]:
             raise ValueError("checkpoint directory step differs from its saved cursor")
         if rank == 0:
@@ -214,7 +215,7 @@ def train_loop(
 ):
     output = Path(config.output_dir)
     metrics_path = output / "metrics.jsonl"
-    total_steps = config.epochs * math.ceil(len(train) / config.global_batch_size)
+    total_steps = config.epochs * math.ceil(len(train) / engine.global_batch_size)
     for epoch in range(cursor["epoch"], config.epochs):
         if stop is not None and cursor["step"] >= stop:
             break

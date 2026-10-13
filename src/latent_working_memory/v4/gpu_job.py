@@ -23,8 +23,8 @@ TRAINING_OPTIONS = (
     "output_root",
     "model_path",
     "data_dir",
-    "global_batch_size",
     "micro_batch_size_per_gpu",
+    "gradient_accumulation_steps",
     "epochs",
     "seed",
     "eval_every",
@@ -83,8 +83,8 @@ def parse_args(argv=None):
     parser.add_argument("--model-path", type=Path, help="覆盖预设中的本地基座模型位置")
     parser.add_argument("--data-dir", type=Path, help="含 train/dev/test.jsonl 的数据目录")
     for name in (
-        "global-batch-size",
         "micro-batch-size-per-gpu",
+        "gradient-accumulation-steps",
         "epochs",
         "eval-every",
         "save-total-limit",
@@ -158,8 +158,8 @@ def prepare_training(args):
     overrides = {
         name: getattr(args, name)
         for name in (
-            "global_batch_size",
             "micro_batch_size_per_gpu",
+            "gradient_accumulation_steps",
             "epochs",
             "seed",
             "eval_every",

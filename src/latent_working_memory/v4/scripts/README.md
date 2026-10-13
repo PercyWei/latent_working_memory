@@ -2,7 +2,7 @@
 
 创建时间：20261013 10:12:17 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261013 23:46:24 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261014 00:01:31 Asia/Shanghai（UTC+08:00）
 
 使用 [run.sh](run.sh) 启动训练、恢复、独立评估或单条生成。模型与训练目标见 [v4 说明](../README.md)，默认配置见 [experiment.json](../../../../configs/v4/attention_matching/experiment.json)。以下命令均从项目根目录执行。
 
@@ -99,10 +99,11 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 | `--data-dir` | 覆盖数据目录；固定使用 `train.jsonl`、`dev.jsonl`、`test.jsonl` |
 | `--run-id`／`--output-root` | 实验系列及产物父目录；父目录默认 `artifacts/v4` |
 | `--epochs`／`--seed` | 训练轮数与随机种子，预设 1／42；seed 允许 0 |
-| `--global-batch-size`／`--micro-batch-size-per-gpu` | 全局样本数与每卡单次前向样本数，预设 8／2 |
+| `--micro-batch-size-per-gpu`／`--gradient-accumulation-steps` | 每卡单次前向样本数与梯度累积次数，预设 4／2 |
 | `--max-seq-length` | train 完整输入的人为上限，预设 12288；`null` 关闭，固定下限与模型窗口始终生效 |
 
-全局 batch 保持独立设置，实际按 GPU 数分配并累积 microbatch。预设双卡对应每卡累积两次；尾批按实际目标 token 数归一化。
+- 全局 batch = GPU 数 × 每卡 microbatch × 梯度累积步数。预设双卡全局 batch 为 16，每卡累积 2 次 microbatch 后更新优化器；尾批按实际有效答案 token 数归一化。
+- 单卡沿用预设时全局 batch 为 8；若需保持 16，设置 `--gradient-accumulation-steps 4`。
 
 **验证、保存与跟踪**
 

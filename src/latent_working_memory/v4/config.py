@@ -77,8 +77,8 @@ class TrainingConfig:
     dataset_dir: str
     output_dir: str | None = None
     epochs: int = 1
-    global_batch_size: int = 8
-    micro_batch_size_per_gpu: int = 2
+    micro_batch_size_per_gpu: int = 4
+    gradient_accumulation_steps: int = 2
     learning_rate: float = 1e-4
     weight_decay: float = 0.01
     gradient_clip: float = 1.0
@@ -125,6 +125,9 @@ class TrainingConfig:
         ):
             raise ValueError("tags must be namespaced strings, for example study:query-generation")
         object.__setattr__(self, "tags", tuple(self.tags))
+
+    def global_batch_size(self, world_size):
+        return world_size * self.micro_batch_size_per_gpu * self.gradient_accumulation_steps
 
 
 def validate_experiment(model, training):

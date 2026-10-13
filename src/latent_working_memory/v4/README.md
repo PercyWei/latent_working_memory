@@ -2,7 +2,7 @@
 
 创建时间：20261003 21:51:43 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261013 23:46:24 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261014 00:01:31 Asia/Shanghai（UTC+08:00）
 
 冻结基座，在每层维护 latent memory，通过 Attention Matching 局部更新记忆，并由答案 CE 学习如何生成压缩查询和读写记忆。
 
@@ -109,12 +109,12 @@ $R$ 为压缩查询数；每次写入固定执行 `inner_steps` 步，查询与�
 | `model.attention_implementation` | 主干 `sdpa`，可选 `eager`；局部 reader 使用显式计算 |
 | `model.loss_chunk_size` | 256；有效答案位置的 LM head／CE 分块重计算 |
 | `training.epochs`／`learning_rate` | 1／0.0001 |
-| `training.global_batch_size`／`micro_batch_size_per_gpu` | 8／2；双卡完整 batch 对应每卡累积两次 microbatch |
+| `training.micro_batch_size_per_gpu`／`gradient_accumulation_steps` | 4／2；双卡全局 batch 为 16 |
 | `training.max_seq_length` | train 完整序列的人为上限 12288；省略或 `null` 关闭 |
 | `training.eval_every` | 每 50 个 optimizer steps 验证；epoch 结束和主动停止时也验证 |
 | `training.save_every`／`save_total_limit` | 每 50 steps 保存、保留最近 2 个；支持 `after_each_epoch`，epoch 结束和主动停止时始终保存 |
 
-- 全局 batch 与每卡 microbatch 分别控制优化器更新规模和单次前向规模；尾批按实际有效答案 token 数归一化。
+- 全局 batch = GPU 数 × 每卡 microbatch × 梯度累积步数。预设每卡累积 2 次 microbatch 后更新优化器；尾批按实际有效答案 token 数归一化。
 - 使用 verl Engine、optimizer、DDP、collator、StatefulDataLoader 和 checkpoint 管理；恢复保留配置、加载器游标、各 rank RNG 和原运行身份。
 - 同一 run 恢复要求配置、分词后数据、设备类型及 GPU 数一致。更改方法设置时使用新 run。
 - 主干尚未采用带可变 KV／hook 状态的激活重计算；推理缓存有界不代表完整 meta-training 显存有界。
