@@ -2,7 +2,7 @@
 
 创建时间：20261012 15:01:54 Asia/Shanghai
 
-最后修订时间：20261013 16:09:17 Asia/Shanghai
+最后修订时间：20261013 20:54:11 Asia/Shanghai
 
 本阶段回答两个问题：原阈值是否与 `I` 的实际尺度不匹配，以及 `I` 能否反映覆盖相对追加造成的 QA 损失。先固定 warmup checkpoint，完成诊断和完整轨迹扫描，再决定修改阈值还是训练目标。
 
@@ -31,7 +31,7 @@ MC_CKPT="/替换为上一步选出的warmup/checkpoints/global_step_N"
 
 CUDA_VISIBLE_DEVICES=0 uv run --frozen python -m "$MC_MODULE.probe" \
   --checkpoint "$MC_CKPT" --dataset-dir "$MC_DATA" \
-  --max-trajectories 24 --output-dir "$MC_OUT/probe"
+  --max-dev-samples 24 --output-dir "$MC_OUT/probe"
 ```
 
 默认以固定 seed、50% append 概率推进轨迹。在每个更新点，从同一旧状态构造两个候选，读取已出现的 evaluation 题；旧题还读取更新前状态。gate 题和未来题不参与质量诊断。
@@ -101,4 +101,4 @@ policy 结束后替换 checkpoint，并将输出目录改为 `$MC_OUT/policy-end
 
 当前探索代码提供冻结诊断与校准，训练使用 v3 的现有入口；辅助训练目标根据诊断结果再决定。阈值在 dev 上选定，后续训练方案确定后再做最终 test。
 
-输出目录需为新目录。若更换 checkpoint，重新运行 probe 和 sweep。`--max-trajectories` 可用于缩小诊断集；它按训练 seed 固定选完整轨迹，不复制数据。
+输出目录需为新目录。若更换 checkpoint，重新运行 probe 和 sweep。诊断默认使用完整 dev，`--max-dev-samples` 接受正整数或 `null`，后者表示不限；按训练 seed 固定选择完整轨迹，不复制数据。

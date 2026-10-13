@@ -570,19 +570,11 @@ def test_runtime_loaders_reject_presets_and_round_trip_stage_and_evaluation_conf
     saved = tmp_path / "eval.json"
     saved.write_text(json.dumps({"dataset_dir": "independent-factqa"}))
     assert load_evaluation(saved) == EvaluationConfig("independent-factqa")
-    assert load_evaluation(saved).split == "test"
     assert load_evaluation(saved).seed == 20261004
+    assert load_evaluation(saved).max_test_samples is None
     assert load_evaluation(saved).max_new_tokens == 64
-    assert load_evaluation(saved).gate_qa_count == 8
-    saved.write_text(
-        json.dumps({"dataset_dir": "independent-factqa", "seed": 91, "gate_qa_count": 3})
-    )
-    assert load_evaluation(saved) == EvaluationConfig(
-        "independent-factqa", seed=91, gate_qa_count=3
-    )
-    for count in (0, -1, True, 1.5):
-        with pytest.raises(ValueError, match="gate_qa_count"):
-            EvaluationConfig("independent-factqa", gate_qa_count=count)
+    saved.write_text(json.dumps({"dataset_dir": "independent-factqa", "seed": 91}))
+    assert load_evaluation(saved) == EvaluationConfig("independent-factqa", seed=91)
 
 
 @pytest.mark.parametrize("method", ["dynamic", "memory_change", "information_loss"])

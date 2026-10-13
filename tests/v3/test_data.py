@@ -494,7 +494,7 @@ def test_factqa_length_filter_preserves_exact_boundary_and_complete_qa(tmp_path,
         > limit
     )
 
-    retained, statistics = filter_factqa(original, limit, limit * 2)
+    retained, statistics = filter_factqa(original, limit)
     assert retained["train"] == (trajectory,)
     assert retained["train"][0] is trajectory
     assert retained["train"][0].qas is trajectory.qas
@@ -534,7 +534,7 @@ def test_factqa_length_filter_preserves_exact_boundary_and_complete_qa(tmp_path,
         },
     }
 
-    rejected, rejected_statistics = filter_factqa(original, limit - 1, limit * 2)
+    rejected, rejected_statistics = filter_factqa(original, limit - 1)
     assert rejected["train"] == ()
     assert rejected_statistics["splits"]["train"] == {
         "read": 1,
@@ -547,11 +547,9 @@ def test_factqa_length_filter_preserves_exact_boundary_and_complete_qa(tmp_path,
     assert original["train"][0] is trajectory
 
 
-@pytest.mark.parametrize(
-    "max_input_tokens,model_window", [(3000, 4000), (None, 3000), (4000, 3000)]
-)
-def test_factqa_length_filter_applies_effective_limit_only_to_train(
-    tmp_path, tokenizer, max_input_tokens, model_window
+@pytest.mark.parametrize("max_input_tokens", [3000, None, 4000])
+def test_factqa_length_filter_applies_configured_limit_only_to_train(
+    tmp_path, tokenizer, max_input_tokens
 ):
     records = [
         make_record(6, split, index=index, segment_chars=length)
@@ -560,15 +558,18 @@ def test_factqa_length_filter_applies_effective_limit_only_to_train(
     ]
     write_dataset(tmp_path, records)
     original = load_factqa(tmp_path, tokenizer)
-    retained, statistics = filter_factqa(original, max_input_tokens, model_window)
-    assert statistics["input_token_interval"] == [1, 3000]
+    retained, statistics = filter_factqa(original, max_input_tokens)
+    assert statistics["input_token_interval"] == [1, max_input_tokens]
     assert statistics["upper_limit_split"] == "train"
     for split in ("train", "dev", "test"):
-        expected_rows = original[split][:2] if split == "train" else original[split]
+        expected_rows = (
+            original[split][:2]
+            if split == "train" and max_input_tokens is not None
+            else original[split]
+        )
         assert retained[split] == expected_rows
         if split != "train":
             assert retained[split] is original[split]
-            assert len(retained[split][-1].full_input_ids) > model_window
         assert all(
             actual is expected
             for actual, expected in zip(retained[split], expected_rows, strict=True)
@@ -584,15 +585,9 @@ def test_factqa_length_filter_applies_effective_limit_only_to_train(
         assert len(original[split]) == 3
 
 
-@pytest.mark.parametrize("model_window", [0, -1, True, 1.5, "4096", None])
-def test_factqa_length_filter_requires_positive_integer_model_window(model_window):
-    with pytest.raises(ValueError, match="model_window must be a positive integer"):
-        filter_factqa({"train": (), "dev": (), "test": ()}, None, model_window)
-
-
 def test_factqa_length_filter_does_not_hide_invalid_long_sources(tmp_path, tokenizer):
     first = make_record(6)
     duplicate = copy.deepcopy(first)
     write_dataset(tmp_path, [first, duplicate])
     with pytest.raises(ValueError, match="duplicate trajectory"):
-        filter_factqa(load_factqa(tmp_path, tokenizer), 1, 4096)
+        filter_factqa(load_factqa(tmp_path, tokenizer), 1)

@@ -18,14 +18,15 @@ from latent_working_memory.v3.config import (
     WRITER_MODES,
     EvaluationConfig,
     load_evaluation,
+    parse_optional_positive_integer,
 )
 from latent_working_memory.tracking_credentials import swanlab_api_key
 
 
-def bounded_count(value):
+def nonnegative_count(value):
     number = int(value)
     if number < 0:
-        raise argparse.ArgumentTypeError("must be >= 0; 0 means unlimited")
+        raise argparse.ArgumentTypeError("must be non-negative")
     return number
 
 
@@ -96,10 +97,17 @@ def parse_args(argv=None):
     )
     parser.add_argument("--eval-data", type=Path, help="独立的最终 QA 评估数据目录")
     parser.add_argument(
-        "--eval-seed", type=bounded_count, help="最终评估轨迹及 gate 选题 seed，默认复用 eval.json"
+        "--train-seed",
+        type=nonnegative_count,
+        help="覆盖 training.seed：初始化、数据抽样与打乱、AE/LM 目标选择；默认沿用配置",
     )
     parser.add_argument(
-        "--eval-gate-qa-count", type=positive_count, help="最终评估每次门控的题数，初次沿用训练配置"
+        "--objective-seed",
+        type=nonnegative_count,
+        help="覆盖 objective.seed：随机分块、warmup 动作、训练 task/gate 与 dev gate 选题；默认沿用配置",
+    )
+    parser.add_argument(
+        "--eval-seed", type=nonnegative_count, help="最终评估轨迹及 gate 选题 seed，默认复用 eval.json"
     )
     parser.add_argument(
         "--model-path", help="覆盖预设模型位置，当前预设为 ~/models/Qwen3-4B-Instruct-2507"
@@ -135,13 +143,15 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--max-input-tokens",
-        type=bounded_count,
-        help="AE/LM 训练正文 token 上限，预设 12288；0 表示模型窗口，仅过滤 train",
+        type=parse_optional_positive_integer,
+        default=argparse.SUPPRESS,
+        help="AE/LM 训练正文 token 上限，预设 12288；null 跳过上限筛选，仅过滤 train",
     )
     parser.add_argument(
         "--max-qa-input-tokens",
-        type=bounded_count,
-        help="FactQA 训练正文 token 上限，预设 12288；0 表示模型窗口，仅过滤 train",
+        type=parse_optional_positive_integer,
+        default=argparse.SUPPRESS,
+        help="FactQA 训练正文 token 上限，预设 12288；null 跳过上限筛选，仅过滤 train",
     )
     parser.add_argument(
         "--lm-target-tokens",
@@ -165,8 +175,9 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--bptt-steps",
-        type=bounded_count,
-        help="每个反传窗口的写入轮数，0 表示完整 BPTT；AutoCompressors 同时据此分组随机切分文本",
+        type=parse_optional_positive_integer,
+        default=argparse.SUPPRESS,
+        help="每个反传窗口的写入轮数，null 表示完整 BPTT；AutoCompressors 同时据此分组随机切分文本",
     )
     parser.add_argument(
         "--writer-mode",
@@ -186,13 +197,30 @@ def parse_args(argv=None):
     for stage in ("pretrain", "qa", "warmup", "policy"):
         parser.add_argument(
             f"--{stage}-train-samples",
-            type=bounded_count,
-            help=f"{stage} 阶段训练样本上限，0 表示不限；smoke 另受档位上限约束",
+            type=parse_optional_positive_integer,
+            default=argparse.SUPPRESS,
+            help=f"{stage} 阶段训练样本上限，null 表示不限；smoke 另受档位上限约束",
         )
-    for name in ("dev-samples", "max-steps", "eval-trajectories"):
-        parser.add_argument(f"--{name}", type=bounded_count, help="覆盖运行档位，0 表示不限")
     parser.add_argument(
-        "--eval-every", type=positive_count, help="每隔多少 optimizer step 验证 dev"
+        "--max-dev-samples",
+        type=parse_optional_positive_integer,
+        default=argparse.SUPPRESS,
+        help="训练中 dev 验证的样本上限：正整数或 null；smoke 默认 4，显式 null 不限",
+    )
+    parser.add_argument(
+        "--max-test-samples",
+        type=parse_optional_positive_integer,
+        default=argparse.SUPPRESS,
+        help="最终 test 评估的样本上限：正整数或 null；smoke 默认 2，显式 null 不限",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=parse_optional_positive_integer,
+        default=argparse.SUPPRESS,
+        help="覆盖运行档位的训练步数上限，null 表示不限",
+    )
+    parser.add_argument(
+        "--dev-every", type=positive_count, help="每隔多少 optimizer step 验证 dev"
     )
     parser.add_argument(
         "--save-every",
@@ -203,11 +231,6 @@ def parse_args(argv=None):
         "--save-total-limit",
         type=positive_count,
         help="每阶段保留最近成功保存的 checkpoint 数，默认 2",
-    )
-    parser.add_argument(
-        "--eval-split",
-        choices=("dev", "test"),
-        help="首次训练默认随档位；续训和补评估沿用 eval.json",
     )
     parser.add_argument(
         "--max-new-tokens", type=positive_count, help="最终评估生成上限，初次默认 64"
@@ -244,7 +267,7 @@ def parse_args(argv=None):
         "dynamic_pretrain",
     }:
         parser.error("--append-slots is only supported by dynamic posttraining methods")
-    if args.bptt_steps is not None and args.method not in (
+    if "bptt_steps" in vars(args) and args.method not in (
         "autocompressors",
         *DYNAMIC_METHODS,
     ):
@@ -300,7 +323,7 @@ def save_json(path, value):
     )
 
 
-def resolve_evaluation_config(args, config_path, level=None, gate_qa_count=8):
+def resolve_evaluation_config(args, config_path, level=None):
     """沿用独立评估设置，只应用显式评估参数；旧产物须明确指定数据入口。"""
     if config_path.is_file():
         config = load_evaluation(config_path)
@@ -309,26 +332,21 @@ def resolve_evaluation_config(args, config_path, level=None, gate_qa_count=8):
             raise ValueError(f"{config_path} is missing; specify --eval-data to create it")
         config = EvaluationConfig(
             dataset_dir=str((args.eval_data or args.qa_data).resolve()),
-            split=level["eval_split"] if level is not None else "test",
-            max_trajectories=level["eval_trajectories"] if level is not None else None,
-            gate_qa_count=gate_qa_count,
+            max_test_samples=level["max_test_samples"] if level is not None else None,
         )
     updates = {}
     for argument, field in (
         ("eval_data", "dataset_dir"),
-        ("eval_split", "split"),
         ("eval_seed", "seed"),
-        ("eval_gate_qa_count", "gate_qa_count"),
-        ("eval_trajectories", "max_trajectories"),
         ("max_new_tokens", "max_new_tokens"),
     ):
         value = getattr(args, argument)
         if value is not None:
             if argument == "eval_data":
                 value = str(value.resolve())
-            elif argument == "eval_trajectories" and value == 0:
-                value = None
             updates[field] = value
+    if "max_test_samples" in vars(args):
+        updates["max_test_samples"] = args.max_test_samples
     return replace(config, **updates)
 
 
@@ -426,9 +444,7 @@ def run_resume(args):
     result["checkpoints"][jobs[0].key] = str(args.checkpoint.resolve())
     evaluation_path = plan_directory / "eval.json"
     evaluation_config = (
-        resolve_evaluation_config(
-            args, evaluation_path, gate_qa_count=jobs[-1].config.objective.gate_qa_count
-        )
+        resolve_evaluation_config(args, evaluation_path)
         if any(job.evaluate for job in jobs)
         else None
     )
@@ -508,9 +524,7 @@ def run_job(args):
     }
     evaluation_path = plan_directory / "eval.json"
     evaluation_config = (
-        resolve_evaluation_config(
-            args, evaluation_path, level, jobs[-1].config.objective.gate_qa_count
-        )
+        resolve_evaluation_config(args, evaluation_path, level)
         if evaluation_directories
         else None
     )

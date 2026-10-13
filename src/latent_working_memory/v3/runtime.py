@@ -73,20 +73,16 @@ def load_codec(model_config, device, objective_config):
     return codec, tokenizer
 
 
-def load_splits(config, tokenizer, model_window):
+def load_splits(config, tokenizer):
     training = config.training
     pretraining = config.objective.stage in {"pretrain", "lm"}
     if pretraining:
-        splits, statistics = load_pretraining(config, tokenizer, model_window)
+        splits, statistics = load_pretraining(config, tokenizer)
     else:
         qa_splits, qa_statistics = filter_qa_budget(
             load_factqa(training.dataset_dir, tokenizer), config.objective
         )
-        splits, statistics = filter_factqa(
-            qa_splits,
-            training.max_qa_input_tokens,
-            model_window,
-        )
+        splits, statistics = filter_factqa(qa_splits, training.max_qa_input_tokens)
         statistics["qa_budget_filter"] = qa_statistics
         statistics["qa_selection"] = {
             "task_qa_count": config.objective.task_qa_count,
@@ -513,7 +509,7 @@ def train_loop(config, engine, splits, run, stage, stop_after_steps=None, tracki
                 **{f"resources/{key}": value for key, value in resources.items()},
             }
             development_observations = []
-            if step % settings.eval_every == 0 or epoch_end or stopping:
+            if step % settings.dev_every == 0 or epoch_end or stopping:
                 development = evaluate_split(engine, dev)
                 if "qa_observations" in development:
                     development_observations = development.pop("qa_observations")

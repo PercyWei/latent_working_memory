@@ -376,7 +376,7 @@ def test_two_dynamic_methods_share_one_source_and_keep_one_run_per_method(
         root = tmp_path / (f"{method_name}-k64" if explicit_name else f"{method_name}-k64_trial")
         cloud_name = f"{method_name}-k64_trial"
         warmup = online_config(root, "warmup", method, source_result["checkpoint"])
-        warmup = replace(warmup, training=replace(warmup.training, eval_every=2))
+        warmup = replace(warmup, training=replace(warmup.training, dev_every=2))
         if explicit_name:
             warmup = replace(warmup, training=replace(warmup.training, experiment_name=cloud_name))
         warmup_result, warmup_run = run_stage(warmup, 2)
@@ -384,7 +384,7 @@ def test_two_dynamic_methods_share_one_source_and_keep_one_run_per_method(
         identity = json.loads(identity_bytes)
         before = json.loads((root / "experiment.json").read_text())
         policy = online_config(root, "policy", method, warmup_result["checkpoint"])
-        policy = replace(policy, training=replace(policy.training, eval_every=2))
+        policy = replace(policy, training=replace(policy.training, dev_every=2))
         if explicit_name:
             policy = replace(policy, training=replace(policy.training, experiment_name=cloud_name))
         policy_result, policy_run = run_stage(policy, 2)

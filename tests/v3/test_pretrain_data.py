@@ -144,7 +144,7 @@ def test_pretraining_preserves_tokenizer_error_and_notes_location(
 
     monkeypatch.setattr(tokenizer, "encode", failing_encode)
     with pytest.raises(error_type) as caught:
-        load_pretraining(experiment(root), tokenizer, 64)
+        load_pretraining(experiment(root), tokenizer)
     assert caught.value is error
     assert caught.value.__notes__ == [f"{root / 'train.jsonl'}:1"]
 
@@ -155,7 +155,7 @@ def test_multisegment_loader_uses_only_saved_window_configuration(
 ):
     root = write_multisegment(tmp_path, train=[multisegment_row()])
     config = experiment(root)
-    expected = load_pretraining(config, tokenizer, 64)
+    expected = load_pretraining(config, tokenizer)
     saved_config = {"window": MULTISEGMENT_CONFIG.to_dict()["window"]}
     if include_construction_settings:
         saved_config.update(
@@ -166,7 +166,7 @@ def test_multisegment_loader_uses_only_saved_window_configuration(
             split_counts={"train": 0},
         )
     (root / "preparation.json").write_text(json.dumps({"config": saved_config}), encoding="utf-8")
-    assert load_pretraining(config, tokenizer, 64) == expected
+    assert load_pretraining(config, tokenizer) == expected
 
 
 @pytest.mark.parametrize("overlap", ("none", "body", "continuation"))
@@ -184,9 +184,9 @@ def test_multisegment_same_document_windows_include_continuation_in_nonoverlap_c
     config = experiment(directory)
     if overlap != "none":
         with pytest.raises(ValueError, match="overlapping source windows"):
-            load_pretraining(config, tokenizer, 64)
+            load_pretraining(config, tokenizer)
     else:
-        splits, _ = load_pretraining(config, tokenizer, 64)
+        splits, _ = load_pretraining(config, tokenizer)
         assert len(splits["train"]) == 2
         assert len({row.document_id for row in splits["train"]}) == 1
         assert len({row.sample_id for row in splits["train"]}) == 2
@@ -200,7 +200,7 @@ def test_multisegment_samples_one_objective_on_the_complete_body(
     root = write_multisegment(tmp_path, train=[row])
     before = (root / "train.jsonl").read_bytes()
     config = experiment(root, lm_ratio=lm_ratio)
-    splits, statistics = load_pretraining(config, tokenizer, 64)
+    splits, statistics = load_pretraining(config, tokenizer)
     assert len(splits["train"]) == 1
     example = splits["train"][0]
     assert example.input_ids == (4, 5, 6)
@@ -225,7 +225,7 @@ def test_training_lm_target_length_uses_only_saved_continuation(tmp_path, tokeni
     )
     before = (root / "preparation.json").read_bytes()
     config = experiment(root, lm_ratio=1.0, lm_target_tokens=target_tokens)
-    splits, statistics = load_pretraining(config, tokenizer, 64)
+    splits, statistics = load_pretraining(config, tokenizer)
     example = splits["train"][0]
     assert example.input_ids == (3, 4, 5, 6, 7, 3)
     assert example.task == "continuation"
@@ -241,7 +241,7 @@ def test_long_complete_body_is_filtered_without_partial_prefix(tmp_path, tokeniz
     ]
     root = write_multisegment(tmp_path, train=rows)
     config = experiment(root, max_input_tokens=4, lm_ratio=0.0)
-    splits, statistics = load_pretraining(config, tokenizer, 64)
+    splits, statistics = load_pretraining(config, tokenizer)
     assert [row.sample_id for row in splits["train"]] == ["fits:ae"]
     assert splits["train"][0].input_ids == (3, 4)
     counts = statistics["splits"]["train"]
@@ -273,7 +273,7 @@ def test_upper_limit_filters_only_train_and_preserves_dev_test_body_and_target(
     root = write_multisegment(tmp_path, **rows)
     before = {split: (root / f"{split}.jsonl").read_bytes() for split in rows}
     config = experiment(root, method=method, max_input_tokens=3, lm_ratio=lm_ratio)
-    splits, statistics = load_pretraining(config, tokenizer, 4)
+    splits, statistics = load_pretraining(config, tokenizer)
     assert splits["train"] == ()
     assert statistics["input_token_interval"][1] == 3
     assert statistics["upper_limit_split"] == "train"
@@ -301,7 +301,7 @@ def test_multi_filters_bodies_too_short_for_any_configured_chunk_count(tmp_path,
     )
     config = experiment(root, method="icae_multi", max_input_tokens=8, lm_ratio=0.0)
     config = replace(config, objective=replace(config.objective, icae_max_segments=4))
-    splits, statistics = load_pretraining(config, tokenizer, 64)
+    splits, statistics = load_pretraining(config, tokenizer)
     assert [row.sample_id for row in splits["train"]] == ["fits:ae"]
     assert splits["train"][0].input_ids == (3, 4, 5, 6)
     assert statistics["input_token_interval"] == [4, 8]
@@ -315,7 +315,7 @@ def test_body_limit_excludes_memory_prompt_and_lm_target(tmp_path, tokenizer, me
     root = write_multisegment(tmp_path, train=[multisegment_row()])
     config = experiment(root, method=method, max_input_tokens=3, lm_ratio=1.0)
     config = replace(config, objective=replace(config.objective, lm_prompt="a " * 20))
-    splits, statistics = load_pretraining(config, tokenizer, 64)
+    splits, statistics = load_pretraining(config, tokenizer)
     assert len(splits["train"]) == 1
     assert splits["train"][0].input_ids == (3, 4, 5)
     assert splits["train"][0].target_ids == (6, 7)
@@ -330,7 +330,7 @@ def test_task_sampling_is_stable_and_never_changes_body(tmp_path, tokenizer):
     root = write_multisegment(tmp_path, train=rows)
 
     def load(seed=123, lm_ratio=0.5):
-        return load_pretraining(experiment(root, seed=seed, lm_ratio=lm_ratio), tokenizer, 64)
+        return load_pretraining(experiment(root, seed=seed, lm_ratio=lm_ratio), tokenizer)
 
     splits, statistics = load()
     assert load() == (splits, statistics)
@@ -353,7 +353,7 @@ def test_autocompressors_filters_bodies_too_short_for_fixed_segments(tmp_path, t
     root = write_multisegment(tmp_path, train=rows)
     config = experiment(root, method="autocompressors")
     config = replace(config, objective=replace(config.objective, ac_num_segments=4))
-    splits, statistics = load_pretraining(config, tokenizer, 64)
+    splits, statistics = load_pretraining(config, tokenizer)
     (row,) = splits["train"]
     assert len(row.input_ids) == 8
     assert row.target_ids == (6, 7)
@@ -367,7 +367,7 @@ def test_short_saved_continuation_falls_back_only_for_ae_lm_methods(tmp_path, to
     root = write_multisegment(tmp_path, train=[row])
     method = "autocompressors" if lm_only else "icae_single"
     config = experiment(root, method=method, lm_ratio=1.0, lm_target_tokens=3)
-    splits, statistics = load_pretraining(config, tokenizer, 64)
+    splits, statistics = load_pretraining(config, tokenizer)
     example = splits["train"][0]
     assert example.input_ids == (3, 4, 5, 6)
     assert example.task == ("continuation" if lm_only else "ae")
@@ -384,7 +384,7 @@ def test_short_saved_continuation_falls_back_only_for_ae_lm_methods(tmp_path, to
 def test_default_lm_target_is_independent_of_construction_estimate(tmp_path, tokenizer):
     root = write_multisegment(tmp_path, train=[multisegment_row()])
     config = experiment(root, lm_ratio=1.0, lm_target_tokens=512)
-    splits, statistics = load_pretraining(config, tokenizer, 64)
+    splits, statistics = load_pretraining(config, tokenizer)
     assert splits["train"][0].task == "ae"
     assert statistics["lm_target_tokens"] == 512
     assert statistics["splits"]["train"]["lm_to_ae_sources"] == 1
@@ -414,8 +414,8 @@ def test_complete_body_is_tokenized_once_across_original_segment_boundaries(
     root = write_multisegment(tmp_path, config=config, train=[row])
     before = (root / "train.jsonl").read_bytes()
     runtime_config = experiment(root, lm_ratio=0.0)
-    word_splits, _ = load_pretraining(runtime_config, word_tokenizer, 64)
-    char_splits, _ = load_pretraining(runtime_config, char_tokenizer, 64)
+    word_splits, _ = load_pretraining(runtime_config, word_tokenizer)
+    char_splits, _ = load_pretraining(runtime_config, char_tokenizer)
     word_ae, char_ae = word_splits["train"][0], char_splits["train"][0]
     assert word_ae.input_ids == (0,)
     assert char_ae.input_ids == tuple(char_tokenizer.encode(row["text"]))
@@ -430,7 +430,7 @@ def test_multisegment_ac_receives_each_complete_source_once_and_ignores_lm_ratio
 ):
     root = write_multisegment(tmp_path, train=[multisegment_row()])
     config = experiment(root, method="autocompressors", lm_ratio=0.0)
-    splits, statistics = load_pretraining(config, tokenizer, 64)
+    splits, statistics = load_pretraining(config, tokenizer)
     assert len(splits["train"]) == 1
     example = splits["train"][0]
     assert example.task == "continuation"
@@ -449,7 +449,7 @@ def test_autocompressors_pretrain_and_legacy_lm_use_identical_data(tmp_path, tok
     config = experiment(root, method="autocompressors", lm_ratio=0.0)
     assert config.objective.stage == "pretrain"
     legacy = replace(config, objective=replace(config.objective, stage="lm"))
-    assert load_splits(config, tokenizer, 64) == load_splits(legacy, tokenizer, 64)
+    assert load_splits(config, tokenizer) == load_splits(legacy, tokenizer)
 
 
 @pytest.mark.parametrize("leak", ("document", "cluster", "trajectory_id"))
@@ -466,7 +466,7 @@ def test_multisegment_source_isolation_before_filtering(tmp_path, tokenizer, lea
         dev["trajectory_id"] = train["trajectory_id"]
     root = write_multisegment(tmp_path, train=[train], dev=[dev])
     with pytest.raises(ValueError, match="source document|dedup cluster|duplicate") as caught:
-        load_pretraining(experiment(root, min_input_tokens=3, max_input_tokens=4), tokenizer, 64)
+        load_pretraining(experiment(root, min_input_tokens=3, max_input_tokens=4), tokenizer)
     assert caught.value.__notes__ == [f"{root / 'dev.jsonl'}:1"]
 
 
@@ -492,7 +492,7 @@ def test_multisegment_row_contract_is_enforced_with_location(tmp_path, tokenizer
     root = write_multisegment(tmp_path, train=[row])
     error_type = TypeError if invalid == "old_field" else ValueError
     with pytest.raises(error_type) as caught:
-        load_pretraining(experiment(root), tokenizer, 64)
+        load_pretraining(experiment(root), tokenizer)
     assert caught.value.__notes__ == [f"{root / 'train.jsonl'}:1"]
 
 
@@ -508,7 +508,7 @@ def test_multisegment_invalid_continuation_metadata_fails(tmp_path, tokenizer, c
     }
     (root / "preparation.json").write_text(json.dumps(metadata))
     with pytest.raises(ValueError, match="continuation_tokens"):
-        load_pretraining(experiment(root), tokenizer, 64)
+        load_pretraining(experiment(root), tokenizer)
 
 
 @pytest.mark.parametrize("lm_ratio", [0.0, 0.5, 1.0])
@@ -523,7 +523,7 @@ def test_runtime_loads_full_text_view_with_one_objective(tmp_path, tokenizer, me
         dev=[multisegment_row("dev", "dev-document", parts, split="dev")],
     )
     config = experiment(root, method=method, seed=456, lm_ratio=lm_ratio)
-    splits, statistics = load_splits(config, tokenizer, 64)
+    splits, statistics = load_splits(config, tokenizer)
     for split in ("train", "dev"):
         assert len(splits[split]) == 1
         assert splits[split][0].input_ids == (3, 4, 5, 6, 7)
@@ -549,9 +549,9 @@ def test_train_sample_limit_selects_whole_sources_after_length_filtering(tmp_pat
         ],
     )
     config = experiment(root, max_input_tokens=3, max_train_samples=1, lm_ratio=0.0)
-    one, first_stats = load_splits(config, tokenizer, 64)
+    one, first_stats = load_splits(config, tokenizer)
     two, second_stats = load_splits(
-        replace(config, training=replace(config.training, max_train_samples=2)), tokenizer, 64
+        replace(config, training=replace(config.training, max_train_samples=2)), tokenizer
     )
     assert len(one["train"]) == 1
     assert len(two["train"]) == 2
@@ -565,7 +565,7 @@ def test_train_sample_limit_selects_whole_sources_after_length_filtering(tmp_pat
 
 
 @pytest.mark.parametrize("configured_limit", [None, 64])
-def test_model_window_limits_only_train_body_independently_of_tokenizer_metadata(
+def test_configured_train_body_limit_is_independent_of_tokenizer_metadata(
     tmp_path, tokenizer, configured_limit
 ):
     root = write_multisegment(
@@ -578,23 +578,17 @@ def test_model_window_limits_only_train_body_independently_of_tokenizer_metadata
         test=[multisegment_row("test", "test-document", ("a b", "c d"), split="test")],
     )
     splits, statistics = load_pretraining(
-        experiment(root, max_input_tokens=configured_limit, lm_ratio=0.0), tokenizer, 3
+        experiment(root, max_input_tokens=configured_limit, lm_ratio=0.0), tokenizer
     )
-    assert [row.sample_id for row in splits["train"]] == ["fits:ae"]
-    assert statistics["input_token_interval"] == [1, 3]
+    assert [row.sample_id for row in splits["train"]] == ["fits:ae", "long:ae"]
+    assert statistics["input_token_interval"] == [1, configured_limit]
     assert statistics["upper_limit_split"] == "train"
-    assert statistics["splits"]["train"]["filtered_too_long"] == 1
+    assert statistics["splits"]["train"]["filtered_too_long"] == 0
     for split in ("dev", "test"):
         (example,) = splits[split]
         assert example.input_ids == example.target_ids == (3, 4, 5, 6)
         assert statistics["splits"][split]["filtered_too_long"] == 0
     assert tokenizer.model_max_length == 2
-
-
-@pytest.mark.parametrize("model_window", [0, True, 4.0])
-def test_invalid_model_window_fails_before_reading(tmp_path, tokenizer, model_window):
-    with pytest.raises(ValueError, match="model_window"):
-        load_pretraining(experiment(tmp_path), tokenizer, model_window)
 
 
 def test_length_filter_checks_complete_body_and_never_crops(tmp_path, tokenizer):
@@ -608,7 +602,7 @@ def test_length_filter_checks_complete_body_and_never_crops(tmp_path, tokenizer)
         ],
     )
     config = experiment(root, min_input_tokens=3, max_input_tokens=4, lm_ratio=0.0)
-    splits, statistics = load_pretraining(config, tokenizer, 64)
+    splits, statistics = load_pretraining(config, tokenizer)
     assert [row.sample_id for row in splits["train"]] == ["lower:ae", "upper:ae"]
     assert [len(row.input_ids) for row in splits["train"]] == [3, 4]
     assert statistics["kind"] == "multisegment_text"
@@ -631,5 +625,5 @@ def test_duplicate_trajectory_in_one_split_is_rejected(tmp_path, tokenizer):
     row = multisegment_row()
     root = write_multisegment(tmp_path, train=[row, row])
     with pytest.raises(ValueError, match="duplicate") as caught:
-        load_pretraining(experiment(root), tokenizer, 64)
+        load_pretraining(experiment(root), tokenizer)
     assert caught.value.__notes__ == [f"{root / 'train.jsonl'}:2"]

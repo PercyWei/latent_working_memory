@@ -18,7 +18,7 @@ from .test_objective import TinyTokenizer, trajectory
 from .test_runtime import experiment_config
 
 
-def stage_data(config, tokenizer, model_window):
+def stage_data(config, tokenizer):
     splits = {}
     for split in ("train", "dev", "test"):
         if config.objective.stage in {"pretrain", "lm"}:
@@ -319,9 +319,9 @@ def test_continuous_worker_keeps_stage_specific_sample_limits(tmp_path):
     configs = train.training_configs(arguments(paths))
     assert [config.training.max_train_samples for config in configs] == [3, 2]
     with pytest.raises(ValueError, match="separate max_train_samples"):
-        train.training_configs(arguments(paths, "--max-train-samples", "1"))
-    (config,) = train.training_configs(arguments([paths[0]], "--max-train-samples", "1"))
-    assert config.training.max_train_samples == 1
+        train.training_configs(arguments(paths, "--max-train-samples", "null"))
+    (config,) = train.training_configs(arguments([paths[0]], "--max-train-samples", "null"))
+    assert config.training.max_train_samples is None
 
 
 def test_continuous_multi_stages_require_the_same_memory_embedding_shape(tmp_path):

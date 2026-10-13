@@ -9,7 +9,11 @@ from pathlib import Path
 import torch.distributed as dist
 from transformers import set_seed
 
-from latent_working_memory.v3.config import load_experiment, validate_stage_sequence
+from latent_working_memory.v3.config import (
+    load_experiment,
+    parse_optional_positive_integer,
+    validate_stage_sequence,
+)
 from latent_working_memory.v3.engine import TokenMemoryEngine, initialize_device
 from latent_working_memory.v3.objective import TokenMemoryTask
 from latent_working_memory.v3.runtime import (
@@ -33,7 +37,7 @@ from latent_working_memory.tracking_credentials import swanlab_api_key
 
 def training_configs(args):
     configs = [load_experiment(path) for path in args.config]
-    if len(configs) > 1 and args.max_train_samples is not None:
+    if len(configs) > 1 and "max_train_samples" in vars(args):
         raise ValueError(
             "multi-stage training requires a separate max_train_samples in each config"
         )
@@ -54,14 +58,15 @@ def training_configs(args):
         {
             key: value
             for key, value in {
-                "max_train_samples": args.max_train_samples,
-                "max_dev_samples": args.max_dev_samples,
                 "micro_batch_size_per_gpu": args.micro_batch_size_per_gpu,
                 "gradient_accumulation_steps": args.gradient_accumulation_steps,
             }.items()
             if value is not None
         }
     )
+    for name in ("max_train_samples", "max_dev_samples"):
+        if name in vars(args):
+            training[name] = getattr(args, name)
     configs = [replace(config, training=replace(config.training, **training)) for config in configs]
     if any(config.training.output_dir is None for config in configs):
         raise ValueError(
@@ -165,7 +170,7 @@ def run_training(args):
                     )
                     model.cfg = config.objective
                     engine.reset_optimizer(config.training)
-            splits, statistics = load_splits(config, tokenizer, codec.max_positions)
+            splits, statistics = load_splits(config, tokenizer)
             run = make_run(
                 config,
                 splits,
@@ -222,9 +227,23 @@ def parse_args(argv=None):
     parser.add_argument("--dataset-dir", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--init-checkpoint", "--init", type=Path)
-    parser.add_argument("--stop-after-steps", type=int, help="本阶段 optimizer step 上限")
-    parser.add_argument("--max-train-samples", type=int, help="内存选取的训练样本上限")
-    parser.add_argument("--max-dev-samples", type=int, help="内存选取的开发集样本上限")
+    parser.add_argument(
+        "--stop-after-steps",
+        type=parse_optional_positive_integer,
+        help="本阶段 optimizer step 上限：正整数或 null（完整训练），默认完整训练",
+    )
+    parser.add_argument(
+        "--max-train-samples",
+        type=parse_optional_positive_integer,
+        default=argparse.SUPPRESS,
+        help="内存选取的训练样本上限：正整数或 null（不限）；未传时沿用配置",
+    )
+    parser.add_argument(
+        "--max-dev-samples",
+        type=parse_optional_positive_integer,
+        default=argparse.SUPPRESS,
+        help="开发集样本上限：正整数或 null（不限）；未传时沿用配置",
+    )
     parser.add_argument(
         "--micro-batch-size-per-gpu", type=int, help="每卡一次并行处理的样本/轨迹数"
     )

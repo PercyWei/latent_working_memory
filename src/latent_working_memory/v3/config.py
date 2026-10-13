@@ -45,6 +45,15 @@ def positive_integer(value, name):
         raise ValueError(f"{name} must be a positive integer")
 
 
+def parse_optional_positive_integer(value):
+    """CLI 可空正整数与 JSON 一致：正整数或 null。"""
+    if value == "null":
+        return None
+    number = int(value)
+    positive_integer(number, "value")
+    return number
+
+
 def finite(value, name, minimum=0):
     if (
         isinstance(value, bool)
@@ -205,7 +214,7 @@ class TrainingConfig:
     weight_decay: float = 0.01
     gradient_clip: float = 1.0
     seed: int = 20261004
-    eval_every: int = 25
+    dev_every: int = 25
     save_every: int | str = 25
     save_total_limit: int = 2
     lm_ratio: float = 0.5
@@ -232,7 +241,7 @@ class TrainingConfig:
             "epochs",
             "micro_batch_size_per_gpu",
             "gradient_accumulation_steps",
-            "eval_every",
+            "dev_every",
             "save_total_limit",
             "min_input_tokens",
             "lm_target_tokens",
@@ -280,23 +289,18 @@ class TrainingConfig:
 @dataclass(frozen=True)
 class EvaluationConfig:
     dataset_dir: str
-    split: str = "test"
     seed: int = 20261004
-    max_trajectories: int | None = None
+    max_test_samples: int | None = None
     max_new_tokens: int = 64
-    gate_qa_count: int = 8
 
     def __post_init__(self):
         if not isinstance(self.dataset_dir, str) or not self.dataset_dir:
             raise ValueError("dataset_dir must be a nonempty path")
-        if self.split not in {"dev", "test"}:
-            raise ValueError("QA evaluation requires the dev or test split")
         if type(self.seed) is not int or self.seed < 0:
             raise ValueError("seed must be a nonnegative integer")
-        if self.max_trajectories is not None:
-            positive_integer(self.max_trajectories, "max_trajectories")
+        if self.max_test_samples is not None:
+            positive_integer(self.max_test_samples, "max_test_samples")
         positive_integer(self.max_new_tokens, "max_new_tokens")
-        positive_integer(self.gate_qa_count, "gate_qa_count")
 
 
 @dataclass(frozen=True)

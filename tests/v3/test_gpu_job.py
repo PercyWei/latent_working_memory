@@ -194,7 +194,7 @@ class Commands:
             output = Path(value(command, "--output-dir"))
             output.mkdir(parents=True)
             (output / "summary.json").write_text(
-                json.dumps({"split": call["evaluation_config"]["split"], "trajectories": 2})
+                json.dumps({"split": "test", "trajectories": 2})
             )
         else:
             assert "latent_working_memory.v3.compare" in command
@@ -204,8 +204,8 @@ class Commands:
 @pytest.mark.parametrize(
     "mode,expected",
     [
-        ("smoke", (16, 4, 2, 2, "dev")),
-        ("full", (None, None, None, None, "test")),
+        ("smoke", (16, 4, 2, 2)),
+        ("full", (None, None, None, None)),
     ],
 )
 def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode, expected):
@@ -218,10 +218,9 @@ def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode,
             level[name]
             for name in (
                 "train_samples",
-                "dev_samples",
+                "max_dev_samples",
                 "max_steps",
-                "eval_trajectories",
-                "eval_split",
+                "max_test_samples",
             )
         )
         == expected
@@ -320,8 +319,8 @@ def test_dynamic_stage_training_parameters_come_from_their_own_presets(tmp_path,
 
 
 @pytest.mark.parametrize("method", ["autocompressors", *DYNAMIC_METHODS])
-@pytest.mark.parametrize("steps", [0, 1, 2, 7])
-def test_bptt_cli_affects_only_ac_lm_and_dynamic_qa_and_zero_restores_full_bptt(
+@pytest.mark.parametrize("steps", ["null", 1, 2, 7])
+def test_bptt_cli_affects_only_ac_lm_and_dynamic_qa_and_null_restores_full_bptt(
     tmp_path, monkeypatch, method, steps
 ):
     def preset(path):
@@ -342,7 +341,7 @@ def test_bptt_cli_affects_only_ac_lm_and_dynamic_qa_and_zero_restores_full_bptt(
         uses_bptt = objective.method == "autocompressors" or (
             objective.method in DYNAMIC_METHODS and objective.stage in {"warmup", "policy"}
         )
-        assert objective.bptt_steps == ((steps or None) if uses_bptt else None)
+        assert objective.bptt_steps == (steps if uses_bptt and steps != "null" else None)
 
 
 def test_dynamic_qa_presets_default_to_full_bptt(tmp_path):
@@ -354,7 +353,7 @@ def test_dynamic_qa_presets_default_to_full_bptt(tmp_path):
 
 @pytest.mark.parametrize("method", ["autocompressors", *DYNAMIC_METHODS])
 @pytest.mark.parametrize("configured", [None, 3])
-@pytest.mark.parametrize("override", [None, 0, 1])
+@pytest.mark.parametrize("override", [None, "null", 1])
 def test_bptt_custom_config_is_preserved_unless_cli_overrides_it(
     tmp_path, method, configured, override
 ):
@@ -363,7 +362,7 @@ def test_bptt_custom_config_is_preserved_unless_cli_overrides_it(
     _, _, jobs = job_plan.build_jobs(
         arguments(tmp_path, "--method", method, "--config", str(path), *options)
     )
-    expected = configured if override is None else override or None
+    expected = configured if override is None else None if override == "null" else override
     for job in jobs:
         if job.method == "dynamic_pretrain":
             assert job.config.objective.bptt_steps is None
@@ -381,7 +380,7 @@ def test_full_plan_preserves_each_stage_training_budget(tmp_path):
 
 
 @pytest.mark.parametrize("stage", ["pretrain", "qa", "warmup", "policy"])
-@pytest.mark.parametrize("limit", [0, 7])
+@pytest.mark.parametrize("limit", ["null", 7])
 def test_stage_training_limit_overrides_only_selected_stage(tmp_path, stage, limit):
     for method in METHODS:
         _, _, defaults = job_plan.build_jobs(
@@ -400,28 +399,30 @@ def test_stage_training_limit_overrides_only_selected_stage(tmp_path, stage, lim
         )
         for before, after in zip(defaults, overridden, strict=True):
             assert after.config.training.max_train_samples == (
-                (limit or None)
+                (None if limit == "null" else limit)
                 if after.config.objective.stage == stage
                 else before.config.training.max_train_samples
             )
 
 
 @pytest.mark.parametrize("mode,profile_limit", [("smoke", 16)])
-@pytest.mark.parametrize("limit", [0, 7, 3000])
+@pytest.mark.parametrize("limit", ["null", 7, 3000])
 def test_trial_profiles_cap_each_stage_independently(tmp_path, mode, profile_limit, limit):
     _, _, jobs = job_plan.build_jobs(
         arguments(tmp_path, "--mode", mode, "--warmup-train-samples", str(limit))
     )
     warmup, policy = jobs
-    assert warmup.config.training.max_train_samples == min(limit or profile_limit, profile_limit)
+    assert warmup.config.training.max_train_samples == (
+        profile_limit if limit == "null" else min(limit, profile_limit)
+    )
     assert policy.config.training.max_train_samples == profile_limit
 
 
-def test_zero_input_limit_selects_model_window_only_for_ae_lm(tmp_path):
+def test_null_input_limit_removes_upper_bound_only_for_ae_lm(tmp_path):
     for method in (*METHODS, "dynamic_pretrain"):
         _, _, defaults = job_plan.build_jobs(arguments(tmp_path, "--method", method))
         _, _, overridden = job_plan.build_jobs(
-            arguments(tmp_path, "--method", method, "--max-input-tokens", "0")
+            arguments(tmp_path, "--method", method, "--max-input-tokens", "null")
         )
         for before, after in zip(defaults, overridden, strict=True):
             assert after.config.training.max_input_tokens == (
@@ -438,14 +439,14 @@ def test_zero_input_limit_selects_model_window_only_for_ae_lm(tmp_path):
 @pytest.mark.parametrize(
     "method", ["icae_single", "icae_multi", "autocompressors", *DYNAMIC_METHODS]
 )
-@pytest.mark.parametrize("limit", [0, 4096])
+@pytest.mark.parametrize("limit", ["null", 4096])
 def test_factqa_input_limit_is_saved_without_changing_pretraining_limit(tmp_path, method, limit):
     _, _, defaults = job_plan.build_jobs(arguments(tmp_path, "--method", method))
     _, _, overridden = job_plan.build_jobs(
         arguments(tmp_path, "--method", method, "--max-qa-input-tokens", str(limit))
     )
     for before, after in zip(defaults, overridden, strict=True):
-        assert after.config.training.max_qa_input_tokens == (limit or None)
+        assert after.config.training.max_qa_input_tokens == (None if limit == "null" else limit)
         assert after.config.training.max_input_tokens == before.config.training.max_input_tokens
 
 
@@ -510,7 +511,7 @@ def test_custom_method_preset_preserves_parameters_and_launcher_overrides(
                 ]["stages"]
             },
             "max_dev_samples": 888,
-            "eval_every": 17,
+            "dev_every": 17,
             "save_every": 19,
             "swanlab_project": "ignored-project",
             "group": "ignored-group",
@@ -567,7 +568,7 @@ def test_custom_method_preset_preserves_parameters_and_launcher_overrides(
         assert config.training.gradient_accumulation_steps == (3 if override else 5)
         assert config.training.max_train_samples == 16
         assert config.training.max_dev_samples == 4
-        assert config.training.eval_every == config.training.save_every == 1
+        assert config.training.dev_every == config.training.save_every == 1
         assert config.training.swanlab_project == "latent-working-memory-v3"
         assert config.training.group == config.training.experiment_id == "unit-job"
         assert config.training.tags == ("study:smoke",)
@@ -893,7 +894,7 @@ def test_custom_preset_execution_records_resolved_configs_and_evaluates_final_st
         assert config.objective.qa_batch_size == 5
         assert config.training.max_train_samples == 16
         assert config.training.max_dev_samples == 4
-        assert config.training.eval_every == config.training.save_every == 1
+        assert config.training.dev_every == config.training.save_every == 1
     assert json.loads((plan_directory / "result.json").read_text()) == result
     assert path.read_bytes() == original
 
@@ -1240,7 +1241,7 @@ def test_autocompressors_defaults_preserve_the_preset(tmp_path, monkeypatch):
     )
 
 
-def test_explicit_overrides_and_zero_remove_profile_limits(tmp_path):
+def test_explicit_overrides_and_null_remove_profile_limits(tmp_path):
     checkpoint = external_checkpoint(tmp_path)
     args = arguments(
         tmp_path,
@@ -1251,17 +1252,15 @@ def test_explicit_overrides_and_zero_remove_profile_limits(tmp_path):
         "--checkpoint",
         str(checkpoint),
         "--warmup-train-samples",
-        "0",
+        "null",
         "--policy-train-samples",
-        "0",
-        "--dev-samples",
+        "null",
+        "--max-dev-samples",
         "6",
         "--max-steps",
-        "0",
-        "--eval-trajectories",
-        "0",
-        "--eval-split",
-        "test",
+        "null",
+        "--max-test-samples",
+        "null",
         "--epochs",
         "3",
         "--micro-batch-size-per-gpu",
@@ -1272,7 +1271,7 @@ def test_explicit_overrides_and_zero_remove_profile_limits(tmp_path):
         "2",
         "--threshold-i",
         "0.25",
-        "--eval-every",
+        "--dev-every",
         "2",
         "--save-every",
         "3",
@@ -1303,8 +1302,12 @@ def test_explicit_overrides_and_zero_remove_profile_limits(tmp_path):
     assert job.config.objective.qa_batch_size == 2
     assert job.config.objective.threshold_i == 0.25
     assert job.config.model.model_name_or_path == "models/local Qwen3"
-    assert level["max_steps"] is None and level["eval_trajectories"] is None
-    assert level["eval_every"] == 2 and level["save_every"] == 3
+    assert level["max_steps"] is None
+    evaluation_config = gpu_job.resolve_evaluation_config(
+        args, job.config_path.parent / "eval.json", level
+    )
+    assert evaluation_config.max_test_samples is None
+    assert level["dev_every"] == 2 and level["save_every"] == 3
     assert "--log-to-swanlab" not in gpu_job.evaluation_command(
         args, job.config_path.parent / "eval.json", Path("a"), Path("b")
     )
@@ -1443,8 +1446,7 @@ def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
     assert "latent_working_memory.v3.evaluate" in evaluation["command"]
     assert value(evaluation["command"], "--checkpoint") == str(checkpoints[-1])
     assert evaluation["environment"]["CUDA_VISIBLE_DEVICES"] == gpus.split(",")[0]
-    assert evaluation["evaluation_config"]["split"] == "dev"
-    assert evaluation["evaluation_config"]["max_trajectories"] == 2
+    assert evaluation["evaluation_config"]["max_test_samples"] == 2
     plan_directory = (
         args.output_root / "unit-job" / "plan" / Path(trained[0].training.experiment_dir).name
     )

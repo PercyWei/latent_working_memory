@@ -12,6 +12,7 @@ from latent_working_memory.v3.config import (
     ModelConfig,
     ObjectiveConfig,
     TrainingConfig,
+    positive_integer,
 )
 from latent_working_memory.v3.data import load_factqa
 from latent_working_memory.v3.engine import initialize_device
@@ -28,13 +29,13 @@ from latent_working_memory.v3.runtime import (
 __all__ = ["load_dev_task", "save_json"]
 
 
-def load_dev_task(checkpoint_path, dataset_dir, device, max_trajectories):
+def load_dev_task(checkpoint_path, dataset_dir, device, max_dev_samples):
     if int(os.environ.get("WORLD_SIZE", "1")) != 1 or (
         dist.is_initialized() and dist.get_world_size() != 1
     ):
         raise ValueError("探索评估使用单进程，请勿使用 torchrun")
-    if max_trajectories is not None and max_trajectories < 1:
-        raise ValueError("max_trajectories 必须为正整数")
+    if max_dev_samples is not None:
+        positive_integer(max_dev_samples, "max_dev_samples")
     checkpoint = read_checkpoint(checkpoint_path)
     raw = checkpoint["run"]["config"]
     config = ExperimentConfig(
@@ -62,7 +63,7 @@ def load_dev_task(checkpoint_path, dataset_dir, device, max_trajectories):
     if source_identity != checkpoint["run"]["source_data"]["dev"]:
         raise ValueError("开发集与 checkpoint 记录的数据不一致")
     trajectories = select_examples(
-        trajectories, max_trajectories, config.training.seed, "dev", pretraining=False
+        trajectories, max_dev_samples, config.training.seed, "dev", pretraining=False
     )
     if not trajectories:
         raise ValueError("开发集为空")
@@ -81,7 +82,7 @@ def load_dev_task(checkpoint_path, dataset_dir, device, max_trajectories):
         "selection": {
             "total": source_identity["examples"],
             "selected": len(trajectories),
-            "limit": max_trajectories,
+            "limit": max_dev_samples,
             "seed": config.training.seed,
         },
     }

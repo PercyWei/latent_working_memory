@@ -11,6 +11,7 @@ import time
 
 import torch
 
+from latent_working_memory.v3.config import parse_optional_positive_integer
 from latent_working_memory.v3.evaluate import evaluate
 from latent_working_memory.v3.exploration.memory_change.common import load_dev_task, save_json
 from latent_working_memory.v3.objective import TokenMemoryTask
@@ -211,7 +212,11 @@ def main(argv=None):
     parser.add_argument("--dataset-dir", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--max-trajectories", type=_positive_integer)
+    parser.add_argument(
+        "--max-dev-samples",
+        type=parse_optional_positive_integer,
+        help="开发集样本数上限：正整数或 null（不限），默认不限",
+    )
     thresholds_group = parser.add_mutually_exclusive_group(required=True)
     thresholds_group.add_argument("--thresholds-file", type=Path)
     thresholds_group.add_argument("--thresholds", nargs="+", type=_threshold)
@@ -222,7 +227,7 @@ def main(argv=None):
     if directory.exists():
         raise ValueError(f"output directory already exists: {directory}")
     task, trajectories, metadata = load_dev_task(
-        args.checkpoint, args.dataset_dir, args.device, args.max_trajectories
+        args.checkpoint, args.dataset_dir, args.device, args.max_dev_samples
     )
     if args.thresholds_file is not None:
         candidates = json.loads(args.thresholds_file.read_text(encoding="utf-8"))

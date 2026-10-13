@@ -123,7 +123,7 @@ def make_config(output, stage="pretrain", init=None):
             learning_rate=0.01,
             weight_decay=0.0,
             gradient_clip=10.0,
-            eval_every=1,
+            dev_every=1,
             save_every=1,
             seed=123,
             init_checkpoint=init,
@@ -487,7 +487,7 @@ def test_resume_rejects_changed_config_or_data_before_loading_weights(tmp_path):
 
 def test_early_stop_always_evaluates_and_saves_at_the_actual_last_step(tmp_path):
     config = make_config(tmp_path / "smoke")
-    config = replace(config, training=replace(config.training, eval_every=25, save_every=25))
+    config = replace(config, training=replace(config.training, dev_every=25, save_every=25))
     splits = make_splits()
     engine = make_engine(config)
 
@@ -734,17 +734,17 @@ def test_pretraining_accepts_a_single_objective_after_actual_length_filtering(
             config.training, dataset_dir=str(tmp_path), max_input_tokens=3, lm_target_tokens=1
         ),
     )
-    splits, _ = load_splits(config, tokenizer, 64)
+    splits, _ = load_splits(config, tokenizer)
     assert {row.task for row in splits["test"]} == {"ae"}
     restricted = replace(config, training=replace(config.training, max_input_tokens=2))
-    splits, _ = load_splits(restricted, tokenizer, 64)
+    splits, _ = load_splits(restricted, tokenizer)
     expected_tasks = {"ae"} if filtered_split == "train" else {"ae", "continuation"}
     assert {row.task for row in splits[filtered_split]} == expected_tasks
     lm = replace(
         restricted,
         objective=ObjectiveConfig(method="autocompressors", stage="lm", ac_num_segments=1),
     )
-    splits, _ = load_splits(lm, tokenizer, 64)
+    splits, _ = load_splits(lm, tokenizer)
     assert len(splits[filtered_split]) == (1 if filtered_split == "train" else 2)
     assert {row.task for row in splits[filtered_split]} == {"continuation"}
 
@@ -851,12 +851,12 @@ def test_sample_limits_keep_both_pretraining_tasks_and_full_test_source_identity
             max_qa_input_tokens=1,
         ),
     )
-    full, full_statistics = load_splits(config, tokenizer, 64)
+    full, full_statistics = load_splits(config, tokenizer)
     limited = replace(
         config,
         training=replace(config.training, max_train_samples=4, max_dev_samples=3),
     )
-    splits, statistics = load_splits(limited, tokenizer, 64)
+    splits, statistics = load_splits(limited, tokenizer)
 
     assert {name: len(rows) for name, rows in splits.items()} == {"train": 4, "dev": 3, "test": 12}
     assert statistics["splits"]["train"]["selected_by_task"] == {"ae": 3, "continuation": 1}
@@ -866,11 +866,11 @@ def test_sample_limits_keep_both_pretraining_tasks_and_full_test_source_identity
     assert statistics["splits"]["train"]["selected_input_tokens"] == 8
     assert statistics["source_data"] == full_statistics["source_data"]
     assert splits["test"] == full["test"]
-    assert load_splits(limited, tokenizer, 64) == (splits, statistics)
+    assert load_splits(limited, tokenizer) == (splits, statistics)
     other_method = replace(limited, objective=replace(limited.objective, method="information_loss"))
-    assert load_splits(other_method, tokenizer, 64) == (splits, statistics)
+    assert load_splits(other_method, tokenizer) == (splits, statistics)
     changed_seed = replace(limited, training=replace(limited.training, seed=999))
-    assert load_splits(changed_seed, tokenizer, 64)[0]["train"] != splits["train"]
+    assert load_splits(changed_seed, tokenizer)[0]["train"] != splits["train"]
     run = make_run(limited, splits, statistics, "cpu", 1)
     assert run["source_data"]["train"] == dataset_identity(full["train"])
     assert run["data"]["train"] == dataset_identity(splits["train"])
@@ -887,11 +887,11 @@ def test_pretraining_sample_limit_can_keep_one_source_without_forcing_both_objec
         config,
         training=replace(config.training, dataset_dir=str(tmp_path), **{name: 1}),
     )
-    splits, statistics = load_splits(config, tokenizer, 64)
+    splits, statistics = load_splits(config, tokenizer)
     split = "train" if name == "max_train_samples" else "dev"
     assert len(splits[split]) == statistics["splits"][split]["selected"] == 1
     assert sum(statistics["splits"][split]["selected_by_task"].values()) == 1
-    assert load_splits(config, tokenizer, 64) == (splits, statistics)
+    assert load_splits(config, tokenizer) == (splits, statistics)
 
 
 def test_selection_follows_full_canonical_validation(tmp_path):
@@ -905,7 +905,7 @@ def test_selection_follows_full_canonical_validation(tmp_path):
         training=replace(config.training, dataset_dir=str(tmp_path), max_train_samples=2),
     )
     with pytest.raises(ValueError, match="duplicate pretraining trajectory_id"):
-        load_splits(config, tokenizer, 64)
+        load_splits(config, tokenizer)
 
 
 def test_qa_selection_keeps_complete_trajectories_and_original_test_split(tmp_path, monkeypatch):
@@ -926,7 +926,7 @@ def test_qa_selection_keeps_complete_trajectories_and_original_test_split(tmp_pa
     config = replace(
         config, training=replace(config.training, max_train_samples=3, max_dev_samples=2)
     )
-    splits, statistics = load_splits(config, None, 64)
+    splits, statistics = load_splits(config, None)
     assert {name: len(rows) for name, rows in splits.items()} == {"train": 3, "dev": 2, "test": 8}
     assert splits["test"] is original["test"]
     for split in ("train", "dev"):
@@ -937,7 +937,7 @@ def test_qa_selection_keeps_complete_trajectories_and_original_test_split(tmp_pa
         )
         assert statistics["source_data"][split] == dataset_identity(original[split])
     changed = replace(config, objective=replace(config.objective, method="information_loss"))
-    assert load_splits(changed, None, 64)[0] == splits
+    assert load_splits(changed, None)[0] == splits
 
 
 @pytest.mark.parametrize(
@@ -981,7 +981,7 @@ def test_factqa_train_length_filter_precedes_selection_and_preserves_dev_test_so
             max_dev_samples=2,
         ),
     )
-    splits, statistics = load_splits(config, None, 64)
+    splits, statistics = load_splits(config, None)
     assert statistics["kind"] == "factqa"
     assert statistics["upper_limit_split"] == "train"
     assert {name: len(rows) for name, rows in splits.items()} == {"train": 3, "dev": 2, "test": 8}
@@ -1007,7 +1007,7 @@ def test_factqa_train_length_filter_precedes_selection_and_preserves_dev_test_so
             assert len(selected.qas) == 6
             assert len(selected.task_qa_ids) == len(selected.gate_qa_ids) == 3
     changed = replace(config, training=replace(config.training, max_input_tokens=64))
-    assert load_splits(changed, None, 64) == (splits, statistics)
+    assert load_splits(changed, None) == (splits, statistics)
     run = make_run(config, splits, statistics, "cpu", 1)
     assert run["source_data"]["train"] != run["data"]["train"]
     assert run["data_statistics"]["splits"]["train"]["filtered_too_long"] == 4
@@ -1016,7 +1016,7 @@ def test_factqa_train_length_filter_precedes_selection_and_preserves_dev_test_so
 
 
 @pytest.mark.parametrize("max_qa_input_tokens", [None, 8, 12])
-def test_factqa_train_length_filter_uses_real_model_window(
+def test_factqa_train_length_filter_uses_only_configured_upper_bound(
     tmp_path, monkeypatch, max_qa_input_tokens
 ):
     original = {
@@ -1029,9 +1029,10 @@ def test_factqa_train_length_filter_uses_real_model_window(
         config,
         training=replace(config.training, max_qa_input_tokens=max_qa_input_tokens),
     )
-    splits, statistics = load_splits(config, None, 8)
-    assert splits["train"] == (original["train"][0],)
-    assert statistics["splits"]["train"]["filtered_too_long"] == 1
+    splits, statistics = load_splits(config, None)
+    expected_train = original["train"][:1] if max_qa_input_tokens == 8 else original["train"]
+    assert splits["train"] == expected_train
+    assert statistics["splits"]["train"]["filtered_too_long"] == 2 - len(expected_train)
     for split in ("dev", "test"):
         assert splits[split] is original[split]
         assert len(splits[split][-1].full_input_ids) > 8

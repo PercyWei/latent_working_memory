@@ -8,6 +8,7 @@ from statistics import mean
 
 import torch
 
+from latent_working_memory.v3.config import parse_optional_positive_integer
 from latent_working_memory.v3.exploration.memory_change.common import load_dev_task, save_json
 from latent_working_memory.v3.objective import memory_change_score
 from latent_working_memory.v3.segmentation import example_rng
@@ -249,7 +250,11 @@ def main():
     parser.add_argument("--dataset-dir", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--max-trajectories", type=int)
+    parser.add_argument(
+        "--max-dev-samples",
+        type=parse_optional_positive_integer,
+        help="开发集样本数上限：正整数或 null（不限），默认不限",
+    )
     parser.add_argument(
         "--append-probability", type=float, default=0.5, help="诊断轨迹的随机 append 概率，默认 0.5"
     )
@@ -257,7 +262,7 @@ def main():
     if not 0 <= args.append_probability <= 1:
         parser.error("--append-probability 必须在 [0, 1] 内")
     task, trajectories, metadata = load_dev_task(
-        args.checkpoint, args.dataset_dir, args.device, args.max_trajectories
+        args.checkpoint, args.dataset_dir, args.device, args.max_dev_samples
     )
     summary = probe(task, trajectories, args.output_dir, metadata, args.append_probability)
     for size, group in summary["by_tail_slots"].items():

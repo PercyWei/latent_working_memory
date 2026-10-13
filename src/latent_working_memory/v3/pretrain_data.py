@@ -20,17 +20,13 @@ class PretrainExample:
     target_ids: tuple[int, ...]
 
 
-def _limits(config, model_window):
-    if type(model_window) is not int or model_window < 1:
-        raise ValueError("model_window must be a positive integer")
-    requested = config.training.max_input_tokens
-    limit = model_window if requested is None else min(requested, model_window)
+def _limits(config):
     minimum = config.training.min_input_tokens
     if config.objective.method == "icae_multi":
         minimum = max(minimum, config.objective.icae_max_segments)
     elif config.objective.method == "autocompressors":
         minimum = max(minimum, 2 * config.objective.ac_num_segments)
-    return minimum, limit
+    return minimum, config.training.max_input_tokens
 
 
 def _counts():
@@ -72,9 +68,9 @@ def _summarize(examples, counts):
         counts[name] = _length_statistics(values)
 
 
-def load_pretraining(config, tokenizer, model_window):
+def load_pretraining(config, tokenizer):
     """完整正文只构造一个 AE 或 LM 样本；LM 续文来自正文后的 continuation。"""
-    minimum, limit = _limits(config, model_window)
+    minimum, limit = _limits(config)
     training = config.training
     root = Path(training.dataset_dir)
     metadata = json.loads((root / "preparation.json").read_text(encoding="utf-8"))

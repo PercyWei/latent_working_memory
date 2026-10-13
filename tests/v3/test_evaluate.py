@@ -342,7 +342,7 @@ def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
 ):
     config = ExperimentConfig(
         ModelConfig(model_name_or_path="local-tiny"),
-        ObjectiveConfig(method="icae_single", stage="qa"),
+        ObjectiveConfig(method="icae_single", stage="qa", gate_qa_count=1),
         TrainingConfig(dataset_dir="train-data", output_dir="training"),
     )
     checkpoint = {
@@ -390,10 +390,8 @@ def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
     monkeypatch.setattr(evaluation, "_append_evaluation", lambda *args: published.append(args))
     evaluation_config = {
         "dataset_dir": "evaluation-data",
-        "split": "test",
         "seed": 42,
-        "gate_qa_count": 1,
-        "max_trajectories": None,
+        "max_test_samples": None,
         "max_new_tokens": 8,
     }
     evaluation_path = tmp_path / "eval.json"
@@ -648,13 +646,13 @@ def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_pat
 def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
     tmp_path, monkeypatch, problem
 ):
-    examples = tuple(trajectory(f"doc{i}", split="dev") for i in range(6))
+    examples = tuple(trajectory(f"doc{i}", split="test") for i in range(6))
     config = ExperimentConfig(
         ModelConfig(model_name_or_path="local-tiny"),
-        ObjectiveConfig(method="icae_single", stage="qa"),
+        ObjectiveConfig(method="icae_single", stage="qa", gate_qa_count=1),
         TrainingConfig(dataset_dir="train-data", output_dir="training", seed=7),
     )
-    selected = evaluation.select_examples(examples, 2, 42, "dev", pretraining=False)
+    selected = evaluation.select_examples(examples, 2, 42, "test", pretraining=False)
     unselected = next(row for row in examples if row not in selected)
     checkpoint = {
         "run": {
@@ -664,8 +662,8 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
             "pretraining": None,
             "pretraining_sources": {"document_ids": [], "dedup_clusters": []},
             # 训练数据记录与独立评估配置可以不同。
-            "data": {"dev": evaluation.dataset_identity(selected)},
-            "source_data": {"dev": evaluation.dataset_identity(examples)},
+            "data": {"test": evaluation.dataset_identity(selected)},
+            "source_data": {"test": evaluation.dataset_identity(examples)},
         },
         "trainable": {},
         "optimizer": {},
@@ -673,7 +671,7 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
         "rng": {},
     }
     if problem == "source_changed":
-        checkpoint["run"]["source_data"]["dev"]["fingerprint"] = "changed-unselected-record"
+        checkpoint["run"]["source_data"]["test"]["fingerprint"] = "changed-unselected-record"
     elif problem == "pretraining_overlap":
         checkpoint["run"]["pretraining_sources"]["document_ids"] = [unselected.document_id]
     if problem in {"filtered_gate", "below_gate_threshold"}:
@@ -706,10 +704,8 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
     )
     evaluation_config = {
         "dataset_dir": "data",
-        "split": "dev",
         "seed": 42,
-        "gate_qa_count": 1,
-        "max_trajectories": 2,
+        "max_test_samples": 2,
         "max_new_tokens": 64,
     }
     evaluation_path = tmp_path / "eval.json"
@@ -760,15 +756,15 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
     "method", ["icae_single", "icae_multi", "autocompressors", "memory_change", "information_loss"]
 )
 @pytest.mark.parametrize("max_qa_input_tokens,model_window", [(3, 64), (None, 3), (9, 3)])
-@pytest.mark.parametrize("max_trajectories", [None, 1])
+@pytest.mark.parametrize("max_test_samples", [None, 1])
 def test_cli_ignores_training_length_limits_and_selects_from_complete_factqa_split(
-    tmp_path, monkeypatch, method, max_qa_input_tokens, model_window, max_trajectories
+    tmp_path, monkeypatch, method, max_qa_input_tokens, model_window, max_test_samples
 ):
     examples = tuple(
         replace(trajectory(f"doc{length}"), full_input_ids=tuple(range(length)))
         for length in (2, 3, 4)
     )
-    selected = evaluation.select_examples(examples, max_trajectories, 42, "test", pretraining=False)
+    selected = evaluation.select_examples(examples, max_test_samples, 42, "test", pretraining=False)
     task = Task(method)
     task.codec.max_positions = model_window
     config = ExperimentConfig(
@@ -817,10 +813,8 @@ def test_cli_ignores_training_length_limits_and_selects_from_complete_factqa_spl
     )
     evaluation_config = {
         "dataset_dir": "data",
-        "split": "test",
         "seed": 42,
-        "gate_qa_count": 1,
-        "max_trajectories": max_trajectories,
+        "max_test_samples": max_test_samples,
         "max_new_tokens": 64,
     }
     evaluation_path = tmp_path / "eval.json"
@@ -848,7 +842,7 @@ def test_cli_ignores_training_length_limits_and_selects_from_complete_factqa_spl
     assert summary["metadata"]["selection"]["total"] == 3
     assert summary["metadata"]["selection"]["retained"] == 3
     assert summary["metadata"]["selection"]["selected"] == len(selected)
-    assert summary["metadata"]["selection"]["limit"] == max_trajectories
+    assert summary["metadata"]["selection"]["limit"] == max_test_samples
     assert summary["metadata"]["selection"]["qa_budget"]["kept"] == 3
     records = [
         json.loads(line) for line in (tmp_path / "trajectories.jsonl").read_text().splitlines()
@@ -874,13 +868,12 @@ def test_cli_rejects_invalid_trajectory_limits_before_model_load(tmp_path, monke
         json.dumps(
             {
                 "dataset_dir": "unused",
-                "split": "dev",
                 "seed": 42,
-                "max_trajectories": json.loads(limit),
+                "max_test_samples": json.loads(limit),
             }
         )
     )
-    with pytest.raises(ValueError, match="max_trajectories"):
+    with pytest.raises(ValueError, match="max_test_samples"):
         evaluation.main(
             [
                 "--config",

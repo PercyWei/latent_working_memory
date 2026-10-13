@@ -446,29 +446,28 @@ def main(argv=None):
     )
     codec, tokenizer = load_codec(model_config, device, config.objective)
     codec.load_trainable_state_dict(checkpoint["trainable"])
-    objective = replace(config.objective, gate_qa_count=evaluation_config.gate_qa_count)
-    task = TokenMemoryTask(codec, tokenizer, objective, qa_seed=evaluation_config.seed)
-    trajectories = load_factqa(evaluation_config.dataset_dir, tokenizer)[evaluation_config.split]
+    task = TokenMemoryTask(codec, tokenizer, config.objective, qa_seed=evaluation_config.seed)
+    trajectories = load_factqa(evaluation_config.dataset_dir, tokenizer)["test"]
     _check_qa_sources(trajectories, checkpoint["run"]["pretraining_sources"])
     source_data = dataset_identity(trajectories)
     total_trajectories = len(trajectories)
     filtered, budget_statistics = filter_qa_budget(
-        {evaluation_config.split: trajectories}, objective, include_train=False
+        {"test": trajectories}, config.objective, include_train=False
     )
-    trajectories = filtered[evaluation_config.split]
+    trajectories = filtered["test"]
     retained_trajectories = len(trajectories)
     trajectories = select_examples(
         trajectories,
-        evaluation_config.max_trajectories,
+        evaluation_config.max_test_samples,
         evaluation_config.seed,
-        evaluation_config.split,
+        "test",
         pretraining=False,
     )
     summary = evaluate(
         task,
         trajectories,
         args.output_dir,
-        evaluation_config.split,
+        "test",
         evaluation_config.max_new_tokens,
         metadata={
             "checkpoint": str(Path(args.checkpoint).resolve()),
@@ -485,8 +484,8 @@ def main(argv=None):
                 "total": total_trajectories,
                 "selected": len(trajectories),
                 "retained": retained_trajectories,
-                "qa_budget": budget_statistics[evaluation_config.split],
-                "limit": evaluation_config.max_trajectories,
+                "qa_budget": budget_statistics["test"],
+                "limit": evaluation_config.max_test_samples,
                 "seed": evaluation_config.seed,
             },
         },
@@ -503,7 +502,7 @@ def main(argv=None):
         f"{name}={quality[name]:.4f}" for name in quality if name != "questions"
     )
     print(
-        f"[evaluation] method={summary['method']} split={evaluation_config.split} "
+        f"[evaluation] method={summary['method']} split=test "
         f"trajectories={summary['trajectories']} {quality_text} "
         f"summary={Path(args.output_dir) / 'summary.json'}",
         flush=True,

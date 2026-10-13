@@ -27,21 +27,19 @@ PRESETS = {
 LEVELS = {
     "smoke": {
         "train_samples": 16,
-        "dev_samples": 4,
+        "max_dev_samples": 4,
+        "max_test_samples": 2,
         "max_steps": 2,
-        "eval_trajectories": 2,
-        "eval_every": 1,
+        "dev_every": 1,
         "save_every": 1,
-        "eval_split": "dev",
     },
     "full": {
         "train_samples": None,
-        "dev_samples": None,
+        "max_dev_samples": None,
+        "max_test_samples": None,
         "max_steps": None,
-        "eval_trajectories": None,
-        "eval_every": 25,
+        "dev_every": 25,
         "save_every": None,
-        "eval_split": "test",
     },
 }
 
@@ -58,12 +56,11 @@ class TrainingJob:
 
 def resolve_level(args):
     level = dict(LEVELS[args.mode])
-    for name in level:
-        if name == "train_samples":
-            continue
-        value = getattr(args, name)
-        if value is not None:
-            level[name] = None if value == 0 else value
+    for name, value in vars(args).items():
+        if name in level and (
+            value is not None or name in {"max_dev_samples", "max_test_samples", "max_steps"}
+        ):
+            level[name] = value
     return level
 
 
@@ -102,6 +99,8 @@ def _training_job(config, args, directory, level, method_directory, initialize_f
         else f"{method.replace('_', '-')}-{stage}"
     )
     objective = {}
+    if args.objective_seed is not None:
+        objective["seed"] = args.objective_seed
     for name in (
         "qa_batch_size",
         "task_qa_count",
@@ -135,18 +134,21 @@ def _training_job(config, args, directory, level, method_directory, initialize_f
         and stage in {"pretrain", "lm"}
         or (method in DYNAMIC_METHODS and stage in {"warmup", "policy"})
     )
-    if uses_bptt and args.bptt_steps is not None:
-        objective["bptt_steps"] = args.bptt_steps or None
+    if uses_bptt and "bptt_steps" in vars(args):
+        objective["bptt_steps"] = args.bptt_steps
     resolved_objective = replace(config.objective, **objective)
     is_pretrain = stage in {"pretrain", "lm"}
     dataset = args.pretrain_data if is_pretrain else args.qa_data
     experiment_dir = directory / "train" / method_directory
-    stage_limit = getattr(args, f"{'pretrain' if is_pretrain else stage}_train_samples")
-    if stage_limit is None:
-        stage_limit = config.training.max_train_samples
-    elif stage_limit == 0:
-        stage_limit = None
+    stage_limit = getattr(
+        args,
+        f"{'pretrain' if is_pretrain else stage}_train_samples",
+        config.training.max_train_samples,
+    )
     limits = [limit for limit in (stage_limit, level["train_samples"]) if limit is not None]
+    dev_limit = level["max_dev_samples"]
+    if dev_limit is None and "max_dev_samples" not in vars(args):
+        dev_limit = config.training.max_dev_samples
     training = {
         "dataset_dir": str(dataset.resolve()),
         "experiment_dir": str(experiment_dir),
@@ -159,8 +161,8 @@ def _training_job(config, args, directory, level, method_directory, initialize_f
         if initialize_from is None
         else None,
         "max_train_samples": min(limits) if limits else None,
-        "max_dev_samples": level["dev_samples"],
-        "eval_every": level["eval_every"],
+        "max_dev_samples": dev_limit,
+        "dev_every": level["dev_every"],
         "save_every": config.training.save_every
         if level["save_every"] is None
         else level["save_every"],
@@ -168,14 +170,16 @@ def _training_job(config, args, directory, level, method_directory, initialize_f
         "group": args.group or args.run_id,
         "tags": (f"study:{'main' if args.mode == 'full' else args.mode}",),
     }
+    if args.train_seed is not None:
+        training["seed"] = args.train_seed
     if stage == "pretrain" and method != "autocompressors" and args.lm_ratio is not None:
         training["lm_ratio"] = args.lm_ratio
-    if is_pretrain and args.max_input_tokens is not None:
-        training["max_input_tokens"] = args.max_input_tokens or None
+    if is_pretrain and "max_input_tokens" in vars(args):
+        training["max_input_tokens"] = args.max_input_tokens
     if is_pretrain and args.lm_target_tokens is not None:
         training["lm_target_tokens"] = args.lm_target_tokens
-    if args.max_qa_input_tokens is not None:
-        training["max_qa_input_tokens"] = args.max_qa_input_tokens or None
+    if "max_qa_input_tokens" in vars(args):
+        training["max_qa_input_tokens"] = args.max_qa_input_tokens
     for name in (
         "epochs",
         "micro_batch_size_per_gpu",
