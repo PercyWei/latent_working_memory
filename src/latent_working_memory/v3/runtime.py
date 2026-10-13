@@ -320,11 +320,12 @@ def validate_cursor(cursor, config, samples, world_size):
         raise ValueError("checkpoint cursor does not match the epoch/batch schedule")
 
 
-def evaluate_split(engine, examples, epoch=0):
+def evaluate_split(engine, examples):
+    """验证固定使用采样 epoch 0，跨训练 epoch 保持相同的动作和分段。"""
     totals, samples = {}, 0
     loader = make_data_loader(examples, engine.global_batch_size, engine.config.seed, shuffle=False)
     for batch in loader:
-        metrics = engine.eval_batch(batch, epoch=epoch)
+        metrics = engine.eval_batch(batch, epoch=0)
         weight = metrics["samples"]
         for name, value in metrics.items():
             if name != "samples" and value is not None:
@@ -475,7 +476,7 @@ def train_loop(config, engine, splits, run, stage, stop_after_steps=None, tracki
                 **{f"resources/{key}": value for key, value in resources.items()},
             }
             if step % settings.eval_every == 0 or epoch_end or stopping:
-                development = evaluate_split(engine, dev, epoch=epoch)
+                development = evaluate_split(engine, dev)
                 record.update({f"dev/{key}": value for key, value in development.items()})
             if engine.rank == 0:
                 with metrics_path.open("a", encoding="utf-8") as stream:

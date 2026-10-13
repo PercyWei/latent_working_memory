@@ -157,6 +157,9 @@
 
 全局 batch = GPU 数 × 每卡 microbatch × 梯度累积；双卡默认均为 **16**，尾批按实际样本数平均。
 
+dev 验证固定使用采样 epoch 0，跨训练 epoch 保持相同的随机动作和分段；训练仍按当前 epoch 采样。
+每个 epoch 结束时自动保存 checkpoint，目录保留使用 verl 的最近 N 个规则，`save_total_limit` 限制全部 checkpoint 的数量。若要保留三轮的 epoch 末 checkpoint，可将 `save_every` 设为每 epoch 的 optimizer step 数，`save_total_limit` 设为 3。
+
 ## 四、运行
 
 ### 4.1 启动与配置

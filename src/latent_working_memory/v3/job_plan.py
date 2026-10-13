@@ -191,7 +191,8 @@ def _training_job(config, args, directory, level, method_directory, initialize_f
         config=config,
         config_path=directory / "plan" / method_directory / f"{stage}.json",
         initialize_from=initialize_from,
-        evaluate=stage in {"qa", "policy"} or (method == "autocompressors" and is_pretrain),
+        evaluate=not args.train_only
+        and (stage in {"qa", "policy"} or (method == "autocompressors" and is_pretrain)),
     )
 
 

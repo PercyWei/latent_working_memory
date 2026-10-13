@@ -56,6 +56,11 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument(
+        "--train-only",
+        action="store_true",
+        help="只启动新训练，保留训练中 dev 验证，跳过最终生成评估",
+    )
+    actions.add_argument(
         "--evaluate-only", action="store_true", help="只评估已有 checkpoint，不启动训练"
     )
     actions.add_argument(

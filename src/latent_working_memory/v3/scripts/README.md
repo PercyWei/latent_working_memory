@@ -35,6 +35,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
   | `full`（默认） | 按阶段配置／全部开发集 | 默认 1 epoch | 完整 test |
 
 - 普通训练必须显式传入 `--method`，每次只运行一种方法；续训和补评估可省略 `--method`，但必须提供 `--checkpoint`。
+- 新训练加 `--train-only` 时，保留训练中的 dev NLL 验证，跳过训练结束后的生成评估；该参数不能与 `--resume` 或 `--evaluate-only` 同用。
 - `--run-id` 默认使用格式为 `YYYYMMDD-HHMMSS` 的当前时间；动态后训练复用预训练 checkpoint 时，省略该参数则继承来源编号。
 
 ### 2.1 完整运行

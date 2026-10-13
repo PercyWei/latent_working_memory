@@ -2,7 +2,7 @@
 
 创建时间：20261012 15:01:54 Asia/Shanghai
 
-最后修订时间：20261012 17:06:19 Asia/Shanghai
+最后修订时间：20261013 12:46:10 Asia/Shanghai
 
 本阶段回答两个问题：原阈值是否与 `I` 的实际尺度不匹配，以及 `I` 能否反映覆盖相对追加造成的 QA 损失。先固定 warmup checkpoint，完成诊断和完整轨迹扫描，再决定修改阈值还是训练目标。
 
@@ -58,28 +58,52 @@ CUDA_VISIBLE_DEVICES=0 uv run --frozen python -m "$MC_MODULE.sweep" \
 
 打开 `sweep/comparison.csv`，比较 `append_ratio`、`final_slots`、`all_nll`、`old_nll`、`new_nll` 和写入成本。目标是以较少容量保持 QA 质量，不是把 append_ratio 调成某个中间值。固定动作基线只执行实际需要的写入，所以写入调用数可能少于阈值策略。
 
-## 4. 用 EM/F1 确认入选阈值
+## 4. 多 epoch 训练的验证与保存
 
-把 `MC_THRESHOLD` 换成上一步选中的实际数值，再跑完整 dev 的生成评估；同时仍会评估两个固定动作基线。
+本轮以 NLL 为质量指标，采用 warmup 3 epochs、policy 3 epochs、阈值 0.4，其他训练参数沿用原设置。从原动态预训练 checkpoint 重新开始 warmup，不恢复旧的一轮 warmup 或 policy。
+
+训练中的 dev 验证固定使用采样 epoch 0，跨 epoch 保持相同的随机动作和分段；训练仍按当前 epoch 采样。固定的是评估条件，NLL 仍随模型权重变化。
+
+代码通过 GitHub 同步到服务器后，在项目根目录执行。原实验的模型位置和动态预训练 checkpoint 已记录在诊断结果中：
 
 ```bash
-MC_THRESHOLD="替换为选中的阈值"
-
-CUDA_VISIBLE_DEVICES=0 uv run --frozen python -m "$MC_MODULE.sweep" \
-  --checkpoint "$MC_CKPT" --dataset-dir "$MC_DATA" \
-  --thresholds "$MC_THRESHOLD" --generate \
-  --output-dir "$MC_OUT/confirm"
+CUDA_VISIBLE_DEVICES=0,1 uv run --frozen python -m latent_working_memory.v3.gpu_job \
+  --train-only --mode full --method memory_change --gpus 0,1 \
+  --run-id memory-change-3ep-threshold04_20261013-01 \
+  --group memory-change-3ep-threshold04_20261013-01 \
+  --checkpoint artifacts/v3/capacity-comparison_20261010-01/train/dynamic-pretrain-k512/pretrain/checkpoints/global_step_800 \
+  --model-path /home/zhangdw12/models/Qwen3-4B-Instruct-2507 \
+  --qa-data data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008 \
+  --writer-mode local --append-slots 32 \
+  --micro-batch-size-per-gpu 4 --gradient-accumulation-steps 2 \
+  --epochs 3 --threshold-i 0.4 \
+  --eval-every 25 --save-every 63 --save-total-limit 3
 ```
 
-查看 `confirm/comparison.csv` 的 old/new EM、F1 和容量。随后依据结果选择下一阶段：
+`--train-only` 保留训练中的 dev NLL 验证，跳过最终生成评估。`--epochs 3` 同时应用于 warmup 和 policy，阈值 0.4 只影响 policy 的动作选择；warmup 仍以 50% 概率追加。
+
+每个 epoch 结束时已有自动保存逻辑，目录清理复用 verl 的最近 N 个规则。当前实际训练样本为 1006，全局 batch 为 16，每 epoch 为 63 个 optimizer step。warmup 和 policy 分别保留各自的 `global_step_63`、`global_step_126`、`global_step_189`，无需增加自定义保留规则。若数据数量或全局 batch 改变，`--save-every` 相应改为 `ceil(训练样本数 / 全局 batch)`。额外保存的 epoch 中间 checkpoint 也计入保留数量。
+
+在 SwanLab 观察 `dev/qa_loss`、`dev/qa_old_nll`、`dev/qa_new_nll` 是否随 epoch 改善，以及 train 持续改善而 dev 恶化的情况。warmup 的 `append_ratio` 应约为 0.5，固定 dev 的值跨 epoch 相同是预期；policy 重点结合 `append_ratio`、`slots_final` 与 NLL，判断是否重新趋向全追加，容量增长是否带来质量改善。`gate_I` 当前只记录在各阶段 `metrics.jsonl`，使用 `train/gate_I`、`dev/gate_I` 查看。
+
+在 warmup 和 policy 结束后，分别将 `MC_CKPT` 指向该阶段 checkpoint，再用同一阈值计算最终记忆的 NLL：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run --frozen python -m "$MC_MODULE.sweep" \
+  --checkpoint "$MC_CKPT" --dataset-dir "$MC_DATA" \
+  --thresholds 0.4 --output-dir "$MC_OUT/warmup-end"
+```
+
+policy 结束后替换 checkpoint，并将输出目录改为 `$MC_OUT/policy-end`。比较两次评估的 old/new NLL、append_ratio 和容量：
 
 | 结果 | 下一步 |
 |---|---|
-| 较高阈值节省容量，NLL 和 EM/F1 基本保持 | 从同一 warmup checkpoint 开始 policy，先只改变阈值做对照 |
+| policy 训练后 NLL 降低，容量仍较小 | 继续验证当前阈值和训练预算 |
+| policy 训练后 append_ratio 再次接近 1 | 检查训练后的 I 分布，判断阈值尺度是否漂移 |
 | I 与损失差缺乏关系，扫描只是在损失质量和增加容量之间切换 | 修改评分信号；不继续靠阈值强行控制动作比例 |
 | 多数更新点 overwrite 明显损害旧题，较高阈值也无法保持质量 | 优先研究 overwrite 训练，例如给未选中的覆盖候选加入 QA 监督 |
 | warmup 本身已明显恶化 | 先检查 warmup 训练，再讨论 policy 门控 |
 
-当前代码完成冻结诊断与校准，不包含尚未选定的辅助训练目标。阈值在 dev 上选定，后续训练方案确定后再做最终 test。
+当前探索代码提供冻结诊断与校准，训练使用 v3 的现有入口；辅助训练目标根据诊断结果再决定。阈值在 dev 上选定，后续训练方案确定后再做最终 test。
 
 输出目录需为新目录。若更换 checkpoint，重新运行 probe 和 sweep。`--max-trajectories` 可用于缩小诊断集；它按训练 seed 固定选完整轨迹，不复制数据。
