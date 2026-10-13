@@ -2,7 +2,7 @@
 
 创建时间：20261003 21:51:43 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261014 00:01:31 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261014 00:37:44 Asia/Shanghai（UTC+08:00）
 
 冻结基座，在每层维护 latent memory，通过 Attention Matching 局部更新记忆，并由答案 CE 学习如何生成压缩查询和读写记忆。
 
@@ -143,7 +143,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 
 ### 4.2 SwanLab 与本地产物
 
-- 默认仅本地记录。在线训练显式指定已有 project；相关 runs 通过 `group` 关联，`job_type=train`，固定 tags 为 `scope:main`、`method:attention-matching`，数据和研究标签通过配置补充。
+- 默认在线记录到 `latent-working-memory-v4`，使用与 v3 相同的 `SWANLAB_API_KEY` 配置；`--tracking disabled` 仅保存本地。相关 runs 通过 `group` 关联，`job_type=train`，固定 tags 为 `scope:main`、`method:attention-matching`，数据和研究标签通过配置补充。
 - `--run-id` 标识实验系列；方法目录由 `query_mode` 与 `num_slots` 自动生成，例如 `conditioned-m32`。SwanLab 名称为 `<method-dir>_<run-id>`。
 - train/dev 在同一 run 中按真实 optimizer step 追加原生曲线。`write_loss` 表示更新后的 AM loss，`write_loss_before` 表示更新前；均先按层、再按写入事件平均。
 - 最终评估可追加到原训练 run 的 `evaluation/*`，保留原配置和身份；不创建新 project 或 run。辅助计数与逐题结果保存在本地。

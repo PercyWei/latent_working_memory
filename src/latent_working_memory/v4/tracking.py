@@ -56,18 +56,15 @@ def training_tracking(config, run, device, resume=False):
     rng = capture_rng(device)
     try:
         api_key = swanlab_api_key()
-        api = swanlab.Api(api_key=api_key)
-        workspace = api.username
+        workspace = None
         if identity is not None:
             project_path = identity["url"].split("/@", 1)[1].split("/runs/", 1)[0]
             workspace, project = project_path.split("/")
             if project != config.swanlab_project:
                 raise ValueError("SwanLab URL differs from its saved project")
-            remote = api.run(f"{project_path}/{identity['id']}")
+            remote = swanlab.Api(api_key=api_key).run(f"{project_path}/{identity['id']}")
             if remote.state not in {"FINISHED", "CRASHED", "ABORTED"}:
                 raise ValueError("SwanLab run is still active; cannot resume training")
-        if not api.project(f"{workspace}/{config.swanlab_project}").project_id:
-            raise ValueError("online tracking requires an existing, explicitly selected project")
         tracking = swanlab.init(
             project=config.swanlab_project,
             workspace=workspace,

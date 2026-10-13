@@ -105,8 +105,10 @@ def parse_args(argv=None):
     parser.add_argument(
         "--stop-after-steps", type=positive_count, help="停止于指定全局 optimizer step，不修改预算"
     )
-    parser.add_argument("--tracking", choices=("online", "disabled"), help="默认沿用配置")
-    parser.add_argument("--swanlab-project", help="已有 SwanLab project；不自动创建")
+    parser.add_argument(
+        "--tracking", choices=("online", "disabled"), help="沿用配置；默认预设开启在线记录"
+    )
+    parser.add_argument("--swanlab-project", help="覆盖配置中的 SwanLab project")
     parser.add_argument("--group", help="实验系列 group，未配置时使用 run-id")
     parser.add_argument("--tag", action="append", help="追加命名空间标签，可重复指定")
     parser.add_argument("--prompt-file", type=Path, help="生成使用的纯文本 prompt")

@@ -2,7 +2,7 @@
 
 创建时间：20261013 10:12:17 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261014 00:01:31 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261014 00:37:44 Asia/Shanghai（UTC+08:00）
 
 使用 [run.sh](run.sh) 启动训练、恢复、独立评估或单条生成。模型与训练目标见 [v4 说明](../README.md)，默认配置见 [experiment.json](../../../../configs/v4/attention_matching/experiment.json)。以下命令均从项目根目录执行。
 
@@ -19,7 +19,7 @@ uv run --frozen python -m latent_working_memory.data_preparation.delta_mem_qaspe
   --config configs/data_preparation/delta-mem-qasper.json
 ```
 
-- 默认关闭在线跟踪。启用时使用项目 `.env` 或终端中的 `SWANLAB_API_KEY`，并指定已有 SwanLab project；入口不创建新 project。
+- 默认在线记录到 `latent-working-memory-v4`，使用与 v3 相同的凭据：有项目 `.env` 时读取其中的 `SWANLAB_API_KEY`，否则读取终端环境变量。加 `--tracking disabled` 仅保存本地产物，无需 key。
 
 ## 2. 新训练
 
@@ -35,7 +35,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - `--run-id` 是唯一的用户命名入口，未指定时采用上海时间 `YYYYMMDD-HHMMSS`。方法目录自动使用 `<query_mode>-m<num_slots>`，例如 `conditioned-m32`；SwanLab 名称为 `<method-dir>_<run-id>`。
 - 新训练的输出目录由入口派生，写入运行配置；预设 JSON 无需设置 `output_dir`。不覆盖已有运行目录。
 - `--stop-after-steps 10` 在绝对 optimizer step 10 停止，执行 dev 验证和 checkpoint 保存，不改变原 epoch 预算。
-- 在线记录增加 `--tracking online --swanlab-project 已有项目名`。`group` 依次使用 CLI、配置或 run-id；可重复传入 `--tag study:名称`。默认 QASPER 配置包含 `data:qasper`。
+- `--swanlab-project 项目名` 可覆盖配置中的项目。`group` 依次使用 CLI、配置或 run-id；可重复传入 `--tag study:名称`。默认 QASPER 配置包含 `data:qasper`。
 
 ## 3. 恢复训练
 
@@ -113,8 +113,8 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 | `--save-every` | 正整数保存间隔或 `after_each_epoch`，预设 50 |
 | `--save-total-limit` | 保留最近成功保存的 checkpoint 数，预设 2 |
 | `--stop-after-steps` | 本次训练／恢复的绝对停止点，不改变 epoch 预算 |
-| `--tracking` | `disabled`／`online`；新训练默认本地，独立评估默认沿用原训练设置 |
-| `--swanlab-project`／`--group`／`--tag` | 已有项目、实验分组和可重复的命名空间标签；仅用于新训练 |
+| `--tracking` | `disabled`／`online`；默认预设开启在线记录，独立评估沿用原训练设置 |
+| `--swanlab-project`／`--group`／`--tag` | 项目、实验分组和可重复的命名空间标签；仅用于新训练，项目预设为 `latent-working-memory-v4` |
 
 - epoch 结束及主动停止时始终验证、保存。仅按 epoch 保存可使用 `--save-every after_each_epoch`。
 - 模型、记忆与局部更新参数直接修改 JSON，见 [v4 配置说明](../README.md#三配置与执行)。
