@@ -616,9 +616,12 @@ def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_pat
     monkeypatch.setattr(evaluation, "evaluation_tracking_run", resume)
     monkeypatch.setattr(evaluation, "configure_evaluation_metrics", lambda *args: None)
     monkeypatch.setattr(
-        evaluation, "configure_evaluation_layout", lambda *args: {"url": "https://example.test/view"}
+        evaluation,
+        "configure_evaluation_layout",
+        lambda *args: {"name": "checkpoint_comparison", "url": "https://example.test/view"},
     )
     monkeypatch.setattr(evaluation, "verify_evaluation_publication", lambda *args: None)
+    monkeypatch.setattr(evaluation, "configure_evaluation_visibility", lambda *args: None)
     checkpoint = training_dir / "policy" / "checkpoints" / "global_step_37"
     output = tmp_path / "evaluation" / "policy" / checkpoint.name
     evaluation_config = {
@@ -651,18 +654,19 @@ def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_pat
     assert len(publications) == 1 and publications[0][1] == 38
     assert publications[0][0]["evaluation/nll"].options["series"][0]["data"][-1]["value"] == 2
     em_f1 = publications[0][0]["evaluation/em_f1"].options
-    assert [axis["max"] for axis in em_f1["yAxis"]] == [1, 1]
-    assert [series["yAxisIndex"] for series in em_f1["series"]] == [0, 1]
-    assert em_f1["xAxis"][0]["data"] == ["第1段引入", "第3段引入", "overall"]
-    assert publications[0][0]["evaluation/capacity"].options["xAxis"][0]["data"] == [
-        "final_slots",
-        "mean_slots",
-    ]
+    assert [axis["max"] for axis in em_f1["yAxis"]] == [1]
+    assert [series["yAxisIndex"] for series in em_f1["series"]] == [0, 0]
+    assert em_f1["xAxis"][0]["data"] == ["1", "3", "总体"]
+    statistics = publications[0][0]["evaluation/statistics"].content
+    assert "最终记忆容量" in statistics and "平均记忆容量" in statistics
     assert not any(
         name in publications[0][0]
         for name in ("evaluation/summary", "evaluation/details", "evaluation/examples")
     )
-    assert all(name.startswith("evaluation/") for name in publications[0][0])
+    assert all(
+        name.startswith(("evaluation/", "checkpoint_comparison/"))
+        for name in publications[0][0]
+    )
     assert all(
         (output / name).read_bytes() == original
         for name, original in local_results.items()

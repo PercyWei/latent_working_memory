@@ -223,7 +223,7 @@ artifacts/v3/<run-id>/
 - **运行目录**：`run-id` 可用 `--run-id` 指定，默认使用格式为 `YYYYMMDD-HHMMSS` 的当前时间，复用动态预训练且省略 `--run-id` 时继承 checkpoint 来源的编号。父目录由 `--output-root` 控制。
 - **方法目录**：三个 baseline 和独立动态预训练使用 `<method>-k<K>{_<mode>}`，两种动态方法统一使用 `<method>-k<K>+<ΔK>-<writer>{_<mode>}`。例如，正式运行 `memory-change-k512+32-local`、试跑 `memory-change-k512+32-tag_smoke`。
 - **Checkpoint**：目录为 `checkpoints/global_step_<阶段step>/`。`state.pt` 保存新增权重、优化器及运行状态，`data_<rank>.pt` 保存各卡加载器状态。
-- **评估记录**：每个 checkpoint 单独保存结果和四项评估配置快照；`evaluations.json` 登记历史与发布 step，`swanlab-publication.json` 记录原 run 身份、真实 checkpoint 步数、发布信息与汇总视图链接。相同 checkpoint、相同配置复用结果；云端数据核验通过后才登记发布完成。发布失败保留本地结果，重新执行原命令即可补传。
+- **评估记录**：每个 checkpoint 单独保存结果和四项评估配置快照；`evaluations.json` 登记历史与发布 step，`swanlab-publication.json` 记录原 run 身份、真实 checkpoint 步数、发布指标和对比视图链接。相同 checkpoint、相同配置复用结果；云端数据核验通过后才登记发布完成。在线评估同时检查当前结果与此前已发布的本地结果，展示需要更新时从缓存回填，不重新加载模型，也不依赖历史 checkpoint 仍被保留；其他离线结果仅在明确选择后发布。
 - **结果与比较**：`summary.json` 汇总指标，`trajectories.jsonl` 保存动作、分数、计时与逐题结果。比较单独调用 [compare.py](compare.py)，导出 `points.json` 与 `points.csv`；命令见[运行指南](scripts/README.md#5-查看结果)。比较要求 split、实际 task 题池、各段选中的 gate QA 签名、QA prompt 和生成 token 上限一致；seed 不同但实际选题相同仍可比较，各方法的训练数据与训练配置可不同。
 
 ### 5.3 SwanLab 组织与展示
@@ -231,7 +231,7 @@ artifacts/v3/<run-id>/
 **运行组织**
 
 - 默认 project 为 `latent-working-memory-v3`，run 名称为 `<method-dir>_<run-id>`；相关 runs 通过 `--group` 关联，未指定时采用当前 `run-id`。
-- 同一方法的连续训练、dev 验证和最终 test 评估共用一个 run，分别展示在 `train/*`、`dev/*`、`evaluation/*`。独立共享预训练使用自己的 run，来源通过 `pretraining` 配置追溯。
+- 同一方法的连续训练、dev 验证和最终 test 评估共用一个 run，使用 `train/*`、`dev/*`、`evaluation/*` 和 `checkpoint_comparison/*` 分区。独立共享预训练使用自己的 run，来源通过 `pretraining` 配置追溯。
 
 **训练与验证**
 
@@ -244,18 +244,20 @@ artifacts/v3/<run-id>/
 
 **最终评估**
 
-最终 test 结果追加到对应方法已完成的训练 run，保留其身份、训练配置和完成状态。项目的公共自定义视图 `evaluation` 展示四张原生增量曲线：总体 NLL、EM／F1 合图、最终／平均 slots 合图，以及平均记忆构建耗时。横轴固定为 `evaluation/checkpoint_step`，表示真实累计 step；发布完成后打印视图链接。
+最终 test 结果追加到对应方法已完成的训练 run，保留其身份、训练配置和完成状态。展示分为 checkpoint 结果和 checkpoint 对比两个区域。
 
-默认视图的 `evaluation` 分区展示各 checkpoint 的图表快照：
+默认视图的 `evaluation` 分区查看某个 checkpoint 的结果：
 
 | 内容 | 展示方式 |
 |---|---|
 | NLL | 柱状图，横轴为 QA 首次引入的原始段编号及总体均值 |
-| EM／F1 | 合并为双纵轴分组柱状图，横轴同上，两轴范围均为 `[0,1]` |
-| 动态方法的过程保持 | “引入段 × 已读段” NLL 热图，以及按引入后经过的段数对齐的相对首次 NLL 变化曲线 |
-| 容量与成本 | 最终／平均 slots 柱状图，以及每条轨迹平均记忆构建耗时柱状图 |
+| EM／F1 | 分组柱状图，横轴同上，两项共用 `[0,1]` 纵轴 |
+| 动态方法的过程保持 | “问题引入段 × 已读段” NLL 热图 |
+| 容量与成本 | 统计表，列出最终／平均 slots、平均记忆构建耗时及单位 |
 
-云端记录按单调递增的发布 step 追加；图表快照按发布 step 切换版本，标题注明阶段、阶段内 step 和真实累计 step。
+动态方法固定为三张图、一张表，baseline 为两张图、一张表。多个 checkpoint 共用这些面板，按发布 step 切换版本；标题注明阶段、阶段内 step 和真实累计 step。按 `age` 汇总的相对首次 NLL 变化保存在本地 `summary.json`，供辅助分析。
+
+公共自定义视图 `checkpoint_comparison` 展示四张原生增量曲线：总体 NLL、EM／F1 合图、最终／平均 slots 合图，以及平均记忆构建耗时。横轴固定为 `checkpoint_comparison/checkpoint_step`，表示真实累计训练 step；单 checkpoint 时每条序列有一个点，补评估时追加数据点。发布完成后打印视图链接。SDK 自动生成的单指标图位于隐藏分组，原始标量仍正常记录；更新已有展示时，也将旧容量、耗时和 `age` 面板移入该分组。
 
 ## 六、代码入口与验证
 

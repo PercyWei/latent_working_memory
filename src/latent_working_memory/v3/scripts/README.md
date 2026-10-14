@@ -107,7 +107,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 - `--eval-run` 仅用于单独评估，指向 `artifacts/v3/<run-id>/train/<method-dir>/` 方法级目录，会扫描其各阶段当前保留且包含 `state.pt` 的 checkpoint。
 - `--checkpoint` 仅接受属于同一 run 下的单/多个 checkpoint 列表。
 - 默认原样复用 `plan/<method-dir>/eval.json`，模型、方法和写入配置从 checkpoint 读取。首次评估前可用 `--eval-data`、`--eval-seed`、`--max-test-samples`、`--max-new-tokens` 设置评估条件；已有评估历史后，同一 run 须保持相同 test 配置与 QA 协议。
-- 每个 checkpoint 的结果独立保存。相同 checkpoint、相同配置复用已有结果和日志；已发布结果不重复上传，仅本地评估的结果可后续在线发布，补发日志追加到原 `eval.log`。
+- 每个 checkpoint 的结果独立保存。相同 checkpoint、相同配置复用已有结果和日志；在线评估检查当前展示与发布记录，已匹配的结果跳过，需要更新的展示从缓存生成，补发日志追加到原 `eval.log`。
 - 默认追加到原训练 SwanLab run，须保留原训练目录与身份文件且云端 run 状态为 `FINISHED`；加 `--tracking disabled` 仅保存本地结果。
 
 ### 2.3 中断恢复
@@ -288,7 +288,7 @@ artifacts/v3/<run-id>/
 
 方法名将 `_` 转为 `-`；独立共享预训练用 `dynamic-pretrain`，完整动态流程的各阶段保存在同一方法目录。writer 为 `local`、`tag`、`mask` 或 `dual-lora`。试跑在末尾添加 `_<mode>`。SwanLab 名称为 `<method-dir>_<run-id>`；跨系列复用使用当前系列编号，预训练来源通过 `pretraining` 配置追溯。
 
-- **进度与图表**：终端每 step 一行摘要，完整指标见 `train/` 下的 `metrics.jsonl`。SwanLab 同一方法的训练、验证、评估共用一个 run；阶段与进度看 `train/stage`、`train/epoch`。项目的公共自定义视图 `evaluation` 按真实累计 step 展示 test NLL、EM／F1 合图、容量合图与耗时曲线，发布完成后打印链接；默认视图的 `evaluation` 分区按发布 step 保留来源柱状图和动态过程热图，标题注明实际 checkpoint。
+- **进度与图表**：终端每 step 一行摘要，完整指标见 `train/` 下的 `metrics.jsonl`。SwanLab 同一方法的训练、验证、评估共用一个 run；阶段与进度看 `train/stage`、`train/epoch`。默认视图的 `evaluation` 分区按 checkpoint 版本展示 NLL、EM／F1 柱状图、动态过程热图和容量／耗时统计表。公共自定义视图 `checkpoint_comparison` 用四张曲线比较 checkpoint，横轴为真实累计训练 step；发布完成后打印链接。详细布局见 [v3 说明](../README.md#53-swanlab-组织与展示)。
 - **评估与比较**：逐条结果见 `eval/`；不同方法的结果通过独立比较命令汇总。比较要求 split、实际 task 题池、各段选中的 gate QA 签名、QA prompt 和生成 token 上限一致；各方法的训练数据与训练配置可不同。指标含义见 [v3 说明](../README.md#五评估与产物)。
 - **错误**：训练查看方法 `plan/` 下的 `result.json`、`train.log`；评估查看对应 checkpoint 结果目录的 `eval.log`。发布失败保留本地结果，重新执行原命令即可补传；追加要求云端原训练 run 为 `FINISHED`。独立比较错误直接在终端报告。
 - **Checkpoint 与恢复**：每阶段默认保留最近两个 `checkpoints/global_step_<阶段step>/` 目录；初始化、恢复和评估均通过 `--checkpoint` 传目录路径。中断恢复见[第 2.3 节](#23-中断恢复)。

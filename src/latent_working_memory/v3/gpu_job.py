@@ -465,15 +465,13 @@ def evaluate_checkpoint(args, checkpoint, config_path, environment):
             f"summary={output / 'summary.json'}",
             flush=True,
         )
-    if cached is None or args.tracking == "online" and history.publication() is None:
+    if cached is None or args.tracking == "online":
         execute(
             evaluation_command(args, output / "eval.json", checkpoint, output),
             environment,
             output / "eval.log",
             append=cached is not None,
         )
-    elif args.tracking == "online":
-        print("[evaluation] already published to the training run; skipping upload", flush=True)
     else:
         print("[evaluation] cached local result ready; tracking disabled", flush=True)
     summary = str(output / "summary.json")

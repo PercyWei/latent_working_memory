@@ -105,6 +105,16 @@ class EvaluationHistory:
         path = self.output_dir / "swanlab-publication.json"
         return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
+    def published_summaries(self):
+        """读取已有发布记录的本地结果，返回各自的输出目录和 summary。"""
+        with self._index() as index:
+            summaries = []
+            for entry in index["checkpoints"]:
+                path = Path(entry["summary"])
+                if (path.parent / "swanlab-publication.json").is_file():
+                    summaries.append((path.parent, json.loads(path.read_text(encoding="utf-8"))))
+            return summaries
+
     def last_publication_step(self):
         with self._index() as index:
             return max(
