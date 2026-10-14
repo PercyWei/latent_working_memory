@@ -34,13 +34,9 @@ from latent_working_memory.v3.runtime import (
     select_examples,
 )
 from latent_working_memory.v3.tracking import (
-    EVALUATION_VIEW_NAME,
     configure_evaluation_layout,
-    configure_evaluation_media_layout,
-    configure_evaluation_metrics,
-    configure_evaluation_visibility,
     evaluation_media,
-    evaluation_scalars,
+    evaluation_panel_types,
     evaluation_training_run,
     evaluation_tracking_run,
     experiment_directory,
@@ -214,7 +210,7 @@ class _PublicationLog:
 
 
 def _append_evaluations(evaluations, training_dir, log_publications=False):
-    """同一方法的选中结果与已有发布历史统一按真实 step 串行处理。"""
+    """将选中结果与已发布历史合成一份报告，由父进程串行发布。"""
     history = evaluations[0][3]
     failures = []
     with history.publication_lock():
@@ -223,38 +219,33 @@ def _append_evaluations(evaluations, training_dir, log_publications=False):
                 saved,
                 directory,
                 saved["metadata"]["global_step"],
-                EvaluationHistory(directory, history.evaluation_config),
             )
             for directory, saved in history.published_summaries()
         }
-        for summary, output_dir, step, selected_history in evaluations:
+        for summary, output_dir, step, _ in evaluations:
             summaries[summary["metadata"]["checkpoint"]] = (
-                summary, output_dir, step, selected_history
+                summary, output_dir, step
             )
-        layout = None
-        for saved, directory, global_step, saved_history in sorted(
-            summaries.values(), key=lambda item: item[2]
-        ):
-            try:
-                with ExitStack() as stack:
-                    if log_publications:
+        ordered = sorted(summaries.values(), key=lambda item: item[2])
+        try:
+            with ExitStack() as stack:
+                if log_publications:
+                    for _, directory, _ in ordered:
                         log = stack.enter_context(
                             (Path(directory) / "eval.log").open("a", encoding="utf-8")
                         )
                         stack.enter_context(redirect_stdout(_PublicationLog(sys.stdout, log)))
                         stack.enter_context(redirect_stderr(_PublicationLog(sys.stderr, log)))
-                    layout = _publish_evaluation(
-                        saved, training_dir, directory, global_step, saved_history, layout
-                    )
-            except Exception as error:
+                _publish_evaluations(ordered, training_dir, history)
+        except Exception as error:
+            for saved, _, _ in ordered:
                 checkpoint = Path(saved["metadata"]["checkpoint"])
                 failures.append((checkpoint, error))
-                layout = None
-                print(
-                    f"[evaluation] SwanLab failed checkpoint={checkpoint} "
-                    f"error={type(error).__name__}: {error}",
-                    flush=True,
-                )
+            print(
+                f"[evaluation] SwanLab report failed checkpoints={len(ordered)} "
+                f"error={type(error).__name__}: {error}",
+                flush=True,
+            )
     return failures
 
 
@@ -302,72 +293,77 @@ def publish_cached_evaluations(checkpoints, output_dirs, evaluation_config, trai
     return failures
 
 
-def _publish_evaluation(summary, training_dir, output_dir, step, history, layout=None):
-    """核对单个缓存结果的发布记录，上传并验证当前布局所需的数据。"""
-    metrics = evaluation_scalars(summary)
-    media = evaluation_media(summary)
-    values = {**metrics, **media}
-    publication = history.publication()
+def _publish_evaluations(evaluations, training_dir, history):
+    """发布完整 checkpoint 合图，匹配的缓存报告只核对云端布局。"""
+    identity = json.loads((training_dir / "swanlab.json").read_text(encoding="utf-8"))
+    summaries = [summary for summary, _, _ in evaluations]
+    media_types = evaluation_panel_types(summaries)
+    signature = hashlib.sha256(
+        json.dumps(summaries, ensure_ascii=False, sort_keys=True, allow_nan=False).encode()
+    ).hexdigest()
+    publication = history.report_publication()
+    if publication is not None and (
+        publication["run_id"] != identity["id"]
+        or publication["project"] != identity["project"]
+        or publication["group"] != identity["group"]
+    ):
+        raise ValueError("evaluation report publication differs from the original training run")
     already_published = (
         publication is not None
-        and publication["metrics"] == metrics
-        and set(publication["panels"]) == set(values)
-        and publication.get("view", {}).get("name") == EVALUATION_VIEW_NAME
-        and publication["view"].get("default_metrics_hidden") is True
+        and publication["signature"] == signature
+        and publication["panels"] == list(media_types)
     )
-    if already_published and layout is not None:
-        history.record_publication({**publication, "view": layout})
-        print(
-            f"[evaluation] SwanLab already published; shared layout checked; skipping global_step={step}",
-            flush=True,
-        )
-        return layout
     print(
-        f"[evaluation] SwanLab {'layout check' if already_published else 'publication'} started "
-        f"method={summary['method']} stage={summary['stage']} global_step={step}",
+        f"[evaluation] SwanLab report {'layout check' if already_published else 'publication'} started "
+        f"method={summaries[0]['method']} checkpoints={len(summaries)} "
+        f"global_steps={[summary['metadata']['global_step'] for summary in summaries]}",
         flush=True,
     )
     api_key = swanlab_api_key()
     try:
         if already_published:
-            view = configure_evaluation_layout(training_dir, summary["method"], api_key)
+            evaluation_training_run(training_dir, api_key)
+            publication_step = publication["publication_step"]
         else:
+            media = evaluation_media(summaries)
             with evaluation_tracking_run(training_dir, api_key) as tracking:
-                configure_evaluation_metrics(tracking)
-                view = configure_evaluation_layout(training_dir, summary["method"], api_key)
-                # 各指标的 min_step 来自云端；本地计数器在恢复时重新从 -1 开始。
+                # 发布编号只接续评估媒体历史，训练 step 不参与累计报告编号。
                 resumed_step = max(
-                    (metric.min_step for metric in tracking._ctx.core._metrics._metrics.values()),
-                    default=-1,
+                    (
+                        metric.min_step
+                        for key, metric in tracking._ctx.core._metrics._metrics.items()
+                        if key in media
+                    ),
+                    default=0,
                 )
                 publication_step = max(
-                    resumed_step, history.last_publication_step(), step
+                    0, resumed_step, history.last_publication_step()
                 ) + 1
-                tracking.log(values, step=publication_step)
+                tracking.log(media, step=publication_step)
             verify_evaluation_publication(
-                training_dir, metrics, media, publication_step, api_key
+                training_dir, media, publication_step, api_key
             )
-        configure_evaluation_media_layout(training_dir, media, api_key)
-        configure_evaluation_visibility(training_dir, api_key)
-        view["default_metrics_hidden"] = True
+        view = configure_evaluation_layout(training_dir, media_types, api_key)
     except BaseException as error:
         print(
-            f"[evaluation] SwanLab publication failed; cached results retained "
-            f"path={Path(output_dir) / 'summary.json'} "
+            f"[evaluation] SwanLab report failed; cached results retained "
+            f"path={history.path} "
             f"error={type(error).__name__}: {error}",
             flush=True,
         )
         raise
-    if already_published:
-        history.record_publication({**publication, "view": view})
-        print(
-            f"[evaluation] SwanLab layout ready; existing data retained "
-            f"global_step={step} publication_step={publication['publication_step']} view={view['url']}",
-            flush=True,
-        )
-        return view
-    identity = json.loads((training_dir / "swanlab.json").read_text(encoding="utf-8"))
-    history.record_publication(
+    publication = {
+        "training_dir": str(training_dir.resolve()),
+        "run_id": identity["id"],
+        "project": identity["project"],
+        "group": identity["group"],
+        "signature": signature,
+        "checkpoints": [summary["metadata"]["checkpoint"] for summary in summaries],
+        "publication_step": publication_step,
+        "view": view,
+        "panels": list(media_types),
+    }
+    checkpoints = [
         {
             "training_dir": str(training_dir.resolve()),
             "output_dir": str(Path(output_dir).resolve()),
@@ -380,17 +376,15 @@ def _publish_evaluation(summary, training_dir, output_dir, step, history, layout
             "stage_step": summary["metadata"]["stage_step"],
             "global_step": step,
             "publication_step": publication_step,
+            "report_signature": signature,
             "view": view,
-            "panels": list(values),
-            "metrics": metrics,
-            "quality": summary["quality"],
-            "capacity": summary["capacity"],
-            "selection": summary["metadata"].get("selection"),
-        },
-    )
+        }
+        for summary, output_dir, step in evaluations
+    ]
+    history.record_report_publication(publication, checkpoints)
     print(
-        f"[evaluation] SwanLab publication finished "
-        f"run_id={identity['id']} global_step={step} publication_step={publication_step} "
+        f"[evaluation] SwanLab report {'layout ready' if already_published else 'publication finished'} "
+        f"run_id={identity['id']} checkpoints={len(summaries)} publication_step={publication_step} "
         f"view={view['url']}",
         flush=True,
     )

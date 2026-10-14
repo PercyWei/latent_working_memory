@@ -198,7 +198,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 
 完整训练默认只评估最后阶段的最后一个 checkpoint。单独评估可用 `--checkpoint` 选择同一方法原 run 的一个或多个 checkpoint，或用 `--eval-run` 指定 `train/<method-dir>/`，评估该方法当前保留的全部 checkpoint；两种入口互斥。
 
-单独评估由 `--gpus` 指定计算资源，每张卡一个固定槽位，并行完成各 checkpoint 的计算；全部计算结束后，由父进程按真实累计 step 串行上传。缓存结果和上传不占用 GPU。同一方法 run 同时只运行一个评估调度任务，共用原 `eval.json`、seed 与 QA 协议，GPU 分配不改变选题。单个 checkpoint 计算或上传失败时保留其他成功结果，最后汇总失败并以非零状态退出；重新执行原命令复用已完成结果。命令见[单独评估指南](scripts/README.md#22-单独评估)。
+单独评估由 `--gpus` 指定计算资源，每张卡一个固定槽位，并行完成各 checkpoint 的计算；全部计算结束后，由父进程汇总结果，串行上传完整报告，checkpoint 按真实累计 step 排列。缓存结果和上传不占用 GPU。同一方法 run 同时只运行一个评估调度任务，共用原 `eval.json`、seed 与 QA 协议，GPU 分配不改变选题。单个 checkpoint 计算失败不影响其他结果保存，报告上传失败也保留全部本地结果；最后汇总失败并以非零状态退出，重新执行原命令复用已完成结果。命令见[单独评估指南](scripts/README.md#22-单独评估)。
 
 **QA 评估流程**
 
@@ -214,7 +214,7 @@ artifacts/v3/<run-id>/
 ├── plan/<method-dir>/           阶段配置、eval.json、job.json、训练日志、result.json
 ├── train/<method-dir>/<stage>/  config.json、run.json、metrics.jsonl、dev-qa.jsonl、checkpoints/
 ├── eval/<method-dir>/
-│   ├── evaluations.json         checkpoint 评估历史与发布 step
+│   ├── evaluations.json         checkpoint 评估历史与累计报告发布记录
 │   └── <stage>/global_step_<阶段step>/
 │       ├── eval.json            本次评估配置快照
 │       ├── summary.json、trajectories.jsonl、eval.log
@@ -225,7 +225,7 @@ artifacts/v3/<run-id>/
 - **运行目录**：`run-id` 可用 `--run-id` 指定，默认使用格式为 `YYYYMMDD-HHMMSS` 的当前时间，复用动态预训练且省略 `--run-id` 时继承 checkpoint 来源的编号。父目录由 `--output-root` 控制。
 - **方法目录**：三个 baseline 和独立动态预训练使用 `<method>-k<K>{_<mode>}`，两种动态方法统一使用 `<method>-k<K>+<ΔK>-<writer>{_<mode>}`。例如，正式运行 `memory-change-k512+32-local`、试跑 `memory-change-k512+32-tag_smoke`。
 - **Checkpoint**：目录为 `checkpoints/global_step_<阶段step>/`。`state.pt` 保存新增权重、优化器及运行状态，`data_<rank>.pt` 保存各卡加载器状态。
-- **评估记录**：每个 checkpoint 单独保存结果和四项评估配置快照；`evaluations.json` 登记历史与发布 step，`swanlab-publication.json` 记录原 run 身份、真实 checkpoint 步数、发布指标和对比视图链接。相同 checkpoint、相同配置复用结果；云端数据核验通过后才登记发布完成。在线评估同时检查当前结果与此前已发布的本地结果，即使发布记录匹配，也会检查并修复云端布局；数据需要更新时从缓存补传，不重新加载模型或计算 QA，也不依赖历史 checkpoint 仍被保留。其他离线结果仅在明确选择后发布。
+- **评估记录**：每个 checkpoint 单独保存结果、四项评估配置快照与 `swanlab-publication.json`；`evaluations.json` 登记评估历史与累计报告发布记录，各 checkpoint 的发布文件指向最新完整报告。相同 checkpoint、相同配置复用结果；在线发布将本次选中的结果与此前已发布的本地结果合并，云端核验通过后才登记完成。报告内容相同时仅检查、修复布局；需要更新时从缓存重建，不重新加载模型或计算 QA，也不依赖历史 checkpoint 仍被保留。其他离线结果仅在明确选择后发布。
 - **结果与比较**：`summary.json` 汇总指标，`trajectories.jsonl` 保存动作、分数、计时与逐题结果。比较单独调用 [compare.py](compare.py)，导出 `points.json` 与 `points.csv`；命令见[运行指南](scripts/README.md#5-查看结果)。比较要求 split、实际 task 题池、各段选中的 gate QA 签名、QA prompt 和生成 token 上限一致；seed 不同但实际选题相同仍可比较，各方法的训练数据与训练配置可不同。
 
 ### 5.3 SwanLab 组织与展示
@@ -233,7 +233,7 @@ artifacts/v3/<run-id>/
 **运行组织**
 
 - 默认 project 为 `latent-working-memory-v3`，run 名称为 `<method-dir>_<run-id>`；相关 runs 通过 `--group` 关联，未指定时采用当前 `run-id`。
-- 同一方法的连续训练、dev 验证和最终 test 评估共用一个 run，使用 `train/*`、`dev/*`、`evaluation/*` 和 `checkpoint_comparison/*` 分区。独立共享预训练使用自己的 run，来源通过 `pretraining` 配置追溯。
+- 同一方法的连续训练、dev 验证和最终 test 评估共用一个 run，使用 `train/*`、`dev/*` 和 `evaluation/*` 分区。独立共享预训练使用自己的 run，来源通过 `pretraining` 配置追溯。
 
 **训练与验证**
 
@@ -246,22 +246,19 @@ artifacts/v3/<run-id>/
 
 **最终评估**
 
-最终 test 结果追加到对应方法已完成的训练 run，保留其身份、训练配置和完成状态。展示分为 checkpoint 结果和 checkpoint 对比两个区域。
-
-默认视图的 `evaluation` 分区查看某个 checkpoint 的结果：
+最终 test 结果追加到对应方法已完成的训练 run，保留其身份、训练配置和完成状态。默认视图的 `evaluation` 分区集中展示该 run 已发布的 checkpoint：
 
 | 内容 | 展示方式 |
 |---|---|
-| NLL | 柱状图，横轴为 QA 首次引入的原始段编号及总体均值 |
-| EM／F1 | 分组柱状图，横轴同上，两项共用 `[0,1]` 纵轴 |
-| 动态方法的过程保持 | “问题引入段 × 已读段” NLL 热图 |
-| 容量与成本 | 统计表，列出最终／平均 slots、平均记忆构建耗时及单位 |
+| NLL、EM、F1 | 各一张带点折线合图；横轴为 QA 首次引入的原始段编号及“总体”，每个 checkpoint 一条线 |
+| 容量与成本 | 一张统计表，每个 checkpoint 一行，列出阶段、步数、最终／平均 slots、平均记忆构建耗时及单位 |
+| 动态方法的过程保持 | 每个 checkpoint 一张“问题引入段 × 已读段” NLL 热图，依次排在最后 |
 
-动态方法固定为三张图、一张表，baseline 为两张图、一张表。多个 checkpoint 共用这些面板，按发布 step 切换版本；默认显示最近发布的版本，其 checkpoint 不一定是累计 step 最大者。标题注明阶段、阶段内 step 和真实累计 step。已发布且匹配的结果只检查、修复布局，不重复上传以调整默认版本。按 `age` 汇总的相对首次 NLL 变化保存在本地 `summary.json`，供辅助分析。
+三张合图的图例、统计表与热图均按真实累计训练 step 排序，阶段和阶段内 step 用于标识 checkpoint；同一 checkpoint 在三张合图中保持相同颜色，EM 和 F1 的纵轴均为 `[0,1]`。热图使用统一色阶，便于跨 checkpoint 比较。baseline 仅展示三张合图和统计表；按 `age` 汇总的相对首次 NLL 变化保存在本地 `summary.json`，供辅助分析。
 
-公共自定义视图 `checkpoint_comparison` 展示四张原生增量曲线：总体 NLL、EM／F1 合图、最终／平均 slots 合图，以及平均记忆构建耗时。横轴固定为 `checkpoint_comparison/checkpoint_step`，表示真实累计训练 step；单 checkpoint 时每条序列有一个点，补评估时追加数据点。发布完成后打印视图链接。SDK 自动生成的单指标图位于隐藏分组，原始标量仍正常记录；更新已有展示时，也将旧容量、耗时和 `age` 面板移入该分组。
+补评估后，从已有和新增结果重建完整报告，评估先后不影响 checkpoint 的展示顺序。媒体下方的 step 滑块表示整份报告的发布版本，默认最新版本包含全部已发布的 checkpoint；它不用于选择单个 checkpoint。报告内容相同时仅检查、修复布局，不重复上传媒体版本。
 
-删除云端 `evaluation` 分组后，保持评估参数不变，重新执行[单独评估命令](scripts/README.md#22-单独评估)即可恢复所需图表和统计表。布局修复沿用原训练 run 和已上传的媒体版本，不重新计算 QA，也不重复追加 checkpoint 曲线点或媒体版本。
+**复用本地结果更新展示**：保持参数不变，重新执行[单独评估命令](scripts/README.md#22-单独评估)。需要转换布局时会从本地结果重建并上传报告；删除云端 `evaluation` 分组后，也可用同一命令恢复图表和统计表。布局修复复用已上传的媒体版本，两种操作均不重新计算 QA。
 
 ## 六、代码入口与验证
 

@@ -1,11 +1,12 @@
 """v3 方法级 SwanLab 身份、跨阶段增量曲线与最终评估汇总。"""
 
+from colorsys import hsv_to_rgb
 from contextlib import contextmanager
 from copy import deepcopy
 import fcntl
+from hashlib import sha256
 from html import escape
 import json
-import math
 from pathlib import Path
 import secrets
 import signal
@@ -38,20 +39,10 @@ METHOD_COLORS = {
 STAGE_NUMBERS = {"pretrain": 1, "lm": 1, "qa": 2, "warmup": 2, "policy": 3}
 DEV_QA_METRICS = ("dev/qa_old_nll", "dev/qa_new_nll")
 APPEND_RATIO_METRICS = ("train/append_ratio", "dev/append_ratio")
-EVALUATION_STEP_METRIC = "checkpoint_comparison/checkpoint_step"
-EVALUATION_VIEW_NAME = "checkpoint_comparison"
-EVALUATION_METRICS = (
-    "checkpoint_comparison/overall_nll",
-    "checkpoint_comparison/overall_em",
-    "checkpoint_comparison/overall_f1",
-    "checkpoint_comparison/final_slots",
-    "checkpoint_comparison/mean_slots",
-    "checkpoint_comparison/mean_build_seconds",
-)
 EVALUATION_MEDIA_TYPES = {
     "evaluation/nll": "ECHARTS",
-    "evaluation/em_f1": "ECHARTS",
-    "evaluation/nll_retention": "ECHARTS",
+    "evaluation/em": "ECHARTS",
+    "evaluation/f1": "ECHARTS",
     "evaluation/statistics": "HTML",
 }
 
@@ -286,56 +277,25 @@ def _configure_append_ratio_panel(tracking, root, method, name, api_key):
     )
 
 
-def configure_evaluation_metrics(tracking):
-    """以真实 checkpoint step 展示原生曲线，媒体发布步数独立递增。"""
-    if tracking is None:
-        return
-    for metric in (EVALUATION_STEP_METRIC, *EVALUATION_METRICS):
-        tracking.define_metric(
-            metric,
-            x_axis=EVALUATION_STEP_METRIC if metric != EVALUATION_STEP_METRIC else "_step",
-            section_name=EVALUATION_VIEW_NAME,
-            hidden=True,
-        )
-
-
-def configure_evaluation_layout(root, method, api_key):
-    """checkpoint 对比区域配置四张汇总曲线；单个 checkpoint 保留单点。"""
-    identity = json.loads((Path(root) / "swanlab.json").read_text(encoding="utf-8"))
-    return _configure_line_panels(
-        Path(root),
-        method,
-        identity["url"].split("/@", 1)[1].split("/runs/", 1)[0],
-        identity["id"],
-        None,
-        EVALUATION_VIEW_NAME,
-        [
-            ("checkpoint_comparison/overall_nll", (EVALUATION_METRICS[0],), ("NLL",), [0, None]),
-            ("checkpoint_comparison/overall_em_f1", EVALUATION_METRICS[1:3], ("EM", "F1"), [0, 1]),
-            (
-                "checkpoint_comparison/slots",
-                EVALUATION_METRICS[3:5],
-                ("final slots", "mean slots"),
-                [0, None],
-            ),
-            (
-                "checkpoint_comparison/mean_build_seconds",
-                (EVALUATION_METRICS[5],),
-                ("seconds / trajectory",),
-                [0, None],
-            ),
-        ],
-        {"key": EVALUATION_STEP_METRIC, "type": "FLOAT", "class": "SCALAR"},
-        api_key,
-        view_name=EVALUATION_VIEW_NAME,
-        previous_view_name="evaluation",
-    )
-
-
-def configure_evaluation_media_layout(training_dir, media_keys, api_key):
-    """检查默认视图，将删除分组后保留的媒体面板恢复到 evaluation。"""
+def configure_evaluation_layout(training_dir, media_types, api_key):
+    """恢复 evaluation 媒体面板、清理旧布局，并按 checkpoint 顺序排列热图。"""
+    training_dir = Path(training_dir)
     identity = json.loads((training_dir / "swanlab.json").read_text(encoding="utf-8"))
     project_path = identity["url"].split("/@", 1)[1].split("/runs/", 1)[0]
+    # 这些 key 仅用于清理已有云端面板；当前发布路径只记录媒体。
+    retired_scalars = {
+        f"{prefix}/{suffix}"
+        for prefix in ("evaluation", "checkpoint_comparison")
+        for suffix in (
+            "checkpoint_step", "overall_nll", "overall_em", "overall_f1",
+            "final_slots", "mean_slots", "mean_build_seconds",
+        )
+    }
+    retired_media = {
+        "evaluation/em_f1", "evaluation/nll_retention", "evaluation/nll_delta_by_age",
+        "evaluation/capacity", "evaluation/build_seconds_per_trajectory",
+    }
+    retired = retired_scalars | retired_media
     with (training_dir.parent / ".swanlab-panels.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         api = swanlab.Api(api_key=api_key)
@@ -345,32 +305,89 @@ def configure_evaluation_media_layout(training_dir, media_keys, api_key):
                 raise RuntimeError(response.errmsg)
             return response.data
 
-        view = _default_view(api, project_path)
-        sections_path = f"/sections/{project_path}/{view}"
-        charts_path = f"/charts/{project_path}/{view}"
-        sections = checked(api._get(sections_path, params={"size": 100}))
-        for kind in ("PINNED", "HIDDEN"):
-            protected = checked(api._get(f"{sections_path}/protected", params={"type": kind}))
-            if protected is not None:
-                sections.append(protected)
+        def panels(view):
+            sections_path = f"/sections/{project_path}/{view}"
+            sections = checked(api._get(sections_path, params={"size": 100}))
+            hidden = None
+            for kind in ("PINNED", "HIDDEN"):
+                protected = checked(api._get(f"{sections_path}/protected", params={"type": kind}))
+                if protected is not None:
+                    sections.append(protected)
+                if kind == "HIDDEN":
+                    hidden = protected
+            charts_path = f"/charts/{project_path}/{view}"
+            return sections, [
+                (section, checked(api._get(f"{charts_path}/xxxxxx/{index}")))
+                for section in sections for index in section["chartIndex"]
+            ], hidden
+
+        def keys(chart):
+            columns = chart["config"]["yAxis" if chart["type"] == "LINE" else "keys"]
+            return {column["key"] for column in columns}
+
+        # 删除旧的专用趋势视图以及原生重复面板，底层指标数据仍保留。
+        default_view = _default_view(api, project_path)
+        views_path = f"/views/{project_path}"
+        for row in checked(api._get(views_path, params={"size": 50})):
+            view = checked(api._get(f"{views_path}/{row['index']}"))
+            if view["viewPermission"] != "WRITE":
+                continue
+            sections, charts, hidden = panels(view["index"])
+            old_charts = [
+                (section, chart)
+                for section, chart in charts
+                if chart["type"] in {"LINE", "BAR", "SCALAR", "ECHARTS", "HTML"}
+                and keys(chart) and keys(chart).issubset(retired)
+            ]
+            if (
+                view["index"] != default_view
+                and view["locked"] and view["type"] == "PUBLIC"
+                and view["name"] in {"checkpoint_comparison", "evaluation"}
+                and len(old_charts) == len(charts)
+            ):
+                checked(api._delete(f"{views_path}/{view['index']}"))
+                continue
+            charts_path = f"/charts/{project_path}/{view['index']}"
+            for section, chart in old_charts:
+                if chart["type"] in {"LINE", "BAR", "SCALAR"}:
+                    checked(api._delete(f"{charts_path}/{section['index']}/{chart['index']}"))
+                elif hidden is None or section["index"] != hidden["index"]:
+                    # 官方媒体菜单只提供隐藏，按已确认的 move 接口保留原始记录。
+                    if hidden is None:
+                        hidden = checked(
+                            api._get(
+                                f"/sections/{project_path}/{view['index']}/protected",
+                                params={"type": "HIDDEN"},
+                            )
+                        )
+                    checked(
+                        api._post(
+                            f"{charts_path}/{section['index']}/{chart['index']}/move",
+                            data={"index": hidden["index"]},
+                        )
+                    )
+            sections_path = f"/sections/{project_path}/{view['index']}"
+            for section in checked(api._get(sections_path, params={"size": 100})):
+                if section["name"] == "checkpoint_comparison" and not section["chartIndex"]:
+                    checked(api._delete(f"{sections_path}/{section['index']}"))
+
+        sections_path = f"/sections/{project_path}/{default_view}"
+        charts_path = f"/charts/{project_path}/{default_view}"
+        sections, charts, _ = panels(default_view)
         found = {}
-        for section in sections:
-            for index in section["chartIndex"]:
-                chart = checked(api._get(f"{charts_path}/xxxxxx/{index}"))
-                if chart["type"] not in {"ECHARTS", "HTML"}:
-                    continue
-                columns = chart["config"]["keys"]
-                if len(columns) != 1:
-                    continue
-                key = columns[0]["key"]
-                if key not in EVALUATION_MEDIA_TYPES:
-                    continue
-                if chart["type"] != EVALUATION_MEDIA_TYPES[key]:
-                    raise ValueError(f"SwanLab evaluation panel has an unexpected type: {key}")
-                if key in found:
-                    raise ValueError(f"multiple SwanLab evaluation panels for {key}")
-                found[key] = (section["index"], index)
-        missing = set(media_keys).difference(found)
+        for section, chart in charts:
+            if chart["type"] not in {"ECHARTS", "HTML"}:
+                continue
+            columns = chart["config"]["keys"]
+            if len(columns) != 1 or columns[0]["key"] not in media_types:
+                continue
+            key = columns[0]["key"]
+            if chart["type"] != media_types[key]:
+                raise ValueError(f"SwanLab evaluation panel has an unexpected type: {key}")
+            if key in found:
+                raise ValueError(f"multiple SwanLab evaluation panels for {key}")
+            found[key] = (section["index"], chart["index"])
+        missing = set(media_types).difference(found)
         if missing:
             raise RuntimeError(f"SwanLab evaluation media panels are missing: {sorted(missing)}")
         matches = [section for section in sections if section["name"] == "evaluation"]
@@ -386,79 +403,39 @@ def configure_evaluation_media_layout(training_dir, media_keys, api_key):
                 )
             )
             target["chartIndex"] = []
-        for key in EVALUATION_MEDIA_TYPES:
-            if key not in found:
-                continue
+        for key in media_types:
             source, index = found[key]
             if source == target["index"]:
                 continue
-            target["chartIndex"].insert(0, index)
+            target["chartIndex"].append(index)
             checked(
                 api._post(
                     f"{charts_path}/{source}/{index}/move",
                     data={"index": target["index"], "chartIndex": target["chartIndex"]},
                 )
             )
-        result_indices = [found[key][1] for key in EVALUATION_MEDIA_TYPES if key in found]
-        order = result_indices + [index for index in target["chartIndex"] if index not in result_indices]
-        if order != target["chartIndex"]:
-            checked(api._put(f"{sections_path}/{target['index']}", data={"chartIndex": order}))
+        expected = [found[key][1] for key in media_types]
+        order = expected + [index for index in target["chartIndex"] if index not in expected]
+        checked(
+            api._put(
+                f"{sections_path}/{target['index']}",
+                data={"chartIndex": order, "folded": False},
+            )
+        )
         restored = checked(api._get(f"{sections_path}/{target['index']}"))
-        if restored["name"] != "evaluation" or restored["chartIndex"] != order:
+        if (
+            restored["name"] != "evaluation" or restored["chartIndex"] != order
+            or restored.get("folded", False)
+        ):
             raise RuntimeError("SwanLab evaluation layout verification failed")
-
-
-def configure_evaluation_visibility(training_dir, api_key):
-    """将自动视图的旧结果面板和重复标量图移入隐藏分组，保留底层记录。"""
-    identity = json.loads((training_dir / "swanlab.json").read_text(encoding="utf-8"))
-    project_path = identity["url"].split("/@", 1)[1].split("/runs/", 1)[0]
-    retired = {
-        EVALUATION_STEP_METRIC,
-        *EVALUATION_METRICS,
-        *(f"evaluation/{key.rsplit('/', 1)[-1]}" for key in (EVALUATION_STEP_METRIC, *EVALUATION_METRICS)),
-        "evaluation/nll_delta_by_age",
-        "evaluation/capacity",
-        "evaluation/build_seconds_per_trajectory",
-    }
-    with (training_dir.parent / ".swanlab-panels.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        api = swanlab.Api(api_key=api_key)
-
-        def checked(response):
-            if not response.ok:
-                raise RuntimeError(response.errmsg)
-            return response.data
-
-        views_path = f"/views/{project_path}"
-        for row in checked(api._get(views_path, params={"size": 50})):
-            if row["locked"]:
-                continue
-            view = checked(api._get(f"{views_path}/{row['index']}"))
-            if view["viewPermission"] != "WRITE":
-                continue
-            sections_path = f"/sections/{project_path}/{view['index']}"
-            charts_path = f"/charts/{project_path}/{view['index']}"
-            sections = checked(api._get(sections_path, params={"size": 100}))
-            hidden = None
-            for section in sections:
-                if section["name"] not in {"evaluation", EVALUATION_VIEW_NAME}:
-                    continue
-                for index in section["chartIndex"]:
-                    chart = checked(api._get(f"{charts_path}/xxxxxx/{index}"))
-                    columns = chart["config"]["yAxis"] if chart["type"] == "LINE" else chart["config"]["keys"]
-                    keys = {column["key"] for column in columns}
-                    if not keys or not keys.issubset(retired):
-                        continue
-                    if hidden is None:
-                        hidden = checked(
-                            api._get(f"{sections_path}/protected", params={"type": "HIDDEN"})
-                        )["index"]
-                    checked(
-                        api._post(
-                            f"{charts_path}/{section['index']}/{index}/move",
-                            data={"index": hidden},
-                        )
-                    )
+        return {
+            "name": "evaluation",
+            "index": default_view,
+            "url": (
+                f"{identity['url'].split('/@', 1)[0]}/@{project_path}/v1/{default_view}"
+                f"/runs/{identity['id']}/chart"
+            ),
+        }
 
 
 def evaluation_training_run(training_dir, api_key):
@@ -523,58 +500,30 @@ def evaluation_tracking_run(training_dir, api_key):
         tracking.finish(state="success")
 
 
-def verify_evaluation_publication(training_dir, metrics, media_keys, step, api_key):
-    """确认本次标量与图表已上传后，才能保存成功发布记录。"""
+def verify_evaluation_publication(training_dir, media_keys, step, api_key):
+    """确认汇总图和各 checkpoint 热图已上传，才能保存成功发布记录。"""
     identity = json.loads((training_dir / "swanlab.json").read_text(encoding="utf-8"))
     project_path = identity["url"].split("/@", 1)[1].split("/runs/", 1)[0]
     for attempt in range(5):
         remote = swanlab.Api(api_key=api_key).run(f"{project_path}/{identity['id']}")
-        scalars = remote.summary(keys=list(metrics))
         media = {
             item["key"]: item
             for item in remote.medias(keys=list(media_keys), step=step)["list"]
         }
         missing = [
-            key
-            for key, expected in metrics.items()
-            if key not in scalars
-            or scalars[key]["step"] != step
-            or not math.isclose(scalars[key]["value"], expected, rel_tol=1e-6, abs_tol=1e-8)
-        ]
-        missing.extend(
-            key
-            for key in media_keys
+            key for key in media_keys
             if key not in media
-            or not any(
-                item["index"] == step and item["items"] for item in media[key]["metrics"]
-            )
-        )
+            or not any(item["index"] == step and item["items"] for item in media[key]["metrics"])
+        ]
         if not missing and remote.state == "FINISHED":
             return
         if attempt < 4:
             time.sleep(2)
     raise RuntimeError(
         f"SwanLab publication verification failed at step {step}: "
-        f"state={remote.state}, missing or mismatched metrics={missing}. "
+        f"state={remote.state}, missing media={missing}. "
         "Cached evaluation results are retained; rerun the same evaluation to publish them."
     )
-
-
-def evaluation_scalars(summary):
-    """最终质量按题平均，容量和构建耗时按轨迹平均。"""
-    return {
-        EVALUATION_STEP_METRIC: summary["metadata"]["global_step"],
-        **{
-            f"checkpoint_comparison/overall_{metric}": summary["quality"]["all"][metric]
-            for metric in ("nll", "em", "f1")
-        },
-        **{
-            f"checkpoint_comparison/{metric}": summary["capacity"][metric]
-            for metric in ("final_slots", "mean_slots")
-        },
-        "checkpoint_comparison/mean_build_seconds": summary["costs"]["build_seconds"]
-        / summary["trajectories"],
-    }
 
 
 @contextmanager
@@ -790,111 +739,156 @@ def _introduction_nll_chart(method, introduction, overall):
     return chart
 
 
-def _evaluation_statistics_table(summary, title):
-    rows = (
-        ("最终记忆容量", summary["capacity"]["final_slots"], "slots"),
-        ("平均记忆容量", summary["capacity"]["mean_slots"], "slots"),
-        (
-            "平均记忆构建耗时",
+def _checkpoint_label(summary):
+    metadata = summary["metadata"]
+    return (
+        f"{summary['stage']} · stage step {metadata['stage_step']} "
+        f"· global step {metadata['global_step']}"
+    )
+
+
+def _checkpoint_color(summary):
+    """颜色只取决于方法和真实 step，补评其他 checkpoint 时保持不变。"""
+    identity = f"{summary['method']}:{summary['metadata']['global_step']}"
+    hue = int.from_bytes(sha256(identity.encode()).digest()[:4], "big") / 2**32
+    channels = hsv_to_rgb(hue, 0.65, 0.75)
+    return "#" + "".join(f"{round(channel * 255):02x}" for channel in channels)
+
+
+def _evaluation_quality_chart(summaries, metric, introduction_steps):
+    labels = [str(step) for step in introduction_steps] + ["总体"]
+    chart = swanlab.echarts.Line().add_xaxis(labels)
+    for summary in summaries:
+        introduction = summary["quality"]["by_introduction"]
+        rows = [introduction.get(str(step)) for step in introduction_steps]
+        rows.append(summary["quality"]["all"])
+        color = _checkpoint_color(summary)
+        chart.add_yaxis(
+            _checkpoint_label(summary),
+            [row[metric] if row is not None else None for row in rows],
+            color=color,
+            is_symbol_show=True,
+            symbol="circle",
+            symbol_size=6,
+            label_opts={"show": False},
+            linestyle_opts={"color": color, "width": 2},
+            itemstyle_opts={"color": color},
+        )
+    name = metric.upper()
+    chart.set_global_opts(
+        tooltip_opts={"trigger": "axis"},
+        legend_opts={"type": "scroll", "top": 28},
+        xaxis_opts={"name": "QA 首次引入段", "type": "category"},
+        yaxis_opts={"name": name, "min": 0, **({"max": 1} if metric != "nll" else {})},
+    )
+    chart.options["title"] = {
+        "text": f"最终压缩后 {name}",
+        "left": "center",
+        "top": 0,
+        "textStyle": {"fontSize": 14},
+    }
+    chart.options["grid"] = {"top": 85, "bottom": 60, "left": 65, "right": 100}
+    return chart
+
+
+def _evaluation_statistics_table(summaries):
+    headers = (
+        "阶段", "阶段 step", "累计 step", "QA 数", "NLL", "EM", "F1",
+        "最终 slots", "平均 slots", "构建秒 / 轨迹",
+    )
+    body = []
+    for summary in summaries:
+        metadata = summary["metadata"]
+        quality = summary["quality"]["all"]
+        values = (
+            metadata["stage_step"], metadata["global_step"], quality["questions"],
+            quality["nll"], quality["em"], quality["f1"],
+            summary["capacity"]["final_slots"], summary["capacity"]["mean_slots"],
             summary["costs"]["build_seconds"] / summary["trajectories"],
-            "秒 / 轨迹",
-        ),
-    )
-    body = "".join(
-        f"<tr><th scope='row'>{escape(label)}</th>"
-        f"<td class='number'>{escape(f'{value:.6g}')}</td><td>{escape(unit)}</td></tr>"
-        for label, value, unit in rows
-    )
+        )
+        cells = "".join(
+            f"<td class='number'>{escape(str(value) if isinstance(value, int) else format(value, '.6g'))}</td>"
+            for value in values
+        )
+        body.append(f"<tr><th scope='row'>{escape(summary['stage'])}</th>{cells}</tr>")
+    head = "".join(f"<th>{escape(label)}</th>" for label in headers)
+    title = "Checkpoint 评估统计"
     return swanlab.Html(
         "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
         f"<title>{escape(title)}</title>"
         "<style>body{font:14px system-ui,sans-serif;margin:20px;color:#222}"
-        "h1{font-size:15px;margin:0 0 16px}table{border-collapse:collapse;width:100%}"
-        "th,td{padding:10px 12px;border-bottom:1px solid #ddd;text-align:left}"
+        "h1{font-size:15px;margin:0 0 16px}.table-wrap{overflow-x:auto}"
+        "table{border-collapse:collapse;width:100%}"
+        "th,td{padding:10px 12px;border-bottom:1px solid #ddd;white-space:nowrap;text-align:left}"
         "thead th{background:#f5f5f5}tbody th{font-weight:normal}"
         ".number{font-variant-numeric:tabular-nums;text-align:right}"
         "p{font-size:12px;color:#666}</style></head><body>"
-        f"<h1>{escape(title)}</h1><table><thead><tr><th>指标</th>"
-        "<th class='number'>数值</th><th>单位</th></tr></thead>"
-        f"<tbody>{body}</tbody></table><p>容量与构建耗时均按轨迹平均。</p></body></html>",
+        f"<h1>{escape(title)}</h1><div class='table-wrap'><table><thead><tr>{head}</tr></thead>"
+        f"<tbody>{''.join(body)}</tbody></table></div>"
+        "<p>质量按题平均；容量与构建耗时按轨迹平均。所有 checkpoint 按累计 step 排序。</p>"
+        "</body></html>",
         caption=title,
     )
 
 
-def evaluation_media(summary):
-    """展示当前 checkpoint 的最终质量、动态保留热图及资源统计。"""
-    method = summary["method"]
-    color = METHOD_COLORS[method]
-    introduction = summary["quality"]["by_introduction"]
-    steps = sorted(introduction, key=int)
-    labels = [str(step) for step in steps] + ["总体"]
-    rows = [introduction[step] for step in steps] + [summary["quality"]["all"]]
-    section = "dev" if summary["split"] == "dev" else "evaluation"
-    values = {
-        f"{section}/nll": _introduction_nll_chart(
-            method,
-            {step: row["nll"] for step, row in introduction.items()},
-            summary["quality"]["all"]["nll"],
-        )
+def evaluation_panel_types(summaries):
+    """最终评估的完整面板顺序：质量合图、统计表、逐 checkpoint 热图。"""
+    return {
+        **EVALUATION_MEDIA_TYPES,
+        **{
+            f"evaluation/nll_retention/step_{summary['metadata']['global_step']}": "ECHARTS"
+            for summary in sorted(summaries, key=lambda row: row["metadata"]["global_step"])
+            if summary["method"] in DYNAMIC_METHODS
+        },
     }
-    if summary["split"] == "test":
-        chart = swanlab.echarts.Bar().add_xaxis(labels)
-        for index, metric in enumerate(("em", "f1")):
-            chart.add_yaxis(
-                metric.upper(),
-                [row[metric] for row in rows],
-                yaxis_index=0,
-                label_opts={"show": False},
-                itemstyle_opts={"color": _shade(color, index, 2)},
-            )
-        chart.set_global_opts(
-            tooltip_opts={"trigger": "axis"},
-            legend_opts={"top": 0},
-            xaxis_opts={"name": "QA 首次引入段"},
-            yaxis_opts={"name": "EM / F1", "min": 0, "max": 1},
-        )
-        values[f"{section}/em_f1"] = chart
-    if method in DYNAMIC_METHODS:
-        retention = summary["nll_retention"]
-        count = max(cell["read_step"] for cell in retention["cells"])
-        axis = [str(step) for step in range(1, count + 1)]
+
+
+def evaluation_media(summaries):
+    """合并全部 checkpoint 的最终质量；动态热图共享坐标域和色阶并逐张展开。"""
+    summaries = sorted(summaries, key=lambda row: row["metadata"]["global_step"])
+    introduction_steps = sorted(
+        {int(step) for summary in summaries for step in summary["quality"]["by_introduction"]}
+    )
+    values = {
+        f"evaluation/{metric}": _evaluation_quality_chart(summaries, metric, introduction_steps)
+        for metric in ("nll", "em", "f1")
+    }
+    values["evaluation/statistics"] = _evaluation_statistics_table(summaries)
+    dynamic = [summary for summary in summaries if summary["method"] in DYNAMIC_METHODS]
+    if not dynamic:
+        return values
+    cells = [cell for summary in dynamic for cell in summary["nll_retention"]["cells"]]
+    axis = [str(step) for step in range(1, max(cell["read_step"] for cell in cells) + 1)]
+    maximum = max(cell["nll"] for cell in cells)
+    color = METHOD_COLORS[dynamic[0]["method"]]
+    for summary in dynamic:
         chart = swanlab.echarts.HeatMap().add_xaxis(axis)
         chart.add_yaxis(
-            method,
+            "NLL",
             axis,
             [
                 [cell["read_step"] - 1, cell["introduced_at"] - 1, cell["nll"]]
-                for cell in retention["cells"]
+                for cell in summary["nll_retention"]["cells"]
             ],
             label_opts={"show": False},
         )
         chart.set_global_opts(
+            legend_opts={"show": False},
             xaxis_opts={"name": "已读来源段", "type": "category"},
             yaxis_opts={"name": "问题引入段", "type": "category"},
             visualmap_opts={
                 "min": 0,
-                "max": max(cell["nll"] for cell in retention["cells"]),
+                "max": maximum,
                 "orient": "horizontal",
                 "bottom": 0,
                 "inRange": {"color": [_shade(color, 1, 2), color]},
             },
         )
-        values[f"{section}/nll_retention"] = chart
-    metadata = summary.get("metadata", {})
-    title = f"{method} · {summary['split']} 统计"
-    if summary["split"] == "test" and "checkpoint" in metadata:
-        title = (
-            f"{summary['stage']} · stage step {metadata['stage_step']} "
-            f"· global step {metadata['global_step']}"
-        )
-        for chart in values.values():
-            chart.options["title"] = {
-                "text": title,
-                "left": "center",
-                "top": 0,
-                "textStyle": {"fontSize": 12},
-            }
-            for legend in chart.options["legend"]:
-                legend["top"] = 24
-    values[f"{section}/statistics"] = _evaluation_statistics_table(summary, title)
+        chart.options["title"] = {
+            "text": _checkpoint_label(summary),
+            "left": "center",
+            "top": 0,
+            "textStyle": {"fontSize": 12},
+        }
+        values[f"evaluation/nll_retention/step_{summary['metadata']['global_step']}"] = chart
     return values

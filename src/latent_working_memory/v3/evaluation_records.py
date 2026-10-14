@@ -105,6 +105,10 @@ class EvaluationHistory:
         path = self.output_dir / "swanlab-publication.json"
         return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
+    def report_publication(self):
+        with self._index() as index:
+            return index.get("publication")
+
     def published_summaries(self):
         """读取已有发布记录的本地结果，返回各自的输出目录和 summary。"""
         with self._index() as index:
@@ -133,12 +137,12 @@ class EvaluationHistory:
             fcntl.flock(lock, fcntl.LOCK_EX)
             yield
 
-    def record_publication(self, publication):
+    def record_report_publication(self, publication, checkpoints):
+        """同一份累计报告的发布状态与各 checkpoint 记录一并登记。"""
         with self._index() as index:
-            entry = next(
-                row
-                for row in index["checkpoints"]
-                if row["checkpoint"] == publication["checkpoint"]
-            )
-            _save_json(self.output_dir / "swanlab-publication.json", publication)
-            entry["publication_step"] = publication["publication_step"]
+            entries = {row["checkpoint"]: row for row in index["checkpoints"]}
+            for checkpoint in checkpoints:
+                entry = entries[checkpoint["checkpoint"]]
+                _save_json(Path(entry["summary"]).parent / "swanlab-publication.json", checkpoint)
+                entry["publication_step"] = publication["publication_step"]
+            index["publication"] = publication
