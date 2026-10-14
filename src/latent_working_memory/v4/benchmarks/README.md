@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261014 11:16:01 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261014 16:34:33 Asia/Shanghai（UTC+08:00）
 
 ## 1. 数据位置与评估协议
 
@@ -20,80 +20,53 @@
 
 ## 2. 手动准备数据
 
-先安装项目锁定依赖；RULER 准备程序使用本项目的 Python 环境，无需安装其推理服务框架。
+- 下载与生成使用独立入口，均从项目根目录执行，无需 GPU。
+- 先安装系统 `git`、`git-lfs`、`curl`，再执行 `uv sync --frozen` 安装项目锁定依赖；脚本不自动安装依赖。
 
 ```bash
 uv sync --frozen
+bash src/latent_working_memory/v4/scripts/download_benchmarks.sh --benchmark all
 ```
 
-### RULER v1
+**原始数据下载：[download_benchmarks.sh](../scripts/download_benchmarks.sh)**
 
-固定采用 [NVIDIA/RULER](https://github.com/NVIDIA/RULER/tree/c3f5e3b4f87f97e048793bb510a3a6b19a46bf3a) 的 v1 生成代码。系统需安装 `git-lfs` 和 `curl`；`english_words.json` 由 Git LFS 管理，用于 CWE 任务。下载源代码和所需的 essay、SQuAD、HotpotQA 素材：
+- RULER 固定采用 [NVIDIA/RULER v1 源码](https://github.com/NVIDIA/RULER/tree/c3f5e3b4f87f97e048793bb510a3a6b19a46bf3a)，下载 essay、SQuAD、HotpotQA、CWE 词表及 NLTK 分词资源；不加载 tokenizer，不生成样本。
+- LoCoMo 下载 [官方正式数据](https://github.com/snap-research/locomo/tree/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376)，下载后可直接评估，无需额外构造脚本。
+
+| 参数 | 填法与默认值 |
+|---|---|
+| `--benchmark` | `all`、`ruler` 或 `locomo`，默认 `all` |
+| `--data-root` | LoCoMo 数据父目录，默认 `data/benchmarks`；写入 `locomo/locomo10.json` |
+| `--ruler-source-dir` | RULER 官方源码及下载素材目录，默认 `data/raw/ruler-v1-source` |
+
+- 已下载素材和已有 LoCoMo 文件直接复用。只下载其中一个 benchmark 时，将 `--benchmark all` 改为 `ruler` 或 `locomo`。
+
+**RULER 样本生成：[generate_ruler.sh](../scripts/generate_ruler.sh)**
+
+- 使用上述已下载素材，调用官方生成器构造全部 13 项任务；仅加载 tokenizer，在 CPU 上控制文本长度。
 
 ```bash
-mkdir -p data/raw data/benchmarks/ruler-v1
-git clone --no-checkout https://github.com/NVIDIA/RULER.git data/raw/ruler-v1-source
-git -C data/raw/ruler-v1-source lfs install --local
-git -C data/raw/ruler-v1-source checkout c3f5e3b4f87f97e048793bb510a3a6b19a46bf3a
-git -C data/raw/ruler-v1-source lfs pull --include="scripts/data/synthetic/json/english_words.json"
-uv run --frozen python -m nltk.downloader punkt punkt_tab
-
-benchmark_project_dir="$PWD"
-(
-  cd data/raw/ruler-v1-source/scripts/data/synthetic/json
-  uv run --frozen --project "$benchmark_project_dir" python download_paulgraham_essay.py
-  curl -fL https://rajpurkar.github.io/SQuAD-explorer/dataset/dev-v2.0.json -o squad.json
-  curl -fL https://huggingface.co/datasets/namlh2004/hotpotqa/resolve/7e54db4656209750ff487f6fdf8e39a66dba136b/hotpot_dev_distractor_v1.json -o hotpotqa.json
-)
+bash src/latent_working_memory/v4/scripts/generate_ruler.sh \
+  --model-path "$HOME/models/Qwen3-4B-Instruct-2507" \
+  --lengths 8192 16384 32768 \
+  --num-samples 100 --seed 42
 ```
 
-使用训练时相同的 tokenizer 生成固定样本，默认每个长度、每项任务 100 条，seed 为 42：
+| 参数 | 填法与默认值 |
+|---|---|
+| `--ruler-source-dir` | 已下载的 RULER 源码及素材目录，默认 `data/raw/ruler-v1-source` |
+| `--output-dir` | 生成样本的根目录，默认 `data/benchmarks/ruler-v1` |
+| `--model-path` | 与训练一致的 tokenizer 来源；本地路径或 HF repo ID，默认 `~/models/Qwen3-4B-Instruct-2507` |
+| `--lengths` | 空格分隔的长度列表，默认 `8192 16384 32768` |
+| `--num-samples` | 每个长度、每项任务的样本数，默认 `100` |
+| `--seed` | 样本生成的随机种子，默认 `42` |
 
-```bash
-benchmark_model_path="$HOME/models/Qwen3-4B-Instruct-2507"
-benchmark_template_overhead="$(uv run --frozen python - "$benchmark_model_path" <<'PY'
-import sys
-from transformers import AutoTokenizer
-
-tokenizer = AutoTokenizer.from_pretrained(sys.argv[1])
-chat_tokens = tokenizer.apply_chat_template(
-    [{"role": "user", "content": ""}],
-    tokenize=True, add_generation_prompt=True, enable_thinking=False,
-)
-# 官方 --prepare_for_ns 会再次减去 base 模板本身的 token 数。
-print(len(chat_tokens) - len(tokenizer.tokenize("{task_template}")))
-PY
-)"
-
-for length in 8192 16384 32768; do
-  for task in niah_single_1 niah_single_2 niah_single_3 \
-    niah_multikey_1 niah_multikey_2 niah_multikey_3 \
-    niah_multivalue niah_multiquery vt cwe fwe qa_1 qa_2; do
-    uv run --frozen python data/raw/ruler-v1-source/scripts/data/prepare.py \
-      --save_dir "data/benchmarks/ruler-v1/$length" \
-      --benchmark synthetic --task "$task" --subset test \
-      --tokenizer_path "$benchmark_model_path" --tokenizer_type hf \
-      --max_seq_length "$((length - benchmark_template_overhead))" \
-      --model_template_type base --prepare_for_ns \
-      --num_samples 100 --random_seed 42
-  done
-done
-```
-
-- `<length>` 表示完整输入与该任务生成预算的总长度上限；上述指令预留 chat template 开销，官方生成器另行预留任务的输出预算。
-- 官方生成器将 `answer_prefix` 单独保存；评估只读取 `input`，不把它拼回 prompt。多值／多 query 任务保持一条输入、一次回答。
-- 所有比较方法应使用同一批生成样本；更换 tokenizer 或生成设置后，应重新生成到独立目录，并以 `--data-dir` 选择。
-
-### LoCoMo
-
-直接下载 [官方正式数据](https://github.com/snap-research/locomo/tree/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376)，无需额外构造样本：
-
-```bash
-mkdir -p data/benchmarks/locomo
-curl -fL \
-  https://raw.githubusercontent.com/snap-research/locomo/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376/data/locomo10.json \
-  -o data/benchmarks/locomo/locomo10.json
-```
+- 相对目录以项目根目录为准；路径含空格时加双引号。更换下载目录时，生成阶段须传入相同的 `--ruler-source-dir`。
+- 已有 RULER 长度目录拒绝覆盖；更换 tokenizer 或生成设置时，用新的 `--output-dir` 保存样本，复用原素材。
+- RULER 的 `<length>` 表示完整输入与该任务生成预算的总长度上限；脚本预留 chat template 开销，官方生成器另行预留输出预算。
+- 官方生成器将 `answer_prefix` 单独保存；评估只读取 `input`，不拼回该前缀。多值／多 query 任务保持一条输入、一次回答。
+- 所有比较方法应使用同一批生成样本。评估自定义位置时，`--data-dir` 指向 RULER 的 `--output-dir` 或 LoCoMo 的 `<data-root>/locomo`。
+- 完整参数分别执行 `bash src/latent_working_memory/v4/scripts/download_benchmarks.sh --help` 与 `bash src/latent_working_memory/v4/scripts/generate_ruler.sh --help`。
 
 ## 3. 运行评估与查看结果
 
@@ -110,6 +83,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
   --checkpoint artifacts/v4/<run-id>/train/conditioned-m32/checkpoints/global_step_N
 ```
 
+- 独立评估统一使用 `--evaluate-only`；`--benchmark` 默认 `null`，不传时执行 QASPER test，显式传入 `ruler` 或 `locomo` 时执行本节的 benchmark 评估。
 - `--data-dir` 可覆盖表中的 benchmark 根目录；RULER 指向包含各长度子目录的目录，LoCoMo 指向包含 `locomo10.json` 的目录。
 - 模型、revision、tokenizer 和 memory 权重取自 checkpoint；只需选择一张 GPU。
 - 默认产物位于原实验的 `eval/<method-dir>/ruler/` 或 `eval/<method-dir>/locomo/`，保存逐题预测与汇总。重跑时用 `--output-dir` 指定新目录。

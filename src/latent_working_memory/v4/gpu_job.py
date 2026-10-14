@@ -74,8 +74,13 @@ def parse_args(argv=None):
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument("--resume", action="store_true", help="按原配置恢复训练")
     actions.add_argument("--generate-only", action="store_true", help="从 checkpoint 生成单条文本")
-    actions.add_argument("--evaluate-only", action="store_true", help="从 checkpoint 评估 test 或 benchmark")
-    parser.add_argument("--benchmark", choices=("ruler", "locomo"), help="独立评估的 benchmark")
+    actions.add_argument(
+        "--evaluate-only", action="store_true", help="从 checkpoint 评估 QASPER test 或 benchmark"
+    )
+    parser.add_argument(
+        "--benchmark", choices=("ruler", "locomo"), default=None,
+        help="评估数据；默认 null（不传时评估 QASPER test）",
+    )
     parser.add_argument("--lengths", type=positive_count, nargs="+", help="RULER 输入与生成预算的总长度列表")
     parser.add_argument("--checkpoint", type=Path, help="global_step_<step> 目录")
     parser.add_argument("--config", type=Path, help=f"训练预设，默认 {DEFAULT_CONFIG}")
@@ -118,11 +123,16 @@ def parse_args(argv=None):
     parser.add_argument(
         "--output-dir", type=Path, help="评估结果目录，默认 <series>/eval/<method-dir>/<test或benchmark>"
     )
-    parser.add_argument("--max-new-tokens", type=positive_count, help="生成 token 上限，默认 128")
+    parser.add_argument(
+        "--max-new-tokens", type=positive_count,
+        help="单条生成或 QASPER test 的生成 token 上限，默认 128",
+    )
     args = parser.parse_args(argv)
     if args.resume or args.generate_only or args.evaluate_only:
         if args.checkpoint is None:
-            parser.error("--resume, --generate-only and --evaluate-only require --checkpoint")
+            parser.error(
+                "--resume, --generate-only and --evaluate-only require --checkpoint"
+            )
         supplied = [
             name
             for name in TRAINING_OPTIONS
@@ -296,19 +306,20 @@ def run_job(args):
         ]
     elif args.evaluate_only:
         action = "evaluate"
-        evaluation_name = f"{args.benchmark}-evaluation" if args.benchmark else "evaluation"
+        evaluation_name = f"{args.benchmark}-evaluation" if args.benchmark is not None else "evaluation"
         result_path = plan / f"{evaluation_name}-result.json"
         log_path = plan / f"{evaluation_name}.log"
         destination = (
             args.output_dir.expanduser().resolve()
             if args.output_dir is not None
-            else output.parent.parent / "eval" / output.name / (args.benchmark or "test")
+            else output.parent.parent / "eval" / output.name
+            / (args.benchmark if args.benchmark is not None else "test")
         )
         command += [
             "-m",
             (
                 "latent_working_memory.v4.benchmarks.evaluate"
-                if args.benchmark
+                if args.benchmark is not None
                 else "latent_working_memory.v4.evaluate"
             ),
             "--checkpoint",
@@ -318,7 +329,7 @@ def run_job(args):
             "--device",
             "cuda",
         ]
-        if args.benchmark:
+        if args.benchmark is not None:
             command += ["--benchmark", args.benchmark]
             if args.lengths is not None:
                 command += ["--lengths", *(str(length) for length in args.lengths)]

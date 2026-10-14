@@ -2,15 +2,15 @@
 
 创建时间：20261013 10:12:17 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261014 11:02:52 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261014 16:34:33 Asia/Shanghai（UTC+08:00）
 
-使用 [run.sh](run.sh) 启动训练、恢复、独立评估或单条生成。模型与训练目标见 [v4 说明](../README.md)，默认配置见 [experiment.json](../../../../configs/v4/attention_matching/experiment.json)。以下命令均从项目根目录执行。
+使用 [run.sh](run.sh) 启动训练、恢复、QASPER test、benchmark 评估或单条生成。模型与训练目标见 [v4 说明](../README.md)，默认配置见 [experiment.json](../../../../configs/v4/attention_matching/experiment.json)。以下命令均从项目根目录执行。
 
 ## 1. 准备环境、模型与数据
 
 - 使用与 v3 共用的根 `.venv/`，依赖由 `pyproject.toml` 和 `uv.lock` 管理；执行 `uv sync --frozen` 安装环境。默认依赖组为 `cuda124`，使用 Python 3.11、PyTorch 2.6.0、Transformers 4.57.6 和 verl 0.8.0。
-- 模型预设为 `~/models/Qwen3-4B-Instruct-2507`；本地路径支持 `~`。可用 `--model-path` 覆盖，或在 JSON 中设置 HF repo ID 和固定 `revision`。
-- `training.dataset_dir` 默认 `data/delta-mem-qasper`，固定读取其中的 `train.jsonl`、`dev.jsonl`、`test.jsonl`；`--data-dir` 可在新训练或独立评估时覆盖该目录。数据可从 [ModelScope](https://modelscope.cn/datasets/percyWeeei/latent-working-memory/files) 的 `delta-mem-qasper/` 获取。
+- 模型预设为 `~/models/Qwen3-4B-Instruct-2507`。可用 `--model-path` 覆盖，或在 JSON 中设置 HF repo ID 和固定 `revision`。
+- `training.dataset_dir` 默认 `data/delta-mem-qasper`，固定读取其中的 `train.jsonl`、`dev.jsonl`、`test.jsonl`；`--data-dir` 可在新训练或 QASPER test 评估时覆盖该目录。数据可从 [ModelScope](https://modelscope.cn/datasets/percyWeeei/latent-working-memory/files) 的 `delta-mem-qasper/` 获取。
 - 数据格式、独立 QA 样本及长度上下限见 [v4 数据说明](../README.md#二数据)。划分文件保留全部样本，加载时才筛选；训练和评估均不截断输入。
 - 从本地 raw 构造数据时执行：
 
@@ -31,7 +31,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 ```
 
 - 默认使用物理 GPU 0、1；单卡使用 `--gpus 0` 或 `--gpus 1`。
-- 完成全部训练预算后自动执行最终 test 评估：等待训练进程退出，使用所选 GPU 中的第一张卡，生成上限为 128 tokens；在线结果追加到原 SwanLab run 的 `evaluation/*`。
+- 完成全部训练预算后自动执行最终 QASPER test 评估：等待训练进程退出，使用所选 GPU 中的第一张卡，生成上限为 128 tokens；在线结果追加到原 SwanLab run 的 `evaluation/*`。
 - 显式 CLI 参数覆盖配置。相对数据、输出路径以运行目录为基准；`run.sh` 统一切到项目根目录，因此 JSON 和 CLI 使用相同的路径规则。
 - `--run-id` 是唯一的用户命名入口，未指定时采用上海时间 `YYYYMMDD-HHMMSS`。方法目录自动使用 `<query_mode>-m<num_slots>`，例如 `conditioned-m32`；SwanLab 名称为 `<method-dir>_<run-id>`。
 - 新训练的输出目录由入口派生，写入运行配置；预设 JSON 无需设置 `output_dir`。不覆盖已有运行目录。
@@ -53,9 +53,9 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - 保留原 `plan/<method-dir>/config.json`、`run.json`、`tokenizer/`、checkpoint，以及在线运行的 `swanlab.json`。checkpoint 须位于原 `<实验系列>/train/<method-dir>/checkpoints/` 下。
 - 恢复新增模块权重、optimizer、加载器状态和各 rank RNG；保存点在完整全局 batch 结束后，每条 QA 样本仍独立初始化记忆。
 - 入口从 `run.json` 读取元数据，训练进程沿用原 `config.json`、检查运行配置一致性并加载 checkpoint；日志追加到 `train.log`。
-- 续训完成全部预算后，同样自动执行最终 test 评估。
+- 续训完成全部预算后，同样自动执行最终 QASPER test 评估。
 
-## 4. 独立 test 评估
+## 4. 独立 QASPER test 评估
 
 为已完成的训练补评估，或以不同生成预算重新评估时，使用最后一个 checkpoint：
 
@@ -77,25 +77,41 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 
 ## 5. Benchmark 评估
 
-按 [benchmark 数据准备说明](../benchmarks/README.md) 手动准备 RULER 或 LoCoMo，然后使用同一 checkpoint 独立评估：
+```bash
+# 下载 benchmarks，支持单独下载
+bash src/latent_working_memory/v4/scripts/download_benchmarks.sh --benchmark all
+
+# 为 RULER 创建实际用于评估的样本
+bash src/latent_working_memory/v4/scripts/generate_ruler.sh \
+  --model-path "~/models/Qwen3-4B-Instruct-2507" \
+  --lengths 8192 16384 32768 \
+  --num-samples 100 \
+  --seed 42
+```
+
+- Benchmark 准备：使用 [download_benchmarks.sh](download_benchmarks.sh) 下载原始数据。LoCoMo 下载后可直接用于评估，RULER 需要进一步生成可用样本。
+- RULER 后处理：使用 [generate_ruler.sh](generate_ruler.sh) 从素材生成样本，默认三个长度（8k，16k，32k）、每长度／任务 100 条。
+- 环境依赖及参数填法见 [benchmark 数据准备说明](../benchmarks/README.md#2-手动准备数据)。
 
 ```bash
+# LoCoMo 评估
+bash src/latent_working_memory/v4/scripts/run.sh \
+  --evaluate-only --benchmark locomo --gpus 0 \
+  --checkpoint artifacts/v4/am-query_20261013/train/conditioned-m32/checkpoints/global_step_N
+
+# RULER 评估
 bash src/latent_working_memory/v4/scripts/run.sh \
   --evaluate-only --benchmark ruler --gpus 0 \
   --checkpoint artifacts/v4/am-query_20261013/train/conditioned-m32/checkpoints/global_step_N \
   --lengths 8192 16384 32768
-
-bash src/latent_working_memory/v4/scripts/run.sh \
-  --evaluate-only --benchmark locomo --gpus 0 \
-  --checkpoint artifacts/v4/am-query_20261013/train/conditioned-m32/checkpoints/global_step_N
 ```
 
-- `--benchmark` 仅用于独立评估；未指定时仍执行第 4 节的 QASPER test 评估。完成训练后自动执行的也是 test。
-- 默认数据目录为 `data/benchmarks/ruler-v1/` 和 `data/benchmarks/locomo/`，可用 `--data-dir` 覆盖；原始格式、准备指令及评分口径见上述说明。
-- RULER 默认评估 8192、16384、32768 三种长度，可用 `--lengths` 调整；LoCoMo 不接受该参数。
+- `--benchmark` 是 benchmark 评估时的必须参数，不传该参数时执行[第 4 节的 QASPER test 评估](#4-独立-qasper-test-评估)。
+- benchmark 默认目录为 `data/benchmarks/<benchmark-name>/`，可用 `--data-dir` 覆盖。
+- `--lengths` 是 RULER 评估专用参数，默认 8192、16384、32768。
 - 每题独立初始化记忆，使用 greedy 生成和各任务规定的生成预算，不接受 `--max-new-tokens` 覆盖。
-- 默认输出 `eval/<method-dir>/ruler/` 或 `eval/<method-dir>/locomo/`；重跑须用 `--output-dir` 指定新目录。
-- 分别记录 `plan/<method-dir>/ruler-evaluation.log`、`ruler-evaluation-result.json` 或对应的 `locomo` 文件。在线结果追加到原训练 run；`--tracking disabled` 仅保存本地。
+- 评估产物：逐题预测和评分汇总保存到 `--output-dir` 指定目录（默认 `eval/<method-dir>/<benchmark-name>/`），运行日志和执行状态分别写入 `plan/<method-dir>/` 目录下的 `<benchmark-name>-evaluation.log` 和 `<benchmark-name>-evaluation-result.json`。
+- 在线结果追加到原训练 run，`--tracking disabled` 仅保存本地。
 
 ## 6. 单条生成
 
@@ -143,7 +159,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 
 - epoch 结束及主动停止时始终验证、保存。仅按 epoch 保存可使用 `--save-every after_each_epoch`。
 - 模型、记忆与局部更新参数直接修改 JSON，见 [v4 配置说明](../README.md#三配置与执行)。
-- 生成与评估必须显式选一张卡。`--resume`、`--generate-only`、`--evaluate-only` 互斥，均须提供 `--checkpoint`。
+- 生成与评估必须显式选一张卡。`--resume`、`--generate-only`、`--evaluate-only` 互斥，均须提供 `--checkpoint`。`--benchmark` 仅用于 `--evaluate-only`，默认 `null`；显式传入时仅接受 `ruler` 或 `locomo`。
 - 完整参数：`bash src/latent_working_memory/v4/scripts/run.sh --help`。
 
 ## 8. 产物与进度
@@ -171,4 +187,4 @@ artifacts/v4/<run-id>/
 
 - 状态文件保存执行命令、GPU 和起止时间；训练与评估分别记录在 `result.json`、`evaluation-result.json`。启动时为 `running`，结束后更新为 `finished`／`stopped`／`failed`，失败时记录原因与子进程退出码。
 - 终端展示简洁的 epoch、step、loss、耗时及显存；完整指标保存在 `metrics.jsonl`。训练与 dev 追加到同一 SwanLab run。
-- 新训练及续训完成后自动执行 test；`--evaluate-only` 和 `--generate-only` 只执行对应动作。
+- 新训练及续训完成后自动执行 QASPER test；`--evaluate-only` 和 `--generate-only` 只执行对应动作。

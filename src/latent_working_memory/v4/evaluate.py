@@ -90,7 +90,7 @@ def evaluate(
             "generation": "greedy; each NLL and generation call starts with independent memory",
             "em_f1": "single-reference QA mean; lowercase, remove ASCII punctuation and English "
             "articles a/an/the, collapse whitespace; token-overlap F1",
-            "benchmark": "document-QA evaluation, not official QASPER multi-reference scoring",
+            "task": "held-out document-QA test with single-reference scoring",
             "write_loss": "teacher-forced path only; average across layers and write events",
         },
         "memory": {
