@@ -2,7 +2,7 @@
 
 创建时间：20261003 21:51:43 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261014 00:37:44 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261014 09:50:06 Asia/Shanghai（UTC+08:00）
 
 冻结基座，在每层维护 latent memory，通过 Attention Matching 局部更新记忆，并由答案 CE 学习如何生成压缩查询和读写记忆。
 
@@ -133,9 +133,10 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 | 场景 | 计算内容 |
 |---|---|
 | 训练中 dev | 答案 token CE，以及局部写入前／后的 AM loss |
-| 独立 test 评估 | 从 checkpoint 计算答案 NLL、greedy 生成的 EM／F1，保存逐题结果及汇总 |
+| 最终 test 评估 | 从 checkpoint 计算答案 NLL、greedy 生成的 EM／F1，保存逐题结果及汇总 |
 | 单条生成 | 从纯文本 prompt 生成，用于查看模型输出，不计算 QA 指标 |
 
+- 统一入口在训练或续训完成全部预算后自动评估最终 checkpoint；等待训练进程退出，再使用所选 GPU 中的第一张卡，默认生成上限为 128 tokens。提前停止或训练失败时不执行 test；已有 checkpoint 可通过 `--evaluate-only` 补评估。
 - NLL 按答案 token 加权，EM／F1 按 QA 平均；EM／F1 使用小写化、去标点及英文冠词、合并空白后的短答评分。这是当前单参考答案协议，不是官方 QASPER 多参考评测。
 - NLL 与生成各自初始化记忆；生成仅接收 prompt，参考答案不进入生成路径。
 - test 沿用固定 prompt 下限及模型窗口上限；生成预算超过剩余窗口时缩至可用长度，记录实际预算，不改变样本筛选。
@@ -146,7 +147,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - 默认在线记录到 `latent-working-memory-v4`，使用与 v3 相同的 `SWANLAB_API_KEY` 配置；`--tracking disabled` 仅保存本地。相关 runs 通过 `group` 关联，`job_type=train`，固定 tags 为 `scope:main`、`method:attention-matching`，数据和研究标签通过配置补充。
 - `--run-id` 标识实验系列；方法目录由 `query_mode` 与 `num_slots` 自动生成，例如 `conditioned-m32`。SwanLab 名称为 `<method-dir>_<run-id>`。
 - train/dev 在同一 run 中按真实 optimizer step 追加原生曲线。`write_loss` 表示更新后的 AM loss，`write_loss_before` 表示更新前；均先按层、再按写入事件平均。
-- 最终评估可追加到原训练 run 的 `evaluation/*`，保留原配置和身份；不创建新 project 或 run。辅助计数与逐题结果保存在本地。
+- 最终评估沿用原训练的在线设置，在同一 run 的 `evaluation/*` 展示 NLL、EM／F1、写入前后 AM loss，保留原配置和身份。辅助计数与逐题结果保存在本地。
 
 | 位置 | 主要产物 |
 |---|---|

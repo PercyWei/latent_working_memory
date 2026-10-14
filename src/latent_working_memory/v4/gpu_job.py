@@ -378,12 +378,27 @@ def run_job(args):
             "finished_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
         },
     )
+    return result
 
 
 def main(argv=None):
     args = parse_args(argv)
     try:
-        run_job(args)
+        result = run_job(args)
+        if not (args.generate_only or args.evaluate_only) and result["complete"]:
+            # 训练子进程已退出；复用独立评估入口，在第一张卡上评估最终 checkpoint。
+            print("训练完成，开始最终 test 评估。", flush=True)
+            run_job(
+                parse_args(
+                    [
+                        "--evaluate-only",
+                        "--gpus",
+                        args.gpus.split(",")[0],
+                        "--checkpoint",
+                        result["checkpoint"],
+                    ]
+                )
+            )
     except subprocess.CalledProcessError as error:
         raise SystemExit(error.returncode) from error
     except KeyboardInterrupt as error:

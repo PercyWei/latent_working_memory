@@ -2,7 +2,7 @@
 
 创建时间：20261013 10:12:17 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261014 00:37:44 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261014 09:50:06 Asia/Shanghai（UTC+08:00）
 
 使用 [run.sh](run.sh) 启动训练、恢复、独立评估或单条生成。模型与训练目标见 [v4 说明](../README.md)，默认配置见 [experiment.json](../../../../configs/v4/attention_matching/experiment.json)。以下命令均从项目根目录执行。
 
@@ -31,10 +31,11 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 ```
 
 - 默认使用物理 GPU 0、1；单卡使用 `--gpus 0` 或 `--gpus 1`。
+- 完成全部训练预算后自动执行最终 test 评估：等待训练进程退出，使用所选 GPU 中的第一张卡，生成上限为 128 tokens；在线结果追加到原 SwanLab run 的 `evaluation/*`。
 - 显式 CLI 参数覆盖配置。相对数据、输出路径以运行目录为基准；`run.sh` 统一切到项目根目录，因此 JSON 和 CLI 使用相同的路径规则。
 - `--run-id` 是唯一的用户命名入口，未指定时采用上海时间 `YYYYMMDD-HHMMSS`。方法目录自动使用 `<query_mode>-m<num_slots>`，例如 `conditioned-m32`；SwanLab 名称为 `<method-dir>_<run-id>`。
 - 新训练的输出目录由入口派生，写入运行配置；预设 JSON 无需设置 `output_dir`。不覆盖已有运行目录。
-- `--stop-after-steps 10` 在绝对 optimizer step 10 停止，执行 dev 验证和 checkpoint 保存，不改变原 epoch 预算。
+- `--stop-after-steps 10` 在绝对 optimizer step 10 停止，执行 dev 验证和 checkpoint 保存，不改变原 epoch 预算；未完成全部预算时不执行 test。
 - `--swanlab-project 项目名` 可覆盖配置中的项目。`group` 依次使用 CLI、配置或 run-id；可重复传入 `--tag study:名称`。默认 QASPER 配置包含 `data:qasper`。
 
 ## 3. 恢复训练
@@ -52,10 +53,11 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - 保留原 `plan/<method-dir>/config.json`、`run.json`、`tokenizer/`、checkpoint，以及在线运行的 `swanlab.json`。checkpoint 须位于原 `<实验系列>/train/<method-dir>/checkpoints/` 下。
 - 恢复新增模块权重、optimizer、加载器状态和各 rank RNG；保存点在完整全局 batch 结束后，每条 QA 样本仍独立初始化记忆。
 - 入口从 `run.json` 读取元数据，训练进程沿用原 `config.json`、检查运行配置一致性并加载 checkpoint；日志追加到 `train.log`。
+- 续训完成全部预算后，同样自动执行最终 test 评估。
 
 ## 4. 独立 test 评估
 
-使用最后一个 checkpoint，在一张 GPU 上评估：
+为已完成的训练补评估，或以不同生成预算重新评估时，使用最后一个 checkpoint：
 
 ```bash
 bash src/latent_working_memory/v4/scripts/run.sh \
@@ -70,6 +72,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - 分别从初始记忆执行答案 NLL 与仅 prompt 的 greedy 生成。生成时仍进行局部 TTT，参考答案仅用于 NLL 和结果评分。
 - `--max-new-tokens` 是生成预算，不是输入筛选条件；实际预算受剩余模型窗口限制。每题保存实际预算与停止原因。
 - 本地输出 `data-statistics.json`、`predictions.jsonl` 和 `summary.json`；汇总包含完整评估配置、NLL／EM／F1、记忆容量及耗时／显存，逐题结果单独保存。评分口径见 [v4 评估说明](../README.md#四评估与记录)。
+- 自动与独立评估共用本节流程。评估失败时查看 `plan/<method-dir>/evaluation.log` 和 `evaluation-result.json`；已完成的训练结果和 checkpoint 保留，无需重新训练。
 - 默认沿用原训练是否在线记录的设置；`--tracking disabled` 仅保存本地。在线评估只向已完成训练的原 run 发布最终 checkpoint 结果，保存 `publication.json`；不改变训练配置或新建 run。
 
 ## 5. 单条生成
@@ -142,6 +145,6 @@ artifacts/v4/<run-id>/
     └── test/                              评估配置、逐题结果、汇总及发布记录
 ```
 
-- 状态文件保存执行命令、GPU 和起止时间；启动时为 `running`，结束后更新为 `finished`／`stopped`／`failed`，失败时记录原因与子进程退出码。
+- 状态文件保存执行命令、GPU 和起止时间；训练与评估分别记录在 `result.json`、`evaluation-result.json`。启动时为 `running`，结束后更新为 `finished`／`stopped`／`failed`，失败时记录原因与子进程退出码。
 - 终端展示简洁的 epoch、step、loss、耗时及显存；完整指标保存在 `metrics.jsonl`。训练与 dev 追加到同一 SwanLab run。
-- 默认只运行请求的动作；训练结束后按第 4 节执行 test 评估，当前没有自动跨运行比较流程。
+- 新训练及续训完成后自动执行 test；`--evaluate-only` 和 `--generate-only` 只执行对应动作。
