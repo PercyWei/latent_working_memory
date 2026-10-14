@@ -2,14 +2,18 @@
 
 import argparse
 from dataclasses import asdict, replace
+import fcntl
 import json
 import math
 import os
 from pathlib import Path
+from queue import Empty, Queue
 import re
 import shlex
+import signal
 import subprocess
 import sys
+import threading
 import time
 
 from latent_working_memory.v3 import job_plan
@@ -23,6 +27,10 @@ from latent_working_memory.v3.config import (
 )
 from latent_working_memory.v3.evaluation_records import EvaluationHistory
 from latent_working_memory.v3.checkpoint import read_checkpoint
+from latent_working_memory.v3.evaluate import (
+    publish_cached_evaluations,
+    validate_evaluation_publication,
+)
 from latent_working_memory.tracking_credentials import swanlab_api_key
 
 
@@ -125,7 +133,10 @@ def parse_args(argv=None):
         "--model-path", help="覆盖预设模型位置，当前预设为 ~/models/Qwen3-4B-Instruct-2507"
     )
     parser.add_argument(
-        "--gpus", type=physical_gpus, default="0,1", help="逗号分隔的物理 GPU 编号，不允许重复"
+        "--gpus",
+        type=physical_gpus,
+        default="0,1",
+        help="逗号分隔且不重复的物理 GPU 编号；训练使用所选卡，--evaluate-only 每卡一个计算进程",
     )
     parser.add_argument(
         "--epochs", type=positive_count, help="覆盖所选阶段的训练轮数，默认沿用预设"
@@ -320,7 +331,7 @@ def training_command(jobs, gpu_count, max_steps, resume=None):
     return command
 
 
-def evaluation_command(args, config_path, checkpoint, output):
+def evaluation_command(args, config_path, checkpoint, output, log_to_swanlab=None):
     command = [
         sys.executable,
         "-m",
@@ -334,7 +345,9 @@ def evaluation_command(args, config_path, checkpoint, output):
         "--device",
         "cuda",
     ]
-    if args.tracking == "online":
+    if log_to_swanlab is None:
+        log_to_swanlab = args.tracking == "online"
+    if log_to_swanlab:
         command.append("--log-to-swanlab")
     return command
 
@@ -490,6 +503,226 @@ def evaluate_checkpoint(args, checkpoint, config_path, environment):
     return summary
 
 
+def _terminate_evaluation_process(process):
+    """回收本调度器启动的进程组，避免中断后留下 GPU worker。"""
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+
+
+def _compute_evaluations(args, tasks, outputs, identities, environment, total):
+    """每张 GPU 固定一个槽位，仅并行计算，不在子进程发布 SwanLab。"""
+    pending = Queue()
+    for task in tasks:
+        pending.put(task)
+    stopping = threading.Event()
+    state_lock = threading.Lock()
+    processes = set()
+    successes, failures = set(), {}
+
+    def worker(gpu):
+        while not stopping.is_set():
+            try:
+                position, checkpoint = pending.get_nowait()
+            except Empty:
+                return
+            output = outputs[checkpoint]
+            stage, global_step = identities[checkpoint]
+            prefix = (
+                f"[evaluation] gpu={gpu} checkpoint={position}/{total} "
+                f"source={stage.name}/{checkpoint.name}"
+            )
+            command = evaluation_command(
+                args, output / "eval.json", checkpoint, output, log_to_swanlab=False
+            )
+            print(f"{prefix} compute started global_step={global_step}", flush=True)
+            print(f"{prefix} $ {shlex.join(command)}", flush=True)
+            try:
+                with (output / "eval.log").open("w", encoding="utf-8") as log:
+                    with state_lock:
+                        if stopping.is_set():
+                            return
+                        process = subprocess.Popen(
+                            command,
+                            env=dict(environment, CUDA_VISIBLE_DEVICES=gpu),
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            bufsize=1,
+                            start_new_session=True,
+                        )
+                        processes.add(process)
+                    try:
+                        for line in process.stdout:
+                            print(f"{prefix} {line}", end="", flush=True)
+                            log.write(line)
+                            log.flush()
+                        code = process.wait()
+                    finally:
+                        if process.poll() is None:
+                            _terminate_evaluation_process(process)
+                        with state_lock:
+                            processes.discard(process)
+                        process.stdout.close()
+                    if code != 0:
+                        raise subprocess.CalledProcessError(code, command)
+            except Exception as error:
+                with state_lock:
+                    failures[checkpoint] = error
+                    completed = len(successes) + len(failures)
+                print(
+                    f"{prefix} compute failed completed={completed}/{len(tasks)} "
+                    f"error={error} log={output / 'eval.log'}",
+                    flush=True,
+                )
+            else:
+                with state_lock:
+                    successes.add(checkpoint)
+                    completed = len(successes) + len(failures)
+                print(
+                    f"{prefix} compute finished completed={completed}/{len(tasks)} "
+                    f"summary={output / 'summary.json'}",
+                    flush=True,
+                )
+
+    threads = []
+    previous_handlers = {
+        signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+
+    try:
+        for gpu in args.gpus.split(",")[:len(tasks)]:
+            thread = threading.Thread(target=worker, args=(gpu,), name=f"v3-eval-gpu-{gpu}")
+            thread.start()
+            threads.append(thread)
+        for thread in threads:
+            thread.join()
+    except BaseException:
+        stopping.set()
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(signum, signal.SIG_IGN)
+        with state_lock:
+            active = list(processes)
+        for process in active:
+            _terminate_evaluation_process(process)
+        for thread in threads:
+            thread.join()
+        raise
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+    return successes, failures
+
+
+def _run_evaluation_locked(args, checkpoints, method_directory, started):
+    identities = {path: checkpoint_evaluation_identity(path) for path in checkpoints}
+    if len({identity[1] for identity in identities.values()}) != len(checkpoints):
+        raise ValueError("different checkpoints cannot share the same global optimizer step")
+    directory = method_directory.parent.parent
+    checkpoints.sort(key=lambda path: identities[path][1])
+    print(
+        f"[evaluation] run={method_directory.name} checkpoints={len(checkpoints)} gpus={args.gpus}",
+        flush=True,
+    )
+    plan_directory = directory / "plan" / method_directory.name
+    config_path = plan_directory / "eval.json"
+    config = resolve_evaluation_config(args, config_path)
+    require_dataset_entries([config.dataset_dir])
+    training_dir = (
+        validate_evaluation_publication(checkpoints) if args.tracking == "online" else None
+    )
+    outputs = {
+        checkpoint: (
+            directory / "eval" / method_directory.name / identities[checkpoint][0].name
+            / checkpoint.name
+        )
+        for checkpoint in checkpoints
+    }
+    successes, tasks = set(), []
+    for position, checkpoint in enumerate(checkpoints, 1):
+        history = EvaluationHistory(outputs[checkpoint], asdict(config))
+        cached = history.cached_summary(checkpoint)
+        if cached is None:
+            tasks.append((position, checkpoint))
+        else:
+            history.record(cached)
+            successes.add(checkpoint)
+            print(
+                f"[evaluation] checkpoint={position}/{len(checkpoints)} "
+                f"source={identities[checkpoint][0].name}/{checkpoint.name} cache ready "
+                f"samples={cached['trajectories']} summary={outputs[checkpoint] / 'summary.json'}",
+                flush=True,
+            )
+    environment = execution_environment(args)
+    plan_directory.mkdir(parents=True, exist_ok=True)
+    save_evaluation_config(config_path, config)
+    print(
+        f"[evaluation] computation started cached={len(successes)} pending={len(tasks)} "
+        f"gpu_slots={min(len(args.gpus.split(',')), len(tasks))}",
+        flush=True,
+    )
+    computed, compute_failures = _compute_evaluations(
+        args, tasks, outputs, identities, environment, len(checkpoints)
+    )
+    successes.update(computed)
+    successful_checkpoints = [checkpoint for checkpoint in checkpoints if checkpoint in successes]
+    summaries = [str(outputs[checkpoint] / "summary.json") for checkpoint in successful_checkpoints]
+    result_path = plan_directory / "result.json"
+    if result_path.is_file():
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        for summary in summaries:
+            if summary not in result["summaries"]:
+                result["summaries"].append(summary)
+        save_json(result_path, result)
+    print(
+        f"[evaluation] computation finished success={len(successes)}/{len(checkpoints)} "
+        f"failed={len(compute_failures)}",
+        flush=True,
+    )
+    publication_failures = []
+    if training_dir is not None and successful_checkpoints:
+        print(
+            f"[evaluation] CPU publication started checkpoints={len(successful_checkpoints)}",
+            flush=True,
+        )
+        publication_failures = publish_cached_evaluations(
+            successful_checkpoints,
+            [outputs[checkpoint] for checkpoint in successful_checkpoints],
+            config,
+            training_dir,
+        )
+        for checkpoint, error in publication_failures:
+            print(
+                f"[evaluation] publication failed source={checkpoint.parent.parent.name}"
+                f"/{checkpoint.name} error={error}",
+                flush=True,
+            )
+    status = "failed" if compute_failures or publication_failures else "finished"
+    print(
+        f"[evaluation] {status} computed={len(successes)}/{len(checkpoints)} "
+        f"compute_failed={len(compute_failures)} publication_failed={len(publication_failures)} "
+        f"elapsed={time.perf_counter() - started:.1f}s",
+        flush=True,
+    )
+    if status == "failed":
+        raise RuntimeError(
+            f"evaluation completed with failures: compute={len(compute_failures)}, "
+            f"publication={len(publication_failures)}; local results and logs are retained"
+        )
+    return {"status": "finished", "summaries": summaries}
+
+
 def run_evaluation(args):
     started = time.perf_counter()
     print("[evaluation] preparing checkpoint list", flush=True)
@@ -510,43 +743,24 @@ def run_evaluation(args):
         checkpoints = [path.resolve() for path in args.checkpoint]
     if len(set(checkpoints)) != len(checkpoints):
         raise ValueError("checkpoint list contains duplicate directories")
-    identities = {path: checkpoint_evaluation_identity(path) for path in checkpoints}
-    stages = {path: identity[0] for path, identity in identities.items()}
-    methods = {stage.parent for stage in stages.values()}
+    methods = {job_plan.checkpoint_stage_directory(path).parent for path in checkpoints}
     if len(methods) != 1:
         raise ValueError("batch evaluation requires checkpoints from the same method run")
     method_directory = next(iter(methods))
-    directory = method_directory.parent.parent
-    checkpoints.sort(key=lambda path: identities[path][1])
-    print(
-        f"[evaluation] run={method_directory.name} checkpoints={len(checkpoints)}",
-        flush=True,
-    )
-    plan_directory = directory / "plan" / method_directory.name
-    config_path = plan_directory / "eval.json"
-    config = resolve_evaluation_config(args, config_path)
-    require_dataset_entries([config.dataset_dir])
-    for checkpoint in checkpoints:
-        output = directory / "eval" / method_directory.name / stages[checkpoint].name / checkpoint.name
-        EvaluationHistory(output, asdict(config)).cached_summary(checkpoint)
-    environment = execution_environment(args)
-    environment["CUDA_VISIBLE_DEVICES"] = args.gpus.split(",")[0]
-    plan_directory.mkdir(parents=True, exist_ok=True)
-    save_evaluation_config(config_path, config)
-    summaries = []
-    for index, checkpoint in enumerate(checkpoints, 1):
-        print(
-            f"[evaluation] checkpoint={index}/{len(checkpoints)} "
-            f"source={stages[checkpoint].name}/{checkpoint.name}",
-            flush=True,
-        )
-        summaries.append(evaluate_checkpoint(args, checkpoint, config_path, environment))
-    print(
-        f"[evaluation] finished checkpoints={len(summaries)}/{len(checkpoints)} "
-        f"elapsed={time.perf_counter() - started:.1f}s",
-        flush=True,
-    )
-    return {"status": "finished", "summaries": summaries}
+
+    def interrupt_evaluation(signum, frame):
+        raise KeyboardInterrupt(f"evaluation interrupted by {signal.Signals(signum).name}")
+
+    with (method_directory / ".evaluation-scheduler.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError(f"another evaluation scheduler is running for {method_directory}")
+        previous_handler = signal.signal(signal.SIGTERM, interrupt_evaluation)
+        try:
+            return _run_evaluation_locked(args, checkpoints, method_directory, started)
+        finally:
+            signal.signal(signal.SIGTERM, previous_handler)
 
 
 def collect_training_result(job):

@@ -1,12 +1,13 @@
 """在最终记忆上统一评估 FactQA；门控题不计入质量指标。"""
 
 import argparse
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext, redirect_stderr, redirect_stdout
 from dataclasses import asdict, replace
 import hashlib
 import json
 import os
 from pathlib import Path
+import sys
 import time
 
 import torch
@@ -40,6 +41,7 @@ from latent_working_memory.v3.tracking import (
     configure_evaluation_visibility,
     evaluation_media,
     evaluation_scalars,
+    evaluation_training_run,
     evaluation_tracking_run,
     experiment_directory,
     tracking_method,
@@ -184,6 +186,37 @@ def _training_run_directory(config, run):
 
 def _append_evaluation(summary, training_dir, output_dir, step, history):
     """发布当前结果，并将此前已发布的缓存结果同步到当前展示布局。"""
+    failures = _append_evaluations([(summary, output_dir, step, history)], training_dir)
+    if failures:
+        raise failures[0][1]
+
+
+class _PublicationLog:
+    """父进程的发布摘要同时写入终端和对应 checkpoint 的评估日志。"""
+
+    def __init__(self, console, log):
+        self.console, self.log = console, log
+
+    @property
+    def encoding(self):
+        return self.console.encoding
+
+    def isatty(self):
+        return False
+
+    def write(self, text):
+        self.log.write(text)
+        return self.console.write(text)
+
+    def flush(self):
+        self.log.flush()
+        self.console.flush()
+
+
+def _append_evaluations(evaluations, training_dir, log_publications=False):
+    """同一方法的选中结果与已有发布历史统一按真实 step 串行处理。"""
+    history = evaluations[0][3]
+    failures = []
     with history.publication_lock():
         summaries = {
             saved["metadata"]["checkpoint"]: (
@@ -194,14 +227,79 @@ def _append_evaluation(summary, training_dir, output_dir, step, history):
             )
             for directory, saved in history.published_summaries()
         }
-        summaries[summary["metadata"]["checkpoint"]] = (summary, output_dir, step, history)
+        for summary, output_dir, step, selected_history in evaluations:
+            summaries[summary["metadata"]["checkpoint"]] = (
+                summary, output_dir, step, selected_history
+            )
         layout = None
         for saved, directory, global_step, saved_history in sorted(
             summaries.values(), key=lambda item: item[2]
         ):
-            layout = _publish_evaluation(
-                saved, training_dir, directory, global_step, saved_history, layout
+            try:
+                with ExitStack() as stack:
+                    if log_publications:
+                        log = stack.enter_context(
+                            (Path(directory) / "eval.log").open("a", encoding="utf-8")
+                        )
+                        stack.enter_context(redirect_stdout(_PublicationLog(sys.stdout, log)))
+                        stack.enter_context(redirect_stderr(_PublicationLog(sys.stderr, log)))
+                    layout = _publish_evaluation(
+                        saved, training_dir, directory, global_step, saved_history, layout
+                    )
+            except Exception as error:
+                checkpoint = Path(saved["metadata"]["checkpoint"])
+                failures.append((checkpoint, error))
+                layout = None
+                print(
+                    f"[evaluation] SwanLab failed checkpoint={checkpoint} "
+                    f"error={type(error).__name__}: {error}",
+                    flush=True,
+                )
+    return failures
+
+
+def validate_evaluation_publication(checkpoints):
+    """在批量计算前检查所有 checkpoint 的原训练身份与云端完成状态。"""
+    directories = set()
+    for path in checkpoints:
+        checkpoint = read_checkpoint(path)
+        raw = checkpoint["run"]["config"]
+        config = ExperimentConfig(
+            ModelConfig(**raw["model"]),
+            ObjectiveConfig(**raw["objective"]),
+            TrainingConfig(**raw["training"]),
+        )
+        directories.add(_training_run_directory(config, checkpoint["run"]))
+        del checkpoint
+    if len(directories) != 1:
+        raise ValueError("batch publication requires checkpoints from one original training run")
+    training_dir = directories.pop()
+    evaluation_training_run(training_dir, swanlab_api_key())
+    return training_dir
+
+
+def publish_cached_evaluations(checkpoints, output_dirs, evaluation_config, training_dir):
+    """读取已完成结果统一发布；不加载模型、不初始化 CUDA、不重新计算 QA。"""
+    evaluations = []
+    failures = []
+    for checkpoint, output in zip(checkpoints, output_dirs, strict=True):
+        try:
+            history = EvaluationHistory(output, asdict(evaluation_config))
+            summary = history.cached_summary(checkpoint)
+            if summary is None:
+                raise ValueError(f"SwanLab publication requires completed local results: {output}")
+            history.record(summary)
+            evaluations.append((summary, Path(output), summary["metadata"]["global_step"], history))
+        except Exception as error:
+            failures.append((Path(checkpoint), error))
+            print(
+                f"[evaluation] SwanLab cache rejected checkpoint={checkpoint} "
+                f"error={type(error).__name__}: {error}",
+                flush=True,
             )
+    if evaluations:
+        failures.extend(_append_evaluations(evaluations, training_dir, log_publications=True))
+    return failures
 
 
 def _publish_evaluation(summary, training_dir, output_dir, step, history, layout=None):
@@ -252,10 +350,11 @@ def _publish_evaluation(summary, training_dir, output_dir, step, history, layout
         configure_evaluation_media_layout(training_dir, media, api_key)
         configure_evaluation_visibility(training_dir, api_key)
         view["default_metrics_hidden"] = True
-    except BaseException:
+    except BaseException as error:
         print(
             f"[evaluation] SwanLab publication failed; cached results retained "
-            f"path={Path(output_dir) / 'summary.json'}",
+            f"path={Path(output_dir) / 'summary.json'} "
+            f"error={type(error).__name__}: {error}",
             flush=True,
         )
         raise

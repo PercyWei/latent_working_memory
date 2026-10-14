@@ -182,7 +182,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | `--method` | 方法名，普通训练必须显式指定，断点恢复与单独评估可省略 |
 | `--mode` | 运行模式，默认 `full`，支持试跑 `smoke` |
 | `--config` | 配置文件地址，默认读取 `configs/v3/` 中的默认配置 |
-| `--gpus` | GPU 序号 |
+| `--gpus` | 物理 GPU 序号；训练使用所选 GPU，单独评估每卡一个计算进程 |
 
 ## 五、评估与产物
 
@@ -196,7 +196,9 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | QA 训练中验证 | FineWeb FactQA dev，评估全部可见 task QA | NLL |
 | 最终评估 | FineWeb FactQA test，评估全部可见 task QA | NLL、EM、F1 |
 
-完整训练默认只评估最后阶段的最后一个 checkpoint。单独评估可用 `--checkpoint` 选择同一方法原 run 的一个或多个 checkpoint，或用 `--eval-run` 指定 `train/<method-dir>/`，评估该方法当前保留的全部 checkpoint；两种入口互斥，均按真实累计 step 排序执行。同一 run 的评估共用 test 配置与 QA 协议，见[单独评估指南](scripts/README.md#22-单独评估)。
+完整训练默认只评估最后阶段的最后一个 checkpoint。单独评估可用 `--checkpoint` 选择同一方法原 run 的一个或多个 checkpoint，或用 `--eval-run` 指定 `train/<method-dir>/`，评估该方法当前保留的全部 checkpoint；两种入口互斥。
+
+单独评估由 `--gpus` 指定计算资源，每张卡一个固定槽位，并行完成各 checkpoint 的计算；全部计算结束后，由父进程按真实累计 step 串行上传。缓存结果和上传不占用 GPU。同一方法 run 同时只运行一个评估调度任务，共用原 `eval.json`、seed 与 QA 协议，GPU 分配不改变选题。单个 checkpoint 计算或上传失败时保留其他成功结果，最后汇总失败并以非零状态退出；重新执行原命令复用已完成结果。命令见[单独评估指南](scripts/README.md#22-单独评估)。
 
 **QA 评估流程**
 
@@ -255,7 +257,7 @@ artifacts/v3/<run-id>/
 | 动态方法的过程保持 | “问题引入段 × 已读段” NLL 热图 |
 | 容量与成本 | 统计表，列出最终／平均 slots、平均记忆构建耗时及单位 |
 
-动态方法固定为三张图、一张表，baseline 为两张图、一张表。多个 checkpoint 共用这些面板，按发布 step 切换版本；标题注明阶段、阶段内 step 和真实累计 step。按 `age` 汇总的相对首次 NLL 变化保存在本地 `summary.json`，供辅助分析。
+动态方法固定为三张图、一张表，baseline 为两张图、一张表。多个 checkpoint 共用这些面板，按发布 step 切换版本；默认显示最近发布的版本，其 checkpoint 不一定是累计 step 最大者。标题注明阶段、阶段内 step 和真实累计 step。已发布且匹配的结果只检查、修复布局，不重复上传以调整默认版本。按 `age` 汇总的相对首次 NLL 变化保存在本地 `summary.json`，供辅助分析。
 
 公共自定义视图 `checkpoint_comparison` 展示四张原生增量曲线：总体 NLL、EM／F1 合图、最终／平均 slots 合图，以及平均记忆构建耗时。横轴固定为 `checkpoint_comparison/checkpoint_step`，表示真实累计训练 step；单 checkpoint 时每条序列有一个点，补评估时追加数据点。发布完成后打印视图链接。SDK 自动生成的单指标图位于隐藏分组，原始标量仍正常记录；更新已有展示时，也将旧容量、耗时和 `age` 面板移入该分组。
 

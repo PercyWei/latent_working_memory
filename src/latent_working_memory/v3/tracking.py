@@ -461,14 +461,13 @@ def configure_evaluation_visibility(training_dir, api_key):
                     )
 
 
-@contextmanager
-def evaluation_tracking_run(training_dir, api_key):
-    """追加评估并保留已完成训练的身份、配置与完成状态。"""
+def evaluation_training_run(training_dir, api_key):
+    """校验原在线训练身份和完成状态，返回可追加评估的云端 run。"""
     identity = json.loads((training_dir / "swanlab.json").read_text(encoding="utf-8"))
     if identity["job_type"] != "train" or identity["mode"] != "online":
         raise ValueError("evaluation append requires an online training run")
     project_path = identity["url"].split("/@", 1)[1].split("/runs/", 1)[0]
-    workspace, project = project_path.split("/")
+    _, project = project_path.split("/")
     if project != identity["project"]:
         raise ValueError("training run URL differs from its project")
     remote = swanlab.Api(api_key=api_key).run(f"{project_path}/{identity['id']}")
@@ -478,6 +477,16 @@ def evaluation_tracking_run(training_dir, api_key):
             f"{identity['url']}. If an earlier evaluation publication changed its state, "
             "confirm training succeeded and restore the completed state before retrying."
         )
+    return remote
+
+
+@contextmanager
+def evaluation_tracking_run(training_dir, api_key):
+    """追加评估并保留已完成训练的身份、配置与完成状态。"""
+    identity = json.loads((training_dir / "swanlab.json").read_text(encoding="utf-8"))
+    project_path = identity["url"].split("/@", 1)[1].split("/runs/", 1)[0]
+    workspace, project = project_path.split("/")
+    remote = evaluation_training_run(training_dir, api_key)
     config = {
         key: item["value"]
         for key, item in sorted(remote.profile["config"].items(), key=lambda pair: pair[1]["sort"])
