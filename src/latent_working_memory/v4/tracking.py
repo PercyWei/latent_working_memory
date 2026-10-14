@@ -1,8 +1,10 @@
 """同一训练 run 的 SwanLab 身份和原生增量指标。"""
 
 from contextlib import contextmanager
+import fcntl
 import json
 from pathlib import Path
+import secrets
 
 import swanlab
 from swanlab.sdk.internal.run.components.config import Config as SwanLabConfig
@@ -90,7 +92,81 @@ def training_tracking(config, run, device, resume=False):
     with tracking:
         if identity is None:
             write_json(identity_path, {**expected, "id": tracking.id, "url": tracking.url})
+        project_path = tracking.url.split("/@", 1)[1].split("/runs/", 1)[0]
+        with (root.parents[2] / ".swanlab-panels.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            api = swanlab.Api(api_key=api_key)
+            configure_write_loss_panels(api, api.run(f"{project_path}/{tracking.id}"))
         yield tracking
+
+
+def configure_write_loss_panels(api, remote):
+    """合并默认视图中的写入前后曲线，删除冗余面板并保留标量数据。"""
+    def checked(response):
+        if not response.ok:
+            raise RuntimeError(response.errmsg)
+        return response.data
+
+    project_path = remote.url.split("/@", 1)[1].split("/runs/", 1)[0]
+    project = checked(api._get(f"/project/{project_path}"))
+    view = project["viewIndex"][0]
+    sections_path = f"/sections/{project_path}/{view}"
+    sections = checked(api._get(sections_path, params={"size": 100}))
+    charts_path = f"/charts/{project_path}/{view}"
+    for split in ("train", "dev"):
+        section = next((row for row in sections if row["name"] == split), None)
+        if section is None:
+            section = checked(
+                api._post(
+                    sections_path,
+                    data={"name": split, "index": secrets.token_hex(3), "position": "above"},
+                )
+            )
+            section["chartIndex"] = []
+        charts = [
+            checked(api._get(f"{charts_path}/xxxxxx/{index}")) for index in section["chartIndex"]
+        ]
+        title = f"{split}/write_loss"
+        before = f"{split}/write_loss_before"
+        names = (before, title)
+        existing = next(
+            (chart for chart in charts if chart["title"] == title and chart["type"] == "LINE"),
+            None,
+        )
+        custom = {}
+        for chart in charts:
+            if chart["type"] == "LINE" and chart["title"] in names:
+                custom.update(chart.get("custom") or {})
+        custom.update((existing or {}).get("custom") or {})
+        for metric, label, color in zip(
+            names, ("写入前", "写入后"), ("#74a9cf", "#2b8cbe"), strict=True
+        ):
+            custom[f"{remote.run_id}-{metric}"] = {
+                "name": f"{remote.name}/{label}",
+                "colors": [color, color],
+            }
+        body = {
+            "type": "LINE",
+            "title": title,
+            "custom": custom,
+            "config": {
+                **((existing or {}).get("config") or {}),
+                "xAxis": {"key": "step", "type": "SYSTEM", "class": "SCALAR"},
+                "yAxis": [
+                    {"key": metric, "type": "FLOAT", "class": "SCALAR"} for metric in names
+                ],
+            },
+        }
+        if existing is None:
+            existing = checked(api._post(f"{charts_path}/{section['index']}", data=body))
+        else:
+            checked(api._put(f"{charts_path}/xxxxxx/{existing['index']}", data=body))
+        for chart in charts:
+            if chart["index"] == existing["index"] or chart["type"] != "LINE":
+                continue
+            keys = {axis["key"] for axis in chart["config"]["yAxis"]}
+            if chart["title"] in names and keys and keys <= set(names):
+                checked(api._delete(f"{charts_path}/{section['index']}/{chart['index']}"))
 
 
 def configure_metrics(tracking, device):
