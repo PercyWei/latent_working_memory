@@ -180,7 +180,16 @@ def _training_run_directory(config, run):
 def _append_evaluation(summary, training_dir, output_dir, step, history):
     with history.publication_lock():
         if history.publication() is not None:
+            print(
+                f"[evaluation] SwanLab already published; skipping global_step={step}",
+                flush=True,
+            )
             return
+        print(
+            f"[evaluation] SwanLab publication started "
+            f"method={summary['method']} stage={summary['stage']} global_step={step}",
+            flush=True,
+        )
         metrics = evaluation_scalars(summary)
         values = {**metrics, **evaluation_media(summary)}
         api_key = swanlab_api_key()
@@ -217,6 +226,11 @@ def _append_evaluation(summary, training_dir, output_dir, step, history):
                 "selection": summary["metadata"].get("selection"),
             },
         )
+        print(
+            f"[evaluation] SwanLab publication finished "
+            f"run_id={identity['id']} global_step={step} publication_step={publication_step}",
+            flush=True,
+        )
 
 
 @torch.no_grad()
@@ -247,7 +261,9 @@ def evaluate(task, trajectories, output_dir, split, max_new_tokens, metadata=Non
             else nullcontext()
         )
         with precision, temporary.open("w", encoding="utf-8") as stream:
-            for trajectory in trajectories:
+            evaluation_started = time.perf_counter()
+            for sample_index, trajectory in enumerate(trajectories, start=1):
+                sample_started = time.perf_counter()
                 qa_ids = [qid for ids in trajectory.task_qa_ids for qid in ids]
                 if not qa_ids:
                     raise ValueError(
@@ -393,6 +409,18 @@ def evaluate(task, trajectories, output_dir, split, max_new_tokens, metadata=Non
                     }
                     for qa in questions
                 )
+                if split == "test":
+                    finished = time.perf_counter()
+                    progress_elapsed = finished - evaluation_started
+                    print(
+                        f"[evaluation] {task.cfg.method}/{task.cfg.stage} "
+                        f"| samples={sample_index}/{len(trajectories)} "
+                        f"| qa={len(questions)} slots={capacity['final_slots']} "
+                        f"| sample={finished - sample_started:.2f}s "
+                        f"| elapsed={progress_elapsed:.2f}s "
+                        f"| avg={progress_elapsed / sample_index:.2f}s/sample",
+                        flush=True,
+                    )
     finally:
         task.train(was_training)
     temporary.replace(directory / "trajectories.jsonl")
@@ -452,6 +480,7 @@ def main(argv=None):
         )
     evaluation_config = load_evaluation(args.config)
     checkpoint_path = Path(args.checkpoint).resolve()
+    print(f"[evaluation] loading checkpoint={checkpoint_path}", flush=True)
     checkpoint = read_checkpoint(checkpoint_path)
     raw = checkpoint["run"]["config"]
     config = ExperimentConfig(
@@ -464,9 +493,15 @@ def main(argv=None):
     )
     stage_step = checkpoint["cursor"]["step"]
     global_step = checkpoint["run"]["step_offset"] + stage_step
+    print(
+        f"[evaluation] checkpoint loaded method={config.objective.method} "
+        f"stage={config.objective.stage} stage_step={stage_step} global_step={global_step}",
+        flush=True,
+    )
     history = EvaluationHistory(Path(args.output_dir), asdict(evaluation_config))
     summary = history.cached_summary(checkpoint_path)
     if summary is None:
+        print(f"[evaluation] loading model device={args.device}", flush=True)
         device = initialize_device(args.device)
         revision = checkpoint["run"]["resolved_model_revision"]
         model_config = (
@@ -475,6 +510,10 @@ def main(argv=None):
         codec, tokenizer = load_codec(model_config, device, config.objective)
         codec.load_trainable_state_dict(checkpoint["trainable"])
         task = TokenMemoryTask(codec, tokenizer, config.objective, qa_seed=evaluation_config.seed)
+        print("[evaluation] model loaded", flush=True)
+        print(
+            f"[evaluation] loading test data={evaluation_config.dataset_dir}", flush=True
+        )
         trajectories = load_factqa(evaluation_config.dataset_dir, tokenizer)["test"]
         _check_qa_sources(trajectories, checkpoint["run"]["pretraining_sources"])
         source_data = dataset_identity(trajectories)
@@ -490,6 +529,11 @@ def main(argv=None):
             evaluation_config.seed,
             "test",
             pretraining=False,
+        )
+        print(
+            f"[evaluation] data ready trajectories={len(trajectories)} "
+            f"retained={retained_trajectories} total={total_trajectories}",
+            flush=True,
         )
         summary = evaluate(
             task,
@@ -518,6 +562,12 @@ def main(argv=None):
                     "seed": evaluation_config.seed,
                 },
             },
+        )
+    else:
+        print(
+            f"[evaluation] reusing cached summary "
+            f"trajectories={summary['trajectories']} path={Path(args.output_dir) / 'summary.json'}",
+            flush=True,
         )
     history.record(summary)
     if training_dir is not None:

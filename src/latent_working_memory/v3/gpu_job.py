@@ -10,6 +10,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 
 from latent_working_memory.v3 import job_plan
 from latent_working_memory.v3.config import (
@@ -444,15 +445,26 @@ def checkpoint_evaluation_identity(checkpoint):
 
 def evaluate_checkpoint(args, checkpoint, config_path, environment):
     """自动评估与补评估共用 checkpoint 目录、配置快照和结果登记。"""
-    stage_directory, _ = checkpoint_evaluation_identity(checkpoint)
+    started = time.perf_counter()
+    stage_directory, global_step = checkpoint_evaluation_identity(checkpoint)
     method_directory = stage_directory.parent
     directory = method_directory.parent.parent
     output = directory / "eval" / method_directory.name / stage_directory.name / checkpoint.name
+    print(
+        f"[evaluation] method={method_directory.name} stage={stage_directory.name} "
+        f"checkpoint={checkpoint.name} global_step={global_step}",
+        flush=True,
+    )
     config = load_evaluation(config_path)
     history = EvaluationHistory(output, asdict(config))
     cached = history.cached_summary(checkpoint)
     if cached is not None:
         history.record(cached)
+        print(
+            f"[evaluation] reusing local result | samples={cached['trajectories']} "
+            f"summary={output / 'summary.json'}",
+            flush=True,
+        )
     if cached is None or args.tracking == "online" and history.publication() is None:
         execute(
             evaluation_command(args, output / "eval.json", checkpoint, output),
@@ -460,6 +472,10 @@ def evaluate_checkpoint(args, checkpoint, config_path, environment):
             output / "eval.log",
             append=cached is not None,
         )
+    elif args.tracking == "online":
+        print("[evaluation] already published to the training run; skipping upload", flush=True)
+    else:
+        print("[evaluation] cached local result ready; tracking disabled", flush=True)
     summary = str(output / "summary.json")
     plan_directory = directory / "plan" / method_directory.name
     result_path = plan_directory / "result.json"
@@ -468,10 +484,17 @@ def evaluate_checkpoint(args, checkpoint, config_path, environment):
         if summary not in result["summaries"]:
             result["summaries"].append(summary)
         save_json(result_path, result)
+    print(
+        f"[evaluation] checkpoint={checkpoint.name} finished "
+        f"elapsed={time.perf_counter() - started:.1f}s summary={summary}",
+        flush=True,
+    )
     return summary
 
 
 def run_evaluation(args):
+    started = time.perf_counter()
+    print("[evaluation] preparing checkpoint list", flush=True)
     if args.eval_run is not None:
         method_directory = args.eval_run.resolve()
         if not method_directory.is_dir():
@@ -497,6 +520,10 @@ def run_evaluation(args):
     method_directory = next(iter(methods))
     directory = method_directory.parent.parent
     checkpoints.sort(key=lambda path: identities[path][1])
+    print(
+        f"[evaluation] run={method_directory.name} checkpoints={len(checkpoints)}",
+        flush=True,
+    )
     plan_directory = directory / "plan" / method_directory.name
     config_path = plan_directory / "eval.json"
     config = resolve_evaluation_config(args, config_path)
@@ -508,10 +535,19 @@ def run_evaluation(args):
     environment["CUDA_VISIBLE_DEVICES"] = args.gpus.split(",")[0]
     plan_directory.mkdir(parents=True, exist_ok=True)
     save_evaluation_config(config_path, config)
-    summaries = [
-        evaluate_checkpoint(args, checkpoint, config_path, environment)
-        for checkpoint in checkpoints
-    ]
+    summaries = []
+    for index, checkpoint in enumerate(checkpoints, 1):
+        print(
+            f"[evaluation] checkpoint={index}/{len(checkpoints)} "
+            f"source={stages[checkpoint].name}/{checkpoint.name}",
+            flush=True,
+        )
+        summaries.append(evaluate_checkpoint(args, checkpoint, config_path, environment))
+    print(
+        f"[evaluation] finished checkpoints={len(summaries)}/{len(checkpoints)} "
+        f"elapsed={time.perf_counter() - started:.1f}s",
+        flush=True,
+    )
     return {"status": "finished", "summaries": summaries}
 
 
