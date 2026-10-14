@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 import pytest
+import torch
 
 from latent_working_memory import tracking_credentials
 from latent_working_memory.v3 import gpu_job, job_plan
@@ -136,10 +137,11 @@ class Commands:
         self.omit_checkpoint = omit_checkpoint
         self.fail_stage = fail_stage
 
-    def __call__(self, command, environment, log_path):
+    def __call__(self, command, environment, log_path, append=False):
         call = {"command": command, "environment": dict(environment), "log_path": log_path}
         self.calls.append(call)
-        log_path.write_text("orchestration test subprocess log\n")
+        with log_path.open("a" if append else "w") as log:
+            log.write("orchestration test subprocess log\n")
         if self.fail_at == len(self.calls):
             raise subprocess.CalledProcessError(7, command)
         if "latent_working_memory.v3.train" in command:
@@ -159,18 +161,32 @@ class Commands:
                 output = Path(config.training.output_dir)
                 (output / "checkpoints").mkdir(parents=True)
                 (output / "config.json").write_text(json.dumps(config.to_dict()))
-                (output / "run.json").write_text(json.dumps({"config": config.to_dict()}))
                 steps = (
                     int(value(command, "--stop-after-steps"))
                     if "--stop-after-steps" in command
                     else 80
                 )
+                run = {
+                    "config": config.to_dict(),
+                    "step_offset": sum(
+                        int(path.name.removeprefix("global_step_"))
+                        for path in call["checkpoints"]
+                    ),
+                }
+                (output / "run.json").write_text(json.dumps(run))
                 checkpoint = output / "checkpoints" / f"global_step_{steps}"
                 if not self.omit_checkpoint:
-                    # 编排器只传递此文件，不读取权重；这不是可加载的模型 checkpoint。
+                    # 编排器读取身份；权重与优化器状态留空，不用于模型加载。
                     checkpoint.mkdir()
-                    (checkpoint / "state.pt").write_bytes(
-                        b"opaque orchestration checkpoint fixture"
+                    torch.save(
+                        {
+                            "run": run,
+                            "trainable": {},
+                            "optimizer": {},
+                            "cursor": {"step": steps},
+                            "rng": [],
+                        },
+                        checkpoint / "state.pt",
                     )
                 (output / "training-result.json").write_text(
                     json.dumps(
@@ -192,10 +208,29 @@ class Commands:
         elif "latent_working_memory.v3.evaluate" in command:
             call["evaluation_config"] = json.loads(Path(value(command, "--config")).read_text())
             output = Path(value(command, "--output-dir"))
-            output.mkdir(parents=True)
-            (output / "summary.json").write_text(
-                json.dumps({"split": "test", "trajectories": 2})
-            )
+            output.mkdir(parents=True, exist_ok=True)
+            checkpoint = Path(value(command, "--checkpoint")).resolve()
+            run = json.loads((checkpoint.parent.parent / "run.json").read_text())
+            objective = run["config"]["objective"]
+            stage_step = int(checkpoint.name.removeprefix("global_step_"))
+            summary = {
+                "split": "test",
+                "trajectories": 2,
+                "method": objective["method"],
+                "stage": objective["stage"],
+                "dataset_signature": "orchestration-test-task-pool",
+                "objective": objective,
+                "qa_sampling": {"gate_signature": "orchestration-test-gate-pool"},
+                "max_new_tokens": call["evaluation_config"]["max_new_tokens"],
+                "metadata": {
+                    "checkpoint": str(checkpoint),
+                    "global_step": run["step_offset"] + stage_step,
+                    "stage_step": stage_step,
+                    "evaluation_config": call["evaluation_config"],
+                },
+            }
+            (output / "summary.json").write_text(json.dumps(summary))
+            gpu_job.EvaluationHistory(output, call["evaluation_config"]).record(summary)
         else:
             assert "latent_working_memory.v3.compare" in command
             Path(value(command, "--output-dir")).mkdir(parents=True, exist_ok=True)
@@ -911,7 +946,11 @@ def test_minimal_command_builds_one_method_with_preset_batch_settings(mode, meth
     for action in ("--resume", "--evaluate-only"):
         restored = gpu_job.parse_args([action, "--checkpoint", "existing/checkpoint"])
         assert restored.method is None
-        assert restored.checkpoint == Path("existing/checkpoint")
+        assert restored.checkpoint == (
+            [Path("existing/checkpoint")]
+            if action == "--evaluate-only"
+            else Path("existing/checkpoint")
+        )
     directory, _, jobs = job_plan.build_jobs(args)
     assert re.fullmatch(r"\d{8}-\d{6}", args.run_id)
     assert directory == args.output_root.resolve() / args.run_id
@@ -1546,7 +1585,7 @@ def test_new_capacity_names_reuse_old_pretraining_paths_and_preserve_source_iden
         )
         assert config.training.group == "legacy-series"
     assert training["configs"][0].training.init_checkpoint == str(checkpoint.resolve())
-    assert Path(value(evaluation["command"], "--output-dir")).parent.name == name
+    assert Path(value(evaluation["command"], "--output-dir")).parent.parent.name == name
     assert "dynamic-pretrain" not in result["checkpoints"]
     assert {path: path.read_bytes() for path in original_files} == original_files
 

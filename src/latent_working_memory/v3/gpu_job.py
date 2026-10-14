@@ -20,6 +20,8 @@ from latent_working_memory.v3.config import (
     load_evaluation,
     parse_optional_positive_integer,
 )
+from latent_working_memory.v3.evaluation_records import EvaluationHistory
+from latent_working_memory.v3.checkpoint import read_checkpoint
 from latent_working_memory.tracking_credentials import swanlab_api_key
 
 
@@ -68,13 +70,16 @@ def parse_args(argv=None):
         help="只启动新训练，保留训练中 dev 验证，跳过最终生成评估",
     )
     actions.add_argument(
-        "--evaluate-only", action="store_true", help="只评估已有 checkpoint，不启动训练"
+        "--evaluate-only", action="store_true", help="评估一个或多个已有 checkpoint，不启动训练"
     )
     actions.add_argument(
         "--resume", action="store_true", help="恢复原阶段，并完成该方法的剩余训练与评估"
     )
     parser.add_argument(
-        "--checkpoint", type=Path, help="初始化、单独评估或断点恢复所用的 checkpoint 目录"
+        "--checkpoint",
+        type=Path,
+        nargs="+",
+        help="checkpoint 目录；--evaluate-only 可传多个，初始化与恢复只接受一个",
     )
     parser.add_argument("--mode", choices=job_plan.LEVELS, default="full")
     parser.add_argument("--method", choices=(*METHODS, "dynamic_pretrain"), help="本次训练的方法")
@@ -246,9 +251,17 @@ def parse_args(argv=None):
     )
     parser.add_argument("--output-root", type=Path, default=Path("artifacts/v3"))
     args = parser.parse_args(argv)
-    if args.evaluate_only or args.resume:
+    if args.evaluate_only:
         if args.checkpoint is None:
-            parser.error("--evaluate-only and --resume require --checkpoint")
+            parser.error("--evaluate-only requires --checkpoint")
+        return args
+    if args.checkpoint is not None:
+        if len(args.checkpoint) != 1:
+            parser.error("multiple checkpoints require --evaluate-only")
+        args.checkpoint = args.checkpoint[0]
+    if args.resume:
+        if args.checkpoint is None:
+            parser.error("--resume requires --checkpoint")
         return args
     if args.method is None:
         parser.error("training requires --method")
@@ -371,9 +384,9 @@ def require_dataset_entries(directories):
             raise FileNotFoundError(f"required dataset entry is missing: {path}")
 
 
-def execute(command, environment, log_path):
+def execute(command, environment, log_path, append=False):
     print(f"$ {shlex.join(command)}", flush=True)
-    with log_path.open("w", encoding="utf-8") as log:
+    with log_path.open("a" if append else "w", encoding="utf-8") as log:
         with subprocess.Popen(
             command,
             env=environment,
@@ -404,26 +417,78 @@ def execution_environment(args):
     return environment
 
 
-def run_evaluation(args):
-    checkpoint = args.checkpoint.resolve()
+def checkpoint_evaluation_identity(checkpoint):
     stage_directory = job_plan.checkpoint_stage_directory(checkpoint)
+    saved = read_checkpoint(checkpoint)
+    run = saved["run"]
+    stage_step = saved["cursor"]["step"]
+    if (
+        int(checkpoint.name.removeprefix("global_step_")) != stage_step
+        or Path(run["config"]["training"]["output_dir"]).resolve() != stage_directory
+        or run["config"]["objective"]["stage"] != stage_directory.name
+        or json.loads((stage_directory / "run.json").read_text(encoding="utf-8")) != run
+    ):
+        raise ValueError("checkpoint identity differs from its saved stage directory")
+    return stage_directory, run["step_offset"] + stage_step
+
+
+def evaluate_checkpoint(args, checkpoint, config_path, environment):
+    """自动评估与补评估共用 checkpoint 目录、配置快照和结果登记。"""
+    stage_directory, _ = checkpoint_evaluation_identity(checkpoint)
     method_directory = stage_directory.parent
     directory = method_directory.parent.parent
-    output = directory / "eval" / method_directory.name / stage_directory.name
+    output = directory / "eval" / method_directory.name / stage_directory.name / checkpoint.name
+    config = load_evaluation(config_path)
+    history = EvaluationHistory(output, asdict(config))
+    cached = history.cached_summary(checkpoint)
+    if cached is not None:
+        history.record(cached)
+    if cached is None or args.tracking == "online" and history.publication() is None:
+        execute(
+            evaluation_command(args, output / "eval.json", checkpoint, output),
+            environment,
+            output / "eval.log",
+            append=cached is not None,
+        )
+    summary = str(output / "summary.json")
+    plan_directory = directory / "plan" / method_directory.name
+    result_path = plan_directory / "result.json"
+    if result_path.is_file():
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        if summary not in result["summaries"]:
+            result["summaries"].append(summary)
+        save_json(result_path, result)
+    return summary
+
+
+def run_evaluation(args):
+    checkpoints = [path.resolve() for path in args.checkpoint]
+    if len(set(checkpoints)) != len(checkpoints):
+        raise ValueError("checkpoint list contains duplicate directories")
+    identities = {path: checkpoint_evaluation_identity(path) for path in checkpoints}
+    stages = {path: identity[0] for path, identity in identities.items()}
+    methods = {stage.parent for stage in stages.values()}
+    if len(methods) != 1:
+        raise ValueError("batch evaluation requires checkpoints from the same method run")
+    method_directory = next(iter(methods))
+    directory = method_directory.parent.parent
+    checkpoints.sort(key=lambda path: identities[path][1])
     plan_directory = directory / "plan" / method_directory.name
     config_path = plan_directory / "eval.json"
     config = resolve_evaluation_config(args, config_path)
     require_dataset_entries([config.dataset_dir])
+    for checkpoint in checkpoints:
+        output = directory / "eval" / method_directory.name / stages[checkpoint].name / checkpoint.name
+        EvaluationHistory(output, asdict(config)).cached_summary(checkpoint)
     environment = execution_environment(args)
     environment["CUDA_VISIBLE_DEVICES"] = args.gpus.split(",")[0]
     plan_directory.mkdir(parents=True, exist_ok=True)
     save_evaluation_config(config_path, config)
-    execute(
-        evaluation_command(args, config_path, checkpoint, output),
-        environment,
-        plan_directory / "eval.log",
-    )
-    return {"status": "finished", "summaries": [str(output / "summary.json")]}
+    summaries = [
+        evaluate_checkpoint(args, checkpoint, config_path, environment)
+        for checkpoint in checkpoints
+    ]
+    return {"status": "finished", "summaries": summaries}
 
 
 def collect_training_result(job):
@@ -450,6 +515,9 @@ def run_resume(args):
     )
     if evaluation_config is not None:
         require_dataset_entries([evaluation_config.dataset_dir])
+        checkpoint = args.checkpoint.resolve()
+        output = directory / "eval" / plan_directory.name / jobs[0].config.objective.stage / checkpoint.name
+        EvaluationHistory(output, asdict(evaluation_config)).validate_configuration()
 
     def save_result(status, error=None):
         result["status"] = status
@@ -475,13 +543,9 @@ def run_resume(args):
             checkpoint = collect_training_result(job)
             result["checkpoints"][job.key] = str(checkpoint)
             if job.evaluate:
-                output = directory / "eval" / plan_directory.name / job.config.objective.stage
-                execute(
-                    evaluation_command(args, evaluation_path, checkpoint, output),
-                    evaluation_environment,
-                    plan_directory / "eval.log",
+                summary = evaluate_checkpoint(
+                    args, checkpoint, evaluation_path, evaluation_environment
                 )
-                summary = str(output / "summary.json")
                 if summary not in result["summaries"]:
                     result["summaries"].append(summary)
         save_result("finished")
@@ -604,13 +668,10 @@ def run_job(args):
             checkpoint = collect_training_result(job)
             checkpoints[job.key] = str(checkpoint)
             if job.evaluate:
-                output = evaluation_directories[job.key]
-                execute(
-                    evaluation_command(args, evaluation_path, checkpoint, output),
-                    evaluation_environment,
-                    plan_directory / "eval.log",
+                summary = evaluate_checkpoint(
+                    args, checkpoint, evaluation_path, evaluation_environment
                 )
-                summaries.append(str(output / "summary.json"))
+                summaries.append(summary)
         save_result("finished")
     except Exception as error:
         # 后续阶段失败时，保留已经完成阶段的配置与 checkpoint。

@@ -196,6 +196,8 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | QA 训练中验证 | FineWeb FactQA dev，评估全部可见 task QA | NLL |
 | 最终评估 | FineWeb FactQA test，评估全部可见 task QA | NLL、EM、F1 |
 
+完整训练默认只评估最后阶段的最后一个 checkpoint。单独评估可一次指定同一方法原 run 的多个 checkpoint，按真实累计 step 排序执行；同一 run 的评估共用 test 配置与 QA 协议，见[单独评估指南](scripts/README.md#22-单独评估)。
+
 **QA 评估流程**
 
 - **三个 baseline**：一次性或分段完成全文压缩后，统一在最终记忆上评估全部 task QA。
@@ -207,15 +209,21 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 
 ```text
 artifacts/v3/<run-id>/
-├── plan/<method-dir>/           阶段配置、eval.json、job.json、日志、result.json
+├── plan/<method-dir>/           阶段配置、eval.json、job.json、训练日志、result.json
 ├── train/<method-dir>/<stage>/  config.json、run.json、metrics.jsonl、dev-qa.jsonl、checkpoints/
-├── eval/<method-dir>/<stage>/   summary.json、trajectories.jsonl
+├── eval/<method-dir>/
+│   ├── evaluations.json         checkpoint 评估历史与发布 step
+│   └── <stage>/global_step_<阶段step>/
+│       ├── eval.json            本次评估配置快照
+│       ├── summary.json、trajectories.jsonl、eval.log
+│       └── swanlab-publication.json
 └── compare/                     独立比较生成的 points.json、points.csv
 ```
 
 - **运行目录**：`run-id` 可用 `--run-id` 指定，默认使用格式为 `YYYYMMDD-HHMMSS` 的当前时间，复用动态预训练且省略 `--run-id` 时继承 checkpoint 来源的编号。父目录由 `--output-root` 控制。
 - **方法目录**：三个 baseline 和独立动态预训练使用 `<method>-k<K>{_<mode>}`，两种动态方法统一使用 `<method>-k<K>+<ΔK>-<writer>{_<mode>}`。例如，正式运行 `memory-change-k512+32-local`、试跑 `memory-change-k512+32-tag_smoke`。
 - **Checkpoint**：目录为 `checkpoints/global_step_<阶段step>/`。`state.pt` 保存新增权重、优化器及运行状态，`data_<rank>.pt` 保存各卡加载器状态。
+- **评估记录**：每个 checkpoint 单独保存结果和四项评估配置快照；`evaluations.json` 登记历史与发布 step，`swanlab-publication.json` 记录原 run 身份、真实 checkpoint 步数和发布信息。相同 checkpoint、相同配置复用结果，已发布结果不重复上传；仅保存于本地的结果可随后追加到原训练 run。
 - **结果与比较**：`summary.json` 汇总指标，`trajectories.jsonl` 保存动作、分数、计时与逐题结果。比较单独调用 [compare.py](compare.py)，导出 `points.json` 与 `points.csv`；命令见[运行指南](scripts/README.md#5-查看结果)。比较要求 split、实际 task 题池、各段选中的 gate QA 签名、QA prompt 和生成 token 上限一致；seed 不同但实际选题相同仍可比较，各方法的训练数据与训练配置可不同。
 
 ### 5.3 SwanLab 组织与展示
@@ -236,7 +244,9 @@ artifacts/v3/<run-id>/
 
 **最终评估**
 
-最终 test 结果展示在对应方法的 run 中：
+最终 test 结果追加到对应方法的训练 run。总体 NLL、EM／F1、最终／平均 slots 与平均记忆构建耗时使用原生增量曲线，横轴 `evaluation/checkpoint_step` 为真实累计 step，用于比较不同 checkpoint。
+
+各 checkpoint 还保存以下图表快照：
 
 | 内容 | 展示方式 |
 |---|---|
@@ -244,6 +254,8 @@ artifacts/v3/<run-id>/
 | EM／F1 | 合并为双纵轴分组柱状图，横轴同上，两轴范围均为 `[0,1]` |
 | 动态方法的过程保持 | “引入段 × 已读段” NLL 热图，以及按引入后经过的段数对齐的相对首次 NLL 变化曲线 |
 | 容量与成本 | 最终／平均 slots 柱状图，以及每条轨迹平均记忆构建耗时柱状图 |
+
+云端记录按单调递增的发布 step 追加；图表快照按发布 step 切换版本，标题注明阶段、阶段内 step 和真实累计 step。
 
 ## 六、代码入口与验证
 
@@ -254,7 +266,7 @@ artifacts/v3/<run-id>/
 | 数据加载与选题 | [data.py](data.py)、[pretrain_data.py](pretrain_data.py)、[qa_selection.py](qa_selection.py) |
 | 模型、写入与目标 | [model.py](model.py)、[objective.py](objective.py) |
 | 训练、恢复与记录 | [engine.py](engine.py)、[runtime.py](runtime.py)、[tracking.py](tracking.py) |
-| 评估与比较 | [evaluate.py](evaluate.py)、[compare.py](compare.py) |
+| 评估、记录与比较 | [evaluate.py](evaluate.py)、[evaluation_records.py](evaluation_records.py)、[compare.py](compare.py) |
 
 ```bash
 uv run --frozen pytest -q tests/v3

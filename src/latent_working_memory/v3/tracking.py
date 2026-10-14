@@ -33,6 +33,15 @@ METHOD_COLORS = {
 STAGE_NUMBERS = {"pretrain": 1, "lm": 1, "qa": 2, "warmup": 2, "policy": 3}
 DEV_QA_METRICS = ("dev/qa_old_nll", "dev/qa_new_nll")
 APPEND_RATIO_METRICS = ("train/append_ratio", "dev/append_ratio")
+EVALUATION_STEP_METRIC = "evaluation/checkpoint_step"
+EVALUATION_METRICS = (
+    "evaluation/overall_nll",
+    "evaluation/overall_em",
+    "evaluation/overall_f1",
+    "evaluation/final_slots",
+    "evaluation/mean_slots",
+    "evaluation/mean_build_seconds",
+)
 
 
 def experiment_directory(training):
@@ -108,8 +117,10 @@ def _save_record(path, value):
     temporary.replace(path)
 
 
-def _configure_append_ratio_panel(tracking, root, method, name, api_key):
-    """在当前默认视图中合并训练／验证追加比例，保留其他 runs 的配色。"""
+def _configure_line_panels(
+    tracking, root, method, name, section_name, panels, x_axis, api_key, bind_columns=False
+):
+    """在默认视图配置共享原生曲线，保留其他 runs 的图例和配色。"""
     with (root.parent / ".swanlab-panels.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         api = swanlab.Api(api_key=api_key)
@@ -125,12 +136,12 @@ def _configure_append_ratio_panel(tracking, root, method, name, api_key):
         view = project["viewIndex"][0]
         sections_path = f"/sections/{project_path}/{view}"
         sections = checked(api._get(sections_path, params={"size": 100}))
-        section = next((row for row in sections if row["name"] == "train"), None)
+        section = next((row for row in sections if row["name"] == section_name), None)
         if section is None:
             section = checked(
                 api._post(
                     sections_path,
-                    data={"name": "train", "index": secrets.token_hex(3), "position": "above"},
+                    data={"name": section_name, "index": secrets.token_hex(3), "position": "above"},
                 )
             )
             section["chartIndex"] = []
@@ -138,34 +149,123 @@ def _configure_append_ratio_panel(tracking, root, method, name, api_key):
         charts = [
             checked(api._get(f"{charts_path}/xxxxxx/{index}")) for index in section["chartIndex"]
         ]
-        title = "train/append_ratio"
-        existing = next(
-            (chart for chart in charts if chart["title"] == title and chart["type"] == "LINE"), None
-        )
-        custom = dict((existing or {}).get("custom") or {})
-        for index, metric in enumerate(APPEND_RATIO_METRICS):
-            color = _shade(METHOD_COLORS[method], index, len(APPEND_RATIO_METRICS))
-            custom[f"{remote.run_id}-{metric}"] = {
-                "name": f"{name}/{metric.split('/')[0]}",
-                "colors": [color, color],
+        configured = []
+        for title, metrics, labels, y_range in panels:
+            existing = next(
+                (chart for chart in charts if chart["title"] == title and chart["type"] == "LINE"),
+                None,
+            )
+            custom = dict((existing or {}).get("custom") or {})
+            for index, (metric, label) in enumerate(zip(metrics, labels, strict=True)):
+                color = _shade(METHOD_COLORS[method], index, len(metrics))
+                custom[f"{remote.run_id}-{metric}"] = {
+                    "name": f"{name}/{label}",
+                    "colors": [color, color],
+                }
+            body = {
+                "type": "LINE",
+                "title": title,
+                "custom": custom,
+                "config": {
+                    "xAxis": x_axis,
+                    "yAxis": [
+                        {"key": metric, "type": "FLOAT", "class": "SCALAR"}
+                        for metric in metrics
+                    ],
+                    "yRange": y_range,
+                },
             }
-        body = {
-            "type": "LINE",
-            "title": title,
-            "custom": custom,
-            "config": {
-                "xAxis": {"key": "step", "type": "SYSTEM", "class": "SCALAR"},
-                "yAxis": [
-                    {"key": metric, "type": "FLOAT", "class": "SCALAR"}
-                    for metric in APPEND_RATIO_METRICS
-                ],
-                "yRange": [0, 1],
-            },
-        }
-        if existing:
-            checked(api._put(f"{charts_path}/xxxxxx/{existing['index']}", data=body))
-        else:
-            checked(api._post(f"{charts_path}/{section['index']}", data=body))
+            if existing is None:
+                existing = checked(api._post(f"{charts_path}/{section['index']}", data=body))
+            configured.append((existing["index"], body))
+        if bind_columns:
+            columns = []
+            for panel_index, (index, body) in enumerate(configured):
+                keys = [axis["key"] for axis in body["config"]["yAxis"]]
+                if panel_index == 0:
+                    keys.append(x_axis["key"])
+                columns.extend(
+                    {
+                        "key": key,
+                        "type": "FLOAT",
+                        "class": "CUSTOM",
+                        "sectionName": section_name,
+                        "chartName": body["title"],
+                        "chartIndex": index,
+                        "metricName": key.rsplit("/", 1)[-1],
+                    }
+                    for key in keys
+                )
+            # 列在首条 log 前直接绑定所需图；横轴列不单独生成面板。
+            checked(api._post(f"/experiment/{remote.run_id}/columns", data=columns))
+        for index, body in configured:
+            checked(api._put(f"{charts_path}/xxxxxx/{index}", data=body))
+
+
+def _configure_append_ratio_panel(tracking, root, method, name, api_key):
+    _configure_line_panels(
+        tracking,
+        root,
+        method,
+        name,
+        "train",
+        [("train/append_ratio", APPEND_RATIO_METRICS, ("train", "dev"), [0, 1])],
+        {"key": "step", "type": "SYSTEM", "class": "SCALAR"},
+        api_key,
+    )
+
+
+def configure_evaluation_metrics(tracking, root, method, api_key):
+    """以真实 checkpoint step 展示原生曲线，媒体发布步数独立递增。"""
+    if tracking is None:
+        return
+    for metric in EVALUATION_METRICS:
+        tracking.define_metric(
+            metric, x_axis=EVALUATION_STEP_METRIC, section_name="evaluation"
+        )
+    _configure_line_panels(
+        tracking,
+        Path(root),
+        method,
+        tracking.name,
+        "evaluation",
+        [
+            ("evaluation/overall_nll", (EVALUATION_METRICS[0],), ("NLL",), [0, None]),
+            ("evaluation/overall_em_f1", EVALUATION_METRICS[1:3], ("EM", "F1"), [0, 1]),
+            (
+                "evaluation/slots",
+                EVALUATION_METRICS[3:5],
+                ("final slots", "mean slots"),
+                [0, None],
+            ),
+            (
+                "evaluation/mean_build_seconds",
+                (EVALUATION_METRICS[5],),
+                ("seconds / trajectory",),
+                [0, None],
+            ),
+        ],
+        {"key": EVALUATION_STEP_METRIC, "type": "FLOAT", "class": "SCALAR"},
+        api_key,
+        bind_columns=True,
+    )
+
+
+def evaluation_scalars(summary):
+    """最终质量按题平均，容量和构建耗时按轨迹平均。"""
+    return {
+        EVALUATION_STEP_METRIC: summary["metadata"]["global_step"],
+        **{
+            f"evaluation/overall_{metric}": summary["quality"]["all"][metric]
+            for metric in ("nll", "em", "f1")
+        },
+        **{
+            f"evaluation/{metric}": summary["capacity"][metric]
+            for metric in ("final_slots", "mean_slots")
+        },
+        "evaluation/mean_build_seconds": summary["costs"]["build_seconds"]
+        / summary["trajectories"],
+    }
 
 
 @contextmanager
@@ -490,4 +590,19 @@ def evaluation_media(summary):
             yaxis_opts={"name": unit, "min": 0},
         )
         values[f"{section}/{name}"] = chart
+    metadata = summary.get("metadata", {})
+    if summary["split"] == "test" and "checkpoint" in metadata:
+        title = (
+            f"{summary['stage']} · stage step {metadata['stage_step']} "
+            f"· global step {metadata['global_step']}"
+        )
+        for chart in values.values():
+            chart.options["title"] = {
+                "text": title,
+                "left": "center",
+                "top": 0,
+                "textStyle": {"fontSize": 12},
+            }
+            for legend in chart.options["legend"]:
+                legend["top"] = 24
     return values

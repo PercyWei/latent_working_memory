@@ -187,6 +187,10 @@ def recorded_swanlab(monkeypatch):
             self.id = record["id"]
             self.url = record["url"]
             self.config = record["config"]
+            self.name = record["name"]
+            self._ctx = SimpleNamespace(
+                _global_step=max((step for step, _ in record["logs"]), default=-1)
+            )
 
         def __enter__(self):
             return self
@@ -199,6 +203,7 @@ def recorded_swanlab(monkeypatch):
 
         def log(self, values, step):
             self.record["logs"].append((step, values))
+            self._ctx._global_step = step
 
     class Service:
         def __init__(self):
@@ -258,6 +263,11 @@ def recorded_swanlab(monkeypatch):
 
         def post(self, path, data):
             self.api_requests.append(("POST", path, deepcopy(data)))
+            if path.startswith("/experiment/"):
+                _, server_id, endpoint = path.strip("/").split("/")
+                assert endpoint == "columns"
+                self.runs[server_id.removeprefix("server-")]["columns"] = deepcopy(data)
+                return self.response({})
             parts, project = self.project(path)
             if parts[0] == "sections":
                 section = {**deepcopy(data), "chartIndex": []}

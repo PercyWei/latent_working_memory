@@ -2,6 +2,7 @@ from dataclasses import replace
 from contextlib import contextmanager
 import csv
 import json
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -396,20 +397,21 @@ def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
     }
     evaluation_path = tmp_path / "eval.json"
     evaluation_path.write_text(json.dumps(evaluation_config))
+    output = tmp_path / "evaluation" / "qa" / path.name
     arguments = [
         "--config",
         str(evaluation_path),
         "--checkpoint",
         str(path),
         "--output-dir",
-        str(tmp_path / "evaluation"),
+        str(output),
         "--device",
         "cpu",
     ]
     if log_to_swanlab:
         arguments.append("--log-to-swanlab")
     evaluation.main(arguments)
-    summary = json.loads((tmp_path / "evaluation" / "summary.json").read_text())
+    summary = json.loads((output / "summary.json").read_text())
     assert loaded[0][0].revision == "resolved-commit"
     assert loaded[0][1] == torch.device("cpu")
     assert task.codec.loaded is not None
@@ -423,7 +425,7 @@ def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
     assert summary["metadata"]["source_data"] == evaluation.dataset_identity([trajectory()])
     assert summary["metadata"]["selection"]["seed"] == 42
     assert summary["max_new_tokens"] == 8
-    assert [entry[-1] for entry in published] == ([27] if log_to_swanlab else [])
+    assert [entry[3] for entry in published] == ([27] if log_to_swanlab else [])
 
 
 @pytest.mark.parametrize(
@@ -595,6 +597,12 @@ def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_pat
     publications = []
 
     class Tracking:
+        _ctx = SimpleNamespace(
+            core=SimpleNamespace(
+                _metrics=SimpleNamespace(_metrics={"train/loss": SimpleNamespace(min_step=37)})
+            )
+        )
+
         def log(self, values, step):
             publications.append((values, step))
 
@@ -606,13 +614,37 @@ def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_pat
 
     monkeypatch.setattr(evaluation, "swanlab_api_key", lambda: "evaluation-test-key")
     monkeypatch.setattr(evaluation, "swanlab_training_run", resume)
-    summary = evaluation.evaluate(Task(), [trajectory()], tmp_path / "evaluation", "test", 8)
+    monkeypatch.setattr(evaluation, "configure_evaluation_metrics", lambda *args: None)
+    checkpoint = training_dir / "policy" / "checkpoints" / "global_step_37"
+    output = tmp_path / "evaluation" / "policy" / checkpoint.name
+    evaluation_config = {
+        "dataset_dir": "data",
+        "seed": 20261004,
+        "max_test_samples": None,
+        "max_new_tokens": 8,
+    }
+    history = evaluation.EvaluationHistory(output, evaluation_config)
+    history.cached_summary(checkpoint)
+    summary = evaluation.evaluate(
+        Task(),
+        [trajectory()],
+        output,
+        "test",
+        8,
+        metadata={
+            "checkpoint": str(checkpoint.resolve()),
+            "global_step": 37,
+            "stage_step": 37,
+            "evaluation_config": evaluation_config,
+        },
+    )
+    history.record(summary)
     local_results = {
-        name: (tmp_path / "evaluation" / name).read_bytes()
+        name: (output / name).read_bytes()
         for name in ("summary.json", "trajectories.jsonl")
     }
-    evaluation._append_evaluation(summary, training_dir, tmp_path / "evaluation", 37)
-    assert len(publications) == 1 and publications[0][1] == 37
+    evaluation._append_evaluation(summary, training_dir, output, 37, history)
+    assert len(publications) == 1 and publications[0][1] == 38
     assert publications[0][0]["evaluation/nll"].options["series"][0]["data"][-1]["value"] == 2
     em_f1 = publications[0][0]["evaluation/em_f1"].options
     assert [axis["max"] for axis in em_f1["yAxis"]] == [1, 1]
@@ -628,13 +660,13 @@ def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_pat
     )
     assert all(name.startswith("evaluation/") for name in publications[0][0])
     assert all(
-        (tmp_path / "evaluation" / name).read_bytes() == original
+        (output / name).read_bytes() == original
         for name, original in local_results.items()
     )
     assert config_path.read_bytes() == original_config
     assert json.loads(identity_path.read_text()) == identity
-    record = json.loads((tmp_path / "evaluation" / "swanlab-publication.json").read_text())
-    assert record["run_id"] == "original" and record["step"] == 37
+    record = json.loads((output / "swanlab-publication.json").read_text())
+    assert record["run_id"] == "original" and record["global_step"] == 37
     assert record["quality"] == summary["quality"]
     assert set(record["panels"]) == set(publications[0][0])
 
@@ -710,13 +742,14 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
     }
     evaluation_path = tmp_path / "eval.json"
     evaluation_path.write_text(json.dumps(evaluation_config))
+    output = tmp_path / "evaluation" / "qa" / "global_step_7"
     arguments = [
         "--config",
         str(evaluation_path),
         "--checkpoint",
         "unused.pt",
         "--output-dir",
-        str(tmp_path),
+        str(output),
         "--device",
         "cpu",
     ]
@@ -726,11 +759,11 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
             match="overlap pretraining" if problem == "pretraining_overlap" else "below 80%",
         ):
             evaluation.main(arguments)
-        assert not (tmp_path / "summary.json").exists()
+        assert not (output / "summary.json").exists()
         assert not task.codec.generated
         return
     evaluation.main(arguments)
-    summary = json.loads((tmp_path / "summary.json").read_text())
+    summary = json.loads((output / "summary.json").read_text())
     assert summary["dataset_signature"] == evaluation._qa_protocol(task, selected)[0]
     assert summary["metadata"]["selection"]["total"] == 6
     assert summary["metadata"]["selection"]["retained"] == (5 if problem == "filtered_gate" else 6)
@@ -746,7 +779,7 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
     assert summary["metadata"]["config"]["training"]["seed"] == 7
     assert summary["quality"]["all"]["questions"] == 4
     records = [
-        json.loads(line) for line in (tmp_path / "trajectories.jsonl").read_text().splitlines()
+        json.loads(line) for line in (output / "trajectories.jsonl").read_text().splitlines()
     ]
     assert [row["trajectory_id"] for row in records] == [row.trajectory_id for row in selected]
     assert all(row["segments"] == 3 for row in records)
@@ -819,18 +852,19 @@ def test_cli_ignores_training_length_limits_and_selects_from_complete_factqa_spl
     }
     evaluation_path = tmp_path / "eval.json"
     evaluation_path.write_text(json.dumps(evaluation_config))
+    output = tmp_path / "evaluation" / task.cfg.stage / "global_step_7"
     arguments = [
         "--config",
         str(evaluation_path),
         "--checkpoint",
         "unused.pt",
         "--output-dir",
-        str(tmp_path),
+        str(output),
         "--device",
         "cpu",
     ]
     evaluation.main(arguments)
-    summary = json.loads((tmp_path / "summary.json").read_text())
+    summary = json.loads((output / "summary.json").read_text())
     assert summary["dataset_signature"] == evaluation._qa_protocol(task, selected)[0]
     assert summary["metadata"]["config"]["training"]["max_input_tokens"] == 1
     assert summary["metadata"]["config"]["training"]["seed"] == 7
@@ -845,7 +879,7 @@ def test_cli_ignores_training_length_limits_and_selects_from_complete_factqa_spl
     assert summary["metadata"]["selection"]["limit"] == max_test_samples
     assert summary["metadata"]["selection"]["qa_budget"]["kept"] == 3
     records = [
-        json.loads(line) for line in (tmp_path / "trajectories.jsonl").read_text().splitlines()
+        json.loads(line) for line in (output / "trajectories.jsonl").read_text().splitlines()
     ]
     assert [row["trajectory_id"] for row in records] == [row.trajectory_id for row in selected]
     assert [row["source_tokens"] for row in records] == [

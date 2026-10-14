@@ -24,6 +24,7 @@ from latent_working_memory.v3.config import (
 )
 from latent_working_memory.v3.data import load_factqa
 from latent_working_memory.v3.engine import initialize_device
+from latent_working_memory.v3.evaluation_records import EvaluationHistory
 from latent_working_memory.v3.objective import TokenMemoryTask
 from latent_working_memory.v3.qa_selection import filter_qa_budget, select_step_qas
 from latent_working_memory.v3.runtime import (
@@ -33,7 +34,9 @@ from latent_working_memory.v3.runtime import (
     select_examples,
 )
 from latent_working_memory.v3.tracking import (
+    configure_evaluation_metrics,
     evaluation_media,
+    evaluation_scalars,
     experiment_directory,
     tracking_method,
 )
@@ -174,27 +177,46 @@ def _training_run_directory(config, run):
     return directory
 
 
-def _append_evaluation(summary, training_dir, output_dir, step):
-    values = evaluation_media(summary)
-    # 既有 helper 保留云端训练 config/name，检查训练已结束并使用 resume="must"。
-    with swanlab_training_run(training_dir, api_key=swanlab_api_key()) as tracking:
-        tracking.log(values, step=step)
-    identity = json.loads((training_dir / "swanlab.json").read_text(encoding="utf-8"))
-    _save_json(
-        Path(output_dir) / "swanlab-publication.json",
-        {
-            "training_dir": str(training_dir.resolve()),
-            "run_id": identity["id"],
-            "project": identity["project"],
-            "group": identity["group"],
-            "split": summary["split"],
-            "step": step,
-            "panels": list(values),
-            "quality": summary["quality"],
-            "capacity": summary["capacity"],
-            "selection": summary["metadata"].get("selection"),
-        },
-    )
+def _append_evaluation(summary, training_dir, output_dir, step, history):
+    with history.publication_lock():
+        if history.publication() is not None:
+            return
+        metrics = evaluation_scalars(summary)
+        values = {**metrics, **evaluation_media(summary)}
+        api_key = swanlab_api_key()
+        # 既有 helper 保留云端训练 config/name，检查训练已结束并使用 resume="must"。
+        with swanlab_training_run(training_dir, api_key=api_key) as tracking:
+            configure_evaluation_metrics(tracking, training_dir, summary["method"], api_key)
+            # 恢复后各指标的 min_step 来自云端；RunContext 的本地计数器会重新从 -1 开始。
+            resumed_step = max(
+                (metric.min_step for metric in tracking._ctx.core._metrics._metrics.values()),
+                default=-1,
+            )
+            publication_step = max(
+                resumed_step, history.last_publication_step(), step
+            ) + 1
+            tracking.log(values, step=publication_step)
+        identity = json.loads((training_dir / "swanlab.json").read_text(encoding="utf-8"))
+        history.record_publication(
+            {
+                "training_dir": str(training_dir.resolve()),
+                "output_dir": str(Path(output_dir).resolve()),
+                "run_id": identity["id"],
+                "project": identity["project"],
+                "group": identity["group"],
+                "split": summary["split"],
+                "checkpoint": summary["metadata"]["checkpoint"],
+                "stage": summary["stage"],
+                "stage_step": summary["metadata"]["stage_step"],
+                "global_step": step,
+                "publication_step": publication_step,
+                "panels": list(values),
+                "metrics": metrics,
+                "quality": summary["quality"],
+                "capacity": summary["capacity"],
+                "selection": summary["metadata"].get("selection"),
+            },
+        )
 
 
 @torch.no_grad()
@@ -429,8 +451,8 @@ def main(argv=None):
             "final QA evaluation supports a single process; do not launch with torchrun"
         )
     evaluation_config = load_evaluation(args.config)
-    device = initialize_device(args.device)
-    checkpoint = read_checkpoint(args.checkpoint)
+    checkpoint_path = Path(args.checkpoint).resolve()
+    checkpoint = read_checkpoint(checkpoint_path)
     raw = checkpoint["run"]["config"]
     config = ExperimentConfig(
         ModelConfig(**raw["model"]),
@@ -440,62 +462,71 @@ def main(argv=None):
     training_dir = (
         _training_run_directory(config, checkpoint["run"]) if args.log_to_swanlab else None
     )
-    revision = checkpoint["run"]["resolved_model_revision"]
-    model_config = (
-        replace(config.model, revision=revision) if revision is not None else config.model
-    )
-    codec, tokenizer = load_codec(model_config, device, config.objective)
-    codec.load_trainable_state_dict(checkpoint["trainable"])
-    task = TokenMemoryTask(codec, tokenizer, config.objective, qa_seed=evaluation_config.seed)
-    trajectories = load_factqa(evaluation_config.dataset_dir, tokenizer)["test"]
-    _check_qa_sources(trajectories, checkpoint["run"]["pretraining_sources"])
-    source_data = dataset_identity(trajectories)
-    total_trajectories = len(trajectories)
-    filtered, budget_statistics = filter_qa_budget(
-        {"test": trajectories}, config.objective, include_train=False
-    )
-    trajectories = filtered["test"]
-    retained_trajectories = len(trajectories)
-    trajectories = select_examples(
-        trajectories,
-        evaluation_config.max_test_samples,
-        evaluation_config.seed,
-        "test",
-        pretraining=False,
-    )
-    summary = evaluate(
-        task,
-        trajectories,
-        args.output_dir,
-        "test",
-        evaluation_config.max_new_tokens,
-        metadata={
-            "checkpoint": str(Path(args.checkpoint).resolve()),
-            "dataset_dir": str(Path(evaluation_config.dataset_dir).resolve()),
-            "config": config.to_dict(),
-            "evaluation_config": asdict(evaluation_config),
-            "source_data": source_data,
-            "resolved_model_revision": revision,
-            "device": args.device,
-            "autocast_dtype": "bfloat16" if device.type == "cuda" else None,
-            "pretraining": checkpoint["run"]["pretraining"],
-            "global_step": checkpoint["run"]["step_offset"] + checkpoint["cursor"]["step"],
-            "selection": {
-                "total": total_trajectories,
-                "selected": len(trajectories),
-                "retained": retained_trajectories,
-                "qa_budget": budget_statistics["test"],
-                "limit": evaluation_config.max_test_samples,
-                "seed": evaluation_config.seed,
+    stage_step = checkpoint["cursor"]["step"]
+    global_step = checkpoint["run"]["step_offset"] + stage_step
+    history = EvaluationHistory(Path(args.output_dir), asdict(evaluation_config))
+    summary = history.cached_summary(checkpoint_path)
+    if summary is None:
+        device = initialize_device(args.device)
+        revision = checkpoint["run"]["resolved_model_revision"]
+        model_config = (
+            replace(config.model, revision=revision) if revision is not None else config.model
+        )
+        codec, tokenizer = load_codec(model_config, device, config.objective)
+        codec.load_trainable_state_dict(checkpoint["trainable"])
+        task = TokenMemoryTask(codec, tokenizer, config.objective, qa_seed=evaluation_config.seed)
+        trajectories = load_factqa(evaluation_config.dataset_dir, tokenizer)["test"]
+        _check_qa_sources(trajectories, checkpoint["run"]["pretraining_sources"])
+        source_data = dataset_identity(trajectories)
+        total_trajectories = len(trajectories)
+        filtered, budget_statistics = filter_qa_budget(
+            {"test": trajectories}, config.objective, include_train=False
+        )
+        trajectories = filtered["test"]
+        retained_trajectories = len(trajectories)
+        trajectories = select_examples(
+            trajectories,
+            evaluation_config.max_test_samples,
+            evaluation_config.seed,
+            "test",
+            pretraining=False,
+        )
+        summary = evaluate(
+            task,
+            trajectories,
+            args.output_dir,
+            "test",
+            evaluation_config.max_new_tokens,
+            metadata={
+                "checkpoint": str(checkpoint_path),
+                "dataset_dir": str(Path(evaluation_config.dataset_dir).resolve()),
+                "config": config.to_dict(),
+                "evaluation_config": asdict(evaluation_config),
+                "source_data": source_data,
+                "resolved_model_revision": revision,
+                "device": args.device,
+                "autocast_dtype": "bfloat16" if device.type == "cuda" else None,
+                "pretraining": checkpoint["run"]["pretraining"],
+                "global_step": global_step,
+                "stage_step": stage_step,
+                "selection": {
+                    "total": total_trajectories,
+                    "selected": len(trajectories),
+                    "retained": retained_trajectories,
+                    "qa_budget": budget_statistics["test"],
+                    "limit": evaluation_config.max_test_samples,
+                    "seed": evaluation_config.seed,
+                },
             },
-        },
-    )
+        )
+    history.record(summary)
     if training_dir is not None:
         _append_evaluation(
             summary,
             training_dir,
             args.output_dir,
-            checkpoint["run"]["step_offset"] + checkpoint["cursor"]["step"],
+            global_step,
+            history,
         )
     quality = summary["quality"]["all"]
     quality_text = " ".join(
