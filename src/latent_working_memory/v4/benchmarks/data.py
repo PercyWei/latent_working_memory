@@ -58,7 +58,7 @@ def _load_ruler(data_dir, lengths):
     for length in lengths:
         for task in RULER_TASKS:
             path = data_dir / str(length) / task / "test.jsonl"
-            indices = set()
+            sample_start = len(samples)
             with path.open(encoding="utf-8") as stream:
                 for line_number, line in enumerate(stream, 1):
                     location = f"{path}:{line_number}"
@@ -66,9 +66,8 @@ def _load_ruler(data_dir, lengths):
                     if not isinstance(row, dict) or not {"index", "input", "outputs"} <= row.keys():
                         raise ValueError(f"{location}: expected index, input and outputs")
                     index = row["index"]
-                    if type(index) is not int or index < 0 or index in indices:
-                        raise ValueError(f"{location}: index must be a unique nonnegative integer")
-                    indices.add(index)
+                    if type(index) is not int or index < 0:
+                        raise ValueError(f"{location}: index must be a nonnegative integer")
                     prompt = _nonempty_string(row["input"], f"{location}.input")
                     references = row["outputs"]
                     if not isinstance(references, list) or not references:
@@ -81,14 +80,15 @@ def _load_ruler(data_dir, lengths):
                         metadata["source_length"] = row["length"]
                     samples.append(
                         BenchmarkSample(
-                            id=f"ruler/{length}/{task}/{index}",
+                            # 官方 NIAH 的 index 是答案字符位置，可能重复。
+                            id=f"ruler/{length}/{task}/{line_number - 1}",
                             prompt=prompt,
                             references=references,
                             max_new_tokens=RULER_BUDGETS[task],
                             metadata=metadata,
                         )
                     )
-            if not indices:
+            if len(samples) == sample_start:
                 raise ValueError(f"{path}: no RULER samples")
     return tuple(samples)
 
