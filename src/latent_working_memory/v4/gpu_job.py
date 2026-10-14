@@ -74,14 +74,16 @@ def parse_args(argv=None):
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument("--resume", action="store_true", help="按原配置恢复训练")
     actions.add_argument("--generate-only", action="store_true", help="从 checkpoint 生成单条文本")
-    actions.add_argument("--evaluate-only", action="store_true", help="从 checkpoint 评估 test")
+    actions.add_argument("--evaluate-only", action="store_true", help="从 checkpoint 评估 test 或 benchmark")
+    parser.add_argument("--benchmark", choices=("ruler", "locomo"), help="独立评估的 benchmark")
+    parser.add_argument("--lengths", type=positive_count, nargs="+", help="RULER 输入与生成预算的总长度列表")
     parser.add_argument("--checkpoint", type=Path, help="global_step_<step> 目录")
     parser.add_argument("--config", type=Path, help=f"训练预设，默认 {DEFAULT_CONFIG}")
     parser.add_argument("--gpus", type=physical_gpus, default="0,1", help="物理 GPU 编号，默认 0,1")
     parser.add_argument("--run-id", help="实验系列目录，默认上海时间 YYYYMMDD-HHMMSS")
     parser.add_argument("--output-root", type=Path, help="产物父目录，默认 artifacts/v4")
     parser.add_argument("--model-path", type=Path, help="覆盖预设中的本地基座模型位置")
-    parser.add_argument("--data-dir", type=Path, help="含 train/dev/test.jsonl 的数据目录")
+    parser.add_argument("--data-dir", type=Path, help="训练或独立评估的数据目录")
     for name in (
         "micro-batch-size-per-gpu",
         "gradient-accumulation-steps",
@@ -114,7 +116,7 @@ def parse_args(argv=None):
     parser.add_argument("--prompt-file", type=Path, help="生成使用的纯文本 prompt")
     parser.add_argument("--output", type=Path, help="生成结果 JSON 的保存路径")
     parser.add_argument(
-        "--output-dir", type=Path, help="评估结果目录，默认 <series>/eval/<method-dir>/test"
+        "--output-dir", type=Path, help="评估结果目录，默认 <series>/eval/<method-dir>/<test或benchmark>"
     )
     parser.add_argument("--max-new-tokens", type=positive_count, help="生成 token 上限，默认 128")
     args = parser.parse_args(argv)
@@ -143,6 +145,12 @@ def parse_args(argv=None):
         parser.error("--prompt-file and --output require --generate-only")
     if not args.evaluate_only and args.output_dir is not None:
         parser.error("--output-dir requires --evaluate-only")
+    if not args.evaluate_only and (args.benchmark is not None or args.lengths is not None):
+        parser.error("--benchmark and --lengths require --evaluate-only")
+    if args.lengths is not None and args.benchmark != "ruler":
+        parser.error("--lengths requires --benchmark ruler")
+    if args.benchmark is not None and args.max_new_tokens is not None:
+        parser.error("benchmark evaluation uses task-defined generation budgets")
     if args.generate_only or args.evaluate_only:
         if len(args.gpus.split(",")) != 1:
             parser.error("generation/evaluation uses one GPU; select --gpus 0 or --gpus 1")
@@ -288,25 +296,34 @@ def run_job(args):
         ]
     elif args.evaluate_only:
         action = "evaluate"
-        result_path = plan / "evaluation-result.json"
-        log_path = plan / "evaluation.log"
+        evaluation_name = f"{args.benchmark}-evaluation" if args.benchmark else "evaluation"
+        result_path = plan / f"{evaluation_name}-result.json"
+        log_path = plan / f"{evaluation_name}.log"
         destination = (
             args.output_dir.expanduser().resolve()
             if args.output_dir is not None
-            else output.parent.parent / "eval" / output.name / "test"
+            else output.parent.parent / "eval" / output.name / (args.benchmark or "test")
         )
         command += [
             "-m",
-            "latent_working_memory.v4.evaluate",
+            (
+                "latent_working_memory.v4.benchmarks.evaluate"
+                if args.benchmark
+                else "latent_working_memory.v4.evaluate"
+            ),
             "--checkpoint",
             str(checkpoint),
             "--output-dir",
             str(destination),
-            "--max-new-tokens",
-            str(args.max_new_tokens or 128),
             "--device",
             "cuda",
         ]
+        if args.benchmark:
+            command += ["--benchmark", args.benchmark]
+            if args.lengths is not None:
+                command += ["--lengths", *(str(length) for length in args.lengths)]
+        else:
+            command += ["--max-new-tokens", str(args.max_new_tokens or 128)]
         if args.data_dir is not None:
             command += ["--data-dir", str(args.data_dir.expanduser().resolve())]
         if args.tracking is not None:

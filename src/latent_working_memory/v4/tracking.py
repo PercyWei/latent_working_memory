@@ -246,8 +246,8 @@ def validate_evaluation_publication(run, checkpoint_path, step):
     return root, identity, project_path
 
 
-def append_evaluation(run, checkpoint_path, summary, output_dir):
-    """将最终 test 评估追加到已完成的原训练 run，保留其配置和运行身份。"""
+def append_evaluation(run, checkpoint_path, summary, output_dir, media=None):
+    """将最终 test 评估追加到原训练 run；benchmark 提供对应的汇总图。"""
     if (
         summary["split"] != "test"
         or Path(summary["checkpoint"]["path"]).resolve() != Path(checkpoint_path).resolve()
@@ -271,7 +271,7 @@ def append_evaluation(run, checkpoint_path, summary, output_dir):
     expected_config.update(run)
     if any(remote_config.get(name) != value for name, value in expected_config.items()):
         raise ValueError("SwanLab configuration differs from the saved training run")
-    values = evaluation_media(summary)
+    values = evaluation_media(summary) if media is None else media
     with swanlab.init(
         project=project,
         workspace=workspace,
@@ -306,5 +306,7 @@ def append_evaluation(run, checkpoint_path, summary, output_dir):
         "metrics": summary["metrics"],
         "summary_file": str(Path(output_dir).resolve() / "summary.json"),
     }
+    if "benchmark" in summary:
+        publication["benchmark"] = summary["benchmark"]
     write_json(Path(output_dir) / "publication.json", publication)
     return publication

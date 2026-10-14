@@ -2,7 +2,7 @@
 
 创建时间：20261013 10:12:17 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261014 09:50:06 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261014 11:02:52 Asia/Shanghai（UTC+08:00）
 
 使用 [run.sh](run.sh) 启动训练、恢复、独立评估或单条生成。模型与训练目标见 [v4 说明](../README.md)，默认配置见 [experiment.json](../../../../configs/v4/attention_matching/experiment.json)。以下命令均从项目根目录执行。
 
@@ -75,7 +75,29 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - 自动与独立评估共用本节流程。评估失败时查看 `plan/<method-dir>/evaluation.log` 和 `evaluation-result.json`；已完成的训练结果和 checkpoint 保留，无需重新训练。
 - 默认沿用原训练是否在线记录的设置；`--tracking disabled` 仅保存本地。在线评估只向已完成训练的原 run 发布最终 checkpoint 结果，保存 `publication.json`；不改变训练配置或新建 run。
 
-## 5. 单条生成
+## 5. Benchmark 评估
+
+按 [benchmark 数据准备说明](../benchmarks/README.md) 手动准备 RULER 或 LoCoMo，然后使用同一 checkpoint 独立评估：
+
+```bash
+bash src/latent_working_memory/v4/scripts/run.sh \
+  --evaluate-only --benchmark ruler --gpus 0 \
+  --checkpoint artifacts/v4/am-query_20261013/train/conditioned-m32/checkpoints/global_step_N \
+  --lengths 8192 16384 32768
+
+bash src/latent_working_memory/v4/scripts/run.sh \
+  --evaluate-only --benchmark locomo --gpus 0 \
+  --checkpoint artifacts/v4/am-query_20261013/train/conditioned-m32/checkpoints/global_step_N
+```
+
+- `--benchmark` 仅用于独立评估；未指定时仍执行第 4 节的 QASPER test 评估。完成训练后自动执行的也是 test。
+- 默认数据目录为 `data/benchmarks/ruler-v1/` 和 `data/benchmarks/locomo/`，可用 `--data-dir` 覆盖；原始格式、准备指令及评分口径见上述说明。
+- RULER 默认评估 8192、16384、32768 三种长度，可用 `--lengths` 调整；LoCoMo 不接受该参数。
+- 每题独立初始化记忆，使用 greedy 生成和各任务规定的生成预算，不接受 `--max-new-tokens` 覆盖。
+- 默认输出 `eval/<method-dir>/ruler/` 或 `eval/<method-dir>/locomo/`；重跑须用 `--output-dir` 指定新目录。
+- 分别记录 `plan/<method-dir>/ruler-evaluation.log`、`ruler-evaluation-result.json` 或对应的 `locomo` 文件。在线结果追加到原训练 run；`--tracking disabled` 仅保存本地。
+
+## 6. 单条生成
 
 准备已组织好的 UTF-8 纯文本 prompt：
 
@@ -91,7 +113,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - 默认写入 `eval/<method-dir>/greedy-sample.json`，可用 `--output` 指定文件。结果包含 prompt、生成文本及 token IDs。
 - prompt 与请求的新增 token 上限之和不得超过模型窗口；单条生成不计算 QA 指标。
 
-## 6. 常用参数
+## 7. 常用参数
 
 **新训练的配置与执行**
 
@@ -124,7 +146,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - 生成与评估必须显式选一张卡。`--resume`、`--generate-only`、`--evaluate-only` 互斥，均须提供 `--checkpoint`。
 - 完整参数：`bash src/latent_working_memory/v4/scripts/run.sh --help`。
 
-## 7. 产物与进度
+## 8. 产物与进度
 
 ```text
 artifacts/v4/<run-id>/
@@ -133,6 +155,7 @@ artifacts/v4/<run-id>/
 │   ├── result.json                         训练／恢复命令与状态
 │   ├── generate-result.json                生成命令与状态
 │   ├── evaluation-result.json              评估命令与状态
+│   ├── <benchmark>-evaluation-result.json  benchmark 命令与状态
 │   └── train.log、generate.log、evaluation.log
 ├── train/<method-dir>/
 │   ├── run.json、tokenizer/                运行配置与 tokenizer
@@ -142,7 +165,8 @@ artifacts/v4/<run-id>/
 │   └── training-result.json                训练结果与最后 checkpoint
 └── eval/<method-dir>/
     ├── greedy-sample.json
-    └── test/                              评估配置、逐题结果、汇总及发布记录
+    ├── test/                              评估配置、逐题结果、汇总及发布记录
+    └── ruler/、locomo/                    benchmark 逐题结果、汇总及发布记录
 ```
 
 - 状态文件保存执行命令、GPU 和起止时间；训练与评估分别记录在 `result.json`、`evaluation-result.json`。启动时为 `running`，结束后更新为 `finished`／`stopped`／`failed`，失败时记录原因与子进程退出码。

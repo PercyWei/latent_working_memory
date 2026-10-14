@@ -2,11 +2,11 @@
 
 创建时间：20261003 21:51:43 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261014 10:24:25 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261014 11:19:59 Asia/Shanghai（UTC+08:00）
 
 冻结基座，在每层维护 latent memory，通过 Attention Matching 局部更新记忆，并由答案 CE 学习如何生成压缩查询和读写记忆。
 
-[运行指南](scripts/README.md) · [默认配置](../../../configs/v4/attention_matching/experiment.json) · [框架笔记](../../../notes/v4/20261003_attention_matching_meta_memory.md)
+[运行指南](scripts/README.md) · [Benchmark 数据准备与评估](benchmarks/README.md) · [默认配置](../../../configs/v4/attention_matching/experiment.json) · [框架笔记](../../../notes/v4/20261003_attention_matching_meta_memory.md)
 
 ## 一、模型与训练
 
@@ -134,12 +134,14 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 |---|---|
 | 训练中 dev | 答案 token CE，以及局部写入前／后的 AM loss |
 | 最终 test 评估 | 从 checkpoint 计算答案 NLL、greedy 生成的 EM／F1，保存逐题结果及汇总 |
+| Benchmark 评估 | RULER v1 的 13 项任务与 LoCoMo 类别 1–4；独立生成，沿用官方评分 |
 | 单条生成 | 从纯文本 prompt 生成，用于查看模型输出，不计算 QA 指标 |
 
 - 统一入口在训练或续训完成全部预算后自动评估最终 checkpoint；等待训练进程退出，再使用所选 GPU 中的第一张卡，默认生成上限为 128 tokens。提前停止或训练失败时不执行 test；已有 checkpoint 可通过 `--evaluate-only` 补评估。
 - NLL 按答案 token 加权，EM／F1 按 QA 平均；EM／F1 使用小写化、去标点及英文冠词、合并空白后的短答评分。这是当前单参考答案协议，不是官方 QASPER 多参考评测。
 - NLL 与生成各自初始化记忆；生成仅接收 prompt，参考答案不进入生成路径。
 - test 沿用固定 prompt 下限及模型窗口上限；生成预算超过剩余窗口时缩至可用长度，记录实际预算，不改变样本筛选。
+- Benchmark 使用官方原始格式，每题独立初始化记忆，输入只应用一次 chat template。严格检查输入与任务生成预算的总长度，不截断或套用训练筛选；数据位置、手动准备指令和评估协议见 [benchmark 说明](benchmarks/README.md)。
 - 汇总包含模型各层 slots、维度、总 latent 元素及字节数，以及评估耗时、局部写入耗时和峰值显存。计量范围随结果保存，不将 latent 状态大小视为整个模型显存。
 
 ### 4.2 SwanLab 与本地产物
@@ -148,12 +150,14 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - `--run-id` 标识实验系列；方法目录由 `query_mode` 与 `num_slots` 自动生成，例如 `conditioned-m32`。SwanLab 名称为 `<method-dir>_<run-id>`。
 - train/dev 在同一 run 中按真实 optimizer step 追加原生曲线。各分区的 `write_loss` 图合并写入前后两条曲线，以浅色／深色区分；底层分别保存 `write_loss_before` 和 `write_loss`，均先按层、再按写入事件平均。
 - 最终评估沿用原训练的在线设置，在同一 run 的 `evaluation/*` 展示 NLL、EM／F1、写入前后 AM loss，保留原配置和身份。辅助计数与逐题结果保存在本地。
+- Benchmark 结果同样追加到原 run，分别用 `evaluation/ruler` 汇总任务／长度、`evaluation/locomo` 汇总 QA 类别及总体分数。
 
 | 位置 | 主要产物 |
 |---|---|
 | `plan/<method-dir>/` | 配置快照、命令、运行状态和执行日志 |
 | `train/<method-dir>/` | `run.json`、`tokenizer/`、`data-statistics.json`、`metrics.jsonl`、checkpoint 与训练结果 |
 | `eval/<method-dir>/test/` | 含评估配置的 `summary.json`、`predictions.jsonl`、筛选统计，以及在线发布时的 `publication.json` |
+| `eval/<method-dir>/ruler/`、`locomo/` | 含 benchmark 协议的 `summary.json`、逐题 `predictions.jsonl` 及在线发布记录 |
 
 共同父目录为 `artifacts/v4/<run-id>/`。详细文件和命令见[运行指南](scripts/README.md)。当前没有独立跨运行比较入口。
 
@@ -166,7 +170,9 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 | 逐层记忆与流式主干 | [memory.py](memory.py)、[model.py](model.py) |
 | 外层训练与批处理 | [train.py](train.py)、[engine.py](engine.py)、[training_data.py](training_data.py) |
 | 保存恢复与实验记录 | [checkpoint.py](checkpoint.py)、[tracking.py](tracking.py) |
-| 独立评估与生成 | [evaluate.py](evaluate.py)、[inference.py](inference.py) |
+| 评估共用模型加载与计时 | [evaluation_runtime.py](evaluation_runtime.py) |
+| QASPER 评估与单条生成 | [evaluate.py](evaluate.py)、[inference.py](inference.py) |
+| Benchmark 原始读取、官方评分与评估 | [benchmarks/data.py](benchmarks/data.py)、[scoring.py](benchmarks/scoring.py)、[evaluate.py](benchmarks/evaluate.py) |
 
 ```bash
 uv run --frozen python -m compileall -q src/latent_working_memory/v4
