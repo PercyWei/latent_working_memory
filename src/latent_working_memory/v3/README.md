@@ -196,7 +196,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | QA 训练中验证 | FineWeb FactQA dev，评估全部可见 task QA | NLL |
 | 最终评估 | FineWeb FactQA test，评估全部可见 task QA | NLL、EM、F1 |
 
-完整训练默认只评估最后阶段的最后一个 checkpoint。单独评估可一次指定同一方法原 run 的多个 checkpoint，按真实累计 step 排序执行；同一 run 的评估共用 test 配置与 QA 协议，见[单独评估指南](scripts/README.md#22-单独评估)。
+完整训练默认只评估最后阶段的最后一个 checkpoint。单独评估可用 `--checkpoint` 选择同一方法原 run 的一个或多个 checkpoint，或用 `--eval-run` 指定 `train/<method-dir>/`，评估该方法当前保留的全部 checkpoint；两种入口互斥，均按真实累计 step 排序执行。同一 run 的评估共用 test 配置与 QA 协议，见[单独评估指南](scripts/README.md#22-单独评估)。
 
 **QA 评估流程**
 

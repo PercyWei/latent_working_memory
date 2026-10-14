@@ -40,6 +40,8 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 
 ### 2.1 完整运行
 
+完整训练默认仅评估最后阶段的最后一个 checkpoint，多 checkpoint 评估见[第 2.2 节](#22-单独评估)。
+
 #### 1）Baseline
 
 ```bash
@@ -83,6 +85,16 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 
 ### 2.2 单独评估
 
+评估一个方法 run 当前保留的全部 checkpoint：
+
+```bash
+bash src/latent_working_memory/v3/scripts/run.sh \
+  --evaluate-only --gpus 0 \
+  --eval-run artifacts/v3/capacity-comparison_20261010-01/train/information-loss-k512+32-local
+```
+
+也可显式选择一个或多个 checkpoint：
+
 ```bash
 bash src/latent_working_memory/v3/scripts/run.sh \
   --evaluate-only --gpus 0 \
@@ -91,8 +103,10 @@ bash src/latent_working_memory/v3/scripts/run.sh \
     artifacts/v3/capacity-comparison_20261010-01/train/information-loss-k512+32-local/policy/checkpoints/global_step_50
 ```
 
-- `--evaluate-only` 和 `--checkpoint` 必须提供。后者接受一个或多个现存 checkpoint 目录，须属于同一方法的原 run，执行时按真实累计 step 排序；训练初始化和中断恢复仍只接受一个目录。完整训练默认仅评估最后阶段的最后一个 checkpoint。
-- 默认原样复用 `plan/<method-dir>/eval.json`；模型、方法和写入配置从 checkpoint 读取。首次评估前可用 `--eval-data`、`--eval-seed`、`--max-test-samples`、`--max-new-tokens` 设置评估条件；已有评估历史后，同一 run 须保持相同 test 配置与 QA 协议。
+- `--evaluate-only` 须搭配 `--eval-run` 或 `--checkpoint`，两者互斥。两种入口均按 checkpoint 对应的累计 step 排序评估。
+- `--eval-run` 仅用于单独评估，指向 `artifacts/v3/<run-id>/train/<method-dir>/` 方法级目录，会扫描其各阶段当前保留且包含 `state.pt` 的 checkpoint。
+- `--checkpoint` 仅接受属于同一 run 下的单/多个 checkpoint 列表。
+- 默认原样复用 `plan/<method-dir>/eval.json`，模型、方法和写入配置从 checkpoint 读取。首次评估前可用 `--eval-data`、`--eval-seed`、`--max-test-samples`、`--max-new-tokens` 设置评估条件；已有评估历史后，同一 run 须保持相同 test 配置与 QA 协议。
 - `--train-only` 运行首次补评估时，需传 `--eval-data <目录>` 建立评估配置；其余参数默认全部 test 数据、seed 20261004、最多生成 64 tokens。seed 控制测试轨迹和 gate 选题。
 - 每个 checkpoint 的结果独立保存。相同 checkpoint、相同配置复用已有结果和日志；已发布结果不重复上传，仅本地评估的结果可后续在线发布，补发日志追加到原 `eval.log`。
 - 默认追加到原训练 SwanLab run，须保留原训练目录与身份文件且云端 run 状态为 `FINISHED`；加 `--tracking disabled` 仅保存本地结果。

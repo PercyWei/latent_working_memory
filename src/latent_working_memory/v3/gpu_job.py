@@ -75,11 +75,17 @@ def parse_args(argv=None):
     actions.add_argument(
         "--resume", action="store_true", help="恢复原阶段，并完成该方法的剩余训练与评估"
     )
-    parser.add_argument(
+    checkpoint_sources = parser.add_mutually_exclusive_group()
+    checkpoint_sources.add_argument(
         "--checkpoint",
         type=Path,
         nargs="+",
         help="checkpoint 目录；--evaluate-only 可传多个，初始化与恢复只接受一个",
+    )
+    checkpoint_sources.add_argument(
+        "--eval-run",
+        type=Path,
+        help="评估指定方法 run 目录中全部保留的 checkpoint；仅用于 --evaluate-only",
     )
     parser.add_argument("--mode", choices=job_plan.LEVELS, default="full")
     parser.add_argument("--method", choices=(*METHODS, "dynamic_pretrain"), help="本次训练的方法")
@@ -251,9 +257,11 @@ def parse_args(argv=None):
     )
     parser.add_argument("--output-root", type=Path, default=Path("artifacts/v3"))
     args = parser.parse_args(argv)
+    if args.eval_run is not None and not args.evaluate_only:
+        parser.error("--eval-run requires --evaluate-only")
     if args.evaluate_only:
-        if args.checkpoint is None:
-            parser.error("--evaluate-only requires --checkpoint")
+        if args.checkpoint is None and args.eval_run is None:
+            parser.error("--evaluate-only requires --checkpoint or --eval-run")
         return args
     if args.checkpoint is not None:
         if len(args.checkpoint) != 1:
@@ -421,6 +429,8 @@ def checkpoint_evaluation_identity(checkpoint):
     stage_directory = job_plan.checkpoint_stage_directory(checkpoint)
     saved = read_checkpoint(checkpoint)
     run = saved["run"]
+    if run["config"]["objective"]["method"] == "dynamic":
+        raise ValueError("shared dynamic pretraining has no FactQA memory policy")
     stage_step = saved["cursor"]["step"]
     if (
         int(checkpoint.name.removeprefix("global_step_")) != stage_step
@@ -462,7 +472,21 @@ def evaluate_checkpoint(args, checkpoint, config_path, environment):
 
 
 def run_evaluation(args):
-    checkpoints = [path.resolve() for path in args.checkpoint]
+    if args.eval_run is not None:
+        method_directory = args.eval_run.resolve()
+        if not method_directory.is_dir():
+            raise FileNotFoundError(method_directory)
+        if method_directory.parent.name != "train":
+            raise ValueError("--eval-run requires <series>/train/<method>")
+        checkpoints = [
+            path.parent.resolve()
+            for path in method_directory.glob("*/checkpoints/global_step_*/state.pt")
+            if path.is_file()
+        ]
+        if not checkpoints:
+            raise ValueError(f"no retained checkpoints found in {method_directory}")
+    else:
+        checkpoints = [path.resolve() for path in args.checkpoint]
     if len(set(checkpoints)) != len(checkpoints):
         raise ValueError("checkpoint list contains duplicate directories")
     identities = {path: checkpoint_evaluation_identity(path) for path in checkpoints}
