@@ -613,8 +613,12 @@ def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_pat
         yield Tracking()
 
     monkeypatch.setattr(evaluation, "swanlab_api_key", lambda: "evaluation-test-key")
-    monkeypatch.setattr(evaluation, "swanlab_training_run", resume)
+    monkeypatch.setattr(evaluation, "evaluation_tracking_run", resume)
     monkeypatch.setattr(evaluation, "configure_evaluation_metrics", lambda *args: None)
+    monkeypatch.setattr(
+        evaluation, "configure_evaluation_layout", lambda *args: {"url": "https://example.test/view"}
+    )
+    monkeypatch.setattr(evaluation, "verify_evaluation_publication", lambda *args: None)
     checkpoint = training_dir / "policy" / "checkpoints" / "global_step_37"
     output = tmp_path / "evaluation" / "policy" / checkpoint.name
     evaluation_config = {

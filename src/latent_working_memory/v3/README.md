@@ -223,7 +223,7 @@ artifacts/v3/<run-id>/
 - **运行目录**：`run-id` 可用 `--run-id` 指定，默认使用格式为 `YYYYMMDD-HHMMSS` 的当前时间，复用动态预训练且省略 `--run-id` 时继承 checkpoint 来源的编号。父目录由 `--output-root` 控制。
 - **方法目录**：三个 baseline 和独立动态预训练使用 `<method>-k<K>{_<mode>}`，两种动态方法统一使用 `<method>-k<K>+<ΔK>-<writer>{_<mode>}`。例如，正式运行 `memory-change-k512+32-local`、试跑 `memory-change-k512+32-tag_smoke`。
 - **Checkpoint**：目录为 `checkpoints/global_step_<阶段step>/`。`state.pt` 保存新增权重、优化器及运行状态，`data_<rank>.pt` 保存各卡加载器状态。
-- **评估记录**：每个 checkpoint 单独保存结果和四项评估配置快照；`evaluations.json` 登记历史与发布 step，`swanlab-publication.json` 记录原 run 身份、真实 checkpoint 步数和发布信息。相同 checkpoint、相同配置复用结果，已发布结果不重复上传；仅保存于本地的结果可随后追加到原训练 run。
+- **评估记录**：每个 checkpoint 单独保存结果和四项评估配置快照；`evaluations.json` 登记历史与发布 step，`swanlab-publication.json` 记录原 run 身份、真实 checkpoint 步数、发布信息与汇总视图链接。相同 checkpoint、相同配置复用结果；云端数据核验通过后才登记发布完成。发布失败保留本地结果，重新执行原命令即可补传。
 - **结果与比较**：`summary.json` 汇总指标，`trajectories.jsonl` 保存动作、分数、计时与逐题结果。比较单独调用 [compare.py](compare.py)，导出 `points.json` 与 `points.csv`；命令见[运行指南](scripts/README.md#5-查看结果)。比较要求 split、实际 task 题池、各段选中的 gate QA 签名、QA prompt 和生成 token 上限一致；seed 不同但实际选题相同仍可比较，各方法的训练数据与训练配置可不同。
 
 ### 5.3 SwanLab 组织与展示
@@ -244,9 +244,9 @@ artifacts/v3/<run-id>/
 
 **最终评估**
 
-最终 test 结果追加到对应方法的训练 run。总体 NLL、EM／F1、最终／平均 slots 与平均记忆构建耗时使用原生增量曲线，横轴 `evaluation/checkpoint_step` 为真实累计 step，用于比较不同 checkpoint。
+最终 test 结果追加到对应方法已完成的训练 run，保留其身份、训练配置和完成状态。项目的公共自定义视图 `evaluation` 展示四张原生增量曲线：总体 NLL、EM／F1 合图、最终／平均 slots 合图，以及平均记忆构建耗时。横轴固定为 `evaluation/checkpoint_step`，表示真实累计 step；发布完成后打印视图链接。
 
-各 checkpoint 还保存以下图表快照：
+默认视图的 `evaluation` 分区展示各 checkpoint 的图表快照：
 
 | 内容 | 展示方式 |
 |---|---|

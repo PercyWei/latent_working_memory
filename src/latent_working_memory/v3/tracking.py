@@ -4,10 +4,14 @@ from contextlib import contextmanager
 from copy import deepcopy
 import fcntl
 import json
+import math
 from pathlib import Path
 import secrets
+import signal
+import time
 
 import swanlab
+import torch
 from swanlab.sdk.internal.run.components.config import Config as SwanLabConfig
 
 from latent_working_memory.v1.reporting import _shade
@@ -34,6 +38,7 @@ STAGE_NUMBERS = {"pretrain": 1, "lm": 1, "qa": 2, "warmup": 2, "policy": 3}
 DEV_QA_METRICS = ("dev/qa_old_nll", "dev/qa_new_nll")
 APPEND_RATIO_METRICS = ("train/append_ratio", "dev/append_ratio")
 EVALUATION_STEP_METRIC = "evaluation/checkpoint_step"
+EVALUATION_VIEW_NAME = "evaluation"
 EVALUATION_METRICS = (
     "evaluation/overall_nll",
     "evaluation/overall_em",
@@ -118,9 +123,9 @@ def _save_record(path, value):
 
 
 def _configure_line_panels(
-    tracking, root, method, name, section_name, panels, x_axis, api_key, bind_columns=False
+    tracking, root, method, name, section_name, panels, x_axis, api_key, view_name=None
 ):
-    """在默认视图配置共享原生曲线，保留其他 runs 的图例和配色。"""
+    """配置共享原生曲线，指定名称时使用空白公共自定义视图。"""
     with (root.parent / ".swanlab-panels.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         api = swanlab.Api(api_key=api_key)
@@ -132,8 +137,33 @@ def _configure_line_panels(
                 raise RuntimeError(response.errmsg)
             return response.data
 
-        project = checked(api._get(f"/project/{project_path}"))
-        view = project["viewIndex"][0]
+        if view_name is None:
+            project = checked(api._get(f"/project/{project_path}"))
+            view = project["viewIndex"][0]
+        else:
+            views_path = f"/views/{project_path}"
+            matches = [
+                row
+                for row in checked(api._get(views_path, params={"name": view_name, "size": 50}))
+                if row["name"] == view_name and row["type"] == "PUBLIC"
+            ]
+            if len(matches) > 1:
+                raise ValueError(f"multiple public SwanLab views named {view_name}")
+            if matches:
+                record = checked(api._get(f"{views_path}/{matches[0]['index']}"))
+            else:
+                # 官方网页创建自定义视图使用 locked=True；公开范围单独设置。
+                created = checked(api._post(views_path, data={"name": view_name, "locked": True}))
+                view_path = f"{views_path}/{created['index']}"
+                checked(api._put(view_path, data={"name": view_name, "type": "PUBLIC"}))
+                record = checked(api._get(view_path))
+            if (
+                not record["locked"]
+                or record["type"] != "PUBLIC"
+                or record["viewPermission"] != "WRITE"
+            ):
+                raise ValueError(f"SwanLab view {view_name} must be a writable public custom view")
+            view = record["index"]
         sections_path = f"/sections/{project_path}/{view}"
         sections = checked(api._get(sections_path, params={"size": 100}))
         section = next((row for row in sections if row["name"] == section_name), None)
@@ -168,6 +198,7 @@ def _configure_line_panels(
                 "custom": custom,
                 "config": {
                     "xAxis": x_axis,
+                    "fixedXAxis": True,
                     "yAxis": [
                         {"key": metric, "type": "FLOAT", "class": "SCALAR"}
                         for metric in metrics
@@ -178,28 +209,16 @@ def _configure_line_panels(
             if existing is None:
                 existing = checked(api._post(f"{charts_path}/{section['index']}", data=body))
             configured.append((existing["index"], body))
-        if bind_columns:
-            columns = []
-            for panel_index, (index, body) in enumerate(configured):
-                keys = [axis["key"] for axis in body["config"]["yAxis"]]
-                if panel_index == 0:
-                    keys.append(x_axis["key"])
-                columns.extend(
-                    {
-                        "key": key,
-                        "type": "FLOAT",
-                        "class": "CUSTOM",
-                        "sectionName": section_name,
-                        "chartName": body["title"],
-                        "chartIndex": index,
-                        "metricName": key.rsplit("/", 1)[-1],
-                    }
-                    for key in keys
-                )
-            # 列在首条 log 前直接绑定所需图；横轴列不单独生成面板。
-            checked(api._post(f"/experiment/{remote.run_id}/columns", data=columns))
         for index, body in configured:
             checked(api._put(f"{charts_path}/xxxxxx/{index}", data=body))
+        return {
+            "name": view_name,
+            "index": view,
+            "url": (
+                f"{tracking.url.split('/@', 1)[0]}/@{project_path}/v1/{view}"
+                f"/runs/{remote.run_id}/chart"
+            ),
+        }
 
 
 def _configure_append_ratio_panel(tracking, root, method, name, api_key):
@@ -215,7 +234,7 @@ def _configure_append_ratio_panel(tracking, root, method, name, api_key):
     )
 
 
-def configure_evaluation_metrics(tracking, root, method, api_key):
+def configure_evaluation_metrics(tracking):
     """以真实 checkpoint step 展示原生曲线，媒体发布步数独立递增。"""
     if tracking is None:
         return
@@ -223,7 +242,11 @@ def configure_evaluation_metrics(tracking, root, method, api_key):
         tracking.define_metric(
             metric, x_axis=EVALUATION_STEP_METRIC, section_name="evaluation"
         )
-    _configure_line_panels(
+
+
+def configure_evaluation_layout(tracking, root, method, api_key):
+    """同一原训练 run 的 evaluation 自定义视图仅配置四张汇总曲线。"""
+    return _configure_line_panels(
         tracking,
         Path(root),
         method,
@@ -247,7 +270,97 @@ def configure_evaluation_metrics(tracking, root, method, api_key):
         ],
         {"key": EVALUATION_STEP_METRIC, "type": "FLOAT", "class": "SCALAR"},
         api_key,
-        bind_columns=True,
+        view_name=EVALUATION_VIEW_NAME,
+    )
+
+
+@contextmanager
+def evaluation_tracking_run(training_dir, api_key):
+    """追加评估并保留已完成训练的身份、配置与完成状态。"""
+    identity = json.loads((training_dir / "swanlab.json").read_text(encoding="utf-8"))
+    if identity["job_type"] != "train" or identity["mode"] != "online":
+        raise ValueError("evaluation append requires an online training run")
+    project_path = identity["url"].split("/@", 1)[1].split("/runs/", 1)[0]
+    workspace, project = project_path.split("/")
+    if project != identity["project"]:
+        raise ValueError("training run URL differs from its project")
+    remote = swanlab.Api(api_key=api_key).run(f"{project_path}/{identity['id']}")
+    if remote.state != "FINISHED":
+        raise ValueError(
+            f"evaluation append requires a finished training run, got {remote.state}: "
+            f"{identity['url']}. If an earlier evaluation publication changed its state, "
+            "confirm training succeeded and restore the completed state before retrying."
+        )
+    config = {
+        key: item["value"]
+        for key, item in sorted(remote.profile["config"].items(), key=lambda pair: pair[1]["sort"])
+    }
+    # 补传本地结果不需要初始化 CUDA；SDK 初始化只保护 CPU 随机状态。
+    device = torch.device("cpu")
+    rng = capture_rng(device)
+    interrupt_handler = signal.getsignal(signal.SIGINT)
+    try:
+        tracking = swanlab.init(
+            project=project,
+            workspace=workspace,
+            name=remote.name,
+            config=config,
+            id=identity["id"],
+            resume="must",
+            mode="online",
+            log_dir=str(training_dir / "swanlab"),
+            settings=swanlab.Settings(
+                api_key=api_key,
+                interactive=False,
+                terminal={"proxy_type": "none"},
+                probe={"git": False, "monitor": False},
+            ),
+        )
+    finally:
+        restore_rng(rng, device)
+    try:
+        # SDK 的 SIGINT hook 会先标记 ABORTED；交由本上下文统一结束补传。
+        signal.signal(signal.SIGINT, interrupt_handler)
+        yield tracking
+    finally:
+        # 发布异常继续向外抛出；不要让 SDK 的 __exit__ 把原训练标记为失败。
+        tracking.finish(state="success")
+
+
+def verify_evaluation_publication(training_dir, metrics, media_keys, step, api_key):
+    """确认本次标量与图表已上传后，才能保存成功发布记录。"""
+    identity = json.loads((training_dir / "swanlab.json").read_text(encoding="utf-8"))
+    project_path = identity["url"].split("/@", 1)[1].split("/runs/", 1)[0]
+    for attempt in range(5):
+        remote = swanlab.Api(api_key=api_key).run(f"{project_path}/{identity['id']}")
+        scalars = remote.summary(keys=list(metrics))
+        media = {
+            item["key"]: item
+            for item in remote.medias(keys=list(media_keys), step=step)["list"]
+        }
+        missing = [
+            key
+            for key, expected in metrics.items()
+            if key not in scalars
+            or scalars[key]["step"] != step
+            or not math.isclose(scalars[key]["value"], expected, rel_tol=1e-6, abs_tol=1e-8)
+        ]
+        missing.extend(
+            key
+            for key in media_keys
+            if key not in media
+            or not any(
+                item["index"] == step and item["items"] for item in media[key]["metrics"]
+            )
+        )
+        if not missing and remote.state == "FINISHED":
+            return
+        if attempt < 4:
+            time.sleep(2)
+    raise RuntimeError(
+        f"SwanLab publication verification failed at step {step}: "
+        f"state={remote.state}, missing or mismatched metrics={missing}. "
+        "Cached evaluation results are retained; rerun the same evaluation to publish them."
     )
 
 

@@ -13,7 +13,6 @@ import torch
 import torch.distributed as dist
 
 from latent_working_memory.data_preparation.personamem.audit import scores
-from latent_working_memory.v1.tracking import swanlab_training_run
 from latent_working_memory.v3.config import (
     DYNAMIC_METHODS,
     ExperimentConfig,
@@ -34,11 +33,14 @@ from latent_working_memory.v3.runtime import (
     select_examples,
 )
 from latent_working_memory.v3.tracking import (
+    configure_evaluation_layout,
     configure_evaluation_metrics,
     evaluation_media,
     evaluation_scalars,
+    evaluation_tracking_run,
     experiment_directory,
     tracking_method,
+    verify_evaluation_publication,
 )
 from latent_working_memory.tracking_credentials import swanlab_api_key
 
@@ -191,20 +193,34 @@ def _append_evaluation(summary, training_dir, output_dir, step, history):
             flush=True,
         )
         metrics = evaluation_scalars(summary)
-        values = {**metrics, **evaluation_media(summary)}
+        media = evaluation_media(summary)
+        values = {**metrics, **media}
         api_key = swanlab_api_key()
-        # 既有 helper 保留云端训练 config/name，检查训练已结束并使用 resume="must"。
-        with swanlab_training_run(training_dir, api_key=api_key) as tracking:
-            configure_evaluation_metrics(tracking, training_dir, summary["method"], api_key)
-            # 恢复后各指标的 min_step 来自云端；RunContext 的本地计数器会重新从 -1 开始。
-            resumed_step = max(
-                (metric.min_step for metric in tracking._ctx.core._metrics._metrics.values()),
-                default=-1,
+        try:
+            with evaluation_tracking_run(training_dir, api_key) as tracking:
+                configure_evaluation_metrics(tracking)
+                view = configure_evaluation_layout(
+                    tracking, training_dir, summary["method"], api_key
+                )
+                # 各指标的 min_step 来自云端；本地计数器在恢复时重新从 -1 开始。
+                resumed_step = max(
+                    (metric.min_step for metric in tracking._ctx.core._metrics._metrics.values()),
+                    default=-1,
+                )
+                publication_step = max(
+                    resumed_step, history.last_publication_step(), step
+                ) + 1
+                tracking.log(values, step=publication_step)
+            verify_evaluation_publication(
+                training_dir, metrics, media, publication_step, api_key
             )
-            publication_step = max(
-                resumed_step, history.last_publication_step(), step
-            ) + 1
-            tracking.log(values, step=publication_step)
+        except BaseException:
+            print(
+                f"[evaluation] SwanLab publication failed; cached results retained "
+                f"path={Path(output_dir) / 'summary.json'}",
+                flush=True,
+            )
+            raise
         identity = json.loads((training_dir / "swanlab.json").read_text(encoding="utf-8"))
         history.record_publication(
             {
@@ -219,6 +235,7 @@ def _append_evaluation(summary, training_dir, output_dir, step, history):
                 "stage_step": summary["metadata"]["stage_step"],
                 "global_step": step,
                 "publication_step": publication_step,
+                "view": view,
                 "panels": list(values),
                 "metrics": metrics,
                 "quality": summary["quality"],
@@ -228,7 +245,8 @@ def _append_evaluation(summary, training_dir, output_dir, step, history):
         )
         print(
             f"[evaluation] SwanLab publication finished "
-            f"run_id={identity['id']} global_step={step} publication_step={publication_step}",
+            f"run_id={identity['id']} global_step={step} publication_step={publication_step} "
+            f"view={view['url']}",
             flush=True,
         )
 
