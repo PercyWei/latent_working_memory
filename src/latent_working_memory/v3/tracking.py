@@ -48,6 +48,12 @@ EVALUATION_METRICS = (
     "checkpoint_comparison/mean_slots",
     "checkpoint_comparison/mean_build_seconds",
 )
+EVALUATION_MEDIA_TYPES = {
+    "evaluation/nll": "ECHARTS",
+    "evaluation/em_f1": "ECHARTS",
+    "evaluation/nll_retention": "ECHARTS",
+    "evaluation/statistics": "HTML",
+}
 
 
 def experiment_directory(training):
@@ -123,16 +129,31 @@ def _save_record(path, value):
     temporary.replace(path)
 
 
+def _default_view(api, project_path):
+    """按项目视图顺序选择可写的自动视图，跳过空白自定义视图。"""
+    response = api._get(f"/project/{project_path}")
+    if not response.ok:
+        raise RuntimeError(response.errmsg)
+    for index in response.data["viewIndex"]:
+        response = api._get(f"/views/{project_path}/{index}")
+        if not response.ok:
+            raise RuntimeError(response.errmsg)
+        view = response.data
+        if not view["locked"] and view["viewPermission"] == "WRITE":
+            return view["index"]
+    raise ValueError("SwanLab project requires a writable default view")
+
+
 def _configure_line_panels(
-    tracking, root, method, name, section_name, panels, x_axis, api_key,
+    root, method, project_path, run_id, name, section_name, panels, x_axis, api_key,
     view_name=None, previous_view_name=None,
 ):
     """配置共享原生曲线，指定名称时使用空白公共自定义视图。"""
     with (root.parent / ".swanlab-panels.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         api = swanlab.Api(api_key=api_key)
-        project_path = tracking.url.split("/@", 1)[1].split("/runs/", 1)[0]
-        remote = api.run(f"{project_path}/{tracking.id}")
+        remote = api.run(f"{project_path}/{run_id}")
+        name = remote.name if name is None else name
 
         def checked(response):
             if not response.ok:
@@ -140,8 +161,7 @@ def _configure_line_panels(
             return response.data
 
         if view_name is None:
-            project = checked(api._get(f"/project/{project_path}"))
-            view = project["viewIndex"][0]
+            view = _default_view(api, project_path)
         else:
             views_path = f"/views/{project_path}"
             matches = [
@@ -201,7 +221,6 @@ def _configure_line_panels(
         charts = [
             checked(api._get(f"{charts_path}/xxxxxx/{index}")) for index in section["chartIndex"]
         ]
-        configured = []
         for title, metrics, labels, y_range in panels:
             existing = next(
                 (
@@ -237,15 +256,17 @@ def _configure_line_panels(
                 },
             }
             if existing is None:
-                existing = checked(api._post(f"{charts_path}/{section['index']}", data=body))
-            configured.append((existing["index"], body))
-        for index, body in configured:
-            checked(api._put(f"{charts_path}/xxxxxx/{index}", data=body))
+                checked(api._post(f"{charts_path}/{section['index']}", data=body))
+            elif (
+                any(existing.get(key) != body[key] for key in ("type", "title", "custom"))
+                or any(existing["config"].get(key) != value for key, value in body["config"].items())
+            ):
+                checked(api._put(f"{charts_path}/xxxxxx/{existing['index']}", data=body))
         return {
             "name": view_name,
             "index": view,
             "url": (
-                f"{tracking.url.split('/@', 1)[0]}/@{project_path}/v1/{view}"
+                f"{remote.url.split('/@', 1)[0]}/@{project_path}/v1/{view}"
                 f"/runs/{remote.run_id}/chart"
             ),
         }
@@ -253,9 +274,10 @@ def _configure_line_panels(
 
 def _configure_append_ratio_panel(tracking, root, method, name, api_key):
     _configure_line_panels(
-        tracking,
         root,
         method,
+        tracking.url.split("/@", 1)[1].split("/runs/", 1)[0],
+        tracking.id,
         name,
         "train",
         [("train/append_ratio", APPEND_RATIO_METRICS, ("train", "dev"), [0, 1])],
@@ -277,13 +299,15 @@ def configure_evaluation_metrics(tracking):
         )
 
 
-def configure_evaluation_layout(tracking, root, method, api_key):
+def configure_evaluation_layout(root, method, api_key):
     """checkpoint 对比区域配置四张汇总曲线；单个 checkpoint 保留单点。"""
+    identity = json.loads((Path(root) / "swanlab.json").read_text(encoding="utf-8"))
     return _configure_line_panels(
-        tracking,
         Path(root),
         method,
-        tracking.name,
+        identity["url"].split("/@", 1)[1].split("/runs/", 1)[0],
+        identity["id"],
+        None,
         EVALUATION_VIEW_NAME,
         [
             ("checkpoint_comparison/overall_nll", (EVALUATION_METRICS[0],), ("NLL",), [0, None]),
@@ -306,6 +330,82 @@ def configure_evaluation_layout(tracking, root, method, api_key):
         view_name=EVALUATION_VIEW_NAME,
         previous_view_name="evaluation",
     )
+
+
+def configure_evaluation_media_layout(training_dir, media_keys, api_key):
+    """检查默认视图，将删除分组后保留的媒体面板恢复到 evaluation。"""
+    identity = json.loads((training_dir / "swanlab.json").read_text(encoding="utf-8"))
+    project_path = identity["url"].split("/@", 1)[1].split("/runs/", 1)[0]
+    with (training_dir.parent / ".swanlab-panels.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        api = swanlab.Api(api_key=api_key)
+
+        def checked(response):
+            if not response.ok:
+                raise RuntimeError(response.errmsg)
+            return response.data
+
+        view = _default_view(api, project_path)
+        sections_path = f"/sections/{project_path}/{view}"
+        charts_path = f"/charts/{project_path}/{view}"
+        sections = checked(api._get(sections_path, params={"size": 100}))
+        for kind in ("PINNED", "HIDDEN"):
+            protected = checked(api._get(f"{sections_path}/protected", params={"type": kind}))
+            if protected is not None:
+                sections.append(protected)
+        found = {}
+        for section in sections:
+            for index in section["chartIndex"]:
+                chart = checked(api._get(f"{charts_path}/xxxxxx/{index}"))
+                if chart["type"] not in {"ECHARTS", "HTML"}:
+                    continue
+                columns = chart["config"]["keys"]
+                if len(columns) != 1:
+                    continue
+                key = columns[0]["key"]
+                if key not in EVALUATION_MEDIA_TYPES:
+                    continue
+                if chart["type"] != EVALUATION_MEDIA_TYPES[key]:
+                    raise ValueError(f"SwanLab evaluation panel has an unexpected type: {key}")
+                if key in found:
+                    raise ValueError(f"multiple SwanLab evaluation panels for {key}")
+                found[key] = (section["index"], index)
+        missing = set(media_keys).difference(found)
+        if missing:
+            raise RuntimeError(f"SwanLab evaluation media panels are missing: {sorted(missing)}")
+        matches = [section for section in sections if section["name"] == "evaluation"]
+        if len(matches) > 1:
+            raise ValueError("multiple SwanLab sections named evaluation")
+        if matches:
+            target = matches[0]
+        else:
+            target = checked(
+                api._post(
+                    sections_path,
+                    data={"name": "evaluation", "index": secrets.token_hex(3), "position": "above"},
+                )
+            )
+            target["chartIndex"] = []
+        for key in EVALUATION_MEDIA_TYPES:
+            if key not in found:
+                continue
+            source, index = found[key]
+            if source == target["index"]:
+                continue
+            target["chartIndex"].insert(0, index)
+            checked(
+                api._post(
+                    f"{charts_path}/{source}/{index}/move",
+                    data={"index": target["index"], "chartIndex": target["chartIndex"]},
+                )
+            )
+        result_indices = [found[key][1] for key in EVALUATION_MEDIA_TYPES if key in found]
+        order = result_indices + [index for index in target["chartIndex"] if index not in result_indices]
+        if order != target["chartIndex"]:
+            checked(api._put(f"{sections_path}/{target['index']}", data={"chartIndex": order}))
+        restored = checked(api._get(f"{sections_path}/{target['index']}"))
+        if restored["name"] != "evaluation" or restored["chartIndex"] != order:
+            raise RuntimeError("SwanLab evaluation layout verification failed")
 
 
 def configure_evaluation_visibility(training_dir, api_key):

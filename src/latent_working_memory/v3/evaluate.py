@@ -35,6 +35,7 @@ from latent_working_memory.v3.runtime import (
 from latent_working_memory.v3.tracking import (
     EVALUATION_VIEW_NAME,
     configure_evaluation_layout,
+    configure_evaluation_media_layout,
     configure_evaluation_metrics,
     configure_evaluation_visibility,
     evaluation_media,
@@ -194,54 +195,61 @@ def _append_evaluation(summary, training_dir, output_dir, step, history):
             for directory, saved in history.published_summaries()
         }
         summaries[summary["metadata"]["checkpoint"]] = (summary, output_dir, step, history)
+        layout = None
         for saved, directory, global_step, saved_history in sorted(
             summaries.values(), key=lambda item: item[2]
         ):
-            _publish_evaluation(saved, training_dir, directory, global_step, saved_history)
+            layout = _publish_evaluation(
+                saved, training_dir, directory, global_step, saved_history, layout
+            )
 
 
-def _publish_evaluation(summary, training_dir, output_dir, step, history):
+def _publish_evaluation(summary, training_dir, output_dir, step, history, layout=None):
     """核对单个缓存结果的发布记录，上传并验证当前布局所需的数据。"""
     metrics = evaluation_scalars(summary)
     media = evaluation_media(summary)
     values = {**metrics, **media}
     publication = history.publication()
-    if (
+    already_published = (
         publication is not None
         and publication["metrics"] == metrics
         and set(publication["panels"]) == set(values)
         and publication.get("view", {}).get("name") == EVALUATION_VIEW_NAME
         and publication["view"].get("default_metrics_hidden") is True
-    ):
+    )
+    if already_published and layout is not None:
+        history.record_publication({**publication, "view": layout})
         print(
-            f"[evaluation] SwanLab already published; skipping global_step={step}",
+            f"[evaluation] SwanLab already published; shared layout checked; skipping global_step={step}",
             flush=True,
         )
-        return
+        return layout
     print(
-        f"[evaluation] SwanLab publication started "
+        f"[evaluation] SwanLab {'layout check' if already_published else 'publication'} started "
         f"method={summary['method']} stage={summary['stage']} global_step={step}",
         flush=True,
     )
     api_key = swanlab_api_key()
     try:
-        with evaluation_tracking_run(training_dir, api_key) as tracking:
-            configure_evaluation_metrics(tracking)
-            view = configure_evaluation_layout(
-                tracking, training_dir, summary["method"], api_key
+        if already_published:
+            view = configure_evaluation_layout(training_dir, summary["method"], api_key)
+        else:
+            with evaluation_tracking_run(training_dir, api_key) as tracking:
+                configure_evaluation_metrics(tracking)
+                view = configure_evaluation_layout(training_dir, summary["method"], api_key)
+                # 各指标的 min_step 来自云端；本地计数器在恢复时重新从 -1 开始。
+                resumed_step = max(
+                    (metric.min_step for metric in tracking._ctx.core._metrics._metrics.values()),
+                    default=-1,
+                )
+                publication_step = max(
+                    resumed_step, history.last_publication_step(), step
+                ) + 1
+                tracking.log(values, step=publication_step)
+            verify_evaluation_publication(
+                training_dir, metrics, media, publication_step, api_key
             )
-            # 各指标的 min_step 来自云端；本地计数器在恢复时重新从 -1 开始。
-            resumed_step = max(
-                (metric.min_step for metric in tracking._ctx.core._metrics._metrics.values()),
-                default=-1,
-            )
-            publication_step = max(
-                resumed_step, history.last_publication_step(), step
-            ) + 1
-            tracking.log(values, step=publication_step)
-        verify_evaluation_publication(
-            training_dir, metrics, media, publication_step, api_key
-        )
+        configure_evaluation_media_layout(training_dir, media, api_key)
         configure_evaluation_visibility(training_dir, api_key)
         view["default_metrics_hidden"] = True
     except BaseException:
@@ -251,6 +259,14 @@ def _publish_evaluation(summary, training_dir, output_dir, step, history):
             flush=True,
         )
         raise
+    if already_published:
+        history.record_publication({**publication, "view": view})
+        print(
+            f"[evaluation] SwanLab layout ready; existing data retained "
+            f"global_step={step} publication_step={publication['publication_step']} view={view['url']}",
+            flush=True,
+        )
+        return view
     identity = json.loads((training_dir / "swanlab.json").read_text(encoding="utf-8"))
     history.record_publication(
         {
@@ -279,6 +295,7 @@ def _publish_evaluation(summary, training_dir, output_dir, step, history):
         f"view={view['url']}",
         flush=True,
     )
+    return view
 
 
 @torch.no_grad()

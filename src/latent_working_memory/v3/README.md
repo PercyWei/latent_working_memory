@@ -223,7 +223,7 @@ artifacts/v3/<run-id>/
 - **运行目录**：`run-id` 可用 `--run-id` 指定，默认使用格式为 `YYYYMMDD-HHMMSS` 的当前时间，复用动态预训练且省略 `--run-id` 时继承 checkpoint 来源的编号。父目录由 `--output-root` 控制。
 - **方法目录**：三个 baseline 和独立动态预训练使用 `<method>-k<K>{_<mode>}`，两种动态方法统一使用 `<method>-k<K>+<ΔK>-<writer>{_<mode>}`。例如，正式运行 `memory-change-k512+32-local`、试跑 `memory-change-k512+32-tag_smoke`。
 - **Checkpoint**：目录为 `checkpoints/global_step_<阶段step>/`。`state.pt` 保存新增权重、优化器及运行状态，`data_<rank>.pt` 保存各卡加载器状态。
-- **评估记录**：每个 checkpoint 单独保存结果和四项评估配置快照；`evaluations.json` 登记历史与发布 step，`swanlab-publication.json` 记录原 run 身份、真实 checkpoint 步数、发布指标和对比视图链接。相同 checkpoint、相同配置复用结果；云端数据核验通过后才登记发布完成。在线评估同时检查当前结果与此前已发布的本地结果，展示需要更新时从缓存回填，不重新加载模型，也不依赖历史 checkpoint 仍被保留；其他离线结果仅在明确选择后发布。
+- **评估记录**：每个 checkpoint 单独保存结果和四项评估配置快照；`evaluations.json` 登记历史与发布 step，`swanlab-publication.json` 记录原 run 身份、真实 checkpoint 步数、发布指标和对比视图链接。相同 checkpoint、相同配置复用结果；云端数据核验通过后才登记发布完成。在线评估同时检查当前结果与此前已发布的本地结果，即使发布记录匹配，也会检查并修复云端布局；数据需要更新时从缓存补传，不重新加载模型或计算 QA，也不依赖历史 checkpoint 仍被保留。其他离线结果仅在明确选择后发布。
 - **结果与比较**：`summary.json` 汇总指标，`trajectories.jsonl` 保存动作、分数、计时与逐题结果。比较单独调用 [compare.py](compare.py)，导出 `points.json` 与 `points.csv`；命令见[运行指南](scripts/README.md#5-查看结果)。比较要求 split、实际 task 题池、各段选中的 gate QA 签名、QA prompt 和生成 token 上限一致；seed 不同但实际选题相同仍可比较，各方法的训练数据与训练配置可不同。
 
 ### 5.3 SwanLab 组织与展示
@@ -258,6 +258,8 @@ artifacts/v3/<run-id>/
 动态方法固定为三张图、一张表，baseline 为两张图、一张表。多个 checkpoint 共用这些面板，按发布 step 切换版本；标题注明阶段、阶段内 step 和真实累计 step。按 `age` 汇总的相对首次 NLL 变化保存在本地 `summary.json`，供辅助分析。
 
 公共自定义视图 `checkpoint_comparison` 展示四张原生增量曲线：总体 NLL、EM／F1 合图、最终／平均 slots 合图，以及平均记忆构建耗时。横轴固定为 `checkpoint_comparison/checkpoint_step`，表示真实累计训练 step；单 checkpoint 时每条序列有一个点，补评估时追加数据点。发布完成后打印视图链接。SDK 自动生成的单指标图位于隐藏分组，原始标量仍正常记录；更新已有展示时，也将旧容量、耗时和 `age` 面板移入该分组。
+
+删除云端 `evaluation` 分组后，保持评估参数不变，重新执行[单独评估命令](scripts/README.md#22-单独评估)即可恢复所需图表和统计表。布局修复沿用原训练 run 和已上传的媒体版本，不重新计算 QA，也不重复追加 checkpoint 曲线点或媒体版本。
 
 ## 六、代码入口与验证
 

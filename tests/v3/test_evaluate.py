@@ -621,6 +621,7 @@ def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_pat
         lambda *args: {"name": "checkpoint_comparison", "url": "https://example.test/view"},
     )
     monkeypatch.setattr(evaluation, "verify_evaluation_publication", lambda *args: None)
+    monkeypatch.setattr(evaluation, "configure_evaluation_media_layout", lambda *args: None)
     monkeypatch.setattr(evaluation, "configure_evaluation_visibility", lambda *args: None)
     checkpoint = training_dir / "policy" / "checkpoints" / "global_step_37"
     output = tmp_path / "evaluation" / "policy" / checkpoint.name
