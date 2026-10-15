@@ -1,7 +1,6 @@
 """从 v4 checkpoint 运行单条流式 greedy 生成。"""
 
 import argparse
-from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -25,9 +24,6 @@ def main():
     device = initialize_device(args.device)
     checkpoint = read_checkpoint(args.checkpoint)
     config = ModelConfig(**checkpoint["run"]["model"])
-    config = replace(
-        config, revision=checkpoint["run"]["resolved_model_revision"] or config.revision
-    )
     tokenizer = AutoTokenizer.from_pretrained(
         Path(checkpoint["run"]["training"]["output_dir"]) / "tokenizer"
     )

@@ -241,7 +241,6 @@ def test_training_resume_is_exact_and_checkpoint_excludes_frozen_backbone(tiny_b
     restored = read_checkpoint(resumed["checkpoint"])
     assert set(restored) == {"run", "memory", "optimizer", "cursor", "rng"}
     assert not any("backbone" in name for name in restored["memory"])
-    assert restored["run"]["resolved_model_revision"] is None
     for key in ("memory", "optimizer", "cursor", "rng"):
         assert_nested_equal(full[key], restored[key])
     full_metrics = [

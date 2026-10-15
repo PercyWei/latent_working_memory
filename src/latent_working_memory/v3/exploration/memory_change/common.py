@@ -1,6 +1,5 @@
 """加载本阶段共同使用的冻结 checkpoint 和开发集。"""
 
-from dataclasses import replace
 import os
 from pathlib import Path
 
@@ -49,10 +48,8 @@ def load_dev_task(checkpoint_path, dataset_dir, device, max_dev_samples):
     }:
         raise ValueError("需要 memory_change 的 warmup 或 policy checkpoint")
     device = initialize_device(device)
-    revision = checkpoint["run"]["resolved_model_revision"]
-    model_config = replace(config.model, revision=revision) if revision else config.model
     torch.manual_seed(config.training.seed)
-    codec, tokenizer = load_codec(model_config, device, config.objective)
+    codec, tokenizer = load_codec(config.model, device, config.objective)
     codec.load_trainable_state_dict(checkpoint["trainable"])
     task = TokenMemoryTask(codec, tokenizer, config.objective)
     task.requires_grad_(False)
@@ -74,7 +71,6 @@ def load_dev_task(checkpoint_path, dataset_dir, device, max_dev_samples):
         "source_dataset_signature": source_identity["fingerprint"],
         "dataset_signature": dataset_identity(trajectories)["fingerprint"],
         "config": config.to_dict(),
-        "resolved_model_revision": revision,
         "device": str(device),
         "autocast_dtype": "bfloat16" if device.type == "cuda" else None,
         "pretraining": checkpoint["run"]["pretraining"],

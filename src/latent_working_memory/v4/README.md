@@ -2,7 +2,7 @@
 
 创建时间：20261003 21:51:43 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261014 16:34:33 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261015 19:27:38 Asia/Shanghai（UTC+08:00）
 
 冻结基座，在每层维护 latent memory，通过 Attention Matching 局部更新记忆，并由答案 CE 学习如何生成压缩查询和读写记忆。
 
@@ -84,7 +84,7 @@ $R$ 为压缩查询数；每次写入固定执行 `inner_steps` 步，查询与�
 ## 三、配置与执行
 
 - [experiment.json](../../../configs/v4/attention_matching/experiment.json) 是默认配置及格式示例，可通过 `--config` 指定其他文件。
-- JSON 顶层使用 `model` 和 `training`。本地路径支持 `~`；相对数据、输出路径以运行目录为基准，`run.sh` 统一从项目根目录执行。模型也支持 HF repo ID，`revision` 可固定模型版本。
+- JSON 顶层使用 `model` 和 `training`。本地路径支持 `~`；相对数据、输出路径以运行目录为基准，`run.sh` 统一从项目根目录执行。
 - 下表为仓库预设；CLI 参数、覆盖规则和运行目录见[运行指南](scripts/README.md)。
 
 **记忆与局部更新（`model`）**

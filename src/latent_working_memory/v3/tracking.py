@@ -82,7 +82,6 @@ def _experiment_config(config, run, previous):
         "experiment_id": config.training.experiment_id,
         "method": tracking_method(config, previous),
         "model": run["config"]["model"],
-        "resolved_model_revision": run["resolved_model_revision"],
     }
     if previous is not None:
         if any(previous[name] != value for name, value in fixed.items()):

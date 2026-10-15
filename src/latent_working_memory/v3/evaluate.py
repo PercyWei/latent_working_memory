@@ -2,7 +2,7 @@
 
 import argparse
 from contextlib import ExitStack, nullcontext, redirect_stderr, redirect_stdout
-from dataclasses import asdict, replace
+from dataclasses import asdict
 import hashlib
 import json
 import os
@@ -661,11 +661,7 @@ def main(argv=None):
     if summary is None:
         print(f"[evaluation] loading model device={args.device}", flush=True)
         device = initialize_device(args.device)
-        revision = checkpoint["run"]["resolved_model_revision"]
-        model_config = (
-            replace(config.model, revision=revision) if revision is not None else config.model
-        )
-        codec, tokenizer = load_codec(model_config, device, config.objective)
+        codec, tokenizer = load_codec(config.model, device, config.objective)
         codec.load_trainable_state_dict(checkpoint["trainable"])
         task = TokenMemoryTask(codec, tokenizer, config.objective, qa_seed=evaluation_config.seed)
         print("[evaluation] model loaded", flush=True)
@@ -705,7 +701,6 @@ def main(argv=None):
                 "config": config.to_dict(),
                 "evaluation_config": asdict(evaluation_config),
                 "source_data": source_data,
-                "resolved_model_revision": revision,
                 "device": args.device,
                 "autocast_dtype": "bfloat16" if device.type == "cuda" else None,
                 "pretraining": checkpoint["run"]["pretraining"],

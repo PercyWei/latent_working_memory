@@ -451,7 +451,7 @@ def test_actual_legacy_autocompressors_checkpoint_resumes_without_renaming_lm(tm
     )
     splits = {"train": examples, "dev": (), "test": ()}
     statistics = {"source_data": {name: dataset_identity(rows) for name, rows in splits.items()}}
-    run = make_run(config, splits, statistics, "cpu", 1, resolved_model_revision="tiny-fixture")
+    run = make_run(config, splits, statistics, "cpu", 1)
     engine = TokenMemoryEngine(model, config.training, "cpu")
     engine.initialize()
     loader = make_data_loader(examples, engine.global_batch_size, config.training.seed)
@@ -472,9 +472,7 @@ def test_actual_legacy_autocompressors_checkpoint_resumes_without_renaming_lm(tm
     resumed_loader = make_data_loader(
         examples, resumed_engine.global_batch_size, saved_config.training.seed
     )
-    resumed_run = make_run(
-        saved_config, splits, statistics, "cpu", 1, resolved_model_revision="tiny-fixture"
-    )
+    resumed_run = make_run(saved_config, splits, statistics, "cpu", 1)
     resumed_cursor = {}
     resumed_handler = TokenMemoryCheckpointHandler(
         resumed_engine,
@@ -512,7 +510,7 @@ def test_actual_writer_checkpoint_resume_and_pretrain_warmup_policy_chain(
     examples = pretraining_examples()
     splits = {"train": examples, "dev": (), "test": ()}
     statistics = {"source_data": {name: dataset_identity(rows) for name, rows in splits.items()}}
-    run = make_run(config, splits, statistics, "cpu", 1, resolved_model_revision="tiny-fixture")
+    run = make_run(config, splits, statistics, "cpu", 1)
     engine.step(examples)
     checkpoint = tmp_path / "pretrain/checkpoints/global_step_1"
     cursor = {"epoch": 1, "sample_offset": 0, "step": 1, "sample_visits": 2}
@@ -557,7 +555,6 @@ def test_actual_writer_checkpoint_resume_and_pretrain_warmup_policy_chain(
             {"source_data": {name: dataset_identity(rows) for name, rows in splits.items()}},
             "cpu",
             1,
-            resolved_model_revision="tiny-fixture",
             initialization=initialization,
         )
         current_engine = TokenMemoryEngine(current, config.training, "cpu")

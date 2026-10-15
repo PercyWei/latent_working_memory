@@ -28,7 +28,6 @@ def finite_number(value, name, minimum=0, inclusive=False):
 @dataclass(frozen=True)
 class ModelConfig:
     model_name_or_path: str = "~/models/Qwen3-4B-Instruct-2507"
-    revision: str | None = None
     backbone_dtype: str = "float32"
     attention_implementation: str = "sdpa"
     loss_chunk_size: int = 256
@@ -51,10 +50,6 @@ class ModelConfig:
         if not isinstance(self.model_name_or_path, str) or not self.model_name_or_path.strip():
             raise ValueError("model_name_or_path must be a nonempty string")
         object.__setattr__(self, "model_name_or_path", os.path.expanduser(self.model_name_or_path))
-        if self.revision is not None and (
-            not isinstance(self.revision, str) or not self.revision.strip()
-        ):
-            raise ValueError("revision must be null or a nonempty string")
         if self.backbone_dtype not in {"float32", "bfloat16"}:
             raise ValueError("backbone_dtype must be float32 or bfloat16")
         if self.attention_implementation not in {"eager", "sdpa"}:

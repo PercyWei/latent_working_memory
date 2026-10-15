@@ -1,6 +1,5 @@
 """QA 与 benchmark 共用的 checkpoint 模型加载和局部写入计时。"""
 
-from dataclasses import replace
 from pathlib import Path
 import time
 
@@ -57,10 +56,9 @@ class TimedStreamingMemoryLM(StreamingMemoryLM):
 
 
 def load_evaluation_model(checkpoint, device):
-    """沿用训练时的基座 revision、tokenizer 和记忆读写参数。"""
+    """沿用训练时的基座模型、tokenizer 和记忆读写参数。"""
     run = checkpoint["run"]
     config = ModelConfig(**run["model"])
-    config = replace(config, revision=run["resolved_model_revision"] or config.revision)
     tokenizer_path = Path(run["training"]["output_dir"]).expanduser().resolve() / "tokenizer"
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     model = TimedStreamingMemoryLM(config).to(device).eval()

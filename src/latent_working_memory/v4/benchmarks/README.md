@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261015 16:46:40 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261015 19:27:38 Asia/Shanghai（UTC+08:00）
 
 ## 1. 数据位置与评估协议
 
@@ -90,7 +90,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - 独立评估统一使用 `--evaluate-only`；`--benchmark` 默认 `null`，不传时执行 QASPER test，显式传入 `ruler` 或 `locomo` 时执行本节的 benchmark 评估。
 - RULER 默认按 checkpoint 中原始 `model_name_or_path` 的末级名称读取对应模型目录；人工确认不同模型可复用同一批样本时，用 `--data-dir` 指定已有模型目录，不自动判断 tokenizer 是否一致。
 - `--data-dir` 可覆盖表中的 benchmark 根目录；RULER 直接指向包含各长度子目录的目录，LoCoMo 指向包含 `locomo10.json` 的目录。
-- 模型、revision、tokenizer 和 memory 权重取自 checkpoint；只需选择一张 GPU。
+- 模型配置、tokenizer 和 memory 权重取自 checkpoint；只需选择一张 GPU。
 - 默认产物位于原实验的 `eval/<method-dir>/ruler/` 或 `eval/<method-dir>/locomo/`，保存逐题预测与汇总。重跑时用 `--output-dir` 指定新目录。
 - 在线结果追加到已完成训练的原 SwanLab run，按 benchmark 展示任务／长度或 QA 类别分数。`--tracking disabled` 仅保存本地结果。
 - 复用项目的 checkpoint 加载、流式生成、资源记录和发布流程，评分沿用上述固定官方源码；不计算答案 NLL。

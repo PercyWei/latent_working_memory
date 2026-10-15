@@ -2,7 +2,7 @@
 
 import argparse
 from contextlib import ExitStack, nullcontext
-from dataclasses import asdict, replace
+from dataclasses import asdict
 import json
 import math
 from pathlib import Path
@@ -13,7 +13,7 @@ import torch.distributed as dist
 from transformers import AutoTokenizer, set_seed
 
 from latent_working_memory.runtime import initialize_device
-from latent_working_memory.v4.checkpoint import MetaMemoryCheckpointHandler, read_checkpoint
+from latent_working_memory.v4.checkpoint import MetaMemoryCheckpointHandler
 from latent_working_memory.v4.config import load_experiment
 from latent_working_memory.v4.data import (
     dataset_identity,
@@ -112,19 +112,11 @@ def run_training(args):
             raise ValueError(error)
 
     set_seed(config.seed)
-    load_model_config = model_config
     if resume is not None:
-        previous = read_checkpoint(resume)
-        resolved = previous["run"]["resolved_model_revision"]
-        if resolved is not None:
-            load_model_config = replace(model_config, revision=resolved)
         tokenizer = AutoTokenizer.from_pretrained(output / "tokenizer")
-        del previous
     else:
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_config.model_name_or_path, revision=model_config.revision
-        )
-    model = StreamingMemoryLM(load_model_config).to(device)
+        tokenizer = AutoTokenizer.from_pretrained(model_config.model_name_or_path)
+    model = StreamingMemoryLM(model_config).to(device)
     position_limit = model.backbone.config.max_position_embeddings
     min_prompt_length = model_config.pending_size + model_config.recent_size + 1
     dataset_dir = Path(config.dataset_dir)
@@ -142,7 +134,6 @@ def run_training(args):
     engine.initialize()
     run = {
         "model": asdict(model_config),
-        "resolved_model_revision": getattr(model.backbone.config, "_commit_hash", None),
         "training": {**asdict(config), "tags": list(config.tags)},
         "data": {
             "train": dataset_identity(train),

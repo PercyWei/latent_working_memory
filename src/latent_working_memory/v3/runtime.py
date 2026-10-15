@@ -39,16 +39,13 @@ def write_json(path, value):
 
 def load_codec(model_config, device, objective_config):
     """同源独立编码器／解码器；编码训练 LoRA，冻结读取保留记忆梯度。"""
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_config.model_name_or_path, revision=model_config.revision
-    )
+    tokenizer = AutoTokenizer.from_pretrained(model_config.model_name_or_path)
     if tokenizer.eos_token_id is None:
         raise ValueError("v3 training and generation require tokenizer.eos_token_id")
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     base = AutoModelForCausalLM.from_pretrained(
         model_config.model_name_or_path,
-        revision=model_config.revision,
         torch_dtype=getattr(torch, model_config.dtype),
         attn_implementation=model_config.attention_implementation,
     ).to(device)
@@ -176,7 +173,6 @@ def make_run(
     statistics,
     device,
     world_size,
-    resolved_model_revision=None,
     initialization=None,
 ):
     inherited = (
@@ -207,7 +203,6 @@ def make_run(
     )
     return {
         "config": config.to_dict(),
-        "resolved_model_revision": resolved_model_revision,
         "data": {name: dataset_identity(rows) for name, rows in splits.items()},
         "source_data": statistics["source_data"],
         "data_statistics": {
@@ -305,7 +300,6 @@ def initialization_record(path, previous_run, step, config):
         "global_step": previous_run["step_offset"] + step,
         "experiment_dir": str(root),
         "experiment_id": previous_training["experiment_id"],
-        "resolved_model_revision": previous_run["resolved_model_revision"],
         "pretraining_sources": previous_run["pretraining_sources"],
         "pretraining": pretraining,
     }

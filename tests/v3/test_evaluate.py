@@ -338,7 +338,7 @@ def test_comparison_rejects_changed_evaluation_conditions(tmp_path, difference):
 
 @pytest.mark.parametrize("changed_split", [False, True])
 @pytest.mark.parametrize("log_to_swanlab", [False, True])
-def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
+def test_cli_loads_canonical_checkpoint_and_saved_model_config(
     tmp_path, monkeypatch, changed_split, log_to_swanlab
 ):
     config = ExperimentConfig(
@@ -349,7 +349,6 @@ def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
     checkpoint = {
         "run": {
             "config": config.to_dict(),
-            "resolved_model_revision": "resolved-commit",
             "step_offset": 20,
             "pretraining": None,
             "pretraining_sources": {"document_ids": [], "dedup_clusters": []},
@@ -412,12 +411,11 @@ def test_cli_loads_canonical_checkpoint_and_pins_backbone_revision(
         arguments.append("--log-to-swanlab")
     evaluation.main(arguments)
     summary = json.loads((output / "summary.json").read_text())
-    assert loaded[0][0].revision == "resolved-commit"
+    assert loaded[0][0] == config.model
     assert loaded[0][1] == torch.device("cpu")
     assert task.codec.loaded is not None
-    assert summary["metadata"]["resolved_model_revision"] == "resolved-commit"
     assert summary["metadata"]["global_step"] == 27
-    assert summary["metadata"]["config"]["model"]["revision"] is None
+    assert summary["metadata"]["config"]["model"] == config.to_dict()["model"]
     assert summary["qa_sampling"]["seed"] == 42
     assert summary["qa_sampling"]["gate_qa_count"] == 1
     assert summary["objective"]["seed"] == config.objective.seed
@@ -698,7 +696,6 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
     checkpoint = {
         "run": {
             "config": config.to_dict(),
-            "resolved_model_revision": None,
             "step_offset": 0,
             "pretraining": None,
             "pretraining_sources": {"document_ids": [], "dedup_clusters": []},
@@ -823,7 +820,6 @@ def test_cli_ignores_training_length_limits_and_selects_from_complete_factqa_spl
     checkpoint = {
         "run": {
             "config": config.to_dict(),
-            "resolved_model_revision": None,
             "step_offset": 0,
             "pretraining": None,
             "pretraining_sources": {"document_ids": [], "dedup_clusters": []},

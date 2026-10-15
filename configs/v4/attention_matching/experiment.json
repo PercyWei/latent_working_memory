@@ -1,7 +1,6 @@
 {
   "model": {
     "model_name_or_path": "~/models/Qwen3-4B-Instruct-2507",
-    "revision": null,
     "backbone_dtype": "bfloat16",
     "attention_implementation": "sdpa",
     "loss_chunk_size": 256,

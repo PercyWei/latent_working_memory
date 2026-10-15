@@ -38,7 +38,6 @@ class StreamingMemoryLM(nn.Module):
             if backbone is not None
             else AutoModelForCausalLM.from_pretrained(
                 config.model_name_or_path,
-                revision=config.revision,
                 dtype=getattr(torch, config.backbone_dtype),
                 attn_implementation=config.attention_implementation,
             )

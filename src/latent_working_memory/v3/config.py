@@ -67,7 +67,6 @@ def finite(value, name, minimum=0):
 @dataclass(frozen=True)
 class ModelConfig:
     model_name_or_path: str = "Qwen/Qwen3-4B-Instruct-2507"
-    revision: str | None = None
     dtype: str = "bfloat16"
     attention_implementation: str = "sdpa"
     gradient_checkpointing: bool = True

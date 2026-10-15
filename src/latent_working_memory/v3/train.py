@@ -124,20 +124,12 @@ def run_training(args):
             )
     device = initialize_device(args.device)
     set_seed(config.training.seed)
-    initial_path = args.resume if args.resume is not None else config.training.init_checkpoint
-    previous = read_checkpoint(initial_path) if initial_path is not None else None
-    model_config = config.model
-    if previous is not None and model_config.revision is None:
-        resolved = previous["run"]["resolved_model_revision"]
-        if resolved is not None:
-            model_config = replace(model_config, revision=resolved)
-    codec, tokenizer = load_codec(model_config, device, config.objective)
+    codec, tokenizer = load_codec(config.model, device, config.objective)
     initialization = None
     if args.resume is not None:
-        initialization = previous["run"]["initialization"]
+        initialization = read_checkpoint(args.resume)["run"]["initialization"]
     elif config.training.init_checkpoint is not None:
         initialization = load_initialization(config.training.init_checkpoint, codec, config)
-    del previous
     model = TokenMemoryTask(codec, tokenizer, config.objective)
     engine = TokenMemoryEngine(model, config.training, device)
     engine.initialize()
@@ -152,14 +144,9 @@ def run_training(args):
                 set_seed(config.training.seed)
                 if config.objective.writer_mode != model.cfg.writer_mode:
                     # 写入器会改变参数和 attention 结构，按已有初始化契约重建一次。
-                    model_config = config.model
-                    if model_config.revision is None and run["resolved_model_revision"] is not None:
-                        model_config = replace(
-                            model_config, revision=run["resolved_model_revision"]
-                        )
                     del engine, model, codec, tokenizer
                     gc.collect()
-                    codec, tokenizer = load_codec(model_config, device, config.objective)
+                    codec, tokenizer = load_codec(config.model, device, config.objective)
                     initialization = load_initialization(result["checkpoint"], codec, config)
                     model = TokenMemoryTask(codec, tokenizer, config.objective)
                     engine = TokenMemoryEngine(model, config.training, device)
@@ -177,9 +164,6 @@ def run_training(args):
                 statistics,
                 device,
                 engine.world_size,
-                resolved_model_revision=getattr(
-                    codec.language_model.get_base_model().config, "_commit_hash", None
-                ),
                 initialization=initialization,
             )
             if (

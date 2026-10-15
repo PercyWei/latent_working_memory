@@ -2,7 +2,7 @@
 
 创建时间：20261013 10:12:17 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261015 16:46:40 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261015 19:27:38 Asia/Shanghai（UTC+08:00）
 
 使用 [run.sh](run.sh) 完成训练、恢复、独立评估和单条生成。默认 Qwen3-4B-Instruct-2507、每层 32 个 memory slots；模型与训练目标见 [v4 说明](../README.md)，默认配置为 [experiment.json](../../../../configs/v4/attention_matching/experiment.json)。以下命令从项目根目录执行。
 
@@ -93,7 +93,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - RULER 默认按 checkpoint 中原始模型路径的末级名称查找数据。人工确认新模型可复用已有样本时，用 `--data-dir data/benchmarks/ruler-v1/<model-name>` 指定对应目录。
 - 每题独立初始化记忆，执行流式读取、局部 TTT 和 greedy 生成，沿用官方评分与任务生成预算。协议见 [benchmark 说明](../benchmarks/README.md)。
 
-两类评估均从 checkpoint 读取模型配置、实际 revision 和保存的 tokenizer，可用 `--data-dir`、`--output-dir`、`--tracking` 调整本次评估。输出目录须不存在，重跑时指定新目录。在线评估仅向原训练 run 追加最终 checkpoint 的结果，云端 run 须为 `FINISHED`；加 `--tracking disabled` 仅保存本地。
+两类评估均从 checkpoint 读取模型配置和保存的 tokenizer，可用 `--data-dir`、`--output-dir`、`--tracking` 调整本次评估。输出目录须不存在，重跑时指定新目录。在线评估仅向原训练 run 追加最终 checkpoint 的结果，云端 run 须为 `FINISHED`；加 `--tracking disabled` 仅保存本地。
 
 ### 2.3 中断恢复
 
@@ -132,7 +132,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 | 参数 | 用途／默认值 |
 |---|---|
 | `--config` | 训练 JSON，默认 `configs/v4/attention_matching/experiment.json` |
-| `--model-path` | 覆盖本地基座模型位置，默认见[第 1 节](#1-准备环境模型与数据)；HF repo ID 和 revision 在 JSON 中设置 |
+| `--model-path` | 覆盖基座模型位置，默认见[第 1 节](#1-准备环境模型与数据) |
 | `--data-dir` | 训练数据目录，默认 `data/delta-mem-qasper` |
 | `--seed` | 训练随机种子，默认 42；接受非负整数，0 有效 |
 | `--max-seq-length` | train 完整序列的人为上限，默认 12288；`null` 关闭该上限 |

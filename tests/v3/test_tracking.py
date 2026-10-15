@@ -900,9 +900,8 @@ def test_sdk_serialized_empty_values_resume_without_changing_local_semantics(
     local = json.loads(original)
     identity = json.loads((root / "swanlab.json").read_text())
     remote = recorded_swanlab.runs[identity["id"]]
-    assert local["pretraining"] is local["resolved_model_revision"] is None
-    assert remote["config"]["pretraining"] == remote["config"]["resolved_model_revision"] == {}
-    assert remote["config"]["model"]["revision"] is None
+    assert local["pretraining"] is None
+    assert remote["config"]["pretraining"] == {}
     assert local["model"]["lora_target_modules"] == remote["config"]["model"]["lora_target_modules"]
     with method_tracking_run(config, record, torch.device("cpu"), api_key="test-api-key"):
         pass
@@ -916,7 +915,6 @@ def test_sdk_serialized_empty_values_resume_without_changing_local_semantics(
     [
         ("missing", "pretraining"),
         ("source", "pretraining"),
-        ("nested_null", "model"),
         ("slots", "model"),
         ("learning_rate", "stages"),
     ],
@@ -934,8 +932,6 @@ def test_serialized_config_comparison_still_rejects_missing_or_changed_fields(
         del remote["pretraining"]
     elif change == "source":
         remote["pretraining"] = {"checkpoint": "unexpected-source.pt"}
-    elif change == "nested_null":
-        remote["model"]["revision"] = {}
     elif change == "slots":
         remote["model"]["memory_slots"] += 1
     else:

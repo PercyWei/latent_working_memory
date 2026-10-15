@@ -76,7 +76,6 @@ def evaluate(
         "checkpoint": {"path": str(checkpoint_path), "step": step},
         "training_run": str(training_dir),
         "model": asdict(config),
-        "resolved_model_revision": getattr(model.backbone.config, "_commit_hash", None),
         "tokenizer": str(tokenizer_path),
         "test_file": str(test_file),
         "dataset": dataset_identity(episodes),

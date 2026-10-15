@@ -319,7 +319,6 @@ def save_source_checkpoint(tmp_path, model, config):
     path.mkdir(parents=True)
     run = {
         "config": config.to_dict(),
-        "resolved_model_revision": None,
         "step_offset": 0,
         "pretraining_sources": {"document_ids": ["pre"], "dedup_clusters": ["pre-cluster"]},
         "pretraining": None,
