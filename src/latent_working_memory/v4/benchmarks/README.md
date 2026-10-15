@@ -2,13 +2,13 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261015 15:31:29 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261015 16:46:40 Asia/Shanghai（UTC+08:00）
 
 ## 1. 数据位置与评估协议
 
 | Benchmark | 本地数据 | 默认评估范围 | 评分 |
 |---|---|---|---|
-| RULER v1 | `data/benchmarks/ruler-v1/<length>/<task>/test.jsonl` | 8192、16384、32768 tokens；完整 13 项任务 | 官方必答项召回／任一参考答案命中，按任务等权汇总 |
+| RULER v1 | `data/benchmarks/ruler-v1/<model-name>/<length>/<task>/test.jsonl` | 8192、16384、32768 tokens；完整 13 项任务 | 官方必答项召回／任一参考答案命中，按任务等权汇总 |
 | LoCoMo | `data/benchmarks/locomo/locomo10.json` | 全部会话的 QA 类别 1–4 | 官方分类别 F1 与按题平均 F1 |
 
 - 以下指令从项目根目录执行；数据下载和 RULER 样本生成由用户手动运行。
@@ -41,6 +41,8 @@ bash src/latent_working_memory/v4/scripts/download_benchmarks.sh --benchmark all
 | `--ruler-source-dir` | RULER 官方源码及下载素材目录，默认 `data/raw/ruler-v1-source` |
 
 - 已下载素材和已有 LoCoMo 文件直接复用。只下载其中一个 benchmark 时，将 `--benchmark all` 改为 `ruler` 或 `locomo`。
+- HotpotQA 默认通过 `https://hf-mirror.com` 下载，可用 `HF_ENDPOINT` 覆盖下载源；数据路径和 revision 保持不变。
+- 镜像可能重定向至 Hugging Face。仍无法连接时，使用可用代理，或在其他机器下载同一文件，保存为 `<ruler-source-dir>/scripts/data/synthetic/json/hotpotqa.json` 后重跑脚本。
 
 **RULER 样本生成：[generate_ruler.sh](../scripts/generate_ruler.sh)**
 
@@ -56,17 +58,18 @@ bash src/latent_working_memory/v4/scripts/generate_ruler.sh \
 | 参数 | 填法与默认值 |
 |---|---|
 | `--ruler-source-dir` | 已下载的 RULER 源码及素材目录，默认 `data/raw/ruler-v1-source` |
-| `--output-dir` | 生成样本的根目录，默认 `data/benchmarks/ruler-v1` |
+| `--output-dir` | 默认 `data/benchmarks/ruler-v1/<model-name>`；显式指定时直接使用该目录，不附加模型名 |
 | `--model-path` | 与训练一致的 tokenizer 来源；本地路径或 HF repo ID，默认 `~/models/Qwen3-4B-Instruct-2507` |
 | `--lengths` | 空格分隔的长度列表，默认 `8192 16384 32768` |
 | `--num-samples` | 每个长度、每项任务的样本数，默认 `100` |
 | `--seed` | 样本生成的随机种子，默认 `42` |
 
+- `<model-name>` 取 `--model-path` 去掉尾部斜杠后的最后一级目录名或 HF 仓库名，默认 `Qwen3-4B-Instruct-2507`；不同模型自动使用各自目录，原始素材共享。
 - 相对目录以项目根目录为准；路径含空格时加双引号。更换下载目录时，生成阶段须传入相同的 `--ruler-source-dir`。
-- 已有 RULER 长度目录拒绝覆盖；更换 tokenizer 或生成设置时，用新的 `--output-dir` 保存样本，复用原素材。
+- 已有 RULER 长度目录拒绝覆盖；同一模型修改长度、样本数或 seed 等设置并需重建已有长度时，用新的 `--output-dir` 保存样本。
 - RULER 的 `<length>` 表示完整输入与该任务生成预算的总长度上限；脚本预留 chat template 开销，官方生成器另行预留输出预算。
 - 官方生成器将 `answer_prefix` 单独保存；评估只读取 `input`，不拼回该前缀。多值／多 query 任务保持一条输入、一次回答。
-- 所有比较方法应使用同一批生成样本。评估自定义位置时，`--data-dir` 指向 RULER 的 `--output-dir` 或 LoCoMo 的 `<data-root>/locomo`。
+- 同一模型的比较方法应使用同一批生成样本。评估自定义位置时，`--data-dir` 指向 RULER 的 `--output-dir` 或 LoCoMo 的 `<data-root>/locomo`。
 - 完整生成参数执行 `bash src/latent_working_memory/v4/scripts/generate_ruler.sh --help` 查看；下载参数见上表。
 
 ## 3. 运行评估与查看结果
@@ -85,7 +88,8 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 ```
 
 - 独立评估统一使用 `--evaluate-only`；`--benchmark` 默认 `null`，不传时执行 QASPER test，显式传入 `ruler` 或 `locomo` 时执行本节的 benchmark 评估。
-- `--data-dir` 可覆盖表中的 benchmark 根目录；RULER 指向包含各长度子目录的目录，LoCoMo 指向包含 `locomo10.json` 的目录。
+- RULER 默认按 checkpoint 中原始 `model_name_or_path` 的末级名称读取对应模型目录；人工确认不同模型可复用同一批样本时，用 `--data-dir` 指定已有模型目录，不自动判断 tokenizer 是否一致。
+- `--data-dir` 可覆盖表中的 benchmark 根目录；RULER 直接指向包含各长度子目录的目录，LoCoMo 指向包含 `locomo10.json` 的目录。
 - 模型、revision、tokenizer 和 memory 权重取自 checkpoint；只需选择一张 GPU。
 - 默认产物位于原实验的 `eval/<method-dir>/ruler/` 或 `eval/<method-dir>/locomo/`，保存逐题预测与汇总。重跑时用 `--output-dir` 指定新目录。
 - 在线结果追加到已完成训练的原 SwanLab run，按 benchmark 展示任务／长度或 QA 类别分数。`--tracking disabled` 仅保存本地结果。

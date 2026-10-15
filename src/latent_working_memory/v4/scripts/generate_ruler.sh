@@ -11,7 +11,7 @@ usage() {
 从已下载的 RULER v1 素材构造全部 13 项评估任务。
 
   --ruler-source-dir PATH  RULER 源码与素材，默认 data/raw/ruler-v1-source
-  --output-dir PATH        评估数据目录，默认 data/benchmarks/ruler-v1
+  --output-dir PATH        评估数据目录，默认 data/benchmarks/ruler-v1/<model-name>
   --model-path PATH        tokenizer 来源，默认 ~/models/Qwen3-4B-Instruct-2507
   --lengths N [N ...]      输入与生成预算的总长度，默认 8192 16384 32768
   --num-samples N          每个长度、每项任务的样本数，默认 100
@@ -20,6 +20,7 @@ usage() {
 
 先执行 download_benchmarks.sh --benchmark ruler；仅需 tokenizer 与 CPU。
 相对路径以项目根目录为基准；已有长度目录不覆盖，另用 --output-dir 保存新设置。
+model-name 取 --model-path 的最后一级目录名或 HF 仓库名。
 HELP
 }
 
@@ -36,7 +37,7 @@ expand_user_path() {
 }
 
 ruler_source_dir=data/raw/ruler-v1-source
-output_dir=data/benchmarks/ruler-v1
+output_dir=""
 model_path="$HOME/models/Qwen3-4B-Instruct-2507"
 lengths=(8192 16384 32768)
 num_samples=100
@@ -69,8 +70,11 @@ for ((i=0; i<${#lengths[@]}; i++)); do
   done
 done
 ruler_source_dir="$(expand_user_path "$ruler_source_dir")"
-output_dir="$(expand_user_path "$output_dir")"
 model_path="$(expand_user_path "$model_path")"
+if [[ -z $output_dir ]]; then
+  output_dir="data/benchmarks/ruler-v1/$(basename "$model_path")"
+fi
+output_dir="$(expand_user_path "$output_dir")"
 [[ $ruler_source_dir == /* ]] || ruler_source_dir="$LWM_ROOT/$ruler_source_dir"
 [[ $output_dir == /* ]] || output_dir="$LWM_ROOT/$output_dir"
 [[ -f "$ruler_source_dir/scripts/synthetic.yaml" ]] || fail 'RULER 源码不存在；请先执行 download_benchmarks.sh --benchmark ruler'

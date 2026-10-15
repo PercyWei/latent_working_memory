@@ -19,6 +19,7 @@ expand_user_path() {
 benchmark=all
 data_root=data/benchmarks
 ruler_source_dir=data/raw/ruler-v1-source
+hf_endpoint="${HF_ENDPOINT:-https://hf-mirror.com}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -67,7 +68,7 @@ PY
       uv run --frozen --project "$LWM_ROOT" python download_paulgraham_essay.py
     fi
     download_file https://rajpurkar.github.io/SQuAD-explorer/dataset/dev-v2.0.json squad.json
-    download_file https://huggingface.co/datasets/namlh2004/hotpotqa/resolve/7e54db4656209750ff487f6fdf8e39a66dba136b/hotpot_dev_distractor_v1.json hotpotqa.json
+    download_file "${hf_endpoint%/}/datasets/namlh2004/hotpotqa/resolve/7e54db4656209750ff487f6fdf8e39a66dba136b/hotpot_dev_distractor_v1.json" hotpotqa.json
   )
   printf 'RULER 素材已下载：%s\n' "$ruler_source_dir"
 fi

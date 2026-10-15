@@ -55,9 +55,11 @@ def evaluate(
     if tracking == "online":
         validate_evaluation_publication(run, checkpoint_path, step)
 
-    data_dir = Path(
-        DEFAULT_DATA_DIRS[benchmark] if data_dir is None else data_dir
-    ).expanduser().resolve()
+    if data_dir is None:
+        data_dir = DEFAULT_DATA_DIRS[benchmark]
+        if benchmark == "ruler":
+            data_dir = data_dir / Path(run["model"]["model_name_or_path"]).name
+    data_dir = Path(data_dir).expanduser().resolve()
     selected_lengths = DEFAULT_RULER_LENGTHS if lengths is None else tuple(lengths)
     samples = load_samples(benchmark, data_dir, selected_lengths)
     fingerprint = hashlib.blake2b(digest_size=32)
@@ -215,7 +217,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--benchmark", choices=("ruler", "locomo"), required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--data-dir", type=Path, help="默认使用 data/benchmarks 下对应目录")
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        help="默认 RULER 为 data/benchmarks/ruler-v1/<model-name>，LoCoMo 为 data/benchmarks/locomo",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--lengths", type=int, nargs="+", help="RULER 长度，默认 8192 16384 32768")
     parser.add_argument("--device", default="cuda")

@@ -2,7 +2,7 @@
 
 创建时间：20261013 10:12:17 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261014 17:05:31 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261015 16:46:40 Asia/Shanghai（UTC+08:00）
 
 使用 [run.sh](run.sh) 完成训练、恢复、独立评估和单条生成。默认 Qwen3-4B-Instruct-2507、每层 32 个 memory slots；模型与训练目标见 [v4 说明](../README.md)，默认配置为 [experiment.json](../../../../configs/v4/attention_matching/experiment.json)。以下命令从项目根目录执行。
 
@@ -14,10 +14,10 @@
 |---|---|---|
 | Qwen3-4B-Instruct-2507 | `~/models/Qwen3-4B-Instruct-2507` | `--model-path` |
 | QASPER 数据 | `data/delta-mem-qasper/` | `--data-dir` |
-| RULER Benchmark 数据 | `data/benchmarks/ruler-v1/` | `--data-dir` |
+| RULER Benchmark 数据 | `data/benchmarks/ruler-v1/<model-name>/` | `--data-dir` |
 | LoCoMo Benchmark 数据 | `data/benchmarks/locomo/` | `--data-dir` |
 
-### 1.1 训练/评估数据准备
+### 1.1 训练与评估数据准备
 
 QASPER 目录保留 `train/dev/test.jsonl`，可从 [ModelScope](https://modelscope.cn/datasets/percyWeeei/latent-working-memory/files) 下载 `delta-mem-qasper/`。数据格式与筛选规则见 [v4 数据说明](../README.md#二数据)，从本地 raw 构造数据见 [QASPER 构造说明](../../data_preparation/delta_mem_qasper/README.md)。
 
@@ -25,26 +25,28 @@ QASPER 目录保留 `train/dev/test.jsonl`，可从 [ModelScope](https://modelsc
 
 ### 1.2 Benchmark 数据准备
 
-下载与生成使用独立入口。下载 RULER 素材需安装系统 `git`、`git-lfs`、`curl`：
+下载与生成使用独立入口，确保系统安装有 `git`、`git-lfs`、`curl`：
 
 ```bash
 bash src/latent_working_memory/v4/scripts/download_benchmarks.sh --benchmark all
 ```
 
-`--benchmark` 可选 `all`、`ruler`、`locomo`，默认 `all`。LoCoMo 下载后直接用于评估；RULER 素材默认位于 `data/raw/ruler-v1-source/`，再用训练时相同的 tokenizer 生成样本：
+`--benchmark` 可选 `all`（默认）、`ruler`、`locomo`。LoCoMo 下载后可直接用于评估，RULER 下载的是素材，需要进一步生成样本（使用和模型训练相同的 tokenizer）：
 
 ```bash
 bash src/latent_working_memory/v4/scripts/generate_ruler.sh \
-  --model-path "$HOME/models/Qwen3-4B-Instruct-2507" \
+  --model-path "~/models/Qwen3-4B-Instruct-2507" \
   --lengths 8192 16384 32768 \
   --num-samples 100 --seed 42
 ```
 
-默认每个长度、每项任务生成 100 条，共 13 项任务。更换设置时用新的 `--output-dir` 保存样本，原始素材可复用。下载与生成参数见 [benchmark 数据准备说明](../benchmarks/README.md#2-手动准备数据)。
+- 默认三个长度（8k，16k，32k），每个长度、每项任务生成 100 条，共 13 项任务。
+- 默认写入 `data/benchmarks/ruler-v1/<model-name>/`，可传入 `--output-dir` 更改输出目录。
+- 不同模型自动分目录，原始素材共享，详情见 [benchmark 数据准备说明](../benchmarks/README.md#2-手动准备数据)。
 
 ## 2. 运行
 
-`run.sh` 统一切到项目根目录，相对配置、数据和输出路径均以此为基准。`--resume`、`--evaluate-only`、`--generate-only` 互斥，均须提供一个 `--checkpoint` 目录；独立评估和生成必须选择单卡。
+`run.sh` 统一切到项目根目录，相对配置、数据和输出路径均以此为基准。`--resume`、`--evaluate-only`、`--generate-only` 互斥，均须提供一个 `--checkpoint` 目录。
 
 ### 2.1 新训练
 
@@ -54,13 +56,13 @@ bash src/latent_working_memory/v4/scripts/run.sh \
   --gpus 0,1 --run-id am-query_20261013
 ```
 
-- 显式 CLI 训练参数覆盖配置。模型和局部记忆更新参数直接修改 JSON，见 [v4 配置说明](../README.md#三配置与执行)。
-- `--run-id` 默认采用上海时间 `YYYYMMDD-HHMMSS`，运行目录由入口派生；已有目录不覆盖，更换设置时使用新的编号。
-- 完成全部训练预算后，自动用最终 checkpoint 执行 QASPER test，使用所选 GPU 中的第一张卡，生成上限为 128 tokens。提前停止或训练失败时不自动评估。
+- 显式 CLI 训练参数覆盖配置。模型和局部记忆更新参数直接修改 JSON，见[配置文件说明](../README.md#三配置与执行)。
+- `--run-id` 默认采用格式为 `YYYYMMDD-HHMMSS` 的当前时间。
+- 完成全部训练预算后，自动用最终 checkpoint 执行基础非 benchmark 评估，使用所选 GPU 中的第一张卡，生成上限为 128 tokens。提前停止或训练失败时不自动评估。
 
 ### 2.2 单独评估
 
-**QASPER test**
+**基础评估**
 
 ```bash
 bash src/latent_working_memory/v4/scripts/run.sh \
@@ -69,16 +71,18 @@ bash src/latent_working_memory/v4/scripts/run.sh \
   --max-new-tokens 128
 ```
 
-- `--benchmark` 默认 `null`，即不传时执行 QASPER test；默认读取原训练数据目录的 `test.jsonl`。
-- 计算答案 NLL 与 greedy 生成的 EM／F1，使用本实验的单参考答案协议。筛选、生成预算和评分规则见 [v4 评估说明](../README.md#四评估与记录)。
+- `--benchmark` 默认 `null`，即读取原训练数据目录的 `test.jsonl`，进行与训练集配对的 test 评估。
+- 计算答案 NLL 与 greedy 生成的 EM／F1。筛选、生成预算和评分规则见 [评估说明](../README.md#四评估与记录)。
 
-**RULER／LoCoMo**
+**Benchmark 评估**
 
 ```bash
+# LoCoMo
 bash src/latent_working_memory/v4/scripts/run.sh \
   --evaluate-only --benchmark locomo --gpus 0 \
   --checkpoint artifacts/v4/am-query_20261013/train/conditioned-m32/checkpoints/global_step_N
 
+# RULER
 bash src/latent_working_memory/v4/scripts/run.sh \
   --evaluate-only --benchmark ruler --gpus 0 \
   --checkpoint artifacts/v4/am-query_20261013/train/conditioned-m32/checkpoints/global_step_N \
@@ -86,6 +90,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 ```
 
 - 传入 `--benchmark ruler` 或 `locomo` 选择对应评估。RULER 的 `--lengths` 须与已生成数据一致；LoCoMo 不接受该参数。
+- RULER 默认按 checkpoint 中原始模型路径的末级名称查找数据。人工确认新模型可复用已有样本时，用 `--data-dir data/benchmarks/ruler-v1/<model-name>` 指定对应目录。
 - 每题独立初始化记忆，执行流式读取、局部 TTT 和 greedy 生成，沿用官方评分与任务生成预算。协议见 [benchmark 说明](../benchmarks/README.md)。
 
 两类评估均从 checkpoint 读取模型配置、实际 revision 和保存的 tokenizer，可用 `--data-dir`、`--output-dir`、`--tracking` 调整本次评估。输出目录须不存在，重跑时指定新目录。在线评估仅向原训练 run 追加最终 checkpoint 的结果，云端 run 须为 `FINISHED`；加 `--tracking disabled` 仅保存本地。
