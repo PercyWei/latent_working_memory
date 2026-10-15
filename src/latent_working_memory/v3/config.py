@@ -125,7 +125,6 @@ class ObjectiveConfig:
     threshold_g: float = 0.1
     eta: float = 0.0
     rms_epsilon: float = 1e-6
-    seed: int = 20261004
     ae_prompt: str = "Reconstruct the text stored in memory:\n"
     lm_prompt: str = "Continue the text stored in memory:\n"
     qa_prompt: str = "Question: {question}\nAnswer:"
@@ -183,8 +182,8 @@ class ObjectiveConfig:
             finite(getattr(self, name), name)
         if not 0 <= self.eta < self.threshold_g or self.rms_epsilon == 0:
             raise ValueError("require 0 <= eta < threshold_g and rms_epsilon > 0")
-        if self.append_probability > 1 or type(self.seed) is not int or self.seed < 0:
-            raise ValueError("invalid warmup probability or seed")
+        if self.append_probability > 1:
+            raise ValueError("append_probability must be <= 1")
         if not 0 < self.task_new_ratio <= 1:
             raise ValueError("task_new_ratio must be in (0, 1]")
         new_count = Decimal(str(self.task_new_ratio)) * self.task_qa_count
@@ -219,9 +218,10 @@ class TrainingConfig:
     lm_ratio: float = 0.5
     lm_target_tokens: int = 512
     min_input_tokens: int = 1
-    max_input_tokens: int | None = None
-    max_qa_input_tokens: int | None = None
-    max_train_samples: int | None = None
+    max_pretrain_data_tokens: int | None = None
+    max_qa_data_tokens: int | None = None
+    max_pretrain_train_samples: int | None = None
+    max_qa_train_samples: int | None = None
     max_dev_samples: int | None = None
     init_checkpoint: str | None = None
     experiment_dir: str | None = None
@@ -249,15 +249,19 @@ class TrainingConfig:
         if self.save_every != "after_each_epoch":
             positive_integer(self.save_every, "save_every")
         for name in (
-            "max_input_tokens",
-            "max_qa_input_tokens",
-            "max_train_samples",
+            "max_pretrain_data_tokens",
+            "max_qa_data_tokens",
+            "max_pretrain_train_samples",
+            "max_qa_train_samples",
             "max_dev_samples",
         ):
             if getattr(self, name) is not None:
                 positive_integer(getattr(self, name), name)
-        if self.max_input_tokens is not None and self.min_input_tokens > self.max_input_tokens:
-            raise ValueError("min_input_tokens must not exceed max_input_tokens")
+        if (
+            self.max_pretrain_data_tokens is not None
+            and self.min_input_tokens > self.max_pretrain_data_tokens
+        ):
+            raise ValueError("min_input_tokens must not exceed max_pretrain_data_tokens")
         finite(self.lm_ratio, "lm_ratio")
         if self.lm_ratio > 1:
             raise ValueError("lm_ratio must be <= 1")
@@ -382,11 +386,6 @@ def load_preset(path):
     stages = validate_stage_sequence(objective["method"], objective.pop("stages"))
     model = ModelConfig(**raw["model"])
     training = dict(raw["training"])
-    stage_limits = training.pop("stage_max_train_samples")
-    if not isinstance(stage_limits, dict) or set(stage_limits) != set(stages):
-        raise ValueError("stage_max_train_samples must specify each declared stage exactly once")
-    if "max_train_samples" in training:
-        raise ValueError("preset training requires stage_max_train_samples, not max_train_samples")
     configs = []
     for stage in stages:
         stage_objective = {**objective, "stage": stage}
@@ -396,7 +395,7 @@ def load_preset(path):
             ExperimentConfig(
                 model,
                 ObjectiveConfig(**stage_objective),
-                TrainingConfig(**training, max_train_samples=stage_limits[stage]),
+                TrainingConfig(**training),
             )
         )
     return tuple(configs)

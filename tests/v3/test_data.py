@@ -177,8 +177,8 @@ def test_tokenization_preserves_variable_segments_roles_and_complete_pools(
         for qa_id in task_ids + gate_ids:
             start, end = trajectory.qas[qa_id].evidence_char_span
             assert segment.char_span[0] <= start < end <= segment.char_span[1]
-        selected = select_step_qas(trajectory, index, config, epoch=0)
-        assert selected == select_step_qas(trajectory, index, config, epoch=0)
+        selected = select_step_qas(trajectory, index, config, 20261004, epoch=0)
+        assert selected == select_step_qas(trajectory, index, config, 20261004, epoch=0)
         assert selected.new_qa_ids == (tuple(sorted(task_ids)) if split == "train" else task_ids)
         assert len(selected.old_qa_ids) == ((4 if index else 0) if split == "train" else 4 * index)
         assert len(selected.gate_qa_ids) == (8 if index else 0)
@@ -187,9 +187,11 @@ def test_tokenization_preserves_variable_segments_roles_and_complete_pools(
         for qa_id in selected.old_qa_ids + selected.gate_qa_ids:
             assert trajectory.qas[qa_id].evidence_char_span[1] <= segment.char_span[0]
         if split != "train":
-            assert selected == select_step_qas(trajectory, index, config, epoch=9)
+            assert selected == select_step_qas(trajectory, index, config, 20261004, epoch=9)
     if split == "train":
-        selections = [select_step_qas(trajectory, 2, config, epoch=epoch) for epoch in range(8)]
+        selections = [
+            select_step_qas(trajectory, 2, config, 20261004, epoch=epoch) for epoch in range(8)
+        ]
         assert len({selection.old_qa_ids for selection in selections}) > 1
         assert len({selection.gate_qa_ids for selection in selections}) > 1
     for raw in record["qas"]:
@@ -547,9 +549,9 @@ def test_factqa_length_filter_preserves_exact_boundary_and_complete_qa(tmp_path,
     assert original["train"][0] is trajectory
 
 
-@pytest.mark.parametrize("max_input_tokens", [3000, None, 4000])
+@pytest.mark.parametrize("max_qa_data_tokens", [3000, None, 4000])
 def test_factqa_length_filter_applies_configured_limit_only_to_train(
-    tmp_path, tokenizer, max_input_tokens
+    tmp_path, tokenizer, max_qa_data_tokens
 ):
     records = [
         make_record(6, split, index=index, segment_chars=length)
@@ -558,13 +560,13 @@ def test_factqa_length_filter_applies_configured_limit_only_to_train(
     ]
     write_dataset(tmp_path, records)
     original = load_factqa(tmp_path, tokenizer)
-    retained, statistics = filter_factqa(original, max_input_tokens)
-    assert statistics["input_token_interval"] == [1, max_input_tokens]
+    retained, statistics = filter_factqa(original, max_qa_data_tokens)
+    assert statistics["input_token_interval"] == [1, max_qa_data_tokens]
     assert statistics["upper_limit_split"] == "train"
     for split in ("train", "dev", "test"):
         expected_rows = (
             original[split][:2]
-            if split == "train" and max_input_tokens is not None
+            if split == "train" and max_qa_data_tokens is not None
             else original[split]
         )
         assert retained[split] == expected_rows

@@ -99,8 +99,6 @@ def _training_job(config, args, directory, level, method_directory, initialize_f
         else f"{method.replace('_', '-')}-{stage}"
     )
     objective = {}
-    if args.objective_seed is not None:
-        objective["seed"] = args.objective_seed
     for name in (
         "qa_batch_size",
         "task_qa_count",
@@ -140,11 +138,8 @@ def _training_job(config, args, directory, level, method_directory, initialize_f
     is_pretrain = stage in {"pretrain", "lm"}
     dataset = args.pretrain_data if is_pretrain else args.qa_data
     experiment_dir = directory / "train" / method_directory
-    stage_limit = getattr(
-        args,
-        f"{'pretrain' if is_pretrain else stage}_train_samples",
-        config.training.max_train_samples,
-    )
+    sample_limit_name = f"max_{'pretrain' if is_pretrain else 'qa'}_train_samples"
+    stage_limit = getattr(args, sample_limit_name, getattr(config.training, sample_limit_name))
     limits = [limit for limit in (stage_limit, level["train_samples"]) if limit is not None]
     dev_limit = level["max_dev_samples"]
     if dev_limit is None and "max_dev_samples" not in vars(args):
@@ -160,7 +155,7 @@ def _training_job(config, args, directory, level, method_directory, initialize_f
         else config.training.init_checkpoint
         if initialize_from is None
         else None,
-        "max_train_samples": min(limits) if limits else None,
+        sample_limit_name: min(limits) if limits else None,
         "max_dev_samples": dev_limit,
         "dev_every": level["dev_every"],
         "save_every": config.training.save_every
@@ -170,16 +165,16 @@ def _training_job(config, args, directory, level, method_directory, initialize_f
         "group": args.group or args.run_id,
         "tags": (f"study:{'main' if args.mode == 'full' else args.mode}",),
     }
-    if args.train_seed is not None:
-        training["seed"] = args.train_seed
+    if args.seed is not None:
+        training["seed"] = args.seed
     if stage == "pretrain" and method != "autocompressors" and args.lm_ratio is not None:
         training["lm_ratio"] = args.lm_ratio
-    if is_pretrain and "max_input_tokens" in vars(args):
-        training["max_input_tokens"] = args.max_input_tokens
+    if is_pretrain and "max_pretrain_data_tokens" in vars(args):
+        training["max_pretrain_data_tokens"] = args.max_pretrain_data_tokens
     if is_pretrain and args.lm_target_tokens is not None:
         training["lm_target_tokens"] = args.lm_target_tokens
-    if "max_qa_input_tokens" in vars(args):
-        training["max_qa_input_tokens"] = args.max_qa_input_tokens
+    if "max_qa_data_tokens" in vars(args):
+        training["max_qa_data_tokens"] = args.max_qa_data_tokens
     for name in (
         "epochs",
         "micro_batch_size_per_gpu",
@@ -297,6 +292,8 @@ def build_resume_jobs(args):
     for index, item in enumerate(plan["jobs"][first:]):
         path = Path(item["config_path"])
         current = config if index == 0 else load_experiment(path)
+        if args.seed is not None and args.seed != current.training.seed:
+            raise ValueError("--seed must match the saved training seed when resuming")
         if index > 0 and Path(current.training.output_dir).exists():
             raise ValueError("cannot resume while a later stage output already exists")
         jobs.append(

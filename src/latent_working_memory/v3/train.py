@@ -37,10 +37,6 @@ from latent_working_memory.tracking_credentials import swanlab_api_key
 
 def training_configs(args):
     configs = [load_experiment(path) for path in args.config]
-    if len(configs) > 1 and "max_train_samples" in vars(args):
-        raise ValueError(
-            "multi-stage training requires a separate max_train_samples in each config"
-        )
     if len(configs) > 1 and any(
         value is not None for value in (args.dataset_dir, args.output_dir, args.init_checkpoint)
     ):
@@ -64,10 +60,20 @@ def training_configs(args):
             if value is not None
         }
     )
-    for name in ("max_train_samples", "max_dev_samples"):
-        if name in vars(args):
-            training[name] = getattr(args, name)
-    configs = [replace(config, training=replace(config.training, **training)) for config in configs]
+    if "max_dev_samples" in vars(args):
+        training["max_dev_samples"] = args.max_dev_samples
+    resolved = []
+    for config in configs:
+        sample_limit_name = (
+            "max_pretrain_train_samples"
+            if config.objective.stage in {"pretrain", "lm"}
+            else "max_qa_train_samples"
+        )
+        stage_training = dict(training)
+        if sample_limit_name in vars(args):
+            stage_training[sample_limit_name] = getattr(args, sample_limit_name)
+        resolved.append(replace(config, training=replace(config.training, **stage_training)))
+    configs = resolved
     if any(config.training.output_dir is None for config in configs):
         raise ValueError(
             "training requires a resolved output_dir; start experiments with v3.gpu_job "
@@ -130,7 +136,7 @@ def run_training(args):
         initialization = read_checkpoint(args.resume)["run"]["initialization"]
     elif config.training.init_checkpoint is not None:
         initialization = load_initialization(config.training.init_checkpoint, codec, config)
-    model = TokenMemoryTask(codec, tokenizer, config.objective)
+    model = TokenMemoryTask(codec, tokenizer, config.objective, config.training.seed)
     engine = TokenMemoryEngine(model, config.training, device)
     engine.initialize()
     result, run, tracking = None, None, None
@@ -148,7 +154,7 @@ def run_training(args):
                     gc.collect()
                     codec, tokenizer = load_codec(config.model, device, config.objective)
                     initialization = load_initialization(result["checkpoint"], codec, config)
-                    model = TokenMemoryTask(codec, tokenizer, config.objective)
+                    model = TokenMemoryTask(codec, tokenizer, config.objective, config.training.seed)
                     engine = TokenMemoryEngine(model, config.training, device)
                     engine.initialize()
                 else:
@@ -156,6 +162,7 @@ def run_training(args):
                         result["checkpoint"], run, result["completed_steps"], config
                     )
                     model.cfg = config.objective
+                    model.seed = config.training.seed
                     engine.reset_optimizer(config.training)
             splits, statistics = load_splits(config, tokenizer)
             run = make_run(
@@ -216,12 +223,13 @@ def parse_args(argv=None):
         type=parse_optional_positive_integer,
         help="本阶段 optimizer step 上限：正整数或 null（完整训练），默认完整训练",
     )
-    parser.add_argument(
-        "--max-train-samples",
-        type=parse_optional_positive_integer,
-        default=argparse.SUPPRESS,
-        help="内存选取的训练样本上限：正整数或 null（不限）；未传时沿用配置",
-    )
+    for category, stages in (("pretrain", "pretrain/lm"), ("qa", "qa/warmup/policy")):
+        parser.add_argument(
+            f"--max-{category}-train-samples",
+            type=parse_optional_positive_integer,
+            default=argparse.SUPPRESS,
+            help=f"{stages} 训练样本上限：正整数或 null（不限）；未传时沿用配置",
+        )
     parser.add_argument(
         "--max-dev-samples",
         type=parse_optional_positive_integer,

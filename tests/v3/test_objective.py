@@ -64,7 +64,7 @@ def trajectory(split="train", n=3):
     )
 
 
-def task(method, stage, memory_slots=3, **options):
+def task(method, stage, memory_slots=3, seed=20261004, **options):
     if method == "icae_multi":
         options = {"icae_min_segments": 3, "icae_max_segments": 3, **options}
     elif method == "autocompressors":
@@ -93,6 +93,7 @@ def task(method, stage, memory_slots=3, **options):
         ),
         TinyTokenizer(),
         config,
+        seed,
     )
 
 
@@ -200,7 +201,7 @@ def test_damage_gates_are_no_grad_and_excluded_from_task_loss(append):
     result["loss"].backward()
     assert len(gate_calls) == 6
     assert gate_calls == [
-        select_step_qas(trajectory(), step, model.cfg, seed=model.qa_seed).gate_qa_ids
+        select_step_qas(trajectory(), step, model.cfg, seed=model.seed).gate_qa_ids
         for step in (1, 2)
         for _ in range(3)
     ]
@@ -222,7 +223,7 @@ def test_dynamic_qa_is_actual_question_mean_then_step_mean():
     ]
     output = model(record)
     selected = [
-        select_step_qas(record, step, model.cfg, seed=model.qa_seed)
+        select_step_qas(record, step, model.cfg, seed=model.seed)
         for step in range(len(record.segments))
     ]
     expected = torch.tensor(
@@ -266,6 +267,7 @@ def test_dynamic_initial_64_append_8_and_overwrite_preserves_last_block_size(
             task_qa_count=2,
             gate_qa_count=1,
         ),
+        20261004,
     )
     choices = iter([False, True, False, True])
     compared_sizes = []
@@ -404,6 +406,7 @@ def test_icae_multi_pretrain_uses_uniform_chunks_with_fixed_total_budget(total_s
         ObjectiveConfig(
             method="icae_multi", icae_min_segments=num_segments, icae_max_segments=num_segments
         ),
+        20261004,
     )
     writes = trace_writes(model)
     reads, original = [], model.codec.answer_nll
@@ -470,7 +473,7 @@ def test_icae_multi_qa_rechunks_full_text_and_keeps_original_question_scopes(num
     assert all(not history for _, history, _ in writes)
     assert result["metrics"]["slots_final"] == model.codec.memory_slots
     assert len(requests) == 1
-    selected = select_step_qas(record, 2, model.cfg, seed=model.qa_seed)
+    selected = select_step_qas(record, 2, model.cfg, seed=model.seed)
     assert requests[0][2] == selected.new_qa_ids + selected.old_qa_ids
     assert result["metrics"]["qa_new_count"] == 1
     assert result["metrics"]["qa_old_count"] == 1
@@ -764,7 +767,7 @@ def test_batch_qa_preserves_question_then_update_then_trajectory_weights():
     for record in records:
         step_losses = []
         for step in range(len(record.segments)):
-            selected = select_step_qas(record, step, model.cfg, seed=model.qa_seed)
+            selected = select_step_qas(record, step, model.cfg, seed=model.seed)
             ids = selected.new_qa_ids + selected.old_qa_ids
             step_losses.append(sum(float(qid.removeprefix("task")) + 1 for qid in ids) / len(ids))
         expected.append(sum(step_losses) / len(step_losses))
@@ -796,7 +799,7 @@ def test_batch_warmup_rng_and_actions_are_independent_of_batch_order():
             for states in model._states_batch(rows, epoch=7):
                 for i, _, event in states:
                     selected = select_step_qas(
-                        rows[i], event["step"], model.cfg, epoch=7, seed=model.qa_seed
+                        rows[i], event["step"], model.cfg, seed=model.seed, epoch=7
                     )
                     assert event["task_new_qa_ids"] == selected.new_qa_ids
                     assert event["task_old_qa_ids"] == selected.old_qa_ids
@@ -818,8 +821,19 @@ def test_batch_warmup_rng_and_actions_are_independent_of_batch_order():
     assert all(len(histories) == len(records) for histories in writes)
     assert any(set(histories) == {0, 1} for histories in writes)
     assert actions(records[::-1]) == expected[::-1]
-    model.qa_seed = 42
+    model.seed = 42
+    expected = []
+    for row in records:
+        rng = example_rng(model.seed, 7, row.trajectory_id)
+        expected.append(
+            ["initial"]
+            + [
+                "append" if rng.random() < model.cfg.append_probability else "overwrite"
+                for _ in row.segments[1:]
+            ]
+        )
     assert actions(records) == expected
+    assert actions(records[::-1]) == expected[::-1]
 
 
 def test_empty_microbatch_is_rejected():
@@ -897,7 +911,7 @@ def test_two_step_bptt_preserves_values_actions_and_full_trajectory_tail_weights
     ]
     for row, events in zip(rows, state.events, strict=True):
         for event in events:
-            selected = select_step_qas(row, event["step"], model.cfg, epoch=4, seed=model.qa_seed)
+            selected = select_step_qas(row, event["step"], model.cfg, seed=model.seed, epoch=4)
             assert event["task_new_qa_ids"] == selected.new_qa_ids
             assert event["task_old_qa_ids"] == selected.old_qa_ids
     assert not torch.allclose(

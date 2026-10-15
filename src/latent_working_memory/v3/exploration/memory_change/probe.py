@@ -119,7 +119,7 @@ def probe(task, trajectories, output_dir, metadata, append_probability):
     )
     with precision, (directory / "updates.jsonl").open("w", encoding="utf-8") as stream:
         for index, trajectory in enumerate(trajectories):
-            rng = example_rng(task.cfg.seed, 0, trajectory.trajectory_id)
+            rng = example_rng(task.seed, 0, trajectory.trajectory_id)
             initial = task._event(0, trajectory.segments[0].segment_id)
             blocks = task._write_batch(
                 [trajectory.segments[0].input_ids], [[]], [initial], actions=["initial"]
@@ -211,7 +211,7 @@ def probe(task, trajectories, output_dir, metadata, append_probability):
         "rollout": {
             "policy": "random",
             "append_probability": append_probability,
-            "seed": task.cfg.seed,
+            "seed": task.seed,
             "epoch": 0,
         },
         "original_threshold": threshold,

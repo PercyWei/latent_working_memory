@@ -12,6 +12,7 @@ import time
 
 import torch
 import torch.distributed as dist
+from transformers import set_seed
 
 from latent_working_memory.data_preparation.personamem.audit import scores
 from latent_working_memory.v3.config import (
@@ -113,7 +114,7 @@ def _qa_protocol(task, trajectories):
         }
         task_digest.update(json.dumps(task_record, ensure_ascii=False, sort_keys=True).encode())
         for step in range(len(trajectory.segments)):
-            selection = select_step_qas(trajectory, step, task.cfg, epoch=0, seed=task.qa_seed)
+            selection = select_step_qas(trajectory, step, task.cfg, task.seed, epoch=0)
             record = {
                 "trajectory_id": trajectory.trajectory_id,
                 "step": step,
@@ -122,7 +123,7 @@ def _qa_protocol(task, trajectories):
             gate_reads += len(selection.gate_qa_ids)
             gate_digest.update(json.dumps(record, ensure_ascii=False, sort_keys=True).encode())
     return task_digest.hexdigest(), {
-        "seed": task.qa_seed,
+        "seed": task.seed,
         "gate_qa_count": task.cfg.gate_qa_count,
         "gate_qa_reads": gate_reads,
         "gate_signature": gate_digest.hexdigest(),
@@ -661,9 +662,10 @@ def main(argv=None):
     if summary is None:
         print(f"[evaluation] loading model device={args.device}", flush=True)
         device = initialize_device(args.device)
+        set_seed(evaluation_config.seed)
         codec, tokenizer = load_codec(config.model, device, config.objective)
         codec.load_trainable_state_dict(checkpoint["trainable"])
-        task = TokenMemoryTask(codec, tokenizer, config.objective, qa_seed=evaluation_config.seed)
+        task = TokenMemoryTask(codec, tokenizer, config.objective, evaluation_config.seed)
         print("[evaluation] model loaded", flush=True)
         print(
             f"[evaluation] loading test data={evaluation_config.dataset_dir}", flush=True

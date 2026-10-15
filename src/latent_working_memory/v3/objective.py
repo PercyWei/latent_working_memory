@@ -49,10 +49,10 @@ def measured(device, event, key):
 
 
 class TokenMemoryTask(nn.Module):
-    def __init__(self, codec, tokenizer, config, qa_seed=None):
+    def __init__(self, codec, tokenizer, config, seed):
         super().__init__()
         self.codec, self.tokenizer, self.cfg = codec, tokenizer, config
-        self.qa_seed = config.seed if qa_seed is None else qa_seed
+        self.seed = seed
 
     @property
     def device(self):
@@ -160,7 +160,7 @@ class TokenMemoryTask(nn.Module):
                         self.codec.memory_slots,
                         self.cfg.icae_min_segments,
                         self.cfg.icae_max_segments,
-                        self.cfg.seed,
+                        self.seed,
                         row.trajectory_id,
                     )[0]
                 )
@@ -178,7 +178,7 @@ class TokenMemoryTask(nn.Module):
         if blocks is None:
             blocks = [[] for _ in trajectories]
         if rngs is None:
-            rngs = [example_rng(self.cfg.seed, epoch, row.trajectory_id) for row in trajectories]
+            rngs = [example_rng(self.seed, epoch, row.trajectory_id) for row in trajectories]
         single = self.cfg.method == "icae_single"
         multi = self.cfg.method == "icae_multi"
         ac = self.cfg.method == "autocompressors"
@@ -191,7 +191,7 @@ class TokenMemoryTask(nn.Module):
                     self.codec.memory_slots,
                     self.cfg.icae_min_segments,
                     self.cfg.icae_max_segments,
-                    self.cfg.seed,
+                    self.seed,
                     row.trajectory_id,
                 )
                 for row in trajectories
@@ -218,7 +218,7 @@ class TokenMemoryTask(nn.Module):
             active = [i for i, row_chunks in enumerate(chunks) if step < len(row_chunks)]
             selected_qas = (
                 {
-                    i: select_step_qas(trajectories[i], step, self.cfg, epoch, self.qa_seed)
+                    i: select_step_qas(trajectories[i], step, self.cfg, self.seed, epoch)
                     for i in active
                 }
                 if self.cfg.method in DYNAMIC_METHODS
@@ -389,7 +389,7 @@ class TokenMemoryTask(nn.Module):
                 state = QAWindowState(
                     0,
                     [[] for _ in trajectories],
-                    [example_rng(self.cfg.seed, epoch, row.trajectory_id) for row in trajectories],
+                    [example_rng(self.seed, epoch, row.trajectory_id) for row in trajectories],
                     [[] for _ in trajectories],
                     [[] for _ in trajectories],
                     [[] for _ in trajectories],
@@ -426,7 +426,7 @@ class TokenMemoryTask(nn.Module):
                         old_ids = ()
                     else:
                         selected = select_step_qas(
-                            trajectory, len(trajectory.segments) - 1, self.cfg, epoch, self.qa_seed
+                            trajectory, len(trajectory.segments) - 1, self.cfg, self.seed, epoch
                         )
                         new_ids, old_ids = selected.new_qa_ids, selected.old_qa_ids
                     event["task_qa_ids"] = new_ids + old_ids
@@ -519,7 +519,7 @@ class TokenMemoryTask(nn.Module):
                     self.codec.memory_slots,
                     self.cfg.icae_min_segments,
                     self.cfg.icae_max_segments,
-                    self.cfg.seed,
+                    self.seed,
                     example.sample_id,
                 )
                 for example in examples
@@ -574,7 +574,7 @@ class TokenMemoryTask(nn.Module):
                 self.cfg.ac_num_segments,
                 self.cfg.bptt_steps,
                 self.codec.max_positions,
-                example_rng(self.cfg.seed, epoch, example.sample_id),
+                example_rng(self.seed, epoch, example.sample_id),
             )
             for example in examples
         ]

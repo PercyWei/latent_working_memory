@@ -75,6 +75,7 @@ def tiny_task(model_type, method, stage, **options):
         ),
         TinyTokenizer(),
         config,
+        20261004,
     )
 
 

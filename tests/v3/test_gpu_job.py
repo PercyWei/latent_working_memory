@@ -69,9 +69,6 @@ def prepare_dataset_entries(args):
 def install_preset_stages(tmp_path, monkeypatch, filename, stages, initialization=None):
     preset = json.loads((Path("configs/v3") / filename).read_text())
     preset["objective"]["stages"] = list(stages)
-    preset["training"]["stage_max_train_samples"] = {
-        stage: preset["training"]["stage_max_train_samples"].get(stage, 512) for stage in stages
-    }
     if initialization is not None:
         preset["training"]["init_checkpoint"] = str(initialization)
     path = tmp_path / filename
@@ -87,16 +84,17 @@ def custom_preset_file(tmp_path, method, **sections):
     preset = json.loads((Path("configs/v3") / f"{method}.json").read_text())
     for section, values in sections.items():
         preset[section].update(values)
-    if "stages" in sections.get("objective", {}):
-        preset["training"]["stage_max_train_samples"] = {
-            stage: preset["training"]["stage_max_train_samples"].get(
-                stage, 12800 if stage == "pretrain" else 512
-            )
-            for stage in preset["objective"]["stages"]
-        }
     path = tmp_path / "custom experiment.json"
     path.write_text(json.dumps(preset))
     return path
+
+
+def training_limit(config):
+    return (
+        config.training.max_pretrain_train_samples
+        if config.objective.stage in {"pretrain", "lm"}
+        else config.training.max_qa_train_samples
+    )
 
 
 def value(command, flag):
@@ -275,7 +273,7 @@ def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode,
     assert directory == args.output_root / "unit-job"
     for job in jobs:
         stage = job.config.objective.stage
-        assert job.config.training.max_train_samples == (
+        assert training_limit(job.config) == (
             expected[0] if mode != "full" else 12800 if stage == "pretrain" else None
         )
         assert job.config.training.max_dev_samples == expected[1]
@@ -421,14 +419,14 @@ def test_full_plan_preserves_each_stage_training_budget(tmp_path):
     for method in (*METHODS, "dynamic_pretrain"):
         _, _, jobs = job_plan.build_jobs(arguments(tmp_path, "--method", method, "--mode", "full"))
         for job in jobs:
-            assert job.config.training.max_train_samples == (
+            assert training_limit(job.config) == (
                 12800 if job.config.objective.stage == "pretrain" else None
             )
 
 
-@pytest.mark.parametrize("stage", ["pretrain", "qa", "warmup", "policy"])
+@pytest.mark.parametrize("category", ["pretrain", "qa"])
 @pytest.mark.parametrize("limit", ["null", 7])
-def test_stage_training_limit_overrides_only_selected_stage(tmp_path, stage, limit):
+def test_training_limit_overrides_only_selected_data_category(tmp_path, category, limit):
     for method in METHODS:
         _, _, defaults = job_plan.build_jobs(
             arguments(tmp_path, "--method", method, "--mode", "full")
@@ -440,46 +438,50 @@ def test_stage_training_limit_overrides_only_selected_stage(tmp_path, stage, lim
                 method,
                 "--mode",
                 "full",
-                f"--{stage}-train-samples",
+                f"--max-{category}-train-samples",
                 str(limit),
             )
         )
         for before, after in zip(defaults, overridden, strict=True):
-            assert after.config.training.max_train_samples == (
+            stage_category = (
+                "pretrain" if after.config.objective.stage in {"pretrain", "lm"} else "qa"
+            )
+            assert training_limit(after.config) == (
                 (None if limit == "null" else limit)
-                if after.config.objective.stage == stage
-                else before.config.training.max_train_samples
+                if stage_category == category
+                else training_limit(before.config)
             )
 
 
 @pytest.mark.parametrize("mode,profile_limit", [("smoke", 16)])
 @pytest.mark.parametrize("limit", ["null", 7, 3000])
-def test_trial_profiles_cap_each_stage_independently(tmp_path, mode, profile_limit, limit):
+def test_trial_profiles_cap_shared_qa_training_budget(tmp_path, mode, profile_limit, limit):
     _, _, jobs = job_plan.build_jobs(
-        arguments(tmp_path, "--mode", mode, "--warmup-train-samples", str(limit))
+        arguments(tmp_path, "--mode", mode, "--max-qa-train-samples", str(limit))
     )
     warmup, policy = jobs
-    assert warmup.config.training.max_train_samples == (
-        profile_limit if limit == "null" else min(limit, profile_limit)
+    assert (
+        training_limit(warmup.config)
+        == training_limit(policy.config)
+        == (profile_limit if limit == "null" else min(limit, profile_limit))
     )
-    assert policy.config.training.max_train_samples == profile_limit
 
 
 def test_null_input_limit_removes_upper_bound_only_for_ae_lm(tmp_path):
     for method in (*METHODS, "dynamic_pretrain"):
         _, _, defaults = job_plan.build_jobs(arguments(tmp_path, "--method", method))
         _, _, overridden = job_plan.build_jobs(
-            arguments(tmp_path, "--method", method, "--max-input-tokens", "null")
+            arguments(tmp_path, "--method", method, "--max-pretrain-data-tokens", "null")
         )
         for before, after in zip(defaults, overridden, strict=True):
-            assert after.config.training.max_input_tokens == (
+            assert after.config.training.max_pretrain_data_tokens == (
                 None
                 if after.config.objective.stage == "pretrain"
-                else before.config.training.max_input_tokens
+                else before.config.training.max_pretrain_data_tokens
             )
             assert (
-                after.config.training.max_qa_input_tokens
-                == before.config.training.max_qa_input_tokens
+                after.config.training.max_qa_data_tokens
+                == before.config.training.max_qa_data_tokens
             )
 
 
@@ -490,11 +492,14 @@ def test_null_input_limit_removes_upper_bound_only_for_ae_lm(tmp_path):
 def test_factqa_input_limit_is_saved_without_changing_pretraining_limit(tmp_path, method, limit):
     _, _, defaults = job_plan.build_jobs(arguments(tmp_path, "--method", method))
     _, _, overridden = job_plan.build_jobs(
-        arguments(tmp_path, "--method", method, "--max-qa-input-tokens", str(limit))
+        arguments(tmp_path, "--method", method, "--max-qa-data-tokens", str(limit))
     )
     for before, after in zip(defaults, overridden, strict=True):
-        assert after.config.training.max_qa_input_tokens == (None if limit == "null" else limit)
-        assert after.config.training.max_input_tokens == before.config.training.max_input_tokens
+        assert after.config.training.max_qa_data_tokens == (None if limit == "null" else limit)
+        assert (
+            after.config.training.max_pretrain_data_tokens
+            == before.config.training.max_pretrain_data_tokens
+        )
 
 
 def test_removed_shared_training_limit_is_rejected():
@@ -551,12 +556,8 @@ def test_custom_method_preset_preserves_parameters_and_launcher_overrides(
             "micro_batch_size_per_gpu": 3,
             "gradient_accumulation_steps": 5,
             "dataset_dir": "ignored/preset-data",
-            "stage_max_train_samples": {
-                stage: 999
-                for stage in json.loads((Path("configs/v3") / f"{method}.json").read_text())[
-                    "objective"
-                ]["stages"]
-            },
+            "max_pretrain_train_samples": 999,
+            "max_qa_train_samples": 999,
             "max_dev_samples": 888,
             "dev_every": 17,
             "save_every": 19,
@@ -613,7 +614,7 @@ def test_custom_method_preset_preserves_parameters_and_launcher_overrides(
         assert config.training.learning_rate == 2e-4
         assert config.training.micro_batch_size_per_gpu == (2 if override else 3)
         assert config.training.gradient_accumulation_steps == (3 if override else 5)
-        assert config.training.max_train_samples == 16
+        assert training_limit(config) == 16
         assert config.training.max_dev_samples == 4
         assert config.training.dev_every == config.training.save_every == 1
         assert config.training.swanlab_project == "latent-working-memory-v3"
@@ -793,7 +794,7 @@ def test_custom_dynamic_pretraining_uses_its_requested_file(tmp_path, capsys, su
 def test_saved_autocompressors_lm_preset_keeps_its_stage_and_uses_pretrain_budget(tmp_path):
     raw = json.loads(Path("configs/v3/autocompressors.json").read_text())
     raw["objective"]["stages"] = ["lm"]
-    raw["training"]["stage_max_train_samples"] = {"lm": 12800}
+    raw["training"]["max_pretrain_train_samples"] = 12800
     path = tmp_path / "original-autocompressors.json"
     path.write_text(json.dumps(raw))
     args = arguments(
@@ -804,7 +805,7 @@ def test_saved_autocompressors_lm_preset_keeps_its_stage_and_uses_pretrain_budge
         str(path),
         "--mode",
         "full",
-        "--pretrain-train-samples",
+        "--max-pretrain-train-samples",
         "7",
     )
 
@@ -812,7 +813,7 @@ def test_saved_autocompressors_lm_preset_keeps_its_stage_and_uses_pretrain_budge
 
     (job,) = jobs
     assert job.config.objective.stage == "lm"
-    assert job.config.training.max_train_samples == 7
+    assert training_limit(job.config) == 7
     assert job.config_path.name == "lm.json"
     assert Path(job.config.training.output_dir).name == "lm"
     assert job.evaluate
@@ -950,7 +951,7 @@ def test_custom_preset_execution_records_resolved_configs_and_evaluates_final_st
         assert job["config"]["objective"]["qa_batch_size"] == 5
         assert config.training.learning_rate == 2e-4
         assert config.objective.qa_batch_size == 5
-        assert config.training.max_train_samples == 16
+        assert training_limit(config) == 16
         assert config.training.max_dev_samples == 4
         assert config.training.dev_every == config.training.save_every == 1
     assert json.loads((plan_directory / "result.json").read_text()) == result
@@ -999,7 +1000,10 @@ def test_cli_only_overrides_explicitly_supplied_preset_values(tmp_path, monkeypa
                 model=replace(config.model, model_name_or_path="local/preset-model"),
                 objective=replace(config.objective, qa_batch_size=5, append_slots=12),
                 training=replace(
-                    config.training, micro_batch_size_per_gpu=3, gradient_accumulation_steps=5
+                    config.training,
+                    micro_batch_size_per_gpu=3,
+                    gradient_accumulation_steps=5,
+                    seed=71,
                 ),
             )
             for config in load_preset(path)
@@ -1014,16 +1018,19 @@ def test_cli_only_overrides_explicitly_supplied_preset_values(tmp_path, monkeypa
             "~/models/override-model",
             "--append-slots",
             "16",
+            "--seed",
+            "0",
         ]
         if override
         else []
     )
     args = arguments(tmp_path, "--mode", "full", *options)
-    _, _, jobs = job_plan.build_jobs(args)
+    _, level, jobs = job_plan.build_jobs(args)
     assert args.method == "memory_change"
     for job in jobs:
         assert job.config.training.micro_batch_size_per_gpu == (4 if override else 3)
         assert job.config.training.gradient_accumulation_steps == 5
+        assert job.config.training.seed == (0 if override else 71)
         assert job.config.objective.qa_batch_size == 5
         assert job.config.objective.append_slots == (16 if override else 12)
         name = f"memory-change-k512+{16 if override else 12}-local"
@@ -1032,6 +1039,10 @@ def test_cli_only_overrides_explicitly_supplied_preset_values(tmp_path, monkeypa
         assert job.config.model.model_name_or_path == (
             str(Path.home() / "models/override-model") if override else "local/preset-model"
         )
+        evaluation_config = gpu_job.resolve_evaluation_config(
+            args, job.config_path.parent / "eval.json", job.config.training.seed, level
+        )
+        assert evaluation_config.seed == job.config.training.seed
 
 
 @pytest.mark.parametrize("method", DYNAMIC_METHODS)
@@ -1212,7 +1223,7 @@ def test_pretraining_sampling_overrides_do_not_change_qa_or_autocompressors_task
             method,
             "--lm-ratio",
             "0.75",
-            "--max-input-tokens",
+            "--max-pretrain-data-tokens",
             "2048",
             "--lm-target-tokens",
             "256",
@@ -1223,7 +1234,7 @@ def test_pretraining_sampling_overrides_do_not_change_qa_or_autocompressors_task
             assert job.config.training.lm_ratio == (
                 0.75 if stage == "pretrain" and method != "autocompressors" else 0.5
             )
-            assert job.config.training.max_input_tokens == (
+            assert job.config.training.max_pretrain_data_tokens == (
                 2048 if stage == "pretrain" else None if stage in {"warmup", "policy"} else 12288
             )
             assert job.config.training.lm_target_tokens == (256 if stage == "pretrain" else 512)
@@ -1313,9 +1324,7 @@ def test_explicit_overrides_and_null_remove_profile_limits(tmp_path):
         "full",
         "--checkpoint",
         str(checkpoint),
-        "--warmup-train-samples",
-        "null",
-        "--policy-train-samples",
+        "--max-qa-train-samples",
         "null",
         "--max-dev-samples",
         "6",
@@ -1352,7 +1361,7 @@ def test_explicit_overrides_and_null_remove_profile_limits(tmp_path):
     assert warmup.config.training.init_checkpoint == str(checkpoint.resolve())
     assert job.initialize_from == warmup.key and job.evaluate
     assert job.config.training.init_checkpoint is None
-    assert job.config.training.max_train_samples is None
+    assert training_limit(job.config) is None
     assert job.config.training.max_dev_samples == 6
     assert job.config.training.epochs == 3
     assert job.config.training.micro_batch_size_per_gpu == 2
@@ -1366,7 +1375,7 @@ def test_explicit_overrides_and_null_remove_profile_limits(tmp_path):
     assert job.config.model.model_name_or_path == "models/local Qwen3"
     assert level["max_steps"] is None
     evaluation_config = gpu_job.resolve_evaluation_config(
-        args, job.config_path.parent / "eval.json", level
+        args, job.config_path.parent / "eval.json", job.config.training.seed, level
     )
     assert evaluation_config.max_test_samples is None
     assert level["dev_every"] == 2 and level["save_every"] == 3
@@ -1409,7 +1418,7 @@ def test_plan_derives_each_global_batch_from_selected_gpus_microbatch_and_accumu
         ["--gpus", "4,04"],
         ["--gpus", "4,"],
         ["--gpus", ""],
-        ["--pretrain-train-samples", "-1"],
+        ["--max-pretrain-train-samples", "-1"],
         ["--lm-train-samples", "10"],
         ["--epochs", "0"],
         ["--micro-batch-size-per-gpu", "0"],
@@ -1422,8 +1431,8 @@ def test_plan_derives_each_global_batch_from_selected_gpus_microbatch_and_accumu
         ["--lm-ratio", "1.1"],
         ["--lm-ratio", "nan"],
         ["--lm-ratio", "inf"],
-        ["--max-input-tokens", "-1"],
-        ["--max-qa-input-tokens", "-1"],
+        ["--max-pretrain-data-tokens", "-1"],
+        ["--max-qa-data-tokens", "-1"],
         ["--lm-target-tokens", "0"],
         ["--lm-target-tokens", "-1"],
         ["--save-total-limit", "0"],
@@ -1902,7 +1911,7 @@ def test_full_execution_uses_its_stage_budget_without_smoke_checkpoint(tmp_path,
     full_call = commands.calls[-1]
     assert "--max-steps" not in full_call["command"]
     assert full_call["configs"][0].training.init_checkpoint is None
-    assert full_call["configs"][0].training.max_train_samples == 12800
+    assert training_limit(full_call["configs"][0]) == 12800
     assert full_call["configs"][0].training.max_dev_samples is None
 
 

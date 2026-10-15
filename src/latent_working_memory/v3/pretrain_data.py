@@ -26,7 +26,7 @@ def _limits(config):
         minimum = max(minimum, config.objective.icae_max_segments)
     elif config.objective.method == "autocompressors":
         minimum = max(minimum, 2 * config.objective.ac_num_segments)
-    return minimum, config.training.max_input_tokens
+    return minimum, config.training.max_pretrain_data_tokens
 
 
 def _counts():

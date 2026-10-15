@@ -41,11 +41,9 @@
     "init_checkpoint": null,
     "lm_ratio": 0.5,
     "lm_target_tokens": 512,
-    "stage_max_train_samples": {
-      "pretrain": 12800,
-      "qa": null
-    },
-    "max_input_tokens": 12288,
-    "max_qa_input_tokens": 12288
+    "max_pretrain_train_samples": 12800,
+    "max_qa_train_samples": null,
+    "max_pretrain_data_tokens": 12288,
+    "max_qa_data_tokens": 12288
   }
 }

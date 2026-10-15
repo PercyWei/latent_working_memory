@@ -27,7 +27,6 @@
     "gate_qa_count": 8,
     "task_new_ratio": 0.5,
     "append_probability": 0.5,
-    "seed": 20261004,
     "append_slots": 32,
     "bptt_steps": null
   },
@@ -43,10 +42,8 @@
     "dev_every": 25,
     "save_every": 25,
     "save_total_limit": 2,
-    "max_qa_input_tokens": 12288,
-    "stage_max_train_samples": {
-      "warmup": null,
-      "policy": null
-    }
+    "max_qa_data_tokens": 12288,
+    "max_pretrain_train_samples": null,
+    "max_qa_train_samples": null
   }
 }

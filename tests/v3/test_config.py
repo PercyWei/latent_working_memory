@@ -38,7 +38,7 @@ def test_presets_use_requested_model_and_memory_size(filename):
         assert config.training.save_total_limit == 2
         assert config.training.swanlab_project is None
         assert config.training.lm_target_tokens == 512
-        assert config.training.max_qa_input_tokens == (
+        assert config.training.max_qa_data_tokens == (
             None if filename.name in {"dynamic_pretrain.json", "autocompressors.json"} else 12288
         )
         assert config.objective.bptt_steps == (
@@ -53,11 +53,10 @@ def test_presets_use_requested_model_and_memory_size(filename):
         assert config.objective.ac_num_segments == 4
         if config.objective.stage == "pretrain":
             assert config.training.min_input_tokens == 1
-            assert config.training.max_input_tokens == 12288
+            assert config.training.max_pretrain_data_tokens == 12288
             assert config.training.lm_ratio == 0.5
-        assert config.training.max_train_samples == (
-            12800 if config.objective.stage == "pretrain" else None
-        )
+        assert config.training.max_pretrain_train_samples == (None if dynamic else 12800)
+        assert config.training.max_qa_train_samples is None
 
 
 @pytest.mark.parametrize(
@@ -301,14 +300,15 @@ def test_output_can_be_unresolved_only_without_a_method_directory():
 @pytest.mark.parametrize(
     "name",
     [
-        "max_train_samples",
+        "max_pretrain_train_samples",
+        "max_qa_train_samples",
         "max_dev_samples",
         "micro_batch_size_per_gpu",
         "gradient_accumulation_steps",
         "save_total_limit",
         "lm_target_tokens",
-        "max_input_tokens",
-        "max_qa_input_tokens",
+        "max_pretrain_data_tokens",
+        "max_qa_data_tokens",
     ],
 )
 @pytest.mark.parametrize("value", [0, -1, True, 1.5])
@@ -319,15 +319,16 @@ def test_sample_limits_require_positive_integers(name, value):
 
 def test_sample_limits_default_to_full_splits():
     config = TrainingConfig("data", "output")
-    assert config.max_train_samples is None
+    assert config.max_pretrain_train_samples is None
+    assert config.max_qa_train_samples is None
     assert config.max_dev_samples is None
-    assert config.max_input_tokens is None
-    assert config.max_qa_input_tokens is None
+    assert config.max_pretrain_data_tokens is None
+    assert config.max_qa_data_tokens is None
 
 
 def test_pretraining_minimum_cannot_exceed_the_input_limit():
     with pytest.raises(ValueError, match="min_input_tokens"):
-        TrainingConfig("data", min_input_tokens=2048, max_input_tokens=1024)
+        TrainingConfig("data", min_input_tokens=2048, max_pretrain_data_tokens=1024)
 
 
 @pytest.mark.parametrize("method", ["memory_change", "information_loss"])
@@ -367,68 +368,37 @@ def test_presets_expand_explicit_stage_sequences_without_changing_other_options(
     assert tuple(config.objective.stage for config in configs) == stages
     for config in configs:
         assert config.model == configs[0].model
-        assert replace(
-            config.training, max_train_samples=configs[0].training.max_train_samples
-        ) == (configs[0].training)
+        assert config.training == configs[0].training
         assert (
-            config.training.max_train_samples
-            == raw["training"]["stage_max_train_samples"][config.objective.stage]
+            config.training.max_pretrain_train_samples
+            == raw["training"]["max_pretrain_train_samples"]
         )
+        assert config.training.max_qa_train_samples == raw["training"]["max_qa_train_samples"]
         assert replace(config.objective, stage=stages[0]) == configs[0].objective
         assert "stages" not in config.to_dict()["objective"]
-        assert "stage_max_train_samples" not in config.to_dict()["training"]
 
 
 @pytest.mark.parametrize("method", ["icae_single", "memory_change", "information_loss"])
-def test_preset_expands_independent_stage_budgets(tmp_path, method):
+def test_preset_expands_shared_data_category_budgets(tmp_path, method):
     raw = json.loads((Path("configs/v3") / f"{method}.json").read_text())
     dynamic = method in {"memory_change", "information_loss"}
     stages = ["pretrain", "warmup", "policy"] if dynamic else ["pretrain", "qa"]
     raw["objective"]["stages"] = stages
     if dynamic:
         raw["objective"].update(writer_mode="tag", tag_tokens=5, bptt_steps=2)
-    raw["training"]["stage_max_train_samples"] = {
-        stage: 37 if stage == "pretrain" else None for stage in stages
-    }
+    raw["training"]["max_pretrain_train_samples"] = 37
+    raw["training"]["max_qa_train_samples"] = None
     path = tmp_path / "preset.json"
     path.write_text(json.dumps(raw))
     configs = load_preset(path)
-    assert configs[0].training.max_train_samples == 37
-    assert all(config.training.max_train_samples is None for config in configs[1:])
+    assert all(config.training.max_pretrain_train_samples == 37 for config in configs)
+    assert all(config.training.max_qa_train_samples is None for config in configs)
     if dynamic:
         assert configs[0].objective.writer_mode == "local"
         assert configs[0].objective.bptt_steps is None
         assert all(config.objective.writer_mode == "tag" for config in configs[1:])
         assert all(config.objective.tag_tokens == 5 for config in configs[1:])
         assert all(config.objective.bptt_steps == 2 for config in configs[1:])
-
-
-@pytest.mark.parametrize(
-    "limits",
-    [
-        {"pretrain": 4},
-        {"pretrain": 4, "qa": 3, "policy": 2},
-        {"pretrain": 0, "qa": 3},
-        {"pretrain": True, "qa": 3},
-        [4, 3],
-    ],
-)
-def test_preset_rejects_missing_extra_or_invalid_stage_budgets(tmp_path, limits):
-    raw = json.loads(Path("configs/v3/icae_single.json").read_text())
-    raw["training"]["stage_max_train_samples"] = limits
-    path = tmp_path / "preset.json"
-    path.write_text(json.dumps(raw))
-    with pytest.raises(ValueError, match="stage_max_train_samples|max_train_samples"):
-        load_preset(path)
-
-
-def test_preset_rejects_one_shared_training_budget(tmp_path):
-    raw = json.loads(Path("configs/v3/icae_single.json").read_text())
-    raw["training"]["max_train_samples"] = 7
-    path = tmp_path / "preset.json"
-    path.write_text(json.dumps(raw))
-    with pytest.raises(ValueError, match="stage_max_train_samples"):
-        load_preset(path)
 
 
 @pytest.mark.parametrize("method", ["icae_single", "icae_multi"])
@@ -478,12 +448,12 @@ def test_autocompressors_stage_keeps_its_original_value_and_bptt_setting(stage, 
 def test_legacy_autocompressors_preset_keeps_lm_stage_and_budget(tmp_path):
     raw = json.loads(Path("configs/v3/autocompressors.json").read_text())
     raw["objective"]["stages"] = ["lm"]
-    raw["training"]["stage_max_train_samples"] = {"lm": 11}
+    raw["training"]["max_pretrain_train_samples"] = 11
     path = tmp_path / "legacy-ac.json"
     path.write_text(json.dumps(raw))
     (config,) = load_preset(path)
     assert config.objective.stage == "lm"
-    assert config.training.max_train_samples == 11
+    assert config.training.max_pretrain_train_samples == 11
 
 
 @pytest.mark.parametrize(
@@ -519,9 +489,6 @@ def test_stage_sequence_rejects_invalid_and_mixed_pipeline_orders(method, stages
 def test_single_stage_preset_uses_requested_stage(tmp_path, stages):
     raw = json.loads(Path("configs/v3/icae_single.json").read_text())
     raw["objective"]["stages"] = stages
-    raw["training"]["stage_max_train_samples"] = {
-        stage: raw["training"]["stage_max_train_samples"][stage] for stage in stages
-    }
     preset = tmp_path / "preset.json"
     preset.write_text(json.dumps(raw))
     (config,) = load_preset(preset)

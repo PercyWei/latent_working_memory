@@ -21,7 +21,7 @@ class FixedActionTask(TokenMemoryTask):
     """固定动作基线只执行所选写入，不额外构造门控候选。"""
 
     def __init__(self, task, append):
-        super().__init__(task.codec, task.tokenizer, task.cfg)
+        super().__init__(task.codec, task.tokenizer, task.cfg, task.seed)
         self.append = append
 
     def build_memory(self, trajectory, epoch=0, force_policy=True):

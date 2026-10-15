@@ -80,8 +80,9 @@
 
 通用设置：
 
+- **随机性**：统一使用 `training.seed` 控制初始化、数据采样与打乱、目标选择、分块和动作抽样；评估配置保存执行 seed，默认继承训练值。
 - **数据校验**：加载时检查数据集的划分与来源，以及 FineWeb FactQA 的 task／gate 题池隔离。
-- **长度限制**：两类数据均使用完整正文。Multisegment 和 FactQA 分别通过 `training.max_input_tokens` 与 `training.max_qa_input_tokens` 筛选 train 正文，默认均为 12288；正整数仅按给定值筛选，超限样本整条排除，`null` 跳过长度上限筛选。dev/test 不按该上限过滤。
+- **长度限制**：两类数据均使用完整正文。Multisegment 和 FactQA 分别通过 `training.max_pretrain_data_tokens` 与 `training.max_qa_data_tokens` 筛选 train 正文，默认均为 12288；正整数仅按给定值筛选，超限样本整条排除，`null` 跳过长度上限筛选。dev/test 不按该上限过滤。
 - **QA 损失**：先平均每题答案 token 的 NLL，再按实际题数平均。
 
 FineWeb FactQA 数据按如下流程使用：
@@ -95,7 +96,7 @@ FineWeb FactQA 数据按如下流程使用：
    - **gate QA**（用于信息损失门控计算）：train/dev/test 均进行抽样，抽样总题数由 `gate_qa_count`（默认 8）指定。注意，首段不执行门控。
    - **抽样规则**：
         - 动态方法在每次压缩新段时进行抽样，baselines 则在压缩完整全文后进行抽样。
-        - 训练时 task QA 和 gate QA 按 `objective.seed`、epoch 可复现地重采样，允许跨 epoch 不同；dev gate 使用 `objective.seed`，test gate 使用评估 seed，均固定选题。
+        - 训练时 task QA 和 gate QA 按统一 seed、epoch 可复现地重采样，允许跨 epoch 不同；dev/test gate 固定使用 epoch 0 选题。
 
 ### 3.2 ICAE-single：完整正文单次压缩
 
@@ -114,7 +115,7 @@ FineWeb FactQA 数据按如下流程使用：
 | `qa` | FineWeb FactQA 完整正文分段独立压缩，最后拼接为 K slots，以末段为新题来源，按训练题数和比例计算任务损失 |
 
 - 分段压缩逻辑：
-    1. **选择段数**：由 `objective.icae_min_segments`／`icae_max_segments` 指定范围（默认 3–6），从中均匀采样 n。采样由 `objective.seed` 和样本 ID 决定，同一样本跨 epoch 使用相同的 n；测试沿用 checkpoint 中的该 seed。
+    1. **选择段数**：由 `objective.icae_min_segments`／`icae_max_segments` 指定范围（默认 3–6），从中均匀采样 n。采样由统一 seed 和样本 ID 决定，同一样本跨 epoch 使用相同的 n。
     2. **切分文本**：将正文均分为 n 个连续段，不沿用数据原始段界。
     3. **分配容量**：将 K 个 slots 均分为 n 块。例如 K=512、n=3 时，各块为 **171／171／170 slots**。
 - 各记忆块共用压缩器与 gist embeddings，按所需容量使用 embedding 表的前若干行；输出记忆分别生成。因此，embedding 表只需 `ceil(K / icae_min_segments)` 行，容纳单块的最大容量。
@@ -128,7 +129,7 @@ FineWeb FactQA 数据按如下流程使用：
 
 - 分段压缩逻辑：
     1. **确定段数**：由 `objective.ac_num_segments` 指定正文压缩段数 n（默认 4）；续文不计入段数。
-    2. **切分文本**：`objective.bptt_steps` 为正整数 B 时（默认 2），训练按 B 段一组：先将正文均分为 n 段以确定各组的 token 总量，再在组内随机重划段界；尾组取剩余段数。段长为组内平均段长的约 2/3–4/3，采样由 `objective.seed`、样本 ID 和 epoch 决定。
+    2. **切分文本**：`objective.bptt_steps` 为正整数 B 时（默认 2），训练按 B 段一组：先将正文均分为 n 段以确定各组的 token 总量，再在组内随机重划段界；尾组取剩余段数。段长为组内平均段长的约 2/3–4/3，采样由统一 seed、样本 ID 和 epoch 决定。
     3. **分配容量与追加**：将 K 个 slots 均分为 n 块。每段文本结合累计记忆压缩为新块并追加，旧块保持不变；n 次追加后总容量为 K。例如 K=512、n=4 时，每次追加 **128 slots**。
 - 各记忆块共用压缩器与 gist embeddings，按所需容量使用 embedding 表的前若干行；embedding 表只需 `ceil(K / n)` 行。
 - **LM 监督**：逐段用此前的累计记忆与当前段已有文本计算 next-token LM，随后压缩当前段并追加记忆；第一段不读取历史记忆，也计算 LM 损失。正文处理完后，以完整 K 记忆预测独立续文；续文最多取 `training.lm_target_tokens` 个 tokens（默认 512），不参与压缩。两部分损失按实际目标 token 数合并平均。
@@ -158,7 +159,7 @@ FineWeb FactQA 数据按如下流程使用：
 | 所有方法的预训练（FineWeb Multisegment） | 12800 |
 | 所有方法的后训练（Fineweb FactQA） | null（全部） |
 
-- `training.stage_max_train_samples` 按阶段指定样本上限，过滤后以 `training.seed` 可复现地选取。
+- `training.max_pretrain_train_samples` 控制 `pretrain`／`lm`，`training.max_qa_train_samples` 控制 `qa`／`warmup`／`policy`；过滤后以 `training.seed` 可复现地选取。
 - 全局 batch = GPU 数（默认 2）× 每卡 microbatch（默认 4）× 梯度累积（默认 2）。双卡默认均为 **16**，尾批按实际样本数平均。
 
 ### 3.7 Checkpoint

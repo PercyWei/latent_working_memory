@@ -53,7 +53,7 @@ def experiment(path, method="icae_single", **training):
         TrainingConfig(
             **{
                 "dataset_dir": str(path),
-                "max_input_tokens": 64,
+                "max_pretrain_data_tokens": 64,
                 "lm_target_tokens": 2,
             }
             | training
@@ -240,7 +240,7 @@ def test_long_complete_body_is_filtered_without_partial_prefix(tmp_path, tokeniz
         multisegment_row("long", "long-document", ("a b c d", "e a")),
     ]
     root = write_multisegment(tmp_path, train=rows)
-    config = experiment(root, max_input_tokens=4, lm_ratio=0.0)
+    config = experiment(root, max_pretrain_data_tokens=4, lm_ratio=0.0)
     splits, statistics = load_pretraining(config, tokenizer)
     assert [row.sample_id for row in splits["train"]] == ["fits:ae"]
     assert splits["train"][0].input_ids == (3, 4)
@@ -272,7 +272,7 @@ def test_upper_limit_filters_only_train_and_preserves_dev_test_body_and_target(
     }
     root = write_multisegment(tmp_path, **rows)
     before = {split: (root / f"{split}.jsonl").read_bytes() for split in rows}
-    config = experiment(root, method=method, max_input_tokens=3, lm_ratio=lm_ratio)
+    config = experiment(root, method=method, max_pretrain_data_tokens=3, lm_ratio=lm_ratio)
     splits, statistics = load_pretraining(config, tokenizer)
     assert splits["train"] == ()
     assert statistics["input_token_interval"][1] == 3
@@ -299,7 +299,7 @@ def test_multi_filters_bodies_too_short_for_any_configured_chunk_count(tmp_path,
             multisegment_row("fits", "fits-document", ("a b", "c d")),
         ],
     )
-    config = experiment(root, method="icae_multi", max_input_tokens=8, lm_ratio=0.0)
+    config = experiment(root, method="icae_multi", max_pretrain_data_tokens=8, lm_ratio=0.0)
     config = replace(config, objective=replace(config.objective, icae_max_segments=4))
     splits, statistics = load_pretraining(config, tokenizer)
     assert [row.sample_id for row in splits["train"]] == ["fits:ae"]
@@ -313,7 +313,7 @@ def test_multi_filters_bodies_too_short_for_any_configured_chunk_count(tmp_path,
 )
 def test_body_limit_excludes_memory_prompt_and_lm_target(tmp_path, tokenizer, method):
     root = write_multisegment(tmp_path, train=[multisegment_row()])
-    config = experiment(root, method=method, max_input_tokens=3, lm_ratio=1.0)
+    config = experiment(root, method=method, max_pretrain_data_tokens=3, lm_ratio=1.0)
     config = replace(config, objective=replace(config.objective, lm_prompt="a " * 20))
     splits, statistics = load_pretraining(config, tokenizer)
     assert len(splits["train"]) == 1
@@ -466,7 +466,9 @@ def test_multisegment_source_isolation_before_filtering(tmp_path, tokenizer, lea
         dev["trajectory_id"] = train["trajectory_id"]
     root = write_multisegment(tmp_path, train=[train], dev=[dev])
     with pytest.raises(ValueError, match="source document|dedup cluster|duplicate") as caught:
-        load_pretraining(experiment(root, min_input_tokens=3, max_input_tokens=4), tokenizer)
+        load_pretraining(
+            experiment(root, min_input_tokens=3, max_pretrain_data_tokens=4), tokenizer
+        )
     assert caught.value.__notes__ == [f"{root / 'dev.jsonl'}:1"]
 
 
@@ -548,10 +550,12 @@ def test_train_sample_limit_selects_whole_sources_after_length_filtering(tmp_pat
             multisegment_row("long", "long-document", ("a b c d", "e")),
         ],
     )
-    config = experiment(root, max_input_tokens=3, max_train_samples=1, lm_ratio=0.0)
+    config = experiment(
+        root, max_pretrain_data_tokens=3, max_pretrain_train_samples=1, lm_ratio=0.0
+    )
     one, first_stats = load_splits(config, tokenizer)
     two, second_stats = load_splits(
-        replace(config, training=replace(config.training, max_train_samples=2)), tokenizer
+        replace(config, training=replace(config.training, max_pretrain_train_samples=2)), tokenizer
     )
     assert len(one["train"]) == 1
     assert len(two["train"]) == 2
@@ -578,7 +582,7 @@ def test_configured_train_body_limit_is_independent_of_tokenizer_metadata(
         test=[multisegment_row("test", "test-document", ("a b", "c d"), split="test")],
     )
     splits, statistics = load_pretraining(
-        experiment(root, max_input_tokens=configured_limit, lm_ratio=0.0), tokenizer
+        experiment(root, max_pretrain_data_tokens=configured_limit, lm_ratio=0.0), tokenizer
     )
     assert [row.sample_id for row in splits["train"]] == ["fits:ae", "long:ae"]
     assert statistics["input_token_interval"] == [1, configured_limit]
@@ -601,7 +605,7 @@ def test_length_filter_checks_complete_body_and_never_crops(tmp_path, tokenizer)
             multisegment_row("long", "long-document", ("a b c", "d e")),
         ],
     )
-    config = experiment(root, min_input_tokens=3, max_input_tokens=4, lm_ratio=0.0)
+    config = experiment(root, min_input_tokens=3, max_pretrain_data_tokens=4, lm_ratio=0.0)
     splits, statistics = load_pretraining(config, tokenizer)
     assert [row.sample_id for row in splits["train"]] == ["lower:ae", "upper:ae"]
     assert [len(row.input_ids) for row in splits["train"]] == [3, 4]

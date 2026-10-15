@@ -79,24 +79,27 @@ def load_splits(config, tokenizer):
         qa_splits, qa_statistics = filter_qa_budget(
             load_factqa(training.dataset_dir, tokenizer), config.objective
         )
-        splits, statistics = filter_factqa(qa_splits, training.max_qa_input_tokens)
+        splits, statistics = filter_factqa(qa_splits, training.max_qa_data_tokens)
         statistics["qa_budget_filter"] = qa_statistics
         statistics["qa_selection"] = {
             "task_qa_count": config.objective.task_qa_count,
             "task_new_ratio": config.objective.task_new_ratio,
             "gate_qa_count": config.objective.gate_qa_count,
-            "seed": config.objective.seed,
+            "seed": training.seed,
             "train": "deterministic_per_epoch",
             "dev_test": "all_read_tasks_and_fixed_gate",
             "historical_pool": "all_previous_segments",
         }
+    train_limit = (
+        training.max_pretrain_train_samples if pretraining else training.max_qa_train_samples
+    )
     statistics["source_data"] = {name: dataset_identity(rows) for name, rows in splits.items()}
     statistics["selection"] = {
         "seed": training.seed,
-        "max_train_samples": training.max_train_samples,
+        "max_train_samples": train_limit,
         "max_dev_samples": training.max_dev_samples,
     }
-    limits = {"train": training.max_train_samples, "dev": training.max_dev_samples, "test": None}
+    limits = {"train": train_limit, "dev": training.max_dev_samples, "test": None}
     for split, rows in splits.items():
         selected = select_examples(rows, limits[split], training.seed, split, pretraining)
         splits[split] = selected
@@ -515,7 +518,7 @@ def train_loop(config, engine, splits, run, stage, max_steps=None, tracking=None
                                     "step": step,
                                     "global_step": record["global_step"],
                                     "stage": config.objective.stage,
-                                    "qa_seed": config.objective.seed,
+                                    "seed": settings.seed,
                                     "observations": development_observations,
                                 },
                                 ensure_ascii=False,

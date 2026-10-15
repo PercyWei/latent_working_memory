@@ -1,4 +1,4 @@
-from dataclasses import replace
+from dataclasses import asdict, replace
 from contextlib import contextmanager
 import csv
 import json
@@ -118,11 +118,11 @@ class Task(nn.Module):
             method, "policy"
         )
         self.cfg = ObjectiveConfig(method=method, stage=stage, task_qa_count=2, gate_qa_count=1)
-        self.qa_seed = self.cfg.seed
+        self.seed = 20261004
         self.loss_queries = []
 
-    def configure(self, config, qa_seed):
-        self.cfg, self.qa_seed = config, qa_seed
+    def configure(self, config, seed):
+        self.cfg, self.seed = config, seed
         return self
 
     def build_memory(self, example, epoch, force_policy):
@@ -288,13 +288,13 @@ def test_split_contract_and_training_state_restore_on_failure(tmp_path):
     assert not (tmp_path / "summary.json").exists()
 
 
-@pytest.mark.parametrize("qa_seed", [20261004, 42])
-def test_comparison_keeps_unequal_capacity_and_exports_json_csv(tmp_path, qa_seed):
+@pytest.mark.parametrize("seed", [20261004, 42])
+def test_comparison_keeps_unequal_capacity_and_exports_json_csv(tmp_path, seed):
     example = trajectory()
     for method in ("icae_single", "information_loss"):
         task = Task(method)
         if method == "information_loss":
-            task.qa_seed = qa_seed
+            task.seed = seed
         evaluation.evaluate(task, [example], tmp_path / method, "test", 8)
     paths = [tmp_path / method / "summary.json" for method in ("icae_single", "information_loss")]
     points = compare(paths, tmp_path / "comparison")
@@ -376,7 +376,7 @@ def test_cli_loads_canonical_checkpoint_and_saved_model_config(
     monkeypatch.setattr(
         evaluation,
         "TokenMemoryTask",
-        lambda codec, tokenizer, objective, qa_seed: task.configure(objective, qa_seed),
+        lambda codec, tokenizer, objective, seed: task.configure(objective, seed),
     )
     monkeypatch.setattr(
         evaluation,
@@ -418,7 +418,7 @@ def test_cli_loads_canonical_checkpoint_and_saved_model_config(
     assert summary["metadata"]["config"]["model"] == config.to_dict()["model"]
     assert summary["qa_sampling"]["seed"] == 42
     assert summary["qa_sampling"]["gate_qa_count"] == 1
-    assert summary["objective"]["seed"] == config.objective.seed
+    assert summary["objective"] == asdict(config.objective)
     assert summary["metadata"]["evaluation_config"] == evaluation_config
     assert summary["metadata"]["source_data"] == evaluation.dataset_identity([trajectory()])
     assert summary["metadata"]["selection"]["seed"] == 42
@@ -481,6 +481,7 @@ def test_real_tiny_model_evaluates_all_methods_without_training_or_gate_leakage(
             icae_max_segments=2,
             ac_num_segments=2,
         ),
+        20261004,
     )
     example = objective_trajectory(split="test")
     summary = evaluation.evaluate(task, [example], tmp_path / method, "test", 2)
@@ -496,7 +497,7 @@ def test_real_tiny_model_evaluates_all_methods_without_training_or_gate_leakage(
 
 def test_shared_dynamic_pretraining_cannot_fall_through_to_a_qa_policy(tmp_path):
     task = TokenMemoryTask(
-        build_model(), TinyTokenizer(), ObjectiveConfig(task_qa_count=2, gate_qa_count=1)
+        build_model(), TinyTokenizer(), ObjectiveConfig(task_qa_count=2, gate_qa_count=1), 20261004
     )
     directory = tmp_path / "evaluation"
     with pytest.raises(ValueError, match="shared dynamic pretraining has no FactQA memory policy"):
@@ -731,7 +732,7 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
     monkeypatch.setattr(
         evaluation,
         "TokenMemoryTask",
-        lambda *args, **kwargs: task.configure(args[2], kwargs["qa_seed"]),
+        lambda codec, tokenizer, objective, seed: task.configure(objective, seed),
     )
     monkeypatch.setattr(
         evaluation,
@@ -780,7 +781,7 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
     )
     assert summary["qa_sampling"]["seed"] == 42
     assert summary["qa_sampling"]["gate_qa_count"] == 1
-    assert summary["objective"]["seed"] == config.objective.seed
+    assert summary["objective"] == asdict(config.objective)
     assert summary["metadata"]["evaluation_config"] == evaluation_config
     assert summary["metadata"]["source_data"] == evaluation.dataset_identity(examples)
     assert summary["metadata"]["config"]["training"]["seed"] == 7
@@ -795,10 +796,10 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
 @pytest.mark.parametrize(
     "method", ["icae_single", "icae_multi", "autocompressors", "memory_change", "information_loss"]
 )
-@pytest.mark.parametrize("max_qa_input_tokens,model_window", [(3, 64), (None, 3), (9, 3)])
+@pytest.mark.parametrize("max_qa_data_tokens,model_window", [(3, 64), (None, 3), (9, 3)])
 @pytest.mark.parametrize("max_test_samples", [None, 1])
 def test_cli_ignores_training_length_limits_and_selects_from_complete_factqa_split(
-    tmp_path, monkeypatch, method, max_qa_input_tokens, model_window, max_test_samples
+    tmp_path, monkeypatch, method, max_qa_data_tokens, model_window, max_test_samples
 ):
     examples = tuple(
         replace(trajectory(f"doc{length}"), full_input_ids=tuple(range(length)))
@@ -813,8 +814,8 @@ def test_cli_ignores_training_length_limits_and_selects_from_complete_factqa_spl
         TrainingConfig(
             dataset_dir="train-data",
             output_dir="training",
-            max_input_tokens=1,
-            max_qa_input_tokens=max_qa_input_tokens,
+            max_pretrain_data_tokens=1,
+            max_qa_data_tokens=max_qa_data_tokens,
             seed=7,
         ),
     )
@@ -840,7 +841,7 @@ def test_cli_ignores_training_length_limits_and_selects_from_complete_factqa_spl
     monkeypatch.setattr(
         evaluation,
         "TokenMemoryTask",
-        lambda *args, **kwargs: task.configure(args[2], kwargs["qa_seed"]),
+        lambda codec, tokenizer, objective, seed: task.configure(objective, seed),
     )
     monkeypatch.setattr(
         evaluation,
@@ -872,11 +873,11 @@ def test_cli_ignores_training_length_limits_and_selects_from_complete_factqa_spl
     evaluation.main(arguments)
     summary = json.loads((output / "summary.json").read_text())
     assert summary["dataset_signature"] == evaluation._qa_protocol(task, selected)[0]
-    assert summary["metadata"]["config"]["training"]["max_input_tokens"] == 1
+    assert summary["metadata"]["config"]["training"]["max_pretrain_data_tokens"] == 1
     assert summary["metadata"]["config"]["training"]["seed"] == 7
     assert summary["qa_sampling"]["seed"] == 42
     assert summary["qa_sampling"]["gate_qa_count"] == 1
-    assert summary["objective"]["seed"] == config.objective.seed
+    assert summary["objective"] == asdict(config.objective)
     assert summary["metadata"]["evaluation_config"] == evaluation_config
     assert summary["metadata"]["source_data"] == evaluation.dataset_identity(examples)
     assert summary["metadata"]["selection"]["total"] == 3

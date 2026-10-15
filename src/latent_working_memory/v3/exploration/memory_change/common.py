@@ -3,8 +3,8 @@
 import os
 from pathlib import Path
 
-import torch
 import torch.distributed as dist
+from transformers import set_seed
 
 from latent_working_memory.v3.config import (
     ExperimentConfig,
@@ -48,10 +48,10 @@ def load_dev_task(checkpoint_path, dataset_dir, device, max_dev_samples):
     }:
         raise ValueError("需要 memory_change 的 warmup 或 policy checkpoint")
     device = initialize_device(device)
-    torch.manual_seed(config.training.seed)
+    set_seed(config.training.seed)
     codec, tokenizer = load_codec(config.model, device, config.objective)
     codec.load_trainable_state_dict(checkpoint["trainable"])
-    task = TokenMemoryTask(codec, tokenizer, config.objective)
+    task = TokenMemoryTask(codec, tokenizer, config.objective, config.training.seed)
     task.requires_grad_(False)
     task.eval()
     trajectories = load_factqa(dataset_dir, tokenizer)["dev"]

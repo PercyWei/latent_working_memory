@@ -65,6 +65,7 @@ def make_model(stage="warmup", bptt_steps=2):
             gate_qa_count=1,
             task_new_ratio=0.5,
         ),
+        20261004,
     )
 
 
@@ -102,7 +103,7 @@ def reference_step(model, optimizer, batch, epoch):
     total_loss = 0.0
     for record in batch:
         blocks, losses = [], []
-        rng = example_rng(model.cfg.seed, epoch, record.trajectory_id)
+        rng = example_rng(model.seed, epoch, record.trajectory_id)
         for step, segment in enumerate(record.segments):
             append = (
                 step > 0
@@ -115,7 +116,7 @@ def reference_step(model, optimizer, batch, epoch):
                 [1],
             )[0]
             blocks = blocks + [candidate] if step == 0 or append else blocks[:-1] + [candidate]
-            selected = select_step_qas(record, step, model.cfg, epoch, model.qa_seed)
+            selected = select_step_qas(record, step, model.cfg, model.seed, epoch)
             losses.append(
                 model.qa_losses(blocks, record, selected.new_qa_ids + selected.old_qa_ids).mean()
             )
@@ -309,7 +310,7 @@ def test_ac_full_and_partial_bptt_windows_match_independent_gradients(
         ac_num_segments=num_segments,
         bptt_steps=bptt_steps,
     )
-    model = TokenMemoryTask(ACWindowCodec(num_segments, 9), TinyTokenizer(), config)
+    model = TokenMemoryTask(ACWindowCodec(num_segments, 9), TinyTokenizer(), config, 20261004)
     reference = deepcopy(model)
     example = PretrainExample(
         "ac",

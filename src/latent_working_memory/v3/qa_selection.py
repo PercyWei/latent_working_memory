@@ -18,9 +18,8 @@ def _sample(pool, count, seed, epoch, trajectory_id, step, kind):
     return tuple(sorted(rng.sample(pool, count)))
 
 
-def select_step_qas(trajectory, step, config, epoch=0, seed=None):
+def select_step_qas(trajectory, step, config, seed, epoch=0):
     """训练按 epoch 重采样；dev/test 固定题池和 gate，不消耗动作随机流。"""
-    seed = config.seed if seed is None else seed
     epoch = epoch if trajectory.split == "train" else 0
     current = trajectory.task_qa_ids[step]
     history = tuple(qid for pool in trajectory.task_qa_ids[:step] for qid in pool)

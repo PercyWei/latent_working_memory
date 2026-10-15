@@ -22,8 +22,7 @@
     "stages": ["pretrain"],
     "qa_batch_size": 8,
     "ac_num_segments": 4,
-    "bptt_steps": 2,
-    "seed": 20261004
+    "bptt_steps": 2
   },
   "training": {
     "dataset_dir": "data/fineweb-multisegment-k512-seg1to3x_train32k_20261008",
@@ -40,9 +39,8 @@
     "min_input_tokens": 1,
     "init_checkpoint": null,
     "lm_target_tokens": 512,
-    "stage_max_train_samples": {
-      "pretrain": 12800
-    },
-    "max_input_tokens": 12288
+    "max_pretrain_train_samples": 12800,
+    "max_qa_train_samples": null,
+    "max_pretrain_data_tokens": 12288
   }
 }

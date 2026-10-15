@@ -117,17 +117,9 @@ def parse_args(argv=None):
     )
     parser.add_argument("--eval-data", type=Path, help="独立的最终 QA 评估数据目录")
     parser.add_argument(
-        "--train-seed",
+        "--seed",
         type=nonnegative_count,
-        help="覆盖 training.seed：初始化、数据抽样与打乱、AE/LM 目标选择；默认沿用配置",
-    )
-    parser.add_argument(
-        "--objective-seed",
-        type=nonnegative_count,
-        help="覆盖 objective.seed：随机分块、warmup 动作、训练 task/gate 与 dev gate 选题；默认沿用配置",
-    )
-    parser.add_argument(
-        "--eval-seed", type=nonnegative_count, help="最终评估轨迹及 gate 选题 seed，默认复用 eval.json"
+        help="统一随机种子；新训练默认沿用 training.seed，独立评估默认复用 eval.json 或训练 seed",
     )
     parser.add_argument(
         "--model-path", help="覆盖预设模型位置，当前预设为 ~/models/Qwen3-4B-Instruct-2507"
@@ -165,13 +157,13 @@ def parse_args(argv=None):
         help="AE＋LM 预训练中每条来源选择 LM 的概率，默认 0.5；AutoCompressors 始终使用 LM",
     )
     parser.add_argument(
-        "--max-input-tokens",
+        "--max-pretrain-data-tokens",
         type=parse_optional_positive_integer,
         default=argparse.SUPPRESS,
         help="AE/LM 训练正文 token 上限，预设 12288；null 跳过上限筛选，仅过滤 train",
     )
     parser.add_argument(
-        "--max-qa-input-tokens",
+        "--max-qa-data-tokens",
         type=parse_optional_positive_integer,
         default=argparse.SUPPRESS,
         help="FactQA 训练正文 token 上限，预设 12288；null 跳过上限筛选，仅过滤 train",
@@ -217,12 +209,12 @@ def parse_args(argv=None):
         type=positive_count,
         help="动态后训练每次追加的 slots 数，预设 32；首次写入为 K slots",
     )
-    for stage in ("pretrain", "qa", "warmup", "policy"):
+    for category, stages in (("pretrain", "pretrain/lm"), ("qa", "qa/warmup/policy")):
         parser.add_argument(
-            f"--{stage}-train-samples",
+            f"--max-{category}-train-samples",
             type=parse_optional_positive_integer,
             default=argparse.SUPPRESS,
-            help=f"{stage} 阶段训练样本上限，null 表示不限；smoke 另受档位上限约束",
+            help=f"{stages} 阶段训练样本上限，null 表示不限；smoke 另受档位上限约束",
         )
     parser.add_argument(
         "--max-dev-samples",
@@ -358,7 +350,7 @@ def save_json(path, value):
     )
 
 
-def resolve_evaluation_config(args, config_path, level=None):
+def resolve_evaluation_config(args, config_path, default_seed, level=None):
     """沿用独立评估设置，只应用显式评估参数；旧产物须明确指定数据入口。"""
     if config_path.is_file():
         config = load_evaluation(config_path)
@@ -367,12 +359,12 @@ def resolve_evaluation_config(args, config_path, level=None):
             raise ValueError(f"{config_path} is missing; specify --eval-data to create it")
         config = EvaluationConfig(
             dataset_dir=str((args.eval_data or args.qa_data).resolve()),
+            seed=default_seed,
             max_test_samples=level["max_test_samples"] if level is not None else None,
         )
     updates = {}
     for argument, field in (
         ("eval_data", "dataset_dir"),
-        ("eval_seed", "seed"),
         ("max_new_tokens", "max_new_tokens"),
     ):
         value = getattr(args, argument)
@@ -380,6 +372,8 @@ def resolve_evaluation_config(args, config_path, level=None):
             if argument == "eval_data":
                 value = str(value.resolve())
             updates[field] = value
+    if args.seed is not None and not args.resume:
+        updates["seed"] = args.seed
     if "max_test_samples" in vars(args):
         updates["max_test_samples"] = args.max_test_samples
     return replace(config, **updates)
@@ -637,7 +631,19 @@ def _run_evaluation_locked(args, checkpoints, method_directory, started):
     )
     plan_directory = directory / "plan" / method_directory.name
     config_path = plan_directory / "eval.json"
-    config = resolve_evaluation_config(args, config_path)
+    default_seed = args.seed
+    if not config_path.is_file() and default_seed is None:
+        seeds = {
+            json.loads((stage / "run.json").read_text(encoding="utf-8"))["config"]["training"]["seed"]
+            for stage, _ in identities.values()
+        }
+        if len(seeds) != 1:
+            raise ValueError(
+                "selected checkpoints have different training seeds; specify --seed "
+                "to create their shared evaluation configuration"
+            )
+        default_seed = seeds.pop()
+    config = resolve_evaluation_config(args, config_path, default_seed)
     require_dataset_entries([config.dataset_dir])
     training_dir = (
         validate_evaluation_publication(checkpoints) if args.tracking == "online" else None
@@ -814,7 +820,7 @@ def run_resume(args):
     result["checkpoints"][jobs[0].key] = str(args.checkpoint.resolve())
     evaluation_path = plan_directory / "eval.json"
     evaluation_config = (
-        resolve_evaluation_config(args, evaluation_path)
+        resolve_evaluation_config(args, evaluation_path, jobs[0].config.training.seed)
         if any(job.evaluate for job in jobs)
         else None
     )
@@ -883,7 +889,7 @@ def run_job(args):
     }
     evaluation_path = plan_directory / "eval.json"
     evaluation_config = (
-        resolve_evaluation_config(args, evaluation_path, level)
+        resolve_evaluation_config(args, evaluation_path, first.config.training.seed, level)
         if evaluation_directories
         else None
     )

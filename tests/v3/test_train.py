@@ -71,6 +71,7 @@ def stage_configs(tmp_path, method="icae_single", source=None, stages=None):
                 gradient_accumulation_steps=1,
                 micro_batch_size_per_gpu=index + 1,
                 learning_rate=0.01 * (index + 1),
+                seed=123 + index,
             ),
         )
         path = tmp_path / f"{method}-{stage}.json"
@@ -111,6 +112,7 @@ def install_small_training(monkeypatch):
             "optimizer_initially_empty": not engine.optimizer.state,
             "gradients_initially_clear": all(p.grad is None for p in engine.parameters),
             "global_batch": engine.global_batch_size,
+            "seed": engine.model.seed,
         }
         result = original_loop(config, engine, *args, **kwargs)
         record["final"] = engine.model.trainable_state_dict()
@@ -170,6 +172,7 @@ def test_method_inherits_weights_across_stages_with_fresh_stage_optimizer(
             )
     assert second["optimizer_initially_empty"] and second["gradients_initially_clear"]
     assert [row["global_batch"] for row in records] == list(range(1, len(records) + 1))
+    assert [row["seed"] for row in records] == list(range(123, 123 + len(records)))
     assert second["optimizer"].param_groups[0]["lr"] == 0.02
     assert all(state["step"] == 1 for state in second["optimizer"].state.values())
     assert result["global_step"] == len(records) and result["completed_steps"] == 1
@@ -196,6 +199,7 @@ def test_method_inherits_weights_across_stages_with_fresh_stage_optimizer(
             .splitlines()
         ]
         assert [row["global_step"] for row in observed] == [stage_record["result"]["global_step"]]
+        assert observed[0]["seed"] == stage_record["seed"]
         rows = observed[0]["observations"]
         assert len(rows) == (12 if dynamic else 8)
         assert len({(row["trajectory_id"], row["qa_id"], row["read_step"]) for row in rows}) == len(
@@ -310,18 +314,19 @@ def test_worker_rejects_preset_before_loading_any_model(tmp_path, monkeypatch, e
     assert not (tmp_path / "resolved-output").exists()
 
 
-def test_continuous_worker_keeps_stage_specific_sample_limits(tmp_path):
+def test_continuous_worker_keeps_data_category_sample_limits(tmp_path):
     paths = stage_configs(tmp_path)
-    for path, limit in zip(paths, (3, 2), strict=True):
+    for path in paths:
         raw = json.loads(path.read_text())
-        raw["training"]["max_train_samples"] = limit
+        raw["training"]["max_pretrain_train_samples"] = 3
+        raw["training"]["max_qa_train_samples"] = 2
         path.write_text(json.dumps(raw))
     configs = train.training_configs(arguments(paths))
-    assert [config.training.max_train_samples for config in configs] == [3, 2]
-    with pytest.raises(ValueError, match="separate max_train_samples"):
-        train.training_configs(arguments(paths, "--max-train-samples", "null"))
-    (config,) = train.training_configs(arguments([paths[0]], "--max-train-samples", "null"))
-    assert config.training.max_train_samples is None
+    assert all(config.training.max_pretrain_train_samples == 3 for config in configs)
+    assert all(config.training.max_qa_train_samples == 2 for config in configs)
+    configs = train.training_configs(arguments(paths, "--max-pretrain-train-samples", "null"))
+    assert configs[0].training.max_pretrain_train_samples is None
+    assert configs[1].training.max_qa_train_samples == 2
 
 
 def test_continuous_multi_stages_require_the_same_memory_embedding_shape(tmp_path):
