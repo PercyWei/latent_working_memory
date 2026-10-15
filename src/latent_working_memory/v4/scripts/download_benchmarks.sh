@@ -4,22 +4,6 @@ set -euo pipefail
 LWM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 cd "$LWM_ROOT"
 
-usage() {
-  cat <<'HELP'
-用法：bash src/latent_working_memory/v4/scripts/download_benchmarks.sh [参数]
-
-下载 RULER v1 源码与原始素材，以及可直接评估的 LoCoMo 原始 JSON。
-
-  --benchmark all|ruler|locomo  要下载的数据，默认 all
-  --data-root PATH             LoCoMo 数据父目录，默认 data/benchmarks
-  --ruler-source-dir PATH      RULER 源码与素材，默认 data/raw/ruler-v1-source
-  -h, --help                   显示帮助
-
-无需模型或 GPU。RULER 下载需项目 Python 环境；先执行 uv sync --frozen，安装 git-lfs 和 curl。
-相对路径以项目根目录为基准；已有下载文件复用。
-HELP
-}
-
 fail() { printf '错误：%s\n' "$*" >&2; exit 2; }
 require_value() {
   [[ $# -ge 2 && -n $2 && $2 != --* ]] || fail "$1 缺少参数值"
@@ -41,8 +25,7 @@ while [[ $# -gt 0 ]]; do
     --benchmark) require_value "$@"; benchmark="$2"; shift 2 ;;
     --data-root) require_value "$@"; data_root="$2"; shift 2 ;;
     --ruler-source-dir) require_value "$@"; ruler_source_dir="$2"; shift 2 ;;
-    -h|--help) usage; exit 0 ;;
-    *) fail "未知参数：$1；使用 --help 查看说明" ;;
+    *) fail "未知参数：$1" ;;
   esac
 done
 
@@ -70,7 +53,14 @@ if [[ $benchmark == all || $benchmark == ruler ]]; then
   git -C "$ruler_source_dir" lfs install --local
   GIT_LFS_SKIP_SMUDGE=1 git -C "$ruler_source_dir" checkout c3f5e3b4f87f97e048793bb510a3a6b19a46bf3a
   git -C "$ruler_source_dir" lfs pull --include="scripts/data/synthetic/json/english_words.json"
-  uv run --frozen python -m nltk.downloader punkt punkt_tab
+  # 仅为 NLTK 下载允许使用现有代理，调用方可通过同名环境变量覆盖。
+  NLTK_ALLOW_PROXIED_URLOPEN="${NLTK_ALLOW_PROXIED_URLOPEN:-1}" \
+    uv run --frozen python - <<'PY'
+import nltk
+
+for package in ("punkt", "punkt_tab"):
+    nltk.download(package, raise_on_error=True)
+PY
   (
     cd "$ruler_source_dir/scripts/data/synthetic/json"
     if [[ ! -f PaulGrahamEssays.json ]]; then
