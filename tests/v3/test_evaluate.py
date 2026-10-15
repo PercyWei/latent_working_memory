@@ -612,15 +612,12 @@ def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_pat
 
     monkeypatch.setattr(evaluation, "swanlab_api_key", lambda: "evaluation-test-key")
     monkeypatch.setattr(evaluation, "evaluation_tracking_run", resume)
-    monkeypatch.setattr(evaluation, "configure_evaluation_metrics", lambda *args: None)
     monkeypatch.setattr(
         evaluation,
         "configure_evaluation_layout",
-        lambda *args: {"name": "checkpoint_comparison", "url": "https://example.test/view"},
+        lambda *args: {"name": "evaluation", "url": "https://example.test/view"},
     )
     monkeypatch.setattr(evaluation, "verify_evaluation_publication", lambda *args: None)
-    monkeypatch.setattr(evaluation, "configure_evaluation_media_layout", lambda *args: None)
-    monkeypatch.setattr(evaluation, "configure_evaluation_visibility", lambda *args: None)
     checkpoint = training_dir / "policy" / "checkpoints" / "global_step_37"
     output = tmp_path / "evaluation" / "policy" / checkpoint.name
     evaluation_config = {
@@ -650,22 +647,23 @@ def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_pat
         for name in ("summary.json", "trajectories.jsonl")
     }
     evaluation._append_evaluation(summary, training_dir, output, 37, history)
-    assert len(publications) == 1 and publications[0][1] == 38
-    assert publications[0][0]["evaluation/nll"].options["series"][0]["data"][-1]["value"] == 2
-    em_f1 = publications[0][0]["evaluation/em_f1"].options
-    assert [axis["max"] for axis in em_f1["yAxis"]] == [1]
-    assert [series["yAxisIndex"] for series in em_f1["series"]] == [0, 0]
-    assert em_f1["xAxis"][0]["data"] == ["1", "3", "总体"]
+    assert len(publications) == 1 and publications[0][1] == 1
+    assert publications[0][0]["evaluation/nll"].options["series"][0]["data"][-1] == ["总体", 2]
+    for metric in ("em", "f1"):
+        quality = publications[0][0][f"evaluation/{metric}"].options
+        assert [axis["max"] for axis in quality["yAxis"]] == [1]
+        assert [series["name"] for series in quality["series"]] == [
+            "policy · stage step 37 · global step 37"
+        ]
+        assert quality["xAxis"][0]["data"] == ["1", "3", "总体"]
     statistics = publications[0][0]["evaluation/statistics"].content
-    assert "最终记忆容量" in statistics and "平均记忆容量" in statistics
+    assert "最终 slots" in statistics and "平均 slots" in statistics
     assert not any(
         name in publications[0][0]
         for name in ("evaluation/summary", "evaluation/details", "evaluation/examples")
     )
-    assert all(
-        name.startswith(("evaluation/", "checkpoint_comparison/"))
-        for name in publications[0][0]
-    )
+    assert all(name.startswith("evaluation/") for name in publications[0][0])
+    assert "evaluation/nll_retention/step_37" in publications[0][0]
     assert all(
         (output / name).read_bytes() == original
         for name, original in local_results.items()
@@ -674,8 +672,11 @@ def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_pat
     assert json.loads(identity_path.read_text()) == identity
     record = json.loads((output / "swanlab-publication.json").read_text())
     assert record["run_id"] == "original" and record["global_step"] == 37
-    assert record["quality"] == summary["quality"]
-    assert set(record["panels"]) == set(publications[0][0])
+    publication = json.loads(history.path.read_text())["publication"]
+    assert record["publication_step"] == publication["publication_step"] == 1
+    assert record["report_signature"] == publication["signature"]
+    assert publication["checkpoints"] == [str(checkpoint.resolve())]
+    assert set(publication["panels"]) == set(publications[0][0])
 
 
 @pytest.mark.parametrize(

@@ -395,14 +395,14 @@ class TrainingStage:
     checkpoint_path: Path | None = None
 
 
-def prepare_training(config, engine, splits, run, resume=None, stop_after_steps=None):
+def prepare_training(config, engine, splits, run, resume=None, max_steps=None):
     """先校验并准备阶段目录或恢复进度，再开启／更新方法级跟踪会话。"""
     settings = config.training
     train, dev = splits["train"], splits["dev"]
     if not train or not dev:
         raise ValueError("training requires nonempty train and dev splits")
-    if stop_after_steps is not None and (type(stop_after_steps) is not int or stop_after_steps < 1):
-        raise ValueError("stop_after_steps must be a positive optimizer-step limit")
+    if max_steps is not None and (type(max_steps) is not int or max_steps < 1):
+        raise ValueError("max_steps must be a positive optimizer-step limit")
     if resume is None and config.objective.stage in {"warmup", "qa", "policy"}:
         if settings.init_checkpoint is None or run["initialization"] is None:
             raise ValueError(f"{config.objective.stage} requires an initialization checkpoint")
@@ -446,7 +446,7 @@ def prepare_training(config, engine, splits, run, resume=None, stop_after_steps=
     return TrainingStage(cursor, loader, handler, checkpoint_path)
 
 
-def train_loop(config, engine, splits, run, stage, stop_after_steps=None, tracking=None):
+def train_loop(config, engine, splits, run, stage, max_steps=None, tracking=None):
     """执行已准备阶段的全局 batch 日程，跟踪会话由方法训练入口管理。"""
     settings = config.training
     train, dev = splits["train"], splits["dev"]
@@ -457,13 +457,11 @@ def train_loop(config, engine, splits, run, stage, stop_after_steps=None, tracki
     if save_every == "after_each_epoch":
         save_every = len(stage.data_loader)
     total_steps = settings.epochs * math.ceil(len(train) / engine.global_batch_size)
-    planned_steps = (
-        min(total_steps, stop_after_steps) if stop_after_steps is not None else total_steps
-    )
+    planned_steps = min(total_steps, max_steps) if max_steps is not None else total_steps
     if tracking is not None:
         configure_training_metrics(tracking, config.objective.method, config.objective.stage)
     for epoch in range(cursor["epoch"], settings.epochs):
-        if stop_after_steps is not None and cursor["step"] >= stop_after_steps:
+        if max_steps is not None and cursor["step"] >= max_steps:
             break
         stage.data_loader.sampler.set_epoch(epoch)
         for batch in stage.data_loader:
@@ -492,7 +490,7 @@ def train_loop(config, engine, splits, run, stage, stop_after_steps=None, tracki
             cursor["epoch"] = epoch + int(epoch_end)
             cursor["sample_offset"] = 0 if epoch_end else consumed
             step = cursor["step"]
-            stopping = stop_after_steps is not None and step >= stop_after_steps
+            stopping = max_steps is not None and step >= max_steps
             record = {
                 "step": step,
                 "global_step": run["step_offset"] + step,
@@ -558,7 +556,7 @@ def train_loop(config, engine, splits, run, stage, stop_after_steps=None, tracki
                 stage.checkpoint_path = output / "checkpoints" / f"global_step_{step}"
             if stopping:
                 break
-        if stop_after_steps is not None and cursor["step"] >= stop_after_steps:
+        if max_steps is not None and cursor["step"] >= max_steps:
             break
     result = {
         "complete": cursor["epoch"] == settings.epochs,
@@ -567,7 +565,7 @@ def train_loop(config, engine, splits, run, stage, stop_after_steps=None, tracki
         "total_steps": total_steps,
         "completed_epochs": cursor["epoch"],
         "sample_visits": cursor["sample_visits"],
-        "stop_after_steps": stop_after_steps,
+        "max_steps": max_steps,
         "checkpoint": str(stage.checkpoint_path),
     }
     if engine.rank == 0:

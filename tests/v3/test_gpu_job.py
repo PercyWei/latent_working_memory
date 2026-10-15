@@ -5,6 +5,7 @@ import os
 from dataclasses import replace
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 
@@ -148,8 +149,6 @@ class Commands:
             call["configs"], call["checkpoints"] = [], []
             for config_path in config_paths(command):
                 config = load_experiment(config_path)
-                if config.objective.stage == self.fail_stage:
-                    raise subprocess.CalledProcessError(7, command)
                 if call["checkpoints"]:
                     config = replace(
                         config,
@@ -162,8 +161,8 @@ class Commands:
                 (output / "checkpoints").mkdir(parents=True)
                 (output / "config.json").write_text(json.dumps(config.to_dict()))
                 steps = (
-                    int(value(command, "--stop-after-steps"))
-                    if "--stop-after-steps" in command
+                    int(value(command, "--max-steps"))
+                    if "--max-steps" in command
                     else 80
                 )
                 run = {
@@ -188,10 +187,24 @@ class Commands:
                         },
                         checkpoint / "state.pt",
                     )
+                    retained = sorted(
+                        Path(config.training.experiment_dir).glob(
+                            "*/checkpoints/global_step_*/state.pt"
+                        ),
+                        key=lambda path: (
+                            json.loads((path.parents[2] / "run.json").read_text())["step_offset"]
+                            + int(path.parent.name.removeprefix("global_step_"))
+                        ),
+                    )
+                    for state in retained[: -config.training.save_total_limit]:
+                        shutil.rmtree(state.parent)
+                call["checkpoints"].append(checkpoint)
+                if config.objective.stage == self.fail_stage:
+                    raise subprocess.CalledProcessError(7, command)
                 (output / "training-result.json").write_text(
                     json.dumps(
                         {
-                            "complete": "--stop-after-steps" not in command,
+                            "complete": "--max-steps" not in command,
                             "completed_steps": steps,
                             "total_steps": 80,
                             "completed_epochs": 1 if steps == 80 else 0,
@@ -199,12 +212,11 @@ class Commands:
                             * config.training.global_batch_size(
                                 len(environment["CUDA_VISIBLE_DEVICES"].split(","))
                             ),
-                            "stop_after_steps": steps if steps != 80 else None,
+                            "max_steps": steps if steps != 80 else None,
                             "checkpoint": str(checkpoint),
                         }
                     )
                 )
-                call["checkpoints"].append(checkpoint)
         elif "latent_working_memory.v3.evaluate" in command:
             call["evaluation_config"] = json.loads(Path(value(command, "--config")).read_text())
             output = Path(value(command, "--output-dir"))
@@ -292,7 +304,7 @@ def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode,
         assert "global_batch_size" not in job.config.to_dict()["training"]
         command = gpu_job.training_command([job], 4, level["max_steps"])
         assert "--nproc_per_node=4" in command
-        assert ("--stop-after-steps" in command) == (mode != "full")
+        assert ("--max-steps" in command) == (mode != "full")
     evaluation_path = jobs[-1].config_path.parent / "eval.json"
     evaluation = gpu_job.evaluation_command(
         args, evaluation_path, Path("final.pt"), Path("evaluation")
@@ -901,7 +913,17 @@ def test_custom_preset_execution_records_resolved_configs_and_evaluates_final_st
         tmp_path, "icae_single", objective={"qa_batch_size": 5}, training={"learning_rate": 2e-4}
     )
     original = path.read_bytes()
-    args = arguments(tmp_path, "--method", "icae_single", "--config", str(path), "--mode", "smoke")
+    args = arguments(
+        tmp_path,
+        "--method",
+        "icae_single",
+        "--config",
+        str(path),
+        "--mode",
+        "smoke",
+        "--save-total-limit",
+        "1",
+    )
     prepare_dataset_entries(args)
     commands = Commands()
     monkeypatch.setattr(gpu_job, "execute", commands)
@@ -909,9 +931,10 @@ def test_custom_preset_execution_records_resolved_configs_and_evaluates_final_st
     result = gpu_job.run_job(args)
 
     assert result["status"] == "finished"
+    assert set(result["checkpoints"]) == {"icae-single-qa"}
     training, evaluation = commands.calls
     assert [config.objective.stage for config in training["configs"]] == ["pretrain", "qa"]
-    assert value(training["command"], "--stop-after-steps") == "2"
+    assert value(training["command"], "--max-steps") == "2"
     assert training["configs"][1].training.init_checkpoint == str(training["checkpoints"][0])
     assert value(evaluation["command"], "--checkpoint") == str(training["checkpoints"][-1])
     plan_directory = args.output_root / "unit-job/plan/icae-single-k512_smoke"
@@ -1478,7 +1501,7 @@ def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
     for call in training:
         assert call["environment"]["CUDA_VISIBLE_DEVICES"] == gpus
         assert f"--nproc_per_node={len(gpus.split(','))}" in call["command"]
-        assert value(call["command"], "--stop-after-steps") == "2"
+        assert value(call["command"], "--max-steps") == "2"
         for config_path, config in zip(config_paths(call["command"]), call["configs"], strict=True):
             assert json.loads(Path(config_path).read_text()) == config.to_dict()
     evaluation = commands.calls[-1]
@@ -1877,7 +1900,7 @@ def test_full_execution_uses_its_stage_budget_without_smoke_checkpoint(tmp_path,
     assert short_result["experiment_id"] == full_result["experiment_id"] == "unit-job"
     assert set(short_result["checkpoints"].values()).isdisjoint(full_result["checkpoints"].values())
     full_call = commands.calls[-1]
-    assert "--stop-after-steps" not in full_call["command"]
+    assert "--max-steps" not in full_call["command"]
     assert full_call["configs"][0].training.init_checkpoint is None
     assert full_call["configs"][0].training.max_train_samples == 12800
     assert full_call["configs"][0].training.max_dev_samples is None
@@ -1904,8 +1927,8 @@ def test_failed_training_or_evaluation_preserves_method_result(tmp_path, monkeyp
     assert not result["summaries"]
 
 
-def test_second_stage_failure_preserves_first_stage_checkpoint_in_result(tmp_path, monkeypatch):
-    args = arguments(tmp_path)
+def test_second_stage_failure_preserves_latest_saved_checkpoint_in_result(tmp_path, monkeypatch):
+    args = arguments(tmp_path, "--save-total-limit", "1")
     prepare_dataset_entries(args)
     commands = Commands(fail_stage="policy")
     monkeypatch.setattr(gpu_job, "execute", commands)
@@ -1918,10 +1941,13 @@ def test_second_stage_failure_preserves_first_stage_checkpoint_in_result(tmp_pat
         ).read_text()
     )
     assert failure["status"] == "failed"
-    assert set(failure["checkpoints"]) == {"memory-change-warmup"}
-    assert failure["checkpoints"]["memory-change-warmup"] == str(
-        commands.calls[0]["checkpoints"][0]
+    assert set(failure["checkpoints"]) == {"memory-change-policy"}
+    assert failure["checkpoints"]["memory-change-policy"] == str(
+        commands.calls[0]["checkpoints"][-1]
     )
+    assert not commands.calls[0]["checkpoints"][0].exists()
+    policy = commands.calls[0]["configs"][-1]
+    assert not (Path(policy.training.output_dir) / "training-result.json").exists()
     assert not failure["summaries"]
 
 

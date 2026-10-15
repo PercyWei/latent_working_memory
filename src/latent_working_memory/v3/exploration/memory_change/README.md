@@ -2,7 +2,7 @@
 
 创建时间：20261012 15:01:54 Asia/Shanghai
 
-最后修订时间：20261013 20:54:11 Asia/Shanghai
+最后修订时间：20261015 20:09:53 Asia/Shanghai
 
 本阶段回答两个问题：原阈值是否与 `I` 的实际尺度不匹配，以及 `I` 能否反映覆盖相对追加造成的 QA 损失。先固定 warmup checkpoint，完成诊断和完整轨迹扫描，再决定修改阈值还是训练目标。
 
@@ -72,12 +72,12 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3/scripts/run.sh \
   --run-id memory-change-3ep-threshold04_20261013-01 \
   --checkpoint artifacts/v3/capacity-comparison_20261010-01/train/dynamic-pretrain-k512/pretrain/checkpoints/global_step_800 \
   --epochs 3 --threshold-i 0.4 \
-  --save-every after_each_epoch --save-total-limit 3
+  --save-every after_each_epoch --save-total-limit 6
 ```
 
 `--train-only` 保留训练中的 dev NLL 验证，跳过最终生成评估。`--epochs 3` 同时应用于 warmup 和 policy，阈值 0.4 只影响 policy 的动作选择；warmup 仍以 50% 概率追加。
 
-`after_each_epoch` 按实际训练 dataloader 长度确定保存间隔，无需在启动前计算每 epoch 的 optimizer step 数。目录清理复用 verl 的最近 N 个规则；当前实际训练样本为 1006、全局 batch 为 16 时，warmup 和 policy 正常完成后分别保留 `global_step_63`、`global_step_126`、`global_step_189`。数据数量或 batch 改变后，目录中的步数相应变化，启动参数无需修改。主动停止保存的 epoch 中间 checkpoint 也计入保留数量。
+`after_each_epoch` 按实际训练 dataloader 长度确定保存间隔，无需预先计算步数。上例将总保留数设为 6，使 warmup 与 policy 各 3 epochs 的 checkpoint 均可用于后续比较；外部共享预训练不计入此限额。当前训练样本为 1006、全局 batch 为 16 时，两个阶段分别保留 `global_step_63`、`global_step_126`、`global_step_189`。样本数或 batch 改变时，步数相应变化。提前停止时保存的 epoch 中间 checkpoint 同样计入总数；若总保留数设为 3，policy 完成后 warmup checkpoint 会被淘汰。
 
 在 SwanLab 观察 `dev/qa_loss`、`dev/qa_old_nll`、`dev/qa_new_nll` 是否随 epoch 改善，以及 train 持续改善而 dev 恶化的情况。warmup 的 `append_ratio` 应约为 0.5，固定 dev 的值跨 epoch 相同是预期；policy 重点结合 `append_ratio`、`slots_final` 与 NLL，判断是否重新趋向全追加，容量增长是否带来质量改善。`gate_I` 当前只记录在各阶段 `metrics.jsonl`，使用 `train/gate_I`、`dev/gate_I` 查看。
 

@@ -335,10 +335,10 @@ def run_stage(config, steps, prefix="qa"):
         else None
     )
     run = _run(config, engine, data, initialization)
-    stage = prepare_training(config, engine, data, run, stop_after_steps=steps)
+    stage = prepare_training(config, engine, data, run, max_steps=steps)
     with runtime._tracking_context(config, engine, run) as active:
         result = train_loop(
-            config, engine, data, run, stage, stop_after_steps=steps, tracking=active
+            config, engine, data, run, stage, max_steps=steps, tracking=active
         )
     return result, run
 
@@ -501,7 +501,7 @@ def test_append_ratio_panel_failure_preserves_previous_stage_and_restores_random
     config = online_config(root, "pretrain", "memory_change")
     engine, data = make_engine(config), make_splits("pretrain")
     run = _run(config, engine, data)
-    stage = prepare_training(config, engine, data, run, stop_after_steps=1)
+    stage = prepare_training(config, engine, data, run, max_steps=1)
     original_post = recorded_swanlab.post
 
     def reject_chart(path, data):
@@ -517,7 +517,7 @@ def test_append_ratio_panel_failure_preserves_previous_stage_and_restores_random
     with pytest.raises(RuntimeError, match="panel denied"):
         with method_tracking_run(config, run, engine.device, api_key="test-api-key") as active:
             result = train_loop(
-                config, engine, data, run, stage, stop_after_steps=1, tracking=active
+                config, engine, data, run, stage, max_steps=1, tracking=active
             )
             target = online_config(root, "warmup", "memory_change", result["checkpoint"])
             initialization = load_initialization(result["checkpoint"], engine.model, target)
@@ -525,7 +525,7 @@ def test_append_ratio_panel_failure_preserves_previous_stage_and_restores_random
             original_manifest = (root / "experiment.json").read_bytes()
             before = capture_rng(engine.device)
             configure_posttraining_panel(target, active, engine.device, "test-api-key")
-            prepare_training(target, engine, make_splits("qa"), next_run, stop_after_steps=1)
+            prepare_training(target, engine, make_splits("qa"), next_run, max_steps=1)
             entered = True
     assert not entered
     assert not (root / "warmup").exists()
@@ -566,11 +566,11 @@ def test_existing_shared_pretrain_identity_resumes_and_initializes_new_dynamic_m
 
     engine, data = make_engine(source), make_splits("pretrain")
     stage = prepare_training(
-        source, engine, data, record, resume=result["checkpoint"], stop_after_steps=3
+        source, engine, data, record, resume=result["checkpoint"], max_steps=3
     )
     with method_tracking_run(source, record, engine.device, api_key="test-api-key") as active:
         resumed_result = train_loop(
-            source, engine, data, record, stage, stop_after_steps=3, tracking=active
+            source, engine, data, record, stage, max_steps=3, tracking=active
         )
     assert resumed_result["global_step"] == 3
     resumed_checkpoint = runtime.read_checkpoint(resumed_result["checkpoint"])
@@ -627,7 +627,7 @@ def test_live_method_run_continues_two_stages_without_reinitializing(
     engine = make_engine(config)
     pretrain_data = make_splits("pretrain")
     run = _run(config, engine, pretrain_data)
-    stage = prepare_training(config, engine, pretrain_data, run, stop_after_steps=2)
+    stage = prepare_training(config, engine, pretrain_data, run, max_steps=2)
     with runtime._tracking_context(config, engine, run) as active:
         result = train_loop(
             config,
@@ -635,7 +635,7 @@ def test_live_method_run_continues_two_stages_without_reinitializing(
             pretrain_data,
             run,
             stage,
-            stop_after_steps=2,
+            max_steps=2,
             tracking=active,
         )
         before = json.loads((root / "experiment.json").read_text())
@@ -648,7 +648,7 @@ def test_live_method_run_continues_two_stages_without_reinitializing(
         qa_run = _run(target, engine, qa_data, initialization)
         if active is not None:
             configure_posttraining_panel(target, active, engine.device, "test-api-key")
-        stage = prepare_training(target, engine, qa_data, qa_run, stop_after_steps=2)
+        stage = prepare_training(target, engine, qa_data, qa_run, max_steps=2)
         update_method_tracking(target, qa_run, active)
         combined = json.loads((root / "experiment.json").read_text())
         assert list(combined["stages"]) == ["pretrain", next_stage]
@@ -660,7 +660,7 @@ def test_live_method_run_continues_two_stages_without_reinitializing(
             assert active.record["state"] == "RUNNING"
             assert active.config == serialized_config(combined)
         result = train_loop(
-            target, engine, qa_data, qa_run, stage, stop_after_steps=2, tracking=active
+            target, engine, qa_data, qa_run, stage, max_steps=2, tracking=active
         )
         assert result["global_step"] == 4
     if online:
@@ -691,9 +691,9 @@ def test_live_stage_update_rejects_invalid_transition_before_mutation(
     config = online_config(root, "pretrain", "icae_single")
     engine, data = make_engine(config), make_splits("pretrain")
     run = _run(config, engine, data)
-    stage = prepare_training(config, engine, data, run, stop_after_steps=1)
+    stage = prepare_training(config, engine, data, run, max_steps=1)
     with runtime._tracking_context(config, engine, run) as active:
-        result = train_loop(config, engine, data, run, stage, stop_after_steps=1, tracking=active)
+        result = train_loop(config, engine, data, run, stage, max_steps=1, tracking=active)
         target = online_config(root, "qa", "icae_single", result["checkpoint"])
         initialization = load_initialization(result["checkpoint"], engine.model, target)
         qa_run = _run(target, engine, make_splits("qa"), initialization)
@@ -740,7 +740,7 @@ def test_same_stage_checkpoint_resume_obeys_session_state(
     engine = make_engine(config)
     data = make_splits()
     stage = prepare_training(
-        config, engine, data, run, resume=result["checkpoint"], stop_after_steps=2
+        config, engine, data, run, resume=result["checkpoint"], max_steps=2
     )
     if not allowed:
         with pytest.raises(ValueError, match="session state"):
@@ -751,7 +751,7 @@ def test_same_stage_checkpoint_resume_obeys_session_state(
                     data,
                     run,
                     stage,
-                    stop_after_steps=2,
+                    max_steps=2,
                     tracking=active,
                 )
         assert len(recorded_swanlab.initializations) == 1
@@ -763,7 +763,7 @@ def test_same_stage_checkpoint_resume_obeys_session_state(
             data,
             run,
             stage,
-            stop_after_steps=2,
+            max_steps=2,
             tracking=active,
         )
     assert result["global_step"] == 2
@@ -805,11 +805,11 @@ def test_cross_stage_recovers_failure_before_successor_registration(
     config = online_config(root, "pretrain", "icae_single")
     engine, data = make_engine(config), make_splits("pretrain")
     run = _run(config, engine, data)
-    stage = prepare_training(config, engine, data, run, stop_after_steps=1)
+    stage = prepare_training(config, engine, data, run, max_steps=1)
     with pytest.raises(RuntimeError, match="QA data unavailable"):
         with runtime._tracking_context(config, engine, run) as active:
             result = train_loop(
-                config, engine, data, run, stage, stop_after_steps=1, tracking=active
+                config, engine, data, run, stage, max_steps=1, tracking=active
             )
             raise RuntimeError("QA data unavailable before stage registration")
     identity = json.loads((root / "swanlab.json").read_text())

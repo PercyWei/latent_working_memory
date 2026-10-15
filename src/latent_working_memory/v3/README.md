@@ -163,8 +163,8 @@ FineWeb FactQA 数据按如下流程使用：
 
 ### 3.7 Checkpoint
 
-- `--save_every` 支持正整数 optimizer step 间隔或 `"after_each_epoch"`。
-- `--save_total_limit` 限制全部 checkpoint 的数量。
+- `--save-every` 支持正整数 optimizer step 间隔或 `after_each_epoch`，并且 epoch 末会自动保存。
+- `--save-total-limit` 限制当前运行合计保留的 checkpoint 数量，默认 2。
 
 ## 四、运行
 
@@ -196,7 +196,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | QA 训练中验证 | FineWeb FactQA dev，评估全部可见 task QA | NLL |
 | 最终评估 | FineWeb FactQA test，评估全部可见 task QA | NLL、EM、F1 |
 
-完整训练默认只评估最后阶段的最后一个 checkpoint。单独评估可用 `--checkpoint` 选择同一方法原 run 的一个或多个 checkpoint，或用 `--eval-run` 指定 `train/<method-dir>/`，评估该方法当前保留的全部 checkpoint；两种入口互斥。
+完整训练默认只评估最后一个保存的 checkpoint。评估中间 checkpoint 需要进行单独评估，用 `--checkpoint` 选择同一运行所保存的一个或多个 checkpoint，或用 `--eval-run` 指定 `train/<method-dir>/` 以评估同一运行所保留的全部 checkpoint；两种入口互斥。
 
 单独评估由 `--gpus` 指定计算资源，每张卡一个固定槽位，并行完成各 checkpoint 的计算；全部计算结束后，由父进程汇总结果，串行上传完整报告，checkpoint 按真实累计 step 排列。缓存结果和上传不占用 GPU。同一方法 run 同时只运行一个评估调度任务，共用原 `eval.json`、seed 与 QA 协议，GPU 分配不改变选题。单个 checkpoint 计算失败不影响其他结果保存，报告上传失败也保留全部本地结果；最后汇总失败并以非零状态退出，重新执行原命令复用已完成结果。命令见[单独评估指南](scripts/README.md#22-单独评估)。
 

@@ -42,9 +42,9 @@ from latent_working_memory.runtime import capture_rng
 from .test_objective import trajectory
 
 
-def train_loop(config, engine, splits, run, resume=None, stop_after_steps=None):
+def train_loop(config, engine, splits, run, resume=None, max_steps=None):
     stage = runtime.prepare_training(
-        config, engine, splits, run, resume=resume, stop_after_steps=stop_after_steps
+        config, engine, splits, run, resume=resume, max_steps=max_steps
     )
     with runtime._tracking_context(config, engine, run) as tracking:
         return stage_train_loop(
@@ -54,7 +54,7 @@ def train_loop(config, engine, splits, run, resume=None, stop_after_steps=None):
             run,
             stage,
             tracking=tracking,
-            stop_after_steps=stop_after_steps,
+            max_steps=max_steps,
         )
 
 
@@ -208,12 +208,25 @@ def test_checkpoint_retention_uses_numeric_steps_and_ignores_incomplete_director
     assert temporary.read_bytes() == b"unfinished checkpoint"
 
 
-def test_checkpoint_retention_is_stage_local_and_uses_updated_engine_config(tmp_path):
+def test_checkpoint_retention_is_method_global_and_uses_updated_engine_config(tmp_path):
     pretrain = make_config(tmp_path / "method/pretrain")
-    pretrain = replace(pretrain, training=replace(pretrain.training, save_total_limit=3))
+    pretrain = replace(
+        pretrain,
+        training=replace(
+            pretrain.training,
+            save_total_limit=3,
+            experiment_dir=str(tmp_path / "method"),
+            experiment_id="method",
+        ),
+    )
     engine, splits = make_engine(pretrain), make_splits()
     run = _run(pretrain, engine, splits)
     source = tmp_path / "method/pretrain/checkpoints"
+    source.parent.mkdir(parents=True)
+    (source.parent / "run.json").write_text(json.dumps(run), encoding="utf-8")
+    other_method = tmp_path / "other-method/pretrain/checkpoints/global_step_1"
+    other_method.mkdir(parents=True)
+    (other_method / "state.pt").write_bytes(b"another method checkpoint")
     cursor = {"step": 0}
     handler = checkpoint_handler(engine, run, cursor, source)
     for step in (1, 2, 3):
@@ -221,24 +234,36 @@ def test_checkpoint_retention_is_stage_local_and_uses_updated_engine_config(tmp_
         handler.save_checkpoint(step)
 
     warmup = make_config(tmp_path / "method/warmup", "warmup", str(source / "global_step_3"))
-    warmup = replace(warmup, training=replace(warmup.training, save_total_limit=1))
+    warmup = replace(
+        warmup,
+        training=replace(
+            warmup.training,
+            save_total_limit=2,
+            experiment_dir=str(tmp_path / "method"),
+            experiment_id="method",
+        ),
+    )
     engine.reset_optimizer(warmup.training)
     initialization = load_initialization(source / "global_step_3", engine.model, warmup)
     run = _run(warmup, engine, make_splits("qa"), initialization)
     target = tmp_path / "method/warmup/checkpoints"
-    cursor = {"step": 0}
+    target.parent.mkdir(parents=True)
+    (target.parent / "run.json").write_text(json.dumps(run), encoding="utf-8")
+    cursor = {"step": 1}
+    checkpoint_handler(engine, run, cursor, target).save_checkpoint(1)
+    assert [path.name for path in source.glob("global_step_*")] == ["global_step_3"]
     handler = checkpoint_handler(engine, run, cursor, target)
-    for step in (1, 2, 3):
+    for step in (2, 3):
         cursor["step"] = step
         handler.save_checkpoint(step)
 
-    assert sorted(path.name for path in source.glob("global_step_*")) == [
-        "global_step_1",
+    assert list(source.glob("global_step_*")) == []
+    assert sorted(path.name for path in target.glob("global_step_*")) == [
         "global_step_2",
         "global_step_3",
     ]
-    assert [path.name for path in target.glob("global_step_*")] == ["global_step_3"]
     assert read_checkpoint(target / "global_step_3")["cursor"]["step"] == 3
+    assert (other_method / "state.pt").read_bytes() == b"another method checkpoint"
 
 
 def test_nonzero_rank_only_saves_its_loader_without_deleting_model_states(tmp_path, monkeypatch):
@@ -344,7 +369,7 @@ def test_interrupted_training_retains_two_recent_readable_checkpoints(tmp_path, 
 def test_checkpoint_requires_explicit_append_size_only_after_dynamic_pretraining(tmp_path, stage):
     config = make_config(tmp_path / "source")
     engine, splits = make_engine(config), make_splits()
-    result = train_loop(config, engine, splits, _run(config, engine, splits), stop_after_steps=1)
+    result = train_loop(config, engine, splits, _run(config, engine, splits), max_steps=1)
     saved = read_checkpoint(result["checkpoint"])
     saved["run"]["config"]["objective"]["stage"] = stage
     saved["run"]["config"]["objective"]["method"] = "memory_change"
@@ -392,7 +417,7 @@ def test_checkpoint_resume_matches_uninterrupted_rng_optimizer_and_tail_batch(
     set_seed(11)
     partial = make_engine(partial_config)
     run = _run(partial_config, partial, splits)
-    stopped = train_loop(partial_config, partial, splits, run, stop_after_steps=stop_step)
+    stopped = train_loop(partial_config, partial, splits, run, max_steps=stop_step)
     assert not stopped["complete"]
     checkpoint = read_checkpoint(stopped["checkpoint"])
     assert run["global_batch_size"] == checkpoint["run"]["global_batch_size"] == 2
@@ -443,7 +468,7 @@ def test_resume_from_saved_run_without_explicit_experiment_name(tmp_path):
     config = make_config(tmp_path / "source")
     engine, splits = make_engine(config), make_splits()
     run = _run(config, engine, splits)
-    stopped = train_loop(config, engine, splits, run, stop_after_steps=1)
+    stopped = train_loop(config, engine, splits, run, max_steps=1)
     output = tmp_path / "source"
     saved_config = json.loads((output / "config.json").read_text())
     saved_config["training"].pop("experiment_name", None)
@@ -472,7 +497,7 @@ def test_resume_rejects_changed_config_or_data_before_loading_weights(tmp_path):
     config, splits = make_config(tmp_path / "run"), make_splits()
     engine = make_engine(config)
     run = _run(config, engine, splits)
-    result = train_loop(config, engine, splits, run, stop_after_steps=1)
+    result = train_loop(config, engine, splits, run, max_steps=1)
     fresh = make_engine(config)
     before = fresh.model.weight.detach().clone()
     changed = replace(config, training=replace(config.training, learning_rate=0.02))
@@ -491,10 +516,10 @@ def test_early_stop_always_evaluates_and_saves_at_the_actual_last_step(tmp_path)
     splits = make_splits()
     engine = make_engine(config)
 
-    result = train_loop(config, engine, splits, _run(config, engine, splits), stop_after_steps=2)
+    result = train_loop(config, engine, splits, _run(config, engine, splits), max_steps=2)
 
     assert not result["complete"]
-    assert result["completed_steps"] == result["stop_after_steps"] == 2
+    assert result["completed_steps"] == result["max_steps"] == 2
     records = [
         json.loads(line) for line in (tmp_path / "smoke/metrics.jsonl").read_text().splitlines()
     ]
@@ -511,7 +536,7 @@ def test_stage_initialization_loads_only_trainable_weights_and_preserves_ancestr
     pretrain, splits = make_config(tmp_path / "pretrain"), make_splits()
     engine = make_engine(pretrain)
     result = train_loop(
-        pretrain, engine, splits, _run(pretrain, engine, splits), stop_after_steps=1
+        pretrain, engine, splits, _run(pretrain, engine, splits), max_steps=1
     )
     source = read_checkpoint(result["checkpoint"])
     if source_checkpointing is None:
@@ -686,7 +711,7 @@ def _distributed_training_worker(rank, rendezvous, output):
             "source_data": {name: dataset_identity(rows) for name, rows in splits.items()}
         }
         run = make_run(config, splits, statistics, "cpu", 2)
-        partial = train_loop(config, engine, splits, run, stop_after_steps=1)
+        partial = train_loop(config, engine, splits, run, max_steps=1)
         assert partial["completed_steps"] == 1
         checkpoint = read_checkpoint(partial["checkpoint"])
         assert len(checkpoint["rng"]) == 2
@@ -1080,7 +1105,7 @@ def test_dynamic_stages_preserve_shared_source_and_accumulate_only_method_steps(
         source_engine,
         pretraining,
         _run(source_config, source_engine, pretraining),
-        stop_after_steps=2,
+        max_steps=2,
     )
     assert source_result["global_step"] == 2
     source_files = {path: path.read_bytes() for path in source_root.rglob("*") if path.is_file()}
@@ -1098,7 +1123,7 @@ def test_dynamic_stages_preserve_shared_source_and_accumulate_only_method_steps(
         run = _run(config, engine, qa, initialization)
         assert run["config"]["training"]["experiment_id"] == target_id
         assert run["step_offset"] == 0
-        result = train_loop(config, engine, qa, run, stop_after_steps=2)
+        result = train_loop(config, engine, qa, run, max_steps=2)
         assert result["global_step"] == result["completed_steps"] == 2
         config = experiment_config(
             root, "policy", identifier=target_id, method=method, init=result["checkpoint"]
@@ -1111,7 +1136,7 @@ def test_dynamic_stages_preserve_shared_source_and_accumulate_only_method_steps(
         run = _run(config, engine, qa, initialization)
         assert run["config"]["training"]["experiment_id"] == target_id
         assert run["step_offset"] == 2
-        result = train_loop(config, engine, qa, run, stop_after_steps=1)
+        result = train_loop(config, engine, qa, run, max_steps=1)
         assert result["global_step"] == 3 and result["completed_steps"] == 1
         checkpoint = read_checkpoint(result["checkpoint"])
         assert checkpoint["run"]["pretraining"] == sources[-1]
@@ -1134,7 +1159,7 @@ def test_dynamic_stages_preserve_shared_source_and_accumulate_only_method_steps(
             qa,
             _run(config, restored, qa, initialization),
             resume=result["checkpoint"],
-            stop_after_steps=2,
+            max_steps=2,
         )
         assert result["global_step"] == 4 and result["completed_steps"] == 2
         records = [
@@ -1178,14 +1203,14 @@ def test_icae_qa_offset_includes_pretraining_in_same_method_run(tmp_path):
     pretrain = experiment_config(root, "pretrain", method="icae_single")
     engine = make_engine(pretrain)
     data = make_splits()
-    result = train_loop(pretrain, engine, data, _run(pretrain, engine, data), stop_after_steps=2)
+    result = train_loop(pretrain, engine, data, _run(pretrain, engine, data), max_steps=2)
     qa = experiment_config(root, "qa", method="icae_single", init=result["checkpoint"])
     next_engine = make_engine(qa)
     initialization = load_initialization(result["checkpoint"], next_engine.model, qa)
     data = make_splits("qa")
     run = _run(qa, next_engine, data, initialization)
     assert run["step_offset"] == 2
-    result = train_loop(qa, next_engine, data, run, stop_after_steps=1)
+    result = train_loop(qa, next_engine, data, run, max_steps=1)
     assert result["global_step"] == 3
     manifest = json.loads((root / "experiment.json").read_text())
     assert list(manifest["stages"]) == ["pretrain", "qa"]
@@ -1196,7 +1221,7 @@ def test_dynamic_source_requires_experiment_identity_before_loading_weights(tmp_
     source = make_config(tmp_path / "legacy-source")
     engine = make_engine(source)
     data = make_splits()
-    result = train_loop(source, engine, data, _run(source, engine, data), stop_after_steps=1)
+    result = train_loop(source, engine, data, _run(source, engine, data), max_steps=1)
     target = experiment_config(tmp_path / "method_trial", "warmup", init=result["checkpoint"])
     model = TinyTask()
     before = model.weight.detach().clone()

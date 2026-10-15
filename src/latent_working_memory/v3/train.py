@@ -179,7 +179,7 @@ def run_training(args):
                 splits,
                 run,
                 resume=args.resume if index == 0 else None,
-                stop_after_steps=args.stop_after_steps,
+                max_steps=args.max_steps,
             )
             if index == 0:
                 tracking = stack.enter_context(_tracking_context(config, engine, run))
@@ -193,7 +193,7 @@ def run_training(args):
                 splits,
                 run,
                 stage,
-                stop_after_steps=args.stop_after_steps,
+                max_steps=args.max_steps,
                 tracking=tracking,
             )
             # 下一阶段读取来源记录前，确保 rank 0 已写完结果与阶段指标。
@@ -212,7 +212,7 @@ def parse_args(argv=None):
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--init-checkpoint", "--init", type=Path)
     parser.add_argument(
-        "--stop-after-steps",
+        "--max-steps",
         type=parse_optional_positive_integer,
         help="本阶段 optimizer step 上限：正整数或 null（完整训练），默认完整训练",
     )

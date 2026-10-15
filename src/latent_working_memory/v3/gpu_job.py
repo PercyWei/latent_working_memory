@@ -253,7 +253,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--save-total-limit",
         type=positive_count,
-        help="每阶段保留最近成功保存的 checkpoint 数，默认 2",
+        help="同一方法所有阶段合计保留的 checkpoint 数，默认 2",
     )
     parser.add_argument(
         "--max-new-tokens", type=positive_count, help="最终评估生成上限，初次默认 64"
@@ -325,7 +325,7 @@ def training_command(jobs, gpu_count, max_steps, resume=None):
         "cuda",
     ]
     if max_steps is not None:
-        command.extend(("--stop-after-steps", str(max_steps)))
+        command.extend(("--max-steps", str(max_steps)))
     if resume is not None:
         command.extend(("--resume", str(resume)))
     return command
@@ -763,14 +763,47 @@ def run_evaluation(args):
             signal.signal(signal.SIGTERM, previous_handler)
 
 
-def collect_training_result(job):
+def collect_training_result(job, allow_pruned=False):
     output = Path(job.config.training.output_dir)
     result = json.loads((output / "training-result.json").read_text(encoding="utf-8"))
+    save_json(job.config_path, json.loads((output / "config.json").read_text(encoding="utf-8")))
     checkpoint = Path(result["checkpoint"])
     if not (checkpoint / "state.pt").is_file():
+        if allow_pruned:
+            return None
         raise FileNotFoundError(f"training did not save its reported checkpoint: {checkpoint}")
-    save_json(job.config_path, json.loads((output / "config.json").read_text(encoding="utf-8")))
     return checkpoint
+
+
+def collect_training_results(jobs, checkpoints, complete=True):
+    """仅登记仍存在的阶段 checkpoint，失败时保留尚未写阶段报告的恢复点。"""
+    retained = {}
+    for job in jobs:
+        paths = list(
+            Path(job.config.training.output_dir).glob("checkpoints/global_step_*/state.pt")
+        )
+        if paths:
+            retained[job.key] = max(
+                (path.parent for path in paths),
+                key=lambda path: int(path.name.removeprefix("global_step_")),
+            )
+    for key, path in list(checkpoints.items()):
+        if not (Path(path) / "state.pt").is_file():
+            del checkpoints[key]
+    for index, job in enumerate(jobs):
+        if complete:
+            checkpoint = collect_training_result(
+                job, allow_pruned=any(later.key in retained for later in jobs[index + 1 :])
+            )
+        else:
+            config_path = Path(job.config.training.output_dir) / "config.json"
+            if config_path.is_file():
+                save_json(job.config_path, json.loads(config_path.read_text(encoding="utf-8")))
+            checkpoint = retained.get(job.key)
+        if checkpoint is None:
+            checkpoints.pop(job.key, None)
+        else:
+            checkpoints[job.key] = str(checkpoint)
 
 
 def run_resume(args):
@@ -811,28 +844,18 @@ def run_resume(args):
             environment,
             plan_directory / "train.log",
         )
+        collect_training_results(jobs, result["checkpoints"])
         for job in jobs:
-            checkpoint = collect_training_result(job)
-            result["checkpoints"][job.key] = str(checkpoint)
-            if job.evaluate:
+            checkpoint = result["checkpoints"].get(job.key)
+            if job.evaluate and checkpoint is not None:
                 summary = evaluate_checkpoint(
-                    args, checkpoint, evaluation_path, evaluation_environment
+                    args, Path(checkpoint), evaluation_path, evaluation_environment
                 )
                 if summary not in result["summaries"]:
                     result["summaries"].append(summary)
         save_result("finished")
     except Exception as error:
-        for job in jobs:
-            report = Path(job.config.training.output_dir) / "training-result.json"
-            if report.is_file():
-                checkpoint = Path(json.loads(report.read_text(encoding="utf-8"))["checkpoint"])
-                if (checkpoint / "state.pt").is_file():
-                    result["checkpoints"][job.key] = str(collect_training_result(job))
-        result["checkpoints"] = {
-            key: path
-            for key, path in result["checkpoints"].items()
-            if (Path(path) / "state.pt").is_file()
-        }
+        collect_training_results(jobs, result["checkpoints"], complete=False)
         save_result("failed", error)
         raise
     print(
@@ -936,23 +959,17 @@ def run_job(args):
     evaluation_environment = dict(environment, CUDA_VISIBLE_DEVICES=args.gpus.split(",")[0])
     try:
         execute(training_run["command"], environment, Path(training_run["log_path"]))
+        collect_training_results(jobs, checkpoints)
         for job in jobs:
-            checkpoint = collect_training_result(job)
-            checkpoints[job.key] = str(checkpoint)
-            if job.evaluate:
+            checkpoint = checkpoints.get(job.key)
+            if job.evaluate and checkpoint is not None:
                 summary = evaluate_checkpoint(
-                    args, checkpoint, evaluation_path, evaluation_environment
+                    args, Path(checkpoint), evaluation_path, evaluation_environment
                 )
                 summaries.append(summary)
         save_result("finished")
     except Exception as error:
-        # 后续阶段失败时，保留已经完成阶段的配置与 checkpoint。
-        for job in jobs:
-            report = Path(job.config.training.output_dir) / "training-result.json"
-            if job.key not in checkpoints and report.is_file():
-                checkpoint = Path(json.loads(report.read_text(encoding="utf-8"))["checkpoint"])
-                if (checkpoint / "state.pt").is_file():
-                    checkpoints[job.key] = str(collect_training_result(job))
+        collect_training_results(jobs, checkpoints, complete=False)
         save_result("failed", error)
         raise
     print(

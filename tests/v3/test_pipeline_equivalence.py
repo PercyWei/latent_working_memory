@@ -121,11 +121,11 @@ def original_list_training(config, engine, splits):
     return records, visits
 
 
-def train(config, engine, splits, run, resume=None, stop_after_steps=None):
+def train(config, engine, splits, run, resume=None, max_steps=None):
     stage = runtime.prepare_training(
-        config, engine, splits, run, resume=resume, stop_after_steps=stop_after_steps
+        config, engine, splits, run, resume=resume, max_steps=max_steps
     )
-    return runtime.train_loop(config, engine, splits, run, stage, stop_after_steps=stop_after_steps)
+    return runtime.train_loop(config, engine, splits, run, stage, max_steps=max_steps)
 
 
 def recorded_metrics(output):
@@ -190,7 +190,7 @@ def test_verl_checkpoint_resume_matches_full_pipeline_at_mid_epoch_and_epoch_bou
     partial = make_engine(config)
     partial_batches, partial_forwards = record_execution(partial)
     run = _run(config, partial, splits)
-    stopped = train(config, partial, splits, run, stop_after_steps=stop_step)
+    stopped = train(config, partial, splits, run, max_steps=stop_step)
     assert not stopped["complete"]
     checkpoint = runtime.read_checkpoint(stopped["checkpoint"])
     assert checkpoint["cursor"] == (

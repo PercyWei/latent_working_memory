@@ -126,7 +126,7 @@ def install_small_training(monkeypatch):
 
 def arguments(paths, *options):
     return train.parse_args(
-        ["--config", *map(str, paths), "--device", "cpu", "--stop-after-steps", "1", *options]
+        ["--config", *map(str, paths), "--device", "cpu", "--max-steps", "1", *options]
     )
 
 
@@ -218,7 +218,7 @@ def test_second_stage_can_resume_from_its_saved_checkpoint(tmp_path, monkeypatch
             [tmp_path / "icae_single/qa/config.json"],
             "--resume",
             partial["checkpoint"],
-            "--stop-after-steps",
+            "--max-steps",
             "2",
         )
     )

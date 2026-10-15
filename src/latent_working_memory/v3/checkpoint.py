@@ -1,6 +1,7 @@
 """verl checkpoint 生命周期；目录内仅保存新增权重与精确续训状态。"""
 
 from enum import Enum
+import json
 from pathlib import Path
 import re
 
@@ -37,22 +38,36 @@ def read_checkpoint(path):
 
 
 class TokenMemoryCheckpointManager(BaseCheckpointManager):
-    """replicated 模型的小权重序列化；目录保留由 verl 基类实现。"""
+    """replicated 模型的小权重序列化；同一方法各阶段共享 verl 保留队列。"""
 
     def __init__(self, engine, run, cursor, checkpoint_directory):
         # 基类构造面向分片模型并要求进程组；这里使用真实 replicated engine 上下文。
         self.engine, self.run, self.cursor = engine, run, cursor
         self.rank, self.world_size = engine.rank, engine.world_size
         self.previous_global_step = None
-        self.previous_saved_paths = [
-            str(path)
-            for path in sorted(
-                Path(checkpoint_directory).glob("global_step_*"),
-                key=lambda path: int(path.name.removeprefix("global_step_")),
+        directory = Path(checkpoint_directory).resolve()
+        experiment_dir = engine.config.experiment_dir
+        directories = (
+            Path(experiment_dir).resolve().glob("*/checkpoints")
+            if experiment_dir is not None
+            else [directory]
+        )
+        saved = []
+        for stage_directory in directories:
+            stage_run = (
+                run
+                if stage_directory == directory
+                else json.loads((stage_directory.parent / "run.json").read_text(encoding="utf-8"))
             )
-            if (path / "state.pt").is_file()
-            and all((path / f"data_{rank}.pt").is_file() for rank in range(self.world_size))
-        ]
+            step_offset = stage_run["step_offset"] if experiment_dir is not None else 0
+            world_size = stage_run["world_size"] if experiment_dir is not None else self.world_size
+            for path in stage_directory.glob("global_step_*"):
+                if (path / "state.pt").is_file() and all(
+                    (path / f"data_{rank}.pt").is_file() for rank in range(world_size)
+                ):
+                    step = int(path.name.removeprefix("global_step_"))
+                    saved.append((step_offset + step, str(path)))
+        self.previous_saved_paths = [path for _, path in sorted(saved)]
 
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         local_rng = capture_rng(self.engine.device)

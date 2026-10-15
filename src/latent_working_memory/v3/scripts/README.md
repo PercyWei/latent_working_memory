@@ -40,7 +40,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 
 ### 2.1 完整运行
 
-完整训练默认仅评估最后阶段的最后一个 checkpoint，多 checkpoint 评估见[第 2.2 节](#22-单独评估)。
+完整训练默认仅评估最后一个保存的 checkpoint，多 checkpoint 评估见[第 2.2 节](#22-单独评估)。
 
 #### 1）Baseline
 
@@ -245,10 +245,10 @@ BPTT 表示跨写入轮次的反向传播；AutoCompressors 还用该窗口组�
 
 | 参数 | 用途／默认值 |
 |---|---|
-| `--save-every` | 正整数 optimizer step 保存间隔或 `after_each_epoch`；`full` 默认 25，`smoke` 默认 1；除此之外，epoch 末会自动保存 |
-| `--save-total-limit` | 每阶段 checkpoint 保留数，默认 2 |
+| `--save-every` | checkpoint 保存的正整数 optimizer step 间隔或 `after_each_epoch`；`full` 默认 25，`smoke` 默认 1；除此之外，epoch 末会自动保存 |
+| `--save-total-limit` | 保留最近成功保存的 checkpoint 数，默认 2 |
 
-例如，`--epochs 3 --save-every after_each_epoch --save-total-limit 3` 会保留每轮末的 checkpoint。达到 `--max-steps` 提前停止时也会保存，并计入保留数量。
+例如，warmup 与 policy 各训练 3 epochs，设置 `--save-every after_each_epoch --save-total-limit 6`，最终保留所有六个 epoch 末 checkpoint。
 
 **最终 test 评估**
 
@@ -295,7 +295,7 @@ artifacts/v3/<run-id>/
 - **进度与图表**：终端每 step 一行摘要，完整指标见 `train/` 下的 `metrics.jsonl`。SwanLab 同一方法的训练、验证、评估共用一个 run；阶段与进度看 `train/stage`、`train/epoch`。`evaluation` 展示 NLL、EM、F1 三张合图，横轴为 QA 首次引入段及“总体”，每个 checkpoint 一条带点折线；容量与耗时汇入一张统计表，动态方法的各 checkpoint 热图排在最后。图例、表格和热图按真实累计 step 排序。最新发布版本包含全部已发布 checkpoint，底部滑块表示报告版本。详细布局见 [v3 说明](../README.md#53-swanlab-组织与展示)。
 - **评估与比较**：逐条结果见 `eval/`；不同方法的结果通过独立比较命令汇总。比较要求 split、实际 task 题池、各段选中的 gate QA 签名、QA prompt 和生成 token 上限一致；各方法的训练数据与训练配置可不同。指标含义见 [v3 说明](../README.md#五评估与产物)。
 - **错误**：训练查看方法 `plan/` 下的 `result.json`、`train.log`；评估查看对应 checkpoint 结果目录的 `eval.log`。发布失败保留本地结果，重新执行原命令即可补传；追加要求云端原训练 run 为 `FINISHED`。独立比较错误直接在终端报告。
-- **Checkpoint 与恢复**：每阶段默认保留最近两个 `checkpoints/global_step_<阶段step>/` 目录；初始化、恢复和评估均通过 `--checkpoint` 传目录路径。中断恢复见[第 2.3 节](#23-中断恢复)。
+- **Checkpoint 与恢复**：checkpoint 保存目录为 `<stage>/checkpoints/global_step_<阶段step>/`，`result.json` 仅记录仍保留的 checkpoint。初始化、恢复和评估均通过 `--checkpoint` 传目录路径。中断恢复见[第 2.3 节](#23-中断恢复)。
 
 例如，两种动态方法评估完成后，独立导出比较结果：
 
