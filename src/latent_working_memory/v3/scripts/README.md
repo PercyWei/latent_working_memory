@@ -175,7 +175,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 
 - `--train-only`、`--resume`、`--evaluate-only` 互斥。
 - 配置中的 `objective.method` 须与所选方法对应，`objective.stages` 指定训练阶段顺序。独立动态预训练（`--method dynamic_pretrain`）的 method／stages 分别为 `dynamic`／`["pretrain"]`。
-- 长度筛选仅用于 train 正文，不含记忆、提示和目标。`--max-pretrain-data-tokens` 和 `--max-qa-data-tokens` 接受正整数或 `null`：超限样本整条排除，`null` 跳过该长度筛选。实际每次编码／解码仍须满足模型窗口限制。
+- 长度筛选仅用于 train 正文，不含记忆、提示和目标等。`--max-pretrain-data-tokens` 和 `--max-qa-data-tokens` 接受正整数或 `null`：超限样本整条排除，`null` 跳过该长度筛选。实际每次编码／解码仍须满足模型窗口限制。
 - 全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数，默认按全局 batch 16 进行设置。`--qa-batch-size` 控制读取并行量，不改变选题数量。
 
 ### 4.2 训练目标与压缩策略
