@@ -115,7 +115,7 @@ def parse_args(argv=None):
         default=Path("data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008"),
         help="QA 训练数据目录；首次创建评估配置时默认共用此目录",
     )
-    parser.add_argument("--eval-data", type=Path, help="独立的最终 QA 评估数据目录")
+    parser.add_argument("--test-data", type=Path, help="独立的最终 QA 测试数据目录")
     parser.add_argument(
         "--seed",
         type=nonnegative_count,
@@ -355,21 +355,21 @@ def resolve_evaluation_config(args, config_path, default_seed, level=None):
     if config_path.is_file():
         config = load_evaluation(config_path)
     else:
-        if level is None and args.eval_data is None:
-            raise ValueError(f"{config_path} is missing; specify --eval-data to create it")
+        if level is None and args.test_data is None:
+            raise ValueError(f"{config_path} is missing; specify --test-data to create it")
         config = EvaluationConfig(
-            dataset_dir=str((args.eval_data or args.qa_data).resolve()),
+            dataset_dir=str((args.test_data or args.qa_data).resolve()),
             seed=default_seed,
             max_test_samples=level["max_test_samples"] if level is not None else None,
         )
     updates = {}
     for argument, field in (
-        ("eval_data", "dataset_dir"),
+        ("test_data", "dataset_dir"),
         ("max_new_tokens", "max_new_tokens"),
     ):
         value = getattr(args, argument)
         if value is not None:
-            if argument == "eval_data":
+            if argument == "test_data":
                 value = str(value.resolve())
             updates[field] = value
     if args.seed is not None and not args.resume:

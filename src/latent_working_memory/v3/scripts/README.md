@@ -11,7 +11,7 @@
 | Qwen3-4B-Instruct-2507 | `~/models/Qwen3-4B-Instruct-2507` | `--model-path` |
 | AE／LM 训练数据 | `data/fineweb-multisegment-k512-seg1to3x_train32k_20261008/` | `--pretrain-data` |
 | QA 训练数据 | `data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008/` | `--qa-data` |
-| QA 评估数据 | 默认同上 | `--eval-data` |
+| QA test 数据 | 默认同上 | `--test-data` |
 
 数据目录须保留 `preparation.json` 与 `train/dev/test.jsonl`。数据集详细格式见 [FineWeb Multisegment](../../data_preparation/fineweb_multisegment/README.md) 和 [FineWeb FactQA](../../data_preparation/fineweb_factqa/README.md)，可从 [ModelScope](https://modelscope.cn/datasets/percyWeeei/latent-working-memory/files) 下载。
 
@@ -108,7 +108,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 - `--checkpoint` 仅接受属于同一 run 下的单/多个 checkpoint 列表。
 - `--gpus 0,1` 为每张物理卡分配一个固定计算槽位，各 checkpoint 并行计算；全部计算结束后，由父进程汇总结果，串行上传完整报告，checkpoint 按真实累计 step 排列。计算子进程退出后释放 GPU，缓存结果和上传不占用 GPU。训练时该参数仍指定参与训练的 GPU。
 - 同一方法 run 同时只运行一个评估调度任务。所有 checkpoint 共用原评估配置与 seed，GPU 分配不改变选题。
-- 默认原样复用 `plan/<method-dir>/eval.json`，模型、方法和写入配置从 checkpoint 读取。首次评估前可用 `--eval-data`、`--seed`、`--max-test-samples`、`--max-new-tokens` 设置评估条件；已有评估历史后，同一 run 须保持相同 test 配置与 QA 协议。
+- 默认原样复用 `plan/<method-dir>/eval.json`，模型、方法和写入配置从 checkpoint 读取。首次评估前可用 `--test-data`、`--seed`、`--max-test-samples`、`--max-new-tokens` 设置评估条件；已有评估历史后，同一 run 须保持相同 test 配置与 QA 协议。
 - 每个 checkpoint 的结果独立保存。相同 checkpoint、相同配置复用已有结果和日志；在线发布将本次选中的结果与此前已发布的本地结果合并为完整报告，其他离线结果须明确选择后才发布。内容相同时仅检查、修复云端布局；需要更新时从缓存重建，补发日志追加到原 `eval.log`，不重新计算 QA，也无需保留此前 checkpoint 的权重。
 - 单个 checkpoint 计算失败不影响其他结果保存，报告上传失败也保留全部本地结果；最终汇总失败并以非零状态退出，重新执行原命令复用已完成的本地结果。
 - 保持参数不变重新执行上述命令，可从本地结果更新展示；需要转换布局时上传一次完整报告。删除云端 `evaluation` 分组后也可用同一命令恢复图表和统计表；仅修复布局时复用已上传的媒体版本，不重复追加版本。
@@ -144,30 +144,39 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 
 | 参数 | 用途／默认值 |
 |---|---|
+| **运行方式** |
+| `--mode` | 运行模式，支持 `full`（默认）和 `smoke` |
+| `--train-only` | 只进行训练及 dev 验证，跳过 test 评估 |
+| `--resume` | 从 checkpoint 恢复并沿用原配置继续未完成的训练和评估，须指定 `--checkpoint` |
+| `--evaluate-only` | 仅评估已有 checkpoint，须指定 `--checkpoint` 或 `--eval-run` |
 | **配置与模型** |
+| `--method` | 训练的方法，必须指定；方法列表见[第 2.1 节](#21-完整运行) |
 | `--config` | 所选方法的 JSON 配置文件，默认读取 `configs/v3/` 下的预设 |
 | `--model-path` | 基座模型位置，默认 `~/models/Qwen3-4B-Instruct-2507` |
-| `--output-root` | 产物父目录，默认 `artifacts/v3` |
 | `--seed` | 控制初始化、样本选择、数据打乱等随机性，预设为 20261004 |
+| **目录与设备** |
+| `--run-id` | 实验运行编号，默认 `YYYYMMDD-HHMMSS` |
+| `--output-root` | 运行产物的父目录，默认 `artifacts/v3` |
+| `--gpus` | 物理 GPU 编号，默认 `0,1` |
 | **训练数据** |
 | `--pretrain-data` | 预训练数据目录，默认位置见[第 1 节](#1-准备环境模型与数据) |
 | `--qa-data` | QA 训练数据目录，默认位置见[第 1 节](#1-准备环境模型与数据) |
 | `--max-pretrain-train-samples` | 预训练阶段训练样本上限，默认 12800 |
-| `--max-qa-train-samples` | 后训练阶段 QA 训练样本上限，默认 `null`（全部） |
+| `--max-qa-train-samples` | QA 训练样本上限，默认 `null`（全部） |
 | `--max-pretrain-data-tokens` | 预训练正文上限，默认 12288 |
 | `--max-qa-data-tokens` | QA 训练正文上限，默认 12288 |
 | **训练时长** |
 | `--epochs` | 每阶段训练轮数，默认 1 |
 | `--max-steps` | 每阶段优化器更新步数上限，`full` 默认 `null`（完整 epoch），`smoke` 默认 2 |
 | **批处理** |
-| `--micro-batch-size-per-gpu` | 每张 GPU 一次并行处理的样本／轨迹数，默认 4 |
+| `--micro-batch-size-per-gpu` | 每张 GPU 一次并行处理的样本数，默认 4 |
 | `--gradient-accumulation-steps` | 每次优化器更新前累积的 microbatch 数，默认 2 |
 | `--qa-batch-size` | 每条轨迹每次并行读取的题数上限，默认 8 |
 
+- `--train-only`、`--resume`、`--evaluate-only` 互斥。
 - 配置中的 `objective.method` 须与所选方法对应，`objective.stages` 指定训练阶段顺序。独立动态预训练（`--method dynamic_pretrain`）的 method／stages 分别为 `dynamic`／`["pretrain"]`。
-- 长度筛选仅用于 train 正文，不含记忆、提示和目标。两个参数均接受正整数或 `null`：正整数仅按给定值筛选，超限样本整条排除；`null` 跳过长度上限筛选。dev/test 不按该上限过滤，实际每次编码／解码仍须满足模型窗口限制。
-- 配置中的对应字段为 `training.max_pretrain_train_samples` 和 `training.max_qa_train_samples`，按训练 seed 选取样本。上述样本与步数上限接受正整数或 `null`；`smoke` 另受档位样本上限约束。
-- 全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数，双卡默认 16。`--qa-batch-size` 控制读取并行量，不改变选题数量。
+- 长度筛选仅用于 train 正文，不含记忆、提示和目标。`--max-pretrain-data-tokens` 和 `--max-qa-data-tokens` 接受正整数或 `null`：超限样本整条排除，`null` 跳过该长度筛选。实际每次编码／解码仍须满足模型窗口限制。
+- 全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数，默认按全局 batch 16 进行设置。`--qa-batch-size` 控制读取并行量，不改变选题数量。
 
 ### 4.2 训练目标与压缩策略
 
@@ -176,12 +185,12 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | **配置** |
 | `--bptt-steps` | 每个反向传播窗口包含的写入轮数，AutoCompressors 默认 2，动态后训练默认 `null`（完整 BPTT） |
 | **AE／LM 目标** |
-| `--lm-ratio` | AE／LM 预训练选择 LM 目标的概率，默认 0.5；AutoCompressors 始终使用 LM |
-| `--lm-target-tokens` | 预训练 LM 续文目标的 token 数，默认 512 |
+| `--lm-ratio` | 使用 AE／LM 数据进行训练时选择 LM 目标的概率，默认 0.5，AutoCompressors 始终使用 LM |
+| `--lm-target-tokens` | LM 续文目标的 token 数，默认 512 |
 | **QA 抽样** |
-| `--task-qa-count` | 训练时每次选取的 task QA 总数，默认 8；首段仅使用其中的新题 |
-| `--task-new-ratio` | 训练任务题中新题比例，默认 0.5；总题数乘比例须为正整数 |
-| `--gate-qa-count` | 每次门控时选取的 gate QA 总数，默认 8；首段不进行门控 |
+| `--task-qa-count` | 使用 QA 数据训练时每次选取的 task QA 总数，默认 8 |
+| `--task-new-ratio` | 使用 QA 数据训练时选取的 task QA 中新题比例，默认 0.5 |
+| `--gate-qa-count` | 每次门控时选取的 gate QA 总数，默认 8 |
 | **Baseline 分段** |
 | `--icae-min-segments` | ICAE-multi 正文随机分段数下限，默认 3 |
 | `--icae-max-segments` | ICAE-multi 正文随机分段数上限，默认 6 |
@@ -196,26 +205,30 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | `--eta` | `information_loss` 在旧信息损伤超限时要求的最低追加收益，默认 0；须小于 `--threshold-g` |
 
 - 选题、跨 epoch 随机性与题池数量检查见[数据说明](../README.md#31-数据输入与通用设置)。
-- BPTT 表示跨写入轮次的反向传播；AutoCompressors 还用该窗口组织随机分块。分块与训练目标的具体规则见[方法说明](../README.md#三数据与训练)。
+- BPTT 表示跨写入轮次的反向传播；AutoCompressors 还用该窗口组织随机分块。分段与训练目标的具体规则见[方法说明](../README.md#三数据与训练)。
 
 ### 4.3 验证、测试与结果记录
 
 | 参数 | 用途／默认值 |
 |---|---|
-| **Checkpoint 保存** |
-| `--save-every` | checkpoint 保存的正整数 optimizer step 间隔或 `after_each_epoch`；`full` 默认 25，`smoke` 默认 1；除此之外，epoch 末会自动保存 |
+| **Checkpoint** |
+| `--save-every` | checkpoint 保存的正整数 optimizer step 间隔或 `after_each_epoch`，默认 25，`smoke` 默认 1 |
 | `--save-total-limit` | 保留最近成功保存的 checkpoint 数，默认 2 |
+| `--checkpoint` | 用于动态方法后训练初始化、训练恢复或独立评估，其中独立评估支持传入同一 run 的多个 checkpoint 目录|
+| `--eval-run` | 仅用于独立评估，指定 `train/<method-dir>/` 方法目录，评估其全部保留的 checkpoint |
 | **Dev 验证** |
-| `--max-dev-samples` | 训练中 dev 验证的样本上限，默认 `null`（全部），`smoke` 默认 4 |
-| `--dev-every` | dev 验证的 optimizer step 间隔，`full` 默认 25，`smoke` 默认 1；除此之外，epoch 末会自动验证 |
+| `--max-dev-samples` | dev 验证样本上限，默认 `null`（全部），`smoke` 默认 4 |
+| `--dev-every` | dev 验证的 optimizer step 间隔，`full` 默认 25，`smoke` 默认 1 |
 | **Test 评估** |
-| `--eval-data` | 最终 QA 评估数据目录，新训练首次默认采用 `--qa-data` |
-| `--max-test-samples` | 最终 test 评估的样本上限，默认 `null`（全部），`smoke` 默认 2 |
-| `--max-new-tokens` | 最终评估每题生成的 token 上限，初次默认 64 |
+| `--test-data` | test 数据目录，默认同 `--qa-data` |
+| `--max-test-samples` | test 评估样本上限，默认 `null`（全部），`smoke` 默认 2 |
+| `--max-new-tokens` | test 评估时 token 生成上限，默认 64 |
 | **SwanLab** |
+| `--tracking` | SwanLab 记录方式，默认 `online`，`disabled` 仅保存本地产物 |
+| `--swanlab-project` | SwanLab 项目，默认 `latent-working-memory-v3` |
 | `--group` | SwanLab 实验分组，默认当前 `run-id` |
 
-- 例如，warmup 与 policy 各训练 3 epochs，设置 `--save-every after_each_epoch --save-total-limit 6`，最终保留所有六个 epoch 末 checkpoint。
+- epoch 末会自动保存 checkpoint 以及进行 dev 验证。
 - 评估的数据目录、seed、样本上限和生成上限保存于 `plan/<method-dir>/eval.json`，每个 checkpoint 的结果目录另存本次快照。正常训练、续训与单独评估默认复用该配置；已有评估历史后，显式参数须与原设置一致。方法配置从 checkpoint 读取。指标与计算场景见[评估说明](../README.md#51-评估方式与指标)。
 
 ## 5. 查看结果
