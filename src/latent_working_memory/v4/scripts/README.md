@@ -2,9 +2,9 @@
 
 创建时间：20261013 10:12:17 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261015 19:27:38 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261016 18:51:46 Asia/Shanghai（UTC+08:00）
 
-使用 [run.sh](run.sh) 完成训练、恢复、独立评估和单条生成。默认 Qwen3-4B-Instruct-2507、每层 32 个 memory slots；模型与训练目标见 [v4 说明](../README.md)，默认配置为 [experiment.json](../../../../configs/v4/attention_matching/experiment.json)。以下命令从项目根目录执行。
+使用 [run.sh](run.sh) 完成训练、恢复和独立评估。默认 Qwen3-4B-Instruct-2507、每层 32 个 memory slots；模型与训练目标见 [v4 说明](../README.md)，默认配置为 [experiment.json](../../../../configs/v4/attention_matching/experiment.json)。以下命令从项目根目录执行。
 
 ## 1. 准备环境、模型与数据
 
@@ -13,9 +13,9 @@
 | 内容 | 默认位置 | 覆盖参数 |
 |---|---|---|
 | Qwen3-4B-Instruct-2507 | `~/models/Qwen3-4B-Instruct-2507` | `--model-path` |
-| QASPER 数据 | `data/delta-mem-qasper/` | `--data-dir` |
-| RULER Benchmark 数据 | `data/benchmarks/ruler-v1/<model-name>/` | `--data-dir` |
-| LoCoMo Benchmark 数据 | `data/benchmarks/locomo/` | `--data-dir` |
+| QASPER 数据 | `data/delta-mem-qasper/` | `--train-data`（训练／dev）、`--test-data`（独立 test） |
+| RULER Benchmark 数据 | `data/benchmarks/ruler-v1/<model-name>/` | `--benchmark-data` |
+| LoCoMo Benchmark 数据 | `data/benchmarks/locomo/` | `--benchmark-data` |
 
 ### 1.1 训练与评估数据准备
 
@@ -46,7 +46,7 @@ bash src/latent_working_memory/v4/scripts/generate_ruler.sh \
 
 ## 2. 运行
 
-`run.sh` 统一切到项目根目录，相对配置、数据和输出路径均以此为基准。`--resume`、`--evaluate-only`、`--generate-only` 互斥，均须提供一个 `--checkpoint` 目录。
+`run.sh` 统一切到项目根目录，相对配置、数据和输出路径均以此为基准。`--train-only`、`--resume`、`--evaluate-only` 互斥。恢复须提供一个 `--checkpoint` 目录；独立评估须指定 `--checkpoint` 或 `--eval-run`，两者互斥。
 
 ### 2.1 新训练
 
@@ -57,69 +57,92 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 ```
 
 - 显式 CLI 训练参数覆盖配置。模型和局部记忆更新参数直接修改 JSON，见[配置文件说明](../README.md#三配置与执行)。
+- `--train-data` 指向包含 `train/dev/test.jsonl` 的目录；训练读取前两个文件，自动 test 使用同目录的 `test.jsonl`。
 - `--run-id` 默认采用格式为 `YYYYMMDD-HHMMSS` 的当前时间。
-- 完成全部训练预算后，自动用最终 checkpoint 执行基础非 benchmark 评估，使用所选 GPU 中的第一张卡，生成上限为 128 tokens。提前停止或训练失败时不自动评估。
+- 完成全部训练预算后，自动用最终 checkpoint 执行 test 评估，使用所选 GPU 中的第一张卡，生成上限为 128 tokens。训练中断或失败时不自动评估。
+- 新训练加 `--train-only` 时只进行训练及 dev 验证，跳过最终 test；该选择保存在 `plan/<method-dir>/result.json` 中，恢复时沿用。例如：
+
+```bash
+bash src/latent_working_memory/v4/scripts/run.sh \
+  --train-only --gpus 0,1 --run-id am-query_20261016
+```
 
 ### 2.2 单独评估
 
-**基础评估**
+**Test 评估**
+
+```bash
+bash src/latent_working_memory/v4/scripts/run.sh \
+  --evaluate-only --eval-type test --gpus 0 \
+  --checkpoint artifacts/v4/am-query_20261013/train/conditioned-query-m32/checkpoints/global_step_N \
+  --max-new-tokens 128
+```
+
+- `--eval-type` 默认 `test`，可省略；读取原训练数据目录的 `test.jsonl`，可用 `--test-data` 指定其他目录。
+- 计算答案 NLL 与 greedy 生成的 EM／F1。筛选、生成预算和评分规则见 [评估说明](../README.md#四评估与记录)。
+
+评估同一 run 中选定的多个 checkpoint，在一个 `--checkpoint` 后列出目录：
 
 ```bash
 bash src/latent_working_memory/v4/scripts/run.sh \
   --evaluate-only --gpus 0 \
-  --checkpoint artifacts/v4/am-query_20261013/train/conditioned-m32/checkpoints/global_step_N \
+  --checkpoint \
+    artifacts/v4/am-query_20261013/train/conditioned-query-m32/checkpoints/global_step_50 \
+    artifacts/v4/am-query_20261013/train/conditioned-query-m32/checkpoints/global_step_100
+```
+
+评估同一方法目录下当前保留的全部完整 checkpoint：
+
+```bash
+bash src/latent_working_memory/v4/scripts/run.sh \
+  --evaluate-only --gpus 0 \
+  --eval-run artifacts/v4/am-query_20261013/train/conditioned-query-m32 \
   --max-new-tokens 128
 ```
 
-- `--benchmark` 默认 `null`，即读取原训练数据目录的 `test.jsonl`，进行与训练集配对的 test 评估。
-- 计算答案 NLL 与 greedy 生成的 EM／F1。筛选、生成预算和评分规则见 [评估说明](../README.md#四评估与记录)。
+- `--checkpoint` 接受同一 run 的一个或多个目录，拒绝重复、跨 run 或缺少 `state.pt` 的未完成 checkpoint；`--eval-run` 指向 `artifacts/v4/<run-id>/train/<method-dir>/`，扫描其中全部 `checkpoints/global_step_*/state.pt`。
+- 两种方式互斥。多个 checkpoint 均按数字 step 升序在单卡上顺序评估，独立保存结果；某个 checkpoint 失败后继续其余 checkpoint，最后汇总结果并报错。
 
 **Benchmark 评估**
 
 ```bash
 # LoCoMo
 bash src/latent_working_memory/v4/scripts/run.sh \
-  --evaluate-only --benchmark locomo --gpus 0 \
-  --checkpoint artifacts/v4/am-query_20261013/train/conditioned-m32/checkpoints/global_step_N
+  --evaluate-only --eval-type benchmark --benchmark locomo --gpus 0 \
+  --checkpoint artifacts/v4/am-query_20261013/train/conditioned-query-m32/checkpoints/global_step_N
 
 # RULER
 bash src/latent_working_memory/v4/scripts/run.sh \
-  --evaluate-only --benchmark ruler --gpus 0 \
-  --checkpoint artifacts/v4/am-query_20261013/train/conditioned-m32/checkpoints/global_step_N \
+  --evaluate-only --eval-type benchmark --benchmark ruler --gpus 0 \
+  --checkpoint artifacts/v4/am-query_20261013/train/conditioned-query-m32/checkpoints/global_step_N \
   --lengths 8192 16384 32768
 ```
 
-- 传入 `--benchmark ruler` 或 `locomo` 选择对应评估。RULER 的 `--lengths` 须与已生成数据一致；LoCoMo 不接受该参数。
-- RULER 默认按 checkpoint 中原始模型路径的末级名称查找数据。人工确认新模型可复用已有样本时，用 `--data-dir data/benchmarks/ruler-v1/<model-name>` 指定对应目录。
+- `--eval-type benchmark` 选择 benchmark 评估，须同时指定 `--benchmark ruler` 或 `--benchmark locomo`；`--benchmark` 默认 `null`。
+- 批量评估同样可在 `--checkpoint` 后列出多个目录，或改用 `--eval-run artifacts/v4/<run-id>/train/<method-dir>/`，仍使用单卡。
+- benchmark 数据目录通过 `--benchmark-data` 覆盖；RULER 默认按 checkpoint 中原始模型路径的末级名称查找数据，LoCoMo 使用第 1 节的默认目录。
 - 每题独立初始化记忆，执行流式读取、局部 TTT 和 greedy 生成，沿用官方评分与任务生成预算。协议见 [benchmark 说明](../benchmarks/README.md)。
 
-两类评估均从 checkpoint 读取模型配置和保存的 tokenizer，可用 `--data-dir`、`--output-dir`、`--tracking` 调整本次评估。输出目录须不存在，重跑时指定新目录。在线评估仅向原训练 run 追加最终 checkpoint 的结果，云端 run 须为 `FINISHED`；加 `--tracking disabled` 仅保存本地。
+两类评估均从 checkpoint 读取模型配置和 tokenizer。在线追加要求训练已完成、云端原 run 为 `FINISHED`；批量评估可向该 run 追加全部已完成保存的 checkpoint，使用真实 checkpoint step 的原生增量曲线，单 checkpoint 保留汇总图。加 `--tracking disabled` 仅保存本地。
+
+- `--eval-type`、`--benchmark`、`--test-data`、`--benchmark-data`、`--lengths` 和 `--max-new-tokens` 仅用于 `--evaluate-only`；训练后的自动 test 保持固定规则，dev 使用独立验证设置。
+- test 不接受 `--benchmark`、`--benchmark-data` 或 `--lengths`；benchmark 不接受 `--test-data` 或 `--max-new-tokens`，且 `--lengths` 仅用于 RULER。仅传 `--benchmark` 不会自动切换评估类型。
+- 结果统一由 checkpoint 推导到原实验的 `eval/<method-dir>/<test|ruler|locomo>/global_step_N/`，单个、多个 checkpoint 与 `--eval-run` 使用同一规则。
+- 同类评估共用 `eval/<method-dir>/<test|ruler|locomo>/eval.json`，记录实际数据内容、模型／分词、筛选、生成与评分设置；已有协议后须保持一致，配置冲突时报错。
+- 相同 checkpoint、相同协议且已有完整 `summary.json` 时直接复用，不重新加载模型或生成答案。缺少汇总的未完成评估在原目录从头计算；本地计算已完成但在线发布失败时，重跑原命令复用结果补传。
+- tracking、GPU 分配及单次／批量展示方式不属于计算协议，可先用 `--tracking disabled` 计算，再在线发布，或将单 checkpoint 结果用于批量评估。
 
 ### 2.3 中断恢复
 
 ```bash
 bash src/latent_working_memory/v4/scripts/run.sh \
   --resume --gpus 0,1 \
-  --checkpoint artifacts/v4/am-query_20261013/train/conditioned-m32/checkpoints/global_step_N
+  --checkpoint artifacts/v4/am-query_20261013/train/conditioned-query-m32/checkpoints/global_step_N
 ```
 
-- 沿用原训练配置、预算、输出目录和 SwanLab 身份，不接受训练参数覆盖；可通过 `--stop-after-steps N` 指定本次绝对停止点。
+- 沿用原训练配置、预算、输出目录和 SwanLab 身份，不接受训练参数覆盖。
 - GPU 编号可以重新选择，卡数、数据和配置须与原 run 一致；恢复 optimizer、加载器位置和各 rank RNG。
-- 保留原 `plan/<method-dir>/config.json`、训练目录的 `run.json`、`tokenizer/`、checkpoint，以及在线运行的 `swanlab.json`。续训完成预算后同样自动执行 QASPER test。
-
-### 2.4 单条生成
-
-准备 UTF-8 纯文本 prompt：
-
-```bash
-bash src/latent_working_memory/v4/scripts/run.sh \
-  --generate-only --gpus 0 \
-  --checkpoint artifacts/v4/am-query_20261013/train/conditioned-m32/checkpoints/global_step_N \
-  --prompt-file data/attention-matching/prompt.txt \
-  --max-new-tokens 128
-```
-
-直接编码 prompt，不额外应用 chat template；需要完整提示格式时由输入文件提供。prompt 与请求的新增 token 上限之和须满足模型窗口限制；该入口只保存生成结果，不计算 QA 分数。
+- 保留原 `plan/<method-dir>/config.json`、`result.json`、训练目录的 `run.json`、`tokenizer/`、checkpoint，以及在线运行的 `swanlab.json`。恢复沿用原 `--train-only` 选择；原运行未启用该选项时，续训完成预算后自动执行 QASPER test。
 
 ## 3. 调整参数
 
@@ -127,71 +150,64 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 
 ### 3.1 训练输入与执行预算
 
-**配置与数据**
-
 | 参数 | 用途／默认值 |
 |---|---|
-| `--config` | 训练 JSON，默认 `configs/v4/attention_matching/experiment.json` |
-| `--model-path` | 覆盖基座模型位置，默认见[第 1 节](#1-准备环境模型与数据) |
-| `--data-dir` | 训练数据目录，默认 `data/delta-mem-qasper` |
-| `--seed` | 训练随机种子，默认 42；接受非负整数，0 有效 |
-| `--max-seq-length` | train 完整序列的人为上限，默认 12288；`null` 关闭该上限 |
-
-完整序列包含正文、问题、答案和模板。超限样本整条过滤，不截断；dev/test 不使用该人为上限。QASPER 的 train/dev/test 均要求答案前 prompt 至少为 `pending_size + recent_size + 1` tokens，完整序列不得超过模型窗口。
-
-**批处理与训练时长**
-
-| 参数 | 用途／默认值 |
-|---|---|
-| `--micro-batch-size-per-gpu` | 每卡一次前向的样本数，默认 4 |
-| `--gradient-accumulation-steps` | 每次优化器更新前累积的 microbatch 数，默认 2 |
+| **运行方式** |
+| `--train-only` |  只进行训练及 dev 验证，跳过 test 评估 |
+| `--resume` | 从 checkpoint 恢复并沿用原配置继续训练及配套评估，须指定 `--checkpoint` |
+| `--evaluate-only` | 仅评估已有 checkpoint，须指定 `--checkpoint` 或 `--eval-run` |
+| **配置与模型** |
+| `--config` | JSON 配置文件，默认 `configs/v4/attention_matching/experiment.json` |
+| `--model-path` | 基座模型位置，默认 `~/models/Qwen3-4B-Instruct-2507` |
+| `--seed` | 随机种子，控制初始化、样本选择及数据打乱，默认 42 |
+| **目录与设备** |
+| `--run-id` | 实验运行编号，默认 `YYYYMMDD-HHMMSS` |
+| `--output-root` | 新训练运行产物的父目录，默认 `artifacts/v4` |
+| `--gpus` | 物理 GPU 编号，默认 `0,1` |
+| **训练数据** |
+| `--train-data` | 训练数据目录，默认 `data/delta-mem-qasper` |
+| `--max-train-samples` | 训练样本数上限，默认 `null`（全部） |
+| `--max-train-data-tokens` | 训练原始正文的 token 上限，默认 12288；`null` 关闭 |
+| **训练时长** |
 | `--epochs` | 训练轮数，默认 1 |
-| `--stop-after-steps` | 本次执行的绝对 optimizer step 停止点，不改变原 epoch 预算 |
+| **批处理** |
+| `--micro-batch-size-per-gpu` | 每张 GPU 一次并行处理的样本数，默认 4 |
+| `--gradient-accumulation-steps` | 每次优化器更新前累积的 microbatch 数，默认 2 |
 
-全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数，双卡默认 16。单卡保持全局 16 时使用 `--gradient-accumulation-steps 4`。
+- `--train-only`、`--resume`、`--evaluate-only` 互斥。
+- 长度筛选仅用于 train 正文，不含系统提示、chat template 等。`--max-train-data-tokens` 接受正整数或 `null`：超限样本整条排除，`null` 跳过该长度筛选。除此之外，默认要求样本正文至少包含 `pending_size + recent_size + 1` 个 tokens，即能进行至少一次压缩。实际每次编码／解码仍须满足模型窗口限制。
+- 全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数，默认按全局 batch 16 进行设置。
 
-### 3.2 验证与 checkpoint 保存
+### 3.2 验证、测试与结果记录
 
 | 参数 | 用途／默认值 |
 |---|---|
-| `--eval-every` | dev 验证间隔，默认 50 optimizer steps |
-| `--save-every` | 正整数保存间隔或 `after_each_epoch`，默认 50 steps |
+| **Checkpoint** |
+| `--save-every` | checkpoint 保存的正整数 optimizer step 间隔或 `after_each_epoch`，默认 50 |
 | `--save-total-limit` | 保留最近成功保存的 checkpoint 数，默认 2 |
+| `--checkpoint` | 用于训练恢复或独立评估，其中独立评估支持传入同一 run 的多个 checkpoint 目录 |
+| `--eval-run` | 仅用于独立评估，指定 `train/<method-dir>/`，评估其全部保留的 checkpoint |
+| **Dev 验证** |
+| `--max-dev-samples` | dev 验证样本数上限，默认 `null`（全部） |
+| `--dev-every` | dev 验证的 optimizer step 间隔，默认 50 |
+| **Test 和 benchmark 评估** |
+| `--eval-type` | 评估类型，支持 `test`（默认）和 `benchmark` |
+| `--test-data` | test 数据目录，默认同 `--train-data` |
+| `--max-new-tokens` | 每题生成的 token 上限，默认 128 |
+| `--benchmark` | benchmark 名称，默认 `null`，benchmark 评估时必填 |
+| `--benchmark-data` | benchmark 数据目录，默认位置见[第 1 节](#1-准备环境模型与数据) |
+| `--lengths` | 仅用于 RULER benchmark 评估，默认 `8192 16384 32768` |
+| **SwanLab** |
+| `--tracking` | SwanLab 记录方式，支持 `online`（默认）和 `disabled`（仅保存本地产物） |
+| `--swanlab-project` | SwanLab 项目，默认 `latent-working-memory-v4` |
+| `--group` | SwanLab 实验分组，默认当前 `run-id` |
+| `--tag` | SwanLab 命名空间标签 |
 
-epoch 结束和达到 `--stop-after-steps` 时也会验证、保存。例如，`--epochs 3 --save-every after_each_epoch --save-total-limit 3` 保留每轮末的 checkpoint。
-
-### 3.3 独立评估与生成
-
-| 参数 | 用途／默认值 |
-|---|---|
-| `--checkpoint` | 原运行的 `checkpoints/global_step_N/` 目录；恢复、评估和生成均必填 |
-| `--benchmark` | 仅用于独立评估，默认 `null`（不传时为 QASPER test）；显式值为 `ruler` 或 `locomo` |
-| `--data-dir` | 覆盖评估数据目录；QASPER 默认沿用训练目录，benchmark 默认位置见[第 1 节](#1-准备环境模型与数据) |
-| `--lengths` | 仅用于 RULER，默认 `8192 16384 32768` |
-| `--max-new-tokens` | QASPER test 或单条生成的 token 上限，默认 128；benchmark 不接受此参数 |
-| `--output-dir` | 评估结果目录，默认 `eval/<method-dir>/test/`、`ruler/` 或 `locomo/` |
-| `--prompt-file` | 单条生成的纯文本输入，必填 |
-| `--output` | 单条生成的结果 JSON，默认 `eval/<method-dir>/greedy-sample.json` |
-
-checkpoint 须保留原运行目录结构。模型和记忆设置从保存配置读取，不能通过评估或生成命令覆盖。
-
-### 3.4 运行目录与跟踪
-
-| 参数 | 用途／默认值 |
-|---|---|
-| `--gpus` | 物理 GPU，训练默认 `0,1`；生成和独立评估选择 `0` 或 `1` |
-| `--run-id` | 新训练的实验系列编号，默认上海时间 `YYYYMMDD-HHMMSS` |
-| `--output-root` | 新训练产物的父目录，默认 `artifacts/v4` |
-| `--tracking` | `online` 或 `disabled`；新训练沿用配置，预设为在线，评估沿用原训练设置 |
-| `--swanlab-project` | 新训练的 SwanLab 项目，默认 `latent-working-memory-v4` |
-| `--group` | 新训练的实验分组，省略时沿用配置或当前 `run-id` |
-| `--tag` | 新训练追加的命名空间标签，可重复传入，如 `--tag study:query-generation` |
-
-默认 QASPER 配置包含 `data:qasper`，代码自动附加 `scope:main`、`method:attention-matching`。模型、优化器及局部更新的具体超参数保存在 JSON 和 SwanLab config 中。
+- epoch 末会自动保存 checkpoint 以及进行 dev 验证。
 
 ## 4. 查看结果
 
-产物位于 `artifacts/v4/<run-id>/`，`<method-dir>` 按 `<query_mode>-m<num_slots>` 生成，例如 `conditioned-m32`；SwanLab 名称为 `<method-dir>_<run-id>`。
+产物位于 `artifacts/v4/<run-id>/`，`<method-dir>` 按 `<query_mode>-query-m<num_slots>` 生成，例如 `conditioned-query-m32`；SwanLab 名称为 `<method-dir>_<run-id>`。
 
 ```text
 artifacts/v4/<run-id>/
@@ -201,12 +217,14 @@ artifacts/v4/<run-id>/
 │   ├── swanlab.json              在线运行身份
 │   └── training-result.json      训练结果与最终 checkpoint
 └── eval/<method-dir>/
-    ├── greedy-sample.json        单条生成结果
-    ├── test/                    QASPER 评估配置、逐题结果、汇总及发布记录
-    └── ruler/、locomo/           benchmark 逐题结果、汇总及发布记录
+    ├── test/                    QASPER test
+    │   ├── eval.json            同类评估共用的计算协议
+    │   └── global_step_N/       协议快照、逐题结果、汇总及发布记录
+    └── ruler/、locomo/           同样保存 eval.json 及各 checkpoint 的结果
 ```
 
-- **评估产物**：逐题预测和评分汇总保存到 `--output-dir` 指定目录，主要文件为 `predictions.jsonl`、`summary.json`；QASPER 另存筛选统计，在线发布时保存 `publication.json`。运行日志和执行状态写入 `plan/<method-dir>/` 下的 `evaluation.log`／`evaluation-result.json`，benchmark 对应 `<benchmark>-evaluation.log`／`<benchmark>-evaluation-result.json`。
-- **进度与图表**：终端展示 step、loss、耗时与显存，完整训练指标见 `metrics.jsonl`。训练、dev 和最终评估共用原 SwanLab run；`train/*`、`dev/*` 的写入 loss 图合并写入前后曲线，`evaluation/*` 展示 QASPER 指标及 RULER／LoCoMo 汇总。布局见 [v4 评估与记录](../README.md#四评估与记录)。
-- **错误与状态**：训练查看 `plan/<method-dir>/train.log`、`result.json`；评估查看上述日志和状态文件，生成查看 `generate.log`、`generate-result.json`。状态从 `running` 更新为 `finished`／`stopped`／`failed`，保存命令、GPU、起止时间、退出码及失败原因。
+- **评估产物**：每个 checkpoint 的结果目录包含 `eval.json` 协议快照、`predictions.jsonl` 和计算完成标记 `summary.json`；QASPER 另存筛选统计，在线发布时保存 `publication.json`。运行日志和状态位于 `plan/<method-dir>/<evaluation-name>/global_step_N.log`、`global_step_N-result.json`，其中 `<evaluation-name>` 为 `evaluation`、`ruler-evaluation` 或 `locomo-evaluation`。批量评估另存 `plan/<method-dir>/<evaluation-name>-result.json` 汇总各 checkpoint 的结果与失败情况。
+- **进度与图表**：终端展示 step、loss、耗时与显存，完整训练指标见 `metrics.jsonl`。训练、dev 和评估共用原 SwanLab run；`train/*`、`dev/*` 的写入 loss 图合并写入前后曲线，单 checkpoint 的 `evaluation/*` 展示汇总图，批量评估使用真实 checkpoint step 的原生增量曲线。布局见 [v4 评估与记录](../README.md#四评估与记录)。
+- **错误与状态**：训练查看 `plan/<method-dir>/train.log`、`result.json`；评估查看上述日志和状态文件。状态从 `running` 更新为 `finished`／`stopped`／`failed`，保存命令、GPU、起止时间、退出码及失败原因。
+- **数据统计**：`data-statistics.json` 保存筛选、抽样统计及实际选中样本身份；恢复沿用原配置及所选子集，不接受数量上限或 seed 覆盖。
 - **Checkpoint 与恢复**：默认保留最近两个 checkpoint，恢复与评估均传目录路径；具体 step 可从训练结果或 checkpoint 目录取得。中断恢复见[第 2.3 节](#23-中断恢复)。

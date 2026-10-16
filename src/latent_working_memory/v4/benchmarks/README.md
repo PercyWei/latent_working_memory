@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261015 19:27:38 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261016 18:51:46 Asia/Shanghai（UTC+08:00）
 
 ## 1. 数据位置与评估协议
 
@@ -69,28 +69,34 @@ bash src/latent_working_memory/v4/scripts/generate_ruler.sh \
 - 已有 RULER 长度目录拒绝覆盖；同一模型修改长度、样本数或 seed 等设置并需重建已有长度时，用新的 `--output-dir` 保存样本。
 - RULER 的 `<length>` 表示完整输入与该任务生成预算的总长度上限；脚本预留 chat template 开销，官方生成器另行预留输出预算。
 - 官方生成器将 `answer_prefix` 单独保存；评估只读取 `input`，不拼回该前缀。多值／多 query 任务保持一条输入、一次回答。
-- 同一模型的比较方法应使用同一批生成样本。评估自定义位置时，`--data-dir` 指向 RULER 的 `--output-dir` 或 LoCoMo 的 `<data-root>/locomo`。
+- 同一模型的比较方法应使用同一批生成样本。评估自定义位置时，`--benchmark-data` 指向 RULER 的 `--output-dir` 或 LoCoMo 的 `<data-root>/locomo`。
 - 完整生成参数执行 `bash src/latent_working_memory/v4/scripts/generate_ruler.sh --help` 查看；下载参数见上表。
 
 ## 3. 运行评估与查看结果
 
-将 `global_step_N` 替换为最终 checkpoint 的实际目录：
+将 `global_step_N` 替换为要评估的 checkpoint 的实际目录：
 
 ```bash
 bash src/latent_working_memory/v4/scripts/run.sh \
-  --evaluate-only --benchmark ruler --gpus 0 \
-  --checkpoint artifacts/v4/<run-id>/train/conditioned-m32/checkpoints/global_step_N \
+  --evaluate-only --eval-type benchmark --benchmark ruler --gpus 0 \
+  --checkpoint artifacts/v4/<run-id>/train/conditioned-query-m32/checkpoints/global_step_N \
   --lengths 8192 16384 32768
 
 bash src/latent_working_memory/v4/scripts/run.sh \
-  --evaluate-only --benchmark locomo --gpus 0 \
-  --checkpoint artifacts/v4/<run-id>/train/conditioned-m32/checkpoints/global_step_N
+  --evaluate-only --eval-type benchmark --benchmark locomo --gpus 0 \
+  --checkpoint artifacts/v4/<run-id>/train/conditioned-query-m32/checkpoints/global_step_N
 ```
 
-- 独立评估统一使用 `--evaluate-only`；`--benchmark` 默认 `null`，不传时执行 QASPER test，显式传入 `ruler` 或 `locomo` 时执行本节的 benchmark 评估。
-- RULER 默认按 checkpoint 中原始 `model_name_or_path` 的末级名称读取对应模型目录；人工确认不同模型可复用同一批样本时，用 `--data-dir` 指定已有模型目录，不自动判断 tokenizer 是否一致。
-- `--data-dir` 可覆盖表中的 benchmark 根目录；RULER 直接指向包含各长度子目录的目录，LoCoMo 指向包含 `locomo10.json` 的目录。
+- 独立评估统一使用 `--evaluate-only`。本节须设置 `--eval-type benchmark`，并通过 `--benchmark` 指定 `ruler` 或 `locomo`；该参数默认 `null`，在 benchmark 模式下不可为空。省略 `--eval-type` 时为 test 评估，仅传 benchmark 名称不会自动切换。
+- `--checkpoint` 后可列出同一 run 的多个目录；或改用 `--eval-run artifacts/v4/<run-id>/train/conditioned-query-m32/`，扫描其中全部 `checkpoints/global_step_*/state.pt`。两者互斥；拒绝重复、跨 run 或缺少 `state.pt` 的未完成 checkpoint。多个 checkpoint 按数字 step 升序在单卡上顺序评估，命令示例见[运行指南](../scripts/README.md#22-单独评估)。
+- RULER 默认按 checkpoint 中原始 `model_name_or_path` 的末级名称读取对应模型目录；人工确认不同模型可复用同一批样本时，用 `--benchmark-data` 指定已有模型目录，不自动判断 tokenizer 是否一致。
+- `--benchmark-data` 可覆盖表中的 benchmark 根目录；RULER 直接指向包含各长度子目录的目录，LoCoMo 指向包含 `locomo10.json` 的目录。
+- benchmark 模式不接受 test 专用的 `--test-data` 和 `--max-new-tokens`，`--lengths` 仅用于 RULER。以上评估参数不用于训练或恢复；下载脚本的同名 `--benchmark` 参数仍按第 2 节选择下载范围。
 - 模型配置、tokenizer 和 memory 权重取自 checkpoint；只需选择一张 GPU。
-- 默认产物位于原实验的 `eval/<method-dir>/ruler/` 或 `eval/<method-dir>/locomo/`，保存逐题预测与汇总。重跑时用 `--output-dir` 指定新目录。
-- 在线结果追加到已完成训练的原 SwanLab run，按 benchmark 展示任务／长度或 QA 类别分数。`--tracking disabled` 仅保存本地结果。
+- 产物统一由 checkpoint 推导到原实验的 `eval/<method-dir>/<ruler|locomo>/global_step_N/`，单个、多个 checkpoint 与 `--eval-run` 使用同一规则。
+- 同类评估共用父目录的 `eval.json`，记录实际数据内容、模型／分词、生成与官方评分设置；已有协议后须保持一致，配置冲突时报错。每个 checkpoint 另存协议快照、逐题预测及计算完成标记 `summary.json`。
+- 相同 checkpoint、相同协议且已有完整汇总时直接复用，不重新加载模型或生成答案；缺少汇总时在原目录从头计算。本地结果先于在线发布保存，发布失败后重跑原命令可复用结果补传。
+- tracking、设备及单次／批量展示方式不改变计算协议，可先离线计算再在线发布，也可将单 checkpoint 结果用于批量评估。
+- 在线追加要求训练已完成、云端原 SwanLab run 为 `FINISHED`。单 checkpoint 用汇总图展示任务／长度或 QA 类别分数，批量评估可上传原运行全部已完成保存的 checkpoint，使用真实 checkpoint step 的原生增量曲线。`--tracking disabled` 仅保存本地结果。
+- 各 checkpoint 的日志和执行状态位于 `plan/<method-dir>/<benchmark>-evaluation/global_step_N.log`、`global_step_N-result.json`。批量评估另存 `plan/<method-dir>/<benchmark>-evaluation-result.json`；某个 checkpoint 失败后继续其余 checkpoint，最后汇总结果并报错。
 - 复用项目的 checkpoint 加载、流式生成、资源记录和发布流程，评分沿用上述固定官方源码；不计算答案 NLL。

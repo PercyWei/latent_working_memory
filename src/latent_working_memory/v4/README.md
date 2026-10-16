@@ -2,7 +2,7 @@
 
 创建时间：20261003 21:51:43 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261015 19:27:38 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261016 18:51:46 Asia/Shanghai（UTC+08:00）
 
 冻结基座，在每层维护 latent memory，通过 Attention Matching 局部更新记忆，并由答案 CE 学习如何生成压缩查询和读写记忆。
 
@@ -72,13 +72,16 @@ $R$ 为压缩查询数；每次写入固定执行 `inner_steps` 步，查询与�
 - **样本组织**：遵循 δ-Mem 的组织形式，完整正文配上一条 QA 作为独立样本，这意味着一条包含若干不同问题的数据可以构造出多条训练/评估样本。
 - **监督目标**：正文与问题作为输入，在 outer loop 计算答案 CE。
 - **长度下限**：所有划分的样本均要求答案前的 prompt（含正文、问题及模板）至少为 `pending_size + recent_size + 1` tokens，低于下限时整条过滤。
-- **长度上限**：正文、问题、答案及模板的总 token 数不得超过模型窗口；train 允许另设人为上限。超限样本整条过滤，不截断。
+- **正文上限**：仅 train 可通过 `max_train_data_tokens` 限制原始 `text` 的 token 数，按 `tokenizer.encode(text, add_special_tokens=False)` 计算，不含问题、答案、系统提示与 chat template；dev/test 不使用该上限。
+- **模型窗口**：所有划分的正文、问题、答案及模板总 token 数均不得超过模型窗口。任一长度条件不满足时整条过滤，不截断。
+- **数量上限**：QA 展开并完成长度过滤后，train/dev 可分别限制独立 QA 样本数；按 `seed`、划分名和稳定样本 ID 确定随机子集，上限为 `null` 或不小于可用数时保留全部。划分隔离检查仍使用完整的原始文档集合。
+- **固定子集**：每次运行选定一次，跨 epoch 不重抽；仅 train 每个 epoch 打乱顺序，dev 各次验证共用同一子集。test 与 benchmark 不受 train/dev 数量上限影响。
 
 ### 2.3 当前数据：δ-Mem QASPER
 
 - **来源与转换**：[δ-Mem 发布集](https://huggingface.co/datasets/huaXiaKyrie/delta-mem-qasper-data) 的原始文件保存在 `data/raw/delta-mem-qasper/`。去除对话编号及固定提问包装，按原顺序拼接正文，并将同一论文的全部 QA 聚合为一行。
 - **固定划分**：`data/delta-mem-qasper/` 保存 `train.jsonl`、`dev.jsonl`、`test.jsonl`，按原始论文划分，保存时不做长度过滤；来源 ID 与转换规则记录在 `preparation.json`。
-- **实验预设**：train 人为上限 12288 tokens；dev 计算答案 CE，test 留作独立评估。dev/test 均为本实验留出集。
+- **实验预设**：train 正文上限 12288 tokens；dev 计算答案 CE，test 留作独立评估。dev/test 均为本实验留出集。
 - **构造与使用**：见[数据说明](../../../data/delta-mem-qasper/README.md)与[构造入口](../data_preparation/delta_mem_qasper/README.md)。
 
 ## 三、配置与执行
@@ -104,15 +107,17 @@ $R$ 为压缩查询数；每次写入固定执行 `inner_steps` 步，查询与�
 | 参数 | 预设与含义 |
 |---|---|
 | `model.model_name_or_path` | `~/models/Qwen3-4B-Instruct-2507` |
-| `training.dataset_dir` | `data/delta-mem-qasper`；固定读取 `train.jsonl`、`dev.jsonl`、`test.jsonl` |
+| `training.dataset_dir` | `data/delta-mem-qasper`；训练读取 `train.jsonl` 和 `dev.jsonl`，配套 test 读取 `test.jsonl` |
 | `model.backbone_dtype` | GPU 预设 `bfloat16`；类默认 `float32`，新增模块与 slots 始终 FP32 |
 | `model.attention_implementation` | 主干 `sdpa`，可选 `eager`；局部 reader 使用显式计算 |
 | `model.loss_chunk_size` | 256；有效答案位置的 LM head／CE 分块重计算 |
 | `training.epochs`／`learning_rate` | 1／0.0001 |
 | `training.micro_batch_size_per_gpu`／`gradient_accumulation_steps` | 4／2；双卡全局 batch 为 16 |
-| `training.max_seq_length` | train 完整序列的人为上限 12288；省略或 `null` 关闭 |
-| `training.eval_every` | 每 50 个 optimizer steps 验证；epoch 结束和主动停止时也验证 |
-| `training.save_every`／`save_total_limit` | 每 50 steps 保存、保留最近 2 个；支持 `after_each_epoch`，epoch 结束和主动停止时始终保存 |
+| `training.max_train_data_tokens` | train 原始正文的 token 上限 12288；省略或 `null` 关闭 |
+| `training.max_train_samples`／`max_dev_samples` | 过滤后的 train／dev 独立 QA 样本数上限；正整数或 `null`，预设 `null`（全部） |
+| `training.seed` | 42；控制新增记忆模块初始化、train/dev 子集选择及训练样本打乱 |
+| `training.dev_every` | 每 50 个 optimizer steps 验证；epoch 结束时也验证 |
+| `training.save_every`／`save_total_limit` | 每 50 steps 保存、保留最近 2 个；支持 `after_each_epoch`，epoch 结束时始终保存 |
 
 - 全局 batch = GPU 数 × 每卡 microbatch × 梯度累积步数。预设每卡累积 2 次 microbatch 后更新优化器；尾批按实际有效答案 token 数归一化。
 - 使用 verl Engine、optimizer、DDP、collator、StatefulDataLoader 和 checkpoint 管理；恢复保留配置、加载器游标、各 rank RNG 和原运行身份。
@@ -135,30 +140,37 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 | 训练中 dev | 答案 token CE，以及局部写入前／后的 AM loss |
 | QASPER test 评估 | 从 checkpoint 计算答案 NLL、greedy 生成的 EM／F1，保存逐题结果及汇总 |
 | Benchmark 评估 | RULER v1 的 13 项任务与 LoCoMo 类别 1–4；独立生成，沿用官方评分 |
-| 单条生成 | 从纯文本 prompt 生成，用于查看模型输出，不计算 QA 指标 |
 
-- 统一入口在训练或续训完成全部预算后自动执行最终 checkpoint 的 QASPER test；等待训练进程退出，再使用所选 GPU 中的第一张卡，默认生成上限为 128 tokens。提前停止或训练失败时不执行 test；已有 checkpoint 可通过 `--evaluate-only` 补评估 QASPER test。
+- 统一入口在训练或续训完成全部预算后自动执行最终 checkpoint 的 QASPER test；等待训练进程退出，再使用所选 GPU 中的第一张卡，默认生成上限为 128 tokens。新训练加 `--train-only` 时保留训练中 dev、跳过最终 test，该选择随执行记录保存并在恢复时沿用。训练中断或失败时不执行 test。
 - NLL 按答案 token 加权，EM／F1 按 QA 平均；EM／F1 使用小写化、去标点及英文冠词、合并空白后的短答评分。这是当前单参考答案协议，不是官方 QASPER 多参考评测。
 - NLL 与生成各自初始化记忆；生成仅接收 prompt，参考答案不进入生成路径。
 - test 沿用固定 prompt 下限及模型窗口上限；生成预算超过剩余窗口时缩至可用长度，记录实际预算，不改变样本筛选。
-- 独立评估统一使用 `--evaluate-only`；`--benchmark` 默认 `null`，不传时执行 QASPER test，传入 `ruler` 或 `locomo` 时执行对应 benchmark 评估。
+- 独立评估统一使用 `--evaluate-only`，通过 `--checkpoint <目录1> <目录2> ...` 指定同一 run 的一个或多个 checkpoint，或通过 `--eval-run` 指定 `artifacts/v4/<run-id>/train/<method-dir>/`，扫描其中全部 `checkpoints/global_step_*/state.pt`。两者互斥；不接受重复、跨 run 或缺少 `state.pt` 的未完成 checkpoint。多个 checkpoint 按数字 step 升序在单卡上顺序评估。
+- 独立评估由 `--eval-type` 选择 `test`（默认）或 `benchmark`。benchmark 模式须通过 `--benchmark` 指定 `ruler` 或 `locomo`，该参数默认 `null`，不用于自动切换评估类型。批量评估中某个 checkpoint 失败后继续其余 checkpoint，最终汇总结果并报错。
+- 新训练用 `--train-data` 指定数据目录。独立 test 用 `--test-data` 覆盖目录，默认读取训练目录的 `test.jsonl`；benchmark 用 `--benchmark-data` 覆盖各自默认位置。
+- 评估类型、benchmark 名称与评估数据参数仅用于 `--evaluate-only`；训练完成后的自动 test 与训练中 dev 不受其控制。test 不接受 benchmark 参数；benchmark 不接受 `--test-data` 或 `--max-new-tokens`，`--lengths` 仅用于 RULER。
+- 评估结果由 checkpoint 推导到原实验的 `eval/<method-dir>/<test|ruler|locomo>/global_step_N/`，单个、多个 checkpoint 与 `--eval-run` 使用同一目录规则。
+- 同一方法、同类评估共用 `eval.json` 计算协议，记录实际数据内容、模型／分词、筛选、生成与评分设置，已有协议后须保持一致。相同 checkpoint、相同协议且已有完整 `summary.json` 时直接复用，不重新加载模型；缺少汇总的未完成评估在原目录从头计算，配置冲突则报错。
+- 本地汇总先于在线发布保存，发布失败可重跑原命令补传。tracking、设备分配及单次／批量展示方式不改变计算协议，可先离线计算，再复用结果在线发布。
 - Benchmark 使用官方原始格式，每题独立初始化记忆，输入只应用一次 chat template。严格检查输入与任务生成预算的总长度，不截断或套用训练筛选；数据位置、手动准备指令和评估协议见 [benchmark 说明](benchmarks/README.md)。
 - 汇总包含模型各层 slots、维度、总 latent 元素及字节数，以及评估耗时、局部写入耗时和峰值显存。计量范围随结果保存，不将 latent 状态大小视为整个模型显存。
 
 ### 4.2 SwanLab 与本地产物
 
 - 默认在线记录到 `latent-working-memory-v4`，使用与 v3 相同的 `SWANLAB_API_KEY` 配置；`--tracking disabled` 仅保存本地。相关 runs 通过 `group` 关联，`job_type=train`，固定 tags 为 `scope:main`、`method:attention-matching`，数据和研究标签通过配置补充。
-- `--run-id` 标识实验系列；方法目录由 `query_mode` 与 `num_slots` 自动生成，例如 `conditioned-m32`。SwanLab 名称为 `<method-dir>_<run-id>`。
+- `--run-id` 标识实验系列；方法目录按 `<query_mode>-query-m<num_slots>` 自动生成，例如 `conditioned-query-m32`。SwanLab 名称为 `<method-dir>_<run-id>`。
 - train/dev 在同一 run 中按真实 optimizer step 追加原生曲线。各分区的 `write_loss` 图合并写入前后两条曲线，以浅色／深色区分；底层分别保存 `write_loss_before` 和 `write_loss`，均先按层、再按写入事件平均。
-- QASPER test 评估沿用原训练的在线设置，在同一 run 的 `evaluation/*` 展示 NLL、EM／F1、写入前后 AM loss，保留原配置和身份。辅助计数与逐题结果保存在本地。
+- QASPER test 评估沿用原训练的在线设置，在同一 run 的 `evaluation/*` 展示 NLL、EM／F1、写入前后 AM loss，保留原配置和身份。在线追加要求训练已完成、云端原 run 为 `FINISHED`；批量评估可上传原运行内全部已完成保存的 checkpoint。辅助计数与逐题结果保存在本地。
 - Benchmark 结果同样追加到原 run，分别用 `evaluation/ruler` 汇总任务／长度、`evaluation/locomo` 汇总 QA 类别及总体分数。
+- 单 checkpoint 的 QASPER 与 benchmark 评估使用汇总图；手动指定多个 checkpoint 或使用 `--eval-run` 时，使用以真实 checkpoint step 为横轴的原生增量曲线。
 
 | 位置 | 主要产物 |
 |---|---|
 | `plan/<method-dir>/` | 配置快照、命令、运行状态和执行日志 |
-| `train/<method-dir>/` | `run.json`、`tokenizer/`、`data-statistics.json`、`metrics.jsonl`、checkpoint 与训练结果 |
-| `eval/<method-dir>/test/` | 含评估配置的 `summary.json`、`predictions.jsonl`、筛选统计，以及在线发布时的 `publication.json` |
-| `eval/<method-dir>/ruler/`、`locomo/` | 含 benchmark 协议的 `summary.json`、逐题 `predictions.jsonl` 及在线发布记录 |
+| `train/<method-dir>/` | `run.json`、`tokenizer/`、数据筛选／抽样统计及样本身份 `data-statistics.json`、`metrics.jsonl`、checkpoint 与训练结果 |
+| `eval/<method-dir>/<test\|ruler\|locomo>/eval.json` | 同类评估共用的计算协议 |
+| `eval/<method-dir>/test/global_step_N/` | `eval.json` 协议快照、完成标记 `summary.json`、`predictions.jsonl`、筛选统计，以及在线发布时的 `publication.json` |
+| `eval/<method-dir>/ruler/global_step_N/`、`locomo/global_step_N/` | 协议快照、完成标记 `summary.json`、逐题 `predictions.jsonl` 及在线发布记录 |
 
 共同父目录为 `artifacts/v4/<run-id>/`。详细文件和命令见[运行指南](scripts/README.md)。当前没有独立跨运行比较入口。
 
@@ -171,8 +183,8 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 | 逐层记忆与流式主干 | [memory.py](memory.py)、[model.py](model.py) |
 | 外层训练与批处理 | [train.py](train.py)、[engine.py](engine.py)、[training_data.py](training_data.py) |
 | 保存恢复与实验记录 | [checkpoint.py](checkpoint.py)、[tracking.py](tracking.py) |
-| 评估共用模型加载与计时 | [evaluation_runtime.py](evaluation_runtime.py) |
-| QASPER 评估与单条生成 | [evaluate.py](evaluate.py)、[inference.py](inference.py) |
+| 评估协议、结果复用、模型加载与计时 | [evaluation_records.py](evaluation_records.py)、[evaluation_runtime.py](evaluation_runtime.py) |
+| QASPER 评估 | [evaluate.py](evaluate.py) |
 | Benchmark 原始读取、官方评分与评估 | [benchmarks/data.py](benchmarks/data.py)、[scoring.py](benchmarks/scoring.py)、[evaluate.py](benchmarks/evaluate.py) |
 
 ```bash
