@@ -2,7 +2,7 @@
 
 创建时间：20261003 21:51:43 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261016 18:51:46 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261016 19:26:12 Asia/Shanghai（UTC+08:00）
 
 冻结基座，在每层维护 latent memory，通过 Attention Matching 局部更新记忆，并由答案 CE 学习如何生成压缩查询和读写记忆。
 
@@ -147,8 +147,9 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - test 沿用固定 prompt 下限及模型窗口上限；生成预算超过剩余窗口时缩至可用长度，记录实际预算，不改变样本筛选。
 - 独立评估统一使用 `--evaluate-only`，通过 `--checkpoint <目录1> <目录2> ...` 指定同一 run 的一个或多个 checkpoint，或通过 `--eval-run` 指定 `artifacts/v4/<run-id>/train/<method-dir>/`，扫描其中全部 `checkpoints/global_step_*/state.pt`。两者互斥；不接受重复、跨 run 或缺少 `state.pt` 的未完成 checkpoint。多个 checkpoint 按数字 step 升序在单卡上顺序评估。
 - 独立评估由 `--eval-type` 选择 `test`（默认）或 `benchmark`。benchmark 模式须通过 `--benchmark` 指定 `ruler` 或 `locomo`，该参数默认 `null`，不用于自动切换评估类型。批量评估中某个 checkpoint 失败后继续其余 checkpoint，最终汇总结果并报错。
-- 新训练用 `--train-data` 指定数据目录。独立 test 用 `--test-data` 覆盖目录，默认读取训练目录的 `test.jsonl`；benchmark 用 `--benchmark-data` 覆盖各自默认位置。
-- 评估类型、benchmark 名称与评估数据参数仅用于 `--evaluate-only`；训练完成后的自动 test 与训练中 dev 不受其控制。test 不接受 benchmark 参数；benchmark 不接受 `--test-data` 或 `--max-new-tokens`，`--lengths` 仅用于 RULER。
+- 新训练用 `--data` 指定完整数据集目录，训练、验证与自动 test 分别读取其中的 `train.jsonl`、`dev.jsonl` 和 `test.jsonl`。
+- 独立 test 默认沿用保存的评估配置中的数据目录和生成上限；没有该配置时，必须传入 `--eval-data`，生成上限默认 128 tokens。`--eval-data` 默认 `null`，显式传入时覆盖本次评估数据目录并读取其中的 `test.jsonl`，不修改训练配置。benchmark 用 `--benchmark-data` 覆盖各自默认位置。
+- 评估类型、benchmark 名称与评估数据参数仅用于 `--evaluate-only`；训练完成后的自动 test 与训练中 dev 不受其控制。test 不接受 benchmark 参数；benchmark 不接受 `--eval-data` 或 `--max-new-tokens`，`--lengths` 仅用于 RULER。
 - 评估结果由 checkpoint 推导到原实验的 `eval/<method-dir>/<test|ruler|locomo>/global_step_N/`，单个、多个 checkpoint 与 `--eval-run` 使用同一目录规则。
 - 同一方法、同类评估共用 `eval.json` 计算协议，记录实际数据内容、模型／分词、筛选、生成与评分设置，已有协议后须保持一致。相同 checkpoint、相同协议且已有完整 `summary.json` 时直接复用，不重新加载模型；缺少汇总的未完成评估在原目录从头计算，配置冲突则报错。
 - 本地汇总先于在线发布保存，发布失败可重跑原命令补传。tracking、设备分配及单次／批量展示方式不改变计算协议，可先离线计算，再复用结果在线发布。

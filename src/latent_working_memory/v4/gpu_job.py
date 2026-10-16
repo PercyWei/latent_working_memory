@@ -3,17 +3,24 @@
 import argparse
 from dataclasses import asdict, replace
 from datetime import datetime
+import fcntl
 import json
 import os
 from pathlib import Path
+from queue import Empty, Queue
 import re
 import shlex
+import signal
 import subprocess
 import sys
+import threading
 from zoneinfo import ZoneInfo
 
+from latent_working_memory.v4.benchmarks.reporting import benchmark_media
 from latent_working_memory.v4.config import load_experiment
+from latent_working_memory.v4.evaluation_records import EvaluationHistory
 from latent_working_memory.v4.io import write_json
+from latent_working_memory.v4.tracking import append_evaluation, validate_evaluation_publication
 
 
 DEFAULT_CONFIG = Path("configs/v4/attention_matching/experiment.json")
@@ -22,7 +29,7 @@ TRAINING_OPTIONS = (
     "run_id",
     "output_root",
     "model_path",
-    "train_data",
+    "data",
     "micro_batch_size_per_gpu",
     "gradient_accumulation_steps",
     "epochs",
@@ -100,13 +107,22 @@ def parse_args(argv=None):
         help="评估 <series>/train/<method-dir> 中全部保留的 checkpoint；仅用于 --evaluate-only",
     )
     parser.add_argument("--config", type=Path, help=f"训练预设，默认 {DEFAULT_CONFIG}")
-    parser.add_argument("--gpus", type=physical_gpus, default="0,1", help="物理 GPU 编号，默认 0,1")
+    parser.add_argument(
+        "--gpus", type=physical_gpus, default="0,1",
+        help="物理 GPU 编号，默认 0,1；独立评估每卡一个进程，并行计算不同 checkpoint",
+    )
     parser.add_argument("--run-id", help="实验系列目录，默认上海时间 YYYYMMDD-HHMMSS")
     parser.add_argument("--output-root", type=Path, help="产物父目录，默认 artifacts/v4")
     parser.add_argument("--model-path", type=Path, help="覆盖预设中的本地基座模型位置")
-    parser.add_argument("--train-data", type=Path, help="训练数据目录，包含 train.jsonl 与 dev.jsonl")
-    parser.add_argument("--test-data", type=Path, help="test 评估数据目录，默认沿用训练记录")
-    parser.add_argument("--benchmark-data", type=Path, help="benchmark 数据目录，默认沿用对应 benchmark 的位置")
+    parser.add_argument("--data", type=Path, help="完整数据集目录，包含 train/dev/test.jsonl")
+    parser.add_argument(
+        "--eval-data", type=Path,
+        help="覆盖完整运行或独立 test 的数据目录；独立评估无 eval.json 时必填",
+    )
+    parser.add_argument(
+        "--benchmark-data", type=Path,
+        help="benchmark 数据目录，默认沿用评估配置；无评估配置时必填",
+    )
     for name in (
         "micro-batch-size-per-gpu",
         "gradient-accumulation-steps",
@@ -145,11 +161,13 @@ def parse_args(argv=None):
     parser.add_argument("--tag", action="append", help="追加命名空间标签，可重复指定")
     parser.add_argument(
         "--max-new-tokens", type=positive_count,
-        help="QASPER test 的生成 token 上限，默认 128",
+        help="QASPER test 的生成 token 上限，沿用评估配置；无配置时默认 128",
     )
     args = parser.parse_args(argv)
     if args.eval_run is not None and not args.evaluate_only:
         parser.error("--eval-run requires --evaluate-only")
+    if args.eval_data is not None and (args.train_only or args.resume):
+        parser.error("--eval-data cannot be used with --train-only or --resume")
     if args.resume or args.evaluate_only:
         if args.resume and args.checkpoint is None:
             parser.error("--resume requires --checkpoint")
@@ -181,21 +199,19 @@ def parse_args(argv=None):
         else:
             if args.benchmark is None:
                 parser.error("--eval-type benchmark requires --benchmark")
-            if args.test_data is not None or args.max_new_tokens is not None:
-                parser.error("--test-data and --max-new-tokens require --eval-type test")
+            if args.eval_data is not None or args.max_new_tokens is not None:
+                parser.error("--eval-data and --max-new-tokens require --eval-type test")
             if args.lengths is not None and args.benchmark != "ruler":
                 parser.error("--lengths requires --benchmark ruler")
-        if len(args.gpus.split(",")) != 1:
-            parser.error("evaluation uses one GPU; select --gpus 0 or --gpus 1")
     elif any(
         value is not None
         for value in (
-            args.eval_type, args.benchmark, args.test_data, args.benchmark_data,
+            args.eval_type, args.benchmark, args.benchmark_data,
             args.lengths, args.max_new_tokens,
         )
     ):
         parser.error(
-            "--eval-type, --benchmark, --test-data, --benchmark-data, --lengths and "
+            "--eval-type, --benchmark, --benchmark-data, --lengths and "
             "--max-new-tokens require --evaluate-only"
         )
     if args.checkpoint is not None and not args.evaluate_only:
@@ -222,8 +238,8 @@ def prepare_training(args):
         )
         if getattr(args, name) is not None
     }
-    if args.train_data is not None:
-        overrides["dataset_dir"] = str(args.train_data.expanduser().resolve())
+    if args.data is not None:
+        overrides["dataset_dir"] = str(args.data.expanduser().resolve())
     for name in ("max_train_data_tokens", "max_train_samples", "max_dev_samples"):
         if hasattr(args, name):
             overrides[name] = getattr(args, name)
@@ -284,7 +300,272 @@ def execute(command, environment, log_path):
         raise subprocess.CalledProcessError(code, command)
 
 
-def run_evaluation_series(args):
+def _terminate_evaluation_process(process):
+    """回收调度器创建的进程组，避免中断后留下 GPU worker。"""
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+
+
+def _compute_evaluations(args, results, summary, result_path):
+    """每张 GPU 固定一个槽位，只并行计算，发布由父进程负责。"""
+    pending = Queue()
+    for result in results:
+        pending.put(result)
+    stopping = threading.Event()
+    state_lock = threading.Lock()
+    processes = set()
+
+    def worker(gpu):
+        while not stopping.is_set():
+            try:
+                result = pending.get_nowait()
+            except Empty:
+                return
+            command = result["command"]
+            prefix = f"[evaluation] gpu={gpu} checkpoint=global_step_{result['step']}"
+            job = {
+                "action": "evaluate",
+                "eval_type": args.eval_type,
+                "gpus": gpu,
+                "command": command,
+                "started_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+            }
+            error = None
+            try:
+                with state_lock:
+                    if stopping.is_set():
+                        return
+                    result.update(status="running", gpu=gpu)
+                    write_json(result["result_path"], {**job, "status": "running"})
+                    write_json(result_path, summary)
+                with Path(result["log_path"]).open("a", encoding="utf-8") as log:
+                    invocation = "$ " + shlex.join(command) + "\n"
+                    print(f"{prefix} {invocation}", end="", flush=True)
+                    log.write(invocation)
+                    log.flush()
+                    with state_lock:
+                        if stopping.is_set():
+                            return
+                        process = subprocess.Popen(
+                            command,
+                            env=dict(
+                                os.environ,
+                                CUDA_DEVICE_ORDER="PCI_BUS_ID",
+                                CUDA_VISIBLE_DEVICES=gpu,
+                                PYTHONUNBUFFERED="1",
+                                TOKENIZERS_PARALLELISM="false",
+                            ),
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            encoding="utf-8",
+                            bufsize=1,
+                            start_new_session=True,
+                        )
+                        processes.add(process)
+                    try:
+                        for line in process.stdout:
+                            print(f"{prefix} {line}", end="", flush=True)
+                            log.write(line)
+                            log.flush()
+                        code = process.wait()
+                    finally:
+                        if process.poll() is None:
+                            _terminate_evaluation_process(process)
+                        with state_lock:
+                            processes.discard(process)
+                        process.stdout.close()
+                    if code != 0:
+                        raise subprocess.CalledProcessError(code, command)
+            except Exception as caught:
+                error = caught
+                print(f"{prefix} compute failed: {error}", flush=True)
+            with state_lock:
+                result["status"] = (
+                    "stopped" if stopping.is_set() else "failed" if error is not None else "finished"
+                )
+                if error is not None:
+                    result["error"] = f"{type(error).__name__}: {error}"
+                write_json(
+                    result["result_path"],
+                    {
+                        **job,
+                        "status": result["status"],
+                        "output_dir": result["output_dir"],
+                        "return_code": (
+                            error.returncode if isinstance(error, subprocess.CalledProcessError)
+                            else 1 if error is not None else 0
+                        ),
+                        **({"error": result["error"]} if error is not None else {}),
+                        "finished_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(
+                            timespec="seconds"
+                        ),
+                    },
+                )
+                write_json(result_path, summary)
+
+    threads = []
+    previous_handlers = {
+        signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+    try:
+        for gpu in args.gpus.split(",")[:len(results)]:
+            thread = threading.Thread(target=worker, args=(gpu,), name=f"v4-eval-gpu-{gpu}")
+            thread.start()
+            threads.append(thread)
+        for thread in threads:
+            thread.join()
+    except BaseException:
+        stopping.set()
+        for signum in previous_handlers:
+            signal.signal(signum, signal.SIG_IGN)
+        with state_lock:
+            active = list(processes)
+        for process in active:
+            _terminate_evaluation_process(process)
+        for thread in threads:
+            thread.join()
+        raise
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+
+
+def _run_evaluation_locked(args, checkpoints, output, run, checkpoint_series):
+    plan = output.parent.parent / "plan" / output.name
+    evaluation_task = args.benchmark if args.eval_type == "benchmark" else "test"
+    evaluation_name = f"{evaluation_task}-evaluation" if args.eval_type == "benchmark" else "evaluation"
+    evaluation_plan = plan / evaluation_name
+    evaluation_plan.mkdir(parents=True, exist_ok=True)
+    result_path = plan / f"{evaluation_name}-result.json"
+    destination = output.parent.parent / "eval" / output.name / evaluation_task
+    data_dir = args.benchmark_data if args.eval_type == "benchmark" else args.eval_data
+    data_option = "--benchmark-data" if args.eval_type == "benchmark" else "--eval-data"
+    if data_dir is None and not (destination / "eval.json").is_file():
+        raise ValueError(f"{destination / 'eval.json'} is missing; specify {data_option}")
+    tracking = args.tracking or (
+        "online" if run["training"]["swanlab_project"] is not None else "disabled"
+    )
+    if tracking == "online":
+        for checkpoint in checkpoints:
+            validate_evaluation_publication(
+                run, checkpoint, int(checkpoint.name.removeprefix("global_step_"))
+            )
+    results = []
+    for checkpoint in checkpoints:
+        command = [
+            sys.executable,
+            "-m",
+            (
+                "latent_working_memory.v4.benchmarks.evaluate"
+                if args.eval_type == "benchmark" else "latent_working_memory.v4.evaluate"
+            ),
+            "--checkpoint", str(checkpoint),
+            "--output-dir", str(destination / checkpoint.name),
+            "--device", "cuda",
+            "--tracking", tracking,
+            "--defer-publication",
+        ]
+        if args.eval_type == "benchmark":
+            command += ["--benchmark", args.benchmark]
+            if args.benchmark_data is not None:
+                command += ["--benchmark-data", str(args.benchmark_data.expanduser().resolve())]
+            if args.lengths is not None:
+                command += ["--lengths", *(str(length) for length in args.lengths)]
+        else:
+            if args.max_new_tokens is not None:
+                command += ["--max-new-tokens", str(args.max_new_tokens)]
+            if args.eval_data is not None:
+                command += ["--eval-data", str(args.eval_data.expanduser().resolve())]
+        if checkpoint_series:
+            command += ["--checkpoint-series"]
+        results.append({
+            "checkpoint": str(checkpoint),
+            "step": int(checkpoint.name.removeprefix("global_step_")),
+            "status": "pending",
+            "command": command,
+            "output_dir": str(destination / checkpoint.name),
+            "result_path": str(evaluation_plan / f"{checkpoint.name}-result.json"),
+            "log_path": str(evaluation_plan / f"{checkpoint.name}.log"),
+        })
+    summary = {
+        "action": "evaluate",
+        "eval_run": str(output),
+        "eval_type": args.eval_type,
+        "benchmark": args.benchmark,
+        "gpus": args.gpus,
+        "started_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+        "status": "running",
+        "checkpoints": results,
+    }
+    write_json(result_path, summary)
+    try:
+        _compute_evaluations(args, results, summary, result_path)
+        if tracking == "online":
+            for result in results:
+                if result["status"] != "finished":
+                    continue
+                checkpoint = Path(result["checkpoint"])
+                output_dir = Path(result["output_dir"])
+                try:
+                    saved = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
+                    history = EvaluationHistory(output_dir, saved)
+                    with history.lock():
+                        saved = history.cached_summary()
+                        append_evaluation(
+                            run, checkpoint, saved, output_dir,
+                            media=(
+                                benchmark_media(saved)
+                                if args.eval_type == "benchmark" and not checkpoint_series else None
+                            ),
+                            checkpoint_series=checkpoint_series,
+                        )
+                except Exception as error:
+                    result.update(
+                        status="failed", publication_status="failed",
+                        error=f"publication failed: {type(error).__name__}: {error}",
+                    )
+                    print(f"[evaluation] {checkpoint.name} {result['error']}", flush=True)
+                else:
+                    result["publication_status"] = "finished"
+                checkpoint_result = json.loads(
+                    Path(result["result_path"]).read_text(encoding="utf-8")
+                )
+                write_json(result["result_path"], {**checkpoint_result, **result})
+                write_json(result_path, summary)
+    except KeyboardInterrupt:
+        for result in results:
+            if result["status"] in {"pending", "running"}:
+                result["status"] = "stopped"
+        summary["status"] = "stopped"
+        summary["finished_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
+        write_json(result_path, summary)
+        raise
+    failures = sum(result["status"] != "finished" for result in results)
+    summary["status"] = "failed" if failures else "finished"
+    summary["finished_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
+    write_json(result_path, summary)
+    if failures:
+        raise RuntimeError(
+            f"evaluation failed for {failures}/{len(checkpoints)} checkpoints; see {result_path}"
+        )
+    return summary
+
+
+def run_evaluation(args):
+    checkpoint_series = args.eval_run is not None or len(args.checkpoint) > 1
     if args.eval_run is not None:
         output = args.eval_run.expanduser().resolve()
         if not output.is_dir() or output.parent.name != "train":
@@ -302,10 +583,7 @@ def run_evaluation_series(args):
     if len(set(checkpoints)) != len(checkpoints):
         raise ValueError("checkpoint list contains duplicate directories")
     for checkpoint in checkpoints:
-        if (
-            checkpoint.parent.name != "checkpoints"
-            or checkpoint.parent.parent.parent.name != "train"
-        ):
+        if checkpoint.parent.name != "checkpoints" or checkpoint.parent.parent.parent.name != "train":
             raise ValueError("checkpoint must belong to <series>/train/<method-dir>/checkpoints")
         if re.fullmatch(r"global_step_[0-9]+", checkpoint.name) is None or not checkpoint.is_dir():
             raise ValueError("checkpoint must be an existing global_step_<step> directory")
@@ -321,86 +599,29 @@ def run_evaluation_series(args):
     run = json.loads((output / "run.json").read_text(encoding="utf-8"))
     if Path(run["training"]["output_dir"]).resolve() != output:
         raise ValueError("run directory differs from the saved run output_dir")
-    plan = output.parent.parent / "plan" / output.name
-    plan.mkdir(parents=True, exist_ok=True)
-    evaluation_task = args.benchmark if args.eval_type == "benchmark" else "test"
-    evaluation_name = f"{evaluation_task}-evaluation" if args.eval_type == "benchmark" else "evaluation"
-    result_path = plan / f"{evaluation_name}-result.json"
-    destination = (
-        output.parent.parent / "eval" / output.name
-        / evaluation_task
-    )
-    results = [
-        {
-            "checkpoint": str(checkpoint),
-            "step": int(checkpoint.name.removeprefix("global_step_")),
-            "status": "pending",
-            "output_dir": str(destination / checkpoint.name),
-            "result_path": str(plan / evaluation_name / f"{checkpoint.name}-result.json"),
-            "log_path": str(plan / evaluation_name / f"{checkpoint.name}.log"),
-        }
-        for checkpoint in checkpoints
-    ]
-    summary = {
-        "action": "evaluate",
-        "eval_run": str(output),
-        "eval_type": args.eval_type,
-        "benchmark": args.benchmark,
-        "gpus": args.gpus,
-        "started_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
-        "status": "running",
-        "checkpoints": results,
-    }
-    write_json(result_path, summary)
-    try:
-        for checkpoint, result in zip(checkpoints, results, strict=True):
-            result["status"] = "running"
-            write_json(result_path, summary)
-            checkpoint_args = argparse.Namespace(
-                **{
-                    **vars(args),
-                    "checkpoint": [checkpoint],
-                    "eval_run": None,
-                }
-            )
-            try:
-                run_job(checkpoint_args, checkpoint_series=True)
-            except Exception as error:
-                result["status"] = "failed"
-                result["error"] = f"{type(error).__name__}: {error}"
-                print(f"checkpoint evaluation failed: {checkpoint}: {error}", flush=True)
-            else:
-                result["status"] = "finished"
-            write_json(result_path, summary)
-    except KeyboardInterrupt:
-        for result in results:
-            if result["status"] == "running":
-                result["status"] = "stopped"
-        summary["status"] = "stopped"
-        summary["finished_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(
-            timespec="seconds"
-        )
-        write_json(result_path, summary)
-        raise
-    failures = sum(result["status"] == "failed" for result in results)
-    summary["status"] = "failed" if failures else "finished"
-    summary["finished_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
-    write_json(result_path, summary)
-    if failures:
-        raise RuntimeError(
-            f"evaluation failed for {failures}/{len(checkpoints)} checkpoints; see {result_path}"
-        )
-    return summary
+
+    def interrupt_evaluation(signum, frame):
+        raise KeyboardInterrupt(f"evaluation interrupted by {signal.Signals(signum).name}")
+
+    with (output / ".evaluation-scheduler.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError(f"another evaluation scheduler is running for {output}")
+        previous_handler = signal.signal(signal.SIGTERM, interrupt_evaluation)
+        try:
+            return _run_evaluation_locked(args, checkpoints, output, run, checkpoint_series)
+        finally:
+            signal.signal(signal.SIGTERM, previous_handler)
 
 
-def run_job(args, checkpoint_series=False):
-    if args.evaluate_only and (
-        args.eval_run is not None or len(args.checkpoint) > 1
-    ):
-        return run_evaluation_series(args)
-    checkpoint = args.checkpoint[0] if args.evaluate_only else args.checkpoint
+def run_job(args):
+    if args.evaluate_only:
+        return run_evaluation(args)
+    checkpoint = args.checkpoint
     checkpoint = checkpoint.expanduser().resolve() if checkpoint is not None else None
     train_only = args.train_only
+    eval_data = args.eval_data
     if checkpoint is None:
         output, plan, config_path = prepare_training(args)
     else:
@@ -416,12 +637,15 @@ def run_job(args, checkpoint_series=False):
         plan.mkdir(parents=True, exist_ok=True)
         config_path = plan / "config.json"
         if args.resume:
-            train_only = json.loads((plan / "result.json").read_text(encoding="utf-8")).get(
-                "train_only", False
-            )
+            saved_result = json.loads((plan / "result.json").read_text(encoding="utf-8"))
+            train_only = saved_result.get("train_only", False)
+            eval_data = saved_result.get("eval_data")
             if len(args.gpus.split(",")) != run["world_size"]:
                 raise ValueError("resume must retain the original GPU count")
-
+    if eval_data is None:
+        _, training = load_experiment(config_path)
+        eval_data = training.dataset_dir
+    eval_data = str(Path(eval_data).expanduser().resolve())
     environment = dict(
         os.environ,
         CUDA_DEVICE_ORDER="PCI_BUS_ID",
@@ -430,88 +654,28 @@ def run_job(args, checkpoint_series=False):
         TOKENIZERS_PARALLELISM="false",
     )
     command = [sys.executable]
-    action = "resume" if args.resume else "train"
-    result_path, log_path = plan / "result.json", plan / "train.log"
-    if args.evaluate_only:
-        action = "evaluate"
-        evaluation_task = args.benchmark if args.eval_type == "benchmark" else "test"
-        evaluation_name = f"{evaluation_task}-evaluation" if args.eval_type == "benchmark" else "evaluation"
-        evaluation_plan = plan / evaluation_name
-        evaluation_plan.mkdir(parents=True, exist_ok=True)
-        result_path = evaluation_plan / f"{checkpoint.name}-result.json"
-        log_path = evaluation_plan / f"{checkpoint.name}.log"
-        destination = (
-            output.parent.parent / "eval" / output.name
-            / evaluation_task / checkpoint.name
-        )
+    gpu_count = len(args.gpus.split(","))
+    if gpu_count > 1:
         command += [
-            "-m",
-            (
-                "latent_working_memory.v4.benchmarks.evaluate"
-                if args.eval_type == "benchmark"
-                else "latent_working_memory.v4.evaluate"
-            ),
-            "--checkpoint",
-            str(checkpoint),
-            "--output-dir",
-            str(destination),
-            "--device",
-            "cuda",
+            "-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={gpu_count}",
         ]
-        if args.eval_type == "benchmark":
-            command += ["--benchmark", args.benchmark]
-            if args.benchmark_data is not None:
-                command += ["--benchmark-data", str(args.benchmark_data.expanduser().resolve())]
-            if args.lengths is not None:
-                command += ["--lengths", *(str(length) for length in args.lengths)]
-        else:
-            command += ["--max-new-tokens", str(args.max_new_tokens or 128)]
-            if args.test_data is not None:
-                command += ["--test-data", str(args.test_data.expanduser().resolve())]
-        if args.tracking is not None:
-            command += ["--tracking", args.tracking]
-        if checkpoint_series:
-            command += ["--checkpoint-series"]
-    else:
-        gpu_count = len(args.gpus.split(","))
-        if gpu_count > 1:
-            command += [
-                "-m",
-                "torch.distributed.run",
-                "--standalone",
-                f"--nproc_per_node={gpu_count}",
-            ]
-        command += [
-            "-m",
-            "latent_working_memory.v4.train",
-            "--config",
-            str(config_path),
-            "--device",
-            "cuda",
-        ]
-        if args.resume:
-            command += ["--resume", str(checkpoint)]
+    command += ["-m", "latent_working_memory.v4.train", "--config", str(config_path), "--device", "cuda"]
+    if args.resume:
+        command += ["--resume", str(checkpoint)]
     job = {
-        "action": action,
+        "action": "resume" if args.resume else "train",
         "gpus": args.gpus,
         "command": command,
+        "train_only": train_only,
+        "eval_data": eval_data,
         "started_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
     }
-    if args.evaluate_only:
-        job["eval_type"] = args.eval_type
-    else:
-        job["train_only"] = train_only
+    result_path = plan / "result.json"
     write_json(result_path, {**job, "status": "running"})
     try:
-        execute(command, environment, log_path)
-        if args.evaluate_only:
-            result = {
-                "status": "finished",
-                "output_dir": str(destination),
-            }
-        else:
-            result = json.loads((output / "training-result.json").read_text(encoding="utf-8"))
-            result = {**result, "status": "finished", "train_only": train_only}
+        execute(command, environment, plan / "train.log")
+        result = json.loads((output / "training-result.json").read_text(encoding="utf-8"))
+        result = {**result, "status": "finished", "train_only": train_only, "eval_data": eval_data}
     except (Exception, KeyboardInterrupt) as error:
         write_json(
             result_path,
@@ -519,25 +683,18 @@ def run_job(args, checkpoint_series=False):
                 **job,
                 "status": "stopped" if isinstance(error, KeyboardInterrupt) else "failed",
                 "return_code": (
-                    error.returncode
-                    if isinstance(error, subprocess.CalledProcessError)
-                    else 130
-                    if isinstance(error, KeyboardInterrupt)
-                    else None
+                    error.returncode if isinstance(error, subprocess.CalledProcessError)
+                    else 130 if isinstance(error, KeyboardInterrupt) else None
                 ),
                 "error": f"{type(error).__name__}: {error}",
-                "finished_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(
-                    timespec="seconds"
-                ),
+                "finished_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
             },
         )
         raise
     write_json(
         result_path,
         {
-            **job,
-            **result,
-            "return_code": 0,
+            **job, **result, "return_code": 0,
             "finished_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
         },
     )
@@ -559,6 +716,8 @@ def main(argv=None):
                         args.gpus.split(",")[0],
                         "--checkpoint",
                         result["checkpoint"],
+                        "--eval-data",
+                        result["eval_data"],
                     ]
                 )
             )

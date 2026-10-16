@@ -36,22 +36,32 @@ def _check_test_split(statistics, run):
 
 
 def evaluate(
-    checkpoint_path, output_dir, dataset_dir=None, max_new_tokens=128, device="cuda", tracking=None,
-    checkpoint_series=False,
+    checkpoint_path, output_dir, dataset_dir=None, max_new_tokens=None, device="cuda", tracking=None,
+    checkpoint_series=False, defer_publication=False,
 ):
+    output_dir = Path(output_dir).expanduser().resolve()
+    evaluation_path = output_dir.parent / "eval.json"
+    evaluation = (
+        json.loads(evaluation_path.read_text(encoding="utf-8"))
+        if evaluation_path.is_file()
+        else None
+    )
+    if dataset_dir is None:
+        if evaluation is None:
+            raise ValueError(f"{evaluation_path} is missing; specify --eval-data")
+        dataset_dir = Path(evaluation["test_file"]).parent
+    if max_new_tokens is None:
+        max_new_tokens = evaluation["max_new_tokens"] if evaluation is not None else 128
     if type(max_new_tokens) is not int or max_new_tokens < 1:
         raise ValueError("max_new_tokens must be a positive integer")
     if tracking not in {None, "online", "disabled"}:
         raise ValueError("tracking must be online or disabled")
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         raise ValueError("v4 evaluation runs in one process; do not launch it with torchrun")
-    output_dir = Path(output_dir).expanduser().resolve()
     checkpoint_path = Path(checkpoint_path).expanduser().resolve()
     checkpoint = read_checkpoint(checkpoint_path)
     run, step = checkpoint["run"], checkpoint["cursor"]["step"]
-    dataset_dir = Path(
-        run["training"]["dataset_dir"] if dataset_dir is None else dataset_dir
-    ).expanduser().resolve()
+    dataset_dir = Path(dataset_dir).expanduser().resolve()
     test_file = dataset_dir / "test.jsonl"
     if tracking is None:
         tracking = "online" if run["training"]["swanlab_project"] is not None else "disabled"
@@ -99,7 +109,7 @@ def evaluate(
         summary = history.cached_summary()
         if summary is not None:
             print(f"test reusing cached summary: {output_dir / 'summary.json'}", flush=True)
-            if tracking == "online":
+            if tracking == "online" and not defer_publication:
                 append_evaluation(
                     run, checkpoint_path, summary, output_dir, checkpoint_series=checkpoint_series
                 )
@@ -235,7 +245,7 @@ def evaluate(
             "resources": resources,
         }
         write_json(output_dir / "summary.json", summary)
-        if tracking == "online":
+        if tracking == "online" and not defer_publication:
             append_evaluation(
                 run, checkpoint_path, summary, output_dir, checkpoint_series=checkpoint_series
             )
@@ -245,21 +255,26 @@ def evaluate(
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True, help="global_step_<step> 目录")
-    parser.add_argument("--test-data", type=Path, help="默认沿用训练数据目录，读取 test.jsonl")
+    parser.add_argument(
+        "--eval-data", type=Path,
+        help="默认 null，沿用已保存的评估目录；无评估配置时必填，读取 test.jsonl",
+    )
     parser.add_argument("--output-dir", type=Path, required=True, help="评估产物目录")
-    parser.add_argument("--max-new-tokens", type=int, default=128)
+    parser.add_argument("--max-new-tokens", type=int, help="沿用已有评估配置；无配置时默认 128")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--tracking", choices=("online", "disabled"))
     parser.add_argument("--checkpoint-series", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--defer-publication", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     evaluate(
         args.checkpoint,
         args.output_dir,
-        args.test_data,
+        args.eval_data,
         args.max_new_tokens,
         args.device,
         args.tracking,
         args.checkpoint_series,
+        args.defer_publication,
     )
 
 

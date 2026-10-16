@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261016 18:51:46 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261016 19:08:22 Asia/Shanghai（UTC+08:00）
 
 ## 1. 数据位置与评估协议
 
@@ -91,7 +91,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - `--checkpoint` 后可列出同一 run 的多个目录；或改用 `--eval-run artifacts/v4/<run-id>/train/conditioned-query-m32/`，扫描其中全部 `checkpoints/global_step_*/state.pt`。两者互斥；拒绝重复、跨 run 或缺少 `state.pt` 的未完成 checkpoint。多个 checkpoint 按数字 step 升序在单卡上顺序评估，命令示例见[运行指南](../scripts/README.md#22-单独评估)。
 - RULER 默认按 checkpoint 中原始 `model_name_or_path` 的末级名称读取对应模型目录；人工确认不同模型可复用同一批样本时，用 `--benchmark-data` 指定已有模型目录，不自动判断 tokenizer 是否一致。
 - `--benchmark-data` 可覆盖表中的 benchmark 根目录；RULER 直接指向包含各长度子目录的目录，LoCoMo 指向包含 `locomo10.json` 的目录。
-- benchmark 模式不接受 test 专用的 `--test-data` 和 `--max-new-tokens`，`--lengths` 仅用于 RULER。以上评估参数不用于训练或恢复；下载脚本的同名 `--benchmark` 参数仍按第 2 节选择下载范围。
+- benchmark 模式不接受 test 专用的 `--eval-data` 和 `--max-new-tokens`，`--lengths` 仅用于 RULER。以上评估参数不用于训练或恢复；下载脚本的同名 `--benchmark` 参数仍按第 2 节选择下载范围。
 - 模型配置、tokenizer 和 memory 权重取自 checkpoint；只需选择一张 GPU。
 - 产物统一由 checkpoint 推导到原实验的 `eval/<method-dir>/<ruler|locomo>/global_step_N/`，单个、多个 checkpoint 与 `--eval-run` 使用同一规则。
 - 同类评估共用父目录的 `eval.json`，记录实际数据内容、模型／分词、生成与官方评分设置；已有协议后须保持一致，配置冲突时报错。每个 checkpoint 另存协议快照、逐题预测及计算完成标记 `summary.json`。
