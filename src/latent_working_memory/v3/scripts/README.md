@@ -151,9 +151,9 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | `--evaluate-only` | 仅评估已有 checkpoint，须指定 `--checkpoint` 或 `--eval-run` |
 | **配置与模型** |
 | `--method` | 训练的方法，必须指定；方法列表见[第 2.1 节](#21-完整运行) |
-| `--config` | 所选方法的 JSON 配置文件，默认读取 `configs/v3/` 下的预设 |
+| `--config` | 所选方法的 JSON 配置文件，默认 `configs/v3/` 下的预设 |
 | `--model-path` | 基座模型位置，默认 `~/models/Qwen3-4B-Instruct-2507` |
-| `--seed` | 控制初始化、样本选择、数据打乱等随机性，预设为 20261004 |
+| `--seed` | 随机种子，控制初始化、样本选择、数据打乱等随机性，默认 20261004 |
 | **目录与设备** |
 | `--run-id` | 实验运行编号，默认 `YYYYMMDD-HHMMSS` |
 | `--output-root` | 运行产物的父目录，默认 `artifacts/v3` |
@@ -161,8 +161,8 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | **训练数据** |
 | `--pretrain-data` | 预训练数据目录，默认位置见[第 1 节](#1-准备环境模型与数据) |
 | `--qa-data` | QA 训练数据目录，默认位置见[第 1 节](#1-准备环境模型与数据) |
-| `--max-pretrain-train-samples` | 预训练阶段训练样本上限，默认 12800 |
-| `--max-qa-train-samples` | QA 训练样本上限，默认 `null`（全部） |
+| `--max-pretrain-train-samples` | 预训练阶段训练样本数上限，默认 12800 |
+| `--max-qa-train-samples` | QA 训练样本数上限，默认 `null`（全部） |
 | `--max-pretrain-data-tokens` | 预训练正文上限，默认 12288 |
 | `--max-qa-data-tokens` | QA 训练正文上限，默认 12288 |
 | **训练时长** |
@@ -217,11 +217,11 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | `--checkpoint` | 用于动态方法后训练初始化、训练恢复或独立评估，其中独立评估支持传入同一 run 的多个 checkpoint 目录|
 | `--eval-run` | 仅用于独立评估，指定 `train/<method-dir>/` 方法目录，评估其全部保留的 checkpoint |
 | **Dev 验证** |
-| `--max-dev-samples` | dev 验证样本上限，默认 `null`（全部），`smoke` 默认 4 |
+| `--max-dev-samples` | dev 验证样本数上限，默认 `null`（全部），`smoke` 默认 4 |
 | `--dev-every` | dev 验证的 optimizer step 间隔，`full` 默认 25，`smoke` 默认 1 |
 | **Test 评估** |
 | `--test-data` | test 数据目录，默认同 `--qa-data` |
-| `--max-test-samples` | test 评估样本上限，默认 `null`（全部），`smoke` 默认 2 |
+| `--max-test-samples` | test 评估样本数上限，默认 `null`（全部），`smoke` 默认 2 |
 | `--max-new-tokens` | test 评估时 token 生成上限，默认 64 |
 | **SwanLab** |
 | `--tracking` | SwanLab 记录方式，默认 `online`，`disabled` 仅保存本地产物 |
