@@ -175,7 +175,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 
 - `--train-only`、`--resume`、`--evaluate-only` 互斥。
 - 配置中的 `objective.method` 须与所选方法对应，`objective.stages` 指定训练阶段顺序。独立动态预训练（`--method dynamic_pretrain`）的 method／stages 分别为 `dynamic`／`["pretrain"]`。
-- 长度筛选仅用于 train 正文，不含记忆、提示和目标等。`--max-pretrain-data-tokens` 和 `--max-qa-data-tokens` 接受正整数或 `null`：超限样本整条排除，`null` 跳过该长度筛选。实际每次编码／解码仍须满足模型窗口限制。
+- 长度筛选仅用于 train 正文，不含系统提示、gist token、目标文本等。`--max-<pretrain/qa>-data-tokens` 接受正整数或 `null`：超限样本整条排除，`null` 跳过该长度筛选。实际每次编码／解码仍须满足模型窗口限制。
 - 全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数，默认按全局 batch 16 进行设置。`--qa-batch-size` 控制读取并行量，不改变选题数量。
 
 ### 4.2 训练目标与压缩策略
@@ -214,8 +214,8 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | **Checkpoint** |
 | `--save-every` | checkpoint 保存的正整数 optimizer step 间隔或 `after_each_epoch`，默认 25，`smoke` 默认 1 |
 | `--save-total-limit` | 保留最近成功保存的 checkpoint 数，默认 2 |
-| `--checkpoint` | 用于动态方法后训练初始化、训练恢复或独立评估，其中独立评估支持传入同一 run 的多个 checkpoint 目录|
-| `--eval-run` | 仅用于独立评估，指定 `train/<method-dir>/` 方法目录，评估其全部保留的 checkpoint |
+| `--checkpoint` | 用于动态方法后训练初始化、训练恢复或独立评估，其中独立评估支持传入同一 run 的多个 checkpoint 目录 |
+| `--eval-run` | 仅用于独立评估，指定 `train/<method-dir>/`，评估其全部保留的 checkpoint |
 | **Dev 验证** |
 | `--max-dev-samples` | dev 验证样本数上限，默认 `null`（全部），`smoke` 默认 4 |
 | `--dev-every` | dev 验证的 optimizer step 间隔，`full` 默认 25，`smoke` 默认 1 |
@@ -224,7 +224,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | `--max-test-samples` | test 评估样本数上限，默认 `null`（全部），`smoke` 默认 2 |
 | `--max-new-tokens` | test 评估时 token 生成上限，默认 64 |
 | **SwanLab** |
-| `--tracking` | SwanLab 记录方式，默认 `online`，`disabled` 仅保存本地产物 |
+| `--tracking` | SwanLab 记录方式，支持 `online`（默认）和 `disabled`（仅保存本地产物） |
 | `--swanlab-project` | SwanLab 项目，默认 `latent-working-memory-v3` |
 | `--group` | SwanLab 实验分组，默认当前 `run-id` |
 
