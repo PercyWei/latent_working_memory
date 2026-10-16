@@ -102,6 +102,21 @@ def training_tracking(config, run, device, resume=False):
 
 def configure_write_loss_panels(api, remote):
     """合并默认视图中的写入前后曲线，删除冗余面板并保留标量数据。"""
+    for split in ("train", "dev"):
+        title = f"{split}/write_loss"
+        _configure_line_panels(
+            api,
+            remote,
+            split,
+            [(title, (
+                (f"{split}/write_loss_before", "写入前", "#74a9cf"),
+                (title, "写入后", "#2b8cbe"),
+            ))],
+        )
+
+
+def _configure_line_panels(api, remote, section_name, panels):
+    """按同一 optimizer step 合并可比标量，保留已有 run 的配色和图例。"""
     def checked(response):
         if not response.ok:
             raise RuntimeError(response.errmsg)
@@ -113,22 +128,20 @@ def configure_write_loss_panels(api, remote):
     sections_path = f"/sections/{project_path}/{view}"
     sections = checked(api._get(sections_path, params={"size": 100}))
     charts_path = f"/charts/{project_path}/{view}"
-    for split in ("train", "dev"):
-        section = next((row for row in sections if row["name"] == split), None)
-        if section is None:
-            section = checked(
-                api._post(
-                    sections_path,
-                    data={"name": split, "index": secrets.token_hex(3), "position": "above"},
-                )
+    section = next((row for row in sections if row["name"] == section_name), None)
+    if section is None:
+        section = checked(
+            api._post(
+                sections_path,
+                data={"name": section_name, "index": secrets.token_hex(3), "position": "above"},
             )
-            section["chartIndex"] = []
-        charts = [
-            checked(api._get(f"{charts_path}/xxxxxx/{index}")) for index in section["chartIndex"]
-        ]
-        title = f"{split}/write_loss"
-        before = f"{split}/write_loss_before"
-        names = (before, title)
+        )
+        section["chartIndex"] = []
+    charts = [
+        checked(api._get(f"{charts_path}/xxxxxx/{index}")) for index in section["chartIndex"]
+    ]
+    for title, series in panels:
+        names = {title, *(metric for metric, _, _ in series)}
         existing = next(
             (chart for chart in charts if chart["title"] == title and chart["type"] == "LINE"),
             None,
@@ -138,9 +151,7 @@ def configure_write_loss_panels(api, remote):
             if chart["type"] == "LINE" and chart["title"] in names:
                 custom.update(chart.get("custom") or {})
         custom.update((existing or {}).get("custom") or {})
-        for metric, label, color in zip(
-            names, ("写入前", "写入后"), ("#74a9cf", "#2b8cbe"), strict=True
-        ):
+        for metric, label, color in series:
             custom[f"{remote.run_id}-{metric}"] = {
                 "name": f"{remote.name}/{label}",
                 "colors": [color, color],
@@ -153,7 +164,8 @@ def configure_write_loss_panels(api, remote):
                 **((existing or {}).get("config") or {}),
                 "xAxis": {"key": "step", "type": "SYSTEM", "class": "SCALAR"},
                 "yAxis": [
-                    {"key": metric, "type": "FLOAT", "class": "SCALAR"} for metric in names
+                    {"key": metric, "type": "FLOAT", "class": "SCALAR"}
+                    for metric, _, _ in series
                 ],
             },
         }
@@ -165,7 +177,7 @@ def configure_write_loss_panels(api, remote):
             if chart["index"] == existing["index"] or chart["type"] != "LINE":
                 continue
             keys = {axis["key"] for axis in chart["config"]["yAxis"]}
-            if chart["title"] in names and keys and keys <= set(names):
+            if chart["title"] in names and keys and keys <= names:
                 checked(api._delete(f"{charts_path}/{section['index']}/{chart['index']}"))
 
 
@@ -189,7 +201,7 @@ def log_metrics(tracking, record):
 
 
 def evaluation_media(summary):
-    """最终 checkpoint 的质量和写入诊断；样本、容量及资源明细留在本地。"""
+    """单个 checkpoint 的质量和写入诊断；样本、容量及资源明细留在本地。"""
     metrics = summary["metrics"]
     panels = [
         ("nll", ["答案 NLL"], [metrics["nll"]], "NLL"),
@@ -218,8 +230,47 @@ def evaluation_media(summary):
     return values
 
 
+def _evaluation_checkpoint_series(summary):
+    """多 checkpoint 仅追加当前步的核心标量；benchmark 任务明细留在本地。"""
+    metrics = summary["metrics"]
+    prefix = "evaluation/checkpoints"
+    if "benchmark" in summary:
+        benchmark = summary["benchmark"]
+        prefix = f"{prefix}/{benchmark}"
+        values = {f"{prefix}/score": metrics["score"]}
+        series = [(f"{prefix}/score", "总体", "#1d3f55")]
+        groups = metrics["by_length"] if benchmark == "ruler" else metrics["groups"]
+        for index, row in enumerate(groups):
+            if benchmark == "ruler":
+                name, label = f"length_{row['length']}", f"{row['length'] / 1024:g}K"
+            else:
+                name, label = f"category_{row['category']}", row["category_name"]
+            fraction = 0.6 * (1 - index / max(1, len(groups) - 1))
+            color = "#" + "".join(
+                f"{round(channel + (255 - channel) * fraction):02x}" for channel in (49, 104, 142)
+            )
+            values[f"{prefix}/{name}"] = row["score"]
+            series.append((f"{prefix}/{name}", label, color))
+        return values, [(prefix, series)]
+    values = {
+        f"{prefix}/{name}": metrics[name]
+        for name in ("nll", "em", "f1", "write_loss_before", "write_loss")
+    }
+    return values, [
+        (f"{prefix}/nll", [(f"{prefix}/nll", "答案 NLL", "#31688e")]),
+        (f"{prefix}/em_f1", [
+            (f"{prefix}/em", "EM", "#74a9cf"),
+            (f"{prefix}/f1", "F1", "#2b8cbe"),
+        ]),
+        (f"{prefix}/write_loss", [
+            (f"{prefix}/write_loss_before", "写入前", "#74a9cf"),
+            (f"{prefix}/write_loss", "写入后", "#2b8cbe"),
+        ]),
+    ]
+
+
 def validate_evaluation_publication(run, checkpoint_path, step):
-    """在线评估前核对本地训练身份和最终 checkpoint；不访问远端。"""
+    """在线评估前核对已完成训练的身份和成功保存 checkpoint；不访问远端。"""
     training = run["training"]
     if training["swanlab_project"] is None:
         raise ValueError("evaluation publication requires a checkpoint configured for SwanLab")
@@ -230,11 +281,14 @@ def validate_evaluation_publication(run, checkpoint_path, step):
     result = json.loads((root / "training-result.json").read_text(encoding="utf-8"))
     if (
         not result["complete"]
-        or checkpoint_path.parent != root / "checkpoints"
-        or checkpoint_path != Path(result["checkpoint"]).resolve()
-        or step != result["completed_steps"]
+        or type(step) is not int
+        or not 0 < step <= result["completed_steps"]
+        or checkpoint_path != root / "checkpoints" / f"global_step_{step}"
+        or not (checkpoint_path / "state.pt").is_file()
+        or Path(result["checkpoint"]).resolve()
+        != root / "checkpoints" / f"global_step_{result['completed_steps']}"
     ):
-        raise ValueError("publication requires the completed training run's final checkpoint")
+        raise ValueError("publication requires a saved checkpoint from the completed training run")
     identity = json.loads((root / "swanlab.json").read_text(encoding="utf-8"))
     expected = training_identity(training)
     if any(identity[name] != value for name, value in expected.items()):
@@ -246,8 +300,10 @@ def validate_evaluation_publication(run, checkpoint_path, step):
     return root, identity, project_path
 
 
-def append_evaluation(run, checkpoint_path, summary, output_dir, media=None):
-    """将最终 test 评估追加到原训练 run；benchmark 提供对应的汇总图。"""
+def append_evaluation(
+    run, checkpoint_path, summary, output_dir, media=None, checkpoint_series=False
+):
+    """将 test 评估追加到原训练 run；多 checkpoint 使用真实步数的原生曲线。"""
     if (
         summary["split"] != "test"
         or Path(summary["checkpoint"]["path"]).resolve() != Path(checkpoint_path).resolve()
@@ -258,7 +314,8 @@ def append_evaluation(run, checkpoint_path, summary, output_dir, media=None):
     )
     workspace, project = project_path.split("/")
     api_key = swanlab_api_key()
-    remote = swanlab.Api(api_key=api_key).run(f"{project_path}/{identity['id']}")
+    api = swanlab.Api(api_key=api_key)
+    remote = api.run(f"{project_path}/{identity['id']}")
     if remote.state != "FINISHED":
         raise ValueError("evaluation append requires a finished training run")
     remote_config = {
@@ -271,7 +328,11 @@ def append_evaluation(run, checkpoint_path, summary, output_dir, media=None):
     expected_config.update(run)
     if any(remote_config.get(name) != value for name, value in expected_config.items()):
         raise ValueError("SwanLab configuration differs from the saved training run")
-    values = evaluation_media(summary) if media is None else media
+    if checkpoint_series:
+        values, panels = _evaluation_checkpoint_series(summary)
+    else:
+        values = evaluation_media(summary) if media is None else media
+        panels = []
     with swanlab.init(
         project=project,
         workspace=workspace,
@@ -291,8 +352,15 @@ def append_evaluation(run, checkpoint_path, summary, output_dir, media=None):
             probe={"git": False, "monitor": False},
         ),
     ) as tracking:
+        if checkpoint_series:
+            with (root.parents[2] / ".swanlab-panels.lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                _configure_line_panels(api, remote, "evaluation", panels)
         for name in values:
-            tracking.define_metric(name, section_name="evaluation")
+            if checkpoint_series:
+                tracking.define_metric(name, x_axis="_step", section_name="evaluation")
+            else:
+                tracking.define_metric(name, section_name="evaluation")
         tracking.log(values, step=summary["checkpoint"]["step"])
     publication = {
         "training_dir": str(root),
@@ -302,7 +370,10 @@ def append_evaluation(run, checkpoint_path, summary, output_dir, media=None):
         "group": identity["group"],
         "checkpoint": summary["checkpoint"],
         "split": summary["split"],
-        "panels": list(values),
+        "checkpoint_series": checkpoint_series,
+        "panels": [title for title, _ in panels] if checkpoint_series else list(values),
+        "metric_names": list(values),
+        "x_axis": "_step" if checkpoint_series else None,
         "metrics": summary["metrics"],
         "summary_file": str(Path(output_dir).resolve() / "summary.json"),
     }

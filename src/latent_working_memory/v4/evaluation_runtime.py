@@ -4,7 +4,7 @@ from pathlib import Path
 import time
 
 import torch
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 
 from latent_working_memory.v4.config import ModelConfig
 from latent_working_memory.v4.model import StreamingMemoryLM
@@ -55,12 +55,18 @@ class TimedStreamingMemoryLM(StreamingMemoryLM):
         }
 
 
-def load_evaluation_model(checkpoint, device):
-    """沿用训练时的基座模型、tokenizer 和记忆读写参数。"""
+def load_evaluation_inputs(checkpoint):
+    """只读取配置和 tokenizer，结果复用时无需加载 LM。"""
     run = checkpoint["run"]
     config = ModelConfig(**run["model"])
     tokenizer_path = Path(run["training"]["output_dir"]).expanduser().resolve() / "tokenizer"
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    backbone_config = AutoConfig.from_pretrained(config.model_name_or_path)
+    return config, tokenizer, backbone_config
+
+
+def load_evaluation_model(checkpoint, device, config):
+    """沿用训练时的基座模型和已保存的记忆读写参数。"""
     model = TimedStreamingMemoryLM(config).to(device).eval()
     model.load_trainable_state_dict(checkpoint["memory"])
-    return model, tokenizer, config
+    return model

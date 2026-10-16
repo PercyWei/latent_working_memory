@@ -78,8 +78,10 @@ class TrainingConfig:
     weight_decay: float = 0.01
     gradient_clip: float = 1.0
     seed: int = 42
-    max_seq_length: int | None = None
-    eval_every: int = 50
+    max_train_data_tokens: int | None = None
+    max_train_samples: int | None = None
+    max_dev_samples: int | None = None
+    dev_every: int = 50
     save_every: int | str = 50
     save_total_limit: int = 2
     swanlab_project: str | None = None
@@ -101,10 +103,10 @@ class TrainingConfig:
             type(self.save_every) is not int or self.save_every < 1
         ):
             raise ValueError("save_every must be a positive integer or after_each_epoch")
-        if self.max_seq_length is not None and (
-            type(self.max_seq_length) is not int or self.max_seq_length < 1
-        ):
-            raise ValueError("max_seq_length must be null or a positive integer")
+        for name in ("max_train_data_tokens", "max_train_samples", "max_dev_samples"):
+            value = getattr(self, name)
+            if value is not None and (type(value) is not int or value < 1):
+                raise ValueError(f"{name} must be null or a positive integer")
         if type(self.seed) is not int or self.seed < 0:
             raise ValueError("seed must be a nonnegative integer")
         finite_number(self.learning_rate, "learning_rate")
@@ -125,13 +127,6 @@ class TrainingConfig:
         return world_size * self.micro_batch_size_per_gpu * self.gradient_accumulation_steps
 
 
-def validate_experiment(model, training):
-    """检查模型与训练配置共同决定的约束。"""
-    min_prompt_length = model.pending_size + model.recent_size + 1
-    if training.max_seq_length is not None and training.max_seq_length <= min_prompt_length:
-        raise ValueError(f"max_seq_length must exceed min_prompt_length ({min_prompt_length})")
-
-
 def load_experiment(path):
     path = Path(path).expanduser().resolve()
     raw = json.loads(path.read_text(encoding="utf-8"))
@@ -147,5 +142,4 @@ def load_experiment(path):
             if getattr(training, name) is not None
         },
     )
-    validate_experiment(model, training)
     return model, training

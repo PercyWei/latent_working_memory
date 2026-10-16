@@ -90,8 +90,6 @@ def run_training(args):
     model_config, config = load_experiment(args.config)
     if config.output_dir is None:
         raise ValueError("training requires output_dir; launch the preset through scripts/run.sh")
-    if args.stop_after_steps is not None and args.stop_after_steps < 1:
-        raise ValueError("stop_after_steps must be positive")
     device = initialize_device(args.device)
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
@@ -125,8 +123,11 @@ def run_training(args):
         dataset_dir / "dev.jsonl",
         tokenizer,
         min_prompt_length,
-        config.max_seq_length,
+        config.max_train_data_tokens,
         position_limit,
+        config.seed,
+        config.max_train_samples,
+        config.max_dev_samples,
     )
     engine = EngineRegistry.new(
         model_type="lwm_v4_meta", backend="replicated", model=model, config=config, device=device
@@ -196,20 +197,15 @@ def run_training(args):
             handler,
             cursor,
             resume,
-            args.stop_after_steps,
             tracking,
         )
 
 
-def train_loop(
-    engine, config, train, dev, loader, handler, cursor, checkpoint_path, stop, tracking
-):
+def train_loop(engine, config, train, dev, loader, handler, cursor, checkpoint_path, tracking):
     output = Path(config.output_dir)
     metrics_path = output / "metrics.jsonl"
     total_steps = config.epochs * math.ceil(len(train) / engine.global_batch_size)
     for epoch in range(cursor["epoch"], config.epochs):
-        if stop is not None and cursor["step"] >= stop:
-            break
         loader.sampler.set_epoch(epoch)
         for batch in loader:
             if engine.device.type == "cuda":
@@ -238,7 +234,6 @@ def train_loop(
             cursor["epoch"] = epoch + int(epoch_end)
             cursor["sample_offset"] = 0 if epoch_end else consumed
             step = cursor["step"]
-            stopping = stop is not None and step >= stop
             record = {
                 "step": step,
                 "epoch": epoch + 1,
@@ -246,7 +241,7 @@ def train_loop(
                 **{f"train/{k}": v for k, v in metrics.items()},
                 **{f"resources/{k}": v for k, v in resources.items()},
             }
-            if step % config.eval_every == 0 or epoch_end or stopping:
+            if step % config.dev_every == 0 or epoch_end:
                 development = evaluate(engine, dev)
                 record.update({f"dev/{k}": v for k, v in development.items()})
             if engine.rank == 0:
@@ -270,13 +265,9 @@ def train_loop(
                 if tracking is not None:
                     log_metrics(tracking, record)
             save_by_step = isinstance(config.save_every, int) and step % config.save_every == 0
-            if save_by_step or epoch_end or stopping:
+            if save_by_step or epoch_end:
                 handler.save_checkpoint(step)
                 checkpoint_path = output / "checkpoints" / f"global_step_{step}"
-            if stopping:
-                break
-        if stop is not None and cursor["step"] >= stop:
-            break
     result = {
         "complete": cursor["epoch"] == config.epochs,
         "completed_steps": cursor["step"],
@@ -296,7 +287,6 @@ def main():
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--resume", type=Path)
-    parser.add_argument("--stop-after-steps", type=int, help="停止于指定的全局 optimizer step")
     run_training(parser.parse_args())
 
 

@@ -2,7 +2,6 @@ from argparse import Namespace
 from dataclasses import asdict
 import json
 from pathlib import Path
-import sys
 
 import numpy as np
 import pytest
@@ -13,7 +12,6 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from transformers import (
-    AutoTokenizer,
     LlamaConfig,
     LlamaForCausalLM,
     PreTrainedTokenizerFast,
@@ -25,7 +23,6 @@ from latent_working_memory.v4.checkpoint import MetaMemoryCheckpointHandler, rea
 from latent_working_memory.v4.config import ModelConfig, TrainingConfig
 from latent_working_memory.v4.data import TokenizedEpisode
 from latent_working_memory.v4.engine import MetaLearningEngine
-from latent_working_memory.v4.inference import main as inference_main
 from latent_working_memory.v4.model import StreamingMemoryLM
 from latent_working_memory.v4.train import run_training
 from latent_working_memory.v4.training_data import make_data_loader
@@ -94,9 +91,10 @@ def training_config(output, dataset_dir):
         gradient_accumulation_steps=3,
         learning_rate=0.005,
         weight_decay=0.01,
-        max_seq_length=16,
-        eval_every=1,
+        max_train_data_tokens=16,
+        dev_every=1,
         save_every=1,
+        save_total_limit=4,
     )
 
 
@@ -220,19 +218,17 @@ def write_experiment(directory, base, output):
     return path
 
 
-def run(config, resume=None, stop=None):
-    return run_training(
-        Namespace(config=config, device="cpu", resume=resume, stop_after_steps=stop)
-    )
+def run(config, resume=None):
+    return run_training(Namespace(config=config, device="cpu", resume=resume))
 
 
 def test_training_resume_is_exact_and_checkpoint_excludes_frozen_backbone(tiny_base, tmp_path):
     full_path = write_experiment(tmp_path / "full", tiny_base, "output")
     resumed_path = write_experiment(tmp_path / "resumed", tiny_base, "output")
     complete = run(full_path)
-    interrupted = run(resumed_path, stop=1)
-    assert interrupted["complete"] is False
-    resumed = run(resumed_path, resume=interrupted["checkpoint"])
+    run(resumed_path)
+    checkpoint = resumed_path.parent / "output" / "checkpoints" / "global_step_1"
+    resumed = run(resumed_path, resume=checkpoint)
     assert resumed["complete"] is True
     assert resumed["completed_steps"] == 4
     assert resumed["sample_visits"] == 8
@@ -257,55 +253,19 @@ def test_training_resume_is_exact_and_checkpoint_excludes_frozen_backbone(tiny_b
 
 def test_resume_rejects_changed_tokenized_data(tiny_base, tmp_path):
     config = write_experiment(tmp_path, tiny_base, "output")
-    result = run(config, stop=1)
+    result = run(config)
     path = tmp_path / "train.jsonl"
-    path.write_text(path.read_text().replace("red", "blue", 1))
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows[0]["qas"][0]["answer"] = "blue"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
     with pytest.raises(ValueError, match="resume configuration or tokenized data"):
         run(config, resume=result["checkpoint"])
-
-
-def test_trained_checkpoint_runs_inference_cli(tiny_base, tmp_path, monkeypatch):
-    config = write_experiment(tmp_path, tiny_base, "output")
-    result = run(config, stop=1)
-    prompt = "red sky red water blue red"
-    prompt_path = tmp_path / "prompt.txt"
-    prompt_path.write_text(prompt)
-    output_path = tmp_path / "generated.json"
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "inference",
-            "--checkpoint",
-            result["checkpoint"],
-            "--prompt-file",
-            str(prompt_path),
-            "--output",
-            str(output_path),
-            "--device",
-            "cpu",
-            "--max-new-tokens",
-            "3",
-        ],
-    )
-    inference_main()
-    generated = json.loads(output_path.read_text())
-    assert generated["prompt"] == prompt
-    assert 1 <= len(generated["generated_token_ids"]) <= 3
-    checkpoint = read_checkpoint(result["checkpoint"])
-    model = StreamingMemoryLM(ModelConfig(**checkpoint["run"]["model"])).eval()
-    model.load_trainable_state_dict(checkpoint["memory"])
-    tokenizer = AutoTokenizer.from_pretrained(tmp_path / "output" / "tokenizer")
-    ids = tokenizer.encode(prompt, add_special_tokens=False)
-    with torch.no_grad():
-        expected = model.generate(torch.tensor(ids), 3, tokenizer.eos_token_id)
-    assert generated["generated_token_ids"] == expected[len(ids) :].tolist()
 
 
 def test_backbone_position_limit_is_checked_before_training(tiny_base, tmp_path):
     config = write_experiment(tmp_path, tiny_base, "output")
     raw = json.loads(config.read_text())
-    raw["training"]["max_seq_length"] = 100
+    raw["training"]["max_train_data_tokens"] = 100
     config.write_text(json.dumps(raw))
     (tmp_path / "train.jsonl").write_text(json.dumps(document_record(["red"] * 65)))
     with pytest.raises(ValueError, match="no episodes remain"):

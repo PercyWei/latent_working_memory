@@ -13,6 +13,10 @@ from latent_working_memory.v4.training_data import EpochSampler
 
 
 class IntegerTokenizer:
+    def encode(self, text, add_special_tokens):
+        assert add_special_tokens is False
+        return [int(token) for token in text.split()]
+
     def apply_chat_template(self, messages, tokenize, add_generation_prompt, enable_thinking):
         assert tokenize is True
         assert enable_thinking is False
@@ -45,7 +49,7 @@ def test_data_keeps_exact_tokens_and_accepts_inclusive_length_bounds(tmp_path):
         )
         + "\n"
     )
-    episodes = load_tokenized_episodes(path, IntegerTokenizer(), 5, 8, model_window=8)
+    episodes = load_tokenized_episodes(path, IntegerTokenizer(), 5, 6, model_window=8)
     short_group = hashlib.blake2b(b"1 2 3 4", digest_size=16).hexdigest()
     long_group = hashlib.blake2b(b"1 2 3 4 5 6", digest_size=16).hexdigest()
     assert episodes == (

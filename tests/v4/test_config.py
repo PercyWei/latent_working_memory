@@ -10,7 +10,7 @@ from latent_working_memory.v4.config import ModelConfig, TrainingConfig, load_ex
 def test_canonical_config_resolves_paths_and_rejects_unknown_fields(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     model = ModelConfig("local-model", pending_size=4, recent_size=2)
-    training = TrainingConfig("data", "output", max_seq_length=16)
+    training = TrainingConfig("data", "output", max_train_data_tokens=16)
     value = {"model": asdict(model), "training": asdict(training)}
     path = tmp_path / "configs" / "experiment.json"
     path.parent.mkdir()
@@ -46,7 +46,7 @@ def test_model_config_rejects_invalid_contract(values):
         ModelConfig("tiny", **values)
 
 
-def test_config_requires_sequence_limit_above_prompt_minimum(tmp_path):
+def test_config_allows_body_limit_below_prompt_minimum(tmp_path):
     path = tmp_path / "experiment.json"
     path.write_text(
         json.dumps(
@@ -55,13 +55,14 @@ def test_config_requires_sequence_limit_above_prompt_minimum(tmp_path):
                 "training": {
                     "dataset_dir": "data",
                     "output_dir": "out",
-                    "max_seq_length": 7,
+                    "max_train_data_tokens": 4,
                 },
             }
         )
     )
-    with pytest.raises(ValueError, match="max_seq_length must exceed min_prompt_length"):
-        load_experiment(path)
+    model, training = load_experiment(path)
+    assert training.max_train_data_tokens == 4
+    assert training.max_train_data_tokens < model.pending_size + model.recent_size + 1
 
 
 def test_query_norm_defaults_resolve_and_roundtrip():
