@@ -113,13 +113,17 @@ def parse_args(argv=None):
         "--qa-data",
         type=Path,
         default=Path("data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008"),
-        help="QA 训练数据目录；首次创建评估配置时默认共用此目录",
+        help="QA 数据目录，训练、验证和最终评估分别读取 train/dev/test.jsonl",
     )
-    parser.add_argument("--test-data", type=Path, help="独立的最终 QA 测试数据目录")
+    parser.add_argument(
+        "--eval-data",
+        type=Path,
+        help="覆盖最终 test 数据目录；独立评估无 eval.json 时必填，读取 test.jsonl",
+    )
     parser.add_argument(
         "--seed",
         type=nonnegative_count,
-        help="统一随机种子；新训练默认沿用 training.seed，独立评估默认复用 eval.json 或训练 seed",
+        help="统一随机种子；训练默认沿用 training.seed，评估沿用 eval.json，新建评估配置默认 20261004",
     )
     parser.add_argument(
         "--model-path", help="覆盖预设模型位置，当前预设为 ~/models/Qwen3-4B-Instruct-2507"
@@ -263,6 +267,8 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.eval_run is not None and not args.evaluate_only:
         parser.error("--eval-run requires --evaluate-only")
+    if args.eval_data is not None and (args.train_only or args.resume):
+        parser.error("--eval-data is not supported with --train-only or --resume")
     if args.evaluate_only:
         if args.checkpoint is None and args.eval_run is None:
             parser.error("--evaluate-only requires --checkpoint or --eval-run")
@@ -350,26 +356,28 @@ def save_json(path, value):
     )
 
 
-def resolve_evaluation_config(args, config_path, default_seed, level=None):
-    """沿用独立评估设置，只应用显式评估参数；旧产物须明确指定数据入口。"""
-    if config_path.is_file():
+def resolve_evaluation_config(args, config_path, level=None):
+    """沿用已有配置；独立评估首次创建时须显式指定数据，其他字段使用默认值。"""
+    if config_path.is_file() or args.resume:
         config = load_evaluation(config_path)
     else:
-        if level is None and args.test_data is None:
-            raise ValueError(f"{config_path} is missing; specify --test-data to create it")
+        dataset_dir = args.eval_data
+        if dataset_dir is None and not args.evaluate_only:
+            dataset_dir = args.qa_data
+        if dataset_dir is None:
+            raise ValueError(f"{config_path} is missing; specify --eval-data to create it")
         config = EvaluationConfig(
-            dataset_dir=str((args.test_data or args.qa_data).resolve()),
-            seed=default_seed,
+            dataset_dir=str(Path(dataset_dir).resolve()),
             max_test_samples=level["max_test_samples"] if level is not None else None,
         )
     updates = {}
     for argument, field in (
-        ("test_data", "dataset_dir"),
+        ("eval_data", "dataset_dir"),
         ("max_new_tokens", "max_new_tokens"),
     ):
         value = getattr(args, argument)
         if value is not None:
-            if argument == "test_data":
+            if argument == "eval_data":
                 value = str(value.resolve())
             updates[field] = value
     if args.seed is not None and not args.resume:
@@ -631,19 +639,7 @@ def _run_evaluation_locked(args, checkpoints, method_directory, started):
     )
     plan_directory = directory / "plan" / method_directory.name
     config_path = plan_directory / "eval.json"
-    default_seed = args.seed
-    if not config_path.is_file() and default_seed is None:
-        seeds = {
-            json.loads((stage / "run.json").read_text(encoding="utf-8"))["config"]["training"]["seed"]
-            for stage, _ in identities.values()
-        }
-        if len(seeds) != 1:
-            raise ValueError(
-                "selected checkpoints have different training seeds; specify --seed "
-                "to create their shared evaluation configuration"
-            )
-        default_seed = seeds.pop()
-    config = resolve_evaluation_config(args, config_path, default_seed)
+    config = resolve_evaluation_config(args, config_path)
     require_dataset_entries([config.dataset_dir])
     training_dir = (
         validate_evaluation_publication(checkpoints) if args.tracking == "online" else None
@@ -820,7 +816,7 @@ def run_resume(args):
     result["checkpoints"][jobs[0].key] = str(args.checkpoint.resolve())
     evaluation_path = plan_directory / "eval.json"
     evaluation_config = (
-        resolve_evaluation_config(args, evaluation_path, jobs[0].config.training.seed)
+        resolve_evaluation_config(args, evaluation_path)
         if any(job.evaluate for job in jobs)
         else None
     )
@@ -889,7 +885,7 @@ def run_job(args):
     }
     evaluation_path = plan_directory / "eval.json"
     evaluation_config = (
-        resolve_evaluation_config(args, evaluation_path, first.config.training.seed, level)
+        resolve_evaluation_config(args, evaluation_path, level)
         if evaluation_directories
         else None
     )

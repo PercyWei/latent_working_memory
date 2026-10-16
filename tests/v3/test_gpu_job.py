@@ -1040,9 +1040,9 @@ def test_cli_only_overrides_explicitly_supplied_preset_values(tmp_path, monkeypa
             str(Path.home() / "models/override-model") if override else "local/preset-model"
         )
         evaluation_config = gpu_job.resolve_evaluation_config(
-            args, job.config_path.parent / "eval.json", job.config.training.seed, level
+            args, job.config_path.parent / "eval.json", level
         )
-        assert evaluation_config.seed == job.config.training.seed
+        assert evaluation_config.seed == (args.seed if args.seed is not None else 20261004)
 
 
 @pytest.mark.parametrize("method", DYNAMIC_METHODS)
@@ -1375,7 +1375,7 @@ def test_explicit_overrides_and_null_remove_profile_limits(tmp_path):
     assert job.config.model.model_name_or_path == "models/local Qwen3"
     assert level["max_steps"] is None
     evaluation_config = gpu_job.resolve_evaluation_config(
-        args, job.config_path.parent / "eval.json", job.config.training.seed, level
+        args, job.config_path.parent / "eval.json", level
     )
     assert evaluation_config.max_test_samples is None
     assert level["dev_every"] == 2 and level["save_every"] == 3

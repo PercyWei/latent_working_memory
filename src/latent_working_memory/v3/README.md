@@ -80,7 +80,8 @@
 
 通用设置：
 
-- **随机性**：统一使用 `training.seed` 控制初始化、数据采样与打乱、目标选择、分块和动作抽样；评估配置保存执行 seed，默认继承训练值。
+- **数据入口**：`--pretrain-data` 指定预训练数据集，读取其中的 `train.jsonl`／`dev.jsonl`；`--qa-data` 指定 QA 数据集，QA 阶段读取 train／dev，最终 QA 评估读取其 `test.jsonl`。AutoCompressors 等仅预训练的方法也使用 QA test，不使用预训练目录的 test。
+- **随机性**：`training.seed` 控制训练中的初始化、数据采样与打乱、目标选择、分块和动作抽样；评估使用 `eval.json` 中的 seed，首次创建默认 20261004，可用 `--seed` 覆盖。
 - **数据校验**：加载时检查数据集的划分与来源，以及 FineWeb FactQA 的 task／gate 题池隔离。
 - **长度限制**：两类数据均使用完整正文。Multisegment 和 FactQA 分别通过 `training.max_pretrain_data_tokens` 与 `training.max_qa_data_tokens` 筛选 train 正文，默认均为 12288；正整数仅按给定值筛选，超限样本整条排除，`null` 跳过长度上限筛选。dev/test 不按该上限过滤。
 - **QA 损失**：先平均每题答案 token 的 NLL，再按实际题数平均。
@@ -198,6 +199,8 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | 最终评估 | FineWeb FactQA test，评估全部可见 task QA | NLL、EM、F1 |
 
 完整训练默认只评估最后一个保存的 checkpoint。评估中间 checkpoint 需要进行单独评估，用 `--checkpoint` 选择同一运行所保存的一个或多个 checkpoint，或用 `--eval-run` 指定 `train/<method-dir>/` 以评估同一运行所保留的全部 checkpoint；两种入口互斥。
+
+单独评估默认沿用保存的 `eval.json`；没有该配置时，必须传入 `--eval-data` 指定数据目录，读取其中的 `test.jsonl`。新配置默认 seed 为 20261004、评估全部样本、最多生成 64 tokens，不继承训练 seed；可用对应参数覆盖。`--eval-data` 默认 `null`，传入时覆盖本次评估目录，不修改训练配置。已有评估历史后仍须遵守相同数据与 QA 协议，冲突时报错。
 
 单独评估由 `--gpus` 指定计算资源，每张卡一个固定槽位，并行完成各 checkpoint 的计算；全部计算结束后，由父进程汇总结果，串行上传完整报告，checkpoint 按真实累计 step 排列。缓存结果和上传不占用 GPU。同一方法 run 同时只运行一个评估调度任务，共用原 `eval.json`、seed 与 QA 协议，GPU 分配不改变选题。单个 checkpoint 计算失败不影响其他结果保存，报告上传失败也保留全部本地结果；最后汇总失败并以非零状态退出，重新执行原命令复用已完成结果。命令见[单独评估指南](scripts/README.md#22-单独评估)。
 

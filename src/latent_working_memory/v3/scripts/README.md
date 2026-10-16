@@ -9,11 +9,12 @@
 | 内容 | 默认位置 | 覆盖参数 |
 |---|---|---|
 | Qwen3-4B-Instruct-2507 | `~/models/Qwen3-4B-Instruct-2507` | `--model-path` |
-| AE／LM 训练数据 | `data/fineweb-multisegment-k512-seg1to3x_train32k_20261008/` | `--pretrain-data` |
-| QA 训练数据 | `data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008/` | `--qa-data` |
-| QA test 数据 | 默认同上 | `--test-data` |
+| AE／LM 数据 | `data/fineweb-multisegment-k512-seg1to3x_train32k_20261008/` | `--pretrain-data` |
+| QA 数据 | `data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008/` | `--qa-data` |
 
 数据目录须保留 `preparation.json` 与 `train/dev/test.jsonl`。数据集详细格式见 [FineWeb Multisegment](../../data_preparation/fineweb_multisegment/README.md) 和 [FineWeb FactQA](../../data_preparation/fineweb_factqa/README.md)，可从 [ModelScope](https://modelscope.cn/datasets/percyWeeei/latent-working-memory/files) 下载。
+
+预训练读取 `--pretrain-data` 下的 train／dev，后训练阶段读取 `--qa-data` 下的 train／dev；最终评估统一读取 QA 目录的 `test.jsonl`。
 
 默认记录到 SwanLab 项目 `latent-working-memory-v3`，使用项目 `.env` 中的 key。加 `--tracking disabled` 仅保存本地产物，无需 SwanLab key。
 
@@ -27,16 +28,12 @@ bash src/latent_working_memory/v3/scripts/run.sh \
   --run-id capacity-comparison_20261010-01
 ```
 
-- `--mode` 支持试跑（`smoke`）和正式运行（`full`）。
+支持试跑（`smoke`）和完整运行（`full`，默认）：
 
-  | 档位 | 每阶段训练样本上限 | 每阶段 steps 上限 | dev / test 数据上限 |
-  |---|---|---|---|
-  | `smoke` | 16 | 2 | 4 / 2 |
-  | `full`（默认） | 不同阶段默认配置不同 | 默认 1 epoch | 默认全部 / 全部 |
-
-- `--max-dev-samples` 和 `--max-test-samples` 分别控制 dev 和 test 评估，均接受正整数或 `null`（默认，表示全部）。
-- 新训练加 `--train-only` 时会跳过训练结束后的 QA 评估，其不能与 `--resume` 或 `--evaluate-only` 同用。
-- `--run-id` 默认使用格式为 `YYYYMMDD-HHMMSS` 的当前时间。动态后训练复用预训练 checkpoint 时，省略该参数则继承来源编号。
+| 运行模式 | 每阶段训练样本上限 | 每阶段 steps 上限 | dev / test 数据上限 |
+|---|---|---|---|
+| `smoke` | 16 | 2 | 4 / 2 |
+| `full` | 不同阶段默认配置不同 | 默认 1 epoch | 默认全部 / 全部 |
 
 ### 2.1 完整运行
 
@@ -79,8 +76,8 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 ```
 
 - `--method` 可以设为 `memory_change`、`information_loss`。
-- `--writer-mode` 仅用于动态后训练，可选 `local`、`tag`、`mask`、`dual_lora`；使用 `tag` 时可加 `--tag-tokens 3`。动态预训练不使用此参数。
-- 同系列后训练可省略 `--run-id`，自动继承 checkpoint 来源预训练的编号。
+- `--writer-mode` 仅用于动态后训练，可选 `local`、`tag`、`mask`、`dual_lora`；使用 `tag` 时可加 `--tag-tokens 3`。
+- 同系列后训练可省略 `--run-id`，自动继承 checkpoint 来源预训练运行的实验编号。
 - 若要执行完整训练流程，在配置中声明 `"stages": ["pretrain", "warmup", "policy"]`，将 `training.max_pretrain_train_samples` 设为 `12800`，然后通过 `--config` 启动。
 
 ### 2.2 单独评估
@@ -106,12 +103,9 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 - `--evaluate-only` 须搭配 `--eval-run` 或 `--checkpoint`，两者互斥。
 - `--eval-run` 仅用于单独评估，指向 `artifacts/v3/<run-id>/train/<method-dir>/` 方法级目录，会扫描其各阶段当前保留且包含 `state.pt` 的 checkpoint。
 - `--checkpoint` 仅接受属于同一 run 下的单/多个 checkpoint 列表。
-- `--gpus 0,1` 为每张物理卡分配一个固定计算槽位，各 checkpoint 并行计算；全部计算结束后，由父进程汇总结果，串行上传完整报告，checkpoint 按真实累计 step 排列。计算子进程退出后释放 GPU，缓存结果和上传不占用 GPU。训练时该参数仍指定参与训练的 GPU。
-- 同一方法 run 同时只运行一个评估调度任务。所有 checkpoint 共用原评估配置与 seed，GPU 分配不改变选题。
-- 默认原样复用 `plan/<method-dir>/eval.json`，模型、方法和写入配置从 checkpoint 读取。首次评估前可用 `--test-data`、`--seed`、`--max-test-samples`、`--max-new-tokens` 设置评估条件；已有评估历史后，同一 run 须保持相同 test 配置与 QA 协议。
+- 多 checkpoint 评估时支持设置多 GPU 并行计算，全部计算结束后，由父进程汇总结果，串行上传完整报告，checkpoint 按真实累计 step 排列。
+- 默认沿用评估配置 `plan/<method-dir>/eval.json`。缺少该文件时，必须传入 `--eval-data` 以创建评估配置；`--seed`、`--max-test-samples`、`--max-new-tokens` 非必须，可使用默认值。模型、方法和写入配置从 checkpoint 读取。
 - 每个 checkpoint 的结果独立保存。相同 checkpoint、相同配置复用已有结果和日志；在线发布将本次选中的结果与此前已发布的本地结果合并为完整报告，其他离线结果须明确选择后才发布。内容相同时仅检查、修复云端布局；需要更新时从缓存重建，补发日志追加到原 `eval.log`，不重新计算 QA，也无需保留此前 checkpoint 的权重。
-- 单个 checkpoint 计算失败不影响其他结果保存，报告上传失败也保留全部本地结果；最终汇总失败并以非零状态退出，重新执行原命令复用已完成的本地结果。
-- 保持参数不变重新执行上述命令，可从本地结果更新展示；需要转换布局时上传一次完整报告。删除云端 `evaluation` 分组后也可用同一命令恢复图表和统计表；仅修复布局时复用已上传的媒体版本，不重复追加版本。
 - 默认追加到原训练 SwanLab run，须保留原训练目录与身份文件且云端 run 状态为 `FINISHED`；加 `--tracking disabled` 仅保存本地结果。
 
 ### 2.3 中断恢复
@@ -124,8 +118,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
   --checkpoint artifacts/v3/capacity-comparison_20261010-01/train/information-loss-k512+32-local/warmup/checkpoints/global_step_N
 ```
 
-- 保留原 `plan/<method-dir>/job.json` 和阶段 `config.json`，恢复沿用原 `run-id`、训练配置、预算与 SwanLab 身份，不应用 CLI 训练超参数覆盖。
-- 最终评估沿用 `eval.json`；已有评估历史时须保持同一 test 配置与 QA 协议，配置冲突会在恢复训练前报错。
+- 训练配置等信息均沿用原运行，忽略 CLI 参数覆盖。
 - 可重新选择物理 GPU，卡数须与原任务一致。
 
 ## 3. 复用动态预训练
@@ -136,9 +129,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 
 ## 4. 调整参数
 
-以下默认值以正式运行（`full`）和仓库预设为准，`smoke` 的额外限制见[第 2 节](#2-运行)。新训练的显式 CLI 超参数覆盖方法配置；中断恢复沿用保存的训练配置，见[第 2.3 节](#23-中断恢复)。完整参数可通过 `bash src/latent_working_memory/v3/scripts/run.sh --help` 查看。
-
-统一使用 `--seed` 控制随机性，接受非负整数（0 有效），不接受 `null`。训练默认采用 `training.seed`，评估默认沿用 `eval.json`，首次创建时继承训练 seed；各环节按样本、epoch 和用途派生局部随机流。
+以下默认值以正式运行（`full`）和仓库预设为准，`smoke` 的额外限制见[第 2 节](#2-运行)。
 
 ### 4.1 训练输入与执行预算
 
@@ -147,7 +138,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | **运行方式** |
 | `--mode` | 运行模式，支持 `full`（默认）和 `smoke` |
 | `--train-only` | 只进行训练及 dev 验证，跳过 test 评估 |
-| `--resume` | 从 checkpoint 恢复并沿用原配置继续未完成的训练和评估，须指定 `--checkpoint` |
+| `--resume` | 从 checkpoint 恢复并沿用原配置继续训练及评估，须指定 `--checkpoint` |
 | `--evaluate-only` | 仅评估已有 checkpoint，须指定 `--checkpoint` 或 `--eval-run` |
 | **配置与模型** |
 | `--method` | 训练的方法，必须指定；方法列表见[第 2.1 节](#21-完整运行) |
@@ -158,9 +149,9 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | `--run-id` | 实验运行编号，默认 `YYYYMMDD-HHMMSS` |
 | `--output-root` | 运行产物的父目录，默认 `artifacts/v3` |
 | `--gpus` | 物理 GPU 编号，默认 `0,1` |
-| **训练数据** |
-| `--pretrain-data` | 预训练数据目录，默认位置见[第 1 节](#1-准备环境模型与数据) |
-| `--qa-data` | QA 训练数据目录，默认位置见[第 1 节](#1-准备环境模型与数据) |
+| **数据集** |
+| `--pretrain-data` | 预训练数据集目录，默认位置见[第 1 节](#1-准备环境模型与数据) |
+| `--qa-data` | QA 数据集目录，默认位置见[第 1 节](#1-准备环境模型与数据) |
 | `--max-pretrain-train-samples` | 预训练阶段训练样本数上限，默认 12800 |
 | `--max-qa-train-samples` | QA 训练样本数上限，默认 `null`（全部） |
 | `--max-pretrain-data-tokens` | 预训练正文上限，默认 12288 |
@@ -220,16 +211,15 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | `--max-dev-samples` | dev 验证样本数上限，默认 `null`（全部），`smoke` 默认 4 |
 | `--dev-every` | dev 验证的 optimizer step 间隔，`full` 默认 25，`smoke` 默认 1 |
 | **Test 评估** |
-| `--test-data` | test 数据目录，默认同 `--qa-data` |
-| `--max-test-samples` | test 评估样本数上限，默认 `null`（全部），`smoke` 默认 2 |
+| `--eval-data` | 用于完整运行或独立评估时覆盖 test 数据目录，默认 `null` |
+| `--max-test-samples` | test 评估样本数上限，默认 `null`（全部）；仅新训练 `smoke` 的自动评估默认 2 |
 | `--max-new-tokens` | test 评估时 token 生成上限，默认 64 |
 | **SwanLab** |
 | `--tracking` | SwanLab 记录方式，支持 `online`（默认）和 `disabled`（仅保存本地产物） |
 | `--swanlab-project` | SwanLab 项目，默认 `latent-working-memory-v3` |
 | `--group` | SwanLab 实验分组，默认当前 `run-id` |
 
-- epoch 末会自动保存 checkpoint 以及进行 dev 验证。
-- 评估的数据目录、seed、样本上限和生成上限保存于 `plan/<method-dir>/eval.json`，每个 checkpoint 的结果目录另存本次快照。正常训练、续训与单独评估默认复用该配置；已有评估历史后，显式参数须与原设置一致。方法配置从 checkpoint 读取。指标与计算场景见[评估说明](../README.md#51-评估方式与指标)。
+- 除了 `--save-every` 和 `--dev-every` 所指定的 step，epoch 末会自动保存 checkpoint 及进行 dev 验证。
 
 ## 5. 查看结果
 
@@ -259,14 +249,3 @@ artifacts/v3/<run-id>/
 - **评估与比较**：逐条结果见 `eval/`；不同方法的结果通过独立比较命令汇总。比较要求 split、实际 task 题池、各段选中的 gate QA 签名、QA prompt 和生成 token 上限一致；各方法的训练数据与训练配置可不同。指标含义见 [v3 说明](../README.md#五评估与产物)。
 - **错误**：训练查看方法 `plan/` 下的 `result.json`、`train.log`；评估查看对应 checkpoint 结果目录的 `eval.log`。发布失败保留本地结果，重新执行原命令即可补传；追加要求云端原训练 run 为 `FINISHED`。独立比较错误直接在终端报告。
 - **Checkpoint 与恢复**：checkpoint 保存目录为 `<stage>/checkpoints/global_step_<阶段step>/`，`result.json` 仅记录仍保留的 checkpoint。初始化、恢复和评估均通过 `--checkpoint` 传目录路径。中断恢复见[第 2.3 节](#23-中断恢复)。
-
-例如，两种动态方法评估完成后，独立导出比较结果：
-
-```bash
-uv run --frozen python -m latent_working_memory.v3.compare \
-  artifacts/v3/capacity-comparison_20261010-01/eval/memory-change-k512+32-local/policy/global_step_N/summary.json \
-  artifacts/v3/capacity-comparison_20261010-01/eval/information-loss-k512+32-local/policy/global_step_N/summary.json \
-  --output-dir artifacts/v3/capacity-comparison_20261010-01/compare
-```
-
-新试跑与正式训练使用不同 `run-id`；复用预训练时可继承来源编号，或显式指定新系列编号。已有运行目录不覆盖。
