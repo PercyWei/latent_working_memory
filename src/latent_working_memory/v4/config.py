@@ -127,14 +127,11 @@ class TrainingConfig:
         return world_size * self.micro_batch_size_per_gpu * self.gradient_accumulation_steps
 
 
-def load_experiment(path):
-    path = Path(path).expanduser().resolve()
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict) or set(raw) != {"model", "training"}:
-        raise ValueError("experiment must contain exactly model and training objects")
-    model = ModelConfig(**raw["model"])
-    training = TrainingConfig(**raw["training"])
-    training = replace(
+def _training_config(raw, seed):
+    if "seed" in raw:
+        raise ValueError("training.seed belongs in the common configuration")
+    training = TrainingConfig(**raw, seed=seed)
+    return replace(
         training,
         **{
             name: str(Path(getattr(training, name)).expanduser().resolve())
@@ -142,4 +139,49 @@ def load_experiment(path):
             if getattr(training, name) is not None
         },
     )
-    return model, training
+
+
+def load_experiment(path):
+    """读取包含模型和训练设置的用户预设。"""
+    path = Path(path).expanduser().resolve()
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict) or set(raw) != {"seed", "model", "training"}:
+        raise ValueError("experiment must contain exactly seed, model and training")
+    return ModelConfig(**raw["model"]), _training_config(raw["training"], raw["seed"])
+
+
+def load_common_config(config_path):
+    """读取训练与首次评估共用的模型设置和随机种子。"""
+    common = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    if not isinstance(common, dict) or set(common) != {"seed", "model"}:
+        raise ValueError("config.json must contain exactly seed and model")
+    if type(common["seed"]) is not int or common["seed"] < 0:
+        raise ValueError("seed must be a nonnegative integer")
+    return common
+
+
+def load_training_plan(config_path, train_path):
+    """从公共模型配置和训练配置展开本次执行设置。"""
+    common = load_common_config(config_path)
+    plan = load_training_schedule(train_path)
+    return ModelConfig(**common["model"]), _training_config(plan["training"], common["seed"])
+
+
+def load_training_schedule(train_path):
+    """读取训练计划；恢复时仅使用 execution，训练参数从 checkpoint 读取。"""
+    plan = json.loads(Path(train_path).read_text(encoding="utf-8"))
+    if not isinstance(plan, dict) or set(plan) != {"execution", "training"}:
+        raise ValueError("train.json must contain exactly execution and training")
+    execution = plan["execution"]
+    if not isinstance(execution, dict) or set(execution) != {
+        "train_only", "test_data", "max_test_samples"
+    }:
+        raise ValueError("execution must contain exactly train_only, test_data and max_test_samples")
+    if type(execution["train_only"]) is not bool:
+        raise ValueError("execution.train_only must be a boolean")
+    if not isinstance(execution["test_data"], str) or not execution["test_data"].strip():
+        raise ValueError("execution.test_data must be a nonempty path string")
+    limit = execution["max_test_samples"]
+    if limit is not None and (type(limit) is not int or limit < 1):
+        raise ValueError("execution.max_test_samples must be a positive integer or null")
+    return plan

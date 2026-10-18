@@ -43,22 +43,22 @@ def test_data_keeps_exact_tokens_and_accepts_inclusive_length_bounds(tmp_path):
         "\n".join(
             json.dumps(row)
             for row in [
-                document_row("1 2 3 4 5 6"),
+                document_row("1 2 3 4 5 6 7"),
                 document_row("1 2 3 4 5 6 7 8"),
             ]
         )
         + "\n"
     )
     episodes = load_tokenized_episodes(path, IntegerTokenizer(), 5, 6, model_window=8)
-    short_group = hashlib.blake2b(b"1 2 3 4", digest_size=16).hexdigest()
+    short_group = hashlib.blake2b(b"1 2 3 4 5", digest_size=16).hexdigest()
     long_group = hashlib.blake2b(b"1 2 3 4 5 6", digest_size=16).hexdigest()
     assert episodes == (
-        TokenizedEpisode(f"{short_group}:0", (1, 2, 3, 4, 5), (6,), short_group),
+        TokenizedEpisode(f"{short_group}:0", (1, 2, 3, 4, 5, 6), (7,), short_group),
         TokenizedEpisode(f"{long_group}:0", (1, 2, 3, 4, 5, 6, 7), (8,), long_group),
     )
 
 
-@pytest.mark.parametrize("text", ["1 2 3 4 5", "1 2 3 4 5 6 7 8 9"])
+@pytest.mark.parametrize("text", ["1 2 3 4 5 6", "1 2 3 4 5 6 7 8 9"])
 def test_invalid_lengths_fail_without_truncating(tmp_path, text):
     path = tmp_path / "episodes.jsonl"
     path.write_text(json.dumps(document_row(text)) + "\n")

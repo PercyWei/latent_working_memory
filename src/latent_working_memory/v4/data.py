@@ -30,15 +30,15 @@ def _episode_statistics(episodes):
     }
 
 
-def _validate_lengths(min_prompt_length, max_train_data_tokens, model_window):
-    if type(min_prompt_length) is not int or min_prompt_length < 1:
-        raise ValueError("min_prompt_length must be a positive integer")
+def _validate_lengths(min_text_tokens, max_train_data_tokens, model_window):
+    if type(min_text_tokens) is not int or min_text_tokens < 1:
+        raise ValueError("min_text_tokens must be a positive integer")
     if max_train_data_tokens is not None and (
         type(max_train_data_tokens) is not int or max_train_data_tokens < 1
     ):
         raise ValueError("max_train_data_tokens must be null or a positive integer")
-    if type(model_window) is not int or model_window <= min_prompt_length:
-        raise ValueError("model_window must be an integer > min_prompt_length")
+    if type(model_window) is not int or model_window <= min_text_tokens:
+        raise ValueError("model_window must be an integer > min_text_tokens")
 
 
 def _tokenize_qa(text, qa, tokenizer, group_id, qa_index, location):
@@ -118,7 +118,7 @@ def _load_raw_episodes(path, tokenizer):
 
 
 def _filter_split(
-    episodes, text_lengths, min_prompt_length, max_train_data_tokens, model_window, split
+    episodes, text_lengths, min_text_tokens, max_train_data_tokens, model_window, split
 ):
     raw_groups = sorted({episode.group_id for episode in episodes if episode.group_id is not None})
     raw = {
@@ -127,32 +127,33 @@ def _filter_split(
         "group_ids": raw_groups,
         "episode_ids": [episode.id for episode in episodes],
     }
-    after_prompt_minimum = tuple(
-        episode for episode in episodes if len(episode.prompt_ids) >= min_prompt_length
+    after_text_minimum = tuple(
+        episode for episode in episodes if text_lengths[episode.group_id] >= min_text_tokens
     )
-    prompt_minimum = {
-        "min_prompt_length": min_prompt_length,
+    text_minimum = {
+        "scope": "text",
+        "min_text_tokens": min_text_tokens,
         "read": len(episodes),
-        "kept": len(after_prompt_minimum),
-        "filtered_too_short": len(episodes) - len(after_prompt_minimum),
+        "kept": len(after_text_minimum),
+        "filtered_too_short": len(episodes) - len(after_text_minimum),
     }
     train_limit = max_train_data_tokens if split == "train" else None
     after_train_limit = (
         tuple(
             episode
-            for episode in after_prompt_minimum
+            for episode in after_text_minimum
             if text_lengths[episode.group_id] <= train_limit
         )
         if train_limit is not None
-        else after_prompt_minimum
+        else after_text_minimum
     )
     training_limit = {
         "applied": train_limit is not None,
         "scope": "text",
         "max_train_data_tokens": train_limit,
-        "read": len(after_prompt_minimum),
+        "read": len(after_text_minimum),
         "kept": len(after_train_limit),
-        "filtered_too_long": len(after_prompt_minimum) - len(after_train_limit),
+        "filtered_too_long": len(after_text_minimum) - len(after_train_limit),
     }
     after_model_window = tuple(
         episode
@@ -171,7 +172,7 @@ def _filter_split(
         **_episode_statistics(after_model_window),
         "raw": raw,
         "filtering": {
-            "prompt_minimum": prompt_minimum,
+            "text_minimum": text_minimum,
             "training_limit": training_limit,
             "model_window": model_limit,
         },
@@ -180,27 +181,41 @@ def _filter_split(
 
 
 def load_tokenized_episodes(
-    path, tokenizer, min_prompt_length, max_train_data_tokens, model_window
+    path, tokenizer, min_text_tokens, max_train_data_tokens, model_window
 ):
-    """加载训练文件，依次应用 prompt 下限、正文长度上限和完整序列模型窗口上限。"""
-    _validate_lengths(min_prompt_length, max_train_data_tokens, model_window)
+    """加载训练文件，依次应用正文长度下限、上限和完整序列模型窗口上限。"""
+    _validate_lengths(min_text_tokens, max_train_data_tokens, model_window)
     episodes, _, _, text_lengths = _load_raw_episodes(path, tokenizer)
     retained, _ = _filter_split(
-        episodes, text_lengths, min_prompt_length, max_train_data_tokens, model_window, split="train"
+        episodes, text_lengths, min_text_tokens, max_train_data_tokens, model_window, split="train"
     )
     return retained
 
 
-def load_evaluation_episodes(path, tokenizer, min_prompt_length, model_window):
-    """加载测试集并保留原始问答；仅应用固定 prompt 下限和模型窗口上限。"""
-    _validate_lengths(min_prompt_length, None, model_window)
+def load_evaluation_episodes(
+    path, tokenizer, min_text_tokens, model_window, seed, max_test_samples=None
+):
+    """测试集先检查正文下限与模型窗口，再固定抽取 QA；保留原始划分统计。"""
+    _validate_lengths(min_text_tokens, None, model_window)
+    if max_test_samples is not None and (type(max_test_samples) is not int or max_test_samples < 1):
+        raise ValueError("max_test_samples must be a positive integer or null")
     episodes, source, references, text_lengths = _load_raw_episodes(path, tokenizer)
     retained, statistics = _filter_split(
-        episodes, text_lengths, min_prompt_length, None, model_window, split="test"
+        episodes, text_lengths, min_text_tokens, None, model_window, split="test"
+    )
+    selected = _select_episodes(retained, max_test_samples, seed=seed, split="test")
+    statistics.update(
+        **_episode_statistics(selected),
+        selection={
+            "seed": seed,
+            "max_samples": max_test_samples,
+            "read": len(retained),
+            "kept": len(selected),
+        },
     )
     return (
-        retained,
-        {episode.id: references[episode.id] for episode in retained},
+        selected,
+        {episode.id: references[episode.id] for episode in selected},
         {"source": source, **statistics},
     )
 
@@ -219,14 +234,14 @@ def load_episode_splits(
     train_file,
     dev_file,
     tokenizer,
-    min_prompt_length,
+    min_text_tokens,
     max_train_data_tokens,
     model_window,
     seed,
     max_train_samples,
     max_dev_samples,
 ):
-    _validate_lengths(min_prompt_length, max_train_data_tokens, model_window)
+    _validate_lengths(min_text_tokens, max_train_data_tokens, model_window)
     train_path, dev_path = Path(train_file).resolve(), Path(dev_file).resolve()
     train, train_source, _, train_text_lengths = _load_raw_episodes(train_path, tokenizer)
     dev, dev_source, _, dev_text_lengths = _load_raw_episodes(dev_path, tokenizer)
@@ -237,13 +252,13 @@ def load_episode_splits(
     train, train_statistics = _filter_split(
         train,
         train_text_lengths,
-        min_prompt_length,
+        min_text_tokens,
         max_train_data_tokens,
         model_window,
         split="train",
     )
     dev, dev_statistics = _filter_split(
-        dev, dev_text_lengths, min_prompt_length, max_train_data_tokens, model_window, split="dev"
+        dev, dev_text_lengths, min_text_tokens, max_train_data_tokens, model_window, split="dev"
     )
     splits = {"train": train, "dev": dev}
     split_statistics = {"train": train_statistics, "dev": dev_statistics}
@@ -262,7 +277,7 @@ def load_episode_splits(
             }
         )
     statistics = {
-        "min_prompt_length": min_prompt_length,
+        "min_text_tokens": min_text_tokens,
         "max_train_data_tokens": max_train_data_tokens,
         "model_window": model_window,
         "training_limit_split": "train",

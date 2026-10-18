@@ -1,6 +1,5 @@
 """QA 与 benchmark 共用的 checkpoint 模型加载和局部写入计时。"""
 
-from pathlib import Path
 import time
 
 import torch
@@ -59,8 +58,7 @@ def load_evaluation_inputs(checkpoint):
     """只读取配置和 tokenizer，结果复用时无需加载 LM。"""
     run = checkpoint["run"]
     config = ModelConfig(**run["model"])
-    tokenizer_path = Path(run["training"]["output_dir"]).expanduser().resolve() / "tokenizer"
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path)
     backbone_config = AutoConfig.from_pretrained(config.model_name_or_path)
     return config, tokenizer, backbone_config
 

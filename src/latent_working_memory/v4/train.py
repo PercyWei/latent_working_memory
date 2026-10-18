@@ -1,4 +1,4 @@
-"""python -m latent_working_memory.v4.train --config experiment.json --device cpu"""
+"""从公共模型配置和训练计划运行 v4 训练。"""
 
 import argparse
 from contextlib import ExitStack, nullcontext
@@ -13,8 +13,13 @@ import torch.distributed as dist
 from transformers import AutoTokenizer, set_seed
 
 from latent_working_memory.runtime import initialize_device
-from latent_working_memory.v4.checkpoint import MetaMemoryCheckpointHandler
-from latent_working_memory.v4.config import load_experiment
+from latent_working_memory.v4.checkpoint import MetaMemoryCheckpointHandler, read_checkpoint
+from latent_working_memory.v4.config import (
+    ModelConfig,
+    TrainingConfig,
+    load_common_config,
+    load_training_plan,
+)
 from latent_working_memory.v4.data import (
     dataset_identity,
     load_episode_splits,
@@ -87,20 +92,29 @@ def evaluate(engine, episodes):
 
 
 def run_training(args):
-    model_config, config = load_experiment(args.config)
+    resume = Path(args.resume).expanduser().resolve() if args.resume is not None else None
+    if resume is not None:
+        saved_run = read_checkpoint(resume)["run"]
+        model_config = ModelConfig(**saved_run["model"])
+        config = TrainingConfig(**saved_run["training"])
+        if load_common_config(args.config)["seed"] != config.seed:
+            raise ValueError("common seed differs from the checkpoint's training seed")
+    else:
+        model_config, config = load_training_plan(args.config, args.train_config)
     if config.output_dir is None:
         raise ValueError("training requires output_dir; launch the preset through scripts/run.sh")
     device = initialize_device(args.device)
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     output = Path(config.output_dir)
-    resume = Path(args.resume).expanduser().resolve() if args.resume is not None else None
     if resume is not None:
         if resume.parent != output / "checkpoints":
             raise ValueError("resume checkpoint must belong to output_dir/checkpoints")
     else:
         error = None
-        if rank == 0 and output.exists() and any(output.iterdir()):
+        if rank == 0 and output.exists() and any(
+            path.name not in {"train.log", "status.json"} for path in output.iterdir()
+        ):
             error = "new training requires an empty output directory"
         if world_size > 1:
             status = [error]
@@ -110,19 +124,16 @@ def run_training(args):
             raise ValueError(error)
 
     set_seed(config.seed)
-    if resume is not None:
-        tokenizer = AutoTokenizer.from_pretrained(output / "tokenizer")
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(model_config.model_name_or_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_config.model_name_or_path)
     model = StreamingMemoryLM(model_config).to(device)
     position_limit = model.backbone.config.max_position_embeddings
-    min_prompt_length = model_config.pending_size + model_config.recent_size + 1
+    min_text_tokens = model_config.pending_size + model_config.recent_size + 1
     dataset_dir = Path(config.dataset_dir)
     train, dev, data_statistics = load_episode_splits(
         dataset_dir / "train.jsonl",
         dataset_dir / "dev.jsonl",
         tokenizer,
-        min_prompt_length,
+        min_text_tokens,
         config.max_train_data_tokens,
         position_limit,
         config.seed,
@@ -163,8 +174,6 @@ def run_training(args):
     elif rank == 0:
         output.mkdir(parents=True, exist_ok=True)
         write_json(output / "run.json", run)
-        write_json(output / "data-statistics.json", data_statistics)
-        tokenizer.save_pretrained(output / "tokenizer")
         metrics_path.touch()
     if world_size > 1:
         dist.barrier()
@@ -278,13 +287,14 @@ def train_loop(engine, config, train, dev, loader, handler, cursor, checkpoint_p
         "checkpoint": str(checkpoint_path),
     }
     if engine.rank == 0:
-        write_json(output / "training-result.json", result)
+        write_json(output / "summary.json", result)
     return result
 
 
 def main():
     parser = argparse.ArgumentParser(description="v4 局部 attention-matching meta-training")
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--train-config", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--resume", type=Path)
     run_training(parser.parse_args())

@@ -100,10 +100,10 @@ def training_config(output, dataset_dir):
 
 def episodes():
     return (
-        TokenizedEpisode("a", (4, 6, 4, 7, 5), (4,)),
-        TokenizedEpisode("b", (4, 6, 7, 5, 4), (6, 7, 5)),
-        TokenizedEpisode("c", (7, 5, 4, 6, 7), (5, 4, 6, 7)),
-        TokenizedEpisode("d", (5, 6, 4, 7, 5), (4, 7)),
+        TokenizedEpisode("a", (4, 6, 4, 7, 5, 6), (4,)),
+        TokenizedEpisode("b", (4, 6, 7, 5, 4, 6), (6, 7, 5)),
+        TokenizedEpisode("c", (7, 5, 4, 6, 7, 6), (5, 4, 6, 7)),
+        TokenizedEpisode("d", (5, 6, 4, 7, 5, 6), (4, 7)),
     )
 
 
@@ -158,7 +158,7 @@ def test_engine_matches_global_token_weighted_meta_gradient(tiny_base, tmp_path,
     metrics = engine.step(batch)
     assert metrics["target_tokens"] == 8
     assert metrics["samples"] == 3
-    assert metrics["source_tokens"] == 23
+    assert metrics["source_tokens"] == 26
     assert metrics["loss"] == pytest.approx(float(loss.detach()), rel=1e-6)
     for name, state in engine.model.trainable_state_dict().items():
         torch.testing.assert_close(state, reference.model.trainable_state_dict()[name])
@@ -188,8 +188,8 @@ def test_eval_runs_inner_update_without_mutating_outer_weights_or_gradients(tiny
 
 def document_record(words):
     return {
-        "text": " ".join(words[:4]),
-        "qas": [{"question": words[4], "answer": " ".join(words[5:])}],
+        "text": " ".join(words[:5]),
+        "qas": [{"question": words[5], "answer": " ".join(words[6:])}],
     }
 
 
@@ -207,11 +207,14 @@ def write_experiment(directory, base, output):
             "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
         )
     path = directory / "experiment.json"
+    training = asdict(training_config(directory / output, directory))
+    seed = training.pop("seed")
     path.write_text(
         json.dumps(
             {
+                "seed": seed,
                 "model": asdict(model_config(base)),
-                "training": asdict(training_config(directory / output, directory)),
+                "training": training,
             }
         )
     )
@@ -219,7 +222,24 @@ def write_experiment(directory, base, output):
 
 
 def run(config, resume=None):
-    return run_training(Namespace(config=config, device="cpu", resume=resume))
+    preset = json.loads(config.read_text())
+    common_path, train_path = config.parent / "config.json", config.parent / "train.json"
+    common_path.write_text(json.dumps({"seed": preset["seed"], "model": preset["model"]}))
+    train_path.write_text(
+        json.dumps(
+            {
+                "execution": {
+                    "train_only": False,
+                    "test_data": str(Path(preset["training"]["dataset_dir"]).resolve()),
+                    "max_test_samples": None,
+                },
+                "training": preset["training"],
+            }
+        )
+    )
+    return run_training(
+        Namespace(config=common_path, train_config=train_path, device="cpu", resume=resume)
+    )
 
 
 def test_training_resume_is_exact_and_checkpoint_excludes_frozen_backbone(tiny_base, tmp_path):
@@ -248,7 +268,7 @@ def test_training_resume_is_exact_and_checkpoint_excludes_frozen_backbone(tiny_b
         for line in (resumed_path.parent / "output" / "metrics.jsonl").read_text().splitlines()
     ]
     assert full_metrics == resumed_metrics
-    assert (resumed_path.parent / "output" / "tokenizer" / "tokenizer.json").is_file()
+    assert not (resumed_path.parent / "output" / "tokenizer").exists()
 
 
 def test_resume_rejects_changed_tokenized_data(tiny_base, tmp_path):

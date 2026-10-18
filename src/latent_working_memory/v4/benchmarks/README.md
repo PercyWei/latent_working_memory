@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261016 19:08:22 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261018 17:25:01 Asia/Shanghai（UTC+08:00）
 
 ## 1. 数据位置与评估协议
 
@@ -80,23 +80,26 @@ bash src/latent_working_memory/v4/scripts/generate_ruler.sh \
 bash src/latent_working_memory/v4/scripts/run.sh \
   --evaluate-only --eval-type benchmark --benchmark ruler --gpus 0 \
   --checkpoint artifacts/v4/<run-id>/train/conditioned-query-m32/checkpoints/global_step_N \
+  --benchmark-data data/benchmarks/ruler-v1/Qwen3-4B-Instruct-2507 \
   --lengths 8192 16384 32768
 
 bash src/latent_working_memory/v4/scripts/run.sh \
   --evaluate-only --eval-type benchmark --benchmark locomo --gpus 0 \
-  --checkpoint artifacts/v4/<run-id>/train/conditioned-query-m32/checkpoints/global_step_N
+  --checkpoint artifacts/v4/<run-id>/train/conditioned-query-m32/checkpoints/global_step_N \
+  --benchmark-data data/benchmarks/locomo
 ```
 
 - 独立评估统一使用 `--evaluate-only`。本节须设置 `--eval-type benchmark`，并通过 `--benchmark` 指定 `ruler` 或 `locomo`；该参数默认 `null`，在 benchmark 模式下不可为空。省略 `--eval-type` 时为 test 评估，仅传 benchmark 名称不会自动切换。
-- `--checkpoint` 后可列出同一 run 的多个目录；或改用 `--eval-run artifacts/v4/<run-id>/train/conditioned-query-m32/`，扫描其中全部 `checkpoints/global_step_*/state.pt`。两者互斥；拒绝重复、跨 run 或缺少 `state.pt` 的未完成 checkpoint。多个 checkpoint 按数字 step 升序在单卡上顺序评估，命令示例见[运行指南](../scripts/README.md#22-单独评估)。
-- RULER 默认按 checkpoint 中原始 `model_name_or_path` 的末级名称读取对应模型目录；人工确认不同模型可复用同一批样本时，用 `--benchmark-data` 指定已有模型目录，不自动判断 tokenizer 是否一致。
-- `--benchmark-data` 可覆盖表中的 benchmark 根目录；RULER 直接指向包含各长度子目录的目录，LoCoMo 指向包含 `locomo10.json` 的目录。
-- benchmark 模式不接受 test 专用的 `--eval-data` 和 `--max-new-tokens`，`--lengths` 仅用于 RULER。以上评估参数不用于训练或恢复；下载脚本的同名 `--benchmark` 参数仍按第 2 节选择下载范围。
-- 模型配置、tokenizer 和 memory 权重取自 checkpoint；只需选择一张 GPU。
+- `--checkpoint` 后可列出同一 run 的多个目录；或改用 `--eval-run artifacts/v4/<run-id>/train/conditioned-query-m32/`，扫描其中全部 `checkpoints/global_step_*/state.pt`。两者互斥；拒绝重复、跨 run 或缺少 `state.pt` 的未完成 checkpoint。多 GPU 时每卡一个进程并行评估不同 checkpoint，命令示例见[运行指南](../scripts/README.md#22-单独评估)。
+- 默认沿用 `plan/<method-dir>/<ruler|locomo>.json` 中的数据目录；没有该配置时，必须传入 `--benchmark-data`。RULER 指向包含各长度子目录的目录，LoCoMo 指向包含 `locomo10.json` 的目录。
+- 人工确认不同模型可复用同一批 RULER 样本时，用 `--benchmark-data` 指定已有模型目录，不自动判断 tokenizer 是否一致。
+- benchmark 模式不接受 test 专用的 `--test-data`、`--max-test-samples` 和 `--max-new-tokens`，`--lengths` 仅用于 RULER。以上评估参数不用于训练或恢复；下载脚本的同名 `--benchmark` 参数仍按第 2 节选择下载范围。
+- 模型配置与 memory 权重取自 checkpoint，tokenizer 从配置中的本地基座模型目录加载；GPU 通过 `--gpus` 指定。
 - 产物统一由 checkpoint 推导到原实验的 `eval/<method-dir>/<ruler|locomo>/global_step_N/`，单个、多个 checkpoint 与 `--eval-run` 使用同一规则。
-- 同类评估共用父目录的 `eval.json`，记录实际数据内容、模型／分词、生成与官方评分设置；已有协议后须保持一致，配置冲突时报错。每个 checkpoint 另存协议快照、逐题预测及计算完成标记 `summary.json`。
+- 同类评估共用 `plan/<method-dir>/<ruler|locomo>.json`，记录实际数据内容、模型／分词、生成与官方评分设置，不重复保存 seed。评估始终读取创建后固定的公共 `config.json` seed，不接受评估 `--seed`；checkpoint 评估快照与结果记录实际值，补评估与历史 seed 不一致时报错。已有协议后须保持一致，配置冲突时报错。每个 checkpoint 另存协议快照、逐样本详细记录 `details.jsonl` 及计算完成标记 `summary.json`。
 - 相同 checkpoint、相同协议且已有完整汇总时直接复用，不重新加载模型或生成答案；缺少汇总时在原目录从头计算。本地结果先于在线发布保存，发布失败后重跑原命令可复用结果补传。
-- tracking、设备及单次／批量展示方式不改变计算协议，可先离线计算再在线发布，也可将单 checkpoint 结果用于批量评估。
-- 在线追加要求训练已完成、云端原 SwanLab run 为 `FINISHED`。单 checkpoint 用汇总图展示任务／长度或 QA 类别分数，批量评估可上传原运行全部已完成保存的 checkpoint，使用真实 checkpoint step 的原生增量曲线。`--tracking disabled` 仅保存本地结果。
-- 各 checkpoint 的日志和执行状态位于 `plan/<method-dir>/<benchmark>-evaluation/global_step_N.log`、`global_step_N-result.json`。批量评估另存 `plan/<method-dir>/<benchmark>-evaluation-result.json`；某个 checkpoint 失败后继续其余 checkpoint，最后汇总结果并报错。
+- tracking、设备与报告展示不改变计算协议，可先离线计算再在线发布，也可将单 checkpoint 结果用于完整报告。
+- 在线发布要求训练已完成、云端原 SwanLab run 为 `FINISHED`；`--tracking disabled` 仅保存本地结果。各 benchmark 合并此前已发布结果与本次选中结果，按真实 optimizer step 排序重建完整报告，其他离线结果须明确选择后才发布。单 checkpoint 用汇总图展示任务／长度或 QA 类别分数；多 checkpoint 曲线以真实 step 为横轴，滑块表示独立递增的报告发布版本。
+- `eval/<method-dir>/<benchmark>/swanlab.json` 统一保存最新成功报告的 run 身份、成员 `summary.json` 路径、报告签名、发布版本和面板信息；上传并核验成功后原子更新，失败时保留此前成功记录。内容相同时仅检查、修复布局；复用历史汇总无需保留对应 checkpoint 权重。
+- 任务级 `eval/<method-dir>/<benchmark>/status.json` 保存任务信息、本轮选择 `selected_checkpoints`、整体状态与进度 `progress`，以及 `checkpoints` 中以 `global_step_N` 为键的最近详细执行状态；补评估保留未选中的旧条目，整体状态与进度仅统计本轮选择。各 checkpoint 的日志保存在 `global_step_N/eval.log`；某个 checkpoint 失败后继续其余 checkpoint，最后汇总结果并报错。
 - 复用项目的 checkpoint 加载、流式生成、资源记录和发布流程，评分沿用上述固定官方源码；不计算答案 NLL。

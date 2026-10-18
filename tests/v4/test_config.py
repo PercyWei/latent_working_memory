@@ -11,7 +11,9 @@ def test_canonical_config_resolves_paths_and_rejects_unknown_fields(tmp_path, mo
     monkeypatch.chdir(tmp_path)
     model = ModelConfig("local-model", pending_size=4, recent_size=2)
     training = TrainingConfig("data", "output", max_train_data_tokens=16)
-    value = {"model": asdict(model), "training": asdict(training)}
+    training_values = asdict(training)
+    seed = training_values.pop("seed")
+    value = {"seed": seed, "model": asdict(model), "training": training_values}
     path = tmp_path / "configs" / "experiment.json"
     path.parent.mkdir()
     path.write_text(json.dumps(value))
@@ -51,6 +53,7 @@ def test_config_allows_body_limit_below_prompt_minimum(tmp_path):
     path.write_text(
         json.dumps(
             {
+                "seed": 42,
                 "model": {"model_name_or_path": "tiny", "pending_size": 4, "recent_size": 2},
                 "training": {
                     "dataset_dir": "data",

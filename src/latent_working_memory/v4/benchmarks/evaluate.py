@@ -11,6 +11,7 @@ import time
 from zoneinfo import ZoneInfo
 
 import torch
+from transformers import set_seed
 
 from latent_working_memory.runtime import initialize_device
 from latent_working_memory.v4.benchmarks.data import (
@@ -18,16 +19,18 @@ from latent_working_memory.v4.benchmarks.data import (
     RULER_COMMIT,
     load_samples,
 )
-from latent_working_memory.v4.benchmarks.reporting import benchmark_media
 from latent_working_memory.v4.benchmarks.scoring import score_sample, summarize_scores
 from latent_working_memory.v4.checkpoint import read_checkpoint
-from latent_working_memory.v4.evaluation_records import EvaluationHistory
+from latent_working_memory.v4.evaluation_records import (
+    EvaluationHistory,
+    evaluation_config_path,
+    load_evaluation_settings,
+)
 from latent_working_memory.v4.evaluation_runtime import (
     load_evaluation_inputs,
     load_evaluation_model,
 )
-from latent_working_memory.v4.io import write_json
-from latent_working_memory.v4.tracking import append_evaluation, validate_evaluation_publication
+from latent_working_memory.v4.tracking import publish_evaluations, validate_evaluation_publication
 
 
 DEFAULT_RULER_LENGTHS = (8192, 16384, 32768)
@@ -35,7 +38,7 @@ DEFAULT_RULER_LENGTHS = (8192, 16384, 32768)
 
 def evaluate(
     benchmark, checkpoint_path, output_dir, data_dir=None, lengths=None, device="cuda", tracking=None,
-    checkpoint_series=False, defer_publication=False,
+    defer_publication=False,
 ):
     if benchmark not in {"ruler", "locomo"}:
         raise ValueError("benchmark must be ruler or locomo")
@@ -46,18 +49,15 @@ def evaluate(
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         raise ValueError("benchmark evaluation uses one process")
     output_dir = Path(output_dir).expanduser().resolve()
-    evaluation_path = output_dir.parent / "eval.json"
-    evaluation = (
-        json.loads(evaluation_path.read_text(encoding="utf-8"))
-        if evaluation_path.is_file()
-        else None
-    )
+    evaluation_path = evaluation_config_path(output_dir)
+    evaluation, seed = load_evaluation_settings(output_dir)
     if data_dir is None:
         if evaluation is None:
             raise ValueError(f"{evaluation_path} is missing; specify --benchmark-data")
         data_dir = evaluation["data"]["directory"]
     if benchmark == "ruler" and lengths is None and evaluation is not None:
         lengths = evaluation["protocol"]["lengths"]
+    set_seed(seed)
     data_dir = Path(data_dir).expanduser().resolve()
     selected_lengths = DEFAULT_RULER_LENGTHS if lengths is None else tuple(lengths)
     checkpoint_path = Path(checkpoint_path).expanduser().resolve()
@@ -84,8 +84,8 @@ def evaluate(
         "benchmark": benchmark,
         "checkpoint": {"path": str(checkpoint_path), "step": step},
         "training_run": run["training"]["output_dir"],
+        "seed": seed,
         "model": asdict(config),
-        "tokenizer": str(Path(run["training"]["output_dir"]) / "tokenizer"),
         "data": {
             "directory": str(data_dir),
             "source_commit": RULER_COMMIT if benchmark == "ruler" else LOCOMO_COMMIT,
@@ -94,10 +94,9 @@ def evaluate(
         },
         "device": str(device),
         "tracking": tracking,
-        "checkpoint_series": checkpoint_series,
         "model_window": model_window,
         "protocol": {
-            "decoding": "greedy; checkpoint tokenizer chat template; enable_thinking=False",
+            "decoding": "greedy; base model tokenizer chat template; enable_thinking=False",
             "memory": "each question starts from initial memory; local TTT during streaming",
             "input": "complete benchmark prompt; no truncation or training length filtering",
             "generation_budget": "RULER task budget; LoCoMo 50 tokens",
@@ -115,11 +114,7 @@ def evaluate(
         if summary is not None:
             print(f"{benchmark} reusing cached summary: {output_dir / 'summary.json'}", flush=True)
             if tracking == "online" and not defer_publication:
-                append_evaluation(
-                    run, checkpoint_path, summary, output_dir,
-                    media=None if checkpoint_series else benchmark_media(summary),
-                    checkpoint_series=checkpoint_series,
-                )
+                publish_evaluations(run, [(checkpoint_path, summary, output_dir)])
             return summary
 
         device = initialize_device(device)
@@ -142,7 +137,7 @@ def evaluate(
         generation_seconds, write_seconds = 0.0, 0.0
         peak_allocated, peak_reserved = 0, 0
         started = time.perf_counter()
-        with (output_dir / "predictions.jsonl").open("w", encoding="utf-8") as stream:
+        with (output_dir / "details.jsonl").open("w", encoding="utf-8") as stream:
             for index, sample in enumerate(samples, 1):
                 ids = tokenizer.apply_chat_template(
                     [{"role": "user", "content": sample.prompt}],
@@ -228,13 +223,9 @@ def evaluate(
                 ),
             },
         }
-        write_json(output_dir / "summary.json", summary)
+        history.save_summary(summary)
         if tracking == "online" and not defer_publication:
-            append_evaluation(
-                run, checkpoint_path, summary, output_dir,
-                media=None if checkpoint_series else benchmark_media(summary),
-                checkpoint_series=checkpoint_series,
-            )
+            publish_evaluations(run, [(checkpoint_path, summary, output_dir)])
         return summary
 
 
@@ -254,7 +245,6 @@ def main():
     )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--tracking", choices=("online", "disabled"))
-    parser.add_argument("--checkpoint-series", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--defer-publication", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     evaluate(
@@ -265,7 +255,6 @@ def main():
         args.lengths,
         args.device,
         args.tracking,
-        args.checkpoint_series,
         args.defer_publication,
     )
 

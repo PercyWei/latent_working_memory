@@ -1,17 +1,24 @@
-"""同一训练 run 的 SwanLab 身份和原生增量指标。"""
+"""同一训练 run 的身份、训练指标与累计评估报告。"""
 
 from contextlib import contextmanager
 import fcntl
+import hashlib
 import json
 from pathlib import Path
 import secrets
+import signal
+import time
+
+import torch
 
 import swanlab
 from swanlab.sdk.internal.run.components.config import Config as SwanLabConfig
 
 from latent_working_memory.runtime import capture_rng, restore_rng
 from latent_working_memory.tracking_credentials import swanlab_api_key
+from latent_working_memory.v4.evaluation_records import EvaluationHistory
 from latent_working_memory.v4.io import write_json
+from latent_working_memory.v4.reporting import evaluation_media
 
 
 METRICS = (
@@ -200,75 +207,6 @@ def log_metrics(tracking, record):
     tracking.log(values, step=record["step"])
 
 
-def evaluation_media(summary):
-    """单个 checkpoint 的质量和写入诊断；样本、容量及资源明细留在本地。"""
-    metrics = summary["metrics"]
-    panels = [
-        ("nll", ["答案 NLL"], [metrics["nll"]], "NLL"),
-        ("em_f1", ["EM", "F1"], [metrics["em"], metrics["f1"]], "score"),
-        (
-            "write_loss",
-            ["写入前", "写入后"],
-            [metrics["write_loss_before"], metrics["write_loss"]],
-            "Attention Matching loss",
-        )
-    ]
-    values = {}
-    for name, labels, measurements, unit in panels:
-        chart = swanlab.echarts.Bar().add_xaxis(labels)
-        chart.add_yaxis(
-            "attention-matching",
-            measurements,
-            label_opts={"show": False},
-            itemstyle_opts={"color": "#31688e"},
-        )
-        chart.set_global_opts(
-            tooltip_opts={"trigger": "axis"},
-            yaxis_opts={"name": unit, "min": 0, **({"max": 1} if name == "em_f1" else {})},
-        )
-        values[f"evaluation/{name}"] = chart
-    return values
-
-
-def _evaluation_checkpoint_series(summary):
-    """多 checkpoint 仅追加当前步的核心标量；benchmark 任务明细留在本地。"""
-    metrics = summary["metrics"]
-    prefix = "evaluation/checkpoints"
-    if "benchmark" in summary:
-        benchmark = summary["benchmark"]
-        prefix = f"{prefix}/{benchmark}"
-        values = {f"{prefix}/score": metrics["score"]}
-        series = [(f"{prefix}/score", "总体", "#1d3f55")]
-        groups = metrics["by_length"] if benchmark == "ruler" else metrics["groups"]
-        for index, row in enumerate(groups):
-            if benchmark == "ruler":
-                name, label = f"length_{row['length']}", f"{row['length'] / 1024:g}K"
-            else:
-                name, label = f"category_{row['category']}", row["category_name"]
-            fraction = 0.6 * (1 - index / max(1, len(groups) - 1))
-            color = "#" + "".join(
-                f"{round(channel + (255 - channel) * fraction):02x}" for channel in (49, 104, 142)
-            )
-            values[f"{prefix}/{name}"] = row["score"]
-            series.append((f"{prefix}/{name}", label, color))
-        return values, [(prefix, series)]
-    values = {
-        f"{prefix}/{name}": metrics[name]
-        for name in ("nll", "em", "f1", "write_loss_before", "write_loss")
-    }
-    return values, [
-        (f"{prefix}/nll", [(f"{prefix}/nll", "答案 NLL", "#31688e")]),
-        (f"{prefix}/em_f1", [
-            (f"{prefix}/em", "EM", "#74a9cf"),
-            (f"{prefix}/f1", "F1", "#2b8cbe"),
-        ]),
-        (f"{prefix}/write_loss", [
-            (f"{prefix}/write_loss_before", "写入前", "#74a9cf"),
-            (f"{prefix}/write_loss", "写入后", "#2b8cbe"),
-        ]),
-    ]
-
-
 def validate_evaluation_publication(run, checkpoint_path, step):
     """在线评估前核对已完成训练的身份和成功保存 checkpoint；不访问远端。"""
     training = run["training"]
@@ -278,7 +216,7 @@ def validate_evaluation_publication(run, checkpoint_path, step):
     checkpoint_path = Path(checkpoint_path).resolve()
     if json.loads((root / "run.json").read_text(encoding="utf-8")) != run:
         raise ValueError("checkpoint run differs from the original training directory")
-    result = json.loads((root / "training-result.json").read_text(encoding="utf-8"))
+    result = json.loads((root / "summary.json").read_text(encoding="utf-8"))
     if (
         not result["complete"]
         or type(step) is not int
@@ -300,84 +238,209 @@ def validate_evaluation_publication(run, checkpoint_path, step):
     return root, identity, project_path
 
 
-def append_evaluation(
-    run, checkpoint_path, summary, output_dir, media=None, checkpoint_series=False
-):
-    """将 test 评估追加到原训练 run；多 checkpoint 使用真实步数的原生曲线。"""
-    if (
-        summary["split"] != "test"
-        or Path(summary["checkpoint"]["path"]).resolve() != Path(checkpoint_path).resolve()
-    ):
-        raise ValueError("publication summary must match the requested test checkpoint")
-    root, identity, project_path = validate_evaluation_publication(
-        run, checkpoint_path, summary["checkpoint"]["step"]
+
+def _verify_report(api_key, project_path, run_id, media_keys, step):
+    """核对完整报告的媒体已到达云端，再提交本地发布记录。"""
+    for attempt in range(5):
+        remote = swanlab.Api(api_key=api_key).run(f"{project_path}/{run_id}")
+        media = {
+            item["key"]: item
+            for item in remote.medias(keys=list(media_keys), step=step)["list"]
+        }
+        missing = [
+            key for key in media_keys
+            if key not in media
+            or not any(row["index"] == step and row["items"] for row in media[key]["metrics"])
+        ]
+        if not missing and remote.state == "FINISHED":
+            return
+        if attempt < 4:
+            time.sleep(2)
+    raise RuntimeError(
+        f"SwanLab report verification failed at publication {step}: "
+        f"state={remote.state}, missing={missing}"
     )
-    workspace, project = project_path.split("/")
-    api_key = swanlab_api_key()
-    api = swanlab.Api(api_key=api_key)
-    remote = api.run(f"{project_path}/{identity['id']}")
-    if remote.state != "FINISHED":
-        raise ValueError("evaluation append requires a finished training run")
-    remote_config = {
-        name: entry["value"]
-        for name, entry in sorted(
-            remote.profile["config"].items(), key=lambda pair: pair[1]["sort"]
-        )
-    }
-    expected_config = SwanLabConfig()
-    expected_config.update(run)
-    if any(remote_config.get(name) != value for name, value in expected_config.items()):
-        raise ValueError("SwanLab configuration differs from the saved training run")
-    if checkpoint_series:
-        values, panels = _evaluation_checkpoint_series(summary)
-    else:
-        values = evaluation_media(summary) if media is None else media
-        panels = []
-    with swanlab.init(
-        project=project,
-        workspace=workspace,
-        name=remote.name,
-        config=remote_config,
-        job_type=identity["job_type"],
-        group=identity["group"],
-        tags=identity["tags"],
-        id=identity["id"],
-        resume="must",
-        mode="online",
-        log_dir=str(root / "swanlab"),
-        settings=swanlab.Settings(
-            api_key=api_key,
-            interactive=False,
-            terminal={"proxy_type": "none"},
-            probe={"git": False, "monitor": False},
+
+
+def _configure_report_layout(api, remote, media_keys):
+    """完整报告使用媒体面板，清理当前评估类型的旧增量面板。"""
+    def checked(response):
+        if not response.ok:
+            raise RuntimeError(response.errmsg)
+        return response.data
+
+    project_path = remote.url.split("/@", 1)[1].split("/runs/", 1)[0]
+    project = checked(api._get(f"/project/{project_path}"))
+    view = project["viewIndex"][0]
+    sections_path = f"/sections/{project_path}/{view}"
+    charts_path = f"/charts/{project_path}/{view}"
+    sections = checked(api._get(sections_path, params={"size": 100}))
+    target = next((row for row in sections if row["name"] == "evaluation"), None)
+    if target is None:
+        target = checked(api._post(
+            sections_path,
+            data={"name": "evaluation", "index": secrets.token_hex(3), "position": "above"},
+        ))
+        target["chartIndex"] = []
+        sections.append(target)
+    for kind in ("PINNED", "HIDDEN"):
+        protected = checked(api._get(f"{sections_path}/protected", params={"type": kind}))
+        if protected is not None:
+            sections.append(protected)
+    benchmark = next((key.rsplit("/", 1)[1] for key in media_keys if key in {
+        "evaluation/ruler", "evaluation/locomo"
+    }), None)
+    legacy = "evaluation/checkpoints" + (f"/{benchmark}" if benchmark else "")
+    found = {}
+    for section in sections:
+        for index in list(section["chartIndex"]):
+            chart = checked(api._get(f"{charts_path}/xxxxxx/{index}"))
+            axis = "yAxis" if chart["type"] == "LINE" else "keys"
+            keys = {row["key"] for row in chart["config"].get(axis, [])}
+            retired = keys and all(
+                key.startswith(legacy + "/")
+                and (benchmark is not None or not key.startswith((
+                    "evaluation/checkpoints/ruler/", "evaluation/checkpoints/locomo/"
+                )))
+                for key in keys
+            )
+            if chart["type"] in {"LINE", "BAR", "SCALAR"} and retired:
+                checked(api._delete(f"{charts_path}/{section['index']}/{index}"))
+                if index in target["chartIndex"]:
+                    target["chartIndex"].remove(index)
+                continue
+            if len(keys) == 1 and next(iter(keys)) in media_keys:
+                key = next(iter(keys))
+                if chart["type"] != "ECHARTS":
+                    raise ValueError(f"unexpected SwanLab report panel type: {key}")
+                if key in found:
+                    raise ValueError(f"multiple SwanLab report panels for {key}")
+                found[key] = (section["index"], index)
+    missing = set(media_keys).difference(found)
+    if missing:
+        raise RuntimeError(f"SwanLab report panels are missing: {sorted(missing)}")
+    for key in media_keys:
+        section, index = found[key]
+        if section != target["index"]:
+            checked(api._post(
+                f"{charts_path}/{section}/{index}/move", data={"index": target["index"]},
+            ))
+            target["chartIndex"].append(index)
+    order = [found[key][1] for key in media_keys]
+    order.extend(index for index in target["chartIndex"] if index not in order)
+    checked(api._put(f"{sections_path}/{target['index']}", data={"chartIndex": order, "folded": False}))
+    restored = checked(api._get(f"{sections_path}/{target['index']}"))
+    if restored["chartIndex"] != order or restored.get("folded", False):
+        raise RuntimeError("SwanLab report layout verification failed")
+    return {
+        "name": "evaluation", "index": view,
+        "url": (
+            f"{remote.url.split('/@', 1)[0]}/@{project_path}/v1/{view}"
+            f"/runs/{remote.run_id}/chart"
         ),
-    ) as tracking:
-        if checkpoint_series:
-            with (root.parents[2] / ".swanlab-panels.lock").open("a") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                _configure_line_panels(api, remote, "evaluation", panels)
-        for name in values:
-            if checkpoint_series:
-                tracking.define_metric(name, x_axis="_step", section_name="evaluation")
-            else:
-                tracking.define_metric(name, section_name="evaluation")
-        tracking.log(values, step=summary["checkpoint"]["step"])
-    publication = {
-        "training_dir": str(root),
-        "run_id": identity["id"],
-        "url": identity["url"],
-        "project": project,
-        "group": identity["group"],
-        "checkpoint": summary["checkpoint"],
-        "split": summary["split"],
-        "checkpoint_series": checkpoint_series,
-        "panels": [title for title, _ in panels] if checkpoint_series else list(values),
-        "metric_names": list(values),
-        "x_axis": "_step" if checkpoint_series else None,
-        "metrics": summary["metrics"],
-        "summary_file": str(Path(output_dir).resolve() / "summary.json"),
     }
-    if "benchmark" in summary:
-        publication["benchmark"] = summary["benchmark"]
-    write_json(Path(output_dir) / "publication.json", publication)
-    return publication
+
+
+def publish_evaluations(run, evaluations):
+    """合并已发布缓存与本次选择，按真实 step 重建完整报告。"""
+    history = EvaluationHistory(evaluations[0][2], evaluations[0][1])
+    for checkpoint, summary, output_dir in evaluations:
+        if (
+            summary["split"] != "test"
+            or Path(summary["checkpoint"]["path"]).resolve() != Path(checkpoint).resolve()
+            or Path(output_dir).resolve().parent != history.root
+        ):
+            raise ValueError("publication results must belong to the requested checkpoint and task")
+        EvaluationHistory(output_dir, summary).validate_summary(summary)
+        root, identity, project_path = validate_evaluation_publication(
+            run, checkpoint, summary["checkpoint"]["step"]
+        )
+    with history.publication_lock():
+        merged = {
+            saved["checkpoint"]["path"]: (directory, saved)
+            for directory, saved in history.published_summaries()
+        }
+        for _, summary, output_dir in evaluations:
+            merged[summary["checkpoint"]["path"]] = (Path(output_dir).resolve(), summary)
+        ordered = sorted(merged.values(), key=lambda pair: pair[1]["checkpoint"]["step"])
+        summaries = [summary for _, summary in ordered]
+        for directory, summary in ordered:
+            EvaluationHistory(directory, summary).validate_summary(summary)
+        signature = hashlib.sha256(json.dumps(
+            summaries, ensure_ascii=False, sort_keys=True, allow_nan=False
+        ).encode("utf-8")).hexdigest()
+        publication = history.report_publication()
+        if publication is not None and any(
+            publication[name] != value for name, value in (
+                ("run_id", identity["id"]), ("project", identity["project"]),
+                ("group", identity["group"]),
+            )
+        ):
+            raise ValueError("report publication differs from the original training run")
+        values = evaluation_media(summaries)
+        api_key = swanlab_api_key()
+        api = swanlab.Api(api_key=api_key)
+        remote = api.run(f"{project_path}/{identity['id']}")
+        if remote.state != "FINISHED":
+            raise ValueError("evaluation publication requires a finished training run")
+        remote_config = {
+            name: entry["value"] for name, entry in sorted(
+                remote.profile["config"].items(), key=lambda pair: pair[1]["sort"]
+            )
+        }
+        expected_config = SwanLabConfig()
+        expected_config.update(run)
+        if any(remote_config.get(name) != value for name, value in expected_config.items()):
+            raise ValueError("SwanLab configuration differs from the saved training run")
+        already_published = (
+            publication is not None and publication["signature"] == signature
+            and publication["panels"] == list(values)
+        )
+        if already_published:
+            publication_step = publication["publication_step"]
+        else:
+            rng = capture_rng(torch.device("cpu"))
+            interrupt_handler = signal.getsignal(signal.SIGINT)
+            try:
+                workspace, project = project_path.split("/")
+                tracking = swanlab.init(
+                    project=project, workspace=workspace, name=remote.name, config=remote_config,
+                    job_type=identity["job_type"], group=identity["group"], tags=identity["tags"],
+                    id=identity["id"], resume="must", mode="online", log_dir=str(root / "swanlab"),
+                    settings=swanlab.Settings(
+                        api_key=api_key, interactive=False, terminal={"proxy_type": "none"},
+                        probe={"git": False, "monitor": False},
+                    ),
+                )
+            finally:
+                restore_rng(rng, torch.device("cpu"))
+            try:
+                signal.signal(signal.SIGINT, interrupt_handler)
+                resumed_step = max((
+                    metric.min_step for key, metric in tracking._ctx.core._metrics._metrics.items()
+                    if key in values
+                ), default=0)
+                publication_step = max(
+                    0, resumed_step, publication["publication_step"] if publication else -1
+                ) + 1
+                for key in values:
+                    tracking.define_metric(key, section_name="evaluation")
+                tracking.log(values, step=publication_step)
+            finally:
+                tracking.finish(state="success")
+            _verify_report(api_key, project_path, identity["id"], values, publication_step)
+        with (root.parents[2] / ".swanlab-panels.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            view = _configure_report_layout(api, remote, values)
+        publication = {
+            "training_dir": str(root), "run_id": identity["id"], "project": identity["project"],
+            "group": identity["group"], "signature": signature,
+            "summaries": [str(directory / "summary.json") for directory, _ in ordered],
+            "publication_step": publication_step, "view": view, "panels": list(values),
+        }
+        write_json(history.publication_path, publication)
+        print(
+            f"[evaluation] report published steps={[row['checkpoint']['step'] for row in summaries]} "
+            f"publication={publication_step} record={history.publication_path}", flush=True,
+        )
+        return publication

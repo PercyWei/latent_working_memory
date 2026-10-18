@@ -10,21 +10,28 @@ from pathlib import Path
 import time
 
 import torch
+from transformers import set_seed
 
 from latent_working_memory.data_preparation.personamem.audit import scores
 from latent_working_memory.runtime import initialize_device
 from latent_working_memory.v4.checkpoint import read_checkpoint
 from latent_working_memory.v4.data import dataset_identity, load_evaluation_episodes
-from latent_working_memory.v4.evaluation_records import EvaluationHistory
+from latent_working_memory.v4.evaluation_records import (
+    EvaluationHistory,
+    evaluation_config_path,
+    load_evaluation_settings,
+)
 from latent_working_memory.v4.evaluation_runtime import (
     load_evaluation_inputs,
     load_evaluation_model,
 )
-from latent_working_memory.v4.io import write_json
 from latent_working_memory.v4.tracking import (
-    append_evaluation,
+    publish_evaluations,
     validate_evaluation_publication,
 )
+
+
+_UNSPECIFIED = object()
 
 
 def _check_test_split(statistics, run):
@@ -37,27 +44,26 @@ def _check_test_split(statistics, run):
 
 def evaluate(
     checkpoint_path, output_dir, dataset_dir=None, max_new_tokens=None, device="cuda", tracking=None,
-    checkpoint_series=False, defer_publication=False,
+    defer_publication=False, max_test_samples=_UNSPECIFIED,
 ):
     output_dir = Path(output_dir).expanduser().resolve()
-    evaluation_path = output_dir.parent / "eval.json"
-    evaluation = (
-        json.loads(evaluation_path.read_text(encoding="utf-8"))
-        if evaluation_path.is_file()
-        else None
-    )
+    evaluation_path = evaluation_config_path(output_dir)
+    evaluation, seed = load_evaluation_settings(output_dir)
     if dataset_dir is None:
         if evaluation is None:
-            raise ValueError(f"{evaluation_path} is missing; specify --eval-data")
+            raise ValueError(f"{evaluation_path} is missing; specify --test-data")
         dataset_dir = Path(evaluation["test_file"]).parent
     if max_new_tokens is None:
         max_new_tokens = evaluation["max_new_tokens"] if evaluation is not None else 128
+    if max_test_samples is _UNSPECIFIED:
+        max_test_samples = evaluation["max_test_samples"] if evaluation is not None else None
     if type(max_new_tokens) is not int or max_new_tokens < 1:
         raise ValueError("max_new_tokens must be a positive integer")
     if tracking not in {None, "online", "disabled"}:
         raise ValueError("tracking must be online or disabled")
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         raise ValueError("v4 evaluation runs in one process; do not launch it with torchrun")
+    set_seed(seed)
     checkpoint_path = Path(checkpoint_path).expanduser().resolve()
     checkpoint = read_checkpoint(checkpoint_path)
     run, step = checkpoint["run"], checkpoint["cursor"]["step"]
@@ -70,13 +76,14 @@ def evaluate(
 
     config, tokenizer, backbone_config = load_evaluation_inputs(checkpoint)
     training_dir = Path(run["training"]["output_dir"]).expanduser().resolve()
-    tokenizer_path = training_dir / "tokenizer"
     model_window = backbone_config.max_position_embeddings
     episodes, references, statistics = load_evaluation_episodes(
         test_file,
         tokenizer,
         config.pending_size + config.recent_size + 1,
         model_window,
+        seed,
+        max_test_samples,
     )
     _check_test_split(statistics, run)
 
@@ -85,15 +92,15 @@ def evaluate(
         "split": "test",
         "checkpoint": {"path": str(checkpoint_path), "step": step},
         "training_run": str(training_dir),
+        "seed": seed,
         "model": asdict(config),
-        "tokenizer": str(tokenizer_path),
         "test_file": str(test_file),
         "dataset": dataset_identity(episodes),
         "device": str(device),
         "tracking": tracking,
-        "checkpoint_series": checkpoint_series,
         "model_window": model_window,
         "max_new_tokens": max_new_tokens,
+        "max_test_samples": max_test_samples,
         "eos_token_id": tokenizer.eos_token_id,
         "protocol": {
             "nll": "answer-token weighted; includes assistant template ending tokens",
@@ -101,6 +108,7 @@ def evaluate(
             "em_f1": "single-reference QA mean; lowercase, remove ASCII punctuation and English "
             "articles a/an/the, collapse whitespace; token-overlap F1",
             "task": "held-out document-QA test with single-reference scoring",
+            "selection": "after length filtering; QA hash sampling with the evaluation seed",
             "write_loss": "teacher-forced path only; average across layers and write events",
         },
     }
@@ -110,9 +118,7 @@ def evaluate(
         if summary is not None:
             print(f"test reusing cached summary: {output_dir / 'summary.json'}", flush=True)
             if tracking == "online" and not defer_publication:
-                append_evaluation(
-                    run, checkpoint_path, summary, output_dir, checkpoint_series=checkpoint_series
-                )
+                publish_evaluations(run, [(checkpoint_path, summary, output_dir)])
             return summary
 
         device = initialize_device(device)
@@ -129,7 +135,6 @@ def evaluate(
             "bytes": sum(value.numel() * value.element_size() for value in slots),
             "dtype": str(slots[0].dtype),
         }
-        write_json(output_dir / "data-statistics.json", statistics)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
             torch.cuda.reset_peak_memory_stats(device)
@@ -139,7 +144,7 @@ def evaluate(
         generated_tokens, capped_budgets = 0, 0
         budgets, endings = [], Counter()
 
-        with (output_dir / "predictions.jsonl").open("w", encoding="utf-8") as stream:
+        with (output_dir / "details.jsonl").open("w", encoding="utf-8") as stream:
             for index, episode in enumerate(episodes, 1):
                 prompt_length = len(episode.prompt_ids)
                 budget = min(max_new_tokens, model_window - prompt_length)
@@ -223,6 +228,7 @@ def evaluate(
             )
         summary = {
             **evaluation_config,
+            "data_statistics": statistics,
             "samples": len(episodes),
             "documents": statistics["groups"],
             "target_tokens": target_tokens,
@@ -244,11 +250,9 @@ def evaluate(
             },
             "resources": resources,
         }
-        write_json(output_dir / "summary.json", summary)
+        history.save_summary(summary)
         if tracking == "online" and not defer_publication:
-            append_evaluation(
-                run, checkpoint_path, summary, output_dir, checkpoint_series=checkpoint_series
-            )
+            publish_evaluations(run, [(checkpoint_path, summary, output_dir)])
         return summary
 
 
@@ -256,25 +260,29 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True, help="global_step_<step> 目录")
     parser.add_argument(
-        "--eval-data", type=Path,
+        "--test-data", type=Path,
         help="默认 null，沿用已保存的评估目录；无评估配置时必填，读取 test.jsonl",
     )
     parser.add_argument("--output-dir", type=Path, required=True, help="评估产物目录")
     parser.add_argument("--max-new-tokens", type=int, help="沿用已有评估配置；无配置时默认 128")
+    parser.add_argument(
+        "--max-test-samples", type=lambda value: None if value == "null" else int(value),
+        default=_UNSPECIFIED,
+        help="过滤后 test QA 样本上限；沿用已有配置，无配置时默认 null（全量）",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--tracking", choices=("online", "disabled"))
-    parser.add_argument("--checkpoint-series", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--defer-publication", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     evaluate(
         args.checkpoint,
         args.output_dir,
-        args.eval_data,
+        args.test_data,
         args.max_new_tokens,
         args.device,
         args.tracking,
-        args.checkpoint_series,
         args.defer_publication,
+        args.max_test_samples,
     )
 
 
