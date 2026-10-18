@@ -11,9 +11,13 @@ from latent_working_memory.v3.config import (
     DYNAMIC_METHODS,
     DYNAMIC_PRETRAIN_METHODS,
     ExperimentConfig,
-    load_experiment,
+    load_common_config,
     load_preset,
+    load_training_schedule,
+    load_training_stages,
+    validate_stage_sequence,
 )
+from latent_working_memory.v3.training_status import read_training_status
 
 
 PRESETS = {
@@ -50,6 +54,7 @@ class TrainingJob:
     method: str
     config: ExperimentConfig
     config_path: Path
+    train_config_path: Path
     initialize_from: str | None
     evaluate: bool
 
@@ -91,13 +96,23 @@ def resolve_experiment_id(args):
     return args.run_id or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M%S")
 
 
-def _training_job(config, args, directory, level, method_directory, initialize_from=None):
-    method, stage = config.objective.method, config.objective.stage
-    key = (
+def training_job_key(method, stage):
+    return (
         "dynamic-pretrain"
-        if args.method == "dynamic_pretrain"
+        if method == "dynamic_pretrain"
         else f"{method.replace('_', '-')}-{stage}"
     )
+
+
+def evaluates_stage(objective, train_only):
+    return not train_only and (
+        objective.stage in {"qa", "policy"}
+        or (objective.method == "autocompressors" and objective.stage in {"pretrain", "lm"})
+    )
+
+
+def _training_job(config, args, directory, level, method_directory, initialize_from=None):
+    method, stage = config.objective.method, config.objective.stage
     objective = {}
     for name in (
         "qa_batch_size",
@@ -196,13 +211,13 @@ def _training_job(config, args, directory, level, method_directory, initialize_f
         training=replace(config.training, **training),
     )
     return TrainingJob(
-        key=key,
+        key=training_job_key(args.method, stage),
         method=args.method,
         config=config,
-        config_path=directory / "plan" / method_directory / f"{stage}.json",
+        config_path=directory / "plan" / method_directory / "config.json",
+        train_config_path=directory / "plan" / method_directory / "train.json",
         initialize_from=initialize_from,
-        evaluate=not args.train_only
-        and (stage in {"qa", "policy"} or (method == "autocompressors" and is_pretrain)),
+        evaluate=evaluates_stage(config.objective, args.train_only),
     )
 
 
@@ -278,36 +293,52 @@ def build_resume_jobs(args):
     method_directory = stage_directory.parent
     directory = method_directory.parent.parent
     plan_directory = directory / "plan" / method_directory.name
-    plan = json.loads((plan_directory / "job.json").read_text(encoding="utf-8"))
-    config = load_experiment(stage_directory / "config.json")
-    experiment = json.loads((method_directory / "experiment.json").read_text(encoding="utf-8"))
+    train_path = plan_directory / "train.json"
+    plan = load_training_schedule(train_path)
+    execution = plan["execution"]
+    run = json.loads((stage_directory / "run.json").read_text(encoding="utf-8"))
+    config = ExperimentConfig.from_dict(run["config"])
+    if load_common_config(plan_directory / "config.json")["seed"] != config.training.seed:
+        raise ValueError("common seed differs from the saved training seed")
+    experiment = read_training_status(method_directory)["experiment"]
     if next(reversed(experiment["stages"])) != config.objective.stage:
         raise ValueError("cannot resume an earlier stage after a successor has started")
-    first = next(
-        index
-        for index, item in enumerate(plan["jobs"])
-        if item["config"]["objective"]["stage"] == config.objective.stage
+    stages = [item["objective"]["stage"] for item in plan["stages"]]
+    validate_stage_sequence(config.objective.method, stages)
+    first = stages.index(config.objective.stage)
+    remaining = stages[first:]
+    future = iter(
+        load_training_stages(
+            train_path,
+            config.model,
+            config.training.seed,
+            remaining[1:],
+        )
+        if len(remaining) > 1
+        else ()
     )
+    method = "dynamic_pretrain" if config.objective.method == "dynamic" else config.objective.method
     jobs = []
-    for index, item in enumerate(plan["jobs"][first:]):
-        path = Path(item["config_path"])
-        current = config if index == 0 else load_experiment(path)
+    for index, stage in enumerate(remaining):
+        current = config if index == 0 else next(future)
         if args.seed is not None and args.seed != current.training.seed:
             raise ValueError("--seed must match the saved training seed when resuming")
         if index > 0 and Path(current.training.output_dir).exists():
             raise ValueError("cannot resume while a later stage output already exists")
         jobs.append(
             TrainingJob(
-                key=item["key"],
-                method=plan["method"],
+                key=training_job_key(method, stage),
+                method=method,
                 config=current,
-                config_path=path,
-                initialize_from=None if index == 0 else item["initialize_from"],
-                evaluate=item["evaluate"],
+                config_path=plan_directory / "config.json",
+                train_config_path=train_path,
+                initialize_from=None if index == 0 else jobs[-1].key,
+                evaluate=evaluates_stage(current.objective, execution["train_only"]),
             )
         )
-    args.method = plan["method"]
-    args.mode = plan["mode"]
+    args.method = method
+    args.mode = execution["mode"]
+    args.train_only = execution["train_only"]
     args.run_id = config.training.experiment_id
     args.tracking = "online" if config.training.swanlab_project is not None else "disabled"
-    return directory, plan["limits"], jobs
+    return directory, execution["max_steps"], jobs

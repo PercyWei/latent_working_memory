@@ -18,6 +18,7 @@ from swanlab.sdk.internal.run.components.config import Config as SwanLabConfig
 
 from latent_working_memory.v1.reporting import _shade
 from latent_working_memory.v3.config import DYNAMIC_METHODS, DYNAMIC_PRETRAIN_METHODS
+from latent_working_memory.v3.training_status import read_training_status, update_training_status
 from latent_working_memory.runtime import capture_rng, restore_rng
 
 
@@ -76,6 +77,55 @@ def _stage_record(run):
     return record
 
 
+def _stage_fingerprint(record):
+    serialized = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return sha256(serialized.encode()).hexdigest()
+
+
+def load_experiment_stages(root, record):
+    """读取索引绑定的阶段运行记录，防止已有阶段配置被替换。"""
+    stages = {}
+    for stage, entry in record["stages"].items():
+        run = json.loads((root / entry["run_path"]).read_text(encoding="utf-8"))
+        if _stage_fingerprint(_stage_record(run)) != entry["fingerprint"]:
+            raise ValueError(f"existing stage {stage} configuration cannot be replaced")
+        stages[stage] = run
+    return stages
+
+
+def _experiment_configuration(root, record):
+    """从阶段索引读取运行记录，构造用于校验和上传的完整方法配置。"""
+    stages = {
+        stage: _stage_record(run)
+        for stage, run in load_experiment_stages(root, record).items()
+    }
+    return {
+        "experiment_id": record["experiment_id"],
+        "method": record["method"],
+        "model": next(iter(stages.values()))["config"]["model"],
+        "pretraining": next(reversed(stages.values()))["pretraining"],
+        "stages": stages,
+    }
+
+
+def _experiment_index(root, configuration):
+    """仅持久化方法身份及绑定运行记录的阶段索引。"""
+    return {
+        "experiment_id": configuration["experiment_id"],
+        "method": configuration["method"],
+        "stages": {
+            stage: {
+                "run_path": str(
+                    (Path(run["config"]["training"]["output_dir"]).resolve() / "run.json")
+                    .relative_to(root)
+                ),
+                "fingerprint": _stage_fingerprint(run),
+            }
+            for stage, run in configuration["stages"].items()
+        },
+    }
+
+
 def _experiment_config(config, run, previous):
     """只增加新阶段；已有阶段配置与原始预训练来源必须保持不变。"""
     fixed = {
@@ -99,7 +149,7 @@ def _experiment_config(config, run, previous):
             raise ValueError("cannot resume an earlier stage after a successor has started")
         if stage not in stages:
             previous_dir = Path(stages[latest]["config"]["training"]["output_dir"])
-            result = json.loads((previous_dir / "training-result.json").read_text(encoding="utf-8"))
+            result = json.loads((previous_dir / "summary.json").read_text(encoding="utf-8"))
             initialization = run["initialization"]
             if (
                 initialization is None
@@ -117,6 +167,24 @@ def _save_record(path, value):
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     temporary.replace(path)
+
+
+def _register_experiment(root, config, run, expected_index, identity=None):
+    """校验登记基线后提交阶段索引，避免网络交互期间覆盖其他阶段的登记。"""
+    with update_training_status(root) as status:
+        current_index = status.get("experiment")
+        if current_index != expected_index or (
+            current_index is not None
+            and tuple(current_index["stages"]) != tuple(expected_index["stages"])
+        ):
+            raise ValueError("method experiment registration changed before stage commit")
+        previous = (
+            _experiment_configuration(root, current_index) if current_index is not None else None
+        )
+        combined = _experiment_config(config, run, previous)
+        if identity is not None:
+            _save_record(root / "swanlab.json", identity)
+        status["experiment"] = _experiment_index(root, combined)
 
 
 def _default_view(api, project_path):
@@ -530,11 +598,13 @@ def method_tracking_run(config, run, device, api_key=None):
     """建立方法级会话，跨阶段复用；已存在的 run 必须成功恢复。"""
     root = experiment_directory(config.training)
     root.mkdir(parents=True, exist_ok=True)
-    record_path = root / "experiment.json"
-    previous = json.loads(record_path.read_text(encoding="utf-8")) if record_path.exists() else None
+    previous_index = read_training_status(root).get("experiment")
+    previous = (
+        _experiment_configuration(root, previous_index) if previous_index is not None else None
+    )
     combined = _experiment_config(config, run, previous)
     if config.training.swanlab_project is None:
-        _save_record(record_path, combined)
+        _register_experiment(root, config, run, previous_index)
         yield None
         return
     method = combined["method"]
@@ -574,7 +644,7 @@ def method_tracking_run(config, run, device, api_key=None):
     try:
         if identity is not None:
             if previous is None:
-                raise ValueError("existing SwanLab identity requires its method experiment.json")
+                raise ValueError("existing SwanLab identity requires its method status.json.experiment")
             if any(identity[name] != value for name, value in expected_identity.items()):
                 raise ValueError("SwanLab identity differs from the method experiment")
             project_path = identity["url"].split("/@", 1)[1].split("/runs/", 1)[0]
@@ -626,11 +696,14 @@ def method_tracking_run(config, run, device, api_key=None):
     finally:
         restore_rng(rng, device)
     with tracking:
-        if identity is None:
-            _save_record(
-                identity_path, {**expected_identity, "id": tracking.id, "url": tracking.url}
-            )
-        _save_record(record_path, combined)
+        _register_experiment(
+            root,
+            config,
+            run,
+            previous_index,
+            {**expected_identity, "id": tracking.id, "url": tracking.url}
+            if identity is None else None,
+        )
         configure_posttraining_panel(config, tracking, device, api_key)
         yield tracking
 
@@ -657,12 +730,13 @@ def configure_posttraining_panel(config, tracking, device, api_key):
 
 def update_method_tracking(config, run, tracking):
     """验证阶段衔接并更新同一活跃 run，不结束会话或重新访问云端身份。"""
-    record_path = experiment_directory(config.training) / "experiment.json"
-    previous = json.loads(record_path.read_text(encoding="utf-8"))
+    root = experiment_directory(config.training)
+    previous_index = read_training_status(root)["experiment"]
+    previous = _experiment_configuration(root, previous_index)
     combined = _experiment_config(config, run, previous)
     if tracking is not None:
         tracking.config.update(combined)
-    _save_record(record_path, combined)
+    _register_experiment(root, config, run, previous_index)
 
 
 def _loss_name(method, stage):

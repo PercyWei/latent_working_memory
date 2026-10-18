@@ -1,6 +1,5 @@
 """导出同一评估题池上各方法的质量—容量点，不强制相同容量。"""
 
-import argparse
 import csv
 import json
 from pathlib import Path
@@ -61,19 +60,3 @@ def compare(summary_paths, output_dir):
         writer.writeheader()
         writer.writerows(points)
     return points
-
-
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("summaries", nargs="+")
-    parser.add_argument("--output-dir", required=True)
-    args = parser.parse_args(argv)
-    points = compare(args.summaries, args.output_dir)
-    print(
-        f"[compare] runs={len(points)} output={Path(args.output_dir)} (points.json, points.csv)",
-        flush=True,
-    )
-
-
-if __name__ == "__main__":
-    main()

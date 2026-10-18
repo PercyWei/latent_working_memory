@@ -1,6 +1,6 @@
 # 运行 v3 实验
 
-使用 [run.sh](run.sh) 完成单方法的训练与评估，方法比较单独调用 [compare.py](../compare.py)。默认 Qwen3-4B、K=512、ΔK=32；K 为 baseline 总容量或动态方法首次容量，ΔK 为动态追加容量。方法与训练细节见 [v3 说明](../README.md)，默认配置位于 [configs/v3](../../../../configs/v3/)。
+使用 [run.sh](run.sh) 完成单方法的训练与评估。默认 Qwen3-4B-Instruct-2507、K=512、ΔK=32；K 为 baseline 总容量或动态方法首次容量，ΔK 为动态追加容量。方法与训练细节见 [v3 说明](../README.md)，默认配置位于 [configs/v3](../../../../configs/v3/)。
 
 ## 1. 准备环境、模型与数据
 
@@ -63,7 +63,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
   --gradient-accumulation-steps 2
 ```
 
-完成后，从 `artifacts/v3/capacity-comparison_20261010-01/train/dynamic-pretrain-k512/pretrain/training-result.json` 的 `checkpoint` 字段取得实际目录，替换下例的 `global_step_N`：
+完成后，从 `artifacts/v3/capacity-comparison_20261010-01/train/dynamic-pretrain-k512/pretrain/summary.json` 的 `checkpoint` 字段取得实际目录，替换下例的 `global_step_N`：
 
 ```bash
 bash src/latent_working_memory/v3/scripts/run.sh \
@@ -104,8 +104,8 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 - `--eval-run` 仅用于单独评估，指向 `artifacts/v3/<run-id>/train/<method-dir>/` 方法级目录，会扫描其各阶段当前保留且包含 `state.pt` 的 checkpoint。
 - `--checkpoint` 仅接受属于同一 run 下的单/多个 checkpoint 列表。
 - 多 checkpoint 评估时支持设置多 GPU 并行计算，全部计算结束后，由父进程汇总结果，串行上传完整报告，checkpoint 按真实累计 step 排列。
-- 默认沿用评估配置 `plan/<method-dir>/eval.json`。缺少该文件时，必须传入 `--eval-data` 以创建评估配置；`--seed`、`--max-test-samples`、`--max-new-tokens` 非必须，可使用默认值。模型、方法和写入配置从 checkpoint 读取。
-- 每个 checkpoint 的结果独立保存。相同 checkpoint、相同配置复用已有结果和日志；在线发布将本次选中的结果与此前已发布的本地结果合并为完整报告，其他离线结果须明确选择后才发布。内容相同时仅检查、修复云端布局；需要更新时从缓存重建，补发日志追加到原 `eval.log`，不重新计算 QA，也无需保留此前 checkpoint 的权重。
+- 默认沿用评估配置 `plan/<method-dir>/test.json`。缺少该文件时，必须传入 `--test-data` 以创建评估配置，`--max-test-samples`、`--max-new-tokens` 可使用默认值。模型、方法和写入配置等从 checkpoint 读取。
+- 每个 checkpoint 的结果独立保存。相同 checkpoint、相同配置复用已有结果和日志；在线发布将本次选中结果与此前已发布结果合并，按真实累计 step 排序重建完整报告；其他离线结果须明确选择后才发布。内容相同时仅检查、修复云端布局；需要更新时从缓存重建，不重新计算 QA，也无需保留此前 checkpoint 的权重。计算日志见各 checkpoint 的 `eval.log`，发布状态及错误见汇总 `status.json`。
 - 默认追加到原训练 SwanLab run，须保留原训练目录与身份文件且云端 run 状态为 `FINISHED`；加 `--tracking disabled` 仅保存本地结果。
 
 ### 2.3 中断恢复
@@ -118,7 +118,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
   --checkpoint artifacts/v3/capacity-comparison_20261010-01/train/information-loss-k512+32-local/warmup/checkpoints/global_step_N
 ```
 
-- 训练配置等信息均沿用原运行，忽略 CLI 参数覆盖。
+- 训练配置等信息均沿用原运行，拒绝 CLI 参数覆盖。
 - 可重新选择物理 GPU，卡数须与原任务一致。
 
 ## 3. 复用动态预训练
@@ -211,7 +211,7 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 | `--max-dev-samples` | dev 验证样本数上限，默认 `null`（全部），`smoke` 默认 4 |
 | `--dev-every` | dev 验证的 optimizer step 间隔，`full` 默认 25，`smoke` 默认 1 |
 | **Test 评估** |
-| `--eval-data` | 用于完整运行或独立评估时覆盖 test 数据目录，默认 `null` |
+| `--test-data` | 用于完整运行或独立评估时覆盖 test 数据目录，默认 `null` |
 | `--max-test-samples` | test 评估样本数上限，默认 `null`（全部）；仅新训练 `smoke` 的自动评估默认 2 |
 | `--max-new-tokens` | test 评估时 token 生成上限，默认 64 |
 | **SwanLab** |
@@ -227,25 +227,37 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 
 ```text
 artifacts/v3/<run-id>/
-├── plan/<method-dir>/             阶段配置、eval.json、job.json、训练日志、result.json
-├── train/<method-dir>/<stage>/    config.json、metrics.jsonl、dev-qa.jsonl、checkpoints/
-├── eval/<method-dir>/
-│   ├── evaluations.json           checkpoint 评估历史与累计报告发布记录
-│   └── <stage>/global_step_<阶段step>/
-│       ├── eval.json              本次四项评估配置快照
-│       ├── summary.json、trajectories.jsonl、eval.log
-│       └── swanlab-publication.json
-└── compare/                       独立比较生成的 points.json、points.csv
+├── plan/<method-dir>/
+│   ├── config.json             通用配置
+│   ├── train.json              训练设置
+│   └── test.json               评估配置
+├── train/<method-dir>/
+│   ├── status.json             训练流程状态、阶段登记与产物路径
+│   ├── swanlab.json            SwanLab 记录
+│   ├── train.log               训练日志
+│   └── <stage>/
+│       ├── run.json            阶段训练实际配置、数据与运行信息
+│       ├── summary.json        阶段训练完成情况
+│       ├── metrics.jsonl       阶段训练与验证指标
+│       ├── details.jsonl       逐样本详细验证记录
+│       └── checkpoints/global_step_N/
+└── eval/<method-dir>/test/
+    ├── status.json             评估流程状态记录
+    ├── swanlab.json            SwanLab 记录
+    └── <stage>/
+        └── global_step_N/
+            ├── eval.json       评估配置快照
+            ├── eval.log        评估日志
+            ├── summary.json    评估指标与数据统计
+            └── details.jsonl   逐样本详细评估记录
 ```
 
-| 方法 | `<method-dir>` |
-|---|---|
-| 三个 baseline 和独立共享预训练 | `<method>-k<K>` |
-| 两种动态方法（含显式完整流程） | `<method>-k<K>+<ΔK>-<writer>` |
-
-方法名将 `_` 转为 `-`；独立共享预训练用 `dynamic-pretrain`，完整动态流程的各阶段保存在同一方法目录。writer 为 `local`、`tag`、`mask` 或 `dual-lora`。试跑在末尾添加 `_<mode>`。SwanLab 名称为 `<method-dir>_<run-id>`；跨系列复用使用当前系列编号，预训练来源通过 `pretraining` 配置追溯。
-
-- **进度与图表**：终端每 step 一行摘要，完整指标见 `train/` 下的 `metrics.jsonl`。SwanLab 同一方法的训练、验证、评估共用一个 run；阶段与进度看 `train/stage`、`train/epoch`。`evaluation` 展示 NLL、EM、F1 三张合图，横轴为 QA 首次引入段及“总体”，每个 checkpoint 一条带点折线；容量与耗时汇入一张统计表，动态方法的各 checkpoint 热图排在最后。图例、表格和热图按真实累计 step 排序。最新发布版本包含全部已发布 checkpoint，底部滑块表示报告版本。详细布局见 [v3 说明](../README.md#53-swanlab-组织与展示)。
-- **评估与比较**：逐条结果见 `eval/`；不同方法的结果通过独立比较命令汇总。比较要求 split、实际 task 题池、各段选中的 gate QA 签名、QA prompt 和生成 token 上限一致；各方法的训练数据与训练配置可不同。指标含义见 [v3 说明](../README.md#五评估与产物)。
-- **错误**：训练查看方法 `plan/` 下的 `result.json`、`train.log`；评估查看对应 checkpoint 结果目录的 `eval.log`。发布失败保留本地结果，重新执行原命令即可补传；追加要求云端原训练 run 为 `FINISHED`。独立比较错误直接在终端报告。
-- **Checkpoint 与恢复**：checkpoint 保存目录为 `<stage>/checkpoints/global_step_<阶段step>/`，`result.json` 仅记录仍保留的 checkpoint。初始化、恢复和评估均通过 `--checkpoint` 传目录路径。中断恢复见[第 2.3 节](#23-中断恢复)。
+- **目录命名**：`<method-dir>` 为 `<method>-k<K>`（baseline 和动态预训练）或 `<method>-k<K>+<ΔK>-<writer-mode>`（动态后训练）。方法名将 `_` 转为 `-`；试跑在目录名末尾添加 `_<mode>`。
+- **实验配置**：`--config` 读取 `configs/v3/` 中的方法预设。`plan/<method-dir>/` 下，`config.json` 保存模型设置、seed 等通用配置，`train.json` 保存训练流程配置，`test.json` 保存评估流程配置。
+- **训练与验证**：`run.json` 保存阶段训练实际配置、数据与运行信息；`status.json` 的 `experiment` 保存方法身份与已登记的有序阶段索引，用于关联和校验各阶段 `run.json`；`metrics.jsonl` 保存聚合指标；`details.jsonl` 按需保存 dev QA 逐题观测。
+- **评估**：各 checkpoint 的 `summary.json` 汇总指标，`details.jsonl` 按样本保存动作、计时与各道 QA 结果。
+- **累计发布**：`eval/<method-dir>/test/swanlab.json` 保存最新成功报告的 run 身份、成员 `summary.json` 路径、报告签名、发布版本和面板信息；上传并核验成功后原子更新，失败时保留此前成功记录。结果与配置由各自文件保存。
+- **Checkpoint 与恢复**：图中 `N` 为阶段内 step；checkpoint 保存于 `<stage>/checkpoints/global_step_N/`，阶段 `summary.json` 记录训练完成情况、进度统计与最终 checkpoint 路径，`train/<method-dir>/status.json` 的 `checkpoints` 仅索引仍保留的 checkpoint。初始化、恢复和评估通过 `--checkpoint` 传目录路径。中断恢复见[第 2.3 节](#23-中断恢复)。
+- **SwanLab 展示**：同一方法的训练、验证和评估共用 `<method-dir>_<run-id>` run，分别位于 `train/*`、`dev/*` 和 `evaluation/*`。评估按 QA 首次引入段及总体展示 NLL、EM、F1 合图，checkpoint 按真实累计 step 排序；补评估时合并已发布与本次选中结果，按真实累计 step 重建完整报告；滑块表示独立递增的报告发布版本。详细布局见 [SwanLab 组织与展示](../README.md#53-swanlab-组织与展示)。
+- **配置与执行记录**：`plan/` 仅保存流程设置和配置；训练、评估的日志与执行结果分别保存于 `train/`、`eval/`。评估任务级 `status.json` 保存任务信息、本轮选择 `selected_checkpoints`、整体状态与进度 `progress`，以及 `checkpoints` 中以 `<stage>/global_step_N` 为键的最近执行状态，包括命令、GPU、起止时间、返回码及计算／发布失败详情。补评估保留未选中的旧条目，整体状态与进度仅统计本轮选择。各 checkpoint 的日志与结果按阶段独立存放。
+- **失败重跑**：计算或发布失败时保留本地结果，重新执行原命令可复用已完成结果并补传。在线追加要求云端原训练 run 为 `FINISHED`。

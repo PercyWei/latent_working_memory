@@ -1,4 +1,4 @@
-"""v3 训练预设、单阶段运行与独立评估配置；相对路径以项目运行目录为基准。"""
+"""v3 训练预设、模型与阶段计划、运行记录及评估配置。"""
 
 from dataclasses import asdict, dataclass
 from decimal import Decimal
@@ -352,40 +352,121 @@ class ExperimentConfig:
             del raw["training"]["experiment_name"]
         return raw
 
+    @classmethod
+    def from_dict(cls, raw):
+        """从启动配置或运行记录中的单阶段配置构造实验。"""
+        if set(raw) != {"model", "objective", "training"}:
+            raise ValueError("experiment must contain model, objective and training")
+        if "stages" in raw["objective"]:
+            raise ValueError("runtime objective requires stage; use load_preset for objective.stages")
+        if "stage" not in raw["objective"]:
+            raise ValueError("runtime objective requires an explicit stage")
+        return cls(
+            ModelConfig(**raw["model"]),
+            ObjectiveConfig(**raw["objective"]),
+            TrainingConfig(**raw["training"]),
+        )
+
 
 def load_evaluation(path):
-    """读取独立评估配置，不从训练 checkpoint 推断评估数据与选样设置。"""
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
-    return EvaluationConfig(**raw)
+    """读取 test 设置，并从同级公共配置取得唯一 seed。"""
+    path = Path(path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if "seed" in raw:
+        raise ValueError("test configuration must use the common seed")
+    return EvaluationConfig(**raw, seed=load_common_config(path.parent / "config.json")["seed"])
 
 
 def load_experiment(path):
     """读取已展开的单阶段运行配置，拒绝方法预设。"""
     raw = json.loads(Path(path).read_text())
-    if set(raw) != {"model", "objective", "training"}:
-        raise ValueError("experiment must contain model, objective and training")
-    if "stages" in raw["objective"]:
-        raise ValueError("runtime objective requires stage; use load_preset for objective.stages")
-    if "stage" not in raw["objective"]:
-        raise ValueError("runtime objective requires an explicit stage")
-    return ExperimentConfig(
-        ModelConfig(**raw["model"]),
-        ObjectiveConfig(**raw["objective"]),
-        TrainingConfig(**raw["training"]),
+    return ExperimentConfig.from_dict(raw)
+
+
+def load_training_plan(config_path, train_path, stages=None):
+    """组合公共 seed、模型与训练阶段计划，按显式顺序选取连续阶段。"""
+    common = load_common_config(config_path)
+    return load_training_stages(
+        train_path, ModelConfig(**common["model"]), common["seed"], stages
     )
+
+
+def load_common_config(path):
+    """读取训练与评估共用的 seed 和模型配置。"""
+    common = json.loads(Path(path).read_text(encoding="utf-8"))
+    if set(common) != {"seed", "model"}:
+        raise ValueError("common configuration must contain seed and model")
+    if type(common["seed"]) is not int or common["seed"] < 0:
+        raise ValueError("seed must be a nonnegative integer")
+    return common
+
+
+def load_training_schedule(train_path):
+    """读取流程设置与有序阶段，阶段参数在实际选用时解析。"""
+    plan = json.loads(Path(train_path).read_text(encoding="utf-8"))
+    if (
+        set(plan) != {"execution", "stages"}
+        or not isinstance(plan["stages"], list)
+        or not plan["stages"]
+    ):
+        raise ValueError("training plan must contain execution and a nonempty stages list")
+    execution = plan["execution"]
+    if set(execution) != {"mode", "max_steps", "train_only"}:
+        raise ValueError("training execution requires mode, max_steps and train_only")
+    if execution["mode"] not in {"smoke", "full"}:
+        raise ValueError("training execution mode must be smoke or full")
+    if execution["max_steps"] is not None:
+        positive_integer(execution["max_steps"], "execution.max_steps")
+    if type(execution["train_only"]) is not bool:
+        raise ValueError("execution.train_only must be boolean")
+    for raw in plan["stages"]:
+        if set(raw) != {"objective", "training"}:
+            raise ValueError("training stage must contain objective and training")
+        if "stage" not in raw["objective"] or "stages" in raw["objective"]:
+            raise ValueError("training stage objective requires an explicit stage")
+        if "seed" in raw["training"]:
+            raise ValueError("training stage must use the common seed")
+    return plan
+
+
+def load_training_stages(train_path, model, seed, stages=None):
+    """将选中阶段与指定模型和 seed 绑定；恢复时沿用 checkpoint 配置。"""
+    raw_stages = load_training_schedule(train_path)["stages"]
+    plan_stages = tuple(raw["objective"]["stage"] for raw in raw_stages)
+    if stages is not None:
+        selected = tuple(stages)
+        raw_stages = [raw for raw in raw_stages if raw["objective"]["stage"] in selected]
+        if not selected or tuple(raw["objective"]["stage"] for raw in raw_stages) != selected:
+            raise ValueError("selected stages must follow the training plan order")
+    configs = tuple(
+        ExperimentConfig(
+            model,
+            ObjectiveConfig(**raw["objective"]),
+            TrainingConfig(**raw["training"], seed=seed),
+        )
+        for raw in raw_stages
+    )
+    method = configs[0].objective.method
+    if any(config.objective.method != method for config in configs):
+        raise ValueError("training stages must share their method")
+    validate_stage_sequence(method, plan_stages)
+    validate_stage_sequence(method, [config.objective.stage for config in configs])
+    return configs
 
 
 def load_preset(path):
     """按 objective.stages 的显式顺序展开方法预设。"""
     raw = json.loads(Path(path).read_text())
-    if set(raw) != {"model", "objective", "training"}:
-        raise ValueError("preset must contain model, objective and training")
+    if set(raw) != {"seed", "model", "objective", "training"}:
+        raise ValueError("preset must contain seed, model, objective and training")
     objective = dict(raw["objective"])
     if "stage" in objective or "stages" not in objective:
         raise ValueError("preset objective requires stages and must not contain stage")
     stages = validate_stage_sequence(objective["method"], objective.pop("stages"))
     model = ModelConfig(**raw["model"])
     training = dict(raw["training"])
+    if "seed" in training:
+        raise ValueError("preset training must use the top-level seed")
     configs = []
     for stage in stages:
         stage_objective = {**objective, "stage": stage}
@@ -395,7 +476,7 @@ def load_preset(path):
             ExperimentConfig(
                 model,
                 ObjectiveConfig(**stage_objective),
-                TrainingConfig(**training),
+                TrainingConfig(**training, seed=raw["seed"]),
             )
         )
     return tuple(configs)

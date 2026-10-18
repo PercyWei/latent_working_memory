@@ -14,7 +14,12 @@ import torch
 
 from latent_working_memory import tracking_credentials
 from latent_working_memory.v3 import gpu_job, job_plan
-from latent_working_memory.v3.config import DYNAMIC_METHODS, METHODS, load_experiment, load_preset
+from latent_working_memory.v3.config import (
+    DYNAMIC_METHODS,
+    METHODS,
+    load_preset,
+    load_training_plan,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -101,8 +106,12 @@ def value(command, flag):
     return command[command.index(flag) + 1]
 
 
-def config_paths(command):
-    return command[command.index("--config") + 1 : command.index("--device")]
+def training_configs(command):
+    return load_training_plan(
+        value(command, "--config"),
+        value(command, "--train-config"),
+        command[command.index("--stages") + 1 : command.index("--device")],
+    )
 
 
 def external_checkpoint(tmp_path, experiment_id="unit-job", method="dynamic", stage="pretrain"):
@@ -145,8 +154,7 @@ class Commands:
             raise subprocess.CalledProcessError(7, command)
         if "latent_working_memory.v3.train" in command:
             call["configs"], call["checkpoints"] = [], []
-            for config_path in config_paths(command):
-                config = load_experiment(config_path)
+            for config in training_configs(command):
                 if call["checkpoints"]:
                     config = replace(
                         config,
@@ -157,17 +165,11 @@ class Commands:
                 call["configs"].append(config)
                 output = Path(config.training.output_dir)
                 (output / "checkpoints").mkdir(parents=True)
-                (output / "config.json").write_text(json.dumps(config.to_dict()))
-                steps = (
-                    int(value(command, "--max-steps"))
-                    if "--max-steps" in command
-                    else 80
-                )
+                steps = int(value(command, "--max-steps")) if "--max-steps" in command else 80
                 run = {
                     "config": config.to_dict(),
                     "step_offset": sum(
-                        int(path.name.removeprefix("global_step_"))
-                        for path in call["checkpoints"]
+                        int(path.name.removeprefix("global_step_")) for path in call["checkpoints"]
                     ),
                 }
                 (output / "run.json").write_text(json.dumps(run))
@@ -199,7 +201,7 @@ class Commands:
                 call["checkpoints"].append(checkpoint)
                 if config.objective.stage == self.fail_stage:
                     raise subprocess.CalledProcessError(7, command)
-                (output / "training-result.json").write_text(
+                (output / "summary.json").write_text(
                     json.dumps(
                         {
                             "complete": "--max-steps" not in command,
@@ -240,7 +242,7 @@ class Commands:
                 },
             }
             (output / "summary.json").write_text(json.dumps(summary))
-            gpu_job.EvaluationHistory(output, call["evaluation_config"]).record(summary)
+            gpu_job.EvaluationHistory(output, call["evaluation_config"]).validate_summary(summary)
         else:
             assert "latent_working_memory.v3.compare" in command
             Path(value(command, "--output-dir")).mkdir(parents=True, exist_ok=True)
@@ -296,14 +298,13 @@ def test_modes_apply_bounded_or_complete_training_and_evaluation(tmp_path, mode,
         capacity = "-k512" if shared else "-k512+32-local"
         assert root.name.endswith(capacity if mode == "full" else f"{capacity}_{mode}")
         assert job.config.training.experiment_name == f"{root.name}_unit-job"
-        assert (
-            job.config_path == directory / "plan" / root.name / f"{job.config.objective.stage}.json"
-        )
+        assert job.config_path == directory / "plan" / root.name / "config.json"
+        assert job.train_config_path == directory / "plan" / root.name / "train.json"
         assert "global_batch_size" not in job.config.to_dict()["training"]
         command = gpu_job.training_command([job], 4, level["max_steps"])
         assert "--nproc_per_node=4" in command
         assert ("--max-steps" in command) == (mode != "full")
-    evaluation_path = jobs[-1].config_path.parent / "eval.json"
+    evaluation_path = jobs[-1].config_path.parent / "test.json"
     evaluation = gpu_job.evaluation_command(
         args, evaluation_path, Path("final.pt"), Path("evaluation")
     )
@@ -328,7 +329,8 @@ def test_dynamic_capacity_names_use_cli_append_slots_in_every_mode(tmp_path, met
         assert job.config.training.output_dir == str(
             directory / "train" / name / job.config.objective.stage
         )
-        assert job.config_path == directory / "plan" / name / f"{job.config.objective.stage}.json"
+        assert job.config_path == directory / "plan" / name / "config.json"
+        assert job.train_config_path == directory / "plan" / name / "train.json"
         assert job.config.training.experiment_name == f"{name}_unit-job"
         assert job.config.training.group == job.config.training.experiment_id == "unit-job"
 
@@ -626,7 +628,8 @@ def test_custom_method_preset_preserves_parameters_and_launcher_overrides(
         run_name = f"{method.replace('_', '-')}-{capacity}_smoke"
         assert Path(config.training.experiment_dir) == directory / "train" / run_name
         assert config.training.experiment_name == f"{run_name}_unit-job"
-        assert job.config_path == directory / "plan" / run_name / f"{config.objective.stage}.json"
+        assert job.config_path == directory / "plan" / run_name / "config.json"
+        assert job.train_config_path == directory / "plan" / run_name / "train.json"
 
 
 @pytest.mark.parametrize(
@@ -784,7 +787,8 @@ def test_custom_dynamic_pretraining_uses_its_requested_file(tmp_path, capsys, su
     assert job.config.model.memory_slots == 64 and job.config.model.lora_rank == 16
     assert job.config.training.epochs == 3 and job.config.training.learning_rate == 2e-4
     assert job.config.objective.append_slots == 16
-    assert job.config_path == directory / "plan/dynamic-pretrain-k64_smoke/pretrain.json"
+    assert job.config_path == directory / "plan/dynamic-pretrain-k64_smoke/config.json"
+    assert job.train_config_path == directory / "plan/dynamic-pretrain-k64_smoke/train.json"
     assert job.config.training.experiment_name == "dynamic-pretrain-k64_smoke_unit-job"
     assert job.initialize_from is None and not job.evaluate
     assert args.checkpoint is None
@@ -814,7 +818,8 @@ def test_saved_autocompressors_lm_preset_keeps_its_stage_and_uses_pretrain_budge
     (job,) = jobs
     assert job.config.objective.stage == "lm"
     assert training_limit(job.config) == 7
-    assert job.config_path.name == "lm.json"
+    assert job.config_path.name == "config.json"
+    assert job.train_config_path.name == "train.json"
     assert Path(job.config.training.output_dir).name == "lm"
     assert job.evaluate
 
@@ -939,22 +944,28 @@ def test_custom_preset_execution_records_resolved_configs_and_evaluates_final_st
     assert training["configs"][1].training.init_checkpoint == str(training["checkpoints"][0])
     assert value(evaluation["command"], "--checkpoint") == str(training["checkpoints"][-1])
     plan_directory = args.output_root / "unit-job/plan/icae-single-k512_smoke"
-    plan = json.loads((plan_directory / "job.json").read_text())
-    assert plan["method"] == "icae_single"
-    assert plan["training_runs"][0]["command"] == training["command"]
-    assert [job["initialize_from"] for job in plan["jobs"]] == [None, "icae-single-pretrain"]
-    assert all(job["config"]["training"]["init_checkpoint"] is None for job in plan["jobs"])
-    for job, trained in zip(plan["jobs"], training["configs"], strict=True):
-        config = load_experiment(job["config_path"])
+    plan = json.loads((plan_directory / "train.json").read_text())
+    assert plan["execution"] == {"mode": "smoke", "max_steps": 2, "train_only": False}
+    assert [stage["objective"]["stage"] for stage in plan["stages"]] == ["pretrain", "qa"]
+    assert not (plan_directory / "workflow.json").exists()
+    for stage, trained in zip(plan["stages"], training["configs"], strict=True):
+        (config,) = load_training_plan(
+            plan_directory / "config.json",
+            plan_directory / "train.json",
+            [stage["objective"]["stage"]],
+        )
         assert config == trained
-        assert job["config"]["training"]["learning_rate"] == 2e-4
-        assert job["config"]["objective"]["qa_batch_size"] == 5
         assert config.training.learning_rate == 2e-4
         assert config.objective.qa_batch_size == 5
         assert training_limit(config) == 16
         assert config.training.max_dev_samples == 4
         assert config.training.dev_every == config.training.save_every == 1
-    assert json.loads((plan_directory / "result.json").read_text()) == result
+    assert (
+        json.loads(
+            (Path(training["configs"][0].training.experiment_dir) / "status.json").read_text()
+        )
+        == result
+    )
     assert path.read_bytes() == original
 
 
@@ -1040,9 +1051,9 @@ def test_cli_only_overrides_explicitly_supplied_preset_values(tmp_path, monkeypa
             str(Path.home() / "models/override-model") if override else "local/preset-model"
         )
         evaluation_config = gpu_job.resolve_evaluation_config(
-            args, job.config_path.parent / "eval.json", level
+            args, job.config_path.parent / "test.json", level, job.config.training.seed
         )
-        assert evaluation_config.seed == (args.seed if args.seed is not None else 20261004)
+        assert evaluation_config.seed == job.config.training.seed
 
 
 @pytest.mark.parametrize("method", DYNAMIC_METHODS)
@@ -1166,7 +1177,7 @@ def test_dynamic_cli_initialization_inherits_source_id_without_repeating_pretrai
     commands = Commands()
     monkeypatch.setattr(gpu_job, "execute", commands)
     result = gpu_job.run_job(args)
-    assert args.run_id == result["experiment_id"] == "configured-source"
+    assert args.run_id == "configured-source"
     assert len(commands.calls) == 2
     assert [config.objective.stage for config in commands.calls[0]["configs"]] == [
         "warmup",
@@ -1375,12 +1386,12 @@ def test_explicit_overrides_and_null_remove_profile_limits(tmp_path):
     assert job.config.model.model_name_or_path == "models/local Qwen3"
     assert level["max_steps"] is None
     evaluation_config = gpu_job.resolve_evaluation_config(
-        args, job.config_path.parent / "eval.json", level
+        args, job.config_path.parent / "test.json", level, job.config.training.seed
     )
     assert evaluation_config.max_test_samples is None
     assert level["dev_every"] == 2 and level["save_every"] == 3
     assert "--log-to-swanlab" not in gpu_job.evaluation_command(
-        args, job.config_path.parent / "eval.json", Path("a"), Path("b")
+        args, job.config_path.parent / "test.json", Path("a"), Path("b")
     )
 
 
@@ -1511,8 +1522,28 @@ def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
         assert call["environment"]["CUDA_VISIBLE_DEVICES"] == gpus
         assert f"--nproc_per_node={len(gpus.split(','))}" in call["command"]
         assert value(call["command"], "--max-steps") == "2"
-        for config_path, config in zip(config_paths(call["command"]), call["configs"], strict=True):
-            assert json.loads(Path(config_path).read_text()) == config.to_dict()
+        configured = training_configs(call["command"])
+        for configured_stage, config in zip(configured, call["configs"], strict=True):
+            assert configured_stage.to_dict() == config.to_dict()
+        assert json.loads(Path(value(call["command"], "--config")).read_text()) == {
+            "seed": configured[0].training.seed,
+            "model": configured[0].to_dict()["model"]
+        }
+        plan = json.loads(Path(value(call["command"], "--train-config")).read_text())
+        assert plan == {
+            "execution": {"mode": "smoke", "max_steps": 2, "train_only": False},
+            "stages": [
+                {
+                    "objective": config.to_dict()["objective"],
+                    "training": {
+                        name: value
+                        for name, value in config.to_dict()["training"].items()
+                        if name != "seed"
+                    },
+                }
+                for config in configured
+            ]
+        }
     evaluation = commands.calls[-1]
     assert "latent_working_memory.v3.evaluate" in evaluation["command"]
     assert value(evaluation["command"], "--checkpoint") == str(checkpoints[-1])
@@ -1521,11 +1552,16 @@ def test_execution_writes_resolved_configs_and_chains_actual_checkpoints(
     plan_directory = (
         args.output_root / "unit-job" / "plan" / Path(trained[0].training.experiment_dir).name
     )
-    plan = json.loads((plan_directory / "job.json").read_text())
+    plan = json.loads((plan_directory / "train.json").read_text())
     assert len({config.training.experiment_dir for config in trained}) == 1
-    assert plan["evaluation_config_path"] == str(plan_directory / "eval.json")
-    for job in plan["jobs"]:
-        assert job["batching"]["global_batch_size"] == len(gpus.split(",")) * 8
+    assert (plan_directory / "test.json").is_file()
+    for stage in plan["stages"]:
+        (config,) = load_training_plan(
+            plan_directory / "config.json",
+            plan_directory / "train.json",
+            [stage["objective"]["stage"]],
+        )
+        assert config.training.global_batch_size(len(gpus.split(","))) == len(gpus.split(",")) * 8
     assert not (args.output_root / "unit-job" / "compare").exists()
     with pytest.raises(ValueError, match="already exists"):
         gpu_job.run_job(args)
@@ -1606,7 +1642,7 @@ def test_new_capacity_names_reuse_old_pretraining_paths_and_preserve_source_iden
 
     result = gpu_job.run_job(args)
 
-    assert args.run_id == result["experiment_id"] == "legacy-series"
+    assert args.run_id == "legacy-series"
     assert source_directory.parent.name == "dynamic-pretrain-k64_legacy-series"
     name = f"{method.replace('_', '-')}-k512+16-local"
     training, evaluation = commands.calls
@@ -1716,8 +1752,8 @@ def test_separate_methods_share_source_id_and_coexist_without_overwriting_series
             run_id=None,
         )
         assert args.run_id is None
-        result = gpu_job.run_job(args)
-        assert args.run_id == result["experiment_id"] == "unit-job"
+        gpu_job.run_job(args)
+        assert args.run_id == "unit-job"
         descendants.append(args)
     baseline = arguments(tmp_path, "--mode", "full", "--method", "icae_single")
     gpu_job.run_job(baseline)
@@ -1818,7 +1854,7 @@ def test_explicit_id_reuses_pretraining_in_a_new_series(tmp_path, monkeypatch, m
 
     result = gpu_job.run_job(args)
 
-    assert result["experiment_id"] == args.run_id == "writer-mode-comparison"
+    assert args.run_id == "writer-mode-comparison"
     method_directory = f"{method.replace('_', '-')}-k512+32-{writer_mode.replace('_', '-')}_smoke"
     assert result["status"] == "finished"
     training, evaluation = commands.calls
@@ -1879,6 +1915,7 @@ def test_existing_owned_output_is_rejected_without_touching_it(tmp_path, monkeyp
         "evaluation": directory
         / "eval"
         / Path(evaluated.config.training.experiment_dir).name
+        / "test"
         / evaluated.config.objective.stage,
     }[target]
     path.mkdir(parents=True)
@@ -1906,7 +1943,7 @@ def test_full_execution_uses_its_stage_budget_without_smoke_checkpoint(tmp_path,
         "dynamic-pretrain-k512_smoke",
         "dynamic-pretrain-k512",
     }
-    assert short_result["experiment_id"] == full_result["experiment_id"] == "unit-job"
+    assert smoke.run_id == full.run_id == "unit-job"
     assert set(short_result["checkpoints"].values()).isdisjoint(full_result["checkpoints"].values())
     full_call = commands.calls[-1]
     assert "--max-steps" not in full_call["command"]
@@ -1926,7 +1963,7 @@ def test_failed_training_or_evaluation_preserves_method_result(tmp_path, monkeyp
     assert len(commands.calls) == fail_at
     result = json.loads(
         (
-            args.output_root / "unit-job/plan/memory-change-k512+32-local_smoke/result.json"
+            args.output_root / "unit-job/train/memory-change-k512+32-local_smoke/status.json"
         ).read_text()
     )
     assert result["status"] == "failed" and "error" in result
@@ -1946,7 +1983,7 @@ def test_second_stage_failure_preserves_latest_saved_checkpoint_in_result(tmp_pa
     assert len(commands.calls) == 1
     failure = json.loads(
         (
-            args.output_root / "unit-job/plan/memory-change-k512+32-local_smoke/result.json"
+            args.output_root / "unit-job/train/memory-change-k512+32-local_smoke/status.json"
         ).read_text()
     )
     assert failure["status"] == "failed"
@@ -1956,7 +1993,7 @@ def test_second_stage_failure_preserves_latest_saved_checkpoint_in_result(tmp_pa
     )
     assert not commands.calls[0]["checkpoints"][0].exists()
     policy = commands.calls[0]["configs"][-1]
-    assert not (Path(policy.training.output_dir) / "training-result.json").exists()
+    assert not (Path(policy.training.output_dir) / "summary.json").exists()
     assert not failure["summaries"]
 
 

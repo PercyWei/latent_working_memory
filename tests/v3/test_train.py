@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import timedelta
 import json
 from pathlib import Path
+import tempfile
 
 import pytest
 import torch
@@ -71,7 +72,7 @@ def stage_configs(tmp_path, method="icae_single", source=None, stages=None):
                 gradient_accumulation_steps=1,
                 micro_batch_size_per_gpu=index + 1,
                 learning_rate=0.01 * (index + 1),
-                seed=123 + index,
+                seed=123,
             ),
         )
         path = tmp_path / f"{method}-{stage}.json"
@@ -127,8 +128,45 @@ def install_small_training(monkeypatch):
 
 
 def arguments(paths, *options):
+    configs = [json.loads(path.read_text()) for path in paths]
+    directory = Path(tempfile.mkdtemp(prefix="worker-plan-", dir=paths[0].parent))
+    common = directory / "config.json"
+    common.write_text(
+        json.dumps({"seed": configs[0]["training"]["seed"], "model": configs[0]["model"]})
+    )
+    training = directory / "train.json"
+    training.write_text(
+        json.dumps(
+            {
+                "execution": {"mode": "smoke", "max_steps": 1, "train_only": False},
+                "stages": [
+                    {
+                        "objective": config["objective"],
+                        "training": {
+                            name: value
+                            for name, value in config["training"].items()
+                            if name != "seed"
+                        },
+                    }
+                    for config in configs
+                ]
+            }
+        )
+    )
     return train.parse_args(
-        ["--config", *map(str, paths), "--device", "cpu", "--max-steps", "1", *options]
+        [
+            "--config",
+            str(common),
+            "--train-config",
+            str(training),
+            "--stages",
+            *(config["objective"]["stage"] for config in configs),
+            "--device",
+            "cpu",
+            "--max-steps",
+            "1",
+            *options,
+        ]
     )
 
 
@@ -172,11 +210,11 @@ def test_method_inherits_weights_across_stages_with_fresh_stage_optimizer(
             )
     assert second["optimizer_initially_empty"] and second["gradients_initially_clear"]
     assert [row["global_batch"] for row in records] == list(range(1, len(records) + 1))
-    assert [row["seed"] for row in records] == list(range(123, 123 + len(records)))
+    assert [row["seed"] for row in records] == [123] * len(records)
     assert second["optimizer"].param_groups[0]["lr"] == 0.02
     assert all(state["step"] == 1 for state in second["optimizer"].state.values())
     assert result["global_step"] == len(records) and result["completed_steps"] == 1
-    resolved = json.loads((tmp_path / method / second["stage"] / "config.json").read_text())
+    resolved = json.loads((tmp_path / method / second["stage"] / "run.json").read_text())["config"]
     assert resolved["training"]["init_checkpoint"] == first["result"]["checkpoint"]
     assert json.loads(paths[1].read_text())["training"]["init_checkpoint"] is None
     checkpoint = read_checkpoint(result["checkpoint"])
@@ -187,14 +225,14 @@ def test_method_inherits_weights_across_stages_with_fresh_stage_optimizer(
         assert second["model"] is records[2]["model"]
         assert second["module"] is records[2]["module"]
         torch.testing.assert_close(second["final"], records[2]["initial"], rtol=0, atol=0)
-    manifest = json.loads((tmp_path / method / "experiment.json").read_text())
+    manifest = json.loads((tmp_path / method / "status.json").read_text())["experiment"]
     assert manifest["method"] == method
     assert list(manifest["stages"]) == [row["stage"] for row in records]
-    assert not (tmp_path / method / "pretrain/dev-qa.jsonl").exists()
+    assert not (tmp_path / method / "pretrain/details.jsonl").exists()
     for stage_record in records[1:]:
         observed = [
             json.loads(line)
-            for line in (tmp_path / method / stage_record["stage"] / "dev-qa.jsonl")
+            for line in (tmp_path / method / stage_record["stage"] / "details.jsonl")
             .read_text()
             .splitlines()
         ]
@@ -213,13 +251,16 @@ def test_second_stage_can_resume_from_its_saved_checkpoint(tmp_path, monkeypatch
     install_small_training(monkeypatch)
     paths = stage_configs(tmp_path)
     partial = train.run_training(arguments(paths))
-    observations_path = tmp_path / "icae_single/qa/dev-qa.jsonl"
+    observations_path = tmp_path / "icae_single/qa/details.jsonl"
     observations = [json.loads(line) for line in observations_path.read_text().splitlines()]
     with observations_path.open("a") as stream:
         stream.write(json.dumps({**observations[-1], "step": 99, "global_step": 999}) + "\n")
+    paths[1].write_text(
+        json.dumps(json.loads((tmp_path / "icae_single/qa/run.json").read_text())["config"])
+    )
     resumed = train.run_training(
         arguments(
-            [tmp_path / "icae_single/qa/config.json"],
+            [paths[1]],
             "--resume",
             partial["checkpoint"],
             "--max-steps",
@@ -285,8 +326,13 @@ def test_invalid_sequence_fails_before_loading_any_model(tmp_path, monkeypatch, 
     else:
         config["training"]["experiment_id"] = "unrelated"
     paths[1].write_text(json.dumps(config))
+    args = arguments(paths)
+    if change == "model":
+        plan = json.loads(args.train_config.read_text())
+        plan["stages"][1]["model"] = config["model"]
+        args.train_config.write_text(json.dumps(plan))
     with pytest.raises(ValueError):
-        train.run_training(arguments(paths))
+        train.run_training(args)
     assert not loads
 
 
@@ -308,8 +354,21 @@ def test_worker_rejects_preset_before_loading_any_model(tmp_path, monkeypatch, e
     loads, _ = install_small_training(monkeypatch)
     preset = Path("configs/v3/icae_single.json")
     options = ["--output-dir", str(tmp_path / "resolved-output")] if explicit_output else []
-    with pytest.raises(ValueError, match="stages|preset"):
-        train.run_training(arguments([preset], *options))
+    args = train.parse_args(
+        [
+            "--config",
+            str(preset),
+            "--train-config",
+            str(preset),
+            "--stages",
+            "pretrain",
+            "--device",
+            "cpu",
+            *options,
+        ]
+    )
+    with pytest.raises(ValueError, match="seed and model"):
+        train.run_training(args)
     assert not loads
     assert not (tmp_path / "resolved-output").exists()
 
@@ -362,7 +421,7 @@ def test_worker_accepts_single_pretraining_stage(tmp_path, monkeypatch, method):
     assert len(loads) == len(records) == 1
     assert records[0]["stage"] == "pretrain"
     assert result["global_step"] == result["completed_steps"] == 1
-    manifest = json.loads((tmp_path / method / "experiment.json").read_text())
+    manifest = json.loads((tmp_path / method / "status.json").read_text())["experiment"]
     assert list(manifest["stages"]) == ["pretrain"]
 
 
@@ -411,7 +470,7 @@ def test_worker_accepts_single_posttraining_stage_from_pretraining(
     torch.testing.assert_close(source_weights, records[0]["initial"], rtol=0, atol=0)
     checkpoint = read_checkpoint(result["checkpoint"])
     assert checkpoint["run"]["initialization"]["checkpoint"] == source
-    manifest = json.loads((tmp_path / method / "experiment.json").read_text())
+    manifest = json.loads((tmp_path / method / "status.json").read_text())["experiment"]
     assert list(manifest["stages"]) == [stage]
 
 

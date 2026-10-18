@@ -2,6 +2,7 @@
 
 import argparse
 from dataclasses import asdict, replace
+from datetime import datetime
 import fcntl
 import json
 import math
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+from zoneinfo import ZoneInfo
 
 from latent_working_memory.v3 import job_plan
 from latent_working_memory.v3.config import (
@@ -22,15 +24,17 @@ from latent_working_memory.v3.config import (
     METHODS,
     WRITER_MODES,
     EvaluationConfig,
+    load_common_config,
     load_evaluation,
     parse_optional_positive_integer,
 )
-from latent_working_memory.v3.evaluation_records import EvaluationHistory
+from latent_working_memory.v3.evaluation_records import EvaluationHistory, evaluation_log_path
 from latent_working_memory.v3.checkpoint import read_checkpoint
 from latent_working_memory.v3.evaluate import (
     publish_cached_evaluations,
     validate_evaluation_publication,
 )
+from latent_working_memory.v3.training_status import read_training_status, update_training_status
 from latent_working_memory.tracking_credentials import swanlab_api_key
 
 
@@ -116,14 +120,14 @@ def parse_args(argv=None):
         help="QA 数据目录，训练、验证和最终评估分别读取 train/dev/test.jsonl",
     )
     parser.add_argument(
-        "--eval-data",
+        "--test-data",
         type=Path,
-        help="覆盖最终 test 数据目录；独立评估无 eval.json 时必填，读取 test.jsonl",
+        help="覆盖最终 test 数据目录；独立评估无 test.json 时必填，读取 test.jsonl",
     )
     parser.add_argument(
         "--seed",
         type=nonnegative_count,
-        help="统一随机种子；训练默认沿用 training.seed，评估沿用 eval.json，新建评估配置默认 20261004",
+        help="新训练的公共随机种子；默认沿用配置顶层 seed，评估读取公共 config.json 的 seed",
     )
     parser.add_argument(
         "--model-path", help="覆盖预设模型位置，当前预设为 ~/models/Qwen3-4B-Instruct-2507"
@@ -264,12 +268,31 @@ def parse_args(argv=None):
         help="产物目录名和默认 group；默认上海时间 YYYYMMDD-HHMMSS，动态后训练未指定时继承预训练标识",
     )
     parser.add_argument("--output-root", type=Path, default=Path("artifacts/v3"))
+    defaults = [(action, action.default) for action in parser._actions]
+    for action, _ in defaults:
+        action.default = argparse.SUPPRESS
     args = parser.parse_args(argv)
+    supplied = set(vars(args))
+    for action, default in defaults:
+        action.default = default
+        if default != argparse.SUPPRESS and not hasattr(args, action.dest):
+            setattr(args, action.dest, default)
+    if args.resume:
+        overrides = supplied - {"resume", "checkpoint", "gpus"}
+        if overrides:
+            options = sorted(
+                action.option_strings[0]
+                for action, _ in defaults
+                if action.dest in overrides
+            )
+            parser.error(f"--resume does not accept configuration overrides: {', '.join(options)}")
     if args.eval_run is not None and not args.evaluate_only:
         parser.error("--eval-run requires --evaluate-only")
-    if args.eval_data is not None and (args.train_only or args.resume):
-        parser.error("--eval-data is not supported with --train-only or --resume")
+    if args.test_data is not None and (args.train_only or args.resume):
+        parser.error("--test-data is not supported with --train-only or --resume")
     if args.evaluate_only:
+        if "seed" in supplied:
+            parser.error("--seed is only supported when starting new training")
         if args.checkpoint is None and args.eval_run is None:
             parser.error("--evaluate-only requires --checkpoint or --eval-run")
         return args
@@ -318,7 +341,11 @@ def training_command(jobs, gpu_count, max_steps, resume=None):
         "-m",
         "latent_working_memory.v3.train",
         "--config",
-        *(str(job.config_path) for job in jobs),
+        str(jobs[0].config_path),
+        "--train-config",
+        str(jobs[0].train_config_path),
+        "--stages",
+        *(job.config.objective.stage for job in jobs),
         "--device",
         "cuda",
     ]
@@ -351,49 +378,99 @@ def evaluation_command(args, config_path, checkpoint, output, log_to_swanlab=Non
 
 
 def save_json(path, value):
-    path.write_text(
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
         json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+    )
+    temporary.replace(path)
+
+
+def save_training_stage(job, config):
+    """将阶段的实际配置写回训练计划，保留其他阶段。"""
+    training = json.loads(job.train_config_path.read_text(encoding="utf-8"))
+    index = next(
+        index
+        for index, stage in enumerate(training["stages"])
+        if stage["objective"]["stage"] == job.config.objective.stage
+    )
+    training["stages"][index] = {
+        "objective": config["objective"],
+        "training": {name: value for name, value in config["training"].items() if name != "seed"},
+    }
+    save_json(job.train_config_path, training)
+
+
+def _save_training_status(directory, result, status, error=None):
+    """调度器只更新执行字段，保留 worker 登记和评估追加的最新内容。"""
+    result["status"] = status
+    result.pop("error", None)
+    if error is not None:
+        result["error"] = str(error)
+    with update_training_status(directory) as saved:
+        saved["status"] = status
+        saved["checkpoints"] = result["checkpoints"]
+        for path in result["summaries"]:
+            if path not in saved["summaries"]:
+                saved["summaries"].append(path)
+        result["summaries"][:] = saved["summaries"]
+        saved.pop("error", None)
+        if error is not None:
+            saved["error"] = str(error)
+
+
+def _write_evaluation_status(path, summary, results):
+    """集中保存各 checkpoint 最近状态，进度只统计本次选择。"""
+    summary["progress"] = {
+        "total": len(results),
+        **{
+            status: sum(result["status"] == status for result in results)
+            for status in ("pending", "running", "finished", "failed", "stopped")
+        },
+    }
+    save_json(
+        path,
+        {key: value for key, value in summary.items() if key != "summaries"},
     )
 
 
-def resolve_evaluation_config(args, config_path, level=None):
+def resolve_evaluation_config(args, config_path, level=None, initial_seed=None):
     """沿用已有配置；独立评估首次创建时须显式指定数据，其他字段使用默认值。"""
-    if config_path.is_file() or args.resume:
+    if args.resume:
+        return load_evaluation(config_path)
+    if config_path.is_file():
         config = load_evaluation(config_path)
     else:
-        dataset_dir = args.eval_data
+        dataset_dir = args.test_data
         if dataset_dir is None and not args.evaluate_only:
             dataset_dir = args.qa_data
         if dataset_dir is None:
-            raise ValueError(f"{config_path} is missing; specify --eval-data to create it")
+            raise ValueError(f"{config_path} is missing; specify --test-data to create it")
+        seed = initial_seed
+        if seed is None:
+            seed = load_common_config(config_path.parent / "config.json")["seed"]
         config = EvaluationConfig(
             dataset_dir=str(Path(dataset_dir).resolve()),
+            seed=seed,
             max_test_samples=level["max_test_samples"] if level is not None else None,
         )
     updates = {}
     for argument, field in (
-        ("eval_data", "dataset_dir"),
+        ("test_data", "dataset_dir"),
         ("max_new_tokens", "max_new_tokens"),
     ):
         value = getattr(args, argument)
         if value is not None:
-            if argument == "eval_data":
+            if argument == "test_data":
                 value = str(value.resolve())
             updates[field] = value
-    if args.seed is not None and not args.resume:
-        updates["seed"] = args.seed
     if "max_test_samples" in vars(args):
         updates["max_test_samples"] = args.max_test_samples
     return replace(config, **updates)
 
 
 def save_evaluation_config(config_path, config):
-    save_json(config_path, asdict(config))
-    plan_path = config_path.parent / "job.json"
-    if plan_path.is_file():
-        plan = json.loads(plan_path.read_text(encoding="utf-8"))
-        plan["evaluation_config_path"] = str(config_path)
-        save_json(plan_path, plan)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    save_json(config_path, {name: value for name, value in asdict(config).items() if name != "seed"})
 
 
 def require_dataset_entries(directories):
@@ -458,51 +535,24 @@ def checkpoint_evaluation_identity(checkpoint):
     return stage_directory, run["step_offset"] + stage_step
 
 
-def evaluate_checkpoint(args, checkpoint, config_path, environment):
-    """自动评估与补评估共用 checkpoint 目录、配置快照和结果登记。"""
-    started = time.perf_counter()
-    stage_directory, global_step = checkpoint_evaluation_identity(checkpoint)
-    method_directory = stage_directory.parent
-    directory = method_directory.parent.parent
-    output = directory / "eval" / method_directory.name / stage_directory.name / checkpoint.name
-    print(
-        f"[evaluation] method={method_directory.name} stage={stage_directory.name} "
-        f"checkpoint={checkpoint.name} global_step={global_step}",
-        flush=True,
-    )
-    config = load_evaluation(config_path)
-    history = EvaluationHistory(output, asdict(config))
-    cached = history.cached_summary(checkpoint)
-    if cached is not None:
-        history.record(cached)
-        print(
-            f"[evaluation] reusing local result | samples={cached['trajectories']} "
-            f"summary={output / 'summary.json'}",
-            flush=True,
+def evaluate_checkpoints(args, checkpoints, summaries):
+    """自动 test 复用独立评估调度，只使用训练所选的第一张 GPU。"""
+    method_directory = job_plan.checkpoint_stage_directory(checkpoints[0]).parent
+    evaluation_args = argparse.Namespace(**{**vars(args), "gpus": args.gpus.split(",")[0]})
+    try:
+        _schedule_evaluation(evaluation_args, checkpoints, method_directory)
+    finally:
+        result_path = (
+            method_directory.parent.parent / "eval" / method_directory.name / "test" / "status.json"
         )
-    if cached is None or args.tracking == "online":
-        execute(
-            evaluation_command(args, output / "eval.json", checkpoint, output),
-            environment,
-            output / "eval.log",
-            append=cached is not None,
-        )
-    else:
-        print("[evaluation] cached local result ready; tracking disabled", flush=True)
-    summary = str(output / "summary.json")
-    plan_directory = directory / "plan" / method_directory.name
-    result_path = plan_directory / "result.json"
-    if result_path.is_file():
-        result = json.loads(result_path.read_text(encoding="utf-8"))
-        if summary not in result["summaries"]:
-            result["summaries"].append(summary)
-        save_json(result_path, result)
-    print(
-        f"[evaluation] checkpoint={checkpoint.name} finished "
-        f"elapsed={time.perf_counter() - started:.1f}s summary={summary}",
-        flush=True,
-    )
-    return summary
+        if result_path.is_file():
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            for key in result["selected_checkpoints"]:
+                checkpoint_status = result["checkpoints"][key]
+                if checkpoint_status["compute_status"] in {"cached", "finished"}:
+                    summary = str(Path(checkpoint_status["output_dir"]) / "summary.json")
+                    if summary not in summaries:
+                        summaries.append(summary)
 
 
 def _terminate_evaluation_process(process):
@@ -523,7 +573,7 @@ def _terminate_evaluation_process(process):
         process.wait()
 
 
-def _compute_evaluations(args, tasks, outputs, identities, environment, total):
+def _compute_evaluations(args, tasks, results, summary, result_path, environment):
     """每张 GPU 固定一个槽位，仅并行计算，不在子进程发布 SwanLab。"""
     pending = Queue()
     for task in tasks:
@@ -531,27 +581,33 @@ def _compute_evaluations(args, tasks, outputs, identities, environment, total):
     stopping = threading.Event()
     state_lock = threading.Lock()
     processes = set()
-    successes, failures = set(), {}
 
     def worker(gpu):
         while not stopping.is_set():
             try:
-                position, checkpoint = pending.get_nowait()
+                result = pending.get_nowait()
             except Empty:
                 return
-            output = outputs[checkpoint]
-            stage, global_step = identities[checkpoint]
+            command = result["command"]
             prefix = (
-                f"[evaluation] gpu={gpu} checkpoint={position}/{total} "
-                f"source={stage.name}/{checkpoint.name}"
+                f"[evaluation] gpu={gpu} checkpoint={result['stage']}"
+                f"/global_step_{result['stage_step']}"
             )
-            command = evaluation_command(
-                args, output / "eval.json", checkpoint, output, log_to_swanlab=False
-            )
-            print(f"{prefix} compute started global_step={global_step}", flush=True)
-            print(f"{prefix} $ {shlex.join(command)}", flush=True)
+            error = None
             try:
-                with (output / "eval.log").open("w", encoding="utf-8") as log:
+                with state_lock:
+                    if stopping.is_set():
+                        return
+                    result.update(
+                        status="running", compute_status="running", gpu=gpu,
+                        started_at=datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+                    )
+                    _write_evaluation_status(result_path, summary, results)
+                with Path(result["log_path"]).open("a", encoding="utf-8") as log:
+                    invocation = "$ " + shlex.join(command) + "\n"
+                    print(f"{prefix} {invocation}", end="", flush=True)
+                    log.write(invocation)
+                    log.flush()
                     with state_lock:
                         if stopping.is_set():
                             return
@@ -579,22 +635,28 @@ def _compute_evaluations(args, tasks, outputs, identities, environment, total):
                         process.stdout.close()
                     if code != 0:
                         raise subprocess.CalledProcessError(code, command)
-            except Exception as error:
-                with state_lock:
-                    failures[checkpoint] = error
-                    completed = len(successes) + len(failures)
-                print(
-                    f"{prefix} compute failed completed={completed}/{len(tasks)} "
-                    f"error={error} log={output / 'eval.log'}",
-                    flush=True,
+            except Exception as caught:
+                error = caught
+                print(f"{prefix} compute failed: {error}", flush=True)
+            with state_lock:
+                status = "stopped" if stopping.is_set() else "failed" if error is not None else "finished"
+                result.update(
+                    status=status, compute_status=status,
+                    return_code=(
+                        error.returncode if isinstance(error, subprocess.CalledProcessError)
+                        else 1 if error is not None else 0
+                    ),
+                    finished_at=datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
                 )
-            else:
-                with state_lock:
-                    successes.add(checkpoint)
-                    completed = len(successes) + len(failures)
+                if status != "finished":
+                    result["publication_status"] = "skipped"
+                if error is not None:
+                    result["error"] = f"{type(error).__name__}: {error}"
+                _write_evaluation_status(result_path, summary, results)
+                completed = sum(item["compute_status"] not in {"pending", "running"} for item in results)
                 print(
-                    f"{prefix} compute finished completed={completed}/{len(tasks)} "
-                    f"summary={output / 'summary.json'}",
+                    f"{prefix} compute {status} completed={completed}/{len(results)} "
+                    f"log={result['log_path']}",
                     flush=True,
                 )
 
@@ -602,7 +664,6 @@ def _compute_evaluations(args, tasks, outputs, identities, environment, total):
     previous_handlers = {
         signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)
     }
-
     try:
         for gpu in args.gpus.split(",")[:len(tasks)]:
             thread = threading.Thread(target=worker, args=(gpu,), name=f"v3-eval-gpu-{gpu}")
@@ -612,7 +673,7 @@ def _compute_evaluations(args, tasks, outputs, identities, environment, total):
             thread.join()
     except BaseException:
         stopping.set()
-        for signum in (signal.SIGTERM, signal.SIGINT):
+        for signum in previous_handlers:
             signal.signal(signum, signal.SIG_IGN)
         with state_lock:
             active = list(processes)
@@ -624,7 +685,6 @@ def _compute_evaluations(args, tasks, outputs, identities, environment, total):
     finally:
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
-    return successes, failures
 
 
 def _run_evaluation_locked(args, checkpoints, method_directory, started):
@@ -638,95 +698,151 @@ def _run_evaluation_locked(args, checkpoints, method_directory, started):
         flush=True,
     )
     plan_directory = directory / "plan" / method_directory.name
-    config_path = plan_directory / "eval.json"
+    config_path = plan_directory / "test.json"
     config = resolve_evaluation_config(args, config_path)
     require_dataset_entries([config.dataset_dir])
     training_dir = (
         validate_evaluation_publication(checkpoints) if args.tracking == "online" else None
     )
+    evaluation_directory = directory / "eval" / method_directory.name / "test"
     outputs = {
         checkpoint: (
-            directory / "eval" / method_directory.name / identities[checkpoint][0].name
-            / checkpoint.name
+            evaluation_directory / identities[checkpoint][0].name / checkpoint.name
         )
         for checkpoint in checkpoints
     }
-    successes, tasks = set(), []
-    for position, checkpoint in enumerate(checkpoints, 1):
-        history = EvaluationHistory(outputs[checkpoint], asdict(config))
+    results, tasks = [], []
+    for checkpoint in checkpoints:
+        output = outputs[checkpoint]
+        stage, global_step = identities[checkpoint]
+        log_path = evaluation_log_path(output)
+        result = {
+            "checkpoint": str(checkpoint),
+            "stage": stage.name,
+            "stage_step": int(checkpoint.name.removeprefix("global_step_")),
+            "global_step": global_step,
+            "status": "pending",
+            "compute_status": "pending",
+            "publication_status": "pending" if training_dir is not None else "disabled",
+            "command": evaluation_command(
+                args, output / "eval.json", checkpoint, output, log_to_swanlab=False
+            ),
+            "output_dir": str(output),
+            "log_path": str(log_path),
+            "gpu": None,
+        }
+        history = EvaluationHistory(output, asdict(config))
         cached = history.cached_summary(checkpoint)
         if cached is None:
-            tasks.append((position, checkpoint))
+            tasks.append(result)
         else:
-            history.record(cached)
-            successes.add(checkpoint)
+            result.update(
+                status="finished", compute_status="cached", return_code=0,
+                started_at=datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+                finished_at=datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+            )
             print(
-                f"[evaluation] checkpoint={position}/{len(checkpoints)} "
-                f"source={identities[checkpoint][0].name}/{checkpoint.name} cache ready "
-                f"samples={cached['trajectories']} summary={outputs[checkpoint] / 'summary.json'}",
+                f"[evaluation] source={stage.name}/{checkpoint.name} cache ready "
+                f"samples={cached['trajectories']} summary={output / 'summary.json'}",
                 flush=True,
             )
+        results.append(result)
     environment = execution_environment(args)
-    plan_directory.mkdir(parents=True, exist_ok=True)
     save_evaluation_config(config_path, config)
+    result_path = evaluation_directory / "status.json"
+    checkpoint_statuses = (
+        json.loads(result_path.read_text(encoding="utf-8"))["checkpoints"]
+        if result_path.is_file() else {}
+    )
+    selected = [f"{result['stage']}/global_step_{result['stage_step']}" for result in results]
+    checkpoint_statuses.update(zip(selected, results))
+    summary = {
+        "action": "evaluate",
+        "eval_run": str(method_directory),
+        "eval_type": "test",
+        "gpus": args.gpus,
+        "started_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+        "status": "running",
+        "selected_checkpoints": selected,
+        "checkpoints": checkpoint_statuses,
+        "summaries": [],
+    }
+    for result in results:
+        Path(result["output_dir"]).mkdir(parents=True, exist_ok=True)
+        if result["compute_status"] == "cached":
+            with Path(result["log_path"]).open("a", encoding="utf-8") as log:
+                log.write(f"[evaluation] reusing local result: {result['output_dir']}/summary.json\n")
+    _write_evaluation_status(result_path, summary, results)
     print(
-        f"[evaluation] computation started cached={len(successes)} pending={len(tasks)} "
+        f"[evaluation] computation started cached={len(results) - len(tasks)} pending={len(tasks)} "
         f"gpu_slots={min(len(args.gpus.split(',')), len(tasks))}",
         flush=True,
     )
-    computed, compute_failures = _compute_evaluations(
-        args, tasks, outputs, identities, environment, len(checkpoints)
+    try:
+        _compute_evaluations(args, tasks, results, summary, result_path, environment)
+        successful = [result for result in results if result["compute_status"] in {"cached", "finished"}]
+        summary["summaries"] = [str(Path(result["output_dir"]) / "summary.json") for result in successful]
+        training_result_path = method_directory / "status.json"
+        if training_result_path.is_file():
+            with update_training_status(method_directory) as training_result:
+                for path in summary["summaries"]:
+                    if path not in training_result["summaries"]:
+                        training_result["summaries"].append(path)
+        if training_dir is not None and successful:
+            print(f"[evaluation] CPU publication started checkpoints={len(successful)}", flush=True)
+            failures = dict(publish_cached_evaluations(
+                [Path(result["checkpoint"]) for result in successful],
+                [Path(result["output_dir"]) for result in successful],
+                config,
+                training_dir,
+            ))
+            for result in successful:
+                error = failures.get(Path(result["checkpoint"]))
+                result["publication_status"] = "failed" if error is not None else "finished"
+                if error is not None:
+                    result.update(status="failed", error=f"publication failed: {type(error).__name__}: {error}")
+                    print(f"[evaluation] {result['stage']}/{Path(result['checkpoint']).name} {result['error']}", flush=True)
+                result["finished_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
+            _write_evaluation_status(result_path, summary, results)
+    except BaseException as error:
+        stopped = isinstance(error, KeyboardInterrupt)
+        summary["summaries"] = [
+            str(Path(result["output_dir"]) / "summary.json")
+            for result in results if result["compute_status"] in {"cached", "finished"}
+        ]
+        for result in results:
+            if result["status"] in {"pending", "running"}:
+                result["status"] = "stopped" if stopped else "failed"
+                result["compute_status"] = result["status"]
+            if result["publication_status"] == "pending":
+                result["publication_status"] = "stopped" if stopped else "failed"
+            result["finished_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
+        summary.update(
+            status="stopped" if stopped else "failed",
+            error=f"{type(error).__name__}: {error}",
+            finished_at=datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+        )
+        _write_evaluation_status(result_path, summary, results)
+        raise
+    failures = sum(result["status"] != "finished" for result in results)
+    summary.update(
+        status="failed" if failures else "finished",
+        finished_at=datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
     )
-    successes.update(computed)
-    successful_checkpoints = [checkpoint for checkpoint in checkpoints if checkpoint in successes]
-    summaries = [str(outputs[checkpoint] / "summary.json") for checkpoint in successful_checkpoints]
-    result_path = plan_directory / "result.json"
-    if result_path.is_file():
-        result = json.loads(result_path.read_text(encoding="utf-8"))
-        for summary in summaries:
-            if summary not in result["summaries"]:
-                result["summaries"].append(summary)
-        save_json(result_path, result)
+    _write_evaluation_status(result_path, summary, results)
     print(
-        f"[evaluation] computation finished success={len(successes)}/{len(checkpoints)} "
-        f"failed={len(compute_failures)}",
+        f"[evaluation] {summary['status']} computed={len(summary['summaries'])}/{len(checkpoints)} "
+        f"elapsed={time.perf_counter() - started:.1f}s result={result_path}",
         flush=True,
     )
-    publication_failures = []
-    if training_dir is not None and successful_checkpoints:
-        print(
-            f"[evaluation] CPU publication started checkpoints={len(successful_checkpoints)}",
-            flush=True,
-        )
-        publication_failures = publish_cached_evaluations(
-            successful_checkpoints,
-            [outputs[checkpoint] for checkpoint in successful_checkpoints],
-            config,
-            training_dir,
-        )
-        for checkpoint, error in publication_failures:
-            print(
-                f"[evaluation] publication failed source={checkpoint.parent.parent.name}"
-                f"/{checkpoint.name} error={error}",
-                flush=True,
-            )
-    status = "failed" if compute_failures or publication_failures else "finished"
-    print(
-        f"[evaluation] {status} computed={len(successes)}/{len(checkpoints)} "
-        f"compute_failed={len(compute_failures)} publication_failed={len(publication_failures)} "
-        f"elapsed={time.perf_counter() - started:.1f}s",
-        flush=True,
-    )
-    if status == "failed":
+    if failures:
         raise RuntimeError(
-            f"evaluation completed with failures: compute={len(compute_failures)}, "
-            f"publication={len(publication_failures)}; local results and logs are retained"
+            f"evaluation failed for {failures}/{len(checkpoints)} checkpoints; see {result_path}"
         )
-    return {"status": "finished", "summaries": summaries}
+    return summary
 
 
 def run_evaluation(args):
-    started = time.perf_counter()
     print("[evaluation] preparing checkpoint list", flush=True)
     if args.eval_run is not None:
         method_directory = args.eval_run.resolve()
@@ -749,6 +865,11 @@ def run_evaluation(args):
     if len(methods) != 1:
         raise ValueError("batch evaluation requires checkpoints from the same method run")
     method_directory = next(iter(methods))
+    return _schedule_evaluation(args, checkpoints, method_directory)
+
+
+def _schedule_evaluation(args, checkpoints, method_directory):
+    started = time.perf_counter()
 
     def interrupt_evaluation(signum, frame):
         raise KeyboardInterrupt(f"evaluation interrupted by {signal.Signals(signum).name}")
@@ -767,8 +888,9 @@ def run_evaluation(args):
 
 def collect_training_result(job, allow_pruned=False):
     output = Path(job.config.training.output_dir)
-    result = json.loads((output / "training-result.json").read_text(encoding="utf-8"))
-    save_json(job.config_path, json.loads((output / "config.json").read_text(encoding="utf-8")))
+    result = json.loads((output / "summary.json").read_text(encoding="utf-8"))
+    run = json.loads((output / "run.json").read_text(encoding="utf-8"))
+    save_training_stage(job, run["config"])
     checkpoint = Path(result["checkpoint"])
     if not (checkpoint / "state.pt").is_file():
         if allow_pruned:
@@ -798,9 +920,10 @@ def collect_training_results(jobs, checkpoints, complete=True):
                 job, allow_pruned=any(later.key in retained for later in jobs[index + 1 :])
             )
         else:
-            config_path = Path(job.config.training.output_dir) / "config.json"
-            if config_path.is_file():
-                save_json(job.config_path, json.loads(config_path.read_text(encoding="utf-8")))
+            run_path = Path(job.config.training.output_dir) / "run.json"
+            if run_path.is_file():
+                run = json.loads(run_path.read_text(encoding="utf-8"))
+                save_training_stage(job, run["config"])
             checkpoint = retained.get(job.key)
         if checkpoint is None:
             checkpoints.pop(job.key, None)
@@ -809,12 +932,12 @@ def collect_training_results(jobs, checkpoints, complete=True):
 
 
 def run_resume(args):
-    directory, level, jobs = job_plan.build_resume_jobs(args)
+    directory, max_steps, jobs = job_plan.build_resume_jobs(args)
     plan_directory = jobs[0].config_path.parent
-    result_path = plan_directory / "result.json"
-    result = json.loads(result_path.read_text(encoding="utf-8"))
+    training_directory = Path(jobs[0].config.training.experiment_dir)
+    result = read_training_status(training_directory)
     result["checkpoints"][jobs[0].key] = str(args.checkpoint.resolve())
-    evaluation_path = plan_directory / "eval.json"
+    evaluation_path = plan_directory / "test.json"
     evaluation_config = (
         resolve_evaluation_config(args, evaluation_path)
         if any(job.evaluate for job in jobs)
@@ -823,42 +946,35 @@ def run_resume(args):
     if evaluation_config is not None:
         require_dataset_entries([evaluation_config.dataset_dir])
         checkpoint = args.checkpoint.resolve()
-        output = directory / "eval" / plan_directory.name / jobs[0].config.objective.stage / checkpoint.name
+        output = (
+            directory / "eval" / plan_directory.name / "test"
+            / jobs[0].config.objective.stage / checkpoint.name
+        )
         EvaluationHistory(output, asdict(evaluation_config)).validate_configuration()
 
-    def save_result(status, error=None):
-        result["status"] = status
-        result.pop("error", None)
-        if error is not None:
-            result["error"] = str(error)
-        save_json(result_path, result)
-
     environment = execution_environment(args)
-    evaluation_environment = dict(environment, CUDA_VISIBLE_DEVICES=args.gpus.split(",")[0])
     for job in jobs:
-        save_json(job.config_path, job.config.to_dict())
+        save_training_stage(job, job.config.to_dict())
     if evaluation_config is not None:
         save_evaluation_config(evaluation_path, evaluation_config)
-    save_result("running")
+    _save_training_status(training_directory, result, "running")
     try:
         execute(
-            training_command(jobs, len(args.gpus.split(",")), level["max_steps"], args.checkpoint),
+            training_command(jobs, len(args.gpus.split(",")), max_steps, args.checkpoint),
             environment,
-            plan_directory / "train.log",
+            training_directory / "train.log",
         )
         collect_training_results(jobs, result["checkpoints"])
-        for job in jobs:
-            checkpoint = result["checkpoints"].get(job.key)
-            if job.evaluate and checkpoint is not None:
-                summary = evaluate_checkpoint(
-                    args, Path(checkpoint), evaluation_path, evaluation_environment
-                )
-                if summary not in result["summaries"]:
-                    result["summaries"].append(summary)
-        save_result("finished")
+        evaluation_checkpoints = [
+            Path(result["checkpoints"][job.key])
+            for job in jobs if job.evaluate and job.key in result["checkpoints"]
+        ]
+        if evaluation_checkpoints:
+            evaluate_checkpoints(args, evaluation_checkpoints, result["summaries"])
+        _save_training_status(training_directory, result, "finished")
     except Exception as error:
         collect_training_results(jobs, result["checkpoints"], complete=False)
-        save_result("failed", error)
+        _save_training_status(training_directory, result, "failed", error)
         raise
     print(
         f"[finished] method={args.method} mode={args.mode} "
@@ -866,7 +982,7 @@ def run_resume(args):
         f"plan={plan_directory}",
         flush=True,
     )
-    return result
+    return read_training_status(training_directory)
 
 
 def run_job(args):
@@ -877,51 +993,20 @@ def run_job(args):
     directory, level, jobs = job_plan.build_jobs(args)
     first = jobs[0]
     plan_directory = first.config_path.parent
+    training_directory = Path(first.config.training.experiment_dir)
     gpu_count = len(args.gpus.split(","))
     evaluation_directories = {
-        job.key: directory / "eval" / plan_directory.name / job.config.objective.stage
+        job.key: directory / "eval" / plan_directory.name / "test" / job.config.objective.stage
         for job in jobs
         if job.evaluate
     }
-    evaluation_path = plan_directory / "eval.json"
+    evaluation_path = plan_directory / "test.json"
     evaluation_config = (
-        resolve_evaluation_config(args, evaluation_path, level)
+        resolve_evaluation_config(args, evaluation_path, level, first.config.training.seed)
         if evaluation_directories
         else None
     )
-    training_run = {
-        "stages": [job.key for job in jobs],
-        "command": training_command(jobs, gpu_count, level["max_steps"]),
-        "log_path": str(plan_directory / "train.log"),
-    }
-    plan = {
-        "mode": args.mode,
-        "method": args.method,
-        "experiment_id": args.run_id,
-        "directory": str(directory),
-        "plan_directory": str(plan_directory),
-        "gpus": args.gpus,
-        "limits": level,
-        "jobs": [
-            {
-                "key": job.key,
-                "config_path": str(job.config_path),
-                "initialize_from": job.initialize_from,
-                "evaluate": job.evaluate,
-                "batching": {
-                    "world_size": gpu_count,
-                    "micro_batch_size_per_gpu": job.config.training.micro_batch_size_per_gpu,
-                    "gradient_accumulation_steps": job.config.training.gradient_accumulation_steps,
-                    "global_batch_size": job.config.training.global_batch_size(gpu_count),
-                },
-                "config": job.config.to_dict(),
-            }
-            for job in jobs
-        ],
-        "training_runs": [training_run],
-        "evaluation_config_path": str(evaluation_path) if evaluation_config is not None else None,
-    }
-    targets = {plan_directory, Path(first.config.training.experiment_dir)}
+    targets = {plan_directory, training_directory}
     targets.update(path.parent for path in evaluation_directories.values())
     for path in sorted(targets):
         if path.exists():
@@ -934,52 +1019,68 @@ def run_job(args):
     checkpoints, summaries = {}, []
     result = {
         "status": "pending",
-        "mode": args.mode,
-        "experiment_id": args.run_id,
         "checkpoints": checkpoints,
         "summaries": summaries,
     }
 
-    def save_result(status, error=None):
-        result["status"] = status
-        if error is not None:
-            result["error"] = str(error)
-        save_json(plan_directory / "result.json", result)
-
     plan_directory.mkdir(parents=True)
-    save_json(plan_directory / "job.json", plan)
+    training_directory.mkdir(parents=True)
     if evaluation_config is not None:
-        save_json(evaluation_path, asdict(evaluation_config))
-    for job in jobs:
-        save_json(job.config_path, job.config.to_dict())
-    save_result("running")
+        save_evaluation_config(evaluation_path, evaluation_config)
+    save_json(
+        first.config_path,
+        {"seed": first.config.training.seed, "model": asdict(first.config.model)},
+    )
+    save_json(
+        first.train_config_path,
+        {
+            "execution": {
+                "mode": args.mode,
+                "max_steps": level["max_steps"],
+                "train_only": args.train_only,
+            },
+            "stages": [
+                {
+                    "objective": asdict(job.config.objective),
+                    "training": {
+                        name: value
+                        for name, value in asdict(job.config.training).items()
+                        if name != "seed"
+                    },
+                }
+                for job in jobs
+            ]
+        },
+    )
+    _save_training_status(training_directory, result, "running")
     print(
         f"[start] method={args.method} mode={args.mode} stages={len(jobs)} "
         f"gpus={args.gpus} plan={plan_directory}",
         flush=True,
     )
-    evaluation_environment = dict(environment, CUDA_VISIBLE_DEVICES=args.gpus.split(",")[0])
     try:
-        execute(training_run["command"], environment, Path(training_run["log_path"]))
+        execute(
+            training_command(jobs, gpu_count, level["max_steps"]),
+            environment,
+            training_directory / "train.log",
+        )
         collect_training_results(jobs, checkpoints)
-        for job in jobs:
-            checkpoint = checkpoints.get(job.key)
-            if job.evaluate and checkpoint is not None:
-                summary = evaluate_checkpoint(
-                    args, Path(checkpoint), evaluation_path, evaluation_environment
-                )
-                summaries.append(summary)
-        save_result("finished")
+        evaluation_checkpoints = [
+            Path(checkpoints[job.key]) for job in jobs if job.evaluate and job.key in checkpoints
+        ]
+        if evaluation_checkpoints:
+            evaluate_checkpoints(args, evaluation_checkpoints, summaries)
+        _save_training_status(training_directory, result, "finished")
     except Exception as error:
         collect_training_results(jobs, checkpoints, complete=False)
-        save_result("failed", error)
+        _save_training_status(training_directory, result, "failed", error)
         raise
     print(
         f"[finished] method={args.method} mode={args.mode} "
         f"checkpoints={len(checkpoints)} evaluations={len(summaries)} plan={plan_directory}",
         flush=True,
     )
-    return result
+    return read_training_status(training_directory)
 
 
 def main(argv=None):

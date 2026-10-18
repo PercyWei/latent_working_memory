@@ -10,7 +10,10 @@ import torch.distributed as dist
 from transformers import set_seed
 
 from latent_working_memory.v3.config import (
-    load_experiment,
+    ExperimentConfig,
+    load_common_config,
+    load_training_plan,
+    load_training_stages,
     parse_optional_positive_integer,
     validate_stage_sequence,
 )
@@ -36,11 +39,6 @@ from latent_working_memory.tracking_credentials import swanlab_api_key
 
 
 def training_configs(args):
-    configs = [load_experiment(path) for path in args.config]
-    if len(configs) > 1 and any(
-        value is not None for value in (args.dataset_dir, args.output_dir, args.init_checkpoint)
-    ):
-        raise ValueError("multi-stage training takes data, outputs and initialization from configs")
     training = {
         key: str(value)
         for key, value in {
@@ -62,6 +60,37 @@ def training_configs(args):
     )
     if "max_dev_samples" in vars(args):
         training["max_dev_samples"] = args.max_dev_samples
+    sample_limits = {
+        name: getattr(args, name)
+        for name in ("max_pretrain_train_samples", "max_qa_train_samples")
+        if name in vars(args)
+    }
+    if args.resume is not None and (training or sample_limits):
+        options = sorted(name.replace("_", "-") for name in {*training, *sample_limits})
+        raise ValueError(
+            "--resume does not accept configuration overrides: "
+            + ", ".join(f"--{name}" for name in options)
+        )
+    if args.resume is None:
+        configs = load_training_plan(args.config, args.train_config, args.stages)
+    else:
+        current = ExperimentConfig.from_dict(read_checkpoint(args.resume)["run"]["config"])
+        if load_common_config(args.config)["seed"] != current.training.seed:
+            raise ValueError("common seed differs from the saved training seed")
+        if args.stages[0] != current.objective.stage:
+            raise ValueError("resume checkpoint must belong to the first selected stage")
+        later = (
+            load_training_stages(
+                args.train_config, current.model, current.training.seed, args.stages[1:]
+            )
+            if len(args.stages) > 1
+            else ()
+        )
+        configs = (current, *later)
+    if len(configs) > 1 and any(
+        name in training for name in ("dataset_dir", "output_dir", "init_checkpoint")
+    ):
+        raise ValueError("multi-stage training takes data, outputs and initialization from configs")
     resolved = []
     for config in configs:
         sample_limit_name = (
@@ -70,14 +99,14 @@ def training_configs(args):
             else "max_qa_train_samples"
         )
         stage_training = dict(training)
-        if sample_limit_name in vars(args):
-            stage_training[sample_limit_name] = getattr(args, sample_limit_name)
+        if sample_limit_name in sample_limits:
+            stage_training[sample_limit_name] = sample_limits[sample_limit_name]
         resolved.append(replace(config, training=replace(config.training, **stage_training)))
     configs = resolved
     if any(config.training.output_dir is None for config in configs):
         raise ValueError(
             "training requires a resolved output_dir; start experiments with v3.gpu_job "
-            "or resume using the saved stage config.json"
+            "or supply a resolved training plan"
         )
     first = configs[0]
     validate_stage_sequence(first.objective.method, [config.objective.stage for config in configs])
@@ -212,7 +241,9 @@ def run_training(args):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, nargs="+", required=True)
+    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--train-config", type=Path, required=True)
+    parser.add_argument("--stages", nargs="+", required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--dataset-dir", type=Path)

@@ -74,7 +74,7 @@ def evaluate_nll(task, trajectories, directory, metadata):
         if task.device.type == "cuda"
         else nullcontext()
     )
-    temporary = directory / "trajectories.jsonl.tmp"
+    temporary = directory / "details.jsonl.tmp"
     with precision, temporary.open("w", encoding="utf-8") as stream:
         for trajectory in trajectories:
             qa_ids = [qa.qa_id for qa in trajectory.qas.values() if qa.role == "task"]
@@ -140,7 +140,7 @@ def evaluate_nll(task, trajectories, directory, metadata):
             capacities.append(capacity)
             costs.append(cost)
             all_questions.extend(questions)
-    temporary.replace(directory / "trajectories.jsonl")
+    temporary.replace(directory / "details.jsonl")
     return {
         "method": task.cfg.method,
         "stage": task.cfg.stage,

@@ -70,7 +70,8 @@ def inspect_run(run_dir, output_dir):
     stages = {}
     for stage in ("warmup", "policy"):
         directory = run_dir / stage
-        config = json.loads((directory / "config.json").read_text(encoding="utf-8"))
+        run = json.loads((directory / "run.json").read_text(encoding="utf-8"))
+        config = run["config"]
         objective = config["objective"]
         if objective["method"] != "memory_change" or objective["stage"] != stage:
             raise ValueError(f"{directory} 必须是 memory_change 的 {stage} 阶段目录")

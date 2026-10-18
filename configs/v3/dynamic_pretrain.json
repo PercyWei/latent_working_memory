@@ -1,4 +1,5 @@
 {
+  "seed": 20261004,
   "model": {
     "model_name_or_path": "~/models/Qwen3-4B-Instruct-2507",
     "dtype": "bfloat16",
@@ -29,7 +30,6 @@
     "learning_rate": 0.0001,
     "weight_decay": 0.01,
     "gradient_clip": 1,
-    "seed": 20261004,
     "dev_every": 25,
     "save_every": 25,
     "save_total_limit": 2,

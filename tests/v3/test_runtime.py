@@ -24,7 +24,6 @@ from latent_working_memory.v3.config import (
     ModelConfig,
     ObjectiveConfig,
     TrainingConfig,
-    load_experiment,
 )
 from latent_working_memory.v3.engine import TokenMemoryEngine
 from latent_working_memory.v3.runtime import (
@@ -470,9 +469,8 @@ def test_resume_from_saved_run_without_explicit_experiment_name(tmp_path):
     run = _run(config, engine, splits)
     stopped = train_loop(config, engine, splits, run, max_steps=1)
     output = tmp_path / "source"
-    saved_config = json.loads((output / "config.json").read_text())
+    saved_config = json.loads((output / "run.json").read_text())["config"]
     saved_config["training"].pop("experiment_name", None)
-    (output / "config.json").write_text(json.dumps(saved_config))
     saved_run = deepcopy(run)
     saved_run["config"] = saved_config
     (output / "run.json").write_text(json.dumps(saved_run))
@@ -480,7 +478,7 @@ def test_resume_from_saved_run_without_explicit_experiment_name(tmp_path):
     checkpoint["run"] = saved_run
     torch.save(checkpoint, Path(stopped["checkpoint"]) / "state.pt")
 
-    restored_config = load_experiment(output / "config.json")
+    restored_config = ExperimentConfig.from_dict(saved_run["config"])
     restored = make_engine(restored_config)
     result = train_loop(
         restored_config,
@@ -1171,10 +1169,10 @@ def test_dynamic_stages_preserve_shared_source_and_accumulate_only_method_steps(
         assert [row["global_step"] for row in records] == [3, 4]
         assert [row["step"] for row in records] == [1, 2]
         assert all(row["stage"] == "policy" for row in records)
-        manifest = json.loads((root / "experiment.json").read_text())
+        manifest = json.loads((root / "status.json").read_text())["experiment"]
         assert manifest["experiment_id"] == target_id
         assert list(manifest["stages"]) == ["warmup", "policy"]
-        assert manifest["pretraining"] == sources[-1]
+        assert json.loads((root / "policy/run.json").read_text())["pretraining"] == sources[-1]
         assert "pretraining_sources" not in json.dumps(manifest)
     assert sources[0] == sources[1]
     assert sources[0]["experiment_id"] == "trial"
@@ -1215,7 +1213,7 @@ def test_icae_qa_offset_includes_pretraining_in_same_method_run(tmp_path):
     assert run["step_offset"] == 2
     result = train_loop(qa, next_engine, data, run, max_steps=1)
     assert result["global_step"] == 3
-    manifest = json.loads((root / "experiment.json").read_text())
+    manifest = json.loads((root / "status.json").read_text())["experiment"]
     assert list(manifest["stages"]) == ["pretrain", "qa"]
     assert manifest["method"] == "icae_single"
 

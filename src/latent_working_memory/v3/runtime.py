@@ -362,7 +362,7 @@ def _rewind_metrics(path, step):
             encoding="utf-8",
         )
         temporary.replace(path)
-    observations_path = path.with_name("dev-qa.jsonl")
+    observations_path = path.with_name("details.jsonl")
     if observations_path.is_file():
         observations = [
             json.loads(line) for line in observations_path.read_text(encoding="utf-8").splitlines()
@@ -430,7 +430,6 @@ def prepare_training(config, engine, splits, run, resume=None, max_steps=None):
             raise ValueError(error)
         if engine.rank == 0:
             output.mkdir(parents=True, exist_ok=True)
-            write_json(output / "config.json", config.to_dict())
             write_json(output / "run.json", run)
             metrics_path.touch()
     if engine.world_size > 1:
@@ -511,7 +510,7 @@ def train_loop(config, engine, splits, run, stage, max_steps=None, tracking=None
                 record.update({f"dev/{key}": value for key, value in development.items()})
             if engine.rank == 0:
                 if development_observations:
-                    with (output / "dev-qa.jsonl").open("a", encoding="utf-8") as stream:
+                    with (output / "details.jsonl").open("a", encoding="utf-8") as stream:
                         stream.write(
                             json.dumps(
                                 {
@@ -572,5 +571,5 @@ def train_loop(config, engine, splits, run, stage, max_steps=None, tracking=None
         "checkpoint": str(stage.checkpoint_path),
     }
     if engine.rank == 0:
-        write_json(output / "training-result.json", result)
+        write_json(output / "summary.json", result)
     return result

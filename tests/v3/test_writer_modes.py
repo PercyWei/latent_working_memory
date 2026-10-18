@@ -553,8 +553,8 @@ def test_final_evaluation_uses_saved_writer_and_reproduces_memory_quality(tmp_pa
     if method == "memory_change":
         # 即使保存的是纯覆盖 warmup 日程，最终评估仍按门控策略追加。
         assert actual["capacity"]["final_slots"] == 10
-    before = json.loads((tmp_path / "before" / "trajectories.jsonl").read_text())
-    after = json.loads((tmp_path / "after" / "trajectories.jsonl").read_text())
+    before = json.loads((tmp_path / "before" / "details.jsonl").read_text())
+    after = json.loads((tmp_path / "after" / "details.jsonl").read_text())
     assert after["questions"] == before["questions"]
     assert [event["action"] for event in after["events"]] == [
         event["action"] for event in before["events"]

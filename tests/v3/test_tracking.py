@@ -392,13 +392,13 @@ def test_two_dynamic_methods_share_one_source_and_keep_one_run_per_method(
         warmup_result, warmup_run = run_stage(warmup, 2)
         identity_bytes = (root / "swanlab.json").read_bytes()
         identity = json.loads(identity_bytes)
-        before = json.loads((root / "experiment.json").read_text())
+        before = json.loads((root / "status.json").read_text())["experiment"]
         policy = online_config(root, "policy", method, warmup_result["checkpoint"])
         policy = replace(policy, training=replace(policy.training, dev_every=2))
         if explicit_name:
             policy = replace(policy, training=replace(policy.training, experiment_name=cloud_name))
         policy_result, policy_run = run_stage(policy, 2)
-        combined = json.loads((root / "experiment.json").read_text())
+        combined = json.loads((root / "status.json").read_text())["experiment"]
         assert before["stages"]["warmup"] == combined["stages"]["warmup"]
         assert list(combined["stages"]) == ["warmup", "policy"]
         assert (root / "swanlab.json").read_bytes() == identity_bytes
@@ -406,7 +406,7 @@ def test_two_dynamic_methods_share_one_source_and_keep_one_run_per_method(
         assert not (root / "policy/swanlab.json").exists()
         assert policy_result["global_step"] == 4
         cloud = recorded_swanlab.runs[identity["id"]]
-        assert cloud["config"] == serialized_config(combined)
+        assert cloud["config"] == serialized_config(tracking._experiment_configuration(root, combined))
         assert cloud["name"] == cloud_name
         assert [step for step, values in cloud["logs"] if "train/qa_loss" in values] == [1, 2, 3, 4]
         assert not any("train/ae_lm_loss" in values for _, values in cloud["logs"])
@@ -522,14 +522,14 @@ def test_append_ratio_panel_failure_preserves_previous_stage_and_restores_random
             target = online_config(root, "warmup", "memory_change", result["checkpoint"])
             initialization = load_initialization(result["checkpoint"], engine.model, target)
             next_run = _run(target, engine, make_splits("qa"), initialization)
-            original_manifest = (root / "experiment.json").read_bytes()
+            original_manifest = json.loads((root / "status.json").read_text())["experiment"]
             before = capture_rng(engine.device)
             configure_posttraining_panel(target, active, engine.device, "test-api-key")
             prepare_training(target, engine, make_splits("qa"), next_run, max_steps=1)
             entered = True
     assert not entered
     assert not (root / "warmup").exists()
-    assert (root / "experiment.json").read_bytes() == original_manifest
+    assert json.loads((root / "status.json").read_text())["experiment"] == original_manifest
     assert (root / "pretrain/checkpoints/global_step_1/state.pt").is_file()
     identity = json.loads((root / "swanlab.json").read_text())
     assert recorded_swanlab.runs[identity["id"]]["state"] == "CRASHED"
@@ -550,7 +550,7 @@ def test_existing_shared_pretrain_identity_resumes_and_initializes_new_dynamic_m
         legacy.setattr(tracking, "tracking_method", lambda config, previous=None: "shared-pretrain")
         result, record = run_stage(source, 2, "pretrain")
     assert "experiment_name" not in record["config"]["training"]
-    original_manifest = (root / "experiment.json").read_bytes()
+    original_manifest = json.loads((root / "status.json").read_text())["experiment"]
     original_identity = (root / "swanlab.json").read_bytes()
     identity = json.loads(original_identity)
     cloud = recorded_swanlab.runs[identity["id"]]
@@ -575,7 +575,7 @@ def test_existing_shared_pretrain_identity_resumes_and_initializes_new_dynamic_m
     assert resumed_result["global_step"] == 3
     resumed_checkpoint = runtime.read_checkpoint(resumed_result["checkpoint"])
     assert resumed_checkpoint["run"]["config"]["objective"]["method"] == source_method
-    assert (root / "experiment.json").read_bytes() == original_manifest
+    assert json.loads((root / "status.json").read_text())["experiment"] == original_manifest
     assert (root / "swanlab.json").read_bytes() == original_identity
     assert dict(cloud["config"]) == original_cloud_config
     resumed = recorded_swanlab.initializations[-1]
@@ -610,7 +610,7 @@ def test_existing_shared_pretrain_identity_resumes_and_initializes_new_dynamic_m
     assert target_identity["id"] != identity["id"]
     assert target_identity["group"] == target_id
     assert recorded_swanlab.runs[target_identity["id"]]["name"] == f"memory-change-k64_{target_id}"
-    assert (root / "experiment.json").read_bytes() == original_manifest
+    assert json.loads((root / "status.json").read_text())["experiment"] == original_manifest
     assert (root / "swanlab.json").read_bytes() == original_identity
     assert dict(cloud["config"]) == original_cloud_config
 
@@ -638,7 +638,7 @@ def test_live_method_run_continues_two_stages_without_reinitializing(
             max_steps=2,
             tracking=active,
         )
-        before = json.loads((root / "experiment.json").read_text())
+        before = json.loads((root / "status.json").read_text())["experiment"]
         next_stage = "qa" if method == "icae_single" else "warmup"
         target = online_config(root, next_stage, method, result["checkpoint"])
         if not online:
@@ -650,7 +650,7 @@ def test_live_method_run_continues_two_stages_without_reinitializing(
             configure_posttraining_panel(target, active, engine.device, "test-api-key")
         stage = prepare_training(target, engine, qa_data, qa_run, max_steps=2)
         update_method_tracking(target, qa_run, active)
-        combined = json.loads((root / "experiment.json").read_text())
+        combined = json.loads((root / "status.json").read_text())["experiment"]
         assert list(combined["stages"]) == ["pretrain", next_stage]
         assert combined["method"] == method
         assert combined["stages"]["pretrain"] == before["stages"]["pretrain"]
@@ -658,7 +658,9 @@ def test_live_method_run_continues_two_stages_without_reinitializing(
         assert len(recorded_swanlab.initializations) == int(online)
         if online:
             assert active.record["state"] == "RUNNING"
-            assert active.config == serialized_config(combined)
+            assert active.config == serialized_config(
+                tracking._experiment_configuration(root, combined)
+            )
         result = train_loop(
             target, engine, qa_data, qa_run, stage, max_steps=2, tracking=active
         )
@@ -667,7 +669,7 @@ def test_live_method_run_continues_two_stages_without_reinitializing(
         identity = json.loads((root / "swanlab.json").read_text())
         remote = recorded_swanlab.runs[identity["id"]]
         assert remote["state"] == "FINISHED"
-        assert remote["config"] == serialized_config(combined)
+        assert remote["config"] == serialized_config(tracking._experiment_configuration(root, combined))
         assert [step for step, values in remote["logs"] if "train/ae_lm_loss" in values] == [1, 2]
         assert [step for step, values in remote["logs"] if "train/qa_loss" in values] == [3, 4]
         definitions = {name for name, _ in remote["definitions"]}
@@ -697,7 +699,7 @@ def test_live_stage_update_rejects_invalid_transition_before_mutation(
         target = online_config(root, "qa", "icae_single", result["checkpoint"])
         initialization = load_initialization(result["checkpoint"], engine.model, target)
         qa_run = _run(target, engine, make_splits("qa"), initialization)
-        before = (root / "experiment.json").read_bytes()
+        before = json.loads((root / "status.json").read_text())["experiment"]
         remote_before = deepcopy(dict(active.config))
         if invalid == "method":
             target = replace(target, objective=replace(target.objective, method="icae_multi"))
@@ -712,7 +714,7 @@ def test_live_stage_update_rejects_invalid_transition_before_mutation(
         )
         with pytest.raises(ValueError, match=expected):
             update_method_tracking(target, qa_run, active)
-        assert (root / "experiment.json").read_bytes() == before
+        assert json.loads((root / "status.json").read_text())["experiment"] == before
         assert active.config == remote_before
         assert active.record["state"] == "RUNNING"
         assert recorded_swanlab.api_reads == []
@@ -778,7 +780,7 @@ def test_cross_stage_rejects_active_or_offline_session_without_changing_config(
     root = tmp_path / "icae-single-k64_trial"
     config = online_config(root, "pretrain", "icae_single")
     result, _ = run_stage(config, 1, "pretrain")
-    before = (root / "experiment.json").read_bytes()
+    before = json.loads((root / "status.json").read_text())["experiment"]
     identity = json.loads((root / "swanlab.json").read_text())
     remote = recorded_swanlab.runs[identity["id"]]
     remote["state"] = state
@@ -789,7 +791,7 @@ def test_cross_stage_rejects_active_or_offline_session_without_changing_config(
     with pytest.raises(ValueError, match="session state"):
         with method_tracking_run(target, run, engine.device, api_key="test-api-key"):
             pass
-    assert (root / "experiment.json").read_bytes() == before
+    assert json.loads((root / "status.json").read_text())["experiment"] == before
     assert len(recorded_swanlab.initializations) == 1
     remote["state"] = "FINISHED"
     with method_tracking_run(target, run, engine.device, api_key="test-api-key"):
@@ -816,7 +818,7 @@ def test_cross_stage_recovers_failure_before_successor_registration(
     remote = recorded_swanlab.runs[identity["id"]]
     assert remote["state"] == "CRASHED"
     assert list(remote["config"]["stages"]) == ["pretrain"]
-    assert list(json.loads((root / "experiment.json").read_text())["stages"]) == ["pretrain"]
+    assert list(json.loads((root / "status.json").read_text())["experiment"]["stages"]) == ["pretrain"]
     remote["state"] = state
     target = online_config(root, "qa", "icae_single", result["checkpoint"])
     resumed, _ = run_stage(target, 1)
@@ -836,7 +838,7 @@ def test_method_manifest_rejects_source_replacement_and_step_rewind_without_clou
     root = tmp_path / "memory-change-k64_trial"
     warmup = online_config(root, "warmup", init=source_result["checkpoint"])
     result, warmup_run = run_stage(warmup, 2)
-    before = (root / "experiment.json").read_bytes()
+    before = json.loads((root / "status.json").read_text())["experiment"]
     policy = online_config(root, "policy", init=result["checkpoint"])
     engine = make_engine(policy)
     initialization = load_initialization(result["checkpoint"], engine.model, policy)
@@ -851,7 +853,7 @@ def test_method_manifest_rejects_source_replacement_and_step_rewind_without_clou
     with pytest.raises(ValueError, match="last completed checkpoint"):
         with method_tracking_run(policy, invalid, engine.device, api_key="test-api-key"):
             pass
-    assert (root / "experiment.json").read_bytes() == before
+    assert json.loads((root / "status.json").read_text())["experiment"] == before
     assert len(recorded_swanlab.initializations) == 2
     run_stage(policy, 1)
     with pytest.raises(ValueError, match="earlier stage"):
@@ -896,8 +898,8 @@ def test_sdk_serialized_empty_values_resume_without_changing_local_semantics(
     root = tmp_path / "icae-single-k64_trial"
     config = online_config(root, "pretrain", "icae_single")
     _, record = run_stage(config, 1, "pretrain")
-    original = (root / "experiment.json").read_bytes()
-    local = json.loads(original)
+    original = json.loads((root / "status.json").read_text())["experiment"]
+    local = tracking._experiment_configuration(root, original)
     identity = json.loads((root / "swanlab.json").read_text())
     remote = recorded_swanlab.runs[identity["id"]]
     assert local["pretraining"] is None
@@ -905,7 +907,7 @@ def test_sdk_serialized_empty_values_resume_without_changing_local_semantics(
     assert local["model"]["lora_target_modules"] == remote["config"]["model"]["lora_target_modules"]
     with method_tracking_run(config, record, torch.device("cpu"), api_key="test-api-key"):
         pass
-    assert (root / "experiment.json").read_bytes() == original
+    assert json.loads((root / "status.json").read_text())["experiment"] == original
     assert len(recorded_swanlab.runs) == 1
     assert recorded_swanlab.initializations[-1]["id"] == identity["id"]
 
@@ -925,7 +927,7 @@ def test_serialized_config_comparison_still_rejects_missing_or_changed_fields(
     root = tmp_path / "icae-single-k64_trial"
     config = online_config(root, "pretrain", "icae_single")
     _, record = run_stage(config, 1, "pretrain")
-    original = (root / "experiment.json").read_bytes()
+    original = json.loads((root / "status.json").read_text())["experiment"]
     identity = json.loads((root / "swanlab.json").read_text())
     remote = recorded_swanlab.runs[identity["id"]]["config"]
     if change == "missing":
@@ -939,7 +941,7 @@ def test_serialized_config_comparison_still_rejects_missing_or_changed_fields(
     with pytest.raises(ValueError, match=f"saved method experiment: {field}$"):
         with method_tracking_run(config, record, torch.device("cpu"), api_key="test-api-key"):
             pass
-    assert (root / "experiment.json").read_bytes() == original
+    assert json.loads((root / "status.json").read_text())["experiment"] == original
     assert len(recorded_swanlab.initializations) == 1
 
 
@@ -950,12 +952,19 @@ def test_cloud_annotations_remain_outside_local_experiment_contract(
     root = tmp_path / "icae-single-k64_trial"
     config = online_config(root, "pretrain", "icae_single")
     _, record = run_stage(config, 1, "pretrain")
-    original = (root / "experiment.json").read_bytes()
+    original = json.loads((root / "status.json").read_text())["experiment"]
     identity = json.loads((root / "swanlab.json").read_text())
     cloud = recorded_swanlab.runs[identity["id"]]
     if legacy_manifest:
         # 旧恢复代码曾将云端附加字段混入本地记录；它们不属于方法配置。
-        (root / "experiment.json").write_text(json.dumps({**json.loads(original), "note": "old"}))
+        (root / "status.json").write_text(
+            json.dumps(
+                {
+                    **json.loads((root / "status.json").read_text()),
+                    "experiment": {**original, "note": "old"},
+                }
+            )
+        )
     for note in ("first note", "revised note", None):
         if note is None:
             del cloud["config"]["note"]
@@ -963,6 +972,6 @@ def test_cloud_annotations_remain_outside_local_experiment_contract(
             cloud["config"]["note"] = note
         with method_tracking_run(config, record, torch.device("cpu"), api_key="test-api-key"):
             pass
-        assert (root / "experiment.json").read_bytes() == original
+        assert json.loads((root / "status.json").read_text())["experiment"] == original
         assert cloud["config"].get("note") == note
     assert len(recorded_swanlab.runs) == 1

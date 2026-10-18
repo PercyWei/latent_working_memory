@@ -64,7 +64,7 @@ def test_evaluation_separates_quality_charts_and_keeps_retention_counts_local(tm
         metadata={"global_step": 37, "stage_step": 37},
     )
     originals = {
-        name: (tmp_path / name).read_bytes() for name in ("summary.json", "trajectories.jsonl")
+        name: (tmp_path / name).read_bytes() for name in ("summary.json", "details.jsonl")
     }
     media = evaluation_media([summary])
     assert set(media) == {
@@ -112,7 +112,7 @@ def test_evaluation_separates_quality_charts_and_keeps_retention_counts_local(tm
         "trajectories": 1,
         "delta_nll": 0,
     }
-    record = json.loads((tmp_path / "trajectories.jsonl").read_text())
+    record = json.loads((tmp_path / "details.jsonl").read_text())
     assert [len(qa["nll_by_step"]) for qa in record["questions"]] == [3, 1]
     statistics = media["evaluation/statistics"].content
     assert "最终 slots" in statistics and "平均 slots" in statistics

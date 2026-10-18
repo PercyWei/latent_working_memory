@@ -81,7 +81,7 @@
 通用设置：
 
 - **数据入口**：`--pretrain-data` 指定预训练数据集，读取其中的 `train.jsonl`／`dev.jsonl`；`--qa-data` 指定 QA 数据集，QA 阶段读取 train／dev，最终 QA 评估读取其 `test.jsonl`。AutoCompressors 等仅预训练的方法也使用 QA test，不使用预训练目录的 test。
-- **随机性**：`training.seed` 控制训练中的初始化、数据采样与打乱、目标选择、分块和动作抽样；评估使用 `eval.json` 中的 seed，首次创建默认 20261004，可用 `--seed` 覆盖。
+- **随机性**：训练与 test 始终读取公共 `config.json` 的 `seed`，控制初始化、数据采样与打乱、目标选择、分块和动作抽样。新训练可用 `--seed` 指定，预设默认 20261004；公共 seed 创建后固定，恢复与独立评估不接受该参数，补评估与历史 seed 不一致时报错。
 - **数据校验**：加载时检查数据集的划分与来源，以及 FineWeb FactQA 的 task／gate 题池隔离。
 - **长度限制**：两类数据均使用完整正文。Multisegment 和 FactQA 分别通过 `training.max_pretrain_data_tokens` 与 `training.max_qa_data_tokens` 筛选 train 正文，默认均为 12288；正整数仅按给定值筛选，超限样本整条排除，`null` 跳过长度上限筛选。dev/test 不按该上限过滤。
 - **QA 损失**：先平均每题答案 token 的 NLL，再按实际题数平均。
@@ -106,7 +106,7 @@ FineWeb FactQA 数据按如下流程使用：
 | `pretrain` | FineWeb Multisegment 完整正文一次压缩为 K slots，读取记忆计算 AE 或 LM 损失 |
 | `qa` | FineWeb FactQA 完整正文一次压缩为 K slots，以末段为新题来源，按训练题数和比例计算任务损失 |
 
-- 对于 FineWeb Multisegment，每条样本的训练目标（LM 或 AE）通过 `training.lm_ratio` 进行选择（默认概率 0.5）；LM 取 `training.lm_target_tokens` 个续文 tokens（默认 512），不足时改用 AE；选择由 `training.seed` 和样本 ID 决定，跨 epoch 保持不变。
+- 对于 FineWeb Multisegment，每条样本的训练目标（LM 或 AE）通过 `training.lm_ratio` 进行选择（默认概率 0.5）；LM 取 `training.lm_target_tokens` 个续文 tokens（默认 512），不足时改用 AE；选择由公共 `seed` 和样本 ID 决定，跨 epoch 保持不变。
 
 ### 3.3 ICAE-multi：分块压缩，总容量固定
 
@@ -160,7 +160,7 @@ FineWeb FactQA 数据按如下流程使用：
 | 所有方法的预训练（FineWeb Multisegment） | 12800 |
 | 所有方法的后训练（Fineweb FactQA） | null（全部） |
 
-- `training.max_pretrain_train_samples` 控制 `pretrain`／`lm`，`training.max_qa_train_samples` 控制 `qa`／`warmup`／`policy`；过滤后以 `training.seed` 可复现地选取。
+- `training.max_pretrain_train_samples` 控制 `pretrain`／`lm`，`training.max_qa_train_samples` 控制 `qa`／`warmup`／`policy`；过滤后以公共 `seed` 可复现地选取。
 - 全局 batch = GPU 数（默认 2）× 每卡 microbatch（默认 4）× 梯度累积（默认 2）。双卡默认均为 **16**，尾批按实际样本数平均。
 
 ### 3.7 Checkpoint
@@ -178,6 +178,9 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 ```
 
 基本参数如下所示，显式 CLI 超参数会覆盖配置文件的值，更多参数见[运行指南](scripts/README.md#4-调整参数)。
+
+- `configs/v3/` 中的预设保留单文件入口，公共 `seed` 位于顶层；运行时将 `seed` 和 `model` 保存为 `plan/<method-dir>/config.json`，流程设置与各阶段训练配置保存到 `train.json`。
+- 各阶段 `run.json` 和 checkpoint 保存完整实际配置。恢复当前阶段与评估使用其绑定的模型配置，修改公共配置不会覆盖已有运行记录。
 
 | 参数 | 用法 |
 |---|---|
@@ -200,9 +203,9 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 
 完整训练默认只评估最后一个保存的 checkpoint。评估中间 checkpoint 需要进行单独评估，用 `--checkpoint` 选择同一运行所保存的一个或多个 checkpoint，或用 `--eval-run` 指定 `train/<method-dir>/` 以评估同一运行所保留的全部 checkpoint；两种入口互斥。
 
-单独评估默认沿用保存的 `eval.json`；没有该配置时，必须传入 `--eval-data` 指定数据目录，读取其中的 `test.jsonl`。新配置默认 seed 为 20261004、评估全部样本、最多生成 64 tokens，不继承训练 seed；可用对应参数覆盖。`--eval-data` 默认 `null`，传入时覆盖本次评估目录，不修改训练配置。已有评估历史后仍须遵守相同数据与 QA 协议，冲突时报错。
+单独评估默认沿用 `plan/<method-dir>/test.json`；没有该配置时，必须传入 `--test-data` 指定数据目录，读取其中的 `test.jsonl`。默认评估全部样本、最多生成 64 tokens，样本数与生成上限可用对应参数覆盖。评估始终读取公共 `config.json` 的 seed，`test.json` 不重复保存；checkpoint 评估快照与结果记录实际 seed，补评估不一致时报错。`--test-data` 默认 `null`，传入时覆盖本次评估目录，不修改训练配置。已有评估历史后仍须遵守相同数据与 QA 协议，冲突时报错。
 
-单独评估由 `--gpus` 指定计算资源，每张卡一个固定槽位，并行完成各 checkpoint 的计算；全部计算结束后，由父进程汇总结果，串行上传完整报告，checkpoint 按真实累计 step 排列。缓存结果和上传不占用 GPU。同一方法 run 同时只运行一个评估调度任务，共用原 `eval.json`、seed 与 QA 协议，GPU 分配不改变选题。单个 checkpoint 计算失败不影响其他结果保存，报告上传失败也保留全部本地结果；最后汇总失败并以非零状态退出，重新执行原命令复用已完成结果。命令见[单独评估指南](scripts/README.md#22-单独评估)。
+单独评估由 `--gpus` 指定计算资源，每张卡一个固定槽位，并行完成各 checkpoint 的计算；全部计算结束后，由父进程汇总结果，串行上传完整报告，checkpoint 按真实累计 step 排列。缓存结果和上传不占用 GPU。同一方法 run 同时只运行一个评估调度任务，共用原 `test.json`、公共 seed 与 QA 协议，GPU 分配不改变选题。单个 checkpoint 计算失败不影响其他结果保存，报告上传失败也保留全部本地结果；最后汇总失败并以非零状态退出，重新执行原命令复用已完成结果。命令见[单独评估指南](scripts/README.md#22-单独评估)。
 
 **QA 评估流程**
 
@@ -215,22 +218,40 @@ bash src/latent_working_memory/v3/scripts/run.sh \
 
 ```text
 artifacts/v3/<run-id>/
-├── plan/<method-dir>/           阶段配置、eval.json、job.json、训练日志、result.json
-├── train/<method-dir>/<stage>/  config.json、run.json、metrics.jsonl、dev-qa.jsonl、checkpoints/
-├── eval/<method-dir>/
-│   ├── evaluations.json         checkpoint 评估历史与累计报告发布记录
-│   └── <stage>/global_step_<阶段step>/
-│       ├── eval.json            本次评估配置快照
-│       ├── summary.json、trajectories.jsonl、eval.log
-│       └── swanlab-publication.json
-└── compare/                     独立比较生成的 points.json、points.csv
+├── plan/<method-dir>/
+│   ├── config.json                       公共模型配置与 seed
+│   ├── train.json                        流程设置与有序阶段训练配置
+│   └── test.json                         共用 test 评估配置
+├── train/<method-dir>/
+│   ├── train.log                         训练日志
+│   ├── status.json                       执行状态、阶段登记与产物路径
+│   ├── swanlab.json                     在线运行身份
+│   └── <stage>/
+│       ├── run.json                     阶段实际配置、数据与运行信息
+│       ├── metrics.jsonl                训练与验证指标
+│       ├── details.jsonl                dev QA 逐题观测（按需生成）
+│       ├── summary.json                 阶段完成情况与最终 checkpoint 路径
+│       └── checkpoints/global_step_N/
+└── eval/<method-dir>/test/
+    ├── status.json                       本轮进度与各 checkpoint 最近执行状态
+    ├── swanlab.json                      最新成功发布的完整报告记录
+    └── <stage>/
+        └── global_step_N/
+            ├── eval.log                  单 checkpoint 评估日志
+            ├── eval.json                 本次评估配置快照
+            └── summary.json、details.jsonl
 ```
 
 - **运行目录**：`run-id` 可用 `--run-id` 指定，默认使用格式为 `YYYYMMDD-HHMMSS` 的当前时间，复用动态预训练且省略 `--run-id` 时继承 checkpoint 来源的编号。父目录由 `--output-root` 控制。
 - **方法目录**：三个 baseline 和独立动态预训练使用 `<method>-k<K>{_<mode>}`，两种动态方法统一使用 `<method>-k<K>+<ΔK>-<writer>{_<mode>}`。例如，正式运行 `memory-change-k512+32-local`、试跑 `memory-change-k512+32-tag_smoke`。
-- **Checkpoint**：目录为 `checkpoints/global_step_<阶段step>/`。`state.pt` 保存新增权重、优化器及运行状态，`data_<rank>.pt` 保存各卡加载器状态。
-- **评估记录**：每个 checkpoint 单独保存结果、四项评估配置快照与 `swanlab-publication.json`；`evaluations.json` 登记评估历史与累计报告发布记录，各 checkpoint 的发布文件指向最新完整报告。相同 checkpoint、相同配置复用结果；在线发布将本次选中的结果与此前已发布的本地结果合并，云端核验通过后才登记完成。报告内容相同时仅检查、修复布局；需要更新时从缓存重建，不重新加载模型或计算 QA，也不依赖历史 checkpoint 仍被保留。其他离线结果仅在明确选择后发布。
-- **结果与比较**：`summary.json` 汇总指标，`trajectories.jsonl` 保存动作、分数、计时与逐题结果。比较单独调用 [compare.py](compare.py)，导出 `points.json` 与 `points.csv`；命令见[运行指南](scripts/README.md#5-查看结果)。比较要求 split、实际 task 题池、各段选中的 gate QA 签名、QA prompt 和生成 token 上限一致；seed 不同但实际选题相同仍可比较，各方法的训练数据与训练配置可不同。
+- **流程与训练配置**：`config.json` 保存公共 `model` 与 `seed`；`train.json` 的 `execution` 保存运行模式、各阶段 step 上限及 `train_only`，`stages` 按执行顺序保存各阶段的 `objective` 和 `training`。后续阶段继承紧前阶段的 checkpoint；自动 test 沿用方法与阶段规则。实际执行配置保存在 `<stage>/run.json` 的 `config` 字段中；`train/<method-dir>/status.json` 记录执行状态和产物路径。
+- **阶段登记**：训练 `status.json` 的 `experiment` 保存方法身份与已登记的有序阶段索引，用于关联和校验各阶段 `run.json`；阶段配置、数据统计和预训练来源统一从运行记录读取。状态更新共用文件锁，读取最新内容后按字段修改并原子写入，保留其他写入方的记录。
+- **训练结果**：各阶段的 `summary.json` 保存训练完成情况、进度统计与最终 checkpoint 路径；`metrics.jsonl` 保存聚合指标，`details.jsonl` 按需保存 dev QA 逐题观测，每行对应一次验证，`observations` 列表记录该次验证的逐题结果。
+- **Checkpoint**：图中 `N` 为阶段内 step；目录为 `checkpoints/global_step_N/`。`state.pt` 保存新增权重、优化器及运行状态，`data_<rank>.pt` 保存各卡加载器状态。
+- **评估调度**：共享配置保存于 `plan/<method-dir>/test.json`。任务级 `status.json` 保存任务信息、本轮选择 `selected_checkpoints`、整体状态与进度 `progress`，以及各 checkpoint 最近一次的详细执行状态 `checkpoints`；条目以 `<stage>/global_step_N` 为键，记录命令、GPU、起止时间、返回码及计算／发布失败详情。补评估保留未选中的旧条目，整体状态与进度仅统计本轮选择。各 checkpoint 的日志与结果仍独立保存，不同阶段使用独立目录区分相同 step。
+- **评估记录**：每个 checkpoint 独立保存配置快照、指标与详细记录；相同 checkpoint、相同配置复用已有结果，不重新加载模型或计算 QA。
+- **累计发布**：`eval/<method-dir>/test/swanlab.json` 只记录最新成功报告的 run 身份、成员 `summary.json` 路径、报告签名、发布版本和面板信息。将已发布结果与本次选中结果合并，按真实累计 step 排序后重建完整报告，其他离线结果须明确选择后才发布。上传并核验成功后原子更新记录，失败时保留此前成功记录；内容相同时仅检查、修复布局。历史结果从 `summary.json` 读取，无需保留对应 checkpoint 权重。
+- **结果明细**：评估目录中的 `summary.json` 汇总指标，`details.jsonl` 按样本保存完整轨迹，包括动作、分数、计时与各道 QA 结果。
 
 ### 5.3 SwanLab 组织与展示
 
@@ -260,7 +281,7 @@ artifacts/v3/<run-id>/
 
 三张合图的图例、统计表与热图均按真实累计训练 step 排序，阶段和阶段内 step 用于标识 checkpoint；同一 checkpoint 在三张合图中保持相同颜色，EM 和 F1 的纵轴均为 `[0,1]`。热图使用统一色阶，便于跨 checkpoint 比较。baseline 仅展示三张合图和统计表；按 `age` 汇总的相对首次 NLL 变化保存在本地 `summary.json`，供辅助分析。
 
-补评估后，从已有和新增结果重建完整报告，评估先后不影响 checkpoint 的展示顺序。媒体下方的 step 滑块表示整份报告的发布版本，默认最新版本包含全部已发布的 checkpoint；它不用于选择单个 checkpoint。报告内容相同时仅检查、修复布局，不重复上传媒体版本。
+补评估后，将此前已发布结果与本次选中结果合并，按真实累计 step 排序重建完整报告，评估先后不影响展示顺序。媒体下方的 step 滑块表示整份报告的发布版本，默认最新版本包含全部已发布的 checkpoint；它不用于选择单个 checkpoint。报告内容相同时仅检查、修复布局，不重复上传媒体版本。
 
 **复用本地结果更新展示**：保持参数不变，重新执行[单独评估命令](scripts/README.md#22-单独评估)。需要转换布局时会从本地结果重建并上传报告；删除云端 `evaluation` 分组后，也可用同一命令恢复图表和统计表。布局修复复用已上传的媒体版本，两种操作均不重新计算 QA。
 
@@ -272,8 +293,8 @@ artifacts/v3/<run-id>/
 | 启动与调度 | [gpu_job.py](gpu_job.py)、[train.py](train.py) |
 | 数据加载与选题 | [data.py](data.py)、[pretrain_data.py](pretrain_data.py)、[qa_selection.py](qa_selection.py) |
 | 模型、写入与目标 | [model.py](model.py)、[objective.py](objective.py) |
-| 训练、恢复与记录 | [engine.py](engine.py)、[runtime.py](runtime.py)、[tracking.py](tracking.py) |
-| 评估、记录与比较 | [evaluate.py](evaluate.py)、[evaluation_records.py](evaluation_records.py)、[compare.py](compare.py) |
+| 训练、恢复与记录 | [engine.py](engine.py)、[runtime.py](runtime.py)、[tracking.py](tracking.py)、[training_status.py](training_status.py) |
+| 评估与记录 | [evaluate.py](evaluate.py)、[evaluation_records.py](evaluation_records.py) |
 
 ```bash
 uv run --frozen pytest -q tests/v3

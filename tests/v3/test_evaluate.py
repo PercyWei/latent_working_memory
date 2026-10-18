@@ -9,6 +9,7 @@ import torch
 from torch import nn
 
 from latent_working_memory.v3 import evaluate as evaluation
+from latent_working_memory.v3 import tracking
 from latent_working_memory.v3.compare import compare
 from latent_working_memory.v3.config import (
     ExperimentConfig,
@@ -20,6 +21,13 @@ from latent_working_memory.v3.data import FactQATrajectory, QA, Segment
 from latent_working_memory.v3.objective import TokenMemoryTask
 from .test_model import build_model
 from .test_objective import TinyTokenizer, trajectory as objective_trajectory
+
+
+def evaluation_output(tmp_path, stage, checkpoint, seed=42):
+    common = tmp_path / "plan" / "unit-method" / "config.json"
+    common.parent.mkdir(parents=True)
+    common.write_text(json.dumps({"seed": seed, "model": {}}))
+    return tmp_path / "eval" / "unit-method" / "test" / stage / checkpoint
 
 
 def trajectory(identifier="doc1", split="test", extra_question=False):
@@ -235,14 +243,14 @@ def test_evaluation_excludes_gate_and_aggregates_final_quality_capacity_and_cost
     assert len(task.codec.generated) == 5
     assert all(not qid.endswith(":gate") for batch in task.loss_queries for qid in batch)
     records = [
-        json.loads(line) for line in (tmp_path / "trajectories.jsonl").read_text().splitlines()
+        json.loads(line) for line in (tmp_path / "details.jsonl").read_text().splitlines()
     ]
     assert len(records) == 2
     assert records[0]["events"][1]["scores"]["Lrw"] == 3.0
     assert [row["age"] for row in records[0]["questions"]] == [2, 0]
     assert records[0]["questions"][0]["prediction"] == "The blue whale."
     assert json.loads((tmp_path / "summary.json").read_text()) == summary
-    assert not (tmp_path / "trajectories.jsonl.tmp").exists()
+    assert not (tmp_path / "details.jsonl.tmp").exists()
 
 
 @pytest.mark.parametrize(
@@ -396,7 +404,7 @@ def test_cli_loads_canonical_checkpoint_and_saved_model_config(
     }
     evaluation_path = tmp_path / "eval.json"
     evaluation_path.write_text(json.dumps(evaluation_config))
-    output = tmp_path / "evaluation" / "qa" / path.name
+    output = evaluation_output(tmp_path, "qa", path.name)
     arguments = [
         "--config",
         str(evaluation_path),
@@ -502,7 +510,7 @@ def test_shared_dynamic_pretraining_cannot_fall_through_to_a_qa_policy(tmp_path)
     directory = tmp_path / "evaluation"
     with pytest.raises(ValueError, match="shared dynamic pretraining has no FactQA memory policy"):
         evaluation.evaluate(task, [objective_trajectory(split="test")], directory, "test", 2)
-    assert not (directory / "trajectories.jsonl").exists()
+    assert not (directory / "details.jsonl").exists()
     assert not (directory / "summary.json").exists()
 
 
@@ -552,14 +560,22 @@ def test_evaluation_resolves_method_identity_but_verifies_stage_checkpoint(tmp_p
             group="series",
         ),
     )
-    run = {"config": config.to_dict(), "step_offset": 20, "pretraining": {"step": 100}}
+    run = {
+        "config": config.to_dict(),
+        "step_offset": 20,
+        "pretraining": {"step": 100},
+        "pretraining_sources": {"document_ids": [], "dedup_clusters": []},
+        "initialization": None,
+    }
     (stage_directory / "run.json").write_text(json.dumps(run))
-    (directory / "experiment.json").write_text(
+    (directory / "status.json").write_text(
         json.dumps(
             {
-                "experiment_id": "20261007-01",
-                "method": "memory_change",
-                "stages": {"policy": run},
+                "checkpoints": {},
+                "summaries": [],
+                "experiment": tracking._experiment_index(
+                    directory, tracking._experiment_config(config, run, None)
+                ),
             }
         )
     )
@@ -580,7 +596,7 @@ def test_evaluation_resolves_method_identity_but_verifies_stage_checkpoint(tmp_p
         evaluation._training_run_directory(config, {**run, "step_offset": 0})
     changed_run = {**run, "pretraining": {"step": 200}}
     (stage_directory / "run.json").write_text(json.dumps(changed_run))
-    with pytest.raises(ValueError, match="saved method experiment"):
+    with pytest.raises(ValueError, match="configuration cannot be replaced"):
         evaluation._training_run_directory(config, changed_run)
 
 
@@ -590,7 +606,7 @@ def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_pat
     identity = {"id": "original", "project": "project", "group": "experiment"}
     identity_path = training_dir / "swanlab.json"
     identity_path.write_text(json.dumps(identity))
-    config_path = training_dir / "config.json"
+    config_path = training_dir / "run.json"
     config_path.write_text('{"preserve": "training configuration"}')
     original_config = config_path.read_bytes()
     publications = []
@@ -620,7 +636,7 @@ def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_pat
     )
     monkeypatch.setattr(evaluation, "verify_evaluation_publication", lambda *args: None)
     checkpoint = training_dir / "policy" / "checkpoints" / "global_step_37"
-    output = tmp_path / "evaluation" / "policy" / checkpoint.name
+    output = evaluation_output(tmp_path, "policy", checkpoint.name, seed=20261004)
     evaluation_config = {
         "dataset_dir": "data",
         "seed": 20261004,
@@ -642,10 +658,10 @@ def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_pat
             "evaluation_config": evaluation_config,
         },
     )
-    history.record(summary)
+    history.validate_summary(summary)
     local_results = {
         name: (output / name).read_bytes()
-        for name in ("summary.json", "trajectories.jsonl")
+        for name in ("summary.json", "details.jsonl")
     }
     evaluation._append_evaluation(summary, training_dir, output, 37, history)
     assert len(publications) == 1 and publications[0][1] == 1
@@ -671,12 +687,11 @@ def test_swanlab_publication_uses_existing_run_and_keeps_training_config(tmp_pat
     )
     assert config_path.read_bytes() == original_config
     assert json.loads(identity_path.read_text()) == identity
-    record = json.loads((output / "swanlab-publication.json").read_text())
-    assert record["run_id"] == "original" and record["global_step"] == 37
-    publication = json.loads(history.path.read_text())["publication"]
-    assert record["publication_step"] == publication["publication_step"] == 1
-    assert record["report_signature"] == publication["signature"]
-    assert publication["checkpoints"] == [str(checkpoint.resolve())]
+    publication = json.loads(history.path.read_text())
+    assert publication["run_id"] == "original"
+    assert publication["publication_step"] == 1
+    assert publication["summaries"] == [str(output.resolve() / "summary.json")]
+    assert not (output / "swanlab.json").exists()
     assert set(publication["panels"]) == set(publications[0][0])
 
 
@@ -750,7 +765,7 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
     }
     evaluation_path = tmp_path / "eval.json"
     evaluation_path.write_text(json.dumps(evaluation_config))
-    output = tmp_path / "evaluation" / "qa" / "global_step_7"
+    output = evaluation_output(tmp_path, "qa", "global_step_7")
     arguments = [
         "--config",
         str(evaluation_path),
@@ -787,7 +802,7 @@ def test_limited_cli_evaluation_verifies_complete_source_before_selecting(
     assert summary["metadata"]["config"]["training"]["seed"] == 7
     assert summary["quality"]["all"]["questions"] == 4
     records = [
-        json.loads(line) for line in (output / "trajectories.jsonl").read_text().splitlines()
+        json.loads(line) for line in (output / "details.jsonl").read_text().splitlines()
     ]
     assert [row["trajectory_id"] for row in records] == [row.trajectory_id for row in selected]
     assert all(row["segments"] == 3 for row in records)
@@ -859,7 +874,7 @@ def test_cli_ignores_training_length_limits_and_selects_from_complete_factqa_spl
     }
     evaluation_path = tmp_path / "eval.json"
     evaluation_path.write_text(json.dumps(evaluation_config))
-    output = tmp_path / "evaluation" / task.cfg.stage / "global_step_7"
+    output = evaluation_output(tmp_path, task.cfg.stage, "global_step_7")
     arguments = [
         "--config",
         str(evaluation_path),
@@ -886,7 +901,7 @@ def test_cli_ignores_training_length_limits_and_selects_from_complete_factqa_spl
     assert summary["metadata"]["selection"]["limit"] == max_test_samples
     assert summary["metadata"]["selection"]["qa_budget"]["kept"] == 3
     records = [
-        json.loads(line) for line in (output / "trajectories.jsonl").read_text().splitlines()
+        json.loads(line) for line in (output / "details.jsonl").read_text().splitlines()
     ]
     assert [row["trajectory_id"] for row in records] == [row.trajectory_id for row in selected]
     assert [row["source_tokens"] for row in records] == [
@@ -904,6 +919,7 @@ def test_cli_rejects_invalid_trajectory_limits_before_model_load(tmp_path, monke
         raise AssertionError("invalid evaluation config must not load a checkpoint")
 
     monkeypatch.setattr(evaluation, "read_checkpoint", unexpected_load)
+    output = evaluation_output(tmp_path, "qa", "global_step_1")
     evaluation_path = tmp_path / "eval.json"
     evaluation_path.write_text(
         json.dumps(
@@ -922,7 +938,7 @@ def test_cli_rejects_invalid_trajectory_limits_before_model_load(tmp_path, monke
                 "--checkpoint",
                 "unused",
                 "--output-dir",
-                "unused",
+                str(output),
                 "--device",
                 "cpu",
             ]

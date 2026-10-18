@@ -528,19 +528,21 @@ def test_preset_validates_each_expanded_objective(tmp_path):
 
 def test_runtime_loaders_reject_presets_and_round_trip_stage_and_evaluation_configs(tmp_path):
     preset = Path("configs/v3/icae_single.json")
-    with pytest.raises(ValueError, match="use load_preset"):
+    with pytest.raises(ValueError, match="experiment must contain model, objective and training"):
         load_experiment(preset)
     for config in load_preset(preset):
         saved = tmp_path / f"{config.objective.stage}.json"
         saved.write_text(json.dumps(config.to_dict()))
         assert load_experiment(saved) == config
-    saved = tmp_path / "eval.json"
+    common = tmp_path / "config.json"
+    common.write_text(json.dumps({"seed": 20261004, "model": {}}))
+    saved = tmp_path / "test.json"
     saved.write_text(json.dumps({"dataset_dir": "independent-factqa"}))
     assert load_evaluation(saved) == EvaluationConfig("independent-factqa")
     assert load_evaluation(saved).seed == 20261004
     assert load_evaluation(saved).max_test_samples is None
     assert load_evaluation(saved).max_new_tokens == 64
-    saved.write_text(json.dumps({"dataset_dir": "independent-factqa", "seed": 91}))
+    common.write_text(json.dumps({"seed": 91, "model": {}}))
     assert load_evaluation(saved) == EvaluationConfig("independent-factqa", seed=91)
 
 

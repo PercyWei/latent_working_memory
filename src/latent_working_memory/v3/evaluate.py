@@ -17,15 +17,13 @@ from transformers import set_seed
 from latent_working_memory.data_preparation.personamem.audit import scores
 from latent_working_memory.v3.config import (
     DYNAMIC_METHODS,
+    EvaluationConfig,
     ExperimentConfig,
-    ModelConfig,
-    ObjectiveConfig,
-    TrainingConfig,
-    load_evaluation,
+    load_common_config,
 )
 from latent_working_memory.v3.data import load_factqa
 from latent_working_memory.v3.engine import initialize_device
-from latent_working_memory.v3.evaluation_records import EvaluationHistory
+from latent_working_memory.v3.evaluation_records import EvaluationHistory, evaluation_log_path
 from latent_working_memory.v3.objective import TokenMemoryTask
 from latent_working_memory.v3.qa_selection import filter_qa_budget, select_step_qas
 from latent_working_memory.v3.runtime import (
@@ -41,9 +39,11 @@ from latent_working_memory.v3.tracking import (
     evaluation_training_run,
     evaluation_tracking_run,
     experiment_directory,
+    load_experiment_stages,
     tracking_method,
     verify_evaluation_publication,
 )
+from latent_working_memory.v3.training_status import read_training_status
 from latent_working_memory.tracking_credentials import swanlab_api_key
 
 
@@ -161,8 +161,8 @@ def _training_run_directory(config, run):
     if json.loads((stage_directory / "run.json").read_text(encoding="utf-8")) != run:
         raise ValueError("checkpoint run differs from the original training directory")
     if config.training.experiment_dir is not None:
-        experiment = json.loads((directory / "experiment.json").read_text(encoding="utf-8"))
-        stage = experiment["stages"][config.objective.stage]
+        experiment = read_training_status(directory)["experiment"]
+        stage = load_experiment_stages(directory, experiment)[config.objective.stage]
         if (
             experiment["experiment_id"] != config.training.experiment_id
             or experiment["method"] != tracking_method(config, experiment)
@@ -229,11 +229,14 @@ def _append_evaluations(evaluations, training_dir, log_publications=False):
             )
         ordered = sorted(summaries.values(), key=lambda item: item[2])
         try:
+            history.validate_summaries([summary for summary, _, _ in ordered])
             with ExitStack() as stack:
                 if log_publications:
                     for _, directory, _ in ordered:
+                        log_path = evaluation_log_path(directory)
+                        log_path.parent.mkdir(parents=True, exist_ok=True)
                         log = stack.enter_context(
-                            (Path(directory) / "eval.log").open("a", encoding="utf-8")
+                            log_path.open("a", encoding="utf-8")
                         )
                         stack.enter_context(redirect_stdout(_PublicationLog(sys.stdout, log)))
                         stack.enter_context(redirect_stderr(_PublicationLog(sys.stderr, log)))
@@ -256,11 +259,7 @@ def validate_evaluation_publication(checkpoints):
     for path in checkpoints:
         checkpoint = read_checkpoint(path)
         raw = checkpoint["run"]["config"]
-        config = ExperimentConfig(
-            ModelConfig(**raw["model"]),
-            ObjectiveConfig(**raw["objective"]),
-            TrainingConfig(**raw["training"]),
-        )
+        config = ExperimentConfig.from_dict(raw)
         directories.add(_training_run_directory(config, checkpoint["run"]))
         del checkpoint
     if len(directories) != 1:
@@ -280,7 +279,6 @@ def publish_cached_evaluations(checkpoints, output_dirs, evaluation_config, trai
             summary = history.cached_summary(checkpoint)
             if summary is None:
                 raise ValueError(f"SwanLab publication requires completed local results: {output}")
-            history.record(summary)
             evaluations.append((summary, Path(output), summary["metadata"]["global_step"], history))
         except Exception as error:
             failures.append((Path(checkpoint), error))
@@ -338,7 +336,8 @@ def _publish_evaluations(evaluations, training_dir, history):
                     default=0,
                 )
                 publication_step = max(
-                    0, resumed_step, history.last_publication_step()
+                    0, resumed_step,
+                    publication["publication_step"] if publication is not None else -1,
                 ) + 1
                 tracking.log(media, step=publication_step)
             verify_evaluation_publication(
@@ -359,30 +358,15 @@ def _publish_evaluations(evaluations, training_dir, history):
         "project": identity["project"],
         "group": identity["group"],
         "signature": signature,
-        "checkpoints": [summary["metadata"]["checkpoint"] for summary in summaries],
+        "summaries": [
+            str(Path(output_dir).resolve() / "summary.json")
+            for _, output_dir, _ in evaluations
+        ],
         "publication_step": publication_step,
         "view": view,
         "panels": list(media_types),
     }
-    checkpoints = [
-        {
-            "training_dir": str(training_dir.resolve()),
-            "output_dir": str(Path(output_dir).resolve()),
-            "run_id": identity["id"],
-            "project": identity["project"],
-            "group": identity["group"],
-            "split": summary["split"],
-            "checkpoint": summary["metadata"]["checkpoint"],
-            "stage": summary["stage"],
-            "stage_step": summary["metadata"]["stage_step"],
-            "global_step": step,
-            "publication_step": publication_step,
-            "report_signature": signature,
-            "view": view,
-        }
-        for summary, output_dir, step in evaluations
-    ]
-    history.record_report_publication(publication, checkpoints)
+    history.record_report_publication(publication)
     print(
         f"[evaluation] SwanLab report {'layout ready' if already_published else 'publication finished'} "
         f"run_id={identity['id']} checkpoints={len(summaries)} publication_step={publication_step} "
@@ -408,7 +392,7 @@ def evaluate(task, trajectories, output_dir, split, max_new_tokens, metadata=Non
     quality_metrics = ("nll", "em", "f1") if generate_answers else ("nll",)
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
-    temporary = directory / "trajectories.jsonl.tmp"
+    temporary = directory / "details.jsonl.tmp"
     all_questions, capacities, costs = [], [], []
     signature, qa_protocol = _qa_protocol(task, trajectories)
     was_training = task.training
@@ -582,7 +566,7 @@ def evaluate(task, trajectories, output_dir, split, max_new_tokens, metadata=Non
                     )
     finally:
         task.train(was_training)
-    temporary.replace(directory / "trajectories.jsonl")
+    temporary.replace(directory / "details.jsonl")
     summary = {
         "method": task.cfg.method,
         "stage": task.cfg.stage,
@@ -617,7 +601,10 @@ def evaluate(task, trajectories, output_dir, split, max_new_tokens, metadata=Non
         "objective": asdict(task.cfg),
         "metadata": {} if metadata is None else metadata,
     }
-    _save_json(directory / "summary.json", summary)
+    if split == "test" and "evaluation_config" in summary["metadata"]:
+        EvaluationHistory(directory, summary["metadata"]["evaluation_config"]).save_summary(summary)
+    else:
+        _save_json(directory / "summary.json", summary)
     return summary
 
 
@@ -637,16 +624,20 @@ def main(argv=None):
         raise ValueError(
             "final QA evaluation supports a single process; do not launch with torchrun"
         )
-    evaluation_config = load_evaluation(args.config)
+    output = Path(args.output_dir).resolve()
+    common_path = output.parents[4] / "plan" / output.parents[2].name / "config.json"
+    seed = load_common_config(common_path)["seed"]
+    snapshot = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    if snapshot["seed"] != seed:
+        raise ValueError("evaluation snapshot seed differs from the common seed")
+    evaluation_config = EvaluationConfig(
+        **{name: value for name, value in snapshot.items() if name != "seed"}, seed=seed
+    )
     checkpoint_path = Path(args.checkpoint).resolve()
     print(f"[evaluation] loading checkpoint={checkpoint_path}", flush=True)
     checkpoint = read_checkpoint(checkpoint_path)
     raw = checkpoint["run"]["config"]
-    config = ExperimentConfig(
-        ModelConfig(**raw["model"]),
-        ObjectiveConfig(**raw["objective"]),
-        TrainingConfig(**raw["training"]),
-    )
+    config = ExperimentConfig.from_dict(raw)
     training_dir = (
         _training_run_directory(config, checkpoint["run"]) if args.log_to_swanlab else None
     )
@@ -724,7 +715,6 @@ def main(argv=None):
             f"trajectories={summary['trajectories']} path={Path(args.output_dir) / 'summary.json'}",
             flush=True,
         )
-    history.record(summary)
     if training_dir is not None:
         _append_evaluation(
             summary,
