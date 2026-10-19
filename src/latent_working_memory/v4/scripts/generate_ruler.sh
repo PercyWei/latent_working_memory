@@ -96,7 +96,7 @@ import sys
 from transformers import AutoTokenizer
 import yaml
 
-from latent_working_memory.v4.benchmarks.data import RULER_TASKS
+from latent_working_memory.benchmarks.data import RULER_TASKS
 
 source = Path(sys.argv[1]) / "scripts" / "data"
 destination = Path(sys.argv[2])

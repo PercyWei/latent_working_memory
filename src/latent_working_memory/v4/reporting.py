@@ -1,16 +1,24 @@
 """从完整 checkpoint 集合重建评估图，累计 step 决定曲线顺序。"""
 
+from colorsys import hsv_to_rgb
+from hashlib import sha256
+
 import swanlab
 
-from latent_working_memory.v4.benchmarks.data import RULER_TASKS
+from latent_working_memory.benchmarks.data import RULER_TASKS
 
 
-def evaluation_media(summaries):
+def evaluation_media(summaries, baselines=None):
     """summaries 为按真实累计 step 排序、协议一致的非空评估结果。"""
+    baselines = {} if baselines is None else baselines
+    if baselines and "benchmark" not in summaries[0]:
+        raise ValueError("baseline results apply only to benchmark reports")
     if len(summaries) == 1:
         summary = summaries[0]
-        return _benchmark_media(summary) if "benchmark" in summary else _test_media(summary)
-    return _checkpoint_media(summaries)
+        return (
+            _benchmark_media(summary, baselines) if "benchmark" in summary else _test_media(summary)
+        )
+    return _checkpoint_media(summaries, baselines)
 
 
 def _test_media(summary):
@@ -59,8 +67,23 @@ def _group_color(index, count):
     )
 
 
-def _benchmark_media(summary):
+def _baseline_color(label, index=None, count=0):
+    """标签固定色相，内部各组只改变深浅，并避开主方法的蓝色色系。"""
+    hue = int.from_bytes(sha256(label.encode("utf-8")).digest()[:8], "big") / 2**64 * 0.78
+    if hue >= 0.46:
+        hue += 0.22
+    channels = [255 * value for value in hsv_to_rgb(hue, 0.65, 0.75)]
+    if index is None:
+        channels = [value * 0.75 for value in channels]
+    else:
+        fraction = 0.6 * (1 - index / max(1, count - 1))
+        channels = [value + (255 - value) * fraction for value in channels]
+    return "#" + "".join(f"{round(value):02x}" for value in channels)
+
+
+def _benchmark_media(summary, baselines):
     metrics = summary["metrics"]
+    method = summary.get("method", "attention-matching")
     chart = swanlab.echarts.Bar()
     if summary["benchmark"] == "ruler":
         chart.add_xaxis([*RULER_TASKS, "平均"])
@@ -68,21 +91,61 @@ def _benchmark_media(summary):
         lengths = sorted(metrics["by_length"], key=lambda row: row["length"])
         for index, row in enumerate(lengths):
             values = [grouped[(row["length"], task)] for task in RULER_TASKS]
+            label = f"{row['length'] / 1024:g}K"
             chart.add_yaxis(
-                f"{row['length'] / 1024:g}K",
+                f"{method} / {label}" if baselines else label,
                 [100 * value for value in (*values, row["score"])],
                 label_opts={"show": False},
                 itemstyle_opts={"color": _group_color(index, len(lengths))},
             )
+        for baseline_label, baseline in baselines.items():
+            reference_groups = {
+                (row["length"], row["task"]): row["score"]
+                for row in baseline["metrics"]["groups"]
+            }
+            reference_lengths = {
+                row["length"]: row["score"] for row in baseline["metrics"]["by_length"]
+            }
+            for index, row in enumerate(lengths):
+                label = f"{row['length'] / 1024:g}K"
+                reference = [reference_groups[(row["length"], task)] for task in RULER_TASKS]
+                chart.add_yaxis(
+                    f"{baseline_label} / {label}",
+                    [100 * value for value in (*reference, reference_lengths[row["length"]])],
+                    label_opts={"show": False},
+                    itemstyle_opts={"color": _baseline_color(baseline_label, index, len(lengths))},
+                )
     else:
         groups = sorted(metrics["groups"], key=lambda row: row["category"])
         chart.add_xaxis([*[row["category_name"] for row in groups], "总体"])
         chart.add_yaxis(
-            "attention-matching",
+            method,
             [100 * row["score"] for row in groups] + [100 * metrics["score"]],
             label_opts={"show": False},
             itemstyle_opts={"color": "#31688e"},
         )
+        for baseline_label, baseline in baselines.items():
+            reference_groups = {
+                row["category"]: row["score"] for row in baseline["metrics"]["groups"]
+            }
+            chart.add_yaxis(
+                baseline_label,
+                [
+                    {
+                        "value": 100 * reference_groups[row["category"]],
+                        "itemStyle": {
+                            "color": _baseline_color(baseline_label, index, len(groups))
+                        },
+                    }
+                    for index, row in enumerate(groups)
+                ]
+                + [{
+                    "value": 100 * baseline["metrics"]["score"],
+                    "itemStyle": {"color": _baseline_color(baseline_label)},
+                }],
+                label_opts={"show": False},
+                itemstyle_opts={"color": _baseline_color(baseline_label)},
+            )
     chart.set_global_opts(
         tooltip_opts={"trigger": "axis"},
         yaxis_opts={"name": f"{metrics['metric']} (%)", "min": 0, "max": 100},
@@ -90,7 +153,7 @@ def _benchmark_media(summary):
     return {f"evaluation/{summary['benchmark']}": chart}
 
 
-def _line_chart(steps, series, unit, maximum=None):
+def _line_chart(steps, series, unit, maximum=None, references=()):
     chart = swanlab.echarts.Line().add_xaxis(steps)
     for label, measurements, color in series:
         chart.add_yaxis(
@@ -104,6 +167,16 @@ def _line_chart(steps, series, unit, maximum=None):
             linestyle_opts={"color": color, "width": 2},
             itemstyle_opts={"color": color},
         )
+    for label, measurements, color in references:
+        chart.add_yaxis(
+            label,
+            measurements,
+            color=color,
+            is_symbol_show=False,
+            label_opts={"show": False},
+            linestyle_opts={"color": color, "width": 2, "type": "dashed"},
+            itemstyle_opts={"color": color},
+        )
     chart.set_global_opts(
         tooltip_opts={"trigger": "axis"},
         legend_opts={"type": "scroll"},
@@ -113,10 +186,10 @@ def _line_chart(steps, series, unit, maximum=None):
     return chart
 
 
-def _checkpoint_media(summaries):
+def _checkpoint_media(summaries, baselines):
     steps = [summary["checkpoint"]["step"] for summary in summaries]
     if "benchmark" in summaries[0]:
-        return _benchmark_checkpoint_media(summaries, steps)
+        return _benchmark_checkpoint_media(summaries, steps, baselines)
     panels = (
         ("nll", (("nll", "NLL", "#31688e"),), "NLL", None),
         (
@@ -146,7 +219,7 @@ def _checkpoint_media(summaries):
     }
 
 
-def _benchmark_checkpoint_media(summaries, steps):
+def _benchmark_checkpoint_media(summaries, steps, baselines):
     first = summaries[0]
     benchmark = first["benchmark"]
     group_field, identity_field = (
@@ -167,8 +240,27 @@ def _benchmark_checkpoint_media(summaries, steps):
                 _group_color(index, len(groups)),
             )
         )
+    references = []
+    if baselines:
+        method = first.get("method", "attention-matching")
+        series = [(f"{method} / {label}", values, color) for label, values, color in series]
+    for baseline_label, baseline in baselines.items():
+        reference_groups = {
+            row[identity_field]: row["score"] for row in baseline["metrics"][group_field]
+        }
+        references.append((
+            f"{baseline_label} / 总体", [100 * baseline["metrics"]["score"]] * len(steps),
+            _baseline_color(baseline_label),
+        ))
+        for index, row in enumerate(groups):
+            label = f"{row['length'] / 1024:g}K" if benchmark == "ruler" else row["category_name"]
+            references.append((
+                f"{baseline_label} / {label}",
+                [100 * reference_groups[row[identity_field]]] * len(steps),
+                _baseline_color(baseline_label, index, len(groups)),
+            ))
     return {
         f"evaluation/{benchmark}": _line_chart(
-            steps, series, f"{first['metrics']['metric']} (%)", 100
+            steps, series, f"{first['metrics']['metric']} (%)", 100, references
         )
     }

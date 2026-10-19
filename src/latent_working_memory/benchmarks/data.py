@@ -8,6 +8,7 @@ import re
 
 RULER_COMMIT = "c3f5e3b4f87f97e048793bb510a3a6b19a46bf3a"
 LOCOMO_COMMIT = "3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376"
+DEFAULT_RULER_LENGTHS = (8192, 16384, 32768)
 RULER_TASKS = (
     "niah_single_1",
     "niah_single_2",
@@ -199,7 +200,7 @@ def _load_locomo(data_dir):
     return tuple(samples)
 
 
-def load_samples(benchmark: str, data_dir: Path, lengths: tuple[int, ...] = (8192, 16384, 32768)):
+def load_samples(benchmark: str, data_dir: Path, lengths: tuple[int, ...] = DEFAULT_RULER_LENGTHS):
     """data_dir 为对应 benchmark 的原生数据根目录。"""
     data_dir = Path(data_dir).expanduser().resolve()
     if benchmark == "ruler":

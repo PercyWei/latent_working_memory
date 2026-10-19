@@ -2,9 +2,9 @@
 
 from collections import defaultdict
 
-from latent_working_memory.v4.benchmarks.data import LOCOMO_CATEGORIES, RULER_TASKS
-from latent_working_memory.v4.benchmarks.vendor.locomo import f1, f1_score
-from latent_working_memory.v4.benchmarks.vendor.ruler import (
+from latent_working_memory.benchmarks.data import LOCOMO_CATEGORIES, RULER_TASKS
+from latent_working_memory.benchmarks.vendor.locomo import f1, f1_score
+from latent_working_memory.benchmarks.vendor.ruler import (
     postprocess_pred,
     string_match_all,
     string_match_part,

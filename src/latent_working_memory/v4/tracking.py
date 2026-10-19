@@ -14,6 +14,7 @@ import torch
 import swanlab
 from swanlab.sdk.internal.run.components.config import Config as SwanLabConfig
 
+from latent_working_memory.baselines.results import load_baseline_results
 from latent_working_memory.runtime import capture_rng, restore_rng
 from latent_working_memory.tracking_credentials import swanlab_api_key
 from latent_working_memory.v4.evaluation_records import EvaluationHistory
@@ -208,7 +209,7 @@ def log_metrics(tracking, record):
 
 
 def validate_evaluation_publication(run, checkpoint_path, step):
-    """在线评估前核对已完成训练的身份和成功保存 checkpoint；不访问远端。"""
+    """核对已完成训练、真实 step 和运行身份；缓存补发无需保留权重。"""
     training = run["training"]
     if training["swanlab_project"] is None:
         raise ValueError("evaluation publication requires a checkpoint configured for SwanLab")
@@ -222,11 +223,10 @@ def validate_evaluation_publication(run, checkpoint_path, step):
         or type(step) is not int
         or not 0 < step <= result["completed_steps"]
         or checkpoint_path != root / "checkpoints" / f"global_step_{step}"
-        or not (checkpoint_path / "state.pt").is_file()
         or Path(result["checkpoint"]).resolve()
         != root / "checkpoints" / f"global_step_{result['completed_steps']}"
     ):
-        raise ValueError("publication requires a saved checkpoint from the completed training run")
+        raise ValueError("publication requires a checkpoint step from the completed training run")
     identity = json.loads((root / "swanlab.json").read_text(encoding="utf-8"))
     expected = training_identity(training)
     if any(identity[name] != value for name, value in expected.items()):
@@ -349,7 +349,7 @@ def _configure_report_layout(api, remote, media_keys):
     }
 
 
-def publish_evaluations(run, evaluations):
+def publish_evaluations(run, evaluations, baseline_results=None):
     """合并已发布缓存与本次选择，按真实 step 重建完整报告。"""
     history = EvaluationHistory(evaluations[0][2], evaluations[0][1])
     for checkpoint, summary, output_dir in evaluations:
@@ -374,15 +374,19 @@ def publish_evaluations(run, evaluations):
         summaries = [summary for _, summary in ordered]
         for directory, summary in ordered:
             EvaluationHistory(directory, summary).validate_summary(summary)
-        values = evaluation_media(summaries)
+        publication = history.report_publication()
+        baselines = load_baseline_results(
+            baseline_results, summaries[0].get("benchmark"), summaries,
+        )
+        values = evaluation_media(summaries, baselines)
         signature = hashlib.sha256(json.dumps(
             {
                 "summaries": summaries,
+                "baselines": baselines,
                 "charts": {key: chart.dump_options() for key, chart in values.items()},
             },
             ensure_ascii=False, sort_keys=True, allow_nan=False,
         ).encode("utf-8")).hexdigest()
-        publication = history.report_publication()
         if publication is not None and any(
             publication[name] != value for name, value in (
                 ("run_id", identity["id"]), ("project", identity["project"]),

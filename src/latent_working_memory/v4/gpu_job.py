@@ -16,6 +16,7 @@ import sys
 import threading
 from zoneinfo import ZoneInfo
 
+from latent_working_memory.baselines.results import load_baseline_results
 from latent_working_memory.v4.config import load_experiment, load_training_schedule
 from latent_working_memory.v4.evaluation_records import EvaluationHistory, evaluation_config_path
 from latent_working_memory.v4.io import write_json
@@ -103,7 +104,7 @@ def parse_args(argv=None):
     )
     checkpoint_sources.add_argument(
         "--eval-run", type=Path,
-        help="评估 <series>/train/<method-dir> 中全部保留的 checkpoint；仅用于 --evaluate-only",
+        help="评估指定 run 保留的 checkpoint；benchmark 权重全清理时复用已发布成员",
     )
     parser.add_argument("--config", type=Path, help=f"训练预设，默认 {DEFAULT_CONFIG}")
     parser.add_argument(
@@ -120,7 +121,11 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--benchmark-data", type=Path,
-        help="benchmark 数据目录，默认沿用评估配置；无评估配置时必填",
+        help="benchmark 数据目录，默认沿用评估配置；首次计算无评估配置时必填",
+    )
+    parser.add_argument(
+        "--baseline-results", nargs="+", action="extend", metavar="LABEL_OR_PATH",
+        help="按 标签 基线运行的eval目录 成对传入；仅用于本次 benchmark 在线展示",
     )
     for name in (
         "micro-batch-size-per-gpu",
@@ -172,6 +177,16 @@ def parse_args(argv=None):
         action.default = default
         if default != argparse.SUPPRESS and not hasattr(args, action.dest):
             setattr(args, action.dest, default)
+    if args.baseline_results is not None:
+        if len(args.baseline_results) % 2:
+            parser.error("--baseline-results requires label/path pairs")
+        labels = args.baseline_results[::2]
+        if any(not label.strip() for label in labels) or len(set(labels)) != len(labels):
+            parser.error("--baseline-results requires nonempty, unique labels")
+        args.baseline_results = [
+            (label, Path(path).expanduser().resolve())
+            for label, path in zip(labels, args.baseline_results[1::2])
+        ]
     if args.resume:
         overrides = supplied_options - {"resume", "checkpoint", "gpus"}
         if overrides:
@@ -211,8 +226,13 @@ def parse_args(argv=None):
     if args.evaluate_only:
         args.eval_type = args.eval_type or "test"
         if args.eval_type == "test":
-            if any(value is not None for value in (args.benchmark, args.benchmark_data, args.lengths)):
-                parser.error("--benchmark, --benchmark-data and --lengths require --eval-type benchmark")
+            if any(value is not None for value in (
+                args.benchmark, args.benchmark_data, args.lengths, args.baseline_results,
+            )):
+                parser.error(
+                    "--benchmark, --benchmark-data, --lengths and --baseline-results "
+                    "require --eval-type benchmark"
+                )
         else:
             if args.benchmark is None:
                 parser.error("--eval-type benchmark requires --benchmark")
@@ -225,16 +245,18 @@ def parse_args(argv=None):
                 )
             if args.lengths is not None and args.benchmark != "ruler":
                 parser.error("--lengths requires --benchmark ruler")
+            if args.baseline_results is not None and args.tracking == "disabled":
+                parser.error("--baseline-results requires online benchmark publication")
     elif any(
         value is not None
         for value in (
             args.eval_type, args.benchmark, args.benchmark_data,
-            args.lengths, args.max_new_tokens,
+            args.lengths, args.max_new_tokens, args.baseline_results,
         )
     ):
         parser.error(
             "--eval-type, --benchmark, --benchmark-data, --lengths and "
-            "--max-new-tokens require --evaluate-only"
+            "--max-new-tokens and --baseline-results require --evaluate-only"
         )
     if args.checkpoint is not None and not args.evaluate_only:
         if len(args.checkpoint) != 1:
@@ -368,7 +390,8 @@ def _compute_evaluations(args, results, summary, result_path):
     """每张 GPU 固定一个槽位，只并行计算，发布由父进程负责。"""
     pending = Queue()
     for result in results:
-        pending.put(result)
+        if result["status"] == "pending":
+            pending.put(result)
     stopping = threading.Event()
     state_lock = threading.Lock()
     processes = set()
@@ -475,6 +498,46 @@ def _compute_evaluations(args, results, summary, result_path):
             signal.signal(signum, handler)
 
 
+def _publish_evaluation_results(args, results, summary, result_path, run):
+    """仅用完整结果更新报告；原始样本、tokenizer 和权重均不参与发布。"""
+    publications = []
+    for result in results:
+        if result["status"] != "finished":
+            continue
+        result["publication_status"] = "pending"
+        _write_evaluation_status(result_path, summary, results)
+        checkpoint = Path(result["checkpoint"])
+        output_dir = Path(result["output_dir"])
+        try:
+            saved = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
+            history = EvaluationHistory(output_dir, saved)
+            with history.lock():
+                saved = history.cached_summary()
+            publications.append((result, checkpoint, saved, output_dir))
+        except Exception as error:
+            result.update(
+                status="failed", publication_status="failed",
+                error=f"publication failed: {type(error).__name__}: {error}",
+            )
+            print(f"[evaluation] {checkpoint.name} {result['error']}", flush=True)
+    if publications:
+        try:
+            publish_evaluations(
+                run, [row[1:] for row in publications], baseline_results=args.baseline_results
+            )
+        except Exception as error:
+            for result, checkpoint, _, _ in publications:
+                result.update(
+                    status="failed", publication_status="failed",
+                    error=f"publication failed: {type(error).__name__}: {error}",
+                )
+                print(f"[evaluation] {checkpoint.name} {result['error']}", flush=True)
+        else:
+            for result, _, _, _ in publications:
+                result["publication_status"] = "finished"
+    _write_evaluation_status(result_path, summary, results)
+
+
 def _run_evaluation_locked(args, checkpoints, output, run):
     evaluation_task = args.benchmark if args.eval_type == "benchmark" else "test"
     destination = output.parent.parent / "eval" / output.name / evaluation_task
@@ -483,11 +546,21 @@ def _run_evaluation_locked(args, checkpoints, output, run):
     config_path = evaluation_config_path(destination / checkpoints[0].name)
     data_dir = args.benchmark_data if args.eval_type == "benchmark" else args.test_data
     data_option = "--benchmark-data" if args.eval_type == "benchmark" else "--test-data"
-    if data_dir is None and not config_path.is_file():
+    cached_only = args.eval_type == "benchmark" and all(
+        (destination / checkpoint.name / "summary.json").is_file() for checkpoint in checkpoints
+    )
+    if data_dir is None and not config_path.is_file() and not cached_only:
         raise ValueError(f"{config_path} is missing; specify {data_option}")
     tracking = args.tracking or (
         "online" if run["training"]["swanlab_project"] is not None else "disabled"
     )
+    if args.baseline_results is not None and tracking != "online":
+        raise ValueError("--baseline-results requires an existing online training run")
+    if args.baseline_results is not None:
+        load_baseline_results(args.baseline_results, args.benchmark, [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(destination.glob("global_step_*/summary.json"))
+        ])
     if tracking == "online":
         for checkpoint in checkpoints:
             validate_evaluation_publication(
@@ -501,6 +574,23 @@ def _run_evaluation_locked(args, checkpoints, output, run):
     for checkpoint in checkpoints:
         output_dir = destination / checkpoint.name
         output_dir.mkdir(parents=True, exist_ok=True)
+        cached = None
+        if args.eval_type == "benchmark" and (output_dir / "summary.json").is_file():
+            cached = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
+            if cached["benchmark"] != args.benchmark or cached["checkpoint"] != {
+                "path": str(checkpoint),
+                "step": int(checkpoint.name.removeprefix("global_step_")),
+            }:
+                raise ValueError(f"cached summary does not match the selected checkpoint: {output_dir}")
+            if args.benchmark_data is not None and (
+                str(args.benchmark_data.expanduser().resolve()) != cached["data"]["directory"]
+            ):
+                raise ValueError("cached publication cannot change --benchmark-data")
+            if args.lengths is not None and args.lengths != cached["protocol"]["lengths"]:
+                raise ValueError("cached publication cannot change --lengths")
+            history = EvaluationHistory(output_dir, cached)
+            with history.lock():
+                cached = history.cached_summary()
         command = [
             sys.executable,
             "-m",
@@ -533,8 +623,11 @@ def _run_evaluation_locked(args, checkpoints, output, run):
             "eval_type": args.eval_type,
             "checkpoint": str(checkpoint),
             "step": int(checkpoint.name.removeprefix("global_step_")),
-            "status": "pending",
-            "command": command,
+            "status": "finished" if cached is not None else "pending",
+            **(
+                {"compute_status": "cached", "return_code": 0}
+                if cached is not None else {"command": command}
+            ),
             "output_dir": str(output_dir),
             "log_path": str(output_dir / "eval.log"),
         })
@@ -552,42 +645,12 @@ def _run_evaluation_locked(args, checkpoints, output, run):
     }
     _write_evaluation_status(result_path, summary, results)
     try:
-        _compute_evaluations(args, results, summary, result_path)
+        if any(result["status"] == "pending" for result in results):
+            _compute_evaluations(args, results, summary, result_path)
+        else:
+            print("[evaluation] 使用已完成的汇总结果更新展示，无需加载模型或原始数据。", flush=True)
         if tracking == "online":
-            publications = []
-            for result in results:
-                if result["status"] != "finished":
-                    continue
-                result["publication_status"] = "pending"
-                _write_evaluation_status(result_path, summary, results)
-                checkpoint = Path(result["checkpoint"])
-                output_dir = Path(result["output_dir"])
-                try:
-                    saved = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
-                    history = EvaluationHistory(output_dir, saved)
-                    with history.lock():
-                        saved = history.cached_summary()
-                    publications.append((result, checkpoint, saved, output_dir))
-                except Exception as error:
-                    result.update(
-                        status="failed", publication_status="failed",
-                        error=f"publication failed: {type(error).__name__}: {error}",
-                    )
-                    print(f"[evaluation] {checkpoint.name} {result['error']}", flush=True)
-            if publications:
-                try:
-                    publish_evaluations(run, [row[1:] for row in publications])
-                except Exception as error:
-                    for result, checkpoint, _, _ in publications:
-                        result.update(
-                            status="failed", publication_status="failed",
-                            error=f"publication failed: {type(error).__name__}: {error}",
-                        )
-                        print(f"[evaluation] {checkpoint.name} {result['error']}", flush=True)
-                else:
-                    for result, _, _, _ in publications:
-                        result["publication_status"] = "finished"
-            _write_evaluation_status(result_path, summary, results)
+            _publish_evaluation_results(args, results, summary, result_path, run)
     except KeyboardInterrupt:
         for result in results:
             if (
@@ -622,8 +685,18 @@ def run_evaluation(args):
             for path in output.glob("checkpoints/global_step_*/state.pt")
             if path.is_file() and re.fullmatch(r"global_step_[0-9]+", path.parent.name)
         ]
+        if not checkpoints and args.eval_type == "benchmark":
+            publication_path = (
+                output.parent.parent / "eval" / output.name / args.benchmark / "swanlab.json"
+            )
+            if publication_path.is_file():
+                publication = json.loads(publication_path.read_text(encoding="utf-8"))
+                checkpoints = [
+                    Path(json.loads(Path(path).read_text(encoding="utf-8"))["checkpoint"]["path"])
+                    for path in publication["summaries"]
+                ]
         if not checkpoints:
-            raise ValueError(f"no retained checkpoints found in {output}")
+            raise ValueError(f"no retained checkpoints or published evaluation results found in {output}")
     else:
         checkpoints = args.checkpoint
     checkpoints = [path.expanduser().resolve() for path in checkpoints]
@@ -632,9 +705,16 @@ def run_evaluation(args):
     for checkpoint in checkpoints:
         if checkpoint.parent.name != "checkpoints" or checkpoint.parent.parent.parent.name != "train":
             raise ValueError("checkpoint must belong to <series>/train/<method-dir>/checkpoints")
-        if re.fullmatch(r"global_step_[0-9]+", checkpoint.name) is None or not checkpoint.is_dir():
-            raise ValueError("checkpoint must be an existing global_step_<step> directory")
-        if not (checkpoint / "state.pt").is_file():
+        if re.fullmatch(r"global_step_[0-9]+", checkpoint.name) is None:
+            raise ValueError("checkpoint must be a global_step_<step> directory")
+        cached = (
+            args.eval_type == "benchmark"
+            and (
+                checkpoint.parents[3] / "eval" / checkpoint.parents[1].name
+                / args.benchmark / checkpoint.name / "summary.json"
+            ).is_file()
+        )
+        if not cached and not (checkpoint / "state.pt").is_file():
             raise ValueError(f"checkpoint is incomplete: missing {checkpoint / 'state.pt'}")
     outputs = {checkpoint.parent.parent for checkpoint in checkpoints}
     if len(outputs) != 1 or (args.eval_run is not None and outputs != {output}):

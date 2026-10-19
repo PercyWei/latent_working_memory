@@ -106,9 +106,10 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 ```
 
 - Benchmark 评估时 `--eval-type` 须设置为 `benchmark`，同时指定 `--benchmark`。
-- `--eval-run` 和 `checkpoint` 的使用同 test 评估。
+- `--eval-run` 和 `--checkpoint` 的基本用法同 test。
 - 默认沿用评估配置 `plan/<method-dir>/<benchmark>.json`。缺少该文件时，必须传入 `--benchmark-data` 以创建评估配置，`--lengths`（RULER 专属）可使用默认值。模型、方法和写入配置从 checkpoint 读取。
 - checkpoint 的保存，结果的发布等同 test 评估。
+`--baseline-results` 按 “标签＋目录” 的格式成对传入，标签不可重复，用于在 swanlab evaluation 中展示 baseline 结果以方便对比。
 
 ### 2.3 中断恢复
 
@@ -174,6 +175,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 | `--max-new-tokens` | test 评估时 token 生成上限，默认 128 |
 | `--benchmark` | benchmark 名称，默认 `null` |
 | `--benchmark-data` | benchmark 数据目录，默认位置见[第 1 节](#1-准备环境模型与数据) |
+| `--baseline-results` | 用于 baseline 对比展示的 “标签＋结果目录” 列表 |
 | `--lengths` | 仅用于 RULER benchmark 评估，默认 `8192 16384 32768` |
 | **SwanLab** |
 | `--tracking` | SwanLab 记录方式，支持 `online`（默认）和 `disabled`（仅保存本地产物） |

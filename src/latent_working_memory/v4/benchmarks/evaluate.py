@@ -3,7 +3,6 @@
 import argparse
 from dataclasses import asdict
 from datetime import datetime
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,12 +13,14 @@ import torch
 from transformers import set_seed
 
 from latent_working_memory.runtime import initialize_device
-from latent_working_memory.v4.benchmarks.data import (
-    LOCOMO_COMMIT,
-    RULER_COMMIT,
-    load_samples,
+from latent_working_memory.benchmarks.data import load_samples
+from latent_working_memory.benchmarks.protocol import (
+    DEFAULT_RULER_LENGTHS,
+    data_identity,
+    encode_prompt,
+    protocol,
 )
-from latent_working_memory.v4.benchmarks.scoring import score_sample, summarize_scores
+from latent_working_memory.benchmarks.scoring import score_sample, summarize_scores
 from latent_working_memory.v4.checkpoint import read_checkpoint
 from latent_working_memory.v4.evaluation_records import (
     EvaluationHistory,
@@ -31,9 +32,6 @@ from latent_working_memory.v4.evaluation_runtime import (
     load_evaluation_model,
 )
 from latent_working_memory.v4.tracking import publish_evaluations, validate_evaluation_publication
-
-
-DEFAULT_RULER_LENGTHS = (8192, 16384, 32768)
 
 
 def evaluate(
@@ -69,12 +67,6 @@ def evaluate(
         validate_evaluation_publication(run, checkpoint_path, step)
 
     samples = load_samples(benchmark, data_dir, selected_lengths)
-    fingerprint = hashlib.blake2b(digest_size=32)
-    for sample in samples:
-        fingerprint.update(
-            json.dumps(asdict(sample), ensure_ascii=False, sort_keys=True).encode("utf-8")
-        )
-        fingerprint.update(b"\n")
 
     config, tokenizer, backbone_config = load_evaluation_inputs(checkpoint)
     model_window = backbone_config.max_position_embeddings
@@ -86,27 +78,14 @@ def evaluate(
         "training_run": run["training"]["output_dir"],
         "seed": seed,
         "model": asdict(config),
-        "data": {
-            "directory": str(data_dir),
-            "source_commit": RULER_COMMIT if benchmark == "ruler" else LOCOMO_COMMIT,
-            "samples": len(samples),
-            "fingerprint": fingerprint.hexdigest(),
-        },
+        "data": data_identity(samples, data_dir, benchmark),
         "device": str(device),
         "tracking": tracking,
         "model_window": model_window,
-        "protocol": {
-            "decoding": "greedy; base model tokenizer chat template; enable_thinking=False",
-            "memory": "each question starts from initial memory; local TTT during streaming",
-            "input": "complete benchmark prompt; no truncation or training length filtering",
-            "generation_budget": "RULER task budget; LoCoMo 50 tokens",
-            "reference": "scoring only; never passed to memory writes or generation",
-            **(
-                {"lengths": list(selected_lengths), "answer_prefix": "omitted in chat protocol"}
-                if benchmark == "ruler"
-                else {"categories": [1, 2, 3, 4], "history_order": "chronological"}
-            ),
-        },
+        "protocol": protocol(
+            benchmark, selected_lengths,
+            "each question starts from initial memory; local TTT during streaming",
+        ),
     }
     history = EvaluationHistory(output_dir, evaluation_config)
     with history.lock():
@@ -139,19 +118,7 @@ def evaluate(
         started = time.perf_counter()
         with (output_dir / "details.jsonl").open("w", encoding="utf-8") as stream:
             for index, sample in enumerate(samples, 1):
-                ids = tokenizer.apply_chat_template(
-                    [{"role": "user", "content": sample.prompt}],
-                    tokenize=True,
-                    add_generation_prompt=True,
-                    enable_thinking=False,
-                )
-                total_budget = len(ids) + sample.max_new_tokens
-                limit = sample.metadata["length"] if benchmark == "ruler" else model_window
-                if total_budget > min(limit, model_window):
-                    raise ValueError(
-                        f"{sample.id}: prompt ({len(ids)}) + generation budget "
-                        f"({sample.max_new_tokens}) exceeds limit {min(limit, model_window)}"
-                    )
+                ids = encode_prompt(sample, tokenizer, model_window, benchmark)
                 model.write_measurements.clear()
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
