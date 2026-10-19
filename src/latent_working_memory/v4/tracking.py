@@ -263,7 +263,7 @@ def _verify_report(api_key, project_path, run_id, media_keys, step):
 
 
 def _configure_report_layout(api, remote, media_keys):
-    """完整报告使用媒体面板，清理当前评估类型的旧增量面板。"""
+    """完整报告使用媒体面板，清理当前评估类型的过时面板。"""
     def checked(response):
         if not response.ok:
             raise RuntimeError(response.errmsg)
@@ -290,6 +290,9 @@ def _configure_report_layout(api, remote, media_keys):
     benchmark = next((key.rsplit("/", 1)[1] for key in media_keys if key in {
         "evaluation/ruler", "evaluation/locomo"
     }), None)
+    retired_test_keys = {
+        "evaluation/quality", "evaluation/nll", "evaluation/em_f1"
+    }.difference(media_keys)
     legacy = "evaluation/checkpoints" + (f"/{benchmark}" if benchmark else "")
     found = {}
     for section in sections:
@@ -304,7 +307,12 @@ def _configure_report_layout(api, remote, media_keys):
                 )))
                 for key in keys
             )
-            if chart["type"] in {"LINE", "BAR", "SCALAR"} and retired:
+            retired_test = benchmark is None and keys and keys <= retired_test_keys
+            if (
+                chart["type"] in {"LINE", "BAR", "SCALAR"} and retired
+            ) or (
+                chart["type"] in {"LINE", "BAR", "SCALAR", "ECHARTS"} and retired_test
+            ):
                 checked(api._delete(f"{charts_path}/{section['index']}/{index}"))
                 if index in target["chartIndex"]:
                     target["chartIndex"].remove(index)
@@ -366,8 +374,13 @@ def publish_evaluations(run, evaluations):
         summaries = [summary for _, summary in ordered]
         for directory, summary in ordered:
             EvaluationHistory(directory, summary).validate_summary(summary)
+        values = evaluation_media(summaries)
         signature = hashlib.sha256(json.dumps(
-            summaries, ensure_ascii=False, sort_keys=True, allow_nan=False
+            {
+                "summaries": summaries,
+                "charts": {key: chart.dump_options() for key, chart in values.items()},
+            },
+            ensure_ascii=False, sort_keys=True, allow_nan=False,
         ).encode("utf-8")).hexdigest()
         publication = history.report_publication()
         if publication is not None and any(
@@ -377,7 +390,6 @@ def publish_evaluations(run, evaluations):
             )
         ):
             raise ValueError("report publication differs from the original training run")
-        values = evaluation_media(summaries)
         api_key = swanlab_api_key()
         api = swanlab.Api(api_key=api_key)
         remote = api.run(f"{project_path}/{identity['id']}")

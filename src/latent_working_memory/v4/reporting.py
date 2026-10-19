@@ -15,31 +15,41 @@ def evaluation_media(summaries):
 
 def _test_media(summary):
     metrics = summary["metrics"]
-    panels = (
-        ("nll", ["答案 NLL"], [metrics["nll"]], "NLL"),
-        ("em_f1", ["EM", "F1"], [metrics["em"], metrics["f1"]], "score"),
-        (
-            "write_loss",
-            ["写入前", "写入后"],
-            [metrics["write_loss_before"], metrics["write_loss"]],
-            "Attention Matching loss",
-        ),
-    )
-    values = {}
-    for name, labels, measurements, unit in panels:
-        chart = swanlab.echarts.Bar().add_xaxis(labels)
-        chart.add_yaxis(
-            "attention-matching",
-            measurements,
+    quality = swanlab.echarts.Bar().add_xaxis(["NLL", "EM", "F1"])
+    for index, (metric, label, color) in enumerate((
+        ("nll", "NLL", "#31688e"),
+        ("em", "EM", "#74a9cf"),
+        ("f1", "F1", "#2b8cbe"),
+    )):
+        quality.add_yaxis(
+            label,
+            [metrics[metric] if position == index else None for position in range(3)],
+            yaxis_index=0 if metric == "nll" else 1,
+            gap="-100%",
             label_opts={"show": False},
-            itemstyle_opts={"color": "#31688e"},
+            itemstyle_opts={"color": color},
         )
-        chart.set_global_opts(
-            tooltip_opts={"trigger": "axis"},
-            yaxis_opts={"name": unit, "min": 0, **({"max": 1} if name == "em_f1" else {})},
-        )
-        values[f"evaluation/{name}"] = chart
-    return values
+    quality.set_global_opts(
+        tooltip_opts={"trigger": "axis"},
+        yaxis_opts={"name": "NLL", "type": "value", "min": 0, "position": "left"},
+    )
+    quality.extend_axis(yaxis={
+        "name": "EM / F1", "type": "value", "min": 0, "max": 1, "position": "right",
+        "splitLine": {"show": False},
+    })
+
+    write_loss = swanlab.echarts.Bar().add_xaxis(["写入前", "写入后"])
+    write_loss.add_yaxis(
+        "attention-matching",
+        [metrics["write_loss_before"], metrics["write_loss"]],
+        label_opts={"show": False},
+        itemstyle_opts={"color": "#31688e"},
+    )
+    write_loss.set_global_opts(
+        tooltip_opts={"trigger": "axis"},
+        yaxis_opts={"name": "Attention Matching loss", "min": 0},
+    )
+    return {"evaluation/quality": quality, "evaluation/write_loss": write_loss}
 
 
 def _group_color(index, count):
@@ -108,7 +118,7 @@ def _checkpoint_media(summaries):
     if "benchmark" in summaries[0]:
         return _benchmark_checkpoint_media(summaries, steps)
     panels = (
-        ("nll", (("nll", "答案 NLL", "#31688e"),), "NLL", None),
+        ("nll", (("nll", "NLL", "#31688e"),), "NLL", None),
         (
             "em_f1",
             (("em", "EM", "#74a9cf"), ("f1", "F1", "#2b8cbe")),
