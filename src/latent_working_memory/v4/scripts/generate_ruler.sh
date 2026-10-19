@@ -18,7 +18,8 @@ usage() {
   --seed N                 随机种子，默认 42
   -h, --help               显示帮助
 
-先执行 download_benchmarks.sh --benchmark ruler；仅需 tokenizer 与 CPU。
+先下载 RULER 素材与 data/raw/nltk_data 中的 NLTK 资源；仅需 tokenizer 与 CPU。
+可执行 download_benchmarks.sh --benchmark ruler，或从 ModelScope 还原上述目录。
 相对路径以项目根目录为基准；已有长度目录不覆盖，另用 --output-dir 保存新设置。
 model-name 取 --model-path 的最后一级目录名或 HF 仓库名。
 HELP
@@ -84,6 +85,7 @@ done
 mkdir -p "$output_dir"
 
 export TOKENIZERS_PARALLELISM=false
+export NLTK_DATA="$LWM_ROOT/data/raw/nltk_data"
 uv run --frozen python - \
   "$ruler_source_dir" "$output_dir" "$model_path" \
   "$num_samples" "$seed" "${lengths[@]}" <<'PY'

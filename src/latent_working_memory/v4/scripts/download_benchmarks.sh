@@ -55,12 +55,15 @@ if [[ $benchmark == all || $benchmark == ruler ]]; then
   GIT_LFS_SKIP_SMUDGE=1 git -C "$ruler_source_dir" checkout c3f5e3b4f87f97e048793bb510a3a6b19a46bf3a
   git -C "$ruler_source_dir" lfs pull --include="scripts/data/synthetic/json/english_words.json"
   # 仅为 NLTK 下载允许使用现有代理，调用方可通过同名环境变量覆盖。
+  NLTK_DATA="$LWM_ROOT/data/raw/nltk_data" \
   NLTK_ALLOW_PROXIED_URLOPEN="${NLTK_ALLOW_PROXIED_URLOPEN:-1}" \
     uv run --frozen python - <<'PY'
+import os
+
 import nltk
 
 for package in ("punkt", "punkt_tab"):
-    nltk.download(package, raise_on_error=True)
+    nltk.download(package, download_dir=os.environ["NLTK_DATA"], raise_on_error=True)
 PY
   (
     cd "$ruler_source_dir/scripts/data/synthetic/json"

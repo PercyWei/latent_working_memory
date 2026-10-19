@@ -27,7 +27,9 @@ QASPER 目录保留 `train/dev/test.jsonl`，可从 [ModelScope](https://modelsc
 bash src/latent_working_memory/v4/scripts/download_benchmarks.sh --benchmark all
 ```
 
-`--benchmark` 可选 `all`（默认）、`ruler`、`locomo`。LoCoMo 下载后可直接用于评估，RULER 下载的是素材，需要进一步生成样本（使用和模型训练相同的 tokenizer）：
+`--benchmark` 可选 `all`（默认）、`ruler`、`locomo`。LoCoMo 下载后可直接用于评估，RULER 下载的是源码、素材与分词资源，需要使用和模型训练相同的 tokenizer 生成样本。
+
+NLTK 的 `punkt` 和 `punkt_tab` 固定下载到项目 `data/raw/nltk_data/`。通过 ModelScope 分发时，将它与 `data/raw/ruler-v1-source/`、`data/benchmarks/locomo/` 一起保存并按原相对路径还原，保留 `nltk_data/tokenizers/` 下的资源目录。还原后跳过下载脚本，直接运行下面的生成命令；生成无需 RULER 目录中的 `.git`。生成脚本自动设置项目目录的绝对 `NLTK_DATA`，其子进程共用此设置。
 
 ```bash
 bash src/latent_working_memory/v4/scripts/generate_ruler.sh \
@@ -38,6 +40,7 @@ bash src/latent_working_memory/v4/scripts/generate_ruler.sh \
 
 - 默认三个长度（8k，16k，32k），每个长度、每项任务生成 100 条，共 13 项任务。
 - 默认写入 `data/benchmarks/ruler-v1/<model-name>/`，可传入 `--output-dir` 更改输出目录。
+- 已有长度目录拒绝覆盖；失败生成后，重试前将失败的长度目录移出输出目录，或指定新的 `--output-dir`。
 - 不同模型自动分目录，原始素材共享，详情见 [benchmark 数据准备说明](../benchmarks/README.md#2-手动准备数据)。
 
 ## 2. 运行

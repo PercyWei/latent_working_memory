@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261018 17:25:01 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261019 11:34:58 Asia/Shanghai（UTC+08:00）
 
 ## 1. 数据位置与评估协议
 
@@ -21,7 +21,7 @@
 ## 2. 手动准备数据
 
 - 下载与生成使用独立入口，均从项目根目录执行，无需 GPU。
-- 先安装系统 `git`、`git-lfs`、`curl`，再执行 `uv sync --frozen` 安装项目锁定依赖；脚本不自动安装依赖。
+- 先执行 `uv sync --frozen` 安装项目锁定依赖；从官方来源下载还需系统 `git`、`git-lfs`、`curl`，脚本不自动安装依赖。
 
 ```bash
 uv sync --frozen
@@ -31,6 +31,7 @@ bash src/latent_working_memory/v4/scripts/download_benchmarks.sh --benchmark all
 **原始数据下载：[download_benchmarks.sh](../scripts/download_benchmarks.sh)**
 
 - RULER 固定采用 [NVIDIA/RULER v1 源码](https://github.com/NVIDIA/RULER/tree/c3f5e3b4f87f97e048793bb510a3a6b19a46bf3a)，下载 essay、SQuAD、HotpotQA、CWE 词表及 NLTK 分词资源；不加载 tokenizer，不生成样本。
+- NLTK 的 `punkt` 和 `punkt_tab` 固定下载到项目 `data/raw/nltk_data/`。生成脚本将 `NLTK_DATA` 设置为该目录的绝对路径，官方生成器子进程继承此设置。
 - NLTK 下载默认允许使用已配置的代理（`NLTK_ALLOW_PROXIED_URLOPEN=1`），可通过同名环境变量覆盖；下载失败立即退出，不进入交互重试。
 - LoCoMo 下载 [官方正式数据](https://github.com/snap-research/locomo/tree/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376)，下载后可直接评估，无需额外构造脚本。
 
@@ -43,6 +44,23 @@ bash src/latent_working_memory/v4/scripts/download_benchmarks.sh --benchmark all
 - 已下载素材和已有 LoCoMo 文件直接复用。只下载其中一个 benchmark 时，将 `--benchmark all` 改为 `ruler` 或 `locomo`。
 - HotpotQA 默认通过 `https://hf-mirror.com` 下载，可用 `HF_ENDPOINT` 覆盖下载源；数据路径和 revision 保持不变。
 - 镜像可能重定向至 Hugging Face。仍无法连接时，使用可用代理，或在其他机器下载同一文件，保存为 `<ruler-source-dir>/scripts/data/synthetic/json/hotpotqa.json` 后重跑脚本。
+
+通过 ModelScope 分发时，将下列目录一起保存，并按项目根目录的相对路径还原；`nltk_data/` 保留完整目录结构：
+
+```text
+data/
+├── raw/
+│   ├── ruler-v1-source/          # RULER 源码与已下载素材
+│   └── nltk_data/
+│       └── tokenizers/
+│           ├── punkt/
+│           └── punkt_tab/
+└── benchmarks/
+    └── locomo/
+        └── locomo10.json
+```
+
+还原后跳过下载脚本，直接执行下方 RULER 生成命令；生成只读取源码与素材，`ruler-v1-source/` 无需保留 `.git`。LoCoMo 可直接评估。
 
 **RULER 样本生成：[generate_ruler.sh](../scripts/generate_ruler.sh)**
 
@@ -66,7 +84,7 @@ bash src/latent_working_memory/v4/scripts/generate_ruler.sh \
 
 - `<model-name>` 取 `--model-path` 去掉尾部斜杠后的最后一级目录名或 HF 仓库名，默认 `Qwen3-4B-Instruct-2507`；不同模型自动使用各自目录，原始素材共享。
 - 相对目录以项目根目录为准；路径含空格时加双引号。更换下载目录时，生成阶段须传入相同的 `--ruler-source-dir`。
-- 已有 RULER 长度目录拒绝覆盖；同一模型修改长度、样本数或 seed 等设置并需重建已有长度时，用新的 `--output-dir` 保存样本。
+- 已有 RULER 长度目录拒绝覆盖，包括失败生成留下的目录；重试前将失败的长度目录移出输出目录，或指定新的 `--output-dir`。同一模型修改长度、样本数或 seed 等设置并需重建已有长度时，用新的 `--output-dir` 保存样本。
 - RULER 的 `<length>` 表示完整输入与该任务生成预算的总长度上限；脚本预留 chat template 开销，官方生成器另行预留输出预算。
 - 官方生成器将 `answer_prefix` 单独保存；评估只读取 `input`，不拼回该前缀。多值／多 query 任务保持一条输入、一次回答。
 - 同一模型的比较方法应使用同一批生成样本。评估自定义位置时，`--benchmark-data` 指向 RULER 的 `--output-dir` 或 LoCoMo 的 `<data-root>/locomo`。
