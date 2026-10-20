@@ -83,31 +83,6 @@ def _baseline_selection(results, task, summaries, key):
 
 def _summary_rows(task, summaries, baselines):
     rows = []
-    for summary in summaries:
-        metrics = summary["metrics"]
-        row = {
-            "方法": summary.get("method", "attention-matching"),
-            "累计 step": summary["checkpoint"]["step"],
-            "样本": summary["samples"],
-        }
-        if task == "test":
-            row.update(
-                {
-                    "NLL": metrics["nll"],
-                    "EM": metrics["em"],
-                    "F1": metrics["f1"],
-                    "写入前 loss": metrics["write_loss_before"],
-                    "写入后 loss": metrics["write_loss"],
-                }
-            )
-        else:
-            row[f"{metrics['metric']} (%)"] = 100 * metrics["score"]
-            if task == "ruler":
-                row["评估长度"] = ", ".join(
-                    str(group["length"])
-                    for group in sorted(metrics["by_length"], key=lambda group: group["length"])
-                )
-        rows.append(row)
     for label, summary in baselines.items():
         metrics = summary["metrics"]
         row = {
@@ -121,6 +96,31 @@ def _summary_rows(task, summaries, baselines):
                 str(group["length"])
                 for group in sorted(metrics["by_length"], key=lambda group: group["length"])
             )
+        rows.append(row)
+    for summary in summaries:
+        metrics = summary["metrics"]
+        row = {
+            "方法": Path(summary["training_run"]).name,
+            "累计 step": summary["checkpoint"]["step"],
+            "样本": summary["samples"],
+        }
+        if task == "test":
+            row.update(
+                {
+                    "NLL": metrics["nll"],
+                    "EM": metrics["em"],
+                    "F1": metrics["f1"],
+                    "Loss before write": metrics["write_loss_before"],
+                    "Loss after write": metrics["write_loss"],
+                }
+            )
+        else:
+            row[f"{metrics['metric']} (%)"] = 100 * metrics["score"]
+            if task == "ruler":
+                row["评估长度"] = ", ".join(
+                    str(group["length"])
+                    for group in sorted(metrics["by_length"], key=lambda group: group["length"])
+                )
         rows.append(row)
     return rows
 

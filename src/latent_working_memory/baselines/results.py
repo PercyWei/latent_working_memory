@@ -12,9 +12,7 @@ def load_baseline_results(results, benchmark, summaries):
         return {}
     if benchmark not in {"ruler", "locomo"}:
         raise ValueError("baseline results apply only to RULER or LoCoMo")
-    methods = {value.get("method", "attention-matching") for value in summaries} or {
-        "attention-matching"
-    }
+    methods = {Path(value["training_run"]).name for value in summaries}
     comparisons = []
     for value in summaries:
         comparison = comparison_config(value)

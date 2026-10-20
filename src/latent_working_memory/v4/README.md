@@ -2,7 +2,7 @@
 
 创建时间：20261003 21:51:43 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261020 14:50:30 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261020 15:30:11 Asia/Shanghai（UTC+08:00）
 
 冻结基座，在每层维护 latent memory，通过 Attention Matching 局部更新记忆，并由答案 CE 学习如何生成压缩查询和读写记忆。
 
@@ -168,7 +168,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - **曲线与续训**：train/dev 按真实 optimizer step 追加原生曲线，`write_loss` 合并写入前后两条曲线，以浅色／深色区分。底层分别保存 `write_loss_before` 和 `write_loss`，均先按层、再按写入事件平均。新 run 续训重放来源指标前缀，图表与 checkpoint 使用累计 step；新增预算及验证／保存间隔按本地 step 计算。
 - **训练阶段**：`train/epoch` 表示累计训练进度；`train/stage` 原始训练为 0，每次 `--fork-train` 取来源 checkpoint 所属阶段加 1，继承前缀保留原阶段，`--resume` 保持不变。
 - **评估看板**：通过 [dashboard.sh](scripts/dashboard.sh) 的必填参数 `--run-dir artifacts/v4/<run-id>` 指定单次 run，页面内选择方法、eval-id 和 checkpoint，仅加载当前打开的 test／RULER／LoCoMo 任务。读取本地汇总及其实际 seed，不缓存，点击“刷新结果”后重新读取；同步时保留 `<run-id>/eval/` 目录结构即可，无需 `plan/`、训练记录或权重。
-- **图表组织**：单 checkpoint 的 test 将 NLL、EM／F1 合并为双轴柱图，写入前后 AM loss 单独展示；benchmark 按任务／长度或 QA 类别汇总。多 checkpoint 按真实累计 optimizer step 升序绘图，补评估较早 checkpoint 后顺序保持一致。逐样本记录按需读取。
+- **图表组织**：方法名使用方法目录名；基线先于当前方法排列，LoCoMo 各类别的基线柱使用同一颜色。单 checkpoint 的 test 将 NLL、EM／F1 合并为双轴柱图，AM loss 以 `Before write`／`After write` 展示；benchmark 按任务／长度或 QA 类别汇总。多 checkpoint 按真实累计 optimizer step 升序绘图，逐样本记录按需读取。
 - **基线对照**：看板通过 `--baseline-results <标签> <目录> ...` 接收 [full-context 基线](../baselines/README.md)，在页面勾选显示。每次仅使用当前传入集合，不保存绑定；缺少当前 benchmark 结果时跳过，路径、格式或比较协议错误在页面提示，不影响评估计算。单 checkpoint 加入分组柱，多 checkpoint 加入水平虚线，启动命令见[运行指南](scripts/README.md#25-评估看板)。
 
 | 位置 | 主要产物 |

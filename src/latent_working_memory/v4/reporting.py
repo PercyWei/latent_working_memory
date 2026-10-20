@@ -2,6 +2,7 @@
 
 from colorsys import hsv_to_rgb
 from hashlib import sha256
+from pathlib import Path
 
 from pyecharts import charts
 
@@ -46,9 +47,9 @@ def _test_charts(summary):
         "splitLine": {"show": False},
     })
 
-    write_loss = charts.Bar().add_xaxis(["写入前", "写入后"])
+    write_loss = charts.Bar().add_xaxis(["Before write", "After write"])
     write_loss.add_yaxis(
-        "attention-matching",
+        Path(summary["training_run"]).name,
         [metrics["write_loss_before"], metrics["write_loss"]],
         label_opts={"show": False},
         itemstyle_opts={"color": "#31688e"},
@@ -83,21 +84,12 @@ def _baseline_color(label, index=None, count=0):
 
 def _benchmark_charts(summary, baselines):
     metrics = summary["metrics"]
-    method = summary.get("method", "attention-matching")
+    method = Path(summary["training_run"]).name
     chart = charts.Bar()
     if summary["benchmark"] == "ruler":
         chart.add_xaxis([*RULER_TASKS, "平均"])
         grouped = {(row["length"], row["task"]): row["score"] for row in metrics["groups"]}
         lengths = sorted(metrics["by_length"], key=lambda row: row["length"])
-        for index, row in enumerate(lengths):
-            values = [grouped[(row["length"], task)] for task in RULER_TASKS]
-            label = f"{row['length'] / 1024:g}K"
-            chart.add_yaxis(
-                f"{method} / {label}" if baselines else label,
-                [100 * value for value in (*values, row["score"])],
-                label_opts={"show": False},
-                itemstyle_opts={"color": _group_color(index, len(lengths))},
-            )
         for baseline_label, baseline in baselines.items():
             reference_groups = {
                 (row["length"], row["task"]): row["score"]
@@ -118,37 +110,35 @@ def _benchmark_charts(summary, baselines):
                     label_opts={"show": False},
                     itemstyle_opts={"color": _baseline_color(baseline_label, index, len(lengths))},
                 )
+        for index, row in enumerate(lengths):
+            values = [grouped[(row["length"], task)] for task in RULER_TASKS]
+            label = f"{row['length'] / 1024:g}K"
+            chart.add_yaxis(
+                f"{method} / {label}",
+                [100 * value for value in (*values, row["score"])],
+                label_opts={"show": False},
+                itemstyle_opts={"color": _group_color(index, len(lengths))},
+            )
     else:
         groups = sorted(metrics["groups"], key=lambda row: row["category"])
         chart.add_xaxis([*[row["category_name"] for row in groups], "总体"])
-        chart.add_yaxis(
-            method,
-            [100 * row["score"] for row in groups] + [100 * metrics["score"]],
-            label_opts={"show": False},
-            itemstyle_opts={"color": "#31688e"},
-        )
         for baseline_label, baseline in baselines.items():
             reference_groups = {
                 row["category"]: row["score"] for row in baseline["metrics"]["groups"]
             }
             chart.add_yaxis(
                 baseline_label,
-                [
-                    {
-                        "value": 100 * reference_groups[row["category"]],
-                        "itemStyle": {
-                            "color": _baseline_color(baseline_label, index, len(groups))
-                        },
-                    }
-                    for index, row in enumerate(groups)
-                ]
-                + [{
-                    "value": 100 * baseline["metrics"]["score"],
-                    "itemStyle": {"color": _baseline_color(baseline_label)},
-                }],
+                [100 * reference_groups[row["category"]] for row in groups]
+                + [100 * baseline["metrics"]["score"]],
                 label_opts={"show": False},
                 itemstyle_opts={"color": _baseline_color(baseline_label)},
             )
+        chart.add_yaxis(
+            method,
+            [100 * row["score"] for row in groups] + [100 * metrics["score"]],
+            label_opts={"show": False},
+            itemstyle_opts={"color": "#31688e"},
+        )
     chart.set_global_opts(
         tooltip_opts={"trigger": "axis"},
         yaxis_opts={"name": f"{metrics['metric']} (%)", "min": 0, "max": 100},
@@ -158,6 +148,16 @@ def _benchmark_charts(summary, baselines):
 
 def _line_chart(steps, series, unit, maximum=None, references=()):
     chart = charts.Line().add_xaxis(steps)
+    for label, measurements, color in references:
+        chart.add_yaxis(
+            label,
+            measurements,
+            color=color,
+            is_symbol_show=False,
+            label_opts={"show": False},
+            linestyle_opts={"color": color, "width": 2, "type": "dashed"},
+            itemstyle_opts={"color": color},
+        )
     for label, measurements, color in series:
         chart.add_yaxis(
             label,
@@ -168,16 +168,6 @@ def _line_chart(steps, series, unit, maximum=None, references=()):
             symbol_size=6,
             label_opts={"show": False},
             linestyle_opts={"color": color, "width": 2},
-            itemstyle_opts={"color": color},
-        )
-    for label, measurements, color in references:
-        chart.add_yaxis(
-            label,
-            measurements,
-            color=color,
-            is_symbol_show=False,
-            label_opts={"show": False},
-            linestyle_opts={"color": color, "width": 2, "type": "dashed"},
             itemstyle_opts={"color": color},
         )
     chart.set_global_opts(
@@ -203,7 +193,10 @@ def _checkpoint_charts(summaries, baselines):
         ),
         (
             "write_loss",
-            (("write_loss_before", "写入前", "#74a9cf"), ("write_loss", "写入后", "#2b8cbe")),
+            (
+                ("write_loss_before", "Before write", "#74a9cf"),
+                ("write_loss", "After write", "#2b8cbe"),
+            ),
             "Attention Matching loss",
             None,
         ),
@@ -252,9 +245,8 @@ def _benchmark_checkpoint_charts(summaries, steps, baselines):
             )
         )
     references = []
-    if baselines:
-        method = first.get("method", "attention-matching")
-        series = [(f"{method} / {label}", values, color) for label, values, color in series]
+    method = Path(first["training_run"]).name
+    series = [(f"{method} / {label}", values, color) for label, values, color in series]
     for baseline_label, baseline in baselines.items():
         reference_groups = {
             row[identity_field]: row["score"] for row in baseline["metrics"][group_field]
