@@ -4,9 +4,11 @@ import argparse
 import csv
 import fcntl
 from html import escape
+from itertools import groupby
 import json
 from pathlib import Path
 import re
+import unicodedata
 
 from latent_working_memory.benchmarks.data import LOCOMO_CATEGORIES
 from latent_working_memory.benchmarks.scoring import summarize_scores
@@ -23,6 +25,8 @@ BEHAVIORS = {
     "blank": "空白",
     "immediate_eos": "立即 EOS",
     "budget_exhausted": "生成触顶",
+    "whitespace_repeat": "空白字符复读",
+    "abnormal_character": "异常字符输出",
     "no_information": "无信息回答片段",
     "prompt_copy": "指令片段复制",
     "long_zero_repeat": "连续零复读",
@@ -36,15 +40,59 @@ PAIRS = (
 BEHAVIOR_NOTE = (
     "空白：去除首尾空白后为空；立即 EOS：唯一生成 token 为 EOS；"
     "生成触顶：finish_reason 为 max_new_tokens。"
+    "空白字符复读：连续至少 12 个 Unicode 空白字符，允许不同空白字符混合，按字符而非 token 计数；"
+    "异常字符输出：包含替换字符 U+FFFD（�），或不属于空白的 Unicode 控制字符（Cc）。"
+    "特殊空格与格式字符不自动判为异常。"
     "无信息回答片段：输出包含 “no information available”，忽略大小写；"
     "指令片段复制：输出包含 “Based on the above conversations”，忽略大小写；"
     "连续零复读：出现至少 12 个严格相邻的 0。"
     "各标记可重叠，只用于定位输出行为，不据此剔除样本或修改 F1。"
 )
+CHARACTER_LABELS = {
+    "\n": r"换行 \n",
+    "\r": r"回车 \r",
+    "\t": r"制表 \t",
+    " ": "普通空格",
+    "\u00a0": "不换行空格",
+    "\u2007": "数字空格",
+    "\u2009": "细空格",
+    "\u200b": "零宽空格",
+    "\u202f": "窄不换行空格",
+    "\u3000": "全角空格",
+    "\ufffd": "替换字符 �",
+}
 
 
 def _read_json(path):
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def visible_prediction(prediction):
+    """按原顺序标注不可见字符，连续同字符合并；不改变保存及评分的原文。"""
+    parts = []
+    whitespace_only = bool(prediction) and not prediction.strip()
+    for character, group in groupby(prediction):
+        count = sum(1 for _ in group)
+        category = unicodedata.category(character)
+        mark = (
+            character.isspace() or character == "\ufffd" or category in {"Cc", "Cf"}
+        )
+        if character == " " and count == 1 and not whitespace_only:
+            mark = False
+        if mark:
+            label = CHARACTER_LABELS.get(character)
+            if label is None:
+                kind = (
+                    "空白字符" if character.isspace()
+                    else "控制字符" if category == "Cc" else "格式字符"
+                )
+                name = unicodedata.name(character, "")
+                label = f"{kind} {name}".rstrip()
+            repeat = f" ×{count}" if count > 1 else ""
+            parts.append(f"⟦{label} U+{ord(character):04X}{repeat}⟧")
+        else:
+            parts.append(character * count)
+    return "".join(parts)
 
 
 def behavior_flags(record, eos_token_id):
@@ -54,6 +102,12 @@ def behavior_flags(record, eos_token_id):
         "blank": not prediction.strip(),
         "immediate_eos": record["generated_token_ids"] == [eos_token_id],
         "budget_exhausted": record["finish_reason"] == "max_new_tokens",
+        "whitespace_repeat": re.search(r"\s{12,}", prediction) is not None,
+        "abnormal_character": any(
+            character == "\ufffd"
+            or (unicodedata.category(character) == "Cc" and not character.isspace())
+            for character in prediction
+        ),
         "no_information": "no information available" in prediction.casefold(),
         "prompt_copy": "based on the above conversations" in prediction.casefold(),
         "long_zero_repeat": re.search(r"0{12}", prediction) is not None,
@@ -160,7 +214,8 @@ def _comparison_csv(path, summary):
 
 def _details_csv(path, plan, records):
     result_fields = (
-        "prediction", "score", "generated_tokens", "generation_budget", "finish_reason",
+        "prediction", "prediction_visible", "score", "generated_tokens",
+        "generation_budget", "finish_reason",
         *BEHAVIORS,
     )
     columns = [
@@ -186,6 +241,7 @@ def _details_csv(path, plan, records):
                     result = values[index]
                     fields = {
                         **result, **behavior_flags(result, plan["eos_token_id"]),
+                        "prediction_visible": visible_prediction(result["prediction"]),
                     }
                     row.update({f"{condition}/{name}": fields[name] for name in result_fields})
                 for left, right in PAIRS:
@@ -329,13 +385,20 @@ def _example_content(plan, records):
             marked = [key for key, value in behavior_flags(row, plan["eos_token_id"]).items() if value]
             flags.update(marked)
             badges = "".join(f"<span class='badge'>{BEHAVIORS[key]}</span>" for key in marked)
+            prediction = row["prediction"]
+            visible = visible_prediction(prediction)
+            raw = (
+                "<details><summary>原文（保留原始字符）</summary>"
+                f"<pre class='raw-output'>{escape(prediction)}</pre></details>"
+                if visible != prediction else ""
+            )
             cells.append(
                 f"<div class='answer' style='border-top-color:{COLORS[condition]}'>"
                 f"<h3>{_label(condition)}</h3>"
                 f"<p>F1 {100 * row['score']:.2f}% · "
                 f"{row['generated_tokens']}/{row['generation_budget']} tokens · "
                 f"{escape(row['finish_reason'])}</p>{badges}"
-                f"<pre>{escape(row['prediction']) if row['prediction'] else '（空白输出）'}</pre></div>"
+                f"<pre>{escape(visible) if prediction else '（空字符串）'}</pre>{raw}</div>"
             )
         examples.append(
             f"<article class='example' data-category='{metadata['category']}' "
@@ -354,7 +417,10 @@ def _example_content(plan, records):
         f"<option value='{key}'>{escape(label)}</option>" for key, label in BEHAVIORS.items()
     )
     return (
-        "<h2>逐题并列答案</h2><div class='filters'>"
+        "<h2>逐题并列答案</h2>"
+        "<p>⟦…⟧ 标注换行、特殊空格、控制／格式字符及替换字符；连续相同字符合并为 ×N，"
+        "N 是字符数，不是 token 数。普通单个词间空格保留原样。"
+        "标注只改变展示，原文可展开查看，F1 仍按原文计算。</p><div class='filters'>"
         "<label>搜索<input id='search' type='search' placeholder='问题、答案或样本 ID'></label>"
         f"<label>类别<select id='category'><option value=''>全部类别</option>{options}</select></label>"
         f"<label>行为<select id='behavior'><option value=''>全部输出</option>{behaviors}</select></label>"
@@ -402,6 +468,7 @@ def _document(title, content):
         ".answers{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}"
         ".example{margin:20px 0;padding:16px;background:#edf1f5;border-radius:8px}"
         "pre{font:14px/1.5 ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere}"
+        ".raw-output{max-height:180px;overflow:auto;background:#f5f7fa;padding:8px}"
         ".badge{display:inline-block;padding:2px 6px;background:#fce5db;font-size:12px;"
         "border-radius:4px;margin:2px 4px 2px 0}.missing{color:#6b7280;border-top-color:#b6beca}"
         ".filters{display:flex;align-items:end;flex-wrap:wrap;gap:14px}"
