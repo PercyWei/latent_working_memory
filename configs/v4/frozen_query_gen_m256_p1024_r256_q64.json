@@ -1,0 +1,43 @@
+{
+  "seed": 42,
+  "model": {
+    "model_name_or_path": "~/models/Qwen3-4B-Instruct-2507",
+    "backbone_dtype": "bfloat16",
+    "attention_implementation": "sdpa",
+    "loss_chunk_size": 256,
+    "pending_size": 1024,
+    "recent_size": 256,
+    "num_slots": 256,
+    "memory_dim": 128,
+    "query_dim": 64,
+    "value_dim": 128,
+    "num_probes": 64,
+    "query_mode": "frozen_query_gen",
+    "query_normalization": "none",
+    "read_query_norm": null,
+    "compression_query_norm": null,
+    "inner_steps": 1,
+    "inner_lr": 0.1,
+    "correction_scale": 0.1
+  },
+  "training": {
+    "dataset_dir": "data/delta-mem-qasper",
+    "epochs": 4,
+    "micro_batch_size_per_gpu": 1,
+    "gradient_accumulation_steps": 8,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.01,
+    "gradient_clip": 1.0,
+    "max_train_data_tokens": 12288,
+    "max_train_samples": null,
+    "max_dev_samples": null,
+    "dev_every": 50,
+    "save_every": "after_each_epoch",
+    "save_total_limit": 4,
+    "swanlab_project": "latent-working-memory-v4",
+    "group": null,
+    "tags": [
+      "data:qasper"
+    ]
+  }
+}
