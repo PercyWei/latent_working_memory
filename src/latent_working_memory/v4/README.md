@@ -2,11 +2,11 @@
 
 创建时间：20261003 21:51:43 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261020 15:46:26 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261020 16:26:40 Asia/Shanghai（UTC+08:00）
 
 冻结基座，在每层维护 latent memory，通过 Attention Matching 局部更新记忆，并由答案 CE 学习如何生成压缩查询和读写记忆。
 
-[运行指南](scripts/README.md) · [Benchmark 数据准备与评估](benchmarks/README.md) · [默认配置](../../../configs/v4/attention_matching/experiment.json) · [框架笔记](../../../notes/v4/20261003_attention_matching_meta_memory.md)
+[运行指南](scripts/README.md) · [Benchmark 数据准备与评估](benchmarks/README.md) · [探索实验](exploration/README.md) · [默认配置](../../../configs/v4/attention_matching/experiment.json) · [框架笔记](../../../notes/v4/20261003_attention_matching_meta_memory.md)
 
 ## 一、模型与训练
 
