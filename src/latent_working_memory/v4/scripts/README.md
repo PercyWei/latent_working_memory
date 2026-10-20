@@ -1,6 +1,6 @@
 # 运行 v4 实验
 
-使用 [run.sh](run.sh) 完成训练、恢复、新 run 续训和独立评估。默认 Qwen3-4B-Instruct-2507、每层 32 个 memory slots。方法与训练细节见 [v4 说明](../README.md)，默认配置为 [experiment.json](../../../../configs/v4/attention_matching/experiment.json)。
+使用 [run.sh](run.sh) 完成训练、恢复、新 run 续训和独立评估。默认 Qwen3-4B-Instruct-2507、每层 32 个 memory slots。方法与训练细节见 [v4 说明](../README.md)，默认配置为 [frozen_query_gen.json](../../../../configs/v4/frozen_query_gen.json)。
 
 ## 1. 准备环境、模型与数据
 
@@ -51,7 +51,7 @@ bash src/latent_working_memory/v4/scripts/generate_ruler.sh \
 
 ```bash
 bash src/latent_working_memory/v4/scripts/run.sh \
-  --config configs/v4/attention_matching/experiment.json \
+  --config configs/v4/frozen_query_gen.json \
   --gpus 0,1 \
   --run-id am-query_20261013
 ```
@@ -69,7 +69,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
   --evaluate-only \
   --eval-type test \
   --gpus 0,1 \
-  --eval-run artifacts/v4/am-query_20261013/train/conditioned-query-m32
+  --eval-run artifacts/v4/am-query_20261013/train/frozen-query-gen-m32
 ```
 
 也可显式选择一个或多个 checkpoint：
@@ -80,8 +80,8 @@ bash src/latent_working_memory/v4/scripts/run.sh \
   --eval-type test \
   --gpus 0,1 \
   --checkpoint \
-    artifacts/v4/am-query_20261013/train/conditioned-query-m32/checkpoints/global_step_50 \
-    artifacts/v4/am-query_20261013/train/conditioned-query-m32/checkpoints/global_step_100
+    artifacts/v4/am-query_20261013/train/frozen-query-gen-m32/checkpoints/global_step_50 \
+    artifacts/v4/am-query_20261013/train/frozen-query-gen-m32/checkpoints/global_step_100
 ```
 
 - Test 评估使用 `--eval-type test`（默认）。
@@ -103,7 +103,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
   --eval-type benchmark \
   --benchmark locomo \
   --gpus 0 \
-  --checkpoint artifacts/v4/am-query_20261013/train/conditioned-query-m32/checkpoints/global_step_N \
+  --checkpoint artifacts/v4/am-query_20261013/train/frozen-query-gen-m32/checkpoints/global_step_N \
   --benchmark-data /data/benchmarks/locomo
 
 # RULER
@@ -112,7 +112,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
   --eval-type benchmark \
   --benchmark ruler \
   --gpus 0 \
-  --checkpoint artifacts/v4/am-query_20261013/train/conditioned-query-m32/checkpoints/global_step_N \
+  --checkpoint artifacts/v4/am-query_20261013/train/frozen-query-gen-m32/checkpoints/global_step_N \
   --benchmark-data data/benchmarks/ruler-v1/<model-name>/ \
   --lengths 8192 16384 32768
 ```
@@ -129,7 +129,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 bash src/latent_working_memory/v4/scripts/run.sh \
   --resume \
   --gpus 0,1 \
-  --checkpoint artifacts/v4/am-query_20261013/train/conditioned-query-m32/checkpoints/global_step_N
+  --checkpoint artifacts/v4/am-query_20261013/train/frozen-query-gen-m32/checkpoints/global_step_N
 ```
 
 - 训练配置等信息均沿用原运行，拒绝 CLI 参数覆盖。
@@ -142,7 +142,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 ```bash
 bash src/latent_working_memory/v4/scripts/run.sh \
   --fork-train \
-  --checkpoint artifacts/v4/old-plan/train/conditioned-query-m32/checkpoints/global_step_600 \
+  --checkpoint artifacts/v4/old-plan/train/frozen-query-gen-m32/checkpoints/global_step_600 \
   --train-only \
   --gpus 0,1 \
   --run-id new-plan \
@@ -190,7 +190,7 @@ bash src/latent_working_memory/v4/scripts/dashboard.sh \
 | `--fork-train` | 从 checkpoint 新开 run 续训，须指定 `--checkpoint` |
 | `--evaluate-only` | 仅评估已有 checkpoint，须指定 `--checkpoint` 或 `--eval-run` |
 | **配置与模型** |
-| `--config` | JSON 配置文件，默认 `configs/v4/attention_matching/experiment.json` |
+| `--config` | JSON 配置文件，默认 `configs/v4/frozen_query_gen.json` |
 | `--model-path` | 基座模型位置，默认 `~/models/Qwen3-4B-Instruct-2507` |
 | `--seed` | 随机种子，控制初始化、样本选择及数据打乱，默认 42 |
 | **目录与设备** |
@@ -270,7 +270,7 @@ artifacts/v4/<run-id>/
             └── ...             除去上面四个公共记录，不同评估 task 特有的内容
 ```
 
-- **目录命名**：`<method-dir>` 为 `<query_mode>-query-m<num_slots>`，例如 `conditioned-query-m32`；SwanLab 名称为 `<method-dir>_<run-id>`。
+- **目录命名**：`<method-dir>` 为 `frozen-query-gen-m<num_slots>`（默认）或 `fixed-query-m<num_slots>`，例如 `frozen-query-gen-m32`；SwanLab 名称为 `<method-dir>_<run-id>`。
 - **流程与结果**：`plan/` 仅保存流程设置和配置；`train/`、`eval/` 分别保存训练、评估的日志与执行结果。
 - **实验配置**：`--config` 读取 `configs/v4/` 中的预设。`plan/<method-dir>/` 下，`config.json` 保存模型设置、seed 等通用配置，`train.json` 保存训练流程配置；各 eval-id 下的 `<task>.json` 分别保存不同评估任务的配置，比如 test，locomo，ruler 等。
 - **训练与验证**：终端每 step 输出摘要，`metrics.jsonl` 保存完整指标；`run.json` 的 `data` 字段记录实际样本身份，其中 `data.selection` 保存筛选、抽样统计，新 run 续训的来源见 `run.json.continuation`；`metrics.jsonl` 包含来源前缀与本次训练指标。

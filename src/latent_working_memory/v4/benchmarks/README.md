@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261020 15:46:26 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261020 19:40:50 Asia/Shanghai（UTC+08:00）
 
 ## 1. 数据位置与评估协议
 
@@ -97,18 +97,18 @@ bash src/latent_working_memory/v4/scripts/generate_ruler.sh \
 ```bash
 bash src/latent_working_memory/v4/scripts/run.sh \
   --evaluate-only --eval-type benchmark --benchmark ruler --gpus 0 \
-  --checkpoint artifacts/v4/<run-id>/train/conditioned-query-m32/checkpoints/global_step_N \
+  --checkpoint artifacts/v4/<run-id>/train/frozen-query-gen-m32/checkpoints/global_step_N \
   --benchmark-data data/benchmarks/ruler-v1/Qwen3-4B-Instruct-2507 \
   --lengths 8192 16384 32768
 
 bash src/latent_working_memory/v4/scripts/run.sh \
   --evaluate-only --eval-type benchmark --benchmark locomo --gpus 0 \
-  --checkpoint artifacts/v4/<run-id>/train/conditioned-query-m32/checkpoints/global_step_N \
+  --checkpoint artifacts/v4/<run-id>/train/frozen-query-gen-m32/checkpoints/global_step_N \
   --benchmark-data data/benchmarks/locomo
 ```
 
 - 独立评估统一使用 `--evaluate-only`。本节须设置 `--eval-type benchmark`，并通过 `--benchmark` 指定 `ruler` 或 `locomo`；该参数默认 `null`，在 benchmark 模式下不可为空。省略 `--eval-type` 时为 test 评估，仅传 benchmark 名称不会自动切换。
-- `--checkpoint` 后可列出同一 run 的多个目录；或改用 `--eval-run artifacts/v4/<run-id>/train/conditioned-query-m32/`，选择其中仍保留 `state.pt` 的全部 checkpoint。两者互斥；拒绝重复、跨 run 或缺少 `state.pt` 的 checkpoint。多 GPU 时每卡一个进程并行评估不同 checkpoint，命令示例见[运行指南](../scripts/README.md#22-单独评估)。
+- `--checkpoint` 后可列出同一 run 的多个目录；或改用 `--eval-run artifacts/v4/<run-id>/train/frozen-query-gen-m32/`，选择其中仍保留 `state.pt` 的全部 checkpoint。两者互斥；拒绝重复、跨 run 或缺少 `state.pt` 的 checkpoint。多 GPU 时每卡一个进程并行评估不同 checkpoint，命令示例见[运行指南](../scripts/README.md#22-单独评估)。
 - `--eval-id` 默认 `<run-id>-eval`，同一 run、方法下可包含 test、RULER 和 LoCoMo；各任务分别固定设置，换设置时使用新标识。默认沿用 `plan/<method-dir>/<eval-id>/<ruler|locomo>.json` 中的数据目录；首次计算没有该配置时，必须传入 `--benchmark-data`。RULER 指向包含各长度子目录的目录，LoCoMo 指向包含 `locomo10.json` 的目录。
 - 人工确认不同模型可复用同一批 RULER 样本时，用 `--benchmark-data` 指定已有模型目录，不自动判断 tokenizer 是否一致。
 - benchmark 模式不接受 test 专用的 `--test-data`、`--max-test-samples` 和 `--max-new-tokens`，`--lengths` 仅用于 RULER。以上评估参数不用于训练或恢复；下载脚本的同名 `--benchmark` 参数仍按第 2 节选择下载范围。

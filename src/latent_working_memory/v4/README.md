@@ -2,11 +2,11 @@
 
 创建时间：20261003 21:51:43 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261020 16:26:40 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261020 19:40:50 Asia/Shanghai（UTC+08:00）
 
 冻结基座，在每层维护 latent memory，通过 Attention Matching 局部更新记忆，并由答案 CE 学习如何生成压缩查询和读写记忆。
 
-[运行指南](scripts/README.md) · [Benchmark 数据准备与评估](benchmarks/README.md) · [探索实验](exploration/README.md) · [默认配置](../../../configs/v4/attention_matching/experiment.json) · [框架笔记](../../../notes/v4/20261003_attention_matching_meta_memory.md)
+[运行指南](scripts/README.md) · [Benchmark 数据准备与评估](benchmarks/README.md) · [探索实验](exploration/README.md) · [默认配置](../../../configs/v4/frozen_query_gen.json) · [框架笔记](../../../notes/v4/20261003_attention_matching_meta_memory.md)
 
 ## 一、模型与训练
 
@@ -22,7 +22,7 @@
 
 - pending 的逐层输入经投影得到源表示，保存在独立源缓存中；首次写入前不启用记忆读取修正。
 - 写入后的 memory 用于后续前向；保留的 recent KV 不重算，绝对位置不重置。
-- `query_mode` 可选 `fixed`（可学习、输入无关的查询）或 `conditioned`（根据当前 pending 生成查询）。
+- `query_mode` 可选 `fixed`（直接学习输入无关的查询）或 `frozen_query_gen`（由 $G_\phi$ 根据当前 pending 生成查询，生成器仅在外循环训练，内循环／推理时保持不变）。
 - `query_normalization` 与生成方式独立，可选 `none` 或 `fixed_norm`；后者约束读取查询，以及压缩生成器的初始查询和最终输出范数。
 
 ### 1.2 局部更新与外层训练
@@ -86,7 +86,7 @@ $R$ 为压缩查询数；每次写入固定执行 `inner_steps` 步，查询与�
 
 ## 三、配置与执行
 
-- [experiment.json](../../../configs/v4/attention_matching/experiment.json) 是默认配置及格式示例，可通过 `--config` 指定其他文件。
+- [frozen_query_gen.json](../../../configs/v4/frozen_query_gen.json) 是默认配置及格式示例，可通过 `--config` 指定其他文件。
 - 预设 JSON 顶层使用 `seed`、`model` 和 `training`。运行时公共 `seed` 与 `model` 保存到 `plan/<method-dir>/config.json`，seed 创建后固定；`train.json` 的 `training` 保存训练配置，`execution` 保存 `train_only`、自动 test 数据目录 `test_data` 与样本上限 `max_test_samples`。`run.json` 和 checkpoint 保存完整实际配置。
 - 本地路径支持 `~`；相对数据、输出路径以运行目录为基准，`run.sh` 统一从项目根目录执行。
 - 下表为仓库预设；CLI 参数、覆盖规则和运行目录见[运行指南](scripts/README.md)。
@@ -98,7 +98,7 @@ $R$ 为压缩查询数；每次写入固定执行 `inner_steps` 步，查询与�
 | `pending_size`／`recent_size` | 256／128；首次写入发生在处理完 384 tokens 后 |
 | `num_slots`／`memory_dim` | 每层 32 slots，每个 128 维 |
 | `query_dim`／`value_dim`／`num_probes` | 64／128／16 |
-| `query_mode`／`query_normalization` | `conditioned`／`none`，选择见 1.1 节 |
+| `query_mode`／`query_normalization` | `frozen_query_gen`／`none`，选择见 1.1 节 |
 | `read_query_norm`／`compression_query_norm` | `fixed_norm` 模式的固定范数；省略或 `null` 时为 `sqrt(query_dim)`，此处为 8 |
 | `inner_steps`／`inner_lr` | 1／0.1；训练与推理采用相同更新规则 |
 | `correction_scale` | Q/O 修正尺度 0.1 |
@@ -164,7 +164,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 ### 4.2 训练记录与评估看板
 
 - **训练记录**：SwanLab 保留训练过程的指标、资源统计及运行配置，包括 `train/*`、`dev/*` 和 `resources/*`；资源指标为 optimizer step 耗时及 CUDA 峰值显存。默认项目为 `latent-working-memory-v4`，使用项目 `.env` 的 `SWANLAB_API_KEY`；`--tracking disabled` 仅保存本地。相关 runs 通过 `group` 关联，`job_type=train`，固定 tags 为 `scope:main`、`method:attention-matching`，数据和研究标签通过配置补充。
-- **运行身份**：`--run-id` 标识实验系列；方法目录为 `<query_mode>-query-m<num_slots>`，例如 `conditioned-query-m32`；SwanLab 名称为 `<method-dir>_<run-id>`。
+- **运行身份**：`--run-id` 标识实验系列；方法目录为 `frozen-query-gen-m<num_slots>`（默认）或 `fixed-query-m<num_slots>`，例如 `frozen-query-gen-m32`；SwanLab 名称为 `<method-dir>_<run-id>`。
 - **曲线与续训**：train/dev 按真实 optimizer step 追加原生曲线，`write_loss` 合并写入前后两条曲线，以浅色／深色区分。底层分别保存 `write_loss_before` 和 `write_loss`，均先按层、再按写入事件平均。新 run 续训重放来源指标前缀，图表与 checkpoint 使用累计 step；新增预算及验证／保存间隔按本地 step 计算。
 - **训练阶段**：`train/epoch` 表示累计训练进度；`train/stage` 原始训练为 0，每次 `--fork-train` 取来源 checkpoint 所属阶段加 1，继承前缀保留原阶段，`--resume` 保持不变。
 - **评估看板**：通过 [dashboard.sh](scripts/dashboard.sh) 的必填参数 `--run-dir artifacts/v4/<run-id>` 指定单次 run，页面内选择方法、eval-id 和 checkpoint，仅加载当前打开的 test／RULER／LoCoMo 任务。读取本地汇总及其实际 seed，不缓存，点击“刷新结果”后重新读取；同步时保留 `<run-id>/eval/` 目录结构即可，无需 `plan/`、训练记录或权重。

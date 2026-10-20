@@ -38,7 +38,7 @@ class ModelConfig:
     query_dim: int = 64
     value_dim: int = 128
     num_probes: int = 16
-    query_mode: str = "conditioned"
+    query_mode: str = "frozen_query_gen"
     query_normalization: str = "none"
     read_query_norm: float | None = None
     compression_query_norm: float | None = None
@@ -55,8 +55,8 @@ class ModelConfig:
         if self.attention_implementation not in {"eager", "sdpa"}:
             raise ValueError("attention_implementation must be eager or sdpa")
         positive_ints(self, [field.name for field in fields(self) if field.type is int])
-        if self.query_mode not in {"fixed", "conditioned"}:
-            raise ValueError("query_mode must be fixed or conditioned")
+        if self.query_mode not in {"fixed", "frozen_query_gen"}:
+            raise ValueError("query_mode must be fixed or frozen_query_gen")
         if self.query_normalization not in {"none", "fixed_norm"}:
             raise ValueError("query_normalization must be none or fixed_norm")
         for name in ("read_query_norm", "compression_query_norm"):

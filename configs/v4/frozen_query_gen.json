@@ -12,7 +12,7 @@
     "query_dim": 64,
     "value_dim": 128,
     "num_probes": 16,
-    "query_mode": "conditioned",
+    "query_mode": "frozen_query_gen",
     "query_normalization": "none",
     "read_query_norm": null,
     "compression_query_norm": null,

@@ -66,7 +66,7 @@ def tiny_base(tmp_path_factory):
     return directory
 
 
-def model_config(base, query_mode="conditioned"):
+def model_config(base, query_mode="frozen_query_gen"):
     return ModelConfig(
         str(base),
         pending_size=2,
@@ -107,7 +107,7 @@ def episodes():
     )
 
 
-def make_engine(base, output, query_mode="conditioned"):
+def make_engine(base, output, query_mode="frozen_query_gen"):
     set_seed(42)
     model = StreamingMemoryLM(model_config(base, query_mode))
     engine = MetaLearningEngine(model, training_config(output, output), "cpu")
@@ -133,7 +133,7 @@ def assert_nested_equal(left, right):
         assert left == right
 
 
-@pytest.mark.parametrize("query_mode", ["fixed", "conditioned"])
+@pytest.mark.parametrize("query_mode", ["fixed", "frozen_query_gen"])
 def test_engine_matches_global_token_weighted_meta_gradient(tiny_base, tmp_path, query_mode):
     torch.set_num_threads(1)
     engine = make_engine(tiny_base, tmp_path, query_mode)

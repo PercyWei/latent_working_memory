@@ -40,7 +40,7 @@ class LayerMemory(nn.Module):
         self.probe_seeds = nn.Parameter(
             torch.randn(config.num_probes, config.query_dim) / math.sqrt(config.query_dim)
         )
-        if self.query_mode == "conditioned":
+        if self.query_mode == "frozen_query_gen":
             self.probe_projection = nn.Linear(config.memory_dim, config.query_dim, bias=False)
 
     def _normalize_query(self, query: Tensor, target_norm: float) -> Tensor:
@@ -71,7 +71,7 @@ class LayerMemory(nn.Module):
             source = source.to(dtype=self.initial_slots.dtype)
             seeds = self._normalize_query(self.probe_seeds, self.compression_query_norm)
             seeds = seeds.unsqueeze(0).expand(source.shape[0], -1, -1)
-            if self.query_mode == "conditioned":
+            if self.query_mode == "frozen_query_gen":
                 projected = self.probe_projection(source)
                 scores = seeds @ projected.transpose(-1, -2) / math.sqrt(self.query_dim)
                 seeds = seeds + scores.softmax(dim=-1) @ projected

@@ -38,7 +38,7 @@ from latent_working_memory.v4.evaluation_records import (
 from latent_working_memory.v4.io import write_json
 
 
-DEFAULT_CONFIG = Path("configs/v4/attention_matching/experiment.json")
+DEFAULT_CONFIG = Path("configs/v4/frozen_query_gen.json")
 TRAINING_OPTIONS = (
     "config",
     "run_id",
@@ -316,7 +316,8 @@ def prepare_training(args):
         if hasattr(args, name):
             overrides[name] = getattr(args, name)
     run_id = args.run_id or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M%S")
-    method_dir = f"{model.query_mode}-query-m{model.num_slots}"
+    method_name = "fixed-query" if model.query_mode == "fixed" else model.query_mode.replace("_", "-")
+    method_dir = f"{method_name}-m{model.num_slots}"
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", run_id) is None:
         raise ValueError("run-id must contain only letters, digits, '-' and '_'")
     directory = (args.output_root or Path("artifacts/v4")).expanduser().resolve() / run_id

@@ -7,7 +7,7 @@ from latent_working_memory.v4.memory import LayerMemory
 from latent_working_memory.v4.config import ModelConfig
 
 
-def make_memory(query_mode="conditioned", inner_steps=2, **query_settings):
+def make_memory(query_mode="frozen_query_gen", inner_steps=2, **query_settings):
     torch.manual_seed(31)
     config = ModelConfig(
         "tiny",
@@ -32,7 +32,7 @@ def outer_loss(module, hidden, future_queries, target):
     return (module.read(future_queries, updated) - target).square().sum()
 
 
-@pytest.mark.parametrize("query_mode", ["fixed", "conditioned"])
+@pytest.mark.parametrize("query_mode", ["fixed", "frozen_query_gen"])
 def test_fixed_norm_uses_separate_read_and_compression_scales(query_mode, monkeypatch):
     module = make_memory(
         query_mode,
@@ -82,7 +82,7 @@ def test_query_length_is_free_only_without_normalization(query_normalization, mo
     torch.testing.assert_close(captured[1], factor * captured[0])
 
 
-@pytest.mark.parametrize("query_mode", ["fixed", "conditioned"])
+@pytest.mark.parametrize("query_mode", ["fixed", "frozen_query_gen"])
 @pytest.mark.parametrize("query_normalization", ["none", "fixed_norm"])
 def test_meta_gradient_matches_finite_difference(query_mode, query_normalization):
     module = make_memory(query_mode, query_normalization=query_normalization)
@@ -139,7 +139,7 @@ def test_teacher_query_path_is_retained():
     assert not torch.allclose(actual, detached_gradient, rtol=1e-3, atol=1e-7)
 
 
-def test_conditioned_generator_and_source_receive_outer_gradients():
+def test_frozen_query_generator_and_source_receive_outer_gradients():
     module = make_memory()
     hidden = torch.randn(1, 5, 5, dtype=torch.float64)
     future_queries = torch.randn(1, 2, 3, dtype=torch.float64)
