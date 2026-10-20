@@ -20,14 +20,11 @@ from latent_working_memory.v4.evaluation_records import (
     EvaluationHistory,
     evaluation_config_path,
     load_evaluation_settings,
+    print_evaluation_summary,
 )
 from latent_working_memory.v4.evaluation_runtime import (
     load_evaluation_inputs,
     load_evaluation_model,
-)
-from latent_working_memory.v4.tracking import (
-    publish_evaluations,
-    validate_evaluation_publication,
 )
 
 
@@ -45,8 +42,8 @@ def _check_test_split(statistics, run):
 
 
 def evaluate(
-    checkpoint_path, output_dir, dataset_dir=None, max_new_tokens=None, device="cuda", tracking=None,
-    defer_publication=False, max_test_samples=_UNSPECIFIED,
+    checkpoint_path, output_dir, dataset_dir=None, max_new_tokens=None, device="cuda",
+    max_test_samples=_UNSPECIFIED,
 ):
     output_dir = Path(output_dir).expanduser().resolve()
     evaluation_path = evaluation_config_path(output_dir)
@@ -61,8 +58,6 @@ def evaluate(
         max_test_samples = evaluation["max_test_samples"] if evaluation is not None else None
     if type(max_new_tokens) is not int or max_new_tokens < 1:
         raise ValueError("max_new_tokens must be a positive integer")
-    if tracking not in {None, "online", "disabled"}:
-        raise ValueError("tracking must be online or disabled")
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         raise ValueError("v4 evaluation runs in one process; do not launch it with torchrun")
     set_seed(seed)
@@ -71,10 +66,6 @@ def evaluate(
     run, step = checkpoint["run"], checkpoint["cursor"]["step"]
     dataset_dir = Path(dataset_dir).expanduser().resolve()
     test_file = dataset_dir / "test.jsonl"
-    if tracking is None:
-        tracking = "online" if run["training"]["swanlab_project"] is not None else "disabled"
-    if tracking == "online":
-        validate_evaluation_publication(run, checkpoint_path, step)
 
     config, tokenizer, backbone_config = load_evaluation_inputs(checkpoint)
     training_dir = Path(run["training"]["output_dir"]).expanduser().resolve()
@@ -91,6 +82,7 @@ def evaluate(
 
     evaluation_config = {
         "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "eval_id": output_dir.parents[1].name,
         "split": "test",
         "checkpoint": {"path": str(checkpoint_path), "step": step},
         "training_run": str(training_dir),
@@ -99,7 +91,6 @@ def evaluate(
         "test_file": str(test_file),
         "dataset": dataset_identity(episodes),
         "device": str(device),
-        "tracking": tracking,
         "model_window": model_window,
         "max_new_tokens": max_new_tokens,
         "max_test_samples": max_test_samples,
@@ -119,8 +110,7 @@ def evaluate(
         summary = history.cached_summary()
         if summary is not None:
             print(f"test reusing cached summary: {output_dir / 'summary.json'}", flush=True)
-            if tracking == "online" and not defer_publication:
-                publish_evaluations(run, [(checkpoint_path, summary, output_dir)])
+            print_evaluation_summary(summary)
             return summary
 
         device = initialize_device(device)
@@ -253,8 +243,7 @@ def evaluate(
             "resources": resources,
         }
         history.save_summary(summary)
-        if tracking == "online" and not defer_publication:
-            publish_evaluations(run, [(checkpoint_path, summary, output_dir)])
+        print_evaluation_summary(summary)
         return summary
 
 
@@ -273,8 +262,6 @@ def main():
         help="过滤后 test QA 样本上限；沿用已有配置，无配置时默认 null（全量）",
     )
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--tracking", choices=("online", "disabled"))
-    parser.add_argument("--defer-publication", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     evaluate(
         args.checkpoint,
@@ -282,8 +269,6 @@ def main():
         args.test_data,
         args.max_new_tokens,
         args.device,
-        args.tracking,
-        args.defer_publication,
         args.max_test_samples,
     )
 

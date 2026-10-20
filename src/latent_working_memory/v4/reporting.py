@@ -3,27 +3,27 @@
 from colorsys import hsv_to_rgb
 from hashlib import sha256
 
-import swanlab
+from pyecharts import charts
 
 from latent_working_memory.benchmarks.data import RULER_TASKS
 
 
-def evaluation_media(summaries, baselines=None):
-    """summaries 为按真实累计 step 排序、协议一致的非空评估结果。"""
+def evaluation_charts(summaries, baselines=None):
+    """summaries 按真实累计 step 排序；RULER 各 checkpoint 可覆盖不同长度。"""
     baselines = {} if baselines is None else baselines
     if baselines and "benchmark" not in summaries[0]:
         raise ValueError("baseline results apply only to benchmark reports")
     if len(summaries) == 1:
         summary = summaries[0]
         return (
-            _benchmark_media(summary, baselines) if "benchmark" in summary else _test_media(summary)
+            _benchmark_charts(summary, baselines) if "benchmark" in summary else _test_charts(summary)
         )
-    return _checkpoint_media(summaries, baselines)
+    return _checkpoint_charts(summaries, baselines)
 
 
-def _test_media(summary):
+def _test_charts(summary):
     metrics = summary["metrics"]
-    quality = swanlab.echarts.Bar().add_xaxis(["NLL", "EM", "F1"])
+    quality = charts.Bar().add_xaxis(["NLL", "EM", "F1"])
     for index, (metric, label, color) in enumerate((
         ("nll", "NLL", "#31688e"),
         ("em", "EM", "#74a9cf"),
@@ -46,7 +46,7 @@ def _test_media(summary):
         "splitLine": {"show": False},
     })
 
-    write_loss = swanlab.echarts.Bar().add_xaxis(["写入前", "写入后"])
+    write_loss = charts.Bar().add_xaxis(["写入前", "写入后"])
     write_loss.add_yaxis(
         "attention-matching",
         [metrics["write_loss_before"], metrics["write_loss"]],
@@ -81,10 +81,10 @@ def _baseline_color(label, index=None, count=0):
     return "#" + "".join(f"{round(value):02x}" for value in channels)
 
 
-def _benchmark_media(summary, baselines):
+def _benchmark_charts(summary, baselines):
     metrics = summary["metrics"]
     method = summary.get("method", "attention-matching")
-    chart = swanlab.echarts.Bar()
+    chart = charts.Bar()
     if summary["benchmark"] == "ruler":
         chart.add_xaxis([*RULER_TASKS, "平均"])
         grouped = {(row["length"], row["task"]): row["score"] for row in metrics["groups"]}
@@ -108,10 +108,13 @@ def _benchmark_media(summary, baselines):
             }
             for index, row in enumerate(lengths):
                 label = f"{row['length'] / 1024:g}K"
-                reference = [reference_groups[(row["length"], task)] for task in RULER_TASKS]
+                reference = [reference_groups.get((row["length"], task)) for task in RULER_TASKS]
                 chart.add_yaxis(
                     f"{baseline_label} / {label}",
-                    [100 * value for value in (*reference, reference_lengths[row["length"]])],
+                    [
+                        100 * value if value is not None else None
+                        for value in (*reference, reference_lengths.get(row["length"]))
+                    ],
                     label_opts={"show": False},
                     itemstyle_opts={"color": _baseline_color(baseline_label, index, len(lengths))},
                 )
@@ -154,7 +157,7 @@ def _benchmark_media(summary, baselines):
 
 
 def _line_chart(steps, series, unit, maximum=None, references=()):
-    chart = swanlab.echarts.Line().add_xaxis(steps)
+    chart = charts.Line().add_xaxis(steps)
     for label, measurements, color in series:
         chart.add_yaxis(
             label,
@@ -186,10 +189,10 @@ def _line_chart(steps, series, unit, maximum=None, references=()):
     return chart
 
 
-def _checkpoint_media(summaries, baselines):
+def _checkpoint_charts(summaries, baselines):
     steps = [summary["checkpoint"]["step"] for summary in summaries]
     if "benchmark" in summaries[0]:
-        return _benchmark_checkpoint_media(summaries, steps, baselines)
+        return _benchmark_checkpoint_charts(summaries, steps, baselines)
     panels = (
         ("nll", (("nll", "NLL", "#31688e"),), "NLL", None),
         (
@@ -219,13 +222,18 @@ def _checkpoint_media(summaries, baselines):
     }
 
 
-def _benchmark_checkpoint_media(summaries, steps, baselines):
+def _benchmark_checkpoint_charts(summaries, steps, baselines):
     first = summaries[0]
     benchmark = first["benchmark"]
     group_field, identity_field = (
         ("by_length", "length") if benchmark == "ruler" else ("groups", "category")
     )
-    groups = sorted(first["metrics"][group_field], key=lambda row: row[identity_field])
+    groups = {
+        row[identity_field]: row
+        for summary in summaries
+        for row in summary["metrics"][group_field]
+    }
+    groups = [groups[identity] for identity in sorted(groups)]
     grouped = [
         {row[identity_field]: row["score"] for row in summary["metrics"][group_field]}
         for summary in summaries
@@ -236,7 +244,10 @@ def _benchmark_checkpoint_media(summaries, steps, baselines):
         series.append(
             (
                 label,
-                [100 * scores[row[identity_field]] for scores in grouped],
+                [
+                    100 * scores[row[identity_field]] if row[identity_field] in scores else None
+                    for scores in grouped
+                ],
                 _group_color(index, len(groups)),
             )
         )
@@ -249,14 +260,20 @@ def _benchmark_checkpoint_media(summaries, steps, baselines):
             row[identity_field]: row["score"] for row in baseline["metrics"][group_field]
         }
         references.append((
-            f"{baseline_label} / 总体", [100 * baseline["metrics"]["score"]] * len(steps),
+            f"{baseline_label} / 总体",
+            [100 * baseline["metrics"]["score"]] * len(steps),
             _baseline_color(baseline_label),
         ))
         for index, row in enumerate(groups):
             label = f"{row['length'] / 1024:g}K" if benchmark == "ruler" else row["category_name"]
             references.append((
                 f"{baseline_label} / {label}",
-                [100 * reference_groups[row[identity_field]]] * len(steps),
+                [
+                    100 * reference_groups[row[identity_field]]
+                    if row[identity_field] in reference_groups
+                    else None
+                    for scores in grouped
+                ],
                 _baseline_color(baseline_label, index, len(groups)),
             ))
     return {

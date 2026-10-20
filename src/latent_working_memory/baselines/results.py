@@ -15,7 +15,12 @@ def load_baseline_results(results, benchmark, summaries):
     methods = {value.get("method", "attention-matching") for value in summaries} or {
         "attention-matching"
     }
-    comparisons = [comparison_config(value) for value in summaries]
+    comparisons = []
+    for value in summaries:
+        comparison = comparison_config(value)
+        if value["benchmark"] == "ruler":
+            comparison["data"].pop("by_length", None)
+        comparisons.append(comparison)
     baselines = {}
     labels = set()
     for label, directory in results:

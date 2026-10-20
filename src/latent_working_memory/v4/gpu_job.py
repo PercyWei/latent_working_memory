@@ -16,6 +16,7 @@ import sys
 import threading
 from zoneinfo import ZoneInfo
 
+from latent_working_memory.benchmarks.protocol import DEFAULT_RULER_LENGTHS
 from latent_working_memory.v4.config import (
     ModelConfig,
     TrainingConfig,
@@ -23,9 +24,18 @@ from latent_working_memory.v4.config import (
     load_training_schedule,
 )
 from latent_working_memory.v4.continuation import load_continuation
-from latent_working_memory.v4.evaluation_records import EvaluationHistory, evaluation_config_path
+from latent_working_memory.v4.evaluation_records import (
+    EvaluationHistory,
+    default_evaluation_id,
+    evaluation_config_path,
+    load_evaluation_settings,
+    matching_evaluation_config,
+    normalize_ruler_lengths,
+    print_evaluation_summary,
+    require_ruler_extension,
+    validate_evaluation_id,
+)
 from latent_working_memory.v4.io import write_json
-from latent_working_memory.v4.tracking import publish_evaluations, validate_evaluation_publication
 
 
 DEFAULT_CONFIG = Path("configs/v4/attention_matching/experiment.json")
@@ -102,6 +112,10 @@ def parse_args(argv=None):
         help="独立评估的数据类型，默认 test",
     )
     parser.add_argument(
+        "--eval-id", type=validate_evaluation_id,
+        help="评估计划标识，默认 <run-id>-eval；同计划各任务分别保持设置一致",
+    )
+    parser.add_argument(
         "--benchmark", choices=("ruler", "locomo"), default=None,
         help="benchmark 名称，默认 null；--eval-type benchmark 时必填",
     )
@@ -113,7 +127,7 @@ def parse_args(argv=None):
     )
     checkpoint_sources.add_argument(
         "--eval-run", type=Path,
-        help="评估指定 run 保留的 checkpoint；benchmark 权重全清理时复用已发布成员",
+        help="评估指定 run 当前保留的全部 checkpoint",
     )
     parser.add_argument("--config", type=Path, help=f"训练预设，默认 {DEFAULT_CONFIG}")
     parser.add_argument(
@@ -131,10 +145,6 @@ def parse_args(argv=None):
     parser.add_argument(
         "--benchmark-data", type=Path,
         help="benchmark 数据目录，默认沿用评估配置；首次计算无评估配置时必填",
-    )
-    parser.add_argument(
-        "--baseline-results", nargs="+", action="extend", metavar="LABEL_OR_PATH",
-        help="按 标签 基线运行的eval目录 成对传入；仅用于本次 benchmark 在线展示",
     )
     for name in (
         "micro-batch-size-per-gpu",
@@ -168,7 +178,7 @@ def parse_args(argv=None):
             help=help_text,
         )
     parser.add_argument(
-        "--tracking", choices=("online", "disabled"), help="沿用配置；默认预设开启在线记录"
+        "--tracking", choices=("online", "disabled"), help="训练的 SwanLab 记录方式；默认在线记录"
     )
     parser.add_argument("--swanlab-project", help="覆盖配置中的 SwanLab project")
     parser.add_argument("--group", help="实验系列 group，未配置时使用 run-id")
@@ -186,16 +196,6 @@ def parse_args(argv=None):
         action.default = default
         if default != argparse.SUPPRESS and not hasattr(args, action.dest):
             setattr(args, action.dest, default)
-    if args.baseline_results is not None:
-        if len(args.baseline_results) % 2:
-            parser.error("--baseline-results requires label/path pairs")
-        labels = args.baseline_results[::2]
-        if any(not label.strip() for label in labels) or len(set(labels)) != len(labels):
-            parser.error("--baseline-results requires nonempty, unique labels")
-        args.baseline_results = [
-            (label, Path(path).expanduser().resolve())
-            for label, path in zip(labels, args.baseline_results[1::2])
-        ]
     if args.fork_train:
         if args.resume or args.evaluate_only:
             parser.error("--fork-train cannot be used with --resume or --evaluate-only")
@@ -229,7 +229,6 @@ def parse_args(argv=None):
                     and hasattr(args, name)
                 )
             )
-            and not (args.evaluate_only and name == "tracking")
         ]
         if supplied:
             parser.error(
@@ -241,10 +240,10 @@ def parse_args(argv=None):
         args.eval_type = args.eval_type or "test"
         if args.eval_type == "test":
             if any(value is not None for value in (
-                args.benchmark, args.benchmark_data, args.lengths, args.baseline_results,
+                args.benchmark, args.benchmark_data, args.lengths,
             )):
                 parser.error(
-                    "--benchmark, --benchmark-data, --lengths and --baseline-results "
+                    "--benchmark, --benchmark-data and --lengths "
                     "require --eval-type benchmark"
                 )
         else:
@@ -259,18 +258,21 @@ def parse_args(argv=None):
                 )
             if args.lengths is not None and args.benchmark != "ruler":
                 parser.error("--lengths requires --benchmark ruler")
-            if args.baseline_results is not None and args.tracking == "disabled":
-                parser.error("--baseline-results requires online benchmark publication")
+            if args.lengths is not None:
+                try:
+                    args.lengths = normalize_ruler_lengths(args.lengths)
+                except ValueError as error:
+                    parser.error(str(error))
     elif any(
         value is not None
         for value in (
-            args.eval_type, args.benchmark, args.benchmark_data,
-            args.lengths, args.max_new_tokens, args.baseline_results,
+            args.eval_type, args.eval_id, args.benchmark, args.benchmark_data,
+            args.lengths, args.max_new_tokens,
         )
     ):
         parser.error(
-            "--eval-type, --benchmark, --benchmark-data, --lengths and "
-            "--max-new-tokens and --baseline-results require --evaluate-only"
+            "--eval-type, --eval-id, --benchmark, --benchmark-data, --lengths and "
+            "--max-new-tokens require --evaluate-only"
         )
     if args.checkpoint is not None and not args.evaluate_only:
         if len(args.checkpoint) != 1:
@@ -429,7 +431,7 @@ def _write_evaluation_status(path, summary, results):
 
 
 def _compute_evaluations(args, results, summary, result_path):
-    """每张 GPU 固定一个槽位，只并行计算，发布由父进程负责。"""
+    """每张 GPU 固定一个槽位，并行计算不同 checkpoint。"""
     pending = Queue()
     for result in results:
         if result["status"] == "pending":
@@ -540,69 +542,39 @@ def _compute_evaluations(args, results, summary, result_path):
             signal.signal(signum, handler)
 
 
-def _publish_evaluation_results(args, results, summary, result_path, run):
-    """仅用完整结果更新报告；原始样本、tokenizer 和权重均不参与发布。"""
-    publications = []
-    for result in results:
-        if result["status"] != "finished":
-            continue
-        result["publication_status"] = "pending"
-        _write_evaluation_status(result_path, summary, results)
-        checkpoint = Path(result["checkpoint"])
-        output_dir = Path(result["output_dir"])
-        try:
-            saved = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
-            history = EvaluationHistory(output_dir, saved)
-            with history.lock():
-                saved = history.cached_summary()
-            publications.append((result, checkpoint, saved, output_dir))
-        except Exception as error:
-            result.update(
-                status="failed", publication_status="failed",
-                error=f"publication failed: {type(error).__name__}: {error}",
-            )
-            print(f"[evaluation] {checkpoint.name} {result['error']}", flush=True)
-    if publications:
-        try:
-            publish_evaluations(
-                run, [row[1:] for row in publications], baseline_results=args.baseline_results
-            )
-        except Exception as error:
-            for result, checkpoint, _, _ in publications:
-                result.update(
-                    status="failed", publication_status="failed",
-                    error=f"publication failed: {type(error).__name__}: {error}",
-                )
-                print(f"[evaluation] {checkpoint.name} {result['error']}", flush=True)
-        else:
-            for result, _, _, _ in publications:
-                result["publication_status"] = "finished"
-    _write_evaluation_status(result_path, summary, results)
-
-
-def _run_evaluation_locked(args, checkpoints, output, run):
+def _run_evaluation_locked(args, checkpoints, output):
     evaluation_task = args.benchmark if args.eval_type == "benchmark" else "test"
-    destination = output.parent.parent / "eval" / output.name / evaluation_task
+    destination = output.parent.parent / "eval" / output.name / args.eval_id / evaluation_task
     destination.mkdir(parents=True, exist_ok=True)
     result_path = destination / "status.json"
     config_path = evaluation_config_path(destination / checkpoints[0].name)
     data_dir = args.benchmark_data if args.eval_type == "benchmark" else args.test_data
     data_option = "--benchmark-data" if args.eval_type == "benchmark" else "--test-data"
-    cached_only = args.eval_type == "benchmark" and all(
+    cached_only = all(
         (destination / checkpoint.name / "summary.json").is_file() for checkpoint in checkpoints
     )
     if data_dir is None and not config_path.is_file() and not cached_only:
         raise ValueError(f"{config_path} is missing; specify {data_option}")
-    tracking = args.tracking or (
-        "online" if run["training"]["swanlab_project"] is not None else "disabled"
-    )
-    if args.baseline_results is not None and tracking != "online":
-        raise ValueError("--baseline-results requires an existing online training run")
-    if tracking == "online":
-        for checkpoint in checkpoints:
-            validate_evaluation_publication(
-                run, checkpoint, int(checkpoint.name.removeprefix("global_step_"))
-            )
+    settings, seed = load_evaluation_settings(destination / checkpoints[0].name)
+    lengths = None
+    if evaluation_task == "ruler":
+        if args.lengths is not None:
+            lengths = args.lengths
+        elif settings is not None:
+            lengths = settings["protocol"]["lengths"]
+        elif cached_only:
+            lengths = sorted({
+                length
+                for checkpoint in checkpoints
+                for length in json.loads(
+                    (destination / checkpoint.name / "summary.json").read_text(encoding="utf-8")
+                )["protocol"]["lengths"]
+            })
+        else:
+            lengths = list(DEFAULT_RULER_LENGTHS)
+        lengths = normalize_ruler_lengths(lengths)
+        if settings is not None:
+            require_ruler_extension(settings["protocol"]["lengths"], lengths)
     checkpoint_statuses = (
         json.loads(result_path.read_text(encoding="utf-8"))["checkpoints"]
         if result_path.is_file() else {}
@@ -612,22 +584,47 @@ def _run_evaluation_locked(args, checkpoints, output, run):
         output_dir = destination / checkpoint.name
         output_dir.mkdir(parents=True, exist_ok=True)
         cached = None
-        if args.eval_type == "benchmark" and (output_dir / "summary.json").is_file():
+        if (output_dir / "summary.json").is_file():
             cached = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
-            if cached["benchmark"] != args.benchmark or cached["checkpoint"] != {
+            if cached.get("benchmark", "test") != evaluation_task or cached["checkpoint"] != {
                 "path": str(checkpoint),
                 "step": int(checkpoint.name.removeprefix("global_step_")),
             }:
                 raise ValueError(f"cached summary does not match the selected checkpoint: {output_dir}")
-            if args.benchmark_data is not None and (
-                str(args.benchmark_data.expanduser().resolve()) != cached["data"]["directory"]
+            matching_evaluation_config(
+                cached, {**(settings or cached), "seed": seed}, output_dir / "summary.json"
+            )
+            if args.eval_type == "benchmark":
+                if args.benchmark_data is not None and (
+                    str(args.benchmark_data.expanduser().resolve()) != cached["data"]["directory"]
+                ):
+                    raise ValueError("cached evaluation cannot change --benchmark-data")
+            else:
+                if args.test_data is not None and (
+                    args.test_data.expanduser().resolve() / "test.jsonl" != Path(cached["test_file"])
+                ):
+                    raise ValueError("cached evaluation cannot change --test-data")
+                if args.max_new_tokens is not None and args.max_new_tokens != cached["max_new_tokens"]:
+                    raise ValueError("cached evaluation cannot change --max-new-tokens")
+                if hasattr(args, "max_test_samples") and (
+                    args.max_test_samples != cached["max_test_samples"]
+                ):
+                    raise ValueError("cached evaluation cannot change --max-test-samples")
+            if evaluation_task == "ruler" and not set(lengths).issubset(
+                cached["protocol"]["lengths"]
             ):
-                raise ValueError("cached publication cannot change --benchmark-data")
-            if args.lengths is not None and args.lengths != cached["protocol"]["lengths"]:
-                raise ValueError("cached publication cannot change --lengths")
-            history = EvaluationHistory(output_dir, cached)
-            with history.lock():
-                cached = history.cached_summary()
+                cached = None
+            else:
+                expected = {**(settings or cached), "seed": seed, "checkpoint": cached["checkpoint"]}
+                if evaluation_task == "ruler":
+                    expected = {
+                        **expected, "data": cached["data"],
+                        "protocol": {**expected["protocol"], "lengths": lengths},
+                    }
+                history = EvaluationHistory(output_dir, expected)
+                with history.lock():
+                    cached = history.cached_summary()
+                print_evaluation_summary(cached)
         command = [
             sys.executable,
             "-m",
@@ -638,15 +635,13 @@ def _run_evaluation_locked(args, checkpoints, output, run):
             "--checkpoint", str(checkpoint),
             "--output-dir", str(output_dir),
             "--device", "cuda",
-            "--tracking", tracking,
-            "--defer-publication",
         ]
         if args.eval_type == "benchmark":
             command += ["--benchmark", args.benchmark]
             if args.benchmark_data is not None:
                 command += ["--benchmark-data", str(args.benchmark_data.expanduser().resolve())]
-            if args.lengths is not None:
-                command += ["--lengths", *(str(length) for length in args.lengths)]
+            if lengths is not None:
+                command += ["--lengths", *(str(length) for length in lengths)]
         else:
             if args.max_new_tokens is not None:
                 command += ["--max-new-tokens", str(args.max_new_tokens)]
@@ -673,6 +668,7 @@ def _run_evaluation_locked(args, checkpoints, output, run):
         "action": "evaluate",
         "eval_run": str(output),
         "eval_type": args.eval_type,
+        "eval_id": args.eval_id,
         "benchmark": args.benchmark,
         "gpus": args.gpus,
         "started_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
@@ -684,19 +680,12 @@ def _run_evaluation_locked(args, checkpoints, output, run):
     try:
         if any(result["status"] == "pending" for result in results):
             _compute_evaluations(args, results, summary, result_path)
-        else:
-            print("[evaluation] 使用已完成的汇总结果更新展示，无需加载模型或原始数据。", flush=True)
-        if tracking == "online":
-            _publish_evaluation_results(args, results, summary, result_path, run)
+        elif all(result["status"] == "finished" for result in results):
+            print("[evaluation] 复用已完成结果，无需加载模型或原始数据。", flush=True)
     except KeyboardInterrupt:
         for result in results:
-            if (
-                result["status"] in {"pending", "running"}
-                or result.get("publication_status") == "pending"
-            ):
+            if result["status"] in {"pending", "running"}:
                 result["status"] = "stopped"
-                if result.get("publication_status") == "pending":
-                    result["publication_status"] = "stopped"
         summary["status"] = "stopped"
         summary["finished_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
         _write_evaluation_status(result_path, summary, results)
@@ -709,6 +698,7 @@ def _run_evaluation_locked(args, checkpoints, output, run):
         raise RuntimeError(
             f"evaluation failed for {failures}/{len(checkpoints)} checkpoints; see {result_path}"
         )
+    print(f"[evaluation] results saved to {destination}; refresh the evaluation dashboard.", flush=True)
     return summary
 
 
@@ -717,25 +707,18 @@ def run_evaluation(args):
         output = args.eval_run.expanduser().resolve()
         if not output.is_dir() or output.parent.name != "train":
             raise ValueError("--eval-run requires an existing <series>/train/<method-dir>")
+        args.eval_id = args.eval_id or default_evaluation_id(output)
         checkpoints = [
             path.parent
             for path in output.glob("checkpoints/global_step_*/state.pt")
             if path.is_file() and re.fullmatch(r"global_step_[0-9]+", path.parent.name)
         ]
-        if not checkpoints and args.eval_type == "benchmark":
-            publication_path = (
-                output.parent.parent / "eval" / output.name / args.benchmark / "swanlab.json"
-            )
-            if publication_path.is_file():
-                publication = json.loads(publication_path.read_text(encoding="utf-8"))
-                checkpoints = [
-                    Path(json.loads(Path(path).read_text(encoding="utf-8"))["checkpoint"]["path"])
-                    for path in publication["summaries"]
-                ]
         if not checkpoints:
-            raise ValueError(f"no retained checkpoints or published evaluation results found in {output}")
+            raise ValueError(f"no retained checkpoints found in {output}")
     else:
         checkpoints = args.checkpoint
+        output = checkpoints[0].expanduser().resolve().parent.parent
+        args.eval_id = args.eval_id or default_evaluation_id(output)
     checkpoints = [path.expanduser().resolve() for path in checkpoints]
     if len(set(checkpoints)) != len(checkpoints):
         raise ValueError("checkpoint list contains duplicate directories")
@@ -744,14 +727,7 @@ def run_evaluation(args):
             raise ValueError("checkpoint must belong to <series>/train/<method-dir>/checkpoints")
         if re.fullmatch(r"global_step_[0-9]+", checkpoint.name) is None:
             raise ValueError("checkpoint must be a global_step_<step> directory")
-        cached = (
-            args.eval_type == "benchmark"
-            and (
-                checkpoint.parents[3] / "eval" / checkpoint.parents[1].name
-                / args.benchmark / checkpoint.name / "summary.json"
-            ).is_file()
-        )
-        if not cached and not (checkpoint / "state.pt").is_file():
+        if not (checkpoint / "state.pt").is_file():
             raise ValueError(f"checkpoint is incomplete: missing {checkpoint / 'state.pt'}")
     outputs = {checkpoint.parent.parent for checkpoint in checkpoints}
     if len(outputs) != 1 or (args.eval_run is not None and outputs != {output}):
@@ -774,7 +750,7 @@ def run_evaluation(args):
             raise ValueError(f"another evaluation scheduler is running for {output}")
         previous_handler = signal.signal(signal.SIGTERM, interrupt_evaluation)
         try:
-            return _run_evaluation_locked(args, checkpoints, output, run)
+            return _run_evaluation_locked(args, checkpoints, output)
         finally:
             signal.signal(signal.SIGTERM, previous_handler)
 
