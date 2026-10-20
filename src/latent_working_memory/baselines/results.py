@@ -17,17 +17,28 @@ def load_baseline_results(results, benchmark, summaries):
     }
     comparisons = [comparison_config(value) for value in summaries]
     baselines = {}
+    labels = set()
     for label, directory in results:
         if not isinstance(label, str) or not label.strip():
             raise ValueError("baseline labels must be nonempty strings")
         if label in methods:
             raise ValueError(f"baseline labels cannot use the main method identity: {label}")
-        if label in baselines:
+        if label in labels:
             raise ValueError(f"duplicate baseline label: {label}")
+        labels.add(label)
         directory = Path(directory).expanduser().resolve()
         if directory.name != "eval" or directory.parent.parent.name != "full-context":
             raise ValueError("baseline-results must point to full-context/<run-id>/eval/")
+        if not directory.is_dir():
+            raise FileNotFoundError(f"baseline results directory does not exist: {directory}")
         path = directory / benchmark / "summary.json"
+        if not path.is_file():
+            print(
+                f"[evaluation] baseline {label!r}: no completed {benchmark} results at {path}; "
+                "skipping this comparison",
+                flush=True,
+            )
+            continue
         summary = json.loads(path.read_text(encoding="utf-8"))
         if summary["method"] != "full-context" or summary["benchmark"] != benchmark:
             raise ValueError(f"{path}: expected full-context results for {benchmark}")

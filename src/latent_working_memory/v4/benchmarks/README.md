@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261019 20:54:58 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261020 10:59:18 Asia/Shanghai（UTC+08:00）
 
 ## 1. 数据位置与评估协议
 
@@ -118,7 +118,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - 相同 checkpoint、相同协议且已有完整汇总时直接复用，不重新加载模型或生成答案；缺少汇总时在原目录从头计算。本地结果先于在线发布保存，发布失败后重跑原命令可复用结果补传。
 - tracking、设备与报告展示不改变计算协议，可先离线计算再在线发布，也可将单 checkpoint 结果用于完整报告。
 - 在线发布要求训练已完成、云端原 SwanLab run 为 `FINISHED`；`--tracking disabled` 仅保存本地结果。各 benchmark 合并此前已发布结果与本次选中结果，按真实 optimizer step 排序重建完整报告，其他离线结果须明确选择后才发布。单 checkpoint 用汇总图展示任务／长度或 QA 类别分数；多 checkpoint 曲线以真实 step 为横轴，滑块表示独立递增的报告发布版本。
-- `eval/<method-dir>/<benchmark>/swanlab.json` 统一保存最新成功报告的 run 身份、成员 `summary.json` 路径、报告签名、发布版本和面板信息；上传并核验成功后原子更新，失败时保留此前成功记录。内容相同时仅检查、修复布局；复用历史汇总无需保留对应 checkpoint 权重。
+- `eval/<method-dir>/<benchmark>/swanlab.json` 统一保存最新成功报告的 run 身份、成员 `summary.json` 路径、报告签名、发布版本和面板信息；上传并核验成功后原子更新，失败时保留此前成功记录。内容相同时仅检查、修复布局；同一 run 已发布的其他评估面板复用云端媒体恢复，不重算或增加报告版本。复用历史汇总无需保留对应 checkpoint 权重。
 - 任务级 `eval/<method-dir>/<benchmark>/status.json` 保存任务信息、本轮选择 `selected_checkpoints`、整体状态与进度 `progress`，以及 `checkpoints` 中以 `global_step_N` 为键的最近详细执行状态；补评估保留未选中的旧条目，整体状态与进度仅统计本轮选择。各 checkpoint 的日志保存在 `global_step_N/eval.log`；某个 checkpoint 失败后继续其余 checkpoint，最后汇总结果并报错。
 - 复用项目的 checkpoint 加载、流式生成、资源记录和发布流程，评分沿用上述固定官方源码；不计算答案 NLL。
 
@@ -135,7 +135,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
   --baseline-results full-context artifacts/baselines/full-context/qwen3-4b_full-context/eval
 ```
 
-- `--baseline-results` 仅用于独立 benchmark 的在线展示，不用于 test、训练或 `--tracking disabled`。标签用于图例且不可重复；目录须为 `<output-root>/full-context/<run-id>/eval/`，当前只支持 full-context 格式，读取所选 benchmark 的 `summary.json`，缺失时报错。
+- `--baseline-results` 仅用于独立 benchmark 的在线展示，不用于 test、训练或 `--tracking disabled`。标签用于图例且不可重复；目录须为 `<output-root>/full-context/<run-id>/eval/`，当前只支持 full-context 格式。发布时读取所选 benchmark 的 `summary.json`，尚未计算时告警跳过该项；路径、格式或对照协议错误仍报错，主方法计算结果已保存。
 - 基座模型、精度、attention 实现、窗口、实际样本及生成评分协议须一致；数据目录可以不同，按样本指纹校验。基线不会改变 v4 评估协议。
 - 单 checkpoint 按任务／长度或 QA 类别加入分组柱；多 checkpoint 保持真实 step 曲线，并添加 full-context 水平虚线。
 - 每次传入完整基线集合，不保存或自动沿用绑定；省略某项即移除该项展示，完全不传时只展示当前方法。`swanlab.json` 仅保留当前方法报告的常规发布记录。

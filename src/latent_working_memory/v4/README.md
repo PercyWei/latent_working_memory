@@ -2,7 +2,7 @@
 
 创建时间：20261003 21:51:43 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261020 10:18:14 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261020 10:59:18 Asia/Shanghai（UTC+08:00）
 
 冻结基座，在每层维护 latent memory，通过 Attention Matching 局部更新记忆，并由答案 CE 学习如何生成压缩查询和读写记忆。
 
@@ -166,9 +166,9 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - train/dev 在同一 run 中按真实 optimizer step 追加原生曲线。新 run 续训重放来源 train/dev 指标前缀，后续图表与 checkpoint 使用累计 step；新增预算及验证／保存间隔按新运行本地 step 计算。各分区的 `write_loss` 图合并写入前后两条曲线，以浅色／深色区分；底层分别保存 `write_loss_before` 和 `write_loss`，均先按层、再按写入事件平均。
 - `train/epoch` 表示累计训练进度，`train/stage` 用累计 optimizer step 展示训练阶段：原始训练为 0，每次 `--fork-train` 从来源 checkpoint 所属阶段加 1，继承前缀保留各自阶段；`--resume` 保持不变。从早期 checkpoint 分叉时，以该点的阶段为准。
 - QASPER test 沿用原训练的在线设置和身份。单 checkpoint 的 NLL、EM／F1 合并为 `evaluation/quality` 双轴柱图：NLL 左轴从 0 自适应，EM／F1 右轴固定 0–1；写入前后 AM loss 独立展示。在线发布要求训练已完成、云端原 run 为 `FINISHED`。辅助计数与逐题结果保存在本地。
-- Benchmark 结果同样追加到原 run，分别用 `evaluation/ruler` 汇总任务／长度、`evaluation/locomo` 汇总 QA 类别及总体分数。可通过 `--baseline-results <标签> <目录> ...` 加入独立计算的 [full-context 基线](../baselines/README.md)：标签用于图例，单 checkpoint 使用分组柱对照，多 checkpoint 使用水平虚线。每次传入完整集合，不保存基线绑定；不传时只展示当前方法。
+- Benchmark 结果同样追加到原 run，分别用 `evaluation/ruler` 汇总任务／长度、`evaluation/locomo` 汇总 QA 类别及总体分数。可通过 `--baseline-results <标签> <目录> ...` 加入独立计算的 [full-context 基线](../baselines/README.md)：标签用于图例，单 checkpoint 使用分组柱对照，多 checkpoint 使用水平虚线。每次传入完整集合，不保存基线绑定；不传时只展示当前方法。基线仅在发布时读取，尚无当前 benchmark 汇总时告警跳过；路径、格式或对照协议错误仍报错，本地评估结果保留。
 - QASPER 与每个 benchmark 分别维护完整报告：合并此前已发布结果与本次选中结果，按真实 optimizer step 排序后重建。单 checkpoint 使用汇总图，多 checkpoint 的曲线以真实 step 为横轴；媒体滑块表示独立递增的报告发布版本，补评估更早的 checkpoint 后仍按 step 升序展示。
-- 各评估目录的 `swanlab.json` 只保存最新成功报告的 run 身份、成员 `summary.json` 路径、报告签名、发布版本和面板信息。上传并核验成功后原子更新，失败时保留此前成功记录；内容相同时仅检查、修复布局。其他离线结果须明确选择后才发布，复用历史汇总无需保留对应 checkpoint 权重。
+- 各评估目录的 `swanlab.json` 只保存最新成功报告的 run 身份、成员 `summary.json` 路径、报告签名、发布版本和面板信息。上传并核验成功后原子更新，失败时保留此前成功记录；内容相同时仅检查、修复布局。每次在线发布都会恢复同一 run 已成功发布的 test、RULER 和 LoCoMo 面板，复用已上传媒体，不重算其他任务或增加其报告版本。其他离线结果须明确选择后才发布，复用历史汇总无需保留对应 checkpoint 权重。
 
 | 位置 | 主要产物 |
 |---|---|

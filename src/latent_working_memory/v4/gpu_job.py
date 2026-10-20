@@ -16,7 +16,6 @@ import sys
 import threading
 from zoneinfo import ZoneInfo
 
-from latent_working_memory.baselines.results import load_baseline_results
 from latent_working_memory.v4.config import (
     ModelConfig,
     TrainingConfig,
@@ -599,11 +598,6 @@ def _run_evaluation_locked(args, checkpoints, output, run):
     )
     if args.baseline_results is not None and tracking != "online":
         raise ValueError("--baseline-results requires an existing online training run")
-    if args.baseline_results is not None:
-        load_baseline_results(args.baseline_results, args.benchmark, [
-            json.loads(path.read_text(encoding="utf-8"))
-            for path in sorted(destination.glob("global_step_*/summary.json"))
-        ])
     if tracking == "online":
         for checkpoint in checkpoints:
             validate_evaluation_publication(

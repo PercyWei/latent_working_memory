@@ -92,6 +92,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - 默认沿用评估配置 `plan/<method-dir>/test.json`。缺少该文件时，必须传入 `--test-data` 以创建评估配置，`--max-test-samples`、`--max-new-tokens` 可使用默认值。模型、方法和写入配置从 checkpoint 读取。
 - 每个 checkpoint 的结果独立保存。相同 checkpoint、相同配置复用已有结果和日志；在线发布将本次选中结果与此前已发布结果合并，按真实累计 step 排序重建完整报告；其他离线结果须明确选择后才发布。内容相同时仅检查、修复云端布局；需要更新时从缓存重建，不重新计算 QA，也无需保留此前 checkpoint 的权重。计算日志见各 checkpoint 的 `eval.log`，发布状态及错误见任务级 `status.json`。
 - 默认追加到原训练 SwanLab run，须保留原训练目录与身份文件且云端 run 状态为 `FINISHED`；加 `--tracking disabled` 仅保存本地结果。
+- 在线发布只更新当前任务报告，同时恢复同一 run 已成功发布的 test、RULER 和 LoCoMo 面板；其他任务复用已上传媒体，不重新计算或增加报告版本。
 
 **Benchmark 评估**
 
@@ -120,7 +121,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - `--eval-run` 和 `--checkpoint` 的基本用法同 test。
 - 默认沿用评估配置 `plan/<method-dir>/<benchmark>.json`。缺少该文件时，必须传入 `--benchmark-data` 以创建评估配置，`--lengths`（RULER 专属）可使用默认值。模型、方法和写入配置从 checkpoint 读取。
 - checkpoint 的保存，结果的发布等同 test 评估。
-`--baseline-results` 按 “标签＋目录” 的格式成对传入，标签不可重复，用于在 swanlab evaluation 中展示 baseline 结果以方便对比。
+- `--baseline-results` 按“标签＋目录”成对传入，标签不可重复，每次仅展示本次传入的基线。发布时读取当前 benchmark 的汇总，尚未计算的基线告警跳过；路径、格式或对照协议错误仍报错，不影响主方法计算结果的保存。
 
 ### 2.3 中断恢复
 

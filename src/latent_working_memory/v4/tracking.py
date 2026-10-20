@@ -463,7 +463,24 @@ def publish_evaluations(run, evaluations, baseline_results=None):
             _verify_report(api_key, project_path, identity["id"], values, publication_step)
         with (root.parents[2] / ".swanlab-panels.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            view = _configure_report_layout(api, remote, values)
+            report_panels = {history.root.name: list(values)}
+            for task in ("test", "ruler", "locomo"):
+                path = history.root.parent / task / "swanlab.json"
+                if task == history.root.name or not path.is_file():
+                    continue
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                if Path(saved["training_dir"]).resolve() == root and all(
+                    saved[name] == identity[identity_name]
+                    for name, identity_name in (
+                        ("run_id", "id"), ("project", "project"), ("group", "group"),
+                    )
+                ):
+                    report_panels[task] = saved["panels"]
+            # 每次整理会将该任务置顶；倒序恢复使最终顺序稳定为 test、RULER、LoCoMo。
+            # 分任务处理保留各自的旧面板清理规则，不重新上传其他任务的媒体。
+            for task in ("locomo", "ruler", "test"):
+                if task in report_panels:
+                    view = _configure_report_layout(api, remote, report_panels[task])
         publication = {
             "training_dir": str(root), "run_id": identity["id"], "project": identity["project"],
             "group": identity["group"], "signature": signature,

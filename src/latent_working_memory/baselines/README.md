@@ -2,7 +2,7 @@
 
 创建时间：20261019 20:16:32 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261019 20:53:35 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261020 10:59:18 Asia/Shanghai（UTC+08:00）
 
 使用原始基座模型完整读取 RULER 或 LoCoMo 输入，不压缩上下文、不加载 v4 checkpoint。数据读取与官方评分复用公共 [benchmarks](../benchmarks/) 模块；默认只在终端和本地记录结果，不创建 SwanLab run。
 
@@ -64,5 +64,6 @@ artifacts/baselines/full-context/<run-id>/
 
 - v4 一次传入完整的“标签＋目录”列表，例如 `--baseline-results full-context artifacts/baselines/full-context/qwen3-4b_full-context/eval reference artifacts/baselines/full-context/reference/eval`。标签用于图例且不可重复；目录须为基线运行的 `eval/` 目录，当前仅支持 full-context 结果格式。
 - 本次参数决定完整的基线集合，不保存绑定；省略某项即移除该项展示，完全不传时只展示当前方法。
+- v4 在发布时读取基线：尚无当前 benchmark 的 `summary.json` 时告警跳过该项，主方法继续；路径、格式或对照协议错误仍报错，已保存的主方法计算结果不受影响。
 - 对照要求基座模型、精度、attention 实现、窗口、实际样本及生成评分协议一致；各自的 seed 保留在结果中。
 - 基线只作为展示参照：单 checkpoint 的 benchmark 图加入分组柱，多 checkpoint 图加入水平虚线，不改变 v4 的评估结果和真实 step 顺序。运行命令见 [v4 benchmark 说明](../v4/benchmarks/README.md#4-加入-full-context-基线)。
