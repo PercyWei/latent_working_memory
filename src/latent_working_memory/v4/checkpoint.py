@@ -91,6 +91,7 @@ class MetaMemoryCheckpointHandler(CheckpointHandler):
         self.resume_mode = "resume_path" if resume_from_path is not None else "disable"
         self.resume_from_path = str(Path(resume_from_path).resolve()) if resume_from_path else None
         self.engine = engine
+        self.run = run
         self.train_dataloader = train_dataloader
         self.mode = (
             OrchestrationMode.SPMD if dist.is_initialized() else LocalOrchestrationMode.LOCAL

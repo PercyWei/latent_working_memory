@@ -1,4 +1,4 @@
-"""v4 GPU 入口：训练、恢复和独立评估。"""
+"""v4 GPU 入口：训练、续训、恢复和独立评估。"""
 
 import argparse
 from dataclasses import asdict, replace
@@ -17,7 +17,13 @@ import threading
 from zoneinfo import ZoneInfo
 
 from latent_working_memory.baselines.results import load_baseline_results
-from latent_working_memory.v4.config import load_experiment, load_training_schedule
+from latent_working_memory.v4.config import (
+    ModelConfig,
+    TrainingConfig,
+    load_experiment,
+    load_training_schedule,
+)
+from latent_working_memory.v4.continuation import load_continuation
 from latent_working_memory.v4.evaluation_records import EvaluationHistory, evaluation_config_path
 from latent_working_memory.v4.io import write_json
 from latent_working_memory.v4.tracking import publish_evaluations, validate_evaluation_publication
@@ -89,6 +95,10 @@ def parse_args(argv=None):
         "--evaluate-only", action="store_true", help="从 checkpoint 评估 QASPER test 或 benchmark"
     )
     parser.add_argument(
+        "--fork-train", action="store_true",
+        help="从 --checkpoint 分叉出新训练计划，并继承截至该点的 train/dev 曲线",
+    )
+    parser.add_argument(
         "--eval-type", choices=("test", "benchmark"),
         help="独立评估的数据类型，默认 test",
     )
@@ -100,7 +110,7 @@ def parse_args(argv=None):
     checkpoint_sources = parser.add_mutually_exclusive_group()
     checkpoint_sources.add_argument(
         "--checkpoint", type=Path, nargs="+",
-        help="global_step_<step> 目录；独立评估可传多个，恢复训练只接受一个",
+        help="global_step_<step> 目录；独立评估可传多个，恢复及新计划续训只接受一个",
     )
     checkpoint_sources.add_argument(
         "--eval-run", type=Path,
@@ -187,6 +197,11 @@ def parse_args(argv=None):
             (label, Path(path).expanduser().resolve())
             for label, path in zip(labels, args.baseline_results[1::2])
         ]
+    if args.fork_train:
+        if args.resume or args.evaluate_only:
+            parser.error("--fork-train cannot be used with --resume or --evaluate-only")
+        if args.checkpoint is None:
+            parser.error("--fork-train requires --checkpoint")
     if args.resume:
         overrides = supplied_options - {"resume", "checkpoint", "gpus"}
         if overrides:
@@ -221,8 +236,8 @@ def parse_args(argv=None):
             parser.error(
                 "checkpoint actions retain the original configuration: " + ", ".join(supplied)
             )
-    elif args.checkpoint is not None:
-        parser.error("--checkpoint requires --resume or --evaluate-only")
+    elif args.checkpoint is not None and not args.fork_train:
+        parser.error("--checkpoint requires --resume, --fork-train or --evaluate-only")
     if args.evaluate_only:
         args.eval_type = args.eval_type or "test"
         if args.eval_type == "test":
@@ -266,7 +281,19 @@ def parse_args(argv=None):
 
 
 def prepare_training(args):
-    model, training = load_experiment(args.config or DEFAULT_CONFIG)
+    source_model = None
+    source_training = None
+    if args.fork_train:
+        args.checkpoint = args.checkpoint.expanduser().resolve()
+        source, _ = load_continuation(args.checkpoint)
+        source_model = ModelConfig(**source["run"]["model"])
+        source_training = TrainingConfig(**source["run"]["training"])
+        model, training = (
+            load_experiment(args.config)
+            if args.config is not None else (source_model, source_training)
+        )
+    else:
+        model, training = load_experiment(args.config or DEFAULT_CONFIG)
     if args.model_path is not None:
         model = replace(model, model_name_or_path=str(args.model_path.expanduser().resolve()))
     overrides = {
@@ -306,9 +333,21 @@ def prepare_training(args):
         **overrides,
         output_dir=str(output),
         swanlab_project=project,
-        group=args.group or training.group or run_id,
+        group=(
+            args.group or training.group
+            or (source_training.group if source_training is not None else None) or run_id
+        ),
         tags=tuple(sorted(set(training.tags) | set(args.tag or []))),
     )
+    if source_model is not None and model != source_model:
+        different = [
+            name for name, value in asdict(source_model).items()
+            if getattr(model, name) != value
+        ]
+        raise ValueError(
+            "--fork-train model must match the source checkpoint after CLI overrides; "
+            "differing fields: " + ", ".join(different)
+        )
     plan.mkdir(parents=True)
     config_path = plan / "config.json"
     training_values = asdict(training)
@@ -321,6 +360,10 @@ def prepare_training(args):
                 (args.test_data or Path(training.dataset_dir)).expanduser().resolve()
             ),
             "max_test_samples": getattr(args, "max_test_samples", None),
+            **(
+                {"continue_from": str(args.checkpoint)}
+                if args.fork_train else {}
+            ),
         },
         "training": training_values,
     })
@@ -747,7 +790,7 @@ def run_job(args):
         return run_evaluation(args)
     checkpoint = args.checkpoint
     checkpoint = checkpoint.expanduser().resolve() if checkpoint is not None else None
-    if checkpoint is None:
+    if not args.resume:
         output, plan, config_path = prepare_training(args)
     else:
         output = checkpoint.parent.parent
@@ -785,7 +828,7 @@ def run_job(args):
     if args.resume:
         command += ["--resume", str(checkpoint)]
     job = {
-        "action": "resume" if args.resume else "train",
+        "action": "resume" if args.resume else "fork-train" if args.fork_train else "train",
         "gpus": args.gpus,
         "command": command,
         "started_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),

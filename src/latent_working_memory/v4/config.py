@@ -173,10 +173,15 @@ def load_training_schedule(train_path):
     if not isinstance(plan, dict) or set(plan) != {"execution", "training"}:
         raise ValueError("train.json must contain exactly execution and training")
     execution = plan["execution"]
-    if not isinstance(execution, dict) or set(execution) != {
-        "train_only", "test_data", "max_test_samples"
-    }:
-        raise ValueError("execution must contain exactly train_only, test_data and max_test_samples")
+    required = {"train_only", "test_data", "max_test_samples"}
+    if (
+        not isinstance(execution, dict) or not required <= set(execution)
+        or set(execution) - required - {"continue_from"}
+    ):
+        raise ValueError(
+            "execution requires train_only, test_data and max_test_samples; "
+            "continue_from is optional"
+        )
     if type(execution["train_only"]) is not bool:
         raise ValueError("execution.train_only must be a boolean")
     if not isinstance(execution["test_data"], str) or not execution["test_data"].strip():
@@ -184,4 +189,8 @@ def load_training_schedule(train_path):
     limit = execution["max_test_samples"]
     if limit is not None and (type(limit) is not int or limit < 1):
         raise ValueError("execution.max_test_samples must be a positive integer or null")
+    if "continue_from" in execution and (
+        not isinstance(execution["continue_from"], str) or not execution["continue_from"].strip()
+    ):
+        raise ValueError("execution.continue_from must be a nonempty checkpoint path")
     return plan

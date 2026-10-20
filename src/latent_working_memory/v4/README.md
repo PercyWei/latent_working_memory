@@ -2,7 +2,7 @@
 
 创建时间：20261003 21:51:43 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261019 20:39:35 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261020 10:18:14 Asia/Shanghai（UTC+08:00）
 
 冻结基座，在每层维护 latent memory，通过 Attention Matching 局部更新记忆，并由答案 CE 学习如何生成压缩查询和读写记忆。
 
@@ -112,17 +112,17 @@ $R$ 为压缩查询数；每次写入固定执行 `inner_steps` 步，查询与�
 | `model.backbone_dtype` | GPU 预设 `bfloat16`；类默认 `float32`，新增模块与 slots 始终 FP32 |
 | `model.attention_implementation` | 主干 `sdpa`，可选 `eager`；局部 reader 使用显式计算 |
 | `model.loss_chunk_size` | 256；有效答案位置的 LM head／CE 分块重计算 |
-| `training.epochs`／`learning_rate` | 1／0.0001 |
-| `training.micro_batch_size_per_gpu`／`gradient_accumulation_steps` | 4／2；双卡全局 batch 为 16 |
+| `training.epochs`／`learning_rate` | 4／0.0001 |
+| `training.micro_batch_size_per_gpu`／`gradient_accumulation_steps` | 1／8；双卡全局 batch 为 16 |
 | `training.max_train_data_tokens` | train 原始正文的 token 上限 12288；省略或 `null` 关闭 |
 | `training.max_train_samples`／`max_dev_samples` | 过滤后的 train／dev 独立 QA 样本数上限；正整数或 `null`，预设 `null`（全部） |
 | `seed` | 42；控制新增记忆模块初始化、train/dev 子集选择及训练样本打乱，test／benchmark 始终读取该公共值 |
 | `training.dev_every` | 每 50 个 optimizer steps 验证；epoch 结束时也验证 |
-| `training.save_every`／`save_total_limit` | 每 50 steps 保存、保留最近 2 个；支持 `after_each_epoch`，epoch 结束时始终保存 |
+| `training.save_every`／`save_total_limit` | `after_each_epoch`，每个 epoch 结束时保存、保留最近 4 个；也可指定正整数 step 间隔 |
 
-- 全局 batch = GPU 数 × 每卡 microbatch × 梯度累积步数。预设每卡累积 2 次 microbatch 后更新优化器；尾批按实际有效答案 token 数归一化。
+- 全局 batch = GPU 数 × 每卡 microbatch × 梯度累积步数。预设每卡累积 8 次 microbatch 后更新优化器；尾批按实际有效答案 token 数归一化。
 - 使用 verl Engine、optimizer、DDP、collator、StatefulDataLoader 和 checkpoint 管理；恢复保留配置、加载器游标、各 rank RNG 和原运行身份。
-- 同一 run 恢复要求配置、分词后数据、设备类型及 GPU 数一致。更改方法设置时使用新 run。
+- 同一 run 恢复要求配置、分词后数据、设备类型及 GPU 数一致。更改方法设置时使用新 run。从已有权重追加训练可用 `--fork-train --checkpoint <目录>` 创建新 run，训练设置和 seed 可调整；CLI 参数先覆盖配置，再校验最终 `model` 与来源 checkpoint 的完整模型配置一致，否则报错。仅继承可训练权重，优化器和数据流程重新开始，见[续训说明](scripts/README.md#24-新-run-续训)。
 - 训练、恢复和评估均从配置中的本地基座模型目录加载 tokenizer；checkpoint 保存新增记忆模块与训练状态。
 - 恢复与评估使用运行记录和 checkpoint 绑定的模型配置，不受公共 `config.json` 后续修改影响。
 - 主干尚未采用带可变 KV／hook 状态的激活重计算；推理缓存有界不代表完整 meta-training 显存有界。
@@ -147,7 +147,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - 统一入口在训练或续训完成全部预算后自动执行最终 checkpoint 的 QASPER test；等待训练进程退出，再使用所选 GPU 中的第一张卡，默认生成上限为 128 tokens。新训练加 `--train-only` 时保留训练中 dev、跳过最终 test，该选择与最终 test 数据目录保存到 `train.json` 的 `execution`，恢复时沿用。训练中断或失败时不执行 test。
 - NLL 按答案 token 加权，EM／F1 按 QA 平均；EM／F1 使用小写化、去标点及英文冠词、合并空白后的短答评分。这是当前单参考答案协议，不是官方 QASPER 多参考评测。
 - NLL 与生成各自初始化记忆；生成仅接收 prompt，参考答案不进入生成路径。
-- test 沿用固定正文下限及模型窗口上限；生成预算超过剩余窗口时缩至可用长度，记录实际预算，不改变样本筛选。
+- test 沿用固定正文下限及模型窗口上限；生成预算超过剩余窗口时缩至可用长度，记录实际预算，不改变样本筛选。续训可更换数据，但 test 正文仍须与本次及来源计划已知的 train/dev 正文不重叠；来源正文 ID 合并保存在 `run.json.continuation.documents`，恢复和评估无需读取来源原始数据。
 - 独立评估统一使用 `--evaluate-only`，通过 `--checkpoint <目录1> <目录2> ...` 指定同一 run 的一个或多个 checkpoint，或通过 `--eval-run` 指定 `artifacts/v4/<run-id>/train/<method-dir>/`，扫描其中全部 `checkpoints/global_step_*/state.pt`。两者互斥；不接受重复、跨 run 或缺少 `state.pt` 的未完成 checkpoint。多 GPU 时每卡一个进程并行评估不同 checkpoint，全部计算结束后由父进程统一发布。
 - 独立评估由 `--eval-type` 选择 `test`（默认）或 `benchmark`。benchmark 模式须通过 `--benchmark` 指定 `ruler` 或 `locomo`，该参数默认 `null`，不用于自动切换评估类型。批量评估中某个 checkpoint 失败后继续其余 checkpoint，最终汇总结果并报错。
 - 新训练用 `--data` 指定完整数据集目录，训练、验证与自动 test 分别读取其中的 `train.jsonl`、`dev.jsonl` 和 `test.jsonl`；`--test-data` 可单独覆盖自动 test 数据目录。
@@ -163,7 +163,8 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 
 - 默认在线记录到 `latent-working-memory-v4`，使用与 v3 相同的 `SWANLAB_API_KEY` 配置；`--tracking disabled` 仅保存本地。相关 runs 通过 `group` 关联，`job_type=train`，固定 tags 为 `scope:main`、`method:attention-matching`，数据和研究标签通过配置补充。
 - `--run-id` 标识实验系列；方法目录按 `<query_mode>-query-m<num_slots>` 自动生成，例如 `conditioned-query-m32`。SwanLab 名称为 `<method-dir>_<run-id>`。
-- train/dev 在同一 run 中按真实 optimizer step 追加原生曲线。各分区的 `write_loss` 图合并写入前后两条曲线，以浅色／深色区分；底层分别保存 `write_loss_before` 和 `write_loss`，均先按层、再按写入事件平均。
+- train/dev 在同一 run 中按真实 optimizer step 追加原生曲线。新 run 续训重放来源 train/dev 指标前缀，后续图表与 checkpoint 使用累计 step；新增预算及验证／保存间隔按新运行本地 step 计算。各分区的 `write_loss` 图合并写入前后两条曲线，以浅色／深色区分；底层分别保存 `write_loss_before` 和 `write_loss`，均先按层、再按写入事件平均。
+- `train/epoch` 表示累计训练进度，`train/stage` 用累计 optimizer step 展示训练阶段：原始训练为 0，每次 `--fork-train` 从来源 checkpoint 所属阶段加 1，继承前缀保留各自阶段；`--resume` 保持不变。从早期 checkpoint 分叉时，以该点的阶段为准。
 - QASPER test 沿用原训练的在线设置和身份。单 checkpoint 的 NLL、EM／F1 合并为 `evaluation/quality` 双轴柱图：NLL 左轴从 0 自适应，EM／F1 右轴固定 0–1；写入前后 AM loss 独立展示。在线发布要求训练已完成、云端原 run 为 `FINISHED`。辅助计数与逐题结果保存在本地。
 - Benchmark 结果同样追加到原 run，分别用 `evaluation/ruler` 汇总任务／长度、`evaluation/locomo` 汇总 QA 类别及总体分数。可通过 `--baseline-results <标签> <目录> ...` 加入独立计算的 [full-context 基线](../baselines/README.md)：标签用于图例，单 checkpoint 使用分组柱对照，多 checkpoint 使用水平虚线。每次传入完整集合，不保存基线绑定；不传时只展示当前方法。
 - QASPER 与每个 benchmark 分别维护完整报告：合并此前已发布结果与本次选中结果，按真实 optimizer step 排序后重建。单 checkpoint 使用汇总图，多 checkpoint 的曲线以真实 step 为横轴；媒体滑块表示独立递增的报告发布版本，补评估更早的 checkpoint 后仍按 step 升序展示。
@@ -173,7 +174,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 |---|---|
 | `plan/<method-dir>/` | `config.json` 公共模型配置与 seed、`train.json` 流程设置与训练配置 |
 | `plan/<method-dir>/<test\|ruler\|locomo>.json` | 同类评估共用配置 |
-| `train/<method-dir>/` | `train.log`、执行状态 `status.json`、运行信息与数据统计 `run.json`、指标 `metrics.jsonl`、在线运行身份 `swanlab.json`、checkpoint 与训练摘要 `summary.json`（完成情况、进度统计、最终 checkpoint 路径） |
+| `train/<method-dir>/` | `train.log`、执行状态 `status.json`、运行信息与数据统计 `run.json`（续训来源在 `continuation`）、指标 `metrics.jsonl`、在线运行身份 `swanlab.json`、checkpoint 与训练摘要 `summary.json`（完成情况、进度统计、最终 checkpoint 路径） |
 | `eval/<method-dir>/<test\|ruler\|locomo>/` | 任务级 `status.json` 保存本轮任务信息、选择、进度及各 checkpoint 最近执行状态；`swanlab.json` 保存最新成功发布的完整报告记录 |
 | `eval/<method-dir>/<test\|ruler\|locomo>/global_step_N/` | 日志 `eval.log`、协议快照 `eval.json`、指标汇总与完成标记 `summary.json`、逐样本详细记录 `details.jsonl`；test 的完整数据统计保存在 `summary.json` 的 `data_statistics` 字段 |
 

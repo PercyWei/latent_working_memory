@@ -40,6 +40,8 @@ def _check_test_split(statistics, run):
     for split in ("train", "dev"):
         if documents.intersection(selection[split]["raw"]["group_ids"]):
             raise ValueError(f"raw test documents overlap the training run's {split} split")
+    if "continuation" in run and documents.intersection(run["continuation"]["documents"]):
+        raise ValueError("raw test documents overlap the continuation source's train/dev splits")
 
 
 def evaluate(

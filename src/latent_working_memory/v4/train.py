@@ -19,7 +19,9 @@ from latent_working_memory.v4.config import (
     TrainingConfig,
     load_common_config,
     load_training_plan,
+    load_training_schedule,
 )
+from latent_working_memory.v4.continuation import load_continuation
 from latent_working_memory.v4.data import (
     dataset_identity,
     load_episode_splits,
@@ -27,11 +29,11 @@ from latent_working_memory.v4.data import (
 from latent_working_memory.v4.engine import EngineRegistry
 from latent_working_memory.v4.io import write_json
 from latent_working_memory.v4.model import StreamingMemoryLM
-from latent_working_memory.v4.tracking import configure_metrics, log_metrics, training_tracking
+from latent_working_memory.v4.tracking import log_metrics, training_tracking
 from latent_working_memory.v4.training_data import make_data_loader
 
 
-def validate_cursor(cursor, config, samples, world_size):
+def validate_cursor(cursor, config, samples, world_size, step_offset=0):
     batch_size = config.global_batch_size(world_size)
     names = {"epoch", "sample_offset", "step", "sample_visits", "target_tokens"}
     if set(cursor) != names or any(
@@ -44,7 +46,7 @@ def validate_cursor(cursor, config, samples, world_size):
         or offset >= samples
         or offset % batch_size
         or (epoch == config.epochs and offset != 0)
-        or cursor["step"]
+        or cursor["step"] - step_offset
         != epoch * math.ceil(samples / batch_size) + offset // batch_size
         or cursor["sample_visits"] != epoch * samples + offset
     ):
@@ -93,14 +95,33 @@ def evaluate(engine, episodes):
 
 def run_training(args):
     resume = Path(args.resume).expanduser().resolve() if args.resume is not None else None
+    source, history, continuation = None, [], None
     if resume is not None:
         saved_run = read_checkpoint(resume)["run"]
         model_config = ModelConfig(**saved_run["model"])
         config = TrainingConfig(**saved_run["training"])
         if load_common_config(args.config)["seed"] != config.seed:
             raise ValueError("common seed differs from the checkpoint's training seed")
+        continuation = saved_run.get("continuation")
     else:
         model_config, config = load_training_plan(args.config, args.train_config)
+        source_path = load_training_schedule(args.train_config)["execution"].get("continue_from")
+        if source_path is not None:
+            source_path = Path(source_path).expanduser().resolve()
+            source, history = load_continuation(source_path)
+            source_run = source["run"]
+            model_config = ModelConfig(**source_run["model"])
+            last_training = next(record for record in reversed(history) if "train/loss" in record)
+            documents = set(source_run.get("continuation", {}).get("documents", []))
+            for split in ("train", "dev"):
+                documents.update(source_run["data"]["selection"][split]["raw"]["group_ids"])
+            continuation = {
+                "checkpoint": str(source_path),
+                "step": source["cursor"]["step"],
+                "epoch": last_training["train/epoch"],
+                "stage": last_training["train/stage"] + 1,
+                "documents": sorted(documents),
+            }
     if config.output_dir is None:
         raise ValueError("training requires output_dir; launch the preset through scripts/run.sh")
     device = initialize_device(args.device)
@@ -126,6 +147,9 @@ def run_training(args):
     set_seed(config.seed)
     tokenizer = AutoTokenizer.from_pretrained(model_config.model_name_or_path)
     model = StreamingMemoryLM(model_config).to(device)
+    if source is not None:
+        model.load_trainable_state_dict(source["memory"])
+        del source
     position_limit = model.backbone.config.max_position_embeddings
     min_text_tokens = model_config.pending_size + model_config.recent_size + 1
     dataset_dir = Path(config.dataset_dir)
@@ -156,7 +180,12 @@ def run_training(args):
         "global_batch_size": engine.global_batch_size,
         "device_type": device.type,
     }
-    cursor = {"epoch": 0, "sample_offset": 0, "step": 0, "sample_visits": 0, "target_tokens": 0}
+    if continuation is not None:
+        run["continuation"] = continuation
+    step_offset = continuation["step"] if continuation is not None else 0
+    cursor = {
+        "epoch": 0, "sample_offset": 0, "step": step_offset, "sample_visits": 0, "target_tokens": 0
+    }
     metrics_path = output / "metrics.jsonl"
     loader = make_data_loader(train, engine.global_batch_size, config.seed)
     handler = MetaMemoryCheckpointHandler(
@@ -166,7 +195,7 @@ def run_training(args):
         if json.loads((output / "run.json").read_text(encoding="utf-8")) != run:
             raise ValueError("saved run does not match the resume configuration or tokenized data")
         restored_step = handler.load_checkpoint()
-        validate_cursor(cursor, config, len(train), world_size)
+        validate_cursor(cursor, config, len(train), world_size, step_offset)
         if restored_step != cursor["step"]:
             raise ValueError("checkpoint directory step differs from its saved cursor")
         if rank == 0:
@@ -174,7 +203,16 @@ def run_training(args):
     elif rank == 0:
         output.mkdir(parents=True, exist_ok=True)
         write_json(output / "run.json", run)
-        metrics_path.touch()
+        if continuation is not None:
+            metrics_path.write_text(
+                "".join(
+                    json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n"
+                    for record in history
+                ),
+                encoding="utf-8",
+            )
+        else:
+            metrics_path.touch()
     if world_size > 1:
         dist.barrier()
 
@@ -187,8 +225,6 @@ def run_training(args):
         tracking, error = None, None
         try:
             tracking = stack.enter_context(context)
-            if tracking is not None:
-                configure_metrics(tracking, device)
         except Exception as exception:
             error = f"tracking initialization failed: {exception}"
         if world_size > 1:
@@ -213,7 +249,12 @@ def run_training(args):
 def train_loop(engine, config, train, dev, loader, handler, cursor, checkpoint_path, tracking):
     output = Path(config.output_dir)
     metrics_path = output / "metrics.jsonl"
-    total_steps = config.epochs * math.ceil(len(train) / engine.global_batch_size)
+    continuation = handler.run.get("continuation")
+    step_offset = continuation["step"] if continuation is not None else 0
+    epoch_offset = continuation["epoch"] if continuation is not None else 0
+    stage = continuation["stage"] if continuation is not None else 0
+    planned_steps = config.epochs * math.ceil(len(train) / engine.global_batch_size)
+    total_steps = step_offset + planned_steps
     for epoch in range(cursor["epoch"], config.epochs):
         loader.sampler.set_epoch(epoch)
         for batch in loader:
@@ -243,14 +284,16 @@ def train_loop(engine, config, train, dev, loader, handler, cursor, checkpoint_p
             cursor["epoch"] = epoch + int(epoch_end)
             cursor["sample_offset"] = 0 if epoch_end else consumed
             step = cursor["step"]
+            local_step = step - step_offset
             record = {
                 "step": step,
                 "epoch": epoch + 1,
-                "train/epoch": cursor["sample_visits"] / len(train),
+                "train/epoch": epoch_offset + cursor["sample_visits"] / len(train),
+                "train/stage": stage,
                 **{f"train/{k}": v for k, v in metrics.items()},
                 **{f"resources/{k}": v for k, v in resources.items()},
             }
-            if step % config.dev_every == 0 or epoch_end:
+            if local_step % config.dev_every == 0 or epoch_end:
                 development = evaluate(engine, dev)
                 record.update({f"dev/{k}": v for k, v in development.items()})
             if engine.rank == 0:
@@ -260,9 +303,11 @@ def train_loop(engine, config, train, dev, loader, handler, cursor, checkpoint_p
                 progress = [
                     "attention-matching",
                     f"epoch={epoch + 1}",
-                    f"step={step}/{total_steps}",
+                    f"step={local_step}/{planned_steps}",
                     f"loss={metrics['loss']:.4f}",
                 ]
+                if continuation is not None:
+                    progress.insert(3, f"global_step={step}")
                 if "dev/loss" in record:
                     progress.append(f"dev_loss={record['dev/loss']:.4f}")
                 progress.append(f"{resources['optimizer_step_seconds']:.2f}s/step")
@@ -273,7 +318,7 @@ def train_loop(engine, config, train, dev, loader, handler, cursor, checkpoint_p
                 print(" | ".join(progress), flush=True)
                 if tracking is not None:
                     log_metrics(tracking, record)
-            save_by_step = isinstance(config.save_every, int) and step % config.save_every == 0
+            save_by_step = isinstance(config.save_every, int) and local_step % config.save_every == 0
             if save_by_step or epoch_end:
                 handler.save_checkpoint(step)
                 checkpoint_path = output / "checkpoints" / f"global_step_{step}"

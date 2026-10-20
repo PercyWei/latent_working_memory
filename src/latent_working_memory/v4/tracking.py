@@ -31,6 +31,7 @@ METRICS = (
     "dev/write_loss_before",
     "train/grad_norm",
     "train/epoch",
+    "train/stage",
     "resources/optimizer_step_seconds",
     "resources/peak_memory_allocated_gib",
 )
@@ -105,6 +106,20 @@ def training_tracking(config, run, device, resume=False):
             fcntl.flock(lock, fcntl.LOCK_EX)
             api = swanlab.Api(api_key=api_key)
             configure_write_loss_panels(api, api.run(f"{project_path}/{tracking.id}"))
+        configure_metrics(tracking, device)
+        if not resume and "continuation" in run:
+            rng = capture_rng(device)
+            try:
+                for line in (root / "metrics.jsonl").read_text(encoding="utf-8").splitlines():
+                    record = json.loads(line)
+                    values = {
+                        name: value for name, value in record.items()
+                        if name.startswith(("train/", "dev/"))
+                    }
+                    if values:
+                        log_metrics(tracking, {"step": record["step"], **values})
+            finally:
+                restore_rng(rng, device)
         yield tracking
 
 
@@ -218,10 +233,11 @@ def validate_evaluation_publication(run, checkpoint_path, step):
     if json.loads((root / "run.json").read_text(encoding="utf-8")) != run:
         raise ValueError("checkpoint run differs from the original training directory")
     result = json.loads((root / "summary.json").read_text(encoding="utf-8"))
+    initial_step = run["continuation"]["step"] if "continuation" in run else 0
     if (
         not result["complete"]
         or type(step) is not int
-        or not 0 < step <= result["completed_steps"]
+        or not initial_step < step <= result["completed_steps"]
         or checkpoint_path != root / "checkpoints" / f"global_step_{step}"
         or Path(result["checkpoint"]).resolve()
         != root / "checkpoints" / f"global_step_{result['completed_steps']}"
