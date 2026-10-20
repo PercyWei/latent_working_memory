@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261020 10:59:18 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261020 14:50:30 Asia/Shanghai（UTC+08:00）
 
 ## 1. 数据位置与评估协议
 
@@ -108,48 +108,41 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 ```
 
 - 独立评估统一使用 `--evaluate-only`。本节须设置 `--eval-type benchmark`，并通过 `--benchmark` 指定 `ruler` 或 `locomo`；该参数默认 `null`，在 benchmark 模式下不可为空。省略 `--eval-type` 时为 test 评估，仅传 benchmark 名称不会自动切换。
-- `--checkpoint` 后可列出同一 run 的多个目录；或改用 `--eval-run artifacts/v4/<run-id>/train/conditioned-query-m32/`，扫描其中全部 `checkpoints/global_step_*/state.pt`。两者互斥；拒绝重复、跨 run 或同时缺少权重与完整评估缓存的 checkpoint。多 GPU 时每卡一个进程并行评估不同 checkpoint，命令示例见[运行指南](../scripts/README.md#22-单独评估)。
-- 默认沿用 `plan/<method-dir>/<ruler|locomo>.json` 中的数据目录；首次计算没有该配置时，必须传入 `--benchmark-data`。RULER 指向包含各长度子目录的目录，LoCoMo 指向包含 `locomo10.json` 的目录。
+- `--checkpoint` 后可列出同一 run 的多个目录；或改用 `--eval-run artifacts/v4/<run-id>/train/conditioned-query-m32/`，选择其中仍保留 `state.pt` 的全部 checkpoint。两者互斥；拒绝重复、跨 run 或缺少 `state.pt` 的 checkpoint。多 GPU 时每卡一个进程并行评估不同 checkpoint，命令示例见[运行指南](../scripts/README.md#22-单独评估)。
+- `--eval-id` 默认 `<run-id>-eval`，同一 run、方法下可包含 test、RULER 和 LoCoMo；各任务分别固定设置，换设置时使用新标识。默认沿用 `plan/<method-dir>/<eval-id>/<ruler|locomo>.json` 中的数据目录；首次计算没有该配置时，必须传入 `--benchmark-data`。RULER 指向包含各长度子目录的目录，LoCoMo 指向包含 `locomo10.json` 的目录。
 - 人工确认不同模型可复用同一批 RULER 样本时，用 `--benchmark-data` 指定已有模型目录，不自动判断 tokenizer 是否一致。
 - benchmark 模式不接受 test 专用的 `--test-data`、`--max-test-samples` 和 `--max-new-tokens`，`--lengths` 仅用于 RULER。以上评估参数不用于训练或恢复；下载脚本的同名 `--benchmark` 参数仍按第 2 节选择下载范围。
 - 模型配置与 memory 权重取自 checkpoint，tokenizer 从配置中的本地基座模型目录加载；GPU 通过 `--gpus` 指定。
-- 产物统一由 checkpoint 推导到原实验的 `eval/<method-dir>/<ruler|locomo>/global_step_N/`，单个、多个 checkpoint 与 `--eval-run` 使用同一规则。
-- 同类评估共用 `plan/<method-dir>/<ruler|locomo>.json`，记录实际数据内容、模型／分词、生成与官方评分设置，不重复保存 seed。评估始终读取创建后固定的公共 `config.json` seed，不接受评估 `--seed`；checkpoint 评估快照与结果记录实际值，补评估与历史 seed 不一致时报错。已有协议后须保持一致，配置冲突时报错。每个 checkpoint 另存协议快照、逐样本详细记录 `details.jsonl` 及计算完成标记 `summary.json`。
-- 相同 checkpoint、相同协议且已有完整汇总时直接复用，不重新加载模型或生成答案；缺少汇总时在原目录从头计算。本地结果先于在线发布保存，发布失败后重跑原命令可复用结果补传。
-- tracking、设备与报告展示不改变计算协议，可先离线计算再在线发布，也可将单 checkpoint 结果用于完整报告。
-- 在线发布要求训练已完成、云端原 SwanLab run 为 `FINISHED`；`--tracking disabled` 仅保存本地结果。各 benchmark 合并此前已发布结果与本次选中结果，按真实 optimizer step 排序重建完整报告，其他离线结果须明确选择后才发布。单 checkpoint 用汇总图展示任务／长度或 QA 类别分数；多 checkpoint 曲线以真实 step 为横轴，滑块表示独立递增的报告发布版本。
-- `eval/<method-dir>/<benchmark>/swanlab.json` 统一保存最新成功报告的 run 身份、成员 `summary.json` 路径、报告签名、发布版本和面板信息；上传并核验成功后原子更新，失败时保留此前成功记录。内容相同时仅检查、修复布局；同一 run 已发布的其他评估面板复用云端媒体恢复，不重算或增加报告版本。复用历史汇总无需保留对应 checkpoint 权重。
-- 任务级 `eval/<method-dir>/<benchmark>/status.json` 保存任务信息、本轮选择 `selected_checkpoints`、整体状态与进度 `progress`，以及 `checkpoints` 中以 `global_step_N` 为键的最近详细执行状态；补评估保留未选中的旧条目，整体状态与进度仅统计本轮选择。各 checkpoint 的日志保存在 `global_step_N/eval.log`；某个 checkpoint 失败后继续其余 checkpoint，最后汇总结果并报错。
-- 复用项目的 checkpoint 加载、流式生成、资源记录和发布流程，评分沿用上述固定官方源码；不计算答案 NLL。
+- 产物统一由 checkpoint 推导到原实验的 `eval/<method-dir>/<eval-id>/<ruler|locomo>/global_step_N/`，单个、多个 checkpoint 与 `--eval-run` 使用同一规则。
+- 同一 eval-id 的同类任务共用配置，记录实际数据、模型／分词、生成与官方评分设置，不重复保存 seed。评估始终读取公共 `config.json` seed，不接受评估 `--seed`；快照与结果保存实际值，与已有结果不一致时报错。对选中的 checkpoint，已有完整且设置一致的结果直接复用；设置不一致则报错。
+- RULER 的 `--lengths` 按集合比较，允许保持或扩展为超集，缩减或替换集合时报错。扩展后更新任务配置的目标长度，按 checkpoint × length 复用完整结果，只补算缺失长度；已有长度的样本及其余设置仍须一致。
+- 每个长度保存到 `global_step_N/lengths/<length>/{summary.json,details.jsonl}`；checkpoint 顶层的同名文件汇总实际完成的长度。失败时保留已完成长度，重跑补缺；缺失长度必须有权重才能计算，原有结果仍可独立查看。LoCoMo 缺少完整汇总时从头计算。
+- 评估仅在终端输出重要指标并保存本地结果，不使用 SwanLab；看板直接读取已有汇总，不依赖训练是否完成、云端身份或 checkpoint 权重。
+- 任务级 `eval/<method-dir>/<eval-id>/<benchmark>/status.json` 保存任务信息、本轮选择 `selected_checkpoints`、整体状态与进度 `progress`，以及 `checkpoints` 中以 `global_step_N` 为键的最近详细执行状态；补评估保留未选中的旧条目，整体状态与进度仅统计本轮选择。各 checkpoint 的日志保存在 `global_step_N/eval.log`；某个 checkpoint 失败后继续其余 checkpoint，最后汇总结果并报错。
+- 复用项目的 checkpoint 加载、流式生成和资源记录，评分沿用上述固定官方源码；不计算答案 NLL。
 
 
-## 4. 加入 full-context 基线
+## 4. 看板与 full-context 基线
 
-先按 [full-context 运行说明](../../baselines/README.md) 独立计算基线，只保存终端与本地结果。一次按“标签＋基线运行的 `eval/` 目录”成对传入 v4：
+启动 Streamlit + ECharts 看板，必须用 `--run-dir` 指定单次 run；页面内选择方法、eval-id 和 checkpoint，仅加载当前打开的评估任务，无需重跑评估：
 
 ```bash
-bash src/latent_working_memory/v4/scripts/run.sh \
-  --evaluate-only --eval-type benchmark --benchmark ruler --gpus 0 \
-  --checkpoint artifacts/v4/<run-id>/train/conditioned-query-m32/checkpoints/global_step_N \
-  --benchmark-data data/benchmarks/ruler-v1/Qwen3-4B-Instruct-2507 \
-  --baseline-results full-context artifacts/baselines/full-context/qwen3-4b_full-context/eval
+bash src/latent_working_memory/v4/scripts/dashboard.sh \
+  --run-dir artifacts/v4/<run-id>
 ```
 
-- `--baseline-results` 仅用于独立 benchmark 的在线展示，不用于 test、训练或 `--tracking disabled`。标签用于图例且不可重复；目录须为 `<output-root>/full-context/<run-id>/eval/`，当前只支持 full-context 格式。发布时读取所选 benchmark 的 `summary.json`，尚未计算时告警跳过该项；路径、格式或对照协议错误仍报错，主方法计算结果已保存。
-- 基座模型、精度、attention 实现、窗口、实际样本及生成评分协议须一致；数据目录可以不同，按样本指纹校验。基线不会改变 v4 评估协议。
-- 单 checkpoint 按任务／长度或 QA 类别加入分组柱；多 checkpoint 保持真实 step 曲线，并添加 full-context 水平虚线。
-- 每次传入完整基线集合，不保存或自动沿用绑定；省略某项即移除该项展示，完全不传时只展示当前方法。`swanlab.json` 仅保留当前方法报告的常规发布记录。
-
-已有完整评估结果的 run 可直接调整展示，例如同时加入两组基线：
+先按 [full-context 运行说明](../../baselines/README.md) 独立计算基线，再按“标签＋基线运行的 `eval/` 目录”成对传给看板：
 
 ```bash
-bash src/latent_working_memory/v4/scripts/run.sh \
-  --evaluate-only --eval-type benchmark --benchmark ruler \
-  --eval-run artifacts/v4/<run-id>/train/conditioned-query-m32 \
+bash src/latent_working_memory/v4/scripts/dashboard.sh \
+  --run-dir artifacts/v4/<run-id> \
   --baseline-results \
     full-context artifacts/baselines/full-context/qwen3-4b_full-context/eval \
     reference artifacts/baselines/full-context/reference/eval
 ```
 
-- 保留原训练运行信息、SwanLab 身份和成员 `summary.json`，云端 run 须为 `FINISHED`；恢复已发布成员还需保留发布记录。无论是否传入基线，已有完整缓存时都不加载原 checkpoint 权重、基座模型、tokenizer 或 benchmark 原始数据；历史结果缺失时明确报错。
-- `--eval-run` 在 checkpoint 权重全部清理时使用已发布报告的成员；也可通过 `--checkpoint` 指定已有缓存的原 checkpoint 目录。选中尚未评估且仍有权重的 checkpoint 时，先正常计算，再按本次基线集合与真实 step 重建报告。
+- `--baseline-results` 是看板应用参数，不参与评估计算。标签用于图例且不可重复；目录须为基线运行的 `full-context/<run-id>/eval/`，当前仅支持 full-context 格式。
+- 页面可勾选本次传入的基线；不保存绑定，不传时只展示当前方法。基线缺少当前 benchmark 的 `summary.json` 时跳过；路径、格式或比较协议错误在页面提示，已保存结果不受影响。
+- 基座模型、精度、attention 实现、窗口、实际样本及生成评分协议须一致；数据目录可以不同，按样本指纹校验。基线不会改变 v4 评估协议。
+- 单 checkpoint 按任务／长度或 QA 类别加入分组柱；多 checkpoint 按真实累计 step 升序绘图，并加入基线水平虚线。RULER 总体曲线使用各 checkpoint 实际完成的长度，长度范围在汇总表显示，不额外对齐；长度范围不同可能影响总体分数。补评估或调整基线后点击“刷新结果”重新读取，不缓存。
+- 看板直接显示汇总中保存的实际 seed 和指标；同步时保留 `<run-id>/eval/` 目录结构即可，无需 `plan/`、训练记录或权重。逐样本记录 `details.jsonl` 按需读取。更多启动参数见[运行指南](../scripts/README.md#25-评估看板)。

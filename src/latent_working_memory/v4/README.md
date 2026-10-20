@@ -2,7 +2,7 @@
 
 创建时间：20261003 21:51:43 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261020 10:59:18 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261020 14:50:30 Asia/Shanghai（UTC+08:00）
 
 冻结基座，在每层维护 latent memory，通过 Attention Matching 局部更新记忆，并由答案 CE 学习如何生成压缩查询和读写记忆。
 
@@ -148,41 +148,42 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - NLL 按答案 token 加权，EM／F1 按 QA 平均；EM／F1 使用小写化、去标点及英文冠词、合并空白后的短答评分。这是当前单参考答案协议，不是官方 QASPER 多参考评测。
 - NLL 与生成各自初始化记忆；生成仅接收 prompt，参考答案不进入生成路径。
 - test 沿用固定正文下限及模型窗口上限；生成预算超过剩余窗口时缩至可用长度，记录实际预算，不改变样本筛选。续训可更换数据，但 test 正文仍须与本次及来源计划已知的 train/dev 正文不重叠；来源正文 ID 合并保存在 `run.json.continuation.documents`，恢复和评估无需读取来源原始数据。
-- 独立评估统一使用 `--evaluate-only`，通过 `--checkpoint <目录1> <目录2> ...` 指定同一 run 的一个或多个 checkpoint，或通过 `--eval-run` 指定 `artifacts/v4/<run-id>/train/<method-dir>/`，扫描其中全部 `checkpoints/global_step_*/state.pt`。两者互斥；不接受重复、跨 run 或缺少 `state.pt` 的未完成 checkpoint。多 GPU 时每卡一个进程并行评估不同 checkpoint，全部计算结束后由父进程统一发布。
+- 独立评估统一使用 `--evaluate-only`，通过 `--checkpoint <目录1> <目录2> ...` 指定同一 run 的一个或多个 checkpoint，或通过 `--eval-run` 指定 `artifacts/v4/<run-id>/train/<method-dir>/`，选择其中仍保留 `state.pt` 的全部 checkpoint。两者互斥；不接受重复、跨 run 或缺少 `state.pt` 的 checkpoint。多 GPU 时每卡一个进程并行评估不同 checkpoint，全部计算结束后汇总执行状态。
+- `--eval-id` 标识当前 run、方法下的一组评估，默认 `<run-id>-eval`；一个标识可同时包含 test、RULER 和 LoCoMo，各任务分别维护设置。新设置使用新的 `--eval-id`，不覆盖原结果；该参数仅用于独立评估，完整运行的最终 test 使用默认标识。
 - 独立评估由 `--eval-type` 选择 `test`（默认）或 `benchmark`。benchmark 模式须通过 `--benchmark` 指定 `ruler` 或 `locomo`，该参数默认 `null`，不用于自动切换评估类型。批量评估中某个 checkpoint 失败后继续其余 checkpoint，最终汇总结果并报错。
 - 新训练用 `--data` 指定完整数据集目录，训练、验证与自动 test 分别读取其中的 `train.jsonl`、`dev.jsonl` 和 `test.jsonl`；`--test-data` 可单独覆盖自动 test 数据目录。
 - 独立 test 默认沿用保存的评估配置中的数据目录和生成上限；没有该配置时，必须传入 `--test-data`，生成上限默认 128 tokens。`--test-data` 默认 `null`，显式传入时覆盖本次评估数据目录并读取其中的 `test.jsonl`，不修改训练配置。benchmark 沿用已保存的同类评估配置；没有该配置时，必须传入 `--benchmark-data` 指定数据目录。
 - 评估类型、benchmark 名称及 benchmark 专用参数仅用于 `--evaluate-only`；不控制自动 test 或训练中 dev。test 不接受 benchmark 参数；benchmark 不接受 `--test-data`、`--max-test-samples` 或 `--max-new-tokens`，`--lengths` 仅用于 RULER。
-- 评估结果由 checkpoint 推导到原实验的 `eval/<method-dir>/<test|ruler|locomo>/global_step_N/`，单个、多个 checkpoint 与 `--eval-run` 使用同一目录规则。
-- 同一方法、同类评估共用 `plan/<method-dir>/<test|ruler|locomo>.json` 计算协议，记录实际数据内容、模型／分词、筛选、生成与评分设置。评估始终读取公共 `config.json` 的 seed，共用评估配置不重复保存；checkpoint 评估快照与结果记录实际 seed，补评估不一致时报错。独立评估不接受 `--seed`；已有协议后须保持一致。相同 checkpoint、相同协议且已有完整 `summary.json` 时直接复用，不重新加载模型；缺少汇总的未完成评估在原目录从头计算，配置冲突则报错。
-- 本地汇总先于在线发布保存，发布失败可重跑原命令补传。tracking、设备分配与报告展示不改变计算协议，可先离线计算，再复用结果在线发布。benchmark 已有完整缓存时，无论是否传入基线，都可仅用结果更新展示，无需原权重、模型或原始数据；`--eval-run` 在权重全部清理时使用已发布报告的成员。
+- 评估结果由 checkpoint 推导到原实验的 `eval/<method-dir>/<eval-id>/<test|ruler|locomo>/global_step_N/`，单个、多个 checkpoint 与 `--eval-run` 使用同一目录规则。
+- 同一 `eval-id` 的每项任务共用 `plan/<method-dir>/<eval-id>/<test|ruler|locomo>.json`，固定实际数据、模型／分词、筛选、生成与评分设置。评估始终读取公共 `config.json` 的 seed，不接受评估 `--seed`；任务配置不重复保存 seed，快照和结果记录实际值。对选中的 checkpoint，已有完整且设置一致的结果直接复用；设置不一致则报错，换设置时使用新 `eval-id`。
+- RULER 的 `lengths` 按集合比较，允许保持或扩展为超集；扩展后更新目标长度列表，按 checkpoint × length 复用完整结果，只补算缺失长度。已有长度的样本及其余设置须一致；缩减或替换长度集合时报错。新长度须保留权重，失败后已完成长度仍可复用。各 checkpoint 的汇总按实际完成长度合并，总体曲线直接按真实 step 绘制，实际长度在汇总表中显示。
+- 评估仅保存本地结果并在终端输出重要指标，不上传 SwanLab。展示由独立看板读取已有汇总，无需重新评估、保留 checkpoint 权重或加载模型和原始数据。
 - Benchmark 使用官方原始格式，每题独立初始化记忆，输入只应用一次 chat template。严格检查输入与任务生成预算的总长度，不截断或套用训练筛选；数据位置、手动准备指令和评估协议见 [benchmark 说明](benchmarks/README.md)。
 - 汇总包含模型各层 slots、维度、总 latent 元素及字节数，以及评估耗时、局部写入耗时和峰值显存。计量范围随结果保存，不将 latent 状态大小视为整个模型显存。
 
-### 4.2 SwanLab 与本地产物
+### 4.2 训练记录与评估看板
 
-- 默认在线记录到 `latent-working-memory-v4`，使用与 v3 相同的 `SWANLAB_API_KEY` 配置；`--tracking disabled` 仅保存本地。相关 runs 通过 `group` 关联，`job_type=train`，固定 tags 为 `scope:main`、`method:attention-matching`，数据和研究标签通过配置补充。
-- `--run-id` 标识实验系列；方法目录按 `<query_mode>-query-m<num_slots>` 自动生成，例如 `conditioned-query-m32`。SwanLab 名称为 `<method-dir>_<run-id>`。
-- train/dev 在同一 run 中按真实 optimizer step 追加原生曲线。新 run 续训重放来源 train/dev 指标前缀，后续图表与 checkpoint 使用累计 step；新增预算及验证／保存间隔按新运行本地 step 计算。各分区的 `write_loss` 图合并写入前后两条曲线，以浅色／深色区分；底层分别保存 `write_loss_before` 和 `write_loss`，均先按层、再按写入事件平均。
-- `train/epoch` 表示累计训练进度，`train/stage` 用累计 optimizer step 展示训练阶段：原始训练为 0，每次 `--fork-train` 从来源 checkpoint 所属阶段加 1，继承前缀保留各自阶段；`--resume` 保持不变。从早期 checkpoint 分叉时，以该点的阶段为准。
-- QASPER test 沿用原训练的在线设置和身份。单 checkpoint 的 NLL、EM／F1 合并为 `evaluation/quality` 双轴柱图：NLL 左轴从 0 自适应，EM／F1 右轴固定 0–1；写入前后 AM loss 独立展示。在线发布要求训练已完成、云端原 run 为 `FINISHED`。辅助计数与逐题结果保存在本地。
-- Benchmark 结果同样追加到原 run，分别用 `evaluation/ruler` 汇总任务／长度、`evaluation/locomo` 汇总 QA 类别及总体分数。可通过 `--baseline-results <标签> <目录> ...` 加入独立计算的 [full-context 基线](../baselines/README.md)：标签用于图例，单 checkpoint 使用分组柱对照，多 checkpoint 使用水平虚线。每次传入完整集合，不保存基线绑定；不传时只展示当前方法。基线仅在发布时读取，尚无当前 benchmark 汇总时告警跳过；路径、格式或对照协议错误仍报错，本地评估结果保留。
-- QASPER 与每个 benchmark 分别维护完整报告：合并此前已发布结果与本次选中结果，按真实 optimizer step 排序后重建。单 checkpoint 使用汇总图，多 checkpoint 的曲线以真实 step 为横轴；媒体滑块表示独立递增的报告发布版本，补评估更早的 checkpoint 后仍按 step 升序展示。
-- 各评估目录的 `swanlab.json` 只保存最新成功报告的 run 身份、成员 `summary.json` 路径、报告签名、发布版本和面板信息。上传并核验成功后原子更新，失败时保留此前成功记录；内容相同时仅检查、修复布局。每次在线发布都会恢复同一 run 已成功发布的 test、RULER 和 LoCoMo 面板，复用已上传媒体，不重算其他任务或增加其报告版本。其他离线结果须明确选择后才发布，复用历史汇总无需保留对应 checkpoint 权重。
+- **训练记录**：SwanLab 保留训练过程的指标、资源统计及运行配置，包括 `train/*`、`dev/*` 和 `resources/*`；资源指标为 optimizer step 耗时及 CUDA 峰值显存。默认项目为 `latent-working-memory-v4`，使用项目 `.env` 的 `SWANLAB_API_KEY`；`--tracking disabled` 仅保存本地。相关 runs 通过 `group` 关联，`job_type=train`，固定 tags 为 `scope:main`、`method:attention-matching`，数据和研究标签通过配置补充。
+- **运行身份**：`--run-id` 标识实验系列；方法目录为 `<query_mode>-query-m<num_slots>`，例如 `conditioned-query-m32`；SwanLab 名称为 `<method-dir>_<run-id>`。
+- **曲线与续训**：train/dev 按真实 optimizer step 追加原生曲线，`write_loss` 合并写入前后两条曲线，以浅色／深色区分。底层分别保存 `write_loss_before` 和 `write_loss`，均先按层、再按写入事件平均。新 run 续训重放来源指标前缀，图表与 checkpoint 使用累计 step；新增预算及验证／保存间隔按本地 step 计算。
+- **训练阶段**：`train/epoch` 表示累计训练进度；`train/stage` 原始训练为 0，每次 `--fork-train` 取来源 checkpoint 所属阶段加 1，继承前缀保留原阶段，`--resume` 保持不变。
+- **评估看板**：通过 [dashboard.sh](scripts/dashboard.sh) 的必填参数 `--run-dir artifacts/v4/<run-id>` 指定单次 run，页面内选择方法、eval-id 和 checkpoint，仅加载当前打开的 test／RULER／LoCoMo 任务。读取本地汇总及其实际 seed，不缓存，点击“刷新结果”后重新读取；同步时保留 `<run-id>/eval/` 目录结构即可，无需 `plan/`、训练记录或权重。
+- **图表组织**：单 checkpoint 的 test 将 NLL、EM／F1 合并为双轴柱图，写入前后 AM loss 单独展示；benchmark 按任务／长度或 QA 类别汇总。多 checkpoint 按真实累计 optimizer step 升序绘图，补评估较早 checkpoint 后顺序保持一致。逐样本记录按需读取。
+- **基线对照**：看板通过 `--baseline-results <标签> <目录> ...` 接收 [full-context 基线](../baselines/README.md)，在页面勾选显示。每次仅使用当前传入集合，不保存绑定；缺少当前 benchmark 结果时跳过，路径、格式或比较协议错误在页面提示，不影响评估计算。单 checkpoint 加入分组柱，多 checkpoint 加入水平虚线，启动命令见[运行指南](scripts/README.md#25-评估看板)。
 
 | 位置 | 主要产物 |
 |---|---|
 | `plan/<method-dir>/` | `config.json` 公共模型配置与 seed、`train.json` 流程设置与训练配置 |
-| `plan/<method-dir>/<test\|ruler\|locomo>.json` | 同类评估共用配置 |
+| `plan/<method-dir>/<eval-id>/<test\|ruler\|locomo>.json` | 同一评估标识内各任务的配置 |
 | `train/<method-dir>/` | `train.log`、执行状态 `status.json`、运行信息与数据统计 `run.json`（续训来源在 `continuation`）、指标 `metrics.jsonl`、在线运行身份 `swanlab.json`、checkpoint 与训练摘要 `summary.json`（完成情况、进度统计、最终 checkpoint 路径） |
-| `eval/<method-dir>/<test\|ruler\|locomo>/` | 任务级 `status.json` 保存本轮任务信息、选择、进度及各 checkpoint 最近执行状态；`swanlab.json` 保存最新成功发布的完整报告记录 |
-| `eval/<method-dir>/<test\|ruler\|locomo>/global_step_N/` | 日志 `eval.log`、协议快照 `eval.json`、指标汇总与完成标记 `summary.json`、逐样本详细记录 `details.jsonl`；test 的完整数据统计保存在 `summary.json` 的 `data_statistics` 字段 |
+| `eval/<method-dir>/<eval-id>/<test\|ruler\|locomo>/` | 任务级 `status.json` 保存本轮任务信息、选择、进度及各 checkpoint 最近执行状态 |
+| `eval/<method-dir>/<eval-id>/<test\|ruler\|locomo>/global_step_N/` | 日志 `eval.log`、协议快照 `eval.json`、指标汇总与完成标记 `summary.json`、逐样本详细记录 `details.jsonl`；test 的完整数据统计保存在 `summary.json` 的 `data_statistics` 字段；RULER 的 `lengths/<length>/` 分别保存该长度的 `summary.json` 与 `details.jsonl` |
 
 共同父目录为 `artifacts/v4/<run-id>/`。详细文件和命令见[运行指南](scripts/README.md)。
 
 训练 `status.json` 保存命令、GPU、起止时间、返回码和失败原因等执行状态；训练结果统一从同目录的 `summary.json` 读取。
 
-评估任务级 `status.json` 的 `selected_checkpoints` 记录本轮选择，整体状态与 `progress` 仅统计这些 checkpoint；`checkpoints` 以 `global_step_N` 为键，保留各 checkpoint 最近一次的命令、GPU、起止时间、返回码及计算／发布失败详情。补评估保留未选中的旧条目，不累计每次尝试历史。结果复用与完成判定以 `summary.json` 为准，成功发布记录以 `swanlab.json` 为准。
+评估任务级 `status.json` 的 `selected_checkpoints` 记录本轮选择，整体状态与 `progress` 仅统计这些 checkpoint；`checkpoints` 以 `global_step_N` 为键，保留各 checkpoint 最近一次的命令、GPU、起止时间、返回码及失败详情。补评估保留未选中的旧条目，不累计每次尝试历史；结果复用与完成判定以 `summary.json` 为准。
 
 ## 五、代码职责
 
@@ -195,6 +196,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 | 保存恢复与实验记录 | [checkpoint.py](checkpoint.py)、[tracking.py](tracking.py) |
 | 评估协议、结果复用、模型加载与计时 | [evaluation_records.py](evaluation_records.py)、[evaluation_runtime.py](evaluation_runtime.py) |
 | QASPER 评估 | [evaluate.py](evaluate.py) |
+| 评估看板与图表 | [dashboard.py](dashboard.py)、[reporting.py](reporting.py) |
 | Benchmark 公共读取与评分、v4 评估 | [公共 data.py](../benchmarks/data.py)、[公共 scoring.py](../benchmarks/scoring.py)、[v4 evaluate.py](benchmarks/evaluate.py) |
 
 ```bash
