@@ -168,7 +168,9 @@ bash src/latent_working_memory/v4/scripts/dashboard.sh \
 ```
 
 - 在页面中选择方法、eval-id 和 checkpoint，在不同评估任务页签间切换；仅读取和绘制当前任务，点击“刷新结果”重新读取本地结果。
-- 单 checkpoint 展示指标汇总，多 checkpoint 按真实累计 step 升序绘图；指标表与逐样本记录可在页面查看。RULER 总体分数按各 checkpoint 实际完成的长度计算，长度范围显示在汇总表中，不额外对齐。
+- 单 checkpoint 展示指标汇总，多 checkpoint 按真实累计 step 升序绘图；指标表与逐样本记录可在页面查看，基线排在当前方法之前。
+- RULER 用折线图比较各长度的 Mean，选择长度后用分组柱图展示 13 项任务，只显示实际完成的长度，同一方法保持同色。任务横轴使用 `single_1/2/3`、`multik_1/2/3`、`multiv`、`multiq` 等缩写，`vt`、`cwe`、`fwe`、`qa_1/2` 保持原名；悬停显示完整任务名。
+- RULER 多 checkpoint 可选择 Overall 或具体长度查看 step 曲线，再选择一个 checkpoint 查看长度总览和任务明细。Overall 按各 checkpoint 实际完成的长度计算，长度范围显示在汇总表中，不额外对齐。
 - 要展示 baseline 结果时，在启动命令后追加 `--baseline-results <标签> <基线运行的 eval/ 目录> ...`，可传入多组，标签不可重复。页面可勾选本次传入的基线，不保存绑定，不传时不展示。
 - 缺少当前 benchmark 汇总时跳过；路径、格式或比较设置不一致时在页面提示，不影响已有结果。
 - 地址和端口保存在 [`.streamlit/config.toml`](../../../../.streamlit/config.toml)，修改后须重启看板；临时更换端口时，在启动命令前加 `STREAMLIT_SERVER_PORT=8502`。

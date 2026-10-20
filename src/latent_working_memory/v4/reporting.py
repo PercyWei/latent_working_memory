@@ -9,11 +9,32 @@ from pyecharts import charts
 from latent_working_memory.benchmarks.data import RULER_TASKS
 
 
-def evaluation_charts(summaries, baselines=None):
+RULER_TASK_LABELS = {
+    "niah_single_1": "single_1",
+    "niah_single_2": "single_2",
+    "niah_single_3": "single_3",
+    "niah_multikey_1": "multik_1",
+    "niah_multikey_2": "multik_2",
+    "niah_multikey_3": "multik_3",
+    "niah_multivalue": "multiv",
+    "niah_multiquery": "multiq",
+    "vt": "vt",
+    "cwe": "cwe",
+    "fwe": "fwe",
+    "qa_1": "qa_1",
+    "qa_2": "qa_2",
+}
+
+
+def evaluation_charts(summaries, baselines=None, ruler_length=None):
     """summaries 按真实累计 step 排序；RULER 各 checkpoint 可覆盖不同长度。"""
     baselines = {} if baselines is None else baselines
     if baselines and "benchmark" not in summaries[0]:
         raise ValueError("baseline results apply only to benchmark reports")
+    if summaries[0].get("benchmark") == "ruler":
+        if len(summaries) == 1:
+            return {"evaluation/ruler_lengths": _ruler_lengths_chart(summaries[0], baselines)}
+        return {"evaluation/ruler": _ruler_progress_chart(summaries, baselines, ruler_length)}
     if len(summaries) == 1:
         summary = summaries[0]
         return (
@@ -85,65 +106,101 @@ def _baseline_color(label, index=None, count=0):
 def _benchmark_charts(summary, baselines):
     metrics = summary["metrics"]
     method = Path(summary["training_run"]).name
-    chart = charts.Bar()
-    if summary["benchmark"] == "ruler":
-        chart.add_xaxis([*RULER_TASKS, "平均"])
-        grouped = {(row["length"], row["task"]): row["score"] for row in metrics["groups"]}
-        lengths = sorted(metrics["by_length"], key=lambda row: row["length"])
-        for baseline_label, baseline in baselines.items():
-            reference_groups = {
-                (row["length"], row["task"]): row["score"]
-                for row in baseline["metrics"]["groups"]
-            }
-            reference_lengths = {
-                row["length"]: row["score"] for row in baseline["metrics"]["by_length"]
-            }
-            for index, row in enumerate(lengths):
-                label = f"{row['length'] / 1024:g}K"
-                reference = [reference_groups.get((row["length"], task)) for task in RULER_TASKS]
-                chart.add_yaxis(
-                    f"{baseline_label} / {label}",
-                    [
-                        100 * value if value is not None else None
-                        for value in (*reference, reference_lengths.get(row["length"]))
-                    ],
-                    label_opts={"show": False},
-                    itemstyle_opts={"color": _baseline_color(baseline_label, index, len(lengths))},
-                )
-        for index, row in enumerate(lengths):
-            values = [grouped[(row["length"], task)] for task in RULER_TASKS]
-            label = f"{row['length'] / 1024:g}K"
-            chart.add_yaxis(
-                f"{method} / {label}",
-                [100 * value for value in (*values, row["score"])],
-                label_opts={"show": False},
-                itemstyle_opts={"color": _group_color(index, len(lengths))},
-            )
-    else:
-        groups = sorted(metrics["groups"], key=lambda row: row["category"])
-        chart.add_xaxis([*[row["category_name"] for row in groups], "总体"])
-        for baseline_label, baseline in baselines.items():
-            reference_groups = {
-                row["category"]: row["score"] for row in baseline["metrics"]["groups"]
-            }
-            chart.add_yaxis(
-                baseline_label,
-                [100 * reference_groups[row["category"]] for row in groups]
-                + [100 * baseline["metrics"]["score"]],
-                label_opts={"show": False},
-                itemstyle_opts={"color": _baseline_color(baseline_label)},
-            )
+    groups = sorted(metrics["groups"], key=lambda row: row["category"])
+    chart = charts.Bar().add_xaxis([*[row["category_name"] for row in groups], "总体"])
+    for baseline_label, baseline in baselines.items():
+        reference_groups = {
+            row["category"]: row["score"] for row in baseline["metrics"]["groups"]
+        }
         chart.add_yaxis(
-            method,
-            [100 * row["score"] for row in groups] + [100 * metrics["score"]],
+            baseline_label,
+            [100 * reference_groups[row["category"]] for row in groups]
+            + [100 * baseline["metrics"]["score"]],
             label_opts={"show": False},
-            itemstyle_opts={"color": "#31688e"},
+            itemstyle_opts={"color": _baseline_color(baseline_label)},
         )
+    chart.add_yaxis(
+        method,
+        [100 * row["score"] for row in groups] + [100 * metrics["score"]],
+        label_opts={"show": False},
+        itemstyle_opts={"color": "#31688e"},
+    )
     chart.set_global_opts(
         tooltip_opts={"trigger": "axis"},
         yaxis_opts={"name": f"{metrics['metric']} (%)", "min": 0, "max": 100},
     )
     return {f"evaluation/{summary['benchmark']}": chart}
+
+
+def _ruler_lengths_chart(summary, baselines):
+    lengths = sorted(row["length"] for row in summary["metrics"]["by_length"])
+    chart = charts.Line().add_xaxis([f"{length / 1024:g}K" for length in lengths])
+    methods = [
+        (label, baseline, _baseline_color(label)) for label, baseline in baselines.items()
+    ]
+    methods.append((Path(summary["training_run"]).name, summary, "#31688e"))
+    for label, result, color in methods:
+        values = {row["length"]: 100 * row["score"] for row in result["metrics"]["by_length"]}
+        chart.add_yaxis(
+            label, [values.get(length) for length in lengths],
+            color=color, is_symbol_show=True, symbol="circle", symbol_size=6,
+            label_opts={"show": False},
+            linestyle_opts={"color": color, "width": 2},
+            itemstyle_opts={"color": color},
+        )
+    chart.set_global_opts(
+        tooltip_opts={"trigger": "axis"},
+        legend_opts={"type": "scroll"},
+        xaxis_opts={"name": "Context length", "type": "category", "axisLabel": {"interval": 0}},
+        yaxis_opts={"name": "Mean accuracy (%)", "min": 0, "max": 100},
+    )
+    return chart
+
+
+def ruler_task_chart(summary, length, baselines=None):
+    """只绘制一个长度的任务分数；短标签用于横轴，完整任务名用于悬停提示。"""
+    baselines = {} if baselines is None else baselines
+    chart = charts.Bar().add_xaxis([RULER_TASK_LABELS[task] for task in RULER_TASKS])
+    methods = [
+        (label, baseline, _baseline_color(label)) for label, baseline in baselines.items()
+    ]
+    methods.append((Path(summary["training_run"]).name, summary, "#31688e"))
+    for label, result, color in methods:
+        values = {
+            (row["length"], row["task"]): row["score"] for row in result["metrics"]["groups"]
+        }
+        chart.add_yaxis(
+            label,
+            [{"name": task, "value": 100 * values[(length, task)]} for task in RULER_TASKS],
+            label_opts={"show": False},
+            itemstyle_opts={"color": color},
+        )
+    chart.set_global_opts(
+        tooltip_opts={"trigger": "item", "formatter": "{b}<br/>{a}: {c}%"},
+        legend_opts={"type": "scroll"},
+        xaxis_opts={"type": "category", "axisLabel": {"interval": 0, "hideOverlap": False}},
+        yaxis_opts={"name": "Accuracy (%)", "min": 0, "max": 100},
+    )
+    return chart
+
+
+def _ruler_progress_chart(summaries, baselines, length):
+    steps = [summary["checkpoint"]["step"] for summary in summaries]
+    method = Path(summaries[0]["training_run"]).name
+    values = []
+    for summary in summaries:
+        by_length = {row["length"]: row["score"] for row in summary["metrics"]["by_length"]}
+        value = summary["metrics"]["score"] if length is None else by_length.get(length)
+        values.append(100 * value if value is not None else None)
+    references = []
+    for label, baseline in baselines.items():
+        by_length = {row["length"]: row["score"] for row in baseline["metrics"]["by_length"]}
+        value = baseline["metrics"]["score"] if length is None else by_length.get(length)
+        references.append((
+            label, [100 * value if value is not None else None] * len(steps),
+            _baseline_color(label),
+        ))
+    return _line_chart(steps, [(method, values, "#31688e")], "Mean accuracy (%)", 100, references)
 
 
 def _line_chart(steps, series, unit, maximum=None, references=()):
@@ -218,9 +275,7 @@ def _checkpoint_charts(summaries, baselines):
 def _benchmark_checkpoint_charts(summaries, steps, baselines):
     first = summaries[0]
     benchmark = first["benchmark"]
-    group_field, identity_field = (
-        ("by_length", "length") if benchmark == "ruler" else ("groups", "category")
-    )
+    group_field, identity_field = "groups", "category"
     groups = {
         row[identity_field]: row
         for summary in summaries
@@ -233,7 +288,7 @@ def _benchmark_checkpoint_charts(summaries, steps, baselines):
     ]
     series = [("总体", [100 * summary["metrics"]["score"] for summary in summaries], "#1d3f55")]
     for index, row in enumerate(groups):
-        label = f"{row['length'] / 1024:g}K" if benchmark == "ruler" else row["category_name"]
+        label = row["category_name"]
         series.append(
             (
                 label,
@@ -257,7 +312,7 @@ def _benchmark_checkpoint_charts(summaries, steps, baselines):
             _baseline_color(baseline_label),
         ))
         for index, row in enumerate(groups):
-            label = f"{row['length'] / 1024:g}K" if benchmark == "ruler" else row["category_name"]
+            label = row["category_name"]
             references.append((
                 f"{baseline_label} / {label}",
                 [

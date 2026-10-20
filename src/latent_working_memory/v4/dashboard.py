@@ -10,7 +10,7 @@ import streamlit as st
 
 from latent_working_memory.baselines.results import load_baseline_results
 from latent_working_memory.v4.evaluation_records import load_completed_evaluations
-from latent_working_memory.v4.reporting import evaluation_charts
+from latent_working_memory.v4.reporting import evaluation_charts, ruler_task_chart
 
 
 TASKS = ("test", "ruler", "locomo")
@@ -20,7 +20,8 @@ CHART_LABELS = {
     "evaluation/nll": "NLL",
     "evaluation/em_f1": "EM / F1",
     "evaluation/write_loss": "Attention Matching loss",
-    "evaluation/ruler": "RULER",
+    "evaluation/ruler": "RULER 训练进度",
+    "evaluation/ruler_lengths": "RULER 长度总览",
     "evaluation/locomo": "LoCoMo",
 }
 
@@ -190,9 +191,54 @@ def _render_task(directory, task, baseline_results):
         _baseline_selection(baseline_results, task, summaries, key) if task != "test" else {}
     )
     st.dataframe(_summary_rows(task, summaries, baselines), hide_index=True)
-    for name, chart in evaluation_charts(summaries, baselines).items():
+    ruler_length = None
+    if task == "ruler" and len(summaries) > 1:
+        lengths = sorted(
+            {group["length"] for summary in summaries for group in summary["metrics"]["by_length"]}
+        )
+        ruler_length = st.selectbox(
+            "训练进度长度",
+            [None, *lengths],
+            format_func=lambda value: "Overall" if value is None else f"{value:,} tokens",
+            key=f"{key}:progress-length",
+        )
+    for name, chart in evaluation_charts(summaries, baselines, ruler_length=ruler_length).items():
         st.subheader(CHART_LABELS[name])
         st.echarts_chart(chart, height=460, theme=None, key=f"{key}:{name}")
+    if task == "ruler":
+        summary = summaries[0]
+        if len(summaries) > 1:
+            checkpoints = {summary["checkpoint"]["step"]: summary for summary in summaries}
+            step = st.selectbox(
+                "明细 checkpoint",
+                list(checkpoints),
+                index=len(checkpoints) - 1,
+                format_func=lambda value: f"global_step_{value}",
+                key=f"{key}:task-checkpoint",
+            )
+            summary = checkpoints[step]
+            for name, chart in evaluation_charts([summary], baselines).items():
+                st.subheader(CHART_LABELS[name])
+                st.echarts_chart(
+                    chart,
+                    height=460,
+                    theme=None,
+                    key=f"{key}:{step}:{name}",
+                )
+        lengths = sorted(group["length"] for group in summary["metrics"]["by_length"])
+        length = st.selectbox(
+            "任务明细长度",
+            lengths,
+            format_func=lambda value: f"{value:,} tokens",
+            key=f"{key}:{summary['checkpoint']['step']}:task-length",
+        )
+        st.subheader(f"RULER 任务明细 · {length:,} tokens")
+        st.echarts_chart(
+            ruler_task_chart(summary, length, baselines),
+            height=460,
+            theme=None,
+            key=f"{key}:{summary['checkpoint']['step']}:tasks:{length}",
+        )
     with st.expander("评估配置与统计"):
         step = st.selectbox(
             "汇总 checkpoint",
