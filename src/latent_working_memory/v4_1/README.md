@@ -1,0 +1,177 @@
+# 20261027_v4.1 在线 TTT 记忆
+
+创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
+
+最后修订时间：20261027 16:50:38 Asia/Shanghai（UTC+08:00）
+
+每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
+
+[运行指南](scripts/README.md) · [默认配置](../../../configs/v4-1/online_ttt_memory.json) · [框架笔记](../../../notes/v4-1/20261022_online_ttt_memory_framework.md)
+
+## 1. 计算与执行流程
+
+| 环节 | 当前实现 |
+|---|---|
+| 输入处理 | Memory 保存已压缩历史；pending 保存待压缩原始 KV；recent 保存近期原始 KV 与 queries |
+| 记忆写入 | Pending 达到阈值后，固定本轮 recent queries，执行多步 inner AM，将旧 memory 与 pending 合并 |
+| 训练监督 | 每次写入后计算 outer AM；全文处理后固定 memory，输入问题和答案，计算答案 CE |
+| 外层更新 | 通过完整写入轨迹学习初始化、KV／bias 解码器、正步长与 attention Q/K/V LoRA |
+| 推理 | 固定慢参数，沿用在线写入；正文处理完成后固定 memory，追加问题 KV 并自回归生成 |
+
+首版支持 full-attention Qwen3、固定 default RoPE、单设备、microbatch 1，不启用随机 dropout。Inner 使用 recent 自然读取；outer 使用固定文本提示与 teacher 自然响应。Latent query 生成器与 self-study 保留为研究候选。
+
+### 1.1 记忆接口与在线边界
+
+每层状态为 $M^{(\ell)}\in\mathbb R^{m\times d_m}$。逐 slot 的 SiLU MLP 解码出 memory keys、values 和 attention bias，与原始 KV 拼接后参与显式 attention。Memory 没有额外 query 行：真实 token 可以读取全部 memory，原始 KV 保持因果可见性。
+
+- 每个独立 QA 样本从可学习的 $M_0^{(\ell)}$ 开始；首次写入前不挂载 memory KV。
+- 累计压缩长度为 $T$ 时，memory slot $i$ 的 RoPE 位置为 $Ti/m$；真实 token 保留绝对位置。保留的原始 KV 不重算、不重新旋转。
+- 一个 token 完成全部层前向后才移动窗口。Recent 溢出到 pending；pending 达到 $L_p$ 时写入，清空 pending，保留 recent。
+- 第 $j$ 次写入发生在已处理 $jL_p+L_r$ tokens 时，压缩范围终点为 $jL_p$。计数包含固定输入模板前缀；默认首次边界为 1280，之后间隔 1024。
+- 两个边界之间可分块 prefill，分块不跨越写入时点。正文尾部未满的 pending 继续保留；问题与响应阶段仅追加原始 KV，不再触发写入。
+
+### 1.2 Inner 与 outer 的参照分工
+
+| 项目 | Inner AM | Outer AM |
+|---|---|---|
+| Queries 来源 | Recent 正常前向的逐层 queries | 固定基座在完整已到达历史上的提示与响应 queries |
+| Teacher 局部区域 | 旧 memory + pending；首次只有 pending | 从历史起点到本轮压缩终点的原始 KV |
+| Student 局部区域 | 当前候选 memory | 本轮更新完成后的 memory |
+| 计算时机 | 每轮写入，训练与推理相同 | 离线准备 teacher；训练时每轮计算 student |
+
+Outer teacher 输入包含该边界已到达的完整原始历史，**包括 recent**；但局部压缩目标排除 recent、提示与响应 KV。Teacher 不使用 student 的 LoRA。Inner 只使用在线仍可取得的旧 memory 与 pending。
+
+对已包含位置编码的 query/key，局部 attention 为：
+
+$$
+s_i=\frac{q^\top k_i}{\sqrt{d_h}}+\beta_i,\qquad
+o=\sum_i\operatorname{softmax}(s)_i v_i,\qquad
+z=\operatorname{logsumexp}_i(s_i).
+$$
+
+AM 等权相加局部输出 $o$ 与 log-mass $z$ 的标准化 MSE；$z$ 是归一化前总权重的对数。Teacher 尺度 $\sigma_o,\sigma_z$ 按层和 query head 计算并固定，标准化只进入损失；memory bias 同时用于正式 attention。
+
+Inner 每轮使用全部 recent 位置，固定 queries 与 teacher 的数值，执行 $S_{\mathrm{in}}$ 步无动量 SGD。每层步长 $\eta_\ell=\operatorname{softplus}(a_\ell)$ 由 outer 学习；跨轮仅延续 memory，无额外 inner optimizer 状态。固定本轮参照不表示截断它对此前写入的元梯度。
+
+Outer 对单样本计算：
+
+$$
+\mathcal L=\operatorname{mean}_{\text{答案 tokens}}\mathrm{CE}
++\lambda_{\mathrm{AM}}\operatorname{mean}_{\text{压缩轮次}}\mathcal L_{\mathrm{AM}}.
+$$
+
+AM 内部先对查询／通道、再对 heads 与层取平均；训练 batch 对完整样本损失取平均。每轮包括最后一轮均有 inner 与 outer AM。无压缩的样本只有 QA 损失。
+
+### 1.3 精度与梯度
+
+基座原有权重冻结。Meta-training 保留 inner 二阶梯度、跨写入轮次依赖及 memory 对后续表示的影响；非重入激活重计算复用本次确定的状态与采样。推理仍需为局部 TTT 启用 autograd，不能用 `torch.inference_mode()` 包住整个过程。
+
+基座默认 BF16；memory、解码器、局部 AM、可训练参数、梯度累积及 AdamW 状态使用 FP32。主 attention 的 scores 与 softmax 使用 FP32，权重与挂载的 memory KV 转为主干精度后聚合。完整跨轮训练图的开销随轨迹增长，固定在线缓存不意味着训练显存固定。
+
+## 2. 数据与 teacher 缓存
+
+### 2.1 QA 数据
+
+数据目录保存 `train.jsonl`、`dev.jsonl`、`test.jsonl`。每行一篇正文，字段固定如下；同篇文档的所有 QA 放在一行：
+
+```json
+{"text":"完整正文","qas":[{"question":"问题","answer":"答案"}]}
+```
+
+一篇文档的每条 QA 展开为独立样本。正文、问题和答案按固定模板分别分词后拼接；正文部分包含系统提示与聊天前缀，答案包含 assistant 结束符。文档标识由正文确定，因此同一文档的 QA 共用 teacher 缓存。
+
+长度筛选保留完整正文，不截断。Train/dev 的原始正文至少为 $L_p+L_r$ tokens，独立 test 不加该下限；`max_train_data_tokens` 只限制 train 原始正文的 token 数，不含模板；模型窗口限制覆盖全部输入。Train/dev 数量上限按 seed 与稳定 QA 标识选取一次，train 每个 epoch 打乱，dev 固定。原始文档集合用于检查划分之间的重叠。
+
+公共 benchmark 沿用已有任务的完整 prompt 与官方评分：完整 prompt（含问题）作为在线输入，prefill 结束后固定 memory 再生成。不从 prompt 文本猜测正文与问题边界，这与上述显式 QA 分段协议分别记录。
+
+### 2.2 参考池与缓存内容
+
+固定提示库使用 [Latent Compaction 官方的 480 条组合提示](https://github.com/THUNLP/latent-compaction/blob/81cfd4b3f30f820fb5f76451cb0f6385e0ac9510/latent_compaction/prompts.py)，来源与许可见 [teacher/prompts.py](teacher/prompts.py)。每个文档、每个压缩边界独立准备：
+
+1. 以完整已到达原文为共同前缀，各提示独立贪心生成，最多 24 个新 token，遇 EOS 结束。
+2. 从提示与响应位置中，用 reservoir sampling 均匀、无放回保留 4096 个位置；包含最后生成 token 可提供的 query。位置以“提示编号、序列内位置”区分，不要求 query 数值不同。
+3. 回放含选中位置的提示／响应分支，缓存逐层 queries $q$、局部输出 $o^T$、log-mass $z^T$，以及在完整 4096 位置上统计的固定尺度。候选不足即准备失败，不复制位置或缩小池。
+4. 每次 outer AM 从完整池均匀、无放回抽取 128 个位置，各层与 heads 共用索引；下次重新从完整池抽样，本次反向与重计算保持索引不变。
+
+缓存根目录包含 `identity.json`，每个边界保存为 `documents/<document_id>/write_<j>.safetensors`，$j$ 从 1 开始。先生成再回放增加离线前向，以避免同时常驻所有提示分支；缓存不持久化完整历史 KV。
+
+| 张量 | 形状；$L$ 为层数，$H_q$ 为 query heads，$d_h$ 为 head 维度 |
+|---|---|
+| `queries`、`outputs` | $[L,N_{\mathrm{pool}},H_q,d_h]$ |
+| `log_mass` | $[L,N_{\mathrm{pool}},H_q]$ |
+| `scales_o`、`scales_z` | $[L,H_q]$ |
+| `positions` | $[N_{\mathrm{pool}},2]$，提示编号与序列内位置；采样接口返回 `position_indices` |
+
+缓存绑定 teacher、tokenizer、输入模板、提示库、窗口边界、候选池、尺度规则与 seed。相关设置改变时重新准备；训练仅将本轮抽样位置送入 student。独立 test／benchmark 推理不依赖 teacher 缓存。
+
+上述主要监督张量使用 FP32，单边界磁盘量约为 $4LN_{\mathrm{pool}}H_q(2d_h+1)$ 字节，再乘文档数与各文档边界数。离线准备应据此安排磁盘容量；每次训练采样 128 位置不减少固定池的存储量。
+
+## 3. 配置
+
+唯一 JSON 结构为 `seed`、`model`、`teacher`、`training`，未知字段报错。缺省字段采用 [config.py](config.py) 中的默认值；[正式配置](../../../configs/v4-1/online_ttt_memory.json) 显式列出全部设置。路径支持 `~`，相对路径以运行目录为基准，脚本统一切到项目根目录。
+
+### 3.1 Memory 与 inner：`model`
+
+| 字段 | 符号／默认值 | 含义 |
+|---|---|---|
+| `model_name_or_path` | `~/models/Qwen3-4B-Instruct-2507` | 本地 Qwen3 基座与 tokenizer |
+| `backbone_dtype` | `bfloat16` | 也可用 `float32` |
+| `num_slots`／`memory_dim` | $m=256$／$d_m=512$ | 每层 memory 形状 |
+| `pending_size`／`recent_size` | $L_p=1024$／$L_r=256$ | 在线窗口容量 |
+| `decoder_hidden_dim` | $d_{\mathrm{dec}}=1024$ | SiLU 解码器中间维度 |
+| `init_std` | $\sigma_{\mathrm{init}}=0.02$ | $M_0$ 的正态初始化标准差 |
+| `inner_steps`／`inner_lr_init` | $S_{\mathrm{in}}=3$／$\eta_{\ell,0}=1$ | 每轮更新步数与初始正步长 |
+| `am_std_floor` | $\sigma_{\min}=10^{-4}$ | Inner／outer 固定尺度下限 |
+| `lora_rank`／`lora_alpha`／`lora_dropout` | $r=16$／$\alpha=32$／$p=0$ | Q/K/V LoRA；首版固定 dropout 为 0 |
+| `gradient_checkpointing` | `true` | 非重入激活重计算 |
+| `prefill_chunk_size`／`loss_chunk_size` | 256／256 | 正文前向与答案 CE 的工程分块 |
+
+解码器权重使用 Xavier uniform（gain 1），偏置为 0；LoRA A 使用 Kaiming uniform，B 为 0。层数、KV heads、query heads 与 head 维度沿用基座，不另设超参数。
+
+### 3.2 Outer 参考：`teacher`
+
+| 字段 | 符号／默认值 | 含义 |
+|---|---|---|
+| `num_prompts` | $N_{\mathrm{prompt}}=480$ | 24 类文档请求 × 20 条响应指令 |
+| `response_max_tokens` | $L_{\mathrm{resp}}=24$ | 每条 teacher 响应的新 token 上限 |
+| `pool_size` | $N_{\mathrm{pool}}=4096$ | 每边界须填满的固定候选池 |
+| `am_sample_size` | $N_{\mathrm{AM}}=128$ | 每次均匀、无放回采样；下次重抽 |
+
+### 3.3 Outer 训练与运行：`training`
+
+| 字段 | 默认值 | 含义 |
+|---|---|---|
+| `dataset_dir` | `data/delta-mem-qasper` | QA 数据目录 |
+| `teacher_cache_dir` | `artifacts/v4-1/online-ttt-memory/teacher` | 已准备的 train/dev 参照 |
+| `output_dir` | `null` | 启动时通过 `--output-dir` 指定 |
+| `max_steps` | $S_{\mathrm{outer}}=1000$ | Outer optimizer steps |
+| `micro_batch_size`／`gradient_accumulation_steps` | 1／8 | 单卡全局 batch 为 8；epoch 尾批按实际样本数平均 |
+| `learning_rate`／`lora_learning_rate` | $10^{-4}$／$2\times10^{-5}$ | 新增参数／LoRA 峰值学习率 |
+| `weight_decay` | 0.01 | 仅解码器权重矩阵；其他慢参数为 0 |
+| `beta1`／`beta2`／`adam_epsilon` | 0.9／0.999／$10^{-8}$ | Outer AdamW |
+| `warmup_steps`／`min_lr_ratio` | 50／0.1 | 线性 warmup 后 cosine 降到峰值的 0.1 |
+| `gradient_clip`／`lambda_am` | 1／1 | Outer 全局梯度范数上限／outer AM 权重 |
+| `dev_every`／`save_every`／`save_total_limit` | 50／100／2 | 验证与保存步距，保留最近两个 checkpoint |
+| `max_train_data_tokens` | 12288 | Train 原始正文长度上限；`null` 关闭 |
+| `max_train_samples`／`max_dev_samples` | `null`／`null` | 过滤后的独立 QA 数量上限 |
+| `tracking`／`swanlab_project` | `disabled`／`latent-working-memory-v4` | 可设 `swanlab`，复用当前研究项目 |
+| `group`／`tags` | `null`／`[]` | 开启 SwanLab 时显式指定 group；自定义 tags 使用命名空间 |
+
+公共 `seed=42` 控制初始化、数据选样、训练顺序与 outer 查询采样。Checkpoint 保存实际配置、慢参数、optimizer、scheduler、数据游标、随机状态与数据／缓存身份；基座权重不重复保存。恢复使用同一配置和绑定数据，评估从 checkpoint 读取配置。
+
+## 4. 代码与结果
+
+```text
+v4_1/
+  config.py              # 唯一配置结构与输入校验
+  data.py                # QA 编码、样本选择、压缩边界
+  modeling/              # Memory 解码、局部 AM、Qwen3 接入与在线状态
+  teacher/               # 固定提示、离线准备、缓存采样
+  training/              # 元训练、验证、checkpoint
+  evaluation/            # QA／benchmark 评估与 HTML 展示
+  scripts/               # 环境与设备入口、可复制命令
+```
+
+训练的 `qa_loss` 是样本内答案 token 平均 CE，`outer_am` 是完整历史参照下的写入质量，`inner_before`／`inner_after` 是局部更新诊断。Inner loss 下降不能直接说明 QA 有效。正式实验应结合生成得分、逐题回答及资源成本分析。
+
+检查点位于 `checkpoints/global_step_<N>/state.pt`。独立评估保存汇总与逐题 JSONL，报告读取已有结果生成 HTML；输出中的换行、特殊空白与异常字符可显式查看。具体命令、产物字段与运行限制见[运行指南](scripts/README.md)。真实 Qwen3-4B 的训练稳定性、GPU 成本和 benchmark 效果需通过实际运行确认。

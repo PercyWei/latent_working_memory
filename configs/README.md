@@ -1,7 +1,7 @@
 # 20260914_配置组织规则
 
 创建时间：20260914 11:48:20 UTC+08:00
-最后修订时间：20261008 17:39:11 UTC+08:00
+最后修订时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
 
@@ -39,6 +39,10 @@ configs/
 - `experiment.json` 引用本实验需要的配置，并明确训练预算（预训练为 epoch 数）、保存安排、设备、最终评估和运行记录参数。动态阶段从预训练 checkpoint 取得的模型结构无需在本地再复制一份；文件按实际职责设置，不为凑齐固定文件数创建空配置。
 
 ## 实验与实验组
+
+### v4.1 在线 TTT 配置
+
+[v4-1/online_ttt_memory.json](v4-1/online_ttt_memory.json) 以 `seed`、`model`、`teacher`、`training` 统一描述当前实验，默认逐层 256 slots、pending/recent 1024/256、inner 3 步、单卡全局 batch 8。Teacher 缓存独立准备，训练与评估命令见 [v4.1 运行指南](../src/latent_working_memory/v4_1/scripts/README.md)。
 
 ### v2 固定容量重构配置
 
