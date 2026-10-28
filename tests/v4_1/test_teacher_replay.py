@@ -54,12 +54,12 @@ def test_batched_replay_matches_native_full_context(tiny_setup, dtype):
         for handle in handles:
             handle.remove()
 
-    replay = TeacherReplay(model, prefill_chunk_size=5, branch_batch_size=1)
+    replay = TeacherReplay(model, prefill_chunk_size=5, batch_size=1)
     prefix = DynamicCache(config=model.config)
     replay.advance(context, prefix, len(context))
     original_prefix = [(layer.keys.clone(), layer.values.clone()) for layer in prefix.layers]
     for batch_size in (1, 3):
-        replay.branch_batch_size = batch_size
+        replay.batch_size = batch_size
         actual = {name: torch.empty_like(value) for name, value in expected.items()}
 
         def collect(layer_index, pool_indices, query, outputs, log_mass):

@@ -24,7 +24,7 @@
     "response_max_tokens": 24,
     "pool_size": 4096,
     "am_sample_size": 128,
-    "branch_batch_size": 4
+    "batch_size": 4
   },
   "training": {
     "dataset_dir": "data/delta-mem-qasper",

@@ -19,13 +19,13 @@ def load_teacher(model_config, device):
 
 
 class TeacherReplay:
-    def __init__(self, model, prefill_chunk_size, branch_batch_size):
+    def __init__(self, model, prefill_chunk_size, batch_size):
         if model.config.model_type != "qwen3":
             raise ValueError("v4.1 teacher currently supports native Qwen3 only")
         self.model = model.eval().requires_grad_(False)
         self.device = next(model.parameters()).device
         self.prefill_chunk_size = prefill_chunk_size
-        self.branch_batch_size = branch_batch_size
+        self.batch_size = batch_size
 
     @torch.no_grad()
     def forward(self, tokens, cache, logits=False):
@@ -79,8 +79,8 @@ class TeacherReplay:
             handles.append(layer.self_attn.register_forward_pre_hook(capture_rotary, with_kwargs=True))
             handles.append(layer.self_attn.q_norm.register_forward_hook(query_hook(index)))
         try:
-            for start in range(0, len(branches), self.branch_batch_size):
-                indices = branches[start:start + self.branch_batch_size]
+            for start in range(0, len(branches), self.batch_size):
+                indices = branches[start:start + self.batch_size]
                 lengths = [max(position for _, position in selected[index]) + 1 for index in indices]
                 max_length, batch_size = max(lengths), len(indices)
                 if prefix_length + max_length > self.model.config.max_position_embeddings:

@@ -14,7 +14,7 @@ from latent_working_memory.v4_1.config import (
 )
 from latent_working_memory.v4_1.data import Episode
 from latent_working_memory.v4_1.teacher.cache import build_cache_identity, initialize_cache
-from latent_working_memory.v4_1.teacher.prepare import TeacherPreparer
+from latent_working_memory.v4_1.teacher.prepare import TeacherPreparer, plan_preparation
 from latent_working_memory.v4_1.teacher.replay import load_teacher
 
 
@@ -61,7 +61,8 @@ def tiny_setup(tmp_path):
     cache = initialize_cache(config.training.teacher_cache_dir, build_cache_identity(config, tokenizer))
     episode = Episode("document:0", "document", tuple(range(3, 23)), (5, 6, 7), (8, 9, 1))
     preparer = TeacherPreparer(teacher, config, cache)
-    preparer.prepare_document(episode.document_id, episode.context_ids)
+    jobs = plan_preparation({episode.document_id: episode.context_ids}, config, cache, 1)
+    preparer.prepare_document(jobs[0][0])
     try:
         yield SimpleNamespace(
             config=config, tokenizer=tokenizer, teacher=teacher, cache=cache, episode=episode,

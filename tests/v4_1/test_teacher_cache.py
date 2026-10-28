@@ -1,4 +1,4 @@
-"""响应缓存保留固定池语义；流式尺度与完整位置池统计一致。"""
+"""响应缓存保留固定池语义；融合尺度与独立回放统计一致。"""
 
 import torch
 from transformers import GenerationConfig
@@ -6,7 +6,6 @@ from transformers.cache_utils import DynamicCache
 
 from latent_working_memory.v4_1.modeling.am import teacher_scales
 from latent_working_memory.v4_1.teacher.cache import build_cache_identity
-from latent_working_memory.v4_1.teacher.prepare import PoolScales
 from latent_working_memory.v4_1.teacher.replay import TeacherReplay
 
 
@@ -41,21 +40,12 @@ def test_compact_cache_scales_equal_full_pool_statistics(tiny_setup):
         log_mass[layer, indices] = mass
 
     replay.replay(prefix, sequences, cached["positions"], record["compressed_end"], collect)
-    stream = PoolScales(base.num_hidden_layers, base.num_attention_heads, base.head_dim)
     for layer in range(base.num_hidden_layers):
-        # 改变批次划分，并用低 floor 检查真实方差，避免只验证 clamp 的结果。
-        for indices in (torch.tensor([7, 2, 5]), torch.tensor([0]), torch.tensor([6, 1, 4, 3])):
-            stream.update(layer, indices, None, outputs[layer, indices], log_mass[layer, indices])
         expected_o, expected_z = teacher_scales(
             outputs[layer], log_mass[layer], setup.config.model.am_std_floor
         )
         torch.testing.assert_close(cached["scales_o"][layer], expected_o, rtol=1e-6, atol=1e-7)
         torch.testing.assert_close(cached["scales_z"][layer], expected_z, rtol=1e-6, atol=1e-7)
-    actual = stream.finish(setup.config.teacher.pool_size, 1e-6)
-    for layer in range(base.num_hidden_layers):
-        expected_o, expected_z = teacher_scales(outputs[layer], log_mass[layer], 1e-6)
-        torch.testing.assert_close(actual["scales_o"][layer], expected_o, rtol=1e-6, atol=1e-7)
-        torch.testing.assert_close(actual["scales_z"][layer], expected_z, rtol=1e-6, atol=1e-7)
     # 生成停止条件属于缓存身份；tokenizer 的单个 EOS 不能代替模型的 EOS 集合。
     generation = GenerationConfig.from_pretrained(setup.config.model.model_name_or_path)
     generation.eos_token_id = [2, 1, 2]

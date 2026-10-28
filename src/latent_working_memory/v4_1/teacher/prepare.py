@@ -1,88 +1,70 @@
 """从完整、未压缩的已到达历史准备 outer AM 监督，不读取下游 QA。"""
 
 import argparse
+from dataclasses import dataclass, replace
 import hashlib
+import os
 import random
 
 import torch
+import torch.multiprocessing as mp
 from transformers import AutoTokenizer
 from transformers.cache_utils import DynamicCache
 
 from ..config import load_config
 from ..data import compression_boundaries, load_episodes
-from .cache import build_cache_identity, content_identity, initialize_cache
+from .cache import TeacherCache, build_cache_identity, content_identity, initialize_cache
+from .generation import generate_reference_pool
 from .replay import TeacherReplay, load_teacher
 
 
-def reservoir_positions(lengths, pool_size, rng):
-    """对全部真实位置做等概率无放回抽样；不足固定容量时明确失败。"""
-    reservoir = []
-    count = 0
-    for prompt_index, length in enumerate(lengths):
-        for position in range(length):
-            count += 1
-            if len(reservoir) < pool_size:
-                reservoir.append((prompt_index, position))
+@dataclass(frozen=True)
+class PreparationJob:
+    document_id: str
+    context_ids: tuple[int, ...]
+    boundaries: tuple[tuple[int, int, int], ...]
+
+
+def plan_preparation(documents, config, cache, num_workers):
+    """校验已存边界，按剩余边界的历史长度估算工作量，整篇文档分配给一张卡。"""
+    jobs = []
+    for document_id, context_ids in documents.items():
+        context_identity = content_identity(context_ids)
+        boundaries = compression_boundaries(
+            len(context_ids), config.model.pending_size, config.model.recent_size
+        )
+        missing = []
+        for write_index, processed_end, compressed_end in boundaries:
+            if cache.path(document_id, write_index).exists():
+                record = cache.metadata(document_id, write_index)
+                if (
+                    (record["processed_end"], record["compressed_end"])
+                    != (processed_end, compressed_end)
+                    or record["context_tokens"] != context_identity
+                ):
+                    raise ValueError(f"{document_id} write={write_index}: cached context or boundary differs")
             else:
-                replacement = rng.randrange(count)
-                if replacement < pool_size:
-                    reservoir[replacement] = (prompt_index, position)
-    if count < pool_size:
-        raise ValueError(
-            f"teacher generated {count} candidate positions, below required pool_size={pool_size}; "
-            "increase prompt/response coverage rather than duplicating positions"
-        )
-    return torch.tensor(reservoir, dtype=torch.int64), count
-
-
-class PoolScales:
-    """按层和 head 合并均值与 M2，仅保留完整位置池的 FP64 统计量。"""
-
-    def __init__(self, layers, query_heads, head_dim, device=None):
-        self.head_dim = head_dim
-        self.counts = [0] * layers
-        self.mean_o = torch.zeros(layers, query_heads, dtype=torch.float64, device=device)
-        self.mean_z = torch.zeros_like(self.mean_o)
-        self.m2_o = torch.zeros_like(self.mean_o)
-        self.m2_z = torch.zeros_like(self.mean_o)
-
-    @staticmethod
-    def _combine(mean, m2, old_count, batch_count, batch_variance, batch_mean):
-        total = old_count + batch_count
-        delta = batch_mean - mean
-        m2.add_(batch_variance * batch_count + delta.square() * (old_count * batch_count / total))
-        mean.add_(delta * (batch_count / total))
-
-    def update(self, layer_index, pool_indices, queries, outputs, log_mass):
-        count = outputs.shape[0]
-        variance_o, mean_o = torch.var_mean(outputs.double(), dim=(0, 2), correction=0)
-        variance_z, mean_z = torch.var_mean(log_mass.double(), dim=0, correction=0)
-        old_count = self.counts[layer_index]
-        self._combine(
-            self.mean_o[layer_index], self.m2_o[layer_index], old_count * self.head_dim,
-            count * self.head_dim, variance_o, mean_o,
-        )
-        self._combine(
-            self.mean_z[layer_index], self.m2_z[layer_index], old_count,
-            count, variance_z, mean_z,
-        )
-        self.counts[layer_index] += count
-
-    def finish(self, pool_size, floor):
-        if any(count != pool_size for count in self.counts):
-            raise ValueError("scale statistics must cover every cached position in every layer")
-        return {
-            "scales_o": (self.m2_o / (pool_size * self.head_dim)).sqrt().float().clamp_min(floor).cpu(),
-            "scales_z": (self.m2_z / pool_size).sqrt().float().clamp_min(floor).cpu(),
-        }
+                missing.append((write_index, processed_end, compressed_end))
+        if missing:
+            jobs.append(PreparationJob(document_id, context_ids, tuple(missing)))
+        else:
+            print(f"teacher {document_id}: all {len(boundaries)} boundaries cached", flush=True)
+    shards = [[] for _ in range(min(num_workers, len(jobs)))]
+    loads = [0] * len(shards)
+    weighted_jobs = [(sum(end for _, end, _ in job.boundaries), job) for job in jobs]
+    for cost, job in sorted(weighted_jobs, key=lambda item: (-item[0], item[1].document_id)):
+        rank = min(range(len(shards)), key=loads.__getitem__)
+        shards[rank].append(job)
+        loads[rank] += cost
+    return shards
 
 
 class TeacherPreparer:
-    """逐提示保存响应；固定位置池仅用于流式尺度统计，不保存稠密监督张量。"""
+    """批量生成响应；固定位置池仅用于流式尺度统计，不保存稠密监督张量。"""
 
     def __init__(self, model, config, cache):
         self.replay = TeacherReplay(
-            model, config.model.prefill_chunk_size, config.teacher.branch_batch_size
+            model, config.model.prefill_chunk_size, config.teacher.batch_size
         )
         self.model = model
         self.config = config
@@ -90,101 +72,50 @@ class TeacherPreparer:
         self.prompts = cache.identity["prompt_token_ids"]
         self.eos_ids = set(cache.identity["eos_token_ids"])
 
-    def _generate(self, prefix):
-        responses = []
-        for prompt_index, prompt in enumerate(self.prompts):
-            branch = DynamicCache(ddp_cache_data=prefix)
-            result = self.replay.forward(prompt, branch, logits=True)
-            response = []
-            for _ in range(self.config.teacher.response_max_tokens):
-                token = int(result.logits[0, -1].argmax())
-                response.append(token)
-                if token in self.eos_ids:
-                    break
-                if len(response) < self.config.teacher.response_max_tokens:
-                    result = self.replay.forward([token], branch, logits=True)
-            # 最后生成的 token 会在下一次回放中实际前向，保证其 query 也在候选池中。
-            responses.append(tuple(response))
-            del result, branch
-            if (prompt_index + 1) % 48 == 0:
-                print(f"teacher rollout prompts={prompt_index + 1}/{len(self.prompts)}", flush=True)
-        return responses
-
-    def _collect(self, prefix_cache, responses, positions, compressed_end):
-        architecture = self.cache.identity["architecture"]
-        scales = PoolScales(
-            architecture["layers"], architecture["query_heads"], architecture["head_dim"],
-            self.replay.device,
-        )
-        sequences = [(*prompt, *response) for prompt, response in zip(self.prompts, responses)]
-        self.replay.replay(prefix_cache, sequences, positions, compressed_end, scales.update)
-        lengths = torch.tensor([len(response) for response in responses], dtype=torch.int64)
-        return {
-            "response_token_ids": torch.tensor(
-                [token for response in responses for token in response], dtype=torch.int64
-            ),
-            "response_offsets": torch.cat((lengths.new_zeros(1), lengths.cumsum(0))),
-            "positions": positions,
-            **scales.finish(self.config.teacher.pool_size, self.config.model.am_std_floor),
-        }
-
     @torch.no_grad()
-    def prepare_document(self, document_id, context_ids):
-        boundaries = compression_boundaries(
-            len(context_ids), self.config.model.pending_size, self.config.model.recent_size
-        )
-        context_identity = content_identity(context_ids)
-        cached = set()
-        for write_index, processed_end, compressed_end in boundaries:
-            path = self.cache.path(document_id, write_index)
-            if path.exists():
-                record = self.cache.metadata(document_id, write_index)
-                if (
-                    record["processed_end"] != processed_end
-                    or record["compressed_end"] != compressed_end
-                    or record["context_tokens"] != context_identity
-                ):
-                    raise ValueError(f"{path}: boundary or tokenized context does not match")
-                cached.add(write_index)
-        missing = [index for index, _, _ in boundaries if index not in cached]
-        if not missing:
-            print(f"teacher {document_id}: all {len(boundaries)} boundaries cached", flush=True)
-            return
+    def prepare_document(self, job):
+        document_id, context_ids = job.document_id, job.context_ids
         state = DynamicCache(config=self.model.config)
-        for write_index, processed_end, compressed_end in boundaries[:max(missing)]:
-            # 即使已有某边界缓存，后续边界也仍从完整原文继续 prefill。
+        for write_index, processed_end, compressed_end in job.boundaries:
+            # 跳过已有边界的生成，仍将此前完整原文追加到 teacher prefix KV。
             self.replay.advance(context_ids, state, processed_end)
-            if write_index in cached:
-                continue
             if processed_end + max(map(len, self.prompts)) + self.config.teacher.response_max_tokens > (
                 self.model.config.max_position_embeddings
             ):
                 raise ValueError(f"{document_id} write={write_index}: teacher branch exceeds model window")
             prefix = tuple((layer.keys, layer.values) for layer in state.layers)
             print(
-                f"teacher {document_id} write={write_index}/{len(boundaries)}: generating prompts",
+                f"teacher device={self.replay.device} {document_id} write={write_index}: generating references",
                 flush=True,
             )
-            responses = self._generate(prefix)
             seed = int.from_bytes(hashlib.blake2b(
                 f"{self.config.seed}:{document_id}:{write_index}".encode(), digest_size=8
             ).digest(), "little")
-            positions, candidate_count = reservoir_positions(
-                [len(prompt) + len(response) for prompt, response in zip(self.prompts, responses)],
-                self.config.teacher.pool_size,
-                random.Random(seed),
+            tensors, candidate_count = generate_reference_pool(
+                self.model, prefix, self.prompts, self.eos_ids,
+                self.config.teacher.response_max_tokens, self.config.teacher.batch_size,
+                compressed_end, self.config.teacher.pool_size, random.Random(seed),
+                self.config.model.am_std_floor,
             )
-            tensors = self._collect(state, responses, positions, compressed_end)
             self.cache.write(
                 document_id, write_index, tensors, processed_end, compressed_end,
                 context_ids, candidate_count,
             )
             print(
-                f"teacher {document_id} write={write_index} context={processed_end} "
-                f"compressed={compressed_end} candidates={candidate_count} pool={len(positions)}",
+                f"teacher device={self.replay.device} {document_id} write={write_index} context={processed_end} "
+                f"compressed={compressed_end} candidates={candidate_count} pool={len(tensors['positions'])}",
                 flush=True,
             )
-            del prefix, responses, tensors
+            del prefix, tensors
+
+
+def prepare_worker(rank, shards, config, cache_directory):
+    device = torch.device("cuda", rank)
+    torch.cuda.set_device(device)
+    cache = TeacherCache(cache_directory)
+    preparer = TeacherPreparer(load_teacher(config.model, device), config, cache)
+    for job in shards[rank]:
+        preparer.prepare_document(job)
 
 
 def main():
@@ -192,12 +123,18 @@ def main():
     parser.add_argument("--config", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--splits", nargs="+", choices=("train", "dev"), default=["train", "dev"])
+    parser.add_argument("--batch-size", type=int, help="每卡 teacher 批处理大小；默认使用配置值")
     args = parser.parse_args()
     config = load_config(args.config)
+    if args.batch_size is not None:
+        config = replace(config, teacher=replace(config.teacher, batch_size=args.batch_size))
+    if not os.environ.get("CUDA_VISIBLE_DEVICES"):
+        raise ValueError("set CUDA_VISIBLE_DEVICES to the GPUs used for teacher preparation")
+    num_workers = torch.cuda.device_count()
+    if num_workers == 0:
+        raise RuntimeError("teacher preparation requires a visible CUDA GPU")
     tokenizer = AutoTokenizer.from_pretrained(config.model.model_name_or_path)
-    model = load_teacher(config.model, "cuda:0")
     cache = initialize_cache(args.output_dir, build_cache_identity(config, tokenizer))
-    preparer = TeacherPreparer(model, config, cache)
     documents = {}
     split_documents = {}
     for split in args.splits:
@@ -205,7 +142,7 @@ def main():
             config.training.dataset_dir, tokenizer, split=split,
             min_text_tokens=config.model.pending_size + config.model.recent_size,
             max_text_tokens=config.training.max_train_data_tokens if split == "train" else None,
-            model_window=model.config.max_position_embeddings,
+            model_window=cache.identity["architecture"]["max_position_embeddings"],
             max_samples=(
                 config.training.max_train_samples if split == "train"
                 else config.training.max_dev_samples
@@ -219,8 +156,18 @@ def main():
         split_documents[split] = raw_ids
         for episode in episodes:
             documents[episode.document_id] = episode.context_ids
-    for document_id, context_ids in documents.items():
-        preparer.prepare_document(document_id, context_ids)
+    shards = plan_preparation(documents, config, cache, num_workers)
+    for rank, jobs in enumerate(shards):
+        print(
+            f"teacher cuda:{rank}: documents={len(jobs)} "
+            f"remaining_boundaries={sum(len(job.boundaries) for job in jobs)} "
+            f"batch_size={config.teacher.batch_size}",
+            flush=True,
+        )
+    if len(shards) == 1:
+        prepare_worker(0, shards, config, cache.directory)
+    elif shards:
+        mp.spawn(prepare_worker, args=(shards, config, cache.directory), nprocs=len(shards), join=True)
 
 
 if __name__ == "__main__":

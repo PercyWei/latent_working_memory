@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261028 17:41:11 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261028 20:38:00 Asia/Shanghai（UTC+08:00）
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
 
@@ -18,7 +18,7 @@
 | 外层更新 | 通过完整写入轨迹学习初始化、KV／bias 解码器、正步长与 attention Q/K/V LoRA |
 | 推理 | 固定慢参数，沿用在线写入；正文处理完成后固定 memory，追加问题 KV 并自回归生成 |
 
-首版支持 full-attention Qwen3、固定 default RoPE、单设备、microbatch 1，不启用随机 dropout。GPU 由 `CUDA_VISIBLE_DEVICES` 指定，准备、训练与评估使用首张可见卡。Inner 使用 recent 自然读取；outer 使用固定文本提示与 teacher 自然响应。Latent query 生成器与 self-study 保留为研究候选。
+首版支持 full-attention Qwen3、固定 default RoPE、训练 microbatch 1，不启用随机 dropout。GPU 由 `CUDA_VISIBLE_DEVICES` 指定：离线准备按文档分配到可见 GPU，训练与评估使用首张可见卡。Inner 使用 recent 自然读取；outer 使用固定文本提示与 teacher 自然响应。Latent query 生成器与 self-study 保留为研究候选。
 
 ### 1.1 记忆接口与在线边界
 
@@ -90,9 +90,13 @@ Train/dev 在同一设备保存独立 teacher 与 student，按边界顺序执�
 
 固定提示库使用 [Latent Compaction 官方的 480 条组合提示](https://github.com/THUNLP/latent-compaction/blob/81cfd4b3f30f820fb5f76451cb0f6385e0ac9510/latent_compaction/prompts.py)，来源与许可见 [teacher/prompts.py](teacher/prompts.py)。每个文档、每个压缩边界独立准备：
 
-1. 以完整已到达原文为共同前缀，各提示独立贪心生成，最多 24 个新 token，遇 EOS 结束，保存精确响应 token IDs。
-2. 从提示与响应位置中，用 reservoir sampling 均匀、无放回保留 4096 个位置，包含最后生成 token 可提供的 query。位置以“提示编号、序列内位置”区分；候选不足即准备失败，不复制位置或缩小池。
-3. 回放相关提示／响应分支，在完整 4096 位置上按层、query head 统计 $\sigma_o,\sigma_z$，应用尺度下限后保存。局部输出与 log-mass 仅用于统计，不持久化逐位置监督张量。
+1. 以完整已到达原文为共同前缀，按提示原顺序分批贪心生成，默认每卡 `batch_size=4`。每条最多 24 个新 token，遇 EOS 独立结束；最后一个 token 仍执行前向以取得其 query，不继续生成新答案。
+2. 在生成前向中，逐层计算真实提示／响应位置的局部 attention 输出与 log-mass，立即缩为每个 query head 的三项统计：输出通道均值、通道方差及 log-mass。每批结束后，按原提示编号与序列内位置执行 reservoir sampling，均匀、无放回保留 4096 个位置及其统计。相同响应与 seed 得到相同位置池；候选不足即准备失败。
+3. 从最终完整候选池的统计量计算 $\sigma_o,\sigma_z$，应用尺度下限，以 FP32 保存。离线统计复用生成时的前向；完整 query、局部输出向量与临时统计缓冲均不持久化。
+
+GPU 只暂存当前提示批的三项统计，局部 attention 分块计算，中间向量及时释放。CPU 保留固定大小的候选池：以 4096 位置、36 层、32 query heads 为例，三项 FP64 统计约占 **108 MiB／进程**；这不包含模型权重、原文／分支 KV 和当前批工作区。
+
+离线准备在每张可见 GPU 上启动一个进程，各加载一份冻结 teacher。文档按预计计算量分配，同篇文档的全部边界始终由一个进程处理；原文 prefill 每次处理一篇，并跨边界延续 prefix KV。各进程写入同一缓存目录中互不重叠的文档文件，中断后可复用已完成边界。
 
 缓存根目录的 `identity.json` 保存身份、生成终止标识 `eos_token_ids` 与全局 `prompt_token_ids`；后者为 480 条完整提示片段的 token ID 列表，跨边界共用。每个边界保存为 `documents/<document_id>/write_<j>.safetensors`，$j$ 从 1 开始：
 
@@ -111,9 +115,9 @@ Train/dev 在同一设备保存独立 teacher 与 student，按边界顺序执�
 
 下次使用该边界时仍从完整池重新抽样，本次反向与激活重计算复用已确定的参照。尺度始终来自离线完整池，不用本次 128 位置重估。
 
-Teacher 的完整原文 prefix KV 在一个 QA episode 内随压缩边界递增，结束后释放；同文档的其他 QA 或下个 epoch 重新计算。离线统计与运行时回放均按 `branch_batch_size` 批量执行 teacher forcing，默认每批 4 条分支；离线自然响应仍逐分支生成。
+Teacher 的完整原文 prefix KV 在一个 QA episode 内随压缩边界递增，结束后释放；同文档的其他 QA 或下个 epoch 重新计算。离线生成与统计、运行时 teacher forcing 使用同一配置字段 `batch_size`，默认每卡批处理大小为 4，可在各自启动时覆盖。
 
-缓存绑定 teacher、tokenizer、输入模板、提示库、窗口边界、候选池、尺度规则与 seed。`branch_batch_size` 只控制执行批量，不绑定缓存身份；调整时可以复用缓存。独立 test／benchmark 不加载 teacher 或读取这些缓存。
+缓存绑定 teacher、tokenizer、输入模板、提示库、窗口边界、候选池、尺度规则与 seed。GPU 数量与 `batch_size` 只控制执行，不绑定缓存身份；调整时可以复用缓存。不同 GPU／批量的浮点计算可能存在数值差异，不保证重新生成结果逐位一致。独立 test／benchmark 不加载 teacher 或读取这些缓存。
 
 ## 3. 配置
 
@@ -145,7 +149,11 @@ Teacher 的完整原文 prefix KV 在一个 QA episode 内随压缩边界递增�
 | `response_max_tokens` | $L_{\mathrm{resp}}=24$ | 每条 teacher 响应的新 token 上限 |
 | `pool_size` | $N_{\mathrm{pool}}=4096$ | 每边界须填满的固定候选池 |
 | `am_sample_size` | $N_{\mathrm{AM}}=128$ | 每次均匀、无放回采样；下次重抽 |
-| `branch_batch_size` | $B_{\mathrm{teacher}}=4$ | 离线尺度统计与运行时 teacher forcing 的分支批量 |
+| `batch_size` | $B_{\mathrm{teacher}}=4$ | 每卡 teacher 批处理大小，用于离线生成与统计、运行时 teacher forcing |
+
+`prepare` 和 `train` 均支持 `--batch-size N`，覆盖本次运行的 `teacher.batch_size`；省略时沿用配置。该参数控制每卡 teacher 批处理大小，不是训练 microbatch；两阶段可根据各自显存峰值选择不同值，不改变候选池或 AM 采样数量。
+
+训练覆盖值写入实际配置、checkpoint 与 SwanLab config。恢复训练须保持实际配置一致：传入相同覆盖值，或直接使用训练目录的 `config.json`。
 
 ### 3.3 Outer 训练与运行：`training`
 

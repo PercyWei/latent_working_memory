@@ -78,12 +78,12 @@ class TeacherConfig:
     response_max_tokens: int = 24
     pool_size: int = 4096
     am_sample_size: int = 128
-    branch_batch_size: int = 4
+    batch_size: int = 4
 
     def __post_init__(self):
         _positive_ints(self, (
             "num_prompts", "response_max_tokens", "pool_size", "am_sample_size",
-            "branch_batch_size",
+            "batch_size",
         ))
         if self.num_prompts > 480:
             raise ValueError("num_prompts cannot exceed the fixed 480-prompt bank")

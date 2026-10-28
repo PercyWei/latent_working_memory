@@ -16,7 +16,7 @@ class RuntimeTeacher:
         self.cache = cache
         self.prompts = tuple(tuple(ids) for ids in cache.identity["prompt_token_ids"])
         self.replay = TeacherReplay(
-            model, config.model.prefill_chunk_size, config.teacher.branch_batch_size
+            model, config.model.prefill_chunk_size, config.teacher.batch_size
         )
 
     @contextmanager

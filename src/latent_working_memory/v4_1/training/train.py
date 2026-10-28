@@ -80,10 +80,12 @@ def _restore_metrics(path, checkpoint_step):
     temporary.replace(path)
 
 
-def train(config_path, output_dir=None, device="cuda", resume=None):
+def train(config_path, output_dir=None, device="cuda", resume=None, batch_size=None):
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         raise ValueError("v4.1 currently supports one process; do not use torchrun")
     config = load_config(config_path)
+    if batch_size is not None:
+        config = replace(config, teacher=replace(config.teacher, batch_size=batch_size))
     output_dir = output_dir or config.training.output_dir
     if output_dir is None:
         raise ValueError("specify --output-dir or training.output_dir")
@@ -214,8 +216,9 @@ def main(argv=None):
     parser.add_argument("--config", required=True)
     parser.add_argument("--output-dir")
     parser.add_argument("--resume", help="同一运行的 checkpoint 目录或 state.pt")
+    parser.add_argument("--batch-size", type=int, help="Teacher forcing 批处理大小；默认使用配置值")
     args = parser.parse_args(argv)
-    train(args.config, args.output_dir, resume=args.resume)
+    train(args.config, args.output_dir, resume=args.resume, batch_size=args.batch_size)
 
 
 if __name__ == "__main__":
