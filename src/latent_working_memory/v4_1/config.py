@@ -78,9 +78,13 @@ class TeacherConfig:
     response_max_tokens: int = 24
     pool_size: int = 4096
     am_sample_size: int = 128
+    branch_batch_size: int = 4
 
     def __post_init__(self):
-        _positive_ints(self, ("num_prompts", "response_max_tokens", "pool_size", "am_sample_size"))
+        _positive_ints(self, (
+            "num_prompts", "response_max_tokens", "pool_size", "am_sample_size",
+            "branch_batch_size",
+        ))
         if self.num_prompts > 480:
             raise ValueError("num_prompts cannot exceed the fixed 480-prompt bank")
         if self.am_sample_size > self.pool_size:
@@ -111,7 +115,7 @@ class TrainingConfig:
     max_train_data_tokens: int | None = 12288
     max_train_samples: int | None = None
     max_dev_samples: int | None = None
-    tracking: str = "disabled"
+    tracking: str = "swanlab"
     swanlab_project: str = "latent-working-memory-v4"
     group: str | None = None
     tags: tuple[str, ...] = ()
@@ -146,8 +150,6 @@ class TrainingConfig:
             raise ValueError("swanlab_project must be a nonempty string")
         if self.group is not None and (not isinstance(self.group, str) or not self.group.strip()):
             raise ValueError("group must be null or a nonempty string")
-        if self.tracking == "swanlab" and self.group is None:
-            raise ValueError("SwanLab tracking requires an explicit group")
         if not isinstance(self.tags, (list, tuple)) or any(
             not isinstance(tag, str) or ":" not in tag or not all(tag.split(":", 1))
             for tag in self.tags
@@ -172,12 +174,15 @@ def config_from_dict(payload):
     """读取唯一配置结构，未知字段由 dataclass 构造器直接报错。"""
     if not isinstance(payload, dict) or set(payload) != {"seed", "model", "teacher", "training"}:
         raise ValueError("config must contain exactly seed, model, teacher and training")
-    return ExperimentConfig(
+    config = ExperimentConfig(
         seed=payload["seed"],
         model=ModelConfig(**payload["model"]),
         teacher=TeacherConfig(**payload["teacher"]),
         training=TrainingConfig(**payload["training"]),
     )
+    if config.training.tracking == "swanlab" and config.training.group is None:
+        raise ValueError("SwanLab tracking requires an explicit group in the experiment config")
+    return config
 
 
 def load_config(path):

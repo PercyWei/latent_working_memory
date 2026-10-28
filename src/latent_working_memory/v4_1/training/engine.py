@@ -82,21 +82,22 @@ class TrainingEngine:
         cosine = (1.0 + math.cos(math.pi * progress)) / 2.0
         return self.config.min_lr_ratio + (1.0 - self.config.min_lr_ratio) * cosine
 
-    def train_batch(self, episodes, teacher_cache, am_sample_size, generator):
+    def train_batch(self, episodes, teacher, generator):
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
         totals = {name: 0.0 for name in ("loss", "qa_loss", "outer_am", "inner_before", "inner_after")}
         target_tokens = write_events = 0
         learning_rates = {group["name"]: group["lr"] for group in self.optimizer.param_groups}
         for episode in episodes:
-            output = self.model(
-                episode,
-                teacher_cache=teacher_cache,
-                am_sample_size=am_sample_size,
-                lambda_am=self.config.lambda_am,
-                generator=generator,
-                differentiable=True,
-            )
+            with teacher.episode(episode) as trajectory:
+                output = self.model(
+                    episode,
+                    teacher=trajectory,
+                    lambda_am=self.config.lambda_am,
+                    generator=generator,
+                    differentiable=True,
+                )
+            # 反向只需要固定参考张量，不再占用完整原文的 teacher KV。
             (output["loss"] / len(episodes)).backward()
             for name in totals:
                 totals[name] += float(output[name]) / len(episodes)
@@ -117,17 +118,18 @@ class TrainingEngine:
         }
 
 
-def evaluate_dev(model, episodes, teacher_cache, am_sample_size, lambda_am, generator):
+def evaluate_dev(model, episodes, teacher, lambda_am, generator):
     """验证不保留元梯度；inner 的局部求导由模型内部显式启用。"""
     model.eval()
     totals = {name: 0.0 for name in ("loss", "qa_loss", "outer_am", "inner_before", "inner_after")}
     target_tokens = write_events = 0
     with torch.no_grad():
         for episode in episodes:
-            output = model(
-                episode, teacher_cache=teacher_cache, am_sample_size=am_sample_size,
-                lambda_am=lambda_am, generator=generator, differentiable=False,
-            )
+            with teacher.episode(episode) as trajectory:
+                output = model(
+                    episode, teacher=trajectory, lambda_am=lambda_am,
+                    generator=generator, differentiable=False,
+                )
             for name in totals:
                 totals[name] += float(output[name]) / len(episodes)
             target_tokens += output["target_tokens"]

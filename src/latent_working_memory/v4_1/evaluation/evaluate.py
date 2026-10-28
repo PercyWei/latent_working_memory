@@ -21,7 +21,7 @@ from latent_working_memory.v4_1.config import config_from_dict
 from latent_working_memory.v4_1.data import dataset_identity, load_episodes
 from latent_working_memory.v4_1.evaluation.report import build_report, summarize_outputs
 from latent_working_memory.v4_1.modeling.model import OnlineMemoryLM
-from latent_working_memory.v4_1.training.checkpoint import read_checkpoint
+from latent_working_memory.v4_1.training.checkpoint import checkpoint_file, read_checkpoint
 from latent_working_memory.v4_1.training.train import tracking_run
 
 
@@ -47,9 +47,16 @@ def evaluate(checkpoint_path, data, output_dir, task="test", device="cuda",
     for name, value in (("max_new_tokens", max_new_tokens), ("max_samples", max_samples)):
         if value is not None and (type(value) is not int or value < 1):
             raise ValueError(f"{name} must be a positive integer")
-    checkpoint_path = Path(checkpoint_path).expanduser().resolve()
+    checkpoint_path = checkpoint_file(checkpoint_path)
     state = read_checkpoint(checkpoint_path)
     config = config_from_dict(state["config"])
+    training_directory = Path(config.training.output_dir).expanduser().resolve()
+    training_run = {"directory": str(training_directory), "swanlab": None}
+    if config.training.tracking == "swanlab":
+        identity = json.loads((training_directory / "swanlab.json").read_text(encoding="utf-8"))
+        training_run["swanlab"] = {
+            "project": config.training.swanlab_project, "id": identity["id"], "url": identity["url"],
+        }
     device = initialize_device(device)
     set_seed(config.seed)
     tokenizer = AutoTokenizer.from_pretrained(config.model.model_name_or_path)
@@ -119,7 +126,7 @@ def evaluate(checkpoint_path, data, output_dir, task="test", device="cuda",
                     raise ValueError(f"{sample.id}: no model-window capacity remains for generation")
                 nll_started = time.perf_counter()
                 with torch.no_grad():
-                    output = model(sample, teacher_cache=None, differentiable=False)
+                    output = model(sample, teacher=None, differentiable=False)
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
                 nll_seconds = time.perf_counter() - nll_started
@@ -195,6 +202,7 @@ def evaluate(checkpoint_path, data, output_dir, task="test", device="cuda",
         metrics = summarize_scores(task, records)
     summary = {
         "task": task, "checkpoint": str(checkpoint_path), "checkpoint_step": step,
+        "training_run": training_run,
         "model": asdict(config.model), "model_window": model_window, "seed": config.seed,
         "data": identity, "protocol": evaluation_protocol, "metrics": metrics,
         "outputs": summarize_outputs(records), "stop_reasons": dict(Counter(row["stop_reason"] for row in records)),
@@ -212,7 +220,7 @@ def evaluate(checkpoint_path, data, output_dir, task="test", device="cuda",
     )
     report = build_report(output_dir)
     if config.training.tracking == "swanlab":
-        with tracking_run(config, Path(config.training.output_dir), True, device) as tracking:
+        with tracking_run(config, training_directory, True, device) as tracking:
             values = {f"evaluation/{task}/{key}": metrics[key] for key in ("nll", "em", "f1", "score") if key in metrics}
             for name in values:
                 tracking.define_metric(name, x_axis="_step", section_name="evaluation")

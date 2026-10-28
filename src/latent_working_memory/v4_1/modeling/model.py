@@ -10,7 +10,6 @@ from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 from transformers import AutoModelForCausalLM
 
-from ..teacher.cache import content_identity
 from .am import local_read, matching_loss
 from .attention import decoder_forward
 from .memory import LayerMemory
@@ -168,16 +167,9 @@ class OnlineMemoryLM(nn.Module):
         state.inner_before.append(torch.stack(before).mean())
         state.inner_after.append(torch.stack(after).mean())
 
-    def _outer_am(self, state, episode, teacher_cache, generator, context_identity):
-        record = teacher_cache.metadata(episode.document_id, state.write_events)
-        if (record["processed_end"], record["compressed_end"]) != (
-            state.position, state.compressed_tokens
-        ):
-            raise ValueError("teacher cache boundary does not match the online trajectory")
-        if record["context_tokens"] != context_identity:
-            raise ValueError("teacher cache tokenized context differs from the current episode")
-        reference = teacher_cache.sample(
-            episode.document_id, state.write_events, self.device, generator
+    def _outer_am(self, state, teacher, generator):
+        reference = teacher.reference(
+            state.write_events, state.position, state.compressed_tokens, generator
         )
         losses = []
         for index, kv in enumerate(state.memory_kv):
@@ -221,21 +213,16 @@ class OnlineMemoryLM(nn.Module):
             "inner_after": float(torch.stack(state.inner_after).mean()) if state.inner_after else 0.0,
         }
 
-    def forward(self, episode, teacher_cache=None, am_sample_size=128, lambda_am=1.0,
+    def forward(self, episode, teacher=None, lambda_am=1.0,
                 generator=None, differentiable=True):
         if not episode.context_ids or not episode.target_ids:
             raise ValueError("a QA episode must have nonempty context and target")
-        if teacher_cache is not None and teacher_cache.sample_size != am_sample_size:
-            raise ValueError("requested AM sample size differs from TeacherCache.sample_size")
         with torch.set_grad_enabled(differentiable):
             outer_losses = []
-            context_identity = content_identity(episode.context_ids) if teacher_cache is not None else None
 
             def supervise(state):
-                if teacher_cache is not None:
-                    outer_losses.append(self._outer_am(
-                        state, episode, teacher_cache, generator, context_identity
-                    ))
+                if teacher is not None:
+                    outer_losses.append(self._outer_am(state, teacher, generator))
 
             state = self._ingest(episode.context_ids, differentiable, supervise)
             for _ in self.consume(episode.question_ids, state, differentiable, write=False):

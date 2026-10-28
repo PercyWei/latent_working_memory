@@ -1,20 +1,17 @@
 """从完整、未压缩的已到达历史准备 outer AM 监督，不读取下游 QA。"""
 
 import argparse
-from collections import defaultdict
 import hashlib
 import random
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 from transformers.cache_utils import DynamicCache
-from transformers.models.qwen3.modeling_qwen3 import rotate_half
 
 from ..config import load_config
-from ..data import EpisodeEncoder, compression_boundaries, load_episodes
-from ..modeling.am import local_read, teacher_scales
+from ..data import compression_boundaries, load_episodes
 from .cache import build_cache_identity, content_identity, initialize_cache
-from .prompts import SOURCE_PROMPTS
+from .replay import TeacherReplay, load_teacher
 
 
 def reservoir_positions(lengths, pool_size, rng):
@@ -38,37 +35,66 @@ def reservoir_positions(lengths, pool_size, rng):
     return torch.tensor(reservoir, dtype=torch.int64), count
 
 
-class TeacherPreparer:
-    """同一边界只保留一份 prefix KV；逐提示生成，再回放选中位置收集监督。"""
+class PoolScales:
+    """按层和 head 合并均值与 M2，仅保留完整位置池的 FP64 统计量。"""
 
-    def __init__(self, model, tokenizer, config, cache):
-        if model.config.model_type != "qwen3":
-            raise ValueError("v4.1 teacher currently supports native Qwen3 only")
-        self.model = model.eval().requires_grad_(False)
-        self.encoder = EpisodeEncoder(tokenizer)
+    def __init__(self, layers, query_heads, head_dim, device=None):
+        self.head_dim = head_dim
+        self.counts = [0] * layers
+        self.mean_o = torch.zeros(layers, query_heads, dtype=torch.float64, device=device)
+        self.mean_z = torch.zeros_like(self.mean_o)
+        self.m2_o = torch.zeros_like(self.mean_o)
+        self.m2_z = torch.zeros_like(self.mean_o)
+
+    @staticmethod
+    def _combine(mean, m2, old_count, batch_count, batch_variance, batch_mean):
+        total = old_count + batch_count
+        delta = batch_mean - mean
+        m2.add_(batch_variance * batch_count + delta.square() * (old_count * batch_count / total))
+        mean.add_(delta * (batch_count / total))
+
+    def update(self, layer_index, pool_indices, queries, outputs, log_mass):
+        count = outputs.shape[0]
+        variance_o, mean_o = torch.var_mean(outputs.double(), dim=(0, 2), correction=0)
+        variance_z, mean_z = torch.var_mean(log_mass.double(), dim=0, correction=0)
+        old_count = self.counts[layer_index]
+        self._combine(
+            self.mean_o[layer_index], self.m2_o[layer_index], old_count * self.head_dim,
+            count * self.head_dim, variance_o, mean_o,
+        )
+        self._combine(
+            self.mean_z[layer_index], self.m2_z[layer_index], old_count,
+            count, variance_z, mean_z,
+        )
+        self.counts[layer_index] += count
+
+    def finish(self, pool_size, floor):
+        if any(count != pool_size for count in self.counts):
+            raise ValueError("scale statistics must cover every cached position in every layer")
+        return {
+            "scales_o": (self.m2_o / (pool_size * self.head_dim)).sqrt().float().clamp_min(floor).cpu(),
+            "scales_z": (self.m2_z / pool_size).sqrt().float().clamp_min(floor).cpu(),
+        }
+
+
+class TeacherPreparer:
+    """逐提示保存响应；固定位置池仅用于流式尺度统计，不保存稠密监督张量。"""
+
+    def __init__(self, model, config, cache):
+        self.replay = TeacherReplay(
+            model, config.model.prefill_chunk_size, config.teacher.branch_batch_size
+        )
+        self.model = model
         self.config = config
         self.cache = cache
-        self.device = next(model.parameters()).device
-        self.prompts = [
-            self.encoder.question(prompt)
-            for prompt in SOURCE_PROMPTS[:config.teacher.num_prompts]
-        ]
-        eos = model.generation_config.eos_token_id
-        self.eos_ids = {eos} if isinstance(eos, int) else set(eos)
-
-    def _forward(self, tokens, cache, logits=False):
-        ids = torch.tensor([tokens], dtype=torch.long, device=self.device)
-        if logits:
-            return self.model(
-                input_ids=ids, past_key_values=cache, use_cache=True, logits_to_keep=1
-            )
-        return self.model.model(input_ids=ids, past_key_values=cache, use_cache=True)
+        self.prompts = cache.identity["prompt_token_ids"]
+        self.eos_ids = set(cache.identity["eos_token_ids"])
 
     def _generate(self, prefix):
-        sequences = []
+        responses = []
         for prompt_index, prompt in enumerate(self.prompts):
             branch = DynamicCache(ddp_cache_data=prefix)
-            result = self._forward(prompt, branch, logits=True)
+            result = self.replay.forward(prompt, branch, logits=True)
             response = []
             for _ in range(self.config.teacher.response_max_tokens):
                 token = int(result.logits[0, -1].argmax())
@@ -76,74 +102,31 @@ class TeacherPreparer:
                 if token in self.eos_ids:
                     break
                 if len(response) < self.config.teacher.response_max_tokens:
-                    result = self._forward([token], branch, logits=True)
+                    result = self.replay.forward([token], branch, logits=True)
             # 最后生成的 token 会在下一次回放中实际前向，保证其 query 也在候选池中。
-            sequences.append((*prompt, *response))
+            responses.append(tuple(response))
             del result, branch
             if (prompt_index + 1) % 48 == 0:
                 print(f"teacher rollout prompts={prompt_index + 1}/{len(self.prompts)}", flush=True)
-        return sequences
+        return responses
 
-    def _collect(self, prefix, sequences, positions, compressed_end):
+    def _collect(self, prefix_cache, responses, positions, compressed_end):
         architecture = self.cache.identity["architecture"]
-        shape = (
-            architecture["layers"], len(positions), architecture["query_heads"],
-            architecture["head_dim"],
+        scales = PoolScales(
+            architecture["layers"], architecture["query_heads"], architecture["head_dim"],
+            self.replay.device,
         )
-        tensors = {
-            "queries": torch.empty(shape, dtype=torch.float32),
-            "outputs": torch.empty(shape, dtype=torch.float32),
-            "log_mass": torch.empty(shape[:-1], dtype=torch.float32),
+        sequences = [(*prompt, *response) for prompt, response in zip(self.prompts, responses)]
+        self.replay.replay(prefix_cache, sequences, positions, compressed_end, scales.update)
+        lengths = torch.tensor([len(response) for response in responses], dtype=torch.int64)
+        return {
+            "response_token_ids": torch.tensor(
+                [token for response in responses for token in response], dtype=torch.int64
+            ),
+            "response_offsets": torch.cat((lengths.new_zeros(1), lengths.cumsum(0))),
             "positions": positions,
+            **scales.finish(self.config.teacher.pool_size, self.config.model.am_std_floor),
         }
-        selected = defaultdict(list)
-        for pool_index, (prompt_index, position) in enumerate(positions.tolist()):
-            selected[prompt_index].append((pool_index, position))
-        rotary = {}
-        current = {}
-        bias = torch.zeros(
-            architecture["kv_heads"], compressed_end, device=self.device, dtype=torch.float32
-        )
-
-        def capture_rotary(module, args, kwargs):
-            rotary["cos"], rotary["sin"] = kwargs["position_embeddings"]
-
-        def query_hook(layer_index):
-            def capture(module, args, output):
-                indices = current["token_indices"]
-                queries = output[0, indices]
-                cos = rotary["cos"][0, indices].unsqueeze(1)
-                sin = rotary["sin"][0, indices].unsqueeze(1)
-                queries = (queries * cos + rotate_half(queries) * sin).float()
-                keys, values = prefix[layer_index]
-                outputs, log_mass = local_read(
-                    queries, keys[0, :, :compressed_end], values[0, :, :compressed_end], bias
-                )
-                slots = current["pool_indices"]
-                tensors["queries"][layer_index, slots] = queries.cpu()
-                tensors["outputs"][layer_index, slots] = outputs.cpu()
-                tensors["log_mass"][layer_index, slots] = log_mass.cpu()
-            return capture
-
-        handles = []
-        for layer_index, layer in enumerate(self.model.model.layers):
-            handles.append(layer.self_attn.register_forward_pre_hook(capture_rotary, with_kwargs=True))
-            handles.append(layer.self_attn.q_norm.register_forward_hook(query_hook(layer_index)))
-        try:
-            for prompt_index, choices in selected.items():
-                current["pool_indices"] = [item[0] for item in choices]
-                current["token_indices"] = [item[1] for item in choices]
-                self._forward(sequences[prompt_index], DynamicCache(ddp_cache_data=prefix))
-        finally:
-            for handle in handles:
-                handle.remove()
-        scales = [
-            teacher_scales(outputs, log_mass, self.config.model.am_std_floor)
-            for outputs, log_mass in zip(tensors["outputs"], tensors["log_mass"])
-        ]
-        tensors["scales_o"] = torch.stack([item[0] for item in scales])
-        tensors["scales_z"] = torch.stack([item[1] for item in scales])
-        return tensors
 
     @torch.no_grad()
     def prepare_document(self, document_id, context_ids):
@@ -168,13 +151,9 @@ class TeacherPreparer:
             print(f"teacher {document_id}: all {len(boundaries)} boundaries cached", flush=True)
             return
         state = DynamicCache(config=self.model.config)
-        previous_end = 0
         for write_index, processed_end, compressed_end in boundaries[:max(missing)]:
             # 即使已有某边界缓存，后续边界也仍从完整原文继续 prefill。
-            for start in range(previous_end, processed_end, self.config.model.prefill_chunk_size):
-                end = min(start + self.config.model.prefill_chunk_size, processed_end)
-                self._forward(context_ids[start:end], state)
-            previous_end = processed_end
+            self.replay.advance(context_ids, state, processed_end)
             if write_index in cached:
                 continue
             if processed_end + max(map(len, self.prompts)) + self.config.teacher.response_max_tokens > (
@@ -186,15 +165,16 @@ class TeacherPreparer:
                 f"teacher {document_id} write={write_index}/{len(boundaries)}: generating prompts",
                 flush=True,
             )
-            sequences = self._generate(prefix)
+            responses = self._generate(prefix)
             seed = int.from_bytes(hashlib.blake2b(
                 f"{self.config.seed}:{document_id}:{write_index}".encode(), digest_size=8
             ).digest(), "little")
             positions, candidate_count = reservoir_positions(
-                [len(sequence) for sequence in sequences], self.config.teacher.pool_size,
+                [len(prompt) + len(response) for prompt, response in zip(self.prompts, responses)],
+                self.config.teacher.pool_size,
                 random.Random(seed),
             )
-            tensors = self._collect(prefix, sequences, positions, compressed_end)
+            tensors = self._collect(state, responses, positions, compressed_end)
             self.cache.write(
                 document_id, write_index, tensors, processed_end, compressed_end,
                 context_ids, candidate_count,
@@ -204,7 +184,7 @@ class TeacherPreparer:
                 f"compressed={compressed_end} candidates={candidate_count} pool={len(positions)}",
                 flush=True,
             )
-            del prefix, sequences, tensors
+            del prefix, responses, tensors
 
 
 def main():
@@ -216,14 +196,9 @@ def main():
     args = parser.parse_args()
     config = load_config(args.config)
     tokenizer = AutoTokenizer.from_pretrained(config.model.model_name_or_path)
-    model = AutoModelForCausalLM.from_pretrained(
-        config.model.model_name_or_path, dtype=getattr(torch, config.model.backbone_dtype),
-        attn_implementation="sdpa",
-    ).to(args.device)
-    cache = initialize_cache(
-        args.output_dir, build_cache_identity(config, tokenizer), config.teacher.am_sample_size
-    )
-    preparer = TeacherPreparer(model, tokenizer, config, cache)
+    model = load_teacher(config.model, args.device)
+    cache = initialize_cache(args.output_dir, build_cache_identity(config, tokenizer))
+    preparer = TeacherPreparer(model, config, cache)
     documents = {}
     split_documents = {}
     for split in args.splits:

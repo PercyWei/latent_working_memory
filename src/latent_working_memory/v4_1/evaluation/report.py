@@ -60,7 +60,8 @@ def summarize_outputs(records):
 def build_report(results_dir, output=None):
     results_dir = Path(results_dir).expanduser().resolve()
     summary = json.loads((results_dir / "summary.json").read_text(encoding="utf-8"))
-    records = [json.loads(line) for line in (results_dir / "details.jsonl").read_text().splitlines()]
+    records = [json.loads(line) for line in
+               (results_dir / "details.jsonl").read_text(encoding="utf-8").splitlines()]
     output = Path(output).expanduser().resolve() if output else results_dir / "report" / "index.html"
     output.parent.mkdir(parents=True, exist_ok=True)
     counters = summarize_outputs(records)

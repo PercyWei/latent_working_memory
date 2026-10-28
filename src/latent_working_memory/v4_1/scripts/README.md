@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261027 16:50:38 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261028 17:20:50 Asia/Shanghai（UTC+08:00）
 
 计算协议、数据格式与参数含义见[方法说明](../README.md)。以下命令使用项目根目录 `.venv`，默认单卡、microbatch 1、梯度累积 8；正式实验先检查[配置](../../../../configs/v4-1/online_ttt_memory.json)中的基座与数据路径。
 
@@ -34,7 +34,7 @@ bash src/latent_working_memory/v4_1/scripts/run.sh prepare --gpu 0 \
   --device cuda:0 --splits train dev
 ```
 
-每个文档、每个压缩边界准备完整候选池，并输出进度。缓存放在 `documents/<document_id>/write_<j>.safetensors`，身份约束保存在 `identity.json`。同文档 QA 共用缓存；同配置重复执行会复用已有边界，train/dev 也可分开准备。
+每个文档、每个压缩边界固定 480 条提示的响应、4096 个候选位置及完整池上的逐层尺度，并输出进度。边界缓存只保存响应 token IDs、偏移、位置与尺度，放在 `documents/<document_id>/write_<j>.safetensors`；全局提示 token IDs 与身份约束保存在 `identity.json`。同文档 QA 共用缓存；同配置重复执行会复用已有边界，train/dev 也可分开准备。
 
 `--output-dir` 仅指定本次写入位置；如改用其他目录，同步修改训练配置的 `training.teacher_cache_dir`。Teacher 不需要覆盖 test 或 benchmark。
 
@@ -48,6 +48,8 @@ bash src/latent_working_memory/v4_1/scripts/run.sh train --gpu 0 \
   --output-dir artifacts/v4-1/online-ttt-memory/train/recent-m256 \
   --device cuda:0
 ```
+
+Train/dev 在同一卡上加载独立冻结 teacher 与 student，顺序执行。每轮均匀、无放回抽取 128 个位置，只回放涉及分支到最远选中位置，重算 AM 参照；teacher 原文 prefix KV 在当前 QA episode 内递增，跨 QA／epoch 重算。`teacher.branch_batch_size` 默认 4，控制离线尺度统计和训练回放的分支批量；可根据显存调小，缓存仍可复用。
 
 从同一 run 的已保存 step 恢复，例如第 100 步：
 
@@ -65,11 +67,14 @@ bash src/latent_working_memory/v4_1/scripts/run.sh train --gpu 0 \
 |---|---|
 | `config.json` | 本次实际配置 |
 | `data.json` | 数据选样与身份 |
-| `metrics.jsonl` | 按 optimizer step 追加的 train/dev 指标 |
-| `summary.json` | 训练汇总 |
-| `checkpoints/global_step_<N>/state.pt` | 慢参数与完整恢复状态 |
+| `metrics.jsonl` | 每个 optimizer step 一行的 train/dev 指标；恢复时截至 checkpoint step |
+| `summary.json` | 最终 `step`、`checkpoint`、`output_dir`；checkpoint 为 `state.pt` 绝对路径 |
+| `checkpoints/global_step_<N>/state.pt` | 慢参数、配置、绑定身份与完整恢复状态，作为恢复及评估依据 |
+| `swanlab.json` | 启用上传时保存 `id/url`，恢复与评估续记所需 |
 
-进度直接打印到终端。`metrics.jsonl` 是可供分析的结构化指标，不另存终端输出副本。默认关闭 SwanLab；需要上传时在配置中设 `tracking: "swanlab"` 并给出 `group`，使用既有 `latent-working-memory-v4` 项目；train/dev 在同一 run 内记录。
+字段、索引与单位统一见[方法说明第 4 节](../README.md#4-代码与结果)。展示报告可以重建，checkpoint 和原始记录应保留。
+
+进度直接打印到终端。`metrics.jsonl` 是可供分析的结构化指标，不另存终端输出副本。默认开启 SwanLab，使用既有 `latent-working-memory-v4` 项目，正式配置显式指定 `group: "online-ttt-memory_20261028"`；train/dev 在同一 run 内记录，独立评估续记该 run。运行前配置 SwanLab 登录凭据；新实验系列修改配置中的 group，关闭上传时设 `tracking: "disabled"`。
 
 ## 4. 独立评估与报告
 
@@ -85,7 +90,7 @@ bash src/latent_working_memory/v4_1/scripts/run.sh evaluate --gpu 0 \
   --device cuda:0 --max-new-tokens 128
 ```
 
-独立样本重新初始化 memory，先处理正文，再固定 memory 回答问题。评估不读取 teacher 缓存，报告单参考答案 EM／token F1 和按答案 token 加权的 NLL；NLL 包含 assistant 结束符，与训练时先逐样本平均的汇总口径区分。
+独立样本重新初始化 memory，先处理正文，再固定 memory 回答问题。评估只加载 student，不读取 teacher 缓存，报告单参考答案 EM／token F1 和按答案 token 加权的 NLL；NLL 包含 assistant 结束符，与训练时先逐样本平均的汇总口径区分。
 
 ### 4.2 LoCoMo 与 RULER
 
@@ -109,7 +114,7 @@ Benchmark 默认采用原任务 prompt 与生成预算，完整 prompt 在线压
 
 ### 4.3 查看与重新生成报告
 
-每次评估输出 `summary.json`、`details.jsonl` 和 `report/index.html`。汇总查看任务得分、生成与写入统计；逐题结果保留原始输出，可在 HTML 中查看显式换行、特殊空白和异常字符。原训练启用 SwanLab 时，评估追加到同一 run 的 `evaluation/*`。
+每次评估输出 `summary.json`、`details.jsonl` 和 `report/index.html`。Summary 保存实验身份与汇总，details 每题一行保存原始输出；HTML 可重建，并明确显示换行、特殊空白和异常字符。Summary 的 `checkpoint` 指向绝对 `state.pt` 路径，`training_run` 记录训练目录与 SwanLab 身份快照。原训练启用 SwanLab 时，评估通过训练目录的 `swanlab.json` 续记同一 run 的 `evaluation/*`。
 
 已有结果无需重新运行模型即可生成报告：
 
@@ -128,6 +133,13 @@ bash src/latent_working_memory/v4_1/scripts/run.sh report \
 | 扩大数据选样 | 为新增文档补齐同身份缓存；新训练记录实际数据身份 |
 | Slots／维度、解码器、LoRA、inner 步数／初始步长、outer 优化设置 | 新训练目录；teacher 身份未变时可复用缓存 |
 | 每次 outer AM 采样位置数 | 新训练目录；不超过原池容量时可复用完整池 |
+| `teacher.branch_batch_size` | 可复用缓存；恢复训练仍遵循完整配置一致的要求 |
 | 仅重新展示既有评估 | 运行 `report`，不执行模型 |
 
-GPU 训练、teacher 准备和 benchmark 的实际显存、耗时及效果尚需正式运行确认。离线缓存按层与位置保存 FP32 监督，磁盘预算随文档数与压缩轮数增长。
+离线缓存以 token IDs、索引与固定尺度为主。按 36 层、32 query heads、2571 个边界估算，每条响应均达到 24 tokens 时，主要张量总量约为 439 MB。训练需要额外的 teacher 前向，显存包含两份模型权重、teacher prefix KV 与 student 元训练图；实际成本和效果以运行结果为准。
+
+## 6. 从逐位置张量缓存迁移
+
+旧缓存若保存 `queries`、`outputs` 和 `log_mass`，不能直接用于当前实现。保留原目录，选择新的缓存目录（如 `artifacts/v4-1/online-ttt-memory/teacher-tokens`），将配置的 `training.teacher_cache_dir` 改为该路径，再用第 2 节命令将 `--output-dir` 指向同一路径重新准备。
+
+已有训练 checkpoint 绑定旧缓存身份，迁移后使用新的训练输出目录开始训练，不以旧 checkpoint 执行 `--resume`。模型超参数、480／24／4096／128 查询预算及 CLI 入口保持不变。

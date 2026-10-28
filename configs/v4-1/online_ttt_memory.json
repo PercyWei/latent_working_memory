@@ -23,7 +23,8 @@
     "num_prompts": 480,
     "response_max_tokens": 24,
     "pool_size": 4096,
-    "am_sample_size": 128
+    "am_sample_size": 128,
+    "branch_batch_size": 4
   },
   "training": {
     "dataset_dir": "data/delta-mem-qasper",
@@ -48,9 +49,9 @@
     "max_train_data_tokens": 12288,
     "max_train_samples": null,
     "max_dev_samples": null,
-    "tracking": "disabled",
+    "tracking": "swanlab",
     "swanlab_project": "latent-working-memory-v4",
-    "group": null,
+    "group": "online-ttt-memory_20261028",
     "tags": []
   }
 }

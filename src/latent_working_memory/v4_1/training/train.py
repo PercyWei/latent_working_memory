@@ -18,8 +18,10 @@ from latent_working_memory.v4_1.config import load_config
 from latent_working_memory.v4_1.data import dataset_identity, load_episodes
 from latent_working_memory.v4_1.modeling.model import OnlineMemoryLM
 from latent_working_memory.v4_1.teacher.cache import TeacherCache, build_cache_identity
+from latent_working_memory.v4_1.teacher.replay import load_teacher
+from latent_working_memory.v4_1.teacher.runtime import RuntimeTeacher
 from latent_working_memory.v4_1.training.checkpoint import (
-    read_checkpoint, restore_training, save_checkpoint,
+    checkpoint_file, read_checkpoint, restore_training, save_checkpoint,
 )
 from latent_working_memory.v4_1.training.engine import SampleCursor, TrainingEngine, evaluate_dev
 
@@ -31,7 +33,7 @@ def tracking_run(config, output_dir, resume, device):
         yield None
         return
     path = output_dir / "swanlab.json"
-    identity = json.loads(path.read_text()) if resume else None
+    identity = json.loads(path.read_text(encoding="utf-8")) if resume else None
     rng = capture_rng(device)
     try:
         run = swanlab.init(
@@ -50,13 +52,32 @@ def tracking_run(config, output_dir, resume, device):
         restore_rng(rng, device)
     with run:
         if identity is None:
-            path.write_text(json.dumps({"id": run.id, "url": run.url}, indent=2) + "\n")
+            path.write_text(
+                json.dumps({"id": run.id, "url": run.url}, indent=2) + "\n", encoding="utf-8"
+            )
         for section in ("train", "dev"):
             for name in ("loss", "qa_loss", "outer_am", "inner_before", "inner_after"):
                 run.define_metric(f"{section}/{name}", x_axis="_step", section_name=section)
         for name in ("train/grad_norm", "resources/step_seconds", "resources/peak_memory_gib"):
             run.define_metric(name, x_axis="_step", section_name=name.split("/")[0])
         yield run
+
+
+def _restore_metrics(path, checkpoint_step):
+    """保留已提交完整行，只丢弃 checkpoint 后被中断的末行。"""
+    lines = path.read_bytes().split(b"\n")
+    kept, last_complete_step = [], 0
+    for raw_line in lines[:-1]:
+        line = raw_line.decode("utf-8")
+        row = json.loads(line)
+        last_complete_step = row["step"]
+        if row["step"] <= checkpoint_step:
+            kept.append(line + "\n")
+    if lines[-1] and last_complete_step < checkpoint_step:
+        raise ValueError("incomplete metrics history reaches into the committed checkpoint steps")
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text("".join(kept), encoding="utf-8")
+    temporary.replace(path)
 
 
 def train(config_path, output_dir=None, device="cuda", resume=None):
@@ -101,8 +122,7 @@ def train(config_path, output_dir=None, device="cuda", resume=None):
     if set(train_statistics["raw_document_ids"]) & set(dev_statistics["raw_document_ids"]):
         raise ValueError("train and dev documents overlap")
     teacher_cache = TeacherCache(
-        training.teacher_cache_dir, sample_size=config.teacher.am_sample_size,
-        expected_identity=build_cache_identity(config, tokenizer),
+        training.teacher_cache_dir, expected_identity=build_cache_identity(config, tokenizer),
     )
     binding = {
         "train": dataset_identity(train_episodes), "dev": dataset_identity(dev_episodes),
@@ -113,6 +133,7 @@ def train(config_path, output_dir=None, device="cuda", resume=None):
     if checkpoint is not None and checkpoint["binding"] != binding:
         raise ValueError("training data or teacher cache differs from the resumed checkpoint")
     model = OnlineMemoryLM(config.model).to(device)
+    teacher = RuntimeTeacher(load_teacher(config.model, device), config, teacher_cache)
     engine = TrainingEngine(model, training)
     cursor = SampleCursor(len(train_episodes), config.seed)
     query_generator = torch.Generator().manual_seed(config.seed + 1)
@@ -129,11 +150,10 @@ def train(config_path, output_dir=None, device="cuda", resume=None):
     )
     metrics_path = output_dir / "metrics.jsonl"
     if resume and metrics_path.exists():
-        records = [json.loads(line) for line in metrics_path.read_text().splitlines()]
-        metrics_path.write_text("".join(json.dumps(row) + "\n" for row in records if row["step"] <= step))
+        _restore_metrics(metrics_path, step)
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
-    last_checkpoint = str(Path(resume).resolve()) if resume else None
+    last_checkpoint = str(checkpoint_file(resume)) if resume else None
     with tracking_run(config, output_dir, bool(resume), device) as tracking:
         with metrics_path.open("a", encoding="utf-8") as stream:
             while step < training.max_steps:
@@ -142,8 +162,7 @@ def train(config_path, output_dir=None, device="cuda", resume=None):
                 started = time.perf_counter()
                 indices = cursor.next_batch(training.gradient_accumulation_steps)
                 metrics = engine.train_batch(
-                    [train_episodes[index] for index in indices], teacher_cache,
-                    config.teacher.am_sample_size, query_generator,
+                    [train_episodes[index] for index in indices], teacher, query_generator,
                 )
                 step += 1
                 if device.type == "cuda":
@@ -159,8 +178,8 @@ def train(config_path, output_dir=None, device="cuda", resume=None):
                     rng = capture_rng(device)
                     try:
                         dev = evaluate_dev(
-                            model, dev_episodes, teacher_cache, config.teacher.am_sample_size,
-                            training.lambda_am, torch.Generator().manual_seed(config.seed + 2),
+                            model, dev_episodes, teacher, training.lambda_am,
+                            torch.Generator().manual_seed(config.seed + 2),
                         )
                     finally:
                         restore_rng(rng, device)
@@ -183,7 +202,9 @@ def train(config_path, output_dir=None, device="cuda", resume=None):
                         query_generator, binding, device,
                     ))
     summary = {"step": step, "checkpoint": last_checkpoint, "output_dir": str(output_dir)}
-    (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    (output_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+    )
     print(json.dumps(summary, ensure_ascii=False), flush=True)
     return summary
 

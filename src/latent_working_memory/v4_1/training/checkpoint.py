@@ -9,10 +9,16 @@ import torch
 from latent_working_memory.runtime import capture_rng, restore_rng
 
 
-def read_checkpoint(path):
+def checkpoint_file(path):
+    """CLI 可接收目录或文件；持久化引用统一为绝对 state.pt 路径。"""
     path = Path(path).expanduser().resolve()
     if path.is_dir():
         path = path / "state.pt"
+    return path
+
+
+def read_checkpoint(path):
+    path = checkpoint_file(path)
     state = torch.load(path, map_location="cpu", weights_only=False)
     expected = {"config", "model", "optimizer", "scheduler", "cursor", "rng", "query_rng", "binding"}
     if set(state) != expected:
@@ -36,14 +42,15 @@ def save_checkpoint(output_dir, step, config, model, engine, cursor, query_gener
     }
     temporary = destination / "state.tmp"
     torch.save(state, temporary)
-    temporary.replace(destination / "state.pt")
+    destination_file = checkpoint_file(destination)
+    temporary.replace(destination_file)
     checkpoints = sorted(
         (path for path in root.glob("global_step_*") if (path / "state.pt").exists()),
         key=lambda path: int(path.name.rsplit("_", 1)[1]),
     )
     for path in checkpoints[:-config.training.save_total_limit]:
         shutil.rmtree(path)
-    return destination
+    return destination_file
 
 
 def restore_training(state, model, engine, cursor, query_generator, device):

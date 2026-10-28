@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261027 16:50:38 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261028 17:20:50 Asia/Shanghai（UTC+08:00）
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
 
@@ -37,9 +37,9 @@
 | Queries 来源 | Recent 正常前向的逐层 queries | 固定基座在完整已到达历史上的提示与响应 queries |
 | Teacher 局部区域 | 旧 memory + pending；首次只有 pending | 从历史起点到本轮压缩终点的原始 KV |
 | Student 局部区域 | 当前候选 memory | 本轮更新完成后的 memory |
-| 计算时机 | 每轮写入，训练与推理相同 | 离线准备 teacher；训练时每轮计算 student |
+| 计算时机 | 每轮写入，训练与推理相同 | 离线固定文本、位置池与尺度；训练时重算选中 teacher 参照并计算 student |
 
-Outer teacher 输入包含该边界已到达的完整原始历史，**包括 recent**；但局部压缩目标排除 recent、提示与响应 KV。Teacher 不使用 student 的 LoRA。Inner 只使用在线仍可取得的旧 memory 与 pending。
+Outer teacher 输入包含该边界已到达的完整原始历史，**包括 recent**；但局部压缩目标排除 recent、提示与响应 KV。Teacher 是独立冻结的基座实例，不使用 student 的 LoRA。Inner 只使用在线仍可取得的旧 memory 与 pending。
 
 对已包含位置编码的 query/key，局部 attention 为：
 
@@ -68,6 +68,8 @@ AM 内部先对查询／通道、再对 heads 与层取平均；训练 batch 对
 
 基座默认 BF16；memory、解码器、局部 AM、可训练参数、梯度累积及 AdamW 状态使用 FP32。主 attention 的 scores 与 softmax 使用 FP32，权重与挂载的 memory KV 转为主干精度后聚合。完整跨轮训练图的开销随轨迹增长，固定在线缓存不意味着训练显存固定。
 
+Train/dev 在同一设备保存独立 teacher 与 student，按边界顺序执行。Teacher 前向使用 SDPA，不建立梯度图，局部 AM 参照以 FP32 计算；其权重及完整原文 prefix KV 与 student 的元训练图共同占用显存。独立 test／benchmark 只加载 student。
+
 ## 2. 数据与 teacher 缓存
 
 ### 2.1 QA 数据
@@ -84,27 +86,34 @@ AM 内部先对查询／通道、再对 heads 与层取平均；训练 batch 对
 
 公共 benchmark 沿用已有任务的完整 prompt 与官方评分：完整 prompt（含问题）作为在线输入，prefill 结束后固定 memory 再生成。不从 prompt 文本猜测正文与问题边界，这与上述显式 QA 分段协议分别记录。
 
-### 2.2 参考池与缓存内容
+### 2.2 离线参考池
 
 固定提示库使用 [Latent Compaction 官方的 480 条组合提示](https://github.com/THUNLP/latent-compaction/blob/81cfd4b3f30f820fb5f76451cb0f6385e0ac9510/latent_compaction/prompts.py)，来源与许可见 [teacher/prompts.py](teacher/prompts.py)。每个文档、每个压缩边界独立准备：
 
-1. 以完整已到达原文为共同前缀，各提示独立贪心生成，最多 24 个新 token，遇 EOS 结束。
-2. 从提示与响应位置中，用 reservoir sampling 均匀、无放回保留 4096 个位置；包含最后生成 token 可提供的 query。位置以“提示编号、序列内位置”区分，不要求 query 数值不同。
-3. 回放含选中位置的提示／响应分支，缓存逐层 queries $q$、局部输出 $o^T$、log-mass $z^T$，以及在完整 4096 位置上统计的固定尺度。候选不足即准备失败，不复制位置或缩小池。
-4. 每次 outer AM 从完整池均匀、无放回抽取 128 个位置，各层与 heads 共用索引；下次重新从完整池抽样，本次反向与重计算保持索引不变。
+1. 以完整已到达原文为共同前缀，各提示独立贪心生成，最多 24 个新 token，遇 EOS 结束，保存精确响应 token IDs。
+2. 从提示与响应位置中，用 reservoir sampling 均匀、无放回保留 4096 个位置，包含最后生成 token 可提供的 query。位置以“提示编号、序列内位置”区分；候选不足即准备失败，不复制位置或缩小池。
+3. 回放相关提示／响应分支，在完整 4096 位置上按层、query head 统计 $\sigma_o,\sigma_z$，应用尺度下限后保存。局部输出与 log-mass 仅用于统计，不持久化逐位置监督张量。
 
-缓存根目录包含 `identity.json`，每个边界保存为 `documents/<document_id>/write_<j>.safetensors`，$j$ 从 1 开始。先生成再回放增加离线前向，以避免同时常驻所有提示分支；缓存不持久化完整历史 KV。
+缓存根目录的 `identity.json` 保存身份、生成终止标识 `eos_token_ids` 与全局 `prompt_token_ids`；后者为 480 条完整提示片段的 token ID 列表，跨边界共用。每个边界保存为 `documents/<document_id>/write_<j>.safetensors`，$j$ 从 1 开始：
 
-| 张量 | 形状；$L$ 为层数，$H_q$ 为 query heads，$d_h$ 为 head 维度 |
+| 张量 | 类型与形状；$L$ 为层数，$H_q$ 为 query heads |
 |---|---|
-| `queries`、`outputs` | $[L,N_{\mathrm{pool}},H_q,d_h]$ |
-| `log_mass` | $[L,N_{\mathrm{pool}},H_q]$ |
-| `scales_o`、`scales_z` | $[L,H_q]$ |
-| `positions` | $[N_{\mathrm{pool}},2]$，提示编号与序列内位置；采样接口返回 `position_indices` |
+| `response_token_ids` | INT64，所有提示的响应 token IDs 顺序拼接，保留生成的 EOS |
+| `response_offsets` | INT64，$[N_{\mathrm{prompt}}+1]$，各响应在拼接序列中的起止边界 |
+| `positions` | INT64，$[N_{\mathrm{pool}},2]$，提示编号与序列内位置 |
+| `scales_o`、`scales_z` | FP32，$[L,H_q]$，完整候选池上的固定尺度 |
 
-缓存绑定 teacher、tokenizer、输入模板、提示库、窗口边界、候选池、尺度规则与 seed。相关设置改变时重新准备；训练仅将本轮抽样位置送入 student。独立 test／benchmark 推理不依赖 teacher 缓存。
+缓存只保存响应、位置与尺度。以 36 层、32 query heads、2571 个边界为例，即使每条响应均达到 24 tokens，以上主要张量总量也约为 439 MB；另有少量元数据与全局提示。
 
-上述主要监督张量使用 FP32，单边界磁盘量约为 $4LN_{\mathrm{pool}}H_q(2d_h+1)$ 字节，再乘文档数与各文档边界数。离线准备应据此安排磁盘容量；每次训练采样 128 位置不减少固定池的存储量。
+### 2.3 运行时生成 AM 参照
+
+每次 outer AM 从完整 4096 位置池均匀、无放回抽取 128 个位置，各层与 heads 共用索引。Teacher 读取缓存的固定响应，只回放涉及的提示分支，并在各分支最远的选中位置结束，重算这些位置的 $q,o^T,z^T$；无需重新生成响应。Student 使用这些停止梯度的参照与离线固定尺度计算 AM。
+
+下次使用该边界时仍从完整池重新抽样，本次反向与激活重计算复用已确定的参照。尺度始终来自离线完整池，不用本次 128 位置重估。
+
+Teacher 的完整原文 prefix KV 在一个 QA episode 内随压缩边界递增，结束后释放；同文档的其他 QA 或下个 epoch 重新计算。离线统计与运行时回放均按 `branch_batch_size` 批量执行 teacher forcing，默认每批 4 条分支；离线自然响应仍逐分支生成。
+
+缓存绑定 teacher、tokenizer、输入模板、提示库、窗口边界、候选池、尺度规则与 seed。`branch_batch_size` 只控制执行批量，不绑定缓存身份；调整时可以复用缓存。独立 test／benchmark 不加载 teacher 或读取这些缓存。
 
 ## 3. 配置
 
@@ -136,6 +145,7 @@ AM 内部先对查询／通道、再对 heads 与层取平均；训练 batch 对
 | `response_max_tokens` | $L_{\mathrm{resp}}=24$ | 每条 teacher 响应的新 token 上限 |
 | `pool_size` | $N_{\mathrm{pool}}=4096$ | 每边界须填满的固定候选池 |
 | `am_sample_size` | $N_{\mathrm{AM}}=128$ | 每次均匀、无放回采样；下次重抽 |
+| `branch_batch_size` | $B_{\mathrm{teacher}}=4$ | 离线尺度统计与运行时 teacher forcing 的分支批量 |
 
 ### 3.3 Outer 训练与运行：`training`
 
@@ -154,8 +164,8 @@ AM 内部先对查询／通道、再对 heads 与层取平均；训练 batch 对
 | `dev_every`／`save_every`／`save_total_limit` | 50／100／2 | 验证与保存步距，保留最近两个 checkpoint |
 | `max_train_data_tokens` | 12288 | Train 原始正文长度上限；`null` 关闭 |
 | `max_train_samples`／`max_dev_samples` | `null`／`null` | 过滤后的独立 QA 数量上限 |
-| `tracking`／`swanlab_project` | `disabled`／`latent-working-memory-v4` | 可设 `swanlab`，复用当前研究项目 |
-| `group`／`tags` | `null`／`[]` | 开启 SwanLab 时显式指定 group；自定义 tags 使用命名空间 |
+| `tracking`／`swanlab_project` | `swanlab`／`latent-working-memory-v4` | 默认上传；设为 `disabled` 可关闭 |
+| `group`／`tags` | `online-ttt-memory_20261028`／`[]` | 正式配置显式指定实验系列 group；自定义 tags 使用命名空间 |
 
 公共 `seed=42` 控制初始化、数据选样、训练顺序与 outer 查询采样。Checkpoint 保存实际配置、慢参数、optimizer、scheduler、数据游标、随机状态与数据／缓存身份；基座权重不重复保存。恢复使用同一配置和绑定数据，评估从 checkpoint 读取配置。
 
@@ -166,7 +176,7 @@ v4_1/
   config.py              # 唯一配置结构与输入校验
   data.py                # QA 编码、样本选择、压缩边界
   modeling/              # Memory 解码、局部 AM、Qwen3 接入与在线状态
-  teacher/               # 固定提示、离线准备、缓存采样
+  teacher/               # 固定提示、离线 token 缓存、运行时 teacher 回放
   training/              # 元训练、验证、checkpoint
   evaluation/            # QA／benchmark 评估与 HTML 展示
   scripts/               # 环境与设备入口、可复制命令
@@ -174,4 +184,32 @@ v4_1/
 
 训练的 `qa_loss` 是样本内答案 token 平均 CE，`outer_am` 是完整历史参照下的写入质量，`inner_before`／`inner_after` 是局部更新诊断。Inner loss 下降不能直接说明 QA 有效。正式实验应结合生成得分、逐题回答及资源成本分析。
 
-检查点位于 `checkpoints/global_step_<N>/state.pt`。独立评估保存汇总与逐题 JSONL，报告读取已有结果生成 HTML；输出中的换行、特殊空白与异常字符可显式查看。具体命令、产物字段与运行限制见[运行指南](scripts/README.md)。真实 Qwen3-4B 的训练稳定性、GPU 成本和 benchmark 效果需通过实际运行确认。
+### 4.1 持久化约定
+
+JSON／JSONL 均使用 UTF-8。训练指标每个 optimizer step 一行，逐题评估每个样本一行；模型恢复、实验记录与展示文件按下表区分。
+
+| 产物 | 保存内容与用途 |
+|---|---|
+| Teacher `identity.json` 与边界 safetensors | 固定参考的权威来源；边界只含 2.2 节列出的五个张量，运行时 $q/o/z$ 按保存的 tokens 重算 |
+| `checkpoints/global_step_<N>/state.pt` | 模型参数与完整训练恢复状态；恢复和评估以其中的配置、参数及绑定身份为准 |
+| 训练 `config.json`、`data.json` | 实际配置、选样统计与绑定身份的可读快照，不替代 checkpoint |
+| 训练 `metrics.jsonl` | 每步 train/dev 指标与资源记录；未执行 dev 的 step 不补值 |
+| 训练 `summary.json` | 仅含 `step`、`checkpoint`、`output_dir`，用于定位完成步数与 checkpoint，不保存指标汇总 |
+| 训练 `swanlab.json` | SwanLab run 的 `id/url`；启用上传时，恢复及评估续记还需要此文件 |
+| 评估 `summary.json`、`details.jsonl` | 实验身份、协议、指标汇总与逐题原始输出；部分 details 不表示评估完成 |
+| 评估 `report/index.html` | 从上述两个评估文件重建的展示，不是评分或恢复依据 |
+
+`state.pt` 固定八个顶层字段：`config`、`model`、`optimizer`、`scheduler`、`cursor`、`rng`、`query_rng`、`binding`。`model` 只保存慢参数，不重复保存基座权重或样本临时 memory；`cursor.step` 是已完成的 optimizer step。
+
+训练与评估 summary 的 `checkpoint` 均为 `state.pt` 的绝对路径。评估另保存 `training_run: {directory, swanlab}`，其中 `swanlab` 为 `null` 或 `{project, id, url}`；这是身份快照，续记仍读取训练目录中的 `swanlab.json`。
+
+Teacher 边界与 checkpoint 先写临时文件，再原子替换正式文件。恢复训练时，`metrics.jsonl` 原子重写为不超过 checkpoint step 的完整记录，仅丢弃未完成末行；其他格式错误直接报错。报告可独立重建，不改写原始答案或评分。
+
+### 4.2 坐标与单位
+
+- **Teacher 位置：**`write_index` 从 1 开始；`positions` 的提示编号和序列内位置从 0 开始，后者相对“提示 + 响应”。`response_offsets`、`processed_end`、`compressed_end` 均使用右端不包含的边界；正文计数包含固定模板。尺度按 `[层数, query_heads]` 保存，head 轴不是 KV heads。
+- **训练进度：**`step` 按已完成 optimizer updates 计数，`epoch` 从 0 开始。写入轮次与每轮 inner 步数不充当训练横轴。
+- **指标与资源：**EM／F1／score 范围为 0–1，时间单位为秒；`peak_memory_gib` 使用 $2^{30}$ 字节，`peak_memory_bytes` 使用字节。`generation_seconds` 包含 prefill、inner 写入及 decode；训练 `step_seconds` 不含随后 dev 和 checkpoint 保存。
+- **生成预算：**`requested_max_new_tokens` 是请求上限，`max_new_tokens` 是实际使用上限。Test 遇模型窗口限制时可缩减预算，并以 `model_window` 标记停止原因；`generated_tokens` 是实际生成数量。
+
+具体命令见[运行指南](scripts/README.md)。真实 Qwen3-4B 的训练稳定性、GPU 成本和 benchmark 效果需通过实际运行确认。
