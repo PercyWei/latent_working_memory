@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261028 21:15:50 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261028 23:57:56 Asia/Shanghai（UTC+08:00）
 
 计算协议、数据格式与参数含义见[方法说明](../README.md)。以下命令使用项目根目录 `.venv`；训练采用单卡、microbatch 1、梯度累积 8，离线准备支持多卡。正式实验先检查[配置](../../../../configs/v4-1/online_ttt_memory.json)中的基座与数据路径。
 
@@ -39,6 +39,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh prep
 - **并行与批量**：每张可见 GPU 加载一份 teacher。`--batch-size` 控制每卡批量；省略时沿用配置，默认 4。
 - **数据划分**：`--splits` 指定 train/dev，可分别运行。
 - **缓存复用**：同文档 QA 共用缓存；相同配置重复运行会跳过已完成边界。
+- **进度显示**：汇总文档／已保存边界进度（含缓存命中）及每卡状态；终端原地刷新，重定向输出时每 30 秒打印摘要。
 
 输出目录优先级：`--output-dir` > 配置中的非空 `training.teacher_cache_dir` > 自动目录。配置默认 `null`，prepare 与 train 自动使用：
 

@@ -10,11 +10,13 @@ import torch
 import torch.multiprocessing as mp
 from transformers import AutoTokenizer
 from transformers.cache_utils import DynamicCache
+from transformers.utils.logging import disable_progress_bar
 
 from ..config import load_config
 from ..data import compression_boundaries, load_episodes
 from .cache import TeacherCache, build_cache_identity, content_identity, initialize_cache
 from .generation import generate_reference_pool
+from .progress import PreparationProgress, WorkerProgress
 from .replay import TeacherReplay, load_teacher
 
 
@@ -47,8 +49,6 @@ def plan_preparation(documents, config, cache, num_workers):
                 missing.append((write_index, processed_end, compressed_end))
         if missing:
             jobs.append(PreparationJob(document_id, context_ids, tuple(missing)))
-        else:
-            print(f"teacher {document_id}: all {len(boundaries)} boundaries cached", flush=True)
     shards = [[] for _ in range(min(num_workers, len(jobs)))]
     loads = [0] * len(shards)
     weighted_jobs = [(sum(end for _, end, _ in job.boundaries), job) for job in jobs]
@@ -73,10 +73,12 @@ class TeacherPreparer:
         self.eos_ids = set(cache.identity["eos_token_ids"])
 
     @torch.no_grad()
-    def prepare_document(self, job):
+    def prepare_document(self, job, progress=None):
         document_id, context_ids = job.document_id, job.context_ids
         state = DynamicCache(config=self.model.config)
         for write_index, processed_end, compressed_end in job.boundaries:
+            if progress is not None:
+                progress.set_phase("prefill", write_index)
             # 跳过已有边界的生成，仍将此前完整原文追加到 teacher prefix KV。
             self.replay.advance(context_ids, state, processed_end)
             if processed_end + max(map(len, self.prompts)) + self.config.teacher.response_max_tokens > (
@@ -84,10 +86,8 @@ class TeacherPreparer:
             ):
                 raise ValueError(f"{document_id} write={write_index}: teacher branch exceeds model window")
             prefix = tuple((layer.keys, layer.values) for layer in state.layers)
-            print(
-                f"teacher device={self.replay.device} {document_id} write={write_index}: generating references",
-                flush=True,
-            )
+            if progress is not None:
+                progress.set_phase("generating", write_index)
             seed = int.from_bytes(hashlib.blake2b(
                 f"{self.config.seed}:{document_id}:{write_index}".encode(), digest_size=8
             ).digest(), "little")
@@ -96,26 +96,30 @@ class TeacherPreparer:
                 self.config.teacher.response_max_tokens, self.config.teacher.batch_size,
                 compressed_end, self.config.teacher.pool_size, random.Random(seed),
                 self.config.model.am_std_floor,
+                on_batch=progress.set_prompts if progress is not None else None,
             )
+            if progress is not None:
+                progress.set_phase("saving", write_index)
             self.cache.write(
                 document_id, write_index, tensors, processed_end, compressed_end,
                 context_ids, candidate_count,
             )
-            print(
-                f"teacher device={self.replay.device} {document_id} write={write_index} context={processed_end} "
-                f"compressed={compressed_end} candidates={candidate_count} pool={len(tensors['positions'])}",
-                flush=True,
-            )
+            if progress is not None:
+                progress.finish_boundary()
             del prefix, tensors
+        if progress is not None:
+            progress.finish_document()
 
 
-def prepare_worker(rank, shards, config, cache_directory):
+def prepare_worker(rank, shards, config, cache_directory, workers):
+    disable_progress_bar()
     device = torch.device("cuda", rank)
     torch.cuda.set_device(device)
     cache = TeacherCache(cache_directory)
     preparer = TeacherPreparer(load_teacher(config.model, device), config, cache)
     for job in shards[rank]:
-        preparer.prepare_document(job)
+        preparer.prepare_document(job, workers[rank])
+    workers[rank].set_phase("done")
 
 
 def main():
@@ -160,17 +164,40 @@ def main():
         for episode in episodes:
             documents[episode.document_id] = episode.context_ids
     shards = plan_preparation(documents, config, cache, num_workers)
-    for rank, jobs in enumerate(shards):
-        print(
-            f"teacher cuda:{rank}: documents={len(jobs)} "
-            f"remaining_boundaries={sum(len(job.boundaries) for job in jobs)} "
-            f"batch_size={config.teacher.batch_size}",
-            flush=True,
+    total_boundaries = sum(len(compression_boundaries(
+        len(context_ids), config.model.pending_size, config.model.recent_size,
+    )) for context_ids in documents.values())
+    workers = [WorkerProgress(mp.get_context("spawn")) for _ in shards]
+    progress = PreparationProgress(
+        shards, workers, len(documents), total_boundaries, config.teacher.num_prompts,
+    )
+    if not shards:
+        progress.show(force=True, status="complete")
+        return
+    progress.show(force=True)
+    processes = None
+    try:
+        processes = mp.spawn(
+            prepare_worker, args=(shards, config, cache.directory, workers),
+            nprocs=len(shards), join=False,
         )
-    if len(shards) == 1:
-        prepare_worker(0, shards, config, cache.directory)
-    elif shards:
-        mp.spawn(prepare_worker, args=(shards, config, cache.directory), nprocs=len(shards), join=True)
+        while not processes.join(timeout=1):
+            progress.show()
+    except BaseException as error:
+        progress.show(force=True, status="interrupted" if isinstance(error, KeyboardInterrupt) else "failed")
+        raise
+    else:
+        progress.show(force=True, status="complete")
+    finally:
+        if processes is not None:
+            for process in processes.processes:
+                if process.is_alive():
+                    process.terminate()
+            for process in processes.processes:
+                process.join(timeout=5)
+                if process.is_alive():
+                    process.kill()
+                    process.join()
 
 
 if __name__ == "__main__":

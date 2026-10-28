@@ -8,7 +8,7 @@ from .statistics import GenerationStatistics
 
 @torch.no_grad()
 def generate_reference_pool(model, prefix, prompts, eos_ids, max_new_tokens, batch_size,
-                            compressed_end, pool_size, rng, floor):
+                            compressed_end, pool_size, rng, floor, on_batch=None):
     device = next(model.parameters()).device
     prefix_length = prefix[0][0].shape[-2]
     responses = [[] for _ in prompts]
@@ -89,9 +89,8 @@ def generate_reference_pool(model, prefix, prompts, eos_ids, max_new_tokens, bat
             statistics.finish_batch([
                 len(prompts[index]) + len(responses[index]) for index in batch_indices
             ])
-            completed = start + len(batch_indices)
-            if start // 48 != completed // 48 or completed == len(prompts):
-                print(f"teacher device={device} prompts={completed}/{len(prompts)}", flush=True)
+            if on_batch is not None:
+                on_batch(start + len(batch_indices))
     positions, candidate_count, scales = statistics.finish(floor)
     lengths = torch.tensor([len(response) for response in responses], dtype=torch.int64)
     tensors = {
