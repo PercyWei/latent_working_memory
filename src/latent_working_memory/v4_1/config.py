@@ -1,6 +1,6 @@
 """v4.1 的统一配置；相对路径以运行目录为基准。"""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import math
 import os
@@ -94,7 +94,7 @@ class TeacherConfig:
 @dataclass(frozen=True)
 class TrainingConfig:
     dataset_dir: str = "data/delta-mem-qasper"
-    teacher_cache_dir: str = "artifacts/v4-1/online-ttt-memory/teacher"
+    teacher_cache_dir: str | None = None
     output_dir: str | None = None
     max_steps: int = 1000
     micro_batch_size: int = 1
@@ -121,8 +121,8 @@ class TrainingConfig:
     tags: tuple[str, ...] = ()
 
     def __post_init__(self):
-        for name in ("dataset_dir", "teacher_cache_dir"):
-            _path(self, name)
+        _path(self, "dataset_dir")
+        _path(self, "teacher_cache_dir", optional=True)
         _path(self, "output_dir", optional=True)
         _positive_ints(self, (
             "max_steps", "micro_batch_size", "gradient_accumulation_steps",
@@ -168,6 +168,12 @@ class ExperimentConfig:
     def __post_init__(self):
         if type(self.seed) is not int or self.seed < 0:
             raise ValueError("seed must be a nonnegative integer")
+        if self.training.teacher_cache_dir is None:
+            directory = (
+                "artifacts/v4-1/online-ttt-memory/teacher/"
+                f"p{self.model.pending_size}-r{self.model.recent_size}"
+            )
+            object.__setattr__(self, "training", replace(self.training, teacher_cache_dir=directory))
 
 
 def config_from_dict(payload):

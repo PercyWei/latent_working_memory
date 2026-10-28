@@ -121,11 +121,13 @@ def prepare_worker(rank, shards, config, cache_directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
-    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--output-dir", help="覆盖 teacher 缓存目录；默认按配置中的窗口设置确定")
     parser.add_argument("--splits", nargs="+", choices=("train", "dev"), default=["train", "dev"])
     parser.add_argument("--batch-size", type=int, help="每卡 teacher 批处理大小；默认使用配置值")
     args = parser.parse_args()
     config = load_config(args.config)
+    if args.output_dir is not None:
+        config = replace(config, training=replace(config.training, teacher_cache_dir=args.output_dir))
     if args.batch_size is not None:
         config = replace(config, teacher=replace(config.teacher, batch_size=args.batch_size))
     if not os.environ.get("CUDA_VISIBLE_DEVICES"):
@@ -134,7 +136,8 @@ def main():
     if num_workers == 0:
         raise RuntimeError("teacher preparation requires a visible CUDA GPU")
     tokenizer = AutoTokenizer.from_pretrained(config.model.model_name_or_path)
-    cache = initialize_cache(args.output_dir, build_cache_identity(config, tokenizer))
+    cache = initialize_cache(config.training.teacher_cache_dir, build_cache_identity(config, tokenizer))
+    print(f"teacher cache_dir={cache.directory}", flush=True)
     documents = {}
     split_documents = {}
     for split in args.splits:

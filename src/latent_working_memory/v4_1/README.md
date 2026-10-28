@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261028 20:38:00 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261028 21:09:48 Asia/Shanghai（UTC+08:00）
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
 
@@ -98,7 +98,11 @@ GPU 只暂存当前提示批的三项统计，局部 attention 分块计算，�
 
 离线准备在每张可见 GPU 上启动一个进程，各加载一份冻结 teacher。文档按预计计算量分配，同篇文档的全部边界始终由一个进程处理；原文 prefill 每次处理一篇，并跨边界延续 prefix KV。各进程写入同一缓存目录中互不重叠的文档文件，中断后可复用已完成边界。
 
-缓存根目录的 `identity.json` 保存身份、生成终止标识 `eos_token_ids` 与全局 `prompt_token_ids`；后者为 480 条完整提示片段的 token ID 列表，跨边界共用。每个边界保存为 `documents/<document_id>/write_<j>.safetensors`，$j$ 从 1 开始：
+`training.teacher_cache_dir` 默认 `null`，prepare 与 train 自动使用 `artifacts/v4-1/online-ttt-memory/teacher/p{pending_size}-r{recent_size}`；修改窗口后自动切换目录。训练实际配置保存解析后的路径，完整缓存身份仍由 `identity.json` 校验。
+
+Prepare 的路径优先级为：`--output-dir` > 配置中的非空 `training.teacher_cache_dir` > 自动目录。显式 `--output-dir` 不修改原配置；使用自定义目录时，后续训练须将 `training.teacher_cache_dir` 设为同一路径。
+
+每个窗口目录分别包含 `identity.json` 与 `documents/`。`identity.json` 保存身份、生成终止标识 `eos_token_ids` 与全局 `prompt_token_ids`；后者为 480 条完整提示片段的 token ID 列表，跨边界共用。每个边界保存为 `documents/<document_id>/write_<j>.safetensors`，$j$ 从 1 开始：
 
 | 张量 | 类型与形状；$L$ 为层数，$H_q$ 为 query heads |
 |---|---|
@@ -160,7 +164,7 @@ Teacher 的完整原文 prefix KV 在一个 QA episode 内随压缩边界递增�
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `dataset_dir` | `data/delta-mem-qasper` | QA 数据目录 |
-| `teacher_cache_dir` | `artifacts/v4-1/online-ttt-memory/teacher` | 已准备的 train/dev 参照 |
+| `teacher_cache_dir` | `null` | 按 pending／recent 容量自动确定缓存目录；可显式指定路径 |
 | `output_dir` | `null` | 启动时通过 `--output-dir` 指定 |
 | `max_steps` | $S_{\mathrm{outer}}=1000$ | Outer optimizer steps |
 | `micro_batch_size`／`gradient_accumulation_steps` | 1／8 | 单卡全局 batch 为 8；epoch 尾批按实际样本数平均 |

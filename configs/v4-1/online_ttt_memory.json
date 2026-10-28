@@ -28,7 +28,7 @@
   },
   "training": {
     "dataset_dir": "data/delta-mem-qasper",
-    "teacher_cache_dir": "artifacts/v4-1/online-ttt-memory/teacher",
+    "teacher_cache_dir": null,
     "output_dir": null,
     "max_steps": 1000,
     "micro_batch_size": 1,

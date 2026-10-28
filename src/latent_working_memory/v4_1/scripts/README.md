@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261028 20:38:00 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261028 21:15:50 Asia/Shanghai（UTC+08:00）
 
 计算协议、数据格式与参数含义见[方法说明](../README.md)。以下命令使用项目根目录 `.venv`；训练采用单卡、microbatch 1、梯度累积 8，离线准备支持多卡。正式实验先检查[配置](../../../../configs/v4-1/online_ttt_memory.json)中的基座与数据路径。
 
@@ -21,29 +21,39 @@ bash src/latent_working_memory/v4_1/scripts/run.sh --help
 |---|---|
 | 基座与 tokenizer | `~/models/Qwen3-4B-Instruct-2507` |
 | QA 数据 | `data/delta-mem-qasper/{train,dev,test}.jsonl` |
-| Teacher 缓存 | `artifacts/v4-1/online-ttt-memory/teacher` |
+| Teacher 缓存 | `artifacts/v4-1/online-ttt-memory/teacher/p1024-r256` |
 | 训练目录 | `artifacts/v4-1/online-ttt-memory/train/recent-m256` |
 | 独立评估 | `artifacts/v4-1/online-ttt-memory/eval/<任务名>` |
 
 ## 2. 离线准备 teacher
 
+为 train/dev 准备 teacher 参考缓存；test 和 benchmark 无需此步骤。
+
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh prepare \
   --config configs/v4-1/online_ttt_memory.json \
-  --output-dir artifacts/v4-1/online-ttt-memory/teacher \
   --batch-size 4 \
   --splits train dev
 ```
 
-每张卡加载一份冻结 teacher，按预计计算量分配文档，同篇文档的所有边界由同一进程处理。原文 prefill 每次处理一篇；`--batch-size` 控制每卡 teacher 生成与统计的批处理大小，覆盖本次运行的 `teacher.batch_size`。省略参数时沿用配置，默认 4。
+- **并行与批量**：每张可见 GPU 加载一份 teacher。`--batch-size` 控制每卡批量；省略时沿用配置，默认 4。
+- **数据划分**：`--splits` 指定 train/dev，可分别运行。
+- **缓存复用**：同文档 QA 共用缓存；相同配置重复运行会跳过已完成边界。
 
-每个文档、每个压缩边界固定 480 条提示的响应、4096 个候选位置及完整池上的逐层尺度，并输出进度。边界缓存只保存响应 token IDs、偏移、位置与尺度，放在 `documents/<document_id>/write_<j>.safetensors`；全局提示 token IDs 与身份约束保存在 `identity.json`。同文档 QA 共用缓存；同配置重复执行会复用已有边界，train/dev 也可分开准备。
+输出目录优先级：`--output-dir` > 配置中的非空 `training.teacher_cache_dir` > 自动目录。配置默认 `null`，prepare 与 train 自动使用：
 
-尺度统计并入响应生成：逐层将局部 attention 输出缩为通道均值与方差，并保留 log-mass；每批完成后按原提示／位置顺序维护 4096 位置候选池，最后计算尺度。最后生成的 token（含 EOS）补一次前向取得 query，不继续生成答案。
+```text
+artifacts/v4-1/online-ttt-memory/teacher/p{pending_size}-r{recent_size}
+```
 
-GPU 仅暂存当前批统计，CPU 固定候选池的三项 FP64 统计约占 108 MiB／进程（36 层、32 query heads），不含模型、KV 与当前批工作区。训练时仍从池中抽取 128 个位置，通过 teacher forcing 重算当次 AM 目标，尺度沿用离线结果。
+修改窗口后自动切换目录，需重新准备缓存。若用 `--output-dir <目录>` 自定义路径，后续训练须将 `training.teacher_cache_dir` 设为同一路径。
 
-`--output-dir` 仅指定本次写入位置；如改用其他目录，同步修改训练配置的 `training.teacher_cache_dir`。Teacher 不需要覆盖 test 或 benchmark。
+| 缓存产物 | 内容 |
+|---|---|
+| `identity.json` | 全局提示文本与 token IDs、缓存配置身份 |
+| `documents/<document_id>/write_<j>.safetensors` | 第 j 次压缩的响应 token IDs、偏移、候选位置与标准化尺度 |
+
+计算过程与张量格式见[离线参考池说明](../README.md#22-离线参考池)。
 
 ## 3. 训练与恢复
 
@@ -75,7 +85,7 @@ Checkpoint 只在 optimizer step 完成后保存，默认保留最近两个；�
 
 | 训练产物 | 内容 |
 |---|---|
-| `config.json` | 本次实际配置 |
+| `config.json` | 本次实际配置，包含解析后的 teacher 缓存路径 |
 | `data.json` | 数据选样与身份 |
 | `metrics.jsonl` | 每个 optimizer step 一行的 train/dev 指标；恢复时截至 checkpoint step |
 | `summary.json` | 最终 `step`、`checkpoint`、`output_dir`；checkpoint 为 `state.pt` 绝对路径 |
@@ -148,6 +158,6 @@ bash src/latent_working_memory/v4_1/scripts/run.sh report \
 
 ## 6. 从逐位置张量缓存迁移
 
-旧缓存若保存 `queries`、`outputs` 和 `log_mass`，不能直接用于当前实现。保留原目录，选择新的缓存目录（如 `artifacts/v4-1/online-ttt-memory/teacher-tokens`），将配置的 `training.teacher_cache_dir` 改为该路径，再用第 2 节命令将 `--output-dir` 指向同一路径重新准备。
+旧缓存若保存 `queries`、`outputs` 和 `log_mass`，不能直接用于当前实现。保留原目录，按第 2 节命令在对应窗口目录重新准备（如 `artifacts/v4-1/online-ttt-memory/teacher/p1024-r256`）；若该路径已存旧格式缓存，先将旧目录另存。
 
 已有训练 checkpoint 绑定旧缓存身份，迁移后使用新的训练输出目录开始训练，不以旧 checkpoint 执行 `--resume`。模型超参数、480／24／4096／128 查询预算及 CLI 入口保持不变。
