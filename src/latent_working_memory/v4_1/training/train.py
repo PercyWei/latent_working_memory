@@ -213,10 +213,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
     parser.add_argument("--output-dir")
-    parser.add_argument("--device", default="cuda")
     parser.add_argument("--resume", help="同一运行的 checkpoint 目录或 state.pt")
     args = parser.parse_args(argv)
-    train(args.config, args.output_dir, args.device, args.resume)
+    train(args.config, args.output_dir, resume=args.resume)
 
 
 if __name__ == "__main__":

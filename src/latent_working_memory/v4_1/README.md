@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261028 17:20:50 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261028 17:41:11 Asia/Shanghai（UTC+08:00）
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
 
@@ -18,7 +18,7 @@
 | 外层更新 | 通过完整写入轨迹学习初始化、KV／bias 解码器、正步长与 attention Q/K/V LoRA |
 | 推理 | 固定慢参数，沿用在线写入；正文处理完成后固定 memory，追加问题 KV 并自回归生成 |
 
-首版支持 full-attention Qwen3、固定 default RoPE、单设备、microbatch 1，不启用随机 dropout。Inner 使用 recent 自然读取；outer 使用固定文本提示与 teacher 自然响应。Latent query 生成器与 self-study 保留为研究候选。
+首版支持 full-attention Qwen3、固定 default RoPE、单设备、microbatch 1，不启用随机 dropout。GPU 由 `CUDA_VISIBLE_DEVICES` 指定，准备、训练与评估使用首张可见卡。Inner 使用 recent 自然读取；outer 使用固定文本提示与 teacher 自然响应。Latent query 生成器与 self-study 保留为研究候选。
 
 ### 1.1 记忆接口与在线边界
 

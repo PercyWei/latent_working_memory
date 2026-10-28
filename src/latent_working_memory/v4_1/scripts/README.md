@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261028 17:20:50 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261028 17:41:11 Asia/Shanghai（UTC+08:00）
 
 计算协议、数据格式与参数含义见[方法说明](../README.md)。以下命令使用项目根目录 `.venv`，默认单卡、microbatch 1、梯度累积 8；正式实验先检查[配置](../../../../configs/v4-1/online_ttt_memory.json)中的基座与数据路径。
 
@@ -13,7 +13,7 @@ uv sync
 bash src/latent_working_memory/v4_1/scripts/run.sh --help
 ```
 
-`run.sh` 切换到项目根目录，使用 `uv run --frozen`。`--gpu 0`／`--gpu 1` 指定物理卡，进程内均为 `cuda:0`；默认物理卡 0。模块参数原样传递，可在操作名后使用 `--help`。当前入口支持单进程，不使用 `torchrun`。
+`run.sh` 切换到项目根目录，使用 `uv run --frozen`，直接继承 `CUDA_VISIBLE_DEVICES`。准备、训练与评估使用首张可见 GPU（进程内 `cuda:0`）；本项目选择物理卡 0 或 1，示例统一使用 `CUDA_VISIBLE_DEVICES=0`。当前为单进程单卡，不使用 `torchrun`。模块参数原样传递，可在操作名后使用 `--help`。
 
 本文示例约定：
 
@@ -28,10 +28,10 @@ bash src/latent_working_memory/v4_1/scripts/run.sh --help
 ## 2. 离线准备 teacher
 
 ```bash
-bash src/latent_working_memory/v4_1/scripts/run.sh prepare --gpu 0 \
+CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh prepare \
   --config configs/v4-1/online_ttt_memory.json \
   --output-dir artifacts/v4-1/online-ttt-memory/teacher \
-  --device cuda:0 --splits train dev
+  --splits train dev
 ```
 
 每个文档、每个压缩边界固定 480 条提示的响应、4096 个候选位置及完整池上的逐层尺度，并输出进度。边界缓存只保存响应 token IDs、偏移、位置与尺度，放在 `documents/<document_id>/write_<j>.safetensors`；全局提示 token IDs 与身份约束保存在 `identity.json`。同文档 QA 共用缓存；同配置重复执行会复用已有边界，train/dev 也可分开准备。
@@ -43,10 +43,9 @@ bash src/latent_working_memory/v4_1/scripts/run.sh prepare --gpu 0 \
 新训练：
 
 ```bash
-bash src/latent_working_memory/v4_1/scripts/run.sh train --gpu 0 \
+CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh train \
   --config configs/v4-1/online_ttt_memory.json \
-  --output-dir artifacts/v4-1/online-ttt-memory/train/recent-m256 \
-  --device cuda:0
+  --output-dir artifacts/v4-1/online-ttt-memory/train/recent-m256
 ```
 
 Train/dev 在同一卡上加载独立冻结 teacher 与 student，顺序执行。每轮均匀、无放回抽取 128 个位置，只回放涉及分支到最远选中位置，重算 AM 参照；teacher 原文 prefix KV 在当前 QA episode 内递增，跨 QA／epoch 重算。`teacher.branch_batch_size` 默认 4，控制离线尺度统计和训练回放的分支批量；可根据显存调小，缓存仍可复用。
@@ -54,10 +53,9 @@ Train/dev 在同一卡上加载独立冻结 teacher 与 student，顺序执行�
 从同一 run 的已保存 step 恢复，例如第 100 步：
 
 ```bash
-bash src/latent_working_memory/v4_1/scripts/run.sh train --gpu 0 \
+CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh train \
   --config configs/v4-1/online_ttt_memory.json \
   --output-dir artifacts/v4-1/online-ttt-memory/train/recent-m256 \
-  --device cuda:0 \
   --resume artifacts/v4-1/online-ttt-memory/train/recent-m256/checkpoints/global_step_100
 ```
 
@@ -83,11 +81,11 @@ bash src/latent_working_memory/v4_1/scripts/run.sh train --gpu 0 \
 ### 4.1 QASPER test
 
 ```bash
-bash src/latent_working_memory/v4_1/scripts/run.sh evaluate --gpu 0 \
+CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh evaluate \
   --checkpoint artifacts/v4-1/online-ttt-memory/train/recent-m256/checkpoints/global_step_1000 \
   --task test --data data/delta-mem-qasper \
   --output-dir artifacts/v4-1/online-ttt-memory/eval/qasper-test \
-  --device cuda:0 --max-new-tokens 128
+  --max-new-tokens 128
 ```
 
 独立样本重新初始化 memory，先处理正文，再固定 memory 回答问题。评估只加载 student，不读取 teacher 缓存，报告单参考答案 EM／token F1 和按答案 token 加权的 NLL；NLL 包含 assistant 结束符，与训练时先逐样本平均的汇总口径区分。
@@ -97,17 +95,15 @@ bash src/latent_working_memory/v4_1/scripts/run.sh evaluate --gpu 0 \
 使用项目已有的 benchmark 数据准备结果，数据布局与准备入口见[公共 benchmark 指南](../../v4/benchmarks/README.md)。将下面的 `<已准备数据目录>` 替换为对应实际目录：
 
 ```bash
-bash src/latent_working_memory/v4_1/scripts/run.sh evaluate --gpu 0 \
+CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh evaluate \
   --checkpoint artifacts/v4-1/online-ttt-memory/train/recent-m256/checkpoints/global_step_1000 \
   --task locomo --data '<已准备数据目录>' \
-  --output-dir artifacts/v4-1/online-ttt-memory/eval/locomo \
-  --device cuda:0
+  --output-dir artifacts/v4-1/online-ttt-memory/eval/locomo
 
-bash src/latent_working_memory/v4_1/scripts/run.sh evaluate --gpu 0 \
+CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh evaluate \
   --checkpoint artifacts/v4-1/online-ttt-memory/train/recent-m256/checkpoints/global_step_1000 \
   --task ruler --data '<已准备数据目录>' --lengths 8192 16384 32768 \
-  --output-dir artifacts/v4-1/online-ttt-memory/eval/ruler \
-  --device cuda:0
+  --output-dir artifacts/v4-1/online-ttt-memory/eval/ruler
 ```
 
 Benchmark 默认采用原任务 prompt 与生成预算，完整 prompt 在线压缩后固定 memory 生成，沿用公共评分。`--max-new-tokens` 可显式覆盖生成预算，并记录在评估协议中。`--max-samples` 对 RULER 是每个任务／长度的上限，对其他数据是总体 QA 上限；正式结果保留默认完整评估。

@@ -235,13 +235,13 @@ def main(argv=None):
     parser.add_argument("--data", required=True, help="QA 数据目录或 JSONL；公共 benchmark 原生目录")
     parser.add_argument("--task", choices=("test", "locomo", "ruler"), default="test")
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--device", default="cuda")
     parser.add_argument("--max-new-tokens", type=int)
     parser.add_argument("--max-samples", type=int, help="最多 QA 数；RULER 为每个 task/length 的上限")
     parser.add_argument("--lengths", type=int, nargs="+", default=DEFAULT_RULER_LENGTHS)
     args = parser.parse_args(argv)
-    evaluate(args.checkpoint, args.data, args.output_dir, args.task, args.device,
-             args.max_new_tokens, args.max_samples, args.lengths)
+    evaluate(args.checkpoint, args.data, args.output_dir, args.task,
+             max_new_tokens=args.max_new_tokens, max_samples=args.max_samples,
+             lengths=args.lengths)
 
 
 if __name__ == "__main__":

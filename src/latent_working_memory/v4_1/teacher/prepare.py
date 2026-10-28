@@ -191,12 +191,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--splits", nargs="+", choices=("train", "dev"), default=["train", "dev"])
     args = parser.parse_args()
     config = load_config(args.config)
     tokenizer = AutoTokenizer.from_pretrained(config.model.model_name_or_path)
-    model = load_teacher(config.model, args.device)
+    model = load_teacher(config.model, "cuda:0")
     cache = initialize_cache(args.output_dir, build_cache_identity(config, tokenizer))
     preparer = TeacherPreparer(model, config, cache)
     documents = {}
