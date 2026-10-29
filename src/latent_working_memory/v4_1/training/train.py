@@ -3,10 +3,12 @@
 import argparse
 from contextlib import contextmanager
 from dataclasses import asdict, replace
+from datetime import datetime
 import json
 import os
 from pathlib import Path
 import time
+from zoneinfo import ZoneInfo
 
 import swanlab
 import torch
@@ -80,19 +82,33 @@ def _restore_metrics(path, checkpoint_step):
     temporary.replace(path)
 
 
+def _training_output_dir(config, output_dir, checkpoint):
+    directory = output_dir or config.training.output_dir
+    if directory is None:
+        if checkpoint is not None:
+            directory = checkpoint["config"]["training"]["output_dir"]
+        else:
+            model = config.model
+            date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+            directory = (
+                "artifacts/v4-1/online-ttt-memory/train/"
+                f"am-recent_m{model.num_slots}-d{model.memory_dim}"
+                f"_p{model.pending_size}-r{model.recent_size}"
+                f"_inner{model.inner_steps}_{date}"
+            )
+    return Path(directory).expanduser().resolve()
+
+
 def train(config_path, output_dir=None, device="cuda", resume=None, batch_size=None):
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         raise ValueError("v4.1 currently supports one process; do not use torchrun")
     config = load_config(config_path)
     if batch_size is not None:
         config = replace(config, teacher=replace(config.teacher, batch_size=batch_size))
-    output_dir = output_dir or config.training.output_dir
-    if output_dir is None:
-        raise ValueError("specify --output-dir or training.output_dir")
-    output_dir = Path(output_dir).expanduser().resolve()
+    checkpoint = read_checkpoint(resume) if resume else None
+    output_dir = _training_output_dir(config, output_dir, checkpoint)
     config = replace(config, training=replace(config.training, output_dir=str(output_dir)))
     training = config.training
-    checkpoint = read_checkpoint(resume) if resume else None
     if checkpoint is not None and checkpoint["config"] != asdict(config):
         raise ValueError("resume requires the original run configuration and output directory")
     if checkpoint is not None:
@@ -104,6 +120,7 @@ def train(config_path, output_dir=None, device="cuda", resume=None, batch_size=N
             raise ValueError("resume the latest complete checkpoint in this run")
     if checkpoint is None and output_dir.exists() and any(output_dir.iterdir()):
         raise ValueError(f"output directory is not empty: {output_dir}; use --resume")
+    print(f"train output_dir={output_dir}", flush=True)
     device = initialize_device(device)
     set_seed(config.seed)
     tokenizer = AutoTokenizer.from_pretrained(config.model.model_name_or_path)
@@ -214,7 +231,7 @@ def train(config_path, output_dir=None, device="cuda", resume=None, batch_size=N
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
-    parser.add_argument("--output-dir")
+    parser.add_argument("--output-dir", help="覆盖训练目录；默认按配置与启动日期确定")
     parser.add_argument("--resume", help="同一运行的 checkpoint 目录或 state.pt")
     parser.add_argument("--batch-size", type=int, help="Teacher forcing 批处理大小；默认使用配置值")
     args = parser.parse_args(argv)

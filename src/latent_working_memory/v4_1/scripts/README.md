@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261029 09:38:35 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261029 11:26:28 Asia/Shanghai（UTC+08:00）
 
 计算协议、数据格式与参数含义见[方法说明](../README.md)。以下命令使用项目根目录 `.venv`；训练采用单卡、microbatch 1、梯度累积 8，离线准备支持多卡。正式实验先检查[配置](../../../../configs/v4-1/online_ttt_memory.json)中的基座与数据路径。
 
@@ -24,7 +24,7 @@ bash src/latent_working_memory/v4_1/scripts/run.sh --help
 | 基座与 tokenizer | `~/models/Qwen3-4B-Instruct-2507` |
 | QA 数据 | `data/delta-mem-qasper/{train,dev,test}.jsonl` |
 | Teacher 缓存 | `artifacts/v4-1/online-ttt-memory/teacher/p1024-r256` |
-| 训练目录 | `artifacts/v4-1/online-ttt-memory/train/recent-m256` |
+| 训练目录 | `artifacts/v4-1/online-ttt-memory/train/am-recent_m256-d512_p1024-r256_inner3_20261029` |
 | 独立评估 | `artifacts/v4-1/online-ttt-memory/eval/<任务名>` |
 
 ## 2. 离线准备 teacher
@@ -60,44 +60,58 @@ artifacts/v4-1/online-ttt-memory/teacher/p{pending_size}-r{recent_size}
 
 ## 3. 训练与恢复
 
-新训练：
+### 3.1 启动训练
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh train \
   --config configs/v4-1/online_ttt_memory.json \
-  --batch-size 4 \
-  --output-dir artifacts/v4-1/online-ttt-memory/train/recent-m256
+  --batch-size 4
 ```
 
-Train/dev 在同一卡上加载独立冻结 teacher 与 student，顺序执行。每轮均匀、无放回抽取 128 个位置，只回放涉及分支到最远选中位置，重算 AM 参照；teacher 原文 prefix KV 在当前 QA episode 内递增，跨 QA／epoch 重算。
+Train/dev 的 teacher 与 student 在同一卡上分别加载。`--batch-size` 控制 teacher forcing 批量，默认沿用配置；可与离线准备不同，不改变训练 microbatch。
 
-训练的 `--batch-size` 控制 teacher forcing 批量，不改变训练 microbatch；省略时沿用配置，默认 4。它可与离线准备的批量不同，缓存仍可复用。覆盖值写入训练目录的实际配置、checkpoint 与 SwanLab config。
+输出目录默认按方法设置与启动日期构造：
 
-从同一 run 的已保存 step 恢复，例如第 100 步：
+```text
+artifacts/v4-1/online-ttt-memory/train/am-recent_m{num_slots}-d{memory_dim}_p{pending_size}-r{recent_size}_inner{inner_steps}_{YYYYMMDD}
+```
+
+- **目录优先级**：`--output-dir` > 非空 `training.output_dir` > 自动目录。
+- **日期与路径**：按 `Asia/Shanghai` 时区的启动日期命名；最终绝对路径在启动时打印并写入实际配置。下文以 `20261029` 启动的 run 为例。
+- **重复运行**：新训练遇到非空目录会报错；继续原 run 使用 `--resume`，新实验使用其他目录。
+
+### 3.2 恢复训练
+
+使用已保存的实际配置，指定本 run 最新完整 checkpoint；以下以第 100 步为例：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh train \
-  --config artifacts/v4-1/online-ttt-memory/train/recent-m256/config.json \
-  --output-dir artifacts/v4-1/online-ttt-memory/train/recent-m256 \
-  --resume artifacts/v4-1/online-ttt-memory/train/recent-m256/checkpoints/global_step_100
+  --config artifacts/v4-1/online-ttt-memory/train/am-recent_m256-d512_p1024-r256_inner3_20261029/config.json \
+  --resume artifacts/v4-1/online-ttt-memory/train/am-recent_m256-d512_p1024-r256_inner3_20261029/checkpoints/global_step_100
 ```
 
-恢复会还原慢参数、optimizer、scheduler、数据顺序、查询采样及各随机状态；实际配置、数据和 teacher 缓存必须与 checkpoint 绑定一致，包括 teacher 批处理大小、`max_steps` 和输出目录。示例直接读取已保存的实际配置；若使用原配置文件，须传入与首次训练相同的 `--batch-size` 覆盖值。
+- **恢复状态**：慢参数、optimizer、scheduler、数据游标及随机状态。
+- **一致性要求**：实际配置、数据、teacher 缓存与输出目录须匹配 checkpoint；跨日期恢复沿用原目录。修改方法或训练设置应启动新 run。
+- **保存规则**：仅在 optimizer step 完成后保存，默认保留最近两个 checkpoint。
 
-Checkpoint 只在 optimizer step 完成后保存，默认保留最近两个；恢复须指定本 run 最新完整 checkpoint，示例适用于最新已完成第 100 步的情况。改变方法或训练设置时使用新训练目录。
+### 3.3 产物与记录
 
 | 训练产物 | 内容 |
 |---|---|
-| `config.json` | 本次实际配置，包含解析后的 teacher 缓存路径 |
-| `data.json` | 数据选样与身份 |
-| `metrics.jsonl` | 每个 optimizer step 一行的 train/dev 指标；恢复时截至 checkpoint step |
-| `summary.json` | 最终 `step`、`checkpoint`、`output_dir`；checkpoint 为 `state.pt` 绝对路径 |
-| `checkpoints/global_step_<N>/state.pt` | 慢参数、配置、绑定身份与完整恢复状态，作为恢复及评估依据 |
-| `swanlab.json` | 启用上传时保存 `id/url`，恢复与评估续记所需 |
+| `config.json` | 实际配置，包含解析后的路径与命令行覆盖值 |
+| `data.json` | 数据选样与绑定身份 |
+| `metrics.jsonl` | 每个 optimizer step 的 train/dev 指标；恢复时保留至 checkpoint step |
+| `summary.json` | 最终 step、checkpoint 与 output_dir |
+| `checkpoints/global_step_<N>/state.pt` | 慢参数与完整恢复状态，供恢复和评估使用 |
+| `swanlab.json` | SwanLab run 的 id/url，供恢复和评估续记 |
 
-字段、索引与单位统一见[方法说明第 4 节](../README.md#4-代码与结果)。展示报告可以重建，checkpoint 和原始记录应保留。
+进度打印到终端，逐步指标写入 `metrics.jsonl`。完整格式见[方法说明第 4 节](../README.md#4-代码与结果)。
 
-进度直接打印到终端。`metrics.jsonl` 是可供分析的结构化指标，不另存终端输出副本。默认开启 SwanLab，使用既有 `latent-working-memory-v4` 项目，正式配置显式指定 `group: "online-ttt-memory_20261028"`；train/dev 在同一 run 内记录，独立评估续记该 run。运行前配置 SwanLab 登录凭据；新实验系列修改配置中的 group，关闭上传时设 `tracking: "disabled"`。
+SwanLab 默认开启，运行前需完成登录配置：
+
+- **项目与名称**：项目为 `latent-working-memory-v4`，run 名称使用训练目录名。
+- **实验分组**：`training.group` 显式指定；当前配置为 `online-ttt-memory_20261028`，新实验系列应相应修改。
+- **指标组织**：train/dev 记录在同一 run，独立评估续记 `evaluation/*`；设 `tracking: "disabled"` 可关闭上传。
 
 ## 4. 独立评估与报告
 
@@ -107,7 +121,7 @@ Checkpoint 只在 optimizer step 完成后保存，默认保留最近两个；�
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh evaluate \
-  --checkpoint artifacts/v4-1/online-ttt-memory/train/recent-m256/checkpoints/global_step_1000 \
+  --checkpoint artifacts/v4-1/online-ttt-memory/train/am-recent_m256-d512_p1024-r256_inner3_20261029/checkpoints/global_step_1000 \
   --task test --data data/delta-mem-qasper \
   --output-dir artifacts/v4-1/online-ttt-memory/eval/qasper-test \
   --max-new-tokens 128
@@ -121,12 +135,12 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh evalua
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh evaluate \
-  --checkpoint artifacts/v4-1/online-ttt-memory/train/recent-m256/checkpoints/global_step_1000 \
+  --checkpoint artifacts/v4-1/online-ttt-memory/train/am-recent_m256-d512_p1024-r256_inner3_20261029/checkpoints/global_step_1000 \
   --task locomo --data '<已准备数据目录>' \
   --output-dir artifacts/v4-1/online-ttt-memory/eval/locomo
 
 CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh evaluate \
-  --checkpoint artifacts/v4-1/online-ttt-memory/train/recent-m256/checkpoints/global_step_1000 \
+  --checkpoint artifacts/v4-1/online-ttt-memory/train/am-recent_m256-d512_p1024-r256_inner3_20261029/checkpoints/global_step_1000 \
   --task ruler --data '<已准备数据目录>' --lengths 8192 16384 32768 \
   --output-dir artifacts/v4-1/online-ttt-memory/eval/ruler
 ```

@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261029 09:38:35 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261029 11:16:57 Asia/Shanghai（UTC+08:00）
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
 
@@ -166,7 +166,7 @@ Teacher 的完整原文 prefix KV 在一个 QA episode 内随压缩边界递增�
 |---|---|---|
 | `dataset_dir` | `data/delta-mem-qasper` | QA 数据目录 |
 | `teacher_cache_dir` | `null` | 按 pending／recent 容量自动确定缓存目录；可显式指定路径 |
-| `output_dir` | `null` | 启动时通过 `--output-dir` 指定 |
+| `output_dir` | `null` | 按方法设置与启动日期自动命名，恢复沿用原目录；可[显式指定](scripts/README.md#3-训练与恢复) |
 | `max_steps` | $S_{\mathrm{outer}}=1000$ | Outer optimizer steps |
 | `micro_batch_size`／`gradient_accumulation_steps` | 1／8 | 单卡全局 batch 为 8；epoch 尾批按实际样本数平均 |
 | `learning_rate`／`lora_learning_rate` | $10^{-4}$／$2\times10^{-5}$ | 新增参数／LoRA 峰值学习率 |
