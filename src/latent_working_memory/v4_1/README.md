@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261029 11:16:57 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261029 15:18:45 Asia/Shanghai（UTC+08:00）
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
 
@@ -156,9 +156,7 @@ Teacher 的完整原文 prefix KV 在一个 QA episode 内随压缩边界递增�
 | `am_sample_size` | $N_{\mathrm{AM}}=128$ | 每次均匀、无放回采样；下次重抽 |
 | `batch_size` | $B_{\mathrm{teacher}}=4$ | 每卡 teacher 批处理大小，用于离线生成与统计、运行时 teacher forcing |
 
-`prepare` 和 `train` 均支持 `--batch-size N`，覆盖本次运行的 `teacher.batch_size`；省略时沿用配置。该参数控制每卡 teacher 批处理大小，不是训练 microbatch；两阶段可根据各自显存峰值选择不同值，不改变候选池或 AM 采样数量。
-
-训练覆盖值写入实际配置、checkpoint 与 SwanLab config。恢复训练须保持实际配置一致：传入相同覆盖值，或直接使用训练目录的 `config.json`。
+`prepare --batch-size N` 和 `train --teacher-batch-size N` 均覆盖 `teacher.batch_size`，省略时沿用配置。它控制 teacher 批处理大小，不计入训练 batch，也不改变候选池或 AM 采样数量。
 
 ### 3.3 Outer 训练与运行：`training`
 
@@ -179,6 +177,8 @@ Teacher 的完整原文 prefix KV 在一个 QA episode 内随压缩边界递增�
 | `max_train_samples`／`max_dev_samples` | `null`／`null` | 过滤后的独立 QA 数量上限 |
 | `tracking`／`swanlab_project` | `swanlab`／`latent-working-memory-v4` | 默认上传；设为 `disabled` 可关闭 |
 | `group`／`tags` | `online-ttt-memory_20261028`／`[]` | 正式配置显式指定实验系列 group；自定义 tags 使用命名空间 |
+
+训练参数 `--micro-batch-size-per-gpu` 对应 `training.micro_batch_size`（当前仅支持 1），`--gradient-accumulation-steps` 对应 `training.gradient_accumulation_steps`。单卡默认有效 batch 为 $1\times8=8$；命令行覆盖值写入实际配置、checkpoint 与 SwanLab config，恢复时须保持一致，建议读取训练目录的 `config.json`。
 
 公共 `seed=42` 控制初始化、数据选样、训练顺序与 outer 查询采样。Checkpoint 保存实际配置、慢参数、optimizer、scheduler、数据游标、随机状态与数据／缓存身份；基座权重不重复保存。恢复使用同一配置和绑定数据，评估从 checkpoint 读取配置。
 

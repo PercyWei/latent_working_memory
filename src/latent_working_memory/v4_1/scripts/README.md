@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261029 11:26:28 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261029 15:21:11 Asia/Shanghai（UTC+08:00）
 
 计算协议、数据格式与参数含义见[方法说明](../README.md)。以下命令使用项目根目录 `.venv`；训练采用单卡、microbatch 1、梯度累积 8，离线准备支持多卡。正式实验先检查[配置](../../../../configs/v4-1/online_ttt_memory.json)中的基座与数据路径。
 
@@ -65,10 +65,20 @@ artifacts/v4-1/online-ttt-memory/teacher/p{pending_size}-r{recent_size}
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh train \
   --config configs/v4-1/online_ttt_memory.json \
-  --batch-size 4
+  --micro-batch-size-per-gpu 1 \
+  --gradient-accumulation-steps 8 \
+  --teacher-batch-size 4
 ```
 
-Train/dev 的 teacher 与 student 在同一卡上分别加载。`--batch-size` 控制 teacher forcing 批量，默认沿用配置；可与离线准备不同，不改变训练 microbatch。
+当前仅支持单卡训练，teacher 与 student 在同一卡上分别加载。以下参数省略时沿用配置：
+
+| 参数 | 默认值 | 作用 |
+|---|---|---|
+| `--micro-batch-size-per-gpu` | 1 | 每个 microbatch 的 QA 样本数，当前仅支持 1 |
+| `--gradient-accumulation-steps` | 8 | 每次 optimizer step 累积的 microbatch 数 |
+| `--teacher-batch-size` | 4 | Teacher forcing 每批处理的提示／响应分支数 |
+
+默认有效训练 batch 为 $1\times8=8$ 个样本，epoch 尾批可能更小；teacher 批量不计入训练 batch。
 
 输出目录默认按方法设置与启动日期构造：
 
@@ -91,7 +101,7 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh train 
 ```
 
 - **恢复状态**：慢参数、optimizer、scheduler、数据游标及随机状态。
-- **一致性要求**：实际配置、数据、teacher 缓存与输出目录须匹配 checkpoint；跨日期恢复沿用原目录。修改方法或训练设置应启动新 run。
+- **一致性要求**：实际配置（含命令行覆盖值）、数据、teacher 缓存与输出目录须匹配 checkpoint；跨日期恢复沿用原目录。修改方法或训练设置应启动新 run。
 - **保存规则**：仅在 optimizer step 完成后保存，默认保留最近两个 checkpoint。
 
 ### 3.3 产物与记录

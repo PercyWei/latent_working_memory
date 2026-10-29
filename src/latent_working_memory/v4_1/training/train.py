@@ -99,12 +99,20 @@ def _training_output_dir(config, output_dir, checkpoint):
     return Path(directory).expanduser().resolve()
 
 
-def train(config_path, output_dir=None, device="cuda", resume=None, batch_size=None):
+def train(config_path, output_dir=None, device="cuda", resume=None,
+          micro_batch_size_per_gpu=None, gradient_accumulation_steps=None, teacher_batch_size=None):
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         raise ValueError("v4.1 currently supports one process; do not use torchrun")
     config = load_config(config_path)
-    if batch_size is not None:
-        config = replace(config, teacher=replace(config.teacher, batch_size=batch_size))
+    training_overrides = {}
+    if micro_batch_size_per_gpu is not None:
+        training_overrides["micro_batch_size"] = micro_batch_size_per_gpu
+    if gradient_accumulation_steps is not None:
+        training_overrides["gradient_accumulation_steps"] = gradient_accumulation_steps
+    if training_overrides:
+        config = replace(config, training=replace(config.training, **training_overrides))
+    if teacher_batch_size is not None:
+        config = replace(config, teacher=replace(config.teacher, batch_size=teacher_batch_size))
     checkpoint = read_checkpoint(resume) if resume else None
     output_dir = _training_output_dir(config, output_dir, checkpoint)
     config = replace(config, training=replace(config.training, output_dir=str(output_dir)))
@@ -121,6 +129,13 @@ def train(config_path, output_dir=None, device="cuda", resume=None, batch_size=N
     if checkpoint is None and output_dir.exists() and any(output_dir.iterdir()):
         raise ValueError(f"output directory is not empty: {output_dir}; use --resume")
     print(f"train output_dir={output_dir}", flush=True)
+    print(
+        f"train microbatch_per_gpu={training.micro_batch_size} "
+        f"gradient_accumulation_steps={training.gradient_accumulation_steps} "
+        f"effective_batch_size={training.micro_batch_size * training.gradient_accumulation_steps} "
+        f"teacher_batch_size={config.teacher.batch_size}",
+        flush=True,
+    )
     device = initialize_device(device)
     set_seed(config.seed)
     tokenizer = AutoTokenizer.from_pretrained(config.model.model_name_or_path)
@@ -233,9 +248,19 @@ def main(argv=None):
     parser.add_argument("--config", required=True)
     parser.add_argument("--output-dir", help="覆盖训练目录；默认按配置与启动日期确定")
     parser.add_argument("--resume", help="同一运行的 checkpoint 目录或 state.pt")
-    parser.add_argument("--batch-size", type=int, help="Teacher forcing 批处理大小；默认使用配置值")
+    parser.add_argument("--micro-batch-size-per-gpu", type=int,
+                        help="每卡训练 microbatch；默认使用配置值，当前仅支持 1")
+    parser.add_argument("--gradient-accumulation-steps", type=int,
+                        help="每次 optimizer 更新累积的 microbatch 数；默认使用配置值")
+    parser.add_argument("--teacher-batch-size", type=int,
+                        help="Teacher forcing 的提示分支批量；默认使用 teacher.batch_size")
     args = parser.parse_args(argv)
-    train(args.config, args.output_dir, resume=args.resume, batch_size=args.batch_size)
+    train(
+        args.config, args.output_dir, resume=args.resume,
+        micro_batch_size_per_gpu=args.micro_batch_size_per_gpu,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        teacher_batch_size=args.teacher_batch_size,
+    )
 
 
 if __name__ == "__main__":
