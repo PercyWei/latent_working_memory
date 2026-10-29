@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261028 21:09:48 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261029 09:38:35 Asia/Shanghai（UTC+08:00）
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
 
@@ -66,7 +66,7 @@ AM 内部先对查询／通道、再对 heads 与层取平均；训练 batch 对
 
 基座原有权重冻结。Meta-training 保留 inner 二阶梯度、跨写入轮次依赖及 memory 对后续表示的影响；非重入激活重计算复用本次确定的状态与采样。推理仍需为局部 TTT 启用 autograd，不能用 `torch.inference_mode()` 包住整个过程。
 
-基座默认 BF16；memory、解码器、局部 AM、可训练参数、梯度累积及 AdamW 状态使用 FP32。主 attention 的 scores 与 softmax 使用 FP32，权重与挂载的 memory KV 转为主干精度后聚合。完整跨轮训练图的开销随轨迹增长，固定在线缓存不意味着训练显存固定。
+基座默认 BF16；memory、解码器、训练／推理中的局部 AM、可训练参数、梯度累积及 AdamW 状态使用 FP32。Student attention 的 scores 与 softmax 使用 FP32，权重与挂载的 memory KV 转为主干精度后聚合。完整跨轮训练图的开销随轨迹增长，固定在线缓存不意味着训练显存固定。
 
 Train/dev 在同一设备保存独立 teacher 与 student，按边界顺序执行。Teacher 前向使用 SDPA，不建立梯度图，局部 AM 参照以 FP32 计算；其权重及完整原文 prefix KV 与 student 的元训练图共同占用显存。独立 test／benchmark 只加载 student。
 
@@ -91,12 +91,13 @@ Train/dev 在同一设备保存独立 teacher 与 student，按边界顺序执�
 固定提示库使用 [Latent Compaction 官方的 480 条组合提示](https://github.com/THUNLP/latent-compaction/blob/81cfd4b3f30f820fb5f76451cb0f6385e0ac9510/latent_compaction/prompts.py)，来源与许可见 [teacher/prompts.py](teacher/prompts.py)。每个文档、每个压缩边界独立准备：
 
 1. 以完整已到达原文为共同前缀，按提示原顺序分批贪心生成，默认每卡 `batch_size=4`。每条最多 24 个新 token，遇 EOS 独立结束；最后一个 token 仍执行前向以取得其 query，不继续生成新答案。
-2. 在生成前向中，逐层计算真实提示／响应位置的局部 attention 输出与 log-mass，立即缩为每个 query head 的三项统计：输出通道均值、通道方差及 log-mass。每批结束后，按原提示编号与序列内位置执行 reservoir sampling，均匀、无放回保留 4096 个位置及其统计。相同响应与 seed 得到相同位置池；候选不足即准备失败。
-3. 从最终完整候选池的统计量计算 $\sigma_o,\sigma_z$，应用尺度下限，以 FP32 保存。离线统计复用生成时的前向；完整 query、局部输出向量与临时统计缓冲均不持久化。
+2. 提示／响应前向使用 FlashInfer，分别计算压缩范围内的原始历史、recent、提示／响应三段 attention，并按各段 log-mass 合并为完整输出。前两段 KV 在批内共享，提示／响应 KV 按序列保存。
+3. 直接复用压缩历史段的局部输出与 log-mass，缩为每个 query head 的三项统计：输出通道均值、通道方差及 log-mass。每批结束后，按原提示编号与序列内位置执行 reservoir sampling，均匀、无放回保留 4096 个位置及其统计。相同响应与 seed 得到相同位置池；候选不足即准备失败。
+4. 从最终完整候选池的统计量计算 $\sigma_o,\sigma_z$，应用尺度下限，以 FP32 保存。完整 query、局部输出向量与临时统计缓冲均不持久化。
 
-GPU 只暂存当前提示批的三项统计，局部 attention 分块计算，中间向量及时释放。CPU 保留固定大小的候选池：以 4096 位置、36 层、32 query heads 为例，三项 FP64 统计约占 **108 MiB／进程**；这不包含模型权重、原文／分支 KV 和当前批工作区。
+GPU 保存一份共享原文 KV，以及当前提示批的私有 KV 和三项统计，中间向量及时释放。CPU 保留固定大小的候选池：以 4096 位置、36 层、32 query heads 为例，三项 FP64 统计约占 **108 MiB／进程**；这不包含模型权重、KV 和当前批工作区。
 
-离线准备在每张可见 GPU 上启动一个进程，各加载一份冻结 teacher。文档按预计计算量分配，同篇文档的全部边界始终由一个进程处理；原文 prefill 每次处理一篇，并跨边界延续 prefix KV。各进程写入同一缓存目录中互不重叠的文档文件，中断后可复用已完成边界。
+离线准备在每张可见 GPU 上启动一个进程，各加载一份冻结 teacher。文档按预计计算量分配，同篇文档的全部边界始终由一个进程处理；原文 prefill 使用 Hugging Face SDPA，每次处理一篇，并跨边界延续 prefix KV。各进程写入同一缓存目录中互不重叠的文档文件，中断后可复用已完成边界。
 
 `training.teacher_cache_dir` 默认 `null`，prepare 与 train 自动使用 `artifacts/v4-1/online-ttt-memory/teacher/p{pending_size}-r{recent_size}`；修改窗口后自动切换目录。训练实际配置保存解析后的路径，完整缓存身份仍由 `identity.json` 校验。
 
@@ -121,7 +122,7 @@ Prepare 的路径优先级为：`--output-dir` > 配置中的非空 `training.te
 
 Teacher 的完整原文 prefix KV 在一个 QA episode 内随压缩边界递增，结束后释放；同文档的其他 QA 或下个 epoch 重新计算。离线生成与统计、运行时 teacher forcing 使用同一配置字段 `batch_size`，默认每卡批处理大小为 4，可在各自启动时覆盖。
 
-缓存绑定 teacher、tokenizer、输入模板、提示库、窗口边界、候选池、尺度规则与 seed。GPU 数量与 `batch_size` 只控制执行，不绑定缓存身份；调整时可以复用缓存。不同 GPU／批量的浮点计算可能存在数值差异，不保证重新生成结果逐位一致。独立 test／benchmark 不加载 teacher 或读取这些缓存。
+缓存绑定 teacher、tokenizer、输入模板、提示库、窗口边界、候选池、尺度规则与 seed。GPU 数量与 `batch_size` 只控制执行，不绑定缓存身份；调整时可以复用缓存。不同 attention 内核、GPU 或批量的数值舍入可能影响响应及尺度，不保证重新生成结果逐位一致。同格式、同配置的已完成边界可直接复用。独立 test／benchmark 不加载 teacher 或读取这些缓存。
 
 ## 3. 配置
 
@@ -132,7 +133,7 @@ Teacher 的完整原文 prefix KV 在一个 QA episode 内随压缩边界递增�
 | 字段 | 符号／默认值 | 含义 |
 |---|---|---|
 | `model_name_or_path` | `~/models/Qwen3-4B-Instruct-2507` | 本地 Qwen3 基座与 tokenizer |
-| `backbone_dtype` | `bfloat16` | 也可用 `float32` |
+| `backbone_dtype` | `bfloat16` | 离线准备采用 BF16；训练／评估也可用 `float32` |
 | `num_slots`／`memory_dim` | $m=256$／$d_m=512$ | 每层 memory 形状 |
 | `pending_size`／`recent_size` | $L_p=1024$／$L_r=256$ | 在线窗口容量 |
 | `decoder_hidden_dim` | $d_{\mathrm{dec}}=1024$ | SiLU 解码器中间维度 |

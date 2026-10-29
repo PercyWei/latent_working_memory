@@ -3,6 +3,7 @@
 import torch
 from transformers.cache_utils import DynamicCache
 
+from .attention import SharedPrefixAttention
 from .statistics import GenerationStatistics
 
 
@@ -12,8 +13,8 @@ def generate_reference_pool(model, prefix, prompts, eos_ids, max_new_tokens, bat
     device = next(model.parameters()).device
     prefix_length = prefix[0][0].shape[-2]
     responses = [[] for _ in prompts]
-    statistics = GenerationStatistics(model, prefix, compressed_end, pool_size, rng)
-    with statistics:
+    statistics = GenerationStatistics(model, pool_size, rng)
+    with SharedPrefixAttention(model, prefix, compressed_end, statistics.capture) as attention:
         # 保持原提示顺序，批次大小不改变 reservoir 遍历顺序。
         for start in range(0, len(prompts), batch_size):
             batch_indices = list(range(start, min(start + batch_size, len(prompts))))
@@ -21,30 +22,24 @@ def generate_reference_pool(model, prefix, prompts, eos_ids, max_new_tokens, bat
             statistics.start_batch(
                 batch_indices, [len(prompts[index]) + max_new_tokens for index in batch_indices],
             )
-            lengths = torch.tensor([len(prompts[index]) for index in active], device=device)
-            width = max(len(prompts[index]) for index in active)
+            prompt_lengths = [len(prompts[index]) for index in active]
+            lengths = torch.tensor(prompt_lengths, device=device)
+            width = max(prompt_lengths)
             ids = torch.zeros((len(active), width), dtype=torch.long)
-            rows, columns, prompt_indices, sequence_positions = [], [], [], []
+            prompt_indices, sequence_positions = [], []
             for row, index in enumerate(active):
                 length = len(prompts[index])
                 ids[row, -length:] = torch.tensor(prompts[index])
-                rows.extend([row] * length)
-                columns.extend(range(width - length, width))
                 prompt_indices.extend([index] * length)
                 sequence_positions.extend(range(length))
-            statistics.select_positions(rows, columns, prompt_indices, sequence_positions)
-            # 在原文 prefix 之后左填充，全部真实提示均结束在最后一列。
+            statistics.select_positions(prompt_indices, sequence_positions)
+            # 左填充只存在于私有 suffix；FlashInfer 的 ragged 布局排除这些位置。
             columns_tensor = torch.arange(width, device=device)[None]
-            prompt_mask = columns_tensor >= width - lengths[:, None]
-            attention_mask = torch.cat((
-                torch.ones((len(active), prefix_length), dtype=torch.bool, device=device),
-                prompt_mask,
-            ), dim=1)
             position_ids = prefix_length + (columns_tensor - width + lengths[:, None]).clamp_min(0)
-            branch = DynamicCache(ddp_cache_data=tuple(
-                (keys.expand(len(active), -1, -1, -1), values.expand(len(active), -1, -1, -1))
-                for keys, values in prefix
-            ))
+            branch = DynamicCache(config=model.config)
+            attention.plan(prompt_lengths, width, prompt_lengths, width)
+            # 可见性由分段 attention 控制，不构造 HF 的完整历史因果 mask。
+            attention_mask = {"full_attention": None}
             logits = model(
                 input_ids=ids.to(device), past_key_values=branch, attention_mask=attention_mask,
                 position_ids=position_ids, use_cache=True, logits_to_keep=1,
@@ -56,13 +51,14 @@ def generate_reference_pool(model, prefix, prompts, eos_ids, max_new_tokens, bat
                     responses[active[row]].append(token)
                     if token not in eos_ids:
                         live_rows.append(row)
-                attention_mask = torch.cat((
-                    attention_mask, attention_mask.new_ones((len(active), 1)),
-                ), dim=1)
                 position_ids = (prefix_length + lengths + step)[:, None]
                 statistics.select_positions(
-                    list(range(len(active))), [0] * len(active), active,
+                    active,
                     [len(prompts[index]) + step for index in active],
+                )
+                attention.plan(
+                    [1] * len(active), 1,
+                    [len(prompts[index]) + step + 1 for index in active], width + step + 1,
                 )
                 # EOS 或长度触顶的最后 token 也属于候选池，必须前向取得其 query。
                 if not live_rows or step + 1 == max_new_tokens:
@@ -81,7 +77,6 @@ def generate_reference_pool(model, prefix, prompts, eos_ids, max_new_tokens, bat
                     rows_tensor = torch.tensor(live_rows, dtype=torch.long, device=device)
                     branch.batch_select_indices(rows_tensor)
                     logits = logits.index_select(0, rows_tensor)
-                    attention_mask = attention_mask.index_select(0, rows_tensor)
                     lengths = lengths.index_select(0, rows_tensor)
                     active = [active[row] for row in live_rows]
             # 先释放本批分支 KV，再把入池位置的紧凑统计搬到 CPU。

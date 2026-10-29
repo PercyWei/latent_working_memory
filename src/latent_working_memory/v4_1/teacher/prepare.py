@@ -66,6 +66,8 @@ class TeacherPreparer:
         self.replay = TeacherReplay(
             model, config.model.prefill_chunk_size, config.teacher.batch_size
         )
+        if model.model.has_sliding_layers:
+            raise ValueError("v4.1 teacher preparation requires full-attention Qwen3")
         self.model = model
         self.config = config
         self.cache = cache
@@ -115,6 +117,8 @@ def prepare_worker(rank, shards, config, cache_directory, workers):
     disable_progress_bar()
     device = torch.device("cuda", rank)
     torch.cuda.set_device(device)
+    if torch.cuda.get_device_capability(device)[0] < 8:
+        raise RuntimeError("FlashInfer BF16 teacher preparation requires an SM80+ GPU")
     cache = TeacherCache(cache_directory)
     preparer = TeacherPreparer(load_teacher(config.model, device), config, cache)
     for job in shards[rank]:
@@ -134,6 +138,8 @@ def main():
         config = replace(config, training=replace(config.training, teacher_cache_dir=args.output_dir))
     if args.batch_size is not None:
         config = replace(config, teacher=replace(config.teacher, batch_size=args.batch_size))
+    if config.model.backbone_dtype != "bfloat16":
+        raise ValueError("FlashInfer teacher preparation requires backbone_dtype=bfloat16")
     if not os.environ.get("CUDA_VISIBLE_DEVICES"):
         raise ValueError("set CUDA_VISIBLE_DEVICES to the GPUs used for teacher preparation")
     num_workers = torch.cuda.device_count()

@@ -34,15 +34,37 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "flashinfer-python==0.2.5; sys_platform == 'darwin'",
     "pytest>=8.4,<9",
     "ruff>=0.12,<0.14",
 ]
-cuda124 = ["torch==2.6.0"]
+cuda124 = [
+    "torch==2.6.0",
+    "flashinfer-python==0.2.5+cu124torch2.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
 torch214 = ["torch==2.14.0"]
 
 [tool.uv]
 default-groups = ["dev", "cuda124"]
 conflicts = [[{ group = "cuda124" }, { group = "torch214" }]]
+
+[tool.uv.sources]
+flashinfer-python = [
+    { index = "flashinfer-cu124", marker = "sys_platform == 'linux'" },
+    { index = "pypi", marker = "sys_platform == 'darwin'" },
+]
+
+# 官方索引无独立 metadata；按 v0.2.5 setup.py 的 AOT 依赖避免锁定时下载整个 wheel。
+[[tool.uv.dependency-metadata]]
+name = "flashinfer-python"
+version = "0.2.5+cu124torch2.6"
+requires-python = ">=3.8,<4.0"
+requires-dist = ["torch==2.6.*"]
+
+[[tool.uv.index]]
+name = "flashinfer-cu124"
+url = "https://flashinfer.ai/whl/cu124/torch2.6/"
+explicit = true
 
 [[tool.uv.index]]
 name = "pypi"

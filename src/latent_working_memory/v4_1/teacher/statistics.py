@@ -1,31 +1,12 @@
 """生成时采集紧凑统计；按原提示顺序维护固定候选池，不保存逐位置向量。"""
 
-import math
-
 import torch
-from transformers.models.qwen3.modeling_qwen3 import rotate_half
-
-
-def _local_moments(queries, keys, values):
-    """GQA 共享 KV；返回每个 query/head 的输出通道均值、方差和 log-mass。"""
-    query_heads, head_dim = queries.shape[1:]
-    kv_heads = keys.shape[0]
-    grouped = queries.reshape(len(queries), kv_heads, query_heads // kv_heads, head_dim)
-    scores = torch.einsum("nkgd,ktd->nkgt", grouped, keys) / math.sqrt(head_dim)
-    log_mass = scores.logsumexp(-1).reshape(len(queries), query_heads)
-    outputs = torch.einsum("nkgt,ktd->nkgd", scores.softmax(-1), values)
-    outputs = outputs.reshape(len(queries), query_heads, head_dim)
-    variance, mean = torch.var_mean(outputs.double(), dim=-1, correction=0)
-    return torch.stack((mean, variance, log_mass.double()), dim=-1)
 
 
 class GenerationStatistics:
-    """CPU 保留候选池三标量，GPU 只保留当前批统计和至多 16 个 query 的局部读取。"""
+    """直接消费 attention 的局部输出，CPU 保留候选池，GPU 仅保留本批三标量。"""
 
-    def __init__(self, model, prefix, compressed_end, pool_size, rng):
-        self.model = model
-        self.prefix = prefix
-        self.compressed_end = compressed_end
+    def __init__(self, model, pool_size, rng):
         self.pool_size = pool_size
         self.rng = rng
         self.device = next(model.parameters()).device
@@ -34,24 +15,8 @@ class GenerationStatistics:
         self.pool = torch.empty(self.layers, pool_size, self.heads, 3, dtype=torch.float64)
         self.positions = []
         self.count = 0
-        self.handles = []
         self.batch = None
-        self.rotary = None
-        self.selection = None
-
-    def __enter__(self):
-        for index, layer in enumerate(self.model.model.layers):
-            self.handles.append(layer.self_attn.register_forward_pre_hook(
-                self._capture_rotary, with_kwargs=True,
-            ))
-            self.handles.append(layer.self_attn.q_norm.register_forward_hook(self._query_hook(index)))
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        for handle in self.handles:
-            handle.remove()
-        self.handles.clear()
-        self.batch = self.rotary = self.selection = None
+        self.destinations = None
 
     def start_batch(self, prompt_indices, capacities):
         self.prompt_indices = tuple(prompt_indices)
@@ -64,33 +29,15 @@ class GenerationStatistics:
             self.layers, size, self.heads, 3, device=self.device, dtype=torch.float64,
         )
 
-    def select_positions(self, rows, columns, prompt_indices, sequence_positions):
+    def select_positions(self, prompt_indices, sequence_positions):
         destinations = [self.offsets[index] + position
                         for index, position in zip(prompt_indices, sequence_positions)]
-        self.selection = tuple(torch.tensor(values, device=self.device, dtype=torch.long)
-                               for values in (rows, columns, destinations))
+        self.destinations = torch.tensor(destinations, device=self.device, dtype=torch.long)
 
-    def _capture_rotary(self, module, args, kwargs):
-        self.rotary = kwargs["position_embeddings"]
-
-    def _query_hook(self, layer_index):
-        @torch.no_grad()
-        def capture(module, args, output):
-            rows, columns, destinations = self.selection
-            cosine, sine = self.rotary
-            keys, values = self.prefix[layer_index]
-            # 每层只转换一次原始 KV，不扩展到 query-head 数量，也不跨层保留 FP32 副本。
-            keys = keys[0, :, :self.compressed_end].float()
-            values = values[0, :, :self.compressed_end].float()
-            for start in range(0, len(rows), 16):
-                selected_rows, selected_columns = rows[start:start + 16], columns[start:start + 16]
-                query = output[selected_rows, selected_columns]
-                cos = cosine[selected_rows, selected_columns].unsqueeze(1)
-                sin = sine[selected_rows, selected_columns].unsqueeze(1)
-                query = (query * cos + rotate_half(query) * sin).float()
-                moments = _local_moments(query, keys, values)
-                self.batch[layer_index].index_copy_(0, destinations[start:start + 16], moments)
-        return capture
+    def capture(self, layer_index, outputs, log_mass):
+        variance, mean = torch.var_mean(outputs.double(), dim=-1, correction=0)
+        moments = torch.stack((mean, variance, log_mass.double()), dim=-1)
+        self.batch[layer_index].index_copy_(0, self.destinations, moments)
 
     def finish_batch(self, lengths):
         # 按原提示／位置顺序采样；一批内同槽被多次替换时只拷贝最终值。
@@ -112,7 +59,7 @@ class GenerationStatistics:
             sources = torch.tensor(list(replacements.values()), dtype=torch.long, device=self.device)
             selected = self.batch.index_select(1, sources).cpu()
             self.pool.index_copy_(1, slots, selected)
-        self.batch = self.rotary = self.selection = None
+        self.batch = self.destinations = None
 
     def finish(self, floor):
         if self.count < self.pool_size:

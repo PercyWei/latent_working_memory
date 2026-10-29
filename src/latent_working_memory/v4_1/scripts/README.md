@@ -2,16 +2,18 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261028 23:57:56 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261029 09:38:35 Asia/Shanghai（UTC+08:00）
 
 计算协议、数据格式与参数含义见[方法说明](../README.md)。以下命令使用项目根目录 `.venv`；训练采用单卡、microbatch 1、梯度累积 8，离线准备支持多卡。正式实验先检查[配置](../../../../configs/v4-1/online_ttt_memory.json)中的基座与数据路径。
 
 ## 1. 环境与入口
 
 ```bash
-uv sync
+uv sync --frozen
 bash src/latent_working_memory/v4_1/scripts/run.sh --help
 ```
+
+默认 BF16 离线准备使用 Linux x86_64、支持 BF16 的 NVIDIA GPU（SM80+）。默认 `cuda124` 依赖组固定 PyTorch 2.6／CUDA 12.4 与 FlashInfer `0.2.5+cu124torch2.6`，由上述命令安装；`torch214` 组不适用于此准备入口。
 
 `run.sh` 切换到项目根目录，使用 `uv run --frozen`，直接继承 `CUDA_VISIBLE_DEVICES`。离线准备自动使用所有可见 GPU；训练与评估保持单进程，使用首张可见 GPU（进程内 `cuda:0`）。本项目选择物理卡 0、1，不使用 `torchrun` 或额外设备参数。模块参数原样传递，可在操作名后使用 `--help`。
 
@@ -38,7 +40,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh prep
 
 - **并行与批量**：每张可见 GPU 加载一份 teacher。`--batch-size` 控制每卡批量；省略时沿用配置，默认 4。
 - **数据划分**：`--splits` 指定 train/dev，可分别运行。
-- **缓存复用**：同文档 QA 共用缓存；相同配置重复运行会跳过已完成边界。
+- **缓存复用**：同文档 QA 共用缓存；同格式、同配置的已完成边界直接复用。
 - **进度显示**：汇总文档／已保存边界进度（含缓存命中）及每卡状态；终端原地刷新，重定向输出时每 30 秒打印摘要。
 
 输出目录优先级：`--output-dir` > 配置中的非空 `training.teacher_cache_dir` > 自动目录。配置默认 `null`，prepare 与 train 自动使用：
@@ -155,7 +157,7 @@ bash src/latent_working_memory/v4_1/scripts/run.sh report \
 | 离线 GPU 数量、`teacher.batch_size` | 可复用缓存；恢复训练仍遵循完整配置一致的要求 |
 | 仅重新展示既有评估 | 运行 `report`，不执行模型 |
 
-离线缓存以 token IDs、索引与固定尺度为主。按 36 层、32 query heads、2571 个边界估算，每条响应均达到 24 tokens 时，主要张量总量约为 439 MB。GPU 数量和执行批量不改变缓存格式，已有结果直接复用；重新生成时可能因浮点计算产生数值差异。训练需要额外的 teacher 前向，显存包含两份模型权重、teacher prefix KV 与 student 元训练图；实际成本和效果以运行结果为准。
+离线缓存以 token IDs、索引与固定尺度为主。按 36 层、32 query heads、2571 个边界估算，每条响应均达到 24 tokens 时，主要张量总量约为 439 MB。同格式、同配置的已有结果直接复用；不同 attention 内核、GPU 或批量的数值舍入可能影响重新生成的响应与尺度。训练需要额外的 teacher 前向，显存包含两份模型权重、teacher prefix KV 与 student 元训练图；实际成本和效果以运行结果为准。
 
 ## 6. 从逐位置张量缓存迁移
 

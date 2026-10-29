@@ -1,5 +1,6 @@
 """不依赖下载的真实 Qwen3 与小型 teacher 缓存。"""
 
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -14,12 +15,54 @@ from latent_working_memory.v4_1.config import (
 )
 from latent_working_memory.v4_1.data import Episode
 from latent_working_memory.v4_1.teacher.cache import build_cache_identity, initialize_cache
+from latent_working_memory.v4_1.teacher import attention
 from latent_working_memory.v4_1.teacher.prepare import TeacherPreparer, plan_preparation
 from latent_working_memory.v4_1.teacher.replay import load_teacher
 
 
 @pytest.fixture
-def tiny_setup(tmp_path):
+def reference_teacher_attention(monkeypatch):
+    """CPU 小模型只替换算子，以相同布局验证生产 wrapper 与采样流程。"""
+    def single(query, keys, values, kv_layout="NHD", causal=False, sm_scale=None, **kwargs):
+        if kv_layout == "HND":
+            keys, values = keys.transpose(0, 1), values.transpose(0, 1)
+        groups = query.shape[1] // keys.shape[1]
+        keys, values = (tensor.repeat_interleave(groups, dim=1) for tensor in (keys, values))
+        scores = torch.einsum("qhd,khd->hqk", query.float(), keys.float()) * sm_scale
+        if causal:
+            visible = torch.arange(len(keys))[None] <= (
+                torch.arange(len(query))[:, None] + len(keys) - len(query)
+            )
+            scores = scores.masked_fill(~visible, -torch.inf)
+        output = torch.einsum("hqk,khd->qhd", scores.softmax(-1), values.float())
+        return output.to(query.dtype), scores.logsumexp(-1).transpose(0, 1) / math.log(2)
+
+    class Ragged:
+        def __init__(self, workspace, kv_layout, backend):
+            self.kv_layout = kv_layout
+
+        def plan(self, qo_indptr, kv_indptr, num_heads, num_kv_heads, head_dim, **options):
+            self.qo, self.kv, self.options = qo_indptr.tolist(), kv_indptr.tolist(), options
+
+        def run(self, query, keys, values, return_lse):
+            results = [single(query[ql:qr], keys[kl:kr], values[kl:kr],
+                              kv_layout=self.kv_layout, **self.options)
+                       for ql, qr, kl, kr in zip(self.qo, self.qo[1:], self.kv, self.kv[1:])]
+            return tuple(torch.cat(parts) for parts in zip(*results))
+
+    def merge(output_a, mass_a, output_b, mass_b):
+        masses = torch.stack((mass_a, mass_b)) * math.log(2)
+        weights = masses.softmax(0)[..., None]
+        output = output_a.float() * weights[0] + output_b.float() * weights[1]
+        return output.to(output_a.dtype), masses.logsumexp(0) / math.log(2)
+
+    monkeypatch.setattr(attention, "single_prefill_with_kv_cache", single)
+    monkeypatch.setattr(attention, "BatchPrefillWithRaggedKVCacheWrapper", Ragged)
+    monkeypatch.setattr(attention, "merge_state", merge)
+
+
+@pytest.fixture
+def tiny_setup(tmp_path, reference_teacher_attention):
     threads = torch.get_num_threads()
     torch.set_num_threads(1)
     torch.manual_seed(42)
