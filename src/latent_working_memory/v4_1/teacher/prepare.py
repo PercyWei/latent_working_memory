@@ -1,7 +1,7 @@
 """从完整、未压缩的已到达历史准备 outer AM 监督，不读取下游 QA。"""
 
 import argparse
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import hashlib
 import os
 import random
@@ -12,6 +12,7 @@ from transformers import AutoTokenizer
 from transformers.cache_utils import DynamicCache
 from transformers.utils.logging import disable_progress_bar
 
+from ..cli import DEFAULT_CONFIG, add_config_arguments, config_overrides, positive_int
 from ..config import load_config
 from ..data import compression_boundaries, load_episodes
 from .cache import TeacherCache, build_cache_identity, content_identity, initialize_cache
@@ -64,7 +65,7 @@ class TeacherPreparer:
 
     def __init__(self, model, config, cache):
         self.replay = TeacherReplay(
-            model, config.model.prefill_chunk_size, config.teacher.batch_size
+            model, config.model.prefill_chunk_size, config.teacher.prepare_batch_size
         )
         if model.model.has_sliding_layers:
             raise ValueError("v4.1 teacher preparation requires full-attention Qwen3")
@@ -95,7 +96,7 @@ class TeacherPreparer:
             ).digest(), "little")
             tensors, candidate_count = generate_reference_pool(
                 self.model, prefix, self.prompts, self.eos_ids,
-                self.config.teacher.response_max_tokens, self.config.teacher.batch_size,
+                self.config.teacher.response_max_tokens, self.config.teacher.prepare_batch_size,
                 compressed_end, self.config.teacher.pool_size, random.Random(seed),
                 self.config.model.am_std_floor,
                 on_batch=progress.set_prompts if progress is not None else None,
@@ -128,16 +129,13 @@ def prepare_worker(rank, shards, config, cache_directory, workers):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--output-dir", help="覆盖 teacher 缓存目录；默认按配置中的窗口设置确定")
-    parser.add_argument("--splits", nargs="+", choices=("train", "dev"), default=["train", "dev"])
-    parser.add_argument("--batch-size", type=int, help="每卡 teacher 批处理大小；默认使用配置值")
+    add_config_arguments(parser)
+    parser.add_argument("--prepare-data", default=argparse.SUPPRESS,
+                        help="离线准备使用的 train/dev 数据目录，默认使用 training.dataset_dir")
+    parser.add_argument("--prepare-batch-size-per-gpu", type=positive_int, default=argparse.SUPPRESS,
+                        help="每卡离线准备批量；默认使用 teacher.prepare_batch_size（64）")
     args = parser.parse_args()
-    config = load_config(args.config)
-    if args.output_dir is not None:
-        config = replace(config, training=replace(config.training, teacher_cache_dir=args.output_dir))
-    if args.batch_size is not None:
-        config = replace(config, teacher=replace(config.teacher, batch_size=args.batch_size))
+    config = load_config(getattr(args, "config", DEFAULT_CONFIG), config_overrides(args))
     if config.model.backbone_dtype != "bfloat16":
         raise ValueError("FlashInfer teacher preparation requires backbone_dtype=bfloat16")
     if not os.environ.get("CUDA_VISIBLE_DEVICES"):
@@ -150,7 +148,7 @@ def main():
     print(f"teacher cache_dir={cache.directory}", flush=True)
     documents = {}
     split_documents = {}
-    for split in args.splits:
+    for split in ("train", "dev"):
         episodes, _, statistics = load_episodes(
             config.training.dataset_dir, tokenizer, split=split,
             min_text_tokens=config.model.pending_size + config.model.recent_size,

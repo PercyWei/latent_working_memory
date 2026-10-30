@@ -5,6 +5,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 
 
 def _positive_ints(config, names):
@@ -78,12 +79,13 @@ class TeacherConfig:
     response_max_tokens: int = 24
     pool_size: int = 4096
     am_sample_size: int = 128
+    prepare_batch_size: int = 64
     batch_size: int = 4
 
     def __post_init__(self):
         _positive_ints(self, (
             "num_prompts", "response_max_tokens", "pool_size", "am_sample_size",
-            "batch_size",
+            "prepare_batch_size", "batch_size",
         ))
         if self.num_prompts > 480:
             raise ValueError("num_prompts cannot exceed the fixed 480-prompt bank")
@@ -94,9 +96,17 @@ class TeacherConfig:
 @dataclass(frozen=True)
 class TrainingConfig:
     dataset_dir: str = "data/delta-mem-qasper"
+    output_root: str = "artifacts/v4-1"
     teacher_cache_dir: str | None = None
     output_dir: str | None = None
-    max_steps: int = 1000
+    run_id: str | None = None
+    train_only: bool = False
+    test_data: str | None = None
+    max_test_samples: int | None = None
+    max_new_tokens: int = 128
+    eval_id: str | None = None
+    epochs: int | None = None
+    max_steps: int | None = 1000
     micro_batch_size: int = 1
     gradient_accumulation_steps: int = 8
     learning_rate: float = 1e-4
@@ -110,32 +120,59 @@ class TrainingConfig:
     gradient_clip: float = 1.0
     lambda_am: float = 1.0
     dev_every: int = 50
-    save_every: int = 100
+    save_every: int | str = 100
     save_total_limit: int = 2
     max_train_data_tokens: int | None = 12288
     max_train_samples: int | None = None
     max_dev_samples: int | None = None
     tracking: str = "swanlab"
-    swanlab_project: str = "latent-working-memory-v4"
+    swanlab_project: str = "latent-working-memory-v4.1"
     group: str | None = None
     tags: tuple[str, ...] = ()
 
     def __post_init__(self):
         _path(self, "dataset_dir")
+        _path(self, "output_root")
+        object.__setattr__(self, "output_root", str(Path(self.output_root).resolve()))
         _path(self, "teacher_cache_dir", optional=True)
         _path(self, "output_dir", optional=True)
+        _path(self, "test_data", optional=True)
+        if type(self.train_only) is not bool:
+            raise ValueError("train_only must be a boolean")
+        if self.eval_id is not None and (
+            not isinstance(self.eval_id, str) or not self.eval_id.strip()
+            or Path(self.eval_id).name != self.eval_id or self.eval_id in {".", ".."}
+            or "\\" in self.eval_id
+        ):
+            raise ValueError("eval_id must be null or a nonempty directory name")
+        if self.run_id is not None and (
+            not isinstance(self.run_id, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", self.run_id) is None
+        ):
+            raise ValueError("run_id must contain only letters, digits, '-' and '_'")
         _positive_ints(self, (
-            "max_steps", "micro_batch_size", "gradient_accumulation_steps",
-            "dev_every", "save_every", "save_total_limit",
+            "micro_batch_size", "gradient_accumulation_steps", "dev_every", "save_total_limit",
+            "max_new_tokens",
         ))
+        if self.epochs is None and self.max_steps is None:
+            raise ValueError("at least one of epochs and max_steps must be specified")
+        if self.save_every != "after_each_epoch" and (
+            type(self.save_every) is not int or self.save_every < 1
+        ):
+            raise ValueError("save_every must be a positive integer or after_each_epoch")
         if self.micro_batch_size != 1:
             raise ValueError("v4.1 currently supports micro_batch_size=1")
-        if type(self.warmup_steps) is not int or not 0 <= self.warmup_steps < self.max_steps:
-            raise ValueError("warmup_steps must satisfy 0 <= warmup_steps < max_steps")
-        for name in ("max_train_data_tokens", "max_train_samples", "max_dev_samples"):
+        for name in (
+            "epochs", "max_steps", "max_train_data_tokens", "max_train_samples",
+            "max_dev_samples", "max_test_samples",
+        ):
             value = getattr(self, name)
             if value is not None and (type(value) is not int or value < 1):
                 raise ValueError(f"{name} must be null or a positive integer")
+        if type(self.warmup_steps) is not int or self.warmup_steps < 0:
+            raise ValueError("warmup_steps must be a non-negative integer")
+        if self.max_steps is not None and self.warmup_steps >= self.max_steps:
+            raise ValueError("warmup_steps must be less than max_steps")
         for name in ("learning_rate", "lora_learning_rate", "adam_epsilon", "gradient_clip"):
             _number(getattr(self, name), name)
         for name in ("weight_decay", "lambda_am", "min_lr_ratio", "beta1", "beta2"):
@@ -148,6 +185,8 @@ class TrainingConfig:
             raise ValueError("tracking must be disabled or swanlab")
         if not isinstance(self.swanlab_project, str) or not self.swanlab_project.strip():
             raise ValueError("swanlab_project must be a nonempty string")
+        if self.group is None and self.output_dir is not None:
+            object.__setattr__(self, "group", Path(self.output_dir).parent.name)
         if self.group is not None and (not isinstance(self.group, str) or not self.group.strip()):
             raise ValueError("group must be null or a nonempty string")
         if not isinstance(self.tags, (list, tuple)) or any(
@@ -169,27 +208,33 @@ class ExperimentConfig:
         if type(self.seed) is not int or self.seed < 0:
             raise ValueError("seed must be a nonnegative integer")
         if self.training.teacher_cache_dir is None:
-            directory = (
-                "artifacts/v4-1/online-ttt-memory/teacher/"
+            directory = Path(self.training.output_root) / "teacher" / (
                 f"p{self.model.pending_size}-r{self.model.recent_size}"
             )
-            object.__setattr__(self, "training", replace(self.training, teacher_cache_dir=directory))
+            object.__setattr__(self, "training", replace(self.training, teacher_cache_dir=str(directory)))
 
 
 def config_from_dict(payload):
     """读取唯一配置结构，未知字段由 dataclass 构造器直接报错。"""
     if not isinstance(payload, dict) or set(payload) != {"seed", "model", "teacher", "training"}:
         raise ValueError("config must contain exactly seed, model, teacher and training")
-    config = ExperimentConfig(
+    return ExperimentConfig(
         seed=payload["seed"],
         model=ModelConfig(**payload["model"]),
         teacher=TeacherConfig(**payload["teacher"]),
         training=TrainingConfig(**payload["training"]),
     )
-    if config.training.tracking == "swanlab" and config.training.group is None:
-        raise ValueError("SwanLab tracking requires an explicit group in the experiment config")
-    return config
 
 
-def load_config(path):
-    return config_from_dict(json.loads(Path(path).expanduser().read_text(encoding="utf-8")))
+def load_config(path, overrides=None):
+    """先应用显式 CLI 覆盖，再校验同一份配置；附加 tags 与配置取并集。"""
+    payload = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    for section, values in (overrides or {}).items():
+        if section == "seed":
+            payload[section] = values
+        else:
+            merged = {**payload[section], **values}
+            if section == "training" and "tags" in values:
+                merged["tags"] = sorted(set(payload[section].get("tags", ())) | set(values["tags"]))
+            payload[section] = merged
+    return config_from_dict(payload)
