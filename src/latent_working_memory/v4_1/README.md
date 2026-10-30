@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261030 19:31:25 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261031 00:07:09 Asia/Shanghai（UTC+08:00）
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
 
@@ -65,7 +65,7 @@ AM 内部先对查询／通道、再对 heads 与层取平均；训练 batch 对
 
 ### 1.3 精度与梯度
 
-基座原有权重冻结。Meta-training 保留 inner 二阶梯度、跨写入轮次依赖及 memory 对后续表示的影响；非重入激活重计算复用本次确定的状态与采样。推理仍需为局部 TTT 启用 autograd，不能用 `torch.inference_mode()` 包住整个过程。
+基座原有权重冻结。Meta-training 保留 inner 二阶梯度、跨写入轮次依赖及 memory 对后续表示的影响。主干按层使用非重入 checkpoint；inner 对 teacher 局部读取及每步 student AM 损失重计算，`autograd.grad` 在 checkpoint 外执行。推理仍需为局部 TTT 启用 autograd，不能用 `torch.inference_mode()` 包住整个过程。
 
 基座默认 BF16；memory、解码器、训练／推理中的局部 AM、可训练参数、梯度累积及 AdamW 状态使用 FP32。Student attention 的 scores 与 softmax 使用 FP32，权重与挂载的 memory KV 转为主干精度后聚合。完整跨轮训练图的开销随轨迹增长，固定在线缓存不意味着训练显存固定。
 

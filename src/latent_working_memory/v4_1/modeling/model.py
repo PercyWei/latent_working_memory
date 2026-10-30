@@ -147,14 +147,10 @@ class OnlineMemoryLM(nn.Module):
                     torch.cat((old_bias.float(), old_bias.new_zeros((old_bias.shape[0], count))), -1),
                 )
                 query = state.recent_queries[index][0].transpose(0, 1).float()
-                write = partial(memory.write, compressed_tokens=compressed, rotary=rotary,
-                                differentiable=differentiable)
-                if differentiable and self.config.gradient_checkpointing:
-                    updated, metrics = checkpoint(
-                        write, state.memories[index], teacher, query, use_reentrant=False
-                    )
-                else:
-                    updated, metrics = write(state.memories[index], teacher, query)
+                updated, metrics = memory.write(
+                    state.memories[index], teacher, query, compressed_tokens=compressed,
+                    rotary=rotary, differentiable=differentiable,
+                )
                 state.memories[index] = updated
                 state.memory_kv[index] = memory.decode(updated, compressed, rotary)
                 # clone 释放被删除 pending 的存储；recent KV 保留原值及全局位置。

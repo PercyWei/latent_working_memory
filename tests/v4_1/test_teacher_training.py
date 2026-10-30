@@ -60,6 +60,58 @@ def test_runtime_teacher_matches_materialized_loss_and_meta_gradients(tiny_setup
     assert not any("lora_" in name for name, _ in setup.teacher.named_parameters())
 
 
+def test_per_loss_checkpoint_preserves_multistep_meta_gradients(tiny_setup, monkeypatch):
+    setup = tiny_setup
+    config = replace(setup.config.model, inner_steps=3)
+    teacher = RuntimeTeacher(setup.teacher, setup.config, setup.cache)
+    boundaries = compression_boundaries(
+        len(setup.episode.context_ids), config.pending_size, config.recent_size,
+    )
+    assert len(boundaries) == 2
+    with teacher.episode(setup.episode) as trajectory:
+        generator = torch.Generator().manual_seed(19)
+        references = FixedReferences({
+            boundary: trajectory.reference(*boundary, generator=generator)
+            for boundary in boundaries
+        })
+    checked = OnlineMemoryLM(config)
+    ordinary = OnlineMemoryLM(replace(config, gradient_checkpointing=False))
+    ordinary.load_trainable_state_dict(checked.trainable_state_dict())
+    inner_inputs = []
+    for memory in checked.memory_layers:
+        def track_write(old_memory, teacher_kv, queries, _write=memory.write, **kwargs):
+            for tensor in (*teacher_kv[:2], queries):
+                assert tensor.requires_grad
+                tensor.retain_grad()
+                inner_inputs.append(tensor)
+            return _write(old_memory, teacher_kv, queries, **kwargs)
+
+        monkeypatch.setattr(memory, "write", track_write)
+    actual = checked(setup.episode, teacher=references, lambda_am=0.7)
+    expected = ordinary(setup.episode, teacher=references, lambda_am=0.7)
+    actual["loss"].backward()
+    expected["loss"].backward()
+    for metric in ("loss", "qa_loss", "outer_am"):
+        torch.testing.assert_close(actual[metric], expected[metric], rtol=1e-5, atol=1e-6)
+    assert actual["write_events"] == expected["write_events"] == 2
+    expected_parameters = dict(ordinary.named_parameters())
+    for name, parameter in checked.named_parameters():
+        if parameter.requires_grad:
+            assert parameter.grad is not None, name
+            assert torch.isfinite(parameter.grad).all(), name
+            torch.testing.assert_close(
+                parameter.grad, expected_parameters[name].grad, rtol=2e-5, atol=2e-6,
+                msg=lambda message: f"{name}: {message}",
+            )
+    for suffix in ("initial_slots", "raw_step_size", "decoder.input.weight", "lora_B.default.weight"):
+        assert any(name.endswith(suffix) and parameter.grad.abs().sum() > 0
+                   for name, parameter in checked.named_parameters()), suffix
+    assert inner_inputs
+    for tensor in inner_inputs:
+        assert tensor.grad is not None
+        assert torch.isfinite(tensor.grad).all() and tensor.grad.abs().sum() > 0
+
+
 def test_engine_dev_and_teacher_free_inference(tiny_setup):
     setup = tiny_setup
     model = OnlineMemoryLM(setup.config.model)

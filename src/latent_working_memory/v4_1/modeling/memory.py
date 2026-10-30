@@ -5,6 +5,7 @@ import math
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 from transformers.models.qwen3.modeling_qwen3 import rotate_half
 
 from .am import local_read, matching_loss, teacher_scales
@@ -41,24 +42,35 @@ class LayerMemory(nn.Module):
         key = key * cosine + rotate_half(key) * sine
         return key, value, bias
 
+    def _matching_loss(self, candidate, queries, teacher_outputs, teacher_mass,
+                       scales_o, scales_z, compressed_tokens, rotary):
+        outputs, mass = local_read(queries, *self.decode(candidate, compressed_tokens, rotary))
+        return matching_loss(outputs, mass, teacher_outputs, teacher_mass, scales_o, scales_z)
+
     def write(self, old_memory, teacher_kv, queries, compressed_tokens, rotary, differentiable):
         """Teacher/queries 轮内固定；clone 隔离局部偏导，不截断 outer 历史依赖。"""
         with torch.enable_grad():
             candidate = old_memory.clone() if differentiable else old_memory.detach().clone()
             candidate.requires_grad_(True)
-            teacher_outputs, teacher_mass = local_read(queries, *teacher_kv)
+            recompute = differentiable and self.config.gradient_checkpointing
+            if recompute:
+                teacher_outputs, teacher_mass = checkpoint(
+                    local_read, queries, *teacher_kv, use_reentrant=False
+                )
+            else:
+                teacher_outputs, teacher_mass = local_read(queries, *teacher_kv)
             scales_o, scales_z = teacher_scales(
                 teacher_outputs, teacher_mass, self.config.am_std_floor
             )
             step_size = F.softplus(self.raw_step_size)
             before = None
             for _ in range(self.config.inner_steps):
-                outputs, mass = local_read(
-                    queries, *self.decode(candidate, compressed_tokens, rotary)
+                args = (
+                    candidate, queries, teacher_outputs, teacher_mass,
+                    scales_o, scales_z, compressed_tokens, rotary,
                 )
-                loss = matching_loss(
-                    outputs, mass, teacher_outputs, teacher_mass, scales_o, scales_z
-                )
+                loss = (checkpoint(self._matching_loss, *args, use_reentrant=False)
+                        if recompute else self._matching_loss(*args))
                 if before is None:
                     before = loss.detach()
                 gradient = torch.autograd.grad(loss, candidate, create_graph=differentiable)[0]
