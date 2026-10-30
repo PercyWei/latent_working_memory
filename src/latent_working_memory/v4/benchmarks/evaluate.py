@@ -13,6 +13,7 @@ import torch
 from transformers import set_seed
 
 from latent_working_memory.runtime import initialize_device
+from latent_working_memory.benchmarks.comparison import comparison_data
 from latent_working_memory.benchmarks.data import load_samples
 from latent_working_memory.benchmarks.protocol import (
     DEFAULT_RULER_LENGTHS,
@@ -104,6 +105,7 @@ def _evaluate_samples(benchmark, samples, output_dir, evaluation_config, model, 
             )
     summary = {
         **evaluation_config,
+        "comparison_data": comparison_data(samples, benchmark),
         "samples": len(records),
         "metrics": summarize_scores(benchmark, records),
         "input_tokens": input_tokens,

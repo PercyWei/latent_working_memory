@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig, set_seed
 
+from latent_working_memory.benchmarks.comparison import comparison_data
 from latent_working_memory.benchmarks.data import load_samples
 from latent_working_memory.benchmarks.protocol import (
     DEFAULT_RULER_LENGTHS,
@@ -254,6 +255,7 @@ def _evaluate(args, plan, output):
             )
     summary = {
         **snapshot,
+        "comparison_data": comparison_data(samples, args.benchmark),
         "samples": len(records),
         "metrics": summarize_scores(args.benchmark, records),
         "input_tokens": input_tokens,

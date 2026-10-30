@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261029 15:18:45 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261030 19:31:25 Asia/Shanghai（UTC+08:00）
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
 
@@ -17,8 +17,9 @@
 | 训练监督 | 每次写入后计算 outer AM；全文处理后固定 memory，输入问题和答案，计算答案 CE |
 | 外层更新 | 通过完整写入轨迹学习初始化、KV／bias 解码器、正步长与 attention Q/K/V LoRA |
 | 推理 | 固定慢参数，沿用在线写入；正文处理完成后固定 memory，追加问题 KV 并自回归生成 |
+| 完整运行 | 先保存训练和 test 计划；训练与 dev 结束、全部训练进程退出后，在可见 GPU 间按样本分片测试最后一个 checkpoint |
 
-首版支持 full-attention Qwen3、固定 default RoPE、训练 microbatch 1，不启用随机 dropout。GPU 由 `CUDA_VISIBLE_DEVICES` 指定：离线准备按文档分配到可见 GPU，训练与评估使用首张可见卡。Inner 使用 recent 自然读取；outer 使用固定文本提示与 teacher 自然响应。Latent query 生成器与 self-study 保留为研究候选。
+首版支持 full-attention Qwen3、固定 default RoPE、每卡训练 microbatch 1，不启用随机 dropout。GPU 由 `CUDA_VISIBLE_DEVICES` 指定：离线准备按文档分配，训练每卡一个数据并行进程，评估按样本分片共同处理一个 checkpoint，多个 checkpoint 按 step 串行。Inner 使用 recent 自然读取；outer 使用固定文本提示与 teacher 自然响应。Latent query 生成器与 self-study 保留为研究候选。
 
 ### 1.1 记忆接口与在线边界
 
@@ -68,7 +69,9 @@ AM 内部先对查询／通道、再对 heads 与层取平均；训练 batch 对
 
 基座默认 BF16；memory、解码器、训练／推理中的局部 AM、可训练参数、梯度累积及 AdamW 状态使用 FP32。Student attention 的 scores 与 softmax 使用 FP32，权重与挂载的 memory KV 转为主干精度后聚合。完整跨轮训练图的开销随轨迹增长，固定在线缓存不意味着训练显存固定。
 
-Train/dev 在同一设备保存独立 teacher 与 student，按边界顺序执行。Teacher 前向使用 SDPA，不建立梯度图，局部 AM 参照以 FP32 计算；其权重及完整原文 prefix KV 与 student 的元训练图共同占用显存。独立 test／benchmark 只加载 student。
+Train/dev 每卡保存完整的 teacher 与 student，单样本按边界顺序执行。Teacher 前向使用 SDPA，不建立梯度图，局部 AM 参照以 FP32 计算；其权重及完整原文 prefix KV 与 student 的元训练图共同占用显存。独立 test／benchmark 每卡只加载一份完整 student，每次处理 1 个独立样本；多卡通过样本分片并行，不另设评估 batch size。
+
+多卡共享全局样本游标，将同一 batch 分配到各卡，不重复补齐尾批。各卡完成本地 outer backward 后，打包归约慢参数梯度，按全局实际样本数平均，再统一裁剪并更新。尾批没有样本的进程仍参与归约。Dev 同样分片执行，按全局样本数加权汇总。
 
 ## 2. 数据与 teacher 缓存
 
@@ -90,7 +93,7 @@ Train/dev 在同一设备保存独立 teacher 与 student，按边界顺序执�
 
 固定提示库使用 [Latent Compaction 官方的 480 条组合提示](https://github.com/THUNLP/latent-compaction/blob/81cfd4b3f30f820fb5f76451cb0f6385e0ac9510/latent_compaction/prompts.py)，来源与许可见 [teacher/prompts.py](teacher/prompts.py)。每个文档、每个压缩边界独立准备：
 
-1. 以完整已到达原文为共同前缀，按提示原顺序分批贪心生成，默认每卡 `batch_size=4`。每条最多 24 个新 token，遇 EOS 独立结束；最后一个 token 仍执行前向以取得其 query，不继续生成新答案。
+1. 以完整已到达原文为共同前缀，按提示原顺序分批贪心生成，默认每卡 `prepare_batch_size=64`。每条最多 24 个新 token，遇 EOS 独立结束；最后一个 token 仍执行前向以取得其 query，不继续生成新答案。
 2. 提示／响应前向使用 FlashInfer，分别计算压缩范围内的原始历史、recent、提示／响应三段 attention，并按各段 log-mass 合并为完整输出。前两段 KV 在批内共享，提示／响应 KV 按序列保存。
 3. 直接复用压缩历史段的局部输出与 log-mass，缩为每个 query head 的三项统计：输出通道均值、通道方差及 log-mass。每批结束后，按原提示编号与序列内位置执行 reservoir sampling，均匀、无放回保留 4096 个位置及其统计。相同响应与 seed 得到相同位置池；候选不足即准备失败。
 4. 从最终完整候选池的统计量计算 $\sigma_o,\sigma_z$，应用尺度下限，以 FP32 保存。完整 query、局部输出向量与临时统计缓冲均不持久化。
@@ -99,9 +102,7 @@ GPU 保存一份共享原文 KV，以及当前提示批的私有 KV 和三项统
 
 离线准备在每张可见 GPU 上启动一个进程，各加载一份冻结 teacher。文档按预计计算量分配，同篇文档的全部边界始终由一个进程处理；原文 prefill 使用 Hugging Face SDPA，每次处理一篇，并跨边界延续 prefix KV。各进程写入同一缓存目录中互不重叠的文档文件，中断后可复用已完成边界。
 
-`training.teacher_cache_dir` 默认 `null`，prepare 与 train 自动使用 `artifacts/v4-1/online-ttt-memory/teacher/p{pending_size}-r{recent_size}`；修改窗口后自动切换目录。训练实际配置保存解析后的路径，完整缓存身份仍由 `identity.json` 校验。
-
-Prepare 的路径优先级为：`--output-dir` > 配置中的非空 `training.teacher_cache_dir` > 自动目录。显式 `--output-dir` 不修改原配置；使用自定义目录时，后续训练须将 `training.teacher_cache_dir` 设为同一路径。
+Prepare 与 train 从 `<output_root>/teacher/p{pending_size}-r{recent_size}` 读写缓存，不同 run 共享同一窗口配置的缓存；修改窗口后自动切换目录。自定义 `--output-root` 时，两者使用同一父目录。实际配置记录解析后的缓存路径，完整缓存身份由 `identity.json` 校验。
 
 每个窗口目录分别包含 `identity.json` 与 `documents/`。`identity.json` 保存身份、生成终止标识 `eos_token_ids` 与全局 `prompt_token_ids`；后者为 480 条完整提示片段的 token ID 列表，跨边界共用。每个边界保存为 `documents/<document_id>/write_<j>.safetensors`，$j$ 从 1 开始：
 
@@ -120,13 +121,17 @@ Prepare 的路径优先级为：`--output-dir` > 配置中的非空 `training.te
 
 下次使用该边界时仍从完整池重新抽样，本次反向与激活重计算复用已确定的参照。尺度始终来自离线完整池，不用本次 128 位置重估。
 
-Teacher 的完整原文 prefix KV 在一个 QA episode 内随压缩边界递增，结束后释放；同文档的其他 QA 或下个 epoch 重新计算。离线生成与统计、运行时 teacher forcing 使用同一配置字段 `batch_size`，默认每卡批处理大小为 4，可在各自启动时覆盖。
+Teacher 的完整原文 prefix KV 在一个 QA episode 内随压缩边界递增，结束后释放；同文档的其他 QA 或下个 epoch 重新计算。运行时 teacher forcing 使用 `batch_size`，默认每卡 4；离线生成与统计使用 `prepare_batch_size`，默认每卡 64，二者分别设置。
 
-缓存绑定 teacher、tokenizer、输入模板、提示库、窗口边界、候选池、尺度规则与 seed。GPU 数量与 `batch_size` 只控制执行，不绑定缓存身份；调整时可以复用缓存。不同 attention 内核、GPU 或批量的数值舍入可能影响响应及尺度，不保证重新生成结果逐位一致。同格式、同配置的已完成边界可直接复用。独立 test／benchmark 不加载 teacher 或读取这些缓存。
+缓存绑定 teacher、tokenizer、输入模板、提示库、窗口边界、候选池、尺度规则与 seed。GPU 数量及两种 teacher 批量只控制执行，不绑定缓存身份；调整时可以复用缓存。不同 attention 内核、GPU 或批量的数值舍入可能影响响应及尺度，不保证重新生成结果逐位一致。同格式、同配置的已完成边界可直接复用。独立 test／benchmark 不加载 teacher 或读取这些缓存。
 
 ## 3. 配置
 
-唯一 JSON 结构为 `seed`、`model`、`teacher`、`training`，未知字段报错。缺省字段采用 [config.py](config.py) 中的默认值；[正式配置](../../../configs/v4-1/online_ttt_memory.json) 显式列出全部设置。路径支持 `~`，相对路径以运行目录为基准，脚本统一切到项目根目录。
+实验输入 JSON 的结构为 `seed`、`model`、`teacher`、`training`，未知字段报错。缺省字段采用 [config.py](config.py) 中的默认值，下表以[正式配置](../../../configs/v4-1/online_ttt_memory.json)为准。路径支持 `~`，相对路径以运行目录为基准，脚本统一切到项目根目录。
+
+Prepare/train 默认读取 `configs/v4-1/online_ttt_memory.json`，分别通过 `--prepare-data`、`--train-data` 覆盖 `training.dataset_dir`；显式 CLI 值在校验前覆盖配置。两者的数据、模型、seed、筛选设置与产物父目录须保持一致。
+
+`run.sh` 先保存计划，再按计划执行。默认在训练后评估最后一个 checkpoint；`--train-only` 只创建训练计划并执行训练和 dev，`--evaluate-only` 读取或创建独立评估计划。首次独立评估须明确指定数据目录，已有计划沿用原设置。具体选项见[运行指南](scripts/README.md)。
 
 ### 3.1 Memory 与 inner：`model`
 
@@ -154,52 +159,83 @@ Teacher 的完整原文 prefix KV 在一个 QA episode 内随压缩边界递增�
 | `response_max_tokens` | $L_{\mathrm{resp}}=24$ | 每条 teacher 响应的新 token 上限 |
 | `pool_size` | $N_{\mathrm{pool}}=4096$ | 每边界须填满的固定候选池 |
 | `am_sample_size` | $N_{\mathrm{AM}}=128$ | 每次均匀、无放回采样；下次重抽 |
-| `batch_size` | $B_{\mathrm{teacher}}=4$ | 每卡 teacher 批处理大小，用于离线生成与统计、运行时 teacher forcing |
+| `prepare_batch_size` | $B_{\mathrm{prepare}}=64$ | 每卡离线生成与统计的批量 |
+| `batch_size` | $B_{\mathrm{teacher}}=4$ | 每卡运行时 teacher forcing 批量 |
 
-`prepare --batch-size N` 和 `train --teacher-batch-size N` 均覆盖 `teacher.batch_size`，省略时沿用配置。它控制 teacher 批处理大小，不计入训练 batch，也不改变候选池或 AM 采样数量。
+`prepare --prepare-batch-size-per-gpu N` 覆盖 `teacher.prepare_batch_size`，`--teacher-batch-size-per-gpu N` 覆盖 `teacher.batch_size`；省略时沿用配置。两者不计入训练 batch，也不改变候选池或 AM 采样数量。
 
 ### 3.3 Outer 训练与运行：`training`
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `dataset_dir` | `data/delta-mem-qasper` | QA 数据目录 |
-| `teacher_cache_dir` | `null` | 按 pending／recent 容量自动确定缓存目录；可显式指定路径 |
-| `output_dir` | `null` | 按方法设置与启动日期自动命名，恢复沿用原目录；可[显式指定](scripts/README.md#3-训练与恢复) |
-| `max_steps` | $S_{\mathrm{outer}}=1000$ | Outer optimizer steps |
-| `micro_batch_size`／`gradient_accumulation_steps` | 1／8 | 单卡全局 batch 为 8；epoch 尾批按实际样本数平均 |
+| `output_root` | `artifacts/v4-1` | 产物父目录；teacher 共享，每个 run 下划分 train 与 eval |
+| `run_id` | `null` | 运行目录的末尾标识；`null` 时自动生成 `YYYYMMDD-HHMMSS` |
+| `train_only` | `false` | 仅训练与 dev 验证，跳过最终 test |
+| `test_data` | `null` | 最终 test 数据目录；`null` 沿用 `dataset_dir` |
+| `max_test_samples` | `null` | 最终 test 的 QA 数量上限，默认全量 |
+| `max_new_tokens` | 128 | 最终 test 的响应生成上限 |
+| `eval_id` | `null` | 最终 test 的计划标识；默认 `auto`，独立评估未指定时使用时间戳 |
+| `epochs`／`max_steps` | 4／`null` | 训练轮数／可选 optimizer step 上限；实际配置保存解析后的总步数 |
+| `micro_batch_size`／`gradient_accumulation_steps` | 1／8 | 每卡 microbatch／累积次数；全局 batch 还需乘 GPU 数量 |
 | `learning_rate`／`lora_learning_rate` | $10^{-4}$／$2\times10^{-5}$ | 新增参数／LoRA 峰值学习率 |
 | `weight_decay` | 0.01 | 仅解码器权重矩阵；其他慢参数为 0 |
 | `beta1`／`beta2`／`adam_epsilon` | 0.9／0.999／$10^{-8}$ | Outer AdamW |
 | `warmup_steps`／`min_lr_ratio` | 50／0.1 | 线性 warmup 后 cosine 降到峰值的 0.1 |
 | `gradient_clip`／`lambda_am` | 1／1 | Outer 全局梯度范数上限／outer AM 权重 |
-| `dev_every`／`save_every`／`save_total_limit` | 50／100／2 | 验证与保存步距，保留最近两个 checkpoint |
+| `dev_every` | 50 | 每 50 步验证；epoch 末和最终步也验证 |
+| `save_every`／`save_total_limit` | `after_each_epoch`／4 | 每个 epoch 保存，保留最近 4 个；也可指定正整数步距，最终步必保存 |
 | `max_train_data_tokens` | 12288 | Train 原始正文长度上限；`null` 关闭 |
 | `max_train_samples`／`max_dev_samples` | `null`／`null` | 过滤后的独立 QA 数量上限 |
-| `tracking`／`swanlab_project` | `swanlab`／`latent-working-memory-v4` | 默认上传；设为 `disabled` 可关闭 |
-| `group`／`tags` | `online-ttt-memory_20261028`／`[]` | 正式配置显式指定实验系列 group；自定义 tags 使用命名空间 |
+| `tracking`／`swanlab_project` | `swanlab`／`latent-working-memory-v4.1` | 默认上传 train/dev；设为 `disabled` 可关闭 |
+| `group`／`tags` | `null`／`[]` | Group 默认使用运行目录名；自定义 tags 使用命名空间 |
 
-训练参数 `--micro-batch-size-per-gpu` 对应 `training.micro_batch_size`（当前仅支持 1），`--gradient-accumulation-steps` 对应 `training.gradient_accumulation_steps`。单卡默认有效 batch 为 $1\times8=8$；命令行覆盖值写入实际配置、checkpoint 与 SwanLab config，恢复时须保持一致，建议读取训练目录的 `config.json`。
+`teacher_cache_dir` 记录共享缓存路径，`output_dir` 记录 `<output_root>/<方法设置>_<run_id>/train/` 的实际路径；恢复时原计划、checkpoint 和训练目录须一致。
 
-公共 `seed=42` 控制初始化、数据选样、训练顺序与 outer 查询采样。Checkpoint 保存实际配置、慢参数、optimizer、scheduler、数据游标、随机状态与数据／缓存身份；基座权重不重复保存。恢复使用同一配置和绑定数据，评估从 checkpoint 读取配置。
+训练参数 `--micro-batch-size-per-gpu` 对应 `training.micro_batch_size`（当前仅支持 1），`--gradient-accumulation-steps` 对应每卡累积次数。有效全局 batch 为“GPU 数量 × 每卡 microbatch × 累积次数”：默认单卡 8、双卡 16；双卡设累积次数为 4 可保持全局 batch 8。Epoch 尾批按实际样本数平均；teacher 批量不计入训练 batch。
+
+实际选样数为 $N$、全局 batch 为 $B$ 时，总步数按 `epochs × ceil(N/B)` 推导，用于 warmup/cosine 并写入实际配置。验证与保存均在 optimizer step 完成后进行，epoch 末及最终步也执行。
+
+命令行覆盖值先保存到计划，执行时记录在实际配置、checkpoint 与 SwanLab config；新建 SwanLab run 另记录 `world_size` 与 `effective_batch_size`，恢复训练不重写原云端配置。CLI `--tracking online` 对应配置中的 `swanlab`，`--tag` 与已有 tags 取并集。公共 `seed=42` 控制初始化、选样与训练顺序，各 rank 独立采样 outer 查询并保存随机状态。
+
+### 3.4 计划与执行记录
+
+| 计划 | 内容 |
+|---|---|
+| `<运行目录>/plan/config.json` | 公共 seed、模型与 teacher 设置 |
+| `<运行目录>/plan/train.json` | 训练设置与后续执行安排 |
+| `<运行目录>/plan/eval-<eval-id>/<task>.json` | 任务的数据、生成预算与评估规则 |
+
+完整运行在训练启动前创建自动 test 计划，默认位置为 `plan/eval-auto/test.json`；显式 `eval_id` 替换其中的 `auto`。自动 test 未指定数据时采用训练数据目录，并将最终选择写入计划。计划不绑定本次选中的 checkpoint，补评时可以沿用同一任务计划。
+
+恢复使用 `--resume --checkpoint`，先核对原计划与 checkpoint，再恢复参数、优化器和进度，不接受 CLI 覆盖；GPU 数量和绑定数据须保持一致。Checkpoint 保留完整恢复状态和实际设置快照，计划中的请求预算不随运行改写。训练已完成时仅继续或复用最终 test；训练失败时不启动 test。
+
+独立评估首次创建计划须指定数据目录；已有计划省略参数即沿用，固定设置不一致时报错。RULER 可扩展目标长度，已有结果只补缺失长度。`--evaluate-only` 与 `--train-only`、`--resume` 互斥，不接受训练配置覆盖，评估卡数不受训练卡数限制。
+
+训练保存 `train.log` 与 `status.json`；评估按 step 逐个处理 checkpoint，各卡分片其未完成样本。`eval.log` 汇总带 GPU／分片前缀的输出，任务级 `status.json` 记录 checkpoint 和分片状态。单项失败后继续后续 checkpoint；中断保留逐题完成进度，重试可改变 GPU 数并重新分片剩余样本。SwanLab 仅记录 train/dev，评估不读取云端身份或凭据；dashboard 只需本地 `eval/` 结果。
 
 ## 4. 代码与结果
 
 ```text
 v4_1/
   config.py              # 唯一配置结构与输入校验
+  cli.py                 # 公共 CLI 参数与显式覆盖
   data.py                # QA 编码、样本选择、压缩边界
   modeling/              # Memory 解码、局部 AM、Qwen3 接入与在线状态
   teacher/               # 固定提示、离线 token 缓存、运行时 teacher 回放
-  training/              # 元训练、验证、checkpoint
-  evaluation/            # QA／benchmark 评估与 HTML 展示
+  training/              # 完整运行调度、元训练、验证、checkpoint
+  evaluation/            # 评估计划、样本分片、结果汇总与输出诊断
+  dashboard.py           # 从本地评估结果构建独立看板
   scripts/               # 环境与设备入口、可复制命令
 ```
+
+`training/run.py` 按运行方式调度训练或独立评估；完整运行等待 `training/train.py` 的全部训练进程退出后，再复用独立评估入口计算最终 test。自动评估只选择最后一个 checkpoint，结果续记到原 SwanLab run。
 
 训练的 `qa_loss` 是样本内答案 token 平均 CE，`outer_am` 是完整历史参照下的写入质量，`inner_before`／`inner_after` 是局部更新诊断。Inner loss 下降不能直接说明 QA 有效。正式实验应结合生成得分、逐题回答及资源成本分析。
 
 ### 4.1 持久化约定
 
-JSON／JSONL 均使用 UTF-8。训练指标每个 optimizer step 一行，逐题评估每个样本一行；模型恢复、实验记录与展示文件按下表区分。
+JSON／JSONL 均使用 UTF-8。训练产物与 SwanLab 记录统一由 rank 0 写入；训练指标每个 optimizer step 一行，逐题评估每个样本一行。模型恢复、实验记录与展示文件按下表区分。
 
 | 产物 | 保存内容与用途 |
 |---|---|
@@ -209,20 +245,26 @@ JSON／JSONL 均使用 UTF-8。训练指标每个 optimizer step 一行，逐题
 | 训练 `metrics.jsonl` | 每步 train/dev 指标与资源记录；未执行 dev 的 step 不补值 |
 | 训练 `summary.json` | 仅含 `step`、`checkpoint`、`output_dir`，用于定位完成步数与 checkpoint，不保存指标汇总 |
 | 训练 `swanlab.json` | SwanLab run 的 `id/url`；启用上传时，恢复及评估续记还需要此文件 |
-| 评估 `summary.json`、`details.jsonl` | 实验身份、协议、指标汇总与逐题原始输出；部分 details 不表示评估完成 |
-| 评估 `report/index.html` | 从上述两个评估文件重建的展示，不是评分或恢复依据 |
+| 评估任务 `plan.json` | 同一 eval-id 下该任务固定的数据与生成／评分设置，供再次执行或扩展 RULER 长度复用 |
+| 评估 `eval.json` | 当前 checkpoint 的评估设置快照 |
+| 评估 `summary.json`、`details.jsonl` | 各卡结果按原始样本顺序汇总；所有样本齐全后提交最终结果 |
+| 评估 `work.json`、`progress/worker_<rank>.jsonl` | 本轮样本分工与已完成逐题进度；不作为评估完成标记 |
 
-`state.pt` 固定八个顶层字段：`config`、`model`、`optimizer`、`scheduler`、`cursor`、`rng`、`query_rng`、`binding`。`model` 只保存慢参数，不重复保存基座权重或样本临时 memory；`cursor.step` 是已完成的 optimizer step。
+`state.pt` 固定八个顶层字段：`config`、`model`、`optimizer`、`scheduler`、`cursor`、`rng`、`query_rng`、`binding`。`model` 只保存慢参数，不重复保存基座权重或样本临时 memory；`cursor.step` 是已完成的 optimizer step，样本游标为全局游标。`rng` 与 `query_rng` 均为按 rank 排列的列表，单卡长度为 1；恢复时列表长度须与 GPU 数量一致，各 rank 恢复自己的随机状态。
 
-训练与评估 summary 的 `checkpoint` 均为 `state.pt` 的绝对路径。评估另保存 `training_run: {directory, swanlab}`，其中 `swanlab` 为 `null` 或 `{project, id, url}`；这是身份快照，续记仍读取训练目录中的 `swanlab.json`。
+训练与评估 summary 的 `checkpoint` 均为 `state.pt` 的绝对路径。评估另保存 `training_run: {directory, swanlab}`，`directory` 指向实际 `train/` 路径，`swanlab` 为 `null` 或 `{project, id, url}`；续记仍读取该目录中的 `swanlab.json`。
 
-Teacher 边界与 checkpoint 先写临时文件，再原子替换正式文件。恢复训练时，`metrics.jsonl` 原子重写为不超过 checkpoint step 的完整记录，仅丢弃未完成末行；其他格式错误直接报错。报告可独立重建，不改写原始答案或评分。
+训练与评估分别位于同一运行目录的 `train/` 与 `eval/`，完整布局见[运行指南](scripts/README.md#1-环境与入口)。评估结果为 `<运行目录>/eval/<eval-id>/<task>/global_step_<N>/`，`eval-id` 默认 `YYYYMMDD-HHMMSS`，续跑或复用同一计划时显式指定已有标识；显式指定其他 `output_root` 时，仍保留原运行目录名。RULER 按长度保留子结果，扩展或重试时复用已完成样本与长度；同计划采用调度锁，匹配的完整结果直接复用。所有 checkpoint 完成后，调度器串行向原 SwanLab run 发布结果，不保存终端日志。
+
+Teacher 边界与 checkpoint 先写临时文件，再原子替换正式文件。恢复训练时，`metrics.jsonl` 原子重写为不超过 checkpoint step 的完整记录，仅丢弃未完成末行；其他格式错误直接报错。独立看板读取上述 JSON／JSONL 展示指标与逐题记录，不改写原始答案或评分；启动方式见[运行指南](scripts/README.md#43-评估结果与看板)。
 
 ### 4.2 坐标与单位
 
 - **Teacher 位置：**`write_index` 从 1 开始；`positions` 的提示编号和序列内位置从 0 开始，后者相对“提示 + 响应”。`response_offsets`、`processed_end`、`compressed_end` 均使用右端不包含的边界；正文计数包含固定模板。尺度按 `[层数, query_heads]` 保存，head 轴不是 KV heads。
 - **训练进度：**`step` 按已完成 optimizer updates 计数，`epoch` 从 0 开始。写入轮次与每轮 inner 步数不充当训练横轴。
-- **指标与资源：**EM／F1／score 范围为 0–1，时间单位为秒；`peak_memory_gib` 使用 $2^{30}$ 字节，`peak_memory_bytes` 使用字节。`generation_seconds` 包含 prefill、inner 写入及 decode；训练 `step_seconds` 不含随后 dev 和 checkpoint 保存。
+- **评估指标：**EM／F1／score 范围为 0–1。Test NLL 按答案 token 加权，EM／F1 按样本平均；benchmark 用完整逐题结果执行官方汇总。
+- **评估计时：**时间单位为秒。`resources.seconds` 累计各卡已完成样本的计算时间，不含模型加载；`resources.wall_seconds` 记录本次分工至汇总的墙钟耗时，包含模型加载，重试时仅反映本次执行。`generation_seconds`、`nll_seconds` 按样本求和，前者包含 prefill、inner 写入及 decode。
+- **资源统计：**`peak_memory_bytes` 取各卡样本峰值的最大值；训练 `peak_memory_gib` 使用 $2^{30}$ 字节，`step_seconds` 不含随后 dev 和 checkpoint 保存。
 - **生成预算：**`requested_max_new_tokens` 是请求上限，`max_new_tokens` 是实际使用上限。Test 遇模型窗口限制时可缩减预算，并以 `model_window` 标记停止原因；`generated_tokens` 是实际生成数量。
 
 具体命令见[运行指南](scripts/README.md)。真实 Qwen3-4B 的训练稳定性、GPU 成本和 benchmark 效果需通过实际运行确认。

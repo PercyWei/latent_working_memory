@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261020 19:40:50 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261030 20:26:49 Asia/Shanghai（UTC+08:00）
 
 ## 1. 数据位置与评估协议
 
@@ -141,10 +141,11 @@ bash src/latent_working_memory/v4/scripts/dashboard.sh \
     reference artifacts/baselines/full-context/reference/eval
 ```
 
-- `--baseline-results` 是看板应用参数，不参与评估计算。标签用于图例且不可重复；目录须为基线运行的 `full-context/<run-id>/eval/`，当前仅支持 full-context 格式。
+- `--baseline-results` 是看板应用参数，不参与评估计算。标签用于图例且不可重复；可传入 `eval/<benchmark>/summary.json` 布局的 `eval/`，或直接含 `summary.json` 的单任务／单 checkpoint 目录，支持公共 benchmark、v4 与 v4.1 结果。
 - 页面可勾选本次传入的基线；不保存绑定，不传时只展示当前方法。基线缺少当前 benchmark 的 `summary.json` 时跳过；路径、格式或比较协议错误在页面提示，已保存结果不受影响。
-- 基座模型、精度、attention 实现、窗口、实际样本及生成评分协议须一致；数据目录可以不同，按样本指纹校验。基线不会改变 v4 评估协议。
+- 质量对照核对基座模型标识、实际输入与参考答案、输入／解码／生成预算及评分口径；基座按路径末级名称识别，模型父目录、算法、窗口、精度、attention 实现、设备和批量不参与硬性判等。数据按比较指纹核对，旧结果沿用可核实的原指纹。
 - RULER 单 checkpoint 展示各长度 Mean 的总览折线，以及可切换长度的 13 项任务分组柱图；任务横轴使用缩写，悬停显示完整名称，只显示实际完成的长度。LoCoMo 按 QA 类别展示分组柱。
-- 多 checkpoint 按真实累计 step 升序绘图，基线使用水平虚线。RULER 可选择 Overall 或具体长度，并另选一个 checkpoint 查看总览及任务明细；Overall 使用各 checkpoint 实际完成的长度，范围显示在汇总表中，不额外对齐。
+- 多 checkpoint 按真实累计 step 升序绘图，基线使用虚线。RULER 可比较共同长度；Overall 按各 checkpoint 实际完成的长度范围重算基线，缺任一长度时不显示对应基线 Overall，缺失不补零。
+- 耗时和显存需按实际硬件、精度、批量及计时范围另行比较。跨方法展示不改变结果复用、失败重试和恢复的严格校验。
 - 基线先于当前方法排列，RULER 中同一方法跨长度和任务保持同色。补评估或调整基线后点击“刷新结果”重新读取，不缓存。
 - 看板直接显示汇总中保存的实际 seed 和指标；同步时保留 `<run-id>/eval/` 目录结构即可，无需 `plan/`、训练记录或权重。逐样本记录 `details.jsonl` 按需读取。更多启动参数见[运行指南](../scripts/README.md#25-评估看板)。

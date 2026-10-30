@@ -171,7 +171,8 @@ def ruler_task_chart(summary, length, baselines=None):
         }
         chart.add_yaxis(
             label,
-            [{"name": task, "value": 100 * values[(length, task)]} for task in RULER_TASKS],
+            [{"name": task, "value": 100 * values[(length, task)]
+              if (length, task) in values else None} for task in RULER_TASKS],
             label_opts={"show": False},
             itemstyle_opts={"color": color},
         )
@@ -182,6 +183,12 @@ def ruler_task_chart(summary, length, baselines=None):
         yaxis_opts={"name": "Accuracy (%)", "min": 0, "max": 100},
     )
     return chart
+
+
+def ruler_overall(summary, lengths):
+    """按指定长度范围计算 Mean；缺少任一长度时不提供 Overall。"""
+    scores = {row["length"]: row["score"] for row in summary["metrics"]["by_length"]}
+    return sum(scores[length] for length in lengths) / len(lengths) if set(lengths) <= scores.keys() else None
 
 
 def _ruler_progress_chart(summaries, baselines, length):
@@ -195,9 +202,10 @@ def _ruler_progress_chart(summaries, baselines, length):
     references = []
     for label, baseline in baselines.items():
         by_length = {row["length"]: row["score"] for row in baseline["metrics"]["by_length"]}
-        value = baseline["metrics"]["score"] if length is None else by_length.get(length)
+        reference_values = [ruler_overall(baseline, summary["protocol"]["lengths"])
+                            if length is None else by_length.get(length) for summary in summaries]
         references.append((
-            label, [100 * value if value is not None else None] * len(steps),
+            label, [100 * value if value is not None else None for value in reference_values],
             _baseline_color(label),
         ))
     return _line_chart(steps, [(method, values, "#31688e")], "Mean accuracy (%)", 100, references)
