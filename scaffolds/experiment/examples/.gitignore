@@ -1,0 +1,3 @@
+!run/train/checkpoints/
+!run/train/checkpoints/global_step_2/
+!run/train/checkpoints/global_step_2/state.structure.json

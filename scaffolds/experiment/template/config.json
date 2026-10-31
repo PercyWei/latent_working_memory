@@ -1,0 +1,18 @@
+{
+  "seed": 42,
+  "model": {
+    "hidden_dim": 8,
+    "noise_std": 0.02
+  },
+  "training": {
+    "output_root": "artifacts/experiment-template",
+    "epochs": 2,
+    "micro_batch_size": 2,
+    "gradient_accumulation_steps": 2,
+    "learning_rate": 0.01,
+    "dev_every": 2,
+    "save_every": "after_each_epoch",
+    "save_total_limit": 2,
+    "tracking": "disabled"
+  }
+}

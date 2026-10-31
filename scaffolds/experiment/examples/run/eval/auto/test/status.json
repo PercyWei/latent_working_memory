@@ -1,0 +1,91 @@
+{
+  "action": "evaluate",
+  "eval_run": "/example/latent_working_memory/artifacts/example-run/train",
+  "eval_id": "auto",
+  "task": "test",
+  "gpus": "0",
+  "started_at": "2026-10-31T16:01:00+08:00",
+  "status": "finished",
+  "selected_checkpoints": [
+    "global_step_2"
+  ],
+  "checkpoints": {
+    "global_step_2": {
+      "checkpoint": "/example/latent_working_memory/artifacts/example-run/train/checkpoints/global_step_2/state.pt",
+      "step": 2,
+      "output_dir": "/example/latent_working_memory/artifacts/example-run/eval/auto/test/global_step_2",
+      "log_path": "/example/latent_working_memory/artifacts/example-run/eval/auto/test/global_step_2/eval.log",
+      "command": [
+        "/example/latent_working_memory/.venv/bin/python",
+        "-m",
+        "latent_working_memory.v4_1.evaluation.evaluate",
+        "--checkpoint",
+        "/example/latent_working_memory/artifacts/example-run/train/checkpoints/global_step_2/state.pt",
+        "--data",
+        "/example/latent_working_memory/data/example-qa",
+        "--task",
+        "test",
+        "--output-dir",
+        "/example/latent_working_memory/artifacts/example-run/eval/auto/test/global_step_2",
+        "--eval-id",
+        "auto",
+        "--max-samples",
+        "2",
+        "--max-new-tokens",
+        "4"
+      ],
+      "status": "finished",
+      "started_at": "2026-10-31T16:01:00+08:00",
+      "samples": {
+        "total_samples": 2,
+        "cached_samples": 0,
+        "scheduled_samples": 2,
+        "completed_samples": 2,
+        "pending_samples": 0
+      },
+      "workers": [
+        {
+          "rank": 0,
+          "gpu": "0",
+          "sample_count": 2,
+          "status": "finished",
+          "command": [
+            "/example/latent_working_memory/.venv/bin/python",
+            "-m",
+            "latent_working_memory.v4_1.evaluation.evaluate",
+            "--checkpoint",
+            "/example/latent_working_memory/artifacts/example-run/train/checkpoints/global_step_2/state.pt",
+            "--data",
+            "/example/latent_working_memory/data/example-qa",
+            "--task",
+            "test",
+            "--output-dir",
+            "/example/latent_working_memory/artifacts/example-run/eval/auto/test/global_step_2",
+            "--eval-id",
+            "auto",
+            "--max-samples",
+            "2",
+            "--max-new-tokens",
+            "4",
+            "--worker-rank",
+            "0"
+          ],
+          "started_at": "2026-10-31T16:01:00+08:00",
+          "return_code": 0,
+          "finished_at": "2026-10-31T16:01:02+08:00"
+        }
+      ],
+      "return_code": 0,
+      "finished_at": "2026-10-31T16:01:02+08:00"
+    }
+  },
+  "progress": {
+    "total": 1,
+    "pending": 0,
+    "running": 0,
+    "finished": 1,
+    "failed": 0,
+    "stopped": 0
+  },
+  "finished_at": "2026-10-31T16:01:02+08:00"
+}

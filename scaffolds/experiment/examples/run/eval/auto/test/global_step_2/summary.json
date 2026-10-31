@@ -1,0 +1,80 @@
+{
+  "eval_id": "auto",
+  "task": "test",
+  "checkpoint": "/example/latent_working_memory/artifacts/example-run/train/checkpoints/global_step_2/state.pt",
+  "checkpoint_step": 2,
+  "training_run": {
+    "directory": "/example/latent_working_memory/artifacts/example-run/train"
+  },
+  "model": {
+    "model_name_or_path": "/example/models/example-backbone",
+    "backbone_dtype": "float32",
+    "pending_size": 8,
+    "recent_size": 4,
+    "num_slots": 2,
+    "memory_dim": 4,
+    "inner_steps": 1
+  },
+  "model_window": 128,
+  "seed": 42,
+  "data": {
+    "episodes": 2,
+    "tokenized_content": "<test-token-fingerprint>",
+    "statistics": {
+      "file": "/example/latent_working_memory/data/example-qa/test.jsonl",
+      "split": "test",
+      "raw_documents": 2,
+      "raw_document_ids": [
+        "44444444444444444444444444444444",
+        "55555555555555555555555555555555"
+      ],
+      "raw_qas": 2,
+      "episodes": 2,
+      "documents": 2,
+      "filtered_text": 0,
+      "filtered_model_window": 0,
+      "selection_seed": 42,
+      "max_samples": 2
+    }
+  },
+  "protocol": {
+    "input": "explicit document/question boundary; no writes during QA",
+    "generation": "greedy; independent memory per question and per NLL/generation path",
+    "generation_budget": 4,
+    "max_samples": 2,
+    "selection": "QA hash sampling after length filtering",
+    "nll": "answer-token weighted; includes assistant ending tokens",
+    "scoring": "single-reference QA EM/token-overlap F1; normalized case/articles/punctuation",
+    "teacher": "no offline teacher cache; online local inner AM only",
+    "write_diagnostics": "generation path only; inner losses averaged over write events and layers"
+  },
+  "metrics": {
+    "samples": 2,
+    "nll": 1.6,
+    "perplexity": 4.953032424395115,
+    "em": 0.5,
+    "f1": 0.5,
+    "target_tokens": 10
+  },
+  "outputs": {
+    "blank": 0,
+    "whitespace_repeat": 0,
+    "abnormal_character": 0,
+    "budget_exhausted": 0
+  },
+  "stop_reasons": {
+    "eos": 2
+  },
+  "resources": {
+    "device": "<device: 未实际执行>",
+    "seconds": 1.4,
+    "seconds_scope": "sum of completed sample wall times across workers; excludes model loading",
+    "wall_seconds": 2.0,
+    "wall_timing_scope": "current attempt from work allocation to merge; includes model loading; cached samples are not rerun",
+    "generated_tokens": 5,
+    "generation_seconds": 0.9,
+    "generation_timing_scope": "context prefill, inner writes, question prefill and autoregressive decode",
+    "nll_seconds": 0.5,
+    "peak_memory_bytes": null
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "step": 2,
+  "checkpoint": "/example/latent_working_memory/artifacts/example-run/train/checkpoints/global_step_2/state.pt",
+  "output_dir": "/example/latent_working_memory/artifacts/example-run/train"
+}

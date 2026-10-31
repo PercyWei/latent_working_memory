@@ -235,7 +235,7 @@ v4_1/
   scripts/               # 环境与设备入口、可复制命令
 ```
 
-`training/run.py` 按运行方式调度训练或独立评估；完整运行等待 `training/train.py` 的全部训练进程退出后，再复用独立评估入口计算最终 test。自动评估只选择最后一个 checkpoint，结果续记到原 SwanLab run。
+`training/run.py` 按运行方式调度训练或独立评估；完整运行等待 `training/train.py` 的全部训练进程退出后，再复用独立评估入口计算最终 test。自动评估只选择最后一个 checkpoint，结果保存到本地 `eval/` 目录并由独立 dashboard 展示。
 
 训练的 `qa_loss` 是样本内答案 token 平均 CE；`outer_am` 是完整历史参照下的标准化 AM，等于输出项 `outer_am_output` 与 log-mass 项 `outer_am_mass` 之和。两项沿用总 AM 的 query、head、层、压缩轮次与样本平均方式，仅作为日志诊断；训练目标仍为 `qa_loss + lambda_am * outer_am`。train/dev 的两个分项均写入 `metrics.jsonl` 与 SwanLab，训练终端同步输出。
 
@@ -265,17 +265,17 @@ JSON／JSONL 均使用 UTF-8。训练产物与 SwanLab 记录统一由 rank 0 �
 | 训练 `metrics.jsonl` | 每步 train/dev 指标与资源记录；未执行 dev 的 step 不补值 |
 | 训练 `inner_diagnostics.jsonl` | 每 20 步一行 `{step, samples}`，保留逐样本、写入轮次、层与 inner step 的完整诊断；未采样步骤不补值 |
 | 训练 `summary.json` | 仅含 `step`、`checkpoint`、`output_dir`，用于定位完成步数与 checkpoint，不保存指标汇总 |
-| 训练 `swanlab.json` | SwanLab run 的 `id/url`；启用上传时，恢复及评估续记还需要此文件 |
-| 评估任务 `plan.json` | 同一 eval-id 下该任务固定的数据与生成／评分设置，供再次执行或扩展 RULER 长度复用 |
+| 训练 `swanlab.json` | SwanLab run 的 `id/url`；启用上传时，恢复训练需要此文件 |
+| `plan/eval-<eval-id>/<task>.json` | 同一 eval-id 下该任务固定的数据与生成／评分设置，供再次执行或扩展 RULER 长度复用 |
 | 评估 `eval.json` | 当前 checkpoint 的评估设置快照 |
 | 评估 `summary.json`、`details.jsonl` | 各卡结果按原始样本顺序汇总；所有样本齐全后提交最终结果 |
 | 评估 `work.json`、`progress/worker_<rank>.jsonl` | 本轮样本分工与已完成逐题进度；不作为评估完成标记 |
 
 `state.pt` 固定八个顶层字段：`config`、`model`、`optimizer`、`scheduler`、`cursor`、`rng`、`query_rng`、`binding`。`model` 只保存慢参数，不重复保存基座权重或样本临时 memory；`cursor.step` 是已完成的 optimizer step，样本游标为全局游标。`rng` 与 `query_rng` 均为按 rank 排列的列表，单卡长度为 1；恢复时列表长度须与 GPU 数量一致，各 rank 恢复自己的随机状态。
 
-训练与评估 summary 的 `checkpoint` 均为 `state.pt` 的绝对路径。评估另保存 `training_run: {directory, swanlab}`，`directory` 指向实际 `train/` 路径，`swanlab` 为 `null` 或 `{project, id, url}`；续记仍读取该目录中的 `swanlab.json`。
+训练与评估 summary 的 `checkpoint` 均为 `state.pt` 的绝对路径。评估另保存 `training_run: {directory}`，`directory` 指向实际 `train/` 路径。
 
-训练与评估分别位于同一运行目录的 `train/` 与 `eval/`，完整布局见[运行指南](scripts/README.md#1-环境与入口)。评估结果为 `<运行目录>/eval/<eval-id>/<task>/global_step_<N>/`，`eval-id` 默认 `YYYYMMDD-HHMMSS`，续跑或复用同一计划时显式指定已有标识；显式指定其他 `output_root` 时，仍保留原运行目录名。RULER 按长度保留子结果，扩展或重试时复用已完成样本与长度；同计划采用调度锁，匹配的完整结果直接复用。所有 checkpoint 完成后，调度器串行向原 SwanLab run 发布结果，不保存终端日志。
+训练与评估分别位于同一运行目录的 `train/` 与 `eval/`，完整布局见[运行指南](scripts/README.md#7-产物目录与记录)。评估结果为 `<运行目录>/eval/<eval-id>/<task>/global_step_<N>/`，`eval-id` 默认 `YYYYMMDD-HHMMSS`，续跑或复用同一计划时显式指定已有标识；显式指定其他 `output_root` 时，仍保留原运行目录名。RULER 按长度保留子结果，扩展或重试时复用已完成样本与长度；同计划采用调度锁，匹配的完整结果直接复用。评估命令与各分片输出写入对应 checkpoint 目录的 `eval.log`。
 
 Teacher 边界与 checkpoint 先写临时文件，再原子替换正式文件。恢复训练时，`metrics.jsonl` 原子重写为不超过 checkpoint step 的完整记录；`inner_diagnostics.jsonl` 保留不超过该步的已有稀疏记录，旧 checkpoint 尚无该文件时从后续采样步开始记录。两者均丢弃未完成末行，其他格式错误直接报错。独立看板读取上述 JSON／JSONL 展示指标与逐题记录，不改写原始答案或评分；启动方式见[运行指南](scripts/README.md#43-评估结果与看板)。
 

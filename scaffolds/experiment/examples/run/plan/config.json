@@ -1,0 +1,18 @@
+{
+  "seed": 42,
+  "model": {
+    "model_name_or_path": "/example/models/example-backbone",
+    "backbone_dtype": "float32",
+    "pending_size": 8,
+    "recent_size": 4,
+    "num_slots": 2,
+    "memory_dim": 4,
+    "inner_steps": 1
+  },
+  "teacher": {
+    "num_prompts": 2,
+    "response_max_tokens": 4,
+    "pool_size": 8,
+    "am_sample_size": 4
+  }
+}

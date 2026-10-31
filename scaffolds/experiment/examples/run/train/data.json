@@ -1,0 +1,57 @@
+{
+  "binding": {
+    "train": {
+      "episodes": 4,
+      "tokenized_content": "<train-token-fingerprint>"
+    },
+    "dev": {
+      "episodes": 2,
+      "tokenized_content": "<dev-token-fingerprint>"
+    },
+    "teacher": {
+      "teacher_model": "/example/models/example-backbone",
+      "backbone_dtype": "float32",
+      "pending_size": 8,
+      "recent_size": 4,
+      "seed": 42
+    },
+    "train_documents": [
+      "11111111111111111111111111111111",
+      "22222222222222222222222222222222"
+    ],
+    "dev_documents": [
+      "33333333333333333333333333333333"
+    ]
+  },
+  "train": {
+    "file": "/example/latent_working_memory/data/example-qa/train.jsonl",
+    "split": "train",
+    "raw_documents": 2,
+    "raw_document_ids": [
+      "11111111111111111111111111111111",
+      "22222222222222222222222222222222"
+    ],
+    "raw_qas": 4,
+    "episodes": 4,
+    "documents": 2,
+    "filtered_text": 0,
+    "filtered_model_window": 0,
+    "selection_seed": 42,
+    "max_samples": 4
+  },
+  "dev": {
+    "file": "/example/latent_working_memory/data/example-qa/dev.jsonl",
+    "split": "dev",
+    "raw_documents": 1,
+    "raw_document_ids": [
+      "33333333333333333333333333333333"
+    ],
+    "raw_qas": 2,
+    "episodes": 2,
+    "documents": 1,
+    "filtered_text": 0,
+    "filtered_model_window": 0,
+    "selection_seed": 42,
+    "max_samples": 2
+  }
+}

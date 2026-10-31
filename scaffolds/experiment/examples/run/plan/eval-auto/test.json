@@ -1,0 +1,19 @@
+{
+  "training_run": "/example/latent_working_memory/artifacts/example-run/train",
+  "model": {
+    "model_name_or_path": "/example/models/example-backbone",
+    "backbone_dtype": "float32",
+    "pending_size": 8,
+    "recent_size": 4,
+    "num_slots": 2,
+    "memory_dim": 4,
+    "inner_steps": 1
+  },
+  "seed": 42,
+  "eval_id": "auto",
+  "task": "test",
+  "data": "/example/latent_working_memory/data/example-qa",
+  "max_samples": 2,
+  "max_new_tokens": 4,
+  "lengths": null
+}

@@ -1,0 +1,20 @@
+{
+  "action": "train",
+  "gpus": "0",
+  "command": [
+    "/example/latent_working_memory/.venv/bin/python",
+    "-m",
+    "torch.distributed.run",
+    "--standalone",
+    "--nnodes=1",
+    "--nproc-per-node=1",
+    "--module",
+    "latent_working_memory.v4_1.training.train",
+    "--plan-dir",
+    "/example/latent_working_memory/artifacts/example-run/plan"
+  ],
+  "started_at": "2026-10-31T16:00:00+08:00",
+  "status": "finished",
+  "return_code": 0,
+  "finished_at": "2026-10-31T16:00:10+08:00"
+}

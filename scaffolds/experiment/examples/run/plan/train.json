@@ -1,0 +1,30 @@
+{
+  "dataset_dir": "/example/latent_working_memory/data/example-qa",
+  "output_root": "/example/latent_working_memory/artifacts",
+  "teacher_cache_dir": "/example/latent_working_memory/artifacts/teacher/p8-r4",
+  "output_dir": "/example/latent_working_memory/artifacts/example-run/train",
+  "run_id": "example-run",
+  "train_only": false,
+  "test_data": "/example/latent_working_memory/data/example-qa",
+  "max_test_samples": 2,
+  "max_new_tokens": 4,
+  "eval_id": "auto",
+  "epochs": 1,
+  "max_steps": null,
+  "micro_batch_size": 2,
+  "gradient_accumulation_steps": 1,
+  "learning_rate": 0.0001,
+  "lora_learning_rate": 2e-05,
+  "warmup_steps": 0,
+  "lambda_am": 1.0,
+  "dev_every": 2,
+  "save_every": "after_each_epoch",
+  "save_total_limit": 1,
+  "max_train_samples": 4,
+  "max_dev_samples": 2,
+  "tracking": "disabled",
+  "group": "example-run",
+  "tags": [
+    "study:scaffold-example"
+  ]
+}
