@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261031 15:33:32 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261031 16:13:54 Asia/Shanghai（UTC+08:00）
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
 
@@ -237,7 +237,9 @@ v4_1/
 
 `training/run.py` 按运行方式调度训练或独立评估；完整运行等待 `training/train.py` 的全部训练进程退出后，再复用独立评估入口计算最终 test。自动评估只选择最后一个 checkpoint，结果续记到原 SwanLab run。
 
-训练的 `qa_loss` 是样本内答案 token 平均 CE，`outer_am` 是完整历史参照下的写入质量，`inner_before`／`inner_after` 是局部更新诊断。Inner loss 下降不能直接说明 QA 有效。正式实验应结合生成得分、逐题回答及资源成本分析。
+训练的 `qa_loss` 是样本内答案 token 平均 CE；`outer_am` 是完整历史参照下的标准化 AM，等于输出项 `outer_am_output` 与 log-mass 项 `outer_am_mass` 之和。两项沿用总 AM 的 query、head、层、压缩轮次与样本平均方式，仅作为日志诊断；训练目标仍为 `qa_loss + lambda_am * outer_am`。train/dev 的两个分项均写入 `metrics.jsonl` 与 SwanLab，训练终端同步输出。
+
+`inner_before`／`inner_after` 分别记录同一次写入的首次 inner 更新前与全部 inner steps 完成后的局部 AM。SwanLab 在 train、dev 分区分别用 `inner_am` 原生折线图合并展示，横轴为实际 optimizer step，更新前用浅蓝、更新后用深蓝；保留底层标量数据。Inner loss 下降不能直接说明 QA 有效，正式实验应结合生成得分、逐题回答及资源成本分析。
 
 ### 4.1 持久化约定
 

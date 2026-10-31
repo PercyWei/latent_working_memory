@@ -31,6 +31,7 @@ from latent_working_memory.v4_1.training.checkpoint import (
 from latent_working_memory.v4_1.training.engine import (
     SampleCursor, TrainingEngine, evaluate_dev, training_steps,
 )
+from latent_working_memory.v4_1.training.tracking import configure_inner_am_panels
 
 
 @contextmanager
@@ -51,6 +52,7 @@ def tracking_run(config, output_dir, resume, device):
                 raise ValueError("SwanLab URL differs from the saved project or run id")
         rng = capture_rng(device)
         try:
+            api_key = swanlab_api_key()
             run = swanlab.init(
                 project=training.swanlab_project, workspace=workspace,
                 name=None if resume else output_dir.parent.name,
@@ -66,7 +68,7 @@ def tracking_run(config, output_dir, resume, device):
                 id=identity["id"] if identity else None,
                 resume="must" if identity else "never",
                 settings=swanlab.Settings(
-                    api_key=swanlab_api_key(), interactive=False,
+                    api_key=api_key, interactive=False,
                     terminal={"proxy_type": "none"}, probe={"git": False, "monitor": False},
                 ),
             )
@@ -77,8 +79,16 @@ def tracking_run(config, output_dir, resume, device):
                 path.write_text(
                     json.dumps({"id": run.id, "url": run.url}, indent=2) + "\n", encoding="utf-8"
                 )
+            project_path = run.url.split("/@", 1)[1].split("/runs/", 1)[0]
+            with (output_dir.parents[1] / ".swanlab-panels.lock").open("a") as panel_lock:
+                fcntl.flock(panel_lock, fcntl.LOCK_EX)
+                api = swanlab.Api(api_key=api_key)
+                configure_inner_am_panels(api, api.run(f"{project_path}/{run.id}"))
             for section in ("train", "dev"):
-                for name in ("loss", "qa_loss", "outer_am", "inner_before", "inner_after"):
+                for name in (
+                    "loss", "qa_loss", "outer_am", "outer_am_output", "outer_am_mass",
+                    "inner_before", "inner_after",
+                ):
                     run.define_metric(f"{section}/{name}", x_axis="_step", section_name=section)
             for name in ("train/grad_norm", "resources/step_seconds", "resources/peak_memory_gib"):
                 run.define_metric(name, x_axis="_step", section_name=name.split("/")[0])
@@ -279,6 +289,7 @@ def train(plan_dir, device="cuda", resume=None):
                 print(
                     f"step {step}/{training.max_steps} loss={metrics['loss']:.5f} "
                     f"QA={metrics['qa_loss']:.5f} AM={metrics['outer_am']:.5f} "
+                    f"AM-output={metrics['outer_am_output']:.5f} AM-mass={metrics['outer_am_mass']:.5f} "
                     f"inner={metrics['inner_before']:.5f}->{metrics['inner_after']:.5f} "
                     f"samples={metrics['samples']} seconds={seconds:.1f}"
                     + (f" dev={record['dev/loss']:.5f}" if "dev/loss" in record else ""),

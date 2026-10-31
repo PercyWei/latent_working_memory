@@ -23,6 +23,7 @@ def teacher_scales(outputs, log_mass, floor):
 
 
 def matching_loss(outputs, log_mass, teacher_outputs, teacher_log_mass, scales_o, scales_z):
+    """返回逐样本的 output 与 log-mass 标准化 MSE，二者等权相加为 AM。"""
     output_loss = ((outputs - teacher_outputs) / scales_o[..., None, :, None]).square().mean(dim=(-3, -2, -1))
     mass_loss = ((log_mass - teacher_log_mass) / scales_z[..., None, :]).square().mean(dim=(-2, -1))
-    return output_loss + mass_loss
+    return output_loss, mass_loss

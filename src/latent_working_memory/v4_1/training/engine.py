@@ -189,7 +189,10 @@ class TrainingEngine:
         """episodes 是本 rank 的分片；空分片仍参与梯度和指标归约。"""
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
-        totals = {name: 0.0 for name in ("loss", "qa_loss", "outer_am", "inner_before", "inner_after")}
+        totals = {name: 0.0 for name in (
+            "loss", "qa_loss", "outer_am", "outer_am_output", "outer_am_mass",
+            "inner_before", "inner_after",
+        )}
         target_tokens = write_events = 0
         learning_rates = {group["name"]: group["lr"] for group in self.optimizer.param_groups}
         for start in range(0, len(episodes), self.config.micro_batch_size):
@@ -232,7 +235,10 @@ class TrainingEngine:
 def evaluate_dev(model, episodes, teacher, lambda_am, generator):
     """验证本 rank 分片并汇总全局指标；inner 的局部求导由模型内部启用。"""
     model.eval()
-    totals = {name: 0.0 for name in ("loss", "qa_loss", "outer_am", "inner_before", "inner_after")}
+    totals = {name: 0.0 for name in (
+        "loss", "qa_loss", "outer_am", "outer_am_output", "outer_am_mass",
+        "inner_before", "inner_after",
+    )}
     target_tokens = write_events = 0
     with torch.no_grad():
         for episode in episodes:

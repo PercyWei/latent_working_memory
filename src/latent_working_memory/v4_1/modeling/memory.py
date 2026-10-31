@@ -45,7 +45,10 @@ class LayerMemory(nn.Module):
     def _matching_loss(self, candidate, queries, teacher_outputs, teacher_mass,
                        scales_o, scales_z, compressed_tokens, rotary):
         outputs, mass = local_read(queries, *self.decode(candidate, compressed_tokens, rotary))
-        return matching_loss(outputs, mass, teacher_outputs, teacher_mass, scales_o, scales_z)
+        output_loss, mass_loss = matching_loss(
+            outputs, mass, teacher_outputs, teacher_mass, scales_o, scales_z
+        )
+        return output_loss + mass_loss
 
     def _matching_gradient(self, candidate, *args):
         # 重算求导产生的高阶图；各样本的 inner 步长不随 batch 改变。
@@ -90,7 +93,8 @@ class LayerMemory(nn.Module):
                 outputs, mass = local_read(
                     queries, *self.decode(candidate, compressed_tokens, rotary)
                 )
-                after = matching_loss(
+                output_loss, mass_loss = matching_loss(
                     outputs, mass, teacher_outputs, teacher_mass, scales_o, scales_z
                 )
+                after = output_loss + mass_loss
         return candidate if differentiable else candidate.detach(), (before, after)

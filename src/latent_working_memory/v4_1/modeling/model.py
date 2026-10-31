@@ -181,19 +181,24 @@ class OnlineMemoryLM(nn.Module):
         state.inner_after.append(torch.stack(after).mean(dim=0))
 
     def _outer_am(self, state, teachers, generator):
+        """返回逐样本的 AM 总损失，以及停止梯度的 output、log-mass 分项。"""
         references = [teacher.reference(
             state.write_events, state.position, state.compressed_tokens, generator
         ) for teacher in teachers]
-        losses = []
+        losses, output_losses, mass_losses = [], [], []
         for index, kv in enumerate(state.memory_kv):
             reference = {name: torch.stack([record[name][index] for record in references])
                          for name in ("queries", "outputs", "log_mass", "scales_o", "scales_z")}
             outputs, mass = local_read(reference["queries"], *kv)
-            losses.append(matching_loss(
+            output_loss, mass_loss = matching_loss(
                 outputs, mass, reference["outputs"], reference["log_mass"],
                 reference["scales_o"], reference["scales_z"],
-            ))
-        return torch.stack(losses).mean(dim=0)
+            )
+            losses.append(output_loss + mass_loss)
+            output_losses.append(output_loss.detach())
+            mass_losses.append(mass_loss.detach())
+        return tuple(torch.stack(values).mean(dim=0)
+                     for values in (losses, output_losses, mass_losses))
 
     def consume(self, token_ids, state, differentiable=False, write=True, on_write=None):
         """返回按 chunk 排列的 hidden states；压缩仅发生在完整前向之后。"""
@@ -242,7 +247,7 @@ class OnlineMemoryLM(nn.Module):
                 if teachers is not None:
                     losses = self._outer_am(state, [teachers[index] for index in active], generator)
                     for row, index in enumerate(active):
-                        outer_losses[index].append(losses[row])
+                        outer_losses[index].append(tuple(loss[row] for loss in losses))
             continuing = []
             for row, index in enumerate(active):
                 if state.position == len(episodes[index].context_ids):
@@ -271,7 +276,8 @@ class OnlineMemoryLM(nn.Module):
 
             def supervise(state):
                 if teacher is not None:
-                    outer_losses.append(self._outer_am(state, [teacher], generator)[0])
+                    losses = self._outer_am(state, [teacher], generator)
+                    outer_losses.append(tuple(loss[0] for loss in losses))
 
             state = self._ingest(episode.context_ids, differentiable, supervise)
             return self._sample_output(episode, state, outer_losses, lambda_am, differentiable)
@@ -292,10 +298,16 @@ class OnlineMemoryLM(nn.Module):
 
     def _sample_output(self, episode, state, outer_losses, lambda_am, differentiable):
         qa_loss = self._qa_loss(episode, state, differentiable)
-        outer_am = torch.stack(outer_losses).mean() if outer_losses else qa_loss.new_zeros(())
+        if outer_losses:
+            outer_am, outer_am_output, outer_am_mass = (
+                torch.stack(values).mean() for values in zip(*outer_losses)
+            )
+        else:
+            outer_am, outer_am_output, outer_am_mass = (qa_loss.new_zeros(()) for _ in range(3))
         return {
             "loss": qa_loss + lambda_am * outer_am,
             "qa_loss": qa_loss, "outer_am": outer_am,
+            "outer_am_output": outer_am_output, "outer_am_mass": outer_am_mass,
             "target_tokens": len(episode.target_ids), **self._diagnostics(state),
         }
 

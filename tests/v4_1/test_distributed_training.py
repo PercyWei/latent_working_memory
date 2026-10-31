@@ -36,6 +36,7 @@ class ToyMemory(torch.nn.Module):
         am = self.memory.square().sum() if episode % 2 == 0 else qa.new_zeros(())
         return {
             "loss": qa + lambda_am * am, "qa_loss": qa, "outer_am": am,
+            "outer_am_output": am * 0.4, "outer_am_mass": am * 0.6,
             "inner_before": am + 1, "inner_after": am,
             "target_tokens": episode % 4 + 1, "write_events": episode % 3,
         }
