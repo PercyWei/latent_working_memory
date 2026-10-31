@@ -43,22 +43,33 @@ class LayerMemory(nn.Module):
         return key, value, bias
 
     def _matching_loss(self, candidate, queries, teacher_outputs, teacher_mass,
-                       scales_o, scales_z, compressed_tokens, rotary):
+                       scales_o, scales_z, compressed_tokens, rotary, return_components=False):
         outputs, mass = local_read(queries, *self.decode(candidate, compressed_tokens, rotary))
         output_loss, mass_loss = matching_loss(
             outputs, mass, teacher_outputs, teacher_mass, scales_o, scales_z
         )
-        return output_loss + mass_loss
+        loss = output_loss + mass_loss
+        if return_components:
+            return loss, output_loss.detach(), mass_loss.detach()
+        return loss
 
-    def _matching_gradient(self, candidate, *args):
+    def _matching_gradient(self, candidate, *args, return_components=False):
         # 重算求导产生的高阶图；各样本的 inner 步长不随 batch 改变。
         with torch.enable_grad():
-            loss = self._matching_loss(candidate, *args)
+            result = self._matching_loss(candidate, *args, return_components=return_components)
+            loss = result[0] if return_components else result
             gradient = torch.autograd.grad(loss.sum(), candidate, create_graph=True)[0]
+        if return_components:
+            return gradient, loss.detach(), result[1], result[2]
         return gradient, loss.detach()
 
-    def write(self, old_memory, teacher_kv, queries, compressed_tokens, rotary, differentiable):
-        """Teacher/queries 轮内固定；clone 隔离局部偏导，不截断 outer 历史依赖。"""
+    def write(self, old_memory, teacher_kv, queries, compressed_tokens, rotary, differentiable,
+              diagnostics=None):
+        """轮内参照固定；clone 隔离局部偏导，不截断 outer 历史依赖。
+
+        可选 diagnostics 按 batch 行顺序追加逐样本记录。
+        """
+        step_records = [] if diagnostics is not None else None
         with torch.enable_grad():
             candidate = old_memory.clone() if differentiable else old_memory.detach().clone()
             candidate.requires_grad_(True)
@@ -80,13 +91,34 @@ class LayerMemory(nn.Module):
                     scales_o, scales_z, compressed_tokens, rotary,
                 )
                 if recompute:
-                    gradient, loss = checkpoint(self._matching_gradient, *args, use_reentrant=False)
+                    result = checkpoint(
+                        self._matching_gradient, *args, use_reentrant=False,
+                        return_components=diagnostics is not None,
+                    )
+                    if diagnostics is not None:
+                        gradient, loss, output_loss, mass_loss = result
+                    else:
+                        gradient, loss = result
                 else:
-                    loss = self._matching_loss(*args)
+                    result = self._matching_loss(*args, return_components=diagnostics is not None)
+                    if diagnostics is not None:
+                        loss, output_loss, mass_loss = result
+                    else:
+                        loss = result
                     gradient = torch.autograd.grad(loss.sum(), candidate, create_graph=differentiable)[0]
                 if before is None:
                     before = loss.detach()
-                candidate = candidate - step_size * gradient
+                if diagnostics is not None:
+                    update = step_size * gradient
+                    candidate = candidate - update
+                    with torch.no_grad():
+                        step_records.append(torch.stack((
+                            loss.detach(), output_loss, mass_loss,
+                            torch.linalg.vector_norm(gradient.detach().flatten(1), dim=1),
+                            torch.linalg.vector_norm(update.detach().flatten(1), dim=1),
+                        ), dim=-1))
+                else:
+                    candidate = candidate - step_size * gradient
                 if not differentiable:
                     candidate = candidate.detach().requires_grad_(True)
             with torch.no_grad():
@@ -97,4 +129,22 @@ class LayerMemory(nn.Module):
                     outputs, mass, teacher_outputs, teacher_mass, scales_o, scales_z
                 )
                 after = output_loss + mass_loss
+        if diagnostics is not None:
+            scales_o_rows, scales_z_rows = scales_o.cpu().tolist(), scales_z.cpu().tolist()
+            eta = float(step_size.detach())
+            step_rows = torch.stack(step_records, dim=1).cpu().tolist()
+            after_rows = torch.stack((after, output_loss, mass_loss), dim=-1).cpu().tolist()
+            for row, (steps, final) in enumerate(zip(step_rows, after_rows)):
+                diagnostics.append({
+                    "step_size": eta,
+                    "scales_o": scales_o_rows[row], "scales_z": scales_z_rows[row],
+                    "steps": [
+                        {"inner_step": index + 1, "loss": values[0],
+                         "output_loss": values[1], "mass_loss": values[2],
+                         "gradient_norm": values[3], "update_norm": values[4]}
+                        for index, values in enumerate(steps)
+                    ],
+                    "after": {"inner_step": self.config.inner_steps, "loss": final[0],
+                              "output_loss": final[1], "mass_loss": final[2]},
+                })
         return candidate if differentiable else candidate.detach(), (before, after)

@@ -228,7 +228,7 @@ class TrainingEngine:
             norms[f"{name}_grad_norm"] = math.sqrt(squared_norm)
         return norms
 
-    def train_batch(self, episodes, teacher, generator, step):
+    def train_batch(self, episodes, teacher, generator, step, inner_diagnostics=None):
         """step 是本次更新的全局绝对步数；空 rank 同步参与所需归约。"""
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
@@ -241,18 +241,29 @@ class TrainingEngine:
         learning_rates = {group["name"]: group["lr"] for group in self.optimizer.param_groups}
         for start in range(0, len(episodes), self.config.micro_batch_size):
             group = episodes[start:start + self.config.micro_batch_size]
+            group_diagnostics = [[] for _ in group] if inner_diagnostics is not None else None
             with ExitStack() as stack:
                 trajectories = [stack.enter_context(teacher.episode(episode, generator)) for episode in group]
                 if len(group) == 1:
                     outputs = [self.model(
                         group[0], teacher=trajectories[0], lambda_am=self.config.lambda_am,
                         generator=generator, differentiable=True,
+                        **({"inner_diagnostics": group_diagnostics[0]}
+                           if group_diagnostics is not None else {}),
                     )]
                 else:
                     outputs = self.model.forward_batch(
                         group, teachers=trajectories, lambda_am=self.config.lambda_am,
                         generator=generator, differentiable=True,
+                        **({"inner_diagnostics": group_diagnostics}
+                           if group_diagnostics is not None else {}),
                     )
+            if inner_diagnostics is not None:
+                rank = dist.get_rank() if dist.is_initialized() else 0
+                inner_diagnostics.extend({
+                    "id": episode.id, "document_id": episode.document_id,
+                    "context_tokens": len(episode.context_ids), "rank": rank, "records": records,
+                } for episode, records in zip(group, group_diagnostics))
             # Teacher 前向已完成，反向只经过 student 的完整元训练图。
             if loss_gradients is not None:
                 for name, key in (("qa", "qa_loss"), ("outer_am", "outer_am")):

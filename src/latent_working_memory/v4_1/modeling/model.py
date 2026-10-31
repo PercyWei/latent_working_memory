@@ -148,7 +148,7 @@ class OnlineMemoryLM(nn.Module):
             state.last_hidden = hidden[:, -1]
             return hidden
 
-    def _write(self, state, differentiable):
+    def _write(self, state, differentiable, inner_diagnostics=None):
         count = self.config.pending_size
         compressed = state.compressed_tokens + count
         rotary = self.backbone.model.rotary_emb
@@ -164,10 +164,18 @@ class OnlineMemoryLM(nn.Module):
                     torch.cat((old_bias.float(), old_bias.new_zeros((*old_bias.shape[:-1], count))), -1),
                 )
                 query = state.recent_queries[index].transpose(1, 2).float()
+                layer_diagnostics = [] if inner_diagnostics is not None else None
                 updated, metrics = memory.write(
                     state.memories[index], teacher, query, compressed_tokens=compressed,
-                    rotary=rotary, differentiable=differentiable,
+                    rotary=rotary, differentiable=differentiable, diagnostics=layer_diagnostics,
                 )
+                if inner_diagnostics is not None:
+                    for records, record in zip(inner_diagnostics, layer_diagnostics):
+                        records.append({
+                            "write_index": state.write_events + 1,
+                            "processed_end": state.position, "compressed_end": compressed,
+                            "layer_index": index, **record,
+                        })
                 state.memories[index] = updated
                 state.memory_kv[index] = memory.decode(updated, compressed, rotary)
                 # clone 释放被删除 pending 的存储；recent KV 保留原值及全局位置。
@@ -200,7 +208,8 @@ class OnlineMemoryLM(nn.Module):
         return tuple(torch.stack(values).mean(dim=0)
                      for values in (losses, output_losses, mass_losses))
 
-    def consume(self, token_ids, state, differentiable=False, write=True, on_write=None):
+    def consume(self, token_ids, state, differentiable=False, write=True, on_write=None,
+                inner_diagnostics=None):
         """返回按 chunk 排列的 hidden states；压缩仅发生在完整前向之后。"""
         if torch.is_inference_mode_enabled():
             raise RuntimeError("online TTT needs autograd; use no_grad(), not inference_mode()")
@@ -215,18 +224,22 @@ class OnlineMemoryLM(nn.Module):
             hidden = self._advance([token_ids[start:start + length]], state, differentiable)
             start += length
             if write and state.keys[0].shape[2] == capacity:
-                self._write(state, differentiable)
+                self._write(
+                    state, differentiable,
+                    [inner_diagnostics] if inner_diagnostics is not None else None,
+                )
                 if on_write is not None:
                     on_write(state)
             yield hidden
 
-    def _ingest(self, context_ids, differentiable, on_write=None):
+    def _ingest(self, context_ids, differentiable, on_write=None, inner_diagnostics=None):
         state = self.initial_state(differentiable)
-        for _ in self.consume(context_ids, state, differentiable, on_write=on_write):
+        for _ in self.consume(context_ids, state, differentiable, on_write=on_write,
+                              inner_diagnostics=inner_diagnostics):
             pass
         return state
 
-    def _ingest_batch(self, episodes, teachers, generator, differentiable):
+    def _ingest_batch(self, episodes, teachers, generator, differentiable, inner_diagnostics=None):
         """正文按活跃样本批量推进；正文结束后提取该样本的最终状态。"""
         active = list(range(len(episodes)))
         state = self.initial_state(differentiable, batch_size=len(episodes))
@@ -243,7 +256,11 @@ class OnlineMemoryLM(nn.Module):
                 episodes[index].context_ids[state.position:state.position + length] for index in active
             ], state, differentiable)
             if state.keys[0].shape[2] == capacity:
-                self._write(state, differentiable)
+                self._write(
+                    state, differentiable,
+                    [inner_diagnostics[index] for index in active]
+                    if inner_diagnostics is not None else None,
+                )
                 if teachers is not None:
                     losses = self._outer_am(state, [teachers[index] for index in active], generator)
                     for row, index in enumerate(active):
@@ -268,7 +285,7 @@ class OnlineMemoryLM(nn.Module):
         }
 
     def forward(self, episode, teacher=None, lambda_am=1.0,
-                generator=None, differentiable=True):
+                generator=None, differentiable=True, inner_diagnostics=None):
         if not episode.context_ids or not episode.target_ids:
             raise ValueError("a QA episode must have nonempty context and target")
         with torch.set_grad_enabled(differentiable):
@@ -279,11 +296,11 @@ class OnlineMemoryLM(nn.Module):
                     losses = self._outer_am(state, [teacher], generator)
                     outer_losses.append(tuple(loss[0] for loss in losses))
 
-            state = self._ingest(episode.context_ids, differentiable, supervise)
+            state = self._ingest(episode.context_ids, differentiable, supervise, inner_diagnostics)
             return self._sample_output(episode, state, outer_losses, lambda_am, differentiable)
 
     def forward_batch(self, episodes, teachers=None, lambda_am=1.0,
-                      generator=None, differentiable=True):
+                      generator=None, differentiable=True, inner_diagnostics=None):
         """正文及写入真正批量计算；QA 分别读取各自状态，返回逐样本损失。"""
         if torch.is_inference_mode_enabled():
             raise RuntimeError("online TTT needs autograd; use no_grad(), not inference_mode()")
@@ -292,7 +309,9 @@ class OnlineMemoryLM(nn.Module):
         if max(len(episode.context_ids) for episode in episodes) > self.backbone.config.max_position_embeddings:
             raise ValueError("input exceeds the backbone global position limit")
         with torch.set_grad_enabled(differentiable):
-            states, outer_losses = self._ingest_batch(episodes, teachers, generator, differentiable)
+            states, outer_losses = self._ingest_batch(
+                episodes, teachers, generator, differentiable, inner_diagnostics,
+            )
             return [self._sample_output(episode, state, losses, lambda_am, differentiable)
                     for episode, state, losses in zip(episodes, states, outer_losses)]
 

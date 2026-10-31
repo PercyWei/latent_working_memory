@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261031 16:30:44 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261031 17:57:20 Asia/Shanghai（UTC+08:00）
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
 
@@ -245,6 +245,10 @@ SwanLab 在 `train/loss_grad_norm` 原生折线图中用蓝色展示 QA、橙色
 
 `inner_before`／`inner_after` 分别记录同一次写入的首次 inner 更新前与全部 inner steps 完成后的局部 AM。SwanLab 在 train、dev 分区分别用 `inner_am` 原生折线图合并展示，横轴为实际 optimizer step，更新前用浅蓝、更新后用深蓝；保留底层标量数据。Inner loss 下降不能直接说明 QA 有效，正式实验应结合生成得分、逐题回答及资源成本分析。
 
+同样在实际 global step 为 20、40、60……时，训练将完整 inner 诊断写入本地 `train/inner_diagnostics.jsonl`，不上传 SwanLab。各 rank（含空分片）只在采样步收集已脱离计算图的 CPU 记录，由 rank 0 按 rank、样本顺序汇总，每步写一行 `{step, samples}`。每个样本保存 `id`、`document_id`、`context_tokens`、`rank` 与 `records`；没有压缩写入的样本保留空 `records`。
+
+每条 `records` 对应样本的一层、一次写入，包含从 1 开始的 `write_index`、右端不包含的 `processed_end`／`compressed_end`、从 0 开始的 `layer_index`、本轮实际正步长 `step_size`，以及逐 query-head 的固定 `scales_o`／`scales_z` 数组。`steps` 按从 1 开始的 `inner_step` 记录本次更新前的 `loss`、`output_loss`、`mass_loss`，以及样本 latent memory 上的 `gradient_norm` 和 `update_norm`；`update_norm` 为实际更新方向的 $\|\eta g\|_2$。`after` 保存最后一次更新后的三个 loss，其 `inner_step` 等于已完成的 inner steps 数。采样步的诊断使用该次 outer optimizer 更新前的慢参数；重放需要此前 checkpoint 和对应随机状态，仅凭标量日志无法恢复过去的写入轨迹。
+
 ### 4.1 持久化约定
 
 JSON／JSONL 均使用 UTF-8。训练产物与 SwanLab 记录统一由 rank 0 写入；训练指标每个 optimizer step 一行，逐题评估每个样本一行。模型恢复、实验记录与展示文件按下表区分。
@@ -255,6 +259,7 @@ JSON／JSONL 均使用 UTF-8。训练产物与 SwanLab 记录统一由 rank 0 �
 | `checkpoints/global_step_<N>/state.pt` | 模型参数与完整训练恢复状态；恢复和评估以其中的配置、参数及绑定身份为准 |
 | 训练 `config.json`、`data.json` | 实际配置、选样统计与绑定身份的可读快照，不替代 checkpoint |
 | 训练 `metrics.jsonl` | 每步 train/dev 指标与资源记录；未执行 dev 的 step 不补值 |
+| 训练 `inner_diagnostics.jsonl` | 每 20 步一行 `{step, samples}`，保留逐样本、写入轮次、层与 inner step 的完整诊断；未采样步骤不补值 |
 | 训练 `summary.json` | 仅含 `step`、`checkpoint`、`output_dir`，用于定位完成步数与 checkpoint，不保存指标汇总 |
 | 训练 `swanlab.json` | SwanLab run 的 `id/url`；启用上传时，恢复及评估续记还需要此文件 |
 | 评估任务 `plan.json` | 同一 eval-id 下该任务固定的数据与生成／评分设置，供再次执行或扩展 RULER 长度复用 |
@@ -268,7 +273,7 @@ JSON／JSONL 均使用 UTF-8。训练产物与 SwanLab 记录统一由 rank 0 �
 
 训练与评估分别位于同一运行目录的 `train/` 与 `eval/`，完整布局见[运行指南](scripts/README.md#1-环境与入口)。评估结果为 `<运行目录>/eval/<eval-id>/<task>/global_step_<N>/`，`eval-id` 默认 `YYYYMMDD-HHMMSS`，续跑或复用同一计划时显式指定已有标识；显式指定其他 `output_root` 时，仍保留原运行目录名。RULER 按长度保留子结果，扩展或重试时复用已完成样本与长度；同计划采用调度锁，匹配的完整结果直接复用。所有 checkpoint 完成后，调度器串行向原 SwanLab run 发布结果，不保存终端日志。
 
-Teacher 边界与 checkpoint 先写临时文件，再原子替换正式文件。恢复训练时，`metrics.jsonl` 原子重写为不超过 checkpoint step 的完整记录，仅丢弃未完成末行；其他格式错误直接报错。独立看板读取上述 JSON／JSONL 展示指标与逐题记录，不改写原始答案或评分；启动方式见[运行指南](scripts/README.md#43-评估结果与看板)。
+Teacher 边界与 checkpoint 先写临时文件，再原子替换正式文件。恢复训练时，`metrics.jsonl` 原子重写为不超过 checkpoint step 的完整记录；`inner_diagnostics.jsonl` 保留不超过该步的已有稀疏记录，旧 checkpoint 尚无该文件时从后续采样步开始记录。两者均丢弃未完成末行，其他格式错误直接报错。独立看板读取上述 JSON／JSONL 展示指标与逐题记录，不改写原始答案或评分；启动方式见[运行指南](scripts/README.md#43-评估结果与看板)。
 
 ### 4.2 坐标与单位
 

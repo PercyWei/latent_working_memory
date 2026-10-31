@@ -29,7 +29,7 @@ from latent_working_memory.v4_1.training.checkpoint import (
     checkpoint_file, read_checkpoint, restore_training, save_checkpoint,
 )
 from latent_working_memory.v4_1.training.engine import (
-    SampleCursor, TrainingEngine, evaluate_dev, training_steps,
+    GRAD_NORM_EVERY, SampleCursor, TrainingEngine, evaluate_dev, training_steps,
 )
 from latent_working_memory.v4_1.training.tracking import configure_training_panels
 
@@ -116,6 +116,26 @@ def _restore_metrics(path, checkpoint_step):
     temporary.replace(path)
 
 
+def _restore_inner_diagnostics(path, checkpoint_step):
+    """保留 checkpoint 内的稀疏采样记录，丢弃后续步骤和未完成末行。"""
+    if not path.exists():
+        return
+    kept = []
+    previous_step = 0
+    for raw_line in path.read_bytes().split(b"\n")[:-1]:
+        line = raw_line.decode("utf-8")
+        row = json.loads(line)
+        step = row["step"]
+        if type(step) is not int or step <= previous_step or step % GRAD_NORM_EVERY:
+            raise ValueError("inner diagnostics must contain increasing sampling steps")
+        previous_step = step
+        if step <= checkpoint_step:
+            kept.append(line + "\n")
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text("".join(kept), encoding="utf-8")
+    temporary.replace(path)
+
+
 def _training_output_dir(config, checkpoint):
     if checkpoint is not None:
         return Path(checkpoint["config"]["training"]["output_dir"]).expanduser().resolve()
@@ -152,7 +172,8 @@ def train(plan_dir, device="cuda", resume=None):
             raise ValueError("resume the latest complete checkpoint in this run")
     existing_results = [checkpoint is None and rank == 0 and any(
         (output_dir / name).exists() for name in (
-            "config.json", "data.json", "metrics.jsonl", "summary.json", "checkpoints", "swanlab.json",
+            "config.json", "data.json", "metrics.jsonl", "inner_diagnostics.jsonl",
+            "summary.json", "checkpoints", "swanlab.json",
         )
     )]
     if world_size > 1:
@@ -219,14 +240,16 @@ def train(plan_dir, device="cuda", resume=None):
         step = restore_training(checkpoint, model, engine, cursor, query_generator, device)
     del checkpoint
     metrics_path = output_dir / "metrics.jsonl"
+    inner_diagnostics_path = output_dir / "inner_diagnostics.jsonl"
     last_checkpoint = str(checkpoint_file(resume)) if resume else None
     with ExitStack() as stack:
-        tracking = stream = None
+        tracking = stream = inner_diagnostics_stream = None
         setup_error = None
         if rank == 0:
             try:
                 if resume:
                     _restore_metrics(metrics_path, step)
+                    _restore_inner_diagnostics(inner_diagnostics_path, step)
                 output_dir.mkdir(parents=True, exist_ok=True)
                 (output_dir / "config.json").write_text(
                     json.dumps(asdict(config), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -237,6 +260,9 @@ def train(plan_dir, device="cuda", resume=None):
                 )
                 tracking = stack.enter_context(tracking_run(config, output_dir, bool(resume), device))
                 stream = stack.enter_context(metrics_path.open("a", encoding="utf-8"))
+                inner_diagnostics_stream = stack.enter_context(
+                    inner_diagnostics_path.open("a", encoding="utf-8")
+                )
             except Exception as error:
                 setup_error = f"training output setup failed: {error}"
         status = [setup_error]
@@ -252,11 +278,24 @@ def train(plan_dir, device="cuda", resume=None):
             started = time.perf_counter()
             # 各 rank 推进相同的全局游标；尾批不复制样本，空 rank 仍参与归约。
             indices = cursor.next_batch(global_batch_size)
+            local_inner_diagnostics = [] if (step + 1) % GRAD_NORM_EVERY == 0 else None
             metrics = engine.train_batch(
                 [train_episodes[index] for index in indices[rank::world_size]],
                 teacher, query_generator, step + 1,
+                inner_diagnostics=local_inner_diagnostics,
             )
             step += 1
+            diagnostic_samples = None
+            if local_inner_diagnostics is not None:
+                rank_diagnostics = [None] * world_size if rank == 0 else None
+                if world_size > 1:
+                    dist.gather_object(local_inner_diagnostics, rank_diagnostics, dst=0)
+                else:
+                    rank_diagnostics[0] = local_inner_diagnostics
+                if rank == 0:
+                    diagnostic_samples = [
+                        sample for records in rank_diagnostics for sample in records
+                    ]
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             resources = torch.tensor(
@@ -287,6 +326,11 @@ def train(plan_dir, device="cuda", resume=None):
             if rank == 0:
                 stream.write(json.dumps(record, ensure_ascii=False) + "\n")
                 stream.flush()
+                if diagnostic_samples is not None:
+                    inner_diagnostics_stream.write(
+                        json.dumps({"step": step, "samples": diagnostic_samples}, ensure_ascii=False) + "\n"
+                    )
+                    inner_diagnostics_stream.flush()
                 if tracking is not None:
                     tracking.log({key: value for key, value in record.items() if "/" in key}, step=step)
                 grad_details = ""
