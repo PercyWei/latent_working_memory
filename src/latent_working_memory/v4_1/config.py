@@ -107,7 +107,7 @@ class TrainingConfig:
     eval_id: str | None = None
     epochs: int | None = None
     max_steps: int | None = 1000
-    micro_batch_size: int = 1
+    micro_batch_size: int = 2
     gradient_accumulation_steps: int = 8
     learning_rate: float = 1e-4
     lora_learning_rate: float = 2e-5

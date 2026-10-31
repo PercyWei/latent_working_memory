@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261031 12:56:34 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261031 15:33:32 Asia/Shanghai（UTC+08:00）
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
 
@@ -183,7 +183,7 @@ Prepare/train 默认读取 `configs/v4-1/online_ttt_memory.json`，分别通过 
 | `max_new_tokens` | 128 | 最终 test 的响应生成上限 |
 | `eval_id` | `null` | 最终 test 的计划标识；默认 `auto`，独立评估未指定时使用时间戳 |
 | `epochs`／`max_steps` | 4／`null` | 训练轮数／可选 optimizer step 上限；实际配置保存解析后的总步数 |
-| `micro_batch_size`／`gradient_accumulation_steps` | 1／8 | 每卡 microbatch／累积次数；全局 batch 还需乘 GPU 数量 |
+| `micro_batch_size`／`gradient_accumulation_steps` | 2／8 | 每卡 microbatch／累积次数；全局 batch 还需乘 GPU 数量 |
 | `learning_rate`／`lora_learning_rate` | $10^{-4}$／$2\times10^{-5}$ | 新增参数／LoRA 峰值学习率 |
 | `weight_decay` | 0.01 | 仅解码器权重矩阵；其他慢参数为 0 |
 | `beta1`／`beta2`／`adam_epsilon` | 0.9／0.999／$10^{-8}$ | Outer AdamW |
@@ -198,7 +198,7 @@ Prepare/train 默认读取 `configs/v4-1/online_ttt_memory.json`，分别通过 
 
 `teacher_cache_dir` 记录共享缓存路径，`output_dir` 记录 `<output_root>/<方法设置>_<run_id>/train/` 的实际路径；恢复时原计划、checkpoint 和训练目录须一致。
 
-训练参数 `--micro-batch-size-per-gpu` 对应 `training.micro_batch_size`，`--gradient-accumulation-steps` 对应每卡累积次数。有效全局 batch 为“GPU 数量 × 每卡 microbatch × 累积次数”：默认单卡 8、双卡 16；双卡设累积次数为 4 可保持全局 batch 8。Epoch 尾批按实际样本数平均；teacher 批量不计入训练 batch。
+训练参数 `--micro-batch-size-per-gpu` 对应 `training.micro_batch_size`，`--gradient-accumulation-steps` 对应每卡累积次数。有效全局 batch 为“GPU 数量 × 每卡 microbatch × 累积次数”：默认单卡 16、双卡 32；双卡设累积次数为 4 可保持全局 batch 16。Epoch 尾批按实际样本数平均；teacher 批量不计入训练 batch。
 
 实际选样数为 $N$、全局 batch 为 $B$ 时，总步数按 `epochs × ceil(N/B)` 推导，用于 warmup/cosine 并写入实际配置。验证与保存均在 optimizer step 完成后进行，epoch 末及最终步也执行。
 

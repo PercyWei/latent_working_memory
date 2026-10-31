@@ -60,7 +60,7 @@ class EmptyTeacher:
 def training_config():
     return TrainingConfig(
         max_steps=4, warmup_steps=0, learning_rate=0.03, weight_decay=0.1,
-        gradient_clip=0.7, gradient_accumulation_steps=2, tracking="disabled",
+        gradient_clip=0.7, micro_batch_size=1, gradient_accumulation_steps=2, tracking="disabled",
     )
 
 

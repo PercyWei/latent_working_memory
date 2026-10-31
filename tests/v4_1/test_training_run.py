@@ -41,7 +41,7 @@ def write_checkpoint(config, step, summary=True):
 def configuration(tmp_path):
     return ExperimentConfig(training=TrainingConfig(
         output_root=str(tmp_path), dataset_dir=str(tmp_path / "data"),
-        epochs=3, max_steps=None, warmup_steps=0, tracking="disabled",
+        epochs=3, max_steps=None, warmup_steps=0, micro_batch_size=1, tracking="disabled",
     ))
 
 

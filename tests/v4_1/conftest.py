@@ -97,7 +97,8 @@ def tiny_setup(tmp_path, reference_teacher_attention):
         teacher=TeacherConfig(num_prompts=2, response_max_tokens=3, pool_size=8, am_sample_size=4),
         training=TrainingConfig(
             teacher_cache_dir=str(tmp_path / "teacher"), output_dir=str(tmp_path / "run"),
-            max_steps=2, warmup_steps=1, gradient_accumulation_steps=2, tracking="disabled",
+            max_steps=2, warmup_steps=1, micro_batch_size=1,
+            gradient_accumulation_steps=2, tracking="disabled",
         ),
     )
     teacher = load_teacher(config.model, torch.device("cpu"))

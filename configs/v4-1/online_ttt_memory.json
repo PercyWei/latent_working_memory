@@ -38,7 +38,7 @@
     "eval_id": null,
     "epochs": 4,
     "max_steps": null,
-    "micro_batch_size": 1,
+    "micro_batch_size": 2,
     "gradient_accumulation_steps": 8,
     "learning_rate": 0.0001,
     "lora_learning_rate": 0.00002,
