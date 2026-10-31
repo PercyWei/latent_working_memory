@@ -1,7 +1,7 @@
 # 20260914_配置组织规则
 
 创建时间：20260914 11:48:20 UTC+08:00
-最后修订时间：20261031 15:34:31 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261031 20:07:13 Asia/Shanghai（UTC+08:00）
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
 
@@ -43,6 +43,13 @@ configs/
 ### v4.1 在线 TTT 配置
 
 [v4-1/online_ttt_memory.json](v4-1/online_ttt_memory.json) 以 `seed`、`model`、`teacher`、`training` 统一描述当前实验，默认逐层 256 slots、pending/recent 1024/256、inner 3 步、每卡 microbatch 2、梯度累积 8 次，单卡全局 batch 16。Teacher 缓存独立准备，训练与评估命令见 [v4.1 运行指南](../src/latent_working_memory/v4_1/scripts/README.md)。
+
+Inner 稳定性对照沿用主配置，其余模型、数据、teacher 与优化器设置保持一致；两份配置均训练 1 epoch，每 25 个 optimizer steps 保存并验证，最多保留 5 个 checkpoint，epoch 末和最终步沿用现有保存／验证规则。
+
+| 配置 | 独立调整 |
+|---|---|
+| [online_ttt_memory_inner_steps1.json](v4-1/online_ttt_memory_inner_steps1.json) | `model.inner_steps=1`，`inner_lr_init=1.0` |
+| [online_ttt_memory_inner_lr0p1.json](v4-1/online_ttt_memory_inner_lr0p1.json) | `model.inner_lr_init=0.1`，`inner_steps=3` |
 
 ### v2 固定容量重构配置
 
