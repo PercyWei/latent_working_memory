@@ -40,6 +40,11 @@ class ToyMemory(torch.nn.Module):
             "target_tokens": episode % 4 + 1, "write_events": episode % 3,
         }
 
+    def forward_batch(self, episodes, teachers, lambda_am, generator, differentiable):
+        # 仅作为分布式样本均值的数值 oracle；真实批量计算由 Qwen3 对照覆盖。
+        return [self.forward(episode, teacher, lambda_am, generator, differentiable)
+                for episode, teacher in zip(episodes, teachers)]
+
     def trainable_state_dict(self):
         return {name: value.detach().clone() for name, value in self.named_parameters()}
 
@@ -76,14 +81,17 @@ def init_group(rank, rendezvous):
     )
 
 
-def update_worker(rank, rendezvous, expected, expected_dev):
+def update_worker(rank, rendezvous, expected, expected_dev, micro_batch_size):
     init_group(rank, rendezvous)
     try:
         model, teacher, generator = ToyMemory(), EmptyTeacher(), torch.Generator().manual_seed(1)
         with torch.no_grad():
             for parameter in model.parameters():
                 parameter.add_(rank)
-        engine = TrainingEngine(model, training_config())
+        engine = TrainingEngine(model, replace(
+            training_config(), micro_batch_size=micro_batch_size,
+            gradient_accumulation_steps=2 // micro_batch_size,
+        ))
         for episodes, reference in zip(([0, 1, 2, 3], [4, 5, 6], [7]), expected):
             metrics = engine.train_batch(episodes[rank::2], teacher, generator)
             torch.testing.assert_close(snapshot(model, metrics), reference, rtol=2e-6, atol=2e-7)
@@ -95,15 +103,17 @@ def update_worker(rank, rendezvous, expected, expected_dev):
         dist.destroy_process_group()
 
 
-def test_two_ranks_match_single_global_batch(tmp_path):
+@pytest.mark.parametrize("micro_batch_size", [1, 2])
+def test_two_ranks_match_single_global_batch(tmp_path, micro_batch_size):
     model, teacher, generator = ToyMemory(), EmptyTeacher(), torch.Generator().manual_seed(1)
-    engine = TrainingEngine(model, training_config())
+    # 单卡与双卡均使用有效全局 batch 4；尾批分别含 3 和 1 个实际样本。
+    engine = TrainingEngine(model, replace(training_config(), gradient_accumulation_steps=4))
     expected = [snapshot(model, engine.train_batch(episodes, teacher, generator))
                 for episodes in ([0, 1, 2, 3], [4, 5, 6], [7])]
     expected_dev = [evaluate_dev(model, episodes, teacher, 1.0, generator)
                     for episodes in ([0, 2, 5], [7])]
-    mp.spawn(update_worker, args=(str(tmp_path / "update-rendezvous"), expected, expected_dev),
-             nprocs=2, join=True)
+    mp.spawn(update_worker, args=(str(tmp_path / "update-rendezvous"), expected, expected_dev,
+                                  micro_batch_size), nprocs=2, join=True)
 
 
 def draw_rng(query_generator):
