@@ -25,7 +25,7 @@
     "pool_size": 4096,
     "am_sample_size": 128,
     "prepare_batch_size": 64,
-    "batch_size": 4
+    "batch_size": 64
   },
   "training": {
     "dataset_dir": "data/delta-mem-qasper",

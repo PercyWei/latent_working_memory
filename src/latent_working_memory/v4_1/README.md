@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261031 12:21:42 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261031 12:44:27 Asia/Shanghai（UTC+08:00）
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
 
@@ -125,7 +125,7 @@ Prepare 与 train 从 `<output_root>/teacher/p{pending_size}-r{recent_size}` 读
 
 下次使用该边界时仍从完整池重新抽样，本次反向与激活重计算复用已确定的参照。尺度始终来自离线完整池，不用本次 128 位置重估。
 
-Teacher 的完整原文 prefix KV 在准备当前样本参照时随压缩边界递增；同文档的其他 QA 或下个 epoch 重新计算。运行时 teacher forcing 使用 `batch_size`，默认每卡 4；离线生成与统计使用 `prepare_batch_size`，默认每卡 64，二者分别设置。增大运行时批量主要增加短提示／响应的 KV 与激活，不按分支复制原文 KV，也不与 student 元训练图叠加。
+Teacher 的完整原文 prefix KV 在准备当前样本参照时随压缩边界递增；同文档的其他 QA 或下个 epoch 重新计算。运行时 teacher forcing 使用 `batch_size`，离线生成与统计使用 `prepare_batch_size`，二者分别设置，默认均为每卡 64。增大运行时批量主要增加短提示／响应的 KV 与激活，不按分支复制原文 KV，也不与 student 元训练图叠加。
 
 缓存绑定 teacher、tokenizer、输入模板、提示库、窗口边界、候选池、尺度规则与 seed。GPU 数量及两种 teacher 批量只控制执行，不绑定缓存身份；调整时可以复用缓存。不同 attention 内核、GPU 或批量的数值舍入可能影响响应及尺度，不保证重新生成结果逐位一致。同格式、同配置的已完成边界可直接复用。独立 test／benchmark 不加载 teacher 或读取这些缓存。
 
@@ -164,7 +164,7 @@ Prepare/train 默认读取 `configs/v4-1/online_ttt_memory.json`，分别通过 
 | `pool_size` | $N_{\mathrm{pool}}=4096$ | 每边界须填满的固定候选池 |
 | `am_sample_size` | $N_{\mathrm{AM}}=128$ | 每次均匀、无放回采样；下次重抽 |
 | `prepare_batch_size` | $B_{\mathrm{prepare}}=64$ | 每卡离线生成与统计的批量 |
-| `batch_size` | $B_{\mathrm{teacher}}=4$ | 每卡运行时 teacher forcing 批量 |
+| `batch_size` | $B_{\mathrm{teacher}}=64$ | 每卡运行时 teacher forcing 批量 |
 
 `prepare --prepare-batch-size-per-gpu N` 覆盖 `teacher.prepare_batch_size`，`--teacher-batch-size-per-gpu N` 覆盖 `teacher.batch_size`；省略时沿用配置。两者不计入训练 batch，也不改变候选池或 AM 采样数量。
 

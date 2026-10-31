@@ -69,7 +69,7 @@ def parse_run_args(argv=None):
     parser.add_argument("--gradient-accumulation-steps", type=positive_int,
                         help="每卡 optimizer step 的 microbatch 累积次数，默认 8")
     parser.add_argument("--teacher-batch-size-per-gpu", type=positive_int,
-                        help="每卡 teacher forcing 批量，默认 4")
+                        help="每卡 teacher forcing 批量，默认 64")
     parser.add_argument("--epochs", type=positive_int, help="完整训练轮数，默认使用配置值")
     parser.add_argument("--dev-every", type=positive_int)
     parser.add_argument("--save-every", type=save_frequency,

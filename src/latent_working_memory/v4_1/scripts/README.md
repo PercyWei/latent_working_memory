@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261031 12:21:42 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261031 12:44:27 Asia/Shanghai（UTC+08:00）
 
 计算协议与数据格式见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[配置](../../../../configs/v4-1/online_ttt_memory.json)中的基座与数据路径。
 
@@ -71,7 +71,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh \
   --epochs 4 \
   --micro-batch-size-per-gpu 1 \
   --gradient-accumulation-steps 8 \
-  --teacher-batch-size-per-gpu 4
+  --teacher-batch-size-per-gpu 64
 ```
 
 - **配置覆盖**：显式 CLI 参数覆盖 JSON；模型结构和记忆更新设置直接修改 JSON，参数说明见[第 5 节](#5-调整参数)。
@@ -240,7 +240,7 @@ bash src/latent_working_memory/v4_1/scripts/dashboard.sh \
 | **批处理** |
 | `--micro-batch-size-per-gpu` | 每卡一次并行处理的样本批量，默认 1 |
 | `--gradient-accumulation-steps` | 每次优化器更新前累积的 microbatch 数，默认 8 |
-| `--teacher-batch-size-per-gpu` | 每卡运行时 teacher forcing 的提示／响应分支批量，默认 4 |
+| `--teacher-batch-size-per-gpu` | 每卡运行时 teacher forcing 的提示／响应分支批量，默认 64 |
 
 - `--train-only`、`--resume`、`--evaluate-only` 互斥。
 - 长度筛选仅用于 train 正文，不含系统提示、chat template 等。超限样本整条排除，`null` 跳过该长度筛选。除此之外，默认要求正文至少包含 `pending_size + recent_size` 个 tokens，实际编码／解码仍须满足模型窗口限制。

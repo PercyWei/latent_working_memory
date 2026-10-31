@@ -80,7 +80,7 @@ class TeacherConfig:
     pool_size: int = 4096
     am_sample_size: int = 128
     prepare_batch_size: int = 64
-    batch_size: int = 4
+    batch_size: int = 64
 
     def __post_init__(self):
         _positive_ints(self, (
