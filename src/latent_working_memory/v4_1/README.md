@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261031 17:57:20 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261031 20:52:10 Asia/Shanghai（UTC+08:00）
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
 
@@ -247,7 +247,11 @@ SwanLab 在 `train/loss_grad_norm` 原生折线图中用蓝色展示 QA、橙色
 
 同样在实际 global step 为 20、40、60……时，训练将完整 inner 诊断写入本地 `train/inner_diagnostics.jsonl`，不上传 SwanLab。各 rank（含空分片）只在采样步收集已脱离计算图的 CPU 记录，由 rank 0 按 rank、样本顺序汇总，每步写一行 `{step, samples}`。每个样本保存 `id`、`document_id`、`context_tokens`、`rank` 与 `records`；没有压缩写入的样本保留空 `records`。
 
-每条 `records` 对应样本的一层、一次写入，包含从 1 开始的 `write_index`、右端不包含的 `processed_end`／`compressed_end`、从 0 开始的 `layer_index`、本轮实际正步长 `step_size`，以及逐 query-head 的固定 `scales_o`／`scales_z` 数组。`steps` 按从 1 开始的 `inner_step` 记录本次更新前的 `loss`、`output_loss`、`mass_loss`，以及样本 latent memory 上的 `gradient_norm` 和 `update_norm`；`update_norm` 为实际更新方向的 $\|\eta g\|_2$。`after` 保存最后一次更新后的三个 loss，其 `inner_step` 等于已完成的 inner steps 数。采样步的诊断使用该次 outer optimizer 更新前的慢参数；重放需要此前 checkpoint 和对应随机状态，仅凭标量日志无法恢复过去的写入轨迹。
+每条 `records` 对应样本的一层、一次写入，包含从 1 开始的 `write_index`、右端不包含的 `processed_end`／`compressed_end`、从 0 开始的 `layer_index`、本轮实际正步长 `step_size`，以及逐 query-head 的固定 `scales_o`／`scales_z` 数组。`steps` 按从 1 开始的 `inner_step` 记录本次更新前的 `loss`、`output_loss`、`mass_loss`，以及 `output_loss_per_head`／`mass_loss_per_head`。逐 head 数组沿模型的 query-head 顺序排列；output 项先平均该 head 的 queries 与输出通道，mass 项只平均 queries，数组的 head 均值分别等于原来的两个分项。`after` 保存最后一次更新后的三个 loss 和两个逐 head 数组，其 `inner_step` 等于已完成的 inner steps 数。
+
+每个 inner step 同时记录样本 latent memory 上的总梯度范数 `gradient_norm`、实际更新范数 `update_norm`（$\|\eta g\|_2$）、更新前的 `memory_norm`，以及 `relative_update_norm=update_norm/memory_norm`；memory 范数为 0 时，相对更新量记为 `null`。`output_gradient_norm`／`mass_gradient_norm` 分别是两个整体分项损失对同一更新前 memory 的 L2 梯度范数，包含 head 平均，不是逐 head 的梯度范数。`gradient_cosine_similarity` 与 `gradient_angle_degrees` 记录这两个梯度在相同 memory 空间中的余弦相似度和夹角（度）；任一梯度范数为 0 时，两项均记为 `null`。
+
+每个采样 inner step 额外执行一次独立的局部前向与两次局部 VJP，以脱离主训练图的 memory、queries 和 teacher 参照计算分项梯度；逐 head loss 在同一次诊断前向中归约，无需逐 head 求导。诊断范数与内积使用 FP64 归约以避免统计溢出，训练仍使用原有 FP32。诊断结果脱离计算图，不建立日志所需的高阶图，checkpoint 重计算不重复诊断。训练仍保留原有完整元梯度，不改变 loss 权重、inner 更新或采样频率。采样步使用该次 outer optimizer 更新前的慢参数；重放需要此前 checkpoint 和对应随机状态，仅凭标量日志无法恢复过去的写入轨迹。
 
 ### 4.1 持久化约定
 

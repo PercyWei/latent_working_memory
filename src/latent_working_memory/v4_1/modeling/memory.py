@@ -43,25 +43,43 @@ class LayerMemory(nn.Module):
         return key, value, bias
 
     def _matching_loss(self, candidate, queries, teacher_outputs, teacher_mass,
-                       scales_o, scales_z, compressed_tokens, rotary, return_components=False):
+                       scales_o, scales_z, compressed_tokens, rotary):
         outputs, mass = local_read(queries, *self.decode(candidate, compressed_tokens, rotary))
         output_loss, mass_loss = matching_loss(
             outputs, mass, teacher_outputs, teacher_mass, scales_o, scales_z
         )
-        loss = output_loss + mass_loss
-        if return_components:
-            return loss, output_loss.detach(), mass_loss.detach()
-        return loss
+        return output_loss + mass_loss
 
-    def _matching_gradient(self, candidate, *args, return_components=False):
+    def _matching_gradient(self, candidate, *args):
         # 重算求导产生的高阶图；各样本的 inner 步长不随 batch 改变。
         with torch.enable_grad():
-            result = self._matching_loss(candidate, *args, return_components=return_components)
-            loss = result[0] if return_components else result
+            loss = self._matching_loss(candidate, *args)
             gradient = torch.autograd.grad(loss.sum(), candidate, create_graph=True)[0]
-        if return_components:
-            return gradient, loss.detach(), result[1], result[2]
         return gradient, loss.detach()
+
+    def _matching_diagnostics(self, candidate, queries, teacher_outputs, teacher_mass,
+                              scales_o, scales_z, compressed_tokens, rotary):
+        # 独立局部图只求 memory 偏导；不经过 teacher/query 历史或 checkpoint 重算。
+        probe = candidate.detach().requires_grad_(True)
+        outputs, mass = local_read(
+            queries.detach(), *self.decode(probe, compressed_tokens, rotary)
+        )
+        output_loss, mass_loss, output_heads, mass_heads = matching_loss(
+            outputs, mass, teacher_outputs.detach(), teacher_mass.detach(), scales_o, scales_z,
+            return_per_head=True,
+        )
+        output_gradient = torch.autograd.grad(
+            output_loss.sum(), probe, retain_graph=True, create_graph=False,
+        )[0].flatten(1).double()
+        mass_gradient = torch.autograd.grad(
+            mass_loss.sum(), probe, create_graph=False,
+        )[0].flatten(1).double()
+        return (
+            output_loss.detach(), mass_loss.detach(), output_heads.detach(), mass_heads.detach(),
+            torch.linalg.vector_norm(output_gradient, dim=1),
+            torch.linalg.vector_norm(mass_gradient, dim=1),
+            (output_gradient * mass_gradient).sum(dim=1),
+        )
 
     def write(self, old_memory, teacher_kv, queries, compressed_tokens, rotary, differentiable,
               diagnostics=None):
@@ -70,6 +88,7 @@ class LayerMemory(nn.Module):
         可选 diagnostics 按 batch 行顺序追加逐样本记录。
         """
         step_records = [] if diagnostics is not None else None
+        head_records = [] if diagnostics is not None else None
         with torch.enable_grad():
             candidate = old_memory.clone() if differentiable else old_memory.detach().clone()
             candidate.requires_grad_(True)
@@ -90,33 +109,32 @@ class LayerMemory(nn.Module):
                     candidate, queries, teacher_outputs, teacher_mass,
                     scales_o, scales_z, compressed_tokens, rotary,
                 )
+                if diagnostics is not None:
+                    components = self._matching_diagnostics(*args)
                 if recompute:
-                    result = checkpoint(
+                    gradient, loss = checkpoint(
                         self._matching_gradient, *args, use_reentrant=False,
-                        return_components=diagnostics is not None,
                     )
-                    if diagnostics is not None:
-                        gradient, loss, output_loss, mass_loss = result
-                    else:
-                        gradient, loss = result
                 else:
-                    result = self._matching_loss(*args, return_components=diagnostics is not None)
-                    if diagnostics is not None:
-                        loss, output_loss, mass_loss = result
-                    else:
-                        loss = result
+                    loss = self._matching_loss(*args)
                     gradient = torch.autograd.grad(loss.sum(), candidate, create_graph=differentiable)[0]
                 if before is None:
                     before = loss.detach()
                 if diagnostics is not None:
                     update = step_size * gradient
-                    candidate = candidate - update
                     with torch.no_grad():
                         step_records.append(torch.stack((
-                            loss.detach(), output_loss, mass_loss,
-                            torch.linalg.vector_norm(gradient.detach().flatten(1), dim=1),
-                            torch.linalg.vector_norm(update.detach().flatten(1), dim=1),
+                            loss.detach(), components[0], components[1],
+                            torch.linalg.vector_norm(gradient.detach().flatten(1), dim=1,
+                                                     dtype=torch.float64),
+                            torch.linalg.vector_norm(update.detach().flatten(1), dim=1,
+                                                     dtype=torch.float64),
+                            *components[4:],
+                            torch.linalg.vector_norm(candidate.detach().flatten(1), dim=1,
+                                                     dtype=torch.float64),
                         ), dim=-1))
+                        head_records.append(torch.stack(components[2:4], dim=1))
+                    candidate = candidate - update
                 else:
                     candidate = candidate - step_size * gradient
                 if not differentiable:
@@ -125,26 +143,46 @@ class LayerMemory(nn.Module):
                 outputs, mass = local_read(
                     queries, *self.decode(candidate, compressed_tokens, rotary)
                 )
-                output_loss, mass_loss = matching_loss(
-                    outputs, mass, teacher_outputs, teacher_mass, scales_o, scales_z
+                final_components = matching_loss(
+                    outputs, mass, teacher_outputs, teacher_mass, scales_o, scales_z,
+                    return_per_head=diagnostics is not None,
                 )
+                output_loss, mass_loss = final_components[:2]
                 after = output_loss + mass_loss
         if diagnostics is not None:
             scales_o_rows, scales_z_rows = scales_o.cpu().tolist(), scales_z.cpu().tolist()
             eta = float(step_size.detach())
             step_rows = torch.stack(step_records, dim=1).cpu().tolist()
+            head_rows = torch.stack(head_records, dim=1).cpu().tolist()
             after_rows = torch.stack((after, output_loss, mass_loss), dim=-1).cpu().tolist()
-            for row, (steps, final) in enumerate(zip(step_rows, after_rows)):
+            after_heads = torch.stack(final_components[2:], dim=1).cpu().tolist()
+            for row, (steps, heads, final) in enumerate(zip(step_rows, head_rows, after_rows)):
+                records = []
+                for index, (values, head_losses) in enumerate(zip(steps, heads)):
+                    output_norm, mass_norm, dot, memory_norm = values[5:]
+                    cosine = (max(-1.0, min(1.0, dot / (output_norm * mass_norm)))
+                              if output_norm > 0 and mass_norm > 0 else None)
+                    records.append({
+                        "inner_step": index + 1, "loss": values[0],
+                        "output_loss": values[1], "mass_loss": values[2],
+                        "output_loss_per_head": head_losses[0],
+                        "mass_loss_per_head": head_losses[1],
+                        "gradient_norm": values[3], "update_norm": values[4],
+                        "output_gradient_norm": output_norm, "mass_gradient_norm": mass_norm,
+                        "gradient_cosine_similarity": cosine,
+                        "gradient_angle_degrees": (math.degrees(math.acos(cosine))
+                                                   if cosine is not None else None),
+                        "memory_norm": memory_norm,
+                        "relative_update_norm": (values[4] / memory_norm
+                                                 if memory_norm > 0 else None),
+                    })
                 diagnostics.append({
                     "step_size": eta,
                     "scales_o": scales_o_rows[row], "scales_z": scales_z_rows[row],
-                    "steps": [
-                        {"inner_step": index + 1, "loss": values[0],
-                         "output_loss": values[1], "mass_loss": values[2],
-                         "gradient_norm": values[3], "update_norm": values[4]}
-                        for index, values in enumerate(steps)
-                    ],
+                    "steps": records,
                     "after": {"inner_step": self.config.inner_steps, "loss": final[0],
-                              "output_loss": final[1], "mass_loss": final[2]},
+                              "output_loss": final[1], "mass_loss": final[2],
+                              "output_loss_per_head": after_heads[row][0],
+                              "mass_loss_per_head": after_heads[row][1]},
                 })
         return candidate if differentiable else candidate.detach(), (before, after)

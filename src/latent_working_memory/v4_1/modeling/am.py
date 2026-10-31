@@ -22,8 +22,14 @@ def teacher_scales(outputs, log_mass, floor):
     return scale_o.detach(), scale_z.detach()
 
 
-def matching_loss(outputs, log_mass, teacher_outputs, teacher_log_mass, scales_o, scales_z):
-    """返回逐样本的 output 与 log-mass 标准化 MSE，二者等权相加为 AM。"""
-    output_loss = ((outputs - teacher_outputs) / scales_o[..., None, :, None]).square().mean(dim=(-3, -2, -1))
-    mass_loss = ((log_mass - teacher_log_mass) / scales_z[..., None, :]).square().mean(dim=(-2, -1))
+def matching_loss(outputs, log_mass, teacher_outputs, teacher_log_mass, scales_o, scales_z,
+                  return_per_head=False):
+    """返回逐样本的标准化 MSE；可额外返回逐 query-head 分项，原损失归约不变。"""
+    output_error = ((outputs - teacher_outputs) / scales_o[..., None, :, None]).square()
+    mass_error = ((log_mass - teacher_log_mass) / scales_z[..., None, :]).square()
+    output_loss = output_error.mean(dim=(-3, -2, -1))
+    mass_loss = mass_error.mean(dim=(-2, -1))
+    if return_per_head:
+        return (output_loss, mass_loss, output_error.mean(dim=(-3, -1)),
+                mass_error.mean(dim=-2))
     return output_loss, mass_loss
