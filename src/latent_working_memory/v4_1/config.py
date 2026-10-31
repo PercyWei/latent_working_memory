@@ -160,8 +160,6 @@ class TrainingConfig:
             type(self.save_every) is not int or self.save_every < 1
         ):
             raise ValueError("save_every must be a positive integer or after_each_epoch")
-        if self.micro_batch_size != 1:
-            raise ValueError("v4.1 currently supports micro_batch_size=1")
         for name in (
             "epochs", "max_steps", "max_train_data_tokens", "max_train_samples",
             "max_dev_samples", "max_test_samples",

@@ -29,6 +29,22 @@ class StreamState:
     inner_before: list[torch.Tensor] = field(default_factory=list)
     inner_after: list[torch.Tensor] = field(default_factory=list)
 
+    def select(self, indices):
+        """提取仍带完整计算图的样本；同一活跃组共享流式位置与写入轮次。"""
+        rows = torch.tensor(indices, device=self.keys[0].device, dtype=torch.long)
+        return StreamState(
+            memories=[value.index_select(0, rows) for value in self.memories],
+            memory_kv=[tuple(value.index_select(0, rows) for value in kv) for kv in self.memory_kv],
+            keys=[value.index_select(0, rows) for value in self.keys],
+            values=[value.index_select(0, rows) for value in self.values],
+            recent_queries=[value.index_select(0, rows) for value in self.recent_queries],
+            position=self.position, compressed_tokens=self.compressed_tokens,
+            write_events=self.write_events,
+            last_hidden=None if self.last_hidden is None else self.last_hidden.index_select(0, rows),
+            inner_before=[value.index_select(0, rows) for value in self.inner_before],
+            inner_after=[value.index_select(0, rows) for value in self.inner_after],
+        )
+
 
 class OnlineMemoryLM(nn.Module):
     def __init__(self, config, backbone=None):
@@ -91,27 +107,28 @@ class OnlineMemoryLM(nn.Module):
                     raise ValueError(f"checkpoint shape mismatch: {name}")
                 parameter.copy_(state[name])
 
-    def initial_state(self, differentiable=False):
+    def initial_state(self, differentiable=False, batch_size=1):
         dtype = self.backbone.model.embed_tokens.weight.dtype
         memories, memory_kv, keys, values, queries = [], [], [], [], []
         for memory, layer in zip(self.memory_layers, self.backbone.model.layers):
-            memories.append(memory.initial_slots if differentiable else memory.initial_slots.detach())
+            slots = memory.initial_slots if differentiable else memory.initial_slots.detach()
+            memories.append(slots.unsqueeze(0).expand(batch_size, -1, -1))
             empty = torch.empty(
-                (memory.num_kv_heads, 0, memory.head_dim), device=self.device, dtype=dtype
+                (batch_size, memory.num_kv_heads, 0, memory.head_dim), device=self.device, dtype=dtype
             )
-            memory_kv.append((empty, empty, empty.new_empty((memory.num_kv_heads, 0))))
-            keys.append(empty.unsqueeze(0))
-            values.append(empty.unsqueeze(0))
-            queries.append(empty.new_empty((1, layer.self_attn.q_proj.out_features // memory.head_dim,
+            memory_kv.append((empty, empty, empty.new_empty((batch_size, memory.num_kv_heads, 0))))
+            keys.append(empty)
+            values.append(empty)
+            queries.append(empty.new_empty((batch_size, layer.self_attn.q_proj.out_features // memory.head_dim,
                                             0, memory.head_dim)))
         return StreamState(memories, memory_kv, keys, values, queries)
 
     def _advance(self, token_ids, state, differentiable):
         """纯 layer checkpoint 不读写 StreamState，避免重算时重复追加缓存。"""
         with torch.set_grad_enabled(differentiable):
-            ids = torch.tensor(token_ids, dtype=torch.long, device=self.device)[None]
+            ids = torch.tensor(token_ids, dtype=torch.long, device=self.device)
             hidden = self.backbone.model.embed_tokens(ids)
-            positions = torch.arange(state.position, state.position + len(token_ids),
+            positions = torch.arange(state.position, state.position + len(token_ids[0]),
                                      device=self.device)[None]
             cosine, sine = self.backbone.model.rotary_emb(hidden, positions)
             for index, layer in enumerate(self.backbone.model.layers):
@@ -127,7 +144,7 @@ class OnlineMemoryLM(nn.Module):
                     (state.recent_queries[index], query), dim=2
                 )[:, :, -self.config.recent_size:].clone()
             hidden = self.backbone.model.norm(hidden)
-            state.position += len(token_ids)
+            state.position += len(token_ids[0])
             state.last_hidden = hidden[:, -1]
             return hidden
 
@@ -139,14 +156,14 @@ class OnlineMemoryLM(nn.Module):
         with torch.set_grad_enabled(differentiable):
             for index, memory in enumerate(self.memory_layers):
                 old_key, old_value, old_bias = state.memory_kv[index]
-                pending_key = state.keys[index][0, :, :count].float()
-                pending_value = state.values[index][0, :, :count].float()
+                pending_key = state.keys[index][:, :, :count].float()
+                pending_value = state.values[index][:, :, :count].float()
                 teacher = (
-                    torch.cat((old_key.float(), pending_key), dim=1),
-                    torch.cat((old_value.float(), pending_value), dim=1),
-                    torch.cat((old_bias.float(), old_bias.new_zeros((old_bias.shape[0], count))), -1),
+                    torch.cat((old_key.float(), pending_key), dim=2),
+                    torch.cat((old_value.float(), pending_value), dim=2),
+                    torch.cat((old_bias.float(), old_bias.new_zeros((*old_bias.shape[:-1], count))), -1),
                 )
-                query = state.recent_queries[index][0].transpose(0, 1).float()
+                query = state.recent_queries[index].transpose(1, 2).float()
                 updated, metrics = memory.write(
                     state.memories[index], teacher, query, compressed_tokens=compressed,
                     rotary=rotary, differentiable=differentiable,
@@ -160,21 +177,23 @@ class OnlineMemoryLM(nn.Module):
                 after.append(metrics[1])
         state.compressed_tokens = compressed
         state.write_events += 1
-        state.inner_before.append(torch.stack(before).mean())
-        state.inner_after.append(torch.stack(after).mean())
+        state.inner_before.append(torch.stack(before).mean(dim=0))
+        state.inner_after.append(torch.stack(after).mean(dim=0))
 
-    def _outer_am(self, state, teacher, generator):
-        reference = teacher.reference(
+    def _outer_am(self, state, teachers, generator):
+        references = [teacher.reference(
             state.write_events, state.position, state.compressed_tokens, generator
-        )
+        ) for teacher in teachers]
         losses = []
         for index, kv in enumerate(state.memory_kv):
-            outputs, mass = local_read(reference["queries"][index], *kv)
+            reference = {name: torch.stack([record[name][index] for record in references])
+                         for name in ("queries", "outputs", "log_mass", "scales_o", "scales_z")}
+            outputs, mass = local_read(reference["queries"], *kv)
             losses.append(matching_loss(
-                outputs, mass, reference["outputs"][index], reference["log_mass"][index],
-                reference["scales_o"][index], reference["scales_z"][index],
+                outputs, mass, reference["outputs"], reference["log_mass"],
+                reference["scales_o"], reference["scales_z"],
             ))
-        return torch.stack(losses).mean()
+        return torch.stack(losses).mean(dim=0)
 
     def consume(self, token_ids, state, differentiable=False, write=True, on_write=None):
         """返回按 chunk 排列的 hidden states；压缩仅发生在完整前向之后。"""
@@ -188,7 +207,7 @@ class OnlineMemoryLM(nn.Module):
             if write:
                 capacity = self.config.pending_size + self.config.recent_size
                 length = min(length, capacity - state.keys[0].shape[2])
-            hidden = self._advance(token_ids[start:start + length], state, differentiable)
+            hidden = self._advance([token_ids[start:start + length]], state, differentiable)
             start += length
             if write and state.keys[0].shape[2] == capacity:
                 self._write(state, differentiable)
@@ -201,6 +220,40 @@ class OnlineMemoryLM(nn.Module):
         for _ in self.consume(context_ids, state, differentiable, on_write=on_write):
             pass
         return state
+
+    def _ingest_batch(self, episodes, teachers, generator, differentiable):
+        """正文按活跃样本批量推进；正文结束后提取该样本的最终状态。"""
+        active = list(range(len(episodes)))
+        state = self.initial_state(differentiable, batch_size=len(episodes))
+        final_states = [None] * len(episodes)
+        outer_losses = [[] for _ in episodes]
+        capacity = self.config.pending_size + self.config.recent_size
+        while active:
+            length = min(
+                self.config.prefill_chunk_size,
+                capacity - state.keys[0].shape[2],
+                min(len(episodes[index].context_ids) - state.position for index in active),
+            )
+            self._advance([
+                episodes[index].context_ids[state.position:state.position + length] for index in active
+            ], state, differentiable)
+            if state.keys[0].shape[2] == capacity:
+                self._write(state, differentiable)
+                if teachers is not None:
+                    losses = self._outer_am(state, [teachers[index] for index in active], generator)
+                    for row, index in enumerate(active):
+                        outer_losses[index].append(losses[row])
+            continuing = []
+            for row, index in enumerate(active):
+                if state.position == len(episodes[index].context_ids):
+                    final_states[index] = state.select([row])
+                else:
+                    continuing.append(row)
+            if len(continuing) != len(active):
+                if continuing:
+                    state = state.select(continuing)
+                active = [active[row] for row in continuing]
+        return final_states, outer_losses
 
     def _diagnostics(self, state):
         return {
@@ -218,32 +271,52 @@ class OnlineMemoryLM(nn.Module):
 
             def supervise(state):
                 if teacher is not None:
-                    outer_losses.append(self._outer_am(state, teacher, generator))
+                    outer_losses.append(self._outer_am(state, [teacher], generator)[0])
 
             state = self._ingest(episode.context_ids, differentiable, supervise)
-            for _ in self.consume(episode.question_ids, state, differentiable, write=False):
-                pass
-            # target[0] 由问题末尾预测；其后每个 target token 预测下一个 token。
-            predictors = [state.last_hidden[:, None, :]]
-            predictors.extend(self.consume(episode.target_ids[:-1], state, differentiable, write=False))
-            targets = torch.tensor(episode.target_ids, device=self.device, dtype=torch.long)
-            losses, offset = [], 0
-            for hidden in predictors:
-                for chunk in hidden.split(self.config.loss_chunk_size, dim=1):
-                    labels = targets[offset:offset + chunk.shape[1]]
-                    if differentiable and self.config.gradient_checkpointing:
-                        loss = checkpoint(self._answer_loss, chunk, labels, use_reentrant=False)
-                    else:
-                        loss = self._answer_loss(chunk, labels)
-                    losses.append(loss)
-                    offset += chunk.shape[1]
-            qa_loss = torch.stack(losses).sum() / len(episode.target_ids)
-            outer_am = torch.stack(outer_losses).mean() if outer_losses else qa_loss.new_zeros(())
-            return {
-                "loss": qa_loss + lambda_am * outer_am,
-                "qa_loss": qa_loss, "outer_am": outer_am,
-                "target_tokens": len(episode.target_ids), **self._diagnostics(state),
-            }
+            return self._sample_output(episode, state, outer_losses, lambda_am, differentiable)
+
+    def forward_batch(self, episodes, teachers=None, lambda_am=1.0,
+                      generator=None, differentiable=True):
+        """正文及写入真正批量计算；QA 分别读取各自状态，返回逐样本损失。"""
+        if torch.is_inference_mode_enabled():
+            raise RuntimeError("online TTT needs autograd; use no_grad(), not inference_mode()")
+        if not episodes or any(not episode.context_ids or not episode.target_ids for episode in episodes):
+            raise ValueError("a QA batch must contain nonempty contexts and targets")
+        if max(len(episode.context_ids) for episode in episodes) > self.backbone.config.max_position_embeddings:
+            raise ValueError("input exceeds the backbone global position limit")
+        with torch.set_grad_enabled(differentiable):
+            states, outer_losses = self._ingest_batch(episodes, teachers, generator, differentiable)
+            return [self._sample_output(episode, state, losses, lambda_am, differentiable)
+                    for episode, state, losses in zip(episodes, states, outer_losses)]
+
+    def _sample_output(self, episode, state, outer_losses, lambda_am, differentiable):
+        qa_loss = self._qa_loss(episode, state, differentiable)
+        outer_am = torch.stack(outer_losses).mean() if outer_losses else qa_loss.new_zeros(())
+        return {
+            "loss": qa_loss + lambda_am * outer_am,
+            "qa_loss": qa_loss, "outer_am": outer_am,
+            "target_tokens": len(episode.target_ids), **self._diagnostics(state),
+        }
+
+    def _qa_loss(self, episode, state, differentiable):
+        for _ in self.consume(episode.question_ids, state, differentiable, write=False):
+            pass
+        # target[0] 由问题末尾预测；其后每个 target token 预测下一个 token。
+        predictors = [state.last_hidden[:, None, :]]
+        predictors.extend(self.consume(episode.target_ids[:-1], state, differentiable, write=False))
+        targets = torch.tensor(episode.target_ids, device=self.device, dtype=torch.long)
+        losses, offset = [], 0
+        for hidden in predictors:
+            for chunk in hidden.split(self.config.loss_chunk_size, dim=1):
+                labels = targets[offset:offset + chunk.shape[1]]
+                if differentiable and self.config.gradient_checkpointing:
+                    loss = checkpoint(self._answer_loss, chunk, labels, use_reentrant=False)
+                else:
+                    loss = self._answer_loss(chunk, labels)
+                losses.append(loss)
+                offset += chunk.shape[1]
+        return torch.stack(losses).sum() / len(episode.target_ids)
 
     def _answer_loss(self, hidden, labels):
         logits = self.backbone.lm_head(hidden).float().squeeze(0)

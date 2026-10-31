@@ -20,22 +20,22 @@ def decoder_forward(layer, hidden, old_keys, old_values, memory_key, memory_valu
     raw_keys = torch.cat((old_keys, key), dim=2)
     raw_values = torch.cat((old_values, value), dim=2)
     # 正式读取遵循基座精度；FP32 memory KV 另用于局部 AM。
-    keys = torch.cat((memory_key[None].to(key.dtype), raw_keys), dim=2)
-    values = torch.cat((memory_value[None].to(value.dtype), raw_values), dim=2)
+    keys = torch.cat((memory_key.to(key.dtype), raw_keys), dim=2)
+    values = torch.cat((memory_value.to(value.dtype), raw_values), dim=2)
     groups = query.shape[1] // keys.shape[1]
-    keys = keys.repeat_interleave(groups, dim=1)
-    values = values.repeat_interleave(groups, dim=1)
-    scores = torch.matmul(query.float(), keys.float().transpose(-1, -2))
+    query_grouped = query.unflatten(1, (keys.shape[1], groups))
+    scores = torch.einsum("bhgqd,bhkd->bhgqk", query_grouped.float(), keys.float())
     scores = scores / math.sqrt(attention.head_dim)
-    memory_length, raw_length = memory_key.shape[1], raw_keys.shape[2]
-    bias = torch.cat((memory_bias, memory_bias.new_zeros(memory_bias.shape[0], raw_length)), -1)
-    scores = scores + bias.repeat_interleave(groups, dim=0)[None, :, None, :]
+    memory_length, raw_length = memory_key.shape[-2], raw_keys.shape[2]
+    bias = torch.cat((memory_bias, memory_bias.new_zeros((*memory_bias.shape[:-1], raw_length))), -1)
+    scores = scores + bias[:, :, None, None, :]
     # 所有 memory 条目可见；原始 KV 只可见旧前缀和当前 chunk 的因果前缀。
     columns = torch.arange(keys.shape[2], device=hidden.device)
     rows = memory_length + old_keys.shape[2] + torch.arange(length, device=hidden.device)
     scores = scores.masked_fill(columns[None, :] > rows[:, None], float("-inf"))
     weights = scores.softmax(-1).to(query.dtype)
-    output = torch.matmul(weights, values).transpose(1, 2).reshape(batch, length, -1)
+    output = torch.einsum("bhgqk,bhkd->bhgqd", weights, values)
+    output = output.flatten(1, 2).transpose(1, 2).reshape(batch, length, -1)
     hidden = residual + attention.o_proj(output)
     hidden = hidden + layer.mlp(layer.post_attention_layernorm(hidden))
     return hidden, raw_keys, raw_values, query

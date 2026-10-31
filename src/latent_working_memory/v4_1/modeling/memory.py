@@ -32,12 +32,12 @@ class LayerMemory(nn.Module):
 
     def decode(self, memory, compressed_tokens, rotary):
         hidden = F.silu(self.decoder["input"](memory.float()))
-        shape = (memory.shape[0], self.num_kv_heads, self.head_dim)
-        key = self.decoder["key"](hidden).view(shape).transpose(0, 1)
-        value = self.decoder["value"](hidden).view(shape).transpose(0, 1)
-        bias = self.decoder["bias"](hidden).transpose(0, 1)
-        positions = torch.arange(memory.shape[0], device=memory.device, dtype=torch.float32)
-        positions = positions * (compressed_tokens / memory.shape[0])
+        shape = (*memory.shape[:-1], self.num_kv_heads, self.head_dim)
+        key = self.decoder["key"](hidden).view(shape).transpose(-3, -2)
+        value = self.decoder["value"](hidden).view(shape).transpose(-3, -2)
+        bias = self.decoder["bias"](hidden).transpose(-2, -1)
+        positions = torch.arange(memory.shape[-2], device=memory.device, dtype=torch.float32)
+        positions = positions * (compressed_tokens / memory.shape[-2])
         cosine, sine = rotary(key, positions[None])
         key = key * cosine + rotate_half(key) * sine
         return key, value, bias
@@ -46,6 +46,13 @@ class LayerMemory(nn.Module):
                        scales_o, scales_z, compressed_tokens, rotary):
         outputs, mass = local_read(queries, *self.decode(candidate, compressed_tokens, rotary))
         return matching_loss(outputs, mass, teacher_outputs, teacher_mass, scales_o, scales_z)
+
+    def _matching_gradient(self, candidate, *args):
+        # 重算求导产生的高阶图；各样本的 inner 步长不随 batch 改变。
+        with torch.enable_grad():
+            loss = self._matching_loss(candidate, *args)
+            gradient = torch.autograd.grad(loss.sum(), candidate, create_graph=True)[0]
+        return gradient, loss.detach()
 
     def write(self, old_memory, teacher_kv, queries, compressed_tokens, rotary, differentiable):
         """Teacher/queries 轮内固定；clone 隔离局部偏导，不截断 outer 历史依赖。"""
@@ -69,11 +76,13 @@ class LayerMemory(nn.Module):
                     candidate, queries, teacher_outputs, teacher_mass,
                     scales_o, scales_z, compressed_tokens, rotary,
                 )
-                loss = (checkpoint(self._matching_loss, *args, use_reentrant=False)
-                        if recompute else self._matching_loss(*args))
+                if recompute:
+                    gradient, loss = checkpoint(self._matching_gradient, *args, use_reentrant=False)
+                else:
+                    loss = self._matching_loss(*args)
+                    gradient = torch.autograd.grad(loss.sum(), candidate, create_graph=differentiable)[0]
                 if before is None:
                     before = loss.detach()
-                gradient = torch.autograd.grad(loss, candidate, create_graph=differentiable)[0]
                 candidate = candidate - step_size * gradient
                 if not differentiable:
                     candidate = candidate.detach().requires_grad_(True)

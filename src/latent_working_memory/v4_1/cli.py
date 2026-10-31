@@ -65,7 +65,7 @@ def parse_run_args(argv=None):
     parser.add_argument("--max-new-tokens", type=positive_int, help="Test 生成上限，默认 128")
     parser.add_argument("--eval-id", help="评估计划标识；独立评估默认 YYYYMMDD-HHMMSS，自动 test 默认 auto")
     parser.add_argument("--micro-batch-size-per-gpu", type=positive_int,
-                        help="每卡训练 microbatch；默认 1，当前仅支持 1")
+                        help="每卡训练 microbatch，默认 1")
     parser.add_argument("--gradient-accumulation-steps", type=positive_int,
                         help="每卡 optimizer step 的 microbatch 累积次数，默认 8")
     parser.add_argument("--teacher-batch-size-per-gpu", type=positive_int,

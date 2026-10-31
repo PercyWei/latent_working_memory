@@ -1,5 +1,6 @@
 """按完整样本轨迹累积元梯度，跨进程归约后统一更新慢参数。"""
 
+from contextlib import ExitStack
 import math
 
 import torch
@@ -191,21 +192,27 @@ class TrainingEngine:
         totals = {name: 0.0 for name in ("loss", "qa_loss", "outer_am", "inner_before", "inner_after")}
         target_tokens = write_events = 0
         learning_rates = {group["name"]: group["lr"] for group in self.optimizer.param_groups}
-        for episode in episodes:
-            with teacher.episode(episode, generator) as trajectory:
-                output = self.model(
-                    episode,
-                    teacher=trajectory,
-                    lambda_am=self.config.lambda_am,
-                    generator=generator,
-                    differentiable=True,
-                )
+        for start in range(0, len(episodes), self.config.micro_batch_size):
+            group = episodes[start:start + self.config.micro_batch_size]
+            with ExitStack() as stack:
+                trajectories = [stack.enter_context(teacher.episode(episode, generator)) for episode in group]
+                if len(group) == 1:
+                    outputs = [self.model(
+                        group[0], teacher=trajectories[0], lambda_am=self.config.lambda_am,
+                        generator=generator, differentiable=True,
+                    )]
+                else:
+                    outputs = self.model.forward_batch(
+                        group, teachers=trajectories, lambda_am=self.config.lambda_am,
+                        generator=generator, differentiable=True,
+                    )
             # Teacher 前向已完成，反向只经过 student 的完整元训练图。
-            output["loss"].backward()
-            for name in totals:
-                totals[name] += float(output[name])
-            target_tokens += output["target_tokens"]
-            write_events += output["write_events"]
+            torch.stack([output["loss"] for output in outputs]).sum().backward()
+            for output in outputs:
+                for name in totals:
+                    totals[name] += float(output[name])
+                target_tokens += output["target_tokens"]
+                write_events += output["write_events"]
         metrics = _aggregate_metrics(
             totals, len(episodes), target_tokens, write_events, self.parameters[0].device,
         )

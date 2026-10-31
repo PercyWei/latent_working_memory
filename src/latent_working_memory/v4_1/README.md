@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261031 12:44:27 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261031 12:56:34 Asia/Shanghai（UTC+08:00）
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
 
@@ -19,7 +19,7 @@
 | 推理 | 固定慢参数，沿用在线写入；正文处理完成后固定 memory，追加问题 KV 并自回归生成 |
 | 完整运行 | 先保存训练和 test 计划；训练与 dev 结束、全部训练进程退出后，在可见 GPU 间按样本分片测试最后一个 checkpoint |
 
-首版支持 full-attention Qwen3、固定 default RoPE、每卡训练 microbatch 1，不启用随机 dropout。GPU 由 `CUDA_VISIBLE_DEVICES` 指定：离线准备按文档分配，训练每卡一个数据并行进程，评估按样本分片共同处理一个 checkpoint，多个 checkpoint 按 step 串行。Inner 使用 recent 自然读取；outer 使用固定文本提示与 teacher 自然响应。Latent query 生成器与 self-study 保留为研究候选。
+首版支持 full-attention Qwen3、固定 default RoPE，不启用随机 dropout。GPU 由 `CUDA_VISIBLE_DEVICES` 指定：离线准备按文档分配，训练每卡一个数据并行进程，评估按样本分片共同处理一个 checkpoint，多个 checkpoint 按 step 串行。Inner 使用 recent 自然读取；outer 使用固定文本提示与 teacher 自然响应。Latent query 生成器与 self-study 保留为研究候选。
 
 ### 1.1 记忆接口与在线边界
 
@@ -65,13 +65,15 @@ AM 内部先对查询／通道、再对 heads 与层取平均；训练 batch 对
 
 ### 1.3 精度与梯度
 
-基座原有权重冻结。Meta-training 保留 inner 二阶梯度、跨写入轮次依赖及 memory 对后续表示的影响。主干按层使用非重入 checkpoint；inner 对 teacher 局部读取及每步 student AM 损失重计算，`autograd.grad` 在 checkpoint 外执行。推理仍需为局部 TTT 启用 autograd，不能用 `torch.inference_mode()` 包住整个过程。
+基座原有权重冻结。Meta-training 保留 inner 二阶梯度、跨写入轮次依赖及 memory 对后续表示的影响。主干按层使用非重入 checkpoint；inner 对 teacher 局部读取及每步 AM 梯度计算重计算，避免保留求梯度时产生的高阶中间张量。推理仍需为局部 TTT 启用 autograd，不能用 `torch.inference_mode()` 包住整个过程。
 
 基座默认 BF16；memory、解码器、训练／推理中的局部 AM、可训练参数、梯度累积及 AdamW 状态使用 FP32。Student attention 的 scores 与 softmax 使用 FP32，权重与挂载的 memory KV 转为主干精度后聚合。完整跨轮训练图的开销随轨迹增长，固定在线缓存不意味着训练显存固定。
 
 Train/dev 每卡保存完整的 teacher 与 student。每个样本先计算所有边界的固定 teacher 参照，释放原文 prefix KV 和分支 KV，再执行 student 前向与完整元梯度反向。Teacher 原文 prefill 使用 SDPA，提示／响应回放使用 FlashInfer 共享前缀；不建立梯度图，选中位置的局部 AM 参照仍以 FP32 计算。
 
 独立 test／benchmark 每卡只加载一份完整 student，每次处理 1 个独立样本；多卡通过样本分片并行，不另设评估 batch size。
+
+训练 microbatch 内的正文与 TTT 写入按活跃样本并行计算；每条样本维护独立 memory、KV 和尺度，正文结束后移出活跃批次，QA 分别读取各自状态。Inner 按每样本归一化后求和计算写入梯度，步长不随 batch 改变；outer 按实际样本数平均。Dev 和独立评估逐样本执行。
 
 多卡共享全局样本游标，将同一 batch 分配到各卡，不重复补齐尾批。各卡完成本地 outer backward 后，打包归约慢参数梯度，按全局实际样本数平均，再统一裁剪并更新。尾批没有样本的进程仍参与归约。Dev 同样分片执行，按全局样本数加权汇总。
 
@@ -196,7 +198,7 @@ Prepare/train 默认读取 `configs/v4-1/online_ttt_memory.json`，分别通过 
 
 `teacher_cache_dir` 记录共享缓存路径，`output_dir` 记录 `<output_root>/<方法设置>_<run_id>/train/` 的实际路径；恢复时原计划、checkpoint 和训练目录须一致。
 
-训练参数 `--micro-batch-size-per-gpu` 对应 `training.micro_batch_size`（当前仅支持 1），`--gradient-accumulation-steps` 对应每卡累积次数。有效全局 batch 为“GPU 数量 × 每卡 microbatch × 累积次数”：默认单卡 8、双卡 16；双卡设累积次数为 4 可保持全局 batch 8。Epoch 尾批按实际样本数平均；teacher 批量不计入训练 batch。
+训练参数 `--micro-batch-size-per-gpu` 对应 `training.micro_batch_size`，`--gradient-accumulation-steps` 对应每卡累积次数。有效全局 batch 为“GPU 数量 × 每卡 microbatch × 累积次数”：默认单卡 8、双卡 16；双卡设累积次数为 4 可保持全局 batch 8。Epoch 尾批按实际样本数平均；teacher 批量不计入训练 batch。
 
 实际选样数为 $N$、全局 batch 为 $B$ 时，总步数按 `epochs × ceil(N/B)` 推导，用于 warmup/cosine 并写入实际配置。验证与保存均在 optimizer step 完成后进行，epoch 末及最终步也执行。
 
