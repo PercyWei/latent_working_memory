@@ -58,15 +58,26 @@ def test_batched_replay_matches_native_full_context(tiny_setup, dtype):
     prefix = DynamicCache(config=model.config)
     replay.advance(context, prefix, len(context))
     original_prefix = [(layer.keys.clone(), layer.values.clone()) for layer in prefix.layers]
+    original_attention = [layer.self_attn for layer in model.model.layers]
     for batch_size in (1, 3):
         replay.batch_size = batch_size
         actual = {name: torch.empty_like(value) for name, value in expected.items()}
+        branch_lengths = []
+
+        def capture_branch(module, args, output):
+            branch_lengths.append(output.past_key_values.get_seq_length())
 
         def collect(layer_index, pool_indices, query, outputs, log_mass):
             for name, value in (("queries", query), ("outputs", outputs), ("log_mass", log_mass)):
                 actual[name][layer_index, pool_indices] = value
 
-        replay.replay(prefix, sequences, positions, compressed_end, collect)
+        handle = model.model.register_forward_hook(capture_branch)
+        try:
+            replay.replay(prefix, sequences, positions, compressed_end, collect)
+        finally:
+            handle.remove()
+        assert max(branch_lengths) <= max(map(len, sequences))
+        assert [layer.self_attn for layer in model.model.layers] == original_attention
         for name in actual:
             tolerance = 2e-2 if dtype == torch.bfloat16 else 2e-6
             torch.testing.assert_close(actual[name], expected[name], atol=tolerance, rtol=tolerance)

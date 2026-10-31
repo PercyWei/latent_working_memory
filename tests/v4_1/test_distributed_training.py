@@ -48,7 +48,7 @@ class ToyMemory(torch.nn.Module):
 
 
 class EmptyTeacher:
-    def episode(self, episode):
+    def episode(self, episode, generator=None):
         return nullcontext()
 
 

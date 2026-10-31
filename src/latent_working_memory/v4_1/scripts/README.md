@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261030 20:26:49 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261031 12:21:42 Asia/Shanghai（UTC+08:00）
 
 计算协议与数据格式见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[配置](../../../../configs/v4-1/online_ttt_memory.json)中的基座与数据路径。
 
@@ -76,6 +76,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh \
 
 - **配置覆盖**：显式 CLI 参数覆盖 JSON；模型结构和记忆更新设置直接修改 JSON，参数说明见[第 5 节](#5-调整参数)。
 - **训练批量**：每卡 microbatch 当前仅支持 1，全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数。`--teacher-batch-size-per-gpu` 独立控制 teacher forcing 批量，不计入训练 batch。
+- **Teacher 显存**：每个样本先准备全部固定参照，再执行 student；提示分支共享完整原文 KV，仅保留各自的短 suffix KV。Teacher 批量可独立调大，离线缓存可继续复用。
 - **执行流程**：先保存训练与自动 test 计划；训练和 dev 成功结束、全部训练进程退出后，在可见 GPU 间按样本分片评估最后一个 checkpoint。Test 默认使用训练数据目录。
 
 ### 3.2 仅训练
@@ -289,7 +290,7 @@ bash src/latent_working_memory/v4_1/scripts/dashboard.sh \
 | 评估重试、补评 checkpoint 或更换评估 GPU 数量 | 沿用原任务计划，复用完整结果及逐题进度，重新分片未完成样本 |
 | 仅重新展示既有评估 | 启动或刷新独立看板，不执行模型 |
 
-离线缓存以 token IDs、索引与固定尺度为主。按 36 层、32 query heads、2571 个边界估算，每条响应均达到 24 tokens 时，主要张量总量约为 439 MB。同格式、同配置的已有结果直接复用；不同 attention 内核、GPU 或批量的数值舍入可能影响重新生成的响应与尺度。训练需要额外的 teacher 前向，每卡显存包含两份模型权重、teacher prefix KV 与 student 元训练图；实际成本和效果以运行结果为准。
+离线缓存以 token IDs、索引与固定尺度为主。按 36 层、32 query heads、2571 个边界估算，每条响应均达到 24 tokens 时，主要张量总量约为 439 MB。同格式、同配置的已有结果直接复用；不同 attention 内核、GPU 或批量的数值舍入可能影响重新生成的响应与尺度。训练时两份模型权重常驻；teacher 原文 KV、回放临时张量与 student 元训练图分阶段占用显存，实际成本和效果以运行结果为准。
 
 ## 7. 产物目录与记录
 

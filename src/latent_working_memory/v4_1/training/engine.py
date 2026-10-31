@@ -192,7 +192,7 @@ class TrainingEngine:
         target_tokens = write_events = 0
         learning_rates = {group["name"]: group["lr"] for group in self.optimizer.param_groups}
         for episode in episodes:
-            with teacher.episode(episode) as trajectory:
+            with teacher.episode(episode, generator) as trajectory:
                 output = self.model(
                     episode,
                     teacher=trajectory,
@@ -200,7 +200,7 @@ class TrainingEngine:
                     generator=generator,
                     differentiable=True,
                 )
-            # 反向只需要固定参考张量，不再占用完整原文的 teacher KV。
+            # Teacher 前向已完成，反向只经过 student 的完整元训练图。
             output["loss"].backward()
             for name in totals:
                 totals[name] += float(output[name])
@@ -229,7 +229,7 @@ def evaluate_dev(model, episodes, teacher, lambda_am, generator):
     target_tokens = write_events = 0
     with torch.no_grad():
         for episode in episodes:
-            with teacher.episode(episode) as trajectory:
+            with teacher.episode(episode, generator) as trajectory:
                 output = model(
                     episode, teacher=trajectory, lambda_am=lambda_am,
                     generator=generator, differentiable=False,

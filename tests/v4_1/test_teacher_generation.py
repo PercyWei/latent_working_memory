@@ -118,8 +118,9 @@ def test_batched_generation_matches_full_context(tiny_setup):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="实际 FlashInfer 对照需要 CUDA")
+@pytest.mark.parametrize("compressed_end", [7, 11])
 @torch.no_grad()
-def test_flashinfer_shared_attention_matches_sdpa():
+def test_flashinfer_shared_attention_matches_sdpa(compressed_end):
     if torch.cuda.get_device_capability()[0] < 8:
         pytest.skip("BF16 对照需要 SM80+")
     torch.manual_seed(42)
@@ -133,7 +134,8 @@ def test_flashinfer_shared_attention_matches_sdpa():
                torch.randn(1, 2, 11, 64, device=device, dtype=dtype)),)
     captured = []
     attention = SharedPrefixAttention(
-        model, prefix, 7, lambda layer, output, mass: captured.append((output, mass)),
+        model, prefix, compressed_end,
+        lambda layer, query, output, mass: captured.append((output, mass)),
     )
     # 左填充的提示 prefill，以及已有不同长度 suffix 后的单 token decode。
     for query_lengths, suffix_lengths in (([3, 1], [3, 1]), ([1, 1], [4, 2])):
@@ -156,8 +158,8 @@ def test_flashinfer_shared_attention_matches_sdpa():
             expected[row, -q_len:] = F.scaled_dot_product_attention(
                 query, key, value, attn_mask=visible,
             ).transpose(0, 1)
-            scores = query.float() @ key[:, :7].float().transpose(-1, -2) / 8
-            local_outputs.append((scores.softmax(-1) @ value[:, :7].float()).transpose(0, 1))
+            scores = query.float() @ key[:, :compressed_end].float().transpose(-1, -2) / 8
+            local_outputs.append((scores.softmax(-1) @ value[:, :compressed_end].float()).transpose(0, 1))
             local_masses.append(scores.logsumexp(-1).transpose(0, 1))
         torch.testing.assert_close(actual.float(), expected.float(), rtol=2e-2, atol=2e-2)
         local_output, local_mass = captured[-1]

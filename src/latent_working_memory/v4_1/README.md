@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261031 00:07:09 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261031 12:21:42 Asia/Shanghai（UTC+08:00）
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
 
@@ -69,7 +69,9 @@ AM 内部先对查询／通道、再对 heads 与层取平均；训练 batch 对
 
 基座默认 BF16；memory、解码器、训练／推理中的局部 AM、可训练参数、梯度累积及 AdamW 状态使用 FP32。Student attention 的 scores 与 softmax 使用 FP32，权重与挂载的 memory KV 转为主干精度后聚合。完整跨轮训练图的开销随轨迹增长，固定在线缓存不意味着训练显存固定。
 
-Train/dev 每卡保存完整的 teacher 与 student，单样本按边界顺序执行。Teacher 前向使用 SDPA，不建立梯度图，局部 AM 参照以 FP32 计算；其权重及完整原文 prefix KV 与 student 的元训练图共同占用显存。独立 test／benchmark 每卡只加载一份完整 student，每次处理 1 个独立样本；多卡通过样本分片并行，不另设评估 batch size。
+Train/dev 每卡保存完整的 teacher 与 student。每个样本先计算所有边界的固定 teacher 参照，释放原文 prefix KV 和分支 KV，再执行 student 前向与完整元梯度反向。Teacher 原文 prefill 使用 SDPA，提示／响应回放使用 FlashInfer 共享前缀；不建立梯度图，选中位置的局部 AM 参照仍以 FP32 计算。
+
+独立 test／benchmark 每卡只加载一份完整 student，每次处理 1 个独立样本；多卡通过样本分片并行，不另设评估 batch size。
 
 多卡共享全局样本游标，将同一 batch 分配到各卡，不重复补齐尾批。各卡完成本地 outer backward 后，打包归约慢参数梯度，按全局实际样本数平均，再统一裁剪并更新。尾批没有样本的进程仍参与归约。Dev 同样分片执行，按全局样本数加权汇总。
 
@@ -119,9 +121,11 @@ Prepare 与 train 从 `<output_root>/teacher/p{pending_size}-r{recent_size}` 读
 
 每次 outer AM 从完整 4096 位置池均匀、无放回抽取 128 个位置，各层与 heads 共用索引。Teacher 读取缓存的固定响应，只回放涉及的提示分支，并在各分支最远的选中位置结束，重算这些位置的 $q,o^T,z^T$；无需重新生成响应。Student 使用这些停止梯度的参照与离线固定尺度计算 AM。
 
+每个样本在 student 建图前，按压缩边界顺序完成上述采样与回放。回放批内共享一份完整原文 prefix KV，各提示分支仅保存私有 suffix KV；主干通过 FlashInfer 合并前缀与因果 suffix 的 attention，选中位置另用 FP32 `local_read` 计算压缩范围内的监督目标。完整 prefix 与分支 KV 在全部参照准备完后释放，固定参照交给 student 逐轮使用。
+
 下次使用该边界时仍从完整池重新抽样，本次反向与激活重计算复用已确定的参照。尺度始终来自离线完整池，不用本次 128 位置重估。
 
-Teacher 的完整原文 prefix KV 在一个 QA episode 内随压缩边界递增，结束后释放；同文档的其他 QA 或下个 epoch 重新计算。运行时 teacher forcing 使用 `batch_size`，默认每卡 4；离线生成与统计使用 `prepare_batch_size`，默认每卡 64，二者分别设置。
+Teacher 的完整原文 prefix KV 在准备当前样本参照时随压缩边界递增；同文档的其他 QA 或下个 epoch 重新计算。运行时 teacher forcing 使用 `batch_size`，默认每卡 4；离线生成与统计使用 `prepare_batch_size`，默认每卡 64，二者分别设置。增大运行时批量主要增加短提示／响应的 KV 与激活，不按分支复制原文 KV，也不与 student 元训练图叠加。
 
 缓存绑定 teacher、tokenizer、输入模板、提示库、窗口边界、候选池、尺度规则与 seed。GPU 数量及两种 teacher 批量只控制执行，不绑定缓存身份；调整时可以复用缓存。不同 attention 内核、GPU 或批量的数值舍入可能影响响应及尺度，不保证重新生成结果逐位一致。同格式、同配置的已完成边界可直接复用。独立 test／benchmark 不加载 teacher 或读取这些缓存。
 

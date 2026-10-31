@@ -5,9 +5,9 @@ from collections import defaultdict
 import torch
 from transformers import AutoModelForCausalLM
 from transformers.cache_utils import DynamicCache
-from transformers.models.qwen3.modeling_qwen3 import rotate_half
 
 from ..modeling.am import local_read
+from .attention import SharedPrefixAttention
 
 
 def load_teacher(model_config, device):
@@ -55,30 +55,18 @@ class TeacherReplay:
         prefix = tuple((layer.keys, layer.values) for layer in prefix_cache.layers)
         prefix_length = prefix_cache.get_seq_length()
         bias = torch.zeros(self.model.config.num_key_value_heads, compressed_end, device=self.device)
-        rotary, current = {}, {}
+        current = {}
 
-        def capture_rotary(module, args, kwargs):
-            rotary["cos"], rotary["sin"] = kwargs["position_embeddings"]
+        def collect(layer_index, queries, prefix_outputs, prefix_mass):
+            query = queries.index_select(0, current["query_indices"]).float()
+            keys, values = prefix[layer_index]
+            outputs, log_mass = local_read(
+                query, keys[0, :, :compressed_end], values[0, :, :compressed_end], bias
+            )
+            on_read(layer_index, current["pool_indices"], query, outputs, log_mass)
 
-        def query_hook(layer_index):
-            def capture(module, args, output):
-                rows, columns = current["rows"], current["columns"]
-                query = output[rows, columns]
-                cosine = rotary["cos"][rows, columns].unsqueeze(1)
-                sine = rotary["sin"][rows, columns].unsqueeze(1)
-                query = (query * cosine + rotate_half(query) * sine).float()
-                keys, values = prefix[layer_index]
-                outputs, log_mass = local_read(
-                    query, keys[0, :, :compressed_end], values[0, :, :compressed_end], bias
-                )
-                on_read(layer_index, current["pool_indices"], query, outputs, log_mass)
-            return capture
-
-        handles = []
-        for index, layer in enumerate(self.model.model.layers):
-            handles.append(layer.self_attn.register_forward_pre_hook(capture_rotary, with_kwargs=True))
-            handles.append(layer.self_attn.q_norm.register_forward_hook(query_hook(index)))
-        try:
+        # 主干读取完整共享 prefix；选中的监督位置仍单独执行 FP32 local_read。
+        with SharedPrefixAttention(self.model, prefix, prefix_length, collect) as attention:
             for start in range(0, len(branches), self.batch_size):
                 indices = branches[start:start + self.batch_size]
                 lengths = [max(position for _, position in selected[index]) + 1 for index in indices]
@@ -86,33 +74,24 @@ class TeacherReplay:
                 if prefix_length + max_length > self.model.config.max_position_embeddings:
                     raise ValueError("teacher branch exceeds the backbone position limit")
                 ids = torch.zeros((batch_size, max_length), dtype=torch.long)
-                rows, columns, pool_indices = [], [], []
+                query_indices, pool_indices, offset = [], [], 0
                 for row, (index, length) in enumerate(zip(indices, lengths)):
-                    ids[row, :length] = torch.tensor(sequences[index][:length])
+                    ids[row, -length:] = torch.tensor(sequences[index][:length])
                     for pool_index, position in selected[index]:
-                        rows.append(row)
-                        columns.append(position)
+                        query_indices.append(offset + position)
                         pool_indices.append(pool_index)
+                    offset += length
                 current.update({name: torch.tensor(value, device=self.device, dtype=torch.long)
-                                for name, value in (("rows", rows), ("columns", columns),
+                                for name, value in (("query_indices", query_indices),
                                                     ("pool_indices", pool_indices))})
-                branch_cache = DynamicCache(ddp_cache_data=tuple(
-                    (keys.expand(batch_size, -1, -1, -1), values.expand(batch_size, -1, -1, -1))
-                    for keys, values in prefix
-                ))
+                branch_cache = DynamicCache(config=self.model.config)
                 lengths_tensor = torch.tensor(lengths, device=self.device)
-                attention_mask = torch.cat((
-                    torch.ones((batch_size, prefix_length), device=self.device, dtype=torch.bool),
-                    torch.arange(max_length, device=self.device)[None] < lengths_tensor[:, None],
-                ), dim=1)
-                position_ids = torch.arange(
-                    prefix_length, prefix_length + max_length, device=self.device
-                )[None].expand(batch_size, -1)
+                columns = torch.arange(max_length, device=self.device)[None]
+                position_ids = prefix_length + (columns - max_length + lengths_tensor[:, None]).clamp_min(0)
+                attention.plan(lengths, max_length, lengths, max_length)
                 self.model.model(
-                    input_ids=ids.to(self.device), past_key_values=branch_cache, attention_mask=attention_mask,
+                    input_ids=ids.to(self.device), past_key_values=branch_cache,
+                    attention_mask={"full_attention": None},
                     position_ids=position_ids, use_cache=True,
                 )
                 del branch_cache
-        finally:
-            for handle in handles:
-                handle.remove()

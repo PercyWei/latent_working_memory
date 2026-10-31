@@ -34,7 +34,7 @@ class GenerationStatistics:
                         for index, position in zip(prompt_indices, sequence_positions)]
         self.destinations = torch.tensor(destinations, device=self.device, dtype=torch.long)
 
-    def capture(self, layer_index, outputs, log_mass):
+    def capture(self, layer_index, queries, outputs, log_mass):
         variance, mean = torch.var_mean(outputs.double(), dim=-1, correction=0)
         moments = torch.stack((mean, variance, log_mass.double()), dim=-1)
         self.batch[layer_index].index_copy_(0, self.destinations, moments)

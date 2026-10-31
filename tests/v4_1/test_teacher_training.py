@@ -1,11 +1,14 @@
 """运行时 teacher 参照不改变 student 目标、元梯度与推理边界。"""
 
 from dataclasses import replace
+import weakref
 
 import torch
+from transformers.cache_utils import DynamicCache
 
 from latent_working_memory.v4_1.data import compression_boundaries
 from latent_working_memory.v4_1.modeling.model import OnlineMemoryLM
+from latent_working_memory.v4_1.teacher.cache import content_identity
 from latent_working_memory.v4_1.teacher.runtime import RuntimeTeacher
 from latent_working_memory.v4_1.training.engine import TrainingEngine, evaluate_dev
 
@@ -20,30 +23,53 @@ class FixedReferences:
         return self.references[(write_index, processed_end, compressed_end)]
 
 
-def test_runtime_teacher_matches_materialized_loss_and_meta_gradients(tiny_setup):
+def test_runtime_teacher_matches_materialized_loss_and_meta_gradients(tiny_setup, monkeypatch):
     setup = tiny_setup
     teacher = RuntimeTeacher(setup.teacher, setup.config, setup.cache)
     boundaries = compression_boundaries(
         len(setup.episode.context_ids), setup.config.model.pending_size, setup.config.model.recent_size
     )
+    # 对照逐轮计算：相同查询、目标及采样 RNG，不依赖 student 的执行顺序。
+    direct_generator = torch.Generator().manual_seed(19)
+    prefix = DynamicCache(config=setup.teacher.config)
+    references = {
+        boundary: teacher._reference(
+            setup.episode, prefix, content_identity(setup.episode.context_ids),
+            *boundary, direct_generator,
+        )
+        for boundary in boundaries
+    }
+    del prefix
+    prepared, prefixes = [], []
+    original_reference = teacher._reference
+
+    def track_reference(episode, prefix, identity, *args):
+        prepared.append(args[:3])
+        prefixes.append(weakref.ref(prefix))
+        return original_reference(episode, prefix, identity, *args)
+
+    monkeypatch.setattr(teacher, "_reference", track_reference)
     generator = torch.Generator().manual_seed(19)
-    with teacher.episode(setup.episode) as trajectory:
-        references = {
-            boundary: trajectory.reference(*boundary, generator=generator)
-            for boundary in boundaries
-        }
-        assert trajectory.prefix.get_seq_length() == len(setup.episode.context_ids)
-    assert trajectory.prefix is None
+    with teacher.episode(setup.episode, generator) as trajectory:
+        assert prepared == list(boundaries)
+        assert all(prefix() is None for prefix in prefixes)
+        torch.testing.assert_close(generator.get_state(), direct_generator.get_state(), rtol=0, atol=0)
+        for boundary in boundaries:
+            actual = trajectory.reference(*boundary)
+            for name, expected in references[boundary].items():
+                torch.testing.assert_close(actual[name], expected, rtol=0, atol=0)
+            assert boundary not in trajectory.references
+        assert not trajectory.references
+    assert not trajectory.references
     assert all(not tensor.requires_grad for reference in references.values()
                for tensor in reference.values())
     runtime = OnlineMemoryLM(setup.config.model)
     materialized = OnlineMemoryLM(setup.config.model)
     materialized.load_trainable_state_dict(runtime.trainable_state_dict())
     teacher_weights = {name: tensor.clone() for name, tensor in setup.teacher.state_dict().items()}
-    with teacher.episode(setup.episode) as trajectory:
-        runtime_output = runtime(
-            setup.episode, teacher=trajectory, generator=torch.Generator().manual_seed(19),
-        )
+    with teacher.episode(setup.episode, torch.Generator().manual_seed(19)) as trajectory:
+        runtime_output = runtime(setup.episode, teacher=trajectory)
+        assert not trajectory.references
     runtime_output["loss"].backward()
     fixed_output = materialized(setup.episode, teacher=FixedReferences(references))
     fixed_output["loss"].backward()
@@ -68,10 +94,9 @@ def test_per_loss_checkpoint_preserves_multistep_meta_gradients(tiny_setup, monk
         len(setup.episode.context_ids), config.pending_size, config.recent_size,
     )
     assert len(boundaries) == 2
-    with teacher.episode(setup.episode) as trajectory:
-        generator = torch.Generator().manual_seed(19)
+    with teacher.episode(setup.episode, torch.Generator().manual_seed(19)) as trajectory:
         references = FixedReferences({
-            boundary: trajectory.reference(*boundary, generator=generator)
+            boundary: trajectory.reference(*boundary)
             for boundary in boundaries
         })
     checked = OnlineMemoryLM(config)

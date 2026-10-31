@@ -1,4 +1,4 @@
-"""离线 teacher 的三段 attention：共享原文 KV，复用压缩历史的局部输出。"""
+"""Teacher 共享原文 KV；提示／响应使用私有 suffix，局部读取供统计与回放。"""
 
 from itertools import accumulate
 import math
@@ -13,7 +13,7 @@ from transformers.models.qwen3.modeling_qwen3 import apply_rotary_pos_emb
 
 
 class SharedPrefixAttention:
-    """只在响应生成期间替换 attention；原文 prefill 与运行时回放使用原模块。"""
+    """提示／响应前向期间替换 attention；原文 prefill 使用原模块。"""
 
     def __init__(self, model, prefix, compressed_end, on_read):
         self.model = model
@@ -70,13 +70,14 @@ class SharedPrefixAttention:
             return_lse=True, backend="fa2",
         )
         # FlashInfer 0.2.5 返回 log2 LSE；AM 使用自然对数，合并仍使用原 log2 值。
-        self.on_read(layer, output, mass * math.log(2))
-        recent_output, recent_mass = single_prefill_with_kv_cache(
-            query, prefix_k[0, :, self.compressed_end:], prefix_v[0, :, self.compressed_end:],
-            kv_layout="HND", causal=False, pos_encoding_mode="NONE", sm_scale=scaling,
-            return_lse=True, backend="fa2",
-        )
-        output, mass = merge_state(output, mass, recent_output, recent_mass)
+        self.on_read(layer, query, output, mass * math.log(2))
+        if self.compressed_end < prefix_k.shape[-2]:
+            recent_output, recent_mass = single_prefill_with_kv_cache(
+                query, prefix_k[0, :, self.compressed_end:], prefix_v[0, :, self.compressed_end:],
+                kv_layout="HND", causal=False, pos_encoding_mode="NONE", sm_scale=scaling,
+                return_lse=True, backend="fa2",
+            )
+            output, mass = merge_state(output, mass, recent_output, recent_mass)
         kv_rows, kv_columns = self.suffix_indices
         suffix_output, suffix_mass = self.suffix_attention.run(
             query, keys.transpose(1, 2)[kv_rows, kv_columns],
