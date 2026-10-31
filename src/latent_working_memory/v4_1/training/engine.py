@@ -7,6 +7,9 @@ import torch
 import torch.distributed as dist
 
 
+GRAD_NORM_EVERY = 20
+
+
 def training_steps(config, sample_count, global_batch_size):
     """epoch 与 step 均为上限；尾批计一次更新，取有效预算的较小值。"""
     budgets = []
@@ -185,8 +188,48 @@ class TrainingEngine:
                     parameter.grad = None
                 offset += count
 
-    def train_batch(self, episodes, teacher, generator):
-        """episodes 是本 rank 的分片；空分片仍参与梯度和指标归约。"""
+    def _accumulate_loss_gradients(self, loss, totals):
+        """诊断 VJP 保留 inner 元梯度与总损失反向图，不写入 parameter.grad。"""
+        if not loss.requires_grad:
+            return
+        gradients = torch.autograd.grad(
+            loss, self.parameters, retain_graph=True, create_graph=False, allow_unused=True,
+        )
+        with torch.no_grad():
+            for parameter, gradient in zip(self.parameters, gradients):
+                if gradient is None:
+                    continue
+                if parameter in totals:
+                    totals[parameter].add_(gradient.detach())
+                else:
+                    totals[parameter] = gradient.detach().clone()
+
+    @torch.no_grad()
+    def _loss_grad_norms(self, gradients, samples):
+        """在共同慢参数空间先求全局样本平均梯度，再求各项 L2 范数。"""
+        norms = {}
+        for name, totals in gradients.items():
+            squared_norm = 0.0
+            for (device, dtype), parameters in self._parameter_groups.items():
+                flat = torch.zeros(
+                    sum(parameter.numel() for parameter in parameters), device=device, dtype=dtype,
+                )
+                offset = 0
+                for parameter in parameters:
+                    count = parameter.numel()
+                    if parameter in totals:
+                        flat[offset:offset + count].copy_(totals[parameter].reshape(-1))
+                    offset += count
+                if dist.is_initialized():
+                    dist.all_reduce(flat)
+                flat.div_(samples)
+                squared_norm += float(torch.linalg.vector_norm(flat)) ** 2
+                del flat
+            norms[f"{name}_grad_norm"] = math.sqrt(squared_norm)
+        return norms
+
+    def train_batch(self, episodes, teacher, generator, step):
+        """step 是本次更新的全局绝对步数；空 rank 同步参与所需归约。"""
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
         totals = {name: 0.0 for name in (
@@ -194,6 +237,7 @@ class TrainingEngine:
             "inner_before", "inner_after",
         )}
         target_tokens = write_events = 0
+        loss_gradients = {"qa": {}, "outer_am": {}} if step % GRAD_NORM_EVERY == 0 else None
         learning_rates = {group["name"]: group["lr"] for group in self.optimizer.param_groups}
         for start in range(0, len(episodes), self.config.micro_batch_size):
             group = episodes[start:start + self.config.micro_batch_size]
@@ -210,6 +254,10 @@ class TrainingEngine:
                         generator=generator, differentiable=True,
                     )
             # Teacher 前向已完成，反向只经过 student 的完整元训练图。
+            if loss_gradients is not None:
+                for name, key in (("qa", "qa_loss"), ("outer_am", "outer_am")):
+                    component_loss = torch.stack([output[key] for output in outputs]).sum()
+                    self._accumulate_loss_gradients(component_loss, loss_gradients[name])
             torch.stack([output["loss"] for output in outputs]).sum().backward()
             for output in outputs:
                 for name in totals:
@@ -220,6 +268,11 @@ class TrainingEngine:
             totals, len(episodes), target_tokens, write_events, self.parameters[0].device,
         )
         self._synchronize_gradients(metrics["samples"])
+        loss_grad_norms = (
+            self._loss_grad_norms(loss_gradients, metrics["samples"])
+            if loss_gradients is not None else {}
+        )
+        del loss_gradients
         grad_norm = torch.nn.utils.clip_grad_norm_(
             self.parameters, self.config.gradient_clip, error_if_nonfinite=True
         )
@@ -227,6 +280,7 @@ class TrainingEngine:
         self.scheduler.step()
         return {
             **metrics,
+            **loss_grad_norms,
             "grad_norm": float(grad_norm),
             **{f"lr_{name}": value for name, value in learning_rates.items()},
         }

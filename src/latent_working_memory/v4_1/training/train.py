@@ -31,7 +31,7 @@ from latent_working_memory.v4_1.training.checkpoint import (
 from latent_working_memory.v4_1.training.engine import (
     SampleCursor, TrainingEngine, evaluate_dev, training_steps,
 )
-from latent_working_memory.v4_1.training.tracking import configure_inner_am_panels
+from latent_working_memory.v4_1.training.tracking import configure_training_panels
 
 
 @contextmanager
@@ -83,14 +83,17 @@ def tracking_run(config, output_dir, resume, device):
             with (output_dir.parents[1] / ".swanlab-panels.lock").open("a") as panel_lock:
                 fcntl.flock(panel_lock, fcntl.LOCK_EX)
                 api = swanlab.Api(api_key=api_key)
-                configure_inner_am_panels(api, api.run(f"{project_path}/{run.id}"))
+                configure_training_panels(api, api.run(f"{project_path}/{run.id}"))
             for section in ("train", "dev"):
                 for name in (
                     "loss", "qa_loss", "outer_am", "outer_am_output", "outer_am_mass",
                     "inner_before", "inner_after",
                 ):
                     run.define_metric(f"{section}/{name}", x_axis="_step", section_name=section)
-            for name in ("train/grad_norm", "resources/step_seconds", "resources/peak_memory_gib"):
+            for name in (
+                "train/grad_norm", "train/qa_grad_norm", "train/outer_am_grad_norm",
+                "resources/step_seconds", "resources/peak_memory_gib",
+            ):
                 run.define_metric(name, x_axis="_step", section_name=name.split("/")[0])
             yield run
 
@@ -251,7 +254,7 @@ def train(plan_dir, device="cuda", resume=None):
             indices = cursor.next_batch(global_batch_size)
             metrics = engine.train_batch(
                 [train_episodes[index] for index in indices[rank::world_size]],
-                teacher, query_generator,
+                teacher, query_generator, step + 1,
             )
             step += 1
             if device.type == "cuda":
@@ -286,11 +289,18 @@ def train(plan_dir, device="cuda", resume=None):
                 stream.flush()
                 if tracking is not None:
                     tracking.log({key: value for key, value in record.items() if "/" in key}, step=step)
+                grad_details = ""
+                if "qa_grad_norm" in metrics:
+                    grad_details = (
+                        f" QA-grad={metrics['qa_grad_norm']:.5f}"
+                        f" AM-grad={metrics['outer_am_grad_norm']:.5f}"
+                    )
                 print(
                     f"step {step}/{training.max_steps} loss={metrics['loss']:.5f} "
                     f"QA={metrics['qa_loss']:.5f} AM={metrics['outer_am']:.5f} "
                     f"AM-output={metrics['outer_am_output']:.5f} AM-mass={metrics['outer_am_mass']:.5f} "
                     f"inner={metrics['inner_before']:.5f}->{metrics['inner_after']:.5f} "
+                    f"grad={metrics['grad_norm']:.5f}{grad_details} "
                     f"samples={metrics['samples']} seconds={seconds:.1f}"
                     + (f" dev={record['dev/loss']:.5f}" if "dev/loss" in record else ""),
                     flush=True,

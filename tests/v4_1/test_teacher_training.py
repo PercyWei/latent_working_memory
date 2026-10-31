@@ -172,7 +172,7 @@ def test_engine_dev_and_teacher_free_inference(tiny_setup):
     teacher = RuntimeTeacher(setup.teacher, setup.config, setup.cache)
     engine = TrainingEngine(model, setup.config.training)
     episodes = (setup.episode, replace(setup.episode, id="document:1", target_ids=(10, 1)))
-    metrics = engine.train_batch(episodes, teacher, torch.Generator().manual_seed(7))
+    metrics = engine.train_batch(episodes, teacher, torch.Generator().manual_seed(7), 20)
     assert metrics["samples"] == 2
     assert metrics["write_events"] == 4
     assert metrics["target_tokens"] == 5
@@ -262,8 +262,8 @@ def test_microbatch_tail_preserves_optimizer_update(tiny_setup, monkeypatch):
 
     monkeypatch.setattr(batched, "forward_batch", track_batch)
     teacher = FixedTeacher(references)
-    expected = serial_engine.train_batch(episodes, teacher, torch.Generator().manual_seed(7))
-    actual = batched_engine.train_batch(episodes, teacher, torch.Generator().manual_seed(7))
+    expected = serial_engine.train_batch(episodes, teacher, torch.Generator().manual_seed(7), 20)
+    actual = batched_engine.train_batch(episodes, teacher, torch.Generator().manual_seed(7), 20)
     assert groups == [2]
     assert actual["samples"] == 3 and actual["write_events"] == 3 and actual["target_tokens"] == 6
     assert actual.keys() == expected.keys()

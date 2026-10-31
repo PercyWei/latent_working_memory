@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261031 16:13:54 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261031 16:30:44 Asia/Shanghai（UTC+08:00）
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
 
@@ -238,6 +238,10 @@ v4_1/
 `training/run.py` 按运行方式调度训练或独立评估；完整运行等待 `training/train.py` 的全部训练进程退出后，再复用独立评估入口计算最终 test。自动评估只选择最后一个 checkpoint，结果续记到原 SwanLab run。
 
 训练的 `qa_loss` 是样本内答案 token 平均 CE；`outer_am` 是完整历史参照下的标准化 AM，等于输出项 `outer_am_output` 与 log-mass 项 `outer_am_mass` 之和。两项沿用总 AM 的 query、head、层、压缩轮次与样本平均方式，仅作为日志诊断；训练目标仍为 `qa_loss + lambda_am * outer_am`。train/dev 的两个分项均写入 `metrics.jsonl` 与 SwanLab，训练终端同步输出。
+
+训练在实际 global step 为 20、40、60……时记录 `qa_grad_norm` 与 `outer_am_grad_norm`，恢复训练后沿用已恢复的 global step 判断统计时机。两项分别对未加权的 QA、outer AM 损失求完整元梯度，包含 inner 更新的高阶与跨轮依赖。先累积各 microbatch 的梯度，跨 rank 求和并除以全局实际样本数，再计算同一组可训练慢参数上的 L2 范数；未使用的参数维度按零处理。参数包括 memory、decoder 与 LoRA，不含冻结基座和样本临时 latent memory。两项均在全局梯度裁剪前统计，outer AM 的梯度不乘 `lambda_am`。
+
+SwanLab 在 `train/loss_grad_norm` 原生折线图中用蓝色展示 QA、橙色展示 outer AM，横轴为实际 optimizer step；`metrics.jsonl` 与训练终端同步记录采样步的两项。非统计步完全跳过两次额外的向量–雅可比积（VJP）、两组梯度缓冲区和额外归约，两项日志缺省且不补零。采样步仍需对每个 microbatch 执行两次额外 VJP，并分配梯度缓冲区及临时求导、归约张量；降低频率减少平均开销，但不会降低采样步的显存峰值。原 `train/grad_norm`、outer AM 分项与其他逐步指标照常每步记录；训练权重与总损失的反向传播、裁剪和优化器更新方式保持原样。dev 不计算这两项梯度诊断。
 
 `inner_before`／`inner_after` 分别记录同一次写入的首次 inner 更新前与全部 inner steps 完成后的局部 AM。SwanLab 在 train、dev 分区分别用 `inner_am` 原生折线图合并展示，横轴为实际 optimizer step，更新前用浅蓝、更新后用深蓝；保留底层标量数据。Inner loss 下降不能直接说明 QA 有效，正式实验应结合生成得分、逐题回答及资源成本分析。
 

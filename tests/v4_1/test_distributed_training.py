@@ -93,8 +93,10 @@ def update_worker(rank, rendezvous, expected, expected_dev, micro_batch_size):
             training_config(), micro_batch_size=micro_batch_size,
             gradient_accumulation_steps=2 // micro_batch_size,
         ))
-        for episodes, reference in zip(([0, 1, 2, 3], [4, 5, 6], [7]), expected):
-            metrics = engine.train_batch(episodes[rank::2], teacher, generator)
+        for step, (episodes, reference) in enumerate(
+            zip(([0, 1, 2, 3], [4, 5, 6], [7]), expected), start=19,
+        ):
+            metrics = engine.train_batch(episodes[rank::2], teacher, generator, step)
             torch.testing.assert_close(snapshot(model, metrics), reference, rtol=2e-6, atol=2e-7)
             assert model.decoder_unused.grad is None
         for episodes, reference in zip(([0, 2, 5], [7]), expected_dev):
@@ -109,8 +111,8 @@ def test_two_ranks_match_single_global_batch(tmp_path, micro_batch_size):
     model, teacher, generator = ToyMemory(), EmptyTeacher(), torch.Generator().manual_seed(1)
     # 单卡与双卡均使用有效全局 batch 4；尾批分别含 3 和 1 个实际样本。
     engine = TrainingEngine(model, replace(training_config(), gradient_accumulation_steps=4))
-    expected = [snapshot(model, engine.train_batch(episodes, teacher, generator))
-                for episodes in ([0, 1, 2, 3], [4, 5, 6], [7])]
+    expected = [snapshot(model, engine.train_batch(episodes, teacher, generator, step))
+                for step, episodes in enumerate(([0, 1, 2, 3], [4, 5, 6], [7]), start=19)]
     expected_dev = [evaluate_dev(model, episodes, teacher, 1.0, generator)
                     for episodes in ([0, 2, 5], [7])]
     mp.spawn(update_worker, args=(str(tmp_path / "update-rendezvous"), expected, expected_dev,
@@ -134,7 +136,7 @@ def checkpoint_worker(rank, rendezvous, output_dir):
             training_config(), output_root=str(Path(output_dir).parent.parent), output_dir=str(output_dir),
         ))
         engine, cursor = TrainingEngine(model, config.training), SampleCursor(7, 71)
-        engine.train_batch(cursor.next_batch(4)[rank::2], teacher, generator)
+        engine.train_batch(cursor.next_batch(4)[rank::2], teacher, generator, 1)
         original_save, writes = torch.save, []
 
         def record_save(state, destination, *args, **kwargs):
@@ -157,7 +159,7 @@ def checkpoint_worker(rank, rendezvous, output_dir):
         expected_rng = draw_rng(generator)
         next_episodes = cursor.next_batch(4)
         assert len(next_episodes) == 3 and cursor.epoch_end and cursor.epoch == 1
-        expected = snapshot(model, engine.train_batch(next_episodes[rank::2], teacher, generator))
+        expected = snapshot(model, engine.train_batch(next_episodes[rank::2], teacher, generator, 2))
 
         restored = ToyMemory()
         restored_engine = TrainingEngine(restored, config.training)
@@ -168,7 +170,7 @@ def checkpoint_worker(rank, rendezvous, output_dir):
         assert step == 1
         torch.testing.assert_close(draw_rng(restored_generator), expected_rng, rtol=0, atol=0)
         assert restored_cursor.next_batch(4) == next_episodes
-        actual = restored_engine.train_batch(next_episodes[rank::2], teacher, restored_generator)
+        actual = restored_engine.train_batch(next_episodes[rank::2], teacher, restored_generator, step + 1)
         torch.testing.assert_close(snapshot(restored, actual), expected, rtol=0, atol=0)
 
         # 主 rank 写盘失败须传达给所有 rank，不能使其余进程停在保存同步点。
