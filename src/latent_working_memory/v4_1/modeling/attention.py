@@ -7,7 +7,7 @@ from transformers.models.qwen3.modeling_qwen3 import apply_rotary_pos_emb
 
 
 def decoder_forward(layer, hidden, old_keys, old_values, memory_key, memory_value,
-                    memory_bias, cosine, sine):
+                    memory_bias, cosine, sine, key_mask=None):
     residual = hidden
     hidden = layer.input_layernorm(hidden)
     attention = layer.self_attn
@@ -29,6 +29,8 @@ def decoder_forward(layer, hidden, old_keys, old_values, memory_key, memory_valu
     memory_length, raw_length = memory_key.shape[-2], raw_keys.shape[2]
     bias = torch.cat((memory_bias, memory_bias.new_zeros((*memory_bias.shape[:-1], raw_length))), -1)
     scores = scores + bias[:, :, None, None, :]
+    if key_mask is not None:
+        scores = scores.masked_fill(~key_mask[:, None, None, None, :], float("-inf"))
     # 所有 memory 条目可见；原始 KV 只可见旧前缀和当前 chunk 的因果前缀。
     columns = torch.arange(keys.shape[2], device=hidden.device)
     rows = memory_length + old_keys.shape[2] + torch.arange(length, device=hidden.device)

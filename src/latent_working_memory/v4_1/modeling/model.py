@@ -12,6 +12,7 @@ from transformers import AutoModelForCausalLM
 
 from .am import local_read, matching_loss
 from .attention import decoder_forward
+from .generation import generate_batch as generate_sequences
 from .memory import LayerMemory
 
 
@@ -239,21 +240,21 @@ class OnlineMemoryLM(nn.Module):
             pass
         return state
 
-    def _ingest_batch(self, episodes, teachers, generator, differentiable, inner_diagnostics=None):
+    def _ingest_batch(self, contexts, teachers, generator, differentiable, inner_diagnostics=None):
         """正文按活跃样本批量推进；正文结束后提取该样本的最终状态。"""
-        active = list(range(len(episodes)))
-        state = self.initial_state(differentiable, batch_size=len(episodes))
-        final_states = [None] * len(episodes)
-        outer_losses = [[] for _ in episodes]
+        active = list(range(len(contexts)))
+        state = self.initial_state(differentiable, batch_size=len(contexts))
+        final_states = [None] * len(contexts)
+        outer_losses = [[] for _ in contexts]
         capacity = self.config.pending_size + self.config.recent_size
         while active:
             length = min(
                 self.config.prefill_chunk_size,
                 capacity - state.keys[0].shape[2],
-                min(len(episodes[index].context_ids) - state.position for index in active),
+                min(len(contexts[index]) - state.position for index in active),
             )
             self._advance([
-                episodes[index].context_ids[state.position:state.position + length] for index in active
+                contexts[index][state.position:state.position + length] for index in active
             ], state, differentiable)
             if state.keys[0].shape[2] == capacity:
                 self._write(
@@ -267,7 +268,7 @@ class OnlineMemoryLM(nn.Module):
                         outer_losses[index].append(tuple(loss[row] for loss in losses))
             continuing = []
             for row, index in enumerate(active):
-                if state.position == len(episodes[index].context_ids):
+                if state.position == len(contexts[index]):
                     final_states[index] = state.select([row])
                 else:
                     continuing.append(row)
@@ -310,7 +311,8 @@ class OnlineMemoryLM(nn.Module):
             raise ValueError("input exceeds the backbone global position limit")
         with torch.set_grad_enabled(differentiable):
             states, outer_losses = self._ingest_batch(
-                episodes, teachers, generator, differentiable, inner_diagnostics,
+                [episode.context_ids for episode in episodes], teachers, generator,
+                differentiable, inner_diagnostics,
             )
             return [self._sample_output(episode, state, losses, lambda_am, differentiable)
                     for episode, state, losses in zip(episodes, states, outer_losses)]
@@ -352,6 +354,14 @@ class OnlineMemoryLM(nn.Module):
     def _answer_loss(self, hidden, labels):
         logits = self.backbone.lm_head(hidden).float().squeeze(0)
         return F.cross_entropy(logits, labels, reduction="sum")
+
+    @torch.no_grad()
+    def generate_batch(self, contexts, questions, max_new_tokens, eos_token_id=None,
+                       on_complete=None):
+        """正文及写入批量推进，问题和 decode 使用逐行位置与有效 KV 掩码。"""
+        return generate_sequences(
+            self, contexts, questions, max_new_tokens, eos_token_id, on_complete,
+        )
 
     @torch.no_grad()
     def generate(self, context_ids, question_ids, max_new_tokens, eos_token_id=None):

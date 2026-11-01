@@ -5,6 +5,7 @@ from pathlib import Path
 
 
 DEFAULT_CONFIG = "configs/v4-1/online_ttt_memory.json"
+DEFAULT_EVAL_BATCH_SIZE = 8
 
 
 def positive_int(value):
@@ -64,6 +65,8 @@ def parse_run_args(argv=None):
     parser.add_argument("--max-test-samples", type=optional_positive_int, help="Test 样本上限，null 使用全量")
     parser.add_argument("--max-new-tokens", type=positive_int, help="Test 生成上限，默认 128")
     parser.add_argument("--eval-id", help="评估计划标识，默认 YYYYMMDD-HHMMSS")
+    parser.add_argument("--eval-batch-size-per-gpu", type=positive_int,
+                        help="每卡评估 batch，默认 8")
     parser.add_argument("--micro-batch-size-per-gpu", type=positive_int,
                         help="每卡训练 microbatch，默认 2")
     parser.add_argument("--gradient-accumulation-steps", type=positive_int,
@@ -103,7 +106,7 @@ def parse_run_args(argv=None):
         allowed = {
             "evaluate_only", "checkpoint", "eval_run", "eval_type", "benchmark",
             "benchmark_data", "test_data", "max_test_samples", "max_new_tokens",
-            "lengths", "eval_id", "output_root", "overwrite",
+            "lengths", "eval_id", "output_root", "overwrite", "eval_batch_size_per_gpu",
         }
         overrides = supplied - allowed
         if overrides:
@@ -113,6 +116,7 @@ def parse_run_args(argv=None):
         args.benchmark = getattr(args, "benchmark", None)
         args.eval_id = getattr(args, "eval_id", None)
         args.output_root = getattr(args, "output_root", None)
+        args.eval_batch_size_per_gpu = getattr(args, "eval_batch_size_per_gpu", DEFAULT_EVAL_BATCH_SIZE)
         if args.eval_type == "test":
             if args.benchmark is not None or any(name in supplied for name in ("benchmark_data", "lengths")):
                 parser.error("--benchmark, --benchmark-data and --lengths require --eval-type benchmark")
@@ -129,7 +133,7 @@ def parse_run_args(argv=None):
         if args.eval_run is not None:
             parser.error("--eval-run requires --evaluate-only")
         if supplied & {"eval_type", "benchmark", "benchmark_data", "lengths", "test_data",
-                       "max_test_samples", "max_new_tokens", "eval_id"}:
+                       "max_test_samples", "max_new_tokens", "eval_id", "eval_batch_size_per_gpu"}:
             parser.error("evaluation options require --evaluate-only")
     return args
 

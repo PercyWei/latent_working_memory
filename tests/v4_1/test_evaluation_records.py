@@ -61,6 +61,9 @@ def evaluation_setup(tmp_path, monkeypatch):
             count = len(sample.target_ids)
             return {"qa_loss": {1: 1.0, 2: 2.0, 3: 4.0}[count], "target_tokens": count}
 
+        def forward_batch(self, samples, **kwargs):
+            return [self(sample, **kwargs) for sample in samples]
+
         def generate(self, context, question, budget, eos):
             calls.lengths.append(context[0])
             if len(calls.lengths) == calls.fail_at:
@@ -69,6 +72,15 @@ def evaluation_setup(tmp_path, monkeypatch):
                 "token_ids": [3 if context[0] == 64 else 5], "stop_reason": "max_new_tokens",
                 "write_events": 1, "inner_before": 1.0, "inner_after": 0.5,
             }
+
+        def generate_batch(self, contexts, questions, budgets, eos_token_id=None, on_complete=None):
+            results = []
+            for index, (context, question, budget) in enumerate(zip(contexts, questions, budgets)):
+                result = self.generate(context, question, budget, eos_token_id)
+                results.append(result)
+                if on_complete is not None:
+                    on_complete(index, result)
+            return results
 
     monkeypatch.setattr(evaluation.AutoTokenizer, "from_pretrained", lambda path: Tokenizer())
     monkeypatch.setattr(evaluation.AutoConfig, "from_pretrained",

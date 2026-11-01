@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261101 15:34:53 Asia/Shanghai
+最后修订时间：20261101 16:38:10 Asia/Shanghai
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
 
@@ -71,9 +71,9 @@ AM 内部先对查询／通道、再对 heads 与层取平均；训练 batch 对
 
 Train/dev 每卡保存完整的 teacher 与 student。每个样本先计算所有边界的固定 teacher 参照，释放原文 prefix KV 和分支 KV，再执行 student 前向与完整元梯度反向。Teacher 原文 prefill 使用 SDPA，提示／响应回放使用 FlashInfer 共享前缀；不建立梯度图，选中位置的局部 AM 参照仍以 FP32 计算。
 
-独立 test／benchmark 每卡只加载一份完整 student，每次处理 1 个独立样本；多卡通过样本分片并行，不另设评估 batch size。
+独立 test／benchmark 每卡只加载一份完整 student，通过 `--eval-batch-size-per-gpu` 控制每卡批量，默认 8。样本按相近输入长度组批，批量执行 prefill、TTT 写入与 decode；每条样本独立维护 memory、KV、生成预算和 EOS 状态，完成后立即保存逐题结果。
 
-训练 microbatch 内的正文与 TTT 写入按活跃样本并行计算；每条样本维护独立 memory、KV 和尺度，正文结束后移出活跃批次，QA 分别读取各自状态。Inner 按每样本归一化后求和计算写入梯度，步长不随 batch 改变；outer 按实际样本数平均。Dev 和独立评估逐样本执行。
+训练 microbatch 内的正文与 TTT 写入按活跃样本并行计算；每条样本维护独立 memory、KV 和尺度，正文结束后移出活跃批次，QA 分别读取各自状态。Inner 按每样本归一化后求和计算写入梯度，步长不随 batch 改变；outer 按实际样本数平均。Dev 逐样本执行。
 
 多卡共享全局样本游标，将同一 batch 分配到各卡，不重复补齐尾批。各卡完成本地 outer backward 后，打包归约慢参数梯度，按全局实际样本数平均，再统一裁剪并更新。尾批没有样本的进程仍参与归约。Dev 同样分片执行，按全局样本数加权汇总。
 
@@ -213,9 +213,11 @@ Prepare/train 默认读取 `configs/v4-1/online_ttt_memory.json`，分别通过 
 
 独立评估首次创建计划须指定数据目录；已有计划省略参数即沿用，固定设置不一致时报错。RULER 可扩展目标长度，已有结果只补缺失长度。`--evaluate-only` 与 `--resume` 互斥，不接受训练配置覆盖，评估卡数不受训练卡数限制。
 
+评估批量只控制本次执行，不写入训练配置、评估计划或质量缓存身份。重试时可调整 `--eval-batch-size-per-gpu` 和 GPU 数量，完整结果继续复用，未完成样本重新分片、组批；已经逐题提交的记录保留。
+
 `--overwrite` 默认关闭，仅作用于本次调度。新训练覆盖整个实际 run 目录；独立评估覆盖当前 task 的全部 checkpoint 结果及对应计划，其他 task 与源 checkpoint 保留。评估覆盖按新计划处理，须重新提供数据目录；省略预算使用新计划默认值。校验通过后持锁清理并重建计划，正在执行的目标直接报错；共享 teacher 缓存和 SwanLab 云端历史保留。恢复不允许覆盖。
 
-训练保存 `train.log` 与 `status.json`；评估按 step 逐个处理 checkpoint，各卡分片其未完成样本。`eval.log` 汇总带 GPU／分片前缀的输出，任务级 `status.json` 记录 checkpoint 和分片状态。单项失败后继续后续 checkpoint；中断保留逐题完成进度，重试可改变 GPU 数并重新分片剩余样本。SwanLab 仅记录 train/dev，评估不读取云端身份或凭据；dashboard 只需本地 `eval/` 结果。
+训练保存 `train.log` 与 `status.json`；评估按 step 逐个处理 checkpoint，各卡批量处理其未完成样本分片。`eval.log` 汇总带 GPU／分片前缀的输出，任务级 `status.json` 记录 checkpoint 和分片状态。单项失败后继续后续 checkpoint；中断保留逐题完成进度，重试可改变 GPU 数和评估批量。SwanLab 仅记录 train/dev，评估不读取云端身份或凭据；dashboard 只需本地 `eval/` 结果。
 
 ## 4. 代码与结果
 
@@ -281,7 +283,8 @@ Teacher 边界与 checkpoint 先写临时文件，再原子替换正式文件。
 - **Teacher 位置：**`write_index` 从 1 开始；`positions` 的提示编号和序列内位置从 0 开始，后者相对“提示 + 响应”。`response_offsets`、`processed_end`、`compressed_end` 均使用右端不包含的边界；正文计数包含固定模板。尺度按 `[层数, query_heads]` 保存，head 轴不是 KV heads。
 - **训练进度：**`step` 按已完成 optimizer updates 计数，`epoch` 从 0 开始。写入轮次与每轮 inner 步数不充当训练横轴。
 - **评估指标：**EM／F1／score 范围为 0–1。Test NLL 按答案 token 加权，EM／F1 按样本平均；benchmark 用完整逐题结果执行官方汇总。
-- **评估计时：**时间单位为秒。`resources.seconds` 累计各卡已完成样本的计算时间，不含模型加载；`resources.wall_seconds` 记录本次分工至汇总的墙钟耗时，包含模型加载，重试时仅反映本次执行。`generation_seconds`、`nll_seconds` 按样本求和，前者包含 prefill、inner 写入及 decode。
+- **评估计时：**时间单位为秒。批量阶段的计算时间按参与样本分摊，`resources.seconds` 累计已完成样本分摊后的计算时间，不含模型加载；该值表示计算成本归属，不是每条请求独立等待的时延。`generation_seconds` 包含 prefill、inner 写入及 decode，`nll_seconds` 记录答案评分时间，二者均按分摊值累计。`resources.wall_seconds` 记录本次分工至汇总的墙钟耗时，包含模型加载，重试时仅反映本次执行。
+- **评估显存：**峰值显存是 worker／批次范围的观测值，不能解释为单条样本的独立显存需求；成本比较须统一实际评估批量。
 - **资源统计：**`peak_memory_bytes` 取各卡样本峰值的最大值；训练 `peak_memory_gib` 使用 $2^{30}$ 字节，`step_seconds` 不含随后 dev 和 checkpoint 保存。
 - **生成预算：**`requested_max_new_tokens` 是请求上限，`max_new_tokens` 是实际使用上限。Test 遇模型窗口限制时可缩减预算，并以 `model_window` 标记停止原因；`generated_tokens` 是实际生成数量。
 

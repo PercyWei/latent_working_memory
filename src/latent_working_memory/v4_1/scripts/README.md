@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261101 16:23:27 Asia/Shanghai
+最后修订时间：20261101 16:38:10 Asia/Shanghai
 
 计算协议与数据格式见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[配置](../../../../configs/v4-1/online_ttt_memory.json)中的基座与数据路径。
 
@@ -17,7 +17,7 @@ bash src/latent_working_memory/v4_1/scripts/run.sh --help
 
 `run.sh` 默认执行训练和 dev 验证，使用 `--resume` 恢复训练、`--evaluate-only` 独立评估；离线准备使用 `prepare`，评估看板通过 `dashboard.sh` 启动。各入口支持 `--help`。
 
-脚本切换到项目根目录，使用 `uv run --frozen`，直接继承 `CUDA_VISIBLE_DEVICES`。离线准备自动分配到所有可见 GPU；训练通过 `torchrun` 为每张可见卡启动一个进程；评估在可见 GPU 间分片同一 checkpoint 的待评估样本，多个 checkpoint 按 step 依次执行。本项目双卡设为 `0,1`，单卡设为 `0` 或 `1`，无需额外设备参数。
+脚本切换到项目根目录，使用 `uv run --frozen`，直接继承 `CUDA_VISIBLE_DEVICES`。离线准备自动分配到所有可见 GPU；训练通过 `torchrun` 为每张可见卡启动一个进程；评估在可见 GPU 间分片同一 checkpoint 的待评估样本，每卡批量处理，多个 checkpoint 按 step 依次执行。本项目双卡设为 `0,1`，单卡设为 `0` 或 `1`，无需额外设备参数。
 
 本文示例约定：
 
@@ -104,8 +104,9 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh \
   --evaluate-only \
   --eval-id 01_20261030 \
   --eval-type test \
+  --test-data 'data/delta-mem-qasper' \
   --eval-run 'artifacts/v4-1/am-recent_m256-d512_p1024-r256_inner3_01_20261029/train' \
-  --test-data 'data/delta-mem-qasper'
+  --eval-batch-size-per-gpu 8
 ```
 
 - **指定 checkpoint**：通过 `--checkpoint` 选择同一 run 的一个或多个 checkpoint。
@@ -115,10 +116,11 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh \
   --evaluate-only \
   --eval-id 01_20261030 \
   --eval-type test \
+  --test-data 'data/delta-mem-qasper' \
   --checkpoint \
     'artifacts/v4-1/am-recent_m256-d512_p1024-r256_inner3_01_20261029/train/checkpoints/global_step_<N>' \
     'artifacts/v4-1/am-recent_m256-d512_p1024-r256_inner3_01_20261029/train/checkpoints/global_step_<M>' \
-  --test-data 'data/delta-mem-qasper'
+  --eval-batch-size-per-gpu 8
 ```
 
 - **评估设置**：
@@ -135,8 +137,9 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh \
 
 - **执行与结果**：
 
-  - **并行方式**：多张可见 GPU 共同处理一个 checkpoint 的未完成样本，每卡每次处理 1 个样本；多个 checkpoint 按 step 串行执行，当前项汇总后再处理下一项，无需设置评估 batch size。
-  - **结果复用**：完整且设置一致的结果直接复用，设置不一致则报错；未完成时保留逐题进度，只重新分片剩余样本。GPU 数量只控制并行度，不绑定缓存。
+  - **并行方式**：多张可见 GPU 共同处理一个 checkpoint 的未完成样本，每卡一份模型；`--eval-batch-size-per-gpu` 控制每卡批量，默认 8，按相近输入长度组批执行 prefill、TTT 写入和 decode。多个 checkpoint 仍按 step 串行执行。
+  - **样本独立**：每条样本分别维护 memory、KV、生成预算及 EOS 状态；完成后立即逐题保存，后续失败不回退已提交记录。
+  - **结果复用**：完整且设置一致的结果直接复用，设置不一致则报错；未完成时保留逐题进度，只重新分片剩余样本。GPU 数量与评估批量不绑定计划或质量缓存身份，重试时可以调整。
   - **记录与展示**：计算日志保存在各 checkpoint 的 `eval.log`，执行状态及错误保存在任务级 `status.json`；重要指标打印到终端，图表通过[评估结果与看板](#43-评估结果与看板)查看，不依赖 SwanLab。
 
 ### 4.2 Benchmark
@@ -150,8 +153,9 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh \
   --eval-id 01_20261030 \
   --eval-type benchmark \
   --benchmark locomo \
+  --benchmark-data 'data/benchmarks/locomo' \
   --checkpoint 'artifacts/v4-1/am-recent_m256-d512_p1024-r256_inner3_01_20261029/train/checkpoints/global_step_<N>' \
-  --benchmark-data 'data/benchmarks/locomo'
+  --eval-batch-size-per-gpu 8
 
 # RULER
 CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh \
@@ -159,8 +163,9 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh \
   --eval-id 01_20261030 \
   --eval-type benchmark \
   --benchmark ruler \
-  --checkpoint 'artifacts/v4-1/am-recent_m256-d512_p1024-r256_inner3_01_20261029/train/checkpoints/global_step_<N>' \
   --benchmark-data 'data/benchmarks/ruler-v1/<model-name>' \
+  --checkpoint 'artifacts/v4-1/am-recent_m256-d512_p1024-r256_inner3_01_20261029/train/checkpoints/global_step_<N>' \
+  --eval-batch-size-per-gpu 8 \
   --lengths 8192 16384 32768
 ```
 
@@ -222,7 +227,7 @@ bash src/latent_working_memory/v4_1/scripts/dashboard.sh \
 
   - **质量比较**：核对基座模型标识、实际输入与参考答案、输入／解码／生成预算及评分口径。基座按模型路径末级名称识别，父目录可以不同；算法、窗口、精度、attention 实现、设备和批量不作为质量比较限制。
   - **数据核对**：使用顺序无关的比较指纹，RULER 按长度分别核对。旧结果可沿用原数据指纹；缺少分组指纹且覆盖范围不同时，提示无法核实对应范围。
-  - **资源与成本**：资源统计与质量指标分区展示，保留精度、attention 实现、设备、耗时和峰值显存，不自动计算加速比。比较成本须统一硬件、批量及测量范围；重试的调度墙钟时间仅覆盖本次执行。
+  - **资源与成本**：资源统计与质量指标分区展示。批量计算时间按参与样本分摊后累计，不等同于每条请求的独立等待时延；峰值显存按 worker／批次范围观测。比较成本须统一硬件、实际评估批量及测量范围，不自动计算加速比；重试墙钟时间仅覆盖本次执行。
   - **缓存校验**：跨方法展示允许实现与运行环境不同；结果复用、失败重试和训练恢复仍严格核对原有身份与设置。
 
 - **访问方式**：
@@ -282,6 +287,7 @@ bash src/latent_working_memory/v4_1/scripts/dashboard.sh \
 | **Test 与 benchmark 评估** |
 | `--eval-id` | 独立评估标识，默认 `YYYYMMDD-HHMMSS` |
 | `--eval-type` | 评估类型，支持 `test`（默认）和 `benchmark` |
+| `--eval-batch-size-per-gpu` | 每卡评估批量，默认 8；仅控制本次执行，可在续算时调整 |
 | `--test-data` | Test 数据目录，首次创建或覆盖评估计划时必填 |
 | `--max-test-samples` | test 评估样本数上限，默认 `null`（全部） |
 | `--max-new-tokens` | test 评估时 token 生成上限，默认 128 |
@@ -309,7 +315,7 @@ bash src/latent_working_memory/v4_1/scripts/dashboard.sh \
 | Slots／维度、解码器、LoRA、inner 步数／初始步长、outer 优化设置 | 新训练目录；teacher 身份未变时可复用缓存 |
 | 每次 outer AM 采样位置数 | 新训练目录；不超过原池容量时可复用完整池 |
 | 离线 GPU 数量、`teacher.prepare_batch_size`／`teacher.batch_size` | 可复用缓存；恢复训练仍遵循完整配置一致的要求 |
-| 评估重试、补评 checkpoint 或更换评估 GPU 数量 | 沿用原任务计划，复用完整结果及逐题进度，重新分片未完成样本 |
+| 评估重试、补评 checkpoint、调整评估批量或 GPU 数量 | 沿用原任务计划，复用完整结果及逐题进度，重新分片并组批未完成样本 |
 | 重新创建当前评估任务 | 显式 `--overwrite`，重新提供数据目录与本次设置；当前 task 的旧计划及结果清空 |
 | 仅重新展示既有评估 | 启动或刷新独立看板，不执行模型 |
 
@@ -356,7 +362,7 @@ bash src/latent_working_memory/v4_1/scripts/dashboard.sh \
 - **计划与配置**：`plan/` 保存执行前确定的设置；`train/config.json` 保存实际训练配置，评估结果目录的 `eval.json` 保存评估设置快照。训练只创建训练计划，独立评估创建或沿用对应 task 计划；通常重跑 RULER 允许扩展长度，覆盖时重建当前 task。
 - **覆盖与互斥**：校验通过后，持删除范围之外的稳定锁执行清理与重建；锁覆盖 worker 生命周期，占用时拒绝覆盖。锁文件不属于实验结果。
 - **训练与恢复**：Rank 0 统一写入产物，train/dev 指标汇总全部 GPU 的实际样本。`state.pt` 保存慢参数、优化器、scheduler、数据游标及各 rank 随机状态；恢复时只核对训练计划与绑定状态，不依赖评估计划。已有 checkpoint 中的历史评估编排字段在读取时忽略，训练相关设置仍严格核对。完整格式见[方法说明第 4 节](../README.md#4-代码与结果)。
-- **评估结果**：各卡结果按原始样本顺序汇总；Test NLL 按答案 token 加权，EM／F1 按样本平均，benchmark 沿用官方汇总。完整结果直接复用；未完成时保留逐题进度，重试可更换 GPU 数，只重新分片剩余样本。RULER 继续复用已完成长度。
+- **评估结果**：各卡结果按原始样本顺序汇总；Test NLL 按答案 token 加权，EM／F1 按样本平均，benchmark 沿用官方汇总。完整结果直接复用；未完成时保留逐题进度，重试可调整 GPU 数和评估批量，只重新分片、组批剩余样本。RULER 继续复用已完成长度。
 - **比较指纹**：Benchmark summary 的 `comparison_data` 按原始输入、参考答案、生成预算与任务生成，忽略执行顺序，RULER 按长度分组；仅供跨方法展示，不参与 `eval.json`、缓存或恢复校验。
 - **日志与状态**：日志同时写入文件和终端，评估输出带 GPU／分片前缀；`status.json` 记录 checkpoint 与各分片的设备、命令、起止时间、返回码和错误。整体进度仅统计本轮选择。
 - **展示方式**：SwanLab 默认开启，记录 train/dev、训练资源及配置；`--tracking disabled` 仅保留本地产物，恢复训练沿用 `swanlab.json` 中的 run。评估由独立 dashboard 展示，不读取 SwanLab 身份或凭据。

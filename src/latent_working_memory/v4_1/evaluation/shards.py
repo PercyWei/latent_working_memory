@@ -99,14 +99,16 @@ def _summary(request, entries, wall_seconds):
         "resources": {
             "device": ",".join(sorted({entry["device"] for entry in entries})),
             "seconds": sum(row["seconds"] for row in records),
-            "seconds_scope": "sum of completed sample wall times across workers; excludes model loading",
+            "seconds_scope": "sum of completed-sample attributed compute and scoring times; batched phases amortized across active samples; excludes model loading",
             "wall_seconds": wall_seconds,
             "wall_timing_scope": "current attempt from work allocation to merge; includes model loading; cached samples are not rerun",
             "generated_tokens": sum(row["generated_tokens"] for row in records),
             "generation_seconds": sum(row["generation_seconds"] for row in records),
-            "generation_timing_scope": "context prefill, inner writes, question prefill and autoregressive decode",
+            "generation_timing_scope": "context prefill, inner writes, question prefill and autoregressive decode; batch time amortized across active samples",
             "nll_seconds": sum(row.get("nll_seconds", 0.0) for row in records),
             "peak_memory_bytes": max(peaks) if peaks else None,
+            "peak_memory_scope": "worker peak observed during a batch; shared by samples in that batch",
+            "batch_sizes": sorted({row.get("eval_batch_size", 1) for row in records}),
         },
     }
 

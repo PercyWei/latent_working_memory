@@ -6,17 +6,15 @@ from dataclasses import asdict, replace
 import json
 import os
 from pathlib import Path
-import time
 
-import torch
 from transformers import AutoConfig, AutoTokenizer, set_seed
 
 from latent_working_memory.benchmarks.data import load_samples
-from latent_working_memory.benchmarks.protocol import data_identity, encode_prompt, protocol
-from latent_working_memory.benchmarks.scoring import score_sample
-from latent_working_memory.data_preparation.personamem.audit import scores
+from latent_working_memory.benchmarks.protocol import data_identity, protocol
 from latent_working_memory.runtime import initialize_device
+from latent_working_memory.v4_1.cli import DEFAULT_EVAL_BATCH_SIZE, positive_int
 from latent_working_memory.v4_1.config import config_from_dict
+from latent_working_memory.v4_1.evaluation.batching import compute_batch, sample_batches
 from latent_working_memory.v4_1.data import dataset_identity, load_episodes
 from latent_working_memory.v4_1.evaluation.records import (
     check_evaluation, completed_evaluation, evaluation_lock, normalize_lengths,
@@ -110,74 +108,6 @@ def _evaluation_inputs(checkpoint_path, data, task, max_new_tokens, max_samples,
     }))
     return state, config, tokenizer, request, samples, references
 
-
-
-def _compute_sample(sample, references, request, model, tokenizer, device, max_new_tokens):
-    task, model_window = request["task"], request["model_window"]
-    # 各样本的随机状态独立于分片数量、调度顺序及此前失败位置。
-    set_seed(request["seed"])
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-        torch.cuda.reset_peak_memory_stats(device)
-    started = time.perf_counter()
-    if task == "test":
-        context_ids, question_ids = sample.context_ids, sample.question_ids
-        requested_budget = max_new_tokens or 128
-        budget = min(requested_budget, model_window - len(context_ids) - len(question_ids))
-        if budget < 1:
-            raise ValueError(f"{sample.id}: no model-window capacity remains for generation")
-        nll_started = time.perf_counter()
-        with torch.no_grad():
-            output = model(sample, teacher=None, differentiable=False)
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-        nll_seconds = time.perf_counter() - nll_started
-        reference = references[sample.id]
-        row = {
-            "id": sample.id, "document_id": sample.document_id,
-            "question": reference["question"], "references": [reference["answer"]],
-            "nll": float(output["qa_loss"]), "target_tokens": output["target_tokens"],
-            "nll_seconds": nll_seconds,
-        }
-    else:
-        context_ids = tuple(encode_prompt(sample, tokenizer, model_window, task))
-        question_ids = ()
-        requested_budget = budget = sample.max_new_tokens
-        row = {"id": sample.id, "question": sample.metadata.get("question", ""),
-               "references": list(sample.references), "metadata": sample.metadata}
-    generation_started = time.perf_counter()
-    with torch.no_grad():
-        result = model.generate(context_ids, question_ids, budget, tokenizer.eos_token_id)
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-    generation_seconds = time.perf_counter() - generation_started
-    generated = result["token_ids"]
-    prediction = tokenizer.decode(generated, skip_special_tokens=True)
-    stop_reason = result["stop_reason"]
-    if stop_reason == "max_new_tokens" and budget < requested_budget:
-        stop_reason = "model_window"
-    row.update({
-        "prediction": prediction, "raw_prediction": tokenizer.decode(generated, skip_special_tokens=False),
-        "generated_token_ids": generated, "prompt_tokens": len(context_ids) + len(question_ids),
-        "context_tokens": len(context_ids), "question_tokens": len(question_ids),
-        "generated_tokens": len(generated), "max_new_tokens": budget,
-        "requested_max_new_tokens": requested_budget, "stop_reason": stop_reason,
-        "write_events": result["write_events"], "inner_before": result["inner_before"],
-        "inner_after": result["inner_after"], "generation_seconds": generation_seconds,
-        "seconds": time.perf_counter() - started,
-    })
-    if task == "test":
-        row.update(scores(prediction, reference["answer"]))
-    else:
-        row["score"] = score_sample(task, sample, prediction)
-    device_label = str(device)
-    if device.type == "cuda":
-        device_label += f" (CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '')})"
-    return {"record": row, "device": device_label, "peak_memory_bytes": (
-        torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None
-    )}
-
-
 def _check_complete_details(output_dir, summary, samples):
     if summary is not None:
         records = read_details(output_dir / "details.jsonl")
@@ -222,12 +152,15 @@ def prepare_sample_work(checkpoint_path, data, output_dir, task="test", max_new_
 
 
 def evaluate_shard(checkpoint_path, data, output_dir, worker_rank, task="test", device="cuda",
-                   max_new_tokens=None, max_samples=None, lengths=None, eval_id=None):
-    """每个进程加载一个模型，逐样本追加自己的已完成记录；不生成局部评分汇总。"""
+                   max_new_tokens=None, max_samples=None, lengths=None, eval_id=None,
+                   eval_batch_size_per_gpu=DEFAULT_EVAL_BATCH_SIZE):
+    """每卡一份模型，批量计算；完成一题即追加提交，不生成局部评分汇总。"""
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         raise ValueError("evaluation workers do not use torchrun")
     if type(worker_rank) is not int or worker_rank < 0:
         raise ValueError("worker_rank must be a non-negative integer")
+    if type(eval_batch_size_per_gpu) is not int or eval_batch_size_per_gpu < 1:
+        raise ValueError("eval_batch_size_per_gpu must be a positive integer")
     output_dir = Path(output_dir).expanduser().resolve()
     state, config, tokenizer, request, samples, references = _evaluation_inputs(
         checkpoint_path, data, task, max_new_tokens, max_samples, lengths, eval_id,
@@ -245,16 +178,24 @@ def evaluate_shard(checkpoint_path, data, output_dir, worker_rank, task="test", 
     progress = output_dir / "progress"
     progress.mkdir(parents=True, exist_ok=True)
     with (progress / f"worker_{worker_rank}.jsonl").open("a", encoding="utf-8") as stream:
-        for index, sample_id in enumerate(selected_ids, 1):
-            entry = _compute_sample(by_id[sample_id], references, request, model, tokenizer, device, max_new_tokens)
+        completed = 0
+
+        def commit(entry):
+            nonlocal completed
             stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
             stream.flush()
+            completed += 1
             row = entry["record"]
             quality = row["f1"] if task == "test" else row["score"]
             metric = "accuracy" if task == "ruler" else "f1"
-            print(f"{task} worker={worker_rank} {index}/{len(selected_ids)} {sample_id} "
+            print(f"{task} worker={worker_rank} {completed}/{len(selected_ids)} {row['id']} "
                   f"{metric}={quality:.4f} tokens={row['generated_tokens']}/{row['max_new_tokens']} "
-                  f"stop={row['stop_reason']} seconds={row['seconds']:.1f}", flush=True)
+                  f"stop={row['stop_reason']} batch={row['eval_batch_size']} "
+                  f"seconds={row['seconds']:.1f}", flush=True)
+
+        for batch in sample_batches([by_id[sample_id] for sample_id in selected_ids],
+                                    task, eval_batch_size_per_gpu):
+            compute_batch(batch, references, request, model, tokenizer, device, max_new_tokens, commit)
     del model
 
 
@@ -274,13 +215,17 @@ def finalize_sample_work(checkpoint_path, data, output_dir, task="test", max_new
 
 
 def evaluate(checkpoint_path, data, output_dir, task="test", device="cuda",
-             max_new_tokens=None, max_samples=None, lengths=None, eval_id=None):
+             max_new_tokens=None, max_samples=None, lengths=None, eval_id=None,
+             eval_batch_size_per_gpu=DEFAULT_EVAL_BATCH_SIZE):
+    if type(eval_batch_size_per_gpu) is not int or eval_batch_size_per_gpu < 1:
+        raise ValueError("eval_batch_size_per_gpu must be a positive integer")
     options = dict(task=task, max_new_tokens=max_new_tokens, max_samples=max_samples,
                    lengths=lengths, eval_id=eval_id)
     work = prepare_sample_work(checkpoint_path, data, output_dir, **options)
     try:
         if work["pending_samples"]:
-            evaluate_shard(checkpoint_path, data, output_dir, worker_rank=0, device=device, **options)
+            evaluate_shard(checkpoint_path, data, output_dir, worker_rank=0, device=device,
+                           eval_batch_size_per_gpu=eval_batch_size_per_gpu, **options)
     except BaseException:
         # 成功样本已逐条提交；尽可能保存齐全的长度，不用汇总异常掩盖计算错误。
         try:
@@ -304,9 +249,12 @@ def main(argv=None):
     parser.add_argument("--max-samples", type=int)
     parser.add_argument("--lengths", type=int, nargs="+")
     parser.add_argument("--worker-rank", type=int, help="调度器分配的样本 worker 编号")
+    parser.add_argument("--eval-batch-size-per-gpu", type=positive_int, default=DEFAULT_EVAL_BATCH_SIZE,
+                        help=f"每卡评估批量，默认 {DEFAULT_EVAL_BATCH_SIZE}")
     args = parser.parse_args(argv)
     options = dict(task=args.task, max_new_tokens=args.max_new_tokens, max_samples=args.max_samples,
-                   lengths=args.lengths, eval_id=args.eval_id)
+                   lengths=args.lengths, eval_id=args.eval_id,
+                   eval_batch_size_per_gpu=args.eval_batch_size_per_gpu)
     if args.worker_rank is None:
         evaluate(args.checkpoint, args.data, args.output_dir, **options)
     else:

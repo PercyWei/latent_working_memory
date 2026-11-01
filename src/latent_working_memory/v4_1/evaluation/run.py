@@ -15,7 +15,7 @@ import sys
 import threading
 from zoneinfo import ZoneInfo
 
-from ..cli import optional_positive_int, positive_int
+from ..cli import DEFAULT_EVAL_BATCH_SIZE, optional_positive_int, positive_int
 from ..config import config_from_dict
 from ..execution import evaluation_lock, run_lock
 from ..plans import prepare_evaluation_plan
@@ -328,6 +328,8 @@ def run_evaluations(args):
                 sys.executable, "-m", "latent_working_memory.v4_1.evaluation.evaluate",
                 "--checkpoint", str(checkpoint), "--data", settings["data"],
                 "--task", settings["task"], "--output-dir", str(output), "--eval-id", eval_id,
+                "--eval-batch-size-per-gpu",
+                str(getattr(args, "eval_batch_size_per_gpu", DEFAULT_EVAL_BATCH_SIZE)),
             ]
             for name in ("max_samples", "max_new_tokens"):
                 if settings[name] is not None:
@@ -348,6 +350,7 @@ def run_evaluations(args):
         summary = {
             "action": "evaluate", "eval_run": str(training_directory), "eval_id": eval_id,
             "task": args.task, "gpus": "", "started_at": _now(), "status": "running",
+            "eval_batch_size_per_gpu": getattr(args, "eval_batch_size_per_gpu", DEFAULT_EVAL_BATCH_SIZE),
             "selected_checkpoints": [f"global_step_{step}" for _, step in selected],
             "checkpoints": history,
         }
@@ -383,6 +386,8 @@ def main(argv=None):
                         help="Test 数据目录；首次创建计划必填，已有计划可省略")
     parser.add_argument("--benchmark-data", default=argparse.SUPPRESS, help="Benchmark 数据目录；首次创建计划必填")
     parser.add_argument("--eval-id", help="评估计划标识，默认 YYYYMMDD-HHMMSS")
+    parser.add_argument("--eval-batch-size-per-gpu", type=positive_int, default=DEFAULT_EVAL_BATCH_SIZE,
+                        help="每卡评估 batch，默认 8")
     parser.add_argument("--output-root", help="产物父目录；默认在原 run 下保存评估结果")
     parser.add_argument("--overwrite", action="store_true",
                         help="清理当前 task 的评估结果和计划后重新评估")
