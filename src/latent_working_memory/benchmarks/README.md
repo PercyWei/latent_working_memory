@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261101 17:31:30 Asia/Shanghai
+最后修订时间：20261101 17:42:57 Asia/Shanghai
 
 本目录提供 RULER 与 LoCoMo 的公共数据准备、读取和评分，供不同方法及 full-context 基线共用。
 
@@ -23,7 +23,7 @@
 ## 2. 数据准备
 
 - 下载与生成使用独立入口，均从项目根目录执行，无需 GPU。
-- 先执行 `uv sync --frozen` 安装项目锁定依赖；从官方来源下载还需系统 `git`、`git-lfs`、`curl`，脚本不自动安装依赖。
+- 先执行 `uv sync --frozen` 安装项目锁定依赖；补齐文件需要 `curl`，首次克隆 RULER 源码还需 `git`、`git-lfs`，脚本不自动安装依赖。
 
 ```bash
 uv sync --frozen
@@ -33,7 +33,9 @@ bash src/latent_working_memory/benchmarks/scripts/download_benchmarks.sh --bench
 **原始数据下载：[download_benchmarks.sh](scripts/download_benchmarks.sh)**
 
 - RULER 固定采用 [NVIDIA/RULER v1 源码](https://github.com/NVIDIA/RULER/tree/c3f5e3b4f87f97e048793bb510a3a6b19a46bf3a)，下载 essay、SQuAD、HotpotQA、CWE 词表及 NLTK 分词资源；不加载 tokenizer，不生成样本。
-- NLTK 的 `punkt` 和 `punkt_tab` 固定下载到项目 `data/raw/nltk_data/`。生成脚本将 `NLTK_DATA` 设置为该目录的绝对路径，官方生成器子进程继承此设置。
+- **源码复用**：RULER 源码目录不存在时克隆上述固定版本；已存在时直接复用，不执行 Git 操作，无需保留 `.git`。
+- **资源补齐**：已有数据文件直接复用，只下载缺失文件；缺失的 CWE 词表从上述固定版本的官方 LFS 地址下载。
+- **NLTK 资源**：`punkt` 和 `punkt_tab` 保存到 `data/raw/nltk_data/tokenizers/`，已有资源目录直接复用，缺失才下载。生成脚本设置绝对路径 `NLTK_DATA`，供官方生成器子进程使用。
 - NLTK 下载默认允许使用已配置的代理（`NLTK_ALLOW_PROXIED_URLOPEN=1`），可通过同名环境变量覆盖；下载失败立即退出，不进入交互重试。
 - LoCoMo 下载 [官方正式数据](https://github.com/snap-research/locomo/tree/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376)，下载后可直接评估，无需额外构造脚本。
 
@@ -43,7 +45,7 @@ bash src/latent_working_memory/benchmarks/scripts/download_benchmarks.sh --bench
 | `--data-root` | LoCoMo 数据父目录，默认 `data/benchmarks`；写入 `locomo/locomo10.json` |
 | `--ruler-source-dir` | RULER 官方源码及下载素材目录，默认 `data/raw/ruler-v1-source` |
 
-- 已下载素材和已有 LoCoMo 文件直接复用。只下载其中一个 benchmark 时，将 `--benchmark all` 改为 `ruler` 或 `locomo`。
+- 只准备其中一个 benchmark 时，将 `--benchmark all` 改为 `ruler` 或 `locomo`。
 - HotpotQA 默认通过 `https://hf-mirror.com` 下载，可用 `HF_ENDPOINT` 覆盖下载源；数据路径和 revision 保持不变。
 - 镜像可能重定向至 Hugging Face。仍无法连接时，使用可用代理，或在其他机器下载同一文件，保存为 `<ruler-source-dir>/scripts/data/synthetic/json/hotpotqa.json` 后重跑脚本。
 
@@ -62,7 +64,7 @@ data/
         └── locomo10.json
 ```
 
-还原后跳过下载脚本，直接执行下方 RULER 生成命令；生成只读取源码与素材，`ruler-v1-source/` 无需保留 `.git`。LoCoMo 可直接评估。
+还原完整后可直接生成 RULER 样本、评估 LoCoMo；若缺少素材或 NLTK 资源，重跑下载脚本即可补齐，无需重新下载已有文件。源码目录无需保留 `.git`，应来自上述固定版本；目录位置不同时传入 `--ruler-source-dir`。
 
 **RULER 样本生成：[generate_ruler.sh](scripts/generate_ruler.sh)**
 
