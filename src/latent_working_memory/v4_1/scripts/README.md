@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261101 16:38:10 Asia/Shanghai
+最后修订时间：20261101 17:31:18 Asia/Shanghai
 
 计算协议与数据格式见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[配置](../../../../configs/v4-1/online_ttt_memory.json)中的基座与数据路径。
 
@@ -144,7 +144,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh \
 
 ### 4.2 Benchmark
 
-- **数据准备**：使用项目已有的 benchmark 数据准备结果，数据布局与准备入口见[公共 benchmark 指南](../../v4/benchmarks/README.md)。
+- **数据准备**：使用项目已有的 benchmark 数据准备结果，数据布局与准备入口见[公共 benchmark 指南](../../benchmarks/README.md#2-数据准备)。
 
 ```bash
 # LoCoMo

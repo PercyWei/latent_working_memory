@@ -2,13 +2,13 @@
 
 创建时间：20261019 20:16:32 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261030 20:26:49 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261101 17:31:18 Asia/Shanghai（UTC+08:00）
 
 使用原始基座模型完整读取 RULER 或 LoCoMo 输入，不压缩上下文、不加载 v4 checkpoint。数据读取与官方评分复用公共 [benchmarks](../benchmarks/) 模块。结果保存到本地并在终端打印，图表由 v4 独立看板展示。
 
 ## 1. 运行
 
-先按 [benchmark 数据准备说明](../v4/benchmarks/README.md#2-手动准备数据) 下载素材并生成 RULER 样本。在项目根目录执行：
+先按 [benchmark 数据准备说明](../benchmarks/README.md#2-数据准备) 下载素材并生成 RULER 样本。在项目根目录执行：
 
 ```bash
 # LoCoMo
@@ -77,4 +77,4 @@ bash src/latent_working_memory/v4/scripts/dashboard.sh \
 - 质量对照核对基座模型标识、实际输入与参考答案、输入／解码／生成预算及评分口径。模型父目录、算法、窗口、精度、attention 实现、设备及批量可以不同；基座按模型路径末级名称识别。
 - RULER 可比较共同长度；基线 Overall 按对应 checkpoint 的长度范围重算，缺少任一长度时不显示该点的基线 Overall。新结果的 `comparison_data` 保存顺序无关、按长度分组的比较指纹；旧结果继续使用可核实的原数据指纹。
 - 耗时与显存保留实际测量范围；成本对照须另行统一硬件、精度、批量及计时边界。跨方法质量展示的宽松规则不改变缓存复用、失败重试和恢复时的严格校验。
-- 单 checkpoint 展示分组／长度图，多 checkpoint 按真实 step 绘图、用虚线表示基线。看板直接读取本地结果，无需重新运行评估，更多用法见 [v4 benchmark 说明](../v4/benchmarks/README.md#4-看板与-full-context-基线)。
+- 单 checkpoint 展示分组／长度图，多 checkpoint 按真实 step 绘图、用虚线表示基线。看板直接读取本地结果，无需重新运行评估，更多用法见 [v4 benchmark 说明](../v4/benchmarks/README.md#2-看板与-full-context-基线)。

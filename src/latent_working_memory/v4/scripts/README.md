@@ -1,6 +1,6 @@
 # 运行 v4 实验
 
-最后修订时间：20261030 20:26:49 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261101 17:31:18 Asia/Shanghai（UTC+08:00）
 
 使用 [run.sh](run.sh) 完成训练、恢复、新 run 续训和独立评估。默认 Qwen3-4B-Instruct-2507、每层 32 个 memory slots。方法与训练细节见 [v4 说明](../README.md)，默认配置为 [frozen_query_gen.json](../../../../configs/v4/frozen_query_gen.json)。
 
@@ -23,27 +23,20 @@ QASPER 目录保留 `train/dev/test.jsonl`，可从 [ModelScope](https://modelsc
 
 ### 1.2 Benchmark 数据准备
 
-下载与生成使用独立入口，确保系统安装有 `git`、`git-lfs`、`curl`：
+使用公共入口下载素材并生成 RULER 样本：
 
 ```bash
-bash src/latent_working_memory/v4/scripts/download_benchmarks.sh --benchmark all
-```
+bash src/latent_working_memory/benchmarks/scripts/download_benchmarks.sh --benchmark all
 
-`--benchmark` 可选 `all`（默认）、`ruler`、`locomo`。LoCoMo 下载后可直接用于评估，RULER 下载的是源码、素材与分词资源，需要使用和模型训练相同的 tokenizer 生成样本。
-
-NLTK 的 `punkt` 和 `punkt_tab` 固定下载到项目 `data/raw/nltk_data/`。通过 ModelScope 分发时，将它与 `data/raw/ruler-v1-source/`、`data/benchmarks/locomo/` 一起保存并按原相对路径还原，保留 `nltk_data/tokenizers/` 下的资源目录。还原后跳过下载脚本，直接运行下面的生成命令；生成无需 RULER 目录中的 `.git`。生成脚本自动设置项目目录的绝对 `NLTK_DATA`，其子进程共用此设置。
-
-```bash
-bash src/latent_working_memory/v4/scripts/generate_ruler.sh \
+bash src/latent_working_memory/benchmarks/scripts/generate_ruler.sh \
   --model-path "~/models/Qwen3-4B-Instruct-2507" \
   --lengths 8192 16384 32768 \
   --num-samples 100 --seed 42
 ```
 
-- 默认三个长度（8k，16k，32k），每个长度、每项任务生成 100 条，共 13 项任务。
-- 默认写入 `data/benchmarks/ruler-v1/<model-name>/`，可传入 `--output-dir` 更改输出目录。
-- 已有长度目录拒绝覆盖；失败生成后，重试前将失败的长度目录移出输出目录，或指定新的 `--output-dir`。
-- 不同模型自动分目录，原始素材共享，详情见 [benchmark 数据准备说明](../benchmarks/README.md#2-手动准备数据)。
+- **RULER**：使用与评估模型相同的 tokenizer 生成样本，默认写入 `data/benchmarks/ruler-v1/<model-name>/`。
+- **LoCoMo**：下载后可直接评估，默认位于 `data/benchmarks/locomo/`。
+- **详细说明**：依赖、参数、原始素材搬运与失败重试见[公共 benchmark 数据准备说明](../../benchmarks/README.md#2-数据准备)。
 
 ## 2. 运行
 

@@ -6,7 +6,7 @@ cd "$LWM_ROOT"
 
 usage() {
   cat <<'HELP'
-用法：bash src/latent_working_memory/v4/scripts/generate_ruler.sh [参数]
+用法：bash src/latent_working_memory/benchmarks/scripts/generate_ruler.sh [参数]
 
 从已下载的 RULER v1 素材构造全部 13 项评估任务。
 
@@ -19,7 +19,7 @@ usage() {
   -h, --help               显示帮助
 
 先下载 RULER 素材与 data/raw/nltk_data 中的 NLTK 资源；仅需 tokenizer 与 CPU。
-可执行 download_benchmarks.sh --benchmark ruler，或从 ModelScope 还原上述目录。
+可执行 bash src/latent_working_memory/benchmarks/scripts/download_benchmarks.sh --benchmark ruler，或从 ModelScope 还原上述目录。
 相对路径以项目根目录为基准；已有长度目录不覆盖，另用 --output-dir 保存新设置。
 model-name 取 --model-path 的最后一级目录名或 HF 仓库名。
 HELP
@@ -78,7 +78,7 @@ fi
 output_dir="$(expand_user_path "$output_dir")"
 [[ $ruler_source_dir == /* ]] || ruler_source_dir="$LWM_ROOT/$ruler_source_dir"
 [[ $output_dir == /* ]] || output_dir="$LWM_ROOT/$output_dir"
-[[ -f "$ruler_source_dir/scripts/synthetic.yaml" ]] || fail 'RULER 源码不存在；请先执行 download_benchmarks.sh --benchmark ruler'
+[[ -f "$ruler_source_dir/scripts/synthetic.yaml" ]] || fail 'RULER 源码不存在；请先执行 bash src/latent_working_memory/benchmarks/scripts/download_benchmarks.sh --benchmark ruler'
 for length in "${lengths[@]}"; do
   [[ ! -e "$output_dir/$length" ]] || fail "RULER 长度目录已存在：$output_dir/$length；请更换 --output-dir"
 done
