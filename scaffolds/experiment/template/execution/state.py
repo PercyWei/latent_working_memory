@@ -9,6 +9,8 @@ import time
 
 import torch
 
+from ..config import normalize_saved_config
+
 
 def write_json(path, value):
     path = Path(path)
@@ -45,6 +47,7 @@ def read_checkpoint(path):
         "binding",
     }:
         raise ValueError("checkpoint fields differ from the execution contract")
+    state["config"] = normalize_saved_config(state["config"])
     return state
 
 
@@ -81,23 +84,35 @@ def rewind_metrics(path, step):
 
 
 @contextmanager
-def scheduler_lock(directory):
-    """同一任务仅一个调度器；锁覆盖分工、worker 执行与结果提交。"""
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    with (directory / ".scheduler.lock").open("a") as stream:
+def _file_lock(path, exclusive):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as stream:
         try:
-            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+            fcntl.flock(stream, mode | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            raise ValueError(f"another scheduler is running in {directory}") from error
+            raise ValueError(f"another operation is using {path}") from error
         try:
             yield
         finally:
             fcntl.flock(stream, fcntl.LOCK_UN)
 
 
+def run_lock(directory, exclusive=False):
+    directory = Path(directory).expanduser().resolve()
+    return _file_lock(directory.parent / ".locks" / directory.name / "run.lock", exclusive)
+
+
+def evaluation_lock(directory, eval_id, task):
+    directory = Path(directory).expanduser().resolve()
+    return _file_lock(
+        directory.parent / ".locks" / directory.name / f"eval-{eval_id}" / f"{task}.lock",
+        True,
+    )
+
+
 def prepare_work(output_dir, request, sample_ids, num_workers):
-    """固定任务集合的参考路径；调用方持有 scheduler_lock，当前没有 worker。"""
+    """调用方持有任务锁，分配本轮缺失样本；当前没有 worker。"""
     if num_workers < 1 or len(set(sample_ids)) != len(sample_ids):
         raise ValueError("workers must be positive and sample ids must be unique")
     directory = Path(output_dir)

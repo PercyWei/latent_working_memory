@@ -1,4 +1,4 @@
-"""四种运行模式的参数边界；只覆盖显式提供的配置。"""
+"""训练、恢复与独立评估的参数边界；只覆盖显式提供的配置。"""
 
 import argparse
 from pathlib import Path
@@ -37,12 +37,14 @@ def save_frequency(value):
 
 def parse_run_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="完整运行、只训练、恢复与独立评估。", argument_default=argparse.SUPPRESS
+        description="训练、恢复与独立评估。", argument_default=argparse.SUPPRESS
     )
     modes = parser.add_mutually_exclusive_group()
-    modes.add_argument("--train-only", action="store_true", help="只训练及 dev 验证")
     modes.add_argument("--resume", action="store_true", help="从单个 checkpoint 沿用计划恢复")
     modes.add_argument("--evaluate-only", action="store_true", help="独立评估已有 checkpoint")
+    parser.add_argument(
+        "--overwrite", action="store_true", help="覆盖当前 run 或评估 task 的旧产物"
+    )
     parser.add_argument("--config", help=f"JSON 配置，默认 {DEFAULT_CONFIG}")
     parser.add_argument("--device", choices=("cpu", "cuda"), help="默认 cpu；CUDA 由可见设备选择")
     parser.add_argument("--cpu-processes", type=positive_int, help="CPU worker 数，默认 1")
@@ -70,7 +72,7 @@ def parse_run_args(argv=None):
     sources = parser.add_mutually_exclusive_group()
     sources.add_argument("--checkpoint", nargs="+", help="恢复用单个路径；独立评估可传多个")
     sources.add_argument("--eval-run", help="评估该运行目录仍保留的全部 checkpoint")
-    parser.add_argument("--eval-id", help="独立评估默认 YYYYMMDD-HHMMSS；自动 test 默认 auto")
+    parser.add_argument("--eval-id", help="评估计划标识，默认 YYYYMMDD-HHMMSS")
     parser.add_argument("--test-data", help="包含 test.jsonl 的目录")
     parser.add_argument("--max-test-samples", type=optional_positive_int)
     parser.add_argument(
@@ -98,17 +100,23 @@ def parse_run_args(argv=None):
             "max_new_tokens",
             "device",
             "cpu_processes",
+            "overwrite",
         }
     else:
-        forbidden = supplied & {"checkpoint", "eval_run"}
-        if getattr(args, "train_only", False):
-            forbidden |= supplied & {"test_data", "max_test_samples", "max_new_tokens", "eval_id"}
+        forbidden = supplied & {
+            "checkpoint",
+            "eval_run",
+            "test_data",
+            "max_test_samples",
+            "max_new_tokens",
+            "eval_id",
+        }
     if forbidden:
         options = ", ".join("--" + name.replace("_", "-") for name in sorted(forbidden))
         parser.error(f"options are not valid in this mode: {options}")
     if getattr(args, "device", "cpu") == "cuda" and "cpu_processes" in supplied:
         parser.error("--cpu-processes requires --device cpu")
-    args.train_only = getattr(args, "train_only", False)
+    args.overwrite = getattr(args, "overwrite", False)
     args.resume = resume
     args.evaluate_only = evaluate_only
     args.checkpoint = getattr(args, "checkpoint", None)
@@ -127,8 +135,6 @@ def config_overrides(args):
     for name in (
         "output_root",
         "run_id",
-        "train_only",
-        "eval_id",
         "epochs",
         "max_steps",
         "gradient_accumulation_steps",
@@ -139,8 +145,6 @@ def config_overrides(args):
         "max_train_data_tokens",
         "max_train_samples",
         "max_dev_samples",
-        "max_test_samples",
-        "max_new_tokens",
         "tracking",
         "swanlab_project",
         "group",
@@ -149,9 +153,8 @@ def config_overrides(args):
             training[name] = getattr(args, name)
     if "micro_batch_size_per_gpu" in supplied:
         training["micro_batch_size"] = args.micro_batch_size_per_gpu
-    for option, field in (("train_data", "dataset_dir"), ("test_data", "test_data")):
-        if option in supplied:
-            training[field] = str(Path(getattr(args, option)).expanduser().resolve())
+    if "train_data" in supplied:
+        training["dataset_dir"] = str(Path(args.train_data).expanduser().resolve())
     if training:
         overrides["training"] = training
     return overrides

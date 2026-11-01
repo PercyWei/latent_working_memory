@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 
 from .. import method
+from ..config import normalize_saved_config
 from ..execution.plans import inspect_resume, load_plan, resolve_training
 from ..execution.runtime import capture_rng, initialize_device, restore_rng, seed_all
 from ..execution.state import checkpoint_file, rewind_metrics, save_checkpoint, write_json
@@ -118,7 +119,12 @@ def train(plan_dir, device="cpu", resume=None):
             nonlocal stream, tracking
             output_dir.mkdir(parents=True, exist_ok=True)
             if resume:
-                if json.loads((output_dir / "config.json").read_text(encoding="utf-8")) != config:
+                if (
+                    normalize_saved_config(
+                        json.loads((output_dir / "config.json").read_text(encoding="utf-8"))
+                    )
+                    != config
+                ):
                     raise ValueError("saved actual configuration differs from the checkpoint")
                 rewind_metrics(metrics_path, step)
             elif any(

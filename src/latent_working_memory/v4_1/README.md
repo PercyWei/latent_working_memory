@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261031 20:52:10 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261101 15:34:53 Asia/Shanghai
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
 
@@ -17,7 +17,7 @@
 | 训练监督 | 每次写入后计算 outer AM；全文处理后固定 memory，输入问题和答案，计算答案 CE |
 | 外层更新 | 通过完整写入轨迹学习初始化、KV／bias 解码器、正步长与 attention Q/K/V LoRA |
 | 推理 | 固定慢参数，沿用在线写入；正文处理完成后固定 memory，追加问题 KV 并自回归生成 |
-| 完整运行 | 先保存训练和 test 计划；训练与 dev 结束、全部训练进程退出后，在可见 GPU 间按样本分片测试最后一个 checkpoint |
+| 默认运行 | 先保存训练计划，再进行训练、dev 验证与 checkpoint 保存；test／benchmark 独立启动 |
 
 首版支持 full-attention Qwen3、固定 default RoPE，不启用随机 dropout。GPU 由 `CUDA_VISIBLE_DEVICES` 指定：离线准备按文档分配，训练每卡一个数据并行进程，评估按样本分片共同处理一个 checkpoint，多个 checkpoint 按 step 串行。Inner 使用 recent 自然读取；outer 使用固定文本提示与 teacher 自然响应。Latent query 生成器与 self-study 保留为研究候选。
 
@@ -137,7 +137,7 @@ Teacher 的完整原文 prefix KV 在准备当前样本参照时随压缩边界�
 
 Prepare/train 默认读取 `configs/v4-1/online_ttt_memory.json`，分别通过 `--prepare-data`、`--train-data` 覆盖 `training.dataset_dir`；显式 CLI 值在校验前覆盖配置。两者的数据、模型、seed、筛选设置与产物父目录须保持一致。
 
-`run.sh` 先保存计划，再按计划执行。默认在训练后评估最后一个 checkpoint；`--train-only` 只创建训练计划并执行训练和 dev，`--evaluate-only` 读取或创建独立评估计划。首次独立评估须明确指定数据目录，已有计划沿用原设置。具体选项见[运行指南](scripts/README.md)。
+`run.sh` 默认先保存训练计划，再执行训练和 dev；`--resume` 只恢复训练，预算已完成时直接返回。Test／benchmark 使用 `--evaluate-only` 独立执行，首次创建或覆盖评估计划须明确指定数据目录；通常重跑时沿用原计划与缓存。具体选项见[运行指南](scripts/README.md)。
 
 ### 3.1 Memory 与 inner：`model`
 
@@ -177,11 +177,6 @@ Prepare/train 默认读取 `configs/v4-1/online_ttt_memory.json`，分别通过 
 | `dataset_dir` | `data/delta-mem-qasper` | QA 数据目录 |
 | `output_root` | `artifacts/v4-1` | 产物父目录；teacher 共享，每个 run 下划分 train 与 eval |
 | `run_id` | `null` | 运行目录的末尾标识；`null` 时自动生成 `YYYYMMDD-HHMMSS` |
-| `train_only` | `false` | 仅训练与 dev 验证，跳过最终 test |
-| `test_data` | `null` | 最终 test 数据目录；`null` 沿用 `dataset_dir` |
-| `max_test_samples` | `null` | 最终 test 的 QA 数量上限，默认全量 |
-| `max_new_tokens` | 128 | 最终 test 的响应生成上限 |
-| `eval_id` | `null` | 最终 test 的计划标识；默认 `auto`，独立评估未指定时使用时间戳 |
 | `epochs`／`max_steps` | 4／`null` | 训练轮数／可选 optimizer step 上限；实际配置保存解析后的总步数 |
 | `micro_batch_size`／`gradient_accumulation_steps` | 2／8 | 每卡 microbatch／累积次数；全局 batch 还需乘 GPU 数量 |
 | `learning_rate`／`lora_learning_rate` | $10^{-4}$／$2\times10^{-5}$ | 新增参数／LoRA 峰值学习率 |
@@ -209,14 +204,16 @@ Prepare/train 默认读取 `configs/v4-1/online_ttt_memory.json`，分别通过 
 | 计划 | 内容 |
 |---|---|
 | `<运行目录>/plan/config.json` | 公共 seed、模型与 teacher 设置 |
-| `<运行目录>/plan/train.json` | 训练设置与后续执行安排 |
+| `<运行目录>/plan/train.json` | 训练设置与执行预算 |
 | `<运行目录>/plan/eval-<eval-id>/<task>.json` | 任务的数据、生成预算与评估规则 |
 
-完整运行在训练启动前创建自动 test 计划，默认位置为 `plan/eval-auto/test.json`；显式 `eval_id` 替换其中的 `auto`。自动 test 未指定数据时采用训练数据目录，并将最终选择写入计划。计划不绑定本次选中的 checkpoint，补评时可以沿用同一任务计划。
+训练启动前只保存训练计划。评估计划在独立评估启动时创建，按 `(eval-id, task)` 隔离，不绑定本次选中的 checkpoint；补评时可以沿用同一任务计划。
 
-恢复使用 `--resume --checkpoint`，先核对原计划与 checkpoint，再恢复参数、优化器和进度，不接受 CLI 覆盖；GPU 数量和绑定数据须保持一致。Checkpoint 保留完整恢复状态和实际设置快照，计划中的请求预算不随运行改写。训练已完成时仅继续或复用最终 test；训练失败时不启动 test。
+恢复使用 `--resume --checkpoint`，先核对原计划与 checkpoint，再恢复参数、优化器和进度，不接受 CLI 覆盖；GPU 数量和绑定数据须保持一致。Checkpoint 保留完整恢复状态和实际设置快照，计划中的请求预算不随运行改写。训练已完成时直接返回；训练恢复不依赖评估计划或结果。
 
-独立评估首次创建计划须指定数据目录；已有计划省略参数即沿用，固定设置不一致时报错。RULER 可扩展目标长度，已有结果只补缺失长度。`--evaluate-only` 与 `--train-only`、`--resume` 互斥，不接受训练配置覆盖，评估卡数不受训练卡数限制。
+独立评估首次创建计划须指定数据目录；已有计划省略参数即沿用，固定设置不一致时报错。RULER 可扩展目标长度，已有结果只补缺失长度。`--evaluate-only` 与 `--resume` 互斥，不接受训练配置覆盖，评估卡数不受训练卡数限制。
+
+`--overwrite` 默认关闭，仅作用于本次调度。新训练覆盖整个实际 run 目录；独立评估覆盖当前 task 的全部 checkpoint 结果及对应计划，其他 task 与源 checkpoint 保留。评估覆盖按新计划处理，须重新提供数据目录；省略预算使用新计划默认值。校验通过后持锁清理并重建计划，正在执行的目标直接报错；共享 teacher 缓存和 SwanLab 云端历史保留。恢复不允许覆盖。
 
 训练保存 `train.log` 与 `status.json`；评估按 step 逐个处理 checkpoint，各卡分片其未完成样本。`eval.log` 汇总带 GPU／分片前缀的输出，任务级 `status.json` 记录 checkpoint 和分片状态。单项失败后继续后续 checkpoint；中断保留逐题完成进度，重试可改变 GPU 数并重新分片剩余样本。SwanLab 仅记录 train/dev，评估不读取云端身份或凭据；dashboard 只需本地 `eval/` 结果。
 
@@ -229,13 +226,13 @@ v4_1/
   data.py                # QA 编码、样本选择、压缩边界
   modeling/              # Memory 解码、局部 AM、Qwen3 接入与在线状态
   teacher/               # 固定提示、离线 token 缓存、运行时 teacher 回放
-  training/              # 完整运行调度、元训练、验证、checkpoint
+  training/              # 训练调度、元训练、验证、checkpoint
   evaluation/            # 评估计划、样本分片、结果汇总与输出诊断
   dashboard.py           # 从本地评估结果构建独立看板
   scripts/               # 环境与设备入口、可复制命令
 ```
 
-`training/run.py` 按运行方式调度训练或独立评估；完整运行等待 `training/train.py` 的全部训练进程退出后，再复用独立评估入口计算最终 test。自动评估只选择最后一个 checkpoint，结果保存到本地 `eval/` 目录并由独立 dashboard 展示。
+`training/run.py` 调度训练、恢复或独立评估。训练预算完成、全部训练进程退出后结束；评估独立选择 checkpoint，结果保存到本地 `eval/` 目录并由 dashboard 展示。
 
 训练的 `qa_loss` 是样本内答案 token 平均 CE；`outer_am` 是完整历史参照下的标准化 AM，等于输出项 `outer_am_output` 与 log-mass 项 `outer_am_mass` 之和。两项沿用总 AM 的 query、head、层、压缩轮次与样本平均方式，仅作为日志诊断；训练目标仍为 `qa_loss + lambda_am * outer_am`。train/dev 的两个分项均写入 `metrics.jsonl` 与 SwanLab，训练终端同步输出。
 

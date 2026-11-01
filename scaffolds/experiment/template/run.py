@@ -1,4 +1,4 @@
-"""四种模式共用的控制入口；计算进程只接受已保存计划。"""
+"""训练、恢复和独立评估共用的控制入口；计算进程只接受已保存计划。"""
 
 from functools import partial
 import json
@@ -23,6 +23,7 @@ def launch_training(plan_dir, checkpoint, device, workers):
             "torch.distributed.run",
             "--standalone",
             "--nnodes=1",
+            "--local-addr=127.0.0.1",
             f"--nproc-per-node={workers}",
             "--module",
         ]
@@ -45,7 +46,7 @@ def main(argv=None):
     train = partial(launch_training, device=args.device, workers=workers)
     evaluate = partial(evaluate_checkpoint, device=args.device, workers=workers)
     if args.resume:
-        result = resume_run(args.checkpoint, workers, train, evaluate)
+        result = resume_run(args.checkpoint, workers, train)
     elif args.evaluate_only:
         checkpoints = args.checkpoint
         if args.eval_run is not None:
@@ -64,11 +65,11 @@ def main(argv=None):
             field: getattr(args, name) for name, field in names.items() if name in args._supplied
         }
         result = evaluate_checkpoints(
-            checkpoints, getattr(args, "eval_id", None), "test", options, evaluate
+            checkpoints, getattr(args, "eval_id", None), "test", options, evaluate, args.overwrite
         )
     else:
         config = load_config(getattr(args, "config", None), config_overrides(args))
-        result = start_run(config, method_name(config), workers, train, evaluate)
+        result = start_run(config, method_name(config), workers, train, args.overwrite)
     print(
         json.dumps(
             result if isinstance(result, dict) else {"evaluation_dir": str(result)},

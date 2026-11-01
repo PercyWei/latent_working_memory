@@ -1,4 +1,4 @@
-"""四种运行模式的同步编排；训练与评估模块负责启动并等待计算进程。"""
+"""训练、恢复和独立评估的同步编排；训练与评估模块负责启动并等待计算进程。"""
 
 from datetime import datetime
 import json
@@ -6,43 +6,46 @@ from pathlib import Path
 import subprocess
 from zoneinfo import ZoneInfo
 
-from .plans import create_run, directory_name, evaluation_plan, inspect_resume
-from .state import checkpoint_file, read_checkpoint, scheduler_lock, write_json
+from .plans import create_run, directory_name, evaluation_plan, inspect_resume, resolve_run
+from .state import checkpoint_file, evaluation_lock, read_checkpoint, run_lock, write_json
 
 
 def _now():
     return datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
 
 
-def start_run(config, method_name, world_size, train, evaluate):
-    config = create_run(config, method_name)
-    return _train_and_test(config, world_size, None, train, evaluate)
+def start_run(config, method_name, world_size, train, overwrite=False):
+    config = resolve_run(config, method_name)
+    with run_lock(Path(config["training"]["output_dir"]).parent, exclusive=True):
+        create_run(config, overwrite)
+        return _train(config, world_size, None, train)
 
 
-def resume_run(checkpoint, world_size, train, evaluate):
-    # 接口不接受新配置或 overrides；训练参数从原计划恢复。
-    config, state = inspect_resume(checkpoint, world_size)
-    complete = state["cursor"]["step"] == state["config"]["training"]["max_steps"]
-    if not complete:
+def resume_run(checkpoint, world_size, train):
+    # 规范 checkpoint 路径为 run/train/checkpoints/global_step_N/state.pt。
+    path = checkpoint_file(checkpoint)
+    with run_lock(path.parents[3], exclusive=True):
+        config, state = inspect_resume(path, world_size)
+        complete = state["cursor"]["step"] == state["config"]["training"]["max_steps"]
+        if not complete:
+            del state
+            return _train(config, world_size, path, train)
+        output = Path(config["training"]["output_dir"])
+        result = {
+            "step": state["cursor"]["step"],
+            "checkpoint": str(path),
+            "output_dir": str(output),
+        }
         del state
-        return _train_and_test(config, world_size, checkpoint_file(checkpoint), train, evaluate)
-    output = Path(config["training"]["output_dir"])
-    result = {
-        "step": state["cursor"]["step"],
-        "checkpoint": str(checkpoint_file(checkpoint)),
-        "output_dir": str(output),
-    }
-    del state
-    write_json(output / "summary.json", result)
-    status = json.loads((output / "status.json").read_text(encoding="utf-8"))
-    status.update(status="finished", return_code=0, finished_at=_now())
-    status.pop("error", None)
-    write_json(output / "status.json", status)
-    _automatic_test(config, result, evaluate)
-    return result
+        write_json(output / "summary.json", result)
+        status = json.loads((output / "status.json").read_text(encoding="utf-8"))
+        status.update(status="finished", return_code=0, finished_at=_now())
+        status.pop("error", None)
+        write_json(output / "status.json", status)
+        return result
 
 
-def _train_and_test(config, world_size, checkpoint, train, evaluate):
+def _train(config, world_size, checkpoint, train):
     output = Path(config["training"]["output_dir"])
     output.mkdir(parents=True, exist_ok=True)
     job = {
@@ -86,19 +89,19 @@ def _train_and_test(config, world_size, checkpoint, train, evaluate):
         output / "status.json",
         {**job, "status": "finished", "return_code": 0, "finished_at": _now()},
     )
-    _automatic_test(config, result, evaluate)
     return result
 
 
-def _automatic_test(config, result, evaluate):
-    if not config["training"]["train_only"]:
-        evaluate_checkpoints(
-            [result["checkpoint"]], config["training"]["eval_id"], "test", {}, evaluate
-        )
+def evaluate_checkpoints(checkpoints, eval_id, task, options, evaluate, overwrite=False):
+    """独立评估；evaluate 一次负责一个 checkpoint。"""
+    if not checkpoints:
+        raise ValueError("select checkpoints from one run")
+    source = checkpoint_file(checkpoints[0]).parents[3]
+    with run_lock(source):
+        return _evaluate_locked(checkpoints, eval_id, task, options, evaluate, overwrite)
 
 
-def evaluate_checkpoints(checkpoints, eval_id, task, options, evaluate):
-    """独立评估与自动 test 复用本入口；evaluate 一次负责一个 checkpoint。"""
+def _evaluate_locked(checkpoints, eval_id, task, options, evaluate, overwrite):
     selected, config = [], None
     for checkpoint in checkpoints:
         path = checkpoint_file(checkpoint)
@@ -126,8 +129,9 @@ def evaluate_checkpoints(checkpoints, eval_id, task, options, evaluate):
     directory_name(task)
     run_dir = Path(config["training"]["output_dir"]).parent
     directory = run_dir / "eval" / eval_id / task
-    with scheduler_lock(directory):
-        settings = evaluation_plan(run_dir, config, eval_id, task, options)
+    with evaluation_lock(run_dir, eval_id, task):
+        settings = evaluation_plan(run_dir, config, eval_id, task, options, overwrite)
+        directory.mkdir(parents=True, exist_ok=True)
         path = directory / "status.json"
         history = (
             json.loads(path.read_text(encoding="utf-8"))["checkpoints"] if path.exists() else {}

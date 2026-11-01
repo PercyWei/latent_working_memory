@@ -14,6 +14,7 @@ import torch
 
 from latent_working_memory.v4_1.config import ExperimentConfig, TrainingConfig
 from latent_working_memory.v4_1.evaluation import evaluate, run
+from latent_working_memory.v4_1.execution import evaluation_lock, run_lock
 
 
 def checkpoints(directory, steps):
@@ -146,8 +147,10 @@ def test_cached_checkpoints_sort_and_preserve_plan_without_gpu(tmp_path, monkeyp
 
     parsed = []
     monkeypatch.setattr(run, "run_evaluations", parsed.append)
-    run.main(["--checkpoint", str(paths[0]), "--test-data", "test", "--max-test-samples", "null"])
+    run.main(["--checkpoint", str(paths[0]), "--test-data", "test", "--max-test-samples", "null",
+              "--overwrite"])
     assert parsed[-1].eval_type == "test" and parsed[-1].max_test_samples is None
+    assert parsed[-1].overwrite
     run.main(["--checkpoint", str(paths[0]), "--eval-type", "benchmark", "--benchmark", "locomo", "--benchmark-data", "benchmark"])
     assert parsed[-1].benchmark == "locomo" and parsed[-1].benchmark_data == "benchmark"
     for option in ("--task", "--data", "--max-samples"):
@@ -327,3 +330,116 @@ def test_checkpoints_are_serial_and_samples_use_all_gpus_with_retry(tmp_path, mo
     assert status["progress"]["finished"] == 1 and killed
     assert all(process.poll() is not None for process in processes)
     assert all(signal.getsignal(signum) == handler for signum, handler in original.items())
+
+
+def test_overwrite_rebuilds_only_current_task_and_keeps_validation_before_deletion(tmp_path, monkeypatch):
+    directory = tmp_path / "artifacts/method_01/train"
+    paths = checkpoints(directory, (10, 2))
+    (tmp_path / "data").mkdir()
+    computed = []
+
+    def cached(checkpoint, data, output, **settings):
+        path = output / "summary.json"
+        return json.loads(path.read_text()) if path.exists() else None
+
+    def compute(results, summary, status_path, settings):
+        pending = [result for result in results if result["status"] == "pending"]
+        computed.append((settings["task"], [result["step"] for result in pending]))
+        for result in pending:
+            output = Path(result["output_dir"])
+            (output / "summary.json").write_text(json.dumps({"settings": settings}))
+            (output / "old-result").write_text("completed")
+            result.update(status="finished", return_code=0)
+
+    monkeypatch.setattr(run, "load_cached_evaluation", cached)
+    monkeypatch.setattr(run, "_compute", compute)
+    monkeypatch.setattr(run, "_visible_devices", forbidden)
+    test = arguments(tmp_path, paths, eval_id="auto")
+    test_output = run.run_evaluations(test)
+    test_plan = directory.parent / "plan/eval-auto/test.json"
+    test_settings = test_plan.read_bytes()
+    ruler = arguments(tmp_path, paths, eval_id="auto", eval_type="benchmark", benchmark="ruler",
+                      lengths=[8192, 16384])
+    ruler_output = run.run_evaluations(ruler)
+    ruler_plan = directory.parent / "plan/eval-auto/ruler.json"
+    old_settings = ruler_plan.read_bytes()
+
+    # 相同 eval-id 下其他 task 独立；缺少新任务所需数据时，旧计划和结果不动。
+    missing_data = arguments(tmp_path, paths, eval_id="auto", overwrite=True,
+                             eval_type="benchmark", benchmark="ruler", lengths=[8192])
+    del missing_data.benchmark_data
+    with pytest.raises(ValueError, match="benchmark-data"):
+        run.run_evaluations(missing_data)
+    assert ruler_plan.read_bytes() == old_settings
+    assert (ruler_output / "global_step_2/old-result").is_file()
+    with pytest.raises(FileNotFoundError):
+        run.run_evaluations(arguments(tmp_path, paths, eval_id="auto", overwrite=True,
+                                      eval_type="benchmark", benchmark="ruler",
+                                      benchmark_data=str(tmp_path / "missing-data")))
+    assert ruler_plan.read_bytes() == old_settings
+    assert (ruler_output / "global_step_2/old-result").is_file()
+    with pytest.raises(ValueError, match="expand|superset"):
+        run.run_evaluations(arguments(tmp_path, paths, eval_id="auto", eval_type="benchmark",
+                                      benchmark="ruler", lengths=[8192]))
+    assert ruler_plan.read_bytes() == old_settings
+
+    # 覆盖完整 task，一次清理后只调度本次选择，允许重建不同数据与更短长度集合。
+    new_data = str(tmp_path / "new-benchmark-data")
+    Path(new_data).mkdir()
+    overwrite = arguments(tmp_path, [paths[0]], eval_id="auto", overwrite=True,
+                          eval_type="benchmark", benchmark="ruler", benchmark_data=new_data,
+                          lengths=[8192])
+    assert run.run_evaluations(overwrite) == ruler_output
+    assert computed == [("test", [2, 10]), ("ruler", [2, 10]), ("ruler", [10])]
+    assert not (ruler_output / "global_step_2").exists()
+    settings = json.loads(ruler_plan.read_text())
+    assert settings["data"] == new_data and settings["lengths"] == [8192]
+    status = json.loads((ruler_output / "status.json").read_text())
+    assert set(status["checkpoints"]) == {"global_step_10"}
+    assert test_plan.read_bytes() == test_settings
+    assert (test_output / "global_step_2/old-result").is_file()
+
+    # auto 是普通标识；覆盖 test 可改预算，不影响同 ID 的 ruler。
+    ruler_settings = ruler_plan.read_bytes()
+    run.run_evaluations(arguments(tmp_path, paths, eval_id="auto", overwrite=True,
+                                  max_new_tokens=9))
+    assert computed[-1] == ("test", [2, 10])
+    assert json.loads(test_plan.read_text())["max_new_tokens"] == 9
+    assert all((test_output / f"global_step_{step}/summary.json").is_file() for step in (2, 10))
+    assert ruler_plan.read_bytes() == ruler_settings
+    assert (ruler_output / "global_step_10/old-result").is_file()
+    reuse = arguments(tmp_path, paths, eval_id="auto")
+    del reuse.test_data
+    before = len(computed)
+    run.run_evaluations(reuse)
+    assert len(computed) == before
+
+
+def test_overwrite_respects_source_target_and_task_locks(tmp_path, monkeypatch):
+    directory = tmp_path / "artifacts/method_01/train"
+    paths = checkpoints(directory, (2,))
+    (tmp_path / "data").mkdir()
+    monkeypatch.setattr(run, "load_cached_evaluation", lambda *args, **kwargs: {})
+    monkeypatch.setattr(run, "_compute", forbidden)
+    source = directory.parent
+    target = tmp_path / "evaluation/method_01"
+    args = arguments(tmp_path, paths, output_root=str(target.parent), eval_id="same", overwrite=True)
+    output = run.run_evaluations(args)
+    marker = output / "keep-until-replaced"
+    marker.write_text("old result")
+    for protected in (source, target):
+        with run_lock(protected, exclusive=True):
+            with pytest.raises(ValueError):
+                run.run_evaluations(args)
+        assert marker.read_text() == "old result" and paths[0].is_file()
+    with evaluation_lock(target, "same", "test"):
+        with pytest.raises(ValueError):
+            run.run_evaluations(args)
+    assert marker.is_file()
+
+    # 同 ID 的其他任务可并行；稳定锁不会随当前 task 结果目录一起删除。
+    with evaluation_lock(target, "same", "ruler"):
+        assert run.run_evaluations(args) == output
+    assert not marker.exists()
+    assert paths[0].is_file()
+    assert not (source / "eval").exists()

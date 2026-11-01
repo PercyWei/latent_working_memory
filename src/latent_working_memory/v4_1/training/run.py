@@ -1,12 +1,12 @@
-"""完整运行、训练恢复与独立评估。"""
+"""训练、训练恢复与独立评估。"""
 
-import argparse
 from dataclasses import replace
 from datetime import datetime
 import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -16,8 +16,9 @@ from ..cli import DEFAULT_CONFIG, config_overrides, parse_run_args as parse_args
 from ..config import load_config
 from ..evaluation.records import write_json
 from ..evaluation.run import run_evaluations
+from ..execution import run_lock
 from ..plans import (
-    load_training_plan, prepare_evaluation_plan, save_training_plan, validate_training_plan,
+    load_training_plan, save_training_plan, validate_training_plan,
 )
 from .checkpoint import checkpoint_file, read_checkpoint
 from .train import _training_output_dir
@@ -84,10 +85,7 @@ def _execute(command, environment, log_path):
         raise subprocess.CalledProcessError(returncode, command)
 
 
-def run_job(args):
-    if args.evaluate_only:
-        return run_evaluations(args)
-    devices = _visible_devices()
+def _run_training(args, devices, config, output_dir):
     resume = None
     complete = False
     if args.resume:
@@ -120,26 +118,15 @@ def run_job(args):
             )
             write_json(status_path, status)
     else:
-        config = load_config(getattr(args, "config", DEFAULT_CONFIG), config_overrides(args))
-        now = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M%S")
-        config = replace(config, training=replace(
-            config.training,
-            run_id=config.training.run_id or now,
-            eval_id=config.training.eval_id or "auto",
-            test_data=str(Path(config.training.test_data or config.training.dataset_dir).expanduser().resolve()),
-        ))
-        output_dir = _training_output_dir(config, None)
-        if output_dir.parent.exists() and any(output_dir.parent.iterdir()):
-            raise ValueError(f"run directory is not empty: {output_dir.parent}; use --resume")
+        if args.overwrite:
+            if not Path(config.training.dataset_dir).is_dir():
+                raise FileNotFoundError(f"training data directory does not exist: {config.training.dataset_dir}")
+            if output_dir.parent.exists():
+                shutil.rmtree(output_dir.parent)
+        elif output_dir.parent.exists() and any(output_dir.parent.iterdir()):
+            raise ValueError(f"run directory is not empty: {output_dir.parent}; use --resume or --overwrite")
         config = replace(config, training=replace(config.training, output_dir=str(output_dir)))
         plan_dir = save_training_plan(config)
-        if not config.training.train_only:
-            prepare_evaluation_plan(
-                output_dir.parent, config, config.training.eval_id, "test",
-                {"data": config.training.test_data,
-                 "max_samples": config.training.max_test_samples,
-                 "max_new_tokens": config.training.max_new_tokens},
-            )
 
     if not complete:
         command = [
@@ -180,13 +167,26 @@ def run_job(args):
             "finished_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
         })
 
-    if not config.training.train_only:
-        print("训练完成，开始最终 test 评估。", flush=True)
-        run_evaluations(argparse.Namespace(
-            checkpoint=[result["checkpoint"]], eval_run=None, eval_type="test", benchmark=None,
-            eval_id=config.training.eval_id, output_root=None,
-        ))
     return result
+
+
+def run_job(args):
+    if args.evaluate_only:
+        return run_evaluations(args)
+    devices = _visible_devices()
+    if args.resume:
+        checkpoint = checkpoint_file(args.checkpoint)
+        if checkpoint.name != "state.pt" or not checkpoint.parent.name.startswith("global_step_"):
+            raise ValueError("resume requires a canonical global_step_<step>/state.pt checkpoint")
+        output_dir = checkpoint.parent.parent.parent
+        config = None
+    else:
+        config = load_config(getattr(args, "config", DEFAULT_CONFIG), config_overrides(args))
+        now = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M%S")
+        config = replace(config, training=replace(config.training, run_id=config.training.run_id or now))
+        output_dir = _training_output_dir(config, None)
+    with run_lock(output_dir.parent, exclusive=True):
+        return _run_training(args, devices, config, output_dir)
 
 
 def main(argv=None):

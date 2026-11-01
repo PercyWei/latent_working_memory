@@ -5,8 +5,10 @@ from datetime import datetime
 import json
 import math
 from pathlib import Path
+import shutil
 from zoneinfo import ZoneInfo
 
+from ..config import normalize_saved_config
 from .state import checkpoint_file, read_checkpoint, write_json
 
 
@@ -31,8 +33,8 @@ def resolve_training(config, samples, world_size):
     return result
 
 
-def create_run(config, method_name):
-    """config 已经由方法侧补齐默认值、校验参数；方法名由该方法生成。"""
+def resolve_run(config, method_name):
+    """在加锁前确定运行路径；尚不创建或删除产物。"""
     result = deepcopy(config)
     training = result["training"]
     run_id = training["run_id"] or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M%S")
@@ -40,34 +42,27 @@ def create_run(config, method_name):
         directory_name(name)
     training["output_root"] = str(Path(training["output_root"]).expanduser().resolve())
     directory = Path(training["output_root"]) / f"{method_name}_{run_id}"
-    if directory.exists() and any(directory.iterdir()):
-        raise ValueError("run directory is not empty; resume it or choose a new run-id")
-    training.update(
-        run_id=run_id, output_dir=str(directory / "train"), eval_id=training["eval_id"] or "auto"
-    )
+    training.update(run_id=run_id, output_dir=str(directory / "train"))
     training["dataset_dir"] = str(Path(training["dataset_dir"]).expanduser().resolve())
-    training["test_data"] = str(
-        Path(training["test_data"] or training["dataset_dir"]).expanduser().resolve()
-    )
+    return result
+
+
+def create_run(config, overwrite=False):
+    """调用方持有 run 排他锁；清理后先保存训练计划，再启动计算。"""
+    directory = Path(config["training"]["output_dir"]).parent
+    if overwrite and not Path(config["training"]["dataset_dir"]).is_dir():
+        raise FileNotFoundError(config["training"]["dataset_dir"])
+    if directory.exists():
+        if overwrite:
+            shutil.rmtree(directory)
+        elif any(directory.iterdir()):
+            raise ValueError("run directory is not empty; resume it or use --overwrite")
     plan = directory / "plan"
     plan.mkdir(parents=True, exist_ok=False)
     write_json(
-        plan / "config.json", {key: value for key, value in result.items() if key != "training"}
+        plan / "config.json", {key: value for key, value in config.items() if key != "training"}
     )
-    write_json(plan / "train.json", training)
-    if not training["train_only"]:
-        evaluation_plan(
-            directory,
-            result,
-            training["eval_id"],
-            "test",
-            {
-                "data": training["test_data"],
-                "max_samples": training["max_test_samples"],
-                "max_new_tokens": training["max_new_tokens"],
-            },
-        )
-    return result
+    write_json(plan / "train.json", config["training"])
 
 
 def load_plan(run_dir):
@@ -76,25 +71,7 @@ def load_plan(run_dir):
     training = json.loads((directory / "plan/train.json").read_text(encoding="utf-8"))
     if Path(training["output_dir"]) != directory / "train":
         raise ValueError("plan output directory differs from its location")
-    if not training["train_only"]:
-        saved = json.loads(
-            (directory / "plan" / f"eval-{training['eval_id']}" / "test.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        expected = {
-            "training_run": training["output_dir"],
-            "model": common["model"],
-            "seed": common["seed"],
-            "eval_id": training["eval_id"],
-            "task": "test",
-            "data": training["test_data"],
-            "max_samples": training["max_test_samples"],
-            "max_new_tokens": training["max_new_tokens"],
-        }
-        if saved != expected:
-            raise ValueError("automatic test plan differs from the saved training plan")
-    return {**common, "training": training}
+    return normalize_saved_config({**common, "training": training})
 
 
 def inspect_resume(checkpoint, world_size):
@@ -128,13 +105,15 @@ def inspect_resume(checkpoint, world_size):
     return config, state
 
 
-def evaluation_plan(run_dir, config, eval_id, task, options):
+def evaluation_plan(run_dir, config, eval_id, task, options, overwrite=False):
     if task != "test":
         raise ValueError("the template implements test; add a task adapter before extending it")
     for name in (eval_id, task):
         directory_name(name)
     path = Path(run_dir) / "plan" / f"eval-{eval_id}" / f"{task}.json"
-    saved = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    saved = (
+        json.loads(path.read_text(encoding="utf-8")) if path.exists() and not overwrite else None
+    )
     previous = saved or {}
     data = options.get("data", previous.get("data"))
     if data is None:
@@ -158,6 +137,12 @@ def evaluation_plan(run_dir, config, eval_id, task, options):
     if saved is not None:
         if settings != saved:
             raise ValueError("evaluation settings changed; use a new eval-id")
+    if overwrite:
+        if not Path(settings["data"]).is_dir():
+            raise FileNotFoundError(settings["data"])
+        output = Path(run_dir) / "eval" / eval_id / task
+        if output.exists():
+            shutil.rmtree(output)
     path.parent.mkdir(parents=True, exist_ok=True)
     write_json(path, settings)
     return settings

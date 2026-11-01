@@ -2,11 +2,12 @@
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
 from datetime import datetime
-import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import signal
 import subprocess
@@ -16,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 from ..cli import optional_positive_int, positive_int
 from ..config import config_from_dict
+from ..execution import evaluation_lock, run_lock
 from ..plans import prepare_evaluation_plan
 from ..training.checkpoint import checkpoint_file, read_checkpoint
 from .evaluate import (
@@ -282,7 +284,14 @@ def _evaluation_arguments(args):
 
 def run_evaluations(args):
     args = _evaluation_arguments(args)
-    selected, config, training_directory = _checkpoints(args)
+    if args.eval_run is not None:
+        training_directory = Path(args.eval_run).expanduser().resolve()
+    else:
+        first = checkpoint_file(args.checkpoint[0])
+        if (first.name != "state.pt" or first.parent.parent.name != "checkpoints"
+            or re.fullmatch(r"global_step_[0-9]+", first.parent.name) is None):
+            raise ValueError("checkpoint must use train/checkpoints/global_step_<step>/state.pt")
+        training_directory = first.parents[2]
     eval_id = args.eval_id or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M%S")
     if not eval_id.strip() or Path(eval_id).name != eval_id or eval_id in {".", ".."} or "\\" in eval_id:
         raise ValueError("eval-id must be a nonempty directory name")
@@ -290,17 +299,19 @@ def run_evaluations(args):
     if args.output_root:
         run_directory = Path(args.output_root).expanduser().resolve() / run_directory.name
     task_directory = run_directory / "eval" / eval_id / args.task
-    task_directory.mkdir(parents=True, exist_ok=True)
-    with (task_directory / ".scheduler.lock").open("a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise ValueError(f"an evaluation scheduler is already running in {task_directory}") from error
+    with ExitStack() as stack:
+        # 源 checkpoint 与重定向后的结果目录均保持占用，训练覆盖不能与评估并行。
+        for directory in sorted({training_directory.parent, run_directory}):
+            stack.enter_context(run_lock(directory))
+        selected, config, _ = _checkpoints(args)
+        stack.enter_context(evaluation_lock(run_directory, eval_id, args.task))
         settings = prepare_evaluation_plan(
             run_directory, config, eval_id, args.task,
             {name: getattr(args, name) for name in ("data", "max_samples", "max_new_tokens", "lengths")
              if hasattr(args, name)},
+            overwrite=getattr(args, "overwrite", False),
         )
+        task_directory.mkdir(parents=True, exist_ok=True)
         status_path = task_directory / "status.json"
         history = (json.loads(status_path.read_text(encoding="utf-8"))["checkpoints"]
                    if status_path.exists() else {})
@@ -373,6 +384,8 @@ def main(argv=None):
     parser.add_argument("--benchmark-data", default=argparse.SUPPRESS, help="Benchmark 数据目录；首次创建计划必填")
     parser.add_argument("--eval-id", help="评估计划标识，默认 YYYYMMDD-HHMMSS")
     parser.add_argument("--output-root", help="产物父目录；默认在原 run 下保存评估结果")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="清理当前 task 的评估结果和计划后重新评估")
     parser.add_argument("--max-test-samples", type=optional_positive_int, default=argparse.SUPPRESS)
     parser.add_argument("--max-new-tokens", type=positive_int, default=argparse.SUPPRESS,
                         help="仅用于 test；无既有计划时默认 128")

@@ -44,12 +44,12 @@ def add_config_arguments(parser):
 
 def parse_run_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="v4.1 完整运行、训练恢复与独立评估。", argument_default=argparse.SUPPRESS,
+        description="v4.1 训练、训练恢复与独立评估。", argument_default=argparse.SUPPRESS,
     )
     modes = parser.add_mutually_exclusive_group()
-    modes.add_argument("--train-only", action="store_true", help="只训练及 dev 验证，跳过最终 test")
-    modes.add_argument("--resume", action="store_true", help="沿用 checkpoint 配置恢复训练及评估")
+    modes.add_argument("--resume", action="store_true", help="沿用 checkpoint 配置恢复训练")
     modes.add_argument("--evaluate-only", action="store_true", help="只评估已有 checkpoint")
+    parser.add_argument("--overwrite", action="store_true", help="清理目标 run 或当前评估 task 后重新执行")
     add_config_arguments(parser)
     parser.add_argument("--train-data", help="训练与 dev 数据目录，默认使用 training.dataset_dir")
     parser.add_argument("--run-id", help="运行目录的末尾标识，默认 YYYYMMDD-HHMMSS")
@@ -63,7 +63,7 @@ def parse_run_args(argv=None):
     parser.add_argument("--test-data", help="Test 数据目录；独立评估首次创建计划时必填")
     parser.add_argument("--max-test-samples", type=optional_positive_int, help="Test 样本上限，null 使用全量")
     parser.add_argument("--max-new-tokens", type=positive_int, help="Test 生成上限，默认 128")
-    parser.add_argument("--eval-id", help="评估计划标识；独立评估默认 YYYYMMDD-HHMMSS，自动 test 默认 auto")
+    parser.add_argument("--eval-id", help="评估计划标识，默认 YYYYMMDD-HHMMSS")
     parser.add_argument("--micro-batch-size-per-gpu", type=positive_int,
                         help="每卡训练 microbatch，默认 2")
     parser.add_argument("--gradient-accumulation-steps", type=positive_int,
@@ -85,6 +85,7 @@ def parse_run_args(argv=None):
     args.evaluate_only = getattr(args, "evaluate_only", False)
     args.checkpoint = getattr(args, "checkpoint", None)
     args.eval_run = getattr(args, "eval_run", None)
+    args.overwrite = getattr(args, "overwrite", False)
 
     if args.resume:
         if args.checkpoint is None:
@@ -102,7 +103,7 @@ def parse_run_args(argv=None):
         allowed = {
             "evaluate_only", "checkpoint", "eval_run", "eval_type", "benchmark",
             "benchmark_data", "test_data", "max_test_samples", "max_new_tokens",
-            "lengths", "eval_id", "output_root",
+            "lengths", "eval_id", "output_root", "overwrite",
         }
         overrides = supplied - allowed
         if overrides:
@@ -127,12 +128,9 @@ def parse_run_args(argv=None):
             parser.error("--checkpoint requires --resume or --evaluate-only")
         if args.eval_run is not None:
             parser.error("--eval-run requires --evaluate-only")
-        if supplied & {"eval_type", "benchmark", "benchmark_data", "lengths"}:
-            parser.error("--eval-type, --benchmark, --benchmark-data and --lengths require --evaluate-only")
-        if getattr(args, "train_only", False) and supplied & {
-            "test_data", "max_test_samples", "max_new_tokens", "eval_id",
-        }:
-            parser.error("--train-only cannot be combined with test evaluation options")
+        if supplied & {"eval_type", "benchmark", "benchmark_data", "lengths", "test_data",
+                       "max_test_samples", "max_new_tokens", "eval_id"}:
+            parser.error("evaluation options require --evaluate-only")
     return args
 
 
@@ -161,12 +159,8 @@ def config_overrides(args):
     for name in ("prepare_data", "train_data"):
         if name in values:
             training["dataset_dir"] = str(Path(values[name]).expanduser().resolve())
-    if "test_data" in values:
-        training["test_data"] = str(Path(values["test_data"]).expanduser().resolve())
     for option, field in (
         ("run_id", "run_id"),
-        ("train_only", "train_only"), ("eval_id", "eval_id"),
-        ("max_test_samples", "max_test_samples"), ("max_new_tokens", "max_new_tokens"),
         ("micro_batch_size_per_gpu", "micro_batch_size"),
         ("gradient_accumulation_steps", "gradient_accumulation_steps"),
         ("epochs", "epochs"),

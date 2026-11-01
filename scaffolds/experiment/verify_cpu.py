@@ -12,7 +12,7 @@ import time
 import numpy as np
 import torch
 
-from .template.execution.state import read_checkpoint
+from .template.execution.state import evaluation_lock, read_checkpoint, run_lock
 
 
 def read_json(path):
@@ -43,13 +43,13 @@ def verify(directory):
     logs = directory / "verification-logs"
     logs.mkdir()
 
-    def execute(name, options, interrupt_when=None):
+    def execute(name, options, interrupt_when=None, expected_code=0):
         with (logs / f"{name}.log").open("w", encoding="utf-8") as log:
             process = subprocess.Popen([*prefix, *options], stdout=log, stderr=subprocess.STDOUT)
             try:
                 if interrupt_when is None:
                     code = process.wait(timeout=180)
-                    assert code == 0, f"{name} exited {code}; see {log.name}"
+                    assert code == expected_code, f"{name} exited {code}; see {log.name}"
                 else:
                     deadline = time.monotonic() + 90
                     while not interrupt_when():
@@ -72,7 +72,7 @@ def verify(directory):
     def run_path(name):
         return directory / f"mean-regression-h8_{name}"
 
-    def training(name, steps=64, train_only=False):
+    def training(name, steps=64):
         return [
             "--output-root",
             str(directory),
@@ -94,7 +94,6 @@ def verify(directory):
             "1",
             "--save-total-limit",
             "3",
-            *(["--train-only"] if train_only else []),
         ]
 
     def latest(run):
@@ -103,17 +102,33 @@ def verify(directory):
             key=lambda path: int(path.parent.name.rsplit("_", 1)[1]),
         )
 
-    execute("full", training("full"))
-    full = run_path("full")
+    execute("training", training("baseline"))
+    full = run_path("baseline")
     assert read_json(full / "train/status.json")["status"] == "finished"
-    auto = full / "eval/auto/test"
-    assert [path.name for path in auto.glob("global_step_*")] == ["global_step_64"]
-    assert read_json(auto / "status.json")["status"] == "finished"
+    assert not (full / "eval").exists()
+    assert not list((full / "plan").glob("eval-*"))
 
-    execute("train-only", training("train-only", steps=4, train_only=True))
-    train_only = run_path("train-only")
-    assert not (train_only / "plan/eval-auto").exists()
-    assert not (train_only / "eval").exists()
+    execute("overwrite-seed", training("overwrite", steps=4))
+    overwritten = run_path("overwrite")
+    marker = overwritten / "old-result.txt"
+    marker.write_text("old")
+    shared = directory / "teacher"
+    shared.mkdir()
+    (shared / "keep.txt").write_text("shared")
+    execute("reject-existing-run", training("overwrite", steps=2), expected_code=1)
+    assert marker.read_text() == "old"
+    with run_lock(overwritten):
+        execute(
+            "reject-active-run-overwrite",
+            [*training("overwrite", steps=2), "--overwrite"],
+            expected_code=1,
+        )
+    assert marker.exists()
+    execute("overwrite-training", [*training("overwrite", steps=2), "--overwrite"])
+    assert not marker.exists()
+    assert read_json(overwritten / "train/summary.json")["step"] == 2
+    assert not (overwritten / "train/checkpoints/global_step_4").exists()
+    assert (shared / "keep.txt").read_text() == "shared"
 
     resumed = run_path("resumed")
     execute(
@@ -128,6 +143,26 @@ def verify(directory):
     # 模拟中断留下的末尾片段；恢复只回退 checkpoint 后的记录。
     with (resumed / "train/metrics.jsonl").open("ab") as stream:
         stream.write(b'{"incomplete":')
+    # 旧 checkpoint 的已退役编排字段不会再要求自动 test 计划存在。
+    retired = {
+        "train_only": False,
+        "test_data": "/old/test",
+        "max_test_samples": 3,
+        "max_new_tokens": 128,
+        "eval_id": "auto",
+    }
+    for path in (resumed / "plan/train.json", resumed / "train/config.json"):
+        payload = read_json(path)
+        (payload["training"] if "training" in payload else payload).update(retired)
+        path.write_text(json.dumps(payload))
+    payload = torch.load(checkpoint, weights_only=False)
+    payload["config"]["training"].update(retired)
+    torch.save(payload, checkpoint)
+    execute(
+        "reject-resume-overwrite",
+        ["--resume", "--checkpoint", str(checkpoint), "--overwrite"],
+        expected_code=2,
+    )
     execute(
         "resume-training", ["--resume", "--checkpoint", str(checkpoint), "--cpu-processes", "2"]
     )
@@ -142,10 +177,6 @@ def verify(directory):
         ]
         assert [row["step"] for row in metrics] == list(range(1, 65))
         assert [row["train/samples"] for row in metrics[:2]] == [4, 1]  # rank 1 的尾批为空。
-    assert_equal(
-        read_json(auto / "global_step_64/summary.json")["metrics"],
-        read_json(resumed / "eval/auto/test/global_step_64/summary.json")["metrics"],
-    )
     print(
         "PASS uninterrupted/resumed model, optimizer, scheduler, cursor and RNG are identical",
         flush=True,
@@ -159,20 +190,74 @@ def verify(directory):
             "--eval-run",
             str(full),
             "--eval-id",
-            "independent",
+            "auto",
             "--test-data",
             str(data),
             "--cpu-processes",
             "2",
         ],
     )
-    statuses = read_json(full / "eval/independent/test/status.json")["checkpoints"]
+    statuses = read_json(full / "eval/auto/test/status.json")["checkpoints"]
     assert len(statuses) == 3 and all(row["status"] == "finished" for row in statuses.values())
+    auto = full / "eval/auto/test"
     before = (auto / "global_step_64/summary.json").stat().st_mtime_ns
     execute(
         "resume-completed", ["--resume", "--checkpoint", str(latest(full)), "--cpu-processes", "2"]
     )
     assert (auto / "global_step_64/summary.json").stat().st_mtime_ns == before
+
+    # 同一个 ID 下，覆盖当前 task 的全部 checkpoints，其余 task 和计划保留。
+    other = full / "eval/auto/locomo/keep.txt"
+    other.parent.mkdir(parents=True)
+    other.write_text("other task")
+    other_plan = full / "plan/eval-auto/locomo.json"
+    other_plan.write_text('{"task": "locomo"}')
+    selected = ["--evaluate-only", "--checkpoint", str(latest(full)), "--eval-id", "auto"]
+    execute(
+        "reject-eval-changed-settings",
+        [*selected, "--test-data", str(data), "--max-test-samples", "2"],
+        expected_code=1,
+    )
+    execute("reject-overwrite-missing-data", [*selected, "--overwrite"], expected_code=1)
+    execute(
+        "reject-overwrite-absent-directory",
+        [*selected, "--overwrite", "--test-data", str(directory / "absent")],
+        expected_code=1,
+    )
+    assert (auto / "global_step_64/summary.json").stat().st_mtime_ns == before
+    with evaluation_lock(full, "auto", "test"):
+        execute(
+            "reject-active-task-overwrite",
+            [*selected, "--overwrite", "--test-data", str(data)],
+            expected_code=1,
+        )
+    execute(
+        "overwrite-evaluation",
+        [
+            *selected,
+            "--overwrite",
+            "--test-data",
+            str(data),
+            "--max-test-samples",
+            "2",
+            "--max-new-tokens",
+            "64",
+            "--cpu-processes",
+            "2",
+        ],
+    )
+    assert [path.name for path in auto.glob("global_step_*")] == ["global_step_64"]
+    assert read_json(auto / "global_step_64/summary.json")["metrics"]["samples"] == 2
+    assert other.read_text() == "other task" and read_json(other_plan) == {"task": "locomo"}
+    before = (auto / "global_step_64/summary.json").stat().st_mtime_ns
+    execute("reuse-overwritten-evaluation", [*selected, "--cpu-processes", "1"])
+    assert (auto / "global_step_64/summary.json").stat().st_mtime_ns == before
+    # 删除最终评估计划后，训练恢复仍独立成立。
+    (full / "plan/eval-auto/test.json").unlink()
+    execute(
+        "resume-without-evaluation-plan",
+        ["--resume", "--checkpoint", str(latest(full)), "--cpu-processes", "2"],
+    )
 
     # 较多小样本仅用于留出真实中断窗口，每条仍是一次小型 CPU 前向。
     retry_data = directory / "retry-dataset"
@@ -221,7 +306,7 @@ def verify(directory):
     execute("reuse-evaluation", [*retry_options, "--cpu-processes", "2"])
     assert (retry / "summary.json").stat().st_mtime_ns == before
     print(
-        f"PASS four modes, distributed tail/empty rank, training/evaluation interruption and cache reuse: {directory}",
+        f"PASS three modes, overwrite, distributed tail/empty rank and interruption/cache recovery: {directory}",
         flush=True,
     )
 

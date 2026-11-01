@@ -3,8 +3,9 @@
 from dataclasses import asdict, replace
 import json
 from pathlib import Path
+import shutil
 
-from .config import config_from_dict
+from .config import config_from_dict, saved_config
 from .evaluation.records import normalize_lengths, write_json
 from .training.engine import training_steps
 
@@ -24,22 +25,9 @@ def load_training_plan(plan_dir):
     training = json.loads((directory / "train.json").read_text(encoding="utf-8"))
     if not isinstance(common, dict) or set(common) != {"seed", "model", "teacher"}:
         raise ValueError("common plan must contain exactly seed, model and teacher")
-    config = config_from_dict({**common, "training": training})
+    config = config_from_dict(saved_config({**common, "training": training}))
     if directory != Path(config.training.output_dir).expanduser().resolve().parent / "plan":
         raise ValueError("training plan directory differs from its saved run directory")
-    if not config.training.train_only:
-        path = directory / f"eval-{config.training.eval_id}" / "test.json"
-        evaluation = json.loads(path.read_text(encoding="utf-8"))
-        expected = {
-            "training_run": str(Path(config.training.output_dir).expanduser().resolve()),
-            "model": asdict(config.model), "seed": config.seed,
-            "eval_id": config.training.eval_id, "task": "test",
-            "data": str(Path(config.training.test_data).expanduser().resolve()),
-            "max_samples": config.training.max_test_samples,
-            "max_new_tokens": config.training.max_new_tokens, "lengths": None,
-        }
-        if evaluation != expected:
-            raise ValueError("automatic test plan differs from the saved training execution settings")
     return config
 
 
@@ -53,7 +41,7 @@ def validate_training_plan(config, checkpoint):
         raise ValueError("checkpoint configuration differs from the saved training plan")
 
 
-def prepare_evaluation_plan(run_dir, config, eval_id, task, options):
+def prepare_evaluation_plan(run_dir, config, eval_id, task, options, overwrite=False):
     """省略的值沿用已有计划；首次创建必须明确数据，RULER 仅允许扩展。"""
     if (not isinstance(eval_id, str) or not eval_id.strip()
         or Path(eval_id).name != eval_id or eval_id in {".", ".."} or "\\" in eval_id):
@@ -61,7 +49,7 @@ def prepare_evaluation_plan(run_dir, config, eval_id, task, options):
     if task not in {"test", "locomo", "ruler"}:
         raise ValueError("task must be test, locomo or ruler")
     path = Path(run_dir).expanduser().resolve() / "plan" / f"eval-{eval_id}" / f"{task}.json"
-    saved = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    saved = json.loads(path.read_text(encoding="utf-8")) if path.exists() and not overwrite else None
     previous = saved or {}
     data = options.get("data", previous.get("data"))
     if data is None:
@@ -83,11 +71,17 @@ def prepare_evaluation_plan(run_dir, config, eval_id, task, options):
             raise ValueError(f"{name} must be null or a positive integer")
     if settings["max_new_tokens"] is None and task == "test":
         raise ValueError("max_new_tokens must be a positive integer")
+    if overwrite and not Path(settings["data"]).is_dir():
+        raise FileNotFoundError(f"evaluation data directory does not exist: {settings['data']}")
     if saved is not None:
         if any(value != saved[key] for key, value in settings.items() if key != "lengths"):
             raise ValueError("evaluation plan settings differ; use a new --eval-id or --output-root")
         if task == "ruler" and not set(saved["lengths"]).issubset(settings["lengths"]):
             raise ValueError("RULER lengths may only stay the same or expand within an evaluation plan")
     path.parent.mkdir(parents=True, exist_ok=True)
+    if overwrite:
+        output = Path(run_dir).expanduser().resolve() / "eval" / eval_id / task
+        if output.exists():
+            shutil.rmtree(output)
     write_json(path, settings)
     return settings

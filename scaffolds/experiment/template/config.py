@@ -1,5 +1,6 @@
 """配置默认值、显式覆盖与输入边界校验。"""
 
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 import json
 import math
@@ -21,11 +22,6 @@ class TrainingConfig:
     output_root: str = "artifacts/experiment-template"
     run_id: str | None = None
     output_dir: str | None = None
-    eval_id: str | None = None
-    train_only: bool = False
-    test_data: str | None = None
-    max_test_samples: int | None = None
-    max_new_tokens: int = 128
     epochs: int | None = 2
     max_steps: int | None = None
     micro_batch_size: int = 2
@@ -93,7 +89,6 @@ def load_config(path=None, overrides=None):
         "max_train_data_tokens",
         "max_train_samples",
         "max_dev_samples",
-        "max_test_samples",
     ):
         _positive_integer(training[name], f"training.{name}", nullable=True)
     for name in (
@@ -101,7 +96,6 @@ def load_config(path=None, overrides=None):
         "gradient_accumulation_steps",
         "dev_every",
         "save_total_limit",
-        "max_new_tokens",
     ):
         _positive_integer(training[name], f"training.{name}")
     if training["epochs"] is None and training["max_steps"] is None:
@@ -123,8 +117,6 @@ def load_config(path=None, overrides=None):
         raise ValueError("learning_rate and gradient_clip must be positive")
     if training["min_lr_ratio"] > 1:
         raise ValueError("min_lr_ratio must not exceed 1")
-    if type(training["train_only"]) is not bool:
-        raise ValueError("train_only must be a boolean")
     if training["tracking"] not in {"disabled", "online"}:
         raise ValueError("tracking must be disabled or online")
     if training["tracking"] == "online" and not training["swanlab_project"]:
@@ -134,8 +126,6 @@ def load_config(path=None, overrides=None):
         "output_root",
         "run_id",
         "output_dir",
-        "eval_id",
-        "test_data",
         "swanlab_project",
         "group",
     ):
@@ -145,6 +135,12 @@ def load_config(path=None, overrides=None):
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"training.{name} must be a non-empty string")
     training["dataset_dir"] = str(Path(training["dataset_dir"]).expanduser().resolve())
-    if training["test_data"] is not None:
-        training["test_data"] = str(Path(training["test_data"]).expanduser().resolve())
     return config
+
+
+def normalize_saved_config(config):
+    """旧运行的自动 test 字段不参与训练恢复；新产物只保存训练配置。"""
+    result = deepcopy(config)
+    for name in ("train_only", "test_data", "max_test_samples", "max_new_tokens", "eval_id"):
+        result["training"].pop(name, None)
+    return result

@@ -1,5 +1,5 @@
 {
-  "eval_id": "auto",
+  "eval_id": "manual",
   "task": "test",
   "checkpoint": "/example/latent_working_memory/artifacts/example-run/train/checkpoints/global_step_2/state.pt",
   "checkpoint_step": 2,

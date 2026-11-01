@@ -1,6 +1,6 @@
 """v4.1 的统一配置；相对路径以运行目录为基准。"""
 
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 import json
 import math
 import os
@@ -100,11 +100,6 @@ class TrainingConfig:
     teacher_cache_dir: str | None = None
     output_dir: str | None = None
     run_id: str | None = None
-    train_only: bool = False
-    test_data: str | None = None
-    max_test_samples: int | None = None
-    max_new_tokens: int = 128
-    eval_id: str | None = None
     epochs: int | None = None
     max_steps: int | None = 1000
     micro_batch_size: int = 2
@@ -136,15 +131,6 @@ class TrainingConfig:
         object.__setattr__(self, "output_root", str(Path(self.output_root).resolve()))
         _path(self, "teacher_cache_dir", optional=True)
         _path(self, "output_dir", optional=True)
-        _path(self, "test_data", optional=True)
-        if type(self.train_only) is not bool:
-            raise ValueError("train_only must be a boolean")
-        if self.eval_id is not None and (
-            not isinstance(self.eval_id, str) or not self.eval_id.strip()
-            or Path(self.eval_id).name != self.eval_id or self.eval_id in {".", ".."}
-            or "\\" in self.eval_id
-        ):
-            raise ValueError("eval_id must be null or a nonempty directory name")
         if self.run_id is not None and (
             not isinstance(self.run_id, str)
             or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", self.run_id) is None
@@ -152,7 +138,6 @@ class TrainingConfig:
             raise ValueError("run_id must contain only letters, digits, '-' and '_'")
         _positive_ints(self, (
             "micro_batch_size", "gradient_accumulation_steps", "dev_every", "save_total_limit",
-            "max_new_tokens",
         ))
         if self.epochs is None and self.max_steps is None:
             raise ValueError("at least one of epochs and max_steps must be specified")
@@ -162,7 +147,7 @@ class TrainingConfig:
             raise ValueError("save_every must be a positive integer or after_each_epoch")
         for name in (
             "epochs", "max_steps", "max_train_data_tokens", "max_train_samples",
-            "max_dev_samples", "max_test_samples",
+            "max_dev_samples",
         ):
             value = getattr(self, name)
             if value is not None and (type(value) is not int or value < 1):
@@ -222,6 +207,14 @@ def config_from_dict(payload):
         teacher=TeacherConfig(**payload["teacher"]),
         training=TrainingConfig(**payload["training"]),
     )
+
+
+def saved_config(payload):
+    """已有计划和 checkpoint 的训练状态不再包含末尾测试安排。"""
+    training = dict(payload["training"])
+    for name in ("train_only", "test_data", "max_test_samples", "max_new_tokens", "eval_id"):
+        training.pop(name, None)
+    return asdict(config_from_dict({**payload, "training": training}))
 
 
 def load_config(path, overrides=None):
