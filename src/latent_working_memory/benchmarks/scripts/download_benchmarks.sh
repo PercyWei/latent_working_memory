@@ -39,48 +39,35 @@ ruler_source_dir="$(expand_user_path "$ruler_source_dir")"
 
 download_file() {
   local url="$1" destination="$2"
-  if [[ -f $destination ]]; then
-    printf '复用：%s\n' "$destination"
-  else
-    curl -fL --retry 3 "$url" -o "$destination.tmp"
-    mv "$destination.tmp" "$destination"
-  fi
+  curl -fL --retry 3 "$url" -o "$destination.tmp"
+  mv "$destination.tmp" "$destination"
 }
 
 if [[ $benchmark == all || $benchmark == ruler ]]; then
-  mkdir -p "$(dirname "$ruler_source_dir")"
-  if [[ ! -d $ruler_source_dir ]]; then
-    git clone --no-checkout https://github.com/NVIDIA/RULER.git "$ruler_source_dir"
-    git -C "$ruler_source_dir" lfs install --local
-    GIT_LFS_SKIP_SMUDGE=1 git -C "$ruler_source_dir" checkout "$ruler_revision"
-    git -C "$ruler_source_dir" lfs pull --include="scripts/data/synthetic/json/english_words.json"
-  else
-    printf '复用 RULER 源码与素材目录：%s\n' "$ruler_source_dir"
-  fi
-  [[ -f "$ruler_source_dir/scripts/synthetic.yaml" ]] || fail "RULER 源码不完整，缺少 $ruler_source_dir/scripts/synthetic.yaml"
+  mkdir -p "$ruler_source_dir"
+  download_file "https://github.com/NVIDIA/RULER/archive/$ruler_revision.tar.gz" "$ruler_source_dir/ruler-source.tar.gz"
+  tar -xzf "$ruler_source_dir/ruler-source.tar.gz" --strip-components=1 -C "$ruler_source_dir"
+  rm -- "$ruler_source_dir/ruler-source.tar.gz"
   # 仅为 NLTK 下载允许使用现有代理，调用方可通过同名环境变量覆盖。
   NLTK_DATA="$LWM_ROOT/data/raw/nltk_data" \
   NLTK_ALLOW_PROXIED_URLOPEN="${NLTK_ALLOW_PROXIED_URLOPEN:-1}" \
     uv run --frozen python - <<'PY'
 import os
-from pathlib import Path
 
 import nltk
 
-download_dir = os.environ["NLTK_DATA"]
 for package in ("punkt", "punkt_tab"):
-    resource_dir = Path(download_dir) / "tokenizers" / package
-    if resource_dir.is_dir():
-        print(f"复用：{resource_dir}", flush=True)
-    else:
-        nltk.download(package, download_dir=download_dir, raise_on_error=True)
+    nltk.download(
+        package,
+        download_dir=os.environ["NLTK_DATA"],
+        force=True,
+        raise_on_error=True,
+    )
 PY
   (
     cd "$ruler_source_dir/scripts/data/synthetic/json"
     download_file "https://media.githubusercontent.com/media/NVIDIA/RULER/$ruler_revision/scripts/data/synthetic/json/english_words.json" english_words.json
-    if [[ ! -f PaulGrahamEssays.json ]]; then
-      uv run --frozen --project "$LWM_ROOT" python download_paulgraham_essay.py
-    fi
+    uv run --frozen --project "$LWM_ROOT" python download_paulgraham_essay.py
     download_file https://rajpurkar.github.io/SQuAD-explorer/dataset/dev-v2.0.json squad.json
     download_file "${hf_endpoint%/}/datasets/namlh2004/hotpotqa/resolve/7e54db4656209750ff487f6fdf8e39a66dba136b/hotpot_dev_distractor_v1.json" hotpotqa.json
   )
