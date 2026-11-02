@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261102 10:03:56 Asia/Shanghai
+最后修订时间：20261102 14:48:26 Asia/Shanghai
 
 计算协议与数据格式见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[配置](../../../../configs/v4-1/online_ttt_memory.json)中的基座与数据路径。
 
@@ -204,13 +204,15 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh \
 ```bash
 bash src/latent_working_memory/v4_1/scripts/dashboard.sh \
   --dashboard-run-dir artifacts/v4-1/am-recent_m256-d512_p1024-r256_inner3_01_20261029 \
+  --dashboard-eval-id 01_20261030 \
   --dashboard-baselines \
     full-context artifacts/baselines/full-context/qwen3-4b-inst-2507_20261019/eval
 ```
 
 - **结果浏览**：
 
-  - **任务切换**：选择 eval-id、checkpoint 和任务页签，仅读取当前任务；点击“刷新结果”重新加载本地结果。
+  - **评估选择**：`--dashboard-eval-id` 指定启动时选中的评估，省略时默认列表首项；页面仍可切换其他 eval-id。指定评估不存在或没有已完成结果时提示错误。
+  - **任务切换**：选择 checkpoint 和任务页签，仅读取当前任务；点击“刷新结果”重新加载本地结果。
   - **指标展示**：单 checkpoint 展示指标汇总，多 checkpoint 按实际 optimizer step 升序绘图；可查看指标表与逐样本记录，基线排在当前方法之前。
 
 - **RULER 展示**：
@@ -303,6 +305,7 @@ bash src/latent_working_memory/v4_1/scripts/dashboard.sh \
 | `--tag` | SwanLab 命名空间标签 |
 | **看板** |
 | `--dashboard-run-dir` | 必填，指向运行根目录；仅需保留 `eval/` 目录结构 |
+| `--dashboard-eval-id` | 可选，启动时选中的 eval-id；省略时默认列表首项，页面可切换 |
 | `--dashboard-baselines` | 可选，按“标签 结果目录”成对传入；支持 benchmark 的 `eval/` 或直接含 `summary.json` 的目录 |
 
 - 除了 `--save-every` 和 `--dev-every` 所指定的 step，epoch 末和最终步也保存 checkpoint 及进行 dev 验证。

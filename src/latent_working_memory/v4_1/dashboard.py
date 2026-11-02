@@ -36,6 +36,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dashboard-run-dir", type=Path, required=True,
                         help="单次运行根目录，仅需保留 eval/ 目录结构")
+    parser.add_argument("--dashboard-eval-id", help="启动时选中的评估标识，页面仍可切换")
     parser.add_argument("--dashboard-baselines", nargs="*", default=[], metavar="LABEL_OR_PATH",
                         help="按“标签 评估结果目录”成对传入，仅本次展示使用")
     args = parser.parse_args(argv)
@@ -373,12 +374,18 @@ def main():
     st.sidebar.caption(str(args.dashboard_run_dir))
     st.sidebar.button("刷新结果")
     evaluations = discover_evaluations(args.dashboard_run_dir)
+    if args.dashboard_eval_id is not None and args.dashboard_eval_id not in evaluations:
+        st.error(f"指定评估没有已完成结果：{args.dashboard_run_dir}/eval/{args.dashboard_eval_id}")
+        return
     if not evaluations:
         st.info(f"未找到已完成评估：{args.dashboard_run_dir}/eval/<eval-id>/<task>/global_step_*/summary.json")
         return
     eval_ids = list(evaluations)
-    eval_id = st.sidebar.selectbox("Eval ID", eval_ids,
-                                   index=eval_ids.index("auto") if "auto" in evaluations else 0)
+    eval_id = st.sidebar.selectbox(
+        "Eval ID", eval_ids,
+        index=eval_ids.index(args.dashboard_eval_id) if args.dashboard_eval_id is not None else 0,
+        key=f"{args.dashboard_run_dir}:{args.dashboard_eval_id}:eval-id",
+    )
     directory = evaluations[eval_id]
     st.caption(f"{args.dashboard_run_dir.name} / {eval_id} · {directory}")
     tabs = st.tabs([TASK_LABELS[task] for task in TASKS], key=f"{directory}:task", on_change="rerun")
