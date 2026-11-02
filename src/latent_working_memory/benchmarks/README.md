@@ -41,11 +41,10 @@ bash src/latent_working_memory/benchmarks/scripts/download_benchmarks.sh --bench
 
 | 参数 | 填法与默认值 |
 |---|---|
-| `--benchmark` | `all`、`ruler` 或 `locomo`，默认 `all` |
-| `--data-root` | LoCoMo 数据父目录，默认 `data/benchmarks`；写入 `locomo/locomo10.json` |
+| `--benchmark` | 支持 `all`（默认）、`ruler` 或 `locomo` |
+| `--data-root` | LoCoMo 数据父目录，默认 `data/benchmarks` |
 | `--ruler-source-dir` | RULER 官方源码及下载素材目录，默认 `data/raw/ruler-v1-source` |
 
-- 只准备其中一个 benchmark 时，将 `--benchmark all` 改为 `ruler` 或 `locomo`。
 - HotpotQA 默认通过 `https://hf-mirror.com` 下载，可用 `HF_ENDPOINT` 覆盖下载源；数据路径和 revision 保持不变。
 - 镜像可能重定向至 Hugging Face。仍无法连接时，配置可用代理或更换 `HF_ENDPOINT` 后重新运行。
 
