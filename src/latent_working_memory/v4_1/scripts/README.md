@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261101 17:31:18 Asia/Shanghai
+最后修订时间：20261102 10:03:56 Asia/Shanghai
 
 计算协议与数据格式见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[配置](../../../../configs/v4-1/online_ttt_memory.json)中的基座与数据路径。
 
@@ -217,6 +217,8 @@ bash src/latent_working_memory/v4_1/scripts/dashboard.sh \
 
   - **长度与任务**：用折线图比较各长度的 Mean，选择长度后用分组柱图展示 13 项任务；只显示已完成的长度，同一方法保持同色。
   - **Checkpoint 趋势**：多 checkpoint 可选择 Overall 或具体长度查看 step 曲线，再查看单个 checkpoint 的长度总览与任务明细。基线 Overall 按对应 checkpoint 的长度范围重算，缺任一长度时不显示该点，不补零。
+  - **逐题响应**：开启“查看逐样本记录”，选择 checkpoint 后按长度和子任务筛选，再分页查看参考答案、模型响应与评分。
+  - **完整题面**：展开“完整输入题面”，从原始 `test.jsonl` 读取全文；已有评估结果可直接使用，无需重新评估。
 
 - **基线接入**：
 
@@ -233,7 +235,7 @@ bash src/latent_working_memory/v4_1/scripts/dashboard.sh \
 - **访问方式**：
 
   - **访问配置**：地址和端口见 [`.streamlit/config.toml`](../../../../.streamlit/config.toml)，修改后须重启看板；临时更换端口可在启动命令前加 `STREAMLIT_SERVER_PORT=8502`。
-  - **异地查看**：同步 `<运行目录>/eval/` 并保留目录结构，将 `--dashboard-run-dir` 指向运行根目录即可。
+  - **异地查看**：同步 `<运行目录>/eval/` 并保留目录结构，将 `--dashboard-run-dir` 指向运行根目录。查看 RULER 完整题面还需对应原始数据，在页面“RULER 数据目录”填写本地路径，目录下应包含 `<长度>/<子任务>/test.jsonl`。
 
 ## 5. 调整参数
 

@@ -10,6 +10,7 @@ from pyecharts import charts
 import streamlit as st
 
 from latent_working_memory.baselines.results import load_baseline_results
+from latent_working_memory.benchmarks.data import RULER_TASKS
 from latent_working_memory.benchmarks.protocol import protocol
 from latent_working_memory.v4.reporting import evaluation_charts, ruler_overall, ruler_task_chart
 from latent_working_memory.v4_1.evaluation.diagnostics import output_flags, visible_text
@@ -210,6 +211,21 @@ def _resource_rows(summaries, baselines):
     return rows
 
 
+def _ruler_prompt(data_dir, record):
+    metadata = record["metadata"]
+    path = Path(data_dir).expanduser() / str(metadata["length"]) / metadata["task"] / "test.jsonl"
+    # ID 的末段是源文件行号；官方 index 可能重复，并非样本序号。
+    position = int(record["id"].rsplit("/", 1)[1])
+    with path.open(encoding="utf-8") as stream:
+        for index, line in enumerate(stream):
+            if index == position:
+                source = json.loads(line)
+                if source["index"] != metadata["index"] or source["outputs"] != record["references"]:
+                    raise ValueError(f"{path}:{position + 1} 与评估记录不一致，请选择原评估数据")
+                return source["input"]
+    raise ValueError(f"{path} 中不存在第 {position + 1} 行")
+
+
 def _details(records, key):
     if not st.toggle("查看逐样本记录", key=f"{key}:details"):
         return
@@ -217,12 +233,41 @@ def _details(records, key):
     step = st.selectbox("记录 checkpoint", list(checkpoints), index=len(checkpoints) - 1,
                         format_func=lambda value: f"global_step_{value}", key=f"{key}:details-step")
     directory, summary = checkpoints[step]
+    ruler = summary["task"] == "ruler"
+    length, task = None, None
+    if ruler:
+        with (directory / "details.jsonl").open(encoding="utf-8") as stream:
+            details = [json.loads(line) for line in stream]
+        length_column, task_column = st.columns(2)
+        with length_column:
+            length = st.selectbox(
+                "RULER 长度", [None, *sorted({row["metadata"]["length"] for row in details})],
+                format_func=lambda value: "全部长度" if value is None else f"{value:,} tokens",
+                key=f"{key}:{step}:details-length",
+            )
+        details = [row for row in details if length is None or row["metadata"]["length"] == length]
+        tasks = {row["metadata"]["task"] for row in details}
+        with task_column:
+            task = st.selectbox(
+                "RULER 子任务", [None, *(value for value in RULER_TASKS if value in tasks)],
+                format_func=lambda value: "全部子任务" if value is None else value,
+                key=f"{key}:{step}:{length}:details-task",
+            )
+        details = [row for row in details if task is None or row["metadata"]["task"] == task]
+        data_dir = st.text_input("RULER 数据目录", value=summary["data"]["directory"],
+                                 key=f"{key}:ruler-data-directory")
     count, page_size = summary["metrics"]["samples"], 20
+    if ruler:
+        count = len(details)
     pages = max(1, math.ceil(count / page_size))
     page = st.number_input("页码", min_value=1, max_value=pages, value=1, step=1,
-                           key=f"{key}:{step}:details-page")
-    with (directory / "details.jsonl").open(encoding="utf-8") as stream:
-        rows = [json.loads(line) for line in islice(stream, (page - 1) * page_size, page * page_size)]
+                           key=f"{key}:{step}:{length}:{task}:details-page")
+    start = (page - 1) * page_size
+    if ruler:
+        rows = details[start:start + page_size]
+    else:
+        with (directory / "details.jsonl").open(encoding="utf-8") as stream:
+            rows = [json.loads(line) for line in islice(stream, start, start + page_size)]
     st.caption(f"第 {page} / {pages} 页，每页 {page_size} 条，共 {count} 条")
     for row in rows:
         with st.container(border=True):
@@ -234,6 +279,16 @@ def _details(records, key):
                        f"{row['stop_reason']}")
             if row["question"]:
                 st.write(row["question"])
+            if ruler:
+                with st.expander("完整输入题面", key=f"{key}:{step}:{row['id']}:prompt",
+                                 on_change="rerun") as prompt_panel:
+                    if prompt_panel.open:
+                        try:
+                            prompt = _ruler_prompt(data_dir, row)
+                        except (OSError, ValueError) as error:
+                            st.warning(f"题面读取失败：{error}")
+                        else:
+                            st.code(prompt, language=None, wrap_lines=True, height=350)
             st.write("参考答案：" + " / ".join(row["references"]))
             flags = " · ".join(OUTPUT_LABELS[name] for name, value in output_flags(row).items() if value)
             if flags:
