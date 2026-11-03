@@ -35,7 +35,7 @@ Teacher 缓存由不同 run 共享；运行目录与各阶段产物见 [第 7 �
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh prepare \
-  --config configs/v4-1/online_ttt_memory.json \
+  --config configs/v4-1/default.json \
   --prepare-data data/delta-mem-qasper \
   --prepare-batch-size-per-gpu 64
 ```
@@ -65,7 +65,7 @@ Teacher 缓存目录按产物父目录与窗口设置自动创建：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh \
-  --config configs/v4-1/online_ttt_memory.json \
+  --config configs/v4-1/default.json \
   --run-id 01_20261029 \
   --train-data 'data/delta-mem-qasper' \
   --epochs 4 \
@@ -241,7 +241,7 @@ bash src/latent_working_memory/v4_1/scripts/dashboard.sh \
 
 ## 5. 调整参数
 
-本节汇总训练、恢复、独立评估、离线准备与看板的公开参数。默认值以[正式配置](../../../../configs/v4-1/online_ttt_memory.json)为准：新训练与离线准备的显式 CLI 值在校验前覆盖 JSON，省略时沿用配置。模型结构、记忆更新及优化器设置直接修改 JSON，见[方法说明](../README.md)。
+本节汇总训练、恢复、独立评估、离线准备与看板的公开参数。默认值以[默认配置](../../../../configs/v4-1/default.json)为准：新训练与离线准备的显式 CLI 值在校验前覆盖 JSON，省略时沿用配置。模型结构、记忆更新及优化器设置直接修改 JSON，见[方法说明](../README.md)。
 
 ### 5.1 训练输入与执行预算
 
@@ -252,7 +252,7 @@ bash src/latent_working_memory/v4_1/scripts/dashboard.sh \
 | `--evaluate-only` | 仅评估已有 checkpoint，须指定 `--checkpoint` 或 `--eval-run` |
 | `--overwrite` | 默认关闭；覆盖当前 run 或评估 task 的结果与计划，不能搭配恢复 |
 | **配置与模型** |
-| `--config` | JSON 配置文件，默认 `configs/v4-1/online_ttt_memory.json` |
+| `--config` | JSON 配置文件，默认 `configs/v4-1/default.json` |
 | `--model-path` | 基座与 tokenizer 路径，默认 `~/models/Qwen3-4B-Instruct-2507` |
 | `--seed` | 随机种子，默认 42，控制初始化、选样与打乱 |
 | **目录与运行标识** |
