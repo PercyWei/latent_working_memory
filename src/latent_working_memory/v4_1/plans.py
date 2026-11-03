@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import shutil
 
-from .config import config_from_dict, saved_config
+from .config import config_from_dict
 from .evaluation.records import normalize_lengths, write_json
 from .training.engine import training_steps
 
@@ -25,7 +25,7 @@ def load_training_plan(plan_dir):
     training = json.loads((directory / "train.json").read_text(encoding="utf-8"))
     if not isinstance(common, dict) or set(common) != {"seed", "model", "teacher"}:
         raise ValueError("common plan must contain exactly seed, model and teacher")
-    config = config_from_dict(saved_config({**common, "training": training}))
+    config = config_from_dict({**common, "training": training})
     if directory != Path(config.training.output_dir).expanduser().resolve().parent / "plan":
         raise ValueError("training plan directory differs from its saved run directory")
     return config

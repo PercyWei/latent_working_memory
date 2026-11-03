@@ -1,7 +1,7 @@
 # 20260914_配置组织规则
 
 创建时间：20260914 11:48:20 UTC+08:00
-最后修订时间：20261031 20:07:13 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261103 11:06:59 Asia/Shanghai
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
 
@@ -50,6 +50,8 @@ Inner 稳定性对照沿用主配置，其余模型、数据、teacher 与优化
 |---|---|
 | [online_ttt_memory_inner_steps1.json](v4-1/online_ttt_memory_inner_steps1.json) | `model.inner_steps=1`，`inner_lr_init=1.0` |
 | [online_ttt_memory_inner_lr0p1.json](v4-1/online_ttt_memory_inner_lr0p1.json) | `model.inner_lr_init=0.1`，`inner_steps=3` |
+
+[online_ttt_memory_inner_lr0p1_outer_distill.json](v4-1/online_ttt_memory_inner_lr0p1_outer_distill.json) 与 inner-lr0p1 构成写入监督对照，仅设置 `training.outer_write_obj=distill`。保留答案 CE，使用完整历史 teacher 的下一 token 分布监督每次写入，outer AM 作为诊断。
 
 ### v2 固定容量重构配置
 

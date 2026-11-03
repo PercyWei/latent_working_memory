@@ -29,21 +29,21 @@ class ToyMemory(torch.nn.Module):
         self.memory = torch.nn.Parameter(torch.tensor([0.1, -0.2]))
         self.decoder_unused = torch.nn.Parameter(torch.ones(2, 2))
 
-    def forward(self, episode, teacher, lambda_am, generator, differentiable):
+    def forward(self, episode, teacher, outer_write_obj_weight, generator, differentiable):
         features = torch.tensor([episode + 1, episode % 3 - 1], dtype=torch.float32) / 8
         qa = ((self.decoder @ features).sum() - (episode % 4) / 3).square()
         # 偶数样本才使用 memory，分片后某 rank 的该参数没有梯度。
         am = self.memory.square().sum() if episode % 2 == 0 else qa.new_zeros(())
         return {
-            "loss": qa + lambda_am * am, "qa_loss": qa, "outer_am": am,
+            "loss": qa + outer_write_obj_weight * am, "qa_loss": qa, "outer_am": am,
             "outer_am_output": am * 0.4, "outer_am_mass": am * 0.6,
             "inner_before": am + 1, "inner_after": am,
             "target_tokens": episode % 4 + 1, "write_events": episode % 3,
         }
 
-    def forward_batch(self, episodes, teachers, lambda_am, generator, differentiable):
+    def forward_batch(self, episodes, teachers, outer_write_obj_weight, generator, differentiable):
         # 仅作为分布式样本均值的数值 oracle；真实批量计算由 Qwen3 对照覆盖。
-        return [self.forward(episode, teacher, lambda_am, generator, differentiable)
+        return [self.forward(episode, teacher, outer_write_obj_weight, generator, differentiable)
                 for episode, teacher in zip(episodes, teachers)]
 
     def trainable_state_dict(self):
@@ -225,14 +225,9 @@ def test_training_budget_cursor_and_committed_metrics(tmp_path):
 
     cursor = SampleCursor(7, 71)
     assert len(cursor.next_batch(4)) == 4 and not cursor.epoch_end
-    boundary = cursor.state_dict()
-    # 旧格式在最后一批后仍保存 offset == size，新读取须保持下轮排列不变。
-    boundary["offset"] = 7
     assert len(cursor.next_batch(4)) == 3 and cursor.epoch_end
     assert cursor.epoch == 1 and cursor.offset == 0
     restored = SampleCursor(7, 999)
-    restored.load_state_dict(boundary, 2, 4)
-    torch.testing.assert_close(restored.state_dict(), cursor.state_dict(), rtol=0, atol=0)
     current = cursor.state_dict()
     restored.load_state_dict(current, 2, 4)
     assert restored.next_batch(4) == cursor.next_batch(4)

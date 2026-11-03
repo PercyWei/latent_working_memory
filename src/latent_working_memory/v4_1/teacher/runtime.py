@@ -1,4 +1,4 @@
-"""Student 建图前重建当前样本的 outer AM 参照，随后释放完整原文 KV。"""
+"""Student 建图前重建 outer 参照；AM 与 distillation 共用原文及离线响应。"""
 
 from contextlib import contextmanager
 
@@ -75,6 +75,20 @@ class RuntimeTeacher:
                 result[name][layer_index].index_copy_(0, pool_indices, value)
 
         replay.replay(prefix, sequences, positions, compressed_end, collect)
+        if self.config.training.outer_write_obj == "distill":
+            prompt_index = int(torch.randint(
+                len(self.prompts), (1,), generator=generator,
+                device="cpu" if generator is None else generator.device,
+            ).item())
+            prompt = self.prompts[prompt_index]
+            response = tokens[offsets[prompt_index]:offsets[prompt_index + 1]]
+            branches = [((*prompt, *response[:-1]), len(prompt) - 1)]
+            continuation = episode.context_ids[
+                processed_end:processed_end + self.config.teacher.response_max_tokens
+            ]
+            if len(continuation) >= 2:
+                branches.append((tuple(continuation[:-1]), 0))
+            result["distill_branches"] = replay.distill_branches(prefix, branches)
         return result
 
 

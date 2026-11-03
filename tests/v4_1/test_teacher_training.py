@@ -141,8 +141,8 @@ def test_per_gradient_checkpoint_preserves_multistep_meta_gradients(tiny_setup, 
             return _write(old_memory, teacher_kv, queries, **kwargs)
 
         monkeypatch.setattr(memory, "write", track_write)
-    actual = checked(setup.episode, teacher=references, lambda_am=0.7)
-    expected = ordinary(setup.episode, teacher=references, lambda_am=0.7)
+    actual = checked(setup.episode, teacher=references, outer_write_obj_weight=0.7)
+    expected = ordinary(setup.episode, teacher=references, outer_write_obj_weight=0.7)
     actual["loss"].backward()
     expected["loss"].backward()
     for metric in ("loss", "qa_loss", "outer_am"):
@@ -216,9 +216,9 @@ def test_true_batch_preserves_per_sample_losses_and_full_meta_gradients(tiny_set
 
         monkeypatch.setattr(memory, "write", track_write)
     actual = batched.forward_batch(
-        episodes, teachers=[FixedReferences(references) for _ in episodes], lambda_am=0.7,
+        episodes, teachers=[FixedReferences(references) for _ in episodes], outer_write_obj_weight=0.7,
     )
-    expected = [serial(episode, teacher=FixedReferences(references), lambda_am=0.7)
+    expected = [serial(episode, teacher=FixedReferences(references), outer_write_obj_weight=0.7)
                 for episode in episodes]
     assert batch_sizes[0] == 3 and 2 in batch_sizes
     assert [row["write_events"] for row in actual] == [2, 1, 0]

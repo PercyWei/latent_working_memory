@@ -1,6 +1,6 @@
 """v4.1 的统一配置；相对路径以运行目录为基准。"""
 
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 import json
 import math
 import os
@@ -113,7 +113,7 @@ class TrainingConfig:
     warmup_steps: int = 50
     min_lr_ratio: float = 0.1
     gradient_clip: float = 1.0
-    lambda_am: float = 1.0
+    outer_write_obj_weight: float = 1.0
     dev_every: int = 50
     save_every: int | str = 100
     save_total_limit: int = 2
@@ -124,6 +124,7 @@ class TrainingConfig:
     swanlab_project: str = "latent-working-memory-v4.1"
     group: str | None = None
     tags: tuple[str, ...] = ()
+    outer_write_obj: str = "am"
 
     def __post_init__(self):
         _path(self, "dataset_dir")
@@ -158,7 +159,7 @@ class TrainingConfig:
             raise ValueError("warmup_steps must be less than max_steps")
         for name in ("learning_rate", "lora_learning_rate", "adam_epsilon", "gradient_clip"):
             _number(getattr(self, name), name)
-        for name in ("weight_decay", "lambda_am", "min_lr_ratio", "beta1", "beta2"):
+        for name in ("weight_decay", "outer_write_obj_weight", "min_lr_ratio", "beta1", "beta2"):
             _number(getattr(self, name), name, inclusive=True)
         if self.min_lr_ratio > 1:
             raise ValueError("min_lr_ratio must not exceed 1")
@@ -166,6 +167,8 @@ class TrainingConfig:
             raise ValueError("beta1 and beta2 must be less than 1")
         if self.tracking not in {"disabled", "swanlab"}:
             raise ValueError("tracking must be disabled or swanlab")
+        if self.outer_write_obj not in {"am", "distill"}:
+            raise ValueError("outer_write_obj must be am or distill")
         if not isinstance(self.swanlab_project, str) or not self.swanlab_project.strip():
             raise ValueError("swanlab_project must be a nonempty string")
         if self.group is None and self.output_dir is not None:
@@ -207,14 +210,6 @@ def config_from_dict(payload):
         teacher=TeacherConfig(**payload["teacher"]),
         training=TrainingConfig(**payload["training"]),
     )
-
-
-def saved_config(payload):
-    """已有计划和 checkpoint 的训练状态不再包含末尾测试安排。"""
-    training = dict(payload["training"])
-    for name in ("train_only", "test_data", "max_test_samples", "max_new_tokens", "eval_id"):
-        training.pop(name, None)
-    return asdict(config_from_dict({**payload, "training": training}))
 
 
 def load_config(path, overrides=None):

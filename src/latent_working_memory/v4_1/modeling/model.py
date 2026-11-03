@@ -189,11 +189,8 @@ class OnlineMemoryLM(nn.Module):
         state.inner_before.append(torch.stack(before).mean(dim=0))
         state.inner_after.append(torch.stack(after).mean(dim=0))
 
-    def _outer_am(self, state, teachers, generator):
+    def _outer_am(self, state, references):
         """返回逐样本的 AM 总损失，以及停止梯度的 output、log-mass 分项。"""
-        references = [teacher.reference(
-            state.write_events, state.position, state.compressed_tokens, generator
-        ) for teacher in teachers]
         losses, output_losses, mass_losses = [], [], []
         for index, kv in enumerate(state.memory_kv):
             reference = {name: torch.stack([record[name][index] for record in references])
@@ -208,6 +205,61 @@ class OnlineMemoryLM(nn.Module):
             mass_losses.append(mass_loss.detach())
         return tuple(torch.stack(values).mean(dim=0)
                      for values in (losses, output_losses, mass_losses))
+
+    def _distill_loss(self, hidden, teacher_log_probs):
+        logits = self.backbone.lm_head(hidden).float().squeeze(0)
+        teacher_log_probs = teacher_log_probs.to(device=logits.device)
+        return F.kl_div(logits.log_softmax(-1), teacher_log_probs, reduction="sum", log_target=True)
+
+    def _distill_branch(self, input_ids, first_logit_index, teacher_log_probs,
+                        position, differentiable, keys, values, memory_kv, query_heads):
+        """纯分支：仅共享输入 KV 的存储，全部追加与位置变化留在临时状态中。"""
+        queries = [key.new_empty((key.shape[0], heads, 0, key.shape[-1]))
+                   for key, heads in zip(keys, query_heads)]
+        branch = StreamState([], list(memory_kv), list(keys), list(values), queries, position=position)
+        losses, consumed = [], 0
+        for hidden in self.consume(input_ids, branch, differentiable, write=False):
+            start = max(0, first_logit_index - consumed)
+            offset = consumed + start - first_logit_index
+            for chunk in hidden[:, start:].split(self.config.loss_chunk_size, dim=1):
+                if chunk.shape[1] == 0:
+                    continue
+                target = teacher_log_probs[offset:offset + chunk.shape[1]]
+                if differentiable and self.config.gradient_checkpointing:
+                    loss = checkpoint(self._distill_loss, chunk, target, use_reentrant=False)
+                else:
+                    loss = self._distill_loss(chunk, target)
+                losses.append(loss)
+                offset += chunk.shape[1]
+            consumed += hidden.shape[1]
+        return torch.stack(losses).sum()
+
+    def _outer_losses(self, state, teachers, generator, differentiable, outer_write_obj):
+        references = [teacher.reference(
+            state.write_events, state.position, state.compressed_tokens, generator
+        ) for teacher in teachers]
+        with torch.set_grad_enabled(differentiable and outer_write_obj == "am"):
+            losses = self._outer_am(state, references)
+        if outer_write_obj == "am":
+            return losses
+        distill_losses = []
+        query_heads = tuple(query.shape[1] for query in state.recent_queries)
+        for row, reference in enumerate(references):
+            keys = tuple(key[row:row + 1] for key in state.keys)
+            values = tuple(value[row:row + 1] for value in state.values)
+            memory_kv = tuple(tuple(tensor[row:row + 1] for tensor in kv) for kv in state.memory_kv)
+            branch_losses, tokens = [], 0
+            for input_ids, first_logit_index, teacher_log_probs in reference["distill_branches"]:
+                args = (input_ids, first_logit_index, teacher_log_probs,
+                        state.position, differentiable, keys, values, memory_kv, query_heads)
+                if differentiable and self.config.gradient_checkpointing:
+                    loss = checkpoint(self._distill_branch, *args, use_reentrant=False)
+                else:
+                    loss = self._distill_branch(*args)
+                branch_losses.append(loss)
+                tokens += len(input_ids) - first_logit_index
+            distill_losses.append(torch.stack(branch_losses).sum() / tokens)
+        return (*losses, torch.stack(distill_losses))
 
     def consume(self, token_ids, state, differentiable=False, write=True, on_write=None,
                 inner_diagnostics=None):
@@ -240,7 +292,8 @@ class OnlineMemoryLM(nn.Module):
             pass
         return state
 
-    def _ingest_batch(self, contexts, teachers, generator, differentiable, inner_diagnostics=None):
+    def _ingest_batch(self, contexts, teachers, generator, differentiable, inner_diagnostics=None,
+                      outer_write_obj="am"):
         """正文按活跃样本批量推进；正文结束后提取该样本的最终状态。"""
         active = list(range(len(contexts)))
         state = self.initial_state(differentiable, batch_size=len(contexts))
@@ -263,7 +316,10 @@ class OnlineMemoryLM(nn.Module):
                     if inner_diagnostics is not None else None,
                 )
                 if teachers is not None:
-                    losses = self._outer_am(state, [teachers[index] for index in active], generator)
+                    losses = self._outer_losses(
+                        state, [teachers[index] for index in active], generator,
+                        differentiable, outer_write_obj,
+                    )
                     for row, index in enumerate(active):
                         outer_losses[index].append(tuple(loss[row] for loss in losses))
             continuing = []
@@ -285,8 +341,8 @@ class OnlineMemoryLM(nn.Module):
             "inner_after": float(torch.stack(state.inner_after).mean()) if state.inner_after else 0.0,
         }
 
-    def forward(self, episode, teacher=None, lambda_am=1.0,
-                generator=None, differentiable=True, inner_diagnostics=None):
+    def forward(self, episode, teacher=None, outer_write_obj_weight=1.0,
+                generator=None, differentiable=True, inner_diagnostics=None, outer_write_obj="am"):
         if not episode.context_ids or not episode.target_ids:
             raise ValueError("a QA episode must have nonempty context and target")
         with torch.set_grad_enabled(differentiable):
@@ -294,14 +350,19 @@ class OnlineMemoryLM(nn.Module):
 
             def supervise(state):
                 if teacher is not None:
-                    losses = self._outer_am(state, [teacher], generator)
+                    losses = self._outer_losses(
+                        state, [teacher], generator, differentiable, outer_write_obj,
+                    )
                     outer_losses.append(tuple(loss[0] for loss in losses))
 
             state = self._ingest(episode.context_ids, differentiable, supervise, inner_diagnostics)
-            return self._sample_output(episode, state, outer_losses, lambda_am, differentiable)
+            return self._sample_output(
+                episode, state, outer_losses, outer_write_obj_weight, differentiable, outer_write_obj,
+            )
 
-    def forward_batch(self, episodes, teachers=None, lambda_am=1.0,
-                      generator=None, differentiable=True, inner_diagnostics=None):
+    def forward_batch(self, episodes, teachers=None, outer_write_obj_weight=1.0,
+                      generator=None, differentiable=True, inner_diagnostics=None,
+                      outer_write_obj="am"):
         """正文及写入真正批量计算；QA 分别读取各自状态，返回逐样本损失。"""
         if torch.is_inference_mode_enabled():
             raise RuntimeError("online TTT needs autograd; use no_grad(), not inference_mode()")
@@ -312,23 +373,33 @@ class OnlineMemoryLM(nn.Module):
         with torch.set_grad_enabled(differentiable):
             states, outer_losses = self._ingest_batch(
                 [episode.context_ids for episode in episodes], teachers, generator,
-                differentiable, inner_diagnostics,
+                differentiable, inner_diagnostics, outer_write_obj,
             )
-            return [self._sample_output(episode, state, losses, lambda_am, differentiable)
-                    for episode, state, losses in zip(episodes, states, outer_losses)]
+            return [
+                self._sample_output(
+                    episode, state, losses, outer_write_obj_weight, differentiable, outer_write_obj,
+                )
+                for episode, state, losses in zip(episodes, states, outer_losses)
+            ]
 
-    def _sample_output(self, episode, state, outer_losses, lambda_am, differentiable):
+    def _sample_output(self, episode, state, outer_losses, outer_write_obj_weight,
+                       differentiable, outer_write_obj):
         qa_loss = self._qa_loss(episode, state, differentiable)
         if outer_losses:
-            outer_am, outer_am_output, outer_am_mass = (
-                torch.stack(values).mean() for values in zip(*outer_losses)
-            )
+            averaged = tuple(torch.stack(values).mean() for values in zip(*outer_losses))
+            outer_am, outer_am_output, outer_am_mass = averaged[:3]
         else:
             outer_am, outer_am_output, outer_am_mass = (qa_loss.new_zeros(()) for _ in range(3))
+        objective = outer_am
+        metrics = {}
+        if outer_write_obj == "distill":
+            objective = averaged[3] if outer_losses else qa_loss.new_zeros(())
+            metrics["distill_kl"] = objective
         return {
-            "loss": qa_loss + lambda_am * outer_am,
+            "loss": qa_loss + outer_write_obj_weight * objective,
             "qa_loss": qa_loss, "outer_am": outer_am,
             "outer_am_output": outer_am_output, "outer_am_mass": outer_am_mass,
+            **metrics,
             "target_tokens": len(episode.target_ids), **self._diagnostics(state),
         }
 

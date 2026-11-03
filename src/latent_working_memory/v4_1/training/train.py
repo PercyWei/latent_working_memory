@@ -90,8 +90,13 @@ def tracking_run(config, output_dir, resume, device):
                     "inner_before", "inner_after",
                 ):
                     run.define_metric(f"{section}/{name}", x_axis="_step", section_name=section)
+                if training.outer_write_obj == "distill":
+                    run.define_metric(f"{section}/distill_kl", x_axis="_step", section_name=section)
+            auxiliary_grad = (
+                "distill_kl_grad_norm" if training.outer_write_obj == "distill" else "outer_am_grad_norm"
+            )
             for name in (
-                "train/grad_norm", "train/qa_grad_norm", "train/outer_am_grad_norm",
+                "train/grad_norm", "train/qa_grad_norm", f"train/{auxiliary_grad}",
                 "resources/step_seconds", "resources/peak_memory_gib",
             ):
                 run.define_metric(name, x_axis="_step", section_name=name.split("/")[0])
@@ -118,8 +123,6 @@ def _restore_metrics(path, checkpoint_step):
 
 def _restore_inner_diagnostics(path, checkpoint_step):
     """保留 checkpoint 内的稀疏采样记录，丢弃后续步骤和未完成末行。"""
-    if not path.exists():
-        return
     kept = []
     previous_step = 0
     for raw_line in path.read_bytes().split(b"\n")[:-1]:
@@ -186,7 +189,8 @@ def train(plan_dir, device="cuda", resume=None):
         print(
             f"train world_size={world_size} microbatch_per_gpu={training.micro_batch_size} "
             f"gradient_accumulation_steps={training.gradient_accumulation_steps} "
-            f"effective_batch_size={global_batch_size} teacher_batch_size={config.teacher.batch_size}",
+            f"effective_batch_size={global_batch_size} teacher_batch_size={config.teacher.batch_size} "
+            f"outer_write_obj={training.outer_write_obj}",
             flush=True,
         )
     set_seed(config.seed)
@@ -317,8 +321,9 @@ def train(plan_dir, device="cuda", resume=None):
                 rng = capture_rng(device)
                 try:
                     dev = evaluate_dev(
-                        model, dev_episodes[rank::world_size], teacher, training.lambda_am,
+                        model, dev_episodes[rank::world_size], teacher, training.outer_write_obj_weight,
                         torch.Generator().manual_seed(config.seed + 2 + rank),
+                        outer_write_obj=training.outer_write_obj,
                     )
                 finally:
                     restore_rng(rng, device)
@@ -334,19 +339,33 @@ def train(plan_dir, device="cuda", resume=None):
                 if tracking is not None:
                     tracking.log({key: value for key, value in record.items() if "/" in key}, step=step)
                 grad_details = ""
+                auxiliary_details = ""
+                auxiliary_name = "AM"
+                auxiliary_grad = "outer_am_grad_norm"
+                am_name = "AM"
+                if training.outer_write_obj == "distill":
+                    auxiliary_details = f"KL={metrics['distill_kl']:.5f} "
+                    auxiliary_name = "KL"
+                    auxiliary_grad = "distill_kl_grad_norm"
+                    am_name = "AM-diagnostic"
                 if "qa_grad_norm" in metrics:
                     grad_details = (
                         f" QA-grad={metrics['qa_grad_norm']:.5f}"
-                        f" AM-grad={metrics['outer_am_grad_norm']:.5f}"
+                        f" {auxiliary_name}-grad={metrics[auxiliary_grad]:.5f}"
                     )
+                dev_details = ""
+                if "dev/loss" in record:
+                    dev_details = f" dev={record['dev/loss']:.5f}"
+                    if training.outer_write_obj == "distill":
+                        dev_details += f" dev-KL={record['dev/distill_kl']:.5f}"
                 print(
                     f"step {step}/{training.max_steps} loss={metrics['loss']:.5f} "
-                    f"QA={metrics['qa_loss']:.5f} AM={metrics['outer_am']:.5f} "
+                    f"QA={metrics['qa_loss']:.5f} {auxiliary_details}{am_name}={metrics['outer_am']:.5f} "
                     f"AM-output={metrics['outer_am_output']:.5f} AM-mass={metrics['outer_am_mass']:.5f} "
                     f"inner={metrics['inner_before']:.5f}->{metrics['inner_after']:.5f} "
                     f"grad={metrics['grad_norm']:.5f}{grad_details} "
                     f"samples={metrics['samples']} seconds={seconds:.1f}"
-                    + (f" dev={record['dev/loss']:.5f}" if "dev/loss" in record else ""),
+                    + dev_details,
                     flush=True,
                 )
             save_interval = training.save_every != "after_each_epoch" and step % training.save_every == 0

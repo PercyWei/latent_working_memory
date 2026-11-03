@@ -22,9 +22,11 @@ def configure_training_panels(api, remote):
                 ("train/inner_before", "更新前", "#74a9cf"),
                 ("train/inner_after", "更新后", "#2b8cbe"),
             )),
+            # 默认视图跨 run 共享；保留两种辅助目标，避免切换目标覆盖旧 run 的曲线。
             ("train/loss_grad_norm", (
                 ("train/qa_grad_norm", "QA", "#2b8cbe"),
                 ("train/outer_am_grad_norm", "outer AM", "#d95f0e"),
+                ("train/distill_kl_grad_norm", "distill KL", "#756bb1"),
             )),
         ),
         "dev": (

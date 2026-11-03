@@ -8,7 +8,7 @@ import torch
 import torch.distributed as dist
 
 from latent_working_memory.runtime import capture_rng, restore_rng
-from ..config import saved_config
+from ..config import config_from_dict
 
 
 def checkpoint_file(path):
@@ -25,11 +25,7 @@ def read_checkpoint(path):
     expected = {"config", "model", "optimizer", "scheduler", "cursor", "rng", "query_rng", "binding"}
     if set(state) != expected:
         raise ValueError(f"{path}: not a v4.1 training checkpoint")
-    state["config"] = saved_config(state["config"])
-    # 已有单卡 checkpoint 在读取边界归一化，新写出统一按 rank 保存。
-    if isinstance(state["rng"], dict):
-        state["rng"] = [state["rng"]]
-        state["query_rng"] = [state["query_rng"]]
+    state["config"] = asdict(config_from_dict(state["config"]))
     return state
 
 

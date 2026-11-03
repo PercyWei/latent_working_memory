@@ -205,16 +205,7 @@ def test_resume_uses_training_state_only_and_cli_keeps_modes_separate(tmp_path, 
     ))
     plan_dir = save_training_plan(config)
     first = write_checkpoint(config, 1, summary=False)
-    # 已有真实产物曾保存评估编排字段；读取时归一化，训练状态仍严格核对。
-    legacy_fields = {"train_only": False, "eval_id": "original-test", "test_data": str(tmp_path / "test"),
-                     "max_test_samples": 2, "max_new_tokens": 7}
-    requested = json.loads((plan_dir / "train.json").read_text())
-    requested.update(legacy_fields)
-    (plan_dir / "train.json").write_text(json.dumps(requested))
     original_plan = (plan_dir / "train.json").read_bytes()
-    state = torch.load(first, weights_only=False)
-    state["config"]["training"].update(legacy_fields)
-    torch.save(state, first)
     test_plan = plan_dir / "eval-original-test/test.json"
     test_plan.parent.mkdir()
     test_plan.write_text("obsolete evaluation plan")

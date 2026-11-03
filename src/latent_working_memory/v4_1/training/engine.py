@@ -73,22 +73,19 @@ class SampleCursor:
 
     def load_state_dict(self, state, step, batch_size):
         epoch, offset, order = state["epoch"], state["offset"], state["order"]
-        if type(epoch) is not int or epoch < 0 or type(offset) is not int or not 0 <= offset <= self.size:
+        if type(epoch) is not int or epoch < 0 or type(offset) is not int or not 0 <= offset < self.size:
             raise ValueError("invalid checkpoint sample cursor epoch or offset")
         if not isinstance(order, list) or any(type(index) is not int for index in order) or sorted(order) != list(range(self.size)):
             raise ValueError("checkpoint sample order must be a permutation of the training samples")
         steps_per_epoch = math.ceil(self.size / batch_size)
         completed = epoch * steps_per_epoch + math.ceil(offset / batch_size)
-        if (offset != self.size and offset % batch_size) or type(step) is not int or step != completed:
+        if offset % batch_size or type(step) is not int or step != completed:
             raise ValueError("checkpoint sample cursor differs from its optimizer step and global batch")
         self.epoch = state["epoch"]
         self.offset = state["offset"]
         self.order = list(state["order"])
         self.generator.set_state(state["generator"])
-        self.epoch_end = offset == self.size or (epoch > 0 and offset == 0)
-        # 已有 checkpoint 在尾批后尚未推进；按原 next_batch 的顺序归一化。
-        if self.offset == self.size:
-            self._advance_epoch()
+        self.epoch_end = epoch > 0 and offset == 0
 
 
 class TrainingEngine:
@@ -236,8 +233,12 @@ class TrainingEngine:
             "loss", "qa_loss", "outer_am", "outer_am_output", "outer_am_mass",
             "inner_before", "inner_after",
         )}
+        auxiliary = "distill_kl" if self.config.outer_write_obj == "distill" else "outer_am"
+        objective_options = {"outer_write_obj": "distill"} if auxiliary == "distill_kl" else {}
+        if auxiliary == "distill_kl":
+            totals[auxiliary] = 0.0
         target_tokens = write_events = 0
-        loss_gradients = {"qa": {}, "outer_am": {}} if step % GRAD_NORM_EVERY == 0 else None
+        loss_gradients = {"qa": {}, auxiliary: {}} if step % GRAD_NORM_EVERY == 0 else None
         learning_rates = {group["name"]: group["lr"] for group in self.optimizer.param_groups}
         for start in range(0, len(episodes), self.config.micro_batch_size):
             group = episodes[start:start + self.config.micro_batch_size]
@@ -246,15 +247,19 @@ class TrainingEngine:
                 trajectories = [stack.enter_context(teacher.episode(episode, generator)) for episode in group]
                 if len(group) == 1:
                     outputs = [self.model(
-                        group[0], teacher=trajectories[0], lambda_am=self.config.lambda_am,
+                        group[0], teacher=trajectories[0],
+                        outer_write_obj_weight=self.config.outer_write_obj_weight,
                         generator=generator, differentiable=True,
+                        **objective_options,
                         **({"inner_diagnostics": group_diagnostics[0]}
                            if group_diagnostics is not None else {}),
                     )]
                 else:
                     outputs = self.model.forward_batch(
-                        group, teachers=trajectories, lambda_am=self.config.lambda_am,
+                        group, teachers=trajectories,
+                        outer_write_obj_weight=self.config.outer_write_obj_weight,
                         generator=generator, differentiable=True,
+                        **objective_options,
                         **({"inner_diagnostics": group_diagnostics}
                            if group_diagnostics is not None else {}),
                     )
@@ -266,7 +271,7 @@ class TrainingEngine:
                 } for episode, records in zip(group, group_diagnostics))
             # Teacher 前向已完成，反向只经过 student 的完整元训练图。
             if loss_gradients is not None:
-                for name, key in (("qa", "qa_loss"), ("outer_am", "outer_am")):
+                for name, key in (("qa", "qa_loss"), (auxiliary, auxiliary)):
                     component_loss = torch.stack([output[key] for output in outputs]).sum()
                     self._accumulate_loss_gradients(component_loss, loss_gradients[name])
             torch.stack([output["loss"] for output in outputs]).sum().backward()
@@ -297,20 +302,24 @@ class TrainingEngine:
         }
 
 
-def evaluate_dev(model, episodes, teacher, lambda_am, generator):
+def evaluate_dev(model, episodes, teacher, outer_write_obj_weight, generator, outer_write_obj="am"):
     """验证本 rank 分片并汇总全局指标；inner 的局部求导由模型内部启用。"""
     model.eval()
     totals = {name: 0.0 for name in (
         "loss", "qa_loss", "outer_am", "outer_am_output", "outer_am_mass",
         "inner_before", "inner_after",
     )}
+    objective_options = {"outer_write_obj": "distill"} if outer_write_obj == "distill" else {}
+    if outer_write_obj == "distill":
+        totals["distill_kl"] = 0.0
     target_tokens = write_events = 0
     with torch.no_grad():
         for episode in episodes:
             with teacher.episode(episode, generator) as trajectory:
                 output = model(
-                    episode, teacher=trajectory, lambda_am=lambda_am,
+                    episode, teacher=trajectory, outer_write_obj_weight=outer_write_obj_weight,
                     generator=generator, differentiable=False,
+                    **objective_options,
                 )
             for name in totals:
                 totals[name] += float(output[name])

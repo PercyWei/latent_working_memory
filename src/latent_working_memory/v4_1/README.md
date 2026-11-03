@@ -2,9 +2,9 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261101 16:38:10 Asia/Shanghai
+最后修订时间：20261103 11:10:08 Asia/Shanghai
 
-每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层用 QA 与完整历史提供的 AM 参照，学习连续写入与读取。
+每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层保留 QA，根据配置选择完整历史的 attention matching 或下一 token 分布蒸馏，学习连续写入与读取。
 
 [运行指南](scripts/README.md) · [默认配置](../../../configs/v4-1/online_ttt_memory.json) · [框架笔记](../../../notes/v4-1/20261022_online_ttt_memory_framework.md)
 
@@ -14,12 +14,12 @@
 |---|---|
 | 输入处理 | Memory 保存已压缩历史；pending 保存待压缩原始 KV；recent 保存近期原始 KV 与 queries |
 | 记忆写入 | Pending 达到阈值后，固定本轮 recent queries，执行多步 inner AM，将旧 memory 与 pending 合并 |
-| 训练监督 | 每次写入后计算 outer AM；全文处理后固定 memory，输入问题和答案，计算答案 CE |
+| 训练监督 | 每次写入后计算所选 outer 目标，全文处理后固定 memory，计算答案 CE |
 | 外层更新 | 通过完整写入轨迹学习初始化、KV／bias 解码器、正步长与 attention Q/K/V LoRA |
 | 推理 | 固定慢参数，沿用在线写入；正文处理完成后固定 memory，追加问题 KV 并自回归生成 |
 | 默认运行 | 先保存训练计划，再进行训练、dev 验证与 checkpoint 保存；test／benchmark 独立启动 |
 
-首版支持 full-attention Qwen3、固定 default RoPE，不启用随机 dropout。GPU 由 `CUDA_VISIBLE_DEVICES` 指定：离线准备按文档分配，训练每卡一个数据并行进程，评估按样本分片共同处理一个 checkpoint，多个 checkpoint 按 step 串行。Inner 使用 recent 自然读取；outer 使用固定文本提示与 teacher 自然响应。Latent query 生成器与 self-study 保留为研究候选。
+首版支持 full-attention Qwen3、固定 default RoPE，不启用随机 dropout。GPU 由 `CUDA_VISIBLE_DEVICES` 指定：离线准备按文档分配，训练每卡一个数据并行进程，评估按样本分片共同处理一个 checkpoint，多个 checkpoint 按 step 串行。Inner 使用 recent 自然读取。Outer AM 使用提示与响应的查询，蒸馏使用独立的提示回答与正文续文。Latent query 生成器与 self-study 保留为研究候选。
 
 ### 1.1 记忆接口与在线边界
 
@@ -54,14 +54,19 @@ AM 等权相加局部输出 $o$ 与 log-mass $z$ 的标准化 MSE；$z$ 是归�
 
 Inner 每轮使用全部 recent 位置，固定 queries 与 teacher 的数值，执行 $S_{\mathrm{in}}$ 步无动量 SGD。每层步长 $\eta_\ell=\operatorname{softplus}(a_\ell)$ 由 outer 学习；跨轮仅延续 memory，无额外 inner optimizer 状态。固定本轮参照不表示截断它对此前写入的元梯度。
 
-Outer 对单样本计算：
+外层总目标由答案 CE 和写入后监督两部分组成。答案 CE 的系数为 1，`outer_write_obj` 选择每次 inner 写入完成后的监督方式，`outer_write_obj_weight` 设置其系数。写入后监督先在单个样本的各写入边界间取平均。默认 `training.outer_write_obj=am` 时，目标为
 
 $$
 \mathcal L=\operatorname{mean}_{\text{答案 tokens}}\mathrm{CE}
-+\lambda_{\mathrm{AM}}\operatorname{mean}_{\text{压缩轮次}}\mathcal L_{\mathrm{AM}}.
++\lambda_{\mathrm{write}}\operatorname{mean}_{\text{压缩轮次}}\mathcal L_{\mathrm{AM}}.
 $$
 
-AM 内部先对查询／通道、再对 heads 与层取平均；训练 batch 对完整样本损失取平均。每轮包括最后一轮均有 inner 与 outer AM。无压缩的样本只有 QA 损失。
+AM 内部先对查询／通道、再对 heads 与层取平均。设置 `training.outer_write_obj=distill` 时，每个写入边界从刚更新的 student 状态分出两类只读前向。冻结 teacher 使用相同的文本前缀和完整历史，student 使用自己的 memory、recent KV、queries 及输出头。
+
+- **提示回答**。每个边界从缓存的固定提示中均匀抽一条，在相同提示与已生成回答前缀上，对齐用于预测各回答 token 的分布，包含缓存中实际生成的 EOS。提示本身不计入损失。
+- **正文续文**。从边界后取最多 `teacher.response_max_tokens` 个真实正文 token，第一个作为写入后的首次读取，从第二个起计入损失。剩余正文不足两个 token 时只使用提示回答。
+
+两条分支各用独立 KV，结束后回到同一正文轨迹。每个有效位置按完整词表计算温度 1 的正向 KL，即 $D_{\rm KL}(p_{\rm teacher}\Vert p_{\rm student})$。先在边界内对两类分支的有效 token 一起取平均，再对该样本各次写入取平均，得到 `distill_kl`。总损失为 `qa_loss + outer_write_obj_weight * distill_kl`。Outer AM 总量与分项作为无梯度诊断。两种训练均按实际样本数平均，无写入的样本只贡献 QA 损失。
 
 ### 1.3 精度与梯度
 
@@ -119,9 +124,9 @@ Prepare 与 train 从 `<output_root>/teacher/p{pending_size}-r{recent_size}` 读
 
 缓存只保存响应、位置与尺度。以 36 层、32 query heads、2571 个边界为例，即使每条响应均达到 24 tokens，以上主要张量总量也约为 439 MB；另有少量元数据与全局提示。
 
-### 2.3 运行时生成 AM 参照
+### 2.3 运行时生成 outer 参照
 
-每次 outer AM 从完整 4096 位置池均匀、无放回抽取 128 个位置，各层与 heads 共用索引。Teacher 读取缓存的固定响应，只回放涉及的提示分支，并在各分支最远的选中位置结束，重算这些位置的 $q,o^T,z^T$；无需重新生成响应。Student 使用这些停止梯度的参照与离线固定尺度计算 AM。
+每次 outer AM 从完整 4096 位置池均匀、无放回抽取 128 个位置，各层与 heads 共用索引。Teacher 读取缓存的固定响应，只回放涉及的提示分支，并在各分支最远的选中位置结束，重算这些位置的 $q,o^T,z^T$；无需重新生成响应。Student 使用这些停止梯度的参照与离线固定尺度计算 AM。蒸馏复用同一缓存。Teacher 额外在本次选中的短分支上计算完整词表的 FP32 对数概率，临时保存在 CPU，供 student 计算 KL。
 
 每个样本在 student 建图前，按压缩边界顺序完成上述采样与回放。回放批内共享一份完整原文 prefix KV，各提示分支仅保存私有 suffix KV；主干通过 FlashInfer 合并前缀与因果 suffix 的 attention，选中位置另用 FP32 `local_read` 计算压缩范围内的监督目标。完整 prefix 与分支 KV 在全部参照准备完后释放，固定参照交给 student 逐轮使用。
 
@@ -183,7 +188,9 @@ Prepare/train 默认读取 `configs/v4-1/online_ttt_memory.json`，分别通过 
 | `weight_decay` | 0.01 | 仅解码器权重矩阵；其他慢参数为 0 |
 | `beta1`／`beta2`／`adam_epsilon` | 0.9／0.999／$10^{-8}$ | Outer AdamW |
 | `warmup_steps`／`min_lr_ratio` | 50／0.1 | 线性 warmup 后 cosine 降到峰值的 0.1 |
-| `gradient_clip`／`lambda_am` | 1／1 | Outer 全局梯度范数上限／outer AM 权重 |
+| `outer_write_obj` | `am` | 写入后对 memory 的辅助监督，可选 `am` 或 `distill` |
+| `outer_write_obj_weight` | 1 | 写入后监督的权重，答案 CE 系数为 1 |
+| `gradient_clip` | 1 | 外层总梯度的全局范数上限 |
 | `dev_every` | 50 | 每 50 步验证；epoch 末和最终步也验证 |
 | `save_every`／`save_total_limit` | `after_each_epoch`／4 | 每个 epoch 保存，保留最近 4 个；也可指定正整数步距，最终步必保存 |
 | `max_train_data_tokens` | 12288 | Train 原始正文长度上限；`null` 关闭 |
@@ -236,11 +243,11 @@ v4_1/
 
 `training/run.py` 调度训练、恢复或独立评估。训练预算完成、全部训练进程退出后结束；评估独立选择 checkpoint，结果保存到本地 `eval/` 目录并由 dashboard 展示。
 
-训练的 `qa_loss` 是样本内答案 token 平均 CE；`outer_am` 是完整历史参照下的标准化 AM，等于输出项 `outer_am_output` 与 log-mass 项 `outer_am_mass` 之和。两项沿用总 AM 的 query、head、层、压缩轮次与样本平均方式，仅作为日志诊断；训练目标仍为 `qa_loss + lambda_am * outer_am`。train/dev 的两个分项均写入 `metrics.jsonl` 与 SwanLab，训练终端同步输出。
+Train/dev 均记录答案 CE `qa_loss`、完整历史参照的 `outer_am` 及其两个分项 `outer_am_output` 和 `outer_am_mass`。蒸馏对照另记录 `distill_kl`。指标写入 `metrics.jsonl` 和 SwanLab，训练终端同步输出。
 
-训练在实际 global step 为 20、40、60……时记录 `qa_grad_norm` 与 `outer_am_grad_norm`，恢复训练后沿用已恢复的 global step 判断统计时机。两项分别对未加权的 QA、outer AM 损失求完整元梯度，包含 inner 更新的高阶与跨轮依赖。先累积各 microbatch 的梯度，跨 rank 求和并除以全局实际样本数，再计算同一组可训练慢参数上的 L2 范数；未使用的参数维度按零处理。参数包括 memory、decoder 与 LoRA，不含冻结基座和样本临时 latent memory。两项均在全局梯度裁剪前统计，outer AM 的梯度不乘 `lambda_am`。
+训练在实际 global step 为 20、40、60……时记录 `qa_grad_norm` 与所选辅助目标的梯度范数（`outer_am_grad_norm` 或 `distill_kl_grad_norm`）。恢复时沿用已恢复的 global step。两项均按未加权损失求完整元梯度，包含 inner 更新的高阶与跨轮依赖。先累积各 microbatch 的梯度，跨 rank 求和并除以全局实际样本数，再计算同一组可训练慢参数上的 L2 范数；未使用的参数维度按零处理。参数包括 memory、decoder 与 LoRA，不含冻结基座和样本临时 latent memory。两项均在全局梯度裁剪前统计。
 
-SwanLab 在 `train/loss_grad_norm` 原生折线图中用蓝色展示 QA、橙色展示 outer AM，横轴为实际 optimizer step；`metrics.jsonl` 与训练终端同步记录采样步的两项。非统计步完全跳过两次额外的向量–雅可比积（VJP）、两组梯度缓冲区和额外归约，两项日志缺省且不补零。采样步仍需对每个 microbatch 执行两次额外 VJP，并分配梯度缓冲区及临时求导、归约张量；降低频率减少平均开销，但不会降低采样步的显存峰值。原 `train/grad_norm`、outer AM 分项与其他逐步指标照常每步记录；训练权重与总损失的反向传播、裁剪和优化器更新方式保持原样。dev 不计算这两项梯度诊断。
+SwanLab 在 `train/loss_grad_norm` 原生折线图中合并展示 QA 与实际参与训练的辅助项，横轴为实际 optimizer step；`metrics.jsonl` 与训练终端同步记录采样步的两项。非统计步完全跳过两次额外的向量–雅可比积（VJP）、两组梯度缓冲区和额外归约，两项日志缺省且不补零。采样步仍需对每个 microbatch 执行两次额外 VJP，并分配梯度缓冲区及临时求导、归约张量；降低频率减少平均开销，但不会降低采样步的显存峰值。原 `train/grad_norm`、outer AM 分项与其他逐步指标照常每步记录；训练权重与总损失的反向传播、裁剪和优化器更新方式保持原样。dev 不计算这两项梯度诊断。
 
 `inner_before`／`inner_after` 分别记录同一次写入的首次 inner 更新前与全部 inner steps 完成后的局部 AM。SwanLab 在 train、dev 分区分别用 `inner_am` 原生折线图合并展示，横轴为实际 optimizer step，更新前用浅蓝、更新后用深蓝；保留底层标量数据。Inner loss 下降不能直接说明 QA 有效，正式实验应结合生成得分、逐题回答及资源成本分析。
 
@@ -272,11 +279,13 @@ JSON／JSONL 均使用 UTF-8。训练产物与 SwanLab 记录统一由 rank 0 �
 
 `state.pt` 固定八个顶层字段：`config`、`model`、`optimizer`、`scheduler`、`cursor`、`rng`、`query_rng`、`binding`。`model` 只保存慢参数，不重复保存基座权重或样本临时 memory；`cursor.step` 是已完成的 optimizer step，样本游标为全局游标。`rng` 与 `query_rng` 均为按 rank 排列的列表，单卡长度为 1；恢复时列表长度须与 GPU 数量一致，各 rank 恢复自己的随机状态。
 
+Checkpoint、训练计划与日志使用当前实现的规范格式。需要使用历史产物时，先手动将其字段、状态和文件布局对齐当前约定。
+
 训练与评估 summary 的 `checkpoint` 均为 `state.pt` 的绝对路径。评估另保存 `training_run: {directory}`，`directory` 指向实际 `train/` 路径。
 
 训练与评估分别位于同一运行目录的 `train/` 与 `eval/`，完整布局见[运行指南](scripts/README.md#7-产物目录与记录)。评估结果为 `<运行目录>/eval/<eval-id>/<task>/global_step_<N>/`，`eval-id` 默认 `YYYYMMDD-HHMMSS`，续跑或复用同一计划时显式指定已有标识；显式指定其他 `output_root` 时，仍保留原运行目录名。RULER 按长度保留子结果，扩展或重试时复用已完成样本与长度；同计划采用调度锁，匹配的完整结果直接复用。评估命令与各分片输出写入对应 checkpoint 目录的 `eval.log`。
 
-Teacher 边界与 checkpoint 先写临时文件，再原子替换正式文件。恢复训练时，`metrics.jsonl` 原子重写为不超过 checkpoint step 的完整记录；`inner_diagnostics.jsonl` 保留不超过该步的已有稀疏记录，旧 checkpoint 尚无该文件时从后续采样步开始记录。两者均丢弃未完成末行，其他格式错误直接报错。独立看板读取上述 JSON／JSONL 展示指标与逐题记录，不改写原始答案或评分；启动方式见[运行指南](scripts/README.md#43-评估结果与看板)。
+Teacher 边界与 checkpoint 先写临时文件，再原子替换正式文件。恢复训练时，`metrics.jsonl` 原子重写为不超过 checkpoint step 的完整记录；`inner_diagnostics.jsonl` 保留不超过该步的已有稀疏记录。两者均丢弃未完成末行，其他格式错误直接报错。独立看板读取上述 JSON／JSONL 展示指标与逐题记录，不改写原始答案或评分；启动方式见[运行指南](scripts/README.md#43-评估结果与看板)。
 
 ### 4.2 坐标与单位
 

@@ -41,6 +41,34 @@ class TeacherReplay:
             self.forward(context_ids[start:min(start + self.prefill_chunk_size, processed_end)], cache)
 
     @torch.no_grad()
+    def distill_branches(self, prefix_cache, branches):
+        """共享完整 prefix，返回各分支指定位置开始的全词表 FP32 CPU log-probs。
+
+        两条分支共用 attention 工作区；prefix 不被复制或写入，各 suffix 独立。
+        """
+        prefix = tuple((layer.keys, layer.values) for layer in prefix_cache.layers)
+        prefix_length = prefix_cache.get_seq_length()
+        result = []
+        with SharedPrefixAttention(self.model, prefix, prefix_length, lambda *args: None) as attention:
+            for input_ids, first_logit_index in branches:
+                length = len(input_ids)
+                if prefix_length + length > self.model.config.max_position_embeddings:
+                    raise ValueError("teacher distillation branch exceeds the backbone position limit")
+                ids = torch.tensor([input_ids], dtype=torch.long, device=self.device)
+                positions = prefix_length + torch.arange(length, device=self.device)[None]
+                branch = DynamicCache(config=self.model.config)
+                attention.plan([length], length, [length], length)
+                hidden = self.model.model(
+                    input_ids=ids, past_key_values=branch,
+                    attention_mask={"full_attention": None},
+                    position_ids=positions, use_cache=True,
+                ).last_hidden_state[:, first_logit_index:]
+                log_probs = self.model.lm_head(hidden).float().log_softmax(dim=-1)[0].cpu()
+                result.append((input_ids, first_logit_index, log_probs))
+                del branch, hidden
+        return result
+
+    @torch.no_grad()
     def replay(self, prefix_cache, sequences, positions, compressed_end, on_read):
         """回调逐层接收 pool 索引和 q/o/z；全部为普通的无梯度 tensors。
 
