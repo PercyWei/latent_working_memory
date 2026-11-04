@@ -41,28 +41,54 @@ def validate_training_plan(config, checkpoint):
         raise ValueError("checkpoint configuration differs from the saved training plan")
 
 
-def prepare_evaluation_plan(run_dir, config, eval_id, task, options, overwrite=False):
-    """省略的值沿用已有计划；首次创建必须明确数据，RULER 仅允许扩展。"""
+def prepare_evaluation_plan(run_dir, config, eval_id, task, options, overwrite=False, resume=False):
+    """新建、恢复或重建任务计划；恢复固定协议，并可追加 checkpoint。"""
+    if resume and overwrite:
+        raise ValueError("--resume and --overwrite are mutually exclusive")
     if (not isinstance(eval_id, str) or not eval_id.strip()
         or Path(eval_id).name != eval_id or eval_id in {".", ".."} or "\\" in eval_id):
         raise ValueError("eval-id must be a nonempty directory name")
     if task not in {"test", "locomo", "ruler"}:
         raise ValueError("task must be test, locomo or ruler")
     path = Path(run_dir).expanduser().resolve() / "plan" / f"eval-{eval_id}" / f"{task}.json"
-    saved = read_evaluation_record(path) if path.exists() and not overwrite else None
-    previous = saved or {}
-    data = options.get("data", previous.get("data"))
+    output = Path(run_dir).expanduser().resolve() / "eval" / eval_id / task
+    if resume:
+        if not path.is_file():
+            raise ValueError(f"evaluation plan does not exist: {path}")
+        saved = read_evaluation_record(path)
+        identity = {
+            "training_run": str(Path(config.training.output_dir).expanduser().resolve()),
+            "model": asdict(config.model), "seed": config.seed, "eval_id": eval_id, "task": task,
+        }
+        if any(saved[key] != value for key, value in identity.items()):
+            raise ValueError("evaluation plan settings differ from the original training run")
+        previous = saved.get("checkpoints")
+        if "checkpoints" not in saved:
+            previous = [str(checkpoint) for checkpoint in
+                        Path(saved["training_run"]).glob("checkpoints/global_step_*/state.pt")]
+        checkpoints = sorted(set(previous) | set(options.get("checkpoints", ())),
+                             key=lambda value: int(Path(value).parent.name.removeprefix("global_step_")))
+        if checkpoints != saved.get("checkpoints"):
+            saved["checkpoints"] = checkpoints
+            write_json(path, saved)
+        return saved
+    elif not overwrite:
+        if path.exists():
+            raise ValueError("evaluation plan already exists; use --resume or --overwrite")
+        if output.exists() and any(output.iterdir()):
+            raise ValueError("evaluation results already exist; use --overwrite to rebuild the task")
+    data = options.get("data")
     if data is None:
-        option = "--test-data" if task == "test" else "--benchmark-data"
-        raise ValueError(f"specify {option} when creating an evaluation plan")
+        raise ValueError("specify --eval-data when creating an evaluation plan")
     settings = {
         "training_run": str(Path(config.training.output_dir).expanduser().resolve()),
         "model": asdict(config.model), "seed": config.seed, "eval_id": eval_id, "task": task,
+        "checkpoints": list(options["checkpoints"]),
         "data": str(Path(data).expanduser().resolve()),
-        "max_samples": options.get("max_samples", previous.get("max_samples")) if task == "test" else None,
-        "max_new_tokens": (options.get("max_new_tokens", previous.get("max_new_tokens", 128))
+        "max_samples": options.get("max_samples") if task == "test" else None,
+        "max_new_tokens": (options.get("max_new_tokens", 128)
                            if task == "test" else None),
-        "lengths": (list(normalize_lengths(options.get("lengths", previous.get("lengths"))))
+        "lengths": (list(normalize_lengths(options.get("lengths")))
                     if task == "ruler" else None),
     }
     for name in ("max_samples", "max_new_tokens"):
@@ -73,14 +99,8 @@ def prepare_evaluation_plan(run_dir, config, eval_id, task, options, overwrite=F
         raise ValueError("max_new_tokens must be a positive integer")
     if overwrite and not Path(settings["data"]).is_dir():
         raise FileNotFoundError(f"evaluation data directory does not exist: {settings['data']}")
-    if saved is not None:
-        if any(value != saved[key] for key, value in settings.items() if key != "lengths"):
-            raise ValueError("evaluation plan settings differ; use a new --eval-id or --output-root")
-        if task == "ruler" and not set(saved["lengths"]).issubset(settings["lengths"]):
-            raise ValueError("RULER lengths may only stay the same or expand within an evaluation plan")
     path.parent.mkdir(parents=True, exist_ok=True)
     if overwrite:
-        output = Path(run_dir).expanduser().resolve() / "eval" / eval_id / task
         if output.exists():
             shutil.rmtree(output)
     write_json(path, settings)

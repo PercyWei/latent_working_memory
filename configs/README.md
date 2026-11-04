@@ -1,7 +1,7 @@
 # 20260914_配置组织规则
 
 创建时间：20260914 11:48:20 UTC+08:00
-最后修订时间：20261103 11:06:59 Asia/Shanghai
+最后修订时间：20261104 17:15:20 Asia/Shanghai
 
 本规则用于本项目创建和整理配置。配置区分基础数据准备、具体实验与实验组；正式实验按下述目录组织。
 
@@ -42,16 +42,20 @@ configs/
 
 ### v4.1 在线 TTT 配置
 
-[v4-1/online_ttt_memory.json](v4-1/online_ttt_memory.json) 以 `seed`、`model`、`teacher`、`training` 统一描述当前实验，默认逐层 256 slots、pending/recent 1024/256、inner 3 步、每卡 microbatch 2、梯度累积 8 次，单卡全局 batch 16。Teacher 缓存独立准备，训练与评估命令见 [v4.1 运行指南](../src/latent_working_memory/v4_1/scripts/README.md)。
+[v4-1/default.json](v4-1/default.json) 以 `seed`、`model`、`teacher`、`training` 统一描述当前实验，默认逐层 256 slots、pending/recent 1024/256、inner 3 步、每卡 microbatch 2、梯度累积 8 次，单卡全局 batch 16。Teacher 缓存独立准备，训练与评估命令见 [v4.1 运行指南](../src/latent_working_memory/v4_1/scripts/README.md)。训练恢复仅用 `--checkpoint` 定位原计划，其他已知 CLI 实验设置忽略并集中提示。
+
+独立评估须通过 `--eval-run` 提供运行根目录（`train/`、`plan/` 与 `eval/` 所在层），使用 `--eval-task test|locomo|ruler` 与 `--eval-data`。新建或覆盖时，`--checkpoint` 可选且只填 `global_step_<N>` 名称，支持多个，从 `<eval-run>/train/checkpoints/<名称>/state.pt` 读取；省略时选择当时全部。计划以必需的 `checkpoints` 字段保存累计 checkpoint 绝对路径列表，按 step 排序去重，并固定数据、预算与长度。
+
+续跑通过 `--evaluate-only --resume` 及显式的原 `--eval-run`、`--eval-id`、`--eval-task` 定位计划；省略 checkpoint 名称列表时调度累计范围全部，传入时仅调度指定项，并把新项并入累计计划，不缩减旧列表。仅有新增才原子更新计划，无新增不重写；状态 `selected_checkpoints` 记录本次范围。数据、预算与长度始终沿用计划，对应 CLI 实验选项忽略并集中提示；GPU 数量与评估批量可调整，结果曾重定向时仍须传原 `--output-root`。调整长度另开 eval-id，或使用 `--overwrite` 重建当前任务。
 
 Inner 稳定性对照沿用主配置，其余模型、数据、teacher 与优化器设置保持一致；两份配置均训练 1 epoch，每 25 个 optimizer steps 保存并验证，最多保留 5 个 checkpoint，epoch 末和最终步沿用现有保存／验证规则。
 
 | 配置 | 独立调整 |
 |---|---|
-| [online_ttt_memory_inner_steps1.json](v4-1/online_ttt_memory_inner_steps1.json) | `model.inner_steps=1`，`inner_lr_init=1.0` |
-| [online_ttt_memory_inner_lr0p1.json](v4-1/online_ttt_memory_inner_lr0p1.json) | `model.inner_lr_init=0.1`，`inner_steps=3` |
+| [inner-s1.json](v4-1/inner-s1.json) | `model.inner_steps=1`，`inner_lr_init=1.0` |
+| [inner-lr0p1.json](v4-1/inner-lr0p1.json) | `model.inner_lr_init=0.1`，`inner_steps=3` |
 
-[online_ttt_memory_inner_lr0p1_outer_distill.json](v4-1/online_ttt_memory_inner_lr0p1_outer_distill.json) 与 inner-lr0p1 构成写入监督对照，仅设置 `training.outer_write_obj=distill`。保留答案 CE，使用完整历史 teacher 的下一 token 分布监督每次写入，outer AM 作为诊断。
+[inner-lr0p1_outer-distill.json](v4-1/inner-lr0p1_outer-distill.json) 与 inner-lr0p1 构成写入监督对照，仅设置 `training.outer_write_obj=distill`。保留答案 CE，使用完整历史 teacher 的下一 token 分布监督每次写入，outer AM 作为诊断。
 
 ### v2 固定容量重构配置
 

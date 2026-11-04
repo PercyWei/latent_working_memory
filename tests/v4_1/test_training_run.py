@@ -211,18 +211,35 @@ def test_training_process_lifecycle_overwrite_and_independent_evaluation(tmp_pat
     for name in ("_visible_devices", "_execute", "load_config", "load_training_plan", "read_checkpoint"):
         monkeypatch.setattr(run, name, training_forbidden)
     monkeypatch.setattr(run, "run_evaluations", evaluate_only)
-    assert run.main(["--evaluate-only", "--checkpoint", "step1"]) is evaluation_result
-    assert only_evaluations[-1].checkpoint == ["step1"]
-    assert run.main(["--evaluate-only", "--checkpoint", "step1", "step2", "--overwrite"]) is evaluation_result
-    assert only_evaluations[-1].checkpoint == ["step1", "step2"] and only_evaluations[-1].overwrite
-    assert run.main(["--evaluate-only", "--eval-run", "saved/train"]) is evaluation_result
-    assert only_evaluations[-1].eval_run == "saved/train"
-    assert only_evaluations[-1].eval_type == "test" and only_evaluations[-1].benchmark is None
+    assert run.main(["--evaluate-only", "--eval-run", "saved",
+                     "--checkpoint", "global_step_1"]) is evaluation_result
+    assert only_evaluations[-1].checkpoint == ["global_step_1"]
+    assert run.main(["--evaluate-only", "--eval-run", "saved", "--checkpoint",
+                     "global_step_1", "global_step_2", "--overwrite"]) is evaluation_result
+    assert only_evaluations[-1].checkpoint == ["global_step_1", "global_step_2"]
+    assert only_evaluations[-1].overwrite
+    assert run.main(["--evaluate-only", "--eval-run", "saved"]) is evaluation_result
+    assert only_evaluations[-1].eval_run == "saved"
+    assert only_evaluations[-1].checkpoint is None
+    assert only_evaluations[-1].eval_task == "test"
     assert only_evaluations[-1].eval_id is only_evaluations[-1].output_root is None
-    assert not hasattr(only_evaluations[-1], "test_data")
+    assert run.main([
+        "--evaluate-only", "--resume", "--eval-run", "saved", "--eval-id", "continued",
+        "--eval-task", "ruler", "--checkpoint", "global_step_1", "global_step_17",
+        "--config", "missing.json",
+        "--eval-data", "ignored-data", "--lengths", "65536", "--max-new-tokens", "1",
+        "--max-test-samples", "1", "--epochs", "99", "--eval-batch-size-per-gpu", "3",
+    ]) is evaluation_result
+    resumed = only_evaluations[-1]
+    assert resumed.resume and resumed.eval_run == "saved"
+    assert resumed.checkpoint == ["global_step_1", "global_step_17"]
+    assert resumed.eval_task == "ruler" and resumed.eval_batch_size_per_gpu == 3
+    assert not any(hasattr(resumed, name) for name in (
+        "config", "eval_data", "lengths", "max_new_tokens", "max_test_samples", "epochs",
+    ))
 
 
-def test_resume_uses_training_state_only_and_cli_keeps_modes_separate(tmp_path, monkeypatch):
+def test_resume_uses_training_state_only_and_cli_keeps_modes_separate(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
     config = configuration(tmp_path / "artifacts")
     config = replace(config, training=replace(config.training, run_id="saved", group="saved-series"))
@@ -251,7 +268,21 @@ def test_resume_uses_training_state_only_and_cli_keeps_modes_separate(tmp_path, 
 
     monkeypatch.setattr(run, "_execute", execute)
     monkeypatch.setattr(run, "run_evaluations", forbidden)
-    result = run.run_job(run.parse_args(["--resume", "--checkpoint", str(first)]))
+    args = run.parse_args([
+        "--resume", "--checkpoint", str(first), "--config", str(tmp_path / "missing.json"),
+        "--train-data", str(tmp_path / "missing-data"), "--output-root", str(tmp_path / "ignored"),
+        "--run-id", "ignored", "--epochs", "999", "--micro-batch-size-per-gpu", "99",
+        "--eval-run", "ignored/train", "--eval-task", "ruler", "--lengths", "65536",
+        "--eval-batch-size-per-gpu", "99", "--tracking", "online",
+    ])
+    assert not any(hasattr(args, name) for name in (
+        "config", "train_data", "output_root", "run_id", "epochs", "micro_batch_size_per_gpu",
+        "eval_task", "lengths", "eval_batch_size_per_gpu", "tracking",
+    ))
+    assert args.eval_run is None
+    ignored = capsys.readouterr().err
+    assert "[resume] ignored options" in ignored and "--config" in ignored and "--epochs" in ignored
+    result = run.run_job(args)
     assert len(launched) == 1
     assert load_config(Path(result["output_dir"]) / "config.json").training.group == "saved-series"
     assert (plan_dir / "train.json").read_bytes() == original_plan
@@ -300,31 +331,36 @@ def test_resume_uses_training_state_only_and_cli_keeps_modes_separate(tmp_path, 
     assert len(launched) == 2
 
     benchmark = run.parse_args([
-        "--evaluate-only", "--checkpoint", "saved", "--eval-type", "benchmark", "--overwrite",
-        "--benchmark", "ruler", "--benchmark-data", "ruler-data", "--lengths", "8192", "16384",
+        "--evaluate-only", "--eval-run", "saved", "--checkpoint", "global_step_1", "--overwrite",
+        "--eval-task", "ruler", "--eval-data", "ruler-data", "--lengths", "8192", "16384",
         "--output-root", "other-artifacts",
     ])
-    assert benchmark.benchmark == "ruler" and benchmark.lengths == [8192, 16384] and benchmark.overwrite
+    assert benchmark.eval_task == "ruler" and benchmark.lengths == [8192, 16384] and benchmark.overwrite
     assert benchmark.output_root == "other-artifacts" and not hasattr(benchmark, "max_test_samples")
     for argv in (
         ["--train-only"],
         ["--evaluate-only"],
+        ["--evaluate-only", "--checkpoint", "global_step_1"],
         ["--evaluate-only", "--resume", "--checkpoint", "saved"],
+        ["--evaluate-only", "--resume", "--checkpoint", "saved", "--eval-id", "existing"],
+        ["--evaluate-only", "--resume", "--eval-run", "saved"],
+        ["--evaluate-only", "--resume", "--eval-run", "saved", "--eval-id", "existing"],
         ["--resume", "--checkpoint", "first", "second"],
         ["--resume", "--checkpoint", "saved", "--overwrite"],
-        ["--eval-run", "saved/train"],
+        ["--eval-run", "saved"],
         ["--checkpoint", "saved"],
-        ["--evaluate-only", "--checkpoint", "saved", "--eval-run", "saved/train"],
-        ["--evaluate-only", "--checkpoint", "saved", "--config", "config.json"],
-        ["--evaluate-only", "--checkpoint", "saved", "--train-data", "train-data"],
-        ["--evaluate-only", "--checkpoint", "saved", "--epochs", "4"],
+        ["--evaluate-only", "--eval-run", "saved", "--config", "config.json"],
+        ["--evaluate-only", "--eval-run", "saved", "--train-data", "train-data"],
+        ["--evaluate-only", "--eval-run", "saved", "--epochs", "4"],
         ["--evaluate-only", "--checkpoint", "saved", "--test-data", "test", "--benchmark-data", "benchmark"],
         ["--evaluate-only", "--checkpoint", "saved", "--eval-type", "benchmark"],
-        ["--evaluate-only", "--checkpoint", "saved", "--eval-type", "benchmark", "--benchmark", "ruler", "--max-test-samples", "null"],
-        ["--evaluate-only", "--checkpoint", "saved", "--eval-type", "benchmark", "--benchmark", "ruler", "--max-new-tokens", "8"],
-        ["--evaluate-only", "--checkpoint", "saved", "--eval-type", "benchmark", "--benchmark", "locomo", "--lengths", "8192"],
-        ["--benchmark", "locomo"],
-        ["--test-data", "test"],
+        ["--evaluate-only", "--eval-run", "saved", "--eval-task", "ruler", "--max-test-samples", "null"],
+        ["--evaluate-only", "--eval-run", "saved", "--eval-task", "ruler", "--max-new-tokens", "8"],
+        ["--evaluate-only", "--eval-run", "saved", "--eval-task", "locomo", "--lengths", "8192"],
+        ["--eval-task", "locomo"],
+        ["--eval-data", "test"],
+        ["--evaluate-only", "--checkpoint", "saved", "--eval-name", "test"],
+        ["--evaluate-only", "--resume", "--overwrite", "--eval-id", "same", "--checkpoint", "saved"],
         ["--max-test-samples", "null"],
         ["--max-new-tokens", "8"],
         ["--eval-id", "manual"],

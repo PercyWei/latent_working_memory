@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261104 10:11:35 Asia/Shanghai
+最后修订时间：20261104 17:25:41 Asia/Shanghai
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部更新压缩历史。`model.inner_objective` 选择 v4.1 的 Attention Matching（AM），或 v4.1.1 的 local output 拟合与最终 mass 校准。外层保留 QA，根据配置选择完整历史的 attention matching 或下一 token 分布蒸馏，学习连续写入与读取。
 
@@ -168,9 +168,9 @@ Teacher 的完整原文 prefix KV 在准备当前样本参照时随压缩边界�
 
 训练计划、checkpoint 及评估计划和结果在加载入口补齐配置默认值，再按有效配置校验一致性。新增字段的缺省语义应对应引入该字段前的行为，例如省略 `inner_objective` 等价于 `am`。旧评估记录可以直接读取，未知模型字段、非法值、显式不同的方法和实际评估设置仍会报错。只读加载在内存中补齐字段。
 
-Prepare/train 默认读取 `configs/v4-1/online_ttt_memory.json`，分别通过 `--prepare-data`、`--train-data` 覆盖 `training.dataset_dir`；显式 CLI 值在校验前覆盖配置。两者的数据、模型、seed、筛选设置与产物父目录须保持一致。
+Prepare/train 默认读取 `configs/v4-1/default.json`，分别通过 `--prepare-data`、`--train-data` 覆盖 `training.dataset_dir`；显式 CLI 值在校验前覆盖配置。两者的数据、模型、seed、筛选设置与产物父目录须保持一致。
 
-`run.sh` 默认先保存训练计划，再执行训练和 dev；`--resume` 只恢复训练，预算已完成时直接返回。Test／benchmark 使用 `--evaluate-only` 独立执行，首次创建或覆盖评估计划须明确指定数据目录；通常重跑时沿用原计划与缓存。具体选项见[运行指南](scripts/README.md)。
+`run.sh` 默认先保存训练计划，再执行训练和 dev；训练恢复使用 `--resume --checkpoint`，预算已完成时直接返回。Test／benchmark 使用 `--evaluate-only` 独立执行，通过 `--eval-task` 选择任务；新建或覆盖计划须指定 `--eval-data`，续跑使用 `--evaluate-only --resume`，由运行根目录、已有 eval-id 与 task 定位原计划。具体选项见[运行指南](scripts/README.md)。
 
 ### 3.1 Memory 与 inner：`model`
 
@@ -233,7 +233,7 @@ Prepare/train 默认读取 `configs/v4-1/online_ttt_memory.json`，分别通过 
 
 实际选样数为 $N$、全局 batch 为 $B$ 时，总步数按 `epochs × ceil(N/B)` 推导，用于 warmup/cosine 并写入实际配置。验证与保存均在 optimizer step 完成后进行，epoch 末及最终步也执行。
 
-命令行覆盖值先保存到计划，执行时记录在实际配置、checkpoint 与 SwanLab config；新建 SwanLab run 另记录 `world_size` 与 `effective_batch_size`，恢复训练不重写原云端配置。CLI `--tracking online` 对应配置中的 `swanlab`，`--tag` 与已有 tags 取并集。公共 `seed=42` 控制初始化、选样与训练顺序，各 rank 独立采样 outer 查询并保存随机状态。
+新训练的命令行覆盖值先保存到计划，执行时记录在实际配置、checkpoint 与 SwanLab config；新建 SwanLab run 另记录 `world_size` 与 `effective_batch_size`，恢复训练不重写原云端配置。CLI `--tracking online` 对应配置中的 `swanlab`，`--tag` 与已有 tags 取并集。公共 `seed=42` 控制初始化、选样与训练顺序，各 rank 独立采样 outer 查询并保存随机状态。
 
 ### 3.4 计划与执行记录
 
@@ -241,17 +241,21 @@ Prepare/train 默认读取 `configs/v4-1/online_ttt_memory.json`，分别通过 
 |---|---|
 | `<运行目录>/plan/config.json` | 公共 seed、模型与 teacher 设置 |
 | `<运行目录>/plan/train.json` | 训练设置与执行预算 |
-| `<运行目录>/plan/eval-<eval-id>/<task>.json` | 任务的数据、生成预算与评估规则 |
+| `<eval-run>/plan/eval-<eval-id>/<task>.json` | 默认位置的累计 checkpoint 列表、固定数据、生成预算与评估规则 |
 
-训练启动前只保存训练计划。评估计划在独立评估启动时创建，按 `(eval-id, task)` 隔离，不绑定本次选中的 checkpoint；补评时可以沿用同一任务计划。
+训练启动前只保存训练计划。评估计划在独立评估启动时创建，按 `(eval-id, task)` 隔离，以必需字段 `checkpoints` 保存累计 checkpoint `state.pt` 绝对路径列表，按 optimizer step 排序去重，并持久化完整评估设置。
 
-恢复使用 `--resume --checkpoint`，先核对原计划与 checkpoint，再恢复参数、优化器和进度，不接受 CLI 覆盖；GPU 数量和绑定数据须保持一致。Checkpoint 保留完整恢复状态和实际设置快照，计划中的请求预算不随运行改写。训练已完成时直接返回；训练恢复不依赖评估计划或结果。
+训练恢复使用 `--resume --checkpoint`，仅用 checkpoint 定位原训练计划，再恢复参数、优化器和进度。其他已知 CLI 实验设置忽略，启动时集中提示被忽略的选项；GPU 数量和绑定数据仍须与原训练一致。Checkpoint 保留完整恢复状态和实际设置快照，计划中的请求预算不随运行改写。训练已完成时直接返回；训练恢复不依赖评估计划或结果。
 
-独立评估首次创建计划须指定数据目录；已有计划省略参数即沿用，固定设置不一致时报错。RULER 可扩展目标长度，已有结果只补缺失长度。`--evaluate-only` 与 `--resume` 互斥，不接受训练配置覆盖，评估卡数不受训练卡数限制。
+独立评估使用 `--evaluate-only`，`--eval-task` 选择 `test`（默认）、`locomo` 或 `ruler`，`--eval-data` 指定数据目录；文件路径中的 `task` 即 `eval-task`。新建或覆盖时须提供 `--eval-run <运行根目录>` 与 `--eval-data`；运行根目录是 `train/`、`plan/` 与 `eval/` 所在层。可选的 `--checkpoint global_step_<N> [global_step_<M> ...]` 只接收名称，自动解析到 `<eval-run>/train/checkpoints/<名称>/state.pt`；省略时选择当时保留的全部 checkpoint。默认新建计划，要求对应 `(eval-id, task)` 计划不存在。
+
+评估续跑使用 `--evaluate-only --resume`，须显式传入 `--eval-run <运行根目录> --eval-id <已有标识> --eval-task <已有 task>` 定位已有计划。省略 `--checkpoint` 时调度计划的全部 checkpoint；传入名称列表时，仅调度本次指定的 checkpoint。本次指定且不在原计划中的已保存 checkpoint 并入累计列表，按 step 排序去重，不缩减旧列表；仅在有新项时原子更新计划，无新增则不重写计划文件。任务 `status.json` 的 `eval_run` 指向运行根目录，`selected_checkpoints` 表示本次调度范围，计划的 `checkpoints` 表示累计范围。
+
+数据、预算与 RULER 长度始终从原计划恢复，传入的对应实验选项忽略，启动时集中提示；调整长度须另开 eval-id，或覆盖重建当前任务。若原评估通过 `--output-root` 重定向，续跑仍须传入原值以定位已有计划；该参数表示计划位置。
 
 评估批量只控制本次执行，不写入训练配置、评估计划或质量缓存身份。重试时可调整 `--eval-batch-size-per-gpu` 和 GPU 数量，完整结果继续复用，未完成样本重新分片、组批；已经逐题提交的记录保留。
 
-`--overwrite` 默认关闭，仅作用于本次调度。新训练覆盖整个实际 run 目录；独立评估覆盖当前 task 的全部 checkpoint 结果及对应计划，其他 task 与源 checkpoint 保留。评估覆盖按新计划处理，须重新提供数据目录；省略预算使用新计划默认值。校验通过后持锁清理并重建计划，正在执行的目标直接报错；共享 teacher 缓存和 SwanLab 云端历史保留。恢复不允许覆盖。
+`--overwrite` 默认关闭，仅作用于本次调度。新训练覆盖整个实际 run 目录；独立评估覆盖当前 task 的全部 checkpoint 结果及对应计划，其他 task 与源 checkpoint 保留。评估覆盖按新计划处理，须重新提供 `--eval-run` 与 `--eval-data`；checkpoint 范围按本次可选名称列表确定，省略时选择当时全部，省略预算使用新计划默认值。RULER 可重新选择长度集合。校验通过后持锁清理并重建计划，正在执行的目标直接报错；共享 teacher 缓存和 SwanLab 云端历史保留。
 
 训练保存 `train.log` 与 `status.json`；评估按 step 逐个处理 checkpoint，各卡批量处理其未完成样本分片。`eval.log` 汇总带 GPU／分片前缀的输出，任务级 `status.json` 记录 checkpoint 和分片状态。单项失败后继续后续 checkpoint；中断保留逐题完成进度，重试可改变 GPU 数和评估批量。SwanLab 仅记录 train/dev，评估不读取云端身份或凭据；dashboard 只需本地 `eval/` 结果。
 
@@ -303,7 +307,7 @@ JSON／JSONL 均使用 UTF-8。训练产物与 SwanLab 记录统一由 rank 0 �
 | 训练 `inner_diagnostics.jsonl` | 每 20 步一行 `{step, samples}`，保留逐样本、写入轮次、层与 inner step 的完整诊断；未采样步骤不补值 |
 | 训练 `summary.json` | 仅含 `step`、`checkpoint`、`output_dir`，用于定位完成步数与 checkpoint，不保存指标汇总 |
 | 训练 `swanlab.json` | SwanLab run 的 `id/url`；启用上传时，恢复训练需要此文件 |
-| `plan/eval-<eval-id>/<task>.json` | 同一 eval-id 下该任务固定的数据与生成／评分设置，供再次执行或扩展 RULER 长度复用 |
+| `plan/eval-<eval-id>/<task>.json` | 同一 eval-id 下该任务累计的 checkpoint 列表，以及固定的数据与生成／评分设置 |
 | 评估 `eval.json` | 当前 checkpoint 的评估设置快照 |
 | 评估 `summary.json`、`details.jsonl` | 各卡结果按原始样本顺序汇总；所有样本齐全后提交最终结果 |
 | 评估 `work.json`、`progress/worker_<rank>.jsonl` | 本轮样本分工与已完成逐题进度；不作为评估完成标记 |
@@ -314,7 +318,7 @@ Checkpoint、训练计划与日志使用当前实现的规范格式。需要使�
 
 训练与评估 summary 的 `checkpoint` 均为 `state.pt` 的绝对路径。评估另保存 `training_run: {directory}`，`directory` 指向实际 `train/` 路径。
 
-训练与评估分别位于同一运行目录的 `train/` 与 `eval/`，完整布局见[运行指南](scripts/README.md#7-产物目录与记录)。评估结果为 `<运行目录>/eval/<eval-id>/<task>/global_step_<N>/`，`eval-id` 默认 `YYYYMMDD-HHMMSS`，续跑或复用同一计划时显式指定已有标识；显式指定其他 `output_root` 时，仍保留原运行目录名。RULER 按长度保留子结果，扩展或重试时复用已完成样本与长度；同计划采用调度锁，匹配的完整结果直接复用。评估命令与各分片输出写入对应 checkpoint 目录的 `eval.log`。
+训练与评估分别位于同一运行目录的 `train/` 与 `eval/`，完整布局见[运行指南](scripts/README.md#7-产物目录与记录)。评估结果默认为 `<eval-run>/eval/<eval-id>/<task>/global_step_<N>/`，新建时 `eval-id` 默认 `YYYYMMDD-HHMMSS`；续跑通过原 `--eval-run`、`--eval-id` 与 `--eval-task` 定位计划。显式指定其他 `--output-root` 时，仍保留原运行目录名，续跑须沿用该位置。RULER 按计划中的长度保留子结果，重试时复用已完成样本与长度；同计划采用调度锁，匹配的完整结果直接复用。评估命令与各分片输出写入对应 checkpoint 目录的 `eval.log`。
 
 Teacher 边界与 checkpoint 先写临时文件，再原子替换正式文件。恢复训练时，`metrics.jsonl` 原子重写为不超过 checkpoint step 的完整记录；`inner_diagnostics.jsonl` 保留不超过该步的已有稀疏记录。两者均丢弃未完成末行，其他格式错误直接报错。独立看板读取上述 JSON／JSONL 展示指标与逐题记录，不改写原始答案或评分；启动方式见[运行指南](scripts/README.md#43-评估结果与看板)。
 

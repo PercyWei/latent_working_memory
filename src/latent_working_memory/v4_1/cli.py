@@ -2,9 +2,10 @@
 
 import argparse
 from pathlib import Path
+import sys
 
 
-DEFAULT_CONFIG = "configs/v4-1/online_ttt_memory.json"
+DEFAULT_CONFIG = "configs/v4-1/default.json"
 DEFAULT_EVAL_BATCH_SIZE = 8
 
 
@@ -43,25 +44,33 @@ def add_config_arguments(parser):
         )
 
 
+def ignore_resume_options(args, retained):
+    """删除恢复模式不使用的显式选项，并集中提示。"""
+    ignored = sorted(set(vars(args)) - retained)
+    for name in ignored:
+        delattr(args, name)
+    if ignored:
+        options = ", ".join("--" + name.replace("_", "-") for name in ignored)
+        print(f"[resume] ignored options; using the saved plan: {options}", file=sys.stderr)
+
+
 def parse_run_args(argv=None):
     parser = argparse.ArgumentParser(
         description="v4.1 训练、训练恢复与独立评估。", argument_default=argparse.SUPPRESS,
     )
-    modes = parser.add_mutually_exclusive_group()
-    modes.add_argument("--resume", action="store_true", help="沿用 checkpoint 配置恢复训练")
-    modes.add_argument("--evaluate-only", action="store_true", help="只评估已有 checkpoint")
-    parser.add_argument("--overwrite", action="store_true", help="清理目标 run 或当前评估 task 后重新执行")
+    restart = parser.add_mutually_exclusive_group()
+    restart.add_argument("--resume", action="store_true", help="恢复已有训练或评估计划")
+    restart.add_argument("--overwrite", action="store_true", help="清理目标 run 或当前评估 task 后重新执行")
+    parser.add_argument("--evaluate-only", action="store_true", help="只评估已有 checkpoint")
     add_config_arguments(parser)
     parser.add_argument("--train-data", help="训练与 dev 数据目录，默认使用 training.dataset_dir")
     parser.add_argument("--run-id", help="运行目录名，默认方法设置加上海时间 YYYYMMDD-HHMM")
-    sources = parser.add_mutually_exclusive_group()
-    sources.add_argument("--checkpoint", nargs="+", help="恢复用单个 checkpoint；独立评估可传多个")
-    sources.add_argument("--eval-run", help="评估该训练目录仍保留的全部 checkpoint")
-    parser.add_argument("--eval-type", choices=("test", "benchmark"), help="独立评估类型，默认 test")
-    parser.add_argument("--benchmark", choices=("locomo", "ruler"), help="Benchmark 名称")
-    parser.add_argument("--benchmark-data", help="Benchmark 数据目录，首次创建计划必填")
+    parser.add_argument("--checkpoint", nargs="+",
+                        help="训练恢复用单个路径；评估可选 global_step_<N> 名称列表，续跑可补入计划")
+    parser.add_argument("--eval-run", help="独立评估必填，指定包含 train/、plan/ 与 eval/ 的运行根目录")
+    parser.add_argument("--eval-task", choices=("test", "ruler", "locomo"), help="评估任务，默认 test")
+    parser.add_argument("--eval-data", help="评估数据目录，新建或覆盖计划时必填")
     parser.add_argument("--lengths", nargs="+", type=positive_int, help="仅 RULER；默认 8192 16384 32768")
-    parser.add_argument("--test-data", help="Test 数据目录；独立评估首次创建计划时必填")
     parser.add_argument("--max-test-samples", type=optional_positive_int, help="Test 样本上限，null 使用全量")
     parser.add_argument("--max-new-tokens", type=positive_int, help="Test 生成上限，默认 128")
     parser.add_argument("--eval-id", help="评估计划标识，默认 YYYYMMDD-HHMMSS")
@@ -83,6 +92,15 @@ def parse_run_args(argv=None):
     parser.add_argument("--group", help="实验分组，默认使用运行目录名")
     parser.add_argument("--tag", action="append", help="追加命名空间标签，可重复指定")
     args = parser.parse_args(argv)
+    if getattr(args, "resume", False):
+        retained = {"resume", "overwrite", "evaluate_only"}
+        if getattr(args, "evaluate_only", False):
+            retained.update({
+                "checkpoint", "eval_run", "eval_id", "eval_task", "output_root", "eval_batch_size_per_gpu",
+            })
+        else:
+            retained.add("checkpoint")
+        ignore_resume_options(args, retained)
     supplied = set(vars(args))
     args.resume = getattr(args, "resume", False)
     args.evaluate_only = getattr(args, "evaluate_only", False)
@@ -90,49 +108,42 @@ def parse_run_args(argv=None):
     args.eval_run = getattr(args, "eval_run", None)
     args.overwrite = getattr(args, "overwrite", False)
 
-    if args.resume:
-        if args.checkpoint is None:
-            parser.error("--resume requires --checkpoint")
-        if len(args.checkpoint) != 1:
-            parser.error("--resume accepts exactly one checkpoint")
-        overrides = supplied - {"resume", "checkpoint"}
-        if overrides:
-            options = ", ".join("--" + name.replace("_", "-") for name in sorted(overrides))
-            parser.error(f"--resume does not accept configuration overrides: {options}")
-        args.checkpoint = args.checkpoint[0]
-    elif args.evaluate_only:
-        if args.checkpoint is None and args.eval_run is None:
-            parser.error("--evaluate-only requires --checkpoint or --eval-run")
+    if args.evaluate_only:
+        if args.eval_run is None:
+            parser.error("--evaluate-only requires --eval-run")
         allowed = {
-            "evaluate_only", "checkpoint", "eval_run", "eval_type", "benchmark",
-            "benchmark_data", "test_data", "max_test_samples", "max_new_tokens",
+            "evaluate_only", "resume", "checkpoint", "eval_run", "eval_task",
+            "eval_data", "max_test_samples", "max_new_tokens",
             "lengths", "eval_id", "output_root", "overwrite", "eval_batch_size_per_gpu",
         }
         overrides = supplied - allowed
         if overrides:
             options = ", ".join("--" + name.replace("_", "-") for name in sorted(overrides))
             parser.error(f"--evaluate-only retains the checkpoint configuration: {options}")
-        args.eval_type = getattr(args, "eval_type", "test")
-        args.benchmark = getattr(args, "benchmark", None)
+        args.eval_task = getattr(args, "eval_task", "test")
         args.eval_id = getattr(args, "eval_id", None)
         args.output_root = getattr(args, "output_root", None)
         args.eval_batch_size_per_gpu = getattr(args, "eval_batch_size_per_gpu", DEFAULT_EVAL_BATCH_SIZE)
-        if args.eval_type == "test":
-            if args.benchmark is not None or any(name in supplied for name in ("benchmark_data", "lengths")):
-                parser.error("--benchmark, --benchmark-data and --lengths require --eval-type benchmark")
-        else:
-            if args.benchmark is None:
-                parser.error("--eval-type benchmark requires --benchmark")
-            if any(name in supplied for name in ("test_data", "max_test_samples", "max_new_tokens")):
-                parser.error("--test-data, --max-test-samples and --max-new-tokens require --eval-type test")
-            if "lengths" in supplied and args.benchmark != "ruler":
-                parser.error("--lengths requires --benchmark ruler")
+        if args.resume and not args.eval_id:
+            parser.error("evaluation --resume requires an explicit --eval-id")
+        if args.resume and "eval_task" not in supplied:
+            parser.error("evaluation --resume requires an explicit --eval-task")
+        if args.eval_task != "test" and supplied & {"max_test_samples", "max_new_tokens"}:
+            parser.error("--max-test-samples and --max-new-tokens require --eval-task test")
+        if "lengths" in supplied and args.eval_task != "ruler":
+            parser.error("--lengths requires --eval-task ruler")
+    elif args.resume:
+        if args.checkpoint is None:
+            parser.error("--resume requires --checkpoint")
+        if len(args.checkpoint) != 1:
+            parser.error("--resume accepts exactly one checkpoint")
+        args.checkpoint = args.checkpoint[0]
     else:
         if args.checkpoint is not None:
             parser.error("--checkpoint requires --resume or --evaluate-only")
         if args.eval_run is not None:
             parser.error("--eval-run requires --evaluate-only")
-        if supplied & {"eval_type", "benchmark", "benchmark_data", "lengths", "test_data",
+        if supplied & {"eval_task", "eval_data", "lengths",
                        "max_test_samples", "max_new_tokens", "eval_id", "eval_batch_size_per_gpu"}:
             parser.error("evaluation options require --evaluate-only")
     return args

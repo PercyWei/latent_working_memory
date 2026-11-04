@@ -15,26 +15,23 @@ import sys
 import threading
 from zoneinfo import ZoneInfo
 
-from ..cli import DEFAULT_EVAL_BATCH_SIZE, optional_positive_int, positive_int
+from ..cli import DEFAULT_EVAL_BATCH_SIZE, ignore_resume_options, optional_positive_int, positive_int
 from ..config import config_from_dict
 from ..execution import evaluation_lock, run_lock
 from ..plans import prepare_evaluation_plan
-from ..training.checkpoint import checkpoint_file, read_checkpoint
+from ..training.checkpoint import read_checkpoint
 from .evaluate import (
     IncompleteEvaluationError, finalize_sample_work, load_cached_evaluation, prepare_sample_work,
 )
-from .records import write_json
+from .records import read_evaluation_record, write_json
 
 
-def _checkpoints(args):
-    if args.eval_run is not None:
-        directory = Path(args.eval_run).expanduser().resolve()
-        paths = list(directory.glob("checkpoints/global_step_*/state.pt"))
-        if not paths:
-            raise ValueError(f"no complete checkpoints found in {directory}")
-    else:
-        directory = None
-        paths = [checkpoint_file(path) for path in args.checkpoint]
+def _checkpoints(directory, paths=None):
+    directory = Path(directory).expanduser().resolve()
+    paths = (list(directory.glob("checkpoints/global_step_*/state.pt"))
+             if paths is None else [Path(path) for path in paths])
+    if not paths:
+        raise ValueError(f"no complete checkpoints found in {directory}")
     if len(set(paths)) != len(paths):
         raise ValueError("checkpoint list contains duplicate paths")
     selected, config = [], None
@@ -47,7 +44,7 @@ def _checkpoints(args):
             raise ValueError(f"checkpoint directory and saved step differ: {path}")
         if path != training_directory / "checkpoints" / f"global_step_{step}" / "state.pt":
             raise ValueError("checkpoint path differs from its saved training directory")
-        if directory is not None and training_directory != directory:
+        if training_directory != directory:
             raise ValueError("selected checkpoints must belong to the same training run")
         if config is not None and current != config:
             raise ValueError("selected checkpoints have different training configurations")
@@ -259,57 +256,74 @@ def _now():
 
 
 def _evaluation_arguments(args):
-    """公开参数按 test／benchmark 分工，内部计划仍采用统一字段。"""
+    """公开任务与数据参数映射到统一的计划字段。"""
     values = vars(args).copy()
-    if args.eval_type == "test":
-        if args.benchmark is not None or hasattr(args, "benchmark_data") or hasattr(args, "lengths"):
-            raise ValueError("--benchmark, --benchmark-data and --lengths require --eval-type benchmark")
-        values["task"] = "test"
-        if hasattr(args, "test_data"):
-            values["data"] = args.test_data
-        if hasattr(args, "max_test_samples"):
-            values["max_samples"] = args.max_test_samples
-    else:
-        if args.benchmark is None:
-            raise ValueError("--eval-type benchmark requires --benchmark")
-        if any(hasattr(args, name) for name in ("test_data", "max_test_samples", "max_new_tokens")):
-            raise ValueError("--test-data, --max-test-samples and --max-new-tokens require --eval-type test")
-        if args.benchmark != "ruler" and hasattr(args, "lengths"):
-            raise ValueError("--lengths requires --benchmark ruler")
-        values["task"] = args.benchmark
-        if hasattr(args, "benchmark_data"):
-            values["data"] = args.benchmark_data
+    if args.resume and args.overwrite:
+        raise ValueError("--resume and --overwrite are mutually exclusive")
+    if args.resume:
+        values = {name: value for name, value in values.items() if name in {
+            "resume", "overwrite", "evaluate_only", "eval_run", "eval_id", "eval_task",
+            "checkpoint", "output_root", "eval_batch_size_per_gpu",
+        }}
+        if not hasattr(args, "eval_task"):
+            raise ValueError("evaluation --resume requires an explicit --eval-task")
+    if args.eval_run is None:
+        raise ValueError("evaluation requires --eval-run")
+    if args.eval_task not in {"test", "ruler", "locomo"}:
+        raise ValueError("eval-task must be test, ruler or locomo")
+    if args.resume and not args.eval_id:
+        raise ValueError("evaluation --resume requires an explicit --eval-id")
+    if not args.resume and args.eval_task != "test" and any(
+        hasattr(args, name) for name in ("max_test_samples", "max_new_tokens")
+    ):
+        raise ValueError("--max-test-samples and --max-new-tokens require --eval-task test")
+    if not args.resume and args.eval_task != "ruler" and hasattr(args, "lengths"):
+        raise ValueError("--lengths requires --eval-task ruler")
+    values["task"] = values.pop("eval_task")
+    if "eval_data" in values:
+        values["data"] = values.pop("eval_data")
+    if "max_test_samples" in values:
+        values["max_samples"] = values.pop("max_test_samples")
     return argparse.Namespace(**values)
 
 
 def run_evaluations(args):
     args = _evaluation_arguments(args)
-    if args.eval_run is not None:
-        training_directory = Path(args.eval_run).expanduser().resolve()
-    else:
-        first = checkpoint_file(args.checkpoint[0])
-        if (first.name != "state.pt" or first.parent.parent.name != "checkpoints"
-            or re.fullmatch(r"global_step_[0-9]+", first.parent.name) is None):
-            raise ValueError("checkpoint must use train/checkpoints/global_step_<step>/state.pt")
-        training_directory = first.parents[2]
-    eval_id = args.eval_id or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M%S")
+    source_run_directory = Path(args.eval_run).expanduser().resolve()
+    training_directory = source_run_directory / "train"
+    eval_id = (args.eval_id if args.eval_id is not None
+               else datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M%S"))
     if not eval_id.strip() or Path(eval_id).name != eval_id or eval_id in {".", ".."} or "\\" in eval_id:
         raise ValueError("eval-id must be a nonempty directory name")
-    run_directory = training_directory.parent
+    run_directory = source_run_directory
     if args.output_root:
         run_directory = Path(args.output_root).expanduser().resolve() / run_directory.name
     task_directory = run_directory / "eval" / eval_id / args.task
     with ExitStack() as stack:
         # 源 checkpoint 与重定向后的结果目录均保持占用，训练覆盖不能与评估并行。
-        for directory in sorted({training_directory.parent, run_directory}):
+        for directory in sorted({source_run_directory, run_directory}):
             stack.enter_context(run_lock(directory))
-        selected, config, _ = _checkpoints(args)
         stack.enter_context(evaluation_lock(run_directory, eval_id, args.task))
+        if args.resume:
+            plan_path = run_directory / "plan" / f"eval-{eval_id}" / f"{args.task}.json"
+            if not plan_path.is_file():
+                raise ValueError(f"evaluation plan does not exist: {plan_path}")
+            saved = read_evaluation_record(plan_path)
+            paths = saved.get("checkpoints")
+        else:
+            paths = None
+        if args.checkpoint is not None:
+            if any(re.fullmatch(r"global_step_[0-9]+", name) is None for name in args.checkpoint):
+                raise ValueError("--checkpoint must contain global_step_<step> names")
+            paths = [training_directory / "checkpoints" / name / "state.pt"
+                     for name in args.checkpoint]
+        selected, config, _ = _checkpoints(training_directory, paths)
         settings = prepare_evaluation_plan(
             run_directory, config, eval_id, args.task,
-            {name: getattr(args, name) for name in ("data", "max_samples", "max_new_tokens", "lengths")
-             if hasattr(args, name)},
-            overwrite=getattr(args, "overwrite", False),
+            {"checkpoints": [str(path) for path, _ in selected],
+             **{name: getattr(args, name) for name in ("data", "max_samples", "max_new_tokens", "lengths")
+                if hasattr(args, name)}},
+            overwrite=args.overwrite, resume=args.resume,
         )
         task_directory.mkdir(parents=True, exist_ok=True)
         status_path = task_directory / "status.json"
@@ -348,7 +362,7 @@ def run_evaluations(args):
                 print(f"[evaluate step={step}] cached {args.task}", flush=True)
         pending = any(result["status"] == "pending" for result in results)
         summary = {
-            "action": "evaluate", "eval_run": str(training_directory), "eval_id": eval_id,
+            "action": "evaluate", "eval_run": str(source_run_directory), "eval_id": eval_id,
             "task": args.task, "gpus": "", "started_at": _now(), "status": "running",
             "eval_batch_size_per_gpu": getattr(args, "eval_batch_size_per_gpu", DEFAULT_EVAL_BATCH_SIZE),
             "selected_checkpoints": [f"global_step_{step}" for _, step in selected],
@@ -376,26 +390,40 @@ def run_evaluations(args):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--checkpoint", nargs="+", help="同一 run 的一个或多个 checkpoint")
-    source.add_argument("--eval-run", help="评估该训练目录仍保留的全部完整 checkpoint")
-    parser.add_argument("--eval-type", choices=("test", "benchmark"), default="test")
-    parser.add_argument("--benchmark", choices=("locomo", "ruler"), help="--eval-type benchmark 时必填")
-    parser.add_argument("--test-data", default=argparse.SUPPRESS,
-                        help="Test 数据目录；首次创建计划必填，已有计划可省略")
-    parser.add_argument("--benchmark-data", default=argparse.SUPPRESS, help="Benchmark 数据目录；首次创建计划必填")
+    parser = argparse.ArgumentParser(description=__doc__, argument_default=argparse.SUPPRESS)
+    parser.add_argument("--checkpoint", nargs="+", help="本次评估的 global_step_<step> 名称；省略时新建选全部，续跑沿用计划")
+    parser.add_argument("--eval-run", required=True,
+                        help="运行根目录，包含 train/、plan/ 与 eval/；用于选择 checkpoint 和定位计划")
+    parser.add_argument("--eval-task", choices=("test", "ruler", "locomo"))
+    parser.add_argument("--eval-data",
+                        help="评估数据目录，新建或覆盖计划时必填")
     parser.add_argument("--eval-id", help="评估计划标识，默认 YYYYMMDD-HHMMSS")
-    parser.add_argument("--eval-batch-size-per-gpu", type=positive_int, default=DEFAULT_EVAL_BATCH_SIZE,
+    parser.add_argument("--eval-batch-size-per-gpu", type=positive_int,
                         help="每卡评估 batch，默认 8")
     parser.add_argument("--output-root", help="产物父目录；默认在原 run 下保存评估结果")
-    parser.add_argument("--overwrite", action="store_true",
-                        help="清理当前 task 的评估结果和计划后重新评估")
-    parser.add_argument("--max-test-samples", type=optional_positive_int, default=argparse.SUPPRESS)
-    parser.add_argument("--max-new-tokens", type=positive_int, default=argparse.SUPPRESS,
+    restart = parser.add_mutually_exclusive_group()
+    restart.add_argument("--resume", action="store_true", help="恢复指定 eval-id 下已有的任务计划")
+    restart.add_argument("--overwrite", action="store_true",
+                         help="清理当前 task 的评估结果和计划后重新评估")
+    parser.add_argument("--max-test-samples", type=optional_positive_int)
+    parser.add_argument("--max-new-tokens", type=positive_int,
                         help="仅用于 test；无既有计划时默认 128")
-    parser.add_argument("--lengths", nargs="+", type=positive_int, default=argparse.SUPPRESS)
-    run_evaluations(parser.parse_args(argv))
+    parser.add_argument("--lengths", nargs="+", type=positive_int)
+    args = parser.parse_args(argv)
+    if getattr(args, "resume", False):
+        if not hasattr(args, "eval_task"):
+            parser.error("evaluation --resume requires an explicit --eval-task")
+        ignore_resume_options(args, {
+            "resume", "overwrite", "checkpoint", "eval_run", "eval_id", "eval_task", "output_root",
+            "eval_batch_size_per_gpu",
+        })
+    for name, default in {
+        "resume": False, "overwrite": False, "checkpoint": None, "eval_run": None,
+        "eval_task": "test", "eval_id": None, "output_root": None,
+        "eval_batch_size_per_gpu": DEFAULT_EVAL_BATCH_SIZE,
+    }.items():
+        vars(args).setdefault(name, default)
+    run_evaluations(args)
 
 
 if __name__ == "__main__":
