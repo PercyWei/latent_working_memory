@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261104 09:31:57 Asia/Shanghai
+最后修订时间：20261104 10:11:35 Asia/Shanghai
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部更新压缩历史。`model.inner_objective` 选择 v4.1 的 Attention Matching（AM），或 v4.1.1 的 local output 拟合与最终 mass 校准。外层保留 QA，根据配置选择完整历史的 attention matching 或下一 token 分布蒸馏，学习连续写入与读取。
 
@@ -210,7 +210,7 @@ Prepare/train 默认读取 `configs/v4-1/online_ttt_memory.json`，分别通过 
 |---|---|---|
 | `dataset_dir` | `data/delta-mem-qasper` | QA 数据目录 |
 | `output_root` | `artifacts/v4-1` | 产物父目录；teacher 共享，每个 run 下划分 train 与 eval |
-| `run_id` | `null` | 运行目录的末尾标识；`null` 时自动生成 `YYYYMMDD-HHMMSS` |
+| `run_id` | `null` | 运行目录名；显式值原样使用，`null` 或未设置时按下述规则自动生成 |
 | `epochs`／`max_steps` | 4／`null` | 训练轮数／可选 optimizer step 上限；实际配置保存解析后的总步数 |
 | `micro_batch_size`／`gradient_accumulation_steps` | 2／8 | 每卡 microbatch／累积次数；全局 batch 还需乘 GPU 数量 |
 | `learning_rate`／`lora_learning_rate` | $10^{-4}$／$2\times10^{-5}$ | 新增参数／LoRA 峰值学习率 |
@@ -227,7 +227,7 @@ Prepare/train 默认读取 `configs/v4-1/online_ttt_memory.json`，分别通过 
 | `tracking`／`swanlab_project` | `swanlab`／`latent-working-memory-v4.1` | 默认上传 train/dev；设为 `disabled` 可关闭 |
 | `group`／`tags` | `null`／`[]` | Group 默认使用运行目录名；自定义 tags 使用命名空间 |
 
-`teacher_cache_dir` 记录共享缓存路径，`output_dir` 记录 `<output_root>/<方法设置>_<run_id>/train/` 的实际路径；恢复时原计划、checkpoint 和训练目录须一致。
+`teacher_cache_dir` 记录共享缓存路径，`output_dir` 记录 `<output_root>/<run_id>/train` 的实际路径。显式指定的 `run_id` 原样作为目录名；`run_id=null` 或未设置时，默认生成 `m{num_slots}-d{memory_dim}_p{pending_size}-r{recent_size}_inner-s{inner_steps}-{inner_label}_outer-{outer_label}_{YYYYMMDD-HHMM}`，时间戳采用 `Asia/Shanghai` 时区、精确到分钟。`inner_label` 为 `am` 或 `oomc`，后者对应 `inner_objective=output_only_mass_calibrated`；`outer_label` 采用 `outer_write_obj` 的值 `am` 或 `distill`。最终解析生成的 `run_id` 写入计划配置；恢复训练沿用原目录，原计划、checkpoint 和训练目录须一致。
 
 训练参数 `--micro-batch-size-per-gpu` 对应 `training.micro_batch_size`，`--gradient-accumulation-steps` 对应每卡累积次数。有效全局 batch 为“GPU 数量 × 每卡 microbatch × 累积次数”：默认单卡 16、双卡 32；双卡设累积次数为 4 可保持全局 batch 16。Epoch 尾批按实际样本数平均；teacher 批量不计入训练 batch。
 

@@ -14,7 +14,7 @@ import torch
 from latent_working_memory.v4_1.config import ExperimentConfig, TrainingConfig, load_config
 from latent_working_memory.v4_1.execution import run_lock
 from latent_working_memory.v4_1.plans import load_training_plan, save_training_plan
-from latent_working_memory.v4_1.training import run
+from latent_working_memory.v4_1.training import run, train
 from latent_working_memory.v4_1.training.engine import training_steps
 
 
@@ -47,12 +47,35 @@ def configuration(tmp_path):
     ))
 
 
+@pytest.mark.parametrize(("inner", "label"), [
+    ("am", "am"), ("output_only_mass_calibrated", "oomc"),
+])
+@pytest.mark.parametrize("outer", ["am", "distill"])
+def test_run_directory_distinguishes_inner_and_outer_objectives(tmp_path, monkeypatch, inner, label, outer):
+    monkeypatch.setattr(train, "datetime", SimpleNamespace(
+        now=lambda zone: datetime(2026, 11, 4, 9, 40, 59, tzinfo=zone),
+    ))
+    config = configuration(tmp_path)
+    config = replace(config, model=replace(config.model, inner_objective=inner, inner_steps=1),
+                     training=replace(config.training, outer_write_obj=outer))
+    assert run._training_output_dir(config, None) == (
+        tmp_path / f"m256-d512_p1024-r256_inner-s1-{label}_outer-{outer}_20261104-0940/train"
+    )
+
+
+def test_resume_uses_saved_directory_without_renaming(tmp_path):
+    config = configuration(tmp_path)
+    original = tmp_path / "am-recent_m256-d512_p1024-r256_inner3_original/train"
+    checkpoint = {"config": {"training": {"output_dir": str(original)}}}
+    assert run._training_output_dir(config, checkpoint) == original
+
+
 def test_training_process_lifecycle_overwrite_and_independent_evaluation(tmp_path, monkeypatch):
     source = tmp_path / "source.json"
     source_config = configuration(tmp_path / "artifacts")
     source.write_text(json.dumps(asdict(source_config)), encoding="utf-8")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
-    monkeypatch.setattr(run, "datetime", SimpleNamespace(
+    monkeypatch.setattr(train, "datetime", SimpleNamespace(
         now=lambda zone: datetime(2026, 10, 29, 21, 0, 1, tzinfo=zone),
     ))
     processes, stopped = [], []
@@ -109,7 +132,8 @@ def test_training_process_lifecycle_overwrite_and_independent_evaluation(tmp_pat
     result = run.run_job(run.parse_args(["--config", str(source)]))
     process = processes[0]
     assert result["step"] == 3 and Path(result["checkpoint"]).parent.name == "global_step_3"
-    assert process.config.training.run_id == "20261029-210001"
+    assert process.config.training.run_id == "m256-d512_p1024-r256_inner-s3-am_outer-am_20261029-2100"
+    assert process.directory == Path(source_config.training.output_root) / process.config.training.run_id / "train"
     assert process.config.training.swanlab_project == "latent-working-memory-v4.1"
     assert process.config.training.group == Path(result["output_dir"]).parent.name
     requested = json.loads((process.plan / "train.json").read_text())
@@ -168,8 +192,10 @@ def test_training_process_lifecycle_overwrite_and_independent_evaluation(tmp_pat
 
     custom = run.run_job(run.parse_args([
         "--config", str(source), "--output-root", str(tmp_path / "custom"),
-        "--group", "explicit-series",
+        "--run-id", "example", "--group", "explicit-series",
     ]))
+    assert Path(custom["output_dir"]) == tmp_path / "custom/example/train"
+    assert load_config(Path(custom["output_dir"]) / "config.json").training.run_id == "example"
     assert load_config(Path(custom["output_dir"]) / "config.json").training.group == "explicit-series"
 
     def training_forbidden(*args, **kwargs):

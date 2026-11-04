@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261102 14:48:26 Asia/Shanghai
+最后修订时间：20261104 10:11:51 Asia/Shanghai
 
 计算协议与数据格式见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[配置](../../../../configs/v4-1/online_ttt_memory.json)中的基座与数据路径。
 
@@ -66,7 +66,7 @@ Teacher 缓存目录按产物父目录与窗口设置自动创建：
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh \
   --config configs/v4-1/default.json \
-  --run-id 01_20261029 \
+  --run-id m256-d512_p1024-r256_inner-s3-am_outer-am_20261029 \
   --train-data 'data/delta-mem-qasper' \
   --epochs 4 \
   --micro-batch-size-per-gpu 2 \
@@ -78,14 +78,14 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh \
 - **训练批量**：`--micro-batch-size-per-gpu` 控制每卡正文与 TTT 写入的并行样本数；全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数。`--teacher-batch-size-per-gpu` 独立控制 teacher forcing 批量，不计入训练 batch。
 - **Teacher 显存**：每个样本先准备全部固定参照，再执行 student；提示分支共享完整原文 KV，仅保留各自的短 suffix KV。Teacher 批量可独立调大，离线缓存可继续复用。
 - **执行流程**：先保存训练计划，再执行训练、dev 与 checkpoint 保存。
-- **覆盖训练**：默认拒绝覆盖非空 run 目录。追加 `--overwrite` 会清理本次方法设置与 `run-id` 对应的整个 run，包括计划、训练和评估结果，再保存新计划重新训练；共享 teacher 缓存与云端历史保留。
+- **覆盖训练**：默认拒绝覆盖非空 run 目录。追加 `--overwrite` 会清理本次 `run-id` 对应的整个 run，包括计划、训练和评估结果，再保存新计划重新训练；包含共享 teacher 缓存的目录会拒绝覆盖，云端历史保留。
 
 ### 3.2 中断恢复
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh \
   --resume \
-  --checkpoint 'artifacts/v4-1/am-recent_m256-d512_p1024-r256_inner3_01_20261029/train/checkpoints/global_step_<N>'
+  --checkpoint 'artifacts/v4-1/m256-d512_p1024-r256_inner-s3-am_outer-am_20261029/train/checkpoints/global_step_<N>'
 ```
 
 - **恢复起点**：仅接受当前 run 最新的完整 checkpoint。
@@ -102,10 +102,10 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh \
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh \
   --evaluate-only \
-  --eval-id 01_20261030 \
+  --eval-id standard_20261030 \
   --eval-type test \
   --test-data 'data/delta-mem-qasper' \
-  --eval-run 'artifacts/v4-1/am-recent_m256-d512_p1024-r256_inner3_01_20261029/train' \
+  --eval-run 'artifacts/v4-1/m256-d512_p1024-r256_inner-s3-am_outer-am_20261029/train' \
   --eval-batch-size-per-gpu 8
 ```
 
@@ -114,12 +114,12 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh \
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh \
   --evaluate-only \
-  --eval-id 01_20261030 \
+  --eval-id standard_20261030 \
   --eval-type test \
   --test-data 'data/delta-mem-qasper' \
   --checkpoint \
-    'artifacts/v4-1/am-recent_m256-d512_p1024-r256_inner3_01_20261029/train/checkpoints/global_step_<N>' \
-    'artifacts/v4-1/am-recent_m256-d512_p1024-r256_inner3_01_20261029/train/checkpoints/global_step_<M>' \
+    'artifacts/v4-1/m256-d512_p1024-r256_inner-s3-am_outer-am_20261029/train/checkpoints/global_step_<N>' \
+    'artifacts/v4-1/m256-d512_p1024-r256_inner-s3-am_outer-am_20261029/train/checkpoints/global_step_<M>' \
   --eval-batch-size-per-gpu 8
 ```
 
@@ -150,21 +150,21 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh \
 # LoCoMo
 CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh \
   --evaluate-only \
-  --eval-id 01_20261030 \
+  --eval-id standard_20261030 \
   --eval-type benchmark \
   --benchmark locomo \
   --benchmark-data 'data/benchmarks/locomo' \
-  --checkpoint 'artifacts/v4-1/am-recent_m256-d512_p1024-r256_inner3_01_20261029/train/checkpoints/global_step_<N>' \
+  --checkpoint 'artifacts/v4-1/m256-d512_p1024-r256_inner-s3-am_outer-am_20261029/train/checkpoints/global_step_<N>' \
   --eval-batch-size-per-gpu 8
 
 # RULER
 CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh \
   --evaluate-only \
-  --eval-id 01_20261030 \
+  --eval-id standard_20261030 \
   --eval-type benchmark \
   --benchmark ruler \
   --benchmark-data 'data/benchmarks/ruler-v1/<model-name>' \
-  --checkpoint 'artifacts/v4-1/am-recent_m256-d512_p1024-r256_inner3_01_20261029/train/checkpoints/global_step_<N>' \
+  --checkpoint 'artifacts/v4-1/m256-d512_p1024-r256_inner-s3-am_outer-am_20261029/train/checkpoints/global_step_<N>' \
   --eval-batch-size-per-gpu 8 \
   --lengths 8192 16384 32768
 ```
@@ -203,8 +203,8 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh \
 
 ```bash
 bash src/latent_working_memory/v4_1/scripts/dashboard.sh \
-  --dashboard-run-dir artifacts/v4-1/am-recent_m256-d512_p1024-r256_inner3_01_20261029 \
-  --dashboard-eval-id 01_20261030 \
+  --dashboard-run-dir artifacts/v4-1/m256-d512_p1024-r256_inner-s3-am_outer-am_20261029 \
+  --dashboard-eval-id standard_20261030 \
   --dashboard-baselines \
     full-context artifacts/baselines/full-context/qwen3-4b-inst-2507_20261019/eval
 ```
@@ -256,7 +256,7 @@ bash src/latent_working_memory/v4_1/scripts/dashboard.sh \
 | `--model-path` | 基座与 tokenizer 路径，默认 `~/models/Qwen3-4B-Instruct-2507` |
 | `--seed` | 随机种子，默认 42，控制初始化、选样与打乱 |
 | **目录与运行标识** |
-| `--run-id` | 训练运行编号，如 `01_20261029`；默认 `YYYYMMDD-HHMMSS` |
+| `--run-id` | 训练运行目录名，默认见[目录命名](#7-产物目录与记录) |
 | `--output-root` | 产物父目录，默认 `artifacts/v4-1` |
 | **Teacher 数据准备** |
 | `--prepare-data` | 离线准备的数据目录，默认 `data/delta-mem-qasper` |
@@ -336,7 +336,7 @@ bash src/latent_working_memory/v4_1/scripts/dashboard.sh \
 │   ├── identity.json                         Teacher 缓存身份与提示库
 │   └── documents/<document_id>/
 │       └── write_<j>.safetensors             每轮参考响应、位置与尺度
-└── <方法设置>_<run_id>/
+└── <run_id>/
     ├── plan/
     │   ├── config.json                       公共模型、teacher 设置与 seed
     │   ├── train.json                        训练设置与执行安排
@@ -363,8 +363,8 @@ bash src/latent_working_memory/v4_1/scripts/dashboard.sh \
             └── lengths/<长度>/               RULER 各长度的评估结果
 ```
 
-- **目录命名**：`<方法设置>` 为 `am-recent_m{num_slots}-d{memory_dim}_p{pending_size}-r{recent_size}_inner{inner_steps}`；`run_id` 默认 `YYYYMMDD-HHMMSS`，可显式指定。新训练默认拒绝覆盖已有计划或产物，显式 `--overwrite` 才清理并重建。
-- **计划与配置**：`plan/` 保存执行前确定的设置；`train/config.json` 保存实际训练配置，评估结果目录的 `eval.json` 保存评估设置快照。训练只创建训练计划，独立评估创建或沿用对应 task 计划；通常重跑 RULER 允许扩展长度，覆盖时重建当前 task。
+- **目录命名**：完整训练路径为 `<output_root>/<run_id>/train`。`run_id` 默认为 `m{num_slots}-d{memory_dim}_p{pending_size}-r{recent_size}_inner-s{inner_steps}-{inner_label}_outer-{outer_label}_{YYYYMMDD-HHMM}`，时间戳采用 `Asia/Shanghai` 时区、精确到分钟。`inner_label` 使用 `am` 或 `oomc`，分别对应 `inner_objective=am`、`inner_objective=output_only_mass_calibrated`；`outer_label` 使用 `outer_write_obj` 的值 `am` 或 `distill`。新训练默认拒绝覆盖已有计划或产物，显式 `--overwrite` 才清理并重建；恢复训练沿用原目录。
+- **计划与配置**：`plan/` 保存执行前确定的设置，最终解析生成的 `run_id` 写入计划配置；`train/config.json` 保存实际训练配置，评估结果目录的 `eval.json` 保存评估设置快照。训练只创建训练计划，独立评估创建或沿用对应 task 计划；通常重跑 RULER 允许扩展长度，覆盖时重建当前 task。
 - **覆盖与互斥**：校验通过后，持删除范围之外的稳定锁执行清理与重建；锁覆盖 worker 生命周期，占用时拒绝覆盖。锁文件不属于实验结果。
 - **训练与恢复**：Rank 0 统一写入产物，train/dev 指标汇总全部 GPU 的实际样本。`state.pt` 保存慢参数、优化器、scheduler、数据游标及各 rank 随机状态；恢复时只核对训练计划与绑定状态，不依赖评估计划。已有 checkpoint 中的历史评估编排字段在读取时忽略，训练相关设置仍严格核对。完整格式见[方法说明第 4 节](../README.md#4-代码与结果)。
 - **评估结果**：各卡结果按原始样本顺序汇总；Test NLL 按答案 token 加权，EM／F1 按样本平均，benchmark 沿用官方汇总。完整结果直接复用；未完成时保留逐题进度，重试可调整 GPU 数和评估批量，只重新分片、组批剩余样本。RULER 继续复用已完成长度。

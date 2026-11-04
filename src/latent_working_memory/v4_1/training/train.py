@@ -145,14 +145,18 @@ def _restore_inner_diagnostics(path, checkpoint_step):
 def _training_output_dir(config, checkpoint):
     if checkpoint is not None:
         return Path(checkpoint["config"]["training"]["output_dir"]).expanduser().resolve()
-    model = config.model
-    run_id = config.training.run_id or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M%S")
-    name = (
-        f"am-recent_m{model.num_slots}-d{model.memory_dim}"
-        f"_p{model.pending_size}-r{model.recent_size}"
-        f"_inner{model.inner_steps}_{run_id}"
-    )
-    return Path(config.training.output_root) / name / "train"
+    run_id = config.training.run_id
+    if run_id is None:
+        model = config.model
+        inner_label = {"am": "am", "output_only_mass_calibrated": "oomc"}[model.inner_objective]
+        timestamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M")
+        run_id = (
+            f"m{model.num_slots}-d{model.memory_dim}"
+            f"_p{model.pending_size}-r{model.recent_size}"
+            f"_inner-s{model.inner_steps}-{inner_label}"
+            f"_outer-{config.training.outer_write_obj}_{timestamp}"
+        )
+    return Path(config.training.output_root) / run_id / "train"
 
 
 def train(plan_dir, device="cuda", resume=None):

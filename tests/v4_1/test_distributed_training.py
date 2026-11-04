@@ -212,7 +212,7 @@ def test_training_budget_cursor_and_committed_metrics(tmp_path):
         training_config(), output_root=str(tmp_path), run_id="01_20261029",
     ))
     directory = _training_output_dir(experiment, None)
-    assert directory == tmp_path / "am-recent_m256-d512_p1024-r256_inner3_01_20261029/train"
+    assert directory == tmp_path / "01_20261029/train"
     other = replace(experiment, training=replace(experiment.training, run_id="02_20261029"))
     assert _training_output_dir(other, None).parent != directory.parent
     assert other.training.teacher_cache_dir == experiment.training.teacher_cache_dir

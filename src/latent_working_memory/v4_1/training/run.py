@@ -121,6 +121,8 @@ def _run_training(args, devices, config, output_dir):
         if args.overwrite:
             if not Path(config.training.dataset_dir).is_dir():
                 raise FileNotFoundError(f"training data directory does not exist: {config.training.dataset_dir}")
+            if Path(config.training.teacher_cache_dir).expanduser().resolve().is_relative_to(output_dir.parent):
+                raise ValueError("cannot overwrite a run directory containing the shared teacher cache")
             if output_dir.parent.exists():
                 shutil.rmtree(output_dir.parent)
         elif output_dir.parent.exists() and any(output_dir.parent.iterdir()):
@@ -182,9 +184,8 @@ def run_job(args):
         config = None
     else:
         config = load_config(getattr(args, "config", DEFAULT_CONFIG), config_overrides(args))
-        now = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M%S")
-        config = replace(config, training=replace(config.training, run_id=config.training.run_id or now))
         output_dir = _training_output_dir(config, None)
+        config = replace(config, training=replace(config.training, run_id=output_dir.parent.name))
     with run_lock(output_dir.parent, exclusive=True):
         return _run_training(args, devices, config, output_dir)
 

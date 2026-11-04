@@ -53,7 +53,7 @@ def parse_run_args(argv=None):
     parser.add_argument("--overwrite", action="store_true", help="清理目标 run 或当前评估 task 后重新执行")
     add_config_arguments(parser)
     parser.add_argument("--train-data", help="训练与 dev 数据目录，默认使用 training.dataset_dir")
-    parser.add_argument("--run-id", help="运行目录的末尾标识，默认 YYYYMMDD-HHMMSS")
+    parser.add_argument("--run-id", help="运行目录名，默认方法设置加上海时间 YYYYMMDD-HHMM")
     sources = parser.add_mutually_exclusive_group()
     sources.add_argument("--checkpoint", nargs="+", help="恢复用单个 checkpoint；独立评估可传多个")
     sources.add_argument("--eval-run", help="评估该训练目录仍保留的全部 checkpoint")
