@@ -111,6 +111,9 @@ class LayerMemory(nn.Module):
                 )
             else:
                 teacher_outputs, teacher_mass = local_read(queries, *teacher_kv)
+            if self.config.inner_objective == "output_only_mass_calibrated":
+                # Inner 不使用 mass 梯度，释放未消费的 LSE 分支，避免诊断 VJP 保留重算缓存。
+                teacher_mass = teacher_mass.detach()
             scales_o, scales_z = teacher_scales(
                 teacher_outputs, teacher_mass, self.config.am_std_floor
             )

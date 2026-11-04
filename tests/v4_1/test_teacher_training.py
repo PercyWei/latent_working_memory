@@ -6,9 +6,11 @@ import weakref
 
 import pytest
 import torch
+import torch.utils.checkpoint as checkpoint_module
 from transformers.cache_utils import DynamicCache
 
 from latent_working_memory.v4_1.data import compression_boundaries
+from latent_working_memory.v4_1.modeling import memory as memory_module
 from latent_working_memory.v4_1.modeling.model import OnlineMemoryLM
 from latent_working_memory.v4_1.teacher.cache import content_identity
 from latent_working_memory.v4_1.teacher.runtime import RuntimeTeacher
@@ -115,9 +117,12 @@ def test_runtime_teacher_matches_materialized_loss_and_meta_gradients(tiny_setup
     assert not any("lora_" in name for name, _ in setup.teacher.named_parameters())
 
 
-def test_per_gradient_checkpoint_preserves_multistep_meta_gradients(tiny_setup, monkeypatch):
+@pytest.mark.parametrize("inner_objective", ("am", "output_only_mass_calibrated"))
+def test_per_gradient_checkpoint_preserves_multistep_meta_gradients(
+    tiny_setup, monkeypatch, inner_objective,
+):
     setup = tiny_setup
-    config = replace(setup.config.model, inner_steps=3)
+    config = replace(setup.config.model, inner_steps=3, inner_objective=inner_objective)
     teacher = RuntimeTeacher(setup.teacher, setup.config, setup.cache)
     boundaries = compression_boundaries(
         len(setup.episode.context_ids), config.pending_size, config.recent_size,
@@ -166,9 +171,10 @@ def test_per_gradient_checkpoint_preserves_multistep_meta_gradients(tiny_setup, 
         assert torch.isfinite(tensor.grad).all() and tensor.grad.abs().sum() > 0
 
 
-def test_engine_dev_and_teacher_free_inference(tiny_setup):
+@pytest.mark.parametrize("inner_objective", ("am", "output_only_mass_calibrated"))
+def test_engine_dev_and_teacher_free_inference(tiny_setup, inner_objective):
     setup = tiny_setup
-    model = OnlineMemoryLM(setup.config.model)
+    model = OnlineMemoryLM(replace(setup.config.model, inner_objective=inner_objective))
     teacher = RuntimeTeacher(setup.teacher, setup.config, setup.cache)
     engine = TrainingEngine(model, setup.config.training)
     episodes = (setup.episode, replace(setup.episode, id="document:1", target_ids=(10, 1)))
@@ -192,9 +198,12 @@ def test_engine_dev_and_teacher_free_inference(tiny_setup):
     assert all(parameter.grad is None for parameter in model.parameters())
 
 
-def test_true_batch_preserves_per_sample_losses_and_full_meta_gradients(tiny_setup, monkeypatch):
+@pytest.mark.parametrize("inner_objective", ("am", "output_only_mass_calibrated"))
+def test_true_batch_preserves_per_sample_losses_and_full_meta_gradients(
+    tiny_setup, monkeypatch, inner_objective,
+):
     episodes, references = _mixed_episodes_and_references(tiny_setup)
-    config = replace(tiny_setup.config.model, inner_steps=3)
+    config = replace(tiny_setup.config.model, inner_steps=3, inner_objective=inner_objective)
     batched = OnlineMemoryLM(config)
     serial = OnlineMemoryLM(replace(config, gradient_checkpointing=False))
     serial.load_trainable_state_dict(batched.trainable_state_dict())
@@ -273,3 +282,37 @@ def test_microbatch_tail_preserves_optimizer_update(tiny_setup, monkeypatch):
     for name, value in batched.trainable_state_dict().items():
         torch.testing.assert_close(value, expected_parameters[name], rtol=2e-5, atol=2e-6,
                                    msg=lambda message: f"{name}: {message}")
+
+
+def test_output_only_diagnostic_vjps_release_teacher_checkpoint_cache(tiny_setup, monkeypatch):
+    config = replace(tiny_setup.config.model, inner_steps=3,
+                     inner_objective="output_only_mass_calibrated")
+    model = OnlineMemoryLM(config)
+    _, references = _mixed_episodes_and_references(tiny_setup)
+    teacher_frames = []
+    original_checkpoint = memory_module.checkpoint
+    frame_type = checkpoint_module._CheckpointFrame
+
+    def capture_frame(*args, **kwargs):
+        frame = frame_type(*args, **kwargs)
+        teacher_frames.append(weakref.ref(frame))
+        return frame
+
+    def track_teacher_checkpoint(function, *args, **kwargs):
+        if function is not memory_module.local_read:
+            return original_checkpoint(function, *args, **kwargs)
+        with monkeypatch.context() as patch:
+            patch.setattr(checkpoint_module, "_CheckpointFrame", capture_frame)
+            return original_checkpoint(function, *args, **kwargs)
+
+    monkeypatch.setattr(memory_module, "checkpoint", track_teacher_checkpoint)
+    output = model(tiny_setup.episode, teacher=FixedReferences(references))
+    parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    assert len(teacher_frames) == output["write_events"] * len(model.memory_layers)
+    for name in ("qa_loss", "outer_am"):
+        torch.autograd.grad(output[name], parameters, retain_graph=True, allow_unused=True)
+        for reference in teacher_frames:
+            frame = reference()
+            assert frame is not None
+            assert all(not cache for cache in frame.recomputed.values())
+    output["loss"].backward()
