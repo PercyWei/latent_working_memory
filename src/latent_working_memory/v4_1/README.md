@@ -2,16 +2,20 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261103 23:59:00 Asia/Shanghai
+最后修订时间：20261104 09:31:57 Asia/Shanghai
 
 每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部更新压缩历史。`model.inner_objective` 选择 v4.1 的 Attention Matching（AM），或 v4.1.1 的 local output 拟合与最终 mass 校准。外层保留 QA，根据配置选择完整历史的 attention matching 或下一 token 分布蒸馏，学习连续写入与读取。
 
-[运行指南](scripts/README.md) · [默认配置](../../../configs/v4-1/online_ttt_memory.json) · [框架笔记](../../../notes/v4-1/20261022_online_ttt_memory_framework.md)
-
-v4.1.1 使用[正式配置](../../../configs/v4-1-1/default.json)，通过共用入口启动：
+[运行指南](scripts/README.md) · [默认配置](../../../configs/v4-1/default.json) · [框架笔记](../../../notes/v4-1/20261022_online_ttt_memory_framework.md)
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh --config configs/v4-1-1/default.json
+CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh --config configs/v4-1/default.json
+```
+
+v4.1.1 使用[正式配置](../../../configs/v4-1/inner-obj-oomc.json)，通过共用入口启动：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh --config configs/v4-1/inner-obj-oomc.json
 ```
 
 该配置执行三步 inner 更新，每层正步长初值为 0.1，由 outer 学习。训练产物写入 `artifacts/v4-1-1`，teacher 缓存显式复用 `artifacts/v4-1/teacher/p1024-r256`，SwanLab 采用现有的 `latent-working-memory-v4.1` project，并自动附加 `method:output-only-mass-calibrated`。运行配置与 checkpoint 保存 `inner_objective`，独立评估沿用 checkpoint 中的方法设置。显式传入 `--output-root` 时，teacher 缓存按该父目录重新定位。
