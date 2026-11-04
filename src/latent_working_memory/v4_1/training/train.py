@@ -40,6 +40,9 @@ def tracking_run(config, output_dir, resume, device):
     if training.tracking == "disabled":
         yield None
         return
+    tags = {"scope:main", "method:online-ttt-memory", *training.tags}
+    if config.model.inner_objective == "output_only_mass_calibrated":
+        tags.add("method:output-only-mass-calibrated")
     with (output_dir / ".swanlab-publish.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         path = output_dir / "swanlab.json"
@@ -63,7 +66,7 @@ def tracking_run(config, output_dir, resume, device):
                     * (dist.get_world_size() if dist.is_initialized() else 1),
                 },
                 group=training.group, job_type="train",
-                tags=sorted({"scope:main", "method:online-ttt-memory", *training.tags}),
+                tags=sorted(tags),
                 mode="online", public=False, log_dir=str(output_dir / "swanlab"),
                 id=identity["id"] if identity else None,
                 resume="must" if identity else "never",

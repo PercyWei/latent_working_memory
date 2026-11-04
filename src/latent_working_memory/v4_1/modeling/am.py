@@ -5,14 +5,29 @@ import math
 import torch
 
 
-def local_read(queries, keys, values, bias):
-    """q:[...,N,Hq,D]，k/v:[...,Hkv,K,D]，bias:[...,Hkv,K]，前置样本维独立。"""
+def _attention_scores(queries, keys, bias):
     groups = queries.shape[-2] // keys.shape[-3]
     grouped = queries.float().unflatten(-2, (keys.shape[-3], groups))
     scores = torch.einsum("...nhgd,...hkd->...nhgk", grouped, keys.float())
-    scores = scores / math.sqrt(queries.shape[-1]) + bias.float().unsqueeze(-3).unsqueeze(-2)
+    return scores / math.sqrt(queries.shape[-1]) + bias.float().unsqueeze(-3).unsqueeze(-2)
+
+
+def local_read(queries, keys, values, bias):
+    """q:[...,N,Hq,D]，k/v:[...,Hkv,K,D]，bias:[...,Hkv,K]，前置样本维独立。"""
+    scores = _attention_scores(queries, keys, bias)
     outputs = torch.einsum("...nhgk,...hkd->...nhgd", scores.softmax(-1), values.float())
     return outputs.reshape(queries.shape), scores.logsumexp(-1).flatten(-2)
+
+
+def calibrate_memory_bias(queries, keys, bias, teacher_keys, teacher_bias, floor):
+    """按 KV head 拟合公共 log-mass 偏移；保留 query 与两侧 key/bias 的梯度。"""
+    teacher_mass = _attention_scores(queries, teacher_keys, teacher_bias).logsumexp(-1)
+    memory_mass = _attention_scores(queries, keys, bias).logsumexp(-1)
+    scales = teacher_mass.std(dim=-3, correction=0).clamp_min(floor).detach()
+    weights = scales.double().square().reciprocal()
+    gap = (teacher_mass.double() - memory_mass.double()).mean(dim=-3)
+    offset = (weights * gap).sum(dim=-1) / weights.sum(dim=-1)
+    return bias + offset.to(bias.dtype).unsqueeze(-1)
 
 
 def teacher_scales(outputs, log_mass, floor):

@@ -1,12 +1,14 @@
 """单 checkpoint 评估身份、原子提交与 RULER 长度增量。"""
 
 from contextlib import contextmanager
+from dataclasses import asdict
 import fcntl
 import json
 from pathlib import Path
 
 from latent_working_memory.benchmarks.data import DEFAULT_RULER_LENGTHS
 from latent_working_memory.benchmarks.protocol import data_identity
+from ..config import ModelConfig
 
 
 def normalize_lengths(lengths):
@@ -37,6 +39,13 @@ def write_details(path, records):
 def read_details(path):
     with Path(path).open(encoding="utf-8") as stream:
         return [json.loads(line) for line in stream]
+
+
+def read_evaluation_record(path):
+    """读取评估计划或结果，按当前模型配置的默认值与校验生成有效设置。"""
+    record = json.loads(Path(path).read_text(encoding="utf-8"))
+    record["model"] = asdict(ModelConfig(**record["model"]))
+    return record
 
 
 @contextmanager
@@ -100,7 +109,7 @@ def validate_request(saved, requested):
 def check_evaluation(output_dir, request):
     path = output_dir / "eval.json"
     if path.exists():
-        validate_request(json.loads(path.read_text(encoding="utf-8")), request)
+        validate_request(read_evaluation_record(path), request)
     elif (output_dir / "summary.json").exists():
         raise ValueError(f"{output_dir}: completed evaluation is missing eval.json")
 
@@ -114,7 +123,7 @@ def completed_evaluation(output_dir, request):
     path = output_dir / "summary.json"
     if not path.exists():
         return None
-    summary = json.loads(path.read_text(encoding="utf-8"))
+    summary = read_evaluation_record(path)
     validate_request({key: summary[key] for key in request}, request)
     if not (output_dir / "details.jsonl").is_file():
         raise FileNotFoundError(output_dir / "details.jsonl")

@@ -6,7 +6,7 @@ from pathlib import Path
 import shutil
 
 from .config import config_from_dict
-from .evaluation.records import normalize_lengths, write_json
+from .evaluation.records import normalize_lengths, read_evaluation_record, write_json
 from .training.engine import training_steps
 
 
@@ -49,7 +49,7 @@ def prepare_evaluation_plan(run_dir, config, eval_id, task, options, overwrite=F
     if task not in {"test", "locomo", "ruler"}:
         raise ValueError("task must be test, locomo or ruler")
     path = Path(run_dir).expanduser().resolve() / "plan" / f"eval-{eval_id}" / f"{task}.json"
-    saved = json.loads(path.read_text(encoding="utf-8")) if path.exists() and not overwrite else None
+    saved = read_evaluation_record(path) if path.exists() and not overwrite else None
     previous = saved or {}
     data = options.get("data", previous.get("data"))
     if data is None:

@@ -10,7 +10,7 @@ from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 from transformers import AutoModelForCausalLM
 
-from .am import local_read, matching_loss
+from .am import calibrate_memory_bias, local_read, matching_loss
 from .attention import decoder_forward
 from .generation import generate_batch as generate_sequences
 from .memory import LayerMemory
@@ -178,7 +178,16 @@ class OnlineMemoryLM(nn.Module):
                             "layer_index": index, **record,
                         })
                 state.memories[index] = updated
-                state.memory_kv[index] = memory.decode(updated, compressed, rotary)
+                key, value, bias = memory.decode(updated, compressed, rotary)
+                if self.config.inner_objective == "output_only_mass_calibrated":
+                    calibration_args = (query, key, bias, teacher[0], teacher[2],
+                                        self.config.am_std_floor)
+                    if differentiable and self.config.gradient_checkpointing:
+                        bias = checkpoint(calibrate_memory_bias, *calibration_args,
+                                          use_reentrant=False)
+                    else:
+                        bias = calibrate_memory_bias(*calibration_args)
+                state.memory_kv[index] = (key, value, bias)
                 # clone 释放被删除 pending 的存储；recent KV 保留原值及全局位置。
                 state.keys[index] = state.keys[index][:, :, count:].clone()
                 state.values[index] = state.values[index][:, :, count:].clone()

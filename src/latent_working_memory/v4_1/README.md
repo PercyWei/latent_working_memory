@@ -2,11 +2,19 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261103 11:10:08 Asia/Shanghai
+最后修订时间：20261103 23:59:00 Asia/Shanghai
 
-每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部 Attention Matching（AM）更新压缩历史。外层保留 QA，根据配置选择完整历史的 attention matching 或下一 token 分布蒸馏，学习连续写入与读取。
+每层维护独立的 latent tokens，生成共享 memory KV，通过少量局部更新压缩历史。`model.inner_objective` 选择 v4.1 的 Attention Matching（AM），或 v4.1.1 的 local output 拟合与最终 mass 校准。外层保留 QA，根据配置选择完整历史的 attention matching 或下一 token 分布蒸馏，学习连续写入与读取。
 
 [运行指南](scripts/README.md) · [默认配置](../../../configs/v4-1/online_ttt_memory.json) · [框架笔记](../../../notes/v4-1/20261022_online_ttt_memory_framework.md)
+
+v4.1.1 使用[正式配置](../../../configs/v4-1-1/default.json)，通过共用入口启动：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh --config configs/v4-1-1/default.json
+```
+
+该配置执行三步 inner 更新，每层正步长初值为 0.1，由 outer 学习。训练产物写入 `artifacts/v4-1-1`，teacher 缓存显式复用 `artifacts/v4-1/teacher/p1024-r256`，SwanLab 采用现有的 `latent-working-memory-v4.1` project，并自动附加 `method:output-only-mass-calibrated`。运行配置与 checkpoint 保存 `inner_objective`，独立评估沿用 checkpoint 中的方法设置。显式传入 `--output-root` 时，teacher 缓存按该父目录重新定位。
 
 ## 1. 计算与执行流程
 
@@ -50,9 +58,23 @@ o=\sum_i\operatorname{softmax}(s)_i v_i,\qquad
 z=\operatorname{logsumexp}_i(s_i).
 $$
 
-AM 等权相加局部输出 $o$ 与 log-mass $z$ 的标准化 MSE；$z$ 是归一化前总权重的对数。Teacher 尺度 $\sigma_o,\sigma_z$ 按层和 query head 计算并固定，标准化只进入损失；memory bias 同时用于正式 attention。
+AM 等权相加局部输出 $o$ 与 log-mass $z$ 的标准化 MSE；$z$ 是归一化前总权重的对数。Teacher 尺度 $\sigma_o,\sigma_z$ 按层和 query head 计算并固定，标准化只进入损失；memory bias 同时用于正式 attention。`model.inner_objective=am` 采用该 inner 目标。
 
 Inner 每轮使用全部 recent 位置，固定 queries 与 teacher 的数值，执行 $S_{\mathrm{in}}$ 步无动量 SGD。每层步长 $\eta_\ell=\operatorname{softplus}(a_\ell)$ 由 outer 学习；跨轮仅延续 memory，无额外 inner optimizer 状态。固定本轮参照不表示截断它对此前写入的元梯度。
+
+`model.inner_objective=output_only_mass_calibrated` 对应 v4.1.1。三步更新仅对 local output 的标准化 MSE 求梯度。写入结束后，对最终 memory 使用相同 recent queries 计算 log-mass。每个 KV head $h$ 的公共偏移为
+
+$$
+c_h=
+\frac{\sum_{q\in Q_h}(z^T(q)-z^M(q))/\sigma_{z,q}^2}
+     {\sum_{q\in Q_h}1/\sigma_{z,q}^2},
+\qquad
+\beta_{h,j}^{\mathrm{mounted}}=\beta_{h,j}+c_h.
+$$
+
+$Q_h$ 包含共享该 KV head 的所有 recent 位置与 query heads。校准后的 bias 和最终 K/V 一起缓存，用于后续正式 attention、outer 监督及下次写入的 teacher。训练保留校准对最终 latent、decoder 和写入 query 的梯度。公共偏移保持 memory 内部的相对 slot 权重，调整它与原始 KV 的注意力占比。偏移由当前已观察到的 recent queries 估计，后续 query 的 mass 误差仍可能存在。Outer AM 继续计算 output 与 mass 两项。
+
+在该方法中，bias decoder 的线性层常数项以零系数参与计算，整块 memory 的公共偏移统一由 $c_h$ 确定。逐 slot 的 bias 仍由 decoder 权重和 latent 生成。这一约定避免公共常数被校准抵消后留下的浮点梯度被 Adam 放大，参数布局保持一致。
 
 外层总目标由答案 CE 和写入后监督两部分组成。答案 CE 的系数为 1，`outer_write_obj` 选择每次 inner 写入完成后的监督方式，`outer_write_obj_weight` 设置其系数。写入后监督先在单个样本的各写入边界间取平均。默认 `training.outer_write_obj=am` 时，目标为
 
@@ -140,6 +162,8 @@ Teacher 的完整原文 prefix KV 在准备当前样本参照时随压缩边界�
 
 实验输入 JSON 的结构为 `seed`、`model`、`teacher`、`training`，未知字段报错。缺省字段采用 [config.py](config.py) 中的默认值，下表以[正式配置](../../../configs/v4-1/online_ttt_memory.json)为准。路径支持 `~`，相对路径以运行目录为基准，脚本统一切到项目根目录。
 
+训练计划、checkpoint 及评估计划和结果在加载入口补齐配置默认值，再按有效配置校验一致性。新增字段的缺省语义应对应引入该字段前的行为，例如省略 `inner_objective` 等价于 `am`。旧评估记录可以直接读取，未知模型字段、非法值、显式不同的方法和实际评估设置仍会报错。只读加载在内存中补齐字段。
+
 Prepare/train 默认读取 `configs/v4-1/online_ttt_memory.json`，分别通过 `--prepare-data`、`--train-data` 覆盖 `training.dataset_dir`；显式 CLI 值在校验前覆盖配置。两者的数据、模型、seed、筛选设置与产物父目录须保持一致。
 
 `run.sh` 默认先保存训练计划，再执行训练和 dev；`--resume` 只恢复训练，预算已完成时直接返回。Test／benchmark 使用 `--evaluate-only` 独立执行，首次创建或覆盖评估计划须明确指定数据目录；通常重跑时沿用原计划与缓存。具体选项见[运行指南](scripts/README.md)。
@@ -155,6 +179,7 @@ Prepare/train 默认读取 `configs/v4-1/online_ttt_memory.json`，分别通过 
 | `decoder_hidden_dim` | $d_{\mathrm{dec}}=1024$ | SiLU 解码器中间维度 |
 | `init_std` | $\sigma_{\mathrm{init}}=0.02$ | $M_0$ 的正态初始化标准差 |
 | `inner_steps`／`inner_lr_init` | $S_{\mathrm{in}}=3$／$\eta_{\ell,0}=1$ | 每轮更新步数与初始正步长 |
+| `inner_objective` | `am` | `am` 使用 output + mass；`output_only_mass_calibrated` 使用纯 output 更新与最终按 KV head 校准 |
 | `am_std_floor` | $\sigma_{\min}=10^{-4}$ | Inner／outer 固定尺度下限 |
 | `lora_rank`／`lora_alpha`／`lora_dropout` | $r=16$／$\alpha=32$／$p=0$ | Q/K/V LoRA；首版固定 dropout 为 0 |
 | `gradient_checkpointing` | `true` | 非重入激活重计算 |
@@ -249,13 +274,15 @@ Train/dev 均记录答案 CE `qa_loss`、完整历史参照的 `outer_am` 及其
 
 SwanLab 在 `train/loss_grad_norm` 原生折线图中合并展示 QA 与实际参与训练的辅助项，横轴为实际 optimizer step；`metrics.jsonl` 与训练终端同步记录采样步的两项。非统计步完全跳过两次额外的向量–雅可比积（VJP）、两组梯度缓冲区和额外归约，两项日志缺省且不补零。采样步仍需对每个 microbatch 执行两次额外 VJP，并分配梯度缓冲区及临时求导、归约张量；降低频率减少平均开销，但不会降低采样步的显存峰值。原 `train/grad_norm`、outer AM 分项与其他逐步指标照常每步记录；训练权重与总损失的反向传播、裁剪和优化器更新方式保持原样。dev 不计算这两项梯度诊断。
 
-`inner_before`／`inner_after` 分别记录同一次写入的首次 inner 更新前与全部 inner steps 完成后的局部 AM。SwanLab 在 train、dev 分区分别用 `inner_am` 原生折线图合并展示，横轴为实际 optimizer step，更新前用浅蓝、更新后用深蓝；保留底层标量数据。Inner loss 下降不能直接说明 QA 有效，正式实验应结合生成得分、逐题回答及资源成本分析。
+`inner_before`／`inner_after` 分别记录同一次写入的首次 inner 更新前与全部 inner steps 完成后的优化目标。`am` 为 output + mass，`output_only_mass_calibrated` 为 local output。SwanLab 在 train、dev 分区分别用 `inner_am` 原生折线图合并展示，横轴为实际 optimizer step，更新前用浅蓝、更新后用深蓝；保留底层标量数据。Inner loss 下降不能直接说明 QA 有效，正式实验应结合生成得分、逐题回答及资源成本分析。
 
 同样在实际 global step 为 20、40、60……时，训练将完整 inner 诊断写入本地 `train/inner_diagnostics.jsonl`，不上传 SwanLab。各 rank（含空分片）只在采样步收集已脱离计算图的 CPU 记录，由 rank 0 按 rank、样本顺序汇总，每步写一行 `{step, samples}`。每个样本保存 `id`、`document_id`、`context_tokens`、`rank` 与 `records`；没有压缩写入的样本保留空 `records`。
 
 每条 `records` 对应样本的一层、一次写入，包含从 1 开始的 `write_index`、右端不包含的 `processed_end`／`compressed_end`、从 0 开始的 `layer_index`、本轮实际正步长 `step_size`，以及逐 query-head 的固定 `scales_o`／`scales_z` 数组。`steps` 按从 1 开始的 `inner_step` 记录本次更新前的 `loss`、`output_loss`、`mass_loss`，以及 `output_loss_per_head`／`mass_loss_per_head`。逐 head 数组沿模型的 query-head 顺序排列；output 项先平均该 head 的 queries 与输出通道，mass 项只平均 queries，数组的 head 均值分别等于原来的两个分项。`after` 保存最后一次更新后的三个 loss 和两个逐 head 数组，其 `inner_step` 等于已完成的 inner steps 数。
 
 每个 inner step 同时记录样本 latent memory 上的总梯度范数 `gradient_norm`、实际更新范数 `update_norm`（$\|\eta g\|_2$）、更新前的 `memory_norm`，以及 `relative_update_norm=update_norm/memory_norm`；memory 范数为 0 时，相对更新量记为 `null`。`output_gradient_norm`／`mass_gradient_norm` 分别是两个整体分项损失对同一更新前 memory 的 L2 梯度范数，包含 head 平均，不是逐 head 的梯度范数。`gradient_cosine_similarity` 与 `gradient_angle_degrees` 记录这两个梯度在相同 memory 空间中的余弦相似度和夹角（度）；任一梯度范数为 0 时，两项均记为 `null`。
+
+`output_only_mass_calibrated` 的逐步及 `after` 诊断保留校准前的 `mass_loss`，用于观察原始 log-mass 偏差；它不进入 `loss`。`mass_gradient_norm` 记录实际 inner 梯度贡献，为 0，对应夹角为 `null`。最终公共偏移在诊断之后合入正式 memory bias，并保留 outer 计算图。
 
 每个采样 inner step 额外执行一次独立的局部前向与两次局部 VJP，以脱离主训练图的 memory、queries 和 teacher 参照计算分项梯度；逐 head loss 在同一次诊断前向中归约，无需逐 head 求导。诊断范数与内积使用 FP64 归约以避免统计溢出，训练仍使用原有 FP32。诊断结果脱离计算图，不建立日志所需的高阶图，checkpoint 重计算不重复诊断。训练仍保留原有完整元梯度，不改变 loss 权重、inner 更新或采样频率。采样步使用该次 outer optimizer 更新前的慢参数；重放需要此前 checkpoint 和对应随机状态，仅凭标量日志无法恢复过去的写入轨迹。
 

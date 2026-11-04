@@ -232,3 +232,77 @@ def test_interrupted_ruler_length_restarts_without_recomputing_complete_length(e
     assert summary["metrics"]["score"] == 0.5
     assert summary["metrics"]["samples"] == 26
     assert not list(case.output.glob("*.tmp"))
+
+
+def _omit_model_defaults(path):
+    record = json.loads(path.read_text())
+    for name in ("inner_objective", "gradient_checkpointing"):
+        record["model"].pop(name)
+    path.write_text(json.dumps(record), encoding="utf-8")
+
+
+def test_cached_results_fill_model_defaults_without_rewriting_files(evaluation_setup, monkeypatch):
+    case = evaluation_setup
+    options = dict(task="ruler", max_new_tokens=1, lengths=[64], eval_id="cached")
+    expected = evaluation.evaluate(case.checkpoint, case.data, case.output, device="cpu", **options)
+    paths = [case.output / name for name in ("eval.json", "summary.json")]
+    for path in paths:
+        _omit_model_defaults(path)
+    original = {path: path.read_bytes() for path in paths}
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("cached evaluation must not initialize CUDA or load a model")
+
+    monkeypatch.setattr(evaluation, "OnlineMemoryLM", unexpected)
+    monkeypatch.setattr(evaluation, "initialize_device", unexpected)
+    actual = evaluation.load_cached_evaluation(case.checkpoint, case.data, case.output, **options)
+    assert actual == expected
+    assert actual["model"]["inner_objective"] == "am"
+    assert actual["model"]["gradient_checkpointing"] is True
+    assert {path: path.read_bytes() for path in paths} == original
+
+
+def test_ruler_extension_reuses_old_length_with_missing_model_defaults(evaluation_setup):
+    case = evaluation_setup
+    options = dict(task="ruler", max_new_tokens=1)
+    evaluation.evaluate(case.checkpoint, case.data, case.output, device="cpu", lengths=[64], **options)
+    for directory in (case.output, case.output / "lengths/64"):
+        for name in ("eval.json", "summary.json"):
+            _omit_model_defaults(directory / name)
+    details = (case.output / "lengths/64/details.jsonl").read_bytes()
+    case.calls.lengths.clear()
+    work = evaluation.prepare_sample_work(
+        case.checkpoint, case.data, case.output, num_workers=1, lengths=[64, 128], **options,
+    )
+    assert work["completed_samples"] == work["pending_samples"] == len(RULER_TASKS)
+    evaluation.evaluate_shard(case.checkpoint, case.data, case.output, 0,
+                              device="cpu", lengths=[64, 128], **options)
+    summary = evaluation.finalize_sample_work(case.checkpoint, case.data, case.output,
+                                               lengths=[64, 128], **options)
+    assert case.calls.lengths == [128] * len(RULER_TASKS)
+    assert summary["protocol"]["lengths"] == [64, 128]
+    assert summary["model"]["inner_objective"] == "am"
+    assert (case.output / "lengths/64/details.jsonl").read_bytes() == details
+
+
+@pytest.mark.parametrize("filename", ["eval.json", "summary.json"])
+@pytest.mark.parametrize(("field", "value", "error", "message"), [
+    ("inner_objective", "output_only_mass_calibrated", ValueError, "settings differ"),
+    ("unknown_model_field", True, TypeError, "unexpected keyword"),
+    ("inner_steps", 0, ValueError, "inner_steps must be a positive integer"),
+])
+def test_saved_model_defaults_preserve_strict_validation(
+    evaluation_setup, filename, field, value, error, message,
+):
+    case = evaluation_setup
+    options = dict(task="ruler", max_new_tokens=1, lengths=[64])
+    evaluation.evaluate(case.checkpoint, case.data, case.output, device="cpu", **options)
+    path = case.output / filename
+    _omit_model_defaults(path)
+    saved = json.loads(path.read_text())
+    saved["model"][field] = value
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    original = path.read_bytes()
+    with pytest.raises(error, match=message):
+        evaluation.load_cached_evaluation(case.checkpoint, case.data, case.output, **options)
+    assert path.read_bytes() == original

@@ -47,6 +47,7 @@ class ModelConfig:
     init_std: float = 0.02
     inner_steps: int = 3
     inner_lr_init: float = 1.0
+    inner_objective: str = "am"
     lora_rank: int = 16
     lora_alpha: float = 32.0
     lora_dropout: float = 0.0
@@ -66,6 +67,8 @@ class ModelConfig:
         ))
         for name in ("init_std", "inner_lr_init", "lora_alpha", "am_std_floor"):
             _number(getattr(self, name), name)
+        if self.inner_objective not in {"am", "output_only_mass_calibrated"}:
+            raise ValueError("inner_objective must be am or output_only_mass_calibrated")
         _number(self.lora_dropout, "lora_dropout", inclusive=True)
         if self.lora_dropout != 0:
             raise ValueError("v4.1 requires lora_dropout=0 for deterministic memory trajectories")

@@ -35,7 +35,13 @@ class LayerMemory(nn.Module):
         shape = (*memory.shape[:-1], self.num_kv_heads, self.head_dim)
         key = self.decoder["key"](hidden).view(shape).transpose(-3, -2)
         value = self.decoder["value"](hidden).view(shape).transpose(-3, -2)
-        bias = self.decoder["bias"](hidden).transpose(-2, -1)
+        bias_decoder = self.decoder["bias"]
+        if self.config.inner_objective == "output_only_mass_calibrated":
+            # 公共常数由最终校准确定；保留零梯度路径，避免 Adam 放大抵消误差。
+            bias = F.linear(hidden, bias_decoder.weight, bias_decoder.bias * 0)
+        else:
+            bias = bias_decoder(hidden)
+        bias = bias.transpose(-2, -1)
         positions = torch.arange(memory.shape[-2], device=memory.device, dtype=torch.float32)
         positions = positions * (compressed_tokens / memory.shape[-2])
         cosine, sine = rotary(key, positions[None])
@@ -48,6 +54,8 @@ class LayerMemory(nn.Module):
         output_loss, mass_loss = matching_loss(
             outputs, mass, teacher_outputs, teacher_mass, scales_o, scales_z
         )
+        if self.config.inner_objective == "output_only_mass_calibrated":
+            return output_loss
         return output_loss + mass_loss
 
     def _matching_gradient(self, candidate, *args):
@@ -68,12 +76,16 @@ class LayerMemory(nn.Module):
             outputs, mass, teacher_outputs.detach(), teacher_mass.detach(), scales_o, scales_z,
             return_per_head=True,
         )
+        use_mass = self.config.inner_objective == "am"
         output_gradient = torch.autograd.grad(
-            output_loss.sum(), probe, retain_graph=True, create_graph=False,
+            output_loss.sum(), probe, retain_graph=use_mass, create_graph=False,
         )[0].flatten(1).double()
-        mass_gradient = torch.autograd.grad(
-            mass_loss.sum(), probe, create_graph=False,
-        )[0].flatten(1).double()
+        if use_mass:
+            mass_gradient = torch.autograd.grad(
+                mass_loss.sum(), probe, create_graph=False,
+            )[0].flatten(1).double()
+        else:
+            mass_gradient = torch.zeros_like(output_gradient)
         return (
             output_loss.detach(), mass_loss.detach(), output_heads.detach(), mass_heads.detach(),
             torch.linalg.vector_norm(output_gradient, dim=1),
@@ -148,7 +160,8 @@ class LayerMemory(nn.Module):
                     return_per_head=diagnostics is not None,
                 )
                 output_loss, mass_loss = final_components[:2]
-                after = output_loss + mass_loss
+                after = (output_loss if self.config.inner_objective == "output_only_mass_calibrated"
+                         else output_loss + mass_loss)
         if diagnostics is not None:
             scales_o_rows, scales_z_rows = scales_o.cpu().tolist(), scales_z.cpu().tolist()
             eta = float(step_size.detach())
