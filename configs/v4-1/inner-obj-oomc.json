@@ -30,7 +30,7 @@
   },
   "training": {
     "dataset_dir": "data/delta-mem-qasper",
-    "output_root": "artifacts/v4-1-1",
+    "output_root": "artifacts/v4-1",
     "run_id": null,
     "epochs": 1,
     "max_steps": null,
