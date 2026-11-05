@@ -335,3 +335,30 @@ Teacher 边界与 checkpoint 先写临时文件，再原子替换正式文件。
 - **生成预算：**`requested_max_new_tokens` 是请求上限，`max_new_tokens` 是实际使用上限。Test 遇模型窗口限制时可缩减预算，并以 `model_window` 标记停止原因；`generated_tokens` 是实际生成数量。
 
 具体命令见[运行指南](scripts/README.md)。真实 Qwen3-4B 的训练稳定性、GPU 成本和 benchmark 效果需通过实际运行确认。
+
+## 5. 显存与吞吐对照
+
+`exploration.memory_efficiency.benchmark` 在各自 Git worktree 中运行优化前后的完整训练步骤。两边使用相同的真实数据与 teacher 缓存绝对路径，固定初始化、样本和参照抽样；默认双卡、每卡 microbatch 2、累积 4、teacher batch 64，有效全局 batch 为 16。
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH="$PWD/src" uv run --frozen \
+  python -m torch.distributed.run --standalone --nproc-per-node=2 \
+  --module latent_working_memory.v4_1.exploration.memory_efficiency.benchmark run \
+  --config configs/v4-1/inner-oomc_outer-distill.json \
+  --dataset-dir /绝对路径/data/delta-mem-qasper \
+  --teacher-cache-dir /绝对路径/artifacts/v4-1/teacher/p1024-r256 \
+  --output-dir /绝对路径/benchmark/baseline
+```
+
+代表文档与最长文档分别测量普通路径和每 20 步执行的诊断路径。每组重新初始化可训练参数和 Adam，先预热一次，再连续执行三次更新；诊断组每次都启用诊断，不表示已训练至第 20 步。计时包含 teacher 准备、完整元梯度、归约、裁剪和 Adam 更新，排除产物保存，记录各卡最大 allocated／reserved 峰值。产物保留全量 FP32 裁剪后梯度、裁剪前梯度范数、更新后参数、训练指标与完整 inner diagnostics，不连接 SwanLab。
+
+两边运行完成后进行离线比较：
+
+```bash
+uv run --frozen python -m latent_working_memory.v4_1.exploration.memory_efficiency.benchmark compare \
+  --baseline /绝对路径/benchmark/baseline \
+  --optimized /绝对路径/benchmark/optimized \
+  --output-dir /绝对路径/benchmark/compare
+```
+
+`comparison.json` 记录逐项数值差异、三次测量的耗时中位数、吞吐与最大显存峰值；数值不满足指定容差时返回非零退出码。
