@@ -190,7 +190,7 @@ def run(args):
         "created_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
         "repository": _repository(), "config": asdict(config), "world_size": world_size,
         "global_batch_size": global_batch, "warmup_steps_per_case": 1, "repeats": args.repeats,
-        "teacher_backbone_sharing": True,
+        "teacher_backbone_sharing": not args.independent_teacher,
         "input_packing_disabled": args.disable_input_packing,
         "gradient_capture": "FP32 parameter.grad after global mean and clip, before next zero_grad",
         "parameter_capture": "FP32 trainable parameters after AdamW update",
@@ -220,7 +220,9 @@ def run(args):
         raise RuntimeError(status[0])
 
     model = OnlineMemoryLM(config.model).to(device)
-    teacher = RuntimeTeacher(load_teacher(config.model, device, model.backbone), config, teacher_cache)
+    teacher = RuntimeTeacher(load_teacher(
+        config.model, device, None if args.independent_teacher else model.backbone,
+    ), config, teacher_cache)
     initial_state = model.trainable_state_dict()
     for case in cases:
         model.load_trainable_state_dict(initial_state)
@@ -436,6 +438,8 @@ def main():
                             help="正式重复次数；默认 3，数值定位可显式设为 1")
     run_parser.add_argument("--disable-input-packing", action="store_true",
                             help="数值定位时只关闭写入 checkpoint 输入压缩")
+    run_parser.add_argument("--independent-teacher", action="store_true",
+                            help="数值定位时使用独立冻结 teacher 权重")
     compare_parser = commands.add_parser("compare", help="离线比较所有梯度、更新参数、指标与诊断")
     compare_parser.add_argument("--baseline", required=True)
     compare_parser.add_argument("--optimized", required=True)
