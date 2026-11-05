@@ -1,6 +1,8 @@
-"""读取单次 run 的本地评估结果，不加载模型或连接实验追踪服务。"""
+"""读取并比较多个 run 的本地评估结果，不加载模型或连接实验追踪服务。"""
 
 import argparse
+from colorsys import hsv_to_rgb
+from hashlib import sha256
 from itertools import islice
 import json
 import math
@@ -9,10 +11,10 @@ from pathlib import Path
 from pyecharts import charts
 import streamlit as st
 
-from latent_working_memory.baselines.results import load_baseline_results
+from latent_working_memory.baselines.results import load_baseline_results, validate_quality_comparison
 from latent_working_memory.benchmarks.data import RULER_TASKS
 from latent_working_memory.benchmarks.protocol import protocol
-from latent_working_memory.v4.reporting import evaluation_charts, ruler_overall, ruler_task_chart
+from latent_working_memory.v4.reporting import RULER_TASK_LABELS, ruler_overall
 from latent_working_memory.v4_1.evaluation.diagnostics import output_flags, visible_text
 from latent_working_memory.v4_1.evaluation.records import completed_evaluation
 
@@ -25,6 +27,7 @@ CHART_LABELS = {
     "evaluation/ruler": "RULER 训练进度",
     "evaluation/ruler_lengths": "RULER 长度总览",
     "evaluation/locomo": "LoCoMo",
+    "evaluation/locomo_groups": "LoCoMo 分组对照",
 }
 OUTPUT_LABELS = {
     "blank": "空白答案", "whitespace_repeat": "连续空白 ≥12 字符",
@@ -34,15 +37,25 @@ OUTPUT_LABELS = {
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dashboard-run-dir", type=Path, required=True,
-                        help="单次运行根目录，仅需保留 eval/ 目录结构")
-    parser.add_argument("--dashboard-eval-id", help="启动时选中的评估标识，页面仍可切换")
+    parser.add_argument("--dashboard-run-dir", type=Path, nargs="+", required=True,
+                        help="一个或多个运行根目录，仅需保留 eval/ 目录结构")
+    parser.add_argument("--dashboard-eval-id", nargs="+",
+                        help="启动时选中的评估标识；一个值供所有运行共用，或按运行顺序逐一传入")
     parser.add_argument("--dashboard-baselines", nargs="*", default=[], metavar="LABEL_OR_PATH",
                         help="按“标签 评估结果目录”成对传入，仅本次展示使用")
     args = parser.parse_args(argv)
-    args.dashboard_run_dir = args.dashboard_run_dir.expanduser().resolve()
-    if not args.dashboard_run_dir.is_dir():
-        parser.error(f"--dashboard-run-dir 必须是已有的运行目录：{args.dashboard_run_dir}")
+    args.dashboard_run_dir = [path.expanduser().resolve() for path in args.dashboard_run_dir]
+    for path in args.dashboard_run_dir:
+        if not path.is_dir():
+            parser.error(f"--dashboard-run-dir 必须是已有的运行目录：{path}")
+    if len(set(args.dashboard_run_dir)) != len(args.dashboard_run_dir):
+        parser.error("--dashboard-run-dir 不能重复")
+    if args.dashboard_eval_id is None:
+        args.dashboard_eval_id = [None] * len(args.dashboard_run_dir)
+    elif len(args.dashboard_eval_id) == 1:
+        args.dashboard_eval_id *= len(args.dashboard_run_dir)
+    elif len(args.dashboard_eval_id) != len(args.dashboard_run_dir):
+        parser.error("--dashboard-eval-id 必须传入一个共用值，或与运行目录数量相同的值")
     if len(args.dashboard_baselines) % 2:
         parser.error("--dashboard-baselines 必须按“标签 结果目录”成对传入")
     args.dashboard_baselines = list(zip(args.dashboard_baselines[::2], args.dashboard_baselines[1::2]))
@@ -136,63 +149,158 @@ def _baseline_selection(results, task, summaries, key):
     return baselines
 
 
-def _test_charts(summaries):
-    steps = [summary["checkpoint_step"] for summary in summaries]
-    panels = {}
-    for name, metrics in (("nll", ("nll",)), ("em_f1", ("em", "f1"))):
+def _method_color(label, index=None, count=1):
+    hue = int.from_bytes(sha256(label.encode("utf-8")).digest()[:8], "big") / 2**64
+    channels = hsv_to_rgb(hue, 0.7, 0.65)
+    fraction = 0 if index is None else 0.55 * (1 - (index - 1) / max(1, count - 1))
+    return "#" + "".join(f"{round(255 * (value + (1 - value) * fraction)):02x}" for value in channels)
+
+
+def _quality_value(summary, task, metric, ruler_lengths):
+    if task == "test":
+        return summary["metrics"][metric]
+    if task == "ruler":
+        if metric is None:
+            return ruler_overall(summary, ruler_lengths)
+        return next((row["score"] for row in summary["metrics"]["by_length"]
+                     if row["length"] == metric), None)
+    if metric is None:
+        return summary["metrics"]["score"]
+    return next((row["score"] for row in summary["metrics"]["groups"]
+                 if row["category"] == metric), None)
+
+
+def _progress_charts(methods, baselines, task, ruler_lengths, ruler_length):
+    summaries = [summary for records in methods.values() for _, summary in records]
+    steps = sorted({summary["checkpoint_step"] for summary in summaries})
+    if task == "test":
+        panels = (("nll", (("nll", "NLL"),), "NLL", None),
+                  ("em_f1", (("em", "EM"), ("f1", "F1")), "EM / F1", 1))
+    elif task == "ruler":
+        panels = (("ruler", ((ruler_length, "Mean"),), "Mean accuracy (%)", 100),)
+    else:
+        groups = {row["category"]: row["category_name"] for summary in summaries
+                  for row in summary["metrics"]["groups"]}
+        panels = (("locomo", ((None, "总体"), *sorted(groups.items())),
+                   f"{summaries[0]['metrics']['metric']} (%)", 100),)
+    charts_by_name = {}
+    for name, metrics, unit, maximum in panels:
         chart = charts.Line().add_xaxis(steps)
-        for metric in metrics:
-            chart.add_yaxis(metric.upper(), [summary["metrics"][metric] for summary in summaries],
-                            is_symbol_show=True, symbol_size=8, label_opts={"show": False})
+        series = [(label, [result], True) for label, result in baselines.items()]
+        series.extend((label, [summary for _, summary in records], False)
+                      for label, records in methods.items())
+        for label, values, baseline in series:
+            for index, (metric, metric_label) in enumerate(metrics):
+                points = {value["checkpoint_step"]: value for value in values} if not baseline else {}
+                measurements = []
+                for step in steps:
+                    summary = values[0] if baseline else points.get(step)
+                    score = (_quality_value(summary, task, metric, ruler_lengths)
+                             if summary is not None else None)
+                    measurements.append(score * (1 if task == "test" else 100)
+                                        if score is not None else None)
+                color = _method_color(label, index if index else None, len(metrics))
+                legend = f"{label} / {metric_label}" if len(metrics) > 1 else label
+                chart.add_yaxis(
+                    legend, measurements, color=color, is_symbol_show=not baseline,
+                    symbol_size=7, is_connect_nones=True, label_opts={"show": False},
+                    linestyle_opts={"color": color, "type": "dashed" if baseline else "solid"},
+                    itemstyle_opts={"color": color},
+                )
         chart.set_global_opts(
-            tooltip_opts={"trigger": "axis"},
+            tooltip_opts={"trigger": "axis"}, legend_opts={"type": "scroll"},
             xaxis_opts={"name": "累计 step", "type": "value", "minInterval": 1},
-            yaxis_opts={"name": name.upper(), "min": 0,
-                        **({"max": 1} if name == "em_f1" else {})},
+            yaxis_opts={"name": unit, "min": 0, **({"max": maximum} if maximum is not None else {})},
         )
-        panels[f"evaluation/{name}"] = chart
-    return panels
+        charts_by_name[f"evaluation/{name}"] = chart
+    return charts_by_name
 
 
-def _summary_rows(summaries, baselines):
+def _checkpoint_charts(points, baselines, task, ruler_length=None):
+    series = [(label, label, value) for label, value in baselines.items()]
+    series.extend((label, f"{label} / step {value['checkpoint_step']}", value)
+                  for label, value in points.items())
+    if task == "ruler":
+        lengths = sorted({row["length"] for _, _, value in series for row in value["metrics"]["by_length"]})
+        lengths_chart = charts.Line().add_xaxis([f"{length / 1024:g}K" for length in lengths])
+        tasks_chart = charts.Bar().add_xaxis([RULER_TASK_LABELS[task] for task in RULER_TASKS])
+        for label, legend, value in series:
+            color = _method_color(label)
+            scores = {row["length"]: 100 * row["score"] for row in value["metrics"]["by_length"]}
+            lengths_chart.add_yaxis(
+                legend, [scores.get(length) for length in lengths], color=color,
+                is_symbol_show=True, symbol_size=7, label_opts={"show": False},
+                linestyle_opts={"color": color}, itemstyle_opts={"color": color},
+            )
+            scores = {row["task"]: 100 * row["score"] for row in value["metrics"]["groups"]
+                      if row["length"] == ruler_length}
+            tasks_chart.add_yaxis(legend, [scores.get(task) for task in RULER_TASKS],
+                                 label_opts={"show": False}, itemstyle_opts={"color": color})
+        lengths_chart.set_global_opts(
+            tooltip_opts={"trigger": "axis"}, legend_opts={"type": "scroll"},
+            xaxis_opts={"name": "Context length", "axisLabel": {"interval": 0}},
+            yaxis_opts={"name": "Mean accuracy (%)", "min": 0, "max": 100},
+        )
+        tasks_chart.set_global_opts(
+            tooltip_opts={"trigger": "axis"}, legend_opts={"type": "scroll"},
+            xaxis_opts={"axisLabel": {"interval": 0}},
+            yaxis_opts={"name": "Accuracy (%)", "min": 0, "max": 100},
+        )
+        return {"evaluation/ruler_lengths": lengths_chart, "ruler_tasks": tasks_chart}
+    groups = {row["category"]: row["category_name"] for _, _, value in series
+              for row in value["metrics"]["groups"]}
+    groups = sorted(groups.items())
+    chart = charts.Bar().add_xaxis([*[name for _, name in groups], "总体"])
+    for label, legend, value in series:
+        scores = {row["category"]: 100 * row["score"] for row in value["metrics"]["groups"]}
+        chart.add_yaxis(legend, [scores.get(category) for category, _ in groups]
+                        + [100 * value["metrics"]["score"]],
+                        label_opts={"show": False}, itemstyle_opts={"color": _method_color(label)})
+    chart.set_global_opts(tooltip_opts={"trigger": "axis"}, legend_opts={"type": "scroll"},
+                          yaxis_opts={"name": f"{next(iter(points.values()))['metrics']['metric']} (%)",
+                                      "min": 0, "max": 100})
+    return {"evaluation/locomo_groups": chart}
+
+
+def _summary_rows(methods, baselines, ruler_lengths):
+    summaries = [summary for records in methods.values() for _, summary in records]
     rows = []
     if summaries[0]["task"] == "ruler":
-        scopes = sorted({tuple(sorted(value["protocol"]["lengths"])) for value in summaries})
-        for label, result in baselines.items():
+        results = [(label, None, result) for label, result in baselines.items()]
+        results.extend((label, value["checkpoint_step"], value)
+                       for label, records in methods.items() for _, value in records)
+        for label, step, result in results:
             by_length = {row["length"]: row for row in result["metrics"]["by_length"]}
-            for lengths in scopes:
-                score = ruler_overall(result, lengths)
-                missing = [str(value) for value in lengths if value not in by_length]
-                rows.append({
-                    "方法": label, "累计 step": None,
-                    "样本": sum(by_length[value]["samples"] for value in lengths) if not missing else None,
-                    "accuracy (%)": 100 * score if score is not None else None,
-                    "评估长度": ", ".join(map(str, lengths)),
-                    "覆盖状态": "完整" if not missing else f"缺少长度：{', '.join(missing)}",
-                })
-    else:
-        rows.extend({"方法": label, "累计 step": None, "样本": result["samples"],
-                     f"{result['metrics']['metric']} (%)": 100 * result["metrics"]["score"]}
-                    for label, result in baselines.items())
-    for summary in summaries:
-        metrics = summary["metrics"]
-        row = {"方法": Path(summary["training_run"]["directory"]).parent.name,
-               "累计 step": summary["checkpoint_step"], "样本": metrics["samples"]}
-        if summary["task"] == "test":
-            row.update({name.upper(): metrics[name] for name in ("nll", "em", "f1")})
-        else:
-            row[f"{metrics['metric']} (%)"] = 100 * metrics["score"]
-            if summary["task"] == "ruler":
-                row["评估长度"] = ", ".join(str(value) for value in summary["protocol"]["lengths"])
-                row["覆盖状态"] = "完整"
-        rows.append(row)
+            score = ruler_overall(result, ruler_lengths)
+            missing = [str(value) for value in ruler_lengths if value not in by_length]
+            rows.append({
+                "方法": label, "累计 step": step,
+                "样本": sum(by_length[value]["samples"] for value in ruler_lengths) if not missing else None,
+                "accuracy (%)": 100 * score if score is not None else None,
+                "比较长度": ", ".join(map(str, ruler_lengths)),
+                "评估长度": ", ".join(map(str, result["protocol"]["lengths"])),
+                "覆盖状态": "完整" if not missing else f"缺少长度：{', '.join(missing)}",
+            })
+        return rows
+    rows.extend({"方法": label, "累计 step": None, "样本": result["samples"],
+                 f"{result['metrics']['metric']} (%)": 100 * result["metrics"]["score"]}
+                for label, result in baselines.items())
+    for label, records in methods.items():
+        for _, summary in records:
+            metrics = summary["metrics"]
+            row = {"方法": label, "累计 step": summary["checkpoint_step"], "样本": metrics["samples"]}
+            if summary["task"] == "test":
+                row.update({name.upper(): metrics[name] for name in ("nll", "em", "f1")})
+            else:
+                row[f"{metrics['metric']} (%)"] = 100 * metrics["score"]
+            rows.append(row)
     return rows
 
 
-def _resource_rows(summaries, baselines):
+def _resource_rows(methods, baselines):
     results = [(label, None, result) for label, result in baselines.items()]
-    results.extend((Path(value["training_run"]["directory"]).parent.name,
-                    value["checkpoint_step"], value) for value in summaries)
+    results.extend((label, value["checkpoint_step"], value)
+                   for label, records in methods.items() for _, value in records)
     rows = []
     for label, step, result in results:
         resources, model = result["resources"], result["model"]
@@ -227,9 +335,12 @@ def _ruler_prompt(data_dir, record):
     raise ValueError(f"{path} 中不存在第 {position + 1} 行")
 
 
-def _details(records, key):
+def _details(methods, key):
     if not st.toggle("查看逐样本记录", key=f"{key}:details"):
         return
+    label = st.selectbox("记录运行", list(methods), key=f"{key}:details-run")
+    records = methods[label]
+    key = f"{key}:{label}"
     checkpoints = {summary["checkpoint_step"]: (path, summary) for path, summary in records}
     step = st.selectbox("记录 checkpoint", list(checkpoints), index=len(checkpoints) - 1,
                         format_func=lambda value: f"global_step_{value}", key=f"{key}:details-step")
@@ -299,102 +410,131 @@ def _details(records, key):
                 st.json(row, expanded=1)
 
 
-def _render_task(directory, task, baseline_results):
-    records = load_completed_evaluations(directory / task)
-    if not records:
+def _render_task(directories, task, baseline_results):
+    methods = {}
+    for label, directory in directories.items():
+        records = load_completed_evaluations(directory / task)
+        if records:
+            methods[label] = records
+        else:
+            st.info(f"{label} 暂无已完成的 {TASK_LABELS[task]} 评估。")
+    if not methods:
         st.info(f"暂无已完成的 {TASK_LABELS[task]} 评估。")
         return
-    key = f"{directory}:{task}"
-    if st.toggle("全部 checkpoint", value=True, key=f"{key}:all-checkpoints"):
-        selected = records
-    else:
-        steps = [summary["checkpoint_step"] for _, summary in records]
-        chosen = st.multiselect("Checkpoint", steps, default=steps,
-                                format_func=lambda value: f"global_step_{value}", key=f"{key}:steps")
-        selected = [(path, summary) for path, summary in records if summary["checkpoint_step"] in chosen]
-    if not selected:
+    key = f"{list(directories.values())}:{task}"
+    if not st.toggle("全部 checkpoint", value=True, key=f"{key}:all-checkpoints"):
+        choices = [(label, value["checkpoint_step"]) for label, records in methods.items() for _, value in records]
+        chosen = st.multiselect("Checkpoint", choices, default=choices,
+                                format_func=lambda value: f"{value[0]} / global_step_{value[1]}",
+                                key=f"{key}:steps")
+        methods = {label: [(path, value) for path, value in records
+                           if (label, value["checkpoint_step"]) in chosen]
+                   for label, records in methods.items()}
+        methods = {label: records for label, records in methods.items() if records}
+    if not methods:
         st.info("请选择至少一个 checkpoint。")
         return
-    summaries = [summary for _, summary in selected]
-    views = [_benchmark_view(summary) for summary in summaries] if task != "test" else []
-    baselines = _baseline_selection(baseline_results, task, views, key) if views else {}
-    st.subheader("质量指标")
-    st.dataframe(_summary_rows(summaries, baselines), hide_index=True)
-    if task == "ruler" and baselines:
-        st.caption("基线 Overall 按对应 checkpoint 的长度范围重算；缺少任一长度时不显示总体分数。")
-    ruler_length = None
-    if task == "ruler" and len(summaries) > 1:
-        lengths = sorted({row["length"] for summary in summaries for row in summary["metrics"]["by_length"]})
+    summaries = [summary for records in methods.values() for _, summary in records]
+    views = [_benchmark_view(summary) for summary in summaries] if task != "test" else summaries
+    validate_quality_comparison(views, task)
+    for label, _ in baseline_results:
+        if label in methods:
+            st.warning(f"Baseline {label} 无法比较：标签与运行名称相同。")
+    baseline_results = [(label, path) for label, path in baseline_results if label not in methods]
+    baselines = _baseline_selection(baseline_results, task, views, key) if task != "test" else {}
+    ruler_lengths, ruler_length = (), None
+    if task == "ruler":
+        scopes = [set(value["protocol"]["lengths"]) for value in summaries]
+        lengths = sorted(set.union(*scopes))
+        common = sorted(set.intersection(*scopes))
+        ruler_lengths = st.multiselect("Overall 比较长度", lengths, default=common or lengths,
+                                       format_func=lambda value: f"{value:,} tokens",
+                                       key=f"{key}:overall-lengths")
+        if not ruler_lengths:
+            st.info("请选择至少一个 Overall 比较长度。")
+            return
+        st.caption("Overall 按统一的比较长度重算；未覆盖全部所选长度的 checkpoint 或基线不显示总体分数。")
         ruler_length = st.selectbox("训练进度长度", [None, *lengths],
                                     format_func=lambda value: "Overall" if value is None else f"{value:,} tokens",
                                     key=f"{key}:progress-length")
-    panels = (_test_charts(summaries) if task == "test"
-              else evaluation_charts(views, baselines, ruler_length=ruler_length))
+    st.subheader("质量指标")
+    st.dataframe(_summary_rows(methods, baselines, ruler_lengths), hide_index=True)
+    panels = _progress_charts(methods, baselines, task, ruler_lengths, ruler_length)
     for name, chart in panels.items():
         st.subheader(CHART_LABELS[name])
         st.echarts_chart(chart, height=460, theme=None, key=f"{key}:{name}")
-    selected_step = st.selectbox(
-        "明细 checkpoint", [summary["checkpoint_step"] for summary in summaries], index=len(summaries) - 1,
-        format_func=lambda value: f"global_step_{value}", key=f"{key}:summary-step",
-    )
-    summary = next(value for value in summaries if value["checkpoint_step"] == selected_step)
-    if task == "ruler":
-        view = _benchmark_view(summary)
-        if len(summaries) > 1:
-            st.subheader("RULER 长度总览")
-            st.echarts_chart(evaluation_charts([view], baselines)["evaluation/ruler_lengths"],
-                             height=460, theme=None, key=f"{key}:{selected_step}:lengths")
-        length = st.selectbox("任务明细长度", summary["protocol"]["lengths"],
-                              format_func=lambda value: f"{value:,} tokens",
-                              key=f"{key}:{selected_step}:task-length")
-        st.subheader(f"RULER 任务明细 · {length:,} tokens")
-        st.echarts_chart(ruler_task_chart(view, length, baselines), height=460, theme=None,
-                         key=f"{key}:{selected_step}:tasks:{length}")
+    st.subheader("明细 checkpoint")
+    points = {}
+    for label, records in methods.items():
+        steps = [value["checkpoint_step"] for _, value in records]
+        step = st.selectbox(label, steps, index=len(steps) - 1,
+                            format_func=lambda value: f"global_step_{value}", key=f"{key}:{label}:summary-step")
+        points[label] = next(value for _, value in records if value["checkpoint_step"] == step)
+    if task != "test":
+        length = None
+        if task == "ruler":
+            lengths = sorted({value for summary in points.values() for value in summary["protocol"]["lengths"]})
+            length = st.selectbox("任务明细长度", lengths,
+                                  format_func=lambda value: f"{value:,} tokens", key=f"{key}:task-length")
+        for name, chart in _checkpoint_charts(points, baselines, task, length).items():
+            st.subheader(f"RULER 任务明细 · {length:,} tokens" if name == "ruler_tasks" else CHART_LABELS[name])
+            st.echarts_chart(chart, height=460, theme=None, key=f"{key}:{name}")
     st.subheader("资源测量与执行设置")
-    st.dataframe(_resource_rows(summaries, baselines), hide_index=True)
+    st.dataframe(_resource_rows(methods, baselines), hide_index=True)
     st.caption(
         "资源保留各运行的原始测量范围，未按质量共同范围裁剪。生成路径含 prefill、方法自身的压缩／写入和 decode；"
         "累计耗时与多卡墙钟不同。本次调度墙钟包含模型加载，缓存重试只统计本次执行，"
         "不能作为完整运行速度。硬件与批量记录不完整时，仅展示测量值，不计算加速比。"
     )
     st.subheader("输出诊断")
-    st.dataframe([{"累计 step": value["checkpoint_step"],
+    st.dataframe([{"方法": label, "累计 step": value["checkpoint_step"],
                    **{OUTPUT_LABELS[name]: count for name, count in value["outputs"].items()}}
-                  for value in summaries], hide_index=True)
+                  for label, records in methods.items() for _, value in records], hide_index=True)
     st.caption("字符标记仅用于展示，不改变保存的原文或评分；连续空白按至少 12 个字符统计。")
     with st.expander("评估配置与统计"):
-        st.json(summary, expanded=1)
-    _details(selected, key)
+        st.json(points, expanded=1)
+    _details(methods, key)
 
 
 def main():
     args = parse_args()
     st.set_page_config(page_title="v4.1 评估", layout="wide")
     st.title("v4.1 评估结果")
-    st.sidebar.caption(str(args.dashboard_run_dir))
     st.sidebar.button("刷新结果")
-    evaluations = discover_evaluations(args.dashboard_run_dir)
-    if args.dashboard_eval_id is not None and args.dashboard_eval_id not in evaluations:
-        st.error(f"指定评估没有已完成结果：{args.dashboard_run_dir}/eval/{args.dashboard_eval_id}")
+    names = [path.name for path in args.dashboard_run_dir]
+    runs = {path.name if names.count(path.name) == 1 else str(path): (path, eval_id)
+            for path, eval_id in zip(args.dashboard_run_dir, args.dashboard_eval_id)}
+    labels = st.sidebar.multiselect("运行", list(runs), default=list(runs))
+    directories = {}
+    for label in labels:
+        run_dir, initial_eval_id = runs[label]
+        st.sidebar.caption(str(run_dir))
+        evaluations = discover_evaluations(run_dir)
+        if initial_eval_id is not None and initial_eval_id not in evaluations:
+            st.error(f"指定评估没有已完成结果：{run_dir}/eval/{initial_eval_id}")
+            continue
+        if not evaluations:
+            st.info(f"未找到已完成评估：{run_dir}/eval/<eval-id>/<task>/global_step_*/summary.json")
+            continue
+        eval_ids = list(evaluations)
+        eval_id = st.sidebar.selectbox(
+            f"Eval ID · {label}", eval_ids,
+            index=eval_ids.index(initial_eval_id) if initial_eval_id is not None else 0,
+            key=f"{run_dir}:{initial_eval_id}:eval-id",
+        )
+        directories[label] = evaluations[eval_id]
+    if not directories:
+        st.info("请选择至少一个有完整评估结果的运行。")
         return
-    if not evaluations:
-        st.info(f"未找到已完成评估：{args.dashboard_run_dir}/eval/<eval-id>/<task>/global_step_*/summary.json")
-        return
-    eval_ids = list(evaluations)
-    eval_id = st.sidebar.selectbox(
-        "Eval ID", eval_ids,
-        index=eval_ids.index(args.dashboard_eval_id) if args.dashboard_eval_id is not None else 0,
-        key=f"{args.dashboard_run_dir}:{args.dashboard_eval_id}:eval-id",
-    )
-    directory = evaluations[eval_id]
-    st.caption(f"{args.dashboard_run_dir.name} / {eval_id} · {directory}")
-    tabs = st.tabs([TASK_LABELS[task] for task in TASKS], key=f"{directory}:task", on_change="rerun")
+    for label, directory in directories.items():
+        st.caption(f"{label} / {directory.name} · {directory}")
+    tabs = st.tabs([TASK_LABELS[task] for task in TASKS], key=f"{list(directories.values())}:task", on_change="rerun")
     for task, tab in zip(TASKS, tabs):
         if not tab.open:
             continue
         with tab:
             try:
-                _render_task(directory, task, args.dashboard_baselines)
+                _render_task(directories, task, args.dashboard_baselines)
             except (OSError, ValueError, KeyError, TypeError) as error:
                 st.error(f"{TASK_LABELS[task]} 结果无法展示：{error}")
                 st.exception(error)

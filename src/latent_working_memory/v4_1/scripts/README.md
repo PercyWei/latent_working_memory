@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261104 17:59:00 Asia/Shanghai
+最后修订时间：20261105 09:43:17 Asia/Shanghai
 
 计算协议与数据格式见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[配置](../../../../configs/v4-1/default.json)中的基座与数据路径。
 
@@ -166,27 +166,29 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v4_1/scripts/run.sh \
   - **结果提交**：各分片逐题保存进度，样本齐全并通过校验后才提交最终 details 与 summary。RULER 另在 `lengths/<长度>/` 保存计划中各长度的完成结果，续跑复用已有记录。
   - **运行关联**：Summary 的 `checkpoint` 指向绝对 `state.pt` 路径，`training_run.directory` 记录实际 `train/` 路径；执行进度直接打印到终端。
 
-- **启动看板**：通过 Streamlit + ECharts 查看本地结果，`--dashboard-run-dir` 指向运行根目录；启动后访问 `http://127.0.0.1:8501`。
+- **启动看板**：通过 Streamlit + ECharts 查看本地结果，`--dashboard-run-dir` 可传入一个或多个运行根目录；启动后访问 `http://127.0.0.1:8501`。
 
 ```bash
 bash src/latent_working_memory/v4_1/scripts/dashboard.sh \
-  --dashboard-run-dir artifacts/v4-1/m256-d512_p1024-r256_inner-s3-am_outer-am_20261029 \
-  --dashboard-eval-id standard_20261030 \
+  --dashboard-run-dir \
+    artifacts/v4-1/m256-d512_p1024-r256_inner-s3-am_outer-am_20261029 \
+    artifacts/v4-1/m256-d512_p1024-r256_inner-s3-oomc_outer-am_20261104-1632 \
+  --dashboard-eval-id standard_20261030 standard_20261104 \
   --dashboard-baselines \
     full-context artifacts/baselines/full-context/qwen3-4b-inst-2507_20261019/eval
 ```
 
 - **结果浏览**：
 
-  - **评估选择**：`--dashboard-eval-id` 指定启动时选中的评估，省略时默认列表首项；页面仍可切换其他 eval-id。指定评估不存在或没有已完成结果时提示错误。
+  - **评估选择**：`--dashboard-eval-id` 传一个值时所有运行共用，传多个值时按运行目录顺序逐一对应；省略时各运行默认选中列表首项。侧栏可筛选运行，并为各运行独立切换 eval-id。指定评估不存在或没有已完成结果时提示错误。
   - **任务切换**：选择 checkpoint 和任务页签，仅读取当前任务；点击“刷新结果”重新加载本地结果。
-  - **指标展示**：单 checkpoint 展示指标汇总，多 checkpoint 按实际 optimizer step 升序绘图；可查看指标表与逐样本记录，基线排在当前方法之前。
+  - **指标展示**：各运行按实际 optimizer step 分别绘图，相同步数的不同运行保留独立结果；各运行可独立选择明细 checkpoint，并按运行查看逐样本记录。运行名称取目录名，同名时显示完整路径；基线排在各运行之前。
 
 - **RULER 展示**：
 
   - **长度与任务**：用折线图比较各长度的 Mean，选择长度后用分组柱图展示 13 项任务；只显示已完成的长度，同一方法保持同色。
-  - **Checkpoint 趋势**：多 checkpoint 可选择 Overall 或具体长度查看 step 曲线，再查看单个 checkpoint 的长度总览与任务明细。基线 Overall 按对应 checkpoint 的长度范围重算，缺任一长度时不显示该点，不补零。
-  - **逐题响应**：开启“查看逐样本记录”，选择 checkpoint 后按长度和子任务筛选，再分页查看参考答案、模型响应与评分。
+  - **Checkpoint 趋势**：可选择 Overall 或具体长度查看 step 曲线，再为各运行选择明细 checkpoint，比较长度总览与任务分数。Overall 默认使用所有所选 checkpoint 的共同长度，无共同长度时默认选全部长度；可在页面调整。各运行与基线均按这一范围重算，缺任一长度时不显示该点，不补零。
+  - **逐题响应**：开启“查看逐样本记录”，选择运行与 checkpoint 后按长度和子任务筛选，再分页查看参考答案、模型响应与评分。
   - **完整题面**：展开“完整输入题面”，从原始 `test.jsonl` 读取全文；已有评估结果可直接使用，无需重新评估。
 
 - **基线接入**：
@@ -196,7 +198,7 @@ bash src/latent_working_memory/v4_1/scripts/dashboard.sh \
 
 - **比较规则**：
 
-  - **质量比较**：核对基座模型标识、实际输入与参考答案、输入／解码／生成预算及评分口径。基座按模型路径末级名称识别，父目录可以不同；算法、窗口、精度、attention 实现、设备和批量不作为质量比较限制。
+  - **质量比较**：eval-id 仅定位结果，不要求不同运行使用相同 eval-id。跨运行与基线比较均核对基座模型标识、实际输入与参考答案、输入／解码／生成预算及评分口径。基座按模型路径末级名称识别，父目录可以不同；算法、窗口、精度、attention 实现、设备和批量不作为质量比较限制。
   - **数据核对**：使用顺序无关的比较指纹，RULER 按长度分别核对。旧结果可沿用原数据指纹；缺少分组指纹且覆盖范围不同时，提示无法核实对应范围。
   - **资源与成本**：资源统计与质量指标分区展示。批量计算时间按参与样本分摊后累计，不等同于每条请求的独立等待时延；峰值显存按 worker／批次范围观测。比较成本须统一硬件、实际评估批量及测量范围，不自动计算加速比；重试墙钟时间仅覆盖本次执行。
   - **缓存校验**：跨方法展示允许实现与运行环境不同；结果复用、失败重试和训练恢复仍严格核对原有身份与设置。
@@ -268,8 +270,8 @@ bash src/latent_working_memory/v4_1/scripts/dashboard.sh \
 | `--group` | SwanLab 实验分组，默认 `run_id` |
 | `--tag` | SwanLab 命名空间标签 |
 | **看板** |
-| `--dashboard-run-dir` | 必填，指向运行根目录；仅需保留 `eval/` 目录结构 |
-| `--dashboard-eval-id` | 可选，启动时选中的 eval-id；省略时默认列表首项，页面可切换 |
+| `--dashboard-run-dir` | 必填，一个或多个运行根目录；仅需保留各自的 `eval/` 目录结构 |
+| `--dashboard-eval-id` | 可选，一个值供所有运行共用，或按运行顺序传入等量的值；省略时各运行默认列表首项，页面可独立切换 |
 | `--dashboard-baselines` | 可选，按“标签 结果目录”成对传入；支持 benchmark 的 `eval/` 或直接含 `summary.json` 的目录 |
 
 - **验证与保存**：除了 `--save-every` 和 `--dev-every` 所指定的 step，epoch 末和最终步也保存 checkpoint 及进行 dev 验证。

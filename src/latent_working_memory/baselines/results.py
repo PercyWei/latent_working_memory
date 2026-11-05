@@ -38,6 +38,42 @@ def _data_matches(actual, expected, length=None):
     return identities[0] == identities[1]
 
 
+def validate_quality_comparison(summaries, benchmark):
+    """核对跨方法的实际评估条件；RULER 只约束重复出现的长度。"""
+    if benchmark not in {"test", "ruler", "locomo"}:
+        raise ValueError("quality comparison applies only to test, RULER or LoCoMo")
+    expected, reference, lengths = None, None, {}
+    for summary in summaries:
+        if benchmark == "test":
+            if summary["task"] != "test":
+                raise ValueError("expected test results")
+            actual = {
+                "benchmark": "test",
+                "base_model": Path(summary["model"]["model_name_or_path"]).name,
+                "data": {name: summary["data"][name] for name in ("episodes", "tokenized_content")},
+                "protocol": {name: summary["protocol"][name] for name in (
+                    "input", "generation", "generation_budget", "max_samples", "selection", "nll", "scoring",
+                )},
+            }
+        else:
+            if summary["benchmark"] != benchmark:
+                raise ValueError(f"expected {benchmark} results")
+            actual = _quality_conditions(summary)
+        if expected is not None and actual != expected:
+            changed = sorted(name for name in actual.keys() | expected.keys()
+                             if actual.get(name) != expected.get(name))
+            raise ValueError(f"quality comparison differs: {', '.join(changed)}")
+        expected = actual
+        if benchmark == "ruler":
+            for length in summary["protocol"]["lengths"]:
+                if length in lengths and not _data_matches(summary, lengths[length], length):
+                    raise ValueError(f"cannot verify identical RULER samples at length {length}")
+                lengths[length] = summary
+        elif benchmark == "locomo" and reference is not None and not _data_matches(summary, reference):
+            raise ValueError("cannot verify identical LoCoMo samples")
+        reference = summary
+
+
 def _ruler_scope(summary, lengths):
     by_length = [row for row in summary["metrics"]["by_length"] if row["length"] in lengths]
     groups = [row for row in summary["metrics"]["groups"] if row["length"] in lengths]
@@ -93,26 +129,16 @@ def load_baseline_results(results, benchmark, summaries):
             )
             continue
         summary = _benchmark_view(json.loads(path.read_text(encoding="utf-8")), benchmark)
-        expected = _quality_conditions(summary)
         for value in summaries:
-            actual = _quality_conditions(value)
-            if actual != expected:
-                changed = sorted(
-                    name for name in actual.keys() | expected.keys()
-                    if actual.get(name) != expected.get(name)
-                )
-                raise ValueError(f"quality comparison differs at {path}: {', '.join(changed)}")
+            try:
+                validate_quality_comparison([summary, value], benchmark)
+            except ValueError as error:
+                raise ValueError(f"{error}: {path}") from error
         if benchmark == "ruler":
             lengths = set(summary["protocol"]["lengths"])
             common = lengths & {length for value in summaries for length in value["protocol"]["lengths"]}
             if not common:
                 raise ValueError(f"no common RULER lengths at {path}")
-            for value in summaries:
-                for length in common & set(value["protocol"]["lengths"]):
-                    if not _data_matches(summary, value, length):
-                        raise ValueError(f"cannot verify identical RULER samples at length {length}: {path}")
             summary = _ruler_scope(summary, common)
-        elif any(not _data_matches(summary, value) for value in summaries):
-            raise ValueError(f"cannot verify identical LoCoMo samples: {path}")
         baselines[label] = summary
     return baselines
