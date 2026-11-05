@@ -189,8 +189,9 @@ class OnlineMemoryLM(nn.Module):
             for index, memory in enumerate(self.memory_layers):
                 old_key, old_value, old_bias = state.memory_kv[index]
                 pending_key_source = state.keys[index][:, :, :count]
+                pending_key = pending_key_source.float()
                 pending_value_source = state.values[index][:, :, :count]
-                pending_key, pending_value = pending_key_source.float(), pending_value_source.float()
+                pending_value = pending_value_source.float()
                 teacher = (
                     torch.cat((old_key.float(), pending_key), dim=2),
                     torch.cat((old_value.float(), pending_value), dim=2),
