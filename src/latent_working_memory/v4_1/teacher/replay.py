@@ -1,7 +1,6 @@
 """独立冻结 teacher 的原文 prefill 与提示分支回放；不持有 student 状态。"""
 
 from collections import defaultdict
-from copy import deepcopy
 
 from peft.tuners.tuners_utils import BaseTunerLayer
 import torch
@@ -13,30 +12,23 @@ from .attention import SharedPrefixAttention
 
 
 def load_teacher(model_config, device, backbone=None):
-    if backbone is not None:
-        # Teacher 保留独立的原生模块；仅冻结参数与 student 共用存储。
-        with torch.device("meta"):
-            teacher = AutoModelForCausalLM.from_config(
-                deepcopy(backbone.config), dtype=getattr(torch, model_config.backbone_dtype),
-                attn_implementation="sdpa",
-            )
-        for name, module in teacher.named_modules():
-            source = backbone.get_submodule(name)
-            if isinstance(source, BaseTunerLayer):
-                source = source.get_base_layer()
-            for parameter_name, _ in module.named_parameters(recurse=False):
-                parameter = source.get_parameter(parameter_name)
-                if parameter.requires_grad:
-                    raise ValueError(f"teacher base parameter must be frozen: {name}.{parameter_name}")
-                module.register_parameter(parameter_name, parameter)
-        # 固定 RoPE 的非持久 buffer 和 original_inv_freq 也须离开 meta device。
-        teacher.model.rotary_emb = deepcopy(backbone.model.rotary_emb)
-        return teacher.eval()
-    return AutoModelForCausalLM.from_pretrained(
+    teacher = AutoModelForCausalLM.from_pretrained(
         model_config.model_name_or_path,
         dtype=getattr(torch, model_config.backbone_dtype),
         attn_implementation="sdpa",
     ).to(device).eval().requires_grad_(False)
+    if backbone is not None:
+        # 保留独立加载的模块和缓冲，仅冻结参数与 student 共用存储。
+        for name, module in teacher.named_modules():
+            source = backbone.get_submodule(name)
+            if isinstance(source, BaseTunerLayer):
+                source = source.get_base_layer()
+            for parameter_name, teacher_parameter in module.named_parameters(recurse=False):
+                parameter = source.get_parameter(parameter_name)
+                if parameter.requires_grad:
+                    raise ValueError(f"teacher base parameter must be frozen: {name}.{parameter_name}")
+                teacher_parameter.data = parameter.detach()
+    return teacher
 
 
 class TeacherReplay:

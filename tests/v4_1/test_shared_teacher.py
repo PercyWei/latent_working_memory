@@ -22,7 +22,11 @@ def test_shared_teacher_preserves_native_modules_and_predictions(tiny_setup, dty
     assert teacher.config._attn_implementation == "sdpa"
     assert student.backbone.config._attn_implementation == "eager"
     assert teacher.model.rotary_emb is not student.backbone.model.rotary_emb
+    assert teacher.model.rotary_emb.config._attn_implementation == "sdpa"
     assert teacher.model.rotary_emb.original_inv_freq.device.type == "cpu"
+    assert teacher.generation_config.to_dict() == independent.generation_config.to_dict()
+    assert ((teacher.model.embed_tokens.weight is teacher.lm_head.weight)
+            == (independent.model.embed_tokens.weight is independent.lm_head.weight))
     assert not any("lora_" in name for name, _ in teacher.named_parameters())
     assert all(not parameter.requires_grad and parameter.grad is None
                for parameter in teacher.parameters())
@@ -37,12 +41,28 @@ def test_shared_teacher_preserves_native_modules_and_predictions(tiny_setup, dty
             native = getattr(teacher_layer.self_attn, name)
             adapted = getattr(student_layer.self_attn, name)
             assert not hasattr(native, "lora_A")
-            assert native.weight is adapted.base_layer.weight
+            assert native.weight is not adapted.base_layer.weight
+            assert native.weight.data_ptr() == adapted.base_layer.weight.data_ptr()
     with torch.no_grad():
         ids = torch.tensor([tiny_setup.episode.context_ids])
         expected = independent(ids, use_cache=False).logits
         actual = teacher(ids, use_cache=False).logits
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_shared_teacher_preserves_tied_parameter_identity(tiny_setup, tmp_path):
+    native = tiny_setup.teacher
+    native.config.tie_word_embeddings = True
+    native.tie_weights()
+    model_dir = tmp_path / "tied-model"
+    native.save_pretrained(model_dir)
+    config = replace(tiny_setup.config.model, model_name_or_path=str(model_dir))
+    student = OnlineMemoryLM(config)
+    teacher = load_teacher(config, torch.device("cpu"), student.backbone)
+    assert teacher.model.embed_tokens.weight is teacher.lm_head.weight
+    assert student.backbone.model.embed_tokens.weight is student.backbone.lm_head.weight
+    assert teacher.model.embed_tokens.weight is not student.backbone.model.embed_tokens.weight
+    assert teacher.model.embed_tokens.weight.data_ptr() == student.backbone.model.embed_tokens.weight.data_ptr()
 
 
 def test_shared_teacher_preserves_distill_meta_gradient_optimizer_update(tiny_setup):
