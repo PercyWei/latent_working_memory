@@ -1,6 +1,7 @@
 """从各自 Git worktree 运行基线和优化，再离线比较完整训练步骤。"""
 
 import argparse
+from contextlib import nullcontext
 from dataclasses import asdict, replace
 from datetime import datetime
 import gc
@@ -11,6 +12,7 @@ from pathlib import Path
 import statistics
 import subprocess
 import time
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import torch
@@ -189,6 +191,7 @@ def run(args):
         "repository": _repository(), "config": asdict(config), "world_size": world_size,
         "global_batch_size": global_batch, "warmup_steps_per_case": 1, "repeats": args.repeats,
         "teacher_backbone_sharing": True,
+        "input_packing_disabled": args.disable_input_packing,
         "gradient_capture": "FP32 parameter.grad after global mean and clip, before next zero_grad",
         "parameter_capture": "FP32 trainable parameters after AdamW update",
         "repeat_protocol": "reset trainable parameters and Adam per case; fixed teacher RNG per call; "
@@ -431,6 +434,8 @@ def main():
                             help="运行指定 case，默认全部")
     run_parser.add_argument("--repeats", type=int, default=3,
                             help="正式重复次数；默认 3，数值定位可显式设为 1")
+    run_parser.add_argument("--disable-input-packing", action="store_true",
+                            help="数值定位时只关闭写入 checkpoint 输入压缩")
     compare_parser = commands.add_parser("compare", help="离线比较所有梯度、更新参数、指标与诊断")
     compare_parser.add_argument("--baseline", required=True)
     compare_parser.add_argument("--optimized", required=True)
@@ -440,7 +445,12 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == "run":
-            run(args)
+            context = patch(
+                "latent_working_memory.v4_1.modeling.model._save_write_sources",
+                lambda *args: nullcontext(),
+            ) if args.disable_input_packing else nullcontext()
+            with context:
+                run(args)
             return 0
         return compare(args)
     finally:
