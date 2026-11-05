@@ -16,7 +16,7 @@ from latent_working_memory.benchmarks.data import RULER_TASKS
 from latent_working_memory.benchmarks.protocol import protocol
 from latent_working_memory.v4.reporting import RULER_TASK_LABELS, ruler_overall
 from latent_working_memory.v4_1.evaluation.diagnostics import output_flags, visible_text
-from latent_working_memory.v4_1.evaluation.records import completed_evaluation
+from latent_working_memory.v4_1.evaluation.records import completed_evaluation, read_evaluation_record
 
 
 TASKS = ("test", "ruler", "locomo")
@@ -81,7 +81,7 @@ def load_completed_evaluations(directory):
     directory = Path(directory)
     records, expected, lengths = [], None, {}
     for path in directory.glob("global_step_*/summary.json"):
-        request = json.loads((path.parent / "eval.json").read_text(encoding="utf-8"))
+        request = read_evaluation_record(path.parent / "eval.json")
         summary = completed_evaluation(path.parent, request)
         if summary is None:
             continue
