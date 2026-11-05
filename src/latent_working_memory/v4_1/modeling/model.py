@@ -1,6 +1,7 @@
 """Qwen3 上的在线 TTT：正文触发写入，QA 阶段固定 memory。"""
 
 from dataclasses import dataclass, field
+from contextlib import contextmanager, nullcontext
 from functools import partial
 
 from peft import LoraConfig, inject_adapter_in_model
@@ -14,6 +15,28 @@ from .am import calibrate_memory_bias, local_read, matching_loss
 from .attention import decoder_forward
 from .generation import generate_batch as generate_sequences
 from .memory import LayerMemory
+
+
+@contextmanager
+def _save_cast_sources(cast_sources):
+    """共享 FP32 cast 节点的梯度，仅以原 BF16 来源保存 checkpoint 输入。"""
+    sources = {id(value): source.detach() for value, source in cast_sources
+               if source.dtype == torch.bfloat16}
+    del cast_sources
+    if not sources:
+        yield
+        return
+
+    def pack(value):
+        source = sources.get(id(value))
+        return (source, True) if source is not None else (value.detach(), False)
+
+    def unpack(saved):
+        value, restore_fp32 = saved
+        return value.float() if restore_fp32 else value
+
+    with torch.autograd.graph.saved_tensors_hooks(pack, unpack):
+        yield
 
 
 @dataclass
@@ -156,20 +179,34 @@ class OnlineMemoryLM(nn.Module):
         before, after = [], []
         with torch.set_grad_enabled(differentiable):
             for index, memory in enumerate(self.memory_layers):
-                old_key, old_value, old_bias = state.memory_kv[index]
-                pending_key = state.keys[index][:, :, :count].float()
-                pending_value = state.values[index][:, :, :count].float()
-                teacher = (
-                    torch.cat((old_key.float(), pending_key), dim=2),
-                    torch.cat((old_value.float(), pending_value), dim=2),
-                    torch.cat((old_bias.float(), old_bias.new_zeros((*old_bias.shape[:-1], count))), -1),
-                )
-                query = state.recent_queries[index].transpose(1, 2).float()
+                teacher_memory_kv = state.memory_kv[index]
+                old_key, _, old_bias = teacher_memory_kv
+                pending_key_source = state.keys[index][:, :, :count]
+                pending_value_source = state.values[index][:, :, :count]
+                query_source = state.recent_queries[index].transpose(1, 2)
+                pending_key, pending_value = pending_key_source.float(), pending_value_source.float()
+                query = query_source.float()
                 layer_diagnostics = [] if inner_diagnostics is not None else None
-                updated, metrics = memory.write(
-                    state.memories[index], teacher, query, compressed_tokens=compressed,
-                    rotary=rotary, differentiable=differentiable, diagnostics=layer_diagnostics,
-                )
+                cast_sources = ((query, query_source), (pending_key, pending_key_source),
+                                (pending_value, pending_value_source))
+                saved_sources = (_save_cast_sources(cast_sources)
+                                 if differentiable and self.config.gradient_checkpointing
+                                 else nullcontext())
+                with saved_sources:
+                    updated, metrics = memory.write(
+                        state.memories[index], teacher_memory_kv, (pending_key, pending_value), query,
+                        compressed_tokens=compressed,
+                        rotary=rotary, differentiable=differentiable, diagnostics=layer_diagnostics,
+                    )
+                    key, value, bias = memory.decode(updated, compressed, rotary)
+                    if self.config.inner_objective == "output_only_mass_calibrated":
+                        calibration_args = (query, key, bias, old_key, old_bias, pending_key,
+                                            self.config.am_std_floor)
+                        if differentiable and self.config.gradient_checkpointing:
+                            bias = checkpoint(calibrate_memory_bias, *calibration_args,
+                                              use_reentrant=False)
+                        else:
+                            bias = calibrate_memory_bias(*calibration_args)
                 if inner_diagnostics is not None:
                     for records, record in zip(inner_diagnostics, layer_diagnostics):
                         records.append({
@@ -178,15 +215,6 @@ class OnlineMemoryLM(nn.Module):
                             "layer_index": index, **record,
                         })
                 state.memories[index] = updated
-                key, value, bias = memory.decode(updated, compressed, rotary)
-                if self.config.inner_objective == "output_only_mass_calibrated":
-                    calibration_args = (query, key, bias, teacher[0], teacher[2],
-                                        self.config.am_std_floor)
-                    if differentiable and self.config.gradient_checkpointing:
-                        bias = checkpoint(calibrate_memory_bias, *calibration_args,
-                                          use_reentrant=False)
-                    else:
-                        bias = calibrate_memory_bias(*calibration_args)
                 state.memory_kv[index] = (key, value, bias)
                 # clone 释放被删除 pending 的存储；recent KV 保留原值及全局位置。
                 state.keys[index] = state.keys[index][:, :, count:].clone()
@@ -217,7 +245,6 @@ class OnlineMemoryLM(nn.Module):
 
     def _distill_loss(self, hidden, teacher_log_probs):
         logits = self.backbone.lm_head(hidden).float().squeeze(0)
-        teacher_log_probs = teacher_log_probs.to(device=logits.device)
         return F.kl_div(logits.log_softmax(-1), teacher_log_probs, reduction="sum", log_target=True)
 
     def _distill_branch(self, input_ids, first_logit_index, teacher_log_probs,

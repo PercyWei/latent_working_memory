@@ -100,7 +100,9 @@ AM 内部先对查询／通道、再对 heads 与层取平均。设置 `training
 
 基座默认 BF16；memory、解码器、训练／推理中的局部 AM、可训练参数、梯度累积及 AdamW 状态使用 FP32。Student attention 的 scores 与 softmax 使用 FP32，权重与挂载的 memory KV 转为主干精度后聚合。完整跨轮训练图的开销随轨迹增长，固定在线缓存不意味着训练显存固定。
 
-Train/dev 每卡保存完整的 teacher 与 student。每个样本先计算所有边界的固定 teacher 参照，释放原文 prefix KV 和分支 KV，再执行 student 前向与完整元梯度反向。Teacher 原文 prefill 使用 SDPA，提示／响应回放使用 FlashInfer 共享前缀；不建立梯度图，选中位置的局部 AM 参照仍以 FP32 计算。
+写入时的 query 与 pending KV 保留共享的 FP32 转换节点，以维持各梯度分支在 FP32 汇合后的舍入顺序。Checkpoint 仅对这些由 BF16 精确转换的输入保存原始 BF16 数据，重算时恢复 FP32；旧 memory 的 FP32 数据保持原精度。Teacher KV 在局部读取与 bias 校准的重算边界内拼接。
+
+Train/dev 每卡的 teacher 与 student 保持独立模块，共享同一份冻结基座参数；LoRA 与 memory 仅属于 student。每个样本先计算所有边界的固定 teacher 参照，释放原文 prefix KV 和分支 KV，再执行 student 前向与完整元梯度反向。Teacher 原文 prefill 使用 SDPA，提示／响应回放使用 FlashInfer 共享前缀；不建立梯度图，选中位置的局部 AM 参照仍以 FP32 计算。
 
 独立 test／benchmark 每卡只加载一份完整 student，通过 `--eval-batch-size-per-gpu` 控制每卡批量，默认 8。样本按相近输入长度组批，批量执行 prefill、TTT 写入与 decode；每条样本独立维护 memory、KV、生成预算和 EOS 状态，完成后立即保存逐题结果。
 
@@ -152,7 +154,7 @@ Prepare 与 train 从 `<output_root>/teacher/p{pending_size}-r{recent_size}` 读
 
 ### 2.3 运行时生成 outer 参照
 
-每次 outer AM 从完整 4096 位置池均匀、无放回抽取 128 个位置，各层与 heads 共用索引。Teacher 读取缓存的固定响应，只回放涉及的提示分支，并在各分支最远的选中位置结束，重算这些位置的 $q,o^T,z^T$；无需重新生成响应。Student 使用这些停止梯度的参照与离线固定尺度计算 AM。蒸馏复用同一缓存。Teacher 额外在本次选中的短分支上计算完整词表的 FP32 对数概率，临时保存在 CPU，供 student 计算 KL。
+每次 outer AM 从完整 4096 位置池均匀、无放回抽取 128 个位置，各层与 heads 共用索引。Teacher 读取缓存的固定响应，只回放涉及的提示分支，并在各分支最远的选中位置结束，重算这些位置的 $q,o^T,z^T$；无需重新生成响应。Student 使用这些停止梯度的参照与离线固定尺度计算 AM。蒸馏复用同一缓存。Teacher 额外在本次选中的短分支上计算完整词表的 FP32 对数概率，保留在当前设备上，供 student 前向与 checkpoint 重算直接计算 KL。
 
 每个样本在 student 建图前，按压缩边界顺序完成上述采样与回放。回放批内共享一份完整原文 prefix KV，各提示分支仅保存私有 suffix KV；主干通过 FlashInfer 合并前缀与因果 suffix 的 attention，选中位置另用 FP32 `local_read` 计算压缩范围内的监督目标。完整 prefix 与分支 KV 在全部参照准备完后释放，固定参照交给 student 逐轮使用。
 

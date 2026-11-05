@@ -240,7 +240,7 @@ def train(plan_dir, device="cuda", resume=None):
     if checkpoint is not None and checkpoint["binding"] != binding:
         raise ValueError("training data or teacher cache differs from the resumed checkpoint")
     model = OnlineMemoryLM(config.model).to(device)
-    teacher = RuntimeTeacher(load_teacher(config.model, device), config, teacher_cache)
+    teacher = RuntimeTeacher(load_teacher(config.model, device, model.backbone), config, teacher_cache)
     engine = TrainingEngine(model, training)
     cursor = SampleCursor(len(train_episodes), config.seed)
     query_generator = torch.Generator().manual_seed(config.seed + 1 + rank)

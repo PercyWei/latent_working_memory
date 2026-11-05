@@ -8,7 +8,7 @@ from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 from transformers.models.qwen3.modeling_qwen3 import rotate_half
 
-from .am import local_read, matching_loss, teacher_scales
+from .am import local_read, matching_loss, read_teacher, teacher_scales
 
 
 class LayerMemory(nn.Module):
@@ -93,8 +93,8 @@ class LayerMemory(nn.Module):
             (output_gradient * mass_gradient).sum(dim=1),
         )
 
-    def write(self, old_memory, teacher_kv, queries, compressed_tokens, rotary, differentiable,
-              diagnostics=None):
+    def write(self, old_memory, teacher_memory_kv, pending_kv, queries, compressed_tokens, rotary,
+              differentiable, diagnostics=None):
         """轮内参照固定；clone 隔离局部偏导，不截断 outer 历史依赖。
 
         可选 diagnostics 按 batch 行顺序追加逐样本记录。
@@ -107,10 +107,12 @@ class LayerMemory(nn.Module):
             recompute = differentiable and self.config.gradient_checkpointing
             if recompute:
                 teacher_outputs, teacher_mass = checkpoint(
-                    local_read, queries, *teacher_kv, use_reentrant=False
+                    read_teacher, queries, *teacher_memory_kv, *pending_kv, use_reentrant=False
                 )
             else:
-                teacher_outputs, teacher_mass = local_read(queries, *teacher_kv)
+                teacher_outputs, teacher_mass = read_teacher(
+                    queries, *teacher_memory_kv, *pending_kv,
+                )
             if self.config.inner_objective == "output_only_mass_calibrated":
                 # Inner 不使用 mass 梯度，释放未消费的 LSE 分支，避免诊断 VJP 保留重算缓存。
                 teacher_mass = teacher_mass.detach()

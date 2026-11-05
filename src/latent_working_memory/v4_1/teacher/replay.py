@@ -1,7 +1,9 @@
 """独立冻结 teacher 的原文 prefill 与提示分支回放；不持有 student 状态。"""
 
 from collections import defaultdict
+from copy import deepcopy
 
+from peft.tuners.tuners_utils import BaseTunerLayer
 import torch
 from transformers import AutoModelForCausalLM
 from transformers.cache_utils import DynamicCache
@@ -10,7 +12,26 @@ from ..modeling.am import local_read
 from .attention import SharedPrefixAttention
 
 
-def load_teacher(model_config, device):
+def load_teacher(model_config, device, backbone=None):
+    if backbone is not None:
+        # Teacher 保留独立的原生模块；仅冻结参数与 student 共用存储。
+        with torch.device("meta"):
+            teacher = AutoModelForCausalLM.from_config(
+                deepcopy(backbone.config), dtype=getattr(torch, model_config.backbone_dtype),
+                attn_implementation="sdpa",
+            )
+        for name, module in teacher.named_modules():
+            source = backbone.get_submodule(name)
+            if isinstance(source, BaseTunerLayer):
+                source = source.get_base_layer()
+            for parameter_name, _ in module.named_parameters(recurse=False):
+                parameter = source.get_parameter(parameter_name)
+                if parameter.requires_grad:
+                    raise ValueError(f"teacher base parameter must be frozen: {name}.{parameter_name}")
+                module.register_parameter(parameter_name, parameter)
+        # 固定 RoPE 的非持久 buffer 和 original_inv_freq 也须离开 meta device。
+        teacher.model.rotary_emb = deepcopy(backbone.model.rotary_emb)
+        return teacher.eval()
     return AutoModelForCausalLM.from_pretrained(
         model_config.model_name_or_path,
         dtype=getattr(torch, model_config.backbone_dtype),
@@ -42,7 +63,7 @@ class TeacherReplay:
 
     @torch.no_grad()
     def distill_branches(self, prefix_cache, branches):
-        """共享完整 prefix，返回各分支指定位置开始的全词表 FP32 CPU log-probs。
+        """共享完整 prefix，返回各分支指定位置开始的全词表 FP32 device log-probs。
 
         两条分支共用 attention 工作区；prefix 不被复制或写入，各 suffix 独立。
         """
@@ -63,7 +84,7 @@ class TeacherReplay:
                     attention_mask={"full_attention": None},
                     position_ids=positions, use_cache=True,
                 ).last_hidden_state[:, first_logit_index:]
-                log_probs = self.model.lm_head(hidden).float().log_softmax(dim=-1)[0].cpu()
+                log_probs = self.model.lm_head(hidden).float().log_softmax(dim=-1)[0]
                 result.append((input_ids, first_logit_index, log_probs))
                 del branch, hidden
         return result

@@ -86,3 +86,24 @@ def test_batched_replay_matches_native_full_context(tiny_setup, dtype):
         for layer, (keys, values) in zip(prefix.layers, original_prefix):
             torch.testing.assert_close(layer.keys, keys, rtol=0, atol=0)
             torch.testing.assert_close(layer.values, values, rtol=0, atol=0)
+
+
+def test_distill_branches_preserve_device_and_native_log_probabilities(tiny_setup):
+    model = tiny_setup.teacher
+    context = tiny_setup.episode.context_ids[:12]
+    branches = (((6, 7, 8, 9), 1), ((12, 13, 14), 0))
+    replay = TeacherReplay(model, prefill_chunk_size=5, batch_size=2)
+    prefix = DynamicCache(config=model.config)
+    replay.advance(context, prefix, len(context))
+    original_attention = [layer.self_attn for layer in model.model.layers]
+    actual = replay.distill_branches(prefix, branches)
+    assert [layer.self_attn for layer in model.model.layers] == original_attention
+    assert prefix.get_seq_length() == len(context)
+    for (ids, first, log_probs), (expected_ids, expected_first) in zip(actual, branches):
+        assert ids == expected_ids and first == expected_first
+        assert log_probs.device == replay.device and log_probs.dtype == torch.float32
+        assert not log_probs.requires_grad and not log_probs.is_inference()
+        with torch.no_grad():
+            logits = model(input_ids=torch.tensor([(*context, *ids)]), use_cache=False).logits
+            expected = logits[0, len(context) + first:].float().log_softmax(-1)
+        torch.testing.assert_close(log_probs, expected, rtol=2e-6, atol=2e-6)

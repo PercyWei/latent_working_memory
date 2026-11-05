@@ -166,7 +166,7 @@ def run(args):
         "created_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
         "repository": _repository(), "config": asdict(config), "world_size": world_size,
         "global_batch_size": global_batch, "warmup_steps_per_case": 1, "repeats": args.repeats,
-        "teacher_backbone_sharing": False,
+        "teacher_backbone_sharing": True,
         "gradient_capture": "FP32 parameter.grad after global mean and clip, before next zero_grad",
         "parameter_capture": "FP32 trainable parameters after AdamW update",
         "repeat_protocol": "reset trainable parameters and Adam per case; fixed teacher RNG per call; "
@@ -195,7 +195,7 @@ def run(args):
         raise RuntimeError(status[0])
 
     model = OnlineMemoryLM(config.model).to(device)
-    teacher = RuntimeTeacher(load_teacher(config.model, device), config, teacher_cache)
+    teacher = RuntimeTeacher(load_teacher(config.model, device, model.backbone), config, teacher_cache)
     initial_state = model.trainable_state_dict()
     for case in cases:
         model.load_trainable_state_dict(initial_state)

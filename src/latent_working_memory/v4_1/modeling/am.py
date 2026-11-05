@@ -19,8 +19,27 @@ def local_read(queries, keys, values, bias):
     return outputs.reshape(queries.shape), scores.logsumexp(-1).flatten(-2)
 
 
-def calibrate_memory_bias(queries, keys, bias, teacher_keys, teacher_bias, floor):
+def _teacher_keys_and_bias(memory_key, memory_bias, pending_key):
+    keys = torch.cat((memory_key.float(), pending_key.float()), dim=2)
+    bias = torch.cat((
+        memory_bias.float(), memory_bias.new_zeros((*memory_bias.shape[:-1], pending_key.shape[2])),
+    ), dim=-1)
+    return keys, bias
+
+
+def read_teacher(queries, memory_key, memory_value, memory_bias, pending_key, pending_value):
+    """在重算边界内拼接 FP32 参照，checkpoint 输入保留原始 KV/query 存储。"""
+    keys, bias = _teacher_keys_and_bias(memory_key, memory_bias, pending_key)
+    values = torch.cat((memory_value.float(), pending_value.float()), dim=2)
+    return local_read(queries, keys, values, bias)
+
+
+def calibrate_memory_bias(queries, keys, bias, teacher_memory_key, teacher_memory_bias,
+                          pending_key, floor):
     """按 KV head 拟合公共 log-mass 偏移；保留 query 与两侧 key/bias 的梯度。"""
+    teacher_keys, teacher_bias = _teacher_keys_and_bias(
+        teacher_memory_key, teacher_memory_bias, pending_key,
+    )
     teacher_mass = _attention_scores(queries, teacher_keys, teacher_bias).logsumexp(-1)
     memory_mass = _attention_scores(queries, keys, bias).logsumexp(-1)
     scales = teacher_mass.std(dim=-3, correction=0).clamp_min(floor).detach()
