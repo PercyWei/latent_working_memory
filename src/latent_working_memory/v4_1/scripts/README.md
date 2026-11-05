@@ -17,7 +17,7 @@ bash src/latent_working_memory/v4_1/scripts/run.sh --help
 
 `run.sh` 默认执行训练和 dev 验证，`--evaluate-only` 执行独立评估，`--resume` 用于恢复训练或搭配 `--evaluate-only` 续跑已有评估；离线准备使用 `prepare`，评估看板通过 `dashboard.sh` 启动。各入口支持 `--help`。
 
-脚本切换到项目根目录，使用 `uv run --frozen`，直接继承 `CUDA_VISIBLE_DEVICES`。离线准备自动分配到所有可见 GPU；训练通过 `torchrun` 为每张可见卡启动一个进程；评估在可见 GPU 间分片同一 checkpoint 的待评估样本，每卡批量处理，多个 checkpoint 按 step 依次执行。本项目双卡设为 `0,1`，单卡设为 `0` 或 `1`，无需额外设备参数。
+离线准备自动分配到所有可见 GPU；训练通过 `torchrun` 为每张可见卡启动一个进程；评估在可见 GPU 间分片同一 checkpoint 的待评估样本，每卡批量处理，多个 checkpoint 按 step 依次执行。
 
 本文示例约定：
 
