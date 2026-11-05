@@ -102,7 +102,7 @@ AM 内部先对查询／通道、再对 heads 与层取平均。设置 `training
 
 写入时保留 query 的共享 FP32 转换节点，以及 teacher K/V 的共享拼接节点，使局部读取与 bias 校准沿原有计算图归并梯度。Checkpoint 对 query 保存原始 BF16 数据，对 teacher K/V 保存旧 memory 的 FP32 数据与 pending 的 BF16 数据；重算时恢复相同的 FP32 输入，旧 memory 的精度保持不变。
 
-Train/dev 每卡的 teacher 与 student 保持独立模块，共享同一份冻结基座参数；LoRA 与 memory 仅属于 student。每个样本先计算所有边界的固定 teacher 参照，释放原文 prefix KV 和分支 KV，再执行 student 前向与完整元梯度反向。Teacher 原文 prefill 使用 SDPA，提示／响应回放使用 FlashInfer 共享前缀；不建立梯度图，选中位置的局部 AM 参照仍以 FP32 计算。
+Train/dev 每卡的 teacher 与 student 保持独立模块和 Parameter 对象，共享冻结基座参数的底层存储；teacher 沿用原生加载流程，保留自身的 buffer 和 tied-weight 关系，LoRA 与 memory 仅属于 student。每个样本先计算所有边界的固定 teacher 参照，释放原文 prefix KV 和分支 KV，再执行 student 前向与完整元梯度反向。Teacher 原文 prefill 使用 SDPA，提示／响应回放使用 FlashInfer 共享前缀；不建立梯度图，选中位置的局部 AM 参照仍以 FP32 计算。
 
 独立 test／benchmark 每卡只加载一份完整 student，通过 `--eval-batch-size-per-gpu` 控制每卡批量，默认 8。样本按相近输入长度组批，批量执行 prefill、TTT 写入与 decode；每条样本独立维护 memory、KV、生成预算和 EOS 状态，完成后立即保存逐题结果。
 
@@ -364,3 +364,5 @@ uv run --frozen python -m latent_working_memory.v4_1.exploration.memory_efficien
 `comparison.json` 记录逐项数值差异、三次测量的耗时中位数、吞吐与最大显存峰值；数值不满足指定容差时返回非零退出码。
 
 数值定位可指定 `--cases representative_regular --repeats 1`，运行该组的一次预热与一次正式更新。每组的 `warmup_rank-<rank>.pt` 和正式步骤快照均保存全量梯度与更新参数，可从相同初态核对首次反向，避免 Adam 历史放大偏差。
+
+`--disable-input-packing` 单独关闭写入 checkpoint 输入压缩，`--independent-teacher` 单独使用独立 teacher 权重，其他处理保留当前行为。`exploration.memory_efficiency.teacher_sharing` 可进一步逐项比较两种 teacher 的参数、buffer、模块配置与实际文档的逐边界参照。
