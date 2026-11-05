@@ -28,6 +28,11 @@ from latent_working_memory.v4_1.teacher.runtime import RuntimeTeacher
 from latent_working_memory.v4_1.training.engine import GRAD_NORM_EVERY, TrainingEngine, training_steps
 
 
+CASE_NAMES = (
+    "representative_regular", "representative_diagnostic", "long_regular", "long_diagnostic",
+)
+
+
 def _repository():
     root = Path(subprocess.check_output(
         ["git", "rev-parse", "--show-toplevel"], text=True,
@@ -115,9 +120,26 @@ def _step(engine, episodes, teacher, generator, seed, step, device, diagnostics)
     }
 
 
+def _save_snapshot(model, directory, label, rank, episodes, diagnostics):
+    tensor_path = directory / f"{label}_rank-{rank:02d}.pt"
+    torch.save({
+        "gradients": {
+            name: None if parameter.grad is None else parameter.grad.detach().cpu().clone()
+            for name, parameter in model.named_parameters() if parameter.requires_grad
+        },
+        "parameters": model.trainable_state_dict(),
+    }, tensor_path)
+    write_json(tensor_path.with_suffix(".json"), {
+        "rank": rank, "sample_ids": [episode.id for episode in episodes],
+        "inner_diagnostics": diagnostics,
+    })
+
+
 def run(args):
-    if args.repeats < 3:
-        raise ValueError("benchmark requires at least three measured repeats")
+    if args.repeats < 1:
+        raise ValueError("benchmark repeats must be a positive integer")
+    if len(set(args.cases)) != len(args.cases):
+        raise ValueError("benchmark cases must be distinct")
     device = initialize_device("cuda")
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
@@ -158,10 +180,10 @@ def run(args):
     teacher_cache = TeacherCache(
         config.training.teacher_cache_dir, expected_identity=build_cache_identity(config, tokenizer),
     )
-    cases = [{"name": f"{group}_{mode}", "sample_group": group,
-              "step_argument": GRAD_NORM_EVERY if mode == "diagnostic" else 1,
-              "diagnostics": mode == "diagnostic"}
-             for group in ("representative", "long") for mode in ("regular", "diagnostic")]
+    cases = [{"name": name, "sample_group": name.rsplit("_", 1)[0],
+              "step_argument": GRAD_NORM_EVERY if name.endswith("_diagnostic") else 1,
+              "diagnostics": name.endswith("_diagnostic")}
+             for name in args.cases]
     plan = {
         "created_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
         "repository": _repository(), "config": asdict(config), "world_size": world_size,
@@ -210,9 +232,13 @@ def run(args):
         case_dir = output / case["name"]
         case_dir.mkdir(exist_ok=True)
         torch.cuda.empty_cache()
+        warmup_diagnostics = [] if case["diagnostics"] else None
         warmup = _step(
             engine, local_samples, teacher, generator, query_seed, case["step_argument"], device,
-            [] if case["diagnostics"] else None,
+            warmup_diagnostics,
+        )
+        _save_snapshot(
+            model, case_dir, "warmup", rank, local_samples, warmup_diagnostics,
         )
         if rank == 0:
             write_json(case_dir / "warmup.json", warmup)
@@ -224,18 +250,9 @@ def run(args):
             )
             record.update(repeat=repeat, optimizer_updates=repeat + 1,
                           step_argument=case["step_argument"])
-            tensor_path = case_dir / f"repeat-{repeat:02d}_rank-{rank:02d}.pt"
-            torch.save({
-                "gradients": {
-                    name: None if parameter.grad is None else parameter.grad.detach().cpu().clone()
-                    for name, parameter in model.named_parameters() if parameter.requires_grad
-                },
-                "parameters": model.trainable_state_dict(),
-            }, tensor_path)
-            write_json(tensor_path.with_suffix(".json"), {
-                "rank": rank, "sample_ids": [episode.id for episode in local_samples],
-                "inner_diagnostics": diagnostics,
-            })
+            _save_snapshot(
+                model, case_dir, f"repeat-{repeat:02d}", rank, local_samples, diagnostics,
+            )
             if rank == 0:
                 record["resources"]["context_tokens_per_second"] = (
                     sum(len(episode.context_ids) for episode in samples) / record["resources"]["seconds"]
@@ -410,7 +427,10 @@ def main():
     run_parser.add_argument("--micro-batch-size-per-gpu", type=int, default=2)
     run_parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
     run_parser.add_argument("--teacher-batch-size-per-gpu", type=int, default=64)
-    run_parser.add_argument("--repeats", type=int, default=3)
+    run_parser.add_argument("--cases", nargs="+", choices=CASE_NAMES, default=CASE_NAMES,
+                            help="运行指定 case，默认全部")
+    run_parser.add_argument("--repeats", type=int, default=3,
+                            help="正式重复次数；默认 3，数值定位可显式设为 1")
     compare_parser = commands.add_parser("compare", help="离线比较所有梯度、更新参数、指标与诊断")
     compare_parser.add_argument("--baseline", required=True)
     compare_parser.add_argument("--optimized", required=True)
