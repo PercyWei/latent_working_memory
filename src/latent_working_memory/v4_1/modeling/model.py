@@ -18,22 +18,30 @@ from .memory import LayerMemory
 
 
 @contextmanager
-def _save_cast_sources(cast_sources):
-    """共享 FP32 cast 节点的梯度，仅以原 BF16 来源保存 checkpoint 输入。"""
-    sources = {id(value): source.detach() for value, source in cast_sources
-               if source.dtype == torch.bfloat16}
-    del cast_sources
+def _save_write_sources(query, query_source, teacher_kv, memory_kv, pending_kv):
+    """重建保存数据，保留共享 FP32 cast/CatBackward 的原始梯度归并边。"""
+    sources = {
+        id(teacher): ("cat", memory.detach(), pending.detach())
+        for teacher, memory, pending in zip(teacher_kv[:2], memory_kv[:2], pending_kv)
+        if pending.dtype == torch.bfloat16
+    }
+    if query_source.dtype == torch.bfloat16:
+        sources[id(query)] = ("cast", query_source.detach())
+    del query, query_source, teacher_kv, memory_kv, pending_kv
     if not sources:
         yield
         return
 
     def pack(value):
         source = sources.get(id(value))
-        return (source, True) if source is not None else (value.detach(), False)
+        return source if source is not None else (None, value.detach())
 
     def unpack(saved):
-        value, restore_fp32 = saved
-        return value.float() if restore_fp32 else value
+        if saved[0] == "cat":
+            return torch.cat((saved[1].float(), saved[2].float()), dim=2)
+        if saved[0] == "cast":
+            return saved[1].float()
+        return saved[1]
 
     with torch.autograd.graph.saved_tensors_hooks(pack, unpack):
         yield
@@ -179,42 +187,46 @@ class OnlineMemoryLM(nn.Module):
         before, after = [], []
         with torch.set_grad_enabled(differentiable):
             for index, memory in enumerate(self.memory_layers):
-                teacher_memory_kv = state.memory_kv[index]
-                old_key, _, old_bias = teacher_memory_kv
+                old_key, old_value, old_bias = state.memory_kv[index]
                 pending_key_source = state.keys[index][:, :, :count]
                 pending_value_source = state.values[index][:, :, :count]
-                query_source = state.recent_queries[index].transpose(1, 2)
                 pending_key, pending_value = pending_key_source.float(), pending_value_source.float()
+                teacher = (
+                    torch.cat((old_key.float(), pending_key), dim=2),
+                    torch.cat((old_value.float(), pending_value), dim=2),
+                    torch.cat((old_bias.float(), old_bias.new_zeros((*old_bias.shape[:-1], count))), -1),
+                )
+                query_source = state.recent_queries[index].transpose(1, 2)
                 query = query_source.float()
                 layer_diagnostics = [] if inner_diagnostics is not None else None
-                cast_sources = ((query, query_source), (pending_key, pending_key_source),
-                                (pending_value, pending_value_source))
-                saved_sources = (_save_cast_sources(cast_sources)
-                                 if differentiable and self.config.gradient_checkpointing
-                                 else nullcontext())
+                saved_sources = nullcontext()
+                if differentiable and self.config.gradient_checkpointing:
+                    saved_sources = _save_write_sources(
+                        query, query_source, teacher, state.memory_kv[index],
+                        (pending_key_source, pending_value_source),
+                    )
                 with saved_sources:
                     updated, metrics = memory.write(
-                        state.memories[index], teacher_memory_kv, (pending_key, pending_value), query,
-                        compressed_tokens=compressed,
+                        state.memories[index], teacher, query, compressed_tokens=compressed,
                         rotary=rotary, differentiable=differentiable, diagnostics=layer_diagnostics,
                     )
+                    if inner_diagnostics is not None:
+                        for records, record in zip(inner_diagnostics, layer_diagnostics):
+                            records.append({
+                                "write_index": state.write_events + 1,
+                                "processed_end": state.position, "compressed_end": compressed,
+                                "layer_index": index, **record,
+                            })
+                    state.memories[index] = updated
                     key, value, bias = memory.decode(updated, compressed, rotary)
                     if self.config.inner_objective == "output_only_mass_calibrated":
-                        calibration_args = (query, key, bias, old_key, old_bias, pending_key,
+                        calibration_args = (query, key, bias, teacher[0], teacher[2],
                                             self.config.am_std_floor)
                         if differentiable and self.config.gradient_checkpointing:
                             bias = checkpoint(calibrate_memory_bias, *calibration_args,
                                               use_reentrant=False)
                         else:
                             bias = calibrate_memory_bias(*calibration_args)
-                if inner_diagnostics is not None:
-                    for records, record in zip(inner_diagnostics, layer_diagnostics):
-                        records.append({
-                            "write_index": state.write_events + 1,
-                            "processed_end": state.position, "compressed_end": compressed,
-                            "layer_index": index, **record,
-                        })
-                state.memories[index] = updated
                 state.memory_kv[index] = (key, value, bias)
                 # clone 释放被删除 pending 的存储；recent KV 保留原值及全局位置。
                 state.keys[index] = state.keys[index][:, :, count:].clone()

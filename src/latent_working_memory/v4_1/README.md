@@ -100,7 +100,7 @@ AM 内部先对查询／通道、再对 heads 与层取平均。设置 `training
 
 基座默认 BF16；memory、解码器、训练／推理中的局部 AM、可训练参数、梯度累积及 AdamW 状态使用 FP32。Student attention 的 scores 与 softmax 使用 FP32，权重与挂载的 memory KV 转为主干精度后聚合。完整跨轮训练图的开销随轨迹增长，固定在线缓存不意味着训练显存固定。
 
-写入时的 query 与 pending KV 保留共享的 FP32 转换节点，以维持各梯度分支在 FP32 汇合后的舍入顺序。Checkpoint 仅对这些由 BF16 精确转换的输入保存原始 BF16 数据，重算时恢复 FP32；旧 memory 的 FP32 数据保持原精度。Teacher KV 在局部读取与 bias 校准的重算边界内拼接。
+写入时保留 query 的共享 FP32 转换节点，以及 teacher K/V 的共享拼接节点，使局部读取与 bias 校准沿原有计算图归并梯度。Checkpoint 对 query 保存原始 BF16 数据，对 teacher K/V 保存旧 memory 的 FP32 数据与 pending 的 BF16 数据；重算时恢复相同的 FP32 输入，旧 memory 的精度保持不变。
 
 Train/dev 每卡的 teacher 与 student 保持独立模块，共享同一份冻结基座参数；LoRA 与 memory 仅属于 student。每个样本先计算所有边界的固定 teacher 参照，释放原文 prefix KV 和分支 KV，再执行 student 前向与完整元梯度反向。Teacher 原文 prefill 使用 SDPA，提示／响应回放使用 FlashInfer 共享前缀；不建立梯度图，选中位置的局部 AM 参照仍以 FP32 计算。
 
@@ -362,3 +362,5 @@ uv run --frozen python -m latent_working_memory.v4_1.exploration.memory_efficien
 ```
 
 `comparison.json` 记录逐项数值差异、三次测量的耗时中位数、吞吐与最大显存峰值；数值不满足指定容差时返回非零退出码。
+
+数值定位可指定 `--cases representative_regular --repeats 1`，运行该组的一次预热与一次正式更新。每组的 `warmup_rank-<rank>.pt` 和正式步骤快照均保存全量梯度与更新参数，可从相同初态核对首次反向，避免 Adam 历史放大偏差。

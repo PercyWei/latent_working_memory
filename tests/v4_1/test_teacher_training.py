@@ -121,8 +121,9 @@ def test_runtime_teacher_matches_materialized_loss_and_meta_gradients(tiny_setup
 
 @pytest.mark.parametrize("inner_objective", ("am", "output_only_mass_calibrated"))
 @pytest.mark.parametrize("backbone_dtype", ("float32", "bfloat16"))
+@pytest.mark.parametrize("reference_checkpointing", (False, True))
 def test_per_gradient_checkpoint_preserves_multistep_meta_gradients(
-    tiny_setup, monkeypatch, inner_objective, backbone_dtype,
+    tiny_setup, monkeypatch, inner_objective, backbone_dtype, reference_checkpointing,
 ):
     setup = tiny_setup
     config = replace(setup.config.model, inner_steps=3, inner_objective=inner_objective,
@@ -138,52 +139,49 @@ def test_per_gradient_checkpoint_preserves_multistep_meta_gradients(
             for boundary in boundaries
         })
     checked = OnlineMemoryLM(config)
-    ordinary = OnlineMemoryLM(replace(config, gradient_checkpointing=False))
+    ordinary = OnlineMemoryLM(replace(config, gradient_checkpointing=reference_checkpointing))
     ordinary.load_trainable_state_dict(checked.trainable_state_dict())
     inner_inputs, teacher_checkpoint_sources, calibration_checkpoint_sources = [], [], []
     memory_checkpoint = memory_module.checkpoint
     model_checkpoint = model_module.checkpoint
 
     def track_teacher_sources(function, *args, **kwargs):
-        if function is memory_module.read_teacher:
+        if function is memory_module.local_read:
             teacher_checkpoint_sources.append(tuple(tensor.dtype for tensor in args))
         return memory_checkpoint(function, *args, **kwargs)
 
     def track_calibration_sources(function, *args, **kwargs):
         if function is model_module.calibrate_memory_bias:
-            calibration_checkpoint_sources.append((args[0].dtype, args[5].dtype))
+            calibration_checkpoint_sources.append((args[0].dtype, args[3].dtype))
         return model_checkpoint(function, *args, **kwargs)
 
     monkeypatch.setattr(memory_module, "checkpoint", track_teacher_sources)
     monkeypatch.setattr(model_module, "checkpoint", track_calibration_sources)
     for memory in checked.memory_layers:
-        def track_write(old_memory, teacher_kv, pending_kv, queries, _write=memory.write, **kwargs):
-            for tensor in (*pending_kv, queries):
+        def track_write(old_memory, teacher_kv, queries, _write=memory.write, **kwargs):
+            for tensor in (*teacher_kv[:2], queries):
                 assert tensor.requires_grad
                 assert tensor.dtype == torch.float32
                 tensor.retain_grad()
                 inner_inputs.append(tensor)
-            return _write(old_memory, teacher_kv, pending_kv, queries, **kwargs)
+            return _write(old_memory, teacher_kv, queries, **kwargs)
 
         monkeypatch.setattr(memory, "write", track_write)
-    # 旧路径在 write 外物化 FP32 teacher/query，作为非 checkpoint 对照。
-    for memory in ordinary.memory_layers:
-        def materialized_write(old_memory, teacher_kv, pending_kv, queries,
-                               _write=memory.write, **kwargs):
-            key = torch.cat((teacher_kv[0].float(), pending_kv[0].float()), dim=2)
-            value = torch.cat((teacher_kv[1].float(), pending_kv[1].float()), dim=2)
-            bias = torch.cat((teacher_kv[2].float(), teacher_kv[2].new_zeros(
-                (*teacher_kv[2].shape[:-1], pending_kv[0].shape[2]),
-            )), dim=-1)
-            empty = key[:, :, :0]
-            return _write(old_memory, (key, value, bias), (empty, empty), queries.float(), **kwargs)
-
-        monkeypatch.setattr(memory, "write", materialized_write)
     actual_diagnostics, expected_diagnostics = [], []
     actual = checked(setup.episode, teacher=references, outer_write_obj_weight=0.7,
                      inner_diagnostics=actual_diagnostics)
-    expected = ordinary(setup.episode, teacher=references, outer_write_obj_weight=0.7,
-                        inner_diagnostics=expected_diagnostics)
+    assert len(teacher_checkpoint_sources) == 2 * len(checked.memory_layers)
+    assert all(all(dtype == torch.float32 for dtype in dtypes)
+               for dtypes in teacher_checkpoint_sources)
+    if inner_objective == "output_only_mass_calibrated":
+        assert calibration_checkpoint_sources == [(torch.float32, torch.float32)] * (
+            2 * len(checked.memory_layers)
+        )
+    # 关闭保存压缩，保持原共享 cast/cat 与 checkpoint 图，逐位核对归并顺序。
+    with monkeypatch.context() as patch:
+        patch.setattr(model_module, "_save_write_sources", lambda *args: nullcontext())
+        expected = ordinary(setup.episode, teacher=references, outer_write_obj_weight=0.7,
+                            inner_diagnostics=expected_diagnostics)
     actual["loss"].backward()
     expected["loss"].backward()
     assert actual.keys() == expected.keys()
@@ -191,19 +189,15 @@ def test_per_gradient_checkpoint_preserves_multistep_meta_gradients(
     for metric in actual:
         torch.testing.assert_close(actual[metric], expected[metric], rtol=1e-5, atol=1e-6)
     assert actual["write_events"] == expected["write_events"] == 2
-    dtype = torch.float32
-    assert len(teacher_checkpoint_sources) == 2 * len(checked.memory_layers)
-    assert all(dtypes[0] == dtypes[4] == dtypes[5] == dtype
-               for dtypes in teacher_checkpoint_sources)
-    if inner_objective == "output_only_mass_calibrated":
-        assert calibration_checkpoint_sources == [(dtype, dtype)] * (2 * len(checked.memory_layers))
     expected_parameters = dict(ordinary.named_parameters())
     for name, parameter in checked.named_parameters():
         if parameter.requires_grad:
             assert parameter.grad is not None, name
             assert torch.isfinite(parameter.grad).all(), name
             torch.testing.assert_close(
-                parameter.grad, expected_parameters[name].grad, rtol=2e-5, atol=2e-6,
+                parameter.grad, expected_parameters[name].grad,
+                rtol=0 if reference_checkpointing else 2e-5,
+                atol=0 if reference_checkpointing else 2e-6,
                 msg=lambda message: f"{name}: {message}",
             )
     for suffix in ("initial_slots", "raw_step_size", "decoder.input.weight", "lora_B.default.weight"):
@@ -216,7 +210,7 @@ def test_per_gradient_checkpoint_preserves_multistep_meta_gradients(
 
 
 @pytest.mark.parametrize("dtype", (torch.float32, torch.bfloat16))
-def test_teacher_source_inputs_match_materialized_fp32_outputs_and_meta_gradients(dtype):
+def test_saved_write_inputs_release_fp32_storage_and_preserve_shared_meta_gradients(dtype):
     generator = torch.Generator().manual_seed(73)
     specs = (
         ((2, 3, 4, 2), dtype),       # queries
@@ -231,23 +225,33 @@ def test_teacher_source_inputs_match_materialized_fp32_outputs_and_meta_gradient
     actual_inputs = [torch.randn(shape, dtype=kind, generator=generator).requires_grad_()
                      for shape, kind in specs]
     expected_inputs = [tensor.detach().clone().requires_grad_() for tensor in actual_inputs]
-    query, old_key, old_value, old_bias, pending_key, pending_value, key, bias = actual_inputs
-    query, pending_key, pending_value = query.float(), pending_key.float(), pending_value.float()
-    actual = (*am_module.read_teacher(query, old_key, old_value, old_bias, pending_key, pending_value),
-              am_module.calibrate_memory_bias(query, key, bias, old_key, old_bias, pending_key, 0.1))
-    query, old_key, old_value, old_bias, pending_key, pending_value, key, bias = expected_inputs
-    query, pending_key, pending_value = query.float(), pending_key.float(), pending_value.float()
-    teacher_key = torch.cat((old_key.float(), pending_key), dim=2)
-    teacher_value = torch.cat((old_value.float(), pending_value), dim=2)
-    teacher_bias = torch.cat((old_bias.float(), old_bias.new_zeros((2, 2, 5))), dim=-1)
-    expected_read = am_module.local_read(query.float(), teacher_key, teacher_value, teacher_bias)
-    teacher_mass = am_module._attention_scores(query.float(), teacher_key, teacher_bias).logsumexp(-1)
-    memory_mass = am_module._attention_scores(query.float(), key, bias).logsumexp(-1)
-    scales = teacher_mass.std(dim=-3, correction=0).clamp_min(0.1).detach()
-    weights = scales.double().square().reciprocal()
-    gap = (teacher_mass.double() - memory_mass.double()).mean(dim=-3)
-    offset = (weights * gap).sum(dim=-1) / weights.sum(dim=-1)
-    expected = (*expected_read, bias + offset.to(bias.dtype).unsqueeze(-1))
+
+    def evaluate(inputs, compress):
+        query_source, old_key, old_value, old_bias, pending_key, pending_value, key, bias = inputs
+        query = query_source.float()
+        teacher = (
+            torch.cat((old_key.float(), pending_key.float()), dim=2),
+            torch.cat((old_value.float(), pending_value.float()), dim=2),
+            torch.cat((old_bias.float(), old_bias.new_zeros((2, 2, 5))), dim=-1),
+        )
+        references = tuple(weakref.ref(value) for value in (query, *teacher[:2]))
+        context = (model_module._save_write_sources(
+            query, query_source, teacher, (old_key, old_value, old_bias), (pending_key, pending_value),
+        ) if compress else nullcontext())
+        with context:
+            read = checkpoint_module.checkpoint(am_module.local_read, query, *teacher,
+                                                use_reentrant=False)
+            calibrated = checkpoint_module.checkpoint(
+                am_module.calibrate_memory_bias, query, key, bias, teacher[0], teacher[2], 0.1,
+                use_reentrant=False,
+            )
+        return (*read, calibrated), references
+
+    actual, actual_references = evaluate(actual_inputs, True)
+    expected, expected_references = evaluate(expected_inputs, False)
+    if dtype == torch.bfloat16:
+        assert all(reference() is None for reference in actual_references)
+        assert all(reference() is not None for reference in expected_references)
     for value, reference in zip(actual, expected):
         torch.testing.assert_close(value, reference, rtol=0, atol=0)
     actual_gradient = torch.autograd.grad(
@@ -262,27 +266,6 @@ def test_teacher_source_inputs_match_materialized_fp32_outputs_and_meta_gradient
     expected_meta_gradient = torch.autograd.grad(sum(value.sum() for value in expected_gradient), expected_inputs)
     for value, reference in zip(actual_meta_gradient, expected_meta_gradient):
         torch.testing.assert_close(value, reference, rtol=0, atol=0)
-
-
-def test_checkpoint_retains_bfloat16_sources_without_fp32_cast_storage():
-    raw = tuple(torch.randn(5, dtype=torch.bfloat16).requires_grad_() for _ in range(3))
-    reference = tuple(value.detach().clone().requires_grad_() for value in raw)
-    cast = tuple(value.float() for value in raw)
-    cast_references = tuple(weakref.ref(value) for value in cast)
-
-    def function(query, key, value):
-        return (query.sin() + key.cos() + value.square()).sum()
-
-    with model_module._save_cast_sources(tuple(zip(cast, raw))):
-        actual = checkpoint_module.checkpoint(function, *cast, use_reentrant=False)
-    del cast
-    assert all(reference() is None for reference in cast_references)
-    expected = function(*(value.float() for value in reference))
-    actual.backward()
-    expected.backward()
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    for value, expected in zip(raw, reference):
-        torch.testing.assert_close(value.grad, expected.grad, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("inner_objective", ("am", "output_only_mass_calibrated"))
@@ -330,12 +313,12 @@ def test_true_batch_preserves_per_sample_losses_and_full_meta_gradients(
 
     monkeypatch.setattr(batched, "_advance", track_advance)
     for memory in batched.memory_layers:
-        def track_write(old_memory, teacher_kv, pending_kv, queries, _write=memory.write, **kwargs):
-            for tensor in (*pending_kv, queries):
+        def track_write(old_memory, teacher_kv, queries, _write=memory.write, **kwargs):
+            for tensor in (*teacher_kv[:2], queries):
                 assert tensor.requires_grad
                 tensor.retain_grad()
                 inner_inputs.append(tensor)
-            return _write(old_memory, teacher_kv, pending_kv, queries, **kwargs)
+            return _write(old_memory, teacher_kv, queries, **kwargs)
 
         monkeypatch.setattr(memory, "write", track_write)
     actual = batched.forward_batch(
@@ -413,7 +396,7 @@ def test_output_only_diagnostic_vjps_release_teacher_checkpoint_cache(tiny_setup
         return frame
 
     def track_teacher_checkpoint(function, *args, **kwargs):
-        if function is not memory_module.read_teacher:
+        if function is not memory_module.local_read:
             return original_checkpoint(function, *args, **kwargs)
         with monkeypatch.context() as patch:
             patch.setattr(checkpoint_module, "_CheckpointFrame", capture_frame)
