@@ -1,0 +1,60 @@
+{
+  "stage": "post",
+  "seed": 42,
+  "model": {
+    "model_name_or_path": "~/models/Qwen3-4B-Instruct-2507",
+    "dtype": "bfloat16",
+    "attention_implementation": "sdpa",
+    "gradient_checkpointing": true,
+    "memory_slots": 256,
+    "lora_rank": 16,
+    "lora_alpha": 32,
+    "lora_target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj"
+    ],
+    "boundary_hidden_size": 128
+  },
+  "objective": {
+    "lm_ratio": 0.5,
+    "lm_target_tokens": 512,
+    "unit_tokens": 256,
+    "group_size": 4,
+    "slot_cost": 0.001,
+    "policy_weight": 1.0,
+    "clip_epsilon": 0.2,
+    "advantage_epsilon": 1e-06
+  },
+  "training": {
+    "dataset_dir": "data/delta-mem-qasper",
+    "max_train_data_tokens": 12288,
+    "max_train_samples": null,
+    "max_dev_samples": 64,
+    "init_checkpoint": null,
+    "output_root": "artifacts/v3-1-1",
+    "output_dir": null,
+    "run_id": null,
+    "epochs": 1,
+    "max_steps": null,
+    "micro_batch_size": 2,
+    "gradient_accumulation_steps": 4,
+    "compressor_learning_rate": 2e-05,
+    "boundary_learning_rate": 0.0001,
+    "weight_decay": 0.01,
+    "beta1": 0.9,
+    "beta2": 0.999,
+    "adam_epsilon": 1e-08,
+    "warmup_steps": 50,
+    "min_lr_ratio": 0.1,
+    "gradient_clip": 1.0,
+    "dev_every": 100,
+    "save_every": "after_each_epoch",
+    "save_total_limit": 2,
+    "tracking": "disabled",
+    "swanlab_project": null,
+    "group": null,
+    "tags": []
+  }
+}
