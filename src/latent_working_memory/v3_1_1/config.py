@@ -154,12 +154,14 @@ class TrainingConfig:
             raise ValueError("min_lr_ratio must be <= 1; beta1 and beta2 must be < 1")
         if self.tracking not in {"disabled", "swanlab"}:
             raise ValueError("tracking must be disabled or swanlab")
+        if self.group is None and self.output_dir is not None:
+            object.__setattr__(self, "group", Path(self.output_dir).parent.name)
         for name in ("swanlab_project", "group"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value.strip()):
                 raise ValueError(f"{name} must be null or a nonempty string")
-            if self.tracking == "swanlab" and value is None:
-                raise ValueError(f"online tracking requires an explicitly configured {name}")
+        if self.tracking == "swanlab" and self.swanlab_project is None:
+            raise ValueError("online tracking requires an explicitly configured swanlab_project")
         if not isinstance(self.tags, (list, tuple)) or any(
             not isinstance(tag, str) or ":" not in tag or not all(tag.split(":", 1)) for tag in self.tags
         ):

@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261106 11:46:11 Asia/Shanghai
+最后修订时间：20261107 11:39:43 Asia/Shanghai
 
 计算协议与数据格式见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256.json)中的基座与数据路径。
 
@@ -288,7 +288,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 | **SwanLab** | |
 | `--tracking` | SwanLab 记录方式，支持 `online` 或 `disabled`（默认，仅保存本地产物） |
 | `--swanlab-project` | SwanLab 项目，启用记录时显式指定 |
-| `--group` | SwanLab 实验分组，启用记录时显式指定 |
+| `--group` | SwanLab 实验分组，默认 `run_id` |
 | `--tag` | SwanLab 命名空间标签 |
 | **看板** | |
 | `--dashboard-run-dir` | 必填，指向运行根目录；仅需保留 `eval/` 目录结构 |
@@ -361,4 +361,4 @@ data/fineweb_20261104/
 - **评估结果**：各卡结果按原始样本顺序汇总；Test 的 `qa_nll` 先按题、再按文档平均，`token_nll` 按答案 token 加权，EM／F1 按题平均，benchmark 沿用官方汇总。评估续跑复用完整结果；未完成时保留逐文档／题目进度，可调整 GPU 数和评估批量，只重新分片、组批剩余样本。RULER 继续复用已完成长度。
 - **比较指纹**：Benchmark summary 的 `comparison_data` 按原始输入、参考答案、生成预算与任务生成，忽略执行顺序，RULER 按长度分组；仅供跨方法展示，不参与 `eval.json`、缓存或恢复校验。
 - **日志与状态**：日志同时写入文件和终端，评估输出带 GPU／分片前缀；任务 `status.json` 的 `eval_run` 指向运行根目录，`selected_checkpoints` 是本次调度范围，与计划 `checkpoints` 的累计范围区分。状态记录 checkpoint 与各分片的设备、命令、起止时间、返回码和错误，整体进度仅统计本轮选择。
-- **展示方式**：SwanLab 默认关闭；启用后记录 train/dev、训练资源及配置，project 与 group 须显式配置。`--tracking disabled` 仅保留本地产物，恢复训练沿用 `swanlab.json` 中的 run。评估由独立 dashboard 展示，不读取 SwanLab 身份或凭据。
+- **展示方式**：SwanLab 默认关闭；启用后记录 train/dev、训练资源及配置，project 须明确配置，group 未指定时默认 `run_id`。`--tracking disabled` 仅保留本地产物，恢复训练沿用 `swanlab.json` 中的 run。评估由独立 dashboard 展示，不读取 SwanLab 身份或凭据。

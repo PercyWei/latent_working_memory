@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261106 10:31:19 Asia/Shanghai
+最后修订时间：20261107 11:39:43 Asia/Shanghai
 
 [运行指南](scripts/README.md) · [预训练配置](../../../configs/v3_1_1/pretrain_default.json) · [后训练配置](../../../configs/v3_1_1/post_default.json) · [K256 预训练](../../../configs/v3_1_1/pretrain_k256.json) · [K256 后训练](../../../configs/v3_1_1/post_k256.json)
 
@@ -128,7 +128,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
 
 `--eval-run` 必填并指向运行根目录；评估的 `--checkpoint` 只填 `global_step_<N>` 名称，省略时新建选择当时全部完整 checkpoint。已有任务计划须显式用 `--evaluate-only --resume` 续评，同时提供原 `--eval-run`、`--eval-id` 和 `--eval-task`。续评省略 checkpoint 时使用累计列表，传入时仅调度指定项并将新项加入计划；数据、预算与 RULER 长度从原计划恢复，对应 CLI 设置忽略并提示。GPU 数和每卡批量可调整，已提交记录复用；修改协议须新 eval-id 或 `--overwrite` 重建当前任务。多个 checkpoint 按真实 step 串行，评估日志、状态和结果均保存本地，不依赖 SwanLab 凭据。
 
-默认 `training.tracking="disabled"`。启用 SwanLab 使用 `--tracking online --swanlab-project <已有项目> --group <实验系列>`，可重复 `--tag` 追加标签并去重；project 和 group 须明确配置。训练与 dev 共用一个 run，恢复沿用原云端身份，自动追加方法与阶段标签。具体超参数保存至 config。
+默认 `training.tracking="disabled"`。启用 SwanLab 使用 `--tracking online --swanlab-project <已有项目>`，project 须明确配置。group 未指定时默认 `run_id`，可通过 `--group <实验系列>` 覆盖；可重复 `--tag` 追加标签并去重。训练与 dev 共用一个 run，恢复沿用原云端身份，自动追加方法与阶段标签。具体超参数保存至 config。
 
 ```bash
 bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \

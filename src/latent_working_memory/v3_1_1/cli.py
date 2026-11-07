@@ -70,7 +70,7 @@ def parse_run_args(argv=None):
     parser.add_argument("--save-total-limit", type=positive_int)
     parser.add_argument("--tracking", choices=("online", "disabled"))
     parser.add_argument("--swanlab-project")
-    parser.add_argument("--group", help="显式指定实验系列，不根据目录推断")
+    parser.add_argument("--group", help="SwanLab 实验分组，默认 run_id")
     parser.add_argument("--tag", action="append", help="追加命名空间标签，可重复指定")
     parser.add_argument("--eval-task", choices=("test", "ruler", "locomo"), help="评估任务，默认 test")
     parser.add_argument("--eval-data", help="评估数据目录，新建或覆盖计划时必填")
