@@ -145,6 +145,9 @@ def compute_batch(samples, request, model, config, max_new_tokens, commit):
                 answer.update(qa_index=qa_index, question=qa.question, reference=qa.answer,
                               nll=nll_values[position], target_tokens=len(qa.target_ids),
                               **scores(prediction, qa.answer))
+                if qa.segment_id is not None:
+                    answer.update(segment_id=qa.segment_id,
+                                  segment_char_span=list(qa.segment_char_span))
                 row["qas"].append(answer)
             else:
                 row.update(answer, score=score_sample(task, sample, prediction))

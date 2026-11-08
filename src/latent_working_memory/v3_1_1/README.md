@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261107 11:39:43 Asia/Shanghai
+最后修订时间：20261108 11:25:17 Asia/Shanghai
 
 [运行指南](scripts/README.md) · [预训练配置](../../../configs/v3_1_1/pretrain_default.json) · [后训练配置](../../../configs/v3_1_1/post_default.json) · [K256 预训练](../../../configs/v3_1_1/pretrain_k256.json) · [K256 后训练](../../../configs/v3_1_1/post_k256.json)
 
@@ -14,9 +14,9 @@ train／dev 的长度筛选在预训练按完整样本 `text`、后训练按正�
 
 ### 单次压缩预训练
 
-`prepare` 读取原 FineWeb Multisegment 窗口，将 `text + continuation` 合并成完整原文，再按目标长度随机裁剪一条完整 `text`。预训练只读取准备后的 `train.jsonl`、`dev.jsonl`；每行仅包含八个字段：`trajectory_id`、`document_id`、`dedup_cluster`、`split`、`source`、`window_char_span`、`text`、`estimated_tokens`。其中 `source` 保留原来源信息，`window_char_span` 为原文中的绝对字符区间，`estimated_tokens = len(text) / 4`。
+`prepare-pre` 读取原 FineWeb Multisegment 窗口，将 `text + continuation` 合并成完整原文，再按目标长度随机裁剪一条完整 `text`。预训练只读取准备后的 `train.jsonl`、`dev.jsonl`；JSONL 每行仅为 `{"text":"完整预训练文本"}`。
 
-每条完整 `text` 是一个训练样本，先按其实际 token 数执行长度筛选，再依据 seed 和 `trajectory_id` 按概率选择 AE 或 LM，跨 epoch 固定，每个样本只计算所选目标：
+每条完整 `text` 是一个训练样本，先按其实际 token 数执行长度筛选，再依据 seed 和文本内容标识按概率选择 AE 或 LM，跨 epoch 固定，每个样本只计算所选目标：
 
 - AE 将完整 `text` 压缩为 K slots，并重建完整文本。
 - LM 以完整样本最后 `objective.lm_target_tokens` 个 tokens 为目标（默认 512），仅将前缀压缩为 K slots；若剩余前缀长度不大于 K，则改为 AE。
@@ -30,6 +30,14 @@ train／dev 的长度筛选在预训练按完整样本 `text`、后训练按正�
 ```json
 {"text":"完整正文","qas":[{"question":"问题","answer":"答案"}]}
 ```
+
+每题必填 `question`、`answer`，可成对附带 `segment_id` 和 `segment_char_span`，例如：
+
+```json
+{"text":"完整正文","qas":[{"question":"问题","answer":"答案","segment_id":"seg0","segment_char_span":[0,4]}]}
+```
+
+`prepare-post` 从 FineWeb FactQA 的 task 题池准备该格式，完整 `text` 逐字保留；按要保留的题数 N 将全文等分为 N 份，依次选择答案证据最靠近各份中心的 QA，每题最多选择一次，最后按证据在正文中的顺序输出。每条默认最多 10 题，少于上限时全保留，`null` 保留全部 task 题。段区间来自原段，使用相对当前 `text` 的左闭右开字符下标；这些属性仅用于来源和位置分析，不参与边界判断，评估结果与看板逐题保留展示。QASPER 的 question/answer 数据同样可读。完整命令见[后训练数据准备](scripts/README.md#22-后训练数据)。
 
 一篇文档及其固定 QA 集合是一个训练单位。同一文档采样 G 条完整硬分段；每条路径只压缩一次整篇正文，各题共享其记忆。各题先按答案 token 平均 NLL，再对题目、轨迹和文档等权平均；分布式归约按实际文档数计算。
 
@@ -62,17 +70,17 @@ loss = mean(QA_NLL_g) + policy_weight × GRPO_loss
 
 使用项目根目录 `.venv/`。`CUDA_VISIBLE_DEVICES` 决定训练与评估使用的全部 GPU，每卡一个进程。复用项目公共 runtime，其中多卡 CUDA 进程组由 verl 初始化；采样回放、损失归约和 optimizer 更新是本项目的训练循环。
 
-以下示例分别准备 train/dev，再使用 K256 配置执行预训练和后训练。`--prepare-data` 必须指向标准命名的 `train.jsonl` 或 `dev.jsonl`，由输入文件名确定来源 split，输出保留该 split。每次只读取指定文件，先合并每条原始记录的 `text + continuation`，按完整原文的 `floor(len / 4)` 统计估算长度与可用容量；请求范围夹取到该 split 合并原文的最短、最长长度之间，必填上下限可用正整数或 `null`。本例使用来源最短长度为下界，上界最多 4096。训练阶段仍按 tokenizer 的实际 token 数执行长度筛选。
+以下示例分别准备 train/dev，再使用 K256 配置执行预训练和后训练。`--prepare-data` 指定来源 JSONL 文件，每次只读取该文件，先合并每条原始记录的 `text + continuation`，按完整原文的 `floor(len / 4)` 统计估算长度与可用容量；请求范围夹取到该文件合并原文的最短、最长长度之间，`--min-tokens`、`--max-tokens` 接受正整数或 `null`，默认 `null` 时采用对应来源边界。本例使用来源最短长度为下界，上界最多 4096。训练阶段仍按 tokenizer 的实际 token 数执行长度筛选。
 
-`--target-samples` 指定目标生成数据数量：正整数指定生成条数，超过可用数量时报错；`null`（默认）不设构造数量上限，使用满足长度条件的全部数据。默认分 10 个长度区间，整数长度不足时减少；`uniform` 为各区间设置等配额、尽量均衡，`random` 逐样本等概率选择区间，两者均在区间内随机选择整数长度。内部固定 seed 为 42，从合并原文随机裁出一条完整 `text`，准备长度范围约束整条输出文本；AE／LM 的输入与目标由训练阶段划分。数据写入 `--output-file` 指定文件，元信息保存为同目录的 `preparation-{split}.json`；不同 split 可独立配置，输出文件已存在时直接报错。完整流程见[离线数据准备](scripts/README.md#2-离线数据准备)。
+`--target-samples` 指定目标生成数据数量：正整数指定生成条数，超过可用数量时报错；`null`（默认）不设构造数量上限，使用满足长度条件的全部数据。默认分 10 个长度区间，整数长度不足时减少；`uniform` 为各区间设置等配额、尽量均衡，`random` 逐样本等概率选择区间，两者均在区间内随机选择整数长度。随机种子可通过 `--seed` 设置，默认 42，从合并原文随机裁出一条完整 `text`，准备长度范围约束整条输出文本；AE／LM 的输入与目标由训练阶段划分。数据写入 `--output-file`，已存在时报错；同目录的元信息按输出文件名命名，例如 `train.jsonl` 对应 `preparation-train.json`。完整流程见[离线数据准备](scripts/README.md#2-离线数据准备)。
 
 ```bash
 for split in train dev; do
-  bash src/latent_working_memory/v3_1_1/scripts/run.sh prepare \
+  bash src/latent_working_memory/v3_1_1/scripts/run.sh prepare-pre \
     --prepare-data "data/fineweb-multisegment-k512-seg1to3x_train32k_20261008/${split}.jsonl" \
     --output-file "data/fineweb-4096-docall_20261104/${split}.jsonl" \
+    --seed 42 \
     --target-samples null \
-    --min-tokens null \
     --max-tokens 4096 \
     --length-bins 10 \
     --length-distribution uniform
@@ -143,8 +151,8 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 ```text
 v3_1_1/
   config.py / cli.py       typed 配置与显式 CLI 覆盖
-  prepare.py              长度分层的完整样本裁剪
-  records.py              完整预训练样本的数据契约
+  prepare_pre.py          长度分层的完整样本裁剪
+  prepare_post.py         完整正文与固定位置 QA 选择
   data.py                 单次 AE／LM 与完整文档 QA
   modeling/               压缩器、边界模块和流式状态
   rollout.py / objective.py

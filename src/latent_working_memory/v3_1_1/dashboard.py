@@ -317,6 +317,10 @@ def _details(records, key):
                     references = answer["references"]
                 st.caption(f"{quality} · {answer['generated_tokens']}/{answer['max_new_tokens']} generated tokens · "
                            f"{answer['stop_reason']}")
+                if summary["task"] == "test" and "segment_id" in answer:
+                    segment_start, segment_end = answer["segment_char_span"]
+                    st.caption(f"来源段 {answer['segment_id']} · 完整正文字符区间 "
+                               f"[{segment_start}, {segment_end})")
                 if answer["question"]:
                     st.write(answer["question"])
                 st.write("参考答案：" + " / ".join(references))

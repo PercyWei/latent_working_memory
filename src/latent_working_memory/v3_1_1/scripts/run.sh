@@ -2,7 +2,8 @@
 set -euo pipefail
 
 case "${1:-}" in
-  prepare) module="latent_working_memory.v3_1_1.prepare"; shift ;;
+  prepare-pre) module="latent_working_memory.v3_1_1.prepare_pre"; shift ;;
+  prepare-post) module="latent_working_memory.v3_1_1.prepare_post"; shift ;;
   *) module="latent_working_memory.v3_1_1.training.run" ;;
 esac
 

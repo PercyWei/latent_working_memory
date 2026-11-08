@@ -7,7 +7,6 @@ from pathlib import Path
 import random
 
 from latent_working_memory.v4_1.data import EpisodeEncoder, document_id
-from .records import PreparedPretrainSample
 
 AE_PROMPT = "Reconstruct the original text:\n"
 LM_PROMPT = "Continue the text:\n"
@@ -29,6 +28,8 @@ class QA:
     answer: str
     prompt_ids: tuple[int, ...]
     target_ids: tuple[int, ...]
+    segment_id: str | None = None
+    segment_char_span: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -119,28 +120,27 @@ def load_pretraining(settings, tokenizer, split):
         "ae": tuple(tokenizer.encode(AE_PROMPT, add_special_tokens=False)),
         "lm": tuple(tokenizer.encode(LM_PROMPT, add_special_tokens=False)),
     }
-    examples, seen, raw_documents, raw_texts, clusters = [], set(), set(), set(), set()
-    filtered, short_lm_inputs = 0, 0
+    examples, raw_documents = [], set()
+    raw_samples, filtered, short_lm_inputs = 0, 0, 0
     with path.open(encoding="utf-8") as stream:
         for line_number, line in enumerate(stream, 1):
             try:
-                sample = PreparedPretrainSample(**json.loads(line))
-                if sample.split != split:
-                    raise ValueError("record split differs from the requested split")
-                if sample.trajectory_id in seen:
-                    raise ValueError("duplicate trajectory_id")
-                seen.add(sample.trajectory_id)
-                raw_documents.add(sample.document_id)
-                raw_texts.add(document_id(sample.text))
-                clusters.add(sample.dedup_cluster)
-                full_ids = tuple(tokenizer.encode(sample.text, add_special_tokens=False))
+                row = json.loads(line)
+                if not isinstance(row, dict) or set(row) != {"text"}:
+                    raise ValueError("expected exactly text")
+                if not isinstance(row["text"], str) or not row["text"].strip():
+                    raise ValueError("text must be a nonempty string")
+                doc_id = document_id(row["text"])
+                raw_documents.add(doc_id)
+                raw_samples += 1
+                full_ids = tuple(tokenizer.encode(row["text"], add_special_tokens=False))
                 if len(full_ids) <= settings.model.memory_slots or (
                     split == "train" and data.max_train_data_tokens is not None
                     and len(full_ids) > data.max_train_data_tokens
                 ):
                     filtered += 1
                     continue
-                rng = random.Random(f"{seed}:pretraining:{sample.trajectory_id}")
+                rng = random.Random(f"{seed}:pretraining:{doc_id}")
                 task = "lm" if rng.random() < objective.lm_ratio else "ae"
                 inputs = target = full_ids
                 if task == "lm":
@@ -151,7 +151,7 @@ def load_pretraining(settings, tokenizer, split):
                         inputs = full_ids[:-objective.lm_target_tokens]
                         target = full_ids[-objective.lm_target_tokens:]
                 examples.append(PretrainExample(
-                    f"{sample.trajectory_id}:{task}", sample.document_id, inputs,
+                    f"{doc_id}:{line_number}:{task}", doc_id, inputs,
                     (*target, tokenizer.eos_token_id), task, prompts[task],
                 ))
             except (ValueError, KeyError, TypeError) as error:
@@ -159,10 +159,10 @@ def load_pretraining(settings, tokenizer, split):
                 raise
     examples = _select(examples, maximum, seed, split, allow_empty=split == "dev")
     metadata = _metadata(
-        path, split, examples, raw_documents, raw_texts, filtered, maximum, seed,
+        path, split, examples, raw_documents, raw_documents, filtered, maximum, seed,
     )
     metadata.update({
-        "raw_windows": len(seen), "raw_dedup_clusters": sorted(clusters),
+        "raw_samples": raw_samples,
         "lm_to_ae_sources": short_lm_inputs,
         "ae_samples": sum(row.task == "ae" for row in examples.values()),
         "lm_samples": sum(row.task == "lm" for row in examples.values()),
@@ -191,13 +191,33 @@ def _load_documents(directory, tokenizer, split, minimum, upper, maximum, seed, 
                 raw_documents.add(identifier)
                 qas = []
                 for qa in row["qas"]:
-                    if not isinstance(qa, dict) or set(qa) != {"question", "answer"}:
-                        raise ValueError("QA must contain exactly question and answer")
-                    if any(not isinstance(value, str) or not value.strip() for value in qa.values()):
+                    if not isinstance(qa, dict) or set(qa) not in (
+                        {"question", "answer"},
+                        {"question", "answer", "segment_id", "segment_char_span"},
+                    ):
+                        raise ValueError(
+                            "QA requires question and answer; segment_id and segment_char_span "
+                            "must be supplied together, with no other fields"
+                        )
+                    if any(not isinstance(qa[name], str) or not qa[name].strip()
+                           for name in ("question", "answer")):
                         raise ValueError("question and answer must be nonempty strings")
+                    segment_id = qa.get("segment_id")
+                    segment_span = qa.get("segment_char_span")
+                    if "segment_id" in qa:
+                        if not isinstance(segment_id, str) or not segment_id.strip():
+                            raise ValueError("segment_id must be a nonempty string")
+                        if (not isinstance(segment_span, list) or len(segment_span) != 2
+                            or any(type(position) is not int for position in segment_span)
+                            or not 0 <= segment_span[0] < segment_span[1] <= len(row["text"])):
+                            raise ValueError(
+                                "segment_char_span must contain two integer character positions "
+                                "within the complete text"
+                            )
+                        segment_span = tuple(segment_span)
                     qas.append(QA(
                         qa["question"], qa["answer"], encoder.question(qa["question"]),
-                        encoder.target(qa["answer"]),
+                        encoder.target(qa["answer"]), segment_id, segment_span,
                     ))
                 raw_qas += len(qas)
                 body_length = len(tokenizer.encode(row["text"], add_special_tokens=False))
