@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261101 23:06:31 Asia/Shanghai
+最后修订时间：20261108 19:04:00 Asia/Shanghai
 
 本目录提供 RULER 与 LoCoMo 的公共数据准备、读取和评分，供不同方法及 full-context 基线共用。
 
@@ -16,7 +16,7 @@
 - 以下指令从项目根目录执行；数据下载和 RULER 样本生成由用户手动运行。
 - RULER 保留官方 `input`、`outputs` 等字段；LoCoMo 保留官方完整 JSON，不转换为训练用的 `{text,qas}`。
 - 评估采用 greedy 生成，参考答案只用于评分；模型与记忆机制由各方法的评估入口管理。
-- 输入只应用一次 Qwen chat template，关闭 thinking；不套用训练数据的长度筛选，不截断 benchmark 内容。
+- 本项目 Instruct 模型的输入只应用一次 Qwen chat template，关闭 thinking；不套用训练数据的长度筛选，不截断 benchmark 内容。TTT baselines 的 base 续写协议及任务范围另见 [RULER 数据构造](../../../reproductions/20261108_ttt_ruler_data.md)。
 - RULER 按任务使用官方生成预算：NIAH 128、VT 30、CWE 120、FWE 50、QA 32 tokens。LoCoMo 为 50 tokens。
 - LoCoMo 按 session 时间顺序保留日期、说话人、正文和 `blip_caption`；不同问题不继承之前生成的答案。类别 1–4 分别为 multi-hop、temporal、open-domain、single-hop；不评估 adversarial 类别 5。
 
@@ -67,7 +67,7 @@ data/
 
 **RULER 样本生成：[generate_ruler.sh](scripts/generate_ruler.sh)**
 
-- 使用上述已下载素材，调用官方生成器构造全部 13 项任务；仅加载 tokenizer，在 CPU 上控制文本长度。
+- 使用上述已下载素材，默认调用官方生成器构造全部 13 项任务；仅加载 tokenizer，在 CPU 上控制文本长度。
 
 ```bash
 bash src/latent_working_memory/benchmarks/scripts/generate_ruler.sh \
@@ -81,15 +81,19 @@ bash src/latent_working_memory/benchmarks/scripts/generate_ruler.sh \
 | `--ruler-source-dir` | 已下载的 RULER 源码及素材目录，默认 `data/raw/ruler-v1-source` |
 | `--output-dir` | 默认 `data/benchmarks/ruler-v1/<model-name>`；显式指定时直接使用该目录，不附加模型名 |
 | `--model-path` | 与训练一致的 tokenizer 来源；本地路径或 HF repo ID，默认 `~/models/Qwen3-4B-Instruct-2507` |
+| `--prompt-format` | `chat`（默认）应用现有 Qwen 聊天协议；`base` 使用原始文本与 `answer_prefix`，按默认 special tokens 预留 BOS 等开销 |
+| `--tasks` | 空格分隔的 RULER 任务名称；默认全部 13 项 |
 | `--lengths` | 空格分隔的长度列表，默认 `8192 16384 32768` |
+| `--tokens-to-generate` | 可选，统一覆盖各任务的生成预算；默认沿用官方任务预算 |
 | `--num-samples` | 每个长度、每项任务的样本数，默认 `100` |
 | `--seed` | 样本生成的随机种子，默认 `42` |
 
 - `<model-name>` 取 `--model-path` 去掉尾部斜杠后的最后一级目录名或 HF 仓库名，默认 `Qwen3-4B-Instruct-2507`；不同模型自动使用各自目录，原始素材共享。
 - 相对目录以项目根目录为准；路径含空格时加双引号。更换下载目录时，生成阶段须传入相同的 `--ruler-source-dir`。
 - 已有 RULER 长度目录拒绝覆盖，包括失败生成留下的目录；重试前将失败的长度目录移出输出目录，或指定新的 `--output-dir`。同一模型修改长度、样本数或 seed 等设置并需重建已有长度时，用新的 `--output-dir` 保存样本。
-- RULER 的 `<length>` 表示完整输入与该任务生成预算的总长度上限；脚本预留 chat template 开销，官方生成器另行预留输出预算。
-- 官方生成器将 `answer_prefix` 单独保存；评估只读取 `input`，不拼回该前缀。多值／多 query 任务保持一条输入、一次回答。
+- RULER 的 `<length>` 表示完整输入与该任务生成预算的总长度上限；`chat` 模式预留聊天包装开销，`base` 模式预留编码时的 special tokens，任务生成器另行预留输出预算。
+- 官方生成器将 `answer_prefix` 单独保存；本项目现有聊天评估只读取 `input`，不拼回该前缀。`base` 评估须将 `input + answer_prefix` 编码为完整输入。多值／多 query 任务保持一条输入、一次回答。
+- `base` 模式的 NIAH 使用 [本地 NVIDIA 生成器副本](vendor/ruler_niah.py)，修正 512-token essay 无法缩短到 500 词以下及超长重试不退出的问题；原始素材不变，其他任务继续使用下载的官方生成器。
 - 同一模型的比较方法应使用同一批生成样本。评估自定义位置时，`--benchmark-data` 指向 RULER 的 `--output-dir` 或 LoCoMo 的 `<data-root>/locomo`。
 - 完整生成参数执行 `bash src/latent_working_memory/benchmarks/scripts/generate_ruler.sh --help` 查看；下载参数见上表。
 
