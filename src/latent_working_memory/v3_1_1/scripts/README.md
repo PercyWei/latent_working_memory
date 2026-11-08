@@ -39,8 +39,9 @@ bash src/latent_working_memory/v3_1_1/scripts/run.sh --help
 ```bash
 bash src/latent_working_memory/v3_1_1/scripts/run.sh prepare-pre \
   --prepare-data data/fineweb-multisegment-k512-seg1to3x_train32k_20261008/train.jsonl \
-  --output-file data/fineweb_20261104/train.jsonl \
-  --target-samples null \
+  --output-file data/fineweb_train5k_20261108/train.jsonl \
+  --target-samples 5000 \
+  --min-tokens null \
   --max-tokens 4096 \
   --length-bins 10 \
   --length-distribution uniform \
@@ -56,8 +57,10 @@ bash src/latent_working_memory/v3_1_1/scripts/run.sh prepare-pre \
 ```bash
 bash src/latent_working_memory/v3_1_1/scripts/run.sh prepare-post \
   --prepare-data data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008/train.jsonl \
-  --output-file data/fineweb-factqa_q10_train1000_20261107/train.jsonl \
+  --output-file data/fineweb-factqa_q10_train1k_20261108/train.jsonl \
   --target-samples null \
+  --min-tokens null \
+  --max-tokens null \
   --qas-per-sample 10 \
   --seed 42
 ```
