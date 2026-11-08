@@ -28,7 +28,7 @@
     "advantage_epsilon": 1e-06
   },
   "training": {
-    "dataset_dir": "data/fineweb_train5k_20261107",
+    "dataset_dir": "data/fineweb_train5k_20261108",
     "max_train_data_tokens": null,
     "max_train_samples": null,
     "max_dev_samples": null,
@@ -46,7 +46,7 @@
     "beta1": 0.9,
     "beta2": 0.999,
     "adam_epsilon": 1e-08,
-    "warmup_steps": 50,
+    "warmup_steps": 20,
     "min_lr_ratio": 0.1,
     "gradient_clip": 1.0,
     "dev_every": 20,

@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261108 11:25:17 Asia/Shanghai
+最后修订时间：20261108 15:39:45 Asia/Shanghai
 
 计算协议与数据格式见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256.json)中的基座与数据路径。
 
@@ -21,9 +21,11 @@ bash src/latent_working_memory/v3_1_1/scripts/run.sh --help
 
 | 内容 | 路径 |
 |---|---|
-| 基座与 tokenizer | `~/models/Qwen3-4B-Instruct-2507` |
+| 基座与 tokenizer | `/root/rivermind-data/models/Qwen3-4B-Instruct-2507` |
 | AE / LM 数据来源 | `data/fineweb-multisegment-k512-seg1to3x_train32k_20261008/{train,dev,test}.jsonl` |
 | QA 数据来源 | `data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008/{train,dev,test}.jsonl` |
+| 预训练数据 | `data/fineweb_train5k_20261108/{train,dev}.jsonl` |
+| 后训练数据 | `data/fineweb-factqa_q10_train1k_20261108/{train,dev}.jsonl` |
 | 产物父目录 | `artifacts/v3-1` |
 
 运行目录与各阶段产物见 [第 7 节](#7-产物目录与记录)。
@@ -74,6 +76,7 @@ bash src/latent_working_memory/v3_1_1/scripts/run.sh prepare-post \
 新训练必须同时指定阶段 `--stage` 和配置文件 `--config`，配置中的 `stage` 必须与 `--stage` 一致。两阶段共用以下运行规则：
 
 - **配置覆盖**：显式 CLI 参数覆盖 JSON；模型结构和记忆更新设置直接修改 JSON，参数说明见[第 5 节](#5-调整参数)。
+- **K256 配置**：两阶段使用上述同一基座及各自数据目录；预训练／后训练的 `warmup_steps` 分别为 20／5，均每 20 个 optimizer steps 验证和保存。预训练不设实际 token 数上限，后训练上限为 12288；准备阶段的 4096 是字符估算长度上限。
 - **训练批量**：`--micro-batch-size-per-gpu` 控制每卡 microbatch 的样本数；全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数。预训练按窗口、后训练按文档计数；两阶段示例均为 `2 × 2 × 4 = 16`。
 - **执行流程**：先保存训练计划，再执行训练、dev 与 checkpoint 保存。
 - **覆盖训练**：追加 `--overwrite` 会清理本次 `run-id` 对应的整个 run，包括计划、训练和评估结果，再保存新计划重新训练；云端历史保留。
@@ -84,7 +87,6 @@ bash src/latent_working_memory/v3_1_1/scripts/run.sh prepare-post \
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
   --stage pretrain \
   --config configs/v3_1_1/pretrain_k256.json \
-  --train-data data/fineweb_20261104 \
   --run-id pretrain_k256_20261104 \
   --epochs 1 \
   --micro-batch-size-per-gpu 2 \
@@ -102,7 +104,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
   --stage post \
   --config configs/v3_1_1/post_k256.json \
   --run-id post_k256_20261104 \
-  --init-checkpoint 'artifacts/v3-1-1/pretrain_k256_20261104/train/checkpoints/global_step_<N>' \
+  --init-checkpoint 'artifacts/v3-1/pretrain_k256_20261104/train/checkpoints/global_step_<N>' \
   --epochs 1 \
   --micro-batch-size-per-gpu 2 \
   --gradient-accumulation-steps 4
@@ -119,7 +121,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
   --resume \
-  --checkpoint 'artifacts/v3-1-1/pretrain_k256_20261104/train/checkpoints/global_step_<N>'
+  --checkpoint 'artifacts/v3-1/pretrain_k256_20261104/train/checkpoints/global_step_<N>'
 ```
 
 - **恢复起点**：仅接受当前 run 最新的完整 checkpoint。
@@ -139,7 +141,7 @@ Test、LoCoMo 和 RULER 共用独立评估入口，仅接受后训练 checkpoint
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
   --evaluate-only \
-  --eval-run 'artifacts/v3-1-1/post_k256_20261104' \
+  --eval-run 'artifacts/v3-1/post_k256_20261104' \
   --eval-id standard_20261104 \
   --eval-task test \
   --eval-data 'data/delta-mem-qasper' \
@@ -170,7 +172,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
 CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
   --evaluate-only \
   --resume \
-  --eval-run 'artifacts/v3-1-1/post_k256_20261104' \
+  --eval-run 'artifacts/v3-1/post_k256_20261104' \
   --eval-id standard_20261104 \
   --eval-task test \
   --checkpoint global_step_50 global_step_75 \
@@ -205,7 +207,7 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
 
 ```bash
 bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
-  --dashboard-run-dir artifacts/v3-1-1/post_k256_20261104 \
+  --dashboard-run-dir artifacts/v3-1/post_k256_20261104 \
   --dashboard-eval-id standard_20261104 \
   --dashboard-baselines \
     full-context artifacts/baselines/full-context/qwen3-4b-inst-2507_20261019/eval
@@ -244,7 +246,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 
 ## 5. 调整参数
 
-本节汇总训练、恢复、独立评估、离线准备与看板的公开参数。训练默认值以[预训练配置](../../../../configs/v3_1_1/pretrain_default.json)和[后训练配置](../../../../configs/v3_1_1/post_default.json)为准：新训练的显式 CLI 值在校验前覆盖 JSON，省略时沿用配置。模型结构、方法目标及优化器设置直接修改 JSON，见[方法说明](../README.md)。本文示例改用 K256 配置，预训练完整样本上限为 4096；`*_default.json` 保留 K128 设置。
+本节汇总训练、恢复、独立评估、离线准备与看板的公开参数。训练默认值以[预训练配置](../../../../configs/v3_1_1/pretrain_default.json)和[后训练配置](../../../../configs/v3_1_1/post_default.json)为准：新训练的显式 CLI 值在校验前覆盖 JSON，省略时沿用配置。模型结构、方法目标及优化器设置直接修改 JSON，见[方法说明](../README.md)。本文示例改用 K256 配置：准备阶段上限为估算 4096 tokens，预训练不设实际 token 数上限，后训练上限为 12288；`*_default.json` 保留 K128 设置。
 
 ### 5.1 训练输入与执行预算
 
@@ -261,7 +263,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 | `--seed` | 训练与离线准备的非负随机种子，默认 42 |
 | `--init-checkpoint` | 后训练初始化所用的预训练 checkpoint，后训练新 run 必填 |
 | **目录与运行标识** | |
-| `--output-root` | 训练产物父目录，默认 `artifacts/v3-1-1` |
+| `--output-root` | 训练产物父目录，默认 `artifacts/v3-1` |
 | `--run-id` | 训练运行目录名，默认见[目录命名](#7-产物目录与记录) |
 | **离线数据准备** | |
 | `--prepare-data` | 来源 JSONL 文件，离线数据准备时（`prepare-pre` 或 `prepare-post`）必填 |
@@ -275,7 +277,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 | **数据集与筛选** | |
 | `--train-data` | 训练与 dev 验证的数据目录，默认使用配置的 `training.dataset_dir` |
 | `--max-train-samples` | 训练样本数上限，默认 `null`（全部） |
-| `--max-train-data-tokens` | 预训练完整样本／后训练正文的实际 token 数上限，默认 12288；K256 预训练示例为 4096 |
+| `--max-train-data-tokens` | 预训练完整样本／后训练正文的实际 token 数上限，K128 默认 12288；K256 预训练为 `null`，后训练为 12288 |
 | **训练时长** | |
 | `--epochs` | 训练轮数，默认 1 |
 | **批处理** | |

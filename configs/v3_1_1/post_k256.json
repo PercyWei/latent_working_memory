@@ -2,7 +2,7 @@
   "stage": "post",
   "seed": 42,
   "model": {
-    "model_name_or_path": "~/models/Qwen3-4B-Instruct-2507",
+    "model_name_or_path": "/root/rivermind-data/models/Qwen3-4B-Instruct-2507",
     "dtype": "bfloat16",
     "attention_implementation": "sdpa",
     "gradient_checkpointing": true,
@@ -28,7 +28,7 @@
     "advantage_epsilon": 1e-06
   },
   "training": {
-    "dataset_dir": "data/delta-mem-qasper",
+    "dataset_dir": "data/fineweb-factqa_q10_train1k_20261108",
     "max_train_data_tokens": 12288,
     "max_train_samples": null,
     "max_dev_samples": null,
@@ -46,11 +46,11 @@
     "beta1": 0.9,
     "beta2": 0.999,
     "adam_epsilon": 1e-08,
-    "warmup_steps": 50,
+    "warmup_steps": 5,
     "min_lr_ratio": 0.1,
     "gradient_clip": 1.0,
-    "dev_every": 100,
-    "save_every": 100,
+    "dev_every": 20,
+    "save_every": 20,
     "save_total_limit": 5,
     "tracking": "swanlab",
     "swanlab_project": "latent-working-memory-v3.1",
