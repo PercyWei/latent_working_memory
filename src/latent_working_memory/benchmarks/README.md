@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261108 19:04:00 Asia/Shanghai
+最后修订时间：20261109 00:01:38 Asia/Shanghai
 
 本目录提供 RULER 与 LoCoMo 的公共数据准备、读取和评分，供不同方法及 full-context 基线共用。
 
@@ -16,7 +16,7 @@
 - 以下指令从项目根目录执行；数据下载和 RULER 样本生成由用户手动运行。
 - RULER 保留官方 `input`、`outputs` 等字段；LoCoMo 保留官方完整 JSON，不转换为训练用的 `{text,qas}`。
 - 评估采用 greedy 生成，参考答案只用于评分；模型与记忆机制由各方法的评估入口管理。
-- 本项目 Instruct 模型的输入只应用一次 Qwen chat template，关闭 thinking；不套用训练数据的长度筛选，不截断 benchmark 内容。TTT baselines 的 base 续写协议及任务范围另见 [RULER 数据构造](../../../reproductions/20261108_ttt_ruler_data.md)。
+- 本项目 Instruct 模型的输入只应用一次 Qwen chat template，关闭 thinking；不套用训练数据的长度筛选，不截断 benchmark 内容。TTT baselines 的 base 续写协议及任务范围另见 [评估数据准备](../../../reproductions/20261108_ttt_data_preparation.md)。
 - RULER 按任务使用官方生成预算：NIAH 128、VT 30、CWE 120、FWE 50、QA 32 tokens。LoCoMo 为 50 tokens。
 - LoCoMo 按 session 时间顺序保留日期、说话人、正文和 `blip_caption`；不同问题不继承之前生成的答案。类别 1–4 分别为 multi-hop、temporal、open-domain、single-hop；不评估 adversarial 类别 5。
 
