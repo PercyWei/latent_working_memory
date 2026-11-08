@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261108 15:39:45 Asia/Shanghai
+最后修订时间：20261108 15:52:29 Asia/Shanghai
 
 [运行指南](scripts/README.md) · [预训练配置](../../../configs/v3_1_1/pretrain_default.json) · [后训练配置](../../../configs/v3_1_1/post_default.json) · [K256 预训练](../../../configs/v3_1_1/pretrain_k256.json) · [K256 后训练](../../../configs/v3_1_1/post_k256.json)
 
@@ -68,7 +68,7 @@ loss = mean(QA_NLL_g) + policy_weight × GRPO_loss
 
 新训练必须同时指定阶段（`--stage pretrain` 或 `--stage post`）和配置文件（`--config <配置路径>`），配置中的 `stage` 必须与 `--stage` 一致。训练恢复从原计划读取全部实验设置，其他已知 CLI 实验设置忽略并集中提示；独立评估从 checkpoint 读取模型与方法设置。
 
-运行根目录为 `<output_root>/<run_id>/`，显式 `run_id` 原样作为目录名。`training.run_id` 为 `null` 或省略时，按阶段生成 `pretrain_k{memory_slots}_{YYYYMMDD-HHMM}` 或 `post_k{memory_slots}_{YYYYMMDD-HHMM}`；时间使用 `Asia/Shanghai`，精确到分钟。最终解析的 `run_id` 写入计划与配置，恢复训练沿用原目录。
+运行根目录为 `<output_root>/<run_id>/`，显式 `run_id` 原样作为目录名。`training.run_id` 为 `null` 或省略时，按阶段生成 `pretrain_k{memory_slots}_{YYYYMMDD-HHMM}` 或 `policy-post_k{memory_slots}_{YYYYMMDD-HHMM}`；时间使用 `Asia/Shanghai`，精确到分钟。最终解析的 `run_id` 写入计划与配置，恢复训练沿用原目录。
 
 使用项目根目录 `.venv/`。`CUDA_VISIBLE_DEVICES` 决定训练与评估使用的全部 GPU，每卡一个进程。复用项目公共 runtime，其中多卡 CUDA 进程组由 verl 初始化；采样回放、损失归约和 optimizer 更新是本项目的训练循环。
 
@@ -106,7 +106,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
   --stage post \
   --config configs/v3_1_1/post_k256.json \
-  --run-id post_k256_20261104 \
+  --run-id policy-post_k256_20261104 \
   --init-checkpoint 'artifacts/v3-1/pretrain_k256_20261104/train/checkpoints/global_step_<N>' \
   --micro-batch-size-per-gpu 2 \
   --gradient-accumulation-steps 4
@@ -125,7 +125,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
   --evaluate-only \
-  --eval-run artifacts/v3-1/post_k256_20261104 \
+  --eval-run artifacts/v3-1/policy-post_k256_20261104 \
   --eval-id standard_20261104 --eval-task test \
   --eval-data data/delta-mem-qasper --max-new-tokens 128 \
   --checkpoint 'global_step_<N>' \
@@ -140,7 +140,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
 
 ```bash
 bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
-  --dashboard-run-dir artifacts/v3-1/post_k256_20261104 \
+  --dashboard-run-dir artifacts/v3-1/policy-post_k256_20261104 \
   --dashboard-eval-id standard_20261104
 ```
 

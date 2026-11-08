@@ -52,7 +52,10 @@ def parse_run_args(argv=None):
                         help="新训练必填，选择 pretrain 或 post；恢复与评估从 checkpoint 读取")
     parser.add_argument("--config", help="新训练必填，指定基础 JSON 配置；恢复与评估从 checkpoint 读取")
     parser.add_argument("--output-root", help="实验产物父目录")
-    parser.add_argument("--run-id", help="运行目录名，默认 {stage}_k{memory_slots}_{YYYYMMDD-HHMM}，时间采用 Asia/Shanghai")
+    parser.add_argument("--run-id", help=(
+        "运行目录名，显式值原样使用；预训练默认 pretrain_k{memory_slots}_{YYYYMMDD-HHMM}，"
+        "后训练默认 policy-post_k{memory_slots}_{YYYYMMDD-HHMM}，时间采用 Asia/Shanghai"
+    ))
     parser.add_argument("--checkpoint", nargs="+",
                         help="训练恢复用单个路径；评估可选 global_step_<N> 名称列表，续跑可补入计划")
     parser.add_argument("--eval-run", help="独立评估必填，指定包含 train/、plan/ 与 eval/ 的运行根目录")

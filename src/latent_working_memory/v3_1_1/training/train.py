@@ -31,7 +31,8 @@ def _training_output_dir(config, checkpoint):
     run_id = config.training.run_id
     if run_id is None:
         timestamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M")
-        run_id = f"{config.stage}_k{config.model.memory_slots}_{timestamp}"
+        prefix = "policy-post" if config.stage == "post" else "pretrain"
+        run_id = f"{prefix}_k{config.model.memory_slots}_{timestamp}"
     return Path(config.training.output_root).expanduser().resolve() / run_id / "train"
 
 

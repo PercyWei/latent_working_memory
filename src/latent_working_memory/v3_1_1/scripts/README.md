@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261108 15:39:45 Asia/Shanghai
+最后修订时间：20261108 15:52:29 Asia/Shanghai
 
 计算协议与数据格式见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256.json)中的基座与数据路径。
 
@@ -103,14 +103,14 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
   --stage post \
   --config configs/v3_1_1/post_k256.json \
-  --run-id post_k256_20261104 \
+  --run-id policy-post_k256_20261104 \
   --init-checkpoint 'artifacts/v3-1/pretrain_k256_20261104/train/checkpoints/global_step_<N>' \
   --epochs 1 \
   --micro-batch-size-per-gpu 2 \
   --gradient-accumulation-steps 4
 ```
 
-- **运行目录**：`run_id` 默认为 `post_k{memory_slots}_{YYYYMMDD-HHMM}`，其中 `memory_slots` 取自 `model.memory_slots`。
+- **运行目录**：`run_id` 默认为 `policy-post_k{memory_slots}_{YYYYMMDD-HHMM}`，其中 `memory_slots` 取自 `model.memory_slots`。
 - **初始化**：后训练需通过 `--init-checkpoint` 指定预训练来源。源 checkpoint 阶段须为 `pretrain`，两阶段 `model` 配置一致。新 run 只继承压缩器，重新创建边界模块、optimizer、scheduler、游标和边界随机流。实际来源随训练记录保存。
 - **训练单位**：每行一篇文档及其全部 QA。一篇文档采样 G 条完整硬分段，每条路径共享 memory 评价同一套 QA；G 不计入全局 batch。
 - **一次联合更新**：固定参数采样评价，按记录动作带梯度回放，累计整批后更新一次；下一批刷新轨迹。QA 损失训练记忆内容，停止梯度后的组内优势训练边界选择。
@@ -141,7 +141,7 @@ Test、LoCoMo 和 RULER 共用独立评估入口，仅接受后训练 checkpoint
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
   --evaluate-only \
-  --eval-run 'artifacts/v3-1/post_k256_20261104' \
+  --eval-run 'artifacts/v3-1/policy-post_k256_20261104' \
   --eval-id standard_20261104 \
   --eval-task test \
   --eval-data 'data/delta-mem-qasper' \
@@ -172,7 +172,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
 CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
   --evaluate-only \
   --resume \
-  --eval-run 'artifacts/v3-1/post_k256_20261104' \
+  --eval-run 'artifacts/v3-1/policy-post_k256_20261104' \
   --eval-id standard_20261104 \
   --eval-task test \
   --checkpoint global_step_50 global_step_75 \
@@ -207,7 +207,7 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
 
 ```bash
 bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
-  --dashboard-run-dir artifacts/v3-1/post_k256_20261104 \
+  --dashboard-run-dir artifacts/v3-1/policy-post_k256_20261104 \
   --dashboard-eval-id standard_20261104 \
   --dashboard-baselines \
     full-context artifacts/baselines/full-context/qwen3-4b-inst-2507_20261019/eval
@@ -367,7 +367,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
             └── lengths/<长度>/               RULER 各长度的评估结果
 ```
 
-- **目录命名**：完整训练路径为 `<output_root>/<run_id>/train`。`run_id` 默认为 `pretrain_k{memory_slots}_{YYYYMMDD-HHMM}`（预训练）或 `post_k{memory_slots}_{YYYYMMDD-HHMM}`（后训练），时间戳采用 `Asia/Shanghai` 时区、精确到分钟。显式指定的 `run_id` 原样作为目录名。新训练默认拒绝覆盖已有计划或产物，显式 `--overwrite` 才清理并重建；恢复训练沿用原目录。
+- **目录命名**：完整训练路径为 `<output_root>/<run_id>/train`。`run_id` 默认为 `pretrain_k{memory_slots}_{YYYYMMDD-HHMM}`（预训练）或 `policy-post_k{memory_slots}_{YYYYMMDD-HHMM}`（后训练），时间戳采用 `Asia/Shanghai` 时区、精确到分钟。显式指定的 `run_id` 原样作为目录名。新训练默认拒绝覆盖已有计划或产物，显式 `--overwrite` 才清理并重建；恢复训练沿用原目录。
 - **计划与配置**：`plan/` 保存执行前确定的设置，最终解析生成的 `run_id` 写入计划配置；`train/config.json` 保存实际训练配置，评估结果目录的 `eval.json` 保存评估设置快照。训练只创建训练计划；独立评估默认新建不存在的 task 计划，固定数据、预算与长度，`checkpoints` 保存累计范围。续跑可选择本次 checkpoint 子集并加入新项，仅有新增时原子更新计划；`--overwrite` 重建当前 task。
 - **覆盖与互斥**：校验通过后，持删除范围之外的稳定锁执行清理与重建；锁覆盖 worker 生命周期，占用时拒绝覆盖。锁文件不属于实验结果。
 - **训练与恢复**：Rank 0 统一写入产物，train/dev 指标汇总全部 GPU 的实际样本。`state.pt` 保存可训练的压缩器 LoRA、memory embeddings、边界参数、优化器、scheduler、数据游标及各 rank 随机状态；恢复时严格核对训练计划与绑定状态，不依赖评估计划。完整格式见[方法说明](../README.md#代码与产物)。
