@@ -10,6 +10,7 @@ case "$method" in
 esac
 
 environment_dir="$HOME/rivermind-data/envs/ttt-$method"
+wheel_dir="$HOME/rivermind-data/wheels/ttt"
 export UV_CACHE_DIR="$HOME/rivermind-data/cache/uv"
 export UV_PYTHON_DOWNLOADS=never
 if [[ ! -e $environment_dir ]]; then
@@ -25,6 +26,7 @@ if [[ $method == e2_ttt ]]; then
                 -e "$project_root/reproductions/e2_ttt/upstream/lm-evaluation-harness")
 fi
 uv --no-config pip install --python "$environment_dir/bin/python" \
-  --index-url https://pypi.org/simple "${install_args[@]}"
+  --index-url https://pypi.org/simple --find-links "$wheel_dir" \
+  --only-binary flash-attn "${install_args[@]}"
 uv --no-config pip check --python "$environment_dir/bin/python"
 printf '环境已安装：%s\n' "$environment_dir"

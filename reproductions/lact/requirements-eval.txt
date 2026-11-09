@@ -3,7 +3,8 @@
 # CUDA 12.4 Torch wheels use the CXX11_ABI=FALSE wheel below.
 torch @ https://download.pytorch.org/whl/cu124/torch-2.6.0%2Bcu124-cp311-cp311-linux_x86_64.whl
 triton==3.2.0
-https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1%2Bcu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
+# Official prebuilt wheel: https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1%2Bcu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
+flash-attn==2.7.4.post1
 
 # FLA pins fla-core==0.4.1; its native RMSNorm, RotaryEmbedding and GatedMLP
 # remain required even when the checkpoint disables LaCT's fused TTT kernel.

@@ -3,7 +3,8 @@
 # vendored lm-evaluation-harness separately, without training or task extras.
 torch @ https://download.pytorch.org/whl/cu128/torch-2.8.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl
 triton==3.4.0
-https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
+# Official prebuilt wheel: https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
+flash-attn==2.8.3
 flash-linear-attention==0.4.1
 transformers==4.57.1
 einops==0.8.1
