@@ -2,13 +2,15 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261109 11:54:14 Asia/Shanghai
+最后修订时间：20261109 12:12:01 Asia/Shanghai
 
 本目录保留 [E²-TTT 官方实现](https://github.com/zeyun-zhong/E2-TTT)，使用其原始模型、flame 训练流程与随附 lm-evaluation-harness；不接入本项目的统一框架。论文为 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308)。
 
 ## 当前状态
 
-官方源码已迁入，revision 与许可证见 [UPSTREAM.md](UPSTREAM.md)。本地已通过原始标量核和原始验证函数的 CPU 数值检查及模型／训练源码语法检查，详见[执行记录](20261108_phase1_record.md)。已提供读取本轮本地数据的 checkpoint 评估入口；尚未完成 GPU 验证或模型评估，未取得论文指标复现结果。
+官方源码已迁入，revision 与许可证见 [UPSTREAM.md](UPSTREAM.md)。原始标量核与验证函数的 CPU 数值检查及模型／训练源码语法检查已通过，见[执行记录](20261108_phase1_record.md)。本地数据评估入口已接入，两个 1.3B checkpoint 均已在物理 GPU 0 完成真实样本生成验证。
+
+每个 checkpoint 验证 SQuAD completion 2 条、SWDE 2 条，以及 RULER 六个长度各 2 条，共 16 条；MLP 与 SwiGLU 合计 32 条，均无运行异常。峰值显存分别约 9.96 GiB 和 10.12 GiB。该检查覆盖完整模型加载及生成，完整 benchmark 尚未完成，不能据此报告论文指标复现；运行记录见 [GPU 验证与评估](../20261109_checkpoint_gpu_evaluation.md)。
 
 ## 复现目标
 
@@ -101,7 +103,7 @@ SQuAD／SWDE 的本地 task 继承原 task，保留 `.strip()`、换行停止符
 
 首次执行新建 `--output-dir`，续评复用同一目录：`plan.json` 记录 checkpoint、数据、预算和运行依赖；`predictions.jsonl` 保存原 harness 逐样本记录及任务名；`native_harness/` 保存各次原始汇总；`summary.json` 按任务和 RULER 长度汇总百分比准确率及样本数；`evaluation.log` 与 `execution.json` 保存执行日志、退出状态、本次调用耗时和 CUDA allocated／reserved 峰值显存。每完成一项真实检索任务或一个 RULER 长度即保存结果，仅全部任务完成后设置 `completed=true`。不计算 bootstrap 标准误，准确率与原计分相同。
 
-本地入口保留模型及原始 `upstream/training/eval.sh` 不变，使用随附 harness 的 Python API 接入本地数据。服务器评估环境已安装，通过依赖检查及本地入口、模型注册、harness 与任务模块导入；尚未运行 GPU benchmark。
+本地入口保留模型及原始 `upstream/training/eval.sh` 不变，使用随附 harness 的 Python API 接入本地数据。服务器评估环境已安装，通过依赖检查、本地入口及模型／harness／任务模块导入，并完成上述 32 条真实样本的 GPU 生成验证；原生评分导出与完整 benchmark 结果另行记录。
 
 ## 原训练设置与备用入口
 

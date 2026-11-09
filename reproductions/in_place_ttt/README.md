@@ -2,11 +2,11 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261109 12:03:23 Asia/Shanghai
+最后修订时间：20261109 12:11:42 Asia/Shanghai
 
 ## 当前状态
 
-已迁入官方实现与训练、导出、推理及 RULER 配置，保留原 VeOmni／OpenCompass 工作流。第三方 TTT checkpoint 在 4K–128K 的生成与原生评分路径已通过 GPU 检查，256K 首次运行显存不足；尚未完成完整 benchmark 或论文指标复现。来源和已确认差异见 [UPSTREAM.md](UPSTREAM.md)。本次 GPU 评估使用 `zcy-memory` 当前获准的物理 GPU 0；入口允许显式选择单卡 0 或 1。
+已迁入官方实现与训练、导出、推理及 RULER 配置，保留原 VeOmni／OpenCompass 工作流。第三方 TTT 与 baseline checkpoint 均已通过 4K 的 13 项任务及 8K–256K 长输入的 GPU 生成与原生评分检查；每个 checkpoint 的完整 9,100 条 benchmark 尚未完成。检查详情见 [GPU 执行记录](../20261109_checkpoint_gpu_evaluation.md)，来源和已确认差异见 [UPSTREAM.md](UPSTREAM.md)。本次 GPU 评估使用 `zcy-memory` 当前获准的物理 GPU 0；入口允许显式选择单卡 0 或 1。
 
 `upstream/` 保持官方代码原样；本地 `eval.sh` 读取预构造 RULER JSONL，顺序调用原 OpenCompass 模型 wrapper、预测后处理和评分器。未引入统一训练框架或新的记忆目标。
 
@@ -91,7 +91,7 @@ python scripts/merge_dcp_to_hf.py \
 
 先激活包含上述依赖的 In-Place TTT 方法环境，再从仓库根目录运行 `eval.sh`。它使用当前环境的 `python`，默认物理 GPU 0，允许显式选择单卡 0 或 1，拒绝其他卡号与多卡列表。逻辑设备始终为 `cuda:0`。
 
-入口默认设置 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`，已有的显式环境配置原样保留，实际值写入 `plan.json`。256K 首次检查使用 SDPA，在总显存 79.25 GiB、已分配 58.69 GiB、已保留但未使用 16.12 GiB、空闲 3.94 GiB 时申请 4.75 GiB 失败。该设置用于减少分配器碎片，256K 是否可运行仍需实际重试；模型和 attention backend 保持原设置。
+入口默认设置 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`，已有的显式环境配置原样保留，实际值写入 `plan.json`。256K 首次检查出现分配器碎片导致的 OOM；启用该设置后，TTT 与 baseline 均已成功完成 256K 生成和原生评分，模型及 SDPA backend 保持原设置。显存与耗时详见 [GPU 执行记录](../20261109_checkpoint_gpu_evaluation.md)。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
@@ -143,10 +143,11 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
 | 官方源码迁入 | 40 个文件与固定 revision 对应文件一致，全部可被 Git 正常跟踪 |
 | 上游 Python 语法解析 | 26 个文件通过 |
 | 上游 `train.sh`、`eval.sh` shell 语法 | `bash -n` 通过 |
-| 本地评估入口 | Ruff、Python／shell 语法通过；服务器独立环境依赖检查及完整入口导入通过；第三方 TTT checkpoint 的 4K–128K GPU 生成与原生评分通过，256K 首次运行显存不足 |
+| 本地评估入口 | Ruff、Python／shell 语法通过；服务器独立环境依赖检查及完整入口导入通过 |
+| 第三方 TTT／baseline GPU 检查 | 两者均通过 4K 的 13 项任务及 8K–256K 长输入生成与原生评分；完整 9,100 条 benchmark 尚未完成 |
 | 直接导入训练模型 | 根环境缺少 `einops`，导入失败；未更改上游代码绕过依赖 |
 | Qwen3MLP 训练／推理计算核 CPU 诊断 | 直接编译上游原始 AST 类，使用真实 PyTorch／einops／opt_einsum；chunk=4，长度 4、8、10、12，输出最大误差 `5.96e-8`，训练反传梯度有限 |
 
 CPU 诊断仅覆盖上游 `Qwen3MLP` 的分块矩阵计算，包括完整 chunk 和尾部 padding，不覆盖 Transformer、KV cache、逐 token 解码、FlashAttention、VeOmni 或 OpenCompass。诊断临时依赖为 `einops==0.8.1`、`opt_einsum==3.4.0`，安装在 `/tmp/in-place-ttt-cpu-deps-20261108/`，没有修改根项目依赖。
 
-下一项运行是重试 256K 推理并完成第三方 TTT 与 baseline 的完整评估。官方论文指标复现仍受原训练语料、原模型权重及实验配置缺失的限制。
+下一项运行是完成第三方 TTT 与 baseline 的完整评估。官方论文指标复现仍受原训练语料、原模型权重及实验配置缺失的限制。

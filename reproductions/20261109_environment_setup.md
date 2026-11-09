@@ -2,7 +2,7 @@
 
 创建时间：20261109 10:58:35 Asia/Shanghai
 
-最后修订时间：20261109 11:47:21 Asia/Shanghai
+最后修订时间：20261109 12:18:53 Asia/Shanghai
 
 ## 配置原则与实际版本
 
@@ -40,11 +40,11 @@
 
 | 方法 | 环境目录 | 依赖检查 | 导入检查 |
 |---|---|---|---|
-| LaCT | `~/rivermind-data/envs/ttt-lact/` | `uv pip check` 通过 | Torch、Transformers、FlashAttention 通过；完整模型模块待 GPU 可用后检查 |
-| E²-TTT | `~/rivermind-data/envs/ttt-e2_ttt/` | `uv pip check` 通过 | 本地评估入口、原模型注册、harness 及 SQuAD／SWDE 任务通过 |
-| In-Place TTT | `~/rivermind-data/envs/ttt-in_place_ttt/` | `uv pip check` 通过 | 本地评估入口、原模型注册、OpenCompass wrapper 与 RULER 评分器通过 |
+| LaCT | `~/rivermind-data/envs/ttt-lact/` | `uv pip check` 通过 | 完整模型模块、Momentum checkpoint 加载与 GPU 生成通过 |
+| E²-TTT | `~/rivermind-data/envs/ttt-e2_ttt/` | `uv pip check` 通过 | 入口、原模型注册与 harness 导入通过；两个 1.3B checkpoint 加载和 GPU 生成通过 |
+| In-Place TTT | `~/rivermind-data/envs/ttt-in_place_ttt/` | `uv pip check` 通过 | 入口、原模型注册、OpenCompass 与评分器通过；TTT／baseline 加载和 GPU 生成通过 |
 
-导入检查均隐藏 CUDA 设备，且结束时 `torch.cuda.is_initialized()` 为 `False`。LaCT 所用 Triton 3.2.0 在导入 FLA 模块时会初始化 GPU 驱动，因此尚未完成该模型模块的导入检查。以上结果不代表 GPU kernel、完整 checkpoint 加载或 benchmark 已验证；本轮未新增测试，也未启动训练或 benchmark。
+安装阶段的 CPU 导入检查均隐藏 CUDA 设备，且结束时 `torch.cuda.is_initialized()` 为 `False`。LaCT 所用 Triton 3.2.0 在导入 FLA 模块时会初始化 GPU 驱动，该模块随后已在授权 GPU 0 上完成导入与真实生成。具体 GPU 验证范围、运行问题和耗时见 [GPU 执行记录](20261109_checkpoint_gpu_evaluation.md)；完整 benchmark 指标尚未取得。本轮未新增测试或启动训练。
 
 当前会话 `nvidia-smi` 仅暴露一张 A800，编号 0，设备节点为 `/dev/nvidia7`。用户已授权使用空闲 GPU 0，本轮显式设置 `CUDA_VISIBLE_DEVICES=0`，顺序验证三个方法；执行计划与结果见 [GPU 验证与评估](20261109_checkpoint_gpu_evaluation.md)。
 

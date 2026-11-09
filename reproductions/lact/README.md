@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261109 11:55:19 Asia/Shanghai
+最后修订时间：20261109 12:11:28 Asia/Shanghai
 
 本目录接入 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现，保留其与 sliding-window attention 并行的 SwiGLU fast weights、负内积写入、Momentum / Muon 与逐次权重归一化。已接入本地 RULER checkpoint 评估入口，完成源码静态检查、原始写入函数的 CPU 前后向检查，以及公开 Momentum checkpoint 在 4K、32K 真实样本上的完整生成；尚未完成正式 RULER 评估或论文指标复现。
 
@@ -15,7 +15,8 @@
 - `scripts/train_760m_muon.sh`：在 `zcy-memory` 的单张物理 GPU 上调用原生 flame trainer。
 - `eval.sh`、`scripts/evaluate.py`：在单张物理 GPU 上读取本地六项 RULER JSONL，使用官方 LaCT 模型生成并计分。
 - [UPSTREAM.md](UPSTREAM.md)：固定源码 revision、文件范围和必要接入改动。
-- [本次执行记录](20261108_execution.md)：已运行检查和待验证条件。
+- [源码迁入记录](20261108_execution.md)：源码接入与本地 CPU 检查。
+- [GPU 验证与评估记录](../20261109_checkpoint_gpu_evaluation.md)：完整模型运行状态与正式评估进度。
 
 本地不引入统一训练框架，不更改官方模型或更新函数。flame 的 custom-model 注册仅负责使 Transformers 能够按 `lact_swiglu` 配置加载模型。
 
@@ -103,7 +104,7 @@ checkpoint 仅从本地加载，任何 missing、unexpected、mismatched keys �
 
 评分复用项目保存的 NVIDIA RULER `postprocess_pred` 与 `string_match_all`；最终汇总从全部已保存的原始预测重新计分，逐样本不取整，汇总百分比保留两位小数。只有全部所选样本完成才写入 `summary.json`；部分预测文件不代表完整评估结果。汇总耗时包含历次已记录执行的加载、编译、生成和失败耗时。
 
-已完成 shell、Python 语法和 Ruff 静态检查，并在服务器安装独立评估环境。公开 Momentum checkpoint 已严格加载，在物理 GPU 0 上完成 4K、32K 各一个真实样本的生成，均使用 128-token 输出预算；这只确认运行路径，不能代表正式评估分数。未新增测试，见[评估环境](../20261109_environment_setup.md)。
+已完成 shell、Python 语法和 Ruff 静态检查，并在服务器安装独立评估环境。公开 Momentum checkpoint 已严格加载，在物理 GPU 0 上完成 4K、32K 各一个真实样本的完整 128-token 生成；正式 12000 条 RULER 评估尚未完成。这些样本仅确认运行路径，不计入正式 benchmark 分数；结果与资源开销见 [GPU 验证与评估记录](../20261109_checkpoint_gpu_evaluation.md)，依赖信息见 [评估环境](../20261109_environment_setup.md)。
 
 ## 环境与数据
 
