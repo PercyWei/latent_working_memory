@@ -1,0 +1,24 @@
+# Checkpoint evaluation only: Linux x86-64, Python 3.11, CUDA 12.8.
+# Upstream In-Place TTT pins PyTorch / Transformers and recommends this FA2 wheel.
+torch @ https://download.pytorch.org/whl/cu128/torch-2.8.0%2Bcu128-cp311-cp311-manylinux_2_28_x86_64.whl
+transformers==4.57.3
+flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp311-cp311-linux_x86_64.whl
+accelerate==1.10.1
+einops==0.8.1
+opt_einsum==3.4.0
+
+# OpenCompass 0.5.5 requires numpy<2 and datasets<4; retain those native constraints.
+# Its normal dependencies include mmengine-lite, rouge, rouge_chinese and rouge_score.
+opencompass==0.5.5
+numpy==1.26.4
+datasets==3.6.0
+scipy==1.16.3
+tiktoken==0.11.0
+rouge==1.0.1
+
+# Shared versions where upstream leaves the choice open.
+huggingface-hub==0.36.2
+tokenizers==0.22.2
+safetensors==0.8.0
+triton==3.4.0
+setuptools==80.9.0

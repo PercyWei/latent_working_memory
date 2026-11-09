@@ -1,0 +1,22 @@
+# Checkpoint evaluation only; Linux x86-64, Python 3.12.
+# Fixed versions follow upstream/environment.yml. Install the local model and
+# vendored lm-evaluation-harness separately, without training or task extras.
+torch @ https://download.pytorch.org/whl/cu128/torch-2.8.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl
+triton==3.4.0
+https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
+flash-linear-attention==0.4.1
+transformers==4.57.1
+einops==0.8.1
+numpy==2.3.3
+datasets==4.2.0
+accelerate==1.10.1
+psutil==7.1.0
+nltk==3.9.2
+wonderwords==3.0.1
+scipy==1.16.3
+
+# Shared versions where upstream leaves the choice open.
+huggingface-hub==0.36.2
+tokenizers==0.22.2
+safetensors==0.8.0
+setuptools==80.9.0

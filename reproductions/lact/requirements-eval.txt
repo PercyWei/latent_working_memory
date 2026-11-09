@@ -1,0 +1,19 @@
+# Checkpoint evaluation only; Linux x86-64, Python 3.11.
+# Keep the upstream Torch 2.6 / FlashAttention 2.7.4.post1 stack.
+# CUDA 12.4 Torch wheels use the CXX11_ABI=FALSE wheel below.
+torch @ https://download.pytorch.org/whl/cu124/torch-2.6.0%2Bcu124-cp311-cp311-linux_x86_64.whl
+triton==3.2.0
+https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1%2Bcu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
+
+# FLA pins fla-core==0.4.1; its native RMSNorm, RotaryEmbedding and GatedMLP
+# remain required even when the checkpoint disables LaCT's fused TTT kernel.
+flash-linear-attention==0.4.1
+transformers==4.57.3
+einops==0.8.1
+numpy==1.26.4
+
+# Shared versions where upstream leaves the choice open.
+huggingface-hub==0.36.2
+tokenizers==0.22.2
+safetensors==0.8.0
+setuptools==80.9.0

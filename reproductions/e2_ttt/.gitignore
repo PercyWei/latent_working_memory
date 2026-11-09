@@ -1,0 +1,11 @@
+# 这些目录是上游源码，覆盖项目根目录对模型与文档产物的忽略。
+!upstream/e2_ttt/models/
+!upstream/e2_ttt/models/**
+!upstream/training/flame/models/
+!upstream/training/flame/models/**
+!upstream/lm-evaluation-harness/lm_eval/models/
+!upstream/lm-evaluation-harness/lm_eval/models/**
+!upstream/lm-evaluation-harness/tests/models/
+!upstream/lm-evaluation-harness/tests/models/**
+!upstream/lm-evaluation-harness/docs/
+!upstream/lm-evaluation-harness/docs/**

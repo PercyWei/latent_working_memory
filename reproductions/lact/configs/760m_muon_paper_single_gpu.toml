@@ -1,0 +1,65 @@
+[model]
+config = "../upstream/lact_llm/configs/760M_lact_swiglu_nh4_fwlow_rank_momentum_muon.json"
+
+[job]
+print_args = true
+
+[training]
+batch_size = 1
+seq_len = 32768
+context_len = 32768
+gradient_accumulation_steps = 32
+steps = 40960
+max_norm = 1.0
+skip_nan_inf = true
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+tensor_parallel_degree = 1
+compile = true
+dataset = "arrow"
+dataset_split = "train"
+num_workers = 2
+prefetch_factor = 1
+seed = 42
+varlen = false
+
+[optimizer]
+name = "AdamW"
+eps = 1e-15
+lr = 1e-3
+
+[lr_scheduler]
+warmup_steps = 1024
+decay_type = "cosine"
+lr_min = 0.1
+
+[checkpoint]
+enable_checkpoint = true
+folder = "checkpoint"
+interval_type = "steps"
+interval = 4096
+load_step = -1
+keep_latest_k = 2
+model_weights_only = false
+export_dtype = "float32"
+async_mode = "disabled"
+
+[profiling]
+enable_profiling = false
+
+[metrics]
+log_freq = 10
+enable_wandb = false
+enable_tensorboard = true
+
+[experimental]
+context_parallel_degree = 1
+pipeline_parallel_degree = 1
+
+[float8]
+enable_fsdp_float8_all_gather = false
+precompute_float8_dynamic_scale_for_fsdp = false
+
+[activation_checkpoint]
+mode = "selective"
+selective_ac_option = "2"
