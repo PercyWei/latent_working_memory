@@ -2,7 +2,7 @@
 
 创建时间：20261109 21:16:13 Asia/Shanghai
 
-最后修订时间：20261109 21:16:13 Asia/Shanghai
+最后修订时间：20261109 21:42:19 Asia/Shanghai
 
 ## 执行计划
 
@@ -16,12 +16,16 @@
 ## 验证范围与判定
 
 - `zcy-memory` 单张物理 GPU 0，显式 `CUDA_VISIBLE_DEVICES=0`；开始时该卡空闲，后续各实验顺序执行。
-- 两个现有 Qwen3-4B checkpoint 分别验证。先做 4K／32K 预检查，再覆盖 4K／32K／128K／256K，每长度选择两个真实任务样本，生成预算保持 64，沿用 EOS、base prompt 和原生评分。
+- 两个现有 Qwen3-4B checkpoint 分别验证。先做 4K／32K 预检查，再覆盖完整七个长度档位（4K–256K），每长度选择两个真实任务样本，生成预算保持 64，沿用 EOS、base prompt 和原生评分。
 - 用 1022／1024／2046-token 合成前缀及四步固定续接覆盖 TTT chunk 边界。比较 logits 有限性、argmax、完整 greedy token IDs、TTT 尾段及适配权重差异，并验证跨样本缓存隔离。MLP 分块不要求浮点逐位相同，但分歧必须完整记录，不能以任务分数相同替代 token 一致。
 - 比较只加载一份模型，先释放上一条路径的 KV 后再运行下一条，避免两套长 KV 占满显存。原始与优化结果不混入正式 benchmark 分数。
 - 新运行在 plan／execution 中保存本地 Git commit、dirty 状态、推理模式、实际模型／缓存／MLP 实现、上游 revision 与运行配置。代码先发布 GitHub，服务器不能连接时通过 Gitee 同步，从服务器项目仓库执行。
 - 产物统一放入 `artifacts/reproductions/in_place_ttt/inference-optimization_20261109/`，保留最终验证和必要计时摘要；本文件最终仅保留简要过程、结果与限制。
 
-## 当前状态
+## 阶段结果
 
-正在实现与准备验证。尚未报告优化后的实测结果，未启动正式 9100 条评估。
+- 代码修订 `f94e2231` 的 TTT 4K／32K 预检查完成：四个真实样本的 tail／chunked 两组输入 IDs、完整生成 IDs、文本和原生分数均与原始路径一致；四种合成前缀共 60 次边界检查通过。尾段优化的 TTT 状态逐位相同，分块 MLP 在长合成前缀中存在状态浮点差异，argmax 仍相同。
+- 原始 attention 的 4K prefill／单步 decode 均实际调用 PyTorch FlashAttention，BF16、32 query heads／8 KV heads、无显式 mask，并使用原生 GQA。
+- 32K 原始／尾段／分块路径的平均耗时为 6.27／6.22／6.27 秒；峰值分配显存约为 15.70／14.82／14.46 GiB。此阶段主要体现显存收益，尚未观察到明显提速。
+
+完整七长度的 TTT／baseline 配对验证正在顺序运行；未启动正式 9100 条评估。

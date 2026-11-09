@@ -2,13 +2,13 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261109 12:11:42 Asia/Shanghai
+最后修订时间：20261109 21:33:11 Asia/Shanghai
 
 ## 当前状态
 
 已迁入官方实现与训练、导出、推理及 RULER 配置，保留原 VeOmni／OpenCompass 工作流。第三方 TTT 与 baseline checkpoint 均已通过 4K 的 13 项任务及 8K–256K 长输入的 GPU 生成与原生评分检查；每个 checkpoint 的完整 9,100 条 benchmark 尚未完成。检查详情见 [GPU 执行记录](../20261109_checkpoint_gpu_evaluation.md)，来源和已确认差异见 [UPSTREAM.md](UPSTREAM.md)。本次 GPU 评估使用 `zcy-memory` 当前获准的物理 GPU 0；入口允许显式选择单卡 0 或 1。
 
-`upstream/` 保持官方代码原样；本地 `eval.sh` 读取预构造 RULER JSONL，顺序调用原 OpenCompass 模型 wrapper、预测后处理和评分器。未引入统一训练框架或新的记忆目标。
+代码分为三层：`upstream/` 保持官方源码原样；`scripts/` 负责本地数据、模型加载、生成调度、原生评分与记录；`optimized/` 独立实现 TTT 尾部缓存压紧和 MLP 分块计算。默认使用 `original` 原始模型与 OpenCompass 生成路径；`optimized` 尚在验证中，暂不声明一致性或性能结论。实现与验证记录见 [推理优化记录](../20261109_in_place_ttt_inference_optimization.md)。没有引入新的记忆目标或统一训练框架。
 
 ## 复现目标
 
@@ -96,26 +96,41 @@ python scripts/merge_dcp_to_hf.py \
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
+  --inference-mode original \
   --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt-ruler
 
 CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-baseline \
+  --inference-mode original \
   --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-baseline-ruler
+```
+
+优化路径使用独立输出目录；以下仍为完整评估命令，不代表优化验证已经通过：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
+  --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
+  --inference-mode optimized \
+  --mlp-chunk-size 16384 \
+  --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt-ruler-optimized
 ```
 
 | 参数 | 约定 |
 |---|---|
 | `--checkpoint` | 必需，本地 Hugging Face checkpoint 目录 |
 | `--output-dir` | 必需，新建的本次运行输出目录 |
+| `--inference-mode` | `original`（默认）或 `optimized`；两种模式使用不同输出目录 |
+| `--mlp-chunk-size` | 默认 `16384`，仅优化模式生效；设为 `0` 只启用 TTT 尾部缓存压紧。原始模式的实际分块大小为 `0` |
 | `--ruler-data` | 默认 `data/benchmarks/ruler-v1/reproductions/in-place-ttt-qwen3-4b`；可指定实际构造目录 |
 | `--lengths` | 整数列表，默认 `4096 8192 16384 32768 65536 131072 262144` |
-| `--resume` | 从已有输出目录继续；其余参数、运行配置及依赖版本必须与原运行一致 |
+| `--resume` | 从已有输出目录继续；模式、请求的分块大小、attention backend、运行配置及依赖版本须与原运行一致 |
 
 中断后使用相同参数和输出目录，追加 `--resume`：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
+  --inference-mode original \
   --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt-ruler \
   --resume
 ```
@@ -124,15 +139,39 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
 
 读取 `<ruler-data>/<length>/<task>/test.jsonl`，每个长度包含完整 13 项任务，每项恰好 100 条。默认共 9,100 条，TTT／baseline 读取同一批数据。入口不会现场生成样本、读取原始 RULER 素材或下载模型。
 
-模型输入严格为 `input + answer_prefix`，通过原 `HuggingFaceBaseModel` 的 base completion 路径编码，不应用 chat／thinking 模板。每条生成上限为 64，采用 greedy 生成；预测先经过原配置中的 `extract_non_reasoning_content`，再调用 OpenCompass 原生 NIAH／VT／CWE／FWE／QA evaluator。按各任务完整预测列表评分，长度汇总为 13 项原生分数的等权平均，逐题分数不再次平均替代原评分。
+模型输入严格为 `input + answer_prefix`，使用 base completion，不应用 chat／thinking 模板。每条采用 greedy 生成，上限为 64，保留 checkpoint 的 EOS 设置，不强制生成满 64 个 token。预测先经过原配置中的 `extract_non_reasoning_content`，再调用 OpenCompass 原生 NIAH／VT／CWE／FWE／QA evaluator。按各任务完整预测列表评分，长度汇总为 13 项原生分数的等权平均，逐题分数不再次平均替代原评分。
 
-运行先导入官方 `inference_model` 注册 TTT 模型，并核对实际模型类来自该模块；TTT 与非 TTT 行为由 checkpoint 自身配置决定。单个进程、batch size 1、逐题调用原 `generate`；上游每次调用创建新的 cache，TTT 状态不在样本间传递。
+`scripts/runtime.py` 显式加载官方 `Qwen3ForCausalLM` 或本地 `OptimizedQwen3ForCausalLM`，严格核对 checkpoint 加载结果，不修改全局 AutoModel 注册或 OpenCompass 安装。原始模式调用未经修改的 OpenCompass `generate`；优化模式复用一次完整编码的 token IDs，保持相同的特殊 token、生成参数与解码方式。TTT 与非 TTT 行为由 checkpoint 配置决定。两种模式均为单进程、batch size 1，每题创建独立 cache，TTT 状态不在样本间传递。
 
 运行 `max_seq_len` 取本次最大长度，支持 256K。每条输入在生成前按真实 tokenizer 完整编码，要求 `input_tokens + 64 <= length`；超限直接报错，避免原 wrapper 的截断路径丢弃内容。保持 checkpoint 原有 `max_position_embeddings` 与 `rope_scaling`，不自动添加 YaRN；第三方 32K checkpoint 的长长度结果属于外推评估。
 
-产物：`plan.json`（实际参数）、`runtime.json`（模型类、位置设置、依赖版本）、`predictions.jsonl`（逐题原预测、后处理预测、答案、输入长度和原生分数）、`results/<length>/<task>.json`（原生任务评分）、`summary.json`（全量完成后的长度汇总）、`evaluation.log` 和 `execution.json`。日志与逐题结果增量写入，`summary.json` 仅在全部所选数据完成后生成。`execution.json` 记录本次调用的耗时 `elapsed_seconds`、PyTorch 峰值分配显存 `peak_memory_allocated_bytes`、复用样本数及退出状态；续评时覆盖为本次调用的统计。
+产物及来源记录：
+
+- `plan.json` 保存参数与初始 `source`，包括本地 Git commit、dirty/status、上游 revision、入口和模型／cache／MLP／生成代码路径；续评保留初始来源。
+- `runtime.json` 保存实际模型、cache、MLP 类与代码路径，以及实际优化开关、分块大小、attention backend、dtype、依赖、位置设置和生成配置。原始模式的有效分块大小为 `0`，与计划中保留的请求参数区分。
+- `execution.json` 的 `attempts` 在每次启动时追加记录，分别保存该次来源、runtime、耗时、峰值显存、复用样本数和退出状态。代码来源变化逐次记录，模式、分块参数及 runtime 不匹配则拒绝续评。
+- `predictions.jsonl` 增量保存逐题预测、答案、输入长度、原生分数、完整生成 `token_ids` 与 `generated_tokens`；`execution_attempt` 指向对应执行记录的从零开始索引。
+- `results/<length>/<task>.json` 保存原生任务评分，`summary.json` 仅在全部所选数据完成后生成；`evaluation.log` 追加执行日志。
 
 完整评估结果需待每个 checkpoint 的 9,100 条样本全部完成后报告。
+
+优化验证单独运行，不缩减正式评估范围。激活同一方法环境后，从仓库根目录执行：
+
+```bash
+method_dir="$PWD/reproductions/in_place_ttt"
+CUDA_VISIBLE_DEVICES=0 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+TOKENIZERS_PARALLELISM=false \
+PYTHONPATH="$method_dir/upstream:$method_dir/scripts:$method_dir${PYTHONPATH:+:$PYTHONPATH}" \
+python -u reproductions/in_place_ttt/scripts/validate_optimization.py \
+  --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
+  --output-dir artifacts/reproductions/in_place_ttt/optimization-validation_20261109/ttt-paired \
+  --lengths 4096 32768 131072 262144 \
+  --mlp-chunk-size 16384 \
+  --profile-attention
+```
+
+该入口在同一模型上分别关闭优化、仅压紧尾部缓存、同时启用 MLP 分块；关闭优化时委托官方计算逻辑，并记录实际模型类。验证包含合成 chunk 边界、各长度的 `niah_single_1` 与 `niah_multiquery` 各一条真实输入、完整 64-token 生成预算、cache 进度和跨样本隔离检查；对比完整生成 IDs、预测文本与原生评分。无 TTT 的 baseline 仅比较原始与分块模式，可替换 checkpoint 与输出目录单独运行。`--profile-attention` 仅对首个 4K 输入做额外诊断，要求 `--lengths` 第一项为 `4096`。结果保存在独立验证目录，当前状态与判据见 [推理优化记录](../20261109_in_place_ttt_inference_optimization.md)。
 
 ## 已执行检查
 
@@ -150,4 +189,4 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
 
 CPU 诊断仅覆盖上游 `Qwen3MLP` 的分块矩阵计算，包括完整 chunk 和尾部 padding，不覆盖 Transformer、KV cache、逐 token 解码、FlashAttention、VeOmni 或 OpenCompass。诊断临时依赖为 `einops==0.8.1`、`opt_einsum==3.4.0`，安装在 `/tmp/in-place-ttt-cpu-deps-20261108/`，没有修改根项目依赖。
 
-下一项运行是完成第三方 TTT 与 baseline 的完整评估。官方论文指标复现仍受原训练语料、原模型权重及实验配置缺失的限制。
+优化实现正在单独验证，完整评估尚未完成。官方论文指标复现仍受原训练语料、原模型权重及实验配置缺失的限制。
