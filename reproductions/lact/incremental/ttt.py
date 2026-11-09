@@ -5,6 +5,84 @@ import torch
 import torch.nn.functional as F
 
 
+# 直接编译各自函数体，避免共用 autocast wrapper 的 code object 和重编译缓存。
+@torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16)
+@torch.compile()
+def _ttt_read(w0, w1, w2, q):
+    h = torch.bmm(w2, q)
+    gate = F.silu(torch.bmm(w0, q), inplace=True)
+    return torch.bmm(w1, gate * h)
+
+
+@torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16)
+@torch.compile()
+def _ttt_commit(
+    w0,
+    w1,
+    w2,
+    w0_norm,
+    w1_norm,
+    w2_norm,
+    w0_main,
+    w1_main,
+    w2_main,
+    dw0_momentum,
+    dw1_momentum,
+    dw2_momentum,
+    ki,
+    vi,
+    lr0i,
+    lr1i,
+    lr2i,
+    momentum,
+    prenorm,
+    use_muon,
+    use_momentum,
+):
+    gate_before_act = torch.bmm(w0, ki.transpose(1, 2))
+    hidden_before_mul = torch.bmm(w2, ki.transpose(1, 2))
+    hidden = F.silu(gate_before_act, inplace=False) * hidden_before_mul
+    dhidden = torch.bmm(w1.transpose(1, 2), vi)
+    dhidden_before_mul = dhidden * F.silu(gate_before_act, inplace=False)
+    dgate = dhidden * hidden_before_mul
+    dgate_before_act = silu_backprop(dgate, gate_before_act)
+
+    dw1 = torch.bmm(vi, (hidden.transpose(1, 2) * lr1i).type_as(vi))
+    dw0 = torch.bmm(dgate_before_act, (ki * lr0i).type_as(dgate_before_act))
+    dw2 = torch.bmm(dhidden_before_mul, (ki * lr2i).type_as(dhidden_before_mul))
+
+    if use_momentum:
+        m_i = momentum.mean(dim=1, keepdim=True)
+        dw0 = dw0 + dw0_momentum * m_i
+        dw1 = dw1 + dw1_momentum * m_i
+        dw2 = dw2 + dw2_momentum * m_i
+        dw0_momentum = dw0
+        dw1_momentum = dw1
+        dw2_momentum = dw2
+
+    if use_muon:
+        dw1 = zeropower_via_newtonschulz5(dw1)
+        dw0 = zeropower_via_newtonschulz5(dw0)
+        dw2 = zeropower_via_newtonschulz5(dw2)
+
+    if prenorm:
+        w1_main = w1_main + dw1
+        w0_main = w0_main + dw0
+        w2_main = w2_main + dw2
+        w0 = w0_main / (w0_main.norm(dim=2, keepdim=True) + 1e-5) * w0_norm
+        w1 = w1_main / (w1_main.norm(dim=2, keepdim=True) + 1e-5) * w1_norm
+        w2 = w2_main / (w2_main.norm(dim=2, keepdim=True) + 1e-5) * w2_norm
+    else:
+        w1 = w1 + dw1
+        w0 = w0 + dw0
+        w2 = w2 + dw2
+        w0 = w0 / (w0.norm(dim=2, keepdim=True) + 1e-5) * w0_norm
+        w1 = w1 / (w1.norm(dim=2, keepdim=True) + 1e-5) * w1_norm
+        w2 = w2 / (w2.norm(dim=2, keepdim=True) + 1e-5) * w2_norm
+
+    return w0, w1, w2, w0_main, w1_main, w2_main, dw0_momentum, dw1_momentum, dw2_momentum
+
+
 class TTTState:
     """缓存已完成 chunk 的状态；满尾段在下一 token 到来时才写入。"""
 
@@ -41,47 +119,39 @@ class TTTState:
         self.n_updates = 0
 
     def _commit(self, ki, vi, lr0i, lr1i, lr2i, momentum):
-        gate_before_act = torch.bmm(self.w0, ki.transpose(1, 2))
-        hidden_before_mul = torch.bmm(self.w2, ki.transpose(1, 2))
-        hidden = F.silu(gate_before_act, inplace=False) * hidden_before_mul
-        dhidden = torch.bmm(self.w1.transpose(1, 2), vi)
-        dhidden_before_mul = dhidden * F.silu(gate_before_act, inplace=False)
-        dgate = dhidden * hidden_before_mul
-        dgate_before_act = silu_backprop(dgate, gate_before_act)
-
-        dw1 = torch.bmm(vi, (hidden.transpose(1, 2) * lr1i).type_as(vi))
-        dw0 = torch.bmm(dgate_before_act, (ki * lr0i).type_as(dgate_before_act))
-        dw2 = torch.bmm(dhidden_before_mul, (ki * lr2i).type_as(dhidden_before_mul))
-
-        if self.use_momentum:
-            m_i = momentum.mean(dim=1, keepdim=True)
-            dw0 = dw0 + self.dw0_momentum * m_i
-            dw1 = dw1 + self.dw1_momentum * m_i
-            dw2 = dw2 + self.dw2_momentum * m_i
-            self.dw0_momentum = dw0
-            self.dw1_momentum = dw1
-            self.dw2_momentum = dw2
-
-        if self.use_muon:
-            dw1 = zeropower_via_newtonschulz5(dw1)
-            dw0 = zeropower_via_newtonschulz5(dw0)
-            dw2 = zeropower_via_newtonschulz5(dw2)
-
-        if self.prenorm:
-            self.w1_main = self.w1_main + dw1
-            self.w0_main = self.w0_main + dw0
-            self.w2_main = self.w2_main + dw2
-            self.w0 = self.w0_main / (self.w0_main.norm(dim=2, keepdim=True) + 1e-5) * self.w0_norm
-            self.w1 = self.w1_main / (self.w1_main.norm(dim=2, keepdim=True) + 1e-5) * self.w1_norm
-            self.w2 = self.w2_main / (self.w2_main.norm(dim=2, keepdim=True) + 1e-5) * self.w2_norm
-        else:
-            self.w1 = self.w1 + dw1
-            self.w0 = self.w0 + dw0
-            self.w2 = self.w2 + dw2
-            self.w0 = self.w0 / (self.w0.norm(dim=2, keepdim=True) + 1e-5) * self.w0_norm
-            self.w1 = self.w1 / (self.w1.norm(dim=2, keepdim=True) + 1e-5) * self.w1_norm
-            self.w2 = self.w2 / (self.w2.norm(dim=2, keepdim=True) + 1e-5) * self.w2_norm
-
+        (
+            self.w0,
+            self.w1,
+            self.w2,
+            self.w0_main,
+            self.w1_main,
+            self.w2_main,
+            self.dw0_momentum,
+            self.dw1_momentum,
+            self.dw2_momentum,
+        ) = _ttt_commit(
+            self.w0,
+            self.w1,
+            self.w2,
+            self.w0_norm,
+            self.w1_norm,
+            self.w2_norm,
+            self.w0_main,
+            self.w1_main,
+            self.w2_main,
+            self.dw0_momentum,
+            self.dw1_momentum,
+            self.dw2_momentum,
+            ki,
+            vi,
+            lr0i,
+            lr1i,
+            lr2i,
+            momentum,
+            self.prenorm,
+            self.use_muon,
+            self.use_momentum,
+        )
         self.n_updates += 1
 
     def _commit_pending(self):
@@ -119,9 +189,7 @@ class TTTState:
             direct_commit = self.pending_length == 0 and seq_len - cursor > self.chunk_size
             end = min(seq_len, cursor + self.chunk_size - self.pending_length)
             qi = q[:, :, cursor:end]
-            h = torch.bmm(self.w2, qi)
-            gate = F.silu(torch.bmm(self.w0, qi), inplace=True)
-            output[:, :, cursor:end] = torch.bmm(self.w1, gate * h)
+            output[:, :, cursor:end] = _ttt_read(self.w0, self.w1, self.w2, qi)
 
             if direct_commit:
                 self._commit(

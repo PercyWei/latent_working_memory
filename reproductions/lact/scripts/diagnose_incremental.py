@@ -37,13 +37,47 @@ def numerical_difference(reference, actual):
     if not shape_equal or not finite:
         return {"shape_equal": shape_equal, "finite": finite, "max_abs": None, "mean_abs": None}
     difference = (actual.float() - reference.float()).abs()
-    return {
+    statistics = {
         "shape_equal": True,
         "finite": True,
         "bitwise_equal": bool(torch.equal(reference, actual)),
         "max_abs": difference.max().item(),
         "mean_abs": difference.mean().item(),
     }
+    if reference.ndim == 3:
+        chunk_size = 2048
+        chunk_max_abs = [
+            difference[:, start : start + chunk_size, :].max().item()
+            for start in range(0, reference.shape[1], chunk_size)
+        ]
+        first_chunk = next(
+            (index for index, maximum in enumerate(chunk_max_abs) if maximum != 0), None
+        )
+        first_token = None
+        first_index = None
+        if first_chunk is not None:
+            start = first_chunk * chunk_size
+            different = (
+                reference[:, start : start + chunk_size, :]
+                != actual[:, start : start + chunk_size, :]
+            )
+            token_mask = different.any(dim=-1).any(dim=0)
+            first_token = start + token_mask.int().argmax().item()
+            position_mask = (reference[:, first_token, :] != actual[:, first_token, :]).flatten()
+            position = position_mask.int().argmax().item()
+            # 先定位最早 token，再记录该 token 的首个 batch/head、feature 坐标。
+            first_index = [
+                position // reference.shape[-1],
+                first_token,
+                position % reference.shape[-1],
+            ]
+        statistics.update(
+            token_chunk_size=chunk_size,
+            chunk_max_abs=chunk_max_abs,
+            first_differing_token=first_token,
+            first_differing_index=first_index,
+        )
+    return statistics
 
 
 def compare_prefill(model, input_ids, output, logger):
