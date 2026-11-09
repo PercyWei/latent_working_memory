@@ -2,23 +2,32 @@
 
 import argparse
 from datetime import datetime
-import importlib.metadata
 import logging
 import json
 import os
 from pathlib import Path
+import signal
 from zoneinfo import ZoneInfo
 import time
 
-import inference_model  # noqa: F401 -- registers upstream TTT models before loading.
 import torch
 from opencompass.datasets.ruler.ruler_cwe import RulerCweEvaluator
 from opencompass.datasets.ruler.ruler_fwe import RulerFweEvaluator
 from opencompass.datasets.ruler.ruler_niah import RulerNiahEvaluator
 from opencompass.datasets.ruler.ruler_qa import RulerQaEvaluator
 from opencompass.datasets.ruler.ruler_vt import RulerVtEvaluator
-from opencompass.models import HuggingFaceBaseModel
 from opencompass.utils.text_postprocessors import extract_non_reasoning_content
+
+from provenance import UPSTREAM_REVISION, capture_source
+from runtime import (
+    GENERATION_KWARGS,
+    MODEL_CLASSES,
+    MODEL_KWARGS,
+    TOKENIZER_KWARGS,
+    generate_one,
+    load_model,
+    runtime_info,
+)
 
 
 TASKS = {
@@ -38,6 +47,18 @@ TASKS = {
 }
 
 
+def timestamp():
+    return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d %H:%M:%S Asia/Shanghai")
+
+
+def write_json(path, value):
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+    )
+    temporary.replace(path)
+
+
 def read_rows(path, count):
     with path.open() as stream:
         rows = [json.loads(line) for line in stream]
@@ -53,7 +74,7 @@ def read_rows(path, count):
     return rows
 
 
-def read_predictions(path, plan):
+def read_predictions(path, plan, execution_attempt):
     if not path.exists():
         return {}
     completed = {}
@@ -80,50 +101,26 @@ def read_predictions(path, plan):
             key = record["length"], record["task"], record["row"]
             if key not in expected or key in completed:
                 raise ValueError(f"Unexpected or duplicate prediction key: {key}")
+            if not 0 <= record["execution_attempt"] < execution_attempt:
+                raise ValueError(f"Saved prediction has an invalid execution attempt: {key}")
+            if record["generated_tokens"] != len(record["token_ids"]):
+                raise ValueError(f"Saved prediction token count differs from token IDs: {key}")
             completed[key] = record
             if not line.endswith(b"\n"):
                 stream.write(b"\n")
     return completed
 
 
-def evaluate(plan, resume, completed):
+def evaluate(plan, wrapper, resume, completed, execution_attempt):
     data, output = Path(plan["ruler_data"]), Path(plan["output_dir"])
     budget = plan["tokens_to_generate"]
-    wrapper = HuggingFaceBaseModel(
-        path=plan["checkpoint"],
-        model_kwargs=plan["model_kwargs"],
-        tokenizer_kwargs=plan["tokenizer_kwargs"],
-        max_seq_len=plan["max_seq_len"],
-        generation_kwargs=plan["generation_kwargs"],
-    )
-    if not type(wrapper.model).__module__.startswith("inference_model."):
-        raise TypeError(
-            "The checkpoint was not loaded through the upstream TTT model registration."
-        )
-    config = wrapper.model.config
-    runtime = {
-        "packages": {
-            name: importlib.metadata.version(name)
-            for name in ["torch", "transformers", "opencompass"]
-        },
-        "model_class": f"{type(wrapper.model).__module__}.{type(wrapper.model).__name__}",
-        "ttt_mode": config.ttt_mode,
-        "max_position_embeddings": config.max_position_embeddings,
-        "rope_scaling": config.rope_scaling,
-        "max_seq_len": wrapper.max_seq_len,
-        "attention_implementation": config._attn_implementation,
-        "postprocessor": "opencompass.utils.text_postprocessors.extract_non_reasoning_content",
+    summary = {
+        "checkpoint": plan["checkpoint"],
+        "inference_mode": plan["inference_mode"],
+        "mlp_chunk_size": plan["mlp_chunk_size"],
+        "lengths": {},
+        "samples": 0,
     }
-    runtime_path = output / "runtime.json"
-    if resume:
-        if runtime_path.exists():
-            if json.loads(runtime_path.read_text()) != runtime:
-                raise ValueError("Resume model/backend/package settings differ from runtime.json")
-        elif completed:
-            raise FileNotFoundError("Existing predictions require their original runtime.json")
-    runtime_path.write_text(json.dumps(runtime, ensure_ascii=False, indent=2) + "\n")
-    logging.info("Runtime: %s", json.dumps(runtime, ensure_ascii=False))
-    summary = {"checkpoint": plan["checkpoint"], "lengths": {}, "samples": 0}
     with (output / "predictions.jsonl").open("a" if resume else "w") as predictions_file:
         for length in plan["lengths"]:
             length_results = {}
@@ -136,7 +133,11 @@ def evaluate(plan, resume, completed):
                     key = length, task, index
                     if key in completed:
                         record = completed[key]
-                        if record["source"] != str(source) or record["gold"] != row["outputs"]:
+                        if (
+                            record["source"] != str(source)
+                            or record["source_index"] != row["index"]
+                            or record["gold"] != row["outputs"]
+                        ):
                             raise ValueError(f"{key}: saved prediction does not match current data")
                         prediction = extract_non_reasoning_content(record["raw_prediction"])
                         if prediction != record["prediction"]:
@@ -147,25 +148,18 @@ def evaluate(plan, resume, completed):
                         gold.append(row["outputs"])
                         continue
                     prompt = row["input"] + row["answer_prefix"]
-                    input_tokens = len(
-                        wrapper.tokenizer.encode(prompt, add_special_tokens=True, truncation=False)
-                    )
-                    if input_tokens + budget > length:
-                        raise ValueError(
-                            f"{source}:{index + 1}: {input_tokens} input + {budget} output "
-                            f"exceeds the {length}-token budget; truncation is forbidden"
-                        )
                     start = time.perf_counter()
                     # Every generate call creates a new upstream cache, including TTT state.
-                    raw = wrapper.generate(inputs=[prompt], max_out_len=budget)[0]
-                    prediction = extract_non_reasoning_content(raw)
+                    generated = generate_one(wrapper, prompt, budget, length)
+                    prediction = extract_non_reasoning_content(generated["raw_prediction"])
                     record = {
+                        "execution_attempt": execution_attempt,
                         "length": length,
                         "task": task,
                         "row": index,
                         "source": str(source),
-                        "input_tokens": input_tokens,
-                        "raw_prediction": raw,
+                        "source_index": row["index"],
+                        **generated,
                         "prediction": prediction,
                         "gold": row["outputs"],
                         "native_score": evaluator.score([prediction], [row["outputs"]]),
@@ -180,16 +174,14 @@ def evaluate(plan, resume, completed):
                 length_results[task] = native_score
                 result_dir = output / "results" / str(length)
                 result_dir.mkdir(parents=True, exist_ok=True)
-                (result_dir / f"{task}.json").write_text(
-                    json.dumps(native_score, ensure_ascii=False, indent=2) + "\n"
-                )
+                write_json(result_dir / f"{task}.json", native_score)
                 summary["samples"] += len(rows)
             average = sum(result["score"] for result in length_results.values()) / len(TASKS)
             summary["lengths"][str(length)] = {
                 "tasks": length_results,
                 "score": average,
             }
-    (output / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
+    write_json(output / "summary.json", summary)
 
 
 def main():
@@ -197,6 +189,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--inference-mode", choices=("original", "optimized"), default="original")
+    parser.add_argument("--mlp-chunk-size", type=int, default=16384)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--ruler-data",
@@ -216,6 +210,8 @@ def main():
     os.environ["CUDA_VISIBLE_DEVICES"] = physical_gpu
     if any(length <= 64 for length in args.lengths) or len(set(args.lengths)) != len(args.lengths):
         parser.error("--lengths must contain distinct integers greater than 64.")
+    if args.mlp_chunk_size < 0:
+        parser.error("--mlp-chunk-size must be nonnegative; 0 disables MLP chunking.")
     checkpoint = args.checkpoint.expanduser().resolve()
     data = args.ruler_data.expanduser().resolve()
     if not checkpoint.is_dir():
@@ -226,76 +222,139 @@ def main():
             if not path.is_file():
                 parser.error(f"RULER data file does not exist: {path}")
     output = args.output_dir.expanduser().resolve()
+    run_source = capture_source(__file__, {args.inference_mode: MODEL_CLASSES[args.inference_mode]})
     plan = {
-        "created_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
+        "created_at": timestamp(),
+        "source": run_source,
+        "upstream_revision": UPSTREAM_REVISION,
         "checkpoint": str(checkpoint),
+        "checkpoint_config": json.loads((checkpoint / "config.json").read_text()),
+        "inference_mode": args.inference_mode,
+        "mlp_chunk_size": args.mlp_chunk_size,
+        "compact_tails": args.inference_mode == "optimized",
         "ruler_data": str(data),
         "lengths": args.lengths,
         "samples_per_task": 100,
         "tasks": list(TASKS),
         "tokens_to_generate": 64,
         "prompt": "input + answer_prefix; base completion; no chat template",
-        "model_wrapper": "opencompass.models.HuggingFaceBaseModel",
-        "model_kwargs": {
-            "device_map": "cuda:0",
-            "torch_dtype": "torch.bfloat16",
-            "local_files_only": True,
-        },
-        "tokenizer_kwargs": {"local_files_only": True},
-        "generation_kwargs": {
-            "do_sample": False,
-            "top_k": 20,
-            "top_p": 0.95,
-            "use_cache": True,
-        },
+        "model_wrapper": "runtime.EvaluationModel",
+        "generation_path": (
+            "OpenCompass HuggingFaceBaseModel.generate"
+            if args.inference_mode == "original"
+            else "runtime.generate_one; single tokenization and native generation parameters"
+        ),
+        "model_kwargs": MODEL_KWARGS.copy(),
+        "tokenizer_kwargs": TOKENIZER_KWARGS.copy(),
+        "generation_kwargs": GENERATION_KWARGS.copy(),
         "postprocessor": "opencompass.utils.text_postprocessors.extract_non_reasoning_content",
         "max_seq_len": max(args.lengths),
         "cuda_visible_devices": physical_gpu,
         "pytorch_cuda_alloc_conf": os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""),
         "device": "cuda:0",
         "output_dir": str(output),
+        "sample_timing": "input encoding, generation, decoding, postprocessing and native sample scoring",
     }
     plan_path = output / "plan.json"
     if args.resume:
-        previous = json.loads(plan_path.read_text())
-        previous_settings = {key: value for key, value in previous.items() if key != "created_at"}
-        current_settings = {key: value for key, value in plan.items() if key != "created_at"}
-        if previous_settings != current_settings:
-            raise ValueError(
-                "Resume arguments/backend settings do not match the existing plan.json"
-            )
-        plan = previous
+        if not output.is_dir():
+            parser.error("--resume requires an existing output directory")
     else:
         output.mkdir(parents=True, exist_ok=False)
-        plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[logging.FileHandler(output / "evaluation.log"), logging.StreamHandler()],
     )
+    execution_path = output / "execution.json"
+    execution = (
+        json.loads(execution_path.read_text())
+        if args.resume
+        else {"attempts": [], "elapsed_seconds": 0.0, "peak_memory_allocated_bytes": 0}
+    )
+    execution_attempt = len(execution["attempts"])
+    attempt = {
+        "execution_attempt": execution_attempt,
+        "started_at": timestamp(),
+        "resume": args.resume,
+        "status": "running",
+        "source": run_source,
+        "inference_mode": args.inference_mode,
+        "mlp_chunk_size": args.mlp_chunk_size,
+    }
+    execution["attempts"].append(attempt)
+    write_json(execution_path, execution)
     started = time.perf_counter()
-    execution = {"exit_code": 0}
+
+    def terminate(signum, frame):
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, terminate)
     try:
-        completed = read_predictions(output / "predictions.jsonl", plan) if args.resume else {}
-        execution["resumed_samples"] = len(completed)
+        if args.resume:
+            previous = json.loads(plan_path.read_text())
+            previous_settings = {
+                key: value for key, value in previous.items() if key not in {"created_at", "source"}
+            }
+            current_settings = {
+                key: value for key, value in plan.items() if key not in {"created_at", "source"}
+            }
+            if previous_settings != current_settings:
+                raise ValueError("Resume settings do not match the initial plan.json")
+            plan = previous
+        else:
+            write_json(plan_path, plan)
+        completed = (
+            read_predictions(output / "predictions.jsonl", plan, execution_attempt)
+            if args.resume
+            else {}
+        )
+        attempt["resumed_samples"] = len(completed)
         torch.cuda.init()
         torch.cuda.reset_peak_memory_stats(0)
         logging.info(
             "Starting evaluation; resume=%s, cached_samples=%s", args.resume, len(completed)
         )
-        evaluate(plan, args.resume, completed)
+        wrapper = load_model(
+            plan["checkpoint"],
+            plan["inference_mode"],
+            plan["mlp_chunk_size"],
+            plan["max_seq_len"],
+        )
+        runtime = runtime_info(wrapper)
+        attempt["runtime"] = runtime
+        write_json(execution_path, execution)
+        runtime_path = output / "runtime.json"
+        if args.resume and runtime_path.exists():
+            if json.loads(runtime_path.read_text()) != runtime:
+                raise ValueError("Resume model, optimization, backend or package settings differ")
+        elif completed:
+            raise FileNotFoundError("Existing predictions require their initial runtime.json")
+        else:
+            write_json(runtime_path, runtime)
+        logging.info("Runtime: %s", json.dumps(runtime, ensure_ascii=False))
+        evaluate(plan, wrapper, args.resume, completed, execution_attempt)
+        attempt["status"] = "completed"
+        attempt["exit_code"] = 0
     except BaseException as error:
-        execution.update(
-            exit_code=130 if isinstance(error, KeyboardInterrupt) else 1, error=str(error)
+        attempt.update(
+            status="failed",
+            exit_code=130 if isinstance(error, KeyboardInterrupt) else 1,
+            error=f"{type(error).__name__}: {error}",
         )
         logging.exception("Evaluation failed")
         raise
     finally:
-        execution["elapsed_seconds"] = time.perf_counter() - started
-        execution["peak_memory_allocated_bytes"] = torch.cuda.max_memory_allocated(0)
-        (output / "execution.json").write_text(
-            json.dumps(execution, ensure_ascii=False, indent=2) + "\n"
+        attempt["finished_at"] = timestamp()
+        attempt["elapsed_seconds"] = time.perf_counter() - started
+        attempt["peak_memory_allocated_bytes"] = (
+            torch.cuda.max_memory_allocated(0) if torch.cuda.is_initialized() else 0
         )
+        execution["elapsed_seconds"] += attempt["elapsed_seconds"]
+        execution["peak_memory_allocated_bytes"] = max(
+            execution["peak_memory_allocated_bytes"], attempt["peak_memory_allocated_bytes"]
+        )
+        write_json(execution_path, execution)
 
 
 if __name__ == "__main__":

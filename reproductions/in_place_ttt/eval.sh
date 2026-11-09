@@ -11,6 +11,6 @@ fi
 export CUDA_VISIBLE_DEVICES="$EVAL_GPU"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF-expandable_segments:True}"
 export TOKENIZERS_PARALLELISM=false
-export PYTHONPATH="$METHOD_DIR/upstream:$METHOD_DIR/scripts${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$METHOD_DIR/upstream:$METHOD_DIR/scripts:$METHOD_DIR${PYTHONPATH:+:$PYTHONPATH}"
 cd "$PROJECT_ROOT"
 exec python -u "$METHOD_DIR/scripts/evaluate.py" "$@"
