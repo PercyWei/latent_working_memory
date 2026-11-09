@@ -80,14 +80,8 @@ def read_predictions(path, expected, logger):
                 break
             try:
                 record = json.loads(line)
-            except (json.JSONDecodeError, UnicodeDecodeError) as error:
-                if isinstance(error, UnicodeDecodeError):
-                    incomplete = error.reason == "unexpected end of data"
-                else:
-                    incomplete = error.pos >= len(error.doc.rstrip()) or error.msg.startswith(
-                        "Unterminated string"
-                    )
-                if line.endswith(b"\n") or not incomplete:
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                if line.endswith(b"\n"):
                     raise
                 logger.warning("Removing incomplete final prediction at byte %s", offset)
                 stream.seek(offset)
