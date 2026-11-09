@@ -217,6 +217,14 @@ class MemoryModel(nn.Module):
         source_hidden = self._hidden(backbone, inputs)[-1]
         return self.boundary(source_hidden)
 
+    def boundary_logits(self, memory_blocks, input_ids, positions):
+        """一次因果前向读取多个边界；positions 为正文中的零起始位置。"""
+        backbone = self.writer.get_base_model()
+        inputs = self._inputs(backbone, memory_blocks, input_ids)
+        self._check_length(len(inputs))
+        indices = self._tokens(positions) + sum(len(block) for block in memory_blocks)
+        return self.boundary(self._hidden(backbone, inputs)[indices])
+
     def answer_nll(self, memory_blocks, prompt_ids, target_ids):
         if not memory_blocks or not prompt_ids or not target_ids:
             raise ValueError("answer scoring requires memory, a prompt and nonempty targets")

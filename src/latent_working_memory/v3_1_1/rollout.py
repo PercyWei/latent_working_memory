@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import torch
 from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 
 from .modeling.streaming import SourceStream
 
@@ -16,6 +17,59 @@ class Rollout:
     block_lengths: tuple[int, ...]
 
 
+def _compress_segment(model, pending, *memory_blocks):
+    """压缩重算显式接收历史 memory，不捕获可变 stream 状态。"""
+    return model.compress(pending, memory_blocks)
+
+
+def _boundary_segment(model, visible, positions, *memory_blocks):
+    return model.boundary_logits(memory_blocks, visible, positions)
+
+
+def _replay_fixed(model, units, actions):
+    """同一提交段的边界共享因果前向，压缩时排除仅用于判断的新单元。"""
+    blocks, log_probs, entropies, lengths = [], [], [], []
+    ends = [index + 1 for index, commit in enumerate(actions) if commit] + [len(units)]
+    start = 0
+    for end in ends:
+        pending = tuple(token for unit in units[start:end] for token in unit)
+        visible_end = end + (end < len(units))
+        positions, offset = [], len(units[start]) - 1
+        for unit in units[start + 1:visible_end]:
+            offset += len(unit)
+            positions.append(offset)
+        # 短前缀只保留层级重算；长前缀也按段重算，限制跨段常驻的激活。
+        visible = pending + (tuple(units[end]) if end < len(units) else ())
+        logits = None
+        if positions:
+            if sum(map(len, blocks)) + len(visible) <= 4096:
+                logits = model.boundary_logits(blocks, visible, positions)
+            else:
+                logits = checkpoint(
+                    _boundary_segment, model, visible, tuple(positions), *blocks,
+                    use_reentrant=False,
+                )
+        memory = checkpoint(
+            _compress_segment, model, pending, *blocks,
+            use_reentrant=False,
+        )
+        if positions:
+            # 较早位置不能读取同段中较晚的原文；lookahead 只参与本段最后的判断。
+            chosen = torch.tensor(actions[start:visible_end - 1], device=logits.device, dtype=torch.bool)
+            log_probs.append(F.logsigmoid(torch.where(chosen, logits, -logits)))
+            entropies.append(F.softplus(logits) - logits * logits.sigmoid())
+        blocks.append(memory)
+        lengths.append(len(pending))
+        start = end
+    zero = blocks[0].new_empty((0,), dtype=torch.float32)
+    return (
+        tuple(blocks), tuple(actions),
+        torch.cat(log_probs) if log_probs else zero,
+        torch.cat(entropies) if entropies else zero,
+        tuple(lengths),
+    )
+
+
 def execute(model, input_ids, unit_tokens, actions=None, generator=None):
     """actions=None 时采样（无 generator 则确定性判断），否则回放既定硬动作。"""
     units = tuple(input_ids[i:i + unit_tokens] for i in range(0, len(input_ids), unit_tokens))
@@ -23,6 +77,8 @@ def execute(model, input_ids, unit_tokens, actions=None, generator=None):
         raise ValueError("stream input must be nonempty")
     if actions is not None and len(actions) != len(units) - 1:
         raise ValueError("recorded actions must match the fixed decision positions")
+    if actions is not None and torch.is_grad_enabled():
+        return _replay_fixed(model, units, actions)
     stream = SourceStream(model, units[0])
     chosen, log_probs, entropies, lengths = [], [], [], []
     for index, unit in enumerate(units[1:]):

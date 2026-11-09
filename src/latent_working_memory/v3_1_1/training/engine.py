@@ -6,7 +6,7 @@ import math
 import torch
 import torch.distributed as dist
 
-from ..objective import post_loss
+from ..objective import post_backward
 from ..rollout import execute, qa_nll
 
 
@@ -62,7 +62,8 @@ class SampleCursor:
         self.generator.set_state(state["generator"])
 
 
-def document_loss(model, document, config, training, boundary_generator=None):
+def document_loss(model, document, config):
+    """预训练目标或后训练的确定性 dev 评分；不执行反向传播。"""
     if config.stage == "pretrain":
         memory = model.compress(document.input_ids)
         loss = model.answer_nll((memory,), document.prompt_ids, document.target_ids)
@@ -70,8 +71,6 @@ def document_loss(model, document, config, training, boundary_generator=None):
             f"{document.task}_nll": (float(loss.detach()), 1),
             "lm_fraction": (float(document.task == "lm"), 1),
         }
-    if training:
-        return post_loss(model, document, asdict(config.objective), boundary_generator)
     blocks, actions, _, entropy, lengths = execute(
         model, document.input_ids, config.objective.unit_tokens,
     )
@@ -190,17 +189,23 @@ class TrainingEngine:
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
         totals = {}
-        for start in range(0, len(documents), self.config.micro_batch_size):
-            losses = []
-            for document in documents[start:start + self.config.micro_batch_size]:
-                loss, metrics = document_loss(
-                    self.model, document, self.experiment, True, boundary_generator,
+        if self.experiment.stage == "post":
+            objective = asdict(self.experiment.objective)
+            for document in documents:
+                loss, metrics = post_backward(
+                    self.model, document, objective, boundary_generator,
                 )
-                if not bool(torch.isfinite(loss)):
-                    raise RuntimeError(f"non-finite training loss: {document.id}")
-                losses.append(loss)
                 _accumulate(totals, loss, metrics)
-            torch.stack(losses).sum().backward()
+        else:
+            for start in range(0, len(documents), self.config.micro_batch_size):
+                losses = []
+                for document in documents[start:start + self.config.micro_batch_size]:
+                    loss, metrics = document_loss(self.model, document, self.experiment)
+                    if not bool(torch.isfinite(loss)):
+                        raise RuntimeError(f"non-finite training loss: {document.id}")
+                    losses.append(loss)
+                    _accumulate(totals, loss, metrics)
+                torch.stack(losses).sum().backward()
         metrics = _aggregate_metrics(totals, len(documents))
         self._synchronize_gradients(metrics["samples"])
         for group in self.optimizer.param_groups:
@@ -223,7 +228,7 @@ def evaluate_dev(model, documents, config):
     model.eval()
     totals = {}
     for document in documents:
-        loss, metrics = document_loss(model, document, config, False)
+        loss, metrics = document_loss(model, document, config)
         if not bool(torch.isfinite(loss)):
             raise RuntimeError(f"non-finite dev loss: {document.id}")
         _accumulate(totals, loss, metrics)
