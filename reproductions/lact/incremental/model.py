@@ -198,6 +198,8 @@ class IncrementalLaCTForCausalLM(LaCTForCausalLM):
             raise ValueError("Incremental LaCT requires one unpadded sequence")
         if self.config.use_fused_kernel:
             raise ValueError("Incremental LaCT preserves the non-fused TTT implementation")
+        if kwargs.get("cu_seqlens") is not None:
+            raise ValueError("Packed sequences are not supported by incremental LaCT")
         if attention_mask is not None and not bool(attention_mask.all()):
             raise ValueError("Padding is not supported by this incremental inference path")
         cache = past_key_values

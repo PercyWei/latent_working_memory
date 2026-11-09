@@ -106,20 +106,54 @@ def teacher_forced(model, prefix, continuation, sample_id, output, logger):
         cache = incremental.past_key_values
         if cache is None:
             raise RuntimeError("Incremental forward did not return past_key_values")
+        consumed = complete.shape[-1]
+        chunk_size = model.config.lact_chunk_size
+        expected_updates = (consumed - 1) // chunk_size
+        expected_pending = consumed - expected_updates * chunk_size
+        layer_progress = []
+        for index, layer_cache in enumerate(cache.layers):
+            ttt = layer_cache.ttt
+            layer_progress.append(
+                {
+                    "layer": index,
+                    "seen": layer_cache.seen,
+                    "ttt_seen": ttt.seen,
+                    "n_updates": ttt.n_updates,
+                    "pending_length": ttt.pending_length,
+                    "consistent": (
+                        layer_cache.seen == consumed
+                        and ttt.seen == consumed
+                        and ttt.n_updates == expected_updates
+                        and ttt.pending_length == expected_pending
+                    ),
+                }
+            )
+        cache_progress_consistent = len(cache.layers) == len(model.model.layers) and all(
+            progress["consistent"] for progress in layer_progress
+        )
         comparison = compare_logits(reference.logits[:, -1], incremental.logits[:, -1])
         record = {
             "id": sample_id,
             "teacher_forced_step": step,
-            "consumed_tokens": complete.shape[-1],
+            "consumed_tokens": consumed,
+            "cache_progress_consistent": cache_progress_consistent,
+            "expected_cache_progress": {
+                "layers": len(model.model.layers),
+                "seen": consumed,
+                "n_updates": expected_updates,
+                "pending_length": expected_pending,
+            },
+            "layer_cache_progress": layer_progress,
             **comparison,
         }
         append_record(output / "teacher_forced.jsonl", record)
         records.append(record)
         logger.info(
-            "%s teacher step=%s tokens=%s argmax_equal=%s max_abs=%s max_rel=%s",
+            "%s teacher step=%s tokens=%s cache_progress=%s argmax_equal=%s max_abs=%s max_rel=%s",
             sample_id,
             step,
-            complete.shape[-1],
+            consumed,
+            cache_progress_consistent,
             comparison["argmax_equal"],
             comparison["max_abs"],
             comparison["max_rel"],
@@ -245,6 +279,8 @@ def run(args, output, logger):
         "logit_relative_denominator_floor": RELATIVE_DENOMINATOR_FLOOR,
         "acceptance": (
             "所有teacher-forced logits有限且argmax一致；"
+            "每层cache与TTT的seen=N，n_updates=floor((N-1)/chunk_size)，"
+            "pending_length=N-n_updates*chunk_size；"
             "独立greedy生成token IDs严格相等；跨样本重放结果严格相等。"
             "另报告logits最大绝对和相对差，不把浮点逐位相同作为要求。"
         ),
@@ -375,8 +411,15 @@ def run(args, output, logger):
     all_greedy_equal = all(record["comparison"]["token_ids_equal"] for record in generations)
     all_teacher_equal = all(record["argmax_equal"] for record in teacher_records)
     all_finite = all(record["finite"] for record in teacher_records)
+    all_cache_progress = all(record["cache_progress_consistent"] for record in teacher_records)
     isolation_equal = isolation["comparison"]["token_ids_equal"]
-    passed = all_greedy_equal and all_teacher_equal and all_finite and isolation_equal
+    passed = (
+        all_greedy_equal
+        and all_teacher_equal
+        and all_finite
+        and all_cache_progress
+        and isolation_equal
+    )
     measured_runs = warmups + [replay]
     measured_runs.extend(
         record[mode] for record in generations for mode in ("original", "incremental")
@@ -389,6 +432,7 @@ def run(args, output, logger):
         "all_greedy_token_ids_equal": all_greedy_equal,
         "all_teacher_forced_argmax_equal": all_teacher_equal,
         "all_teacher_forced_logits_finite": all_finite,
+        "all_cache_progress_consistent": all_cache_progress,
         "cache_isolation_equal": isolation_equal,
         "all_teacher_forced_logits_bitwise_equal": all(
             record["bitwise_equal"] for record in teacher_records
