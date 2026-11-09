@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261108 15:52:29 Asia/Shanghai
+最后修订时间：20261109 11:29:41 Asia/Shanghai
 
 计算协议与数据格式见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256.json)中的基座与数据路径。
 
@@ -113,7 +113,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
 - **运行目录**：`run_id` 默认为 `policy-post_k{memory_slots}_{YYYYMMDD-HHMM}`，其中 `memory_slots` 取自 `model.memory_slots`。
 - **初始化**：后训练需通过 `--init-checkpoint` 指定预训练来源。源 checkpoint 阶段须为 `pretrain`，两阶段 `model` 配置一致。新 run 只继承压缩器，重新创建边界模块、optimizer、scheduler、游标和边界随机流。实际来源随训练记录保存。
 - **训练单位**：每行一篇文档及其全部 QA。一篇文档采样 G 条完整硬分段，每条路径共享 memory 评价同一套 QA；G 不计入全局 batch。
-- **一次联合更新**：固定参数采样评价，按记录动作带梯度回放，累计整批后更新一次；下一批刷新轨迹。QA 损失训练记忆内容，停止梯度后的组内优势训练边界选择。
+- **一次联合更新**：固定参数采样并评价整组路径，逐路径回放；QA 逐题累积 memory 梯度并释放计算图，再与策略项一起回传压缩器，累计整批后更新一次。同一提交段内的边界判断共享因果前向，压缩排除仅用于判断的下一单元。QA 损失训练记忆内容，停止梯度后的组内优势训练边界选择。
 - **归约与尾批**：损失按实际文档数平均，尾批不补齐、不丢弃、不跨 epoch 拼接；空 rank 同样参加 collective。
 
 ### 3.3 中断恢复
@@ -285,7 +285,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 | `--gradient-accumulation-steps` | 每次优化器更新前累积的 microbatch 数，默认 4 |
 
 - **数据筛选**：预训练按完整样本 `text`、后训练按正文的实际 token 数筛选，不含系统提示、chat template 等。train 和 dev 均须严格大于 `model.memory_slots`；上限仅用于 train，超限样本整条排除，`null` 取消该上限。LM 划分后的压缩前缀若不大于 K 则改为 AE，实际编码／解码仍须满足模型窗口限制。
-- **批量与预算**：全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数，默认按总批次 16 进行配置。
+- **批量与预算**：全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数，默认按总批次 16 进行配置。后训练逐路径反传，这两个批量参数共同确定每次更新处理的文档数。
 
 ### 5.2 验证、评估与结果记录
 

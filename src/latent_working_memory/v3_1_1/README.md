@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261108 15:52:29 Asia/Shanghai
+最后修订时间：20261109 11:29:41 Asia/Shanghai
 
 [运行指南](scripts/README.md) · [预训练配置](../../../configs/v3_1_1/pretrain_default.json) · [后训练配置](../../../configs/v3_1_1/post_default.json) · [K256 预训练](../../../configs/v3_1_1/pretrain_k256.json) · [K256 后训练](../../../configs/v3_1_1/post_k256.json)
 
@@ -50,9 +50,9 @@ reward_g = -stopgrad(QA_NLL_g) - slot_cost × K × blocks_g
 loss = mean(QA_NLL_g) + policy_weight × GRPO_loss
 ```
 
-奖励、组内优势和旧动作概率停止梯度；压缩器 QA 损失始终使用正权平均，不乘优势。每批固定参数无梯度采样并评价，再固定全部动作带梯度回放，累计整批梯度后联合更新一次，下一批刷新轨迹。采样、dev 和独立评估复用原文增量 KV；提交前排除仅用于判断的 b，追加 memory tokens 压缩 a，再以新 memory 上下文重建 b 的缓存。回放重算完整可见前缀，保留历史 memory 的梯度，并按轨迹执行 activation checkpoint 重算。
+奖励、组内优势和旧动作概率停止梯度；压缩器 QA 损失始终使用正权平均，不乘优势。每篇先固定参数无梯度采样并评价整组路径，再逐路径回放。每条路径的 QA 逐题反传到独立 memory 叶子并释放该题的 decoder 图；全部 QA 的 memory 梯度按原均值汇总，与策略项一起回传完整 writer 图，各路径按 G 归一。累计整批文档梯度后联合更新一次，下一批刷新轨迹。采样、dev 和独立评估复用原文增量 KV；提交前排除仅用于判断的 b，追加 memory tokens 压缩 a，再以新 memory 上下文重建 b 的缓存。固定动作回放时，同一提交段内的判断点共享一次因果前向，各自读取对应单元末位置；压缩仍只包含所提交正文，历史 memory 保留完整梯度。压缩按提交段执行 activation checkpoint，可见前缀不超过 4096 tokens 的边界判断仅保留 Transformer 层重算，较长前缀额外按段重算；答案输出头继续分块重算，以减少重复计算并控制长文本显存。
 
-首版不多轮复用轨迹。数学上，同一组参数的新旧概率比为 1；BF16 分块采样与完整回放可能存在舍入差，`train/replay_log_probability_drift` 记录轨迹内最大 log probability 差的平均值。稳定性主要依赖保守更新与及时刷新反馈。
+首版不多轮复用轨迹。数学上，同一组参数的新旧概率比为 1；BF16 分块采样与分段回放可能存在舍入差，`train/replay_log_probability_drift` 记录轨迹内最大 log probability 差的平均值。稳定性主要依赖保守更新与及时刷新反馈。
 
 ## 配置与运行
 
