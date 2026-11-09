@@ -2,11 +2,11 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261109 11:55:45 Asia/Shanghai
+最后修订时间：20261109 12:03:23 Asia/Shanghai
 
 ## 当前状态
 
-已迁入官方实现与训练、导出、推理及 RULER 配置，保留原 VeOmni／OpenCompass 工作流，尚未运行 GPU 训练或论文指标评估。来源和已确认差异见 [UPSTREAM.md](UPSTREAM.md)。本次 GPU 评估使用 `zcy-memory` 当前获准的物理 GPU 0；入口允许显式选择单卡 0 或 1。
+已迁入官方实现与训练、导出、推理及 RULER 配置，保留原 VeOmni／OpenCompass 工作流。第三方 TTT checkpoint 在 4K–128K 的生成与原生评分路径已通过 GPU 检查，256K 首次运行显存不足；尚未完成完整 benchmark 或论文指标复现。来源和已确认差异见 [UPSTREAM.md](UPSTREAM.md)。本次 GPU 评估使用 `zcy-memory` 当前获准的物理 GPU 0；入口允许显式选择单卡 0 或 1。
 
 `upstream/` 保持官方代码原样；本地 `eval.sh` 读取预构造 RULER JSONL，顺序调用原 OpenCompass 模型 wrapper、预测后处理和评分器。未引入统一训练框架或新的记忆目标。
 
@@ -18,7 +18,7 @@
 |---|---|---|---|---|---|---|---|
 | 原文 baseline | 96.6 | 94.1 | 92.1 | 88.7 | 74.3 | 74.8 | 41.7 |
 | 原文 In-Place TTT | 96.1 | 95.6 | 92.7 | 89.3 | 78.7 | 77.0 | 43.9 |
-| 本次结果 | 未运行 | 未运行 | 未运行 | 未运行 | 未运行 | 未运行 | 未运行 |
+| 本次完整评估 | 未运行 | 未运行 | 未运行 | 未运行 | 未运行 | 未运行 | 未运行 |
 
 原文继续预训练使用 AdamW，学习率 `5e-6`、weight decay `0.1`，先在 32,768 长度训练约 20B tokens，再在 131,072 长度训练约 15B tokens，并进行 YaRN 扩展；Conv kernel size 为 5。作者在[官方 issue 回复](https://github.com/ByteDance-Seed/In-Place-TTT/issues/1)中说明，内部数据政策限制了原训练语料和论文模型权重的发布。
 
@@ -91,6 +91,8 @@ python scripts/merge_dcp_to_hf.py \
 
 先激活包含上述依赖的 In-Place TTT 方法环境，再从仓库根目录运行 `eval.sh`。它使用当前环境的 `python`，默认物理 GPU 0，允许显式选择单卡 0 或 1，拒绝其他卡号与多卡列表。逻辑设备始终为 `cuda:0`。
 
+入口默认设置 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`，已有的显式环境配置原样保留，实际值写入 `plan.json`。256K 首次检查使用 SDPA，在总显存 79.25 GiB、已分配 58.69 GiB、已保留但未使用 16.12 GiB、空闲 3.94 GiB 时申请 4.75 GiB 失败。该设置用于减少分配器碎片，256K 是否可运行仍需实际重试；模型和 attention backend 保持原设置。
+
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
@@ -130,7 +132,7 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
 
 产物：`plan.json`（实际参数）、`runtime.json`（模型类、位置设置、依赖版本）、`predictions.jsonl`（逐题原预测、后处理预测、答案、输入长度和原生分数）、`results/<length>/<task>.json`（原生任务评分）、`summary.json`（全量完成后的长度汇总）、`evaluation.log` 和 `execution.json`。日志与逐题结果增量写入，`summary.json` 仅在全部所选数据完成后生成。`execution.json` 记录本次调用的耗时 `elapsed_seconds`、PyTorch 峰值分配显存 `peak_memory_allocated_bytes`、复用样本数及退出状态；续评时覆盖为本次调用的统计。
 
-这些入口尚未通过 GPU 评估，不能据此声称已完成第三方权重或论文指标复现。
+完整评估结果需待每个 checkpoint 的 9,100 条样本全部完成后报告。
 
 ## 已执行检查
 
@@ -141,10 +143,10 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
 | 官方源码迁入 | 40 个文件与固定 revision 对应文件一致，全部可被 Git 正常跟踪 |
 | 上游 Python 语法解析 | 26 个文件通过 |
 | 上游 `train.sh`、`eval.sh` shell 语法 | `bash -n` 通过 |
-| 本地评估入口 | Ruff、Python／shell 语法通过；服务器独立环境依赖检查及完整入口导入通过，尚未加载 checkpoint 或运行 GPU |
+| 本地评估入口 | Ruff、Python／shell 语法通过；服务器独立环境依赖检查及完整入口导入通过；第三方 TTT checkpoint 的 4K–128K GPU 生成与原生评分通过，256K 首次运行显存不足 |
 | 直接导入训练模型 | 根环境缺少 `einops`，导入失败；未更改上游代码绕过依赖 |
 | Qwen3MLP 训练／推理计算核 CPU 诊断 | 直接编译上游原始 AST 类，使用真实 PyTorch／einops／opt_einsum；chunk=4，长度 4、8、10、12，输出最大误差 `5.96e-8`，训练反传梯度有限 |
 
 CPU 诊断仅覆盖上游 `Qwen3MLP` 的分块矩阵计算，包括完整 chunk 和尾部 padding，不覆盖 Transformer、KV cache、逐 token 解码、FlashAttention、VeOmni 或 OpenCompass。诊断临时依赖为 `einops==0.8.1`、`opt_einsum==3.4.0`，安装在 `/tmp/in-place-ttt-cpu-deps-20261108/`，没有修改根项目依赖。
 
-下一项运行是在获准 GPU 空闲时，验证第三方 TTT 与 baseline 的完整模型加载及推理。官方论文指标复现仍受原训练语料、原模型权重及实验配置缺失的限制。
+下一项运行是重试 256K 推理并完成第三方 TTT 与 baseline 的完整评估。官方论文指标复现仍受原训练语料、原模型权重及实验配置缺失的限制。

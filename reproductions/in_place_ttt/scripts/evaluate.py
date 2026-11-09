@@ -251,6 +251,7 @@ def main():
         "postprocessor": "opencompass.utils.text_postprocessors.extract_non_reasoning_content",
         "max_seq_len": max(args.lengths),
         "cuda_visible_devices": physical_gpu,
+        "pytorch_cuda_alloc_conf": os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""),
         "device": "cuda:0",
         "output_dir": str(output),
     }
