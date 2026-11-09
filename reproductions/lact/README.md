@@ -2,9 +2,9 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261109 12:11:28 Asia/Shanghai
+最后修订时间：20261109 15:34:28 Asia/Shanghai
 
-本目录接入 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现，保留其与 sliding-window attention 并行的 SwiGLU fast weights、负内积写入、Momentum / Muon 与逐次权重归一化。已接入本地 RULER checkpoint 评估入口，完成源码静态检查、原始写入函数的 CPU 前后向检查，以及公开 Momentum checkpoint 在 4K、32K 真实样本上的完整生成；尚未完成正式 RULER 评估或论文指标复现。
+本目录接入 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现，保留其与 sliding-window attention 并行的 SwiGLU fast weights、负内积写入、Momentum / Muon 与逐次权重归一化。已接入本地 RULER checkpoint 评估及增量推理缓存，保留官方完整前缀路径作为对照；尚未完成正式 RULER 评估或论文指标复现。
 
 ## 代码与运行入口
 
@@ -14,9 +14,11 @@
 - `configs/760m_muon_paper_single_gpu.toml`：760M Muon 的单卡运行配置，保留公开命令的全局 token batch 和步数。
 - `scripts/train_760m_muon.sh`：在 `zcy-memory` 的单张物理 GPU 上调用原生 flame trainer。
 - `eval.sh`、`scripts/evaluate.py`：在单张物理 GPU 上读取本地六项 RULER JSONL，使用官方 LaCT 模型生成并计分。
+- `incremental/`：本地增量推理实现，保存每层 attention KV、TTT 状态与待写 chunk；`scripts/validate_incremental.py` 与原始路径比较数值误差、生成结果和缓存隔离。
 - [UPSTREAM.md](UPSTREAM.md)：固定源码 revision、文件范围和必要接入改动。
 - [源码迁入记录](20261108_execution.md)：源码接入与本地 CPU 检查。
 - [GPU 验证与评估记录](../20261109_checkpoint_gpu_evaluation.md)：完整模型运行状态与正式评估进度。
+- [增量推理记录](../20261109_lact_incremental_inference.md)：缓存实现、原始／增量一致性验证和耗时记录。
 
 本地不引入统一训练框架，不更改官方模型或更新函数。flame 的 custom-model 注册仅负责使 Transformers 能够按 `lact_swiglu` 配置加载模型。
 
@@ -59,12 +61,22 @@ hf download YunjinZhang/lact_llm \
 
 ## 本地 RULER 评估
 
-先按 [评估数据准备](../20261108_ttt_data_preparation.md) 准备 `data/benchmarks/ruler-v1/reproductions/lact-760m/`。确认 `zcy-memory` 的物理 GPU 0 空闲、激活 LaCT 的原生 CUDA 环境后，从项目根目录运行：
+先按 [评估数据准备](../20261108_ttt_data_preparation.md) 准备 `data/benchmarks/ruler-v1/reproductions/lact-760m/`。确认 `zcy-memory` 的物理 GPU 0 空闲、激活 LaCT 的原生 CUDA 环境后，从项目根目录运行。官方完整前缀路径：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
-  --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-ruler
+  --inference-mode original \
+  --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-ruler-original
+```
+
+本地增量路径使用同一 checkpoint、数据和生成设置，保存到独立目录：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/eval.sh \
+  --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
+  --inference-mode incremental \
+  --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-ruler-incremental
 ```
 
 `eval.sh` 使用当前方法环境的 `python`，设置官方模型与项目源码路径，仅接受 `CUDA_VISIBLE_DEVICES=0` 或 `1`，未指定时默认 `0`。进程内设备为 `cuda:0`，实际物理设备选择写入 `plan.json`。`--checkpoint` 和 `--output-dir` 必需，首次运行的输出目录必须尚不存在。可选参数如下：
@@ -73,6 +85,7 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/eval.sh \
 |---|---|
 | `--ruler-data` | `data/benchmarks/ruler-v1/reproductions/lact-760m` |
 | `--lengths` | `4096 8192 16384 32768`，可选其中的子集 |
+| `--inference-mode` | `original`；可选 `incremental` |
 | `--resume` | 续评已有输出目录，默认关闭 |
 
 中断后使用相同设置和输出目录续评：
@@ -80,15 +93,18 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/eval.sh \
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
-  --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-ruler \
+  --inference-mode incremental \
+  --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-ruler-incremental \
   --resume
 ```
 
-续评核对 checkpoint 配置、数据路径、长度、任务、生成和精度等设置，跳过已保存的样本 ID，并追加新的预测；时间和运行设备信息可以变化。仅删除最后一条未写完的 JSON 记录；已完成记录的损坏、重复 ID 或样本不匹配均报错。
+续评核对 checkpoint 配置、数据路径、长度、任务、推理模式、生成和精度等设置，跳过已保存的样本 ID，并追加新的预测；时间和运行设备信息可以变化。仅删除最后一条未写完的 JSON 记录；已完成记录的损坏、重复 ID 或样本不匹配均报错。
 
 两个 Muon 模型使用对应的 checkpoint 目录和新的输出目录，数据目录共用。评估要求每个长度的六项 `test.jsonl` 各有 500 条样本，不在入口内生成或截断样本。每条输入按 `input + answer_prefix` 拼接，再由 checkpoint tokenizer 添加默认 special tokens；完整输入与 128-token 输出预算之和必须不超过长度档位。采用 greedy、单样本生成，参考 `outputs` 仅用于计分。
 
-**官方生成路径没有 fast-weight cache。** `prepare_inputs_for_generation` 和模型 `forward` 均强制 `use_cache=False`。本入口保留这一行为，每生成一个 token 都将完整前缀送入原模型，重新执行各层的 chunk 写入及读出；没有补写原实现不更新的当前尾段。生成只计算最后位置的 vocabulary logits（`logits_to_keep=1`），但模型的完整前缀计算仍然存在。因此该入口可用于模型质量评估，耗时不能解释为高效增量解码的性能。
+`original` 直接使用官方 `generate`。官方 `prepare_inputs_for_generation` 和模型 `forward` 均强制 `use_cache=False`，每生成一个 token 都重新计算完整前缀。`logits_to_keep=1` 仅减少 vocabulary logits 的计算，其耗时不代表增量解码性能。
+
+`incremental` 使用独立的本地实现，缓存 sliding-window KV、fast weights、PreNorm 累计状态、初始行范数、Momentum 和待写 chunk。保持先读后更新及尾段延迟写入：前缀长度为 \(L\) 时提交 \(\lfloor(L-1)/2048\rfloor\) 次更新。当前支持单样本、无 padding、非 fused TTT 推理；不修改 `upstream/` 中的模型或更新函数。两种模式均保持 greedy 和 128-token 预算。
 
 参数以 float32 加载，计算使用 CUDA bfloat16 autocast，实际 dtype 记录在 `plan.json`。关闭外层 autograd；原始 TTT 的负内积梯度已实现为显式矩阵运算，仍会执行记忆更新。入口不修改 checkpoint 的 Muon、PreNorm、RoPE、fused-kernel 或状态精度配置。
 
@@ -104,7 +120,22 @@ checkpoint 仅从本地加载，任何 missing、unexpected、mismatched keys �
 
 评分复用项目保存的 NVIDIA RULER `postprocess_pred` 与 `string_match_all`；最终汇总从全部已保存的原始预测重新计分，逐样本不取整，汇总百分比保留两位小数。只有全部所选样本完成才写入 `summary.json`；部分预测文件不代表完整评估结果。汇总耗时包含历次已记录执行的加载、编译、生成和失败耗时。
 
-已完成 shell、Python 语法和 Ruff 静态检查，并在服务器安装独立评估环境。公开 Momentum checkpoint 已严格加载，在物理 GPU 0 上完成 4K、32K 各一个真实样本的完整 128-token 生成；正式 12000 条 RULER 评估尚未完成。这些样本仅确认运行路径，不计入正式 benchmark 分数；结果与资源开销见 [GPU 验证与评估记录](../20261109_checkpoint_gpu_evaluation.md)，依赖信息见 [评估环境](../20261109_environment_setup.md)。
+公开 Momentum checkpoint 已通过严格加载及官方路径的真实样本 GPU 生成。增量路径已通过 4K 初步验证：覆盖 chunk 边界、真实样本 teacher-forced logits、独立 128-token greedy 生成及 A→B→A 缓存隔离；所检查的生成 token IDs 一致，logits 存在浮点误差，并非逐位相同。完整四长度与 Muon 的验证结果以 [增量推理记录](../20261109_lact_incremental_inference.md) 为准。正式 12000 条 RULER 评估尚未完成；运行验证样本不计入正式分数。
+
+增量一致性验证从项目根目录运行，使用 LaCT 环境，并显式加入方法、官方模型和项目源码路径：
+
+```bash
+source ~/rivermind-data/envs/ttt-lact/bin/activate
+export CUDA_VISIBLE_DEVICES=0
+export TOKENIZERS_PARALLELISM=false
+export PYTHONPATH="$PWD/reproductions/lact:$PWD/reproductions/lact/upstream/lact_llm:$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+python -u reproductions/lact/scripts/validate_incremental.py \
+  --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
+  --output-dir artifacts/reproductions/lact/incremental-validation_20261109/momentum \
+  --lengths 4096 8192 16384 32768
+```
+
+该命令实际执行原始与增量 GPU 推理。验证产物需使用新的输出目录；依赖信息见 [评估环境](../20261109_environment_setup.md)。
 
 ## 环境与数据
 

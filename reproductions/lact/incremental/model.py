@@ -19,6 +19,10 @@ class LayerCache:
     keys: torch.Tensor | None = None
     values: torch.Tensor | None = None
     ttt: TTTState | None = None
+    query_offsets: torch.Tensor | None = None
+    key_offsets: torch.Tensor | None = None
+    query_length: int = 0
+    key_length: int = 0
 
 
 class LaCTCache:
@@ -47,14 +51,19 @@ def attention_forward(layer, hidden_states, cache):
         k = torch.cat((cache.keys, k), dim=1)
         v = torch.cat((cache.values, v), dim=1)
     kv_len = k.shape[1]
-    cu_q = torch.tensor([0, q_len], dtype=torch.int32, device=q.device)
-    cu_k = torch.tensor([0, kv_len], dtype=torch.int32, device=q.device)
+    # Decode shapes stay at (1, window_size); reuse the identical GPU metadata.
+    if cache.query_length != q_len:
+        cache.query_offsets = torch.tensor([0, q_len], dtype=torch.int32, device=q.device)
+        cache.query_length = q_len
+    if cache.key_length != kv_len:
+        cache.key_offsets = torch.tensor([0, kv_len], dtype=torch.int32, device=q.device)
+        cache.key_length = kv_len
     output = flash_attn_varlen_func(
         q.squeeze(0),
         k.squeeze(0),
         v.squeeze(0),
-        cu_seqlens_q=cu_q,
-        cu_seqlens_k=cu_k,
+        cu_seqlens_q=cache.query_offsets,
+        cu_seqlens_k=cache.key_offsets,
         max_seqlen_q=q_len,
         max_seqlen_k=kv_len,
         causal=True,
