@@ -197,47 +197,118 @@ class ComponentSpans:
 
 
 def profiler_result(profiler, phase):
-    averages = list(profiler.key_averages())
+    events = list(profiler.events())
+    cpu = [event for event in events if str(event.device_type).endswith("CPU")]
+    cuda = [event for event in events if str(event.device_type).endswith("CUDA")]
+    annotations = [event for event in cuda if event.is_user_annotation]
+    annotation_names = {event.name for event in annotations}
+    kernels = [event for event in cuda if not event.is_user_annotation]
+    pure_device_times = {}
 
-    def row(event):
-        return {
-            "name": event.key,
-            "device_type": str(event.device_type),
-            "calls": event.count,
-            "self_cpu_seconds": event.self_cpu_time_total / 1e6,
-            "cpu_total_seconds": event.cpu_time_total / 1e6,
-            "self_device_seconds": event.self_device_time_total / 1e6,
-            "device_total_seconds": event.device_time_total / 1e6,
-        }
+    def pure_cpu_device_time(event):
+        # Kineto also links CUDA user-annotation spans into CPU event.kernels.
+        # Exclude those spans before following the CPU tree, rather than relying
+        # on device_time_total, which can count an annotation and its children.
+        key = id(event)
+        if key not in pure_device_times:
+            pure_device_times[key] = (
+                0.0
+                if event.is_async or not event.use_device
+                else sum(
+                    kernel.duration
+                    for kernel in event.kernels
+                    if kernel.name not in annotation_names
+                )
+                + sum(pure_cpu_device_time(child) for child in event.cpu_children)
+            )
+        return pure_device_times[key]
 
-    components = {
-        event.key.removeprefix(f"component/{phase}/"): row(event)
-        for event in averages
-        if event.key.startswith(f"component/{phase}/")
-    }
-    cpu = [event for event in averages if str(event.device_type).endswith("CPU")]
-    gpu = [event for event in averages if str(event.device_type).endswith("CUDA")]
-    kernel_seconds = sum(event.self_device_time_total for event in gpu) / 1e6
+    def aggregate(rows):
+        totals = {}
+        for event in rows:
+            key = (event.name, str(event.device_type), event.is_user_annotation)
+            row = totals.setdefault(
+                key,
+                {
+                    "name": event.name,
+                    "device_type": str(event.device_type),
+                    "is_user_annotation": event.is_user_annotation,
+                    "calls": 0,
+                    "self_cpu_seconds": 0.0,
+                    "cpu_total_seconds": 0.0,
+                    "self_device_seconds": 0.0,
+                    "device_total_seconds": 0.0,
+                    "reported_self_device_seconds": 0.0,
+                    "reported_device_total_seconds": 0.0,
+                },
+            )
+            is_cpu = str(event.device_type).endswith("CPU")
+            own_device = (
+                sum(
+                    kernel.duration
+                    for kernel in event.kernels
+                    if kernel.name not in annotation_names
+                )
+                if is_cpu and not event.is_async and event.use_device
+                else 0.0
+                if is_cpu
+                else event.self_device_time_total
+            )
+            inclusive_device = pure_cpu_device_time(event) if is_cpu else event.device_time_total
+            row["calls"] += 1
+            row["self_cpu_seconds"] += event.self_cpu_time_total / 1e6
+            row["cpu_total_seconds"] += event.cpu_time_total / 1e6
+            row["self_device_seconds"] += own_device / 1e6
+            row["device_total_seconds"] += inclusive_device / 1e6
+            row["reported_self_device_seconds"] += event.self_device_time_total / 1e6
+            row["reported_device_total_seconds"] += event.device_time_total / 1e6
+        return list(totals.values())
+
+    component_rows = aggregate(
+        event
+        for event in cpu
+        if event.is_user_annotation and event.name.startswith(f"component/{phase}/")
+    )
+    components = {row["name"].removeprefix(f"component/{phase}/"): row for row in component_rows}
+    cpu_rows = aggregate(cpu)
+    kernel_rows = aggregate(kernels)
+    kernel_seconds = sum(event.self_device_time_total for event in kernels) / 1e6
     return {
         "component_kernel_inclusive": components,
         "top_cpu_operators_by_self_device_time": [
-            row(event)
-            for event in sorted(cpu, key=lambda e: e.self_device_time_total, reverse=True)[:30]
+            row
+            for row in sorted(cpu_rows, key=lambda e: e["self_device_seconds"], reverse=True)[:30]
         ],
         "top_gpu_kernels": [
-            row(event)
-            for event in sorted(gpu, key=lambda e: e.self_device_time_total, reverse=True)[:30]
+            row
+            for row in sorted(kernel_rows, key=lambda e: e["self_device_seconds"], reverse=True)[
+                :30
+            ]
         ],
-        "sum_gpu_kernel_seconds": kernel_seconds if gpu else None,
-        "gpu_kernel_timing_available": bool(gpu) and kernel_seconds > 0,
-        "attention_operators": [
-            row(event)
-            for event in averages
-            if "scaled_dot_product" in event.key or "flash_attention" in event.key
-        ],
+        "sum_gpu_kernel_seconds": kernel_seconds if kernels else None,
+        "gpu_kernel_timing_available": bool(kernels) and kernel_seconds > 0,
+        "excluded_cuda_annotation_events": len(annotations),
+        "excluded_cuda_annotation_seconds": sum(event.device_time_total for event in annotations)
+        / 1e6,
+        "excluded_cuda_annotation_names": sorted(annotation_names),
+        "excluded_cpu_linked_annotation_seconds": sum(
+            kernel.duration
+            for event in cpu
+            for kernel in event.kernels
+            if kernel.name in annotation_names
+        )
+        / 1e6,
+        "attention_operators": aggregate(
+            event
+            for event in events
+            if not event.is_user_annotation
+            and ("scaled_dot_product" in event.name or "flash_attention" in event.name)
+        ),
         "timing_note": (
-            "component device_total为含子算子的kernel时长；顶层component互斥，SDPA与TTTread/write为子项。"
-            "不得把CPU关联的device时间与GPU kernel行重复相加；GPU kernel总时长不是并发关键路径。"
+            "component仅取CPU record_function，device_total按CPU树递归累加实际关联kernel，"
+            "先剔除CUDA user annotations；reported字段保留profiler未经修正的时间。"
+            "GPU总量只加非annotation CUDA events，不再加CPU关联时间。顶层component互斥，"
+            "SDPA与TTTread/write为子项；GPU活动总时长不是并发关键路径。"
         ),
     }
 
@@ -423,8 +494,51 @@ def run(args, output, source, logger):
             with (args.ruler_data / str(length) / task / "test.jsonl").open() as stream:
                 samples[length, task] = json.loads(next(stream))
     failures, generations, profiles, warmups = [], [], [], []
+    if args.generation_results is not None:
+        parent = args.generation_results
+        parent_plan = json.loads((parent / "plan.json").read_text())
+        parent_summary = json.loads((parent / "summary.json").read_text())
+        if not parent_summary["completed"] or not parent_summary["process_success"]:
+            raise ValueError(
+                "The referenced execution must have completed without runtime failures"
+            )
+        for key in (
+            "checkpoint",
+            "ruler_data",
+            "lengths",
+            "tasks",
+            "sample_position",
+            "backends",
+            "compact_tails",
+            "mlp_chunk_size",
+            "generation",
+            "checkpoint_config",
+            "runtime",
+        ):
+            if parent_plan[key] != plan[key]:
+                raise ValueError(f"Referenced generation protocol differs: {key}")
+        generations = [
+            json.loads(line) for line in (parent / "generation.jsonl").read_text().splitlines()
+        ]
+        warmups = [json.loads(line) for line in (parent / "warmup.jsonl").read_text().splitlines()]
+        cases = {(row["length"], row["task"]) for row in generations}
+        if len(generations) != len(args.lengths) * len(TASKS) or cases != {
+            (length, task) for length in args.lengths for task in TASKS
+        }:
+            raise ValueError("Referenced generation records do not cover the planned cases")
+        plan["generation_results"] = {
+            "directory": str(parent),
+            "source": parent_plan["source"],
+            "measured_in_this_execution": False,
+        }
+        plan["warmup"] = "复用父执行的4K预热记录；本次不运行生成预热"
+        plan["profiling"] = "仅补做分项profiling，端到端耗时沿用所引用执行"
+        write_json(output / "plan.json", plan)
+        logger.info(
+            "Reusing completed end-to-end records from %s; collecting profiles only", parent
+        )
     prompt = samples[4096, TASKS[0]]["input"] + samples[4096, TASKS[0]]["answer_prefix"]
-    for backend in BACKENDS:
+    for backend in BACKENDS if args.generation_results is None else ():
         logger.info("4K full-budget warmup backend=%s", backend)
         try:
             with AttentionRoute(backend) as route:
@@ -453,8 +567,13 @@ def run(args, output, source, logger):
         and warmups[0]["token_ids"] == warmups[1]["token_ids"]
         and all(valid_measurement(row) for row in warmups)
     )
-    expected = {}
-    for length in args.lengths:
+    expected = {
+        (row["length"], backend): row["backends"][backend]["token_ids"][:2]
+        for row in generations
+        if row["task"] == TASKS[0]
+        for backend in BACKENDS
+    }
+    for length in args.lengths if args.generation_results is None else ():
         for index, task in enumerate(TASKS):
             row = samples[length, task]
             prompt = row["input"] + row["answer_prefix"]
@@ -597,6 +716,8 @@ def run(args, output, source, logger):
         "profile_checks_passed": profile_passed,
         "candidate_eligible": not failures and generation_consistent and profile_passed,
         "generation_pairs": len(generations),
+        "end_to_end_measured_in_this_execution": args.generation_results is None,
+        "generation_results": plan.get("generation_results"),
         "profile_runs": len(profiles),
         "failures": failures,
         "formal_benchmark_completed": False,
@@ -610,6 +731,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--generation-results",
+        type=Path,
+        help="复用同一协议的已完成端到端记录目录，仅补做分项 profiling",
+    )
     parser.add_argument(
         "--ruler-data",
         type=Path,
@@ -628,6 +754,8 @@ def main():
     source = capture_source(__file__, {"optimized": MODEL_CLASSES["optimized"]})
     args.checkpoint = args.checkpoint.expanduser().resolve()
     args.ruler_data = args.ruler_data.expanduser().resolve()
+    if args.generation_results is not None:
+        args.generation_results = args.generation_results.expanduser().resolve()
     output = args.output_dir.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=False)
     logging.basicConfig(
