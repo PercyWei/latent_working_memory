@@ -242,6 +242,61 @@ def estimate_time(generations, lengths):
     return result
 
 
+def read_reference(reference_output, plan, samples):
+    reference_plan = json.loads((reference_output / "plan.json").read_text(encoding="utf-8"))
+    for key in (
+        "checkpoint",
+        "checkpoint_config",
+        "ruler_data",
+        "lengths",
+        "tasks",
+        "sample_position_per_task",
+        "real_samples",
+        "synthetic_prefix_lengths",
+        "teacher_forced_continuation_tokens",
+        "generation",
+        "prompt",
+        "parameter_dtype",
+        "compute_autocast_dtype",
+    ):
+        if reference_plan[key] != plan[key]:
+            raise ValueError(f"Reference setting differs from this run: {key}")
+    expected = {
+        f"ruler/{length}/{task}/0": (length, task, row) for (length, task), row in samples.items()
+    }
+    records = {}
+    with (reference_output / "generation.jsonl").open(encoding="utf-8") as stream:
+        for line in stream:
+            record = json.loads(line)
+            sample_id = record["id"]
+            if sample_id in records:
+                raise ValueError(f"Duplicate reference generation: {sample_id}")
+            length, task, row = expected[sample_id]
+            if (
+                record["length"] != length
+                or record["task"] != task
+                or record["sample_position"] != 0
+                or record["source_index"] != row["index"]
+                or record["references"] != row["outputs"]
+            ):
+                raise ValueError(f"Reference generation does not match the sample: {sample_id}")
+            original = record["original"]
+            if (
+                original["use_cache"]
+                or len(original["token_ids"]) != original["generated_tokens"]
+                or not 0 < original["generated_tokens"] <= GENERATION_BUDGET
+            ):
+                raise ValueError(f"Reference original generation is invalid: {sample_id}")
+            records[sample_id] = record
+    if records.keys() != expected.keys():
+        raise ValueError(
+            f"Reference generations are missing: {sorted(expected.keys() - records.keys())}"
+        )
+    reference_summary = json.loads((reference_output / "summary.json").read_text(encoding="utf-8"))
+    # A failed incremental comparison does not invalidate the completed original generations.
+    return records, reference_plan, reference_summary["passed"]
+
+
 def run(args, output, logger):
     checkpoint = args.checkpoint.expanduser().resolve()
     data = args.ruler_data.expanduser().resolve()
@@ -254,6 +309,9 @@ def run(args, output, logger):
         for length in args.lengths
         for task in VALIDATION_TASKS
     }
+    reference_output = (
+        args.reference_output.expanduser().resolve() if args.reference_output is not None else None
+    )
     plan = {
         "created_at": timestamp(),
         "purpose": "incremental correctness and timing validation; not formal benchmark",
@@ -275,7 +333,11 @@ def run(args, output, logger):
             "fresh_past_key_values_each_call": True,
         },
         "prompt": "input + answer_prefix; tokenizer default special tokens; no truncation",
-        "warmup": "每长度每路径各完整生成一次，单独记录，不计入稳定耗时",
+        "warmup": (
+            "每长度仅对增量路径完整生成一次；原始完整生成及耗时复用reference_output"
+            if reference_output is not None
+            else "每长度每路径各完整生成一次，单独记录，不计入稳定耗时"
+        ),
         "logit_relative_denominator_floor": RELATIVE_DENOMINATOR_FLOOR,
         "acceptance": (
             "所有teacher-forced logits有限且argmax一致；"
@@ -287,8 +349,17 @@ def run(args, output, logger):
         "parameter_dtype": "float32",
         "compute_autocast_dtype": "bfloat16",
         "cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
+        "reference_output": str(reference_output) if reference_output is not None else None,
     }
     write_json(output / "plan.json", plan)
+    reference_records = {}
+    reference_plan = None
+    if reference_output is not None:
+        reference_records, reference_plan, reference_passed = read_reference(
+            reference_output, plan, samples
+        )
+        plan["reference_validation_passed"] = reference_passed
+        logger.info("Reusing original full generations and timings from %s", reference_output)
     if not torch.cuda.is_available():
         raise RuntimeError("Incremental validation requires the native CUDA LaCT environment")
     start = time.perf_counter()
@@ -309,6 +380,10 @@ def run(args, output, logger):
         "ttt_nope": config.ttt_nope,
         "fp32_states": config.fp32_states,
     }
+    if reference_plan is not None and reference_plan["runtime"] != plan["runtime"]:
+        raise ValueError(
+            "Reference runtime differs from this run; original timings are not comparable"
+        )
     write_json(output / "plan.json", plan)
     if config.lact_chunk_size != 2048:
         raise ValueError("This validation uses boundaries for lact_chunk_size=2048")
@@ -320,7 +395,25 @@ def run(args, output, logger):
         raise ValueError("Teacher continuation does not provide four tokens")
     continuation = torch.tensor([continuation_ids], dtype=torch.long)
     plan["teacher_forced_token_ids"] = continuation_ids
+    if (
+        reference_plan is not None
+        and reference_plan["teacher_forced_token_ids"] != continuation_ids
+    ):
+        raise ValueError("Reference teacher-forced token IDs differ from this run")
     write_json(output / "plan.json", plan)
+    sample_inputs = {}
+    for (length, task), row in samples.items():
+        sample_id = f"ruler/{length}/{task}/0"
+        input_ids = tokenizer(row["input"] + row["answer_prefix"], return_tensors="pt")["input_ids"]
+        input_tokens = input_ids.shape[-1]
+        if input_tokens + GENERATION_BUDGET > length:
+            raise ValueError(f"{sample_id}: prompt plus generation budget exceeds {length}")
+        if (
+            reference_output is not None
+            and reference_records[sample_id]["input_tokens"] != input_tokens
+        ):
+            raise ValueError(f"Reference input token count differs from this run: {sample_id}")
+        sample_inputs[length, task] = input_ids
     synthetic_ids = tokenizer.encode(
         "Alice stored the number 1729 in a blue notebook. Bob kept 2468 in a red box. "
         "The river passes the library, and the museum stands beside a quiet garden. ",
@@ -346,15 +439,17 @@ def run(args, output, logger):
         for task_index, task in enumerate(VALIDATION_TASKS):
             row = samples[length, task]
             sample_id = f"ruler/{length}/{task}/0"
-            encoded = tokenizer(row["input"] + row["answer_prefix"], return_tensors="pt")
-            input_ids = encoded["input_ids"]
+            input_ids = sample_inputs[length, task]
             input_tokens = input_ids.shape[-1]
-            if input_tokens + GENERATION_BUDGET > length:
-                raise ValueError(f"{sample_id}: prompt plus generation budget exceeds {length}")
             if first_input is None:
                 first_input = input_ids.clone()
             if task_index == 0:
-                for mode, use_cache in (("original", False), ("incremental", True)):
+                warmup_modes = (
+                    (("incremental", True),)
+                    if reference_output is not None
+                    else (("original", False), ("incremental", True))
+                )
+                for mode, use_cache in warmup_modes:
                     logger.info("Warmup length=%s mode=%s", length, mode)
                     measured = measure_generation(model, tokenizer, input_ids, use_cache)
                     warmup = {"id": sample_id, "length": length, "mode": mode, **measured}
@@ -372,8 +467,13 @@ def run(args, output, logger):
                 "input_tokens": input_tokens,
                 "references": row["outputs"],
             }
-            modes = (("original", False), ("incremental", True))
-            if task_index % 2:
+            if reference_output is not None:
+                record["original"] = reference_records[sample_id]["original"]
+                record["original_reference_output"] = str(reference_output)
+                modes = (("incremental", True),)
+            else:
+                modes = (("original", False), ("incremental", True))
+            if reference_output is None and task_index % 2:
                 modes = tuple(reversed(modes))
             for mode, use_cache in modes:
                 logger.info("Generating %s mode=%s", sample_id, mode)
@@ -421,8 +521,13 @@ def run(args, output, logger):
         and isolation_equal
     )
     measured_runs = warmups + [replay]
-    measured_runs.extend(
-        record[mode] for record in generations for mode in ("original", "incremental")
+    measured_modes = (
+        ("incremental",) if reference_output is not None else ("original", "incremental")
+    )
+    measured_runs.extend(record[mode] for record in generations for mode in measured_modes)
+    timing = estimate_time(generations, args.lengths)
+    timing["original_reference_output"] = (
+        str(reference_output) if reference_output is not None else None
     )
     summary = {
         "finished_at": timestamp(),
@@ -451,7 +556,11 @@ def run(args, output, logger):
         "peak_generation_reserved_bytes": max(
             record["peak_reserved_bytes"] for record in measured_runs
         ),
-        "timing": estimate_time(generations, args.lengths),
+        "timing": timing,
+        "original_full_generations_reused": reference_output is not None,
+        "original_reference_output": str(reference_output)
+        if reference_output is not None
+        else None,
         "formal_benchmark_completed": False,
     }
     write_json(output / "summary.json", summary)
@@ -465,6 +574,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--reference-output",
+        type=Path,
+        help="复用同CLI既有输出目录中的完整original生成及计时；缺失或设置不同直接报错",
+    )
     parser.add_argument(
         "--ruler-data",
         type=Path,
