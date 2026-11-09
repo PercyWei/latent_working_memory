@@ -2,7 +2,7 @@
 
 创建时间：20261109 21:16:13 Asia/Shanghai
 
-最后修订时间：20261109 22:26:06 Asia/Shanghai
+最后修订时间：20261110 00:46:58 Asia/Shanghai
 
 ## 实现与代码边界
 
@@ -75,6 +75,8 @@ TTT 优化路径按上述规模加权，prefill 约占 wall 的 87.2%，decode �
 | 256K | 127.224 秒 | 121.015 秒 | 不一致，第 8 个 token 开始分歧 |
 
 三条输入 IDs 相同，但最终 TTT 状态均不逐位一致。虽然三条任务分数相同，128K／256K 的 token 与文本比较失败；该对照按预设判据以失败状态保存，不将独立 FA2 纳入正式优化路径。生产后端保持 SDPA，前述 69／68 小时估算也使用 SDPA。
+
+后续 [128K／256K 分项 profiling 与仅 prefill cuDNN 对照](20261109_in_place_ttt_prefill_profiling.md) 已完成：原 attention 内核占真实 GPU 活动时间约 80.3%／89.4%；cuDNN 端到端更慢，且未通过全部生成 IDs 检查，保持现有后端。
 
 产物位于本地及服务器项目的 `artifacts/reproductions/in_place_ttt/inference-optimization_20261109/`：`ttt-full/`、`baseline-full/` 保存最终计划、来源、逐样本生成、边界与隔离检查及计时汇总；4K attention 诊断保存在 `ttt-preflight/attention_profile.json`；`ttt-attention-backends/` 保留失败的后端对照及逐条差异。
 

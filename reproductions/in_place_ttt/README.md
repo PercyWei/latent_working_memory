@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261109 22:26:06 Asia/Shanghai
+最后修订时间：20261110 00:46:58 Asia/Shanghai
 
 ## 当前状态
 
@@ -202,3 +202,5 @@ CPU 诊断仅覆盖上游 `Qwen3MLP` 的分块矩阵计算，包括完整 chunk 
 显存为 PyTorch 峰值分配量；耗时按各长度两条样本外推，仅说明当前速度基本持平，不是完整 benchmark 实测耗时。详细产物与判据见 [推理优化记录](../20261109_in_place_ttt_inference_optimization.md)。完整评估尚未完成，官方论文指标复现仍受原训练语料、原模型权重及实验配置缺失的限制。
 
 生产路径保持 SDPA，已通过 profiler 确认使用 PyTorch FlashAttention。独立 `flash_attention_2` 后端的 128K／256K 对照未通过完整生成 IDs 检查，因此未纳入正式优化路径；结果保留在推理优化记录中。
+
+后续 [长 prefill 分项计时与 cuDNN 对照](../20261109_in_place_ttt_prefill_profiling.md) 已完成：原 SDPA attention 内核占 128K／256K 真实 GPU 活动时间约 80.3%／89.4%；仅 prefill 切换 cuDNN 后，端到端分别慢约 6.7%／7.8%，四对输入中两对生成 IDs 不一致，因此继续保留当前后端。该记录包含独立诊断命令，不改变正式评估入口。

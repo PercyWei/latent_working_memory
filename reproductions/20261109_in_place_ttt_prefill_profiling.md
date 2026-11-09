@@ -2,7 +2,7 @@
 
 创建时间：20261109 23:24:48 Asia/Shanghai
 
-最后修订时间：20261109 23:59:05 Asia/Shanghai
+最后修订时间：20261110 00:46:58 Asia/Shanghai
 
 ## 目标与固定条件
 
@@ -65,7 +65,7 @@ python -u reproductions/in_place_ttt/scripts/profile_prefill.py \
   --lengths 131072 262144
 ```
 
-修正后的 GPU 总量仅累计非 annotation CUDA 活动；CPU component 沿事件树累计关联 kernel 前，先去掉 CUDA annotation。保留原始 reported 时间与剔除项以核对统计，避免标签及其子算子重复相加。
+修正后的 GPU 总量仅累计非 annotation CUDA 活动。补测发现 CPU 关联的 device 时间仍混有加载等 overhead／fallback 跨度，不能可靠归因；采集中的 `component_kernel_inclusive` 不用于结论。分项 latency 使用独立 CUDA-event span，attention kernel 使用真实 CUDA 叶子记录。当前脚本仅保留 CPU 的 reported device 时间供审计，不再将其标为纯 kernel 时间。
 
 ## 执行结果
 
@@ -82,4 +82,42 @@ python -u reproductions/in_place_ttt/scripts/profile_prefill.py \
 - `niah_multiquery` 的 128K／256K 两对完整生成 IDs 与文本一致；`niah_single_1` 分别从第 16／第 8 个生成 token 开始分歧。任务分数相同不能替代生成一致性。
 - 四对最终 TTT 状态均不逐位一致；生成历史已经分歧的两对，终态差异不能解释为同输入下的纯后端误差。
 
-**cuDNN prefill 候选同时未达到生成一致性和提速要求，当前不采用，生产默认保持不变。**独立分项 profiling 正在执行；尚不依据以上 wall 差异判断具体内核或算子的慢因，待分项结果完成后补充。
+**cuDNN prefill 候选同时未达到生成一致性和提速要求，不采用，生产默认保持不变。**四条 SDPA 对照的输入 token 数、完整生成 IDs、文本和评分均与前一轮相同输入的 chunked 结果一致。
+
+## 分项结果与判断
+
+补测使用 `14796403`，执行时 Git 状态为 clean；仅采集 profiling，引用 `6ab044b7` 的端到端记录。环境为 PyTorch 2.8.0+cu128、Transformers 4.57.3、cuDNN 9.10.2。四次 profile 的实际 prefill 算子、decode Flash 算子、前两生成 IDs、有限性及 cache 进度检查均通过。
+
+以下为非 annotation CUDA 活动及实际 attention kernel 时间，分母不包含 CUDA 用户标注区间：
+
+| 长度 | SDPA GPU 活动合计 | Flash attention kernel | 占合计 | cuDNN attention kernel |
+|---|---:|---:|---:|---:|
+| 128K | 32.112 秒 | 25.784 秒 | 80.29% | 27.688 秒 |
+| 256K | 119.890 秒 | 107.146 秒 | 89.37% | 116.404 秒 |
+
+cuDNN 的 GPU 活动合计分别为 34.120／129.232 秒，实际 attention kernel 比 Flash 慢约 7.39%／8.64%；本次端到端变慢也体现在内核执行上，并非只有首次计划构建成本。
+
+下面为原 SDPA 的 CUDA-event 分项跨度。它们包含 launch gap 和插桩开销，不能当作纯 kernel busy 时间，也不能与上表直接相加：
+
+| 分项 | 128K | 256K |
+|---|---:|---:|
+| attention 模块整体 | 28.163 秒 | 111.594 秒 |
+| 其中：SDPA 调用 | 25.784 秒 | 107.145 秒 |
+| 其中：attention 其余计算 | 2.379 秒 | 4.449 秒 |
+| 普通 MLP | 2.468 秒 | 5.015 秒 |
+| TTT MLP 整体 | 0.970 秒 | 1.956 秒 |
+| 其中：TTT read contract | 0.169 秒 | 0.345 秒 |
+| 其中：TTT write contract | 0.221 秒 | 0.450 秒 |
+| attention 外部 norm | 0.710 秒 | 1.278 秒 |
+
+带“其中”的行是子项，不能与父项重复求和。attention 其余计算包含投影、规范化、RoPE、cache 等，不把跨度差全部解释为 QKV GEMM。GPU 内核名称中的普通 BF16 GEMM 同时服务多个模块，也不单独据此归入 MLP。
+
+同输入 prefill 比较中，128K／256K 末位 logits 最大绝对差分别为 0.125／1.3125，argmax 相同；TTT `h/t/W` 合并最大绝对差分别为 7.5／64，均有限但不逐位一致。这些来自相同输入历史；它们与生成分歧后的最终状态差异分别记录。
+
+活动期 GPU SM 时钟中位数约 1245 MHz，最高 1410 MHz，最高温度 67°C；功率限制、默认值和可设上限均为 400 W。本轮没有调整硬件设置。GPU 利用率采样不代表 Tensor Core 利用率。
+
+主要 GPU 成本已定位到长输入 attention。普通 MLP 与 TTT 写入都不是获得数量级提速的主线；后续优先验证 `qa_1` 等任务的完全相同 token 前缀复用，同时保存对应 KV 和 TTT 状态。本轮未实施前缀复用，也未达到半天评估目标。
+
+完整生成和端到端记录位于 `ttt/`，可信分项位于 `ttt-profile-corrected/`。`55ba95a8` 的补测在 JSON 协议核对阶段退出，未生成新测量，保留于 `ttt-profile-input-contract-failure/`；改用持久化 JSON 表示核对后完成补测。首轮有问题的聚合字段保留作审计，不用于上述结论。
+
+全部 GPU 实验与监控已结束，未启动正式 9,100 条评估。Ruff、Python AST 与 diff 检查通过；上游源码、现有优化计算和正式评估入口均无改动。

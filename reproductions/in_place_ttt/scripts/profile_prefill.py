@@ -203,25 +203,6 @@ def profiler_result(profiler, phase):
     annotations = [event for event in cuda if event.is_user_annotation]
     annotation_names = {event.name for event in annotations}
     kernels = [event for event in cuda if not event.is_user_annotation]
-    pure_device_times = {}
-
-    def pure_cpu_device_time(event):
-        # Kineto also links CUDA user-annotation spans into CPU event.kernels.
-        # Exclude those spans before following the CPU tree, rather than relying
-        # on device_time_total, which can count an annotation and its children.
-        key = id(event)
-        if key not in pure_device_times:
-            pure_device_times[key] = (
-                0.0
-                if event.is_async or not event.use_device
-                else sum(
-                    kernel.duration
-                    for kernel in event.kernels
-                    if kernel.name not in annotation_names
-                )
-                + sum(pure_cpu_device_time(child) for child in event.cpu_children)
-            )
-        return pure_device_times[key]
 
     def aggregate(rows):
         totals = {}
@@ -236,30 +217,23 @@ def profiler_result(profiler, phase):
                     "calls": 0,
                     "self_cpu_seconds": 0.0,
                     "cpu_total_seconds": 0.0,
-                    "self_device_seconds": 0.0,
-                    "device_total_seconds": 0.0,
+                    "self_device_seconds": (
+                        None if str(event.device_type).endswith("CPU") else 0.0
+                    ),
+                    "device_total_seconds": (
+                        None if str(event.device_type).endswith("CPU") else 0.0
+                    ),
                     "reported_self_device_seconds": 0.0,
                     "reported_device_total_seconds": 0.0,
                 },
             )
             is_cpu = str(event.device_type).endswith("CPU")
-            own_device = (
-                sum(
-                    kernel.duration
-                    for kernel in event.kernels
-                    if kernel.name not in annotation_names
-                )
-                if is_cpu and not event.is_async and event.use_device
-                else 0.0
-                if is_cpu
-                else event.self_device_time_total
-            )
-            inclusive_device = pure_cpu_device_time(event) if is_cpu else event.device_time_total
             row["calls"] += 1
             row["self_cpu_seconds"] += event.self_cpu_time_total / 1e6
             row["cpu_total_seconds"] += event.cpu_time_total / 1e6
-            row["self_device_seconds"] += own_device / 1e6
-            row["device_total_seconds"] += inclusive_device / 1e6
+            if not is_cpu:
+                row["self_device_seconds"] += event.self_device_time_total / 1e6
+                row["device_total_seconds"] += event.device_time_total / 1e6
             row["reported_self_device_seconds"] += event.self_device_time_total / 1e6
             row["reported_device_total_seconds"] += event.device_time_total / 1e6
         return list(totals.values())
@@ -274,10 +248,10 @@ def profiler_result(profiler, phase):
     kernel_rows = aggregate(kernels)
     kernel_seconds = sum(event.self_device_time_total for event in kernels) / 1e6
     return {
-        "component_kernel_inclusive": components,
-        "top_cpu_operators_by_self_device_time": [
-            row
-            for row in sorted(cpu_rows, key=lambda e: e["self_device_seconds"], reverse=True)[:30]
+        "component_cpu_scopes": components,
+        "cpu_device_attribution_validated": False,
+        "top_cpu_operators_by_self_cpu_time": [
+            row for row in sorted(cpu_rows, key=lambda e: e["self_cpu_seconds"], reverse=True)[:30]
         ],
         "top_gpu_kernels": [
             row
@@ -305,10 +279,9 @@ def profiler_result(profiler, phase):
             and ("scaled_dot_product" in event.name or "flash_attention" in event.name)
         ),
         "timing_note": (
-            "component仅取CPU record_function，device_total按CPU树递归累加实际关联kernel，"
-            "先剔除CUDA user annotations；reported字段保留profiler未经修正的时间。"
-            "GPU总量只加非annotation CUDA events，不再加CPU关联时间。顶层component互斥，"
-            "SDPA与TTTread/write为子项；GPU活动总时长不是并发关键路径。"
+            "GPU总量只加非annotation CUDA活动。CPU关联的device时间可能混入overhead/fallback跨度，"
+            "仅保留reported原值，不作为kernel归因。分项latency采用独立CUDA-event跨度；"
+            "顶层component互斥，SDPA与TTTread/write为子项。GPU活动总时长不是并发关键路径。"
         ),
     }
 
