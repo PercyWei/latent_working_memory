@@ -2,7 +2,7 @@
 
 创建时间：20261109 00:14:58 Asia/Shanghai
 
-最后修订时间：20261109 11:33:52 Asia/Shanghai
+最后修订时间：20261109 11:47:21 Asia/Shanghai
 
 ## 入口与数据
 
@@ -11,7 +11,7 @@
 - LaCT 评估六项 RULER，默认 4K／8K／16K／32K、128-token 输出；E²-TTT 评估两项 RULER、SQuAD completion 和 SWDE；In-Place TTT 评估十三项 RULER、4K–256K、64-token 输出。
 - RULER 使用 `input + answer_prefix`，不添加聊天模板或截断；E²-TTT 的 SQuAD／SWDE 保留原任务的 prompt、生成与计分设置。
 - 输出保存到各方法独立的 `artifacts/reproductions/<method>/eval/`，保留运行配置、逐样本预测与汇总，不上传 SwanLab。
-- 本次不新增测试，不启动数据生成或 GPU 评估；仅做语法、入口参数及必要的静态检查。后续 GPU 运行仅允许使用 `zcy-memory` 空闲的物理 GPU 1，代码先经 GitHub 同步。
+- 不新增测试。GPU 入口允许单卡 0 或 1，默认 0；当前按用户授权，显式使用 `CUDA_VISIBLE_DEVICES=0`，代码先经 GitHub 同步。本轮执行计划与结果见 [GPU 验证与评估](20261109_checkpoint_gpu_evaluation.md)。
 
 ## 方法设置
 

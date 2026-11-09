@@ -8,7 +8,13 @@ repo_root="$(cd "$method_dir/../.." && pwd)"
 output_dir="${OUTPUT_DIR:-$repo_root/artifacts/reproductions/lact/760m-muon-paper/train}"
 output_dir=$(python -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$output_dir")
 
-export CUDA_VISIBLE_DEVICES=1
+case ${CUDA_VISIBLE_DEVICES-0} in
+  0|1) export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES-0} ;;
+  *)
+    printf 'LaCT 复现仅允许单卡；CUDA_VISIBLE_DEVICES 必须为 0 或 1。\n' >&2
+    exit 2
+    ;;
+esac
 export PYTHONPATH="$method_dir/upstream/lact_llm:$method_dir/upstream_flame${PYTHONPATH:+:$PYTHONPATH}"
 cd "$method_dir/upstream_flame"
 

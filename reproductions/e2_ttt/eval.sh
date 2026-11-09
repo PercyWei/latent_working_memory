@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ ${CUDA_VISIBLE_DEVICES:-1} != 1 ]]; then
-  printf 'E²-TTT evaluation requires CUDA_VISIBLE_DEVICES=1.\n' >&2
+eval_gpu="${CUDA_VISIBLE_DEVICES:-0}"
+if [[ $eval_gpu != 0 && $eval_gpu != 1 ]]; then
+  printf 'E²-TTT evaluation requires one physical GPU: CUDA_VISIBLE_DEVICES=0 or 1.\n' >&2
   exit 2
 fi
 if [[ ${WORLD_SIZE:-1} != 1 ]]; then
@@ -11,7 +12,7 @@ if [[ ${WORLD_SIZE:-1} != 1 ]]; then
 fi
 method_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd "$method_dir/../.." && pwd)"
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES="$eval_gpu"
 export TOKENIZERS_PARALLELISM=false
 export PYTHONPATH="$method_dir/upstream:$method_dir/upstream/lm-evaluation-harness${PYTHONPATH:+:$PYTHONPATH}"
 cd "$project_root"

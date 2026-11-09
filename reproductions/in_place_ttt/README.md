@@ -2,11 +2,11 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261109 11:33:52 Asia/Shanghai
+最后修订时间：20261109 11:45:56 Asia/Shanghai
 
 ## 当前状态
 
-已迁入官方实现与训练、导出、推理及 RULER 配置，保留原 VeOmni／OpenCompass 工作流，尚未运行 GPU 训练或论文指标评估。来源和已确认差异见 [UPSTREAM.md](UPSTREAM.md)。本次 GPU 实验指定 `zcy-memory` 的物理 GPU 1，等待该卡空闲后执行。
+已迁入官方实现与训练、导出、推理及 RULER 配置，保留原 VeOmni／OpenCompass 工作流，尚未运行 GPU 训练或论文指标评估。来源和已确认差异见 [UPSTREAM.md](UPSTREAM.md)。本次 GPU 评估使用 `zcy-memory` 当前获准的物理 GPU 0；入口允许显式选择单卡 0 或 1。
 
 `upstream/` 保持官方代码原样；本地 `eval.sh` 读取预构造 RULER JSONL，顺序调用原 OpenCompass 模型 wrapper、预测后处理和评分器。未引入统一训练框架或新的记忆目标。
 
@@ -61,7 +61,7 @@ source ~/rivermind-data/envs/ttt-in_place_ttt/bin/activate
 ```bash
 project_root="$(git rev-parse --show-toplevel)"
 cd reproductions/in_place_ttt/upstream
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=0
 export NPROC_PER_NODE=1
 export NNODES=1
 export PYTHONPATH="$PWD"
@@ -89,14 +89,14 @@ python scripts/merge_dcp_to_hf.py \
 
 ## RULER 评估入口
 
-先激活包含上述依赖的 In-Place TTT 方法环境，再从仓库根目录运行 `eval.sh`。它使用当前环境的 `python`，固定物理 GPU 1，并拒绝其他 `CUDA_VISIBLE_DEVICES` 设置。逻辑设备为 `cuda:0`。
+先激活包含上述依赖的 In-Place TTT 方法环境，再从仓库根目录运行 `eval.sh`。它使用当前环境的 `python`，默认物理 GPU 0，允许显式选择单卡 0 或 1，拒绝其他卡号与多卡列表。逻辑设备始终为 `cuda:0`。
 
 ```bash
-bash reproductions/in_place_ttt/eval.sh \
+CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
   --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt-ruler
 
-bash reproductions/in_place_ttt/eval.sh \
+CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-baseline \
   --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-baseline-ruler
 ```
@@ -135,4 +135,4 @@ bash reproductions/in_place_ttt/eval.sh \
 
 CPU 诊断仅覆盖上游 `Qwen3MLP` 的分块矩阵计算，包括完整 chunk 和尾部 padding，不覆盖 Transformer、KV cache、逐 token 解码、FlashAttention、VeOmni 或 OpenCompass。诊断临时依赖为 `einops==0.8.1`、`opt_einsum==3.4.0`，安装在 `/tmp/in-place-ttt-cpu-deps-20261108/`，没有修改根项目依赖。
 
-下一项运行是在 GPU 1 空闲、方法环境及真实模型和数据准备好后，验证第三方 TTT 与 baseline 的完整模型加载及推理。官方论文指标复现仍受原训练语料、原模型权重及实验配置缺失的限制。
+下一项运行是在获准 GPU 空闲时，验证第三方 TTT 与 baseline 的完整模型加载及推理。官方论文指标复现仍受原训练语料、原模型权重及实验配置缺失的限制。

@@ -2,7 +2,7 @@
 
 创建时间：20261109 10:58:35 Asia/Shanghai
 
-最后修订时间：20261109 11:35:08 Asia/Shanghai
+最后修订时间：20261109 11:47:21 Asia/Shanghai
 
 ## 配置原则与实际版本
 
@@ -46,7 +46,7 @@
 
 导入检查均隐藏 CUDA 设备，且结束时 `torch.cuda.is_initialized()` 为 `False`。LaCT 所用 Triton 3.2.0 在导入 FLA 模块时会初始化 GPU 驱动，因此尚未完成该模型模块的导入检查。以上结果不代表 GPU kernel、完整 checkpoint 加载或 benchmark 已验证；本轮未新增测试，也未启动训练或 benchmark。
 
-当前会话 `nvidia-smi` 仅暴露一张 A800，编号 0，设备节点为 `/dev/nvidia7`，与物理 GPU 1 的分配不一致。用户已明确要求继续仅使用 GPU 1，等待其映射恢复；恢复且该卡空闲前不启动 GPU 检查，评估入口继续保持 `CUDA_VISIBLE_DEVICES=1`。
+当前会话 `nvidia-smi` 仅暴露一张 A800，编号 0，设备节点为 `/dev/nvidia7`。用户已授权使用空闲 GPU 0，本轮显式设置 `CUDA_VISIBLE_DEVICES=0`，顺序验证三个方法；执行计划与结果见 [GPU 验证与评估](20261109_checkpoint_gpu_evaluation.md)。
 
 安装从同步后的服务器项目仓库执行。GitHub 已发布配置，服务器因无法连接 GitHub，通过 Gitee 同步同一提交。安装日志、实际包版本保存在服务器项目 `artifacts/reproductions/environment-setup_20261109/`，分别为 `<method>_install.log`、`<method>_versions.json`，主环境对照为 `main_versions.json`，检查结果为 `validation.json`。服务器系统为 Ubuntu 24.04.4 x86_64，驱动 580.126.20，CUDA Toolkit 12.8（nvcc V12.8.93）。
 

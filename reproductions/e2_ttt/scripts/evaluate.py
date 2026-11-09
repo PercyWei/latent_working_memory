@@ -62,8 +62,8 @@ def parse_args():
         "--lengths", type=int, nargs="+", default=[512, 1024, 2048, 4096, 8192, 16384]
     )
     args = parser.parse_args()
-    if os.environ.get("CUDA_VISIBLE_DEVICES") != "1":
-        parser.error("Use CUDA_VISIBLE_DEVICES=1; this evaluation uses physical GPU 1.")
+    if os.environ.get("CUDA_VISIBLE_DEVICES") not in ("0", "1"):
+        parser.error("Use one physical GPU: CUDA_VISIBLE_DEVICES=0 or 1.")
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         parser.error("This evaluation requires one process.")
     if len(args.benchmarks) != len(set(args.benchmarks)):
@@ -115,7 +115,7 @@ def execute(args):
         "batch_size": 1,
         "num_fewshot": 0,
         "dtype": "bfloat16",
-        "cuda_visible_devices": "1",
+        "cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
         "processes": 1,
         "bootstrap_iters": 0,
         "seeds": {"random": 0, "numpy": 1234, "torch": 1234, "fewshot": 1234},

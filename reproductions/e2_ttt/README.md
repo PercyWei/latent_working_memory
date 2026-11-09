@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261109 11:33:52 Asia/Shanghai
+最后修订时间：20261109 11:45:43 Asia/Shanghai
 
 本目录保留 [E²-TTT 官方实现](https://github.com/zeyun-zhong/E2-TTT)，使用其原始模型、flame 训练流程与随附 lm-evaluation-harness；不接入本项目的统一框架。论文为 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308)。
 
@@ -67,12 +67,12 @@ pip install -e lm-evaluation-harness
 在上述方法环境中，从项目根目录运行本地评估入口：
 
 ```bash
-bash reproductions/e2_ttt/eval.sh \
+CUDA_VISIBLE_DEVICES=0 bash reproductions/e2_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/e2_ttt/mlp-1.3b-15b \
   --output-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b
 ```
 
-SwiGLU 使用 `~/rivermind-data/models/reproductions/e2_ttt/swiglu-1.3b-15b`，并指定独立的新输出目录。入口直接使用已激活环境的 `python`，固定物理 GPU 1、单进程，不依赖 Accelerate 启动配置；如果已有 `CUDA_VISIBLE_DEVICES` 指向其他分配，则拒绝运行。须等 GPU 1 空闲后执行。
+SwiGLU 使用 `~/rivermind-data/models/reproductions/e2_ttt/swiglu-1.3b-15b`，并指定独立的新输出目录。入口直接使用已激活环境的 `python`，默认物理 GPU 0、单进程，不依赖 Accelerate 启动配置。`CUDA_VISIBLE_DEVICES` 仅接受单卡 `0` 或 `1`，拒绝其他分配；当前使用空闲的物理 GPU 0。进程内的 `cuda:0` 对应所选物理 GPU。
 
 默认评估 `ruler squad_completion swde`，只读取本地文件：
 
@@ -94,7 +94,7 @@ SQuAD／SWDE 的本地 task 继承原 task，保留 `.strip()`、换行停止符
 
 ## 原训练设置与备用入口
 
-当前使用公开 1.3B checkpoint 评估。其原始训练长度为 2240、24 层、hidden size 2048、16 heads；训练 28,672 steps，global batch 256，实际约 16.4B tokens，论文和仓库命名统称约 15B。原始训练入口为 `upstream/training/train_1B.sh`，该脚本固定多卡配置，不能直接作为本轮 GPU 1 的单卡命令。
+当前使用公开 1.3B checkpoint 评估。其原始训练长度为 2240、24 层、hidden size 2048、16 heads；训练 28,672 steps，global batch 256，实际约 16.4B tokens，论文和仓库命名统称约 15B。原始训练入口为 `upstream/training/train_1B.sh`，该脚本固定多卡配置，不能直接作为本轮单卡评估命令。
 
 下面保留已迁入的 340M 单卡训练入口及原设置，作为备用参考。
 
@@ -102,7 +102,7 @@ SQuAD／SWDE 的本地 task 继承原 task，保留 `.strip()`、换行停止符
 
 原始训练预算为 28,672 optimizer steps、global batch 256，共 15,032,385,536 tokens；学习率 `1e-3`、warmup 1024 steps、cosine 最小比例 `0.1`、seed 42。论文报告 340M 训练约 132 H100 GPU-hours；该耗时不是当前服务器的预算估计。
 
-官方 `train_340M.sh` 固定 `NGPU=4`、每卡 batch 4、梯度累积 16。项目本轮仅用物理 GPU 1，因此提供 [train_340m_gpu1.sh](scripts/train_340m_gpu1.sh)：单卡、每卡 batch 4、梯度累积 64，保持 global batch 256 与原始 token 预算，仍调用原 `training/train.sh`。硬件和归约次序与原实验不同，实际显存、速度与训练结果需要在服务器上验证。
+官方 `train_340M.sh` 固定 `NGPU=4`、每卡 batch 4、梯度累积 16。备用训练入口固定物理 GPU 1，提供 [train_340m_gpu1.sh](scripts/train_340m_gpu1.sh)：单卡、每卡 batch 4、梯度累积 64，保持 global batch 256 与原始 token 预算，仍调用原 `training/train.sh`。硬件和归约次序与原实验不同，实际显存、速度与训练结果需要在服务器上验证。
 
 准备数据时使用[官方 Data 流程](upstream/training/README.md#data)。该设置会读取 `sample-100BT`，需要数百 GB 缓存；本次尚未下载或处理训练数据。
 

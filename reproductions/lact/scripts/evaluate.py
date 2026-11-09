@@ -117,7 +117,7 @@ def run(args, output, logger):
             "logits_to_keep": 1,
             "recompute_complete_prefix_per_token": True,
         },
-        "cuda_visible_devices": "1",
+        "cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
         "parameter_dtype": "float32",
         "compute_autocast_dtype": "bfloat16",
         "upstream_revision": "a648340f9798f173227a0626fde66a6e9b65879a",
@@ -265,8 +265,8 @@ def main():
     )
     parser.add_argument("--lengths", type=int, nargs="+", choices=LENGTHS, default=list(LENGTHS))
     args = parser.parse_args()
-    if os.environ.get("CUDA_VISIBLE_DEVICES") != "1":
-        parser.error("CUDA_VISIBLE_DEVICES must be 1; only physical GPU 1 is authorized")
+    if os.environ.get("CUDA_VISIBLE_DEVICES") not in {"0", "1"}:
+        parser.error("CUDA_VISIBLE_DEVICES must be 0 or 1; select one physical GPU")
     output = args.output_dir.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=False)
     logging.basicConfig(

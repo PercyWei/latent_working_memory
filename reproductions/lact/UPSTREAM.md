@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261109 00:21:28 Asia/Shanghai
+最后修订时间：20261109 11:46:18 Asia/Shanghai
 
 ## 来源
 
@@ -19,7 +19,7 @@ LaCT 迁入范围为顶层 `README.md`、`LICENSE`、完整 `lact_llm/`、完整
 
 - LaCT 模型、配置和更新函数原样保存。
 - flame 新增 `custom_models/__init__.py`，内容为 `import lact_model`，通过 Transformers 的官方注册入口载入未修改的 LaCT 模型。原快照的 `custom_models/` 是 namespace package，仅复制文件并不能自动执行 LaCT 注册。
-- 新增单卡 TOML 和 shell 入口。shell 直接调用官方 `flame.train`，明确物理 GPU 1、一个进程、按调用目录解析的绝对输出路径与 `PYTHONPATH`，不修改 trainer。原 flame `train.sh` 保留供对照，本地入口不调用其中未注册自定义模型的配置探测及对不存在的 `3rdparty/` 的复制操作。
+- 新增单卡 TOML 和 shell 入口。shell 直接调用官方 `flame.train`，接受物理 GPU 0 或 1（默认 0）、一个进程、按调用目录解析的绝对输出路径与 `PYTHONPATH`，不修改 trainer。原 flame `train.sh` 保留供对照，本地入口不调用其中未注册自定义模型的配置探测及对不存在的 `3rdparty/` 的复制操作。
 - 新增 `eval.sh` 与 `scripts/evaluate.py`，读取本地六项 RULER 数据，调用原 `LaCTForCausalLM.from_pretrained` 和 `generate`。严格拒绝缺失或额外权重；保持官方无 cache 的完整前缀生成路径，只指定最后位置 logits、greedy 及 128-token 预算，不修改模型或更新算法。
 
 ## 公开语言模型权重

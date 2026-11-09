@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261109 03:16:30 Asia/Shanghai
+最后修订时间：20261109 11:45:43 Asia/Shanghai
 
 - 官方仓库：<https://github.com/zeyun-zhong/E2-TTT>
 - 固定 revision：`0d1da370c7e3cea1642ba3af0477b7601849a1be`（`master`）。
@@ -19,7 +19,7 @@
 ## 本地文件
 
 - `README.md`：具体论文目标、依赖、数据及执行入口。
-- `eval.sh`：在项目根目录直接调用方法环境的单进程 Python，固定物理 GPU 1，拒绝其他 GPU 分配。
+- `eval.sh`：在项目根目录直接调用方法环境的单进程 Python，默认物理 GPU 0，仅接受单卡 `CUDA_VISIBLE_DEVICES=0` 或 `1`。
 - `scripts/evaluate.py`：加载一次原 E²-TTT 模型，使用随附 HFLM 与 `evaluator.evaluate` 的显式 task 字典运行本地 benchmark，记录计划、逐样本及按任务／长度汇总的结果。
 - `scripts/local_tasks.py`：只替换数据接入。SQuAD／SWDE 继承原 task 的 prompt、生成参数及计分；绕开原 task 忽略 config kwargs 的初始化，读取本地完整 validation Parquet。RULER 读取既有 JSONL，拼接一次 answer_prefix，调用原 common_utils 计分，检查实际 token 预算，超限报错而不截断。原 task 和 harness 源码未修改。
 

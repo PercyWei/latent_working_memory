@@ -159,8 +159,10 @@ def main():
         default=[4096, 8192, 16384, 32768, 65536, 131072, 262144],
     )
     args = parser.parse_args()
-    if os.environ.get("CUDA_VISIBLE_DEVICES") != "1":
-        parser.error("CUDA_VISIBLE_DEVICES must be 1 (physical GPU 1).")
+    physical_gpu = os.environ.get("CUDA_VISIBLE_DEVICES", "0")
+    if physical_gpu not in {"0", "1"}:
+        parser.error("CUDA_VISIBLE_DEVICES must select a single physical GPU: 0 or 1.")
+    os.environ["CUDA_VISIBLE_DEVICES"] = physical_gpu
     if any(length <= 64 for length in args.lengths) or len(set(args.lengths)) != len(args.lengths):
         parser.error("--lengths must contain distinct integers greater than 64.")
     checkpoint = args.checkpoint.expanduser().resolve()
@@ -183,7 +185,7 @@ def main():
         "tokens_to_generate": 64,
         "prompt": "input + answer_prefix; base completion; no chat template",
         "max_seq_len": max(args.lengths),
-        "cuda_visible_devices": "1",
+        "cuda_visible_devices": physical_gpu,
         "device": "cuda:0",
         "output_dir": str(output),
     }

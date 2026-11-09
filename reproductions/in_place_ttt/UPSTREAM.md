@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261109 03:48:27 Asia/Shanghai
+最后修订时间：20261109 11:45:56 Asia/Shanghai
 
 ## 来源
 
@@ -15,7 +15,7 @@
 
 ## 本地接入
 
-`eval.sh` 使用已激活方法环境中的 `python`，固定 `CUDA_VISIBLE_DEVICES=1`。`scripts/evaluate.py` 保存本次计划，并在同一进程直接调用原 OpenCompass `HuggingFaceBaseModel.generate`、`extract_non_reasoning_content` 和 RULER 的五类 evaluator。只替换数据来源与外围调度：从本地 NVIDIA 格式 JSONL 读取全部 13 项任务，不现场调用 OpenCompass 生成器，不改变模型或评分实现。
+`eval.sh` 使用已激活方法环境中的 `python`，默认 `CUDA_VISIBLE_DEVICES=0`，允许显式选择单卡 0 或 1。`scripts/evaluate.py` 保存本次计划，并在同一进程直接调用原 OpenCompass `HuggingFaceBaseModel.generate`、`extract_non_reasoning_content` 和 RULER 的五类 evaluator。只替换数据来源与外围调度：从本地 NVIDIA 格式 JSONL 读取全部 13 项任务，不现场调用 OpenCompass 生成器，不改变模型或评分实现。
 
 官方 `upstream/eval.sh` 从物理 GPU 5 开始分配到多张卡，保留作来源参考。本地入口按单进程、batch size 1 顺序评估；每条样本由上游 `generate` 创建独立 TTT cache。每项每长度 100 条，统一 64-token 输出、base completion 和原预测后处理。
 

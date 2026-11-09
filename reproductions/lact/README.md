@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261109 11:33:52 Asia/Shanghai
+最后修订时间：20261109 11:46:18 Asia/Shanghai
 
 本目录接入 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现，保留其与 sliding-window attention 并行的 SwiGLU fast weights、负内积写入、Momentum / Muon 与逐次权重归一化。已接入本地 RULER checkpoint 评估入口，完成源码静态检查和原始写入函数的 CPU 前后向检查；尚未完成完整模型 GPU 验证或论文指标复现。
 
@@ -12,8 +12,8 @@
 - `upstream/minimal_implementations/`：官方简化实现，供对照阅读。
 - `upstream_flame/`：官方指定的 flame 训练框架源码。
 - `configs/760m_muon_paper_single_gpu.toml`：760M Muon 的单卡运行配置，保留公开命令的全局 token batch 和步数。
-- `scripts/train_760m_muon.sh`：在 `zcy-memory` 的物理 GPU 1 上调用原生 flame trainer。
-- `eval.sh`、`scripts/evaluate.py`：在同一物理 GPU 1 上读取本地六项 RULER JSONL，使用官方 LaCT 模型生成并计分。
+- `scripts/train_760m_muon.sh`：在 `zcy-memory` 的单张物理 GPU 上调用原生 flame trainer。
+- `eval.sh`、`scripts/evaluate.py`：在单张物理 GPU 上读取本地六项 RULER JSONL，使用官方 LaCT 模型生成并计分。
 - [UPSTREAM.md](UPSTREAM.md)：固定源码 revision、文件范围和必要接入改动。
 - [本次执行记录](20261108_execution.md)：已运行检查和待验证条件。
 
@@ -58,15 +58,15 @@ hf download YunjinZhang/lact_llm \
 
 ## 本地 RULER 评估
 
-先按 [评估数据准备](../20261108_ttt_data_preparation.md) 准备 `data/benchmarks/ruler-v1/reproductions/lact-760m/`。确认 `zcy-memory` 的物理 GPU 1 空闲、激活 LaCT 的原生 CUDA 环境后，从项目根目录运行：
+先按 [评估数据准备](../20261108_ttt_data_preparation.md) 准备 `data/benchmarks/ruler-v1/reproductions/lact-760m/`。确认 `zcy-memory` 的物理 GPU 0 空闲、激活 LaCT 的原生 CUDA 环境后，从项目根目录运行：
 
 ```bash
-bash reproductions/lact/eval.sh \
+CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
   --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-ruler
 ```
 
-`eval.sh` 使用当前方法环境的 `python`，设置官方模型与项目源码路径，固定 `CUDA_VISIBLE_DEVICES=1`；如果调用环境指定其他 GPU 分配则报错。`--checkpoint` 和 `--output-dir` 必需，输出目录必须尚不存在。可选参数如下：
+`eval.sh` 使用当前方法环境的 `python`，设置官方模型与项目源码路径，仅接受 `CUDA_VISIBLE_DEVICES=0` 或 `1`，未指定时默认 `0`。进程内设备为 `cuda:0`，实际物理设备选择写入 `plan.json`。`--checkpoint` 和 `--output-dir` 必需，输出目录必须尚不存在。可选参数如下：
 
 | 参数 | 默认值 |
 |---|---|
@@ -90,7 +90,7 @@ checkpoint 仅从本地加载，任何 missing、unexpected、mismatched keys �
 
 评分复用项目保存的 NVIDIA RULER `postprocess_pred` 与 `string_match_all`；逐样本不取整，汇总百分比保留两位小数。只有全部所选样本完成才写入 `summary.json`；部分预测文件不代表完整评估结果。
 
-已完成 shell、Python 语法和 Ruff 静态检查，并在服务器安装独立评估环境，通过依赖检查及 Torch／Transformers／FlashAttention 导入；未新增测试或占用 GPU。完整模型模块导入、checkpoint 加载及生成仍待 GPU 1 可用后验证，见[评估环境](../20261109_environment_setup.md)。
+已完成 shell、Python 语法和 Ruff 静态检查，并在服务器安装独立评估环境，通过依赖检查及 Torch／Transformers／FlashAttention 导入；未新增测试。完整模型模块导入、checkpoint 加载及生成仍待 GPU 验证，见[评估环境](../20261109_environment_setup.md)。
 
 ## 环境与数据
 
@@ -121,20 +121,20 @@ python -m pip install 'torchtitan @ git+https://github.com/pytorch/torchtitan.gi
 
 ## 单卡训练入口
 
-待 `zcy-memory` 的物理 GPU 1 空闲，并完成环境及数据准备后，从项目根目录运行：
+待 `zcy-memory` 的物理 GPU 0 空闲，并完成环境及数据准备后，从项目根目录运行：
 
 ```bash
 export DATA_FILES='/absolute/path/to/long-data-collections/*.arrow'
 export TOKENIZER_PATH='/absolute/path/to/original-mixstra-tokenizer'
-bash reproductions/lact/scripts/train_760m_muon.sh
+CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/scripts/train_760m_muon.sh
 ```
 
-脚本固定 `CUDA_VISIBLE_DEVICES=1` 和一个进程。默认输出为 `artifacts/reproductions/lact/760m-muon-paper/train/`；需要新运行目录时设置 `OUTPUT_DIR`。训练配置使用 microbatch 1、梯度累积 32，使全局 batch 与原 32 卡、每卡 batch 1 的设置相同；这只保持 token batch，不保证浮点归约、数据分片或训练耗时与原实验一致。精确预算为 40960 × 32 × 32768 = 42,949,672,960 tokens，保留公开命令而不自行将它改成另一个“40B”设置。
+脚本仅接受物理 GPU 0 或 1，未指定时默认 0，固定一个进程。默认输出为 `artifacts/reproductions/lact/760m-muon-paper/train/`；需要新运行目录时设置 `OUTPUT_DIR`。训练配置使用 microbatch 1、梯度累积 32，使全局 batch 与原 32 卡、每卡 batch 1 的设置相同；这只保持 token batch，不保证浮点归约、数据分片或训练耗时与原实验一致。精确预算为 40960 × 32 × 32768 = 42,949,672,960 tokens，保留公开命令而不自行将它改成另一个“40B”设置。
 
 同一个入口可以传入原生 flame 参数。例如，只运行一个实际训练 step：
 
 ```bash
-OUTPUT_DIR='/absolute/path/to/artifacts/reproductions/lact/760m-muon-one-step/train' \
+CUDA_VISIBLE_DEVICES=0 OUTPUT_DIR='/absolute/path/to/artifacts/reproductions/lact/760m-muon-one-step/train' \
   bash reproductions/lact/scripts/train_760m_muon.sh --training.steps 1
 ```
 
@@ -144,7 +144,7 @@ flame 保存原生 DCP checkpoint、配置和 TensorBoard 本地指标；配置�
 
 ## 当前待解决事项
 
-1. 在可用 GPU 1 上完成模型模块导入及公开 checkpoint 的完整加载验证。
+1. 在已授权的可用单卡上完成模型模块导入及公开 checkpoint 的完整加载验证。
 2. 在准备好的本地 RULER 数据上运行评估，记录公开重训模型的实际分数与原论文参照的差异。
 3. 对照当前官方代码与论文 v1 的 Muon 实现差异；详见 [UPSTREAM.md](UPSTREAM.md)。
 4. 若后续开展训练，再落实原训练数据、tokenizer 和训练预算。

@@ -16,7 +16,7 @@ LaCT、E²-TTT 和 In-Place TTT 保留各自官方实现与训练框架；本阶
 
 各方法的 `upstream/` 保存官方源码，外层保存本地运行入口与记录。它们使用的 CUDA、PyTorch 和训练框架不同，按各自说明配置环境，不将这些依赖合并到主项目环境。
 
-本次实验使用 `zcy-memory` 的物理 GPU 1，须在已有任务释放该卡后启动。GPU 可见性在本地启动入口中显式设置；进入进程后的 `cuda:0` 对应物理 GPU 1。原始上游脚本可能包含其他 GPU 编号或多卡配置，执行前须使用各方法目录中注明的本地入口。
+本次实验使用用户授权的 `zcy-memory` 物理 GPU 0。入口允许单卡 0 或 1，默认 0，启动时显式设置 `CUDA_VISIBLE_DEVICES=0`；进程内使用逻辑设备 `cuda:0`。原始上游脚本可能包含其他 GPU 编号或多卡配置，执行前须使用各方法目录中注明的本地入口。
 
 源码与启动入口可用、CPU 检查通过、GPU 最小运行通过、公开 checkpoint 评估复现和训练结果复现分别记录。具体结果以各方法记录为准，代码迁移完成不表示论文指标已复现。
 
@@ -34,7 +34,7 @@ TTT baselines 的模型保存在 `~/rivermind-data/models/reproductions/<method>
 | E²-TTT | [e2_ttt/eval.sh](e2_ttt/eval.sh) | 两项 RULER，512–16K；SQuAD completion、SWDE | [E²-TTT 说明](e2_ttt/README.md) |
 | In-Place TTT | [in_place_ttt/eval.sh](in_place_ttt/eval.sh) | 十三项 RULER，4K–256K | [In-Place TTT 说明](in_place_ttt/README.md) |
 
-三个入口均限定物理 GPU 1，须在该卡空闲后执行。具体参数、生成方式及结果文件见各方法说明；实现与静态检查记录见 [checkpoint 评估记录](20261109_checkpoint_evaluation.md)。
+三个方法顺序使用空闲 GPU 0。具体参数、生成方式及结果文件见各方法说明；实现说明见 [checkpoint 评估入口](20261109_checkpoint_evaluation.md)，本轮执行计划与结果见 [GPU 验证与评估](20261109_checkpoint_gpu_evaluation.md)。
 
 ## 模型下载约定
 
