@@ -26,7 +26,7 @@ TTT baselines 的模型保存在 `~/rivermind-data/models/reproductions/<method>
 
 ## TTT checkpoint 评估
 
-在各方法的独立环境中使用对应的 `eval.sh`，显式传入 `--checkpoint` 和 `--output-dir`。本地数据默认采用上述准备文档中的目录，可通过数据路径参数覆盖；输出目录须为新目录。
+三个独立评估环境已在服务器安装，实际版本、安装命令和检查结果见 [评估环境](20261109_environment_setup.md)。在各方法环境中使用对应的 `eval.sh`，显式传入 `--checkpoint` 和 `--output-dir`。本地数据默认采用上述准备文档中的目录，可通过数据路径参数覆盖；输出目录须为新目录。
 
 | 方法 | 入口 | 默认评估范围 | 完整命令与环境 |
 |---|---|---|---|

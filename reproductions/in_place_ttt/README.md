@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261109 11:06:17 Asia/Shanghai
+最后修订时间：20261109 11:33:52 Asia/Shanghai
 
 ## 当前状态
 
@@ -52,7 +52,7 @@ source ~/rivermind-data/envs/ttt-in_place_ttt/bin/activate
 
 原始安装说明见 [upstream/README.md](upstream/README.md)。需要 Linux NVIDIA CUDA 环境、Python 3.11、PyTorch 2.8.0（CUDA 12.8）、FlashAttention 2.8.3、Transformers 4.57.3，以及指定 revision 的 VeOmni。使用方法自己的环境保留上游依赖；不要对本项目根环境执行上游 `pip uninstall` 指令。
 
-上游目录的 `pyproject.toml` 是 VeOmni 包定义，但不包含 VeOmni 源码；应按官方说明安装固定 revision 的 VeOmni，而不是把当前目录当作完整 VeOmni 包安装。OpenCompass 也是运行依赖，具体 revision 尚待实际环境核对。
+上游目录的 `pyproject.toml` 是 VeOmni 包定义，但不包含 VeOmni 源码；训练时应按官方说明安装固定 revision 的 VeOmni，而不是把当前目录当作完整 VeOmni 包安装。本轮独立评估环境采用 OpenCompass 0.5.5，不安装 VeOmni。
 
 ## 官方训练与导出入口
 
@@ -129,7 +129,7 @@ bash reproductions/in_place_ttt/eval.sh \
 | 官方源码迁入 | 40 个文件与固定 revision 对应文件一致，全部可被 Git 正常跟踪 |
 | 上游 Python 语法解析 | 26 个文件通过 |
 | 上游 `train.sh`、`eval.sh` shell 语法 | `bash -n` 通过 |
-| 本地评估入口 | Ruff、Python／shell 语法通过；目标方法依赖需在其环境中安装，尚未完整导入或运行模型 |
+| 本地评估入口 | Ruff、Python／shell 语法通过；服务器独立环境依赖检查及完整入口导入通过，尚未加载 checkpoint 或运行 GPU |
 | 直接导入训练模型 | 根环境缺少 `einops`，导入失败；未更改上游代码绕过依赖 |
 | Qwen3MLP 训练／推理计算核 CPU 诊断 | 直接编译上游原始 AST 类，使用真实 PyTorch／einops／opt_einsum；chunk=4，长度 4、8、10、12，输出最大误差 `5.96e-8`，训练反传梯度有限 |
 

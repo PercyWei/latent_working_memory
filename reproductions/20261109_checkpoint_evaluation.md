@@ -2,7 +2,7 @@
 
 创建时间：20261109 00:14:58 Asia/Shanghai
 
-最后修订时间：20261109 04:34:16 Asia/Shanghai
+最后修订时间：20261109 11:33:52 Asia/Shanghai
 
 ## 入口与数据
 
@@ -23,4 +23,4 @@
 
 完整命令与方法环境分别见 [LaCT](lact/README.md#本地-ruler-评估)、[E²-TTT](e2_ttt/README.md#环境与评估) 和 [In-Place TTT](in_place_ttt/README.md#ruler-评估入口)。数据下载与构造见 [评估数据准备](20261108_ttt_data_preparation.md)。
 
-入口记录 checkpoint、实际数据路径和生成设置，保存逐样本预测及完整结果。当前仅完成代码与静态检查，尚未运行 GPU checkpoint 评估；原始论文分数与实际效果仍需后续执行确认。
+入口记录 checkpoint、实际数据路径和生成设置，保存逐样本预测及完整结果。三个服务器独立评估环境已安装，依赖与导入检查结果见[评估环境](20261109_environment_setup.md)；尚未运行 GPU checkpoint 评估，原始论文分数与实际效果仍需后续执行确认。

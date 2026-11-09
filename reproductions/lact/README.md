@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261109 11:06:17 Asia/Shanghai
+最后修订时间：20261109 11:33:52 Asia/Shanghai
 
 本目录接入 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现，保留其与 sliding-window attention 并行的 SwiGLU fast weights、负内积写入、Momentum / Muon 与逐次权重归一化。已接入本地 RULER checkpoint 评估入口，完成源码静态检查和原始写入函数的 CPU 前后向检查；尚未完成完整模型 GPU 验证或论文指标复现。
 
@@ -90,7 +90,7 @@ checkpoint 仅从本地加载，任何 missing、unexpected、mismatched keys �
 
 评分复用项目保存的 NVIDIA RULER `postprocess_pred` 与 `string_match_all`；逐样本不取整，汇总百分比保留两位小数。只有全部所选样本完成才写入 `summary.json`；部分预测文件不代表完整评估结果。
 
-本轮仅完成 shell、Python 语法和 Ruff 静态检查，未编写或运行测试，未占用 GPU。实际模型加载、完整生成及显存／耗时仍待方法环境和空闲 GPU 1 验证。
+已完成 shell、Python 语法和 Ruff 静态检查，并在服务器安装独立评估环境，通过依赖检查及 Torch／Transformers／FlashAttention 导入；未新增测试或占用 GPU。完整模型模块导入、checkpoint 加载及生成仍待 GPU 1 可用后验证，见[评估环境](../20261109_environment_setup.md)。
 
 ## 环境与数据
 
@@ -105,9 +105,9 @@ source ~/rivermind-data/envs/ttt-lact/bin/activate
 版本选择与安装记录见 [评估环境](../20261109_environment_setup.md)。以下上游完整环境说明用于训练依赖参考，不是本轮评估环境的安装步骤。
 
 
-运行需要 Linux x86-64、NVIDIA CUDA，以及官方 `upstream/lact_llm/requirement.txt` 中的依赖：PyTorch 2.6.x、torchvision 0.21.x、FlashAttention 2.7.4.post1、FLA 等。flame README 另指定 `torchtitan@0b44d4c`。这些是上游要求，尚未在目标 GPU 环境中完成安装及兼容性验证；不要将当前根项目 macOS 环境视为完整运行环境。
+上游完整训练环境需要 Linux x86-64、NVIDIA CUDA，以及 `upstream/lact_llm/requirement.txt` 中的依赖：PyTorch 2.6.x、torchvision 0.21.x、FlashAttention 2.7.4.post1、FLA 等。flame README 另指定 `torchtitan@0b44d4c`。训练框架尚未安装或验证。
 
-在为本复现建立的独立 Python 环境中，按照以下入口安装：
+若后续进行训练，另建训练环境后按以下入口安装：
 
 ```bash
 python -m pip install -r reproductions/lact/upstream/lact_llm/requirement.txt
@@ -115,7 +115,7 @@ python -m pip install ./reproductions/lact/upstream_flame
 python -m pip install 'torchtitan @ git+https://github.com/pytorch/torchtitan.git@0b44d4c'
 ```
 
-官方没有固定 FLA 与 Transformers 的精确版本。GPU 运行前需要选定并记录能与这份源码配套的环境，不能只安装最新版后宣称与论文环境一致。
+官方没有固定 FLA 与 Transformers 的精确版本。本轮评估分别固定为 0.4.1、4.57.3，属于本项目选定版本，仍需验证完整模型 GPU 运行。
 
 若后续开展从头训练，需要准备原 Long-Data-Collections 的 Arrow 文件与原 tokenizer。原仓库提供示例路径，没有提供对应数据构造脚本、精确数据 revision 和 Book-3 / RULER 的完整评估入口。不要用 FineWeb-Edu 替代后，将结果与原 LaCT 论文分数直接对应。模型及 tokenizer 放在 `~/rivermind-data/models/`，训练数据放在项目 `data/` 下，实际路径由下面两个环境变量指定。
 
@@ -144,7 +144,7 @@ flame 保存原生 DCP checkpoint、配置和 TensorBoard 本地指标；配置�
 
 ## 当前待解决事项
 
-1. 在可用 GPU 1 上完成方法环境安装，核对公开 checkpoint 的配置与权重形状并验证完整模型加载。
+1. 在可用 GPU 1 上完成模型模块导入及公开 checkpoint 的完整加载验证。
 2. 在准备好的本地 RULER 数据上运行评估，记录公开重训模型的实际分数与原论文参照的差异。
 3. 对照当前官方代码与论文 v1 的 Muon 实现差异；详见 [UPSTREAM.md](UPSTREAM.md)。
 4. 若后续开展训练，再落实原训练数据、tokenizer 和训练预算。

@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261109 11:06:17 Asia/Shanghai
+最后修订时间：20261109 11:33:52 Asia/Shanghai
 
 本目录保留 [E²-TTT 官方实现](https://github.com/zeyun-zhong/E2-TTT)，使用其原始模型、flame 训练流程与随附 lm-evaluation-harness；不接入本项目的统一框架。论文为 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308)。
 
@@ -90,7 +90,7 @@ SQuAD／SWDE 的本地 task 继承原 task，保留 `.strip()`、换行停止符
 
 产物保存在新建的 `--output-dir`：`plan.json` 记录 checkpoint、数据、预算和运行依赖；`predictions.jsonl` 保存原 harness 逐样本记录及任务名；`native_harness/` 保存各次原始汇总；`summary.json` 按任务和 RULER 长度汇总百分比准确率及样本数；`evaluation.log` 与 `execution.json` 保存执行日志和退出状态。每完成一项真实检索任务或一个 RULER 长度即保存结果，仅全部任务完成后设置 `completed=true`。不计算 bootstrap 标准误，准确率与原计分相同。
 
-本地入口保留模型及原始 `upstream/training/eval.sh` 不变，使用随附 harness 的 Python API 接入本地数据。当前仅完成语法和静态检查，尚未通过 GPU benchmark 验证。
+本地入口保留模型及原始 `upstream/training/eval.sh` 不变，使用随附 harness 的 Python API 接入本地数据。服务器评估环境已安装，通过依赖检查及本地入口、模型注册、harness 与任务模块导入；尚未运行 GPU benchmark。
 
 ## 原训练设置与备用入口
 
