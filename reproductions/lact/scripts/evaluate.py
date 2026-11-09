@@ -11,6 +11,7 @@ import time
 from zoneinfo import ZoneInfo
 
 from lact_model import LaCTForCausalLM, LaCTSWIGLUConfig
+from incremental import IncrementalLaCTForCausalLM
 import torch
 from transformers import AutoTokenizer
 
@@ -107,9 +108,10 @@ def read_predictions(path, expected, logger):
     return records
 
 
-def load_checkpoint(checkpoint):
+def load_checkpoint(checkpoint, inference_mode="original"):
     config = LaCTSWIGLUConfig.from_pretrained(checkpoint, local_files_only=True)
-    model, loading = LaCTForCausalLM.from_pretrained(
+    model_class = IncrementalLaCTForCausalLM if inference_mode == "incremental" else LaCTForCausalLM
+    model, loading = model_class.from_pretrained(
         checkpoint,
         config=config,
         torch_dtype=torch.float32,
@@ -150,6 +152,7 @@ def run(args, output, logger):
     plan = {
         "created_at": timestamp(),
         "method": "lact",
+        "inference_mode": args.inference_mode,
         "checkpoint": str(checkpoint),
         "checkpoint_config": json.loads((checkpoint / "config.json").read_text()),
         "ruler_data": str(data),
@@ -164,9 +167,9 @@ def run(args, output, logger):
             "do_sample": False,
             "num_beams": 1,
             "max_new_tokens": GENERATION_BUDGET,
-            "use_cache": False,
+            "use_cache": args.inference_mode == "incremental",
             "logits_to_keep": 1,
-            "recompute_complete_prefix_per_token": True,
+            "recompute_complete_prefix_per_token": args.inference_mode == "original",
         },
         "cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
         "parameter_dtype": "float32",
@@ -190,7 +193,7 @@ def run(args, output, logger):
         raise RuntimeError("LaCT evaluation requires the native CUDA method environment")
 
     logger.info("Loading checkpoint strictly: %s", checkpoint)
-    model, config = load_checkpoint(checkpoint)
+    model, config = load_checkpoint(checkpoint, args.inference_mode)
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, local_files_only=True)
     first_layer = model.model.layers[0].attn
     loaded_model = {
@@ -220,7 +223,7 @@ def run(args, output, logger):
         config.num_lact_heads,
         first_layer.w1.shape,
     )
-    logger.info("Native use_cache=False: each generated token recomputes the complete prefix")
+    logger.info("Inference mode: %s", args.inference_mode)
     with (output / "predictions.jsonl").open(
         "a" if args.resume else "x", encoding="utf-8"
     ) as predictions:
@@ -246,7 +249,7 @@ def run(args, output, logger):
                         do_sample=False,
                         num_beams=1,
                         max_new_tokens=GENERATION_BUDGET,
-                        use_cache=False,
+                        use_cache=args.inference_mode == "incremental",
                         logits_to_keep=1,
                         return_dict_in_generate=False,
                         output_scores=False,
@@ -328,6 +331,7 @@ def run(args, output, logger):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--inference-mode", choices=("original", "incremental"), default="original")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--ruler-data",
