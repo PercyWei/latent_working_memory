@@ -1,4 +1,4 @@
-"""使用官方 LaCT 的完整前缀生成路径评估本地 RULER 数据。"""
+"""使用 LaCT 的原始或增量推理路径评估本地 RULER 数据。"""
 
 import argparse
 from datetime import datetime

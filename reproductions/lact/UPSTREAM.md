@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261109 15:34:28 Asia/Shanghai
+最后修订时间：20261109 17:02:03 Asia/Shanghai
 
 ## 来源
 
@@ -21,8 +21,9 @@ LaCT 迁入范围为顶层 `README.md`、`LICENSE`、完整 `lact_llm/`、完整
 - flame 新增 `custom_models/__init__.py`，内容为 `import lact_model`，通过 Transformers 的官方注册入口载入未修改的 LaCT 模型。原快照的 `custom_models/` 是 namespace package，仅复制文件并不能自动执行 LaCT 注册。
 - 新增单卡 TOML 和 shell 入口。shell 直接调用官方 `flame.train`，接受物理 GPU 0 或 1（默认 0）、一个进程、按调用目录解析的绝对输出路径与 `PYTHONPATH`，不修改 trainer。原 flame `train.sh` 保留供对照，本地入口不调用其中未注册自定义模型的配置探测及对不存在的 `3rdparty/` 的复制操作。
 - 新增 `eval.sh` 与 `scripts/evaluate.py`，读取本地六项 RULER 数据，严格拒绝缺失或额外权重。`--inference-mode original|incremental` 显式选择推理路径，默认 `original` 直接调用官方模型与 `generate`；两种模式共用 checkpoint、prompt、greedy、128-token 预算和评分。正式输入为每任务、每长度 500 条；`--resume` 核对推理模式等原计划设置，仅追加尚未完成的样本，并从全部预测重新计分。
-- 新增 `incremental/`，在上游源码之外实现每层 sliding-window KV 和 TTT 状态缓存。TTT 使用官方非 fused 更新公式及其 `silu_backprop`、Muon helper，保存 PreNorm 累计量、初始行范数、Muon 前 Momentum 和待写 chunk，保持满尾段在下一 token 到来时才提交。当前支持单样本、无 padding、非 fused TTT；原始 `upstream/` 保持不变。
+- 新增 `incremental/`，在上游源码之外实现每层 sliding-window KV 和 TTT 状态缓存。TTT 按官方非 fused 公式实现可复用的范数、读出与更新编译函数，并复用 `silu_backprop`、Muon helper；保存 PreNorm 累计量、初始行范数、Muon 前 Momentum 和待写 chunk，保持满尾段在下一 token 到来时才提交。当前支持单样本、无 padding、非 fused TTT；原始 `upstream/` 保持不变。
 - 新增 `scripts/validate_incremental.py`，比较 chunk 边界和真实样本 logits、独立 greedy 生成的 token IDs、缓存进度及跨样本隔离。数值与耗时结果见 [增量推理记录](../20261109_lact_incremental_inference.md)，不将浮点近似称为逐位相同。
+- 新增 `scripts/diagnose_incremental.py`，记录逐层中间值与生成分歧位置的 logits；`--disable-compile` 仅用于两条路径同时采用 eager 的独立诊断，不改变正式评估的默认编译设置。
 
 ## 公开语言模型权重
 

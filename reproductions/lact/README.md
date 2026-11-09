@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261109 15:34:28 Asia/Shanghai
+最后修订时间：20261109 17:02:03 Asia/Shanghai
 
 本目录接入 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现，保留其与 sliding-window attention 并行的 SwiGLU fast weights、负内积写入、Momentum / Muon 与逐次权重归一化。已接入本地 RULER checkpoint 评估及增量推理缓存，保留官方完整前缀路径作为对照；尚未完成正式 RULER 评估或论文指标复现。
 
@@ -70,7 +70,7 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/eval.sh \
   --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-ruler-original
 ```
 
-本地增量路径使用同一 checkpoint、数据和生成设置，保存到独立目录：
+增量路径的验证结论按 checkpoint 区分：Momentum 已通过本轮四长度检查，Muon / PreNorm 尚未通过，默认仍为原始路径。增量路径使用同一 checkpoint、数据和生成设置，保存到独立目录：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/eval.sh \
@@ -120,7 +120,7 @@ checkpoint 仅从本地加载，任何 missing、unexpected、mismatched keys �
 
 评分复用项目保存的 NVIDIA RULER `postprocess_pred` 与 `string_match_all`；最终汇总从全部已保存的原始预测重新计分，逐样本不取整，汇总百分比保留两位小数。只有全部所选样本完成才写入 `summary.json`；部分预测文件不代表完整评估结果。汇总耗时包含历次已记录执行的加载、编译、生成和失败耗时。
 
-公开 Momentum checkpoint 已通过严格加载及官方路径的真实样本 GPU 生成。增量路径已通过 4K 初步验证：覆盖 chunk 边界、真实样本 teacher-forced logits、独立 128-token greedy 生成及 A→B→A 缓存隔离；所检查的生成 token IDs 一致，logits 存在浮点误差，并非逐位相同。完整四长度与 Muon 的验证结果以 [增量推理记录](../20261109_lact_incremental_inference.md) 为准。正式 12000 条 RULER 评估尚未完成；运行验证样本不计入正式分数。
+公开 Momentum checkpoint 已通过严格加载及官方路径的真实样本 GPU 生成。当前增量实现与原始路径在同一进程重新配对验证：55 次 teacher-forced logits 有限性、argmax、缓存进度及 A→B→A 缓存隔离均通过，四长度共八条独立 128-token greedy 生成的 token IDs 全部一致。Muon / PostNorm 通过本轮 4K 检查，Muon / PreNorm 尚未通过。旧参考对比中的跨运行差异、各 checkpoint 的适用范围与实测耗时见 [增量推理记录](../20261109_lact_incremental_inference.md)。这些结果不保证跨运行逐位一致；正式 12000 条 RULER 评估尚未完成，验证样本不计入正式分数。
 
 增量一致性验证从项目根目录运行，使用 LaCT 环境，并显式加入方法、官方模型和项目源码路径：
 
