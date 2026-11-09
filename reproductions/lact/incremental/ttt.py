@@ -8,6 +8,15 @@ import torch.nn.functional as F
 # 直接编译各自函数体，避免共用 autocast wrapper 的 code object 和重编译缓存。
 @torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16)
 @torch.compile()
+def _ttt_initial_norms(w0, w1, w2):
+    w0_norm = w0.norm(dim=2, keepdim=True)
+    w1_norm = w1.norm(dim=2, keepdim=True)
+    w2_norm = w2.norm(dim=2, keepdim=True)
+    return w0_norm, w1_norm, w2_norm
+
+
+@torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16)
+@torch.compile()
 def _ttt_read(w0, w1, w2, q):
     h = torch.bmm(w2, q)
     gate = F.silu(torch.bmm(w0, q), inplace=True)
@@ -97,9 +106,7 @@ class TTTState:
         self.use_momentum = use_momentum
 
         self.w0, self.w1, self.w2 = w0.detach(), w1.detach(), w2.detach()
-        self.w0_norm = self.w0.norm(dim=2, keepdim=True)
-        self.w1_norm = self.w1.norm(dim=2, keepdim=True)
-        self.w2_norm = self.w2.norm(dim=2, keepdim=True)
+        self.w0_norm, self.w1_norm, self.w2_norm = _ttt_initial_norms(self.w0, self.w1, self.w2)
         self.w0_main = self.w0 if prenorm else None
         self.w1_main = self.w1 if prenorm else None
         self.w2_main = self.w2 if prenorm else None
