@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from lact_model import LaCTForCausalLM, LaCTSWIGLUConfig
 from incremental import IncrementalLaCTForCausalLM
+from provenance import UPSTREAM_REVISION, capture_source
 import torch
 from transformers import AutoTokenizer
 
@@ -132,7 +133,7 @@ def load_checkpoint(checkpoint, inference_mode="original"):
     return model, config
 
 
-def run(args, output, logger):
+def run(args, output, logger, run_source, execution_attempt):
     checkpoint = args.checkpoint.expanduser().resolve()
     data = args.ruler_data.expanduser().resolve()
     if not checkpoint.is_dir():
@@ -152,6 +153,7 @@ def run(args, output, logger):
     plan = {
         "created_at": timestamp(),
         "method": "lact",
+        "source": run_source,
         "inference_mode": args.inference_mode,
         "checkpoint": str(checkpoint),
         "checkpoint_config": json.loads((checkpoint / "config.json").read_text()),
@@ -174,13 +176,16 @@ def run(args, output, logger):
         "cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
         "parameter_dtype": "float32",
         "compute_autocast_dtype": "bfloat16",
-        "upstream_revision": "a648340f9798f173227a0626fde66a6e9b65879a",
+        "upstream_revision": UPSTREAM_REVISION,
         "scoring": "NVIDIA RULER string_match_all; case-insensitive reference recall, percent",
     }
     if args.resume:
         saved_plan = json.loads((output / "plan.json").read_text())
         for key, value in plan.items():
-            if key not in {"created_at", "cuda_visible_devices"} and saved_plan[key] != value:
+            if (
+                key not in {"created_at", "cuda_visible_devices", "source"}
+                and saved_plan[key] != value
+            ):
                 raise ValueError(f"Resume setting differs from saved plan: {key}")
         plan = saved_plan
         plan["cuda_visible_devices"] = os.environ["CUDA_VISIBLE_DEVICES"]
@@ -263,6 +268,7 @@ def run(args, output, logger):
                 seconds = time.perf_counter() - start
                 record = {
                     "id": sample_id,
+                    "execution_attempt": execution_attempt,
                     "length": length,
                     "task": task,
                     "sample_position": position,
@@ -317,6 +323,8 @@ def run(args, output, logger):
     summary = {
         "completed_at": timestamp(),
         "benchmark": "ruler",
+        "plan_path": str(output / "plan.json"),
+        "execution_path": str(output / "execution.json"),
         "checkpoint": str(checkpoint),
         "samples": len(records),
         "score_unit": "percent",
@@ -345,6 +353,10 @@ def main():
     args = parser.parse_args()
     if os.environ.get("CUDA_VISIBLE_DEVICES") not in {"0", "1"}:
         parser.error("CUDA_VISIBLE_DEVICES must be 0 or 1; select one physical GPU")
+    model_class = (
+        IncrementalLaCTForCausalLM if args.inference_mode == "incremental" else LaCTForCausalLM
+    )
+    run_source = capture_source(__file__, {args.inference_mode: model_class})
     output = args.output_dir.expanduser().resolve()
     if args.resume:
         if not output.is_dir():
@@ -367,7 +379,16 @@ def main():
             "peak_cuda_memory_allocated_bytes": 0,
         }
     )
-    attempt = {"started_at": timestamp(), "resume": args.resume, "status": "failed"}
+    execution_attempt = len(execution["attempts"])
+    attempt = {
+        "execution_attempt": execution_attempt,
+        "started_at": timestamp(),
+        "resume": args.resume,
+        "status": "running",
+        "source": run_source,
+    }
+    execution["attempts"].append(attempt)
+    write_json(execution_path, execution)
     start = time.perf_counter()
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
@@ -377,9 +398,10 @@ def main():
 
     signal.signal(signal.SIGTERM, terminate)
     try:
-        run(args, output, logger)
+        run(args, output, logger, run_source, execution_attempt)
         attempt["status"] = "completed"
     except BaseException as error:
+        attempt["status"] = "failed"
         attempt["error"] = f"{type(error).__name__}: {error}"
         logger.exception("Evaluation failed; partial predictions are not a completed result")
         raise
@@ -389,7 +411,6 @@ def main():
         attempt["peak_cuda_memory_allocated_bytes"] = (
             torch.cuda.max_memory_allocated() if torch.cuda.is_available() else 0
         )
-        execution["attempts"].append(attempt)
         execution["seconds"] += attempt["seconds"]
         execution["peak_cuda_memory_allocated_bytes"] = max(
             execution["peak_cuda_memory_allocated_bytes"],

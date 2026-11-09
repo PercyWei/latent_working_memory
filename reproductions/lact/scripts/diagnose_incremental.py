@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import time
 
+from incremental import IncrementalLaCTForCausalLM
+from provenance import UPSTREAM_REVISION, capture_source
 import torch
 from transformers import AutoTokenizer
 
@@ -222,7 +224,7 @@ def cache_progress(cache, model, consumed):
     }
 
 
-def run(args, output, logger):
+def run(args, output, logger, run_source):
     checkpoint = args.checkpoint.expanduser().resolve()
     data = args.ruler_data.expanduser().resolve()
     source = args.generation_results.expanduser().resolve()
@@ -232,6 +234,8 @@ def run(args, output, logger):
     if len(matching) != 1:
         raise ValueError(f"Expected one generation record for {sample_id}, got {len(matching)}")
     generation = matching[0]
+    reference_plan_path = source.parent / "plan.json"
+    reference_plan = json.loads(reference_plan_path.read_text(encoding="utf-8"))
     first_difference = generation["comparison"]["first_different_generated_position"]
     if first_difference is None:
         raise ValueError("The selected generation has no differing token")
@@ -246,10 +250,14 @@ def run(args, output, logger):
         raise ValueError("The selected dataset row does not match the saved generation")
     plan = {
         "created_at": timestamp(),
+        "upstream_revision": UPSTREAM_REVISION,
+        "source": run_source,
         "checkpoint": str(checkpoint),
         "checkpoint_config": json.loads((checkpoint / "config.json").read_text()),
         "ruler_data": str(data),
         "generation_results": str(source),
+        "reference_plan": str(reference_plan_path),
+        "reference_source": reference_plan["source"],
         "sample_id": sample_id,
         "first_difference_zero_based": first_difference,
         "original_token": original_ids[first_difference],
@@ -348,6 +356,7 @@ def run(args, output, logger):
         output / "summary.json",
         {
             "finished_at": timestamp(),
+            "plan_path": str(output / "plan.json"),
             "sample_id": sample_id,
             "compile_policy": plan["compile_policy"],
             "first_nonidentical_intermediate": prefill["first_nonidentical_intermediate"],
@@ -390,6 +399,10 @@ def main():
     if os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0") not in {"0", "1"}:
         raise ValueError("CUDA_VISIBLE_DEVICES must select physical GPU 0 or 1")
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    run_source = capture_source(
+        __file__,
+        {"original": IncrementalLaCTForCausalLM, "incremental": IncrementalLaCTForCausalLM},
+    )
     output = args.output_dir.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=False)
     logging.basicConfig(
@@ -398,11 +411,11 @@ def main():
         handlers=[logging.StreamHandler(), logging.FileHandler(output / "diagnosis.log")],
     )
     logger = logging.getLogger(__name__)
-    execution = {"started_at": timestamp(), "status": "running"}
+    execution = {"started_at": timestamp(), "status": "running", "source": run_source}
     write_json(output / "execution.json", execution)
     start = time.perf_counter()
     try:
-        run(args, output, logger)
+        run(args, output, logger, run_source)
         execution["status"] = "complete"
     except BaseException as error:
         execution["status"] = "failed"

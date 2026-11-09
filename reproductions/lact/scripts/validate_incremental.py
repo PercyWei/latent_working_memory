@@ -9,6 +9,8 @@ from pathlib import Path
 import statistics
 import time
 
+from incremental import IncrementalLaCTForCausalLM
+from provenance import UPSTREAM_REVISION, capture_source
 import torch
 from transformers import AutoTokenizer
 
@@ -245,6 +247,7 @@ def estimate_time(generations, lengths):
 def read_reference(reference_output, plan, samples):
     reference_plan = json.loads((reference_output / "plan.json").read_text(encoding="utf-8"))
     for key in (
+        "upstream_revision",
         "checkpoint",
         "checkpoint_config",
         "ruler_data",
@@ -297,7 +300,7 @@ def read_reference(reference_output, plan, samples):
     return records, reference_plan, reference_summary["passed"]
 
 
-def run(args, output, logger):
+def run(args, output, logger, run_source):
     checkpoint = args.checkpoint.expanduser().resolve()
     data = args.ruler_data.expanduser().resolve()
     if not checkpoint.is_dir():
@@ -315,6 +318,8 @@ def run(args, output, logger):
     plan = {
         "created_at": timestamp(),
         "purpose": "incremental correctness and timing validation; not formal benchmark",
+        "upstream_revision": UPSTREAM_REVISION,
+        "source": run_source,
         "checkpoint": str(checkpoint),
         "checkpoint_config": json.loads((checkpoint / "config.json").read_text()),
         "ruler_data": str(data),
@@ -359,6 +364,9 @@ def run(args, output, logger):
             reference_output, plan, samples
         )
         plan["reference_validation_passed"] = reference_passed
+        plan["reference_plan"] = str(reference_output / "plan.json")
+        plan["reference_source"] = reference_plan["source"]
+        write_json(output / "plan.json", plan)
         logger.info("Reusing original full generations and timings from %s", reference_output)
     if not torch.cuda.is_available():
         raise RuntimeError("Incremental validation requires the native CUDA LaCT environment")
@@ -470,6 +478,7 @@ def run(args, output, logger):
             if reference_output is not None:
                 record["original"] = reference_records[sample_id]["original"]
                 record["original_reference_output"] = str(reference_output)
+                record["original_reference_plan"] = str(reference_output / "plan.json")
                 modes = (("incremental", True),)
             else:
                 modes = (("original", False), ("incremental", True))
@@ -531,6 +540,7 @@ def run(args, output, logger):
     )
     summary = {
         "finished_at": timestamp(),
+        "plan_path": str(output / "plan.json"),
         "passed": passed,
         "real_samples": len(generations),
         "teacher_forced_comparisons": len(teacher_records),
@@ -590,6 +600,10 @@ def main():
     if visible not in {"0", "1"}:
         raise ValueError("CUDA_VISIBLE_DEVICES must select physical GPU 0 or 1")
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    run_source = capture_source(
+        __file__,
+        {"original": IncrementalLaCTForCausalLM, "incremental": IncrementalLaCTForCausalLM},
+    )
     output = args.output_dir.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=False)
     logging.basicConfig(
@@ -598,11 +612,11 @@ def main():
         handlers=[logging.StreamHandler(), logging.FileHandler(output / "validation.log")],
     )
     logger = logging.getLogger(__name__)
-    execution = {"started_at": timestamp(), "status": "running"}
+    execution = {"started_at": timestamp(), "status": "running", "source": run_source}
     write_json(output / "execution.json", execution)
     start = time.perf_counter()
     try:
-        run(args, output, logger)
+        run(args, output, logger, run_source)
         execution["status"] = "complete"
     except BaseException as error:
         execution["status"] = "failed"

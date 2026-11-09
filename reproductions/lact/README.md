@@ -2,25 +2,26 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261109 17:02:03 Asia/Shanghai
+最后修订时间：20261109 20:39:51 Asia/Shanghai
 
-本目录接入 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现，保留其与 sliding-window attention 并行的 SwiGLU fast weights、负内积写入、Momentum / Muon 与逐次权重归一化。已接入本地 RULER checkpoint 评估及增量推理缓存，保留官方完整前缀路径作为对照；尚未完成正式 RULER 评估或论文指标复现。
+本目录接入 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现，保留其与 sliding-window attention 并行的 SwiGLU fast weights、负内积写入、Momentum / Muon 与逐次权重归一化。已接入本地 RULER checkpoint 评估及增量推理缓存，保留迁入模型的完整前缀路径作为对照；尚未完成正式 RULER 评估或论文指标复现。
 
 ## 代码与运行入口
 
-- `upstream/lact_llm/`：官方完整语言模型源码、五份模型配置和环境要求。
-- `upstream/minimal_implementations/`：官方简化实现，供对照阅读。
-- `upstream_flame/`：官方指定的 flame 训练框架源码。
-- `configs/760m_muon_paper_single_gpu.toml`：760M Muon 的单卡运行配置，保留公开命令的全局 token batch 和步数。
-- `scripts/train_760m_muon.sh`：在 `zcy-memory` 的单张物理 GPU 上调用原生 flame trainer。
-- `eval.sh`、`scripts/evaluate.py`：在单张物理 GPU 上读取本地六项 RULER JSONL，使用官方 LaCT 模型生成并计分。
-- `incremental/`：本地增量推理实现，保存每层 attention KV、TTT 状态与待写 chunk；`scripts/validate_incremental.py` 与原始路径比较数值误差、生成结果和缓存隔离。
+| 层次 | 位置 | 职责 |
+|---|---|---|
+| 迁入源码（source） | `upstream/lact_llm/`、`upstream/minimal_implementations/`、`upstream_flame/` | 固定 revision 的完整语言模型、简化实现及 flame 训练框架 |
+| 本地接入（adapters） | `scripts/`、`eval.sh`、`configs/` | checkpoint 加载、训练与评估入口、推理模式选择、验证及结果记录 |
+| 本地优化（optimization） | `incremental/` | 每层 attention KV、TTT 状态与待写 chunk 的增量缓存 |
+
+`scripts/evaluate.py` 负责本地六项 RULER 的生成和计分，`scripts/validate_incremental.py` 比较两条路径的数值、完整生成及缓存隔离。单卡训练入口为 `scripts/train_760m_muon.sh`，配置 `configs/760m_muon_paper_single_gpu.toml` 保留公开命令的全局 token batch 和步数。
+
 - [UPSTREAM.md](UPSTREAM.md)：固定源码 revision、文件范围和必要接入改动。
 - [源码迁入记录](20261108_execution.md)：源码接入与本地 CPU 检查。
 - [GPU 验证与评估记录](../20261109_checkpoint_gpu_evaluation.md)：完整模型运行状态与正式评估进度。
 - [增量推理记录](../20261109_lact_incremental_inference.md)：缓存实现、原始／增量一致性验证和耗时记录。
 
-本地不引入统一训练框架，不更改官方模型或更新函数。flame 的 custom-model 注册仅负责使 Transformers 能够按 `lact_swiglu` 配置加载模型。
+本次缓存优化没有修改迁入的 LaCT 模型、配置、TTT 更新函数或 flame trainer。flame 的 custom-model 注册属于必要接入差异，仅负责使 Transformers 能够按 `lact_swiglu` 配置加载模型；具体范围见 [UPSTREAM.md](UPSTREAM.md)。
 
 ## 目标与论文参照
 
@@ -102,7 +103,7 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/eval.sh \
 
 两个 Muon 模型使用对应的 checkpoint 目录和新的输出目录，数据目录共用。评估要求每个长度的六项 `test.jsonl` 各有 500 条样本，不在入口内生成或截断样本。每条输入按 `input + answer_prefix` 拼接，再由 checkpoint tokenizer 添加默认 special tokens；完整输入与 128-token 输出预算之和必须不超过长度档位。采用 greedy、单样本生成，参考 `outputs` 仅用于计分。
 
-`original` 直接使用官方 `generate`。官方 `prepare_inputs_for_generation` 和模型 `forward` 均强制 `use_cache=False`，每生成一个 token 都重新计算完整前缀。`logits_to_keep=1` 仅减少 vocabulary logits 的计算，其耗时不代表增量解码性能。
+`original` 指迁入模型经本地评估接入运行的原始推理路径，不表示完整复现了论文的运行环境。该模式调用迁入模型的 `generate`；原 `prepare_inputs_for_generation` 和模型 `forward` 均强制 `use_cache=False`，每生成一个 token 都重新计算完整前缀。`logits_to_keep=1` 仅减少 vocabulary logits 的计算，其耗时不代表增量解码性能。
 
 `incremental` 使用独立的本地实现，缓存 sliding-window KV、fast weights、PreNorm 累计状态、初始行范数、Momentum 和待写 chunk。保持先读后更新及尾段延迟写入：前缀长度为 \(L\) 时提交 \(\lfloor(L-1)/2048\rfloor\) 次更新。当前支持单样本、无 padding、非 fused TTT 推理；不修改 `upstream/` 中的模型或更新函数。两种模式均保持 greedy 和 128-token 预算。
 
@@ -110,17 +111,36 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/eval.sh \
 
 checkpoint 仅从本地加载，任何 missing、unexpected、mismatched keys 或加载错误均使评估失败，不接受随机初始化的缺失参数。三个发布目录的名称与实际 head 数相反：Momentum 的配置及权重为 **2 heads**，两个 Muon 为 **4 heads**。已读取 safetensors 元数据确认，具体形状见 [UPSTREAM.md](UPSTREAM.md)；加载时按 checkpoint 自带配置构造，不根据目录名改写。
 
+### 运行来源与结果
+
+新运行在 `plan.json` 中记录 `upstream_revision`，并通过 `source` 保存本地代码来源：
+
+| 字段 | 含义 |
+|---|---|
+| `source.local_git_commit` | 启动时本仓库的 Git commit |
+| `source.local_git_dirty`、`source.local_git_status` | tracked 与 untracked 文件的改动状态，不包含 ignored 文件 |
+| `source.entrypoint` | 实际启动入口 |
+| `source.implementations` | 按 `original`／`incremental` 记录实际模型类、forward、`use_cache` 和代码路径 |
+
+每次启动在创建输出文件前采集一次来源，同时写入计划和执行记录。续评保留首次运行的 `plan.source`，各次启动来源写入 `execution.attempts[].source`；来源变化会留痕，不单独作为配置不匹配拒绝续评。
+
+每次执行的来源在生成前落盘。每条预测的 `execution_attempt` 从 0 起计，对应 `execution.attempts[]` 中同一索引的执行及其 `source`，该执行记录也保存相同的 `execution_attempt`。未提交改动的状态记录不包含其代码内容；历史产物不补填当时未采集的 Git 状态。
+
+评估入口按模式分别加载模型；配对验证入口则使用 `IncrementalLaCTForCausalLM` 执行两条路径，其中 `original` 通过 `use_cache=False` 委托父类原始 forward。判断实现来源应结合模式、forward 和代码路径，不能只看模型类名。
+
 输出包含：
 
-- `plan.json`：checkpoint、实际模型配置、数据目录、任务与样本数、生成与精度设置。
+- `plan.json`：checkpoint、实际模型配置、数据目录、任务与样本数、推理模式、生成与精度设置及代码来源。
 - `evaluation.log`：加载、逐样本进度及失败信息。
-- `predictions.jsonl`：逐样本输出、参考、原始百分比得分、token 数与耗时；ID 使用行序号，另存可能重复的源 `index`。
-- `summary.json`：每任务、每长度的分数，以及对应论文表格的三项 S-NIAH 平均、MK-NIAH-1／MQ-NIAH／MV-NIAH 平均和六项平均。
-- `execution.json`：各次执行的成功或失败状态、耗时及显存峰值，保留累计耗时和历次最大峰值。
+- `predictions.jsonl`：逐样本输出、参考、原始百分比得分、token 数、耗时及 `execution_attempt`；ID 使用行序号，另存可能重复的源 `index`。
+- `summary.json`：每任务、每长度的分数，以及对应论文表格的三项 S-NIAH 平均、MK-NIAH-1／MQ-NIAH／MV-NIAH 平均和六项平均；`plan_path`、`execution_path` 分别指向计划与执行记录。
+- `execution.json`：各次执行的成功或失败状态、代码来源、耗时及显存峰值，保留累计耗时和历次最大峰值。
 
 评分复用项目保存的 NVIDIA RULER `postprocess_pred` 与 `string_match_all`；最终汇总从全部已保存的原始预测重新计分，逐样本不取整，汇总百分比保留两位小数。只有全部所选样本完成才写入 `summary.json`；部分预测文件不代表完整评估结果。汇总耗时包含历次已记录执行的加载、编译、生成和失败耗时。
 
-公开 Momentum checkpoint 已通过严格加载及官方路径的真实样本 GPU 生成。当前增量实现与原始路径在同一进程重新配对验证：55 次 teacher-forced logits 有限性、argmax、缓存进度及 A→B→A 缓存隔离均通过，四长度共八条独立 128-token greedy 生成的 token IDs 全部一致。Muon / PostNorm 通过本轮 4K 检查，Muon / PreNorm 尚未通过。旧参考对比中的跨运行差异、各 checkpoint 的适用范围与实测耗时见 [增量推理记录](../20261109_lact_incremental_inference.md)。这些结果不保证跨运行逐位一致；正式 12000 条 RULER 评估尚未完成，验证样本不计入正式分数。
+### 一致性验证
+
+公开 Momentum checkpoint 已通过严格加载及原始路径的真实样本 GPU 生成。当前增量实现与原始路径在同一进程重新配对验证：55 次 teacher-forced logits 有限性、argmax、缓存进度及 A→B→A 缓存隔离均通过，四长度共八条独立 128-token greedy 生成的 token IDs 全部一致。Muon / PostNorm 通过本轮 4K 检查，Muon / PreNorm 尚未通过。旧参考对比中的跨运行差异、各 checkpoint 的适用范围与实测耗时见 [增量推理记录](../20261109_lact_incremental_inference.md)。这些结果不保证跨运行逐位一致；正式 12000 条 RULER 评估尚未完成，验证样本不计入正式分数。
 
 增量一致性验证从项目根目录运行，使用 LaCT 环境，并显式加入方法、官方模型和项目源码路径：
 
@@ -135,7 +155,7 @@ python -u reproductions/lact/scripts/validate_incremental.py \
   --lengths 4096 8192 16384 32768
 ```
 
-该命令实际执行原始与增量 GPU 推理。验证产物需使用新的输出目录；依赖信息见 [评估环境](../20261109_environment_setup.md)。
+该命令实际执行原始与增量 GPU 推理。验证产物需使用新的输出目录；依赖信息见 [评估环境](../20261109_environment_setup.md)。`--reference-output` 可复用具有完整 `plan.source` 的既有原始生成及计时，参考计划路径和来源分别记录为 `reference_plan`、`reference_source`，不以本次运行来源替代。
 
 ## 环境与数据
 
