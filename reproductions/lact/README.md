@@ -2,9 +2,9 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261109 11:46:18 Asia/Shanghai
+最后修订时间：20261109 11:55:19 Asia/Shanghai
 
-本目录接入 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现，保留其与 sliding-window attention 并行的 SwiGLU fast weights、负内积写入、Momentum / Muon 与逐次权重归一化。已接入本地 RULER checkpoint 评估入口，完成源码静态检查和原始写入函数的 CPU 前后向检查；尚未完成完整模型 GPU 验证或论文指标复现。
+本目录接入 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现，保留其与 sliding-window attention 并行的 SwiGLU fast weights、负内积写入、Momentum / Muon 与逐次权重归一化。已接入本地 RULER checkpoint 评估入口，完成源码静态检查、原始写入函数的 CPU 前后向检查，以及公开 Momentum checkpoint 在 4K、32K 真实样本上的完整生成；尚未完成正式 RULER 评估或论文指标复现。
 
 ## 代码与运行入口
 
@@ -66,14 +66,26 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/eval.sh \
   --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-ruler
 ```
 
-`eval.sh` 使用当前方法环境的 `python`，设置官方模型与项目源码路径，仅接受 `CUDA_VISIBLE_DEVICES=0` 或 `1`，未指定时默认 `0`。进程内设备为 `cuda:0`，实际物理设备选择写入 `plan.json`。`--checkpoint` 和 `--output-dir` 必需，输出目录必须尚不存在。可选参数如下：
+`eval.sh` 使用当前方法环境的 `python`，设置官方模型与项目源码路径，仅接受 `CUDA_VISIBLE_DEVICES=0` 或 `1`，未指定时默认 `0`。进程内设备为 `cuda:0`，实际物理设备选择写入 `plan.json`。`--checkpoint` 和 `--output-dir` 必需，首次运行的输出目录必须尚不存在。可选参数如下：
 
 | 参数 | 默认值 |
 |---|---|
 | `--ruler-data` | `data/benchmarks/ruler-v1/reproductions/lact-760m` |
 | `--lengths` | `4096 8192 16384 32768`，可选其中的子集 |
+| `--resume` | 续评已有输出目录，默认关闭 |
 
-两个 Muon 模型使用对应的 checkpoint 目录和新的输出目录，数据目录共用。评估读取每个长度的六项 `test.jsonl`，实际样本数写入计划与结果，不在入口内生成或截断样本。每条输入按 `input + answer_prefix` 拼接，再由 checkpoint tokenizer 添加默认 special tokens；完整输入与 128-token 输出预算之和必须不超过长度档位。采用 greedy、单样本生成，参考 `outputs` 仅用于计分。
+中断后使用相同设置和输出目录续评：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/eval.sh \
+  --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
+  --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-ruler \
+  --resume
+```
+
+续评核对 checkpoint 配置、数据路径、长度、任务、生成和精度等设置，跳过已保存的样本 ID，并追加新的预测；时间和运行设备信息可以变化。仅删除最后一条未写完的 JSON 记录；已完成记录的损坏、重复 ID 或样本不匹配均报错。
+
+两个 Muon 模型使用对应的 checkpoint 目录和新的输出目录，数据目录共用。评估要求每个长度的六项 `test.jsonl` 各有 500 条样本，不在入口内生成或截断样本。每条输入按 `input + answer_prefix` 拼接，再由 checkpoint tokenizer 添加默认 special tokens；完整输入与 128-token 输出预算之和必须不超过长度档位。采用 greedy、单样本生成，参考 `outputs` 仅用于计分。
 
 **官方生成路径没有 fast-weight cache。** `prepare_inputs_for_generation` 和模型 `forward` 均强制 `use_cache=False`。本入口保留这一行为，每生成一个 token 都将完整前缀送入原模型，重新执行各层的 chunk 写入及读出；没有补写原实现不更新的当前尾段。生成只计算最后位置的 vocabulary logits（`logits_to_keep=1`），但模型的完整前缀计算仍然存在。因此该入口可用于模型质量评估，耗时不能解释为高效增量解码的性能。
 
@@ -87,10 +99,11 @@ checkpoint 仅从本地加载，任何 missing、unexpected、mismatched keys �
 - `evaluation.log`：加载、逐样本进度及失败信息。
 - `predictions.jsonl`：逐样本输出、参考、原始百分比得分、token 数与耗时；ID 使用行序号，另存可能重复的源 `index`。
 - `summary.json`：每任务、每长度的分数，以及对应论文表格的三项 S-NIAH 平均、MK-NIAH-1／MQ-NIAH／MV-NIAH 平均和六项平均。
+- `execution.json`：各次执行的成功或失败状态、耗时及显存峰值，保留累计耗时和历次最大峰值。
 
-评分复用项目保存的 NVIDIA RULER `postprocess_pred` 与 `string_match_all`；逐样本不取整，汇总百分比保留两位小数。只有全部所选样本完成才写入 `summary.json`；部分预测文件不代表完整评估结果。
+评分复用项目保存的 NVIDIA RULER `postprocess_pred` 与 `string_match_all`；最终汇总从全部已保存的原始预测重新计分，逐样本不取整，汇总百分比保留两位小数。只有全部所选样本完成才写入 `summary.json`；部分预测文件不代表完整评估结果。汇总耗时包含历次已记录执行的加载、编译、生成和失败耗时。
 
-已完成 shell、Python 语法和 Ruff 静态检查，并在服务器安装独立评估环境，通过依赖检查及 Torch／Transformers／FlashAttention 导入；未新增测试。完整模型模块导入、checkpoint 加载及生成仍待 GPU 验证，见[评估环境](../20261109_environment_setup.md)。
+已完成 shell、Python 语法和 Ruff 静态检查，并在服务器安装独立评估环境。公开 Momentum checkpoint 已严格加载，在物理 GPU 0 上完成 4K、32K 各一个真实样本的生成，均使用 128-token 输出预算；这只确认运行路径，不能代表正式评估分数。未新增测试，见[评估环境](../20261109_environment_setup.md)。
 
 ## 环境与数据
 
@@ -115,7 +128,7 @@ python -m pip install ./reproductions/lact/upstream_flame
 python -m pip install 'torchtitan @ git+https://github.com/pytorch/torchtitan.git@0b44d4c'
 ```
 
-官方没有固定 FLA 与 Transformers 的精确版本。本轮评估分别固定为 0.4.1、4.57.3，属于本项目选定版本，仍需验证完整模型 GPU 运行。
+官方没有固定 FLA 与 Transformers 的精确版本。本轮评估分别固定为 0.4.1、4.57.3，属于本项目选定版本，已用于上述 Momentum checkpoint 的 GPU 生成。
 
 若后续开展从头训练，需要准备原 Long-Data-Collections 的 Arrow 文件与原 tokenizer。原仓库提供示例路径，没有提供对应数据构造脚本、精确数据 revision 和 Book-3 / RULER 的完整评估入口。不要用 FineWeb-Edu 替代后，将结果与原 LaCT 论文分数直接对应。模型及 tokenizer 放在 `~/rivermind-data/models/`，训练数据放在项目 `data/` 下，实际路径由下面两个环境变量指定。
 
@@ -144,7 +157,7 @@ flame 保存原生 DCP checkpoint、配置和 TensorBoard 本地指标；配置�
 
 ## 当前待解决事项
 
-1. 在已授权的可用单卡上完成模型模块导入及公开 checkpoint 的完整加载验证。
-2. 在准备好的本地 RULER 数据上运行评估，记录公开重训模型的实际分数与原论文参照的差异。
+1. 在准备好的本地 RULER 数据上完成正式评估，记录公开重训模型的实际分数与原论文参照的差异。
+2. 需要评估两个 Muon checkpoint 时，分别完成其严格加载和完整生成验证。
 3. 对照当前官方代码与论文 v1 的 Muon 实现差异；详见 [UPSTREAM.md](UPSTREAM.md)。
 4. 若后续开展训练，再落实原训练数据、tokenizer 和训练预算。

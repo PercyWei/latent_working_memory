@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261109 11:45:43 Asia/Shanghai
+最后修订时间：20261109 11:54:14 Asia/Shanghai
 
 本目录保留 [E²-TTT 官方实现](https://github.com/zeyun-zhong/E2-TTT)，使用其原始模型、flame 训练流程与随附 lm-evaluation-harness；不接入本项目的统一框架。论文为 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308)。
 
@@ -72,6 +72,17 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/e2_ttt/eval.sh \
   --output-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b
 ```
 
+中断后，使用相同 checkpoint、任务、数据、长度和输出目录追加 `--resume`：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash reproductions/e2_ttt/eval.sh \
+  --checkpoint ~/rivermind-data/models/reproductions/e2_ttt/mlp-1.3b-15b \
+  --output-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b \
+  --resume
+```
+
+恢复时核对已有 `plan.json`，除创建时间外的设置须相同。每个输出目录使用原生 `CachingLM` 的 `generation_cache.sqlite` 保存生成响应，原 HFLM 在每条生成完成后通过 cache hook 写入。恢复会复用已保存响应、重新生成未缓存请求，并重建完整逐样本结果与汇总；不将旧汇总当作已完成任务直接跳过。
+
 SwiGLU 使用 `~/rivermind-data/models/reproductions/e2_ttt/swiglu-1.3b-15b`，并指定独立的新输出目录。入口直接使用已激活环境的 `python`，默认物理 GPU 0、单进程，不依赖 Accelerate 启动配置。`CUDA_VISIBLE_DEVICES` 仅接受单卡 `0` 或 `1`，拒绝其他分配；当前使用空闲的物理 GPU 0。进程内的 `cuda:0` 对应所选物理 GPU。
 
 默认评估 `ruler squad_completion swde`，只读取本地文件：
@@ -88,7 +99,7 @@ RULER 直接拼接每行 `input + answer_prefix`，不加 chat 模板、不重�
 
 SQuAD／SWDE 的本地 task 继承原 task，保留 `.strip()`、换行停止符、最多 48 个生成 token 及原 `contains_score`。总序列上限固定 2048，实际 prompt 上限为 2000，超过时按原 HFLM 左截断；不采用训练长度 2240 作为默认评估上限。
 
-产物保存在新建的 `--output-dir`：`plan.json` 记录 checkpoint、数据、预算和运行依赖；`predictions.jsonl` 保存原 harness 逐样本记录及任务名；`native_harness/` 保存各次原始汇总；`summary.json` 按任务和 RULER 长度汇总百分比准确率及样本数；`evaluation.log` 与 `execution.json` 保存执行日志和退出状态。每完成一项真实检索任务或一个 RULER 长度即保存结果，仅全部任务完成后设置 `completed=true`。不计算 bootstrap 标准误，准确率与原计分相同。
+首次执行新建 `--output-dir`，续评复用同一目录：`plan.json` 记录 checkpoint、数据、预算和运行依赖；`predictions.jsonl` 保存原 harness 逐样本记录及任务名；`native_harness/` 保存各次原始汇总；`summary.json` 按任务和 RULER 长度汇总百分比准确率及样本数；`evaluation.log` 与 `execution.json` 保存执行日志、退出状态、本次调用耗时和 CUDA allocated／reserved 峰值显存。每完成一项真实检索任务或一个 RULER 长度即保存结果，仅全部任务完成后设置 `completed=true`。不计算 bootstrap 标准误，准确率与原计分相同。
 
 本地入口保留模型及原始 `upstream/training/eval.sh` 不变，使用随附 harness 的 Python API 接入本地数据。服务器评估环境已安装，通过依赖检查及本地入口、模型注册、harness 与任务模块导入；尚未运行 GPU benchmark。
 

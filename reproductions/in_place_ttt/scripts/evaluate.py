@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 import time
 
 import inference_model  # noqa: F401 -- registers upstream TTT models before loading.
+import torch
 from opencompass.datasets.ruler.ruler_cwe import RulerCweEvaluator
 from opencompass.datasets.ruler.ruler_fwe import RulerFweEvaluator
 from opencompass.datasets.ruler.ruler_niah import RulerNiahEvaluator
@@ -52,19 +53,48 @@ def read_rows(path, count):
     return rows
 
 
-def evaluate(plan):
+def read_predictions(path, plan):
+    if not path.exists():
+        return {}
+    completed = {}
+    expected = {
+        (length, task, row)
+        for length in plan["lengths"]
+        for task in plan["tasks"]
+        for row in range(plan["samples_per_task"])
+    }
+    with path.open("r+b") as stream:
+        while True:
+            offset = stream.tell()
+            line = stream.readline()
+            if not line:
+                break
+            try:
+                record = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                if line.endswith(b"\n") or stream.read(1):
+                    raise
+                stream.truncate(offset)
+                logging.warning("Removed incomplete final prediction at byte %s", offset)
+                break
+            key = record["length"], record["task"], record["row"]
+            if key not in expected or key in completed:
+                raise ValueError(f"Unexpected or duplicate prediction key: {key}")
+            completed[key] = record
+            if not line.endswith(b"\n"):
+                stream.write(b"\n")
+    return completed
+
+
+def evaluate(plan, resume, completed):
     data, output = Path(plan["ruler_data"]), Path(plan["output_dir"])
     budget = plan["tokens_to_generate"]
     wrapper = HuggingFaceBaseModel(
         path=plan["checkpoint"],
-        model_kwargs={
-            "device_map": "cuda:0",
-            "torch_dtype": "torch.bfloat16",
-            "local_files_only": True,
-        },
-        tokenizer_kwargs={"local_files_only": True},
+        model_kwargs=plan["model_kwargs"],
+        tokenizer_kwargs=plan["tokenizer_kwargs"],
         max_seq_len=plan["max_seq_len"],
-        generation_kwargs={"do_sample": False, "top_k": 20, "top_p": 0.95, "use_cache": True},
+        generation_kwargs=plan["generation_kwargs"],
     )
     if not type(wrapper.model).__module__.startswith("inference_model."):
         raise TypeError(
@@ -84,10 +114,17 @@ def evaluate(plan):
         "attention_implementation": config._attn_implementation,
         "postprocessor": "opencompass.utils.text_postprocessors.extract_non_reasoning_content",
     }
-    (output / "runtime.json").write_text(json.dumps(runtime, ensure_ascii=False, indent=2) + "\n")
+    runtime_path = output / "runtime.json"
+    if resume:
+        if runtime_path.exists():
+            if json.loads(runtime_path.read_text()) != runtime:
+                raise ValueError("Resume model/backend/package settings differ from runtime.json")
+        elif completed:
+            raise FileNotFoundError("Existing predictions require their original runtime.json")
+    runtime_path.write_text(json.dumps(runtime, ensure_ascii=False, indent=2) + "\n")
     logging.info("Runtime: %s", json.dumps(runtime, ensure_ascii=False))
     summary = {"checkpoint": plan["checkpoint"], "lengths": {}, "samples": 0}
-    with (output / "predictions.jsonl").open("w") as predictions_file:
+    with (output / "predictions.jsonl").open("a" if resume else "w") as predictions_file:
         for length in plan["lengths"]:
             length_results = {}
             for task, evaluator_class in TASKS.items():
@@ -96,6 +133,19 @@ def evaluate(plan):
                 predictions, gold = [], []
                 evaluator = evaluator_class()
                 for index, row in enumerate(rows):
+                    key = length, task, index
+                    if key in completed:
+                        record = completed[key]
+                        if record["source"] != str(source) or record["gold"] != row["outputs"]:
+                            raise ValueError(f"{key}: saved prediction does not match current data")
+                        prediction = extract_non_reasoning_content(record["raw_prediction"])
+                        if prediction != record["prediction"]:
+                            raise ValueError(
+                                f"{key}: saved prediction postprocessing does not match"
+                            )
+                        predictions.append(prediction)
+                        gold.append(row["outputs"])
+                        continue
                     prompt = row["input"] + row["answer_prefix"]
                     input_tokens = len(
                         wrapper.tokenizer.encode(prompt, add_special_tokens=True, truncation=False)
@@ -147,6 +197,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--ruler-data",
         type=Path,
@@ -175,35 +226,75 @@ def main():
             if not path.is_file():
                 parser.error(f"RULER data file does not exist: {path}")
     output = args.output_dir.expanduser().resolve()
-    output.mkdir(parents=True, exist_ok=False)
     plan = {
         "created_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
         "checkpoint": str(checkpoint),
         "ruler_data": str(data),
         "lengths": args.lengths,
         "samples_per_task": 100,
+        "tasks": list(TASKS),
         "tokens_to_generate": 64,
         "prompt": "input + answer_prefix; base completion; no chat template",
+        "model_wrapper": "opencompass.models.HuggingFaceBaseModel",
+        "model_kwargs": {
+            "device_map": "cuda:0",
+            "torch_dtype": "torch.bfloat16",
+            "local_files_only": True,
+        },
+        "tokenizer_kwargs": {"local_files_only": True},
+        "generation_kwargs": {
+            "do_sample": False,
+            "top_k": 20,
+            "top_p": 0.95,
+            "use_cache": True,
+        },
+        "postprocessor": "opencompass.utils.text_postprocessors.extract_non_reasoning_content",
         "max_seq_len": max(args.lengths),
         "cuda_visible_devices": physical_gpu,
         "device": "cuda:0",
         "output_dir": str(output),
     }
-    (output / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
+    plan_path = output / "plan.json"
+    if args.resume:
+        previous = json.loads(plan_path.read_text())
+        previous_settings = {key: value for key, value in previous.items() if key != "created_at"}
+        current_settings = {key: value for key, value in plan.items() if key != "created_at"}
+        if previous_settings != current_settings:
+            raise ValueError(
+                "Resume arguments/backend settings do not match the existing plan.json"
+            )
+        plan = previous
+    else:
+        output.mkdir(parents=True, exist_ok=False)
+        plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[logging.FileHandler(output / "evaluation.log"), logging.StreamHandler()],
     )
+    started = time.perf_counter()
+    execution = {"exit_code": 0}
     try:
-        evaluate(plan)
-    except Exception as error:
-        logging.exception("Evaluation failed")
-        (output / "execution.json").write_text(
-            json.dumps({"exit_code": 1, "error": str(error)}, ensure_ascii=False) + "\n"
+        completed = read_predictions(output / "predictions.jsonl", plan) if args.resume else {}
+        execution["resumed_samples"] = len(completed)
+        torch.cuda.init()
+        torch.cuda.reset_peak_memory_stats(0)
+        logging.info(
+            "Starting evaluation; resume=%s, cached_samples=%s", args.resume, len(completed)
         )
+        evaluate(plan, args.resume, completed)
+    except BaseException as error:
+        execution.update(
+            exit_code=130 if isinstance(error, KeyboardInterrupt) else 1, error=str(error)
+        )
+        logging.exception("Evaluation failed")
         raise
-    (output / "execution.json").write_text(json.dumps({"exit_code": 0}) + "\n")
+    finally:
+        execution["elapsed_seconds"] = time.perf_counter() - started
+        execution["peak_memory_allocated_bytes"] = torch.cuda.max_memory_allocated(0)
+        (output / "execution.json").write_text(
+            json.dumps(execution, ensure_ascii=False, indent=2) + "\n"
+        )
 
 
 if __name__ == "__main__":

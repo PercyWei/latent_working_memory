@@ -1,6 +1,7 @@
 """Evaluate E²-TTT checkpoints with the pinned harness and local benchmark files."""
 
 import argparse
+from contextlib import ExitStack
 from datetime import datetime
 import json
 import logging
@@ -13,6 +14,7 @@ from zoneinfo import ZoneInfo
 import datasets
 import e2_ttt  # noqa: F401 -- registers the original checkpoint model types
 from lm_eval import evaluator
+from lm_eval.api.model import CachingLM
 from lm_eval.models.huggingface import HFLM
 from lm_eval.utils import handle_non_serializable, set_torch_seed
 import numpy as np
@@ -41,6 +43,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--resume", action="store_true", help="Resume the same output and plan using native response caching.")
     parser.add_argument(
         "--benchmarks",
         choices=["ruler", "squad_completion", "swde"],
@@ -80,15 +83,6 @@ def parse_args():
 
 
 def execute(args):
-    args.output_dir.mkdir(parents=True, exist_ok=False)
-    native_dir = args.output_dir / "native_harness"
-    native_dir.mkdir()
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        handlers=[logging.StreamHandler(), logging.FileHandler(args.output_dir / "evaluation.log")],
-        force=True,
-    )
     parquet = {
         "squad_completion": args.squad_data / "data/validation-00000-of-00001.parquet",
         "swde": args.swde_data / "data/validation-00000-of-00001.parquet",
@@ -126,10 +120,33 @@ def execute(args):
             "e2_ttt": e2_ttt.__version__,
         },
     }
-    write_json(args.output_dir / "plan.json", plan)
+    plan_path = args.output_dir / "plan.json"
+    if args.resume:
+        saved_plan = json.loads(plan_path.read_text())
+        saved_settings = {key: value for key, value in saved_plan.items() if key != "created_at"}
+        current_settings = {key: value for key, value in plan.items() if key != "created_at"}
+        if saved_settings != current_settings:
+            different = sorted(
+                key
+                for key in saved_settings.keys() | current_settings.keys()
+                if saved_settings.get(key) != current_settings.get(key)
+            )
+            raise ValueError(f"Resume settings differ from the saved plan: {different}")
+    else:
+        args.output_dir.mkdir(parents=True, exist_ok=False)
+        (args.output_dir / "native_harness").mkdir()
+        write_json(plan_path, plan)
+    native_dir = args.output_dir / "native_harness"
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=[logging.StreamHandler(), logging.FileHandler(args.output_dir / "evaluation.log")],
+        force=True,
+    )
     summary = {"checkpoint": str(args.checkpoint), "completed": False, "metrics": {}}
     write_json(args.output_dir / "summary.json", summary)
     started = time.monotonic()
+    torch.cuda.reset_peak_memory_stats(0)
     try:
         lm = HFLM(
             pretrained=str(args.checkpoint),
@@ -143,13 +160,20 @@ def execute(args):
         )
         if lm.world_size != 1:
             raise ValueError("The harness initialized more than one evaluation process.")
-        with (args.output_dir / "predictions.jsonl").open("w", encoding="utf-8") as predictions:
+        with (
+            (args.output_dir / "predictions.jsonl").open("w", encoding="utf-8") as predictions,
+            ExitStack() as caches,
+        ):
+            cache_path = str(args.output_dir / "generation_cache.sqlite")
+            if any(name in args.benchmarks for name in ("squad_completion", "swde")):
+                recall_cache = CachingLM(lm, cache_path)
+                caches.callback(recall_cache.dbdict.close)
             for benchmark in ("squad_completion", "swde"):
                 if benchmark not in args.benchmarks:
                     continue
                 task_class = LocalSQuAD if benchmark == "squad_completion" else LocalSWDE
                 task = task_class(parquet[benchmark])
-                result = evaluate_tasks(lm, [task])
+                result = evaluate_tasks(recall_cache, [task])
                 save_result(result, benchmark, native_dir, predictions)
                 metric = result["results"][benchmark]["contains,none"]
                 summary["metrics"][benchmark] = {
@@ -168,6 +192,8 @@ def execute(args):
                     truncation=False,
                     add_bos_token=lm.add_bos_token,
                 )
+                ruler_cache = CachingLM(ruler_lm, cache_path)
+                caches.callback(ruler_cache.dbdict.close)
                 summary["metrics"]["ruler"] = {}
                 for length in args.lengths:
                     tasks = [
@@ -175,11 +201,11 @@ def execute(args):
                             args.ruler_data / str(length) / name / "test.jsonl",
                             name,
                             length,
-                            ruler_lm,
+                            ruler_cache,
                         )
                         for name in RULER_TASKS
                     ]
-                    result = evaluate_tasks(ruler_lm, tasks)
+                    result = evaluate_tasks(ruler_cache, tasks)
                     save_result(result, f"ruler_{length}", native_dir, predictions)
                     summary["metrics"]["ruler"][str(length)] = {
                         name: {
@@ -190,11 +216,18 @@ def execute(args):
                         for name in RULER_TASKS
                     }
                     write_json(args.output_dir / "summary.json", summary)
+        torch.cuda.synchronize(0)
         summary["completed"] = True
         write_json(args.output_dir / "summary.json", summary)
         write_json(
             args.output_dir / "execution.json",
-            {"finished_at": timestamp(), "exit_code": 0, "elapsed_seconds": time.monotonic() - started},
+            {
+                "finished_at": timestamp(),
+                "exit_code": 0,
+                "elapsed_seconds": time.monotonic() - started,
+                "peak_cuda_allocated_bytes": torch.cuda.max_memory_allocated(0),
+                "peak_cuda_reserved_bytes": torch.cuda.max_memory_reserved(0),
+            },
         )
     except Exception as exc:
         write_json(
@@ -204,6 +237,8 @@ def execute(args):
                 "exit_code": 1,
                 "elapsed_seconds": time.monotonic() - started,
                 "error": repr(exc),
+                "peak_cuda_allocated_bytes": torch.cuda.max_memory_allocated(0),
+                "peak_cuda_reserved_bytes": torch.cuda.max_memory_reserved(0),
             },
         )
         raise

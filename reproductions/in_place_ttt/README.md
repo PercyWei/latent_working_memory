@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261109 11:45:56 Asia/Shanghai
+最后修订时间：20261109 11:55:45 Asia/Shanghai
 
 ## 当前状态
 
@@ -107,6 +107,18 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
 | `--output-dir` | 必需，新建的本次运行输出目录 |
 | `--ruler-data` | 默认 `data/benchmarks/ruler-v1/reproductions/in-place-ttt-qwen3-4b`；可指定实际构造目录 |
 | `--lengths` | 整数列表，默认 `4096 8192 16384 32768 65536 131072 262144` |
+| `--resume` | 从已有输出目录继续；其余参数、运行配置及依赖版本必须与原运行一致 |
+
+中断后使用相同参数和输出目录，追加 `--resume`：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
+  --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
+  --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt-ruler \
+  --resume
+```
+
+续评按 `(length, task, row)` 跳过已有预测，并在全量预测上重新计算原生评分与汇总。仅自动移除中断留下的末行不完整 JSON，其他记录或配置错误直接报错。
 
 读取 `<ruler-data>/<length>/<task>/test.jsonl`，每个长度包含完整 13 项任务，每项恰好 100 条。默认共 9,100 条，TTT／baseline 读取同一批数据。入口不会现场生成样本、读取原始 RULER 素材或下载模型。
 
@@ -116,7 +128,7 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
 
 运行 `max_seq_len` 取本次最大长度，支持 256K。每条输入在生成前按真实 tokenizer 完整编码，要求 `input_tokens + 64 <= length`；超限直接报错，避免原 wrapper 的截断路径丢弃内容。保持 checkpoint 原有 `max_position_embeddings` 与 `rope_scaling`，不自动添加 YaRN；第三方 32K checkpoint 的长长度结果属于外推评估。
 
-产物：`plan.json`（实际参数）、`runtime.json`（模型类、位置设置、依赖版本）、`predictions.jsonl`（逐题原预测、后处理预测、答案、输入长度和原生分数）、`results/<length>/<task>.json`（原生任务评分）、`summary.json`（全量完成后的长度汇总）、`evaluation.log` 和 `execution.json`。日志与逐题结果增量写入，`summary.json` 仅在全部所选数据完成后生成。
+产物：`plan.json`（实际参数）、`runtime.json`（模型类、位置设置、依赖版本）、`predictions.jsonl`（逐题原预测、后处理预测、答案、输入长度和原生分数）、`results/<length>/<task>.json`（原生任务评分）、`summary.json`（全量完成后的长度汇总）、`evaluation.log` 和 `execution.json`。日志与逐题结果增量写入，`summary.json` 仅在全部所选数据完成后生成。`execution.json` 记录本次调用的耗时 `elapsed_seconds`、PyTorch 峰值分配显存 `peak_memory_allocated_bytes`、复用样本数及退出状态；续评时覆盖为本次调用的统计。
 
 这些入口尚未通过 GPU 评估，不能据此声称已完成第三方权重或论文指标复现。
 

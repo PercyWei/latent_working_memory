@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import signal
 import time
 from zoneinfo import ZoneInfo
 
@@ -30,6 +31,7 @@ TASKS = (
 )
 LENGTHS = (4096, 8192, 16384, 32768)
 GENERATION_BUDGET = 128
+SAMPLES_PER_TASK_LENGTH = 500
 
 
 def timestamp():
@@ -37,7 +39,11 @@ def timestamp():
 
 
 def write_json(path, value):
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+    )
+    temporary.replace(path)
 
 
 def read_samples(path):
@@ -57,9 +63,54 @@ def read_samples(path):
             if any(not isinstance(value, str) or not value for value in references):
                 raise ValueError(f"{path}:{line_number}: outputs must contain nonempty strings")
             samples.append(row)
-    if not samples:
-        raise ValueError(f"{path}: no samples")
+    if len(samples) != SAMPLES_PER_TASK_LENGTH:
+        raise ValueError(f"{path}: expected {SAMPLES_PER_TASK_LENGTH} samples, got {len(samples)}")
     return samples
+
+
+def read_predictions(path, expected, logger):
+    records = {}
+    if not path.exists():
+        return records
+    with path.open("r+b") as stream:
+        while True:
+            offset = stream.tell()
+            line = stream.readline()
+            if not line:
+                break
+            try:
+                record = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                if isinstance(error, UnicodeDecodeError):
+                    incomplete = error.reason == "unexpected end of data"
+                else:
+                    incomplete = error.pos >= len(error.doc.rstrip()) or error.msg.startswith(
+                        "Unterminated string"
+                    )
+                if line.endswith(b"\n") or not incomplete:
+                    raise
+                logger.warning("Removing incomplete final prediction at byte %s", offset)
+                stream.seek(offset)
+                stream.truncate()
+                break
+            sample_id = record["id"]
+            if sample_id in records:
+                raise ValueError(f"Duplicate saved prediction: {sample_id}")
+            length, task, position, row = expected[sample_id]
+            if (
+                record["length"] != length
+                or record["task"] != task
+                or record["sample_position"] != position
+                or record["source_index"] != row["index"]
+                or record["references"] != row["outputs"]
+            ):
+                raise ValueError(f"Saved prediction does not match the current sample: {sample_id}")
+            # 重新计分时直接使用原始 prediction；已保存的 score 不是汇总依据。
+            postprocess_pred(record["prediction"])
+            records[sample_id] = record
+            if not line.endswith(b"\n"):
+                stream.write(b"\n")
+    return records
 
 
 def load_checkpoint(checkpoint):
@@ -97,10 +148,16 @@ def run(args, output, logger):
         for length in args.lengths
         for task in TASKS
     }
+    expected = {
+        f"ruler/{length}/{task}/{position}": (length, task, position, row)
+        for (length, task), rows in samples.items()
+        for position, row in enumerate(rows)
+    }
     plan = {
         "created_at": timestamp(),
         "method": "lact",
         "checkpoint": str(checkpoint),
+        "checkpoint_config": json.loads((checkpoint / "config.json").read_text()),
         "ruler_data": str(data),
         "lengths": args.lengths,
         "tasks": list(TASKS),
@@ -123,7 +180,18 @@ def run(args, output, logger):
         "upstream_revision": "a648340f9798f173227a0626fde66a6e9b65879a",
         "scoring": "NVIDIA RULER string_match_all; case-insensitive reference recall, percent",
     }
-    write_json(output / "plan.json", plan)
+    if args.resume:
+        saved_plan = json.loads((output / "plan.json").read_text())
+        for key, value in plan.items():
+            if key not in {"created_at", "cuda_visible_devices"} and saved_plan[key] != value:
+                raise ValueError(f"Resume setting differs from saved plan: {key}")
+        plan = saved_plan
+        plan["cuda_visible_devices"] = os.environ["CUDA_VISIBLE_DEVICES"]
+        records = read_predictions(output / "predictions.jsonl", expected, logger)
+        logger.info("Resuming with %s/%s completed samples", len(records), len(expected))
+    else:
+        records = {}
+        write_json(output / "plan.json", plan)
     if not torch.cuda.is_available():
         raise RuntimeError("LaCT evaluation requires the native CUDA method environment")
 
@@ -131,7 +199,7 @@ def run(args, output, logger):
     model, config = load_checkpoint(checkpoint)
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, local_files_only=True)
     first_layer = model.model.layers[0].attn
-    plan["loaded_model"] = {
+    loaded_model = {
         "num_lact_heads": config.num_lact_heads,
         "hidden_size": config.hidden_size,
         "num_hidden_layers": config.num_hidden_layers,
@@ -144,6 +212,9 @@ def run(args, output, logger):
         "fp32_states": config.fp32_states,
         "first_layer_w1_shape": list(first_layer.w1.shape),
     }
+    if args.resume and "loaded_model" in plan and plan["loaded_model"] != loaded_model:
+        raise ValueError("Loaded model differs from saved plan")
+    plan["loaded_model"] = loaded_model
     plan["runtime"] = {
         "torch": torch.__version__,
         "cuda": torch.version.cuda,
@@ -156,15 +227,15 @@ def run(args, output, logger):
         first_layer.w1.shape,
     )
     logger.info("Native use_cache=False: each generated token recomputes the complete prefix")
-    group_scores = {}
-    total_samples = 0
-    evaluation_start = time.perf_counter()
-    torch.cuda.reset_peak_memory_stats()
-    with (output / "predictions.jsonl").open("x", encoding="utf-8") as predictions:
+    with (output / "predictions.jsonl").open(
+        "a" if args.resume else "x", encoding="utf-8"
+    ) as predictions:
         for (length, task), rows in samples.items():
-            scores = []
             logger.info("Evaluating length=%s task=%s samples=%s", length, task, len(rows))
             for position, row in enumerate(rows):
+                sample_id = f"ruler/{length}/{task}/{position}"
+                if sample_id in records:
+                    continue
                 prompt = row["input"] + row["answer_prefix"]
                 encoded = tokenizer(prompt, return_tensors="pt", truncation=False)
                 input_tokens = encoded["input_ids"].shape[-1]
@@ -194,7 +265,7 @@ def run(args, output, logger):
                 torch.cuda.synchronize()
                 seconds = time.perf_counter() - start
                 record = {
-                    "id": f"ruler/{length}/{task}/{position}",
+                    "id": sample_id,
                     "length": length,
                     "task": task,
                     "sample_position": position,
@@ -209,8 +280,7 @@ def run(args, output, logger):
                 }
                 predictions.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
                 predictions.flush()
-                scores.append(score)
-                total_samples += 1
+                records[sample_id] = record
                 logger.info(
                     "%s: score=%.4f, tokens=%s, seconds=%.3f",
                     record["id"],
@@ -218,8 +288,17 @@ def run(args, output, logger):
                     continuation.numel(),
                     seconds,
                 )
-            group_scores[(length, task)] = sum(scores) / len(scores)
 
+    group_scores = {}
+    for (length, task), rows in samples.items():
+        scores = [
+            string_match_all(
+                [postprocess_pred(records[f"ruler/{length}/{task}/{position}"]["prediction"])],
+                [row["outputs"]],
+            )
+            for position, row in enumerate(rows)
+        ]
+        group_scores[(length, task)] = sum(scores) / len(scores)
     by_length = []
     for length in args.lengths:
         means = [group_scores[(length, task)] for task in TASKS]
@@ -242,16 +321,14 @@ def run(args, output, logger):
         "completed_at": timestamp(),
         "benchmark": "ruler",
         "checkpoint": str(checkpoint),
-        "samples": total_samples,
+        "samples": len(records),
         "score_unit": "percent",
         "task_length_macro_average": round(sum(group_scores.values()) / len(group_scores), 2),
         "by_length": by_length,
-        "seconds": time.perf_counter() - evaluation_start,
-        "peak_cuda_memory_allocated_bytes": torch.cuda.max_memory_allocated(),
         "generation": plan["generation"],
     }
     write_json(output / "summary.json", summary)
-    logger.info("Completed %s samples; summary: %s", total_samples, output / "summary.json")
+    logger.info("Completed %s samples; summary: %s", len(records), output / "summary.json")
 
 
 def main():
@@ -264,22 +341,71 @@ def main():
         default=PROJECT_ROOT / "data/benchmarks/ruler-v1/reproductions/lact-760m",
     )
     parser.add_argument("--lengths", type=int, nargs="+", choices=LENGTHS, default=list(LENGTHS))
+    parser.add_argument(
+        "--resume", action="store_true", help="Continue an existing output directory"
+    )
     args = parser.parse_args()
     if os.environ.get("CUDA_VISIBLE_DEVICES") not in {"0", "1"}:
         parser.error("CUDA_VISIBLE_DEVICES must be 0 or 1; select one physical GPU")
     output = args.output_dir.expanduser().resolve()
-    output.mkdir(parents=True, exist_ok=False)
+    if args.resume:
+        if not output.is_dir():
+            parser.error("--resume requires an existing output directory")
+    else:
+        output.mkdir(parents=True, exist_ok=False)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[logging.StreamHandler(), logging.FileHandler(output / "evaluation.log")],
     )
     logger = logging.getLogger("lact-evaluation")
+    execution_path = output / "execution.json"
+    execution = (
+        json.loads(execution_path.read_text())
+        if args.resume and execution_path.exists()
+        else {
+            "attempts": [],
+            "seconds": 0.0,
+            "peak_cuda_memory_allocated_bytes": 0,
+        }
+    )
+    attempt = {"started_at": timestamp(), "resume": args.resume, "status": "failed"}
+    start = time.perf_counter()
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
+    def terminate(signum, frame):
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, terminate)
     try:
         run(args, output, logger)
-    except Exception:
+        attempt["status"] = "completed"
+    except BaseException as error:
+        attempt["error"] = f"{type(error).__name__}: {error}"
         logger.exception("Evaluation failed; partial predictions are not a completed result")
         raise
+    finally:
+        attempt["finished_at"] = timestamp()
+        attempt["seconds"] = time.perf_counter() - start
+        attempt["peak_cuda_memory_allocated_bytes"] = (
+            torch.cuda.max_memory_allocated() if torch.cuda.is_available() else 0
+        )
+        execution["attempts"].append(attempt)
+        execution["seconds"] += attempt["seconds"]
+        execution["peak_cuda_memory_allocated_bytes"] = max(
+            execution["peak_cuda_memory_allocated_bytes"],
+            attempt["peak_cuda_memory_allocated_bytes"],
+        )
+        write_json(execution_path, execution)
+        if attempt["status"] == "completed":
+            summary_path = output / "summary.json"
+            summary = json.loads(summary_path.read_text())
+            summary["seconds"] = execution["seconds"]
+            summary["peak_cuda_memory_allocated_bytes"] = execution[
+                "peak_cuda_memory_allocated_bytes"
+            ]
+            write_json(summary_path, summary)
 
 
 if __name__ == "__main__":
