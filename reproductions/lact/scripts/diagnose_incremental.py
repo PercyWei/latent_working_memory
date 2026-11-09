@@ -258,6 +258,7 @@ def run(args, output, logger):
         "cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
         "parameter_dtype": "float32",
         "compute_autocast_dtype": "bfloat16",
+        "compile_policy": "force_eager" if args.disable_compile else "upstream_default",
         "hooks": ["qkv output", "ttt_norm input", "ttt_norm output", "o_proj input", "MLP output"],
         "purpose": "numerical diagnosis only; no precision or generation-rule changes",
     }
@@ -348,6 +349,7 @@ def run(args, output, logger):
         {
             "finished_at": timestamp(),
             "sample_id": sample_id,
+            "compile_policy": plan["compile_policy"],
             "first_nonidentical_intermediate": prefill["first_nonidentical_intermediate"],
             "prefill_logit_difference": prefill["logits_difference"],
             "generation_position_zero_based": first_difference,
@@ -373,6 +375,9 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--generation-results", type=Path, required=True)
     parser.add_argument(
+        "--disable-compile", action="store_true", help="仅作诊断：两条路径均使用 eager 执行"
+    )
+    parser.add_argument(
         "--ruler-data",
         type=Path,
         default=PROJECT_ROOT / "data/benchmarks/ruler-v1/reproductions/lact-760m",
@@ -380,6 +385,8 @@ def main():
     parser.add_argument("--length", type=int, choices=LENGTHS, default=16384)
     parser.add_argument("--task", choices=TASKS, default="niah_multiquery")
     args = parser.parse_args()
+    if args.disable_compile:
+        torch.compiler.set_stance("force_eager")
     if os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0") not in {"0", "1"}:
         raise ValueError("CUDA_VISIBLE_DEVICES must select physical GPU 0 or 1")
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
