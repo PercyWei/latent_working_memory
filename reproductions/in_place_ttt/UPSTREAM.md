@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261109 21:33:11 Asia/Shanghai
+最后修订时间：20261109 22:26:06 Asia/Shanghai
 
 ## 来源
 
@@ -19,7 +19,7 @@
 
 - `upstream/`：固定 revision 的只读来源副本，官方训练、推理模型与配置保持原样。
 - `scripts/`：本地数据、显式模型加载、生成调度、评分和来源记录。`original` 模式调用原 OpenCompass `HuggingFaceBaseModel.generate`；`optimized` 模式复用一次编码的输入，保持原生成参数和解码方式。两者共用原 `extract_non_reasoning_content` 与 RULER 的五类 evaluator。
-- `optimized/`：独立的本地模型子类，实现 TTT 尾部缓存压紧和 MLP 分块，不改动上游文件、全局 AutoModel 注册或 OpenCompass 安装。尚在验证中，不能据此声明与原始实现等价或已经提速。
+- `optimized/`：独立的本地模型子类，实现 TTT 尾部缓存压紧和 MLP 分块，不改动上游文件、全局 AutoModel 注册或 OpenCompass 安装。两个 checkpoint 各 14 条真实样本的输入／生成 IDs、文本与原生评分一致；当前主要收益是降低显存，速度基本持平，可显式使用，默认仍为 `original`。
 
 `eval.sh` 使用已激活方法环境中的 `python`，默认 `CUDA_VISIBLE_DEVICES=0`，允许显式选择单卡 0 或 1。`--inference-mode original|optimized` 默认 `original`；`--mlp-chunk-size` 默认 `16384`，只在优化模式生效，设为 `0` 时只压紧 TTT 尾部缓存，原始模式有效值为 `0`。本地入口从预构造 NVIDIA 格式 JSONL 读取全部 13 项任务，不现场调用 OpenCompass 生成器。命令见 [README](README.md)，实现与验证进展见 [推理优化记录](../20261109_in_place_ttt_inference_optimization.md)。
 
@@ -30,6 +30,8 @@
 当前官方模型配置的 `gen_config`／`engine_config` 不是 OpenCompass `HuggingFaceBaseModel` 的生成接口；本地入口通过其实际支持的 `generation_kwargs` 传入 greedy、top-k／top-p 及 cache 设置，通过 `max_out_len=64` 控制输出长度。`enable_thinking` 是聊天模板参数，不传入 base 模型的 `generate`。
 
 `plan.json.source` 保存初始本地 Git commit、dirty/status、上游 revision 及实现路径；`runtime.json` 保存实际模型、cache、MLP 类与路径、优化参数、attention backend 和运行配置。每次启动先向 `execution.json.attempts` 追加该次来源与状态，再执行加载和生成；逐题 `execution_attempt` 指向对应记录。续评保留初始计划来源，单独记录本次代码状态，并严格核对模式、分块参数及 runtime，不能混用两种实现的结果目录。
+
+本轮验证覆盖七个长度、每长度两项任务，TTT 真实样本最终状态逐位一致；合成边界检查也通过规定判据，但长度 17,406 的 TTT 分块计算出现内部状态与 logits 数值差异。baseline 在同长度合成前缀的五步检查中也有 logits 差异，最大绝对差为 `0.25`，argmax 均相同；两个 checkpoint 均不能声明对任意输入逐位等价。`--mlp-chunk-size 0` 保留原 MLP 计算形状，仅压紧尾部缓存。小样本验证不替代完整 9,100 条 benchmark，具体误差与显存结果见 [推理优化记录](../20261109_in_place_ttt_inference_optimization.md)。
 
 ## 已发现的复现差异
 

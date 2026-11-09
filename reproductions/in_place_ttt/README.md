@@ -2,13 +2,13 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261109 21:33:11 Asia/Shanghai
+最后修订时间：20261109 22:26:06 Asia/Shanghai
 
 ## 当前状态
 
 已迁入官方实现与训练、导出、推理及 RULER 配置，保留原 VeOmni／OpenCompass 工作流。第三方 TTT 与 baseline checkpoint 均已通过 4K 的 13 项任务及 8K–256K 长输入的 GPU 生成与原生评分检查；每个 checkpoint 的完整 9,100 条 benchmark 尚未完成。检查详情见 [GPU 执行记录](../20261109_checkpoint_gpu_evaluation.md)，来源和已确认差异见 [UPSTREAM.md](UPSTREAM.md)。本次 GPU 评估使用 `zcy-memory` 当前获准的物理 GPU 0；入口允许显式选择单卡 0 或 1。
 
-代码分为三层：`upstream/` 保持官方源码原样；`scripts/` 负责本地数据、模型加载、生成调度、原生评分与记录；`optimized/` 独立实现 TTT 尾部缓存压紧和 MLP 分块计算。默认使用 `original` 原始模型与 OpenCompass 生成路径；`optimized` 尚在验证中，暂不声明一致性或性能结论。实现与验证记录见 [推理优化记录](../20261109_in_place_ttt_inference_optimization.md)。没有引入新的记忆目标或统一训练框架。
+代码分为三层：`upstream/` 保持官方源码原样；`scripts/` 负责本地数据、模型加载、生成调度、原生评分与记录；`optimized/` 独立实现 TTT 尾部缓存压紧和 MLP 分块计算。默认使用 `original` 原始模型与 OpenCompass 生成路径；`optimized` 已通过两个 checkpoint 各 14 条真实样本的代表性验证，可显式使用，当前收益是降低显存，速度基本持平。该结果不代表任意输入数值等价或完整 benchmark 已完成，范围与限制见下文及 [推理优化记录](../20261109_in_place_ttt_inference_optimization.md)。没有引入新的记忆目标或统一训练框架。
 
 ## 复现目标
 
@@ -105,7 +105,7 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
   --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-baseline-ruler
 ```
 
-优化路径使用独立输出目录；以下仍为完整评估命令，不代表优化验证已经通过：
+优化路径使用独立输出目录；以下为完整评估命令，小样本验证不替代每个 checkpoint 的 9,100 条正式评估：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
@@ -124,6 +124,8 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
 | `--ruler-data` | 默认 `data/benchmarks/ruler-v1/reproductions/in-place-ttt-qwen3-4b`；可指定实际构造目录 |
 | `--lengths` | 整数列表，默认 `4096 8192 16384 32768 65536 131072 262144` |
 | `--resume` | 从已有输出目录继续；模式、请求的分块大小、attention backend、运行配置及依赖版本须与原运行一致 |
+
+若只希望压紧 TTT 尾部缓存、保留原 MLP 计算形状，可在优化命令中设 `--mlp-chunk-size 0`，并使用独立输出目录。这是更保守的显存优化选项。
 
 中断后使用相同参数和输出目录，追加 `--resume`：
 
@@ -166,7 +168,7 @@ PYTHONPATH="$method_dir/upstream:$method_dir/scripts:$method_dir${PYTHONPATH:+:$
 python -u reproductions/in_place_ttt/scripts/validate_optimization.py \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
   --output-dir artifacts/reproductions/in_place_ttt/optimization-validation_20261109/ttt-paired \
-  --lengths 4096 32768 131072 262144 \
+  --lengths 4096 8192 16384 32768 65536 131072 262144 \
   --mlp-chunk-size 16384 \
   --profile-attention
 ```
@@ -184,9 +186,19 @@ python -u reproductions/in_place_ttt/scripts/validate_optimization.py \
 | 上游 `train.sh`、`eval.sh` shell 语法 | `bash -n` 通过 |
 | 本地评估入口 | Ruff、Python／shell 语法通过；服务器独立环境依赖检查及完整入口导入通过 |
 | 第三方 TTT／baseline GPU 检查 | 两者均通过 4K 的 13 项任务及 8K–256K 长输入生成与原生评分；完整 9,100 条 benchmark 尚未完成 |
+| 本地优化配对验证 | 两个 checkpoint 各覆盖七个长度、每长度两项任务，共 14 条；完整输入 IDs、生成 IDs、预测文本与原生评分一致，TTT 真实样本最终状态逐位一致 |
 | 直接导入训练模型 | 根环境缺少 `einops`，导入失败；未更改上游代码绕过依赖 |
 | Qwen3MLP 训练／推理计算核 CPU 诊断 | 直接编译上游原始 AST 类，使用真实 PyTorch／einops／opt_einsum；chunk=4，长度 4、8、10、12，输出最大误差 `5.96e-8`，训练反传梯度有限 |
 
 CPU 诊断仅覆盖上游 `Qwen3MLP` 的分块矩阵计算，包括完整 chunk 和尾部 padding，不覆盖 Transformer、KV cache、逐 token 解码、FlashAttention、VeOmni 或 OpenCompass。诊断临时依赖为 `einops==0.8.1`、`opt_einsum==3.4.0`，安装在 `/tmp/in-place-ttt-cpu-deps-20261108/`，没有修改根项目依赖。
 
-优化实现正在单独验证，完整评估尚未完成。官方论文指标复现仍受原训练语料、原模型权重及实验配置缺失的限制。
+优化验证的 TTT 60 项、baseline 40 项合成边界检查通过规定的 argmax、有限性与 cache 进度判据，但长度 17,406 的 TTT 合成输入在分块模式下存在数值差异：logits 最大绝对差为 `0.25`，合并比较缓存 `h/t/W` 的最大绝对差为 `2.671875`。baseline 在同长度合成前缀的五步检查中也有 logits 差异，最大绝对差为 `0.25`，argmax 均相同。因此，两个 checkpoint 的真实样本生成一致均不能推广为任意输入或内部状态逐位等价。
+
+| checkpoint | 256K 原始峰值显存 | 仅压紧尾部缓存 | 压紧并分块 | 9,100 条生成耗时外推：原始 → 优化 |
+|---|---:|---:|---:|---:|
+| TTT | 70.72 GiB | 63.28 GiB | 56.84 GiB | 69.21 → 69.08 小时 |
+| baseline | 62.87 GiB | 不适用 | 56.43 GiB | 68.50 → 68.32 小时 |
+
+显存为 PyTorch 峰值分配量；耗时按各长度两条样本外推，仅说明当前速度基本持平，不是完整 benchmark 实测耗时。详细产物与判据见 [推理优化记录](../20261109_in_place_ttt_inference_optimization.md)。完整评估尚未完成，官方论文指标复现仍受原训练语料、原模型权重及实验配置缺失的限制。
+
+生产路径保持 SDPA，已通过 profiler 确认使用 PyTorch FlashAttention。独立 `flash_attention_2` 后端的 128K／256K 对照未通过完整生成 IDs 检查，因此未纳入正式优化路径；结果保留在推理优化记录中。

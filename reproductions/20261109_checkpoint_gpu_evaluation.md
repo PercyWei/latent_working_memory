@@ -2,7 +2,7 @@
 
 创建时间：20261109 11:46:00 Asia/Shanghai
 
-最后修订时间：20261109 17:02:03 Asia/Shanghai
+最后修订时间：20261109 22:26:06 Asia/Shanghai
 
 ## 本轮计划
 
@@ -19,6 +19,8 @@
 正式运行使用各自 `eval.sh`，保留原有 prompt、生成预算、截断规则和评分实现。LaCT 保留原 `use_cache=False` 完整前缀生成；In-Place TTT 超过 32K 的输入标注为长度外推。公开 checkpoint 与原论文模型的差异沿用各方法 README 的说明。
 
 本文 LaCT 耗时对应原始完整前缀路径。新增增量缓存的验证、数值差异和更新后的估时见 [LaCT 增量推理记录](20261109_lact_incremental_inference.md)：Momentum 通过本轮代表性检查，Muon / PreNorm 尚未通过，默认仍使用原始实现。
+
+本文 In-Place TTT 耗时对应优化前的检查。尾段缓存压紧与 MLP 分块的后续配对结果见 [In-Place TTT 推理优化记录](20261109_in_place_ttt_inference_optimization.md)：256K 显存明显降低，SDPA 路径的速度基本持平，完整评估仍约需 69／68 小时；下文保留本轮原始测量。
 
 运行验证保存于服务器项目 `artifacts/reproductions/gpu-validation_20261109/`；正式结果保存于 `artifacts/reproductions/<method>/eval/<checkpoint>_20261109/`。记录计划、逐样本输出、实际耗时、GPU 显存及成功或失败状态；只有完成完整范围才汇总正式指标。
 
