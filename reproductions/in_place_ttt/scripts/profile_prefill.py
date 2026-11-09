@@ -498,6 +498,7 @@ def run(args, output, source, logger):
         parent = args.generation_results
         parent_plan = json.loads((parent / "plan.json").read_text())
         parent_summary = json.loads((parent / "summary.json").read_text())
+        persisted_plan = json.loads((output / "plan.json").read_text())
         if not parent_summary["completed"] or not parent_summary["process_success"]:
             raise ValueError(
                 "The referenced execution must have completed without runtime failures"
@@ -515,7 +516,7 @@ def run(args, output, source, logger):
             "checkpoint_config",
             "runtime",
         ):
-            if parent_plan[key] != plan[key]:
+            if parent_plan[key] != persisted_plan[key]:
                 raise ValueError(f"Referenced generation protocol differs: {key}")
         generations = [
             json.loads(line) for line in (parent / "generation.jsonl").read_text().splitlines()
