@@ -2,7 +2,14 @@
 
 import torch
 
-from .rollout import execute, qa_nll, sample_group
+from .rollout import execute, sample_group
+
+
+def _qa_backward(model, memory_leaves, qa, normalizer):
+    """单题只反传到独立 memory 叶子；返回统计时释放本题的 decoder 图。"""
+    loss = model.answer_nll(memory_leaves, qa.prompt_ids, qa.target_ids)
+    (loss / normalizer).backward()
+    return loss.detach()
 
 
 def _path_backward(model, document, objective, path, advantage, group_size):
@@ -10,7 +17,15 @@ def _path_backward(model, document, objective, path, advantage, group_size):
     blocks, _, log_probs, entropy, _ = execute(
         model, document.input_ids, objective["unit_tokens"], actions=path.actions,
     )
-    task_loss = qa_nll(model, blocks, document)
+    memory_leaves = tuple(block.detach().requires_grad_(True) for block in blocks)
+    question_count = len(document.qas)
+    question_losses = [None] * question_count
+    # 旧 stack(...).mean().backward() 按后建图的题目先执行，保持同样的累加顺序。
+    for index in reversed(range(question_count)):
+        question_losses[index] = _qa_backward(
+            model, memory_leaves, document.qas[index], question_count * group_size,
+        )
+    task_loss = torch.stack(question_losses).mean()
     if len(log_probs):
         ratios = (log_probs - path.old_log_probs).exp()
         clipped = ratios.clamp(1 - objective["clip_epsilon"], 1 + objective["clip_epsilon"])
@@ -24,7 +39,14 @@ def _path_backward(model, document, objective, path, advantage, group_size):
     loss = task_loss + objective["policy_weight"] * policy_loss
     if not bool(torch.isfinite(loss)):
         raise RuntimeError(f"non-finite training loss: {document.id}")
-    (loss / group_size).backward()
+    outputs = list(blocks)
+    gradients = [leaf.grad for leaf in memory_leaves]
+    if policy_loss.requires_grad:
+        # 零权重也连接策略图，保留原更新中 boundary 的显式零梯度。
+        outputs.append(objective["policy_weight"] * policy_loss / group_size)
+        gradients.append(None)
+    # 同时注入所有直接 QA adjoint 与策略梯度，让共享 history 只反传一次。
+    torch.autograd.backward(outputs, gradients)
     return torch.stack((
         task_loss.detach(), policy_loss.detach(), policy_entropy.detach(), drift.detach(),
     ))
