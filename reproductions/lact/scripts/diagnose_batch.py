@@ -93,19 +93,24 @@ class LastTokenCapture:
 
     def begin(self, batch_size, focus):
         self.batch_size, self.focus = batch_size, focus
-        self.values, self.order, self.head_input = {}, [], None
+        self.values, self.order, self.head_parts = {}, [], []
+        self.samplewise_calls, self.current_rows = {}, {}
         self.enabled = True
 
     def take(self):
         self.enabled = False
-        return self.values, self.order, self.head_input
+        return self.values, self.order, torch.cat(self.head_parts, dim=0)
 
-    def save(self, name, value):
+    def save(self, name, value, sample_row=None):
         if isinstance(value, (tuple, list)):
             for index, item in enumerate(value):
-                self.save(f"{name}.{index}", item)
+                self.save(f"{name}.{index}", item, sample_row)
         elif isinstance(value, torch.Tensor) and value.ndim >= 2:
-            if ".ttt_norm." in name:
+            if sample_row is not None:
+                selected = value[sample_row:sample_row + 1]
+                if value.ndim > 2:
+                    selected = selected[:, -1:]
+            elif ".ttt_norm." in name:
                 layer_index = int(name.split(".")[2])
                 heads = self.model.model.layers[layer_index].attn.num_fw_heads
                 selected = value[self.focus * heads:(self.focus + 1) * heads, -1:]
@@ -121,15 +126,32 @@ class LastTokenCapture:
     def before(self, name):
         def hook(module, inputs):
             if self.enabled:
-                self.save(f"{name}.input", inputs)
+                is_samplewise = (
+                    self.batch_size > 1 and inputs[0].shape[0] == 1
+                    and (name == "lm_head" or name.endswith((
+                        ".lr_proj", ".momentum_proj.0", ".ttt_scale_proj",
+                    )))
+                )
+                if is_samplewise:
+                    row = self.samplewise_calls.get(name, 0)
+                    self.samplewise_calls[name] = row + 1
+                    self.current_rows[name] = row
+                    if row == self.focus:
+                        self.save(f"{name}.input", inputs, 0)
+                else:
+                    self.save(f"{name}.input", inputs)
                 if name == "lm_head":
-                    self.head_input = inputs[0][:, -1:].detach().cpu().clone()
+                    self.head_parts.append(inputs[0][:, -1:].detach().cpu().clone())
         return hook
 
     def after(self, name):
         def hook(module, inputs, output):
             if self.enabled:
-                self.save(f"{name}.output", output)
+                if name in self.current_rows:
+                    if self.current_rows[name] == self.focus:
+                        self.save(f"{name}.output", output, 0)
+                else:
+                    self.save(f"{name}.output", output)
         return hook
 
     def close(self):
@@ -252,7 +274,8 @@ def run(args):
                     "first_different_last_token_module_output": first_output,
                     "last_token_modules": modules,
                     "lm_head_isolation": {
-                        "batch_replay_vs_actual": tensor_difference(replay[focus, -1], batch.logits[focus, -1]),
+                        "raw_head_MB_replay_vs_actual": tensor_difference(replay[focus, -1], batch.logits[focus, -1]),
+                        "raw_head_M1_replay_vs_actual": tensor_difference(batch_hidden_m1[0, -1], batch.logits[focus, -1]),
                         "same_batch_hidden_head_MB_vs_M1": logit_report(replay[focus, -1], batch_hidden_m1[0, -1]),
                         "head_M1_batch_hidden_vs_reference_hidden": logit_report(batch_hidden_m1[0, -1], reference_hidden_m1[0, -1]),
                         "reference_replay_vs_actual": tensor_difference(reference_hidden_m1[0, -1], single.logits[0, -1]),
