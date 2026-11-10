@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261110 21:01:35 Asia/Shanghai
+最后修订时间：20261110 21:56:52 Asia/Shanghai
 
 - 官方仓库：<https://github.com/zeyun-zhong/E2-TTT>。
 - 固定 revision：`0d1da370c7e3cea1642ba3af0477b7601849a1be`。
@@ -14,7 +14,7 @@
 
 主项目为 MIT，见 [upstream/LICENSE](upstream/LICENSE)。随附 flame 保留 [training/LICENSE](upstream/training/LICENSE)，lm-evaluation-harness 保留 [LICENSE.md](upstream/lm-evaluation-harness/LICENSE.md) 与其他来源声明。
 
-官方记录的 harness revision 为 `c9772b90a8ee95b0df1ba76651443a0534c96aad`，包含四处作者修改，见 [training/README.md](upstream/training/README.md#vendored-lm-evaluation-harness)。这些修改属于官方实现。
+官方记录的 harness revision 为 `c9772b90a8ee95b0df1ba76651443a0534c96aad`，包含四处作者修改，见 [training/README.md](upstream/training/README.md) 的 “Vendored lm-evaluation-harness”。这些修改属于官方实现。
 
 ## 本地代码边界
 
@@ -43,4 +43,4 @@ SQuAD／SWDE 沿用 HFLM 的 2048 总预算、48 输出预算和左截断；RULE
 
 归一化、梯度与时间权重等公共函数继续导入上游实现。缓存解码先将归一化参数扩展至 `batch × heads` 再构造 target；其余更新公式、chunk 边界、更新前读出、门控与归一化顺序保持原规则。当前范围限定为公开 MLP／SwiGLU 的 closed-form Momentum、无 short convolution、非 fused TTT 配置；其他配置明确拒绝。
 
-适配只替换当前实例的 backbone 和层类，不修改模型注册表或全局函数，不新增、删除或重排参数，`state_dict` 键及缓存 tuple 布局保持不变。批量验证正在进行，结果与数值差异记录于[批量推理记录](../20261110_e2_ttt_batch_inference.md)。当前命令见 [README.md](README.md)，整体进度见[复现状态](../20261110_ttt_reproduction_status.md)。
+适配只替换当前实例的 backbone 和层类，不修改模型注册表或全局函数，不新增、删除或重排参数，`state_dict` 键及缓存 tuple 布局保持不变。代表性验证结果与数值差异见[批量推理记录](../20261110_e2_ttt_batch_inference.md)。当前命令见 [README.md](README.md)，整体进度见[复现状态](../20261110_ttt_reproduction_status.md)。

@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261110 21:01:35 Asia/Shanghai
+最后修订时间：20261110 21:56:52 Asia/Shanghai
 
 本目录接入 [E²-TTT 官方实现](https://github.com/zeyun-zhong/E2-TTT)及随附 lm-evaluation-harness，保留原始推理路径，另提供本地批量实现。论文为 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308)，源码边界见 [UPSTREAM.md](UPSTREAM.md)。公开权重加载、模型生成和计分检查已完成，尚未完成本轮计划的 benchmark 评估；详见[复现状态](../20261110_ttt_reproduction_status.md)。
 
@@ -45,7 +45,7 @@ bash reproductions/setup_eval_env.sh e2_ttt
 source ~/rivermind-data/envs/ttt-e2_ttt/bin/activate
 ```
 
-MLP 和 SwiGLU 分别执行以下命令，使用 `optimized`，每卡 batch 上限为 8。本地批量实现及该设置正在进行 GPU 对照验证，验证记录见[批量推理记录](../20261110_e2_ttt_batch_inference.md)。
+MLP 和 SwiGLU 分别执行以下命令，使用 `optimized`，每卡 batch 上限为 8。已完成 4K／16K 的代表性对照，速度、显存及生成／评分差异见[批量推理记录](../20261110_e2_ttt_batch_inference.md)。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/eval.sh \

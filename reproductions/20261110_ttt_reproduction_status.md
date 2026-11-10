@@ -2,7 +2,7 @@
 
 创建时间：20261110 11:30:45 Asia/Shanghai
 
-最后修订时间：20261110 18:41:28 Asia/Shanghai
+最后修订时间：20261110 21:56:52 Asia/Shanghai
 
 ## 当前状态
 
@@ -10,12 +10,12 @@ LaCT、E²-TTT、In-Place TTT 的源码迁入、独立环境、本地数据接�
 
 各方法保留官方源码和独立 `eval.sh`，不接入统一训练框架。已有测量使用 `zcy-memory` 的单张 A800，显式设置 `CUDA_VISIBLE_DEVICES=0`。当前入口也支持 `CUDA_VISIBLE_DEVICES=0,1`：各卡独立加载模型，评估互斥样本，再按原规则汇总完整结果；此次仅做静态审查，未运行多卡评估。完整命令在各方法 README 中维护。数据下载、构造与共用范围见[数据准备](20261108_ttt_data_preparation.md)，依赖与安装命令见[评估环境](20261109_environment_setup.md)。
 
-评估参数测试的单卡测量、当前设置与完成时间估计统一见[运行参数测试](20261110_ttt_evaluation_tuning.md)。LaCT 推荐每卡一个进程、batch size 上限 16；E²-TTT 与 In-Place TTT 保持每进程 batch size 1，前者每卡并发上限分别为 4／6，后者每卡一个进程。
+LaCT 推荐每卡一个进程、batch size 上限 16；E²-TTT 的本地批量实现与测量见[批量推理记录](20261110_e2_ttt_batch_inference.md)，原始实现的并发对照保留在[运行参数测试](20261110_ttt_evaluation_tuning.md)；In-Place TTT 保持每卡一个进程、batch size 1。
 
-| checkpoint | 正式评估范围 | 当前使用方式 |
+| 模型 | 正式评估范围 | 当前使用方式 |
 |---|---|---|
 | LaCT Momentum 760M | 六项 RULER，4K／8K／16K／32K，每任务每长度 500 条，共 12,000 条 | [增量推理、单进程 batch size 16](lact/README.md#环境与运行命令)，按精确 token 数分组且无 padding；原始路径保留作对照 |
-| E²-TTT MLP／SwiGLU 1.3B | 每模型：两项 RULER，512–16K，共 6,000 条；SQuAD completion 2,984 条；SWDE 1,111 条 | [官方实现，最多 4／6 个独立进程](e2_ttt/README.md#环境与评估命令)，每模型共 10,095 条 |
+| E²-TTT MLP／SwiGLU 1.3B | 每模型：两项 RULER，512–16K，共 6,000 条；SQuAD completion 2,984 条；SWDE 1,111 条 | [本地批量推理，每卡 batch 上限 8](e2_ttt/README.md#环境与评估命令)，保留原始 B1 对照；每个模型使用同一组 10,095 条样本 |
 | In-Place TTT 32K TTT／baseline | 每模型：十三项 RULER，4K–256K 七个长度，每任务每长度 100 条，共 9,100 条 | [完整 attention、单进程](in_place_ttt/README.md#ruler-评估)；TTT 仅压紧尾部缓存，baseline 使用原始路径 |
 
 LaCT 使用作者公开的重训权重；E²-TTT 使用作者官方 checkpoint；In-Place TTT 使用第三方 ProLong 32K／6,000 steps 权重，不对应论文原模型，其超过 32K 的结果属于长度外推。三个方法均不需要为本轮 checkpoint 评估重新训练。
@@ -53,8 +53,9 @@ TTT 256K 平均耗时约 127.82 → 127.38 秒，没有实质提速。128K／256
 
 ### E²-TTT
 
-使用官方增量推理、512-token SWA 和 TTT chunk；未修改模型计算。独立进程并发调参与正式运行设置见[运行参数测试](20261110_ttt_evaluation_tuning.md)。
+保留官方增量推理、512-token SWA 和 TTT chunk；本地 `e2_ttt/optimized/` 提供等长批量推理，更新公式与时序保持原规则，上游文件不修改。命令见 [README](e2_ttt/README.md#环境与评估命令)，验证、速度与数值差异见[批量推理记录](20261110_e2_ttt_batch_inference.md)。
 
+- 批量验证：两个模型在 4K／16K 各检查 RULER 16 条及 SQuAD／SWDE 各 8 条。原始 B1 与优化 B1 的生成 IDs、评分一致；chunk 边界的结构、进度及固定 B4 的严格样本隔离检查通过。B8 存在少量生成和逐题评分差异，具体数量与固定前缀诊断见批量推理记录，不能声称跨 batch 逐项数值相同。
 - 初始 GPU 检查：每模型 SQuAD／SWDE 各两条、RULER 六长度各两条，共 16 条，生成与原生评分流程可执行。
 - 专项诊断：每模型 6 条真实输入、2 条边界输入，带诊断与原始生成的完整 IDs 全部一致。
 - 16K prefill 后，attention KV 与 TTT 缓冲平均持有 5.75 GiB 超额底层存储，首个 decode 后释放；这是存储冗余，不是已实现的峰值节省。
@@ -73,5 +74,7 @@ TTT 256K 平均耗时约 127.82 → 127.38 秒，没有实质提速。128K／256
 | In-Place TTT 最终 prefill profiling | `14796403` | clean |
 | E²-TTT 阶段／缓存诊断 | `48d8ee43` | clean |
 | E²-TTT 算子诊断 | `89a7929c` | clean |
+| E²-TTT 批量推理 4K 对照 | `09791ca3` | clean |
+| E²-TTT 批量推理 16K、固定前缀诊断及评估入口检查 | `194fcf95` | clean |
 
 必要结论集中保存在本记录。正式评估产物统一写入 `artifacts/reproductions/<method>/eval/<run>/`，保留计划、代码来源、逐样本预测、执行状态和完整汇总。小样本验证不计入正式 benchmark；所有入口均支持用相同设置与输出目录追加 `--resume`。
