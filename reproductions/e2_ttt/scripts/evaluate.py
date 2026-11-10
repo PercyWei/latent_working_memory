@@ -8,6 +8,7 @@ import logging
 import os
 import random
 from pathlib import Path
+import subprocess
 import time
 from zoneinfo import ZoneInfo
 
@@ -18,9 +19,11 @@ from lm_eval.api.model import CachingLM
 from lm_eval.models.huggingface import HFLM
 from lm_eval.utils import handle_non_serializable, set_torch_seed
 import numpy as np
+from optimized import optimize_model
 import torch
 import transformers
 
+from batch_harness import EqualLengthHFLM
 from local_tasks import LocalRuler, LocalSQuAD, LocalSWDE
 
 
@@ -41,10 +44,33 @@ def write_json(path, value):
     temporary.replace(path)
 
 
+def source_record(args):
+    def git(*command):
+        return subprocess.run(
+            ["git", *command], cwd=PROJECT_ROOT, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    status = git("status", "--porcelain=v1").splitlines()
+    return {
+        "git_commit": git("rev-parse", "HEAD"),
+        "git_dirty": bool(status),
+        "git_status": status,
+        "entrypoint": str(Path(__file__).resolve().relative_to(PROJECT_ROOT)),
+        "inference_mode": args.inference_mode,
+        "implementation_path": "reproductions/e2_ttt/" + (
+            "optimized" if args.inference_mode == "optimized" else "upstream/e2_ttt"
+        ),
+        "harness_class": "batch_harness.EqualLengthHFLM" if args.inference_mode == "optimized"
+        else "lm_eval.models.huggingface.HFLM",
+    }
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--inference-mode", choices=("original", "optimized"), default="original")
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--resume", action="store_true", help="Resume the same output and plan using native response caching.")
     parser.add_argument("--num-shards", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
@@ -69,11 +95,17 @@ def parse_args():
         "--lengths", type=int, nargs="+", default=[512, 1024, 2048, 4096, 8192, 16384]
     )
     args = parser.parse_args()
+    if args.batch_size < 1 or (args.inference_mode == "original" and args.batch_size != 1):
+        parser.error("--batch-size must be positive; original inference requires --batch-size 1")
     if not 1 <= args.num_shards <= 500 or not 0 <= args.shard_index < args.num_shards:
         parser.error("Use 1 <= --num-shards <= 500 and 0 <= --shard-index < num-shards")
     if os.environ.get("CUDA_VISIBLE_DEVICES") not in ("0", "1"):
         parser.error("Use one physical GPU: CUDA_VISIBLE_DEVICES=0 or 1.")
-    if int(os.environ.get("WORLD_SIZE", "1")) != 1:
+    if (
+        int(os.environ.get("WORLD_SIZE", "1")) != 1
+        or "LOCAL_RANK" in os.environ
+        or "RANK" in os.environ
+    ):
         parser.error("This evaluation requires one process.")
     if len(args.benchmarks) != len(set(args.benchmarks)):
         parser.error("--benchmarks must not contain duplicates.")
@@ -89,6 +121,7 @@ def parse_args():
 
 
 def execute(args):
+    source = source_record(args)
     parquet = {
         "squad_completion": args.squad_data / "data/validation-00000-of-00001.parquet",
         "swde": args.swde_data / "data/validation-00000-of-00001.parquet",
@@ -115,7 +148,10 @@ def execute(args):
         "recall_truncation": "left",
         "ruler_truncation": "forbidden",
         "prompt_format": "base; RULER input + answer_prefix once",
-        "batch_size": 1,
+        "inference_mode": args.inference_mode,
+        "batch_size": args.batch_size,
+        "batching": "equal post-truncation token length" if args.inference_mode == "optimized"
+        else "native single sample",
         "num_fewshot": 0,
         "dtype": "bfloat16",
         "cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
@@ -128,12 +164,13 @@ def execute(args):
             "datasets": datasets.__version__,
             "e2_ttt": e2_ttt.__version__,
         },
+        "source": source,
     }
     plan_path = args.output_dir / "plan.json"
     if args.resume:
         saved_plan = json.loads(plan_path.read_text())
-        saved_settings = {key: value for key, value in saved_plan.items() if key != "created_at"}
-        current_settings = {key: value for key, value in plan.items() if key != "created_at"}
+        saved_settings = {key: value for key, value in saved_plan.items() if key not in ("created_at", "source")}
+        current_settings = {key: value for key, value in plan.items() if key not in ("created_at", "source")}
         if saved_settings != current_settings:
             different = sorted(
                 key
@@ -154,24 +191,28 @@ def execute(args):
     )
     summary = {
         "checkpoint": str(args.checkpoint), "num_shards": args.num_shards,
+        "inference_mode": args.inference_mode, "batch_size": args.batch_size,
         "shard_index": args.shard_index, "completed": False, "metrics": {},
     }
     write_json(args.output_dir / "summary.json", summary)
     started = time.monotonic()
     torch.cuda.reset_peak_memory_stats(0)
     try:
-        lm = HFLM(
+        harness = EqualLengthHFLM if args.inference_mode == "optimized" else HFLM
+        lm = harness(
             pretrained=str(args.checkpoint),
             tokenizer=str(args.checkpoint),
             dtype="bfloat16",
             device="cuda:0",
-            batch_size=1,
+            batch_size=args.batch_size,
             max_length=2048,
             truncation=False,
             trust_remote_code=False,
         )
         if lm.world_size != 1:
             raise ValueError("The harness initialized more than one evaluation process.")
+        if args.inference_mode == "optimized":
+            optimize_model(lm.model)
         with (
             (args.output_dir / "predictions.jsonl").open("w", encoding="utf-8") as predictions,
             ExitStack() as caches,
@@ -195,11 +236,11 @@ def execute(args):
                 write_json(args.output_dir / "summary.json", summary)
             if "ruler" in args.benchmarks:
                 # Reuse the same loaded model; only the harness sequence budget changes.
-                ruler_lm = HFLM(
+                ruler_lm = harness(
                     pretrained=lm.model,
                     tokenizer=lm.tokenizer,
                     device="cuda:0",
-                    batch_size=1,
+                    batch_size=args.batch_size,
                     max_length=max(args.lengths),
                     truncation=False,
                     add_bos_token=lm.add_bos_token,
@@ -238,6 +279,7 @@ def execute(args):
             {
                 "finished_at": timestamp(),
                 "exit_code": 0,
+                "source": source,
                 "elapsed_seconds": time.monotonic() - started,
                 "peak_cuda_allocated_bytes": torch.cuda.max_memory_allocated(0),
                 "peak_cuda_reserved_bytes": torch.cuda.max_memory_reserved(0),
@@ -249,6 +291,7 @@ def execute(args):
             {
                 "finished_at": timestamp(),
                 "exit_code": 1,
+                "source": source,
                 "elapsed_seconds": time.monotonic() - started,
                 "error": repr(exc),
                 "peak_cuda_allocated_bytes": torch.cuda.max_memory_allocated(0),

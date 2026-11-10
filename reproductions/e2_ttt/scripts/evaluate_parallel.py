@@ -33,13 +33,20 @@ def write_json(path, value):
     temporary.replace(path)
 
 
-def source_record():
+def source_record(args):
     def git(*args):
         return subprocess.run(
             ["git", *args], cwd=PROJECT_ROOT, check=True, capture_output=True, text=True
         ).stdout.strip()
     status = git("status", "--porcelain=v1").splitlines()
-    return {"git_commit": git("rev-parse", "HEAD"), "git_dirty": bool(status), "git_status": status}
+    return {
+        "git_commit": git("rev-parse", "HEAD"), "git_dirty": bool(status), "git_status": status,
+        "entrypoint": str(Path(__file__).resolve().relative_to(PROJECT_ROOT)),
+        "inference_mode": args.inference_mode,
+        "implementation_path": "reproductions/e2_ttt/" + (
+            "optimized" if args.inference_mode == "optimized" else "upstream/e2_ttt"
+        ),
+    }
 
 
 def terminate_children(children):
@@ -69,6 +76,7 @@ def run_job(args, job, gpu, slot, stop, processes, lock, record):
         "--swde-data", str(args.swde_data),
         "--num-shards", str(job["num_shards"]),
         "--shard-index", str(job["shard_index"]),
+        "--inference-mode", args.inference_mode, "--batch-size", str(args.batch_size),
     ]
     if job["benchmark"] == "ruler":
         command.extend(("--lengths", str(job["length"])))
@@ -128,7 +136,7 @@ def merge_results(args, jobs):
         "checkpoint", "checkpoint_config", "num_shards", "sharding",
         "ruler_samples_per_task_length", "ruler_generation_tokens",
         "recall_total_token_limit", "recall_input_token_limit", "recall_generation_tokens",
-        "recall_truncation", "ruler_truncation", "prompt_format", "batch_size",
+        "recall_truncation", "ruler_truncation", "prompt_format", "inference_mode", "batch_size", "batching",
         "num_fewshot", "dtype", "bootstrap_iters", "seeds", "versions",
     )
     for job in jobs:
@@ -143,6 +151,8 @@ def merge_results(args, jobs):
             reference_plan = plan
         if any(plan[field] != reference_plan[field] for field in common_fields):
             raise ValueError(f"Native evaluation protocols differ: {job['id']}")
+        if plan["inference_mode"] != args.inference_mode or plan["batch_size"] != args.batch_size:
+            raise ValueError(f"Native inference mode or batch size differs: {job['id']}")
         shards, rank = job["num_shards"], job["shard_index"]
         if (
             plan["num_shards"] != shards or plan["shard_index"] != rank
@@ -230,12 +240,13 @@ def merge_results(args, jobs):
     write_json(args.output_dir / "manifest.json", {"parts": manifest})
     write_json(args.output_dir / "summary.json", {
         "checkpoint": str(args.checkpoint), "completed": True, "samples": count,
+        "inference_mode": args.inference_mode, "batch_size": args.batch_size,
         "metrics": metrics, "manifest": "manifest.json",
     })
 
 
 def execute(args):
-    source = source_record()
+    source = source_record(args)
     base_jobs = [
         {"id": f"ruler-{length}", "benchmark": "ruler", "length": length}
         for length in sorted(args.lengths, reverse=True)
@@ -261,7 +272,8 @@ def execute(args):
         "data": {name: str(getattr(args, f"{name}_data")) for name in ("ruler", "squad", "swde")},
         "jobs": jobs, "gpu_assignments": gpu_assignments,
         "workers_per_gpu": args.workers, "slots": [list(slot) for slot in slots],
-        "batch_size_per_job": 1,
+        "inference_mode": args.inference_mode,
+        "batch_size_per_job": args.batch_size,
         "physical_gpus": args.devices,
         "cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
         "python": sys.executable, "omp_num_threads": "1", "mkl_num_threads": "1",
@@ -348,6 +360,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--inference-mode", choices=("original", "optimized"), default="original")
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--workers", type=int, default=1, help="Independent native workers per physical GPU")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--benchmarks", nargs="+", choices=("ruler", "squad_completion", "swde"), default=["ruler", "squad_completion", "swde"])
@@ -355,6 +369,8 @@ def parse_args():
     for name, default in (("ruler", "ruler-v1/reproductions/e2-ttt-1.3b"), ("squad", "based-squad"), ("swde", "based-swde")):
         parser.add_argument(f"--{name}-data", type=Path, default=PROJECT_ROOT / "data/benchmarks" / default)
     args = parser.parse_args()
+    if args.batch_size < 1 or (args.inference_mode == "original" and args.batch_size != 1):
+        parser.error("--batch-size must be positive; original inference requires --batch-size 1")
     if not 1 <= args.workers <= 8:
         parser.error("--workers must be between 1 and 8")
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "0")
