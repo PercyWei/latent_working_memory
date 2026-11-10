@@ -257,6 +257,9 @@ def run_boundary_checks(model, source_token_ids, batch_sizes):
         "continuation_tokens": 4,
         "cases": cases,
         "all_primary_checks_passed": all(row["primary_passed"] for row in cases),
+        "all_state_invariants_passed": all(
+            row["finite"] and row["structure_ok"] and row["progress_ok"] for row in cases
+        ),
         "interpretation": (
             "Every B1 reference is rebuilt with the same prefix and fixed real continuation, "
             "then compared and released immediately. Primary checks require finite logits/states, "
@@ -486,6 +489,8 @@ def run(args):
         "batch_sizes": args.batch_sizes, "num_samples_per_length": args.num_samples,
         "length_buckets": args.length_buckets, "generation_tokens": GENERATION_BUDGET,
         "boundary_only": args.boundary_only,
+        "generation_only": args.generation_only,
+        "strict_token_ids": args.strict_token_ids,
         "boundary_source": "Distinct real samples, contiguous final 2053-token windows; not formal benchmark prompts",
         "cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
         "protocol": "Distinct real samples; exact token-length buckets; no padding; fresh cache per generate; EOS-aware complete IDs.",
@@ -555,32 +560,47 @@ def run(args):
             entry["controlled_eos"] = controlled_eos(model, tokenizer, rows, reference, min(8, largest_completed))
             write_json(args.output_dir / "results.json", results)
 
-        completed_sizes = set(args.batch_sizes)
-        for entry in results:
-            completed_sizes &= {trial["batch_size"] for trial in entry["trials"] if trial["status"] == "completed"}
-        boundary_sizes = sorted(size for size in completed_sizes if 1 < size <= 8)
-        if not boundary_sizes:
-            raise ValueError("No successful batch size in 2/4/8 for boundary checks")
-        source_rows = batches(selected[lengths[0]], max(boundary_sizes))[0]
-        boundary = run_boundary_checks(
-            model, [row["input_ids"][-2053:] for row in source_rows], boundary_sizes
-        )
-        boundary["source_sample_ids"] = [row["id"] for row in source_rows]
-        boundary["source_slice"] = "Contiguous final 2053 tokens of each real source input"
-        write_json(args.output_dir / "boundary.json", boundary)
-        generation_passed = all(
+        boundary = None
+        if not args.generation_only:
+            completed_sizes = set(args.batch_sizes)
+            for entry in results:
+                completed_sizes &= {trial["batch_size"] for trial in entry["trials"] if trial["status"] == "completed"}
+            boundary_sizes = sorted(size for size in completed_sizes if 1 < size <= 8)
+            if not boundary_sizes:
+                raise ValueError("No successful batch size in 2/4/8 for boundary checks")
+            source_rows = batches(selected[lengths[0]], max(boundary_sizes))[0]
+            boundary = run_boundary_checks(
+                model, [row["input_ids"][-2053:] for row in source_rows], boundary_sizes
+            )
+            boundary["source_sample_ids"] = [row["id"] for row in source_rows]
+            boundary["source_slice"] = "Contiguous final 2053 tokens of each real source input"
+            write_json(args.output_dir / "boundary.json", boundary)
+        generation_ids_equal = all(
             all(trial["all_token_ids_equal_to_batch1"] for trial in item["trials"] if trial["status"] == "completed")
             and item["isolation"]["all_permuted_rows_equal_to_batch1"]
-            and item["isolation"]["batch1_replay_equal"]
-            and item["controlled_eos"].get("early_stop_and_other_rows_continue", False)
             and item["controlled_eos"].get("all_token_ids_equal", False)
             for item in results
         )
-        passed = generation_passed and boundary["all_primary_checks_passed"]
+        passed = all(
+            item["isolation"]["batch1_replay_equal"]
+            and item["controlled_eos"].get("early_stop_and_other_rows_continue", False)
+            for item in results
+        )
+        if boundary is not None:
+            passed &= boundary["all_state_invariants_passed"]
+        if args.strict_token_ids:
+            passed &= generation_ids_equal
+            if boundary is not None:
+                passed &= boundary["all_primary_checks_passed"]
         write_json(args.output_dir / "summary.json", {
-            "passed": passed, "boundary_only": args.boundary_only, "lengths": results,
-            "boundary": {"path": str(args.output_dir / "boundary.json"), "cases": len(boundary["cases"]),
-                         "all_primary_checks_passed": boundary["all_primary_checks_passed"]},
+            "passed": passed, "boundary_only": args.boundary_only,
+            "generation_only": args.generation_only, "strict_token_ids": args.strict_token_ids,
+            "all_generation_ids_equal": generation_ids_equal, "lengths": results,
+            "boundary": None if boundary is None else {
+                "path": str(args.output_dir / "boundary.json"), "cases": len(boundary["cases"]),
+                "all_state_invariants_passed": boundary["all_state_invariants_passed"],
+                "all_primary_checks_passed": boundary["all_primary_checks_passed"],
+            },
         })
         write_json(args.output_dir / "execution.json", {"finished_at": timestamp(), "elapsed_seconds": time.perf_counter() - started, "exit_code": 0 if passed else 1})
         if not passed:
@@ -601,7 +621,11 @@ def main():
     parser.add_argument("--length-buckets", type=int, choices=[1, 2], default=2)
     parser.add_argument("--legacy-measurements", type=Path)
     parser.add_argument("--boundary-only", action="store_true", help="Run the real GPU teacher-forced state checks without repeating generation timing")
+    parser.add_argument("--generation-only", action="store_true", help="Time real generation without repeating state probes")
+    parser.add_argument("--strict-token-ids", action="store_true", help="Also require exact B1 generation and teacher-forced argmax equality")
     args = parser.parse_args()
+    if args.boundary_only and args.generation_only:
+        parser.error("Select either generation-only or boundary-only")
     args.batch_sizes = sorted(set([1, *args.batch_sizes]))
     if args.num_samples <= 0 or args.num_samples % (args.length_buckets * max(args.batch_sizes)):
         parser.error("num-samples must be divisible by length-buckets times the largest batch size")
