@@ -2,9 +2,9 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261110 20:35:23 Asia/Shanghai
+最后修订时间：20261110 21:01:35 Asia/Shanghai
 
-本目录接入 [E²-TTT 官方实现](https://github.com/zeyun-zhong/E2-TTT)及随附 lm-evaluation-harness，使用原模型与评估逻辑。论文为 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308)，源码边界见 [UPSTREAM.md](UPSTREAM.md)。公开权重加载、模型生成和计分检查已完成，尚未完成本轮计划的 benchmark 评估；详见[复现状态](../20261110_ttt_reproduction_status.md)。
+本目录接入 [E²-TTT 官方实现](https://github.com/zeyun-zhong/E2-TTT)及随附 lm-evaluation-harness，保留原始推理路径，另提供本地批量实现。论文为 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308)，源码边界见 [UPSTREAM.md](UPSTREAM.md)。公开权重加载、模型生成和计分检查已完成，尚未完成本轮计划的 benchmark 评估；详见[复现状态](../20261110_ttt_reproduction_status.md)。
 
 ## 评估范围
 
@@ -45,37 +45,43 @@ bash reproductions/setup_eval_env.sh e2_ttt
 source ~/rivermind-data/envs/ttt-e2_ttt/bin/activate
 ```
 
-MLP 和 SwiGLU 分别执行以下命令。当前评估入口尚未接入批处理，每进程 batch size 固定为 1；`--workers` 为每卡独立进程数上限，分别采用 4 和 6，参数依据见[运行参数测试](../20261110_ttt_evaluation_tuning.md)。
+MLP 和 SwiGLU 分别执行以下命令，使用 `optimized`，每卡 batch 上限为 8。本地批量实现及该设置正在进行 GPU 对照验证，验证记录见[批量推理记录](../20261110_e2_ttt_batch_inference.md)。
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/eval_parallel.sh \
+CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/e2_ttt/mlp-1.3b-15b \
-  --output-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b_ruler-squad-completion-swde \
-  --workers 4
+  --output-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b_ruler-squad-completion-swde_optimized \
+  --inference-mode optimized \
+  --batch-size 8
 
-CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/eval_parallel.sh \
+CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/e2_ttt/swiglu-1.3b-15b \
-  --output-dir artifacts/reproductions/e2_ttt/eval/swiglu-1.3b-15b_ruler-squad-completion-swde \
-  --workers 6
+  --output-dir artifacts/reproductions/e2_ttt/eval/swiglu-1.3b-15b_ruler-squad-completion-swde_optimized \
+  --inference-mode optimized \
+  --batch-size 8
 ```
 
 | 参数 | 默认值与约定 |
 |---|---|
 | `--checkpoint` | 必需，本地完整 checkpoint 目录 |
 | `--output-dir` | 必需，首次运行时目录须不存在 |
-| `--workers` | 每卡并发上限，默认 `1`，允许 `1–8`；MLP 推荐 `4`，SwiGLU 推荐 `6` |
+| `--inference-mode` | `original`（默认）或 `optimized`；后者用于本页两个公开 checkpoint 的等长批量推理 |
+| `--batch-size` | 每卡上限，默认 `1`；`original` 仅允许 `1`，`optimized` 按截断后的实际 token 数分组 |
 | `--benchmarks` | 默认 `ruler squad_completion swde`，可选择其中一项或多项 |
 | `--lengths` | RULER 默认 `512 1024 2048 4096 8192 16384`，可选择所需长度 |
 | `--ruler-data`／`--squad-data`／`--swde-data` | 默认分别使用评估范围表中的目录，可按需覆盖；相对路径以仓库根目录为准 |
 | `--resume` | 使用原输出目录继续评估，保持原运行设置 |
 
-中断后在原命令末尾追加 `--resume`，保持 GPU 顺序、checkpoint、workers、任务、长度、数据目录及输出目录一致。例如继续 MLP：
+`original` 对照使用 `--inference-mode original --batch-size 1`，并将输出目录改为独立的 `_original` 目录；不同 checkpoint 或推理模式不共用结果目录。
+
+中断后在原命令末尾追加 `--resume`，保持 GPU 顺序、输出目录与其余参数一致。例如继续 MLP：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/eval_parallel.sh \
+CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/e2_ttt/mlp-1.3b-15b \
-  --output-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b_ruler-squad-completion-swde \
-  --workers 4 \
+  --output-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b_ruler-squad-completion-swde_optimized \
+  --inference-mode optimized \
+  --batch-size 8 \
   --resume
 ```
 
