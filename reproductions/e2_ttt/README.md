@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261110 13:19:33 Asia/Shanghai
+最后修订时间：20261110 16:49:50 Asia/Shanghai
 
 本目录保留 [E²-TTT 官方实现](https://github.com/zeyun-zhong/E2-TTT)及随附 lm-evaluation-harness，使用原模型与评估逻辑。论文为 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308)；源码边界与 revision 见 [UPSTREAM.md](UPSTREAM.md)。
 
@@ -52,15 +52,15 @@ source ~/rivermind-data/envs/ttt-e2_ttt/bin/activate
 推荐使用独立进程并发入口：**每进程 batch size 仍为 1**，MLP 使用 4 个进程，SwiGLU 使用 6 个进程；这是运行调度，不改变模型计算。参数依据与测量范围见[正式评估运行参数测试](../20261110_ttt_evaluation_tuning.md)。
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 bash reproductions/e2_ttt/eval_parallel.sh \
+CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/eval_parallel.sh \
   --checkpoint ~/rivermind-data/models/reproductions/e2_ttt/mlp-1.3b-15b \
-  --workers 4 \
-  --output-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b-parallel-w4
+  --output-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b_ruler-squad-completion-swde \
+  --workers 4
 
-CUDA_VISIBLE_DEVICES=0 bash reproductions/e2_ttt/eval_parallel.sh \
+CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/eval_parallel.sh \
   --checkpoint ~/rivermind-data/models/reproductions/e2_ttt/swiglu-1.3b-15b \
-  --workers 6 \
-  --output-dir artifacts/reproductions/e2_ttt/eval/swiglu-1.3b-15b-parallel-w6
+  --output-dir artifacts/reproductions/e2_ttt/eval/swiglu-1.3b-15b_ruler-squad-completion-swde \
+  --workers 6
 ```
 
 并发入口将完整评估拆成 8 个不重复的原生 `eval.sh` job：六档 RULER 分别运行，另加 SQuAD completion 和 SWDE，每个 checkpoint 仍为 **10,095 条**。每个 job 独立加载模型、使用原生缓存，不分行或复制数据；CPU OMP／MKL 线程固定为 1。首次输出目录须不存在；续评在同一命令末尾追加 `--resume`，保持 checkpoint、workers、数据目录和输出目录一致。
@@ -68,21 +68,21 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/e2_ttt/eval_parallel.sh \
 原单进程入口保留作对照，也用于选择单个 benchmark 或 RULER 长度：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 bash reproductions/e2_ttt/eval.sh \
+CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/e2_ttt/mlp-1.3b-15b \
-  --output-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b
+  --output-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b_ruler-squad-completion-swde-single-process
 
-CUDA_VISIBLE_DEVICES=0 bash reproductions/e2_ttt/eval.sh \
+CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/e2_ttt/swiglu-1.3b-15b \
-  --output-dir artifacts/reproductions/e2_ttt/eval/swiglu-1.3b-15b
+  --output-dir artifacts/reproductions/e2_ttt/eval/swiglu-1.3b-15b_ruler-squad-completion-swde-single-process
 ```
 
 首次运行的输出目录须不存在。中断后保持相同 checkpoint、任务、数据、长度和输出目录，追加 `--resume`：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 bash reproductions/e2_ttt/eval.sh \
+CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/e2_ttt/mlp-1.3b-15b \
-  --output-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b \
+  --output-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b_ruler-squad-completion-swde-single-process \
   --resume
 ```
 

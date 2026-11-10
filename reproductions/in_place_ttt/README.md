@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261110 13:19:33 Asia/Shanghai
+最后修订时间：20261110 16:49:50 Asia/Shanghai
 
 ## 当前状态与目标
 
@@ -52,13 +52,14 @@ source ~/rivermind-data/envs/ttt-in_place_ttt/bin/activate
 ```bash
 CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in_place_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
-  --inference-mode optimized --mlp-chunk-size 0 \
-  --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt-ruler-compact
+  --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt_ruler \
+  --inference-mode optimized \
+  --mlp-chunk-size 0
 
 CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in_place_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-baseline \
-  --inference-mode original \
-  --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-baseline-ruler
+  --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-baseline_ruler \
+  --inference-mode original
 ```
 
 如需原始路径对照，将 TTT 的参数改为 `--inference-mode original` 并使用独立输出目录。以下可选路径同时启用尾部缓存压紧和 MLP 分块；分块的数值限制见下文，不作为本轮正式评估配置。
@@ -66,13 +67,15 @@ CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in
 ```bash
 CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in_place_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
-  --inference-mode optimized --mlp-chunk-size 16384 \
-  --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt-ruler-optimized
+  --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt_ruler-mlp-chunk16384 \
+  --inference-mode optimized \
+  --mlp-chunk-size 16384
 
 CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in_place_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-baseline \
-  --inference-mode optimized --mlp-chunk-size 16384 \
-  --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-baseline-ruler-optimized
+  --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-baseline_ruler-mlp-chunk16384 \
+  --inference-mode optimized \
+  --mlp-chunk-size 16384
 ```
 
 | 参数 | 约定 |
@@ -92,8 +95,9 @@ CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in
 ```bash
 CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in_place_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
-  --inference-mode optimized --mlp-chunk-size 0 \
-  --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt-ruler-compact \
+  --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt_ruler \
+  --inference-mode optimized \
+  --mlp-chunk-size 0 \
   --resume
 ```
 

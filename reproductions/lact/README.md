@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261110 16:13:07 Asia/Shanghai
+最后修订时间：20261110 16:50:53 Asia/Shanghai
 
 本目录接入 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现，保留与 sliding-window attention 并行的 SwiGLU fast weights、负内积写入及 Momentum／Muon 更新。源码、环境和 checkpoint 运行检查已完成，正式 RULER 评估尚未完成。
 
@@ -27,7 +27,7 @@
 作者在[官方回复](https://github.com/a1600012888/LaCT/issues/2#issuecomment-3282879455)中发布了 [YunjinZhang/lact_llm](https://huggingface.co/YunjinZhang/lact_llm/tree/main)，使用 32K 序列、Long-Data-Collections 和约 40B tokens 重训。`hf` CLI 安装方式见[复现总说明](../README.md#模型下载约定)。
 
 ```bash
-# 首批 Momentum／RoPE／PreNorm
+# Momentum／RoPE／PreNorm
 hf download YunjinZhang/lact_llm \
   --include 'lact-momentum-rope-prenorm-nheads4-chunk2048-760m/*' \
   --local-dir ~/rivermind-data/models/reproductions/lact
@@ -52,27 +52,12 @@ source ~/rivermind-data/envs/ttt-lact/bin/activate
 
 首批 Momentum 推荐**单进程、`--batch-size 16`**，同一长度档位内跨六任务按精确输入 token 数分组，不加入 padding。32K S-NIAH-2 的 16 条同长度真实输入实测吞吐为 **0.8266 样本／秒**，全卡峰值 **69,289 MiB（约 67.7 GiB）**；尾批按实际样本数运行。正式评估覆盖四长度的完整 12,000 条数据，4K 补测与整体耗时估计见[运行参数测试](../20261110_ttt_evaluation_tuning.md)。
 
-确认物理 GPU 0 空闲后，从仓库根目录执行：
-
-```bash
-source ~/rivermind-data/envs/ttt-lact/bin/activate
-export CUDA_VISIBLE_DEVICES=0
-export OMP_NUM_THREADS=1
-export MKL_NUM_THREADS=1
-export TOKENIZERS_PARALLELISM=false
-bash reproductions/lact/eval.sh \
-  --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
-  --inference-mode incremental --batch-size 16 \
-  --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-ruler-b16
-```
-
-保留官方完整前缀路径作对照：
-
 ```bash
 CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/lact/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
-  --inference-mode original \
-  --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-ruler-original
+  --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-nheads4-chunk2048-760m_ruler \
+  --inference-mode incremental \
+  --batch-size 16
 ```
 
 | 参数 | 默认值与约定 |
@@ -89,8 +74,9 @@ CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/la
 ```bash
 CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/lact/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
-  --inference-mode incremental --batch-size 16 \
-  --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-ruler-b16 \
+  --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-nheads4-chunk2048-760m_ruler \
+  --inference-mode incremental \
+  --batch-size 16 \
   --resume
 ```
 
@@ -123,16 +109,17 @@ EOS 后已结束的行可在 HF batch 内继续占位计算，其缓存不再使
 
 汇总从全部已保存预测重新计分，原始分数不取整，汇总百分比保留两位小数。部分预测不代表完整结果，累计耗时包括加载、编译和失败执行。
 
-需要重新验证增量实现时，从项目根目录执行：
+需要重新验证增量实现时，使用已激活的 LaCT 环境，从项目根目录设置模块路径：
 
 ```bash
-source ~/rivermind-data/envs/ttt-lact/bin/activate
-export CUDA_VISIBLE_DEVICES=0
 export TOKENIZERS_PARALLELISM=false
 export PYTHONPATH="$PWD/reproductions/lact:$PWD/reproductions/lact/upstream/lact_llm:$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
-python -u reproductions/lact/scripts/validate_incremental.py \
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -u reproductions/lact/scripts/validate_incremental.py \
   --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
-  --output-dir artifacts/reproductions/lact/incremental-validation/momentum \
+  --output-dir artifacts/reproductions/lact/incremental-validation/momentum-rope-prenorm-nheads4-chunk2048-760m_ruler \
   --lengths 4096 8192 16384 32768
 ```
 
@@ -141,12 +128,13 @@ python -u reproductions/lact/scripts/validate_incremental.py \
 批量运行验证使用同一环境和上述 `PYTHONPATH`：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-  python -u reproductions/lact/scripts/validate_batch.py \
+CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -u reproductions/lact/scripts/validate_batch.py \
   --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
-  --lengths 4096 32768 --batch-sizes 1 2 4 8 16 \
-  --num-samples 16 --length-buckets 1 \
-  --output-dir artifacts/reproductions/lact/batch-validation/momentum
+  --output-dir artifacts/reproductions/lact/batch-validation/momentum-rope-prenorm-nheads4-chunk2048-760m_ruler \
+  --lengths 4096 32768 \
+  --batch-sizes 1 2 4 8 16 \
+  --num-samples 16 \
+  --length-buckets 1
 ```
 
 默认检查缓存重放、EOS 和状态结构／有限值／更新进度，生成 IDs 和教师强制 argmax 的差异单独记录。追加 `--strict-token-ids` 才将完全相同作为通过条件；`--generation-only`／`--boundary-only` 分别运行计时或边界检查。
@@ -176,8 +164,8 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/scripts/train_760m_muon.sh
 可直接追加原生 flame 参数，例如执行一个实际 optimizer step：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 OUTPUT_DIR='/absolute/path/to/artifacts/reproductions/lact/760m-muon-one-step/train' \
-  bash reproductions/lact/scripts/train_760m_muon.sh --training.steps 1
+CUDA_VISIBLE_DEVICES=0 OUTPUT_DIR='/absolute/path/to/artifacts/reproductions/lact/760m-muon-one-step/train' bash reproductions/lact/scripts/train_760m_muon.sh \
+  --training.steps 1
 ```
 
 该命令仍执行 32K 序列和 32 次梯度累积。flame 保存 DCP checkpoint、配置与本地 TensorBoard，关闭 W&B；HF 转换入口为 `upstream_flame/flame/utils/convert_dcp_to_hf.py`。
