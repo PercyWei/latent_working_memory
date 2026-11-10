@@ -9,7 +9,8 @@ from pathlib import Path
 import torch
 from transformers import AutoTokenizer
 
-from evaluate import load_checkpoint, read_samples, timestamp, write_json
+from evaluate import IncrementalLaCTForCausalLM, load_checkpoint, read_samples, timestamp, write_json
+from provenance import capture_source
 
 
 WEIGHT_FIELDS = (
@@ -184,6 +185,14 @@ def run(args):
                for start in range(0, len(group), args.batch_size)]
     group = next(group for group in batches if args.focus_id in [row["id"] for row in group])
     focus = [row["id"] for row in group].index(args.focus_id)
+    write_json(args.output_dir / "plan.json", {
+        "created_at": timestamp(),
+        "source": capture_source(__file__, {"incremental": IncrementalLaCTForCausalLM}),
+        "source_sweep": str(args.sweep_dir), "checkpoint": str(checkpoint),
+        "focus_id": args.focus_id, "group_ids": [row["id"] for row in group],
+        "batch_size": len(group), "decode_steps": args.decode_steps,
+        "cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
+    })
     tokens = torch.tensor([row["input_ids"] for row in group], dtype=torch.long, device="cuda:0")
     input_tokens = tokens.shape[1]
     model, _ = load_checkpoint(checkpoint, "incremental")
