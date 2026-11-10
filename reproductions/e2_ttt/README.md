@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261109 12:12:01 Asia/Shanghai
+最后修订时间：20261110 11:16:38 Asia/Shanghai
 
 本目录保留 [E²-TTT 官方实现](https://github.com/zeyun-zhong/E2-TTT)，使用其原始模型、flame 训练流程与随附 lm-evaluation-harness；不接入本项目的统一框架。论文为 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308)。
 
@@ -11,6 +11,8 @@
 官方源码已迁入，revision 与许可证见 [UPSTREAM.md](UPSTREAM.md)。原始标量核与验证函数的 CPU 数值检查及模型／训练源码语法检查已通过，见[执行记录](20261108_phase1_record.md)。本地数据评估入口已接入，两个 1.3B checkpoint 均已在物理 GPU 0 完成真实样本生成验证。
 
 每个 checkpoint 验证 SQuAD completion 2 条、SWDE 2 条，以及 RULER 六个长度各 2 条，共 16 条；MLP 与 SwiGLU 合计 32 条，均无运行异常。峰值显存分别约 9.96 GiB 和 10.12 GiB。该检查覆盖完整模型加载及生成，完整 benchmark 尚未完成，不能据此报告论文指标复现；运行记录见 [GPU 验证与评估](../20261109_checkpoint_gpu_evaluation.md)。
+
+专项[推理分项与缓存诊断](../20261110_e2_ttt_inference_profiling.md)已完成：两个 checkpoint 各 6 条真实输入及 2 条边界输入的诊断前后生成 IDs 一致。16K prefill 后缓存平均持有约 5.75 GiB 的超额底层存储，首个 decode 后释放；普通 decode 约 55–57 ms／步，是速度优化重点。当前仅新增独立诊断脚本，尚未实施推理优化，正式评估仍使用官方实现。
 
 ## 复现目标
 
