@@ -102,6 +102,7 @@ CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/la
 | `--ruler-data` | `data/benchmarks/ruler-v1/reproductions/lact-760m` |
 | `--lengths` | `4096 8192 16384 32768` |
 | `--inference-mode` | `original`；可选 `incremental`，两者使用不同输出目录 |
+| `--batch-size` | 默认 `1`；大于 1 仅用于 `incremental`，按实际 token 数分组，尾批使用实际数量 |
 | `--num-shards`、`--shard-index` | 默认 `1`、`0`；按每任务原始行号分片，多个进程使用独立输出目录 |
 | `--resume` | 同一设置与已有输出目录续评 |
 
@@ -119,9 +120,9 @@ CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/la
 
 全部分片完成后按上面的合并命令生成整体结果。合并从原始预测重新计分，严格检查分片完整性，不平均已取整的分片分数；通过 `(shard_index, execution_attempt)` 和 `plan.source_shards` 关联原执行来源。合并目录只用于汇总，续评仍使用各原始分片目录。
 
-每条输入为 `input + answer_prefix`，由 checkpoint tokenizer 添加默认 special tokens；完整输入加 128-token 输出预算不得超过长度档位，不截断或现场构造数据。采用单样本 greedy，参数 float32、CUDA BF16 autocast、关闭外层 autograd，仍执行显式 TTT 更新。评分复用 NVIDIA RULER 的 `postprocess_pred` 与 `string_match_all`。
+每条输入为 `input + answer_prefix`，由 checkpoint tokenizer 添加默认 special tokens；完整输入加 128-token 输出预算不得超过长度档位，不截断或现场构造数据。同一长度档位内跨六任务按实际 token 数分组，不加入 padding、不复制样本；生成结果按每行首个 EOS 截去补齐部分，保留原任务和样本编号。采用 greedy，参数 float32、CUDA BF16 autocast、关闭外层 autograd，仍执行显式 TTT 更新。评分复用 NVIDIA RULER 的 `postprocess_pred` 与 `string_match_all`。
 
-`original` 调用迁入模型的 `generate`，强制 `use_cache=False`，逐 token 重算完整前缀。`incremental` 缓存历史状态，保持先读后更新及尾段延迟写入：前缀长为 \(L\) 时提交 \(\lfloor(L-1)/2048\rfloor\) 次更新，当前支持单样本、无 padding、非 fused TTT。
+`original` 调用迁入模型的 `generate`，强制 `use_cache=False`，逐 token 重算完整前缀。`incremental` 缓存历史状态，保持先读后更新及尾段延迟写入：前缀长为 \(L\) 时提交 \(\lfloor(L-1)/2048\rfloor\) 次更新，支持等长、无 padding、非 fused TTT 批次，每条样本的 fast weights 与 KV 独立。
 
 **增量路径支持范围：**Momentum 通过四长度、八条独立 128-token 生成的配对检查；Muon／PostNorm 仅通过 4K 检查；Muon／PreNorm 尚未通过，使用原始路径。代表性检查不保证任意输入逐位相同，也不替代正式评估。
 
@@ -135,6 +136,8 @@ CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/la
 | `predictions.jsonl` | 逐样本生成、参考、分数、token 数、耗时和执行关联 |
 | `summary.json` | 全部样本完成后的任务／长度分数、三项 S-NIAH／三项 multi／六项平均 |
 | `execution.json`、`evaluation.log` | 历次状态、累计耗时、显存峰值与运行日志 |
+
+逐条记录的 `seconds` 为 `batch_seconds / 实际 batch_size`，表示摊销生成时间；不包含 CPU 文本解码和评分。`batch_seconds` 在同批各行重复保存，不能逐行相加。批次通过 `(shard_index, execution_attempt, batch_index)` 识别，完整运行耗时以 `execution.json` 为准。
 
 汇总从全部已保存预测重新计分，原始分数不取整，汇总百分比保留两位小数。部分预测不代表完整结果，累计耗时包括加载、编译和失败执行。
 

@@ -1,4 +1,4 @@
-"""Incremental single-sequence inference alongside the unchanged upstream model."""
+"""Incremental unpadded batch inference alongside the unchanged upstream model."""
 
 from dataclasses import dataclass
 
@@ -51,17 +51,25 @@ def attention_forward(layer, hidden_states, cache):
         k = torch.cat((cache.keys, k), dim=1)
         v = torch.cat((cache.values, v), dim=1)
     kv_len = k.shape[1]
-    # Decode shapes stay at (1, window_size); reuse the identical GPU metadata.
-    if cache.query_length != q_len:
-        cache.query_offsets = torch.tensor([0, q_len], dtype=torch.int32, device=q.device)
+    # Every row has the same length; offsets keep samples independent in varlen attention.
+    if cache.query_length != q_len or cache.query_offsets.numel() != batch_size + 1:
+        cache.query_offsets = torch.tensor(
+            [index * q_len for index in range(batch_size + 1)],
+            dtype=torch.int32,
+            device=q.device,
+        )
         cache.query_length = q_len
-    if cache.key_length != kv_len:
-        cache.key_offsets = torch.tensor([0, kv_len], dtype=torch.int32, device=q.device)
+    if cache.key_length != kv_len or cache.key_offsets.numel() != batch_size + 1:
+        cache.key_offsets = torch.tensor(
+            [index * kv_len for index in range(batch_size + 1)],
+            dtype=torch.int32,
+            device=q.device,
+        )
         cache.key_length = kv_len
     output = flash_attn_varlen_func(
-        q.squeeze(0),
-        k.squeeze(0),
-        v.squeeze(0),
+        q.flatten(0, 1),
+        k.flatten(0, 1),
+        v.flatten(0, 1),
         cu_seqlens_q=cache.query_offsets,
         cu_seqlens_k=cache.key_offsets,
         max_seqlen_q=q_len,
@@ -203,17 +211,25 @@ class IncrementalLaCTForCausalLM(LaCTForCausalLM):
             raise ValueError("Incremental LaCT is an input_ids inference path")
         if output_attentions or output_hidden_states or return_dict is False:
             raise ValueError("Incremental LaCT returns last logits and its cache")
-        if input_ids is None or input_ids.ndim != 2 or input_ids.shape[0] != 1:
-            raise ValueError("Incremental LaCT requires one unpadded sequence")
+        if input_ids is None or input_ids.ndim != 2 or 0 in input_ids.shape:
+            raise ValueError("Incremental LaCT requires a nonempty unpadded batch")
         if self.config.use_fused_kernel:
             raise ValueError("Incremental LaCT preserves the non-fused TTT implementation")
         if kwargs.get("cu_seqlens") is not None:
             raise ValueError("Packed sequences are not supported by incremental LaCT")
-        if attention_mask is not None and not bool(attention_mask.all()):
-            raise ValueError("Padding is not supported by this incremental inference path")
+        if attention_mask is not None:
+            if attention_mask.ndim != 2 or attention_mask.shape[0] != input_ids.shape[0]:
+                raise ValueError("Attention mask must match the input batch")
+            if not bool(attention_mask.all()):
+                raise ValueError("Padding is not supported by this incremental inference path")
         cache = past_key_values
         if cache is None:
             cache = LaCTCache(len(self.model.layers))
+        elif (
+            cache.layers[0].keys is not None
+            and cache.layers[0].keys.shape[0] != input_ids.shape[0]
+        ):
+            raise ValueError("Input batch size differs from the existing cache")
         hidden_states = self.model.embeddings(input_ids)
         for block, layer_cache in zip(self.model.layers, cache.layers, strict=True):
             residual = hidden_states

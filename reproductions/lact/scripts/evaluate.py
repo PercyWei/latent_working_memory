@@ -168,6 +168,8 @@ def build_summary(plan, samples, records, output):
         "plan_path": str(output / "plan.json"),
         "execution_path": str(output / "execution.json"),
         "checkpoint": plan["checkpoint"],
+        "batch_size": plan["batch_size"],
+        "batching": plan["batching"],
         "num_shards": num_shards,
         "shard_index": shard_index,
         "samples": len(records),
@@ -202,6 +204,31 @@ def load_checkpoint(checkpoint, inference_mode="original"):
     return model, config
 
 
+def prepare_batches(expected, records, tokenizer, batch_size):
+    """按长度档位及实际 token 数分组，保持原文、样本身份和无 padding 输入。"""
+    for length in dict.fromkeys(sample[0] for sample in expected.values()):
+        buckets = {}
+        for sample_id, (sample_length, task, position, row) in expected.items():
+            if sample_length != length or sample_id in records:
+                continue
+            token_ids = tokenizer.encode(
+                row["input"] + row["answer_prefix"], truncation=False
+            )
+            input_tokens = len(token_ids)
+            if input_tokens + GENERATION_BUDGET > length:
+                raise ValueError(
+                    f"{sample_id}: prompt ({input_tokens}) + "
+                    f"generation budget ({GENERATION_BUDGET}) exceeds {length}"
+                )
+            buckets.setdefault(input_tokens, []).append(
+                (sample_id, task, position, row, token_ids)
+            )
+        for input_tokens in sorted(buckets, reverse=True):
+            rows = buckets[input_tokens]
+            for start in range(0, len(rows), batch_size):
+                yield length, input_tokens, rows[start : start + batch_size]
+
+
 def run(args, output, logger, run_source, execution_attempt):
     checkpoint = args.checkpoint.expanduser().resolve()
     data = args.ruler_data.expanduser().resolve()
@@ -225,6 +252,8 @@ def run(args, output, logger, run_source, execution_attempt):
         "method": "lact",
         "source": run_source,
         "inference_mode": args.inference_mode,
+        "batch_size": args.batch_size,
+        "batching": "Exact input token length across tasks within each RULER length; no padding",
         "num_shards": args.num_shards,
         "shard_index": args.shard_index,
         "assigned_samples": len(expected),
@@ -305,48 +334,45 @@ def run(args, output, logger, run_source, execution_attempt):
     with (output / "predictions.jsonl").open(
         "a" if args.resume else "x", encoding="utf-8"
     ) as predictions:
-        for (length, task), rows in samples.items():
-            assigned = sum(
-                position % args.num_shards == args.shard_index for position in range(len(rows))
+        eos_ids = model.generation_config.eos_token_id
+        eos_ids = {eos_ids} if isinstance(eos_ids, int) else set(eos_ids)
+        batches = prepare_batches(expected, records, tokenizer, args.batch_size)
+        for batch_index, (length, input_tokens, batch) in enumerate(batches):
+            input_ids = torch.tensor(
+                [sample[4] for sample in batch], dtype=torch.long, device="cuda:0"
             )
             logger.info(
-                "Evaluating length=%s task=%s shard=%s/%s assigned=%s source_samples=%s",
-                length, task, args.shard_index, args.num_shards, assigned, len(rows),
+                "Evaluating length=%s input_tokens=%s batch=%s size=%s shard=%s/%s",
+                length, input_tokens, batch_index, len(batch), args.shard_index, args.num_shards,
             )
-            for position, row in enumerate(rows):
-                if position % args.num_shards != args.shard_index:
-                    continue
-                sample_id = f"ruler/{length}/{task}/{position}"
-                if sample_id in records:
-                    continue
-                prompt = row["input"] + row["answer_prefix"]
-                encoded = tokenizer(prompt, return_tensors="pt", truncation=False)
-                input_tokens = encoded["input_ids"].shape[-1]
-                if input_tokens + GENERATION_BUDGET > length:
-                    raise ValueError(
-                        f"{length}/{task}/{position}: prompt ({input_tokens}) + "
-                        f"generation budget ({GENERATION_BUDGET}) exceeds {length}"
-                    )
-                inputs = {name: value.to("cuda:0") for name, value in encoded.items()}
-                start = time.perf_counter()
-                with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-                    generated = model.generate(
-                        **inputs,
-                        do_sample=False,
-                        num_beams=1,
-                        max_new_tokens=GENERATION_BUDGET,
-                        use_cache=args.inference_mode == "incremental",
-                        logits_to_keep=1,
-                        return_dict_in_generate=False,
-                        output_scores=False,
-                        pad_token_id=tokenizer.eos_token_id,
-                    )
-                continuation = generated[0, input_tokens:]
+            start = time.perf_counter()
+            with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+                generated = model.generate(
+                    input_ids=input_ids,
+                    attention_mask=torch.ones_like(input_ids),
+                    do_sample=False,
+                    num_beams=1,
+                    max_new_tokens=GENERATION_BUDGET,
+                    use_cache=args.inference_mode == "incremental",
+                    logits_to_keep=1,
+                    return_dict_in_generate=False,
+                    output_scores=False,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
+            continuations = generated[:, input_tokens:].cpu().tolist()
+            torch.cuda.synchronize()
+            batch_seconds = time.perf_counter() - start
+            for sample, continuation in zip(batch, continuations, strict=True):
+                sample_id, task, position, row, _ = sample
+                # HF 在已结束行填充 pad；只保留该行截至首个 EOS 的真实生成。
+                end = next(
+                    (index + 1 for index, token in enumerate(continuation) if token in eos_ids),
+                    len(continuation),
+                )
+                continuation = continuation[:end]
                 prediction = tokenizer.decode(continuation, skip_special_tokens=True)
                 cleaned = postprocess_pred(prediction)
                 score = string_match_all([cleaned], [row["outputs"]])
-                torch.cuda.synchronize()
-                seconds = time.perf_counter() - start
                 record = {
                     "id": sample_id,
                     "execution_attempt": execution_attempt,
@@ -360,8 +386,12 @@ def run(args, output, logger, run_source, execution_attempt):
                     "references": row["outputs"],
                     "score": score,
                     "input_tokens": input_tokens,
-                    "generated_tokens": int(continuation.numel()),
-                    "seconds": seconds,
+                    "generated_tokens": len(continuation),
+                    "token_ids": continuation,
+                    "batch_index": batch_index,
+                    "batch_size": len(batch),
+                    "batch_seconds": batch_seconds,
+                    "seconds": batch_seconds / len(batch),
                 }
                 predictions.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
                 predictions.flush()
@@ -370,8 +400,8 @@ def run(args, output, logger, run_source, execution_attempt):
                     "%s: score=%.4f, tokens=%s, seconds=%.3f",
                     record["id"],
                     score,
-                    continuation.numel(),
-                    seconds,
+                    len(continuation),
+                    record["seconds"],
                 )
 
     summary = build_summary(plan, samples, records, output)
@@ -384,6 +414,7 @@ def main():
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--inference-mode", choices=("original", "incremental"), default="original")
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--batch-size", type=int, default=1, help="Maximum equal-token-length batch")
     parser.add_argument("--num-shards", type=int, default=1, help="Independent row shards per task and length")
     parser.add_argument("--shard-index", type=int, default=0, help="Zero-based row shard index")
     parser.add_argument(
@@ -396,6 +427,10 @@ def main():
         "--resume", action="store_true", help="Continue an existing output directory"
     )
     args = parser.parse_args()
+    if args.batch_size < 1:
+        parser.error("--batch-size must be positive")
+    if args.batch_size > 1 and args.inference_mode != "incremental":
+        parser.error("--batch-size > 1 requires --inference-mode incremental")
     if not 1 <= args.num_shards <= SAMPLES_PER_TASK_LENGTH:
         parser.error(f"--num-shards must be between 1 and {SAMPLES_PER_TASK_LENGTH}")
     if not 0 <= args.shard_index < args.num_shards:

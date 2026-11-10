@@ -20,7 +20,7 @@ PLAN_FIELDS = (
     "method", "inference_mode", "checkpoint", "checkpoint_config", "ruler_data",
     "lengths", "tasks", "samples_per_task_length", "prompt", "generation",
     "parameter_dtype", "compute_autocast_dtype", "upstream_revision", "scoring",
-    "loaded_model", "runtime", "num_shards",
+    "loaded_model", "runtime", "num_shards", "batch_size", "batching",
 )
 
 
