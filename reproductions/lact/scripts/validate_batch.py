@@ -3,7 +3,9 @@
 import argparse
 from collections import defaultdict
 import gc
+from importlib.metadata import version
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -22,6 +24,246 @@ from evaluate import (
 
 
 SCAN_ROWS_PER_TASK = 64
+
+
+def run_boundary_checks(model, source_token_ids, batch_sizes):
+    """Compare equal-length batch states with fresh B1 teacher-forced references."""
+    sizes = list(batch_sizes)
+    if not sizes or any(size < 2 for size in sizes) or len(set(sizes)) != len(sizes):
+        raise ValueError("Boundary checks require distinct batch sizes >= 2")
+    if len(source_token_ids) < max(sizes):
+        raise ValueError("Not enough distinct source sequences for boundary checks")
+    if any(len(tokens) < 2053 for tokens in source_token_ids[:max(sizes)]):
+        raise ValueError("Boundary sources must contain at least 2053 real tokens")
+    if model.training:
+        raise ValueError("Boundary checks require an evaluation model")
+    if model.model.layers[0].attn.lact_chunk_size != 2048:
+        raise ValueError("Boundary probes target the released 2048-token chunk")
+
+    weight_fields = (
+        "w0", "w1", "w2", "w0_norm", "w1_norm", "w2_norm",
+        "w0_main", "w1_main", "w2_main",
+        "dw0_momentum", "dw1_momentum", "dw2_momentum",
+    )
+    pending_fields = (
+        "pending_k", "pending_v", "pending_lr0", "pending_lr1", "pending_lr2",
+        "pending_momentum",
+    )
+    cases = []
+
+    def forward(token_ids, total_seen, cache=None):
+        return model(
+            input_ids=token_ids,
+            attention_mask=torch.ones(
+                (token_ids.shape[0], total_seen), dtype=torch.long, device=token_ids.device
+            ),
+            past_key_values=cache,
+            use_cache=True,
+            logits_to_keep=1,
+            return_dict=True,
+        )
+
+    def progress(cache, seen, batch_size):
+        failed = []
+        updates = (seen - 1) // 2048
+        pending = seen - updates * 2048
+        for layer_index, (block, layer) in enumerate(
+            zip(model.model.layers, cache.layers, strict=True)
+        ):
+            ttt = layer.ttt
+            heads = block.attn.num_fw_heads
+            actual = {
+                "seen": layer.seen,
+                "ttt_seen": ttt.seen,
+                "updates": ttt.n_updates,
+                "pending": ttt.pending_length,
+                "pending_fragments_length": sum(value.shape[1] for value in ttt.pending_k),
+                "kv_batch": layer.keys.shape[0],
+                "fast_weight_rows": ttt.w0.shape[0],
+            }
+            expected = {
+                "seen": seen,
+                "ttt_seen": seen,
+                "updates": updates,
+                "pending": pending,
+                "pending_fragments_length": pending,
+                "kv_batch": batch_size,
+                "fast_weight_rows": batch_size * heads,
+            }
+            if actual != expected:
+                failed.append({"layer": layer_index, "actual": actual, "expected": expected})
+        return failed
+
+    def compare_tensor(reports, name, actual, reference, location):
+        report = reports.setdefault(name, {
+            "comparisons": 0,
+            "shape_match": True,
+            "dtype_match": True,
+            "finite": True,
+            "exact": True,
+            "max_abs": 0.0,
+            "max_relative_l2": 0.0,
+            "shape_pairs": set(),
+            "dtype_pairs": set(),
+            "worst_location": None,
+        })
+        report["comparisons"] += 1
+        if actual is None or reference is None:
+            same = actual is None and reference is None
+            report["shape_match"] &= same
+            report["exact"] &= same
+            return same, True
+        report["shape_pairs"].add((tuple(actual.shape), tuple(reference.shape)))
+        report["dtype_pairs"].add((str(actual.dtype), str(reference.dtype)))
+        shape_match = actual.shape == reference.shape
+        dtype_match = actual.dtype == reference.dtype
+        report["shape_match"] &= shape_match
+        report["dtype_match"] &= dtype_match
+        if not shape_match:
+            report["exact"] = False
+            return False, True
+        if actual.numel() == 0:
+            return dtype_match, True
+        actual_float, reference_float = actual.float(), reference.float()
+        difference = actual_float - reference_float
+        values = torch.stack((
+            difference.abs().amax(),
+            difference.norm() / reference_float.norm().clamp_min(1e-12),
+            (torch.isfinite(actual_float).all() & torch.isfinite(reference_float).all()).float(),
+        )).cpu().tolist()
+        max_abs, relative, finite_value = values
+        finite = bool(finite_value)
+        report["finite"] &= finite
+        report["exact"] &= finite and max_abs == 0.0 and dtype_match
+        if math.isfinite(max_abs) and max_abs > report["max_abs"]:
+            report["max_abs"] = max_abs
+            report["worst_location"] = location
+        if math.isfinite(relative):
+            report["max_relative_l2"] = max(report["max_relative_l2"], relative)
+        return dtype_match, finite
+
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        for prefix_length in (2047, 2048, 2049):
+            for batch_size in sizes:
+                tokens = torch.tensor(
+                    [row[:prefix_length + 4] for row in source_token_ids[:batch_size]],
+                    dtype=torch.long,
+                    device="cuda:0",
+                )
+                batch_cache = None
+                for step in range(5):
+                    seen = prefix_length + step
+                    current = tokens[:, :prefix_length] if step == 0 else tokens[:, seen - 1:seen]
+                    batched = forward(current, seen, batch_cache)
+                    batch_cache = batched.past_key_values
+                    batched_argmax = batched.logits[:, -1].argmax(-1).cpu().tolist()
+                    finite = bool(torch.isfinite(batched.logits).all())
+                    progress_failures = progress(batch_cache, seen, batch_size)
+                    states, references, argmax_equal = {}, [], []
+                    structure_ok = True
+                    for sample_index in range(batch_size):
+                        reference_cache = None
+                        for reference_step in range(step + 1):
+                            reference_seen = prefix_length + reference_step
+                            current = (
+                                tokens[sample_index:sample_index + 1, :prefix_length]
+                                if reference_step == 0
+                                else tokens[sample_index:sample_index + 1, reference_seen - 1:reference_seen]
+                            )
+                            reference = forward(current, reference_seen, reference_cache)
+                            reference_cache = reference.past_key_values
+                        reference_argmax = int(reference.logits[0, -1].argmax())
+                        references.append(reference_argmax)
+                        argmax_equal.append(batched_argmax[sample_index] == reference_argmax)
+                        finite &= bool(torch.isfinite(reference.logits).all())
+                        for failure in progress(reference_cache, seen, 1):
+                            progress_failures.append({"sample": sample_index, **failure})
+                        for layer_index, (batch_layer, reference_layer) in enumerate(
+                            zip(batch_cache.layers, reference_cache.layers, strict=True)
+                        ):
+                            location = {"sample": sample_index, "layer": layer_index}
+                            pairs = [
+                                (f"attention.{name}", getattr(batch_layer, name)[sample_index:sample_index + 1], getattr(reference_layer, name))
+                                for name in ("keys", "values")
+                            ]
+                            for name in ("query_offsets", "key_offsets"):
+                                offsets = getattr(batch_layer, name)
+                                pairs.append((
+                                    f"attention.{name}",
+                                    offsets[sample_index:sample_index + 2] - offsets[sample_index],
+                                    getattr(reference_layer, name),
+                                ))
+                            heads = reference_layer.ttt.w0.shape[0]
+                            head_slice = slice(sample_index * heads, (sample_index + 1) * heads)
+                            for name in weight_fields:
+                                actual = getattr(batch_layer.ttt, name)
+                                pairs.append((
+                                    f"ttt.{name}",
+                                    actual[head_slice] if actual is not None else None,
+                                    getattr(reference_layer.ttt, name),
+                                ))
+                            for name in pending_fields:
+                                actual = getattr(batch_layer.ttt, name)
+                                expected = getattr(reference_layer.ttt, name)
+                                if len(actual) != len(expected):
+                                    structure_ok = False
+                                    progress_failures.append({
+                                        **location, "field": name,
+                                        "batch_fragments": len(actual), "reference_fragments": len(expected),
+                                    })
+                                for left, right in zip(actual, expected):
+                                    pairs.append((f"ttt.{name}", left[head_slice], right))
+                            for name, actual, expected in pairs:
+                                shape_ok, tensor_finite = compare_tensor(
+                                    states, name, actual, expected, location
+                                )
+                                structure_ok &= shape_ok
+                                finite &= tensor_finite
+                        del reference, reference_cache, reference_layer, pairs
+                    for report in states.values():
+                        report["shape_pairs"] = [
+                            {"batch_slice": list(left), "reference": list(right)}
+                            for left, right in sorted(report["shape_pairs"])
+                        ]
+                        report["dtype_pairs"] = [list(pair) for pair in sorted(report["dtype_pairs"])]
+                    cases.append({
+                        "prefix_tokens": prefix_length,
+                        "batch_size": batch_size,
+                        "distinct_probe_sequences": len({
+                            tuple(row[:prefix_length + 4])
+                            for row in source_token_ids[:batch_size]
+                        }),
+                        "teacher_forced_steps": step,
+                        "seen": seen,
+                        "expected_updates": (seen - 1) // 2048,
+                        "expected_pending_tokens": seen - ((seen - 1) // 2048) * 2048,
+                        "batch_argmax": batched_argmax,
+                        "reference_argmax": references,
+                        "argmax_equal": argmax_equal,
+                        "finite": finite,
+                        "structure_ok": structure_ok,
+                        "progress_ok": not progress_failures,
+                        "progress_failures": progress_failures,
+                        "states": states,
+                        "primary_passed": finite and structure_ok and not progress_failures and all(argmax_equal),
+                    })
+                    del batched
+                del batch_cache, tokens
+    return {
+        "data_kind": "real_token_prefixes_with_fixed_real_continuations",
+        "formal_benchmark_result": False,
+        "batch_sizes": sizes,
+        "prefix_lengths": [2047, 2048, 2049],
+        "continuation_tokens": 4,
+        "cases": cases,
+        "all_primary_checks_passed": all(row["primary_passed"] for row in cases),
+        "interpretation": (
+            "Every B1 reference is rebuilt with the same prefix and fixed real continuation, "
+            "then compared and released immediately. Primary checks require finite logits/states, "
+            "matching next-token argmax, shapes/dtypes, and the original chunk-update progress. "
+            "State exactness and max absolute/relative L2 differences are reported separately."
+        ),
+    }
 
 
 class DeviceMemory:
@@ -143,13 +385,21 @@ def measure(model, tokenizer, rows, size):
         torch.cuda.synchronize()
         started = time.perf_counter()
         outputs = {}
+        batch_details = []
         for group in groups:
+            batch_started = time.perf_counter()
             outputs.update(generate(model, tokenizer, group))
+            batch_details.append({
+                "batch_size": len(group), "input_tokens": len(group[0]["input_ids"]),
+                "seconds": time.perf_counter() - batch_started,
+                "sample_ids": [row["id"] for row in group],
+            })
         torch.cuda.synchronize()
         seconds = time.perf_counter() - started
     return {
         "batch_size": size, "status": "completed", "samples": len(rows),
         "actual_batch_sizes": [len(group) for group in groups],
+        "batch_details": batch_details,
         "warmup_seconds": warm_seconds, "generation_wall_seconds": seconds,
         "samples_per_second": len(rows) / seconds,
         "generated_tokens": sum(map(len, outputs.values())),
@@ -235,12 +485,14 @@ def run(args):
         "ruler_data": str(args.ruler_data), "lengths": args.lengths,
         "batch_sizes": args.batch_sizes, "num_samples_per_length": args.num_samples,
         "length_buckets": args.length_buckets, "generation_tokens": GENERATION_BUDGET,
+        "boundary_only": args.boundary_only,
+        "boundary_source": "Distinct real samples, contiguous final 2053-token windows; not formal benchmark prompts",
         "cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
         "protocol": "Distinct real samples; exact token-length buckets; no padding; fresh cache per generate; EOS-aware complete IDs.",
     }
     write_json(args.output_dir / "plan.json", plan)
     started = time.perf_counter()
-    results = []
+    results, selected = [], {}
     try:
         load_started = time.perf_counter()
         model, config = load_checkpoint(args.checkpoint, "incremental")
@@ -249,13 +501,22 @@ def run(args):
         load_seconds = time.perf_counter() - load_started
         write_json(args.output_dir / "runtime.json", {
             "load_seconds": load_seconds, "torch": torch.__version__, "cuda": torch.version.cuda,
+            "transformers": version("transformers"), "torch_num_threads": torch.get_num_threads(),
+            "omp_num_threads": os.environ.get("OMP_NUM_THREADS"),
+            "mkl_num_threads": os.environ.get("MKL_NUM_THREADS"),
             "device_name": torch.cuda.get_device_name(0), "model_class": type(model).__name__,
             "actual_fast_weight_heads": model.model.layers[0].attn.num_fw_heads,
             "chunk_size": config.lact_chunk_size,
         })
-        for length in args.lengths:
+        lengths = args.lengths[:1] if args.boundary_only else args.lengths
+        for length in lengths:
+            selection_started = time.perf_counter()
             rows, selection = select_samples(args, tokenizer, length)
+            selection["selection_seconds"] = time.perf_counter() - selection_started
+            selected[length] = rows
             write_json(args.output_dir / f"selection_{length}.json", selection)
+            if args.boundary_only:
+                break
             trials = []
             reference = None
             for size in args.batch_sizes:
@@ -273,21 +534,41 @@ def run(args):
                 trials.append(measured)
                 write_json(args.output_dir / f"generation_{length}.json", trials)
                 print(json.dumps({"length": length, **{k: v for k, v in measured.items() if k != "token_ids"}}, ensure_ascii=False), flush=True)
-            largest_completed = max(trial["batch_size"] for trial in trials if trial["status"] == "completed")
-            isolation_group = batches(rows, min(8, largest_completed))[0]
-            reversed_ids = generate(model, tokenizer, list(reversed(isolation_group)))
-            isolation = {
-                "permuted_ids": [row["id"] for row in reversed(isolation_group)],
-                "all_permuted_rows_equal_to_batch1": all(reversed_ids[row["id"]] == reference[row["id"]] for row in isolation_group),
-                "batch1_replay_equal": generate(model, tokenizer, rows[:1])[rows[0]["id"]] == reference[rows[0]["id"]],
-            }
-            eos_test = controlled_eos(model, tokenizer, rows, reference, min(8, largest_completed))
-            entry = {"length": length, "selection": selection, "trials": trials, "isolation": isolation, "controlled_eos": eos_test}
+            entry = {"length": length, "selection": selection, "trials": trials}
             if args.legacy_measurements is not None:
                 entry["legacy"] = legacy_comparison(args.legacy_measurements, args.checkpoint, length, reference, trials)
             results.append(entry)
             write_json(args.output_dir / "results.json", results)
-        passed = all(
+
+        # Extra shapes from stopping/state probes must not affect production timing warmup.
+        for entry in results:
+            rows = selected[entry["length"]]
+            reference = entry["trials"][0]["token_ids"]
+            largest_completed = max(trial["batch_size"] for trial in entry["trials"] if trial["status"] == "completed")
+            isolation_group = batches(rows, min(8, largest_completed))[0]
+            reversed_ids = generate(model, tokenizer, list(reversed(isolation_group)))
+            entry["isolation"] = {
+                "permuted_ids": [row["id"] for row in reversed(isolation_group)],
+                "all_permuted_rows_equal_to_batch1": all(reversed_ids[row["id"]] == reference[row["id"]] for row in isolation_group),
+                "batch1_replay_equal": generate(model, tokenizer, rows[:1])[rows[0]["id"]] == reference[rows[0]["id"]],
+            }
+            entry["controlled_eos"] = controlled_eos(model, tokenizer, rows, reference, min(8, largest_completed))
+            write_json(args.output_dir / "results.json", results)
+
+        completed_sizes = set(args.batch_sizes)
+        for entry in results:
+            completed_sizes &= {trial["batch_size"] for trial in entry["trials"] if trial["status"] == "completed"}
+        boundary_sizes = sorted(size for size in completed_sizes if 1 < size <= 8)
+        if not boundary_sizes:
+            raise ValueError("No successful batch size in 2/4/8 for boundary checks")
+        source_rows = batches(selected[lengths[0]], max(boundary_sizes))[0]
+        boundary = run_boundary_checks(
+            model, [row["input_ids"][-2053:] for row in source_rows], boundary_sizes
+        )
+        boundary["source_sample_ids"] = [row["id"] for row in source_rows]
+        boundary["source_slice"] = "Contiguous final 2053 tokens of each real source input"
+        write_json(args.output_dir / "boundary.json", boundary)
+        generation_passed = all(
             all(trial["all_token_ids_equal_to_batch1"] for trial in item["trials"] if trial["status"] == "completed")
             and item["isolation"]["all_permuted_rows_equal_to_batch1"]
             and item["isolation"]["batch1_replay_equal"]
@@ -295,10 +576,15 @@ def run(args):
             and item["controlled_eos"].get("all_token_ids_equal", False)
             for item in results
         )
-        write_json(args.output_dir / "summary.json", {"passed": passed, "lengths": results})
+        passed = generation_passed and boundary["all_primary_checks_passed"]
+        write_json(args.output_dir / "summary.json", {
+            "passed": passed, "boundary_only": args.boundary_only, "lengths": results,
+            "boundary": {"path": str(args.output_dir / "boundary.json"), "cases": len(boundary["cases"]),
+                         "all_primary_checks_passed": boundary["all_primary_checks_passed"]},
+        })
         write_json(args.output_dir / "execution.json", {"finished_at": timestamp(), "elapsed_seconds": time.perf_counter() - started, "exit_code": 0 if passed else 1})
         if not passed:
-            raise RuntimeError("Batch generation, isolation or stopping validation failed")
+            raise RuntimeError("Batch generation, isolation, stopping or boundary validation failed")
     except BaseException as error:
         write_json(args.output_dir / "execution.json", {"finished_at": timestamp(), "elapsed_seconds": time.perf_counter() - started, "exit_code": 1, "error": f"{type(error).__name__}: {error}"})
         raise
@@ -314,6 +600,7 @@ def main():
     parser.add_argument("--num-samples", type=int, default=16)
     parser.add_argument("--length-buckets", type=int, choices=[1, 2], default=2)
     parser.add_argument("--legacy-measurements", type=Path)
+    parser.add_argument("--boundary-only", action="store_true", help="Run the real GPU teacher-forced state checks without repeating generation timing")
     args = parser.parse_args()
     args.batch_sizes = sorted(set([1, *args.batch_sizes]))
     if args.num_samples <= 0 or args.num_samples % (args.length_buckets * max(args.batch_sizes)):
