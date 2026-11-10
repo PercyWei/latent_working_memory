@@ -33,21 +33,6 @@ class LaCTCache:
         return self.layers[layer_idx].seen
 
 
-def project_each_sample(projection, hidden_states):
-    """Keep sensitive projections at the B1 GEMM shape under the caller's autocast.
-
-    Small control projections and the vocabulary head can choose different numerical
-    kernels when the sample dimension changes. Evaluate their independent rows with
-    the original single-sample shape, then restore the batch dimension.
-    """
-    if hidden_states.shape[0] == 1:
-        return projection(hidden_states)
-    return torch.cat(
-        [projection(hidden_states[index:index + 1]) for index in range(hidden_states.shape[0])],
-        dim=0,
-    )
-
-
 def attention_forward(layer, hidden_states, cache):
     batch_size, q_len, _ = hidden_states.shape
     q, k, v = layer.qkv(hidden_states).chunk(3, dim=-1)
@@ -136,20 +121,20 @@ def attention_forward(layer, hidden_states, cache):
         )
     if layer.lr_parameterization != "mamba":
         raise ValueError("Incremental inference requires the checkpoint's mamba LR rule")
-    lr = F.softplus(project_each_sample(layer.lr_proj, hidden_states).float() + layer.base_lr_inv)
+    lr = F.softplus(layer.lr_proj(hidden_states).float() + layer.base_lr_inv)
     lr = rearrange(lr, "b s (h d) -> (b h) s d", h=layer.num_fw_heads)
     lr0, lr1, lr2 = lr.chunk(3, dim=-1)
     momentum = None
     if layer.use_momentum:
         momentum = rearrange(
-            project_each_sample(layer.momentum_proj, hidden_states).float(),
+            layer.momentum_proj(hidden_states).float(),
             "b s (h d) -> (b h) s d",
             h=layer.num_fw_heads,
         )
     fast_output = cache.ttt.forward(fast_q, fast_k, fast_v, lr0, lr1, lr2, momentum)
     fast_output = layer.ttt_norm(fast_output)
     if layer.learnable_ttt_scale:
-        scale = F.silu(project_each_sample(layer.ttt_scale_proj, hidden_states), inplace=False)
+        scale = F.silu(layer.ttt_scale_proj(hidden_states), inplace=False)
         scale = rearrange(scale, "b s (h d) -> (b h) s d", h=layer.num_fw_heads)
         fast_output = fast_output * scale
     fast_output = rearrange(fast_output, "(b h) s d -> b s (h d)", h=layer.num_fw_heads)
@@ -262,6 +247,6 @@ class IncrementalLaCTForCausalLM(LaCTForCausalLM):
             slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         )
         return CausalLMOutputWithPast(
-            logits=project_each_sample(self.lm_head, hidden_states[:, indices]),
+            logits=self.lm_head(hidden_states[:, indices]),
             past_key_values=cache,
         )

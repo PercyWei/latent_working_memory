@@ -25,13 +25,14 @@ PENDING_FIELDS = (
 def tensor_difference(actual, reference):
     if actual is None or reference is None:
         return {"same_none": actual is None and reference is None,
-                "exact": actual is None and reference is None}
+                "exact": actual is None and reference is None,
+                "bitwise_equal": actual is None and reference is None}
     result = {
         "shape": list(actual.shape), "reference_shape": list(reference.shape),
         "dtype": str(actual.dtype), "reference_dtype": str(reference.dtype),
     }
     if actual.shape != reference.shape:
-        return {**result, "exact": False}
+        return {**result, "exact": False, "bitwise_equal": False}
     left, right = actual.float(), reference.float()
     difference = left - right
     values = torch.stack((
@@ -43,38 +44,145 @@ def tensor_difference(actual, reference):
         **result, "max_abs": values[0], "relative_l2": values[1],
         "finite": bool(values[2]),
         "exact": bool(values[2]) and values[0] == 0 and actual.dtype == reference.dtype,
+        "bitwise_equal": actual.dtype == reference.dtype and torch.equal(
+            actual.contiguous().view(torch.uint8), reference.contiguous().view(torch.uint8)
+        ),
     }
 
 
-def cache_differences(batch_cache, single_cache, focus, model):
+def cache_differences(batch_cache, single_cache, focus, model, reference_focus=0):
     layers = []
     for index, (batch, single, block) in enumerate(zip(
         batch_cache.layers, single_cache.layers, model.model.layers, strict=True
     )):
         heads = block.attn.num_fw_heads
         selected = slice(focus * heads, (focus + 1) * heads)
+        reference_selected = slice(reference_focus * heads, (reference_focus + 1) * heads)
         fields = {
             f"attention.{name}": tensor_difference(
-                getattr(batch, name)[focus:focus + 1], getattr(single, name)
+                getattr(batch, name)[focus:focus + 1],
+                getattr(single, name)[reference_focus:reference_focus + 1],
             )
             for name in ("keys", "values")
         }
+        for name in ("query_offsets", "key_offsets"):
+            left, right = getattr(batch, name), getattr(single, name)
+            fields[f"attention.{name}"] = tensor_difference(
+                left[focus:focus + 2] - left[focus],
+                right[reference_focus:reference_focus + 2] - right[reference_focus],
+            )
         for name in WEIGHT_FIELDS:
             value = getattr(batch.ttt, name)
+            reference = getattr(single.ttt, name)
             fields[f"ttt.{name}"] = tensor_difference(
-                None if value is None else value[selected], getattr(single.ttt, name)
+                None if value is None else value[selected],
+                None if reference is None else reference[reference_selected],
             )
         for name in PENDING_FIELDS:
             left, right = getattr(batch.ttt, name), getattr(single.ttt, name)
             fields[f"ttt.{name}.fragments"] = {"batch": len(left), "reference": len(right)}
             for fragment, (value, reference) in enumerate(zip(left, right, strict=True)):
-                fields[f"ttt.{name}.{fragment}"] = tensor_difference(value[selected], reference)
+                fields[f"ttt.{name}.{fragment}"] = tensor_difference(
+                    value[selected], reference[reference_selected]
+                )
         progress = {
             "batch": [batch.seen, batch.ttt.seen, batch.ttt.n_updates, batch.ttt.pending_length],
             "reference": [single.seen, single.ttt.seen, single.ttt.n_updates, single.ttt.pending_length],
         }
         layers.append({"layer": index, "progress": progress, "fields": fields})
     return layers
+
+
+def run_isolation(model, tokens, group, focus, reference, args):
+    """固定 focus 槽位，置换其他样本；两条路径具有相同 B、形状和 stride。"""
+    other_rows = [index for index in range(len(group)) if index != focus]
+    permutation = list(range(len(group)))
+    for destination, source in zip(other_rows, other_rows[1:] + other_rows[:1], strict=True):
+        permutation[destination] = source
+    permutation_tensor = torch.tensor(permutation, dtype=torch.long, device=tokens.device)
+    original_cache = permuted_cache = None
+    report = {
+        "created_at": timestamp(), "formal_benchmark_result": False,
+        "focus_id": args.focus_id, "focus_row": focus, "batch_size": len(group),
+        "input_tokens": tokens.shape[1], "teacher_forced_continuation_tokens": args.decode_steps,
+        "original_group_ids": [row["id"] for row in group],
+        "permuted_group_ids": [group[index]["id"] for index in permutation],
+        "permutation": permutation,
+        "distinct_input_sequences": len({tuple(row["input_ids"]) for row in group}),
+        "protocol": (
+            "Same batch size and focus slot; only other rows are cyclically permuted. "
+            "Both paths start with fresh caches and use fixed B1 continuation tokens. "
+            "Compare focus logits, all layer KV/offsets, and all TTT tensor fields bitwise. "
+            "Check each path against the original chunk-update progress. No hooks or tensor dumps."
+        ),
+        "steps": [],
+    }
+
+    def forward(current, seen, cache):
+        return model(
+            input_ids=current, attention_mask=torch.ones(
+                (current.shape[0], seen), dtype=torch.long, device=current.device
+            ), past_key_values=cache, use_cache=True, logits_to_keep=1, return_dict=True,
+        )
+
+    def progress_failures(cache, seen):
+        failures = []
+        for index, (layer, block) in enumerate(zip(cache.layers, model.model.layers, strict=True)):
+            chunk = layer.ttt.chunk_size
+            updates = (seen - 1) // chunk
+            pending = seen - updates * chunk
+            actual = [
+                layer.seen, layer.ttt.seen, layer.ttt.n_updates, layer.ttt.pending_length,
+                sum(value.shape[1] for value in layer.ttt.pending_k),
+                layer.keys.shape[0], layer.ttt.w0.shape[0],
+            ]
+            expected = [seen, seen, updates, pending, pending, len(group),
+                        len(group) * block.attn.num_fw_heads]
+            if actual != expected:
+                failures.append({"layer": index, "actual": actual, "expected": expected})
+        return failures
+
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        for step in range(args.decode_steps + 1):
+            current = tokens if step == 0 else torch.tensor(
+                [[reference[row["id"]][step - 1]] for row in group], dtype=torch.long, device=tokens.device
+            )
+            permuted_current = current.index_select(0, permutation_tensor)
+            if not torch.equal(current[focus], permuted_current[focus]):
+                raise ValueError("Isolation permutation changed the focus input")
+            if current.stride() != permuted_current.stride():
+                raise ValueError("Isolation paths must use the same input strides")
+            seen = tokens.shape[1] + step
+            original = forward(current, seen, original_cache)
+            original_cache = original.past_key_values
+            permuted = forward(permuted_current, seen, permuted_cache)
+            permuted_cache = permuted.past_key_values
+            layers = cache_differences(original_cache, permuted_cache, focus, model, focus)
+            logits = tensor_difference(original.logits[focus, -1], permuted.logits[focus, -1])
+            tensor_reports = [value for layer in layers for value in layer["fields"].values()
+                              if "exact" in value]
+            exact = logits["bitwise_equal"] and all(value["bitwise_equal"] for value in tensor_reports)
+            finite = logits["finite"] and all(value.get("finite", True) for value in tensor_reports)
+            progress = {"original": progress_failures(original_cache, seen),
+                        "permuted": progress_failures(permuted_cache, seen)}
+            row = {
+                "phase": "prefill" if step == 0 else "decode", "generated_position": step,
+                "seen": seen, "focus_logits": logits,
+                "original_argmax": int(original.logits[focus, -1].argmax()),
+                "permuted_argmax": int(permuted.logits[focus, -1].argmax()),
+                "focus_all_tensors_exact": exact, "finite": finite,
+                "progress_failures": progress, "progress_ok": not any(progress.values()),
+                "cache_layers": layers,
+            }
+            row["passed"] = exact and finite and row["progress_ok"]
+            report["steps"].append(row)
+            report["all_checks_passed"] = all(value["passed"] for value in report["steps"])
+            write_json(args.output_dir / "isolation.json", report)
+            print(json.dumps({"generated_position": step, "focus_all_tensors_exact": exact,
+                              "progress_ok": row["progress_ok"], "passed": row["passed"]}), flush=True)
+            del original, permuted
+    report["completed_at"] = timestamp()
+    write_json(args.output_dir / "isolation.json", report)
 
 
 class LastTokenCapture:
@@ -213,11 +321,15 @@ def run(args):
         "source_sweep": str(args.sweep_dir), "checkpoint": str(checkpoint),
         "focus_id": args.focus_id, "group_ids": [row["id"] for row in group],
         "batch_size": len(group), "decode_steps": args.decode_steps,
+        "isolation_only": args.isolation_only,
         "cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
     })
     tokens = torch.tensor([row["input_ids"] for row in group], dtype=torch.long, device="cuda:0")
     input_tokens = tokens.shape[1]
     model, _ = load_checkpoint(checkpoint, "incremental")
+    if args.isolation_only:
+        run_isolation(model, tokens, group, focus, reference, args)
+        return
     capture = LastTokenCapture(model)
     batch_cache = single_cache = None
     report = {
@@ -299,10 +411,15 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--focus-id", default="ruler/32768/niah_single_2/35")
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--decode-steps", type=int, default=6)
+    parser.add_argument("--decode-steps", type=int)
+    parser.add_argument("--isolation-only", action="store_true")
     args = parser.parse_args()
+    if args.decode_steps is None:
+        args.decode_steps = 4 if args.isolation_only else 6
     if args.batch_size < 2 or not 1 <= args.decode_steps < 128:
         parser.error("batch-size >= 2 and 1 <= decode-steps < 128 are required")
+    if args.isolation_only and args.batch_size < 3:
+        parser.error("isolation-only requires batch-size >= 3 to permute other rows")
     run(args)
 
 
