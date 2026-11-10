@@ -2,7 +2,7 @@
 
 创建时间：20261110 11:30:45 Asia/Shanghai
 
-最后修订时间：20261110 11:34:26 Asia/Shanghai
+最后修订时间：20261110 13:19:33 Asia/Shanghai
 
 ## 当前状态
 
@@ -10,11 +10,13 @@ LaCT、E²-TTT、In-Place TTT 的源码迁入、独立环境、本地数据接�
 
 各方法保留官方源码和独立 `eval.sh`，不接入统一训练框架。运行使用 `zcy-memory` 的单张 A800，显式设置 `CUDA_VISIBLE_DEVICES=0`；完整命令在各方法 README 中维护。数据下载、构造与共用范围见[数据准备](20261108_ttt_data_preparation.md)，依赖与安装命令见[评估环境](20261109_environment_setup.md)。
 
+评估并发调参已完成，测量、最终设置与完成时间估计统一见[运行参数测试](20261110_ttt_evaluation_tuning.md)。所有模型当前仍为每进程 batch size 1；并发进程数是独立的运行参数。
+
 | checkpoint | 正式评估范围 | 当前使用方式 |
 |---|---|---|
-| LaCT Momentum 760M | 六项 RULER，4K／8K／16K／32K，每任务每长度 500 条，共 12,000 条 | [增量推理](lact/README.md#环境与运行命令)；原始路径保留作对照 |
-| E²-TTT MLP／SwiGLU 1.3B | 每模型：两项 RULER，512–16K，共 6,000 条；SQuAD completion 2,984 条；SWDE 1,111 条 | [官方实现](e2_ttt/README.md#环境与评估命令)，每模型共 10,095 条 |
-| In-Place TTT 32K TTT／baseline | 每模型：十三项 RULER，4K–256K 七个长度，每任务每长度 100 条，共 9,100 条 | [完整 attention 原始路径](in_place_ttt/README.md#ruler-评估)；显存优化可选 |
+| LaCT Momentum 760M | 六项 RULER，4K／8K／16K／32K，每任务每长度 500 条，共 12,000 条 | [增量推理、8 个独立分片进程](lact/README.md#环境与运行命令)；原始路径保留作对照 |
+| E²-TTT MLP／SwiGLU 1.3B | 每模型：两项 RULER，512–16K，共 6,000 条；SQuAD completion 2,984 条；SWDE 1,111 条 | [官方实现，最多 4／6 个独立进程](e2_ttt/README.md#环境与评估命令)，每模型共 10,095 条 |
+| In-Place TTT 32K TTT／baseline | 每模型：十三项 RULER，4K–256K 七个长度，每任务每长度 100 条，共 9,100 条 | [完整 attention、单进程](in_place_ttt/README.md#ruler-评估)；TTT 仅压紧尾部缓存，baseline 使用原始路径 |
 
 LaCT 使用作者公开的重训权重；E²-TTT 使用作者官方 checkpoint；In-Place TTT 使用第三方 ProLong 32K／6,000 steps 权重，不对应论文原模型，其超过 32K 的结果属于长度外推。三个方法均不需要为本轮 checkpoint 评估重新训练。
 
@@ -26,7 +28,8 @@ LaCT 使用作者公开的重训权重；E²-TTT 使用作者官方 checkpoint�
 
 - Momentum：四长度各两条、共 8 条 128-token 生成与原始路径 IDs 一致；55 次 teacher-forced argmax、缓存进度与跨样本隔离检查通过。logits 仍有数值差异，不保证任意输入或不同执行上下文逐位等价。
 - Muon／PostNorm：仅通过 4K 两条生成检查；Muon／PreNorm 的 4K 生成仅 1／2 一致，尚不适用增量评估。
-- Momentum 32K 单样本均值从 97.08 秒降至 9.93 秒；12,000 条生成耗时外推从 154.77 小时降至 32.04 小时。峰值分配显存约 6.60 GiB。
+- 此前单进程的 Momentum 32K 单样本均值从 97.08 秒降至 9.93 秒；单进程峰值分配显存约 6.60 GiB。
+- 当前采用同卡 8 个独立进程，每进程 batch size 1。32K 调参的 8 条生成 IDs 与单进程一致，吞吐 0.3513 样本／秒，整体峰值 70,488 MiB（约 68.8 GiB）。完整评估按原始行号分片，合并时从原始预测重新计分；不改变样本数或模型更新规则。
 
 ### In-Place TTT
 
@@ -42,27 +45,20 @@ LaCT 使用作者公开的重训权重；E²-TTT 使用作者官方 checkpoint�
 | 仅压紧尾段 | 63.28 GiB | 不适用 |
 | 压紧尾段并分块 MLP | 56.84 GiB | 56.43 GiB |
 
-TTT 256K 平均耗时约 127.82 → 127.38 秒，没有实质提速；完整评估仍约 69 小时。128K／256K 原 attention kernel 分别占所测真实 GPU 活动时间约 80.3%／89.4%，完整 attention 的提速探索暂告一段落。入口默认启用 `expandable_segments:True`，用于缓解已遇到的显存碎片问题。
+TTT 256K 平均耗时约 127.82 → 127.38 秒，没有实质提速。128K／256K 原 attention kernel 分别占所测真实 GPU 活动时间约 80.3%／89.4%，完整 attention 的提速探索暂告一段落。入口默认启用 `expandable_segments:True`，用于缓解已遇到的显存碎片问题。
 
 ### E²-TTT
 
-使用官方增量推理、512-token SWA 和 TTT chunk；未实施本地推理优化。
+使用官方增量推理、512-token SWA 和 TTT chunk；未修改模型计算。独立进程并发调参与正式运行设置见[运行参数测试](20261110_ttt_evaluation_tuning.md)。
 
 - 初始 GPU 检查：每模型 SQuAD／SWDE 各两条、RULER 六长度各两条，共 16 条，生成与原生评分流程可执行。
 - 专项诊断：每模型 6 条真实输入、2 条边界输入，带诊断与原始生成的完整 IDs 全部一致。
 - 16K prefill 后，attention KV 与 TTT 缓冲平均持有 5.75 GiB 超额底层存储，首个 decode 后释放；这是存储冗余，不是已实现的峰值节省。
 - 127 次普通 decode 约 7.1–7.3 秒，普通单步约 55–57 ms；存在大量细粒度 CUDA 活动。同步回读集中在 prefill／完整 chunk 更新。若后续优化，先考虑缓存压紧与普通读出编译，再处理更新同步。
 
-## 评估耗时参考与代码来源
+## 代码来源
 
-下表均为单张 A800、batch size 1、少量样本外推，尚非完整评估实测。不同方法生成预算与计时范围不同，不能据此直接比较方法效率。
-
-| checkpoint／路径 | 完整评估规模 | 时间参考 |
-|---|---:|---:|
-| LaCT Momentum 增量 | 12,000 | 约 32 小时，仅生成部分 |
-| E²-TTT MLP | 10,095 | 约 18.9 小时 |
-| E²-TTT SwiGLU | 10,095 | 约 15.3 小时 |
-| In-Place TTT／baseline 原始 | 各 9,100 | 约 69／68 小时 |
+当前评估参数和时间估计集中维护在[运行参数测试](20261110_ttt_evaluation_tuning.md)，不按空余显存或进程数线性换算耗时。
 
 | 验证内容 | 实际计算代码 commit | 当时 Git 状态 |
 |---|---|---|

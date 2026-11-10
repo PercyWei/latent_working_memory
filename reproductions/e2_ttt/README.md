@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261110 11:34:26 Asia/Shanghai
+最后修订时间：20261110 13:19:33 Asia/Shanghai
 
 本目录保留 [E²-TTT 官方实现](https://github.com/zeyun-zhong/E2-TTT)及随附 lm-evaluation-harness，使用原模型与评估逻辑。论文为 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308)；源码边界与 revision 见 [UPSTREAM.md](UPSTREAM.md)。
 
@@ -47,7 +47,25 @@ bash reproductions/setup_eval_env.sh e2_ttt
 source ~/rivermind-data/envs/ttt-e2_ttt/bin/activate
 ```
 
-环境已安装时只需激活。从仓库根目录分别运行两个 checkpoint：
+环境已安装时只需激活。以下命令均从仓库根目录运行。
+
+推荐使用独立进程并发入口：**每进程 batch size 仍为 1**，MLP 使用 4 个进程，SwiGLU 使用 6 个进程；这是运行调度，不改变模型计算。参数依据与测量范围见[正式评估运行参数测试](../20261110_ttt_evaluation_tuning.md)。
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash reproductions/e2_ttt/eval_parallel.sh \
+  --checkpoint ~/rivermind-data/models/reproductions/e2_ttt/mlp-1.3b-15b \
+  --workers 4 \
+  --output-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b-parallel-w4
+
+CUDA_VISIBLE_DEVICES=0 bash reproductions/e2_ttt/eval_parallel.sh \
+  --checkpoint ~/rivermind-data/models/reproductions/e2_ttt/swiglu-1.3b-15b \
+  --workers 6 \
+  --output-dir artifacts/reproductions/e2_ttt/eval/swiglu-1.3b-15b-parallel-w6
+```
+
+并发入口将完整评估拆成 8 个不重复的原生 `eval.sh` job：六档 RULER 分别运行，另加 SQuAD completion 和 SWDE，每个 checkpoint 仍为 **10,095 条**。每个 job 独立加载模型、使用原生缓存，不分行或复制数据；CPU OMP／MKL 线程固定为 1。首次输出目录须不存在；续评在同一命令末尾追加 `--resume`，保持 checkpoint、workers、数据目录和输出目录一致。
+
+原单进程入口保留作对照，也用于选择单个 benchmark 或 RULER 长度：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash reproductions/e2_ttt/eval.sh \
@@ -77,6 +95,7 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/e2_ttt/eval.sh \
 - 每次生成使用独立 cache，保持原模型、task、harness 与 `upstream/training/eval.sh` 不变。Bootstrap 设为 0，仅省略标准误，不改变准确率。
 - 续评严格核对 `plan.json`，通过原生 `CachingLM` 的 `generation_cache.sqlite` 复用已保存响应，重新生成缺失请求并重建完整结果。
 - `predictions.jsonl` 保存逐样本记录，`native_harness/` 保存原始汇总；`summary.json` 按任务／长度汇总，仅全部任务完成后设置 `completed=true`。`evaluation.log`、`execution.json` 记录运行日志、状态、耗时和峰值显存。
+- 并发入口将各 job 的上述原生产物保存于 `parts/<job>/`；根目录 `manifest.json` 指向这些文件，不复制预测。全部 8 个 job 成功且核对总数后生成全量 `summary.json`，直接合并任务／长度指标；根目录 `execution.json` 记录实际并发总耗时，`jobs/` 保存各 job 日志与退出状态。
 
 ## 训练备用入口
 

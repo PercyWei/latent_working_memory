@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261110 11:34:26 Asia/Shanghai
+最后修订时间：20261110 13:19:33 Asia/Shanghai
 
 ## 当前状态与目标
 
@@ -47,29 +47,29 @@ source ~/rivermind-data/envs/ttt-in_place_ttt/bin/activate
 
 ## RULER 评估
 
-以下命令从仓库根目录执行，使用已激活环境的 `python`。显式选择物理 GPU 0；入口也接受单卡 1，进程内均为 `cuda:0`。
+以下命令从仓库根目录执行，使用已激活环境的 `python`。显式选择物理 GPU 0；入口也接受单卡 1，进程内均为 `cuda:0`。正式评估选择单进程、batch size 1；128K 双进程实测更慢。TTT 使用仅压紧尾部缓存的路径，baseline 使用原始路径，MLP 均不分块。参数测试与完整耗时估算见[运行参数测试](../20261110_ttt_evaluation_tuning.md)。
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
+CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in_place_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
-  --inference-mode original \
-  --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt-ruler
+  --inference-mode optimized --mlp-chunk-size 0 \
+  --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt-ruler-compact
 
-CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
+CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in_place_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-baseline \
   --inference-mode original \
   --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-baseline-ruler
 ```
 
-可选显存优化路径使用独立目录。以下命令同时启用尾部缓存压紧和 MLP 分块；分块的数值限制见下文。
+如需原始路径对照，将 TTT 的参数改为 `--inference-mode original` 并使用独立输出目录。以下可选路径同时启用尾部缓存压紧和 MLP 分块；分块的数值限制见下文，不作为本轮正式评估配置。
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
+CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in_place_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
   --inference-mode optimized --mlp-chunk-size 16384 \
   --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt-ruler-optimized
 
-CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
+CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in_place_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-baseline \
   --inference-mode optimized --mlp-chunk-size 16384 \
   --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-baseline-ruler-optimized
@@ -90,10 +90,10 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
 中断后在原命令末尾追加 `--resume`：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 bash reproductions/in_place_ttt/eval.sh \
+CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in_place_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
-  --inference-mode original \
-  --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt-ruler \
+  --inference-mode optimized --mlp-chunk-size 0 \
+  --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt-ruler-compact \
   --resume
 ```
 
