@@ -73,6 +73,7 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/eval.sh \
 | `--ruler-data` | `data/benchmarks/ruler-v1/reproductions/lact-760m` |
 | `--lengths` | `4096 8192 16384 32768` |
 | `--inference-mode` | `original`；可选 `incremental`，两者使用不同输出目录 |
+| `--num-shards`、`--shard-index` | 默认 `1`、`0`；按每任务原始行号分片，多个进程使用独立输出目录 |
 | `--resume` | 同一设置与已有输出目录续评 |
 
 `eval.sh` 使用当前环境的 `python`，仅接受单卡 `CUDA_VISIBLE_DEVICES=0` 或 `1`，默认 0。首次运行输出目录须不存在。中断后原命令追加 `--resume`：
@@ -86,6 +87,17 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/eval.sh \
 ```
 
 续评核对 checkpoint、数据、长度、推理模式、生成与精度设置，跳过已有样本并重新汇总。仅自动移除末行未写完的 JSON，其他损坏、重复或不匹配记录报错。
+
+并发时每进程仍为 batch size 1，使用相同 `--num-shards` 和不同的 `--shard-index`，各自执行四长度／六任务的互不重叠行。全量样本数不变。完成后在 LaCT 环境中合并，例如八片目录为 `shard-00` 至 `shard-07`：
+
+```bash
+export PYTHONPATH="$PWD/reproductions/lact:$PWD/reproductions/lact/upstream/lact_llm:$PWD/src"
+CUDA_VISIBLE_DEVICES=0 python -u reproductions/lact/scripts/merge_evaluation.py \
+  --shard-dirs artifacts/reproductions/lact/eval/momentum-sharded/shard-{00..07} \
+  --output-dir artifacts/reproductions/lact/eval/momentum-sharded/merged
+```
+
+合并从原始预测重新计分，严格检查分片完整性，不平均已取整的分片分数。合并预测通过 `(shard_index, execution_attempt)` 和 `plan.source_shards` 关联原执行来源；合并目录只用于汇总，续评仍使用各原始分片目录。实际进程数与完整启动示例见[运行参数测试](../20261110_ttt_evaluation_tuning.md)。
 
 每条输入为 `input + answer_prefix`，由 checkpoint tokenizer 添加默认 special tokens；完整输入加 128-token 输出预算不得超过长度档位，不截断或现场构造数据。采用单样本 greedy，参数 float32、CUDA BF16 autocast、关闭外层 autograd，仍执行显式 TTT 更新。评分复用 NVIDIA RULER 的 `postprocess_pred` 与 `string_match_all`。
 

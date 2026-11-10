@@ -142,12 +142,17 @@ def main():
     parser.add_argument("--length", type=int, required=True)
     parser.add_argument("--workers", type=int, nargs="+", default=[1, 2, 4])
     parser.add_argument("--num-samples", type=int, default=8)
+    parser.add_argument("--inference-mode", choices=("original", "incremental", "optimized"))
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     if args.num_samples < 2 or min(args.workers) < 1 or max(args.workers) > args.num_samples or len(set(args.workers)) != len(args.workers):
         parser.error("Use distinct positive workers and at least two samples, with samples >= workers")
     if args.dataset != "ruler" and args.method != "e2_ttt":
         parser.error("Recall benchmarks apply only to E2-TTT")
+    inference_mode = args.inference_mode or ("incremental" if args.method == "lact" else "original")
+    allowed_modes = {"lact": ("original", "incremental"), "e2_ttt": ("original",), "in_place_ttt": ("original", "optimized")}
+    if inference_mode not in allowed_modes[args.method]:
+        parser.error("Inference mode does not apply to this method")
     args.checkpoint, args.output_dir = args.checkpoint.expanduser().resolve(), args.output_dir.expanduser().resolve()
     args.output_dir.mkdir(parents=True, exist_ok=False)
     method_root = ROOT / "reproductions" / args.method
@@ -165,7 +170,7 @@ def main():
         "created_at": timestamp(), "source": source_record(), "method": args.method,
         "checkpoint": str(args.checkpoint), "checkpoint_config": json.loads((args.checkpoint / "config.json").read_text()),
         "dataset": args.dataset, "length": args.length, "samples": samples_for(args),
-        "inference_mode": "incremental" if args.method == "lact" else "original",
+        "inference_mode": inference_mode,
         "mlp_chunk_size": 0, "workers_to_test": args.workers,
         "cuda_visible_devices": "0", "batch_size_per_worker": 1,
         "worker_python": str(python), "omp_num_threads": 1, "mkl_num_threads": 1,
@@ -178,9 +183,9 @@ def main():
         result = run_trial(trial, env, python, args.output_dir / f"w{workers}")
         if result["status"] == "completed":
             values = {row["id"]: row["token_ids"] for row in result["samples"]}
-            if references is None:
+            if workers == 1:
                 references = values
-            result["output_ids_equal_to_first_trial"] = values == references
+            result["output_ids_equal_to_first_trial"] = None if references is None else values == references
         summaries.append(result)
         write_json(args.output_dir / "summary.json", summaries)
         print(json.dumps({key: value for key, value in result.items() if key != "samples"}), flush=True)

@@ -70,7 +70,25 @@ def read_samples(path):
     return samples
 
 
-def read_predictions(path, expected, logger):
+def validate_prediction(record, expected, shard_index):
+    sample_id = record["id"]
+    if sample_id not in expected:
+        raise ValueError(f"Prediction is outside the planned shard: {sample_id}")
+    length, task, position, row = expected[sample_id]
+    if (
+        record["length"] != length
+        or record["task"] != task
+        or record["sample_position"] != position
+        or record["source_index"] != row["index"]
+        or record["references"] != row["outputs"]
+        or record["shard_index"] != shard_index
+    ):
+        raise ValueError(f"Saved prediction does not match the current sample: {sample_id}")
+    # 重新计分时直接使用原始 prediction；已保存的 score 不是汇总依据。
+    postprocess_pred(record["prediction"])
+
+
+def read_predictions(path, expected, logger, shard_index):
     records = {}
     if not path.exists():
         return records
@@ -92,21 +110,72 @@ def read_predictions(path, expected, logger):
             sample_id = record["id"]
             if sample_id in records:
                 raise ValueError(f"Duplicate saved prediction: {sample_id}")
-            length, task, position, row = expected[sample_id]
-            if (
-                record["length"] != length
-                or record["task"] != task
-                or record["sample_position"] != position
-                or record["source_index"] != row["index"]
-                or record["references"] != row["outputs"]
-            ):
-                raise ValueError(f"Saved prediction does not match the current sample: {sample_id}")
-            # 重新计分时直接使用原始 prediction；已保存的 score 不是汇总依据。
-            postprocess_pred(record["prediction"])
+            validate_prediction(record, expected, shard_index)
             records[sample_id] = record
             if not line.endswith(b"\n"):
                 stream.write(b"\n")
     return records
+
+
+def build_summary(plan, samples, records, output):
+    shard_index, num_shards = plan["shard_index"], plan["num_shards"]
+    positions = {
+        key: [
+            position
+            for position in range(len(rows))
+            if shard_index is None or position % num_shards == shard_index
+        ]
+        for key, rows in samples.items()
+    }
+    expected_ids = {
+        f"ruler/{length}/{task}/{position}"
+        for (length, task), selected in positions.items()
+        for position in selected
+    }
+    if records.keys() != expected_ids:
+        raise ValueError("Predictions do not exactly cover the planned samples")
+    group_scores = {}
+    for (length, task), rows in samples.items():
+        scores = [
+            string_match_all(
+                [postprocess_pred(records[f"ruler/{length}/{task}/{position}"]["prediction"])],
+                [rows[position]["outputs"]],
+            )
+            for position in positions[(length, task)]
+        ]
+        group_scores[(length, task)] = sum(scores) / len(scores)
+    by_length = []
+    for length in plan["lengths"]:
+        means = [group_scores[(length, task)] for task in TASKS]
+        by_length.append(
+            {
+                "length": length,
+                "tasks": {
+                    task: {
+                        "samples": len(positions[(length, task)]),
+                        "accuracy": round(group_scores[(length, task)], 2),
+                    }
+                    for task in TASKS
+                },
+                "s_niah_average": round(sum(means[:3]) / 3, 2),
+                "multi_niah_average": round(sum(means[3:]) / 3, 2),
+                "six_task_average": round(sum(means) / len(means), 2),
+            }
+        )
+    return {
+        "completed_at": timestamp(),
+        "benchmark": "ruler",
+        "plan_path": str(output / "plan.json"),
+        "execution_path": str(output / "execution.json"),
+        "checkpoint": plan["checkpoint"],
+        "num_shards": num_shards,
+        "shard_index": shard_index,
+        "samples": len(records),
+        "score_unit": "percent",
+        "task_length_macro_average": round(sum(group_scores.values()) / len(group_scores), 2),
+        "by_length": by_length,
+        "generation": plan["generation"],
+    }
 
 
 def load_checkpoint(checkpoint, inference_mode="original"):
@@ -149,12 +218,16 @@ def run(args, output, logger, run_source, execution_attempt):
         f"ruler/{length}/{task}/{position}": (length, task, position, row)
         for (length, task), rows in samples.items()
         for position, row in enumerate(rows)
+        if position % args.num_shards == args.shard_index
     }
     plan = {
         "created_at": timestamp(),
         "method": "lact",
         "source": run_source,
         "inference_mode": args.inference_mode,
+        "num_shards": args.num_shards,
+        "shard_index": args.shard_index,
+        "assigned_samples": len(expected),
         "checkpoint": str(checkpoint),
         "checkpoint_config": json.loads((checkpoint / "config.json").read_text()),
         "ruler_data": str(data),
@@ -189,7 +262,7 @@ def run(args, output, logger, run_source, execution_attempt):
                 raise ValueError(f"Resume setting differs from saved plan: {key}")
         plan = saved_plan
         plan["cuda_visible_devices"] = os.environ["CUDA_VISIBLE_DEVICES"]
-        records = read_predictions(output / "predictions.jsonl", expected, logger)
+        records = read_predictions(output / "predictions.jsonl", expected, logger, args.shard_index)
         logger.info("Resuming with %s/%s completed samples", len(records), len(expected))
     else:
         records = {}
@@ -233,8 +306,16 @@ def run(args, output, logger, run_source, execution_attempt):
         "a" if args.resume else "x", encoding="utf-8"
     ) as predictions:
         for (length, task), rows in samples.items():
-            logger.info("Evaluating length=%s task=%s samples=%s", length, task, len(rows))
+            assigned = sum(
+                position % args.num_shards == args.shard_index for position in range(len(rows))
+            )
+            logger.info(
+                "Evaluating length=%s task=%s shard=%s/%s assigned=%s source_samples=%s",
+                length, task, args.shard_index, args.num_shards, assigned, len(rows),
+            )
             for position, row in enumerate(rows):
+                if position % args.num_shards != args.shard_index:
+                    continue
                 sample_id = f"ruler/{length}/{task}/{position}"
                 if sample_id in records:
                     continue
@@ -269,6 +350,7 @@ def run(args, output, logger, run_source, execution_attempt):
                 record = {
                     "id": sample_id,
                     "execution_attempt": execution_attempt,
+                    "shard_index": args.shard_index,
                     "length": length,
                     "task": task,
                     "sample_position": position,
@@ -292,46 +374,7 @@ def run(args, output, logger, run_source, execution_attempt):
                     seconds,
                 )
 
-    group_scores = {}
-    for (length, task), rows in samples.items():
-        scores = [
-            string_match_all(
-                [postprocess_pred(records[f"ruler/{length}/{task}/{position}"]["prediction"])],
-                [row["outputs"]],
-            )
-            for position, row in enumerate(rows)
-        ]
-        group_scores[(length, task)] = sum(scores) / len(scores)
-    by_length = []
-    for length in args.lengths:
-        means = [group_scores[(length, task)] for task in TASKS]
-        by_length.append(
-            {
-                "length": length,
-                "tasks": {
-                    task: {
-                        "samples": len(samples[(length, task)]),
-                        "accuracy": round(group_scores[(length, task)], 2),
-                    }
-                    for task in TASKS
-                },
-                "s_niah_average": round(sum(means[:3]) / 3, 2),
-                "multi_niah_average": round(sum(means[3:]) / 3, 2),
-                "six_task_average": round(sum(means) / len(means), 2),
-            }
-        )
-    summary = {
-        "completed_at": timestamp(),
-        "benchmark": "ruler",
-        "plan_path": str(output / "plan.json"),
-        "execution_path": str(output / "execution.json"),
-        "checkpoint": str(checkpoint),
-        "samples": len(records),
-        "score_unit": "percent",
-        "task_length_macro_average": round(sum(group_scores.values()) / len(group_scores), 2),
-        "by_length": by_length,
-        "generation": plan["generation"],
-    }
+    summary = build_summary(plan, samples, records, output)
     write_json(output / "summary.json", summary)
     logger.info("Completed %s samples; summary: %s", len(records), output / "summary.json")
 
@@ -341,6 +384,8 @@ def main():
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--inference-mode", choices=("original", "incremental"), default="original")
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--num-shards", type=int, default=1, help="Independent row shards per task and length")
+    parser.add_argument("--shard-index", type=int, default=0, help="Zero-based row shard index")
     parser.add_argument(
         "--ruler-data",
         type=Path,
@@ -351,6 +396,10 @@ def main():
         "--resume", action="store_true", help="Continue an existing output directory"
     )
     args = parser.parse_args()
+    if not 1 <= args.num_shards <= SAMPLES_PER_TASK_LENGTH:
+        parser.error(f"--num-shards must be between 1 and {SAMPLES_PER_TASK_LENGTH}")
+    if not 0 <= args.shard_index < args.num_shards:
+        parser.error("--shard-index must be in [0, num_shards)")
     if os.environ.get("CUDA_VISIBLE_DEVICES") not in {"0", "1"}:
         parser.error("CUDA_VISIBLE_DEVICES must be 0 or 1; select one physical GPU")
     model_class = (
