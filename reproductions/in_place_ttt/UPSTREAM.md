@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261110 11:34:26 Asia/Shanghai
+最后修订时间：20261110 17:31:44 Asia/Shanghai
 
 ## 来源
 
@@ -18,12 +18,13 @@
 |---|---|
 | `upstream/` | 未修改的官方来源，保留训练、推理及导出入口 |
 | `scripts/evaluate.py`、`runtime.py`、`provenance.py` | 本地 JSONL 接入、严格加载、生成调度、原生评分、续评及代码来源记录 |
+| `eval.sh`、`../evaluate_multi_gpu.py`、`scripts/merge_evaluation.py` | 多卡独立进程调度、互斥行分片及完整结果合并，不修改模型计算 |
 | `optimized/` | 独立的模型子类，压紧 TTT 尾部存储、可选 MLP 分块；不改 checkpoint keys、上游文件、全局 AutoModel 注册或 OpenCompass 安装 |
 | `scripts/validate_optimization.py` | 原始／优化生成、chunk 边界和样本隔离的配对验证 |
 
 `original` 调用官方模型及原 OpenCompass `HuggingFaceBaseModel.generate`。`optimized` 复用一次完整编码的输入，保持特殊 token、生成参数、解码和评分；缓存压紧不裁剪 attention KV 或 fast weights，MLP 分块保留原 TTT chunk 的先读后更新及尾段处理。
 
-`eval.sh` 默认 `original`、单进程、batch size 1，显式选择物理 GPU 0 或 1。优化模式的 `--mlp-chunk-size` 默认 `16384`，设为 `0` 时仅压紧 TTT 尾部缓存、保留原 MLP 计算形状。完整运行指令、数据规模和产物见 [README](README.md)，验证与性能结论统一见[复现状态记录](../20261110_ttt_reproduction_status.md)。
+`eval.sh` 默认 `original`、每进程 batch size 1，单卡运行一个进程；设置 `CUDA_VISIBLE_DEVICES=0,1` 或 `1,0` 时，每卡一个进程评估互斥样本，完成后从原始预测重新计分。优化模式的 `--mlp-chunk-size` 默认 `16384`，设为 `0` 时仅压紧 TTT 尾部缓存、保留原 MLP 计算形状。完整运行指令、数据规模和产物见 [README](README.md)，验证与性能结论统一见[复现状态记录](../20261110_ttt_reproduction_status.md)。
 
 本地 wrapper 使用本次最大评估长度作为 `max_seq_len`，通过 OpenCompass 实际支持的 `generation_kwargs` 和 `max_out_len=64` 传入生成设置；不使用原配置中不受支持的 `gen_config`／`engine_config`，也不把聊天模板参数 `enable_thinking` 传入 base 模型。每条完整编码输入加 64-token 预算必须在长度档位内，不截断、不自动改 RoPE 或添加 YaRN。
 

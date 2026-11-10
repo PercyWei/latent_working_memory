@@ -2,11 +2,14 @@
 set -euo pipefail
 
 eval_gpu="${CUDA_VISIBLE_DEVICES:-0}"
-if [[ $eval_gpu != 0 && $eval_gpu != 1 ]]; then
-  printf 'E²-TTT parallel evaluation requires one physical GPU: CUDA_VISIBLE_DEVICES=0 or 1.\n' >&2
-  exit 2
-fi
-if [[ ${WORLD_SIZE:-1} != 1 ]]; then
+case $eval_gpu in
+  0|1|0,1|1,0) ;;
+  *)
+    printf 'E²-TTT parallel evaluation requires CUDA_VISIBLE_DEVICES=0, 1, 0,1 or 1,0.\n' >&2
+    exit 2
+    ;;
+esac
+if [[ ${WORLD_SIZE:-1} != 1 || ${LOCAL_RANK+x} || ${RANK+x} ]]; then
   printf 'E²-TTT parallel evaluation requires one launcher process.\n' >&2
   exit 2
 fi

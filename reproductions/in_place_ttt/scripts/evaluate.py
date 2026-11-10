@@ -74,16 +74,41 @@ def read_rows(path, count):
     return rows
 
 
-def read_predictions(path, plan, execution_attempt):
+def load_expected(plan):
+    expected = {}
+    for length in plan["lengths"]:
+        for task in plan["tasks"]:
+            source = Path(plan["ruler_data"]) / str(length) / task / "test.jsonl"
+            rows = read_rows(source, plan["samples_per_task"])
+            for index, row in enumerate(rows):
+                if plan["shard_index"] is None or index % plan["num_shards"] == plan["shard_index"]:
+                    expected[length, task, index] = (str(source), row)
+    return expected
+
+
+def validate_prediction(record, expected, shard_index):
+    key = record["length"], record["task"], record["row"]
+    if key not in expected or record["shard_index"] != shard_index:
+        raise ValueError(f"Prediction is outside the planned shard: {key}")
+    source, row = expected[key]
+    if (
+        record["source"] != source
+        or record["source_index"] != row["index"]
+        or record["gold"] != row["outputs"]
+    ):
+        raise ValueError(f"Saved prediction does not match current data: {key}")
+    if record["generated_tokens"] != len(record["token_ids"]):
+        raise ValueError(f"Saved prediction token count differs from token IDs: {key}")
+    prediction = extract_non_reasoning_content(record["raw_prediction"])
+    if prediction != record["prediction"]:
+        raise ValueError(f"Saved prediction postprocessing does not match: {key}")
+    return key
+
+
+def read_predictions(path, expected, shard_index, execution_attempt):
     if not path.exists():
         return {}
     completed = {}
-    expected = {
-        (length, task, row)
-        for length in plan["lengths"]
-        for task in plan["tasks"]
-        for row in range(plan["samples_per_task"])
-    }
     with path.open("r+b") as stream:
         while True:
             offset = stream.tell()
@@ -98,90 +123,88 @@ def read_predictions(path, plan, execution_attempt):
                 stream.truncate(offset)
                 logging.warning("Removed incomplete final prediction at byte %s", offset)
                 break
-            key = record["length"], record["task"], record["row"]
-            if key not in expected or key in completed:
-                raise ValueError(f"Unexpected or duplicate prediction key: {key}")
+            key = validate_prediction(record, expected, shard_index)
+            if key in completed:
+                raise ValueError(f"Duplicate prediction key: {key}")
             if not 0 <= record["execution_attempt"] < execution_attempt:
                 raise ValueError(f"Saved prediction has an invalid execution attempt: {key}")
-            if record["generated_tokens"] != len(record["token_ids"]):
-                raise ValueError(f"Saved prediction token count differs from token IDs: {key}")
             completed[key] = record
             if not line.endswith(b"\n"):
                 stream.write(b"\n")
     return completed
 
 
-def evaluate(plan, wrapper, resume, completed, execution_attempt):
-    data, output = Path(plan["ruler_data"]), Path(plan["output_dir"])
-    budget = plan["tokens_to_generate"]
+def build_summary(plan, expected, completed, output):
+    if completed.keys() != expected.keys():
+        raise ValueError("Predictions do not exactly cover the planned samples")
     summary = {
         "checkpoint": plan["checkpoint"],
         "inference_mode": plan["inference_mode"],
         "mlp_chunk_size": plan["mlp_chunk_size"],
+        "num_shards": plan["num_shards"],
+        "shard_index": plan["shard_index"],
+        "completed": True,
         "lengths": {},
-        "samples": 0,
+        "samples": len(completed),
     }
+    for length in plan["lengths"]:
+        length_results = {}
+        for task, evaluator_class in TASKS.items():
+            keys = [key for key in expected if key[0] == length and key[1] == task]
+            native_score = evaluator_class().score(
+                predictions=[
+                    extract_non_reasoning_content(completed[key]["raw_prediction"])
+                    for key in keys
+                ],
+                gold=[expected[key][1]["outputs"] for key in keys],
+            )
+            length_results[task] = native_score
+            result_dir = output / "results" / str(length)
+            result_dir.mkdir(parents=True, exist_ok=True)
+            write_json(result_dir / f"{task}.json", native_score)
+        summary["lengths"][str(length)] = {
+            "tasks": length_results,
+            "score": sum(result["score"] for result in length_results.values()) / len(TASKS),
+        }
+    return summary
+
+
+def evaluate(plan, wrapper, resume, completed, execution_attempt, expected):
+    output = Path(plan["output_dir"])
+    budget = plan["tokens_to_generate"]
+    current_group = None
     with (output / "predictions.jsonl").open("a" if resume else "w") as predictions_file:
-        for length in plan["lengths"]:
-            length_results = {}
-            for task, evaluator_class in TASKS.items():
-                source = data / str(length) / task / "test.jsonl"
-                rows = read_rows(source, plan["samples_per_task"])
-                predictions, gold = [], []
-                evaluator = evaluator_class()
-                for index, row in enumerate(rows):
-                    key = length, task, index
-                    if key in completed:
-                        record = completed[key]
-                        if (
-                            record["source"] != str(source)
-                            or record["source_index"] != row["index"]
-                            or record["gold"] != row["outputs"]
-                        ):
-                            raise ValueError(f"{key}: saved prediction does not match current data")
-                        prediction = extract_non_reasoning_content(record["raw_prediction"])
-                        if prediction != record["prediction"]:
-                            raise ValueError(
-                                f"{key}: saved prediction postprocessing does not match"
-                            )
-                        predictions.append(prediction)
-                        gold.append(row["outputs"])
-                        continue
-                    prompt = row["input"] + row["answer_prefix"]
-                    start = time.perf_counter()
-                    # Every generate call creates a new upstream cache, including TTT state.
-                    generated = generate_one(wrapper, prompt, budget, length)
-                    prediction = extract_non_reasoning_content(generated["raw_prediction"])
-                    record = {
-                        "execution_attempt": execution_attempt,
-                        "length": length,
-                        "task": task,
-                        "row": index,
-                        "source": str(source),
-                        "source_index": row["index"],
-                        **generated,
-                        "prediction": prediction,
-                        "gold": row["outputs"],
-                        "native_score": evaluator.score([prediction], [row["outputs"]]),
-                        "seconds": time.perf_counter() - start,
-                    }
-                    predictions_file.write(json.dumps(record, ensure_ascii=False) + "\n")
-                    predictions_file.flush()
-                    predictions.append(prediction)
-                    gold.append(row["outputs"])
-                    logging.info("%s/%s: %s/%s", length, task, index + 1, len(rows))
-                native_score = evaluator.score(predictions=predictions, gold=gold)
-                length_results[task] = native_score
-                result_dir = output / "results" / str(length)
-                result_dir.mkdir(parents=True, exist_ok=True)
-                write_json(result_dir / f"{task}.json", native_score)
-                summary["samples"] += len(rows)
-            average = sum(result["score"] for result in length_results.values()) / len(TASKS)
-            summary["lengths"][str(length)] = {
-                "tasks": length_results,
-                "score": average,
+        for key, (source, row) in expected.items():
+            if key in completed:
+                continue
+            length, task, index = key
+            if current_group != (length, task):
+                evaluator = TASKS[task]()
+                current_group = length, task
+            prompt = row["input"] + row["answer_prefix"]
+            start = time.perf_counter()
+            # Every generate call creates a new upstream cache, including TTT state.
+            generated = generate_one(wrapper, prompt, budget, length)
+            prediction = extract_non_reasoning_content(generated["raw_prediction"])
+            record = {
+                "execution_attempt": execution_attempt,
+                "shard_index": plan["shard_index"],
+                "length": length,
+                "task": task,
+                "row": index,
+                "source": source,
+                "source_index": row["index"],
+                **generated,
+                "prediction": prediction,
+                "gold": row["outputs"],
+                "native_score": evaluator.score([prediction], [row["outputs"]]),
+                "seconds": time.perf_counter() - start,
             }
-    write_json(output / "summary.json", summary)
+            predictions_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+            predictions_file.flush()
+            completed[key] = record
+            logging.info("%s/%s: row=%s shard=%s/%s", length, task, index, plan["shard_index"], plan["num_shards"])
+    write_json(output / "summary.json", build_summary(plan, expected, completed, output))
 
 
 def main():
@@ -192,6 +215,8 @@ def main():
     parser.add_argument("--inference-mode", choices=("original", "optimized"), default="original")
     parser.add_argument("--mlp-chunk-size", type=int, default=16384)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--num-shards", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument(
         "--ruler-data",
         type=Path,
@@ -204,6 +229,8 @@ def main():
         default=[4096, 8192, 16384, 32768, 65536, 131072, 262144],
     )
     args = parser.parse_args()
+    if not 1 <= args.num_shards <= 100 or not 0 <= args.shard_index < args.num_shards:
+        parser.error("Use 1 <= num-shards <= 100 and 0 <= shard-index < num-shards.")
     physical_gpu = os.environ.get("CUDA_VISIBLE_DEVICES", "0")
     if physical_gpu not in {"0", "1"}:
         parser.error("CUDA_VISIBLE_DEVICES must select a single physical GPU: 0 or 1.")
@@ -236,6 +263,9 @@ def main():
         "lengths": args.lengths,
         "samples_per_task": 100,
         "tasks": list(TASKS),
+        "num_shards": args.num_shards,
+        "shard_index": args.shard_index,
+        "assigned_samples": len(args.lengths) * len(TASKS) * len(range(args.shard_index, 100, args.num_shards)),
         "tokens_to_generate": 64,
         "prompt": "input + answer_prefix; base completion; no chat template",
         "model_wrapper": "runtime.EvaluationModel",
@@ -304,8 +334,9 @@ def main():
             plan = previous
         else:
             write_json(plan_path, plan)
+        expected = load_expected(plan)
         completed = (
-            read_predictions(output / "predictions.jsonl", plan, execution_attempt)
+            read_predictions(output / "predictions.jsonl", expected, plan["shard_index"], execution_attempt)
             if args.resume
             else {}
         )
@@ -333,7 +364,7 @@ def main():
         else:
             write_json(runtime_path, runtime)
         logging.info("Runtime: %s", json.dumps(runtime, ensure_ascii=False))
-        evaluate(plan, wrapper, args.resume, completed, execution_attempt)
+        evaluate(plan, wrapper, args.resume, completed, execution_attempt, expected)
         attempt["status"] = "completed"
         attempt["exit_code"] = 0
     except BaseException as error:

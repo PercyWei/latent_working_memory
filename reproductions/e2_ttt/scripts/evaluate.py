@@ -33,10 +33,12 @@ def timestamp():
 
 
 def write_json(path, value):
-    path.write_text(
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
         json.dumps(value, ensure_ascii=False, indent=2, default=handle_non_serializable) + "\n",
         encoding="utf-8",
     )
+    temporary.replace(path)
 
 
 def parse_args():
@@ -44,6 +46,8 @@ def parse_args():
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--resume", action="store_true", help="Resume the same output and plan using native response caching.")
+    parser.add_argument("--num-shards", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument(
         "--benchmarks",
         choices=["ruler", "squad_completion", "swde"],
@@ -65,6 +69,8 @@ def parse_args():
         "--lengths", type=int, nargs="+", default=[512, 1024, 2048, 4096, 8192, 16384]
     )
     args = parser.parse_args()
+    if not 1 <= args.num_shards <= 500 or not 0 <= args.shard_index < args.num_shards:
+        parser.error("Use 1 <= --num-shards <= 500 and 0 <= --shard-index < num-shards")
     if os.environ.get("CUDA_VISIBLE_DEVICES") not in ("0", "1"):
         parser.error("Use one physical GPU: CUDA_VISIBLE_DEVICES=0 or 1.")
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
@@ -93,6 +99,9 @@ def execute(args):
     plan = {
         "created_at": timestamp(),
         "checkpoint": str(args.checkpoint),
+        "num_shards": args.num_shards,
+        "shard_index": args.shard_index,
+        "sharding": "Original source row index modulo num_shards; source_doc_id remains global",
         "checkpoint_config": json.loads((args.checkpoint / "config.json").read_text()),
         "benchmarks": args.benchmarks,
         "data": sources,
@@ -143,7 +152,10 @@ def execute(args):
         handlers=[logging.StreamHandler(), logging.FileHandler(args.output_dir / "evaluation.log")],
         force=True,
     )
-    summary = {"checkpoint": str(args.checkpoint), "completed": False, "metrics": {}}
+    summary = {
+        "checkpoint": str(args.checkpoint), "num_shards": args.num_shards,
+        "shard_index": args.shard_index, "completed": False, "metrics": {},
+    }
     write_json(args.output_dir / "summary.json", summary)
     started = time.monotonic()
     torch.cuda.reset_peak_memory_stats(0)
@@ -172,9 +184,9 @@ def execute(args):
                 if benchmark not in args.benchmarks:
                     continue
                 task_class = LocalSQuAD if benchmark == "squad_completion" else LocalSWDE
-                task = task_class(parquet[benchmark])
+                task = task_class(parquet[benchmark], args.num_shards, args.shard_index)
                 result = evaluate_tasks(recall_cache, [task])
-                save_result(result, benchmark, native_dir, predictions)
+                save_result(result, benchmark, native_dir, predictions, args.shard_index)
                 metric = result["results"][benchmark]["contains,none"]
                 summary["metrics"][benchmark] = {
                     "samples": len(task.eval_docs),
@@ -202,18 +214,20 @@ def execute(args):
                             name,
                             length,
                             ruler_cache,
+                            args.num_shards,
+                            args.shard_index,
                         )
                         for name in RULER_TASKS
                     ]
                     result = evaluate_tasks(ruler_cache, tasks)
-                    save_result(result, f"ruler_{length}", native_dir, predictions)
+                    save_result(result, f"ruler_{length}", native_dir, predictions, args.shard_index)
                     summary["metrics"]["ruler"][str(length)] = {
                         name: {
-                            "samples": 500,
+                            "samples": len(task.eval_docs),
                             "accuracy_percent": 100
                             * result["results"][f"{name}_{length}"][f"{length},none"],
                         }
-                        for name in RULER_TASKS
+                        for name, task in zip(RULER_TASKS, tasks, strict=True)
                     }
                     write_json(args.output_dir / "summary.json", summary)
         torch.cuda.synchronize(0)
@@ -261,14 +275,17 @@ def evaluate_tasks(lm, tasks):
     )
 
 
-def save_result(result, name, native_dir, predictions):
+def save_result(result, name, native_dir, predictions, shard_index):
     samples = result.pop("samples")
     write_json(native_dir / f"{name}.json", result)
     for task, rows in samples.items():
         for row in rows:
             predictions.write(
                 json.dumps(
-                    {"task": task, **row},
+                    {
+                        **row, "task": task, "shard_index": shard_index,
+                        "source_doc_id": row["doc"]["source_doc_id"],
+                    },
                     ensure_ascii=False,
                     default=handle_non_serializable,
                 )

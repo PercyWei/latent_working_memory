@@ -56,6 +56,7 @@ def merge(args):
             "plan_path": str(path / "plan.json"),
             "execution_path": str(path / "execution.json"),
             "source": plan["source"],
+            "cuda_visible_devices": plan["cuda_visible_devices"],
         }
         for path, plan in sorted(
             zip(directories, plans, strict=True), key=lambda pair: pair[1]["shard_index"]
@@ -70,6 +71,9 @@ def merge(args):
         "shard_index": None,
         "assigned_samples": len(expected),
         "source_shards": sources,
+        "cuda_visible_devices": ",".join(dict.fromkeys(
+            entry["cuda_visible_devices"] for entry in sources
+        )),
     }
     write_json(output / "plan.json", plan)
     started = time.perf_counter()

@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261110 11:34:26 Asia/Shanghai
+最后修订时间：20261110 17:31:44 Asia/Shanghai
 
 - 官方仓库：<https://github.com/zeyun-zhong/E2-TTT>。
 - 固定 revision：`0d1da370c7e3cea1642ba3af0477b7601849a1be`。
@@ -20,9 +20,9 @@
 
 | 文件 | 职责 |
 |---|---|
-| `eval.sh` | 从仓库根目录调用方法环境 Python，限定单进程、单卡 0 或 1 |
-| `scripts/evaluate.py` | 加载一次原模型，使用随附 HFLM／evaluator 评估本地数据，记录结果；原生 CachingLM 支持续评 |
-| `scripts/local_tasks.py` | 仅替换数据接入，保留原 prompt、生成参数及计分；RULER 拼接一次 answer_prefix 并严格检查 token 预算 |
+| `eval.sh`、`eval_parallel.sh`、`scripts/evaluate_parallel.py` | 单卡原生评估或独立进程并发；多卡按原始行号分片，固定 GPU 映射并汇总逐题指标 |
+| `scripts/evaluate.py` | 每进程加载一次原模型，使用随附 HFLM／evaluator 评估分配的本地样本，记录结果；原生 CachingLM 支持续评 |
+| `scripts/local_tasks.py` | 本地数据接入及互斥行分片，保留原 prompt、生成参数及计分；RULER 拼接一次 answer_prefix 并严格检查 token 预算 |
 | `scripts/train_340m_gpu1.sh` | 适配物理 GPU 1，保持官方全局 batch、训练步数及其余参数，调用原 training/train.sh |
 | `requirements-eval.txt` | 固定独立评估环境依赖 |
 
