@@ -12,7 +12,7 @@
 
 ## TTT baselines 第一阶段
 
-LaCT、E²-TTT 和 In-Place TTT 保留各自官方实现与训练框架；本阶段核对原论文设置，不加入新的写入目标或统一模型接口。执行范围和服务器条件见 [第一阶段记录](20261108_ttt_baselines_phase1.md)，固定的源码版本与本地差异见各目录的 `UPSTREAM.md`。
+LaCT、E²-TTT 和 In-Place TTT 的源码迁入、独立环境与 checkpoint 运行检查已完成，当前只剩正式评估。保留各自官方实现与训练框架，不加入新的写入目标或统一模型接口。验证范围、优化结论与耗时参考集中见 [复现状态](20261110_ttt_reproduction_status.md)，固定源码版本与本地差异见各目录的 `UPSTREAM.md`。
 
 各方法的 `upstream/` 保存官方源码，外层保存本地运行入口与记录。它们使用的 CUDA、PyTorch 和训练框架不同，按各自说明配置环境，不将这些依赖合并到主项目环境。
 
@@ -34,7 +34,7 @@ TTT baselines 的模型保存在 `~/rivermind-data/models/reproductions/<method>
 | E²-TTT | [e2_ttt/eval.sh](e2_ttt/eval.sh) | 两项 RULER，512–16K；SQuAD completion、SWDE | [E²-TTT 说明](e2_ttt/README.md) |
 | In-Place TTT | [in_place_ttt/eval.sh](in_place_ttt/eval.sh) | 十三项 RULER，4K–256K | [In-Place TTT 说明](in_place_ttt/README.md) |
 
-三个方法顺序使用空闲 GPU 0。具体参数、生成方式及结果文件见各方法说明；实现说明见 [checkpoint 评估入口](20261109_checkpoint_evaluation.md)，本轮执行计划与结果见 [GPU 验证与评估](20261109_checkpoint_gpu_evaluation.md)。
+三个方法顺序使用空闲 GPU 0，首次运行使用新输出目录，中断后以相同设置追加 `--resume`。完整命令、生成方式及结果文件分别在各方法 README 中维护；验证与优化结果见 [复现状态](20261110_ttt_reproduction_status.md)。
 
 ## 模型下载约定
 

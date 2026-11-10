@@ -2,7 +2,7 @@
 
 创建时间：20261109 10:58:35 Asia/Shanghai
 
-最后修订时间：20261109 12:18:53 Asia/Shanghai
+最后修订时间：20261110 11:34:26 Asia/Shanghai
 
 ## 配置原则与实际版本
 
@@ -44,11 +44,9 @@
 | E²-TTT | `~/rivermind-data/envs/ttt-e2_ttt/` | `uv pip check` 通过 | 入口、原模型注册与 harness 导入通过；两个 1.3B checkpoint 加载和 GPU 生成通过 |
 | In-Place TTT | `~/rivermind-data/envs/ttt-in_place_ttt/` | `uv pip check` 通过 | 入口、原模型注册、OpenCompass 与评分器通过；TTT／baseline 加载和 GPU 生成通过 |
 
-安装阶段的 CPU 导入检查均隐藏 CUDA 设备，且结束时 `torch.cuda.is_initialized()` 为 `False`。LaCT 所用 Triton 3.2.0 在导入 FLA 模块时会初始化 GPU 驱动，该模块随后已在授权 GPU 0 上完成导入与真实生成。具体 GPU 验证范围、运行问题和耗时见 [GPU 执行记录](20261109_checkpoint_gpu_evaluation.md)；完整 benchmark 指标尚未取得。本轮未新增测试或启动训练。
+完整模型 GPU 运行、验证限制和耗时参考见 [复现状态](20261110_ttt_reproduction_status.md)。LaCT 所用 Triton 3.2.0 在导入 FLA 时会初始化 GPU 驱动，运行时需显式设置 `CUDA_VISIBLE_DEVICES=0` 或 `1`。
 
-当前会话 `nvidia-smi` 仅暴露一张 A800，编号 0，设备节点为 `/dev/nvidia7`。用户已授权使用空闲 GPU 0，本轮显式设置 `CUDA_VISIBLE_DEVICES=0`，顺序验证三个方法；执行计划与结果见 [GPU 验证与评估](20261109_checkpoint_gpu_evaluation.md)。
-
-安装从同步后的服务器项目仓库执行。GitHub 已发布配置，服务器因无法连接 GitHub，通过 Gitee 同步同一提交。安装日志、实际包版本保存在服务器项目 `artifacts/reproductions/environment-setup_20261109/`，分别为 `<method>_install.log`、`<method>_versions.json`，主环境对照为 `main_versions.json`，检查结果为 `validation.json`。服务器系统为 Ubuntu 24.04.4 x86_64，驱动 580.126.20，CUDA Toolkit 12.8（nvcc V12.8.93）。
+安装日志与实际包版本保存在服务器项目 `artifacts/reproductions/environment-setup_20261109/`。服务器系统为 Ubuntu 24.04.4 x86_64，驱动 580.126.20，CUDA Toolkit 12.8（nvcc V12.8.93）。
 
 ## 安装命令
 

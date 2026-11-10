@@ -2,76 +2,55 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261109 20:39:51 Asia/Shanghai
+最后修订时间：20261110 11:34:26 Asia/Shanghai
 
-本目录接入 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现，保留其与 sliding-window attention 并行的 SwiGLU fast weights、负内积写入、Momentum / Muon 与逐次权重归一化。已接入本地 RULER checkpoint 评估及增量推理缓存，保留迁入模型的完整前缀路径作为对照；尚未完成正式 RULER 评估或论文指标复现。
+本目录接入 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现，保留与 sliding-window attention 并行的 SwiGLU fast weights、负内积写入及 Momentum／Muon 更新。源码、环境和 checkpoint 运行检查已完成，正式 RULER 评估尚未完成。
 
-## 代码与运行入口
-
-| 层次 | 位置 | 职责 |
+| 代码范围 | 位置 | 职责 |
 |---|---|---|
-| 迁入源码（source） | `upstream/lact_llm/`、`upstream/minimal_implementations/`、`upstream_flame/` | 固定 revision 的完整语言模型、简化实现及 flame 训练框架 |
-| 本地接入（adapters） | `scripts/`、`eval.sh`、`configs/` | checkpoint 加载、训练与评估入口、推理模式选择、验证及结果记录 |
-| 本地优化（optimization） | `incremental/` | 每层 attention KV、TTT 状态与待写 chunk 的增量缓存 |
+| 迁入源码 | `upstream/`、`upstream_flame/` | 固定 revision 的 LaCT 与 flame；来源和必要注册改动见 [UPSTREAM.md](UPSTREAM.md) |
+| 本地接入 | `scripts/`、`eval.sh`、`configs/` | checkpoint 加载、评估、单卡训练与来源记录 |
+| 本地优化 | `incremental/` | attention KV、fast weights、Momentum 与待写 chunk 的增量缓存 |
 
-`scripts/evaluate.py` 负责本地六项 RULER 的生成和计分，`scripts/validate_incremental.py` 比较两条路径的数值、完整生成及缓存隔离。单卡训练入口为 `scripts/train_760m_muon.sh`，配置 `configs/760m_muon_paper_single_gpu.toml` 保留公开命令的全局 token batch 和步数。
+验证、优化结果及适用范围统一记录在[复现状态](../20261110_ttt_reproduction_status.md)。增量实现不修改官方模型、配置或 TTT 更新函数。
 
-- [UPSTREAM.md](UPSTREAM.md)：固定源码 revision、文件范围和必要接入改动。
-- [源码迁入记录](20261108_execution.md)：源码接入与本地 CPU 检查。
-- [GPU 验证与评估记录](../20261109_checkpoint_gpu_evaluation.md)：完整模型运行状态与正式评估进度。
-- [增量推理记录](../20261109_lact_incremental_inference.md)：缓存实现、原始／增量一致性验证和耗时记录。
+## 评估目标与数据
 
-本次缓存优化没有修改迁入的 LaCT 模型、配置、TTT 更新函数或 flame trainer。flame 的 custom-model 注册属于必要接入差异，仅负责使 Transformers 能够按 `lact_swiglu` 配置加载模型；具体范围见 [UPSTREAM.md](UPSTREAM.md)。
+首批评估作者公开重训的 **760M Momentum／RoPE／PreNorm**，两个 Muon 变体按需补充。这些 checkpoint 使用论文训练设置重训，不是论文表格对应的同一次训练产物。
 
-## 目标与论文参照
+完整 RULER 为六项任务、4K／8K／16K／32K、每项每长度 500 条，共 **12,000 条／checkpoint**。三个公开 checkpoint 的 tokenizer 和特殊 token 配置一致，共用 `data/benchmarks/ruler-v1/reproductions/lact-760m/`；数据下载和构造命令见[评估数据准备](../20261108_ttt_data_preparation.md)。
 
-当前先评估作者公开的 760M Momentum、RoPE、PreNorm checkpoint；Muon 变体按需补充。下面列出原论文的训练设置与指标供参照，公开 checkpoint 是作者按相同训练设置重训发布的模型，不代表论文表格对应的同一次训练产物。
-
-| 项目 | 原论文设置 |
-|---|---|
-| 模型 | 24 层，hidden size 1536，TTT heads 4，低秩初始状态 rank 32 |
-| 序列 / TTT chunk / SWA | 32768 / 2048 / 2048 tokens |
-| 训练集 | Long-Data-Collections，约 68.8B tokens，Mixstra tokenizer、vocab size 32000 |
-| 数据配比 | 41.4% General Data、58.6% Instruction Data |
-| 训练预算 | 论文称 40B tokens；公开命令 40960 optimizer steps、全局 batch 32 条 32768-token 序列 |
-| 外层优化 | AdamW，lr 0.001，1024-step warmup，cosine decay，seed 42 |
-| 原硬件 | 32 × A100-40GB，约 20 小时 |
-| 长文本 loss | Book-3，760M 模型评估 2.5B tokens，绘制按位置的 NTP loss |
-| 检索 | RULER，4K / 8K / 16K / 32K |
-
-论文 `tab:ruler-single` 中 760M Momentum 的 S-NIAH-1/2/3 平均准确率为 **89.9 / 64.3 / 40.9 / 33.1**，Muon 为 **77.9 / 60.5 / 40.0 / 35.1**（依次对应 4K / 8K / 16K / 32K，单位 %）。`tab:ruler-multi` 中 MK-NIAH、MQ-NIAH、MV-NIAH 的平均值，Momentum 为 **41.7 / 29.7 / 18.5 / 9.1**，Muon 为 **42.9 / 32.1 / 17.1 / 7.5**。这些是原文参照，不是本次运行结果。
-
-本轮评估数据的任务、规模、共用范围及完整下载与构造命令见 [评估数据准备](../20261108_ttt_data_preparation.md)。公开的 Momentum／RoPE／PreNorm、Muon／NoPE／PostNorm 和 Muon／NoPE／PreNorm 三个 760M checkpoint 的 tokenizer 与特殊 token 配置一致，共用一份 12000 条数据。构造命令使用 Momentum 目录作为 tokenizer 来源，两个 Muon 变体无需另行生成数据；三个模型分别在同一数据集上评估。
+论文 `tab:ruler-single` 的 S-NIAH-1/2/3 平均准确率，Momentum 为 **89.9／64.3／40.9／33.1**，Muon 为 **77.9／60.5／40.0／35.1**；`tab:ruler-multi` 的 MK-NIAH、MQ-NIAH、MV-NIAH 平均，Momentum 为 **41.7／29.7／18.5／9.1**，Muon 为 **42.9／32.1／17.1／7.5**。以上依次对应 4K／8K／16K／32K，单位为 %，仅作原文参照。
 
 ## 模型下载
 
-作者在[官方 issue 回复](https://github.com/a1600012888/LaCT/issues/2#issuecomment-3282879455)中发布了 [YunjinZhang/lact_llm](https://huggingface.co/YunjinZhang/lact_llm/tree/main)，说明使用 32K 序列、Long-Data-Collections 和 40B tokens 重训了若干 760M 模型。下载前确保已有 `hf` CLI，安装方式见[复现总说明](../README.md#模型下载约定)。
+作者在[官方回复](https://github.com/a1600012888/LaCT/issues/2#issuecomment-3282879455)中发布了 [YunjinZhang/lact_llm](https://huggingface.co/YunjinZhang/lact_llm/tree/main)，使用 32K 序列、Long-Data-Collections 和约 40B tokens 重训。`hf` CLI 安装方式见[复现总说明](../README.md#模型下载约定)。
 
-首批下载 Momentum、RoPE、PreNorm 版本：
 ```bash
+# 首批 Momentum／RoPE／PreNorm
 hf download YunjinZhang/lact_llm \
   --include 'lact-momentum-rope-prenorm-nheads4-chunk2048-760m/*' \
   --local-dir ~/rivermind-data/models/reproductions/lact
-```
-可选：同时下载 Muon、NoPE 的 PreNorm 和 PostNorm 两个变体：
-```bash
+
+# 可选：Muon／NoPE 的 PreNorm 和 PostNorm
 hf download YunjinZhang/lact_llm \
   --include 'lact-muon-*/*' \
   --local-dir ~/rivermind-data/models/reproductions/lact
 ```
 
-## 本地 RULER 评估
+目录名与实际 fast-weight head 数不一致：Momentum 配置为 **2 heads**，两个 Muon 为 **4 heads**。加载时以 checkpoint 自带配置为准，严格拒绝 missing、unexpected、mismatched keys，不根据目录名改配置；形状记录见 [UPSTREAM.md](UPSTREAM.md)。
 
-先按 [评估数据准备](../20261108_ttt_data_preparation.md) 准备 `data/benchmarks/ruler-v1/reproductions/lact-760m/`。确认 `zcy-memory` 的物理 GPU 0 空闲、激活 LaCT 的原生 CUDA 环境后，从项目根目录运行。官方完整前缀路径：
+## 环境与运行命令
+
+使用 [requirements-eval.txt](requirements-eval.txt) 固定的独立评估环境，版本表见[评估环境](../20261109_environment_setup.md)。从服务器项目根目录安装并激活：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/eval.sh \
-  --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
-  --inference-mode original \
-  --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-ruler-original
+export PATH="$HOME/rivermind-data/tools/uv/bin:$PATH"
+bash reproductions/setup_eval_env.sh lact
+source ~/rivermind-data/envs/ttt-lact/bin/activate
 ```
 
-增量路径的验证结论按 checkpoint 区分：Momentum 已通过本轮四长度检查，Muon / PreNorm 尚未通过，默认仍为原始路径。增量路径使用同一 checkpoint、数据和生成设置，保存到独立目录：
+确认物理 GPU 0 空闲后运行。推荐首批 Momentum 使用已验证的增量路径：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/eval.sh \
@@ -80,16 +59,23 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/eval.sh \
   --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-ruler-incremental
 ```
 
-`eval.sh` 使用当前方法环境的 `python`，设置官方模型与项目源码路径，仅接受 `CUDA_VISIBLE_DEVICES=0` 或 `1`，未指定时默认 `0`。进程内设备为 `cuda:0`，实际物理设备选择写入 `plan.json`。`--checkpoint` 和 `--output-dir` 必需，首次运行的输出目录必须尚不存在。可选参数如下：
+保留官方完整前缀路径作对照：
 
-| 参数 | 默认值 |
+```bash
+CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/eval.sh \
+  --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
+  --inference-mode original \
+  --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-ruler-original
+```
+
+| 参数 | 默认值与约定 |
 |---|---|
 | `--ruler-data` | `data/benchmarks/ruler-v1/reproductions/lact-760m` |
-| `--lengths` | `4096 8192 16384 32768`，可选其中的子集 |
-| `--inference-mode` | `original`；可选 `incremental` |
-| `--resume` | 续评已有输出目录，默认关闭 |
+| `--lengths` | `4096 8192 16384 32768` |
+| `--inference-mode` | `original`；可选 `incremental`，两者使用不同输出目录 |
+| `--resume` | 同一设置与已有输出目录续评 |
 
-中断后使用相同设置和输出目录续评：
+`eval.sh` 使用当前环境的 `python`，仅接受单卡 `CUDA_VISIBLE_DEVICES=0` 或 `1`，默认 0。首次运行输出目录须不存在。中断后原命令追加 `--resume`：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/eval.sh \
@@ -99,50 +85,28 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/eval.sh \
   --resume
 ```
 
-续评核对 checkpoint 配置、数据路径、长度、任务、推理模式、生成和精度等设置，跳过已保存的样本 ID，并追加新的预测；时间和运行设备信息可以变化。仅删除最后一条未写完的 JSON 记录；已完成记录的损坏、重复 ID 或样本不匹配均报错。
+续评核对 checkpoint、数据、长度、推理模式、生成与精度设置，跳过已有样本并重新汇总。仅自动移除末行未写完的 JSON，其他损坏、重复或不匹配记录报错。
 
-两个 Muon 模型使用对应的 checkpoint 目录和新的输出目录，数据目录共用。评估要求每个长度的六项 `test.jsonl` 各有 500 条样本，不在入口内生成或截断样本。每条输入按 `input + answer_prefix` 拼接，再由 checkpoint tokenizer 添加默认 special tokens；完整输入与 128-token 输出预算之和必须不超过长度档位。采用 greedy、单样本生成，参考 `outputs` 仅用于计分。
+每条输入为 `input + answer_prefix`，由 checkpoint tokenizer 添加默认 special tokens；完整输入加 128-token 输出预算不得超过长度档位，不截断或现场构造数据。采用单样本 greedy，参数 float32、CUDA BF16 autocast、关闭外层 autograd，仍执行显式 TTT 更新。评分复用 NVIDIA RULER 的 `postprocess_pred` 与 `string_match_all`。
 
-`original` 指迁入模型经本地评估接入运行的原始推理路径，不表示完整复现了论文的运行环境。该模式调用迁入模型的 `generate`；原 `prepare_inputs_for_generation` 和模型 `forward` 均强制 `use_cache=False`，每生成一个 token 都重新计算完整前缀。`logits_to_keep=1` 仅减少 vocabulary logits 的计算，其耗时不代表增量解码性能。
+`original` 调用迁入模型的 `generate`，强制 `use_cache=False`，逐 token 重算完整前缀。`incremental` 缓存历史状态，保持先读后更新及尾段延迟写入：前缀长为 \(L\) 时提交 \(\lfloor(L-1)/2048\rfloor\) 次更新，当前支持单样本、无 padding、非 fused TTT。
 
-`incremental` 使用独立的本地实现，缓存 sliding-window KV、fast weights、PreNorm 累计状态、初始行范数、Momentum 和待写 chunk。保持先读后更新及尾段延迟写入：前缀长度为 \(L\) 时提交 \(\lfloor(L-1)/2048\rfloor\) 次更新。当前支持单样本、无 padding、非 fused TTT 推理；不修改 `upstream/` 中的模型或更新函数。两种模式均保持 greedy 和 128-token 预算。
+**增量路径支持范围：**Momentum 通过四长度、八条独立 128-token 生成的配对检查；Muon／PostNorm 仅通过 4K 检查；Muon／PreNorm 尚未通过，使用原始路径。代表性检查不保证任意输入逐位相同，也不替代正式评估。
 
-参数以 float32 加载，计算使用 CUDA bfloat16 autocast，实际 dtype 记录在 `plan.json`。关闭外层 autograd；原始 TTT 的负内积梯度已实现为显式矩阵运算，仍会执行记忆更新。入口不修改 checkpoint 的 Muon、PreNorm、RoPE、fused-kernel 或状态精度配置。
+## 来源记录与输出
 
-checkpoint 仅从本地加载，任何 missing、unexpected、mismatched keys 或加载错误均使评估失败，不接受随机初始化的缺失参数。三个发布目录的名称与实际 head 数相反：Momentum 的配置及权重为 **2 heads**，两个 Muon 为 **4 heads**。已读取 safetensors 元数据确认，具体形状见 [UPSTREAM.md](UPSTREAM.md)；加载时按 checkpoint 自带配置构造，不根据目录名改写。
+`plan.json.source` 保存上游 revision、本地 commit、Git dirty/status、入口及实际实现路径。续评保留首次计划来源，每次执行的当前来源写入 `execution.attempts[]`，逐样本 `execution_attempt` 关联对应执行；代码来源变化会留痕。
 
-### 运行来源与结果
-
-新运行在 `plan.json` 中记录 `upstream_revision`，并通过 `source` 保存本地代码来源：
-
-| 字段 | 含义 |
+| 文件 | 内容 |
 |---|---|
-| `source.local_git_commit` | 启动时本仓库的 Git commit |
-| `source.local_git_dirty`、`source.local_git_status` | tracked 与 untracked 文件的改动状态，不包含 ignored 文件 |
-| `source.entrypoint` | 实际启动入口 |
-| `source.implementations` | 按 `original`／`incremental` 记录实际模型类、forward、`use_cache` 和代码路径 |
+| `plan.json` | checkpoint、数据、规模、生成参数、精度及来源 |
+| `predictions.jsonl` | 逐样本生成、参考、分数、token 数、耗时和执行关联 |
+| `summary.json` | 全部样本完成后的任务／长度分数、三项 S-NIAH／三项 multi／六项平均 |
+| `execution.json`、`evaluation.log` | 历次状态、累计耗时、显存峰值与运行日志 |
 
-每次启动在创建输出文件前采集一次来源，同时写入计划和执行记录。续评保留首次运行的 `plan.source`，各次启动来源写入 `execution.attempts[].source`；来源变化会留痕，不单独作为配置不匹配拒绝续评。
+汇总从全部已保存预测重新计分，原始分数不取整，汇总百分比保留两位小数。部分预测不代表完整结果，累计耗时包括加载、编译和失败执行。
 
-每次执行的来源在生成前落盘。每条预测的 `execution_attempt` 从 0 起计，对应 `execution.attempts[]` 中同一索引的执行及其 `source`，该执行记录也保存相同的 `execution_attempt`。未提交改动的状态记录不包含其代码内容；历史产物不补填当时未采集的 Git 状态。
-
-评估入口按模式分别加载模型；配对验证入口则使用 `IncrementalLaCTForCausalLM` 执行两条路径，其中 `original` 通过 `use_cache=False` 委托父类原始 forward。判断实现来源应结合模式、forward 和代码路径，不能只看模型类名。
-
-输出包含：
-
-- `plan.json`：checkpoint、实际模型配置、数据目录、任务与样本数、推理模式、生成与精度设置及代码来源。
-- `evaluation.log`：加载、逐样本进度及失败信息。
-- `predictions.jsonl`：逐样本输出、参考、原始百分比得分、token 数、耗时及 `execution_attempt`；ID 使用行序号，另存可能重复的源 `index`。
-- `summary.json`：每任务、每长度的分数，以及对应论文表格的三项 S-NIAH 平均、MK-NIAH-1／MQ-NIAH／MV-NIAH 平均和六项平均；`plan_path`、`execution_path` 分别指向计划与执行记录。
-- `execution.json`：各次执行的成功或失败状态、代码来源、耗时及显存峰值，保留累计耗时和历次最大峰值。
-
-评分复用项目保存的 NVIDIA RULER `postprocess_pred` 与 `string_match_all`；最终汇总从全部已保存的原始预测重新计分，逐样本不取整，汇总百分比保留两位小数。只有全部所选样本完成才写入 `summary.json`；部分预测文件不代表完整评估结果。汇总耗时包含历次已记录执行的加载、编译、生成和失败耗时。
-
-### 一致性验证
-
-公开 Momentum checkpoint 已通过严格加载及原始路径的真实样本 GPU 生成。当前增量实现与原始路径在同一进程重新配对验证：55 次 teacher-forced logits 有限性、argmax、缓存进度及 A→B→A 缓存隔离均通过，四长度共八条独立 128-token greedy 生成的 token IDs 全部一致。Muon / PostNorm 通过本轮 4K 检查，Muon / PreNorm 尚未通过。旧参考对比中的跨运行差异、各 checkpoint 的适用范围与实测耗时见 [增量推理记录](../20261109_lact_incremental_inference.md)。这些结果不保证跨运行逐位一致；正式 12000 条 RULER 评估尚未完成，验证样本不计入正式分数。
-
-增量一致性验证从项目根目录运行，使用 LaCT 环境，并显式加入方法、官方模型和项目源码路径：
+需要重新验证增量实现时，从项目根目录执行：
 
 ```bash
 source ~/rivermind-data/envs/ttt-lact/bin/activate
@@ -151,28 +115,17 @@ export TOKENIZERS_PARALLELISM=false
 export PYTHONPATH="$PWD/reproductions/lact:$PWD/reproductions/lact/upstream/lact_llm:$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 python -u reproductions/lact/scripts/validate_incremental.py \
   --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
-  --output-dir artifacts/reproductions/lact/incremental-validation_20261109/momentum \
+  --output-dir artifacts/reproductions/lact/incremental-validation/momentum \
   --lengths 4096 8192 16384 32768
 ```
 
-该命令实际执行原始与增量 GPU 推理。验证产物需使用新的输出目录；依赖信息见 [评估环境](../20261109_environment_setup.md)。`--reference-output` 可复用具有完整 `plan.source` 的既有原始生成及计时，参考计划路径和来源分别记录为 `reference_plan`、`reference_source`，不以本次运行来源替代。
+验证比较 chunk 边界、logits、完整生成及跨样本缓存隔离，输出目录须新建。配对入口使用 `IncrementalLaCTForCausalLM`，原始路径以 `use_cache=False` 委托父类；实际来源应结合模式与 forward 路径判断。`--reference-output` 可复用包含完整 `plan.source` 的既有参考。
 
-## 环境与数据
+## 备用训练入口
 
-本轮 checkpoint 评估使用 [requirements-eval.txt](requirements-eval.txt) 固定依赖。在服务器项目根目录安装并激活：
+本阶段使用公开 checkpoint，不执行训练。原设置为 32K 序列、TTT chunk／SWA 2048、Long-Data-Collections 与 Mixstra tokenizer；公开命令训练 40960 steps、全局 batch 32，精确预算 42,949,672,960 tokens，论文称约 40B。Muon 实现与论文的差异见 [UPSTREAM.md](UPSTREAM.md)。
 
-```bash
-export PATH="$HOME/rivermind-data/tools/uv/bin:$PATH"
-bash reproductions/setup_eval_env.sh lact
-source ~/rivermind-data/envs/ttt-lact/bin/activate
-```
-
-版本选择与安装记录见 [评估环境](../20261109_environment_setup.md)。以下上游完整环境说明用于训练依赖参考，不是本轮评估环境的安装步骤。
-
-
-上游完整训练环境需要 Linux x86-64、NVIDIA CUDA，以及 `upstream/lact_llm/requirement.txt` 中的依赖：PyTorch 2.6.x、torchvision 0.21.x、FlashAttention 2.7.4.post1、FLA 等。flame README 另指定 `torchtitan@0b44d4c`。训练框架尚未安装或验证。
-
-若后续进行训练，另建训练环境后按以下入口安装：
+完整训练环境单独安装：
 
 ```bash
 python -m pip install -r reproductions/lact/upstream/lact_llm/requirement.txt
@@ -180,13 +133,7 @@ python -m pip install ./reproductions/lact/upstream_flame
 python -m pip install 'torchtitan @ git+https://github.com/pytorch/torchtitan.git@0b44d4c'
 ```
 
-官方没有固定 FLA 与 Transformers 的精确版本。本轮评估分别固定为 0.4.1、4.57.3，属于本项目选定版本，已用于上述 Momentum checkpoint 的 GPU 生成。
-
-若后续开展从头训练，需要准备原 Long-Data-Collections 的 Arrow 文件与原 tokenizer。原仓库提供示例路径，没有提供对应数据构造脚本、精确数据 revision 和 Book-3 / RULER 的完整评估入口。不要用 FineWeb-Edu 替代后，将结果与原 LaCT 论文分数直接对应。模型及 tokenizer 放在 `~/rivermind-data/models/`，训练数据放在项目 `data/` 下，实际路径由下面两个环境变量指定。
-
-## 单卡训练入口
-
-待 `zcy-memory` 的物理 GPU 0 空闲，并完成环境及数据准备后，从项目根目录运行：
+准备原始 Arrow 数据和 tokenizer 后，从项目根目录运行：
 
 ```bash
 export DATA_FILES='/absolute/path/to/long-data-collections/*.arrow'
@@ -194,22 +141,13 @@ export TOKENIZER_PATH='/absolute/path/to/original-mixstra-tokenizer'
 CUDA_VISIBLE_DEVICES=0 bash reproductions/lact/scripts/train_760m_muon.sh
 ```
 
-脚本仅接受物理 GPU 0 或 1，未指定时默认 0，固定一个进程。默认输出为 `artifacts/reproductions/lact/760m-muon-paper/train/`；需要新运行目录时设置 `OUTPUT_DIR`。训练配置使用 microbatch 1、梯度累积 32，使全局 batch 与原 32 卡、每卡 batch 1 的设置相同；这只保持 token batch，不保证浮点归约、数据分片或训练耗时与原实验一致。精确预算为 40960 × 32 × 32768 = 42,949,672,960 tokens，保留公开命令而不自行将它改成另一个“40B”设置。
+入口调用官方 `flame.train`，单卡 microbatch 1、梯度累积 32、一个进程；默认输出 `artifacts/reproductions/lact/760m-muon-paper/train/`，可用 `OUTPUT_DIR` 指定目录。训练框架和原训练数据尚未完成运行验证，Book-3 来源与划分尚待落实。
 
-同一个入口可以传入原生 flame 参数。例如，只运行一个实际训练 step：
+可直接追加原生 flame 参数，例如执行一个实际 optimizer step：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 OUTPUT_DIR='/absolute/path/to/artifacts/reproductions/lact/760m-muon-one-step/train' \
   bash reproductions/lact/scripts/train_760m_muon.sh --training.steps 1
 ```
 
-该命令仍执行原 32K 序列和 32 次梯度累积，不能作为低成本语法检查。当前未执行此 GPU 命令。
-
-flame 保存原生 DCP checkpoint、配置和 TensorBoard 本地指标；配置关闭 W&B，不创建外部实验项目。最终 checkpoint 的 HF 转换使用 `upstream_flame/flame/utils/convert_dcp_to_hf.py`。本轮先准备 RULER 评估；Book-3 的精确来源与划分尚待落实。
-
-## 当前待解决事项
-
-1. 在准备好的本地 RULER 数据上完成正式评估，记录公开重训模型的实际分数与原论文参照的差异。
-2. 需要评估两个 Muon checkpoint 时，分别完成其严格加载和完整生成验证。
-3. 对照当前官方代码与论文 v1 的 Muon 实现差异；详见 [UPSTREAM.md](UPSTREAM.md)。
-4. 若后续开展训练，再落实原训练数据、tokenizer 和训练预算。
+该命令仍执行 32K 序列和 32 次梯度累积。flame 保存 DCP checkpoint、配置与本地 TensorBoard，关闭 W&B；HF 转换入口为 `upstream_flame/flame/utils/convert_dcp_to_hf.py`。
