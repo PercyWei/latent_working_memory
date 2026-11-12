@@ -42,10 +42,10 @@
       "curriculum_stage_epochs": 1,
       "curriculum_replay_ratio": 0.2,
       "max_steps": null,
-      "micro_batch_size": 2,
-      "gradient_accumulation_steps": 8,
-      "dev_every": 20,
-      "save_every": 20,
+      "micro_batch_size": 16,
+      "gradient_accumulation_steps": 2,
+      "dev_every": 40,
+      "save_every": 40,
       "save_total_limit": 5
     },
     "optimizer": {

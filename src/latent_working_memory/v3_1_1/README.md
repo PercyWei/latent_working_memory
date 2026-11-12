@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261112 18:46:22 Asia/Shanghai
+最后修订时间：20261112 20:41:10 Asia/Shanghai
 
 [运行指南](scripts/README.md) · [预训练配置](../../../configs/v3_1_1/pretrain_default.json) · [后训练配置](../../../configs/v3_1_1/post_default.json) · [K256 预训练](../../../configs/v3_1_1/pretrain_k256.json) · [K256 后训练](../../../configs/v3_1_1/post_k256.json)
 
@@ -114,7 +114,7 @@ loss = mean(QA_NLL_g) + policy_weight × GRPO_loss
 
 本文训练示例采用 K256 配置，两阶段基座均为 `/root/rivermind-data/models/Qwen3-4B-Instruct-2507`；预训练读取 `data/fineweb_train5k_20261112`，后训练读取 `data/fineweb-factqa_q10_train1k_length3_20261112`。后训练按 3 个长度档位从短到长推进，每档训练 1 轮，并补充本档样本数 20% 的历史数据，完成课程后结束训练。
 
-预训练／后训练的 `warmup_steps` 分别为 20／5，均每 20 个 optimizer steps 验证和保存。预训练不设训练阶段长度上限，后训练上限为 12288；下方预训练准备示例的完整样本上限为实际 4096 tokens。
+预训练／后训练的 `warmup_steps` 分别为 20／5，分别每 40／20 个 optimizer steps 验证和保存，最多保留 5／6 个 checkpoint。预训练不设训练阶段长度上限，后训练上限为 12288；下方预训练准备示例的完整样本上限为实际 4096 tokens。
 
 新训练必须同时指定阶段（`--stage pretrain` 或 `--stage post`）和配置文件（`--config <配置路径>`），配置中的 `stage` 必须与 `--stage` 一致。训练恢复从原计划读取全部实验设置，其他已知 CLI 实验设置忽略并集中提示；独立评估从 checkpoint 读取模型与方法设置。
 
@@ -147,25 +147,25 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
   --config configs/v3_1_1/pretrain_k256.json \
   --run-id pretrain_k256_20261112 \
   --epochs 1 \
-  --micro-batch-size-per-gpu 2 \
-  --gradient-accumulation-steps 8
+  --micro-batch-size-per-gpu 16 \
+  --gradient-accumulation-steps 2
 ```
 
-预训练 5000 条样本按上述设置训练 1 轮，共 313 个 optimizer steps。完成后从 `train/summary.json` 确认最终 checkpoint；后训练阶段使用新的 run，并通过 `--init-checkpoint` 指定该来源：
+预训练 5000 条样本按上述设置训练 1 轮，共 157 个 optimizer steps，在第 40、80、120、157 步验证并保存 checkpoint。完成后从 `train/summary.json` 确认最终 checkpoint；后训练阶段使用新的 run，并通过 `--init-checkpoint` 指定该来源：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
   --stage post \
   --config configs/v3_1_1/post_k256.json \
   --run-id policy-post_k256_20261112 \
-  --init-checkpoint 'artifacts/v3-1/pretrain_k256_20261112/train/checkpoints/global_step_313' \
+  --init-checkpoint 'artifacts/v3-1/pretrain_k256_20261112/train/checkpoints/global_step_157' \
   --micro-batch-size-per-gpu 2 \
   --gradient-accumulation-steps 8
 ```
 
 后训练初始化要求两阶段基座来源、压缩器的 `memory_slots`、LoRA 与 `gradient_checkpointing` 设置一致；`dtype`、混合精度和 CPU 暂存可独立设置。边界模块隐藏维度由后训练独立设置；只继承压缩器，重新创建边界模块、optimizer、scheduler、游标与边界随机流。恢复同阶段训练用 `--resume --checkpoint <最新完整checkpoint路径>`，沿用原计划、基座来源、精度、数据和 GPU 数量；其他已知实验设置忽略并提示。预算已完成时直接返回，不读取或启动评估计划。恢复后训练不依赖预训练来源文件。`--resume` 与 `--overwrite` 互斥，可搭配 `--evaluate-only` 续跑评估。
 
-关闭长度课程时，`training.loop.epochs` 控制完整训练轮数；开启时由 `training.loop.curriculum_stage_epochs` 控制每档轮数，不再额外全量训练。JSON 中可选 `training.loop.max_steps` 进一步限制总更新次数。全局 batch = 训练进程数 × 每进程 microbatch × 梯度累积次数。以上 K256 两阶段示例均使用单卡、microbatch 2、梯度累积 8，全局 batch 为 `1 × 2 × 8 = 16`；每轮尾批按实际样本数归约，不补齐、不丢弃、不跨轮次拼接，空 rank 同样参与 collective。`training.scheduler.warmup_steps` 和 `training.scheduler.min_lr_ratio` 控制学习率线性预热及后续余弦衰减；各参数组使用相同倍率。更多参数和可复制命令见[运行指南](scripts/README.md)。
+关闭长度课程时，`training.loop.epochs` 控制完整训练轮数；开启时由 `training.loop.curriculum_stage_epochs` 控制每档轮数，不再额外全量训练。JSON 中可选 `training.loop.max_steps` 进一步限制总更新次数。全局 batch = 训练进程数 × 每进程 microbatch × 梯度累积次数。以上 K256 两阶段示例均使用单卡，预训练为 `1 × 16 × 2 = 32`，后训练为 `1 × 2 × 8 = 16`；每轮尾批按实际样本数归约，不补齐、不丢弃、不跨轮次拼接，空 rank 同样参与 collective。`training.scheduler.warmup_steps` 和 `training.scheduler.min_lr_ratio` 控制学习率线性预热及后续余弦衰减；各参数组使用相同倍率。更多参数和可复制命令见[运行指南](scripts/README.md)。
 
 ## 验证、独立评估与记录
 

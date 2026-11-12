@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261112 18:46:58 Asia/Shanghai
+最后修订时间：20261112 20:36:37 Asia/Shanghai
 
 计算协议与数据格式见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256.json)中的基座与数据路径。
 
@@ -106,7 +106,7 @@ fineweb-factqa_q10_train1k_length3_20261112/
 
 - **配置覆盖**：显式 CLI 参数覆盖 JSON；模型结构和记忆更新设置直接修改 JSON，参数说明见[第 5 节](#5-调整参数)。
 - **计算设置**：统一使用 SDPA，参数默认 FP32。`--mixed-precision` 和 `--save-on-cpu` 分别开启标准 BF16 autocast（参数精度保持 FP32）和反向保存张量的 CPU 暂存，省略时沿用 JSON。恢复与独立评估沿用已保存设置，详细计算方式见[方法说明](../README.md#配置与运行)。
-- **训练批量**：`--micro-batch-size-per-gpu` 控制每卡 microbatch 的样本数；全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数。预训练按窗口、后训练按文档计数；两阶段示例均使用单卡 A800，`1 × 2 × 8 = 16`。
+- **训练批量**：`--micro-batch-size-per-gpu` 控制每卡 microbatch 的样本数；全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数。预训练按窗口、后训练按文档计数；两阶段示例均使用单卡 A800，预训练为 `1 × 16 × 2 = 32`，后训练为 `1 × 2 × 8 = 16`。
 - **长度课程**：K256 后训练配置已开启课程，每档训练 1 轮，并从此前各档尽量均衡地随机无放回补充本档数量的 20%。按档位从短到长推进，每轮完整遍历本档，历史补充数量四舍五入、不足时取全部；每轮重新抽取，混合打乱后统一切 batch，全部档位完成后结束，不额外执行 `--epochs` 全量训练。其他配置可通过 `--length-curriculum` 开启，以 `--curriculum-stage-epochs` 和 `--curriculum-replay-ratio` 调整轮数与比例。关闭课程时，各档合并后按 `--epochs` 全量随机训练；dev 和 test 保持原协议。
 - **执行流程**：先保存训练计划，再执行训练、dev 与 checkpoint 保存。
 - **覆盖训练**：追加 `--overwrite` 会清理本次 `run-id` 对应的整个 run，包括计划、训练和评估结果，再保存新计划重新训练；云端历史保留。
@@ -119,12 +119,12 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
   --config configs/v3_1_1/pretrain_k256.json \
   --run-id pretrain_k256_20261112 \
   --epochs 1 \
-  --micro-batch-size-per-gpu 2 \
-  --gradient-accumulation-steps 8
+  --micro-batch-size-per-gpu 16 \
+  --gradient-accumulation-steps 2
 ```
 
 - **运行目录**：`run_id` 默认为 `pretrain_k{memory_slots}_{YYYYMMDD-HHMM}`，其中 `memory_slots` 为记忆槽位数。
-- **当前数据**：K256 配置读取 `data/fineweb_train5k_20261112`，5000 条训练样本按上述批量训练 1 轮，共 313 个 optimizer steps。
+- **当前数据**：K256 配置读取 `data/fineweb_train5k_20261112`，5000 条训练样本按上述批量训练 1 轮，共 157 个 optimizer steps。每 40 步及训练结束时验证和保存，在第 40、80、120、157 步生成 checkpoint，最多保留 5 个。
 - **输入与目标**：读取准备后的完整 `text`，先按完整样本的实际 token 数执行长度筛选，再依据 seed 与文本内容标识固定选择 AE 或 LM，跨 epoch 不变。AE 压缩并重建完整样本；LM 以前缀为压缩输入，默认预测样本末尾的 512 tokens，若剩余前缀长度不大于 K 则改为 AE。默认 LM 概率 0.5，目标均追加 EOS。
 - **可训练参数**：压缩器 LoRA 和 memory embeddings；基座与读取器冻结，读取器保留损失到 memory 的梯度。预训练不更新边界模块。
 
@@ -135,7 +135,7 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
   --stage post \
   --config configs/v3_1_1/post_k256.json \
   --run-id policy-post_k256_20261112 \
-  --init-checkpoint 'artifacts/v3-1/pretrain_k256_20261112/train/checkpoints/global_step_313' \
+  --init-checkpoint 'artifacts/v3-1/pretrain_k256_20261112/train/checkpoints/global_step_157' \
   --micro-batch-size-per-gpu 2 \
   --gradient-accumulation-steps 8
 ```

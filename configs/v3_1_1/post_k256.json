@@ -53,7 +53,7 @@
       "gradient_accumulation_steps": 8,
       "dev_every": 20,
       "save_every": 20,
-      "save_total_limit": 5
+      "save_total_limit": 6
     },
     "optimizer": {
       "compressor_learning_rate": 2e-05,
