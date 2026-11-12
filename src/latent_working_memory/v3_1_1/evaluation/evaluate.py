@@ -189,7 +189,8 @@ def evaluate_shard(checkpoint_path, data, output_dir, worker_rank, task="test",
 
         for batch in sample_batches([by_id[sample_id] for sample_id in selected_ids],
                                     task, eval_batch_size_per_gpu):
-            compute_batch(batch, request, model, config, max_new_tokens, commit)
+            with torch.no_grad(), model.forward_context():
+                compute_batch(batch, request, model, config, max_new_tokens, commit)
     del model
 
 

@@ -20,7 +20,9 @@
   },
   "compute": {
     "dtype": "float32",
-    "gradient_checkpointing": true
+    "gradient_checkpointing": true,
+    "mixed_precision": false,
+    "save_on_cpu": false
   },
   "method": {
     "rollout": {

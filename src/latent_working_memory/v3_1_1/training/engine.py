@@ -200,14 +200,16 @@ class TrainingEngine:
                 _accumulate(totals, loss, metrics)
         else:
             for start in range(0, len(documents), self.config.loop.micro_batch_size):
-                losses = []
-                for document in documents[start:start + self.config.loop.micro_batch_size]:
-                    loss, metrics = document_loss(self.model, document, self.experiment)
-                    if not bool(torch.isfinite(loss)):
-                        raise RuntimeError(f"non-finite training loss: {document.id}")
-                    losses.append(loss)
-                    _accumulate(totals, loss, metrics)
-                torch.stack(losses).sum().backward()
+                with self.model.forward_context():
+                    losses = []
+                    for document in documents[start:start + self.config.loop.micro_batch_size]:
+                        loss, metrics = document_loss(self.model, document, self.experiment)
+                        if not bool(torch.isfinite(loss)):
+                            raise RuntimeError(f"non-finite training loss: {document.id}")
+                        losses.append(loss)
+                        _accumulate(totals, loss, metrics)
+                    batch_loss = torch.stack(losses).sum()
+                batch_loss.backward()
         metrics = _aggregate_metrics(totals, len(documents))
         self._synchronize_gradients(metrics["samples"])
         for group in self.optimizer.param_groups:
@@ -230,7 +232,8 @@ def evaluate_dev(model, documents, config):
     model.eval()
     totals = {}
     for document in documents:
-        loss, metrics = document_loss(model, document, config)
+        with model.forward_context():
+            loss, metrics = document_loss(model, document, config)
         if not bool(torch.isfinite(loss)):
             raise RuntimeError(f"non-finite dev loss: {document.id}")
         _accumulate(totals, loss, metrics)

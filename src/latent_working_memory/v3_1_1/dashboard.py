@@ -209,7 +209,8 @@ def _resource_rows(summaries, baselines):
             "测量样本": resources.get("samples", (result["metrics"]["documents"]
                                                 if result.get("task") == "test" else result["metrics"]["samples"])),
             "测量长度": ", ".join(map(str, resources.get("lengths", result["protocol"].get("lengths", [])))),
-            "精度": model["backbone_dtype"],
+            "精度": (f"{model['backbone_dtype']} + BF16 autocast"
+                     if model.get("mixed_precision", False) else model["backbone_dtype"]),
             "设备记录": resources.get("device"),
             "实际评估批量": ", ".join(map(str, batch_sizes)) if batch_sizes is not None else None,
             "批量单位": "文档" if result.get("task") == "test" else "题目",

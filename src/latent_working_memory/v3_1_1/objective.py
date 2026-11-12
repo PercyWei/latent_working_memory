@@ -7,17 +7,20 @@ from .rollout import execute, sample_group
 
 def _qa_backward(model, memory_leaves, qa, normalizer):
     """单题只反传到独立 memory 叶子；返回统计时释放本题的 decoder 图。"""
-    loss = model.answer_nll(memory_leaves, qa.prompt_ids, qa.target_ids)
-    (loss / normalizer).backward()
+    with model.forward_context():
+        loss = model.answer_nll(memory_leaves, qa.prompt_ids, qa.target_ids)
+        normalized_loss = loss / normalizer
+    normalized_loss.backward()
     return loss.detach()
 
 
 def _path_backward(model, document, method, path, advantage, group_size, bptt_steps=None):
     """反传后只返回无图统计，使本路径的中间张量在下一次前向前释放。"""
-    blocks, _, log_probs, entropy, _ = execute(
-        model, document.input_ids, method["rollout"]["unit_tokens"], actions=path.actions,
-        bptt_steps=bptt_steps,
-    )
+    with model.forward_context():
+        blocks, _, log_probs, entropy, _ = execute(
+            model, document.input_ids, method["rollout"]["unit_tokens"], actions=path.actions,
+            bptt_steps=bptt_steps,
+        )
     memory_leaves = tuple(block.detach().requires_grad_(True) for block in blocks)
     question_count = len(document.qas)
     question_losses = [None] * question_count
@@ -26,26 +29,29 @@ def _path_backward(model, document, method, path, advantage, group_size, bptt_st
         question_losses[index] = _qa_backward(
             model, memory_leaves, document.qas[index], question_count * group_size,
         )
-    task_loss = torch.stack(question_losses).mean()
-    grpo = method["grpo"]
-    if len(log_probs):
-        ratios = (log_probs - path.old_log_probs).exp()
-        clipped = ratios.clamp(1 - grpo["clip_epsilon"], 1 + grpo["clip_epsilon"])
-        policy_loss = -torch.minimum(ratios * advantage, clipped * advantage).mean()
-        policy_entropy = entropy.mean()
-        drift = (log_probs - path.old_log_probs).abs().max()
-    else:
-        policy_loss = task_loss.new_zeros(())
-        policy_entropy = policy_loss
-        drift = policy_loss
-    loss = task_loss + grpo["policy_weight"] * policy_loss
-    if not bool(torch.isfinite(loss)):
-        raise RuntimeError(f"non-finite training loss: {document.id}")
+    with model.forward_context():
+        task_loss = torch.stack(question_losses).mean()
+        grpo = method["grpo"]
+        if len(log_probs):
+            ratios = (log_probs - path.old_log_probs).exp()
+            clipped = ratios.clamp(1 - grpo["clip_epsilon"], 1 + grpo["clip_epsilon"])
+            policy_loss = -torch.minimum(ratios * advantage, clipped * advantage).mean()
+            policy_entropy = entropy.mean()
+            drift = (log_probs - path.old_log_probs).abs().max()
+        else:
+            policy_loss = task_loss.new_zeros(())
+            policy_entropy = policy_loss
+            drift = policy_loss
+        loss = task_loss + grpo["policy_weight"] * policy_loss
+        if not bool(torch.isfinite(loss)):
+            raise RuntimeError(f"non-finite training loss: {document.id}")
+        policy_backward = (grpo["policy_weight"] * policy_loss / group_size
+                           if policy_loss.requires_grad else None)
     outputs = list(blocks)
     gradients = [leaf.grad for leaf in memory_leaves]
     if policy_loss.requires_grad:
         # 零权重也连接策略图，保留原更新中 boundary 的显式零梯度。
-        outputs.append(grpo["policy_weight"] * policy_loss / group_size)
+        outputs.append(policy_backward)
         gradients.append(None)
     # 同时注入所有直接 QA adjoint 与策略梯度，让共享 history 只反传一次。
     torch.autograd.backward(outputs, gradients)
@@ -56,7 +62,9 @@ def _path_backward(model, document, method, path, advantage, group_size, bptt_st
 
 def post_backward(model, document, method, generator, bptt_steps=None):
     """采样完整组后逐路径累积梯度；文档归约与参数更新由 engine 执行。"""
-    paths = sample_group(model, document, method["rollout"], generator)
+    # 采样和带图回放使用独立 autocast 区域，避免复用无梯度的权重转换缓存。
+    with torch.no_grad(), model.forward_context():
+        paths = sample_group(model, document, method["rollout"], generator)
     grpo = method["grpo"]
     device = paths[0].old_log_probs.device
     rewards = torch.tensor([

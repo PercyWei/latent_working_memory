@@ -62,12 +62,17 @@ class ModelLoraConfig:
 class ComputeConfig:
     dtype: str = "float32"
     gradient_checkpointing: bool = True
+    mixed_precision: bool = False
+    save_on_cpu: bool = False
 
     def __post_init__(self):
         if self.dtype not in {"bfloat16", "float32"}:
             raise ValueError("dtype must be bfloat16 or float32")
-        if type(self.gradient_checkpointing) is not bool:
-            raise ValueError("gradient_checkpointing must be boolean")
+        for name in ("gradient_checkpointing", "mixed_precision", "save_on_cpu"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"{name} must be boolean")
+        if self.mixed_precision and self.dtype != "float32":
+            raise ValueError("mixed_precision requires compute.dtype=float32")
 
 
 @dataclass(frozen=True)

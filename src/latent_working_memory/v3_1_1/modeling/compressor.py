@@ -1,5 +1,6 @@
 """同源 LoRA 写入器与冻结读取器；连续 memory 路径保留梯度。"""
 
+from contextlib import contextmanager, ExitStack
 from copy import deepcopy
 from pathlib import Path
 
@@ -23,6 +24,8 @@ class MemoryModel(nn.Module):
     def __init__(self, model_name_or_path, model_settings, compute_settings, device):
         super().__init__()
         structure, lora = model_settings["structure"], model_settings["lora"]
+        self.mixed_precision = compute_settings["mixed_precision"]
+        self.save_on_cpu = compute_settings["save_on_cpu"]
         source = str(Path(model_name_or_path).expanduser())
         self.tokenizer = AutoTokenizer.from_pretrained(source)
         if self.tokenizer.eos_token_id is None:
@@ -81,6 +84,17 @@ class MemoryModel(nn.Module):
         self.boundary = (None if boundary_hidden_size is None
                          else BoundaryHead(self.width, boundary_hidden_size, device))
         self.train()
+
+    @contextmanager
+    def forward_context(self):
+        with ExitStack() as stack:
+            if self.mixed_precision:
+                stack.enter_context(torch.autocast(
+                    device_type=self.memory_embeddings.device.type, dtype=torch.bfloat16,
+                ))
+            if self.save_on_cpu and torch.is_grad_enabled():
+                stack.enter_context(torch.autograd.graph.save_on_cpu(pin_memory=True))
+            yield
 
     def _tokens(self, values):
         return torch.tensor(values, dtype=torch.long, device=self.memory_embeddings.device)

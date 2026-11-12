@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261112 11:06:47 Asia/Shanghai
+最后修订时间：20261112 11:50:24 Asia/Shanghai
 
 计算协议与数据格式见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256.json)中的基座与数据路径。
 
@@ -74,7 +74,7 @@ bash src/latent_working_memory/v3_1_1/scripts/run.sh prepare-post \
 新训练必须同时指定阶段 `--stage` 和配置文件 `--config`，配置中的 `stage` 必须与 `--stage` 一致。两阶段共用以下运行规则：
 
 - **配置覆盖**：显式 CLI 参数覆盖 JSON；模型结构和记忆更新设置直接修改 JSON，参数说明见[第 5 节](#5-调整参数)。
-- **计算设置**：统一使用 SDPA，具体内核由 PyTorch 根据设备、精度和输入选择；默认 FP32，详细计算方式见[方法说明](../README.md#后训练qagrpo-联合训练)。
+- **计算设置**：统一使用 SDPA，默认 FP32。`--mixed-precision` 和 `--save-on-cpu` 分别开启标准 BF16 autocast（参数精度保持 FP32）和反向保存张量的 CPU 暂存，两者默认关闭。恢复与独立评估沿用已保存设置，详细计算方式见[方法说明](../README.md#配置与运行)。
 - **K256 配置**：两阶段使用上述同一基座及各自数据目录；预训练／后训练的 `warmup_steps` 分别为 20／5，均每 20 个 optimizer steps 验证和保存。预训练不设实际 token 数上限，后训练上限为 12288；准备阶段的 4096 是字符估算长度上限。
 - **训练批量**：`--micro-batch-size-per-gpu` 控制每卡 microbatch 的样本数；全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数。预训练按窗口、后训练按文档计数；两阶段示例均为 `2 × 2 × 4 = 16`。
 - **执行流程**：先保存训练计划，再执行训练、dev 与 checkpoint 保存。
@@ -110,7 +110,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
 ```
 
 - **运行目录**：`run_id` 默认为 `policy-post_k{memory_slots}_{YYYYMMDD-HHMM}`，其中 `memory_slots` 为记忆槽位数。
-- **初始化**：后训练需通过 `--init-checkpoint` 指定预训练来源。源 checkpoint 阶段须为 `pretrain`，两阶段基座来源、记忆槽位数、LoRA 及除精度外的计算设置须一致，可从 BF16 预训练初始化 FP32 后训练。边界模块隐藏维度由后训练独立设置；新 run 只继承压缩器，重新创建边界模块、optimizer、scheduler、游标和边界随机流。实际来源随训练记录保存。
+- **初始化**：后训练需通过 `--init-checkpoint` 指定预训练来源。源 checkpoint 阶段须为 `pretrain`，两阶段基座来源、记忆槽位数、LoRA 及梯度检查点设置须一致；精度、混合精度和 CPU 暂存可独立设置，可从 BF16 预训练初始化 FP32 后训练。边界模块隐藏维度由后训练独立设置；新 run 只继承压缩器，重新创建边界模块、optimizer、scheduler、游标和边界随机流。实际来源随训练记录保存。
 - **训练单位**：每行一篇文档及其全部 QA。一篇文档采样 G 条完整硬分段，每条路径共享 memory 评价同一套 QA；G 不计入全局 batch。
 - **一次联合更新**：固定参数采样并评价整组路径，逐路径回放；QA 逐题累积 memory 梯度并释放计算图，再与策略项一起回传压缩器，累计整批后更新一次。同一提交段内的边界判断共享因果前向，压缩排除仅用于判断的下一单元。QA 损失训练记忆内容，停止梯度后的组内优势训练边界选择。
 - **反传跨度**：在 JSON 中设置 `training.backward.bptt_steps`，支持 `null`（保留完整跨段反传）或正整数。例如设为 `2`，每两次实际写入为一组，组内正常反传，组间截断后续压缩与边界判断使用的历史梯度。全部历史 memory 仍参与前向，所有块保留直接 QA 监督；预训练、无梯度采样和评估不受影响。
@@ -283,6 +283,9 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 | **批处理** | |
 | `--micro-batch-size-per-gpu` | 每卡 microbatch 的样本数，默认 1 |
 | `--gradient-accumulation-steps` | 每次优化器更新前累积的 microbatch 数，默认 16 |
+| **计算设置** | |
+| `--mixed-precision` | FP32 参数与标准 BF16 autocast，默认不开启 |
+| `--save-on-cpu` | 反向所需的保存张量暂存到 CPU，默认不开启 |
 
 - **数据筛选**：预训练按完整样本 `text`、后训练按正文的实际 token 数筛选，不含系统提示、chat template 等。train 和 dev 的长度均须严格大于记忆槽位数 K；上限仅用于 train，超限样本整条排除，`null` 取消该上限。LM 划分后的压缩前缀若不大于 K 则改为 AE，实际编码／解码仍须满足模型窗口限制。
 
