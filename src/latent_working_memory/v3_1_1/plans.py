@@ -40,7 +40,10 @@ def load_training_plan(plan_dir):
 def validate_training_plan(config, checkpoint):
     """请求预算留在计划中，checkpoint 记录选样后推导的实际总步数。"""
     batch_size = len(checkpoint["rng"]) * config.training.loop.micro_batch_size * config.training.loop.gradient_accumulation_steps
-    steps = training_steps(config.training.loop, checkpoint["binding"]["train"]["episodes"], batch_size)
+    statistics = checkpoint["binding"]["train"]
+    bin_sizes = ([bucket["samples"] for bucket in statistics["length_bins"]]
+                 if config.training.data.length_curriculum else None)
+    steps = training_steps(config.training.loop, statistics["episodes"], batch_size, bin_sizes)
     expected = replace(config, training=replace(
         config.training, loop=replace(config.training.loop, max_steps=steps),
     ))

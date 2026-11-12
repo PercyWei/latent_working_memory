@@ -10,9 +10,23 @@ from ..objective import post_backward
 from ..rollout import execute, qa_nll
 
 
-def training_steps(config, sample_count, global_batch_size):
+def _curriculum_sizes(bin_sizes, replay_ratio):
+    sizes, history = [], 0
+    for count in bin_sizes:
+        replay = min(history, int(count * replay_ratio + 0.5))
+        sizes.append(count + replay)
+        history += count
+    return sizes
+
+
+def training_steps(config, sample_count, global_batch_size, bin_sizes=None):
     budgets = []
-    if config.epochs is not None:
+    if bin_sizes is not None:
+        sizes = _curriculum_sizes(bin_sizes, config.curriculum_replay_ratio)
+        budgets.append(config.curriculum_stage_epochs * sum(
+            math.ceil(size / global_batch_size) for size in sizes
+        ))
+    elif config.epochs is not None:
         budgets.append(config.epochs * math.ceil(sample_count / global_batch_size))
     if config.max_steps is not None:
         budgets.append(config.max_steps)
@@ -20,44 +34,124 @@ def training_steps(config, sample_count, global_batch_size):
 
 
 class SampleCursor:
-    """尾批不补样本、不跨 epoch；完成后立即推进到下一轮起点。"""
+    """普通全量随机，或按档位逐阶段训练并补充历史；尾批不跨轮。"""
 
-    def __init__(self, size, seed):
+    def __init__(self, size, seed, bin_sizes=None, stage_epochs=1, replay_ratio=0.2):
         self.size = size
         self.generator = torch.Generator().manual_seed(seed)
         self.epoch = self.offset = 0
         self.epoch_end = False
-        self.order = torch.randperm(size, generator=self.generator).tolist()
+        self.bin_sizes = None if bin_sizes is None else tuple(bin_sizes)
+        self.stage_epochs = stage_epochs
+        self.stage_epoch = 0
+        self.stage = None
+        if self.bin_sizes is not None:
+            self.pass_sizes = _curriculum_sizes(self.bin_sizes, replay_ratio)
+            self.stage = next(index for index, count in enumerate(self.bin_sizes) if count)
+        self.order = self._make_order()
+
+    def _make_order(self):
+        if self.bin_sizes is None:
+            return torch.randperm(self.size, generator=self.generator).tolist()
+        if self.stage == len(self.bin_sizes):
+            return []
+        start = sum(self.bin_sizes[:self.stage])
+        indices = list(range(start, start + self.bin_sizes[self.stage]))
+        remaining = self.pass_sizes[self.stage] - len(indices)
+        if remaining:
+            candidates = [index for index in torch.randperm(
+                self.stage, generator=self.generator,
+            ).tolist() if self.bin_sizes[index]]
+            quotas = [0] * self.stage
+            while remaining:
+                share = max(1, remaining // len(candidates))
+                for index in candidates:
+                    take = min(share, self.bin_sizes[index] - quotas[index], remaining)
+                    quotas[index] += take
+                    remaining -= take
+                candidates = [index for index in candidates
+                              if quotas[index] < self.bin_sizes[index]]
+            offset = 0
+            for count, quota in zip(self.bin_sizes, quotas):
+                if quota:
+                    indices.extend((torch.randperm(count, generator=self.generator)[:quota]
+                                    + offset).tolist())
+                offset += count
+        return [indices[index] for index in torch.randperm(
+            len(indices), generator=self.generator,
+        ).tolist()]
 
     def next_batch(self, batch_size):
+        if not self.order:
+            raise StopIteration("length curriculum is complete")
         indices = self.order[self.offset:self.offset + batch_size]
         self.offset += len(indices)
-        self.epoch_end = self.offset == self.size
+        self.epoch_end = self.offset == len(self.order)
         if self.epoch_end:
             self.epoch += 1
             self.offset = 0
-            self.order = torch.randperm(self.size, generator=self.generator).tolist()
+            if self.bin_sizes is not None:
+                self.stage_epoch += 1
+                if self.stage_epoch == self.stage_epochs:
+                    self.stage_epoch = 0
+                    self.stage = next(
+                        (index for index in range(self.stage + 1, len(self.bin_sizes))
+                         if self.bin_sizes[index]), len(self.bin_sizes),
+                    )
+            self.order = self._make_order()
         return indices
 
     def state_dict(self):
         return {
             "epoch": self.epoch, "offset": self.offset, "order": list(self.order),
+            "stage": self.stage, "stage_epoch": self.stage_epoch,
             "generator": self.generator.get_state(),
         }
 
     def load_state_dict(self, state, step, batch_size):
         epoch, offset, order = state["epoch"], state["offset"], state["order"]
+        stage, stage_epoch = state["stage"], state["stage_epoch"]
         if (
-            type(epoch) is not int or epoch < 0
-            or type(offset) is not int or not 0 <= offset < self.size
+            set(state) != {"epoch", "offset", "order", "stage", "stage_epoch", "generator"}
+            or type(epoch) is not int or epoch < 0
+            or type(offset) is not int or offset < 0 or offset % batch_size
             or not isinstance(order, list) or any(type(index) is not int for index in order)
-            or sorted(order) != list(range(self.size)) or offset % batch_size
         ):
             raise ValueError("checkpoint has an invalid document cursor")
-        completed = epoch * math.ceil(self.size / batch_size) + math.ceil(offset / batch_size)
+        if self.bin_sizes is None:
+            if (stage is not None or stage_epoch != 0 or offset >= self.size
+                or sorted(order) != list(range(self.size))):
+                raise ValueError("checkpoint has an invalid document cursor")
+            completed = epoch * math.ceil(self.size / batch_size) + math.ceil(offset / batch_size)
+        else:
+            if (type(stage) is not int or not 0 <= stage <= len(self.bin_sizes)
+                or type(stage_epoch) is not int or not 0 <= stage_epoch < self.stage_epochs):
+                raise ValueError("checkpoint has an invalid curriculum stage")
+            completed = self.stage_epochs * sum(
+                math.ceil(size / batch_size) for size in self.pass_sizes[:stage]
+            )
+            expected_epoch = self.stage_epochs * sum(count > 0 for count in self.bin_sizes[:stage])
+            if stage == len(self.bin_sizes):
+                if stage_epoch or offset or order:
+                    raise ValueError("completed curriculum must have an empty cursor")
+            else:
+                count = self.bin_sizes[stage]
+                start = sum(self.bin_sizes[:stage])
+                selected = set(order)
+                if (not count or len(order) != self.pass_sizes[stage]
+                    or offset >= len(order) or len(selected) != len(order)
+                    or any(not 0 <= index < start + count for index in order)
+                    or not set(range(start, start + count)) <= selected):
+                    raise ValueError("checkpoint has an invalid curriculum selection")
+                completed += stage_epoch * math.ceil(len(order) / batch_size)
+                completed += math.ceil(offset / batch_size)
+                expected_epoch += stage_epoch
+            if epoch != expected_epoch:
+                raise ValueError("checkpoint epoch differs from its curriculum stage")
         if type(step) is not int or step != completed:
             raise ValueError("checkpoint document cursor differs from its optimizer step")
         self.epoch, self.offset, self.order = epoch, offset, list(order)
+        self.stage, self.stage_epoch = stage, stage_epoch
         self.epoch_end = epoch > 0 and offset == 0
         self.generator.set_state(state["generator"])
 

@@ -41,10 +41,13 @@
       "dataset_dir": "data/fineweb-factqa_q10_train1k_20261108",
       "max_train_data_tokens": 12288,
       "max_train_samples": null,
-      "max_dev_samples": null
+      "max_dev_samples": null,
+      "length_curriculum": false
     },
     "loop": {
       "epochs": 1,
+      "curriculum_stage_epochs": 1,
+      "curriculum_replay_ratio": 0.2,
       "max_steps": null,
       "micro_batch_size": 2,
       "gradient_accumulation_steps": 4,

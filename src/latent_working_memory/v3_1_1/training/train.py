@@ -136,8 +136,12 @@ def train(plan_dir, resume=None):
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     train_documents, dev_documents, train_statistics, dev_statistics = _load_data(config, tokenizer)
+    bin_sizes = ([bucket["samples"] for bucket in train_statistics["length_bins"]]
+                 if training.data.length_curriculum else None)
     training = replace(training, loop=replace(
-        training.loop, max_steps=training_steps(training.loop, len(train_documents), global_batch),
+        training.loop, max_steps=training_steps(
+            training.loop, len(train_documents), global_batch, bin_sizes,
+        ),
     ))
     config = replace(config, training=training)
     if checkpoint is not None and checkpoint["config"] != config_to_dict(config):
@@ -156,7 +160,11 @@ def train(plan_dir, resume=None):
     if checkpoint is not None and checkpoint["binding"] != binding:
         raise ValueError("training data, model or tokenization differs from the resumed checkpoint")
     engine = TrainingEngine(model, config)
-    cursor = SampleCursor(len(train_documents), config.seed)
+    cursor = SampleCursor(
+        len(train_documents), config.seed, bin_sizes=bin_sizes,
+        stage_epochs=training.loop.curriculum_stage_epochs,
+        replay_ratio=training.loop.curriculum_replay_ratio,
+    )
     boundary_generator = (
         torch.Generator().manual_seed((config.seed + rank) % 2**32)
         if config.stage == "post" else None
@@ -216,6 +224,10 @@ def train(plan_dir, resume=None):
             torch.cuda.synchronize(device)
             torch.cuda.reset_peak_memory_stats(device)
             started = time.perf_counter()
+            curriculum = ({
+                "curriculum_bin": cursor.stage + 1,
+                "curriculum_epoch": cursor.stage_epoch + 1,
+            } if training.data.length_curriculum else {})
             indices = cursor.next_batch(global_batch)
             metrics = engine.train_batch(
                 [train_documents[index] for index in indices[rank::world]], boundary_generator,
@@ -231,6 +243,7 @@ def train(plan_dir, resume=None):
             seconds, peak_memory = resources.tolist()
             record = {
                 "step": step, "epoch": cursor.epoch, "epoch_end": cursor.epoch_end,
+                **curriculum,
                 **{f"train/{key}": value for key, value in metrics.items()},
                 "resources/step_seconds": seconds,
                 "resources/peak_memory_gib": peak_memory,
@@ -249,6 +262,8 @@ def train(plan_dir, resume=None):
                 print(
                     f"step {step}/{training.loop.max_steps} loss={metrics['loss']:.5f} "
                     f"grad={metrics['grad_norm']:.5f} samples={metrics['samples']} seconds={seconds:.1f}"
+                    + (f" bin={curriculum['curriculum_bin']} "
+                       f"stage_epoch={curriculum['curriculum_epoch']}" if curriculum else "")
                     + (f" dev={record['dev/loss']:.5f}" if "dev/loss" in record else ""),
                     flush=True,
                 )

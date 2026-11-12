@@ -133,9 +133,12 @@ class TrainingDataConfig:
     max_train_data_tokens: int | None = None
     max_train_samples: int | None = None
     max_dev_samples: int | None = None
+    length_curriculum: bool = False
 
     def __post_init__(self):
         _path(self, "dataset_dir")
+        if type(self.length_curriculum) is not bool:
+            raise ValueError("length_curriculum must be boolean")
         for name in ("max_train_data_tokens", "max_train_samples", "max_dev_samples"):
             value = getattr(self, name)
             if value is not None and (type(value) is not int or value < 1):
@@ -145,6 +148,8 @@ class TrainingDataConfig:
 @dataclass(frozen=True)
 class TrainingLoopConfig:
     epochs: int | None = 1
+    curriculum_stage_epochs: int = 1
+    curriculum_replay_ratio: float = 0.2
     max_steps: int | None = None
     micro_batch_size: int = 1
     gradient_accumulation_steps: int = 16
@@ -154,10 +159,12 @@ class TrainingLoopConfig:
 
     def __post_init__(self):
         _positive_ints(self, (
-            "micro_batch_size", "gradient_accumulation_steps", "save_total_limit",
+            "curriculum_stage_epochs", "micro_batch_size", "gradient_accumulation_steps",
+            "save_total_limit",
         ))
-        if self.epochs is None and self.max_steps is None:
-            raise ValueError("at least one of epochs and max_steps must be specified")
+        _number(self.curriculum_replay_ratio, "curriculum_replay_ratio", inclusive=True)
+        if self.curriculum_replay_ratio > 1:
+            raise ValueError("curriculum_replay_ratio must not exceed 1")
         for name in ("epochs", "max_steps"):
             value = getattr(self, name)
             if value is not None and (type(value) is not int or value < 1):
@@ -263,6 +270,9 @@ class TrainingConfig:
     swanlab: SwanLabConfig = field(default_factory=SwanLabConfig)
 
     def __post_init__(self):
+        if (not self.data.length_curriculum
+            and self.loop.epochs is None and self.loop.max_steps is None):
+            raise ValueError("ordinary training requires epochs or max_steps")
         if self.loop.max_steps is not None and self.scheduler.warmup_steps >= self.loop.max_steps:
             raise ValueError("warmup_steps must be less than max_steps")
         if self.swanlab.group is None and self.run.output_dir is not None:

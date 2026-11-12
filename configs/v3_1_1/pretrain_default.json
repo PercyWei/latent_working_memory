@@ -34,10 +34,13 @@
       "dataset_dir": "data/fineweb-4096-docall_20261104",
       "max_train_data_tokens": null,
       "max_train_samples": null,
-      "max_dev_samples": null
+      "max_dev_samples": null,
+      "length_curriculum": false
     },
     "loop": {
       "epochs": 1,
+      "curriculum_stage_epochs": 1,
+      "curriculum_replay_ratio": 0.2,
       "max_steps": null,
       "micro_batch_size": 1,
       "gradient_accumulation_steps": 16,

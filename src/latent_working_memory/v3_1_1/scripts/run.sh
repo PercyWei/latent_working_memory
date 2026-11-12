@@ -4,6 +4,7 @@ set -euo pipefail
 case "${1:-}" in
   prepare-pre) module="latent_working_memory.v3_1_1.prepare_pre"; shift ;;
   prepare-post) module="latent_working_memory.v3_1_1.prepare_post"; shift ;;
+  prepare-length) module="latent_working_memory.v3_1_1.prepare_length"; shift ;;
   *) module="latent_working_memory.v3_1_1.training.run" ;;
 esac
 

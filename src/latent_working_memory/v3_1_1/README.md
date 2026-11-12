@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261112 11:50:24 Asia/Shanghai
+最后修订时间：20261112 15:55:39 Asia/Shanghai
 
 [运行指南](scripts/README.md) · [预训练配置](../../../configs/v3_1_1/pretrain_default.json) · [后训练配置](../../../configs/v3_1_1/post_default.json) · [K256 预训练](../../../configs/v3_1_1/pretrain_k256.json) · [K256 后训练](../../../configs/v3_1_1/post_k256.json)
 
@@ -58,6 +58,14 @@ loss = mean(QA_NLL_g) + policy_weight × GRPO_loss
 
 首版不多轮复用轨迹。数学上，同一组参数的新旧概率比为 1；分块采样与分段回放可能存在舍入差，`train/replay_log_probability_drift` 记录轨迹内最大 log probability 差的平均值。稳定性主要依赖保守更新与及时刷新反馈。
 
+### 离线长度分档与课程
+
+`prepare-length` 接收已准备好的数据目录、`--split` 和 tokenizer 路径，读取 `<split>.jsonl`，按完整正文的实际 token 数划分等宽档位，默认 4 档。预训练按完整 `text` 计长，后训练按完整正文计长，均不包含系统提示或 chat 前缀；各条样本及其 QA 保持完整。输出目录包含 `<split>/bin_00.jsonl` 等分档文件、原样复制的其余 split JSONL 文件，以及记录各档边界、样本数和实际长度统计的 `preparation-<split>.json`。命令与布局见[长度分档](scripts/README.md#23-长度分档)。
+
+新训练可用 `--length-curriculum` 开启课程，对应 `training.data.length_curriculum`，默认 `false`。课程按档位从短到长推进，每阶段完整遍历本档数据，额外从此前各档尽量均衡地随机无放回抽取历史数据，合并打乱后训练。`--curriculum-stage-epochs` 控制每阶段轮数，默认 1；`--curriculum-replay-ratio` 控制补充数量相对本档样本数的比例，默认 0.2，范围为 `[0, 1]`，对应 `training.loop.curriculum_stage_epochs` 和 `training.loop.curriculum_replay_ratio`。补充数量四舍五入，例如本档 250 条时默认补充 50 条历史数据；历史不足时取全部，每轮重新抽取，全部档位完成后结束训练。
+
+训练保留现有长度筛选和样本限量，空档跳过，每轮合并后统一切 batch；总步数按各阶段数据量和轮数计算，G、QA 数及全局 batch 保持不变。关闭课程时，同一套分档数据合并后全量随机；普通训练也可使用 `train.jsonl`、`dev.jsonl` 布局。dev 和独立评估沿用完整数据协议。终端和本地训练记录标明当前档位与阶段内轮数，恢复使用已保存的课程阶段、阶段内轮数、样本顺序、游标和随机状态。
+
 ## 配置与运行
 
 配置主体是 `stage`、`seed`、`model_name_or_path`、`model`、`compute`、`method`、`training`。`stage` 使用 `pretrain` 或 `post`，`seed` 控制随机性，`model_name_or_path` 指定基座与 tokenizer 来源，可由 `--model-path` 覆盖；`compute` 集中计算精度与执行方式，`model`、`method`、`training` 按“领域 → 职责组 → 参数”组织为三层，各阶段只配置适用参数：
@@ -70,8 +78,8 @@ loss = mean(QA_NLL_g) + policy_weight × GRPO_loss
 | `method.pretrain` | 仅预训练：AE／LM 比例与 LM 目标长度 |
 | `method.rollout` | 仅后训练：正文处理单元长度与每篇采样路径数 |
 | `method.grpo` | 仅后训练：记忆成本、策略损失权重、裁剪范围与优势归一化 |
-| `training.data` | 数据目录、长度和样本数筛选 |
-| `training.loop` | 训练预算、batch、验证与保存频率、checkpoint 保留数量 |
+| `training.data` | 数据目录、长度和样本数筛选、长度课程开关 |
+| `training.loop` | 训练预算、课程阶段轮数与历史补充比例、batch、验证与保存频率、checkpoint 保留数量 |
 | `training.optimizer` | 压缩器学习率、AdamW 参数、梯度范数裁剪；后训练另设边界模块学习率 |
 | `training.scheduler` | warmup 与余弦衰减比例 |
 | `training.backward` | 仅后训练：跨段反传长度 `bptt_steps` |
@@ -112,7 +120,7 @@ loss = mean(QA_NLL_g) + policy_weight × GRPO_loss
 
 使用项目根目录 `.venv/`。`CUDA_VISIBLE_DEVICES` 决定训练与评估使用的全部 GPU，每卡一个进程。复用项目公共 runtime，其中多卡 CUDA 进程组由 verl 初始化；采样回放、损失归约和 optimizer 更新是本项目的训练循环。
 
-以下示例分别准备 train/dev，再使用 K256 配置执行预训练和后训练。`--prepare-data` 指定来源 JSONL 文件，每次只读取该文件，先合并每条原始记录的 `text + continuation`，按完整原文的 `floor(len / 4)` 统计估算长度与可用容量；请求范围夹取到该文件合并原文的最短、最长长度之间，`--min-tokens`、`--max-tokens` 接受正整数或 `null`，默认 `null` 时采用对应来源边界。本例使用来源最短长度为下界，上界最多 4096。训练阶段仍按 tokenizer 的实际 token 数执行长度筛选。
+以下示例分别准备 train/dev，再使用 K256 配置执行预训练和后训练。其中 `prepare-pre` 的 `--prepare-data` 指定来源 JSONL 文件，每次只读取该文件，先合并每条原始记录的 `text + continuation`，按完整原文的 `floor(len / 4)` 统计估算长度与可用容量；请求范围夹取到该文件合并原文的最短、最长长度之间，`--min-tokens`、`--max-tokens` 接受正整数或 `null`，默认 `null` 时采用对应来源边界。本例使用来源最短长度为下界，上界最多 4096。训练阶段仍按 tokenizer 的实际 token 数执行长度筛选。
 
 `--target-samples` 指定目标生成数据数量：正整数指定生成条数，超过可用数量时报错；`null`（默认）不设构造数量上限，使用满足长度条件的全部数据。默认分 10 个长度区间，整数长度不足时减少；`uniform` 为各区间设置等配额、尽量均衡，`random` 逐样本等概率选择区间，两者均在区间内随机选择整数长度。随机种子可通过 `--seed` 设置，默认 42，从合并原文随机裁出一条完整 `text`，准备长度范围约束整条输出文本；AE／LM 的输入与目标由训练阶段划分。数据写入 `--output-file`，已存在时报错；同目录的元信息按输出文件名命名，例如 `train.jsonl` 对应 `preparation-train.json`。完整流程见[离线数据准备](scripts/README.md#2-离线数据准备)。
 
@@ -154,7 +162,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
 
 `<N>` 替换为真实 optimizer step。后训练初始化要求两阶段基座来源、压缩器的 `memory_slots`、LoRA 与 `gradient_checkpointing` 设置一致；`dtype`、混合精度和 CPU 暂存可独立设置，允许从 BF16 预训练初始化 FP32 后训练。边界模块隐藏维度由后训练独立设置；只继承压缩器，重新创建边界模块、optimizer、scheduler、游标与边界随机流。恢复同阶段训练用 `--resume --checkpoint <最新完整checkpoint路径>`，沿用原计划、基座来源、精度、数据和 GPU 数量；其他已知实验设置忽略并提示。预算已完成时直接返回，不读取或启动评估计划。恢复后训练不依赖预训练来源文件。`--resume` 与 `--overwrite` 互斥，可搭配 `--evaluate-only` 续跑评估。
 
-`training.loop.epochs` 控制完整轮数，JSON 中可选 `training.loop.max_steps` 进一步限制更新次数。全局 batch = 训练进程数 × 每进程 microbatch × 梯度累积次数。默认每卡 microbatch 为 2、梯度累积为 4；以上两阶段示例均使用双卡，全局 batch 为 `2 × 2 × 4 = 16`；epoch 尾批按实际样本数归约，不补齐、不丢弃、不跨 epoch 拼接，空 rank 同样参与 collective。`training.scheduler.warmup_steps` 和 `training.scheduler.min_lr_ratio` 控制学习率线性预热及后续余弦衰减；各参数组使用相同倍率。更多参数和可复制命令见[运行指南](scripts/README.md)。
+关闭长度课程时，`training.loop.epochs` 控制完整训练轮数；开启时由 `training.loop.curriculum_stage_epochs` 控制每档轮数。JSON 中可选 `training.loop.max_steps` 进一步限制总更新次数。全局 batch = 训练进程数 × 每进程 microbatch × 梯度累积次数。默认每卡 microbatch 为 2、梯度累积为 4；以上两阶段示例均使用双卡，全局 batch 为 `2 × 2 × 4 = 16`；每轮尾批按实际样本数归约，不补齐、不丢弃、不跨轮次拼接，空 rank 同样参与 collective。`training.scheduler.warmup_steps` 和 `training.scheduler.min_lr_ratio` 控制学习率线性预热及后续余弦衰减；各参数组使用相同倍率。更多参数和可复制命令见[运行指南](scripts/README.md)。
 
 ## 验证、独立评估与记录
 
@@ -193,6 +201,7 @@ v3_1_1/
   config.py / cli.py       typed 配置与显式 CLI 覆盖
   prepare_pre.py          长度分层的完整样本裁剪
   prepare_post.py         完整正文与固定位置 QA 选择
+  prepare_length.py       正文实际 token 数分档与分布统计
   data.py                 单次 AE／LM 与完整文档 QA
   modeling/               压缩器、边界模块和流式状态
   rollout.py / objective.py
