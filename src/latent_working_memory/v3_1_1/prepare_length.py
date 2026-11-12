@@ -10,6 +10,7 @@ import shutil
 import tempfile
 from zoneinfo import ZoneInfo
 
+from tqdm import tqdm
 from transformers import AutoTokenizer
 
 from .cli import positive_int
@@ -17,7 +18,11 @@ from .cli import positive_int
 
 def _scan(path, tokenizer):
     lengths, fields = [], None
-    with path.open(encoding="utf-8") as stream:
+    with path.open("rb") as stream:
+        total = sum(1 for _ in stream)
+    with path.open(encoding="utf-8") as stream, tqdm(
+        total=total, desc="[prepare-length] scan", unit="samples", mininterval=1, dynamic_ncols=True,
+    ) as progress:
         for line_number, line in enumerate(stream, 1):
             try:
                 row = json.loads(line)
@@ -33,8 +38,7 @@ def _scan(path, tokenizer):
             except (ValueError, TypeError, KeyError) as error:
                 error.add_note(f"{path}:{line_number}")
                 raise
-            if line_number % 1000 == 0:
-                print(f"[prepare-length] scanned={line_number}", flush=True)
+            progress.update(1)
     if not lengths:
         raise ValueError("the selected split must contain at least one sample")
     return lengths
@@ -101,9 +105,13 @@ def prepare_data(source_dir, split, model_path, output_dir, length_bins=4):
         with ExitStack() as stack:
             destinations = [stack.enter_context((staging / entry["file"]).open("w", encoding="utf-8"))
                             for entry in bins]
-            with source.open(encoding="utf-8") as stream:
+            with source.open(encoding="utf-8") as stream, tqdm(
+                total=len(assignments), desc=f"[prepare-length {split}] write",
+                unit="samples", mininterval=1, dynamic_ncols=True,
+            ) as progress:
                 for line, index in zip(stream, assignments, strict=True):
                     destinations[index].write(line if line.endswith("\n") else line + "\n")
+                    progress.update(1)
         for other in sorted(directory.glob("*.jsonl")):
             if other != source:
                 shutil.copyfile(other, staging / other.name)

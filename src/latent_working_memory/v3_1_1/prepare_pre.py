@@ -11,6 +11,7 @@ import tempfile
 import time
 from zoneinfo import ZoneInfo
 
+from tqdm import tqdm
 from transformers import AutoTokenizer
 
 from .cli import nonnegative_int, optional_positive_int, positive_int
@@ -18,10 +19,14 @@ from .cli import nonnegative_int, optional_positive_int, positive_int
 
 def _scan(path, tokenizer):
     capacities, split = [], None
-    started = last_report = time.monotonic()
     print(f"[prepare-pre] scanning source token capacities: {path}", flush=True)
-    with path.open(encoding="utf-8") as stream:
-        for line_number, line in enumerate(stream, 1):
+    with path.open("rb") as stream:
+        total = sum(1 for _ in stream)
+    with path.open(encoding="utf-8") as stream, tqdm(
+        total=total, desc="[prepare-pre] scan", unit="samples",
+        mininterval=1, dynamic_ncols=True,
+    ) as progress:
+        for line in stream:
             sample = json.loads(line)
             if not capacities:
                 split = sample["split"]
@@ -29,13 +34,7 @@ def _scan(path, tokenizer):
                 sample["text"] + sample["continuation"], add_special_tokens=False,
             ))
             capacities.append(capacity)
-            now = time.monotonic()
-            if line_number % 1000 == 0 or now - last_report >= 15:
-                print(f"[prepare-pre {split}] scanned={line_number} seconds={now - started:.1f}",
-                      flush=True)
-                last_report = now
-    print(f"[prepare-pre {split}] scanned={len(capacities)} seconds={time.monotonic() - started:.1f}",
-          flush=True)
+            progress.update(1)
     return capacities, split
 
 
@@ -114,12 +113,17 @@ def _crop(full_text, target, lower, upper, rng, tokenizer):
 def _write_split(path, destination, capacities, assignments, quotas, limited, buckets,
                  seed, distribution, split, target_samples, tokenizer):
     lengths, bucket_counts = Counter(), Counter()
-    started = last_report = time.monotonic()
+    started = time.monotonic()
     eligible = sum(capacity >= buckets[0][0] for capacity in capacities) if buckets else 0
     selected = sum(assignment is not None for assignment in assignments)
     print(f"[prepare-pre {split}] writing {selected} cropped windows from {eligible} eligible "
           f"and {len(capacities)} total sources", flush=True)
-    with path.open(encoding="utf-8") as source, destination.open("w", encoding="utf-8") as output:
+    with (
+        path.open(encoding="utf-8") as source,
+        destination.open("w", encoding="utf-8") as output,
+        tqdm(total=selected, desc=f"[prepare-pre {split}] build", unit="samples",
+             mininterval=1, dynamic_ncols=True) as progress,
+    ):
         for line_number, (line, assignment) in enumerate(zip(source, assignments), 1):
             if assignment is None:
                 continue
@@ -135,11 +139,7 @@ def _write_split(path, destination, capacities, assignments, quotas, limited, bu
             output.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
             lengths[length] += 1
             bucket_counts[next(bucket for bucket in buckets if bucket[0] <= length <= bucket[1])] += 1
-            now = time.monotonic()
-            if line_number % 1000 == 0 or now - last_report >= 15:
-                print(f"[prepare-pre {split}] processed={line_number}/{len(capacities)} written={sum(lengths.values())} "
-                      f"seconds={now - started:.1f}", flush=True)
-                last_report = now
+            progress.update(1)
     counts = [bucket_counts[bucket] for bucket in buckets]
     statistics = {
         "source_windows": len(capacities), "samples": sum(lengths.values()),

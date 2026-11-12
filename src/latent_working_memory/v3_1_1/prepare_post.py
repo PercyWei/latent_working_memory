@@ -11,6 +11,7 @@ import tempfile
 import time
 from zoneinfo import ZoneInfo
 
+from tqdm import tqdm
 from transformers import AutoTokenizer
 
 from .cli import nonnegative_int, optional_positive_int
@@ -49,9 +50,14 @@ def _select_qas(candidates, text_length, qas_per_sample, rng):
 
 def _scan(path, min_tokens, max_tokens, tokenizer):
     rows, split = [], None
-    started = last_report = time.monotonic()
     print(f"[prepare-post] scanning complete source texts: {path}", flush=True)
-    with path.open(encoding="utf-8") as stream:
+    with path.open("rb") as stream:
+        total = sum(1 for _ in stream)
+    with (
+        path.open(encoding="utf-8") as stream,
+        tqdm(total=total, desc="[prepare-post] scan", unit="samples",
+             mininterval=1, dynamic_ncols=True) as progress,
+    ):
         for line_number, line in enumerate(stream, 1):
             sample, candidates = _sample(line, path, line_number)
             if not rows:
@@ -60,18 +66,18 @@ def _scan(path, min_tokens, max_tokens, tokenizer):
             length_ok = ((min_tokens is None or length >= min_tokens)
                          and (max_tokens is None or length <= max_tokens))
             rows.append((length, len(candidates), length_ok))
-            now = time.monotonic()
-            if line_number % 1000 == 0 or now - last_report >= 15:
-                print(f"[prepare-post {split}] scanned={line_number} "
-                      f"seconds={now - started:.1f}", flush=True)
-                last_report = now
+            progress.update(1)
     return rows, split
 
 
 def _write_split(path, destination, rows, selected, split, qas_per_sample, seed):
     lengths, qa_counts = [], Counter()
-    started = last_report = time.monotonic()
-    with path.open(encoding="utf-8") as source, destination.open("w", encoding="utf-8") as output:
+    with (
+        path.open(encoding="utf-8") as source,
+        destination.open("w", encoding="utf-8") as output,
+        tqdm(total=len(selected), desc=f"[prepare-post {split}] build", unit="samples",
+             mininterval=1, dynamic_ncols=True) as progress,
+    ):
         for index, line in enumerate(source):
             if index not in selected:
                 continue
@@ -82,11 +88,7 @@ def _write_split(path, destination, rows, selected, split, qas_per_sample, seed)
             output.write(json.dumps({"text": text, "qas": qas}, ensure_ascii=False) + "\n")
             lengths.append(rows[index][0])
             qa_counts[len(qas)] += 1
-            now = time.monotonic()
-            if (index + 1) % 1000 == 0 or now - last_report >= 15:
-                print(f"[prepare-post {split}] processed={index + 1}/{len(rows)} "
-                      f"written={len(lengths)} seconds={now - started:.1f}", flush=True)
-                last_report = now
+            progress.update(1)
     return {
         "samples": len(lengths),
         "qas": sum(count * samples for count, samples in qa_counts.items()),
