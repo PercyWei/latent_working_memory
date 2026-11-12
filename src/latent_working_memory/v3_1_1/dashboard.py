@@ -132,12 +132,6 @@ def _baseline_selection(results, task, summaries, key):
             continue
         if label not in current:
             st.warning(f"Baseline {label} 缺少 {TASK_LABELS[task]} 结果：{path}")
-        if label in current:
-            baseline_path = Path(path).expanduser().resolve() / "summary.json"
-            if not baseline_path.is_file():
-                baseline_path = Path(path).expanduser().resolve() / task / "summary.json"
-            # 共用质量校验仅按输入和评分判断；资源展示保留来源记录的实际 attention。
-            current[label]["model"] = json.loads(baseline_path.read_text(encoding="utf-8"))["model"]
         baselines.update(current)
     return baselines
 
@@ -216,7 +210,6 @@ def _resource_rows(summaries, baselines):
                                                 if result.get("task") == "test" else result["metrics"]["samples"])),
             "测量长度": ", ".join(map(str, resources.get("lengths", result["protocol"].get("lengths", [])))),
             "精度": model["backbone_dtype"],
-            "Attention 实现": model.get("attention_implementation"),
             "设备记录": resources.get("device"),
             "实际评估批量": ", ".join(map(str, batch_sizes)) if batch_sizes is not None else None,
             "批量单位": "文档" if result.get("task") == "test" else "题目",

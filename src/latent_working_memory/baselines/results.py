@@ -91,8 +91,7 @@ def _ruler_scope(summary, lengths):
 
 def _benchmark_view(summary, benchmark):
     if summary.get("task") == benchmark:
-        return {**summary, "benchmark": benchmark, "samples": summary["metrics"]["samples"],
-                "model": {**summary["model"], "attention_implementation": "eager"}}
+        return {**summary, "benchmark": benchmark, "samples": summary["metrics"]["samples"]}
     if summary["benchmark"] != benchmark:
         raise ValueError(f"expected {benchmark} results")
     return summary

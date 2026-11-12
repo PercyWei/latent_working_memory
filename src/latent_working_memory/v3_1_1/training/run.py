@@ -93,7 +93,7 @@ def _run_training(args, config, output_dir):
     if args.resume:
         resume = checkpoint_file(args.checkpoint)
         state = read_checkpoint(resume)
-        output_dir = Path(state["config"]["training"]["output_dir"]).expanduser().resolve()
+        output_dir = Path(state["config"]["training"]["run"]["output_dir"]).expanduser().resolve()
         plan_dir = output_dir.parent / "plan"
         config = load_training_plan(plan_dir)
         validate_training_plan(config, state)
@@ -108,7 +108,7 @@ def _run_training(args, config, output_dir):
             raise ValueError("resume the latest complete checkpoint in this run")
         if len(state["rng"]) != world_size or len(state["boundary_rng"]) != world_size:
             raise ValueError("resume requires the original number of training processes")
-        complete = step == state["config"]["training"]["max_steps"]
+        complete = step == state["config"]["training"]["loop"]["max_steps"]
         del state
         if complete:
             result = {"step": step, "checkpoint": str(resume), "output_dir": str(output_dir)}
@@ -126,13 +126,15 @@ def _run_training(args, config, output_dir):
         raise RuntimeError("v3.1.1 training requires a CUDA GPU")
     if not args.resume:
         if args.overwrite:
-            if not Path(config.training.dataset_dir).is_dir():
-                raise FileNotFoundError(f"training data directory does not exist: {config.training.dataset_dir}")
+            if not Path(config.training.data.dataset_dir).is_dir():
+                raise FileNotFoundError(f"training data directory does not exist: {config.training.data.dataset_dir}")
             if output_dir.parent.exists():
                 shutil.rmtree(output_dir.parent)
         elif output_dir.parent.exists() and any(output_dir.parent.iterdir()):
             raise ValueError(f"run directory is not empty: {output_dir.parent}; use --resume or --overwrite")
-        config = replace(config, training=replace(config.training, output_dir=str(output_dir)))
+        config = replace(config, training=replace(
+            config.training, run=replace(config.training.run, output_dir=str(output_dir)),
+        ))
         plan_dir = save_training_plan(config)
     command = [
         sys.executable, "-m", "torch.distributed.run", "--standalone", "--local-addr=127.0.0.1",
@@ -190,7 +192,9 @@ def run_job(args):
             args.config, config_overrides(args), stage=args.stage,
         )
         output_dir = _training_output_dir(config, None)
-        config = replace(config, training=replace(config.training, run_id=output_dir.parent.name))
+        config = replace(config, training=replace(
+            config.training, run=replace(config.training.run, run_id=output_dir.parent.name),
+        ))
     with run_lock(output_dir.parent, exclusive=True):
         return _run_training(args, config, output_dir)
 

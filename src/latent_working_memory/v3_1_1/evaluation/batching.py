@@ -48,7 +48,7 @@ def compute_batch(samples, request, model, config, max_new_tokens, commit):
     )) for sample in samples]
     preparation = time.perf_counter() - started
     started = time.perf_counter()
-    paths = execute_batch(model, contexts, config.objective.unit_tokens)
+    paths = execute_batch(model, contexts, config.method.rollout.unit_tokens)
     torch.cuda.synchronize(device)
     compression = time.perf_counter() - started
     memories = [path[0] for path in paths]

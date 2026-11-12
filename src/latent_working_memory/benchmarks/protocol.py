@@ -12,6 +12,7 @@ from latent_working_memory.benchmarks.data import (
 )
 
 
+# 完整上下文基线的模型配置；跨方法质量比较另行提取来源与精度。
 MODEL_FIELDS = ("model_name_or_path", "backbone_dtype", "attention_implementation")
 
 
@@ -74,7 +75,10 @@ def comparison_config(summary):
     """提取完整上下文与压缩方法都需一致的质量评估条件。"""
     return {
         "benchmark": summary["benchmark"],
-        "model": {name: summary["model"][name] for name in MODEL_FIELDS},
+        "model": {
+            "model_name_or_path": summary["model"]["model_name_or_path"],
+            "backbone_dtype": summary["model"]["backbone_dtype"],
+        },
         "model_window": summary["model_window"],
         "data": {name: value for name, value in summary["data"].items() if name != "directory"},
         "protocol": {

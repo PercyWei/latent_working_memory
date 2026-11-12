@@ -26,9 +26,10 @@ def _boundary_segment(model, visible, positions, *memory_blocks):
     return model.boundary_logits(memory_blocks, visible, positions)
 
 
-def _replay_fixed(model, units, actions):
+def _replay_fixed(model, units, actions, bptt_steps):
     """同一提交段的边界共享因果前向，压缩时排除仅用于判断的新单元。"""
     blocks, log_probs, entropies, lengths = [], [], [], []
+    history = []
     ends = [index + 1 for index, commit in enumerate(actions) if commit] + [len(units)]
     start = 0
     for end in ends:
@@ -42,15 +43,15 @@ def _replay_fixed(model, units, actions):
         visible = pending + (tuple(units[end]) if end < len(units) else ())
         logits = None
         if positions:
-            if sum(map(len, blocks)) + len(visible) <= 4096:
-                logits = model.boundary_logits(blocks, visible, positions)
+            if sum(map(len, history)) + len(visible) <= 4096:
+                logits = model.boundary_logits(history, visible, positions)
             else:
                 logits = checkpoint(
-                    _boundary_segment, model, visible, tuple(positions), *blocks,
+                    _boundary_segment, model, visible, tuple(positions), *history,
                     use_reentrant=False,
                 )
         memory = checkpoint(
-            _compress_segment, model, pending, *blocks,
+            _compress_segment, model, pending, *history,
             use_reentrant=False,
         )
         if positions:
@@ -59,6 +60,10 @@ def _replay_fixed(model, units, actions):
             log_probs.append(F.logsigmoid(torch.where(chosen, logits, -logits)))
             entropies.append(F.softplus(logits) - logits * logits.sigmoid())
         blocks.append(memory)
+        history.append(memory)
+        if bptt_steps is not None and len(blocks) % bptt_steps == 0:
+            # 只截断后续上下文；原输出仍接收 Reader 的直接 QA 梯度。
+            history = [block.detach() for block in history]
         lengths.append(len(pending))
         start = end
     zero = blocks[0].new_empty((0,), dtype=torch.float32)
@@ -70,7 +75,7 @@ def _replay_fixed(model, units, actions):
     )
 
 
-def execute(model, input_ids, unit_tokens, actions=None, generator=None):
+def execute(model, input_ids, unit_tokens, actions=None, generator=None, bptt_steps=None):
     """actions=None 时采样（无 generator 则确定性判断），否则回放既定硬动作。"""
     units = tuple(input_ids[i:i + unit_tokens] for i in range(0, len(input_ids), unit_tokens))
     if not units:
@@ -78,7 +83,7 @@ def execute(model, input_ids, unit_tokens, actions=None, generator=None):
     if actions is not None and len(actions) != len(units) - 1:
         raise ValueError("recorded actions must match the fixed decision positions")
     if actions is not None and torch.is_grad_enabled():
-        return _replay_fixed(model, units, actions)
+        return _replay_fixed(model, units, actions, bptt_steps)
     stream = SourceStream(model, units[0])
     chosen, log_probs, entropies, lengths = [], [], [], []
     for index, unit in enumerate(units[1:]):
@@ -187,11 +192,11 @@ def qa_nll(model, blocks, document):
 
 
 @torch.no_grad()
-def sample_group(model, document, objective, generator):
+def sample_group(model, document, rollout, generator):
     paths = []
-    for _ in range(objective["group_size"]):
+    for _ in range(rollout["group_size"]):
         blocks, actions, log_probs, _, lengths = execute(
-            model, document.input_ids, objective["unit_tokens"], generator=generator,
+            model, document.input_ids, rollout["unit_tokens"], generator=generator,
         )
         loss = qa_nll(model, blocks, document)
         paths.append(Rollout(actions, log_probs.detach(), float(loss), lengths))

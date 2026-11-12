@@ -42,7 +42,7 @@ def _checkpoints(directory, paths=None):
         state = read_checkpoint(path)
         current = config_from_dict(state["config"])
         step = state["cursor"]["step"]
-        training_directory = Path(current.training.output_dir).expanduser().resolve()
+        training_directory = Path(current.training.run.output_dir).expanduser().resolve()
         if path.parent.name != f"global_step_{step}":
             raise ValueError(f"checkpoint directory and saved step differ: {path}")
         if path != training_directory / "checkpoints" / f"global_step_{step}" / "state.pt":
@@ -270,8 +270,6 @@ def _evaluation_arguments(args):
             "resume", "overwrite", "evaluate_only", "eval_run", "eval_id", "eval_task",
             "checkpoint", "output_root", "eval_batch_size_per_gpu",
         }}
-        if not hasattr(args, "eval_task"):
-            raise ValueError("evaluation --resume requires an explicit --eval-task")
     if args.eval_run is None:
         raise ValueError("evaluation requires --eval-run")
     if args.eval_task not in {"test", "ruler", "locomo"}:
@@ -401,12 +399,12 @@ def main(argv=None):
     parser.add_argument("--checkpoint", nargs="+", help="本次评估的 global_step_<step> 名称；省略时新建选全部，续跑沿用计划")
     parser.add_argument("--eval-run", required=True,
                         help="运行根目录，包含 train/、plan/ 与 eval/；用于选择 checkpoint 和定位计划")
-    parser.add_argument("--eval-task", choices=("test", "ruler", "locomo"))
+    parser.add_argument("--eval-task", choices=("test", "ruler", "locomo"), required=True)
     parser.add_argument("--eval-data",
                         help="评估数据目录，新建或覆盖计划时必填")
     parser.add_argument("--eval-id", help="评估计划标识，默认 YYYYMMDD-HHMMSS")
     parser.add_argument("--eval-batch-size-per-gpu", type=positive_int,
-                        help="每卡评估 batch，默认 8")
+                        help="每卡评估 batch，默认 1")
     parser.add_argument("--output-root", help="产物父目录；默认在原 run 下保存评估结果")
     restart = parser.add_mutually_exclusive_group()
     restart.add_argument("--resume", action="store_true", help="恢复指定 eval-id 下已有的任务计划")
@@ -418,15 +416,13 @@ def main(argv=None):
     parser.add_argument("--lengths", nargs="+", type=positive_int)
     args = parser.parse_args(argv)
     if getattr(args, "resume", False):
-        if not hasattr(args, "eval_task"):
-            parser.error("evaluation --resume requires an explicit --eval-task")
         ignore_resume_options(args, {
             "resume", "overwrite", "checkpoint", "eval_run", "eval_id", "eval_task", "output_root",
             "eval_batch_size_per_gpu",
         })
     for name, default in {
         "resume": False, "overwrite": False, "checkpoint": None, "eval_run": None,
-        "eval_task": "test", "eval_id": None, "output_root": None,
+        "eval_id": None, "output_root": None,
         "eval_batch_size_per_gpu": DEFAULT_EVAL_BATCH_SIZE,
     }.items():
         vars(args).setdefault(name, default)

@@ -15,7 +15,7 @@ from transformers import AutoTokenizer, set_seed
 from transformers.utils.logging import disable_progress_bar
 
 from latent_working_memory.runtime import initialize_device
-from ..config import config_from_dict
+from ..config import config_from_dict, config_to_dict
 from ..data import load_documents, load_pretraining, tokenization_identity
 from ..evaluation.records import write_json
 from ..modeling.compressor import MemoryModel
@@ -27,13 +27,13 @@ from .tracking import log_metrics, preserve_training_rng, tracking_run
 
 def _training_output_dir(config, checkpoint):
     if checkpoint is not None:
-        return Path(checkpoint["config"]["training"]["output_dir"]).expanduser().resolve()
-    run_id = config.training.run_id
+        return Path(checkpoint["config"]["training"]["run"]["output_dir"]).expanduser().resolve()
+    run_id = config.training.run.run_id
     if run_id is None:
         timestamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M")
         prefix = "policy-post" if config.stage == "post" else "pretrain"
-        run_id = f"{prefix}_k{config.model.memory_slots}_{timestamp}"
-    return Path(config.training.output_root).expanduser().resolve() / run_id / "train"
+        run_id = f"{prefix}_k{config.model.structure.memory_slots}_{timestamp}"
+    return Path(config.training.run.output_root).expanduser().resolve() / run_id / "train"
 
 
 def _restore_metrics(path, checkpoint_step):
@@ -66,10 +66,18 @@ def _load_data(config, tokenizer):
 def _initialize_compressor(model, config):
     if config.stage == "pretrain":
         return None
-    source_path = checkpoint_file(config.training.init_checkpoint)
+    source_path = checkpoint_file(config.training.run.init_checkpoint)
     source = read_checkpoint(source_path)
     source_config = config_from_dict(source["config"])
-    if source_config.stage != "pretrain" or asdict(source_config.model) != asdict(config.model):
+    # 初始化仅继承压缩器；边界结构由后训练独立设置。
+    source_compute = replace(source_config.compute, dtype=config.compute.dtype)
+    if (
+        source_config.stage != "pretrain"
+        or source_config.model_name_or_path != config.model_name_or_path
+        or source_config.model.structure.memory_slots != config.model.structure.memory_slots
+        or source_config.model.lora != config.model.lora
+        or source_compute != config.compute
+    ):
         raise ValueError("post initialization requires a matching pretrain compressor")
     model.load_compressor_state_dict(source["model"])
     return {
@@ -95,7 +103,7 @@ def train(plan_dir, resume=None):
     world = dist.get_world_size() if dist.is_initialized() else 1
     if rank != 0:
         disable_progress_bar()
-    output_dir = Path(config.training.output_dir).expanduser().resolve()
+    output_dir = Path(config.training.run.output_dir).expanduser().resolve()
     training = config.training
     if checkpoint is not None:
         if len(checkpoint["rng"]) != world or len(checkpoint["boundary_rng"]) != world:
@@ -119,17 +127,21 @@ def train(plan_dir, resume=None):
         dist.broadcast_object_list(existing, src=0)
     if existing[0]:
         raise ValueError(f"training results already exist: {output_dir}; use --resume")
-    global_batch = world * training.micro_batch_size * training.gradient_accumulation_steps
+    global_batch = world * training.loop.micro_batch_size * training.loop.gradient_accumulation_steps
     set_seed(config.seed)
-    tokenizer = AutoTokenizer.from_pretrained(config.model.model_name_or_path)
+    tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     train_documents, dev_documents, train_statistics, dev_statistics = _load_data(config, tokenizer)
-    training = replace(training, max_steps=training_steps(training, len(train_documents), global_batch))
+    training = replace(training, loop=replace(
+        training.loop, max_steps=training_steps(training.loop, len(train_documents), global_batch),
+    ))
     config = replace(config, training=training)
-    if checkpoint is not None and checkpoint["config"] != asdict(config):
+    if checkpoint is not None and checkpoint["config"] != config_to_dict(config):
         raise ValueError("resume requires the original run configuration and output directory")
-    model = MemoryModel(asdict(config.model), device)
+    model = MemoryModel(
+        config.model_name_or_path, asdict(config.model), asdict(config.compute), device,
+    )
     # 每个 rank 都在参数广播之前加载预训练压缩器，包括没有本地样本的空 rank。
     pretraining = (_initialize_compressor(model, config) if checkpoint is None
                    else checkpoint["binding"]["pretraining"])
@@ -157,16 +169,16 @@ def train(plan_dir, resume=None):
             if resume:
                 _restore_metrics(metrics_path, step)
             output_dir.mkdir(parents=True, exist_ok=True)
-            write_json(output_dir / "config.json", asdict(config))
+            write_json(output_dir / "config.json", config_to_dict(config))
             write_json(output_dir / "data.json", {
                 "binding": binding, "train": train_statistics, "dev": dev_statistics,
             })
             print(
                 f"train stage={config.stage} output_dir={output_dir} world_size={world} "
-                f"microbatch_per_gpu={training.micro_batch_size} "
-                f"gradient_accumulation_steps={training.gradient_accumulation_steps} "
+                f"microbatch_per_gpu={training.loop.micro_batch_size} "
+                f"gradient_accumulation_steps={training.loop.gradient_accumulation_steps} "
                 f"effective_batch_size={global_batch} documents={len(train_documents)} "
-                f"total_steps={training.max_steps}", flush=True,
+                f"total_steps={training.loop.max_steps}", flush=True,
             )
         except Exception as error:
             setup_error = f"training output setup failed: {error}"
@@ -175,7 +187,7 @@ def train(plan_dir, resume=None):
         dist.broadcast_object_list(status, src=0)
     if status[0] is not None:
         raise RuntimeError(status[0])
-    if step == training.max_steps:
+    if step == training.loop.max_steps:
         summary = {"step": step, "checkpoint": last_checkpoint, "output_dir": str(output_dir)}
         if rank == 0:
             _summary(output_dir, step, last_checkpoint)
@@ -197,7 +209,7 @@ def train(plan_dir, resume=None):
             dist.broadcast_object_list(status, src=0)
         if status[0] is not None:
             raise RuntimeError(status[0])
-        while step < training.max_steps:
+        while step < training.loop.max_steps:
             torch.cuda.synchronize(device)
             torch.cuda.reset_peak_memory_stats(device)
             started = time.perf_counter()
@@ -220,7 +232,8 @@ def train(plan_dir, resume=None):
                 "resources/step_seconds": seconds,
                 "resources/peak_memory_gib": peak_memory,
             }
-            if dev_documents and (step % training.dev_every == 0 or cursor.epoch_end or step == training.max_steps):
+            dev_interval = training.loop.dev_every != "after_each_epoch" and step % training.loop.dev_every == 0
+            if dev_documents and (dev_interval or cursor.epoch_end or step == training.loop.max_steps):
                 with preserve_training_rng(device, boundary_generator):
                     dev = evaluate_dev(model, dev_documents[rank::world], config)
                 record.update({f"dev/{key}": value for key, value in dev.items()})
@@ -231,13 +244,13 @@ def train(plan_dir, resume=None):
                     with preserve_training_rng(device, boundary_generator):
                         log_metrics(remote, record, step, registered)
                 print(
-                    f"step {step}/{training.max_steps} loss={metrics['loss']:.5f} "
+                    f"step {step}/{training.loop.max_steps} loss={metrics['loss']:.5f} "
                     f"grad={metrics['grad_norm']:.5f} samples={metrics['samples']} seconds={seconds:.1f}"
                     + (f" dev={record['dev/loss']:.5f}" if "dev/loss" in record else ""),
                     flush=True,
                 )
-            save_interval = training.save_every != "after_each_epoch" and step % training.save_every == 0
-            if save_interval or cursor.epoch_end or step == training.max_steps:
+            save_interval = training.loop.save_every != "after_each_epoch" and step % training.loop.save_every == 0
+            if save_interval or cursor.epoch_end or step == training.loop.max_steps:
                 last_checkpoint = str(save_checkpoint(
                     output_dir, step, config, model, engine, cursor, boundary_generator, binding, device,
                 ))

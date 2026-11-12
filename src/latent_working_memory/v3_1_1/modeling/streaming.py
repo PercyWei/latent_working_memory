@@ -36,15 +36,18 @@ class SourceStream:
             raise RuntimeError("advance must use the unit from the preceding boundary decision")
         if commit:
             if self._cached:
+                history_length = sum(map(len, self.blocks))
                 # 新单元仅用于判断，提交的是此前的 pending；不能将它混入压缩。
                 self._cache.crop(self._pending_prefix_length)
                 self.blocks.append(self.model.compress_source(self._cache))
+                # 历史 memory 的内容和位置不变；丢弃原文及压缩查询的 KV。
+                self._cache.crop(history_length)
             else:
                 self.blocks.append(self.model.compress(self.pending_ids, self.blocks))
             self.pending_ids = tuple(new_unit_ids)
             if self._cached:
-                # 上下文已由 pending 原文变成新记忆块，新单元的 KV 必须重建。
-                self._cache = self.model.prefill_source(self.blocks, self.pending_ids)
+                # 仅追加新 memory 和新单元，沿用同一缓存，避免整套新旧 KV 并存。
+                self._cache = self.model.prefill_source(self.blocks[-1:], self.pending_ids, self._cache)
         else:
             self.pending_ids += tuple(new_unit_ids)
         self._observed_unit = None

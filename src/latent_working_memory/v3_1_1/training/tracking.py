@@ -1,7 +1,6 @@
 """训练与 dev 共用原生增量曲线，恢复沿用同一 SwanLab run。"""
 
 from contextlib import contextmanager
-from dataclasses import asdict
 import fcntl
 import json
 
@@ -10,6 +9,7 @@ import torch.distributed as dist
 
 from latent_working_memory.runtime import capture_rng, restore_rng
 from latent_working_memory.tracking_credentials import swanlab_api_key
+from ..config import config_to_dict
 from ..evaluation.records import write_json
 
 
@@ -28,7 +28,7 @@ def preserve_training_rng(device, boundary_generator=None):
 @contextmanager
 def tracking_run(config, output_dir, resume, device, boundary_generator=None):
     training = config.training
-    if training.tracking == "disabled":
+    if not training.swanlab.tracking:
         yield None
         return
     with (output_dir / ".swanlab-publish.lock").open("a") as lock:
@@ -39,20 +39,20 @@ def tracking_run(config, output_dir, resume, device, boundary_generator=None):
         if identity is not None:
             project_path, run_id = identity["url"].split("/@", 1)[1].split("/runs/", 1)
             workspace, project = project_path.split("/")
-            if project != training.swanlab_project or run_id != identity["id"]:
+            if project != training.swanlab.project or run_id != identity["id"]:
                 raise ValueError("SwanLab URL differs from the saved project or run id")
         world = dist.get_world_size() if dist.is_initialized() else 1
         with preserve_training_rng(device, boundary_generator):
             run = swanlab.init(
-                project=training.swanlab_project, workspace=workspace,
+                project=training.swanlab.project, workspace=workspace,
                 name=None if resume else output_dir.parent.name,
                 config=None if resume else {
-                    **asdict(config), "world_size": world,
-                    "effective_batch_size": world * training.micro_batch_size
-                    * training.gradient_accumulation_steps,
+                    **config_to_dict(config), "world_size": world,
+                    "effective_batch_size": world * training.loop.micro_batch_size
+                    * training.loop.gradient_accumulation_steps,
                 },
-                group=training.group, job_type="train",
-                tags=sorted({"method:adaptive-boundary-grpo", f"stage:{config.stage}", *training.tags}),
+                group=training.swanlab.group, job_type="train",
+                tags=sorted({"method:adaptive-boundary-grpo", f"stage:{config.stage}", *training.swanlab.tags}),
                 mode="online", public=False, log_dir=str(output_dir / "swanlab"),
                 id=identity["id"] if identity else None,
                 resume="must" if identity else "never",

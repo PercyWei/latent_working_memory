@@ -72,7 +72,7 @@ def document_loss(model, document, config):
             "lm_fraction": (float(document.task == "lm"), 1),
         }
     blocks, actions, _, entropy, lengths = execute(
-        model, document.input_ids, config.objective.unit_tokens,
+        model, document.input_ids, config.method.rollout.unit_tokens,
     )
     loss = qa_nll(model, blocks, document)
     return loss, {
@@ -117,15 +117,16 @@ def _aggregate_metrics(totals, samples):
 class TrainingEngine:
     def __init__(self, model, config):
         self.model, self.experiment, self.config = model, config, config.training
-        model.boundary.requires_grad_(config.stage == "post")
+        if config.stage == "post":
+            model.boundary.requires_grad_(True)
         groups = [{
             "name": "compressor", "params": list(model.compressor_parameters()),
-            "lr": self.config.compressor_learning_rate,
+            "lr": self.config.optimizer.compressor_learning_rate,
         }]
         if config.stage == "post":
             groups.append({
                 "name": "boundary", "params": list(model.boundary_parameters()),
-                "lr": self.config.boundary_learning_rate,
+                "lr": self.config.optimizer.boundary_learning_rate,
             })
         self.parameters = [parameter for group in groups for parameter in group["params"]]
         if any(parameter.dtype != torch.float32 for parameter in self.parameters):
@@ -133,19 +134,19 @@ class TrainingEngine:
         if dist.is_initialized():
             self._broadcast_parameters()
         self.optimizer = torch.optim.AdamW(
-            groups, betas=(self.config.beta1, self.config.beta2),
-            eps=self.config.adam_epsilon, weight_decay=self.config.weight_decay,
+            groups, betas=(self.config.optimizer.beta1, self.config.optimizer.beta2),
+            eps=self.config.optimizer.adam_epsilon, weight_decay=self.config.optimizer.weight_decay,
         )
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(
             self.optimizer, lambda completed: self._lr_factor(completed + 1),
         )
 
     def _lr_factor(self, step):
-        if self.config.warmup_steps and step <= self.config.warmup_steps:
-            return step / self.config.warmup_steps
-        progress = min(1.0, (step - self.config.warmup_steps)
-                       / max(1, self.config.max_steps - self.config.warmup_steps))
-        return self.config.min_lr_ratio + (1 - self.config.min_lr_ratio) * (
+        if self.config.scheduler.warmup_steps and step <= self.config.scheduler.warmup_steps:
+            return step / self.config.scheduler.warmup_steps
+        progress = min(1.0, (step - self.config.scheduler.warmup_steps)
+                       / max(1, self.config.loop.max_steps - self.config.scheduler.warmup_steps))
+        return self.config.scheduler.min_lr_ratio + (1 - self.config.scheduler.min_lr_ratio) * (
             1 + math.cos(math.pi * progress)
         ) / 2
 
@@ -190,16 +191,17 @@ class TrainingEngine:
         self.optimizer.zero_grad(set_to_none=True)
         totals = {}
         if self.experiment.stage == "post":
-            objective = asdict(self.experiment.objective)
+            method = asdict(self.experiment.method)
             for document in documents:
                 loss, metrics = post_backward(
-                    self.model, document, objective, boundary_generator,
+                    self.model, document, method, boundary_generator,
+                    bptt_steps=self.config.backward.bptt_steps,
                 )
                 _accumulate(totals, loss, metrics)
         else:
-            for start in range(0, len(documents), self.config.micro_batch_size):
+            for start in range(0, len(documents), self.config.loop.micro_batch_size):
                 losses = []
-                for document in documents[start:start + self.config.micro_batch_size]:
+                for document in documents[start:start + self.config.loop.micro_batch_size]:
                     loss, metrics = document_loss(self.model, document, self.experiment)
                     if not bool(torch.isfinite(loss)):
                         raise RuntimeError(f"non-finite training loss: {document.id}")
@@ -216,7 +218,7 @@ class TrainingEngine:
             )
             metrics[f"{group['name']}_learning_rate"] = group["lr"]
         norm = torch.nn.utils.clip_grad_norm_(
-            self.parameters, self.config.gradient_clip, error_if_nonfinite=True,
+            self.parameters, self.config.optimizer.gradient_clip, error_if_nonfinite=True,
         )
         self.optimizer.step()
         self.scheduler.step()

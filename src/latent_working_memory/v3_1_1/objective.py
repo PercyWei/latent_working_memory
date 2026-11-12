@@ -12,10 +12,11 @@ def _qa_backward(model, memory_leaves, qa, normalizer):
     return loss.detach()
 
 
-def _path_backward(model, document, objective, path, advantage, group_size):
+def _path_backward(model, document, method, path, advantage, group_size, bptt_steps=None):
     """反传后只返回无图统计，使本路径的中间张量在下一次前向前释放。"""
     blocks, _, log_probs, entropy, _ = execute(
-        model, document.input_ids, objective["unit_tokens"], actions=path.actions,
+        model, document.input_ids, method["rollout"]["unit_tokens"], actions=path.actions,
+        bptt_steps=bptt_steps,
     )
     memory_leaves = tuple(block.detach().requires_grad_(True) for block in blocks)
     question_count = len(document.qas)
@@ -26,9 +27,10 @@ def _path_backward(model, document, objective, path, advantage, group_size):
             model, memory_leaves, document.qas[index], question_count * group_size,
         )
     task_loss = torch.stack(question_losses).mean()
+    grpo = method["grpo"]
     if len(log_probs):
         ratios = (log_probs - path.old_log_probs).exp()
-        clipped = ratios.clamp(1 - objective["clip_epsilon"], 1 + objective["clip_epsilon"])
+        clipped = ratios.clamp(1 - grpo["clip_epsilon"], 1 + grpo["clip_epsilon"])
         policy_loss = -torch.minimum(ratios * advantage, clipped * advantage).mean()
         policy_entropy = entropy.mean()
         drift = (log_probs - path.old_log_probs).abs().max()
@@ -36,14 +38,14 @@ def _path_backward(model, document, objective, path, advantage, group_size):
         policy_loss = task_loss.new_zeros(())
         policy_entropy = policy_loss
         drift = policy_loss
-    loss = task_loss + objective["policy_weight"] * policy_loss
+    loss = task_loss + grpo["policy_weight"] * policy_loss
     if not bool(torch.isfinite(loss)):
         raise RuntimeError(f"non-finite training loss: {document.id}")
     outputs = list(blocks)
     gradients = [leaf.grad for leaf in memory_leaves]
     if policy_loss.requires_grad:
         # 零权重也连接策略图，保留原更新中 boundary 的显式零梯度。
-        outputs.append(objective["policy_weight"] * policy_loss / group_size)
+        outputs.append(grpo["policy_weight"] * policy_loss / group_size)
         gradients.append(None)
     # 同时注入所有直接 QA adjoint 与策略梯度，让共享 history 只反传一次。
     torch.autograd.backward(outputs, gradients)
@@ -52,19 +54,20 @@ def _path_backward(model, document, objective, path, advantage, group_size):
     ))
 
 
-def post_backward(model, document, objective, generator):
+def post_backward(model, document, method, generator, bptt_steps=None):
     """采样完整组后逐路径累积梯度；文档归约与参数更新由 engine 执行。"""
-    paths = sample_group(model, document, objective, generator)
+    paths = sample_group(model, document, method["rollout"], generator)
+    grpo = method["grpo"]
     device = paths[0].old_log_probs.device
     rewards = torch.tensor([
-        -path.qa_nll - objective["slot_cost"] * model.memory_slots * len(path.block_lengths)
+        -path.qa_nll - grpo["slot_cost"] * model.memory_slots * len(path.block_lengths)
         for path in paths
     ], device=device, dtype=torch.float32)
     std = rewards.std(unbiased=False)
-    advantages = ((rewards - rewards.mean()) / (std + objective["advantage_epsilon"])).detach()
+    advantages = ((rewards - rewards.mean()) / (std + grpo["advantage_epsilon"])).detach()
     group_size = len(paths)
     values = torch.stack([
-        _path_backward(model, document, objective, path, advantage, group_size)
+        _path_backward(model, document, method, path, advantage, group_size, bptt_steps)
         for path, advantage in zip(paths, advantages, strict=True)
     ])
     qa_loss, policy_loss = values[:, :2].mean(dim=0)
@@ -86,4 +89,4 @@ def post_backward(model, document, objective, generator):
         ),
         "replay_log_probability_drift": (float(values[:, 3].sum()), group_size),
     }
-    return qa_loss + objective["policy_weight"] * policy_loss, metrics
+    return qa_loss + grpo["policy_weight"] * policy_loss, metrics

@@ -20,9 +20,10 @@ from .boundary import BoundaryHead
 
 
 class MemoryModel(nn.Module):
-    def __init__(self, model_settings, device):
+    def __init__(self, model_name_or_path, model_settings, compute_settings, device):
         super().__init__()
-        source = str(Path(model_settings["model_name_or_path"]).expanduser())
+        structure, lora = model_settings["structure"], model_settings["lora"]
+        source = str(Path(model_name_or_path).expanduser())
         self.tokenizer = AutoTokenizer.from_pretrained(source)
         if self.tokenizer.eos_token_id is None:
             raise ValueError("memory training requires tokenizer.eos_token_id")
@@ -30,8 +31,8 @@ class MemoryModel(nn.Module):
             self.tokenizer.pad_token = self.tokenizer.eos_token
         base = AutoModelForCausalLM.from_pretrained(
             source,
-            torch_dtype=getattr(torch, model_settings["dtype"]),
-            attn_implementation=model_settings["attention_implementation"],
+            torch_dtype=getattr(torch, compute_settings["dtype"]),
+            attn_implementation="sdpa",
         ).to(device)
         if base.config.model_type not in {"llama", "qwen2", "qwen3"}:
             raise ValueError("the memory writer supports Llama, Qwen2 and Qwen3 causal LMs")
@@ -40,7 +41,7 @@ class MemoryModel(nn.Module):
             raise ValueError("the streaming writer requires full-attention layers")
         if base.config.rope_scaling is not None and base.config.rope_scaling["rope_type"] != "default":
             raise ValueError("the streaming writer requires fixed default RoPE")
-        self.memory_slots = model_settings["memory_slots"]
+        self.memory_slots = structure["memory_slots"]
         self.max_positions = base.config.max_position_embeddings
         self.width = base.config.hidden_size
         base.requires_grad_(False)
@@ -51,13 +52,14 @@ class MemoryModel(nn.Module):
         for module in base.modules():
             if isinstance(module, nn.Dropout):
                 module.p = 0.0
-        self.decoder = deepcopy(base)
+        # 模块状态各自独立，只复用始终冻结的基座参数。
+        self.decoder = deepcopy(base, {id(parameter): parameter for parameter in base.parameters()})
         self.writer = get_peft_model(
             base,
             LoraConfig(
-                r=model_settings["lora_rank"],
-                lora_alpha=model_settings["lora_alpha"],
-                target_modules=model_settings["lora_target_modules"],
+                r=lora["lora_rank"],
+                lora_alpha=lora["lora_alpha"],
+                target_modules=lora["lora_target_modules"],
                 lora_dropout=0.0,
                 bias="none",
                 task_type="CAUSAL_LM",
@@ -67,7 +69,7 @@ class MemoryModel(nn.Module):
             if parameter.requires_grad:
                 parameter.data = parameter.data.float()
         for backbone in (self.writer.get_base_model(), self.decoder):
-            if model_settings["gradient_checkpointing"]:
+            if compute_settings["gradient_checkpointing"]:
                 backbone.gradient_checkpointing_enable({"use_reentrant": False})
             else:
                 backbone.gradient_checkpointing_disable()
@@ -75,7 +77,9 @@ class MemoryModel(nn.Module):
             torch.empty(self.memory_slots, self.width, device=device, dtype=torch.float32)
         )
         nn.init.normal_(self.memory_embeddings, mean=0.0, std=0.02)
-        self.boundary = BoundaryHead(self.width, model_settings["boundary_hidden_size"], device)
+        boundary_hidden_size = structure["boundary_hidden_size"]
+        self.boundary = (None if boundary_hidden_size is None
+                         else BoundaryHead(self.width, boundary_hidden_size, device))
         self.train()
 
     def _tokens(self, values):
@@ -136,10 +140,10 @@ class MemoryModel(nn.Module):
         return output.last_hidden_state[0], output.past_key_values
 
     @torch.no_grad()
-    def prefill_source(self, memory_blocks, input_ids):
+    def prefill_source(self, memory_blocks, input_ids, cache=None):
         backbone = self.writer.get_base_model()
         inputs = self._inputs(backbone, memory_blocks, input_ids)
-        return self._source_hidden(inputs)[1]
+        return self._source_hidden(inputs, cache)[1]
 
     @torch.no_grad()
     def observe_source(self, cache, new_unit_ids):
@@ -391,7 +395,7 @@ class MemoryModel(nn.Module):
                     self.writer, save_embedding_layers=False
                 ).items()
             },
-            "boundary": {
+            "boundary": None if self.boundary is None else {
                 key: value.detach().cpu().clone() for key, value in self.boundary.state_dict().items()
             },
         }
@@ -412,5 +416,8 @@ class MemoryModel(nn.Module):
             self.memory_embeddings.copy_(state["memory_embeddings"])
 
     def load_trainable_state_dict(self, state):
+        if (self.boundary is None) != (state["boundary"] is None):
+            raise ValueError("checkpoint boundary state differs from this model's training stage")
         self.load_compressor_state_dict(state)
-        self.boundary.load_state_dict(state["boundary"], strict=True)
+        if self.boundary is not None:
+            self.boundary.load_state_dict(state["boundary"], strict=True)

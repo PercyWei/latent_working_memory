@@ -4,7 +4,7 @@ import argparse
 import sys
 
 
-DEFAULT_EVAL_BATCH_SIZE = 8
+DEFAULT_EVAL_BATCH_SIZE = 1
 
 
 def positive_int(value):
@@ -68,20 +68,18 @@ def parse_run_args(argv=None):
     parser.add_argument("--epochs", type=positive_int)
     parser.add_argument("--micro-batch-size-per-gpu", type=positive_int)
     parser.add_argument("--gradient-accumulation-steps", type=positive_int)
-    parser.add_argument("--dev-every", type=positive_int)
+    parser.add_argument("--dev-every", type=save_frequency)
     parser.add_argument("--save-every", type=save_frequency)
     parser.add_argument("--save-total-limit", type=positive_int)
-    parser.add_argument("--tracking", choices=("online", "disabled"))
-    parser.add_argument("--swanlab-project")
-    parser.add_argument("--group", help="SwanLab 实验分组，默认 run_id")
-    parser.add_argument("--tag", action="append", help="追加命名空间标签，可重复指定")
-    parser.add_argument("--eval-task", choices=("test", "ruler", "locomo"), help="评估任务，默认 test")
+    parser.add_argument("--tracking", choices=("online", "offline"),
+                        help="online 开启 SwanLab，offline 仅保留本地产物")
+    parser.add_argument("--eval-task", choices=("test", "ruler", "locomo"), help="独立评估必填，指定评估任务")
     parser.add_argument("--eval-data", help="评估数据目录，新建或覆盖计划时必填")
     parser.add_argument("--lengths", nargs="+", type=positive_int)
     parser.add_argument("--max-test-samples", type=optional_positive_int)
     parser.add_argument("--max-new-tokens", type=positive_int)
     parser.add_argument("--eval-batch-size-per-gpu", type=positive_int,
-                        help="每卡独立评估 batch，默认 8")
+                        help="每卡独立评估 batch，默认 1")
     parser.add_argument("--eval-id", help="评估计划标识，默认 YYYYMMDD-HHMMSS")
     args = parser.parse_args(argv)
     if getattr(args, "resume", False):
@@ -102,6 +100,8 @@ def parse_run_args(argv=None):
     if args.evaluate_only:
         if args.eval_run is None:
             parser.error("--evaluate-only requires --eval-run")
+        if "eval_task" not in supplied:
+            parser.error("--evaluate-only requires --eval-task")
         allowed = {
             "evaluate_only", "resume", "checkpoint", "eval_run", "eval_task", "eval_data",
             "max_test_samples", "max_new_tokens", "lengths", "eval_id",
@@ -112,7 +112,6 @@ def parse_run_args(argv=None):
         if overrides:
             options = ", ".join("--" + name.replace("_", "-") for name in sorted(overrides))
             parser.error(f"--evaluate-only retains checkpoint configuration: {options}")
-        args.eval_task = getattr(args, "eval_task", "test")
         args.eval_id = getattr(args, "eval_id", None)
         args.output_root = getattr(args, "output_root", None)
         args.eval_batch_size_per_gpu = getattr(
@@ -120,8 +119,6 @@ def parse_run_args(argv=None):
         )
         if args.resume and not args.eval_id:
             parser.error("evaluation --resume requires an explicit --eval-id")
-        if args.resume and "eval_task" not in supplied:
-            parser.error("evaluation --resume requires an explicit --eval-task")
         if args.eval_task != "test" and supplied & {"max_test_samples", "max_new_tokens"}:
             parser.error("--max-test-samples and --max-new-tokens require --eval-task test")
         if "lengths" in supplied and args.eval_task != "ruler":
@@ -148,30 +145,33 @@ def parse_run_args(argv=None):
 
 
 def config_overrides(args):
-    """仅收集实际提供的覆盖项，保留 nullable 字段的显式 null。"""
+    """仅收集实际提供的三层覆盖项，保留 nullable 字段的显式 null。"""
     values = vars(args)
     overrides = {}
     if "seed" in values:
         overrides["seed"] = values["seed"]
     if "model_path" in values:
-        overrides["model"] = {"model_name_or_path": values["model_path"]}
+        overrides["model_name_or_path"] = values["model_path"]
     training = {}
     if "output_root" in values:
-        training.update(output_root=values["output_root"], output_dir=None)
-    for option, name in (
-        ("train_data", "dataset_dir"), ("init_checkpoint", "init_checkpoint"), ("run_id", "run_id"),
-        ("max_train_data_tokens", "max_train_data_tokens"),
-        ("max_train_samples", "max_train_samples"), ("max_dev_samples", "max_dev_samples"),
-        ("epochs", "epochs"), ("micro_batch_size_per_gpu", "micro_batch_size"),
-        ("gradient_accumulation_steps", "gradient_accumulation_steps"), ("dev_every", "dev_every"),
-        ("save_every", "save_every"), ("save_total_limit", "save_total_limit"),
-        ("swanlab_project", "swanlab_project"),
-        ("group", "group"), ("tag", "tags"),
+        training["run"] = {"output_root": values["output_root"], "output_dir": None}
+    for option, group, name in (
+        ("train_data", "data", "dataset_dir"),
+        ("max_train_data_tokens", "data", "max_train_data_tokens"),
+        ("max_train_samples", "data", "max_train_samples"),
+        ("max_dev_samples", "data", "max_dev_samples"),
+        ("init_checkpoint", "run", "init_checkpoint"), ("run_id", "run", "run_id"),
+        ("epochs", "loop", "epochs"), ("micro_batch_size_per_gpu", "loop", "micro_batch_size"),
+        ("gradient_accumulation_steps", "loop", "gradient_accumulation_steps"),
+        ("dev_every", "loop", "dev_every"), ("save_every", "loop", "save_every"),
+        ("save_total_limit", "loop", "save_total_limit"),
     ):
         if option in values:
-            training[name] = values[option]
+            training.setdefault(group, {})[name] = values[option]
     if "tracking" in values:
-        training["tracking"] = {"online": "swanlab", "disabled": "disabled"}[values["tracking"]]
+        training.setdefault("swanlab", {})["tracking"] = {
+            "online": True, "offline": False,
+        }[values["tracking"]]
     if training:
         overrides["training"] = training
     return overrides

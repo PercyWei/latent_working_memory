@@ -1,6 +1,5 @@
 """完整 optimizer step 的单文件 checkpoint 与各 rank 随机流。"""
 
-from dataclasses import asdict
 import os
 from pathlib import Path
 import shutil
@@ -10,7 +9,7 @@ import torch
 import torch.distributed as dist
 
 from latent_working_memory.runtime import capture_rng, restore_rng
-from ..config import config_from_dict
+from ..config import config_from_dict, config_to_dict
 
 
 def checkpoint_file(path):
@@ -70,7 +69,7 @@ def save_checkpoint(output_dir, step, config, model, engine, cursor, boundary_ge
                 raise FileExistsError(f"checkpoint already committed: {destination}")
             destination.parent.mkdir(parents=True, exist_ok=True)
             state = {
-                "config": asdict(config), "model": model.trainable_state_dict(),
+                "config": config_to_dict(config), "model": model.trainable_state_dict(),
                 "optimizer": _cpu_state(engine.optimizer.state_dict()),
                 "scheduler": engine.scheduler.state_dict(),
                 "cursor": {"step": step, "samples": cursor.state_dict()},
@@ -87,7 +86,7 @@ def save_checkpoint(output_dir, step, config, model, engine, cursor, boundary_ge
                 (path for path in root.glob("global_step_*") if (path / "state.pt").is_file()),
                 key=lambda path: int(path.name.rsplit("_", 1)[1]),
             )
-            for old in checkpoints[:-config.training.save_total_limit]:
+            for old in checkpoints[:-config.training.loop.save_total_limit]:
                 shutil.rmtree(old)
         except Exception as exc:
             error = exc
@@ -110,9 +109,9 @@ def restore_training(state, model, engine, cursor, boundary_generator, device):
     if any(len(values) != world for values in (state["rng"], state["boundary_rng"])):
         raise ValueError("resume requires the original number of training processes")
     step = state["cursor"]["step"]
-    if not 0 <= step <= engine.config.max_steps or state["scheduler"]["last_epoch"] != step:
+    if not 0 <= step <= engine.config.loop.max_steps or state["scheduler"]["last_epoch"] != step:
         raise ValueError("checkpoint step or scheduler differs from the training budget")
-    batch = world * engine.config.micro_batch_size * engine.config.gradient_accumulation_steps
+    batch = world * engine.config.loop.micro_batch_size * engine.config.loop.gradient_accumulation_steps
     cursor.load_state_dict(state["cursor"]["samples"], step, batch)
     model.load_trainable_state_dict(state["model"])
     engine.optimizer.load_state_dict(state["optimizer"])

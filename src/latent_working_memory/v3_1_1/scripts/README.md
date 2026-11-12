@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261109 11:29:41 Asia/Shanghai
+最后修订时间：20261112 11:06:47 Asia/Shanghai
 
 计算协议与数据格式见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256.json)中的基座与数据路径。
 
@@ -24,17 +24,15 @@ bash src/latent_working_memory/v3_1_1/scripts/run.sh --help
 | 基座与 tokenizer | `/root/rivermind-data/models/Qwen3-4B-Instruct-2507` |
 | AE / LM 数据来源 | `data/fineweb-multisegment-k512-seg1to3x_train32k_20261008/{train,dev,test}.jsonl` |
 | QA 数据来源 | `data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008/{train,dev,test}.jsonl` |
-| 预训练数据 | `data/fineweb_train5k_20261108/{train,dev}.jsonl` |
-| 后训练数据 | `data/fineweb-factqa_q10_train1k_20261108/{train,dev}.jsonl` |
 | 产物父目录 | `artifacts/v3-1` |
 
 运行目录与各阶段产物见 [第 7 节](#7-产物目录与记录)。
 
 ## 2. 离线数据准备
 
-`--target-samples` 默认 `null`，使用全部合条件数据；指定正整数时随机选取对应数量，超过可用数量时报错。`--seed` 默认 42，相同输入和参数可复现生成结果。
-
-数据写入 `--output-file`（一般为 `<split>.jsonl`），构造参数与统计保存为同目录的元信息文件 `preparation-<split>.json`。
+- `--target-samples` 默认 `null`，使用全部合条件数据；指定正整数时随机选取对应数量，超过可用数量时报错。
+- `--seed` 默认 42，相同输入和参数可复现生成结果。
+- `--output-file` 作为数据输出文件一般为 `<split>.jsonl`，构造参数与统计保存为同目录的元信息文件 `preparation-<split>.json`。
 
 ### 2.1 预训练数据
 
@@ -76,6 +74,7 @@ bash src/latent_working_memory/v3_1_1/scripts/run.sh prepare-post \
 新训练必须同时指定阶段 `--stage` 和配置文件 `--config`，配置中的 `stage` 必须与 `--stage` 一致。两阶段共用以下运行规则：
 
 - **配置覆盖**：显式 CLI 参数覆盖 JSON；模型结构和记忆更新设置直接修改 JSON，参数说明见[第 5 节](#5-调整参数)。
+- **计算设置**：统一使用 SDPA，具体内核由 PyTorch 根据设备、精度和输入选择；默认 FP32，详细计算方式见[方法说明](../README.md#后训练qagrpo-联合训练)。
 - **K256 配置**：两阶段使用上述同一基座及各自数据目录；预训练／后训练的 `warmup_steps` 分别为 20／5，均每 20 个 optimizer steps 验证和保存。预训练不设实际 token 数上限，后训练上限为 12288；准备阶段的 4096 是字符估算长度上限。
 - **训练批量**：`--micro-batch-size-per-gpu` 控制每卡 microbatch 的样本数；全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数。预训练按窗口、后训练按文档计数；两阶段示例均为 `2 × 2 × 4 = 16`。
 - **执行流程**：先保存训练计划，再执行训练、dev 与 checkpoint 保存。
@@ -93,8 +92,8 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
   --gradient-accumulation-steps 4
 ```
 
-- **运行目录**：`run_id` 默认为 `pretrain_k{memory_slots}_{YYYYMMDD-HHMM}`，其中 `memory_slots` 取自 `model.memory_slots`。
-- **输入与目标**：读取准备后的完整 `text`，先按完整样本的实际 token 数执行长度筛选，再依据 seed 与文本内容标识固定选择 AE 或 LM，跨 epoch 不变。AE 压缩并重建完整样本；LM 以前缀为压缩输入，预测样本末尾的 512 tokens（`objective.lm_target_tokens` 默认值），若剩余前缀长度不大于 K 则改为 AE。默认 LM 概率 0.5，目标均追加 EOS。
+- **运行目录**：`run_id` 默认为 `pretrain_k{memory_slots}_{YYYYMMDD-HHMM}`，其中 `memory_slots` 为记忆槽位数。
+- **输入与目标**：读取准备后的完整 `text`，先按完整样本的实际 token 数执行长度筛选，再依据 seed 与文本内容标识固定选择 AE 或 LM，跨 epoch 不变。AE 压缩并重建完整样本；LM 以前缀为压缩输入，默认预测样本末尾的 512 tokens，若剩余前缀长度不大于 K 则改为 AE。默认 LM 概率 0.5，目标均追加 EOS。
 - **可训练参数**：压缩器 LoRA 和 memory embeddings；基座与读取器冻结，读取器保留损失到 memory 的梯度。预训练不更新边界模块。
 
 ### 3.2 后训练（QA／GRPO 联合训练）
@@ -110,10 +109,11 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
   --gradient-accumulation-steps 4
 ```
 
-- **运行目录**：`run_id` 默认为 `policy-post_k{memory_slots}_{YYYYMMDD-HHMM}`，其中 `memory_slots` 取自 `model.memory_slots`。
-- **初始化**：后训练需通过 `--init-checkpoint` 指定预训练来源。源 checkpoint 阶段须为 `pretrain`，两阶段 `model` 配置一致。新 run 只继承压缩器，重新创建边界模块、optimizer、scheduler、游标和边界随机流。实际来源随训练记录保存。
+- **运行目录**：`run_id` 默认为 `policy-post_k{memory_slots}_{YYYYMMDD-HHMM}`，其中 `memory_slots` 为记忆槽位数。
+- **初始化**：后训练需通过 `--init-checkpoint` 指定预训练来源。源 checkpoint 阶段须为 `pretrain`，两阶段基座来源、记忆槽位数、LoRA 及除精度外的计算设置须一致，可从 BF16 预训练初始化 FP32 后训练。边界模块隐藏维度由后训练独立设置；新 run 只继承压缩器，重新创建边界模块、optimizer、scheduler、游标和边界随机流。实际来源随训练记录保存。
 - **训练单位**：每行一篇文档及其全部 QA。一篇文档采样 G 条完整硬分段，每条路径共享 memory 评价同一套 QA；G 不计入全局 batch。
 - **一次联合更新**：固定参数采样并评价整组路径，逐路径回放；QA 逐题累积 memory 梯度并释放计算图，再与策略项一起回传压缩器，累计整批后更新一次。同一提交段内的边界判断共享因果前向，压缩排除仅用于判断的下一单元。QA 损失训练记忆内容，停止梯度后的组内优势训练边界选择。
+- **反传跨度**：在 JSON 中设置 `training.backward.bptt_steps`，支持 `null`（保留完整跨段反传）或正整数。例如设为 `2`，每两次实际写入为一组，组内正常反传，组间截断后续压缩与边界判断使用的历史梯度。全部历史 memory 仍参与前向，所有块保留直接 QA 监督；预训练、无梯度采样和评估不受影响。
 - **归约与尾批**：损失按实际文档数平均，尾批不补齐、不丢弃、不跨 epoch 拼接；空 rank 同样参加 collective。
 
 ### 3.3 中断恢复
@@ -127,7 +127,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
 - **恢复起点**：仅接受当前 run 最新的完整 checkpoint。
 - **恢复状态**：可训练参数、optimizer、scheduler、全局数据游标及各 rank 的随机状态。
 - **参数来源**：仅用 `--checkpoint` 定位原训练计划，恢复全部实验设置；其他已知 CLI 实验设置忽略，启动时集中提示被忽略的选项。
-- **一致性要求**：原计划与 checkpoint 保存的配置须一致；GPU 数量和数据须保持一致。修改训练设置应启动新 run，恢复后训练不依赖预训练来源文件。
+- **一致性要求**：原计划与 checkpoint 保存的配置须一致，GPU 数量和数据须保持一致。修改训练设置应启动新 run，恢复后训练不依赖预训练来源文件。
 - **执行计划**：沿用原训练计划；预算已完成时直接返回，不读取或启动评估计划。
 
 ## 4. 评估
@@ -153,7 +153,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
 
 | `--eval-task` | `--eval-data` | 专属参数 |
 |---|---|---|
-| `test`（默认） | `data/delta-mem-qasper` | `--max-test-samples` 限制文档数，`--max-new-tokens` 设置每题生成上限 |
+| `test` | `data/delta-mem-qasper` | `--max-test-samples` 限制文档数，`--max-new-tokens` 设置每题生成上限 |
 | `locomo` | `data/benchmarks/locomo` | |
 | `ruler` | `data/benchmarks/ruler-v1/Qwen3-4B-Instruct-2507` | `--lengths` 选择长度 |
 
@@ -161,7 +161,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
 - **Test 协议**：固定读取数据目录的完整 `test.jsonl`，不套用训练长度筛选，默认每题最多生成 128 tokens；同文档全部 QA 共用记忆。
 - **运行与范围**：`--eval-run` 必填，指向运行根目录。`--checkpoint` 可选，只填一个或多个 `global_step_<N>` 名称，自动查找 `<eval-run>/train/checkpoints/<名称>/state.pt`；省略时选择当时保存的全部完整 checkpoint。
 - **评估计划**：新建时须提供 `--eval-data`，默认先将选定范围与评估设置保存到 `<eval-run>/plan/eval-<eval-id>/<task>.json`，再执行评估，结果保存到 `<eval-run>/eval/<eval-id>/<task>/`。`--eval-id` 默认 `YYYYMMDD-HHMMSS`；同一标识下各任务独立管理，目标任务计划已存在时直接报错。
-- **并行与批量**：多张可见 GPU 共同处理一个 checkpoint 的样本，每卡一份模型；`--eval-batch-size-per-gpu` 控制每卡批量，默认 8。多个 checkpoint 按 step 升序依次评估。 Test 按文档组批，benchmark 按题组批，RULER 按 length 分组。
+- **并行与批量**：多张可见 GPU 共同处理一个 checkpoint 的样本，每卡一份模型；`--eval-batch-size-per-gpu` 控制每卡批量，默认 1。多个 checkpoint 按 step 升序依次评估。 Test 按文档组批，benchmark 按题组批，RULER 按 length 分组。
 - **覆盖评估**：追加 `--overwrite`，按本次参数重建当前评估任务（`<eval-run>` `<eval-id>` `<eval-task>`）的计划和全部 checkpoint 结果，其他任务、其他 eval-id、其他运行的评估结果保留。目标正在使用时直接报错。
 
 ### 4.2 中断恢复或补充
@@ -234,7 +234,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 
 - **比较规则**：
 
-  - **质量比较**：核对基座模型标识、实际输入与参考答案、输入／解码／生成预算及评分口径。基座按模型路径末级名称识别，父目录可以不同；算法、窗口、精度、attention 实现、设备和批量不作为质量比较限制。
+  - **质量比较**：核对基座模型标识、实际输入与参考答案、输入／解码／生成预算及评分口径。基座按模型路径末级名称识别，父目录可以不同；算法、窗口、精度、设备和批量不作为质量比较限制。
   - **数据核对**：使用顺序无关的比较指纹，RULER 按长度分别核对。旧结果可沿用原数据指纹；缺少分组指纹且覆盖范围不同时，提示无法核实对应范围。
   - **资源与成本**：资源统计与质量指标分区展示。批量计算时间按参与样本分摊后累计，不等同于每条请求的独立等待时延；峰值显存按 worker／批次范围观测。比较成本须统一硬件、实际评估批量及测量范围，不自动计算加速比；重试墙钟时间仅覆盖本次执行。
   - **缓存校验**：跨方法展示允许实现与运行环境不同；结果复用、失败重试和训练恢复仍严格核对原有身份与设置。
@@ -246,46 +246,45 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 
 ## 5. 调整参数
 
-本节汇总训练、恢复、独立评估、离线准备与看板的公开参数。训练默认值以[预训练配置](../../../../configs/v3_1_1/pretrain_default.json)和[后训练配置](../../../../configs/v3_1_1/post_default.json)为准：新训练的显式 CLI 值在校验前覆盖 JSON，省略时沿用配置。模型结构、方法目标及优化器设置直接修改 JSON，见[方法说明](../README.md)。本文示例改用 K256 配置：准备阶段上限为估算 4096 tokens，预训练不设实际 token 数上限，后训练上限为 12288；`*_default.json` 保留 K128 设置。
+本节汇总训练、恢复、独立评估、离线准备与看板的公开参数。训练默认值以[预训练配置](../../../../configs/v3_1_1/pretrain_default.json)和[后训练配置](../../../../configs/v3_1_1/post_default.json)为准：新训练的显式 CLI 值在校验前覆盖 JSON，省略时沿用配置。模型结构、方法目标及优化器设置直接修改 JSON，见[配置与运行](../README.md#配置与运行)。本文示例改用 K256 配置：准备阶段上限为估算 4096 tokens，预训练不设实际 token 数上限，后训练上限为 12288；`*_default.json` 保留 K128 设置。
 
 ### 5.1 训练输入与执行预算
 
 | 参数 | 用途／默认值 |
 |---|---|
 | **运行方式** | |
-| `--evaluate-only` | 启动评估 |
-| `--resume` | 恢复训练或补充评估 |
-| `--overwrite` | 覆盖式训练或评估 |
+| `--evaluate-only` | 启动评估，默认不开启 |
+| `--resume` | 恢复训练或补充评估，默认不开启 |
+| `--overwrite` | 覆盖式训练或评估，默认不开启 |
 | **配置与模型** | |
-| `--stage` | 训练阶段，新训练必填，支持 `pretrain` 或 `post` |
-| `--config` | JSON 配置文件，新训练必填 |
-| `--model-path` | 基座与 tokenizer 路径，默认 `~/models/Qwen3-4B-Instruct-2507` |
+| `--stage` | 训练必填，训练阶段，支持 `pretrain` 和 `post` |
+| `--config` | 训练必填，JSON 配置文件 |
+| `--model-path` | 训练必填，基座与 tokenizer 路径 |
 | `--seed` | 训练与离线准备的非负随机种子，默认 42 |
-| `--init-checkpoint` | 后训练初始化所用的预训练 checkpoint，后训练新 run 必填 |
+| `--init-checkpoint` | 后训练必填，后训练初始化所用的预训练 checkpoint |
 | **目录与运行标识** | |
 | `--output-root` | 训练产物父目录，默认 `artifacts/v3-1` |
 | `--run-id` | 训练运行目录名，默认见[目录命名](#7-产物目录与记录) |
 | **离线数据准备** | |
-| `--prepare-data` | 来源 JSONL 文件，离线数据准备时（`prepare-pre` 或 `prepare-post`）必填 |
-| `--output-file` | 完整输出文件路径，必填；文件已存在时报错 |
-| `--target-samples` | 两种准备的目标生成条数；正整数超过可用数量时报错，`null`（默认）使用全部合条件数据 |
-| `--min-tokens` | 估算长度下限，支持正整数和 `null`（默认）；按字符数 ÷ 4 估算 |
-| `--max-tokens` | 估算长度上限，支持正整数和 `null`（默认）；按字符数 ÷ 4 估算 |
+| `--prepare-data` | 离线数据准备必填，来源 JSONL 文件 |
+| `--output-file` | 离线数据准备必填，完整输出文件路径 |
+| `--target-samples` | 两种准备的目标生成条数，支持正整数和 `null`（默认） |
+| `--min-tokens` | 估算长度下限，支持正整数和 `null`（默认） |
+| `--max-tokens` | 估算长度上限，支持正整数和 `null`（默认） |
 | `--length-bins` | 仅 `prepare-pre`，长度区间数，默认 10 |
 | `--length-distribution` | 仅 `prepare-pre`，不同长度区间样本数分布，支持 `uniform`（默认）和 `random` |
-| `--qas-per-sample` | 仅 `prepare-post`，每条数据 QA 数上限，支持正整数和 `null`（保留全部 task 题），默认 10 |
+| `--qas-per-sample` | 仅 `prepare-post`，每条数据 QA 数上限，支持正整数和 `null`，默认 10 |
 | **数据集与筛选** | |
-| `--train-data` | 训练与 dev 验证的数据目录，默认使用配置的 `training.dataset_dir` |
-| `--max-train-samples` | 训练样本数上限，默认 `null`（全部） |
-| `--max-train-data-tokens` | 预训练完整样本／后训练正文的实际 token 数上限，K128 默认 12288；K256 预训练为 `null`，后训练为 12288 |
+| `--train-data` | 训练必填，训练与 dev 验证的数据目录 |
+| `--max-train-samples` | 训练样本数上限，支持正整数和 `null`（默认） |
+| `--max-train-data-tokens` | 预训练完整样本／后训练正文的实际 token 数上限，支持正整数和 `null`（默认） |
 | **训练时长** | |
 | `--epochs` | 训练轮数，默认 1 |
 | **批处理** | |
-| `--micro-batch-size-per-gpu` | 每卡 microbatch 的样本数，默认 2 |
-| `--gradient-accumulation-steps` | 每次优化器更新前累积的 microbatch 数，默认 4 |
+| `--micro-batch-size-per-gpu` | 每卡 microbatch 的样本数，默认 1 |
+| `--gradient-accumulation-steps` | 每次优化器更新前累积的 microbatch 数，默认 16 |
 
-- **数据筛选**：预训练按完整样本 `text`、后训练按正文的实际 token 数筛选，不含系统提示、chat template 等。train 和 dev 均须严格大于 `model.memory_slots`；上限仅用于 train，超限样本整条排除，`null` 取消该上限。LM 划分后的压缩前缀若不大于 K 则改为 AE，实际编码／解码仍须满足模型窗口限制。
-- **批量与预算**：全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数，默认按总批次 16 进行配置。后训练逐路径反传，这两个批量参数共同确定每次更新处理的文档数。
+- **数据筛选**：预训练按完整样本 `text`、后训练按正文的实际 token 数筛选，不含系统提示、chat template 等。train 和 dev 的长度均须严格大于记忆槽位数 K；上限仅用于 train，超限样本整条排除，`null` 取消该上限。LM 划分后的压缩前缀若不大于 K 则改为 AE，实际编码／解码仍须满足模型窗口限制。
 
 ### 5.2 验证、评估与结果记录
 
@@ -296,26 +295,23 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 | `--save-total-limit` | 保留最近成功保存的 checkpoint 数，默认 2 |
 | `--checkpoint` | 训练恢复用单个完整路径；评估只填 `global_step_<N>` 名称，支持多个；新建或覆盖时省略选当时全部，续跑时省略选累计列表全部，传入则仅调度指定项并累计新项 |
 | **Dev 验证** | |
-| `--max-dev-samples` | dev 验证样本数上限，默认 64；`null` 使用全部 |
-| `--dev-every` | dev 验证的 optimizer step 间隔，默认 100 |
+| `--max-dev-samples` | dev 验证样本数上限，支持正整数和 `null`（默认） |
+| `--dev-every` | dev 验证的正整数 optimizer step 间隔或 `after_each_epoch`（默认） |
 | **Test 与 benchmark 评估** | |
-| `--eval-run` | 指向运行根目录，用于保存评估计划和 checkpoint 确认等 |
+| `--eval-run` | 评估必填，指向运行根目录，用于保存评估计划和 checkpoint 确认等 |
 | `--eval-id` | 评估标识，默认 `YYYYMMDD-HHMMSS` |
-| `--eval-task` | 评估任务，支持 `test`（默认）、`locomo` 和 `ruler` |
-| `--eval-data` | 当前评估任务的数据目录 |
-| `--eval-batch-size-per-gpu` | 每卡评估批量，默认 8 |
-| `--max-test-samples` | test 评估文档数上限，默认 `null`（全部） |
+| `--eval-task` | 评估必填，评估任务，支持 `test`、`locomo` 和 `ruler` |
+| `--eval-data` | 评估必填，当前评估任务的数据目录 |
+| `--eval-batch-size-per-gpu` | 每卡评估批量，默认 1 |
+| `--max-test-samples` | test 评估文档数上限，支持正整数和 `null`（默认） |
 | `--max-new-tokens` | test 评估时 token 生成上限，默认 128 |
 | `--lengths` | RULER 评估时所用数据的长度，默认 `8192 16384 32768` |
 | **SwanLab** | |
-| `--tracking` | SwanLab 记录方式，支持 `online` 或 `disabled`（默认，仅保存本地产物） |
-| `--swanlab-project` | SwanLab 项目，启用记录时显式指定 |
-| `--group` | SwanLab 实验分组，默认 `run_id` |
-| `--tag` | SwanLab 命名空间标签 |
+| `--tracking` | SwanLab 记录，支持 `online`（默认）和 `offline` |
 | **看板** | |
-| `--dashboard-run-dir` | 必填，指向运行根目录；仅需保留 `eval/` 目录结构 |
-| `--dashboard-eval-id` | 可选，启动时选中的 eval-id；省略时默认列表首项，页面可切换 |
-| `--dashboard-baselines` | 可选，按“标签 结果目录”成对传入；支持 benchmark 的 `eval/` 或直接含 `summary.json` 的目录 |
+| `--dashboard-run-dir` | 看板必填，指向运行根目录 |
+| `--dashboard-eval-id` | 看板启动时选中的 eval-id；省略时默认列表首项，页面可切换 |
+| `--dashboard-baselines` | 按“标签 结果目录”成对传入；支持 benchmark 的 `eval/` 或直接含 `summary.json` 的目录 |
 
 - **验证与保存**：除了 `--save-every` 和 `--dev-every` 所指定的 step，epoch 末和最终步也保存 checkpoint 及进行 dev 验证。
 
@@ -342,7 +338,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 <output_root>/
 └── <run_id>/
     ├── plan/
-    │   ├── config.json                       stage、seed、model 与 objective
+    │   ├── config.json                       stage、seed、model 与 method
     │   ├── train.json                        训练设置与执行安排
     │   └── eval-<eval-id>/<task>.json         各任务的评估计划
     ├── train/
@@ -374,4 +370,4 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 - **评估结果**：各卡结果按原始样本顺序汇总；Test 的 `qa_nll` 先按题、再按文档平均，`token_nll` 按答案 token 加权，EM／F1 按题平均，benchmark 沿用官方汇总。评估续跑复用完整结果；未完成时保留逐文档／题目进度，可调整 GPU 数和评估批量，只重新分片、组批剩余样本。RULER 继续复用已完成长度。
 - **比较指纹**：Benchmark summary 的 `comparison_data` 按原始输入、参考答案、生成预算与任务生成，忽略执行顺序，RULER 按长度分组；仅供跨方法展示，不参与 `eval.json`、缓存或恢复校验。
 - **日志与状态**：日志同时写入文件和终端，评估输出带 GPU／分片前缀；任务 `status.json` 的 `eval_run` 指向运行根目录，`selected_checkpoints` 是本次调度范围，与计划 `checkpoints` 的累计范围区分。状态记录 checkpoint 与各分片的设备、命令、起止时间、返回码和错误，整体进度仅统计本轮选择。
-- **展示方式**：SwanLab 默认关闭；启用后记录 train/dev、训练资源及配置，project 须明确配置，group 未指定时默认 `run_id`。`--tracking disabled` 仅保留本地产物，恢复训练沿用 `swanlab.json` 中的 run。评估由独立 dashboard 展示，不读取 SwanLab 身份或凭据。
+- **展示方式**：SwanLab 默认开启，记录 train/dev、训练资源及配置。project、group 和 tags 通过配置文件设置；project 默认为 `latent-working-memory-v3.1`，group 未指定时默认 `run_id`。`--tracking offline` 关闭 SwanLab 记录，仅保留本地产物；恢复训练沿用 `swanlab.json` 中的 run。评估由独立 dashboard 展示，不读取 SwanLab 身份或凭据。

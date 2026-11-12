@@ -92,7 +92,7 @@ def _path(directory, split):
 def _limit(settings, split):
     if split not in {"train", "dev"}:
         raise ValueError("training data split must be train or dev")
-    return getattr(settings.training, f"max_{split}_samples")
+    return getattr(settings.training.data, f"max_{split}_samples")
 
 
 def _metadata(path, split, examples, raw_documents, raw_texts, filtered, maximum, seed):
@@ -111,9 +111,9 @@ def _metadata(path, split, examples, raw_documents, raw_texts, filtered, maximum
 
 def load_pretraining(settings, tokenizer, split):
     """完整文本只选 AE 或 LM；LM 预测末 N tokens，压缩前缀不足时转 AE。"""
-    path = _path(settings.training.dataset_dir, split)
+    path = _path(settings.training.data.dataset_dir, split)
     maximum = _limit(settings, split)
-    data, objective, seed = settings.training, settings.objective, settings.seed
+    data, pretrain, seed = settings.training.data, settings.method.pretrain, settings.seed
     if tokenizer.eos_token_id is None:
         raise ValueError("AE/LM pretraining requires an EOS token")
     prompts = {
@@ -134,22 +134,22 @@ def load_pretraining(settings, tokenizer, split):
                 raw_documents.add(doc_id)
                 raw_samples += 1
                 full_ids = tuple(tokenizer.encode(row["text"], add_special_tokens=False))
-                if len(full_ids) <= settings.model.memory_slots or (
+                if len(full_ids) <= settings.model.structure.memory_slots or (
                     split == "train" and data.max_train_data_tokens is not None
                     and len(full_ids) > data.max_train_data_tokens
                 ):
                     filtered += 1
                     continue
                 rng = random.Random(f"{seed}:pretraining:{doc_id}")
-                task = "lm" if rng.random() < objective.lm_ratio else "ae"
+                task = "lm" if rng.random() < pretrain.lm_ratio else "ae"
                 inputs = target = full_ids
                 if task == "lm":
-                    if len(full_ids) - objective.lm_target_tokens <= settings.model.memory_slots:
+                    if len(full_ids) - pretrain.lm_target_tokens <= settings.model.structure.memory_slots:
                         task = "ae"
                         short_lm_inputs += 1
                     else:
-                        inputs = full_ids[:-objective.lm_target_tokens]
-                        target = full_ids[-objective.lm_target_tokens:]
+                        inputs = full_ids[:-pretrain.lm_target_tokens]
+                        target = full_ids[-pretrain.lm_target_tokens:]
                 examples.append(PretrainExample(
                     f"{doc_id}:{line_number}:{task}", doc_id, inputs,
                     (*target, tokenizer.eos_token_id), task, prompts[task],
@@ -166,7 +166,7 @@ def load_pretraining(settings, tokenizer, split):
         "lm_to_ae_sources": short_lm_inputs,
         "ae_samples": sum(row.task == "ae" for row in examples.values()),
         "lm_samples": sum(row.task == "lm" for row in examples.values()),
-        "lm_ratio": objective.lm_ratio, "lm_target_tokens": objective.lm_target_tokens,
+        "lm_ratio": pretrain.lm_ratio, "lm_target_tokens": pretrain.lm_target_tokens,
     })
     return examples, metadata
 
@@ -238,9 +238,9 @@ def _load_documents(directory, tokenizer, split, minimum, upper, maximum, seed, 
 
 
 def load_documents(settings, tokenizer, split):
-    data = settings.training
+    data = settings.training.data
     return _load_documents(
-        data.dataset_dir, tokenizer, split, settings.model.memory_slots + 1,
+        data.dataset_dir, tokenizer, split, settings.model.structure.memory_slots + 1,
         data.max_train_data_tokens if split == "train" else None,
         _limit(settings, split), settings.seed, allow_empty=split == "dev",
     )

@@ -57,8 +57,10 @@ def _evaluation_inputs(checkpoint_path, data, task, max_new_tokens, max_samples,
     config = config_from_dict(state["config"])
     if config.stage != "post":
         raise ValueError("independent QA and benchmark evaluation requires a post checkpoint")
-    tokenizer = AutoTokenizer.from_pretrained(config.model.model_name_or_path)
-    model_window = AutoConfig.from_pretrained(config.model.model_name_or_path).max_position_embeddings
+    tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path)
+    model_window = AutoConfig.from_pretrained(
+        config.model_name_or_path,
+    ).max_position_embeddings
     if task == "test":
         documents, statistics = load_evaluation_documents(
             data, tokenizer, max_samples=max_samples, seed=config.seed,
@@ -88,14 +90,18 @@ def _evaluation_inputs(checkpoint_path, data, task, max_new_tokens, max_samples,
         })
     evaluation_protocol.update({
         "boundary": "commit at probability >= 0.5; forced final pending flush",
-        "unit_tokens": config.objective.unit_tokens,
+        "unit_tokens": config.method.rollout.unit_tokens,
         "tokenization": tokenization_identity(tokenizer),
     })
     request = json.loads(json.dumps({
         "eval_id": eval_id, "task": task, "checkpoint": str(checkpoint_path),
         "checkpoint_step": state["cursor"]["step"],
-        "training_run": {"directory": config.training.output_dir},
-        "model": {**asdict(config.model), "backbone_dtype": config.model.dtype},
+        "training_run": {"directory": config.training.run.output_dir},
+        "model": {
+            "model_name_or_path": config.model_name_or_path,
+            **asdict(config.model.structure), **asdict(config.model.lora),
+            **asdict(config.compute), "backbone_dtype": config.compute.dtype,
+        },
         "model_window": model_window, "seed": config.seed,
         "data": identity, "protocol": evaluation_protocol,
     }))
@@ -162,7 +168,7 @@ def evaluate_shard(checkpoint_path, data, output_dir, worker_rank, task="test",
         raise RuntimeError("CUDA is required to run v3.1.1 evaluation")
     device = initialize_device("cuda")
     set_seed(config.seed)
-    model = MemoryModel(asdict(config.model), device)
+    model = MemoryModel(config.model_name_or_path, asdict(config.model), asdict(config.compute), device)
     model.load_trainable_state_dict(state["model"])
     model.eval()
     del state, tokenizer
@@ -206,7 +212,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--data", required=True)
-    parser.add_argument("--task", choices=("test", "locomo", "ruler"), default="test")
+    parser.add_argument("--task", choices=("test", "locomo", "ruler"), required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--max-new-tokens", type=positive_int)
     parser.add_argument("--max-samples", type=positive_int)
