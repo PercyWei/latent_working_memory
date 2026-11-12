@@ -31,7 +31,7 @@
   },
   "training": {
     "data": {
-      "dataset_dir": "data/fineweb_train5k_20261108",
+      "dataset_dir": "data/fineweb_train5k_20261112",
       "max_train_data_tokens": null,
       "max_train_samples": null,
       "max_dev_samples": null,
@@ -43,7 +43,7 @@
       "curriculum_replay_ratio": 0.2,
       "max_steps": null,
       "micro_batch_size": 2,
-      "gradient_accumulation_steps": 4,
+      "gradient_accumulation_steps": 8,
       "dev_every": 20,
       "save_every": 20,
       "save_total_limit": 5

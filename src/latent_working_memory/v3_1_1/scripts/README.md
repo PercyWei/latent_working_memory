@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261112 17:11:24 Asia/Shanghai
+最后修订时间：20261112 18:46:58 Asia/Shanghai
 
 计算协议与数据格式见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256.json)中的基座与数据路径。
 
@@ -80,10 +80,10 @@ bash src/latent_working_memory/v3_1_1/scripts/run.sh prepare-post \
 ```bash
 bash src/latent_working_memory/v3_1_1/scripts/run.sh prepare-length \
   --prepare-data data/fineweb-factqa_q10_train1k_20261112/ \
-  --output-dir data/fineweb-factqa_q10_train1k_length4_20261112 \
+  --output-dir data/fineweb-factqa_q10_train1k_length3_20261112 \
   --model-path /root/rivermind-data/models/Qwen3-4B-Instruct-2507 \
   --split train \
-  --length-bins 4
+  --length-bins 3
 ```
 
 - **数据格式**：读取来源目录中的 `<split>.jsonl`，根据数据正文长度进行分别保存，保留原数据格式；其余 split 的 JSONL 文件原样复制到输出目录。
@@ -91,12 +91,11 @@ bash src/latent_working_memory/v3_1_1/scripts/run.sh prepare-length \
 - **输出与统计**：输出目录须不存在。分档写入 `<split>/bin_XX.jsonl`，终端与 `preparation-<split>.json` 展示各档边界、样本数及实际长度的最小值、最大值和均值，方便在训练前查看并调整数据。
 
 ```text
-fineweb-factqa_q10_train1k_length4_20261112/
+fineweb-factqa_q10_train1k_length3_20261112/
 ├── train/
 │   ├── bin_00.jsonl
 │   ├── bin_01.jsonl
-│   ├── bin_02.jsonl
-│   └── bin_03.jsonl
+│   └── bin_02.jsonl
 ├── dev.jsonl
 └── preparation-train.json
 ```
@@ -106,42 +105,43 @@ fineweb-factqa_q10_train1k_length4_20261112/
 新训练必须同时指定阶段 `--stage` 和配置文件 `--config`，配置中的 `stage` 必须与 `--stage` 一致。两阶段共用以下运行规则：
 
 - **配置覆盖**：显式 CLI 参数覆盖 JSON；模型结构和记忆更新设置直接修改 JSON，参数说明见[第 5 节](#5-调整参数)。
-- **计算设置**：统一使用 SDPA，默认 FP32。`--mixed-precision` 和 `--save-on-cpu` 分别开启标准 BF16 autocast（参数精度保持 FP32）和反向保存张量的 CPU 暂存，两者默认关闭。恢复与独立评估沿用已保存设置，详细计算方式见[方法说明](../README.md#配置与运行)。
-- **训练批量**：`--micro-batch-size-per-gpu` 控制每卡 microbatch 的样本数；全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数。预训练按窗口、后训练按文档计数；两阶段示例均为 `2 × 2 × 4 = 16`。
-- **长度课程**：完成[长度分档](#23-长度分档)后，在原训练命令中追加 `--length-curriculum --curriculum-stage-epochs 1 --curriculum-replay-ratio 0.2`。按档位从短到长推进，每轮完整遍历本档，并从此前各档尽量均衡地随机无放回补充本档数量的 20%，数量四舍五入，历史不足时取全部；每轮重新抽取，混合打乱后统一切 batch，全部档位完成后结束。关闭课程时，各档合并后按 `--epochs` 全量随机训练；dev 和 test 保持原协议。
+- **计算设置**：统一使用 SDPA，参数默认 FP32。`--mixed-precision` 和 `--save-on-cpu` 分别开启标准 BF16 autocast（参数精度保持 FP32）和反向保存张量的 CPU 暂存，省略时沿用 JSON。恢复与独立评估沿用已保存设置，详细计算方式见[方法说明](../README.md#配置与运行)。
+- **训练批量**：`--micro-batch-size-per-gpu` 控制每卡 microbatch 的样本数；全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数。预训练按窗口、后训练按文档计数；两阶段示例均使用单卡 A800，`1 × 2 × 8 = 16`。
+- **长度课程**：K256 后训练配置已开启课程，每档训练 1 轮，并从此前各档尽量均衡地随机无放回补充本档数量的 20%。按档位从短到长推进，每轮完整遍历本档，历史补充数量四舍五入、不足时取全部；每轮重新抽取，混合打乱后统一切 batch，全部档位完成后结束，不额外执行 `--epochs` 全量训练。其他配置可通过 `--length-curriculum` 开启，以 `--curriculum-stage-epochs` 和 `--curriculum-replay-ratio` 调整轮数与比例。关闭课程时，各档合并后按 `--epochs` 全量随机训练；dev 和 test 保持原协议。
 - **执行流程**：先保存训练计划，再执行训练、dev 与 checkpoint 保存。
 - **覆盖训练**：追加 `--overwrite` 会清理本次 `run-id` 对应的整个 run，包括计划、训练和评估结果，再保存新计划重新训练；云端历史保留。
 
 ### 3.1 单次压缩预训练
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
+CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
   --stage pretrain \
   --config configs/v3_1_1/pretrain_k256.json \
-  --run-id pretrain_k256_20261104 \
+  --run-id pretrain_k256_20261112 \
   --epochs 1 \
   --micro-batch-size-per-gpu 2 \
-  --gradient-accumulation-steps 4
+  --gradient-accumulation-steps 8
 ```
 
 - **运行目录**：`run_id` 默认为 `pretrain_k{memory_slots}_{YYYYMMDD-HHMM}`，其中 `memory_slots` 为记忆槽位数。
+- **当前数据**：K256 配置读取 `data/fineweb_train5k_20261112`，5000 条训练样本按上述批量训练 1 轮，共 313 个 optimizer steps。
 - **输入与目标**：读取准备后的完整 `text`，先按完整样本的实际 token 数执行长度筛选，再依据 seed 与文本内容标识固定选择 AE 或 LM，跨 epoch 不变。AE 压缩并重建完整样本；LM 以前缀为压缩输入，默认预测样本末尾的 512 tokens，若剩余前缀长度不大于 K 则改为 AE。默认 LM 概率 0.5，目标均追加 EOS。
 - **可训练参数**：压缩器 LoRA 和 memory embeddings；基座与读取器冻结，读取器保留损失到 memory 的梯度。预训练不更新边界模块。
 
 ### 3.2 后训练（QA／GRPO 联合训练）
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
+CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
   --stage post \
   --config configs/v3_1_1/post_k256.json \
-  --run-id policy-post_k256_20261104 \
-  --init-checkpoint 'artifacts/v3-1/pretrain_k256_20261104/train/checkpoints/global_step_<N>' \
-  --epochs 1 \
+  --run-id policy-post_k256_20261112 \
+  --init-checkpoint 'artifacts/v3-1/pretrain_k256_20261112/train/checkpoints/global_step_313' \
   --micro-batch-size-per-gpu 2 \
-  --gradient-accumulation-steps 4
+  --gradient-accumulation-steps 8
 ```
 
 - **运行目录**：`run_id` 默认为 `policy-post_k{memory_slots}_{YYYYMMDD-HHMM}`，其中 `memory_slots` 为记忆槽位数。
+- **当前数据**：K256 配置读取 `data/fineweb-factqa_q10_train1k_length3_20261112`，按 3 个长度档位依次训练，dev 读取该目录下的 `dev.jsonl`；课程已在配置中开启，无需额外传参。
 - **初始化**：后训练需通过 `--init-checkpoint` 指定预训练来源。源 checkpoint 阶段须为 `pretrain`，两阶段基座来源、记忆槽位数、LoRA 及梯度检查点设置须一致；精度、混合精度和 CPU 暂存可独立设置，可从 BF16 预训练初始化 FP32 后训练。边界模块隐藏维度由后训练独立设置；新 run 只继承压缩器，重新创建边界模块、optimizer、scheduler、游标和边界随机流。实际来源随训练记录保存。
 - **训练单位**：每行一篇文档及其全部 QA。一篇文档采样 G 条完整硬分段，每条路径共享 memory 评价同一套 QA；G 不计入全局 batch。
 - **一次联合更新**：固定参数采样并评价整组路径，逐路径回放；QA 逐题累积 memory 梯度并释放计算图，再与策略项一起回传压缩器，累计整批后更新一次。同一提交段内的边界判断共享因果前向，压缩排除仅用于判断的下一单元。QA 损失训练记忆内容，停止梯度后的组内优势训练边界选择。
@@ -151,9 +151,9 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
 ### 3.3 中断恢复
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
+CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
   --resume \
-  --checkpoint 'artifacts/v3-1/pretrain_k256_20261104/train/checkpoints/global_step_<N>'
+  --checkpoint 'artifacts/v3-1/pretrain_k256_20261112/train/checkpoints/global_step_<N>'
 ```
 
 - **恢复起点**：仅接受当前 run 最新的完整 checkpoint。
