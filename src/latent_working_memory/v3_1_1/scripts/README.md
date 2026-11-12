@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261112 15:55:39 Asia/Shanghai
+最后修订时间：20261112 17:11:24 Asia/Shanghai
 
 计算协议与数据格式见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256.json)中的基座与数据路径。
 
@@ -31,6 +31,7 @@ bash src/latent_working_memory/v3_1_1/scripts/run.sh --help
 
 `prepare-pre` 与 `prepare-post` 共用以下规则：
 
+- `--model-path` 必填，使用与训练相同的 tokenizer 计算实际正文 token 数，不额外添加 special tokens、系统提示与 chat 前缀。
 - `--target-samples` 默认 `null`，使用全部合条件数据；指定正整数时随机选取对应数量，超过可用数量时报错。
 - `--seed` 默认 42，相同输入和参数可复现生成结果。
 - `--output-file` 作为数据输出文件一般为 `<split>.jsonl`，构造参数与统计保存为同目录的元信息文件 `preparation-<split>.json`。
@@ -40,7 +41,8 @@ bash src/latent_working_memory/v3_1_1/scripts/run.sh --help
 ```bash
 bash src/latent_working_memory/v3_1_1/scripts/run.sh prepare-pre \
   --prepare-data data/fineweb-multisegment-k512-seg1to3x_train32k_20261008/train.jsonl \
-  --output-file data/fineweb_train5k_20261108/train.jsonl \
+  --output-file data/fineweb_train5k_20261112/train.jsonl \
+  --model-path /root/rivermind-data/models/Qwen3-4B-Instruct-2507 \
   --target-samples 5000 \
   --min-tokens null \
   --max-tokens 4096 \
@@ -50,7 +52,7 @@ bash src/latent_working_memory/v3_1_1/scripts/run.sh prepare-pre \
 ```
 
 - **数据格式**：JSONL 每行仅包含 `{"text":"完整文本"}`。
-- **正文与长度**：合并 Multisegment 的 `text + continuation`，按字符数 ÷ 4 估算长度。`--min-tokens`、`--max-tokens` 默认 `null`（采用对应来源边界），也可指定正整数；请求范围与来源长度范围取交集，再从完整原文随机裁出一条连续文本。
+- **正文与长度**：对 Multisegment 的 `text + continuation` 整体分词，统计实际 token 容量。`--min-tokens`、`--max-tokens` 默认 `null`（采用对应来源边界），也可指定正整数；请求范围与来源长度范围取交集，再按目标 token 长度随机裁出一条连续原文，对最终 `text` 重新分词并统计实际长度。
 - **长度分布**：`--length-bins` 默认划分 10 个等宽区间，整数长度不足时减少区间数。`--length-distribution` 的 `uniform`（默认）尽量均衡分配，`random` 逐条等概率选择区间；均在区间内随机选长度，实际分布受来源容量约束。
 
 ### 2.2 后训练数据
@@ -58,16 +60,17 @@ bash src/latent_working_memory/v3_1_1/scripts/run.sh prepare-pre \
 ```bash
 bash src/latent_working_memory/v3_1_1/scripts/run.sh prepare-post \
   --prepare-data data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008/train.jsonl \
-  --output-file data/fineweb-factqa_q10_train1k_20261108/train.jsonl \
+  --output-file data/fineweb-factqa_q10_train1k_20261112/train.jsonl \
+  --model-path /root/rivermind-data/models/Qwen3-4B-Instruct-2507 \
   --target-samples null \
   --min-tokens null \
-  --max-tokens null \
+  --max-tokens 10000 \
   --qas-per-sample 10 \
   --seed 42
 ```
 
 - **数据格式**：JSONL 每行仅包含 `{"text":"完整正文","qas":[{"question":"问题","answer":"答案","segment_id":"seg0","segment_char_span":[0,4]}]}`。`segment_char_span` 为来源段在正文中的字符区间，左闭右开。
-- **正文筛选**：完整保留 FactQA 正文；`--min-tokens`、`--max-tokens` 默认 `null`，也可指定正整数，按字符数 ÷ 4 过滤整条文本，`null` 取消对应界限。
+- **正文筛选**：完整保留 FactQA 正文；`--min-tokens`、`--max-tokens` 按实际正文 token 数过滤整条文本，默认 `null` 取消对应界限。
 - **QA 选择**：仅使用 `task` 题，`--qas-per-sample` 默认最多 10 题，题数不足时全保留，`null` 保留全部。按保留题数等分全文，依次选择答案证据最靠近各份中心的题，每题最多一次，最后按证据在正文中的顺序输出。
 
 ### 2.3 长度分档
@@ -76,7 +79,7 @@ bash src/latent_working_memory/v3_1_1/scripts/run.sh prepare-post \
 
 ```bash
 bash src/latent_working_memory/v3_1_1/scripts/run.sh prepare-length \
-  --prepare-data data/fineweb-factqa_q10_train1k_20261108/ \
+  --prepare-data data/fineweb-factqa_q10_train1k_20261112/ \
   --output-dir data/fineweb-factqa_q10_train1k_length4_20261112 \
   --model-path /root/rivermind-data/models/Qwen3-4B-Instruct-2507 \
   --split train \
@@ -104,7 +107,6 @@ fineweb-factqa_q10_train1k_length4_20261112/
 
 - **配置覆盖**：显式 CLI 参数覆盖 JSON；模型结构和记忆更新设置直接修改 JSON，参数说明见[第 5 节](#5-调整参数)。
 - **计算设置**：统一使用 SDPA，默认 FP32。`--mixed-precision` 和 `--save-on-cpu` 分别开启标准 BF16 autocast（参数精度保持 FP32）和反向保存张量的 CPU 暂存，两者默认关闭。恢复与独立评估沿用已保存设置，详细计算方式见[方法说明](../README.md#配置与运行)。
-- **K256 配置**：两阶段使用上述同一基座及各自数据目录；预训练／后训练的 `warmup_steps` 分别为 20／5，均每 20 个 optimizer steps 验证和保存。预训练不设实际 token 数上限，后训练上限为 12288；准备阶段的 4096 是字符估算长度上限。
 - **训练批量**：`--micro-batch-size-per-gpu` 控制每卡 microbatch 的样本数；全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数。预训练按窗口、后训练按文档计数；两阶段示例均为 `2 × 2 × 4 = 16`。
 - **长度课程**：完成[长度分档](#23-长度分档)后，在原训练命令中追加 `--length-curriculum --curriculum-stage-epochs 1 --curriculum-replay-ratio 0.2`。按档位从短到长推进，每轮完整遍历本档，并从此前各档尽量均衡地随机无放回补充本档数量的 20%，数量四舍五入，历史不足时取全部；每轮重新抽取，混合打乱后统一切 batch，全部档位完成后结束。关闭课程时，各档合并后按 `--epochs` 全量随机训练；dev 和 test 保持原协议。
 - **执行流程**：先保存训练计划，再执行训练、dev 与 checkpoint 保存。
@@ -276,7 +278,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 
 ## 5. 调整参数
 
-本节汇总训练、恢复、独立评估、离线准备与看板的公开参数。训练默认值以[预训练配置](../../../../configs/v3_1_1/pretrain_default.json)和[后训练配置](../../../../configs/v3_1_1/post_default.json)为准：新训练的显式 CLI 值在校验前覆盖 JSON，省略时沿用配置。模型结构、方法目标及优化器设置直接修改 JSON，见[配置与运行](../README.md#配置与运行)。本文示例改用 K256 配置：准备阶段上限为估算 4096 tokens，预训练不设实际 token 数上限，后训练上限为 12288；`*_default.json` 保留 K128 设置。
+本节汇总训练、恢复、独立评估、离线准备与看板的公开参数。训练默认值以[预训练配置](../../../../configs/v3_1_1/pretrain_default.json)和[后训练配置](../../../../configs/v3_1_1/post_default.json)为准：新训练的显式 CLI 值在校验前覆盖 JSON，省略时沿用配置。模型结构、方法目标及优化器设置直接修改 JSON，见[配置与运行](../README.md#配置与运行)。
 
 ### 5.1 训练输入与执行预算
 
@@ -289,7 +291,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 | **配置与模型** | |
 | `--stage` | 训练必填，训练阶段，支持 `pretrain` 和 `post` |
 | `--config` | 训练必填，JSON 配置文件 |
-| `--model-path` | 训练必填，基座与 tokenizer 路径 |
+| `--model-path` | 训练及三个数据准备入口必填，基座与 tokenizer 路径 |
 | `--seed` | 非负随机种子，默认 42 |
 | `--init-checkpoint` | 后训练必填，后训练初始化所用的预训练 checkpoint |
 | **目录与运行标识** | |
@@ -301,8 +303,8 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 | `--output-dir` | `prepare-length` 必填，完整输出数据集目录 |
 | `--split` | `prepare-length` 必填，处理对应 split，支持 `train`、`dev` 和 `test` |
 | `--target-samples` | `prepare-pre`／`prepare-post` 的目标生成条数，支持正整数和 `null`（默认） |
-| `--min-tokens` | `prepare-pre`／`prepare-post` 的估算长度下限，支持正整数和 `null`（默认） |
-| `--max-tokens` | `prepare-pre`／`prepare-post` 的估算长度上限，支持正整数和 `null`（默认） |
+| `--min-tokens` | `prepare-pre`／`prepare-post` 实际正文长度下限，支持正整数和 `null`（默认） |
+| `--max-tokens` | `prepare-pre`／`prepare-post` 实际正文长度上限，支持正整数和 `null`（默认） |
 | `--length-bins` | `prepare-pre` 的长度区间数，默认 10；`prepare-length` 的长度分档数，默认 4 |
 | `--length-distribution` | 仅 `prepare-pre`，不同长度区间样本数分布，支持 `uniform`（默认）和 `random` |
 | `--qas-per-sample` | 仅 `prepare-post`，每条数据 QA 数上限，支持正整数和 `null`，默认 10 |
@@ -357,8 +359,8 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 
 | 变更 | 操作 |
 |---|---|
-| 预训练准备的来源文件、目标数量、完整样本估算长度范围、区间数或分配方式 | 修改准备参数，准备对应 split；训练仍按实际 token 数筛选，再启动新训练 |
-| 后训练准备的来源文件、目标数量、正文过滤范围或每条 QA 上限 | 调整 `prepare-post` 参数，准备对应 split，再启动新训练 |
+| 预训练准备的来源文件、tokenizer、目标数量、完整样本长度范围、区间数或分配方式 | 修改准备参数，准备对应 split，再启动新训练 |
+| 后训练准备的来源文件、tokenizer、目标数量、正文过滤范围或每条 QA 上限 | 调整 `prepare-post` 参数，准备对应 split，再启动新训练 |
 | 长度分档的正文、QA、tokenizer 或档位数量 | 重新执行 `prepare-length`，检查分布后启动新训练 |
 | 从预训练进入后训练阶段 | 新 run，通过 `--init-checkpoint` 载入兼容压缩器 |
 | 模型结构、计算、方法目标或优化器设置 | 修改基础 JSON，再启动新训练 |

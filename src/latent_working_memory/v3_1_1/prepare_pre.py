@@ -1,4 +1,4 @@
-"""按完整原文估算长度，构造单次压缩预训练样本。"""
+"""按完整原文的实际 token 数，构造单次压缩预训练样本。"""
 
 import argparse
 from collections import Counter
@@ -11,23 +11,23 @@ import tempfile
 import time
 from zoneinfo import ZoneInfo
 
-from latent_working_memory.data_preparation.segmentation import TOKEN_ESTIMATION_RULE
+from transformers import AutoTokenizer
+
 from .cli import nonnegative_int, optional_positive_int, positive_int
 
 
-CHARACTERS_PER_TOKEN = 4
-
-
-def _scan(path):
+def _scan(path, tokenizer):
     capacities, split = [], None
     started = last_report = time.monotonic()
-    print(f"[prepare-pre] scanning source estimated token capacities: {path}", flush=True)
+    print(f"[prepare-pre] scanning source token capacities: {path}", flush=True)
     with path.open(encoding="utf-8") as stream:
         for line_number, line in enumerate(stream, 1):
             sample = json.loads(line)
             if not capacities:
                 split = sample["split"]
-            capacity = (len(sample["text"]) + len(sample["continuation"])) // CHARACTERS_PER_TOKEN
+            capacity = len(tokenizer.encode(
+                sample["text"] + sample["continuation"], add_special_tokens=False,
+            ))
             capacities.append(capacity)
             now = time.monotonic()
             if line_number % 1000 == 0 or now - last_report >= 15:
@@ -40,7 +40,7 @@ def _scan(path):
 
 
 def _assign(capacities, buckets, seed, split, distribution, target_samples=None):
-    """长目标先匹配长来源；计划仅保留估算容量和目标，不缓存正文。"""
+    """长目标先匹配长来源；计划仅保留 token 容量和目标，不缓存正文。"""
     sources = ([index for index, capacity in enumerate(capacities) if capacity >= buckets[0][0]]
                if buckets else [])
     target_samples = len(sources) if target_samples is None else target_samples
@@ -86,8 +86,33 @@ def _assign(capacities, buckets, seed, split, distribution, target_samples=None)
     return assignments, quotas, limited
 
 
+def _crop(full_text, target, lower, upper, rng, tokenizer):
+    """按 token 偏移定位原文子串，再以最终正文的实际长度修正边界。"""
+    offsets = tokenizer(
+        full_text, add_special_tokens=False, return_offsets_mapping=True,
+    )["offset_mapping"]
+    first = rng.randrange(len(offsets) - target + 1)
+    start, end = offsets[first][0], offsets[first + target - 1][1]
+    visited = set()
+    while start < end <= len(full_text) and (start, end) not in visited:
+        visited.add((start, end))
+        text = full_text[start:end]
+        length = len(tokenizer.encode(text, add_special_tokens=False))
+        if lower <= length <= upper:
+            return text, length
+        if length > upper:
+            end -= 1
+        elif end < len(full_text):
+            end += 1
+        elif start:
+            start -= 1
+        else:
+            break
+    raise ValueError(f"cannot crop the selected text to [{lower}, {upper}] tokens; target={target}")
+
+
 def _write_split(path, destination, capacities, assignments, quotas, limited, buckets,
-                 seed, distribution, split, target_samples):
+                 seed, distribution, split, target_samples, tokenizer):
     lengths, bucket_counts = Counter(), Counter()
     started = last_report = time.monotonic()
     eligible = sum(capacity >= buckets[0][0] for capacity in capacities) if buckets else 0
@@ -101,14 +126,15 @@ def _write_split(path, destination, capacities, assignments, quotas, limited, bu
             sample = json.loads(line)
             full_text = sample["text"] + sample["continuation"]
             target, lower, upper = assignment
-            characters = target * CHARACTERS_PER_TOKEN
             rng = random.Random(f"{seed}:prepare:{split}:crop:{sample['trajectory_id']}")
-            start = rng.randrange(len(full_text) - characters + 1)
-            end = start + characters
-            text = full_text[start:end]
+            try:
+                text, length = _crop(full_text, target, lower, upper, rng, tokenizer)
+            except ValueError as error:
+                error.add_note(f"{path}:{line_number}")
+                raise
             output.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
-            lengths[target] += 1
-            bucket_counts[(lower, upper)] += 1
+            lengths[length] += 1
+            bucket_counts[next(bucket for bucket in buckets if bucket[0] <= length <= bucket[1])] += 1
             now = time.monotonic()
             if line_number % 1000 == 0 or now - last_report >= 15:
                 print(f"[prepare-pre {split}] processed={line_number}/{len(capacities)} written={sum(lengths.values())} "
@@ -121,16 +147,16 @@ def _write_split(path, destination, capacities, assignments, quotas, limited, bu
         "requested_target_samples": target_samples, "resolved_target_samples": selected,
         "excluded_short_source_windows": len(capacities) - eligible,
         "unselected_source_windows": eligible - selected,
-        "source_estimated_token_capacity_min": min(capacities, default=None),
-        "source_estimated_token_capacity_max": max(capacities, default=None),
-        "supported_min_estimated_tokens": buckets[0][0] if buckets else None,
-        "supported_max_estimated_tokens": buckets[-1][1] if buckets else None,
+        "source_token_capacity_min": min(capacities, default=None),
+        "source_token_capacity_max": max(capacities, default=None),
+        "supported_min_tokens": buckets[0][0] if buckets else None,
+        "supported_max_tokens": buckets[-1][1] if buckets else None,
         "length_bins": len(buckets), "length_distribution": distribution,
         "capacity_limited_targets": limited,
-        "text_estimated_tokens_min": min(lengths) if lengths else None,
-        "text_estimated_tokens_max": max(lengths) if lengths else None,
-        "text_estimated_tokens_distribution": dict(sorted(lengths.items())),
-        "buckets": [{"min_estimated_tokens": lower, "max_estimated_tokens": upper,
+        "text_tokens_min": min(lengths) if lengths else None,
+        "text_tokens_max": max(lengths) if lengths else None,
+        "text_tokens_distribution": dict(sorted(lengths.items())),
+        "buckets": [{"min_tokens": lower, "max_tokens": upper,
                      "target_samples": quota, "samples": bucket_counts[(lower, upper)]}
                     for (lower, upper), quota in zip(buckets, quotas, strict=True)],
     }
@@ -139,7 +165,7 @@ def _write_split(path, destination, capacities, assignments, quotas, limited, bu
     return statistics
 
 
-def prepare_data(source_file, min_tokens, max_tokens, output_file,
+def prepare_data(source_file, min_tokens, max_tokens, output_file, model_path,
                  length_bins=10, length_distribution="uniform", target_samples=None, seed=42):
     if type(seed) is not int or seed < 0:
         raise ValueError("seed must be a non-negative integer")
@@ -160,7 +186,9 @@ def prepare_data(source_file, min_tokens, max_tokens, output_file,
     if data_path.exists():
         raise FileExistsError(f"output file already exists: {data_path}")
     started = time.monotonic()
-    capacities, split = _scan(path)
+    model_path = str(Path(model_path).expanduser())
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    capacities, split = _scan(path, tokenizer)
     capacity_min = min(capacities, default=None)
     capacity_max = max(capacities, default=None)
     lower = max(capacity_min, min_tokens if min_tokens is not None else 1) if capacities else None
@@ -169,23 +197,23 @@ def prepare_data(source_file, min_tokens, max_tokens, output_file,
     eligible = sum(capacity >= lower for capacity in capacities) if intersects else 0
     supported = f"[{lower}, {upper}]" if intersects else "none"
     requested = json.dumps([min_tokens, max_tokens])
-    print(f"[prepare-pre {split}] source_estimated_capacity=[{capacity_min}, {capacity_max}] "
-          f"requested_estimated_tokens={requested} supported={supported} "
+    print(f"[prepare-pre {split}] source_token_capacity=[{capacity_min}, {capacity_max}] "
+          f"requested_tokens={requested} supported={supported} "
           f"eligible={eligible}/{len(capacities)} excluded_below_min={len(capacities) - eligible}", flush=True)
     if capacities and not intersects:
         raise ValueError(
-            f"{split}: requested estimated token range {requested} has no intersection with "
+            f"{split}: requested token range {requested} has no intersection with "
             f"source capacity range [{capacity_min}, {capacity_max}]"
         )
     if eligible < len(capacities):
         print(f"[prepare-pre {split}] excluding {len(capacities) - eligible} source windows "
-              f"shorter than {lower} estimated tokens", flush=True)
+              f"shorter than {lower} tokens", flush=True)
     if eligible and min_tokens is not None and lower > min_tokens:
         print(f"[prepare-pre {split}] raising minimum from {min_tokens} to {lower} "
-              "estimated tokens to match the source capacity range", flush=True)
+              "tokens to match the source capacity range", flush=True)
     if eligible and max_tokens is not None and upper < max_tokens:
         print(f"[prepare-pre {split}] reducing maximum from {max_tokens} to {upper} "
-              "estimated tokens to match the available source", flush=True)
+              "tokens to match the available source", flush=True)
     if not eligible:
         buckets = []
     else:
@@ -206,24 +234,23 @@ def prepare_data(source_file, min_tokens, max_tokens, output_file,
     try:
         statistics = _write_split(
             path, staging / data_path.name, capacities, assignments, quotas, limited, buckets,
-            seed, length_distribution, split, target_samples,
+            seed, length_distribution, split, target_samples, tokenizer,
         )
         metadata = {
             "created_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
             "dataset": output.name, "output_file": str(data_path),
             "split": split,
             "source_file": str(path),
-            "estimated_tokens_rule": TOKEN_ESTIMATION_RULE,
-            "characters_per_token": CHARACTERS_PER_TOKEN,
+            "tokenizer": model_path,
             "seed": seed, "length_bins": length_bins, "length_distribution": length_distribution,
-            "min_estimated_tokens": min_tokens, "max_estimated_tokens": max_tokens,
+            "min_tokens": min_tokens, "max_tokens": max_tokens,
             "target_samples": target_samples, "resolved_target_samples": resolved_target,
             "length_selection": f"seeded without-replacement source selection; {length_distribution} target bin selection; "
                                 "equal-width integer bins and uniform random integer lengths within each bin; "
-                                "descending targets matched to descending source estimated capacities; "
+                                "descending targets matched to descending source token capacities; "
                                 "capacity-limited targets move to their actual bucket",
-            "text_construction": "one raw character crop per selected source window from text + continuation; "
-                                 "four characters per estimated token; output text is a complete sample without reserved continuation",
+            "text_construction": "one contiguous source substring per selected window from text + continuation; "
+                                 "token offsets locate the crop and final text is retokenized to enforce its token range",
             "statistics": statistics, "elapsed_seconds": time.monotonic() - started,
         }
         (staging / metadata_path.name).write_text(
@@ -242,10 +269,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepare-data", required=True, help="source Multisegment JSONL file")
     parser.add_argument("--output-file", required=True, help="output JSONL file path")
+    parser.add_argument("--model-path", required=True, help="tokenizer path used by training")
     parser.add_argument("--min-tokens", type=optional_positive_int, default=None,
-                        help="minimum estimated sample tokens, inclusive; default null uses the source boundary")
+                        help="minimum actual sample tokens, inclusive; default null uses the source boundary")
     parser.add_argument("--max-tokens", type=optional_positive_int, default=None,
-                        help="maximum estimated sample tokens, inclusive; default null uses the source boundary")
+                        help="maximum actual sample tokens, inclusive; default null uses the source boundary")
     parser.add_argument("--length-bins", type=positive_int, default=10)
     parser.add_argument("--length-distribution", choices=("uniform", "random"), default="uniform")
     parser.add_argument("--target-samples", type=optional_positive_int, default=None,
@@ -254,7 +282,7 @@ def main(argv=None):
                         help="random seed for source selection, length allocation and cropping, default 42")
     args = parser.parse_args(argv)
     return prepare_data(
-        args.prepare_data, args.min_tokens, args.max_tokens, args.output_file,
+        args.prepare_data, args.min_tokens, args.max_tokens, args.output_file, args.model_path,
         args.length_bins, args.length_distribution, args.target_samples, args.seed,
     )
 

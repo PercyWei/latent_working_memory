@@ -11,11 +11,9 @@ import tempfile
 import time
 from zoneinfo import ZoneInfo
 
-from latent_working_memory.data_preparation.segmentation import TOKEN_ESTIMATION_RULE
+from transformers import AutoTokenizer
+
 from .cli import nonnegative_int, optional_positive_int
-
-
-CHARACTERS_PER_TOKEN = 4
 
 
 def _sample(line, path, line_number):
@@ -49,7 +47,7 @@ def _select_qas(candidates, text_length, qas_per_sample, rng):
     return [item[1] for item in selected]
 
 
-def _scan(path, min_tokens, max_tokens):
+def _scan(path, min_tokens, max_tokens, tokenizer):
     rows, split = [], None
     started = last_report = time.monotonic()
     print(f"[prepare-post] scanning complete source texts: {path}", flush=True)
@@ -58,10 +56,10 @@ def _scan(path, min_tokens, max_tokens):
             sample, candidates = _sample(line, path, line_number)
             if not rows:
                 split = sample["split"]
-            characters = len(sample["text"])
-            length_ok = ((min_tokens is None or characters >= min_tokens * CHARACTERS_PER_TOKEN)
-                         and (max_tokens is None or characters <= max_tokens * CHARACTERS_PER_TOKEN))
-            rows.append((characters, len(candidates), length_ok))
+            length = len(tokenizer.encode(sample["text"], add_special_tokens=False))
+            length_ok = ((min_tokens is None or length >= min_tokens)
+                         and (max_tokens is None or length <= max_tokens))
+            rows.append((length, len(candidates), length_ok))
             now = time.monotonic()
             if line_number % 1000 == 0 or now - last_report >= 15:
                 print(f"[prepare-post {split}] scanned={line_number} "
@@ -82,7 +80,7 @@ def _write_split(path, destination, rows, selected, split, qas_per_sample, seed)
             rng = random.Random(f"{seed}:prepare-post:{split}:{sample['trajectory_id']}:qas")
             qas = _select_qas(candidates, len(text), qas_per_sample, rng)
             output.write(json.dumps({"text": text, "qas": qas}, ensure_ascii=False) + "\n")
-            lengths.append(len(text) / CHARACTERS_PER_TOKEN)
+            lengths.append(rows[index][0])
             qa_counts[len(qas)] += 1
             now = time.monotonic()
             if (index + 1) % 1000 == 0 or now - last_report >= 15:
@@ -93,12 +91,12 @@ def _write_split(path, destination, rows, selected, split, qas_per_sample, seed)
         "samples": len(lengths),
         "qas": sum(count * samples for count, samples in qa_counts.items()),
         "qas_per_sample_distribution": dict(sorted(qa_counts.items())),
-        "text_estimated_tokens_min": min(lengths, default=None),
-        "text_estimated_tokens_max": max(lengths, default=None),
+        "text_tokens_min": min(lengths, default=None),
+        "text_tokens_max": max(lengths, default=None),
     }
 
 
-def prepare_data(source_file, min_tokens, max_tokens, output_file,
+def prepare_data(source_file, min_tokens, max_tokens, output_file, model_path,
                  target_samples=None, qas_per_sample=10, seed=42):
     if type(seed) is not int or seed < 0:
         raise ValueError("seed must be a non-negative integer")
@@ -115,7 +113,9 @@ def prepare_data(source_file, min_tokens, max_tokens, output_file,
     output = data_path.parent
     metadata_path = output / f"preparation-{data_path.stem}.json"
     started = time.monotonic()
-    rows, split = _scan(path, min_tokens, max_tokens)
+    model_path = str(Path(model_path).expanduser())
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    rows, split = _scan(path, min_tokens, max_tokens, tokenizer)
     eligible = [index for index, row in enumerate(rows) if row[2] and row[1]]
     resolved_target = len(eligible) if target_samples is None else target_samples
     if resolved_target > len(eligible):
@@ -125,7 +125,7 @@ def prepare_data(source_file, min_tokens, max_tokens, output_file,
         f"{seed}:prepare-post:{split}:sources",
     ).sample(eligible, resolved_target))
     print(f"[prepare-post {split}] source_samples={len(rows)} eligible_samples={len(eligible)} "
-          f"requested_estimated_tokens={json.dumps([min_tokens, max_tokens])} "
+          f"requested_tokens={json.dumps([min_tokens, max_tokens])} "
           f"requested_target_samples={json.dumps(target_samples)} "
           f"selected_samples={resolved_target} qas_per_sample={json.dumps(qas_per_sample)}", flush=True)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -139,17 +139,14 @@ def prepare_data(source_file, min_tokens, max_tokens, output_file,
             "excluded_by_length": sum(not row[2] for row in rows),
             "excluded_without_task_qas": sum(row[2] and not row[1] for row in rows),
             "unselected_samples": len(eligible) - resolved_target,
-            "source_estimated_tokens_min": min((row[0] / CHARACTERS_PER_TOKEN for row in rows),
-                                               default=None),
-            "source_estimated_tokens_max": max((row[0] / CHARACTERS_PER_TOKEN for row in rows),
-                                               default=None),
+            "source_tokens_min": min((row[0] for row in rows), default=None),
+            "source_tokens_max": max((row[0] for row in rows), default=None),
         })
         metadata = {
             "created_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
             "dataset": output.name, "output_file": str(data_path), "source_file": str(path),
-            "split": split, "estimated_tokens_rule": TOKEN_ESTIMATION_RULE,
-            "characters_per_token": CHARACTERS_PER_TOKEN, "seed": seed,
-            "min_estimated_tokens": min_tokens, "max_estimated_tokens": max_tokens,
+            "split": split, "tokenizer": model_path, "seed": seed,
+            "min_tokens": min_tokens, "max_tokens": max_tokens,
             "target_samples": target_samples, "resolved_target_samples": resolved_target,
             "qas_per_sample": qas_per_sample, "qa_role": "task",
             "source_selection": "seeded without-replacement sampling of eligible source rows",
@@ -176,10 +173,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepare-data", required=True, help="source FactQA JSONL file")
     parser.add_argument("--output-file", required=True, help="output JSONL file path")
+    parser.add_argument("--model-path", required=True, help="tokenizer path used by training")
     parser.add_argument("--min-tokens", type=optional_positive_int, default=None,
-                        help="minimum complete-text estimated tokens, inclusive; default null sets no lower bound")
+                        help="minimum actual body tokens, inclusive; default null sets no lower bound")
     parser.add_argument("--max-tokens", type=optional_positive_int, default=None,
-                        help="maximum complete-text estimated tokens, inclusive; default null sets no upper bound")
+                        help="maximum actual body tokens, inclusive; default null sets no upper bound")
     parser.add_argument("--target-samples", type=optional_positive_int, default=None,
                         help="sample count; null retains all eligible source rows")
     parser.add_argument("--qas-per-sample", type=optional_positive_int, default=10,
@@ -187,8 +185,10 @@ def main(argv=None):
     parser.add_argument("--seed", type=nonnegative_int, default=42,
                         help="random seed for source selection and QA tie-breaking, default 42")
     args = parser.parse_args(argv)
-    return prepare_data(args.prepare_data, args.min_tokens, args.max_tokens, args.output_file,
-                        args.target_samples, args.qas_per_sample, args.seed)
+    return prepare_data(
+        args.prepare_data, args.min_tokens, args.max_tokens, args.output_file, args.model_path,
+        args.target_samples, args.qas_per_sample, args.seed,
+    )
 
 
 if __name__ == "__main__":
