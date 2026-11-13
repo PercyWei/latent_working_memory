@@ -21,7 +21,7 @@
   "compute": {
     "dtype": "float32",
     "attention_implementation": "flash_attention_2",
-    "gradient_checkpointing": false,
+    "gradient_checkpointing": true,
     "mixed_precision": true,
     "save_on_cpu": false
   },
@@ -67,10 +67,10 @@
     },
     "scheduler": {
       "warmup_steps": 5,
-      "min_lr_ratio": 0.1
+      "min_lr_ratio": 1.0
     },
     "backward": {
-      "bptt_steps": null
+      "bptt_steps": 2
     },
     "run": {
       "init_checkpoint": null,
