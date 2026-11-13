@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261112 20:41:10 Asia/Shanghai
+最后修订时间：20261113 12:54:11 Asia/Shanghai
 
 [运行指南](scripts/README.md) · [预训练配置](../../../configs/v3_1_1/pretrain_default.json) · [后训练配置](../../../configs/v3_1_1/post_default.json) · [K256 预训练](../../../configs/v3_1_1/pretrain_k256.json) · [K256 后训练](../../../configs/v3_1_1/post_k256.json)
 
@@ -22,6 +22,8 @@ train／dev 的长度筛选在预训练按完整样本 `text`、后训练按正�
 - LM 以完整样本最后 `method.pretrain.lm_target_tokens` 个 tokens 为目标（默认 512），仅将前缀压缩为 K slots；若剩余前缀长度不大于 K，则改为 AE。
 
 默认 `method.pretrain.lm_ratio=0.5`，两个目标均追加 EOS。基座与读取器冻结，只训练压缩器 LoRA 和可学习 memory embeddings；冻结读取器仍保留损失到 memory 的梯度。训练时的筛选与限量在内存中完成，不保存派生数据副本。
+
+预训练在每次更新的本卡样本内按 Writer 输入长度从长到短排序，再切 microbatch 并按 AE／LM 分组，减少异长输入的 padding，并让最大组先计算。组内 Writer 和 Reader 均使用真实批量前向，以左侧 padding、attention mask 和各样本的真实位置处理异长输入。每条样本先对自身目标 tokens 平均损失，各组求和反传，累计后按实际全局样本数归约并更新一次参数；padding 不计入目标。本次更新的样本集合及采样游标保持不变。
 
 ### 后训练（QA／GRPO 联合训练）
 
@@ -43,7 +45,7 @@ train／dev 的长度筛选在预训练按完整样本 `text`、后训练按正�
 
 在线状态包含历史 memory、待提交原文 a 和新到达单元 b。边界模块观察当前已到达的内容，选择继续积累 ab，或提交 a 并保留 b 作为下一块开头。训练与文档 QA test 中，问题、答案和未来正文不进入边界判断。末尾非空正文强制提交，不计为随机动作。公开 benchmark 按其完整题面协议编码，题面中的问题也参与压缩；生成答案期间不再写入 memory。
 
-当前计算要求 full-attention 和固定 default RoPE。模型加载统一指定 SDPA，具体内核由 PyTorch 根据设备、精度和输入选择；SDPA 是固定实现，不提供配置入口，也不重复写入评估结果。Writer 与 Reader 的模块和训练状态独立，共享只读的冻结基座参数；LoRA 仅作用于 Writer，不合并到基座。`compute.dtype` 统一控制两者的参数加载精度，默认 FP32；混合精度与 CPU 暂存设置见[配置与运行](#配置与运行)。所有可训练参数、梯度和优化器状态使用 FP32。预训练不训练边界模块；后训练阶段的目标为：
+当前计算要求 full-attention 和固定 default RoPE。模型加载默认使用 SDPA，具体内核由 PyTorch 根据设备、精度和输入选择；也可通过配置或 CLI 强制使用 FlashAttention 2。Writer 与 Reader 的模块和训练状态独立，共享只读的冻结基座参数；LoRA 仅作用于 Writer，不合并到基座。`compute.dtype` 统一控制两者的参数加载精度，默认 FP32；混合精度与 CPU 暂存设置见[配置与运行](#配置与运行)。所有可训练参数、梯度和优化器状态使用 FP32。预训练不训练边界模块；后训练阶段的目标为：
 
 ```text
 reward_g = -stopgrad(QA_NLL_g) - slot_cost × K × blocks_g
@@ -74,7 +76,7 @@ loss = mean(QA_NLL_g) + policy_weight × GRPO_loss
 |---|---|
 | `model.structure` | memory slots；后训练另设边界模块隐藏维度 |
 | `model.lora` | LoRA rank、alpha、目标模块 |
-| `compute` | 参数精度 dtype、混合精度 mixed_precision、层内激活重算 gradient_checkpointing、保存张量暂存 save_on_cpu |
+| `compute` | 参数精度 dtype、attention 实现 attention_implementation、混合精度 mixed_precision、层内激活重算 gradient_checkpointing、保存张量暂存 save_on_cpu |
 | `method.pretrain` | 仅预训练：AE／LM 比例与 LM 目标长度 |
 | `method.rollout` | 仅后训练：正文处理单元长度与每篇采样路径数 |
 | `method.grpo` | 仅后训练：记忆成本、策略损失权重、裁剪范围与优势归一化 |
@@ -86,17 +88,33 @@ loss = mean(QA_NLL_g) + policy_weight × GRPO_loss
 | `training.run` | 产物目录与 run_id；后训练另设初始化 checkpoint |
 | `training.swanlab` | SwanLab 开关 tracking、project、group 和 tags |
 
-`compute.dtype` 会影响数值精度和梯度误差；`gradient_checkpointing` 通过层内重算换取显存。`training.backward.bptt_steps` 的主要职责是控制梯度传播路径，显存与速率变化是附加影响。
+`compute.dtype` 会影响数值精度和梯度误差；`gradient_checkpointing` 默认关闭，开启后通过层内重算换取显存。`training.backward.bptt_steps` 的主要职责是控制梯度传播路径，显存与速率变化是附加影响。
 
 `compute.mixed_precision` 默认 `false`，启用时要求 `dtype="float32"`，使用 PyTorch 标准 [BF16 autocast](https://docs.pytorch.org/docs/stable/amp.html)。Writer、Reader、LoRA、memory embeddings 和边界模块的参数保持 FP32；采样、前向与 loss 计算使用相同的 autocast 策略，backward 与 optimizer 更新在上下文外执行，不使用 GradScaler。梯度检查点沿用原生机制恢复前向精度。
 
+`compute.attention_implementation` 默认 `"sdpa"`；设为 `"flash_attention_2"` 时强制使用 FA2，需要安装 `flash-attn`，并使用 `dtype="bfloat16"` 或开启 BF16 autocast。纯 FP32 计算不支持 FA2。保留 FP32 参数并启用 FA2 时，在现有配置中设置：
+
+```json
+{
+  "compute": {
+    "dtype": "float32",
+    "attention_implementation": "flash_attention_2",
+    "mixed_precision": true
+  }
+}
+```
+
+当前默认 PyTorch 2.6、CUDA 12.4 的 Linux x86_64 环境使用 `uv sync --frozen --group fa2` 安装可选 FA2 依赖；默认环境不安装。
+
 `compute.save_on_cpu` 默认 `false`，启用时在带梯度前向中使用原生 [`save_on_cpu(pin_memory=True)`](https://docs.pytorch.org/docs/stable/autograd.html#torch.autograd.graph.save_on_cpu)，将反向所需的保存张量暂存到 CPU，需要时取回 GPU。模型参数、返回的 memory 和采样 KV 继续驻留 GPU。它与混合精度可分别开启或同时使用；预训练和后训练均支持，采样、dev 与独立评估的无梯度前向不执行暂存。
 
-模型结构、参数精度、层内激活重算、方法、优化器及学习率调度通过 JSON 修改；混合精度、CPU 暂存与常用运行参数可由显式 CLI 覆盖。新训练使用 `--mixed-precision`、`--save-on-cpu` 开启，省略时沿用 JSON，关闭时在 JSON 中设为 `false`。覆盖后统一校验，最终配置按阶段保存到计划、实际配置、checkpoint 和启用时的云端 config，源 JSON 文件保持原样。恢复训练沿用原计划中的开关，独立评估沿用 checkpoint 中的混合精度设置。实际训练目录 `training.run.output_dir` 由启动流程生成并随运行保存，源配置无需填写。
+模型结构、方法、优化器及学习率调度通过 JSON 修改。新训练的全部 `compute` 设置均可由 CLI 覆盖：`--dtype`、`--attention-implementation`、`--gradient-checkpointing`、`--mixed-precision` 和 `--save-on-cpu`；省略时沿用 JSON。后三个开关支持小写 `true`／`false`，仅传参数名表示开启，例如 `--mixed-precision false` 关闭混合精度。
+
+覆盖后统一校验，最终配置按阶段保存到计划、实际配置、checkpoint 和启用时的云端 config，源 JSON 文件保持原样。恢复训练忽略这些 CLI 覆盖，独立评估不接受计算设置覆盖，均沿用已保存设置。实际训练目录 `training.run.output_dir` 由启动流程生成并随运行保存，源配置无需填写。
 
 `*_default.json` 的 K128 默认设置如下：
 
-- **共用设置**：`model.structure.memory_slots=128`；`model.lora` 中 `lora_rank=16`、`lora_alpha=32`、`lora_target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]`；`compute` 中 `dtype="float32"`、`gradient_checkpointing=true`、`mixed_precision=false`、`save_on_cpu=false`。`training.optimizer` 中 `weight_decay=0.01`、`beta1=0.9`、`beta2=0.999`、`adam_epsilon=1e-8`、`gradient_clip=1.0`；`training.scheduler` 中 `warmup_steps=50`、`min_lr_ratio=0.1`。
+- **共用设置**：`model.structure.memory_slots=128`；`model.lora` 中 `lora_rank=16`、`lora_alpha=32`、`lora_target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]`；`compute` 中 `dtype="float32"`、`attention_implementation="sdpa"`、`gradient_checkpointing=false`、`mixed_precision=false`、`save_on_cpu=false`。`training.optimizer` 中 `weight_decay=0.01`、`beta1=0.9`、`beta2=0.999`、`adam_epsilon=1e-8`、`gradient_clip=1.0`；`training.scheduler` 中 `warmup_steps=50`、`min_lr_ratio=0.1`。
 - **预训练**：`method.pretrain` 中 `lm_ratio=0.5`、`lm_target_tokens=512`；`training.optimizer.compressor_learning_rate=1e-4`。
 - **后训练**：`model.structure.boundary_hidden_size=128`；`method.rollout` 中 `unit_tokens=256`、`group_size=4`；`method.grpo` 中 `slot_cost=0.001`、`policy_weight=1.0`、`clip_epsilon=0.2`、`advantage_epsilon=1e-6`；`training.optimizer` 中 `compressor_learning_rate=2e-5`、`boundary_learning_rate=1e-4`；`training.backward.bptt_steps=null`。
 
@@ -120,7 +138,7 @@ loss = mean(QA_NLL_g) + policy_weight × GRPO_loss
 
 运行根目录为 `<output_root>/<run_id>/`，显式 `run_id` 原样作为目录名。`training.run.run_id` 为 `null` 或省略时，按阶段生成 `pretrain_k{memory_slots}_{YYYYMMDD-HHMM}` 或 `policy-post_k{memory_slots}_{YYYYMMDD-HHMM}`；时间使用 `Asia/Shanghai`，精确到分钟。最终解析的 `run_id` 写入计划与配置，恢复训练沿用原目录。
 
-使用项目根目录 `.venv/`。`CUDA_VISIBLE_DEVICES` 决定训练与评估使用的全部 GPU，每卡一个进程。复用项目公共 runtime，其中多卡 CUDA 进程组由 verl 初始化；采样回放、损失归约和 optimizer 更新是本项目的训练循环。
+使用项目根目录 `.venv/`。`run.sh` 默认设置 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 以减少显存碎片，外部已设置时沿用其值。`CUDA_VISIBLE_DEVICES` 决定训练与评估使用的全部 GPU，每卡一个进程。复用项目公共 runtime，其中多卡 CUDA 进程组由 verl 初始化；采样回放、损失归约和 optimizer 更新是本项目的训练循环。
 
 以下示例分别准备 train/dev，再使用 K256 配置执行预训练和后训练。其中 `prepare-pre` 的 `--prepare-data` 指定来源 JSONL 文件，每次只读取该文件，先合并每条原始记录的 `text + continuation`，再使用必填的 `--model-path` 对应 tokenizer 对完整原文分词，统计实际 token 长度与可用容量；请求范围夹取到该文件合并原文的最短、最长长度之间。`--min-tokens`、`--max-tokens` 接受正整数或 `null`，默认 `null` 时采用对应来源边界。本例使用来源最短长度为下界，上界最多 4096 tokens，计长不额外添加 special tokens、系统提示与 chat 前缀。
 
@@ -163,7 +181,7 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
   --gradient-accumulation-steps 8
 ```
 
-后训练初始化要求两阶段基座来源、压缩器的 `memory_slots`、LoRA 与 `gradient_checkpointing` 设置一致；`dtype`、混合精度和 CPU 暂存可独立设置。边界模块隐藏维度由后训练独立设置；只继承压缩器，重新创建边界模块、optimizer、scheduler、游标与边界随机流。恢复同阶段训练用 `--resume --checkpoint <最新完整checkpoint路径>`，沿用原计划、基座来源、精度、数据和 GPU 数量；其他已知实验设置忽略并提示。预算已完成时直接返回，不读取或启动评估计划。恢复后训练不依赖预训练来源文件。`--resume` 与 `--overwrite` 互斥，可搭配 `--evaluate-only` 续跑评估。
+后训练初始化要求两阶段基座来源、压缩器的 `memory_slots`、LoRA 与 `gradient_checkpointing` 设置一致；`dtype`、attention 实现、混合精度和 CPU 暂存可独立设置。边界模块隐藏维度由后训练独立设置；只继承压缩器，重新创建边界模块、optimizer、scheduler、游标与边界随机流。恢复同阶段训练用 `--resume --checkpoint <最新完整checkpoint路径>`，沿用原计划、基座来源、精度、数据和 GPU 数量；其他已知实验设置忽略并提示。预算已完成时直接返回，不读取或启动评估计划。恢复后训练不依赖预训练来源文件。`--resume` 与 `--overwrite` 互斥，可搭配 `--evaluate-only` 续跑评估。
 
 关闭长度课程时，`training.loop.epochs` 控制完整训练轮数；开启时由 `training.loop.curriculum_stage_epochs` 控制每档轮数，不再额外全量训练。JSON 中可选 `training.loop.max_steps` 进一步限制总更新次数。全局 batch = 训练进程数 × 每进程 microbatch × 梯度累积次数。以上 K256 两阶段示例均使用单卡，预训练为 `1 × 16 × 2 = 32`，后训练为 `1 × 2 × 8 = 16`；每轮尾批按实际样本数归约，不补齐、不丢弃、不跨轮次拼接，空 rank 同样参与 collective。`training.scheduler.warmup_steps` 和 `training.scheduler.min_lr_ratio` 控制学习率线性预热及后续余弦衰减；各参数组使用相同倍率。更多参数和可复制命令见[运行指南](scripts/README.md)。
 

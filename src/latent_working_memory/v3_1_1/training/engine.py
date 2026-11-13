@@ -293,17 +293,30 @@ class TrainingEngine:
                 )
                 _accumulate(totals, loss, metrics)
         else:
+            documents = sorted(documents, key=lambda document: len(document.input_ids), reverse=True)
             for start in range(0, len(documents), self.config.loop.micro_batch_size):
-                with self.model.forward_context():
-                    losses = []
-                    for document in documents[start:start + self.config.loop.micro_batch_size]:
-                        loss, metrics = document_loss(self.model, document, self.experiment)
-                        if not bool(torch.isfinite(loss)):
-                            raise RuntimeError(f"non-finite training loss: {document.id}")
-                        losses.append(loss)
-                        _accumulate(totals, loss, metrics)
-                    batch_loss = torch.stack(losses).sum()
-                batch_loss.backward()
+                microbatch = documents[start:start + self.config.loop.micro_batch_size]
+                # AE 与 LM 的目标长度差异较大，组内批量前向可减少 padding。
+                for task in ("ae", "lm"):
+                    batch = [document for document in microbatch if document.task == task]
+                    if not batch:
+                        continue
+                    with self.model.forward_context():
+                        memories = self.model.compress_batch([document.input_ids for document in batch])
+                        losses = self.model.answer_nll_batch(
+                            [(memory,) for memory in memories],
+                            [document.prompt_ids for document in batch],
+                            [document.target_ids for document in batch],
+                        )
+                        if not bool(torch.isfinite(losses).all()):
+                            raise RuntimeError(f"non-finite {task} training loss")
+                        for loss in losses:
+                            _accumulate(totals, loss, {
+                                f"{task}_nll": (float(loss.detach()), 1),
+                                "lm_fraction": (float(task == "lm"), 1),
+                            })
+                        batch_loss = losses.sum()
+                    batch_loss.backward()
         metrics = _aggregate_metrics(totals, len(documents))
         self._synchronize_gradients(metrics["samples"])
         for group in self.optimizer.param_groups:

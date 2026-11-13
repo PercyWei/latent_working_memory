@@ -1,22 +1,20 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = "==3.11.*"
 resolution-markers = [
     "python_full_version >= '3.11.5' and sys_platform == 'linux'",
-    "python_full_version < '3.11.5' and sys_platform == 'linux'",
     "python_full_version >= '3.11.5' and sys_platform == 'win32'",
-    "python_full_version < '3.11.5' and sys_platform == 'win32'",
     "python_full_version >= '3.11.5' and sys_platform == 'emscripten'",
-    "python_full_version < '3.11.5' and sys_platform == 'emscripten'",
     "python_full_version >= '3.11.5' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
+    "python_full_version < '3.11.5' and sys_platform == 'linux'",
+    "python_full_version < '3.11.5' and sys_platform == 'win32'",
+    "python_full_version < '3.11.5' and sys_platform == 'emscripten'",
     "python_full_version < '3.11.5' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
 ]
 conflicts = [[
     { package = "latent-working-memory", group = "cuda124" },
     { package = "latent-working-memory", group = "torch214" },
 ]]
-
-[manifest]
 
 [[manifest.dependency-metadata]]
 name = "flashinfer-python"
@@ -45,7 +43,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "safetensors" },
     { name = "torch", version = "2.6.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra == 'group-21-latent-working-memory-cuda124'" },
-    { name = "torch", version = "2.14.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra == 'group-21-latent-working-memory-torch214' or extra != 'group-21-latent-working-memory-cuda124'" },
+    { name = "torch", version = "2.14.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra != 'group-21-latent-working-memory-cuda124' or extra == 'group-21-latent-working-memory-torch214'" },
 ]
 sdist = { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/8d/75/94cd5d389649578aca399e5aa822637eec18319a1dadc400ffe2f9a7493f/accelerate-1.14.0.tar.gz", hash = "sha256:41b9c4377a54e0b460a959b0defa1b736e4ca0a2373252d9a539964c2afe3c8d", size = 412167, upload-time = "2026-06-11T13:45:52.326Z" }
 wheels = [
@@ -180,8 +178,8 @@ name = "beautifulsoup4"
 version = "4.15.0"
 source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }
 dependencies = [
-    { name = "soupsieve", version = "2.10", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "python_full_version < '3.11.5' or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "soupsieve", version = "3.0.3", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "python_full_version >= '3.11.5' or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "soupsieve", version = "2.10", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "python_full_version < '3.11.5'" },
+    { name = "soupsieve", version = "3.0.3", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "python_full_version >= '3.11.5'" },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/43/65/318323f98dbee45d42dff61d8f047181bc6f2268a9068cfad035a46be5af/beautifulsoup4-4.15.0.tar.gz", hash = "sha256:288e3ca7d54b06f2ac191970bc275c1939cb46d450b255bf6718b04aa37ab4f7", size = 632571, upload-time = "2026-06-07T16:44:20.453Z" }
@@ -203,7 +201,7 @@ name = "cffi"
 version = "2.1.1"
 source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }
 dependencies = [
-    { name = "pycparser", marker = "implementation_name != 'PyPy' or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy'" },
 ]
 sdist = { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/9e/ef/008a1939e372c06329a3fce4279c02f328488f3526744906eeec3da7ad5f/cffi-2.1.1.tar.gz", hash = "sha256:dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be", size = 530807, upload-time = "2026-08-03T21:21:18.939Z" }
 wheels = [
@@ -304,7 +302,7 @@ name = "colorful"
 version = "0.5.8"
 source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
 ]
 sdist = { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/82/31/109ef4bedeb32b4202e02ddb133162457adc4eb890a9ed9c05c9dd126ed0/colorful-0.5.8.tar.gz", hash = "sha256:bb16502b198be2f1c42ba3c52c703d5f651d826076817185f0294c1a549a7445", size = 209361, upload-time = "2025-10-29T11:53:21.663Z" }
 wheels = [
@@ -316,7 +314,7 @@ name = "cryptography"
 version = "50.0.1"
 source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }
 dependencies = [
-    { name = "cffi", marker = "platform_python_implementation != 'PyPy' or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "cffi", marker = "platform_python_implementation != 'PyPy'" },
 ]
 sdist = { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/bb/ad/5d6702db60b1e40b41ef513b6967ff5848f307d50f8449baf1634f5908f1/cryptography-50.0.1.tar.gz", hash = "sha256:5dd9bda1c12b4162f6ff568eeb5e0ff956c28d14406e875cfe8a63a2d414ff20", size = 880381, upload-time = "2026-08-25T19:45:45.499Z" }
 wheels = [
@@ -385,43 +383,43 @@ wheels = [
 
 [package.optional-dependencies]
 cublas = [
-    { name = "nvidia-cublas", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'aarch64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "nvidia-cuda-nvrtc", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'aarch64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-cublas", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-cuda-nvrtc", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
 ]
 cudart = [
-    { name = "nvidia-cuda-runtime", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'aarch64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-cuda-runtime", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
 ]
 cufft = [
-    { name = "nvidia-cufft", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'aarch64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "nvidia-nvjitlink", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'aarch64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-cufft", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-nvjitlink", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
 ]
 cufile = [
-    { name = "nvidia-cufile", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'aarch64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-cufile", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
 ]
 cupti = [
-    { name = "nvidia-cuda-cupti", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'aarch64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-cuda-cupti", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
 ]
 curand = [
-    { name = "nvidia-curand", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'aarch64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-curand", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
 ]
 cusolver = [
-    { name = "nvidia-cublas", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'aarch64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "nvidia-cusolver", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'aarch64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "nvidia-cusparse", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'aarch64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "nvidia-nvjitlink", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'aarch64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-cublas", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-cusolver", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-cusparse", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-nvjitlink", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
 ]
 cusparse = [
-    { name = "nvidia-cusparse", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'aarch64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "nvidia-nvjitlink", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'aarch64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-cusparse", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-nvjitlink", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
 ]
 nvjitlink = [
-    { name = "nvidia-nvjitlink", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'aarch64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-nvjitlink", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
 ]
 nvrtc = [
-    { name = "nvidia-cuda-nvrtc", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'aarch64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-cuda-nvrtc", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
 ]
 nvtx = [
-    { name = "nvidia-nvtx", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'aarch64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (platform_machine == 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-nvtx", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
 ]
 
 [[package]]
@@ -477,12 +475,40 @@ wheels = [
 ]
 
 [[package]]
+name = "einops"
+version = "0.8.2"
+source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }
+sdist = { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/2c/77/850bef8d72ffb9219f0b1aac23fbc1bf7d038ee6ea666f331fa273031aa2/einops-0.8.2.tar.gz", hash = "sha256:609da665570e5e265e27283aab09e7f279ade90c4f01bcfca111f3d3e13f2827", size = 56261, upload-time = "2026-01-26T04:13:17.638Z" }
+wheels = [
+    { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/2a/09/f8d8f8f31e4483c10a906437b4ce31bdf3d6d417b73fe33f1a8b59e34228/einops-0.8.2-py3-none-any.whl", hash = "sha256:54058201ac7087911181bfec4af6091bb59380360f069276601256a76af08193", size = 65638, upload-time = "2026-01-26T04:13:18.546Z" },
+]
+
+[[package]]
 name = "filelock"
 version = "3.32.5"
 source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }
 sdist = { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/0a/a0/50c2c0ce5e74d7721bbb1b19a26ebd339aac5878553a6e35308c2f31f935/filelock-3.32.5.tar.gz", hash = "sha256:f6a6a28f743f9b95ce19db5abe0f376f75eb56517dff21e1a4751e2657d3e83d", size = 222838, upload-time = "2026-08-31T18:56:34.729Z" }
 wheels = [
     { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/36/d2/b70a31e13d04456d28493f31d2aa087e99eeb2767ef0293b2625727ccb8c/filelock-3.32.5-py3-none-any.whl", hash = "sha256:142cd9fa77a872c5e78c62329a0d15278fadc686eb89e760017968961a4fd6b2", size = 100003, upload-time = "2026-08-31T18:56:33.078Z" },
+]
+
+[[package]]
+name = "flash-attn"
+version = "2.7.4.post1"
+source = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1%2Bcu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl" }
+dependencies = [
+    { name = "einops" },
+    { name = "torch", version = "2.6.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra == 'group-21-latent-working-memory-cuda124'" },
+    { name = "torch", version = "2.14.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra != 'group-21-latent-working-memory-cuda124' or extra == 'group-21-latent-working-memory-torch214'" },
+]
+wheels = [
+    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1%2Bcu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl", hash = "sha256:58853b28a5a926cae14402bfd8d4d93a45ebf8f9e79533f37ab09d0d77a99c05" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "einops" },
+    { name = "torch" },
 ]
 
 [[package]]
@@ -494,10 +520,10 @@ resolution-markers = [
     "python_full_version < '3.11.5' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "ninja", marker = "(sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'emscripten' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform == 'win32' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "numpy", marker = "(sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'emscripten' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform == 'win32' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "torch", version = "2.6.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "(sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-21-latent-working-memory-cuda124') or (sys_platform == 'emscripten' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform == 'win32' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "torch", version = "2.14.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "(sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "ninja" },
+    { name = "numpy" },
+    { name = "torch", version = "2.6.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra == 'group-21-latent-working-memory-cuda124'" },
+    { name = "torch", version = "2.14.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra != 'group-21-latent-working-memory-cuda124' or extra == 'group-21-latent-working-memory-torch214'" },
 ]
 sdist = { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/b2/c4/9ec0f79e2480fc5c93307c4a1ac903e5cf33c551c0eaeb648196234b55af/flashinfer_python-0.2.5.tar.gz", hash = "sha256:990aa090ef781783e76b836696ece4efd23956f72b5696d622fc619a61162aef", size = 2492267, upload-time = "2025-04-04T15:06:42.864Z" }
 
@@ -687,7 +713,7 @@ source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }
 dependencies = [
     { name = "filelock" },
     { name = "fsspec" },
-    { name = "hf-xet", marker = "platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64' or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "hf-xet", marker = "platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'" },
     { name = "packaging" },
     { name = "pyyaml" },
     { name = "requests" },
@@ -807,6 +833,7 @@ wheels = [
 name = "latent-working-memory"
 version = "0.1.0"
 source = { editable = "." }
+default-groups = ["cuda124", "dev"]
 dependencies = [
     { name = "accelerate" },
     { name = "beautifulsoup4" },
@@ -826,7 +853,7 @@ dependencies = [
     { name = "tenacity" },
     { name = "tensordict" },
     { name = "torch", version = "2.6.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra == 'group-21-latent-working-memory-cuda124'" },
-    { name = "torch", version = "2.14.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra == 'group-21-latent-working-memory-torch214' or extra != 'group-21-latent-working-memory-cuda124'" },
+    { name = "torch", version = "2.14.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra != 'group-21-latent-working-memory-cuda124' or extra == 'group-21-latent-working-memory-torch214'" },
     { name = "transformers" },
     { name = "verl" },
     { name = "wonderwords" },
@@ -838,9 +865,12 @@ cuda124 = [
     { name = "torch", version = "2.6.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" } },
 ]
 dev = [
-    { name = "flashinfer-python", version = "0.2.5", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "sys_platform == 'darwin' or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "flashinfer-python", version = "0.2.5", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "sys_platform == 'darwin'" },
     { name = "pytest" },
     { name = "ruff" },
+]
+fa2 = [
+    { name = "flash-attn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 torch214 = [
     { name = "torch", version = "2.14.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" } },
@@ -881,6 +911,7 @@ dev = [
     { name = "pytest", specifier = ">=8.4,<9" },
     { name = "ruff", specifier = ">=0.12,<0.14" },
 ]
+fa2 = [{ name = "flash-attn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1%2Bcu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl" }]
 torch214 = [{ name = "torch", specifier = "==2.14.0" }]
 
 [[package]]
@@ -1061,23 +1092,6 @@ source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }
 sdist = { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/ac/92/410b7917d16ab54c04b05cc32b9284803671d91cf79d33be6009c28d4ea8/ninja-1.13.2.tar.gz", hash = "sha256:525bfa3fc88aa30a4467df270fd5be6f9fcae8061d54d4df74ea1dc5abd5a975", size = 243739, upload-time = "2026-08-30T15:49:51.897Z" }
 wheels = [
     { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/b5/b8/90a9518f2264637084d6199bc20c2f3fb97fefc4c474d277720150c3bd6d/ninja-1.13.2-py3-none-macosx_10_9_universal2.whl", hash = "sha256:fd82e26c0706ad4ab88e5fdd26f3fab0a987a90f810160f6c322e752c6af298b", size = 306611, upload-time = "2026-08-30T15:49:28.267Z" },
-    { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/35/54/7368ce188625e39acc03ee362bb86cc9bfa6ad15e25c50889ae36e2889b3/ninja-1.13.2-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:d775a5e43e9088f507a6250d57fcf5678eb31268c545feb5064ffeee33735622", size = 177180, upload-time = "2026-08-30T15:49:29.59Z" },
-    { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/80/1a/0b5601ece2a5de97253e7c7c442b70315333955593c2b55616fd17f1706f/ninja-1.13.2-py3-none-manylinux2014_i686.manylinux_2_17_i686.whl", hash = "sha256:81d95081c0ad7c95f67bf682220361ed2a32659d7861b4766b03433c58f22516", size = 199485, upload-time = "2026-08-30T15:49:30.72Z" },
-    { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/48/23/fcbe234a66966e35928c47b86336f92a7612db4781665f4e5f5fddef9630/ninja-1.13.2-py3-none-manylinux2014_ppc64le.manylinux_2_17_ppc64le.whl", hash = "sha256:227cbc3ae3e5e429692388103cae8c09451df086cd2d342dae0795af0d162547", size = 197676, upload-time = "2026-08-30T15:49:32.026Z" },
-    { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/24/eb/a6ca97ef0ff7bb8bdcb395ec65a716e65d7c1f40896c3afe0090bb3e1535/ninja-1.13.2-py3-none-manylinux2014_s390x.manylinux_2_17_s390x.whl", hash = "sha256:1684c60d031c54c1d049541b64243c0c567dca5463dbd77682a8901780af293d", size = 187980, upload-time = "2026-08-30T15:49:33.372Z" },
-    { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/6e/53/ebfed7b689c338dd8ebeec9c0730c8d56821292f14e2536e5f3ef1a05744/ninja-1.13.2-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:65a24341b5ac09fcadcc37082660be40a94174e51a937fabf6e2cae26225fa2c", size = 183365, upload-time = "2026-08-30T15:49:34.53Z" },
-    { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/c7/d6/dcf06d7ab44ade992ae5aa1228feff317684b463a1bd47e8642b30ac922e/ninja-1.13.2-py3-none-manylinux_2_28_armv7l.manylinux_2_31_armv7l.whl", hash = "sha256:aa3d2ae5706a2c4d1e93edc951d1c6cbb45107413c404f8fde1741239efbc9a0", size = 155089, upload-time = "2026-08-30T15:49:35.72Z" },
-    { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/e1/6b/6513c09c33382b17c05b4349b8e81437b18680d0d7ec6fb8f7edc29adda1/ninja-1.13.2-py3-none-manylinux_2_31_riscv64.whl", hash = "sha256:919572cbc3f233261ecd41fe1f3efc9d44aa02464a4588867e06a8b4f6f416ea", size = 152149, upload-time = "2026-08-30T15:49:36.971Z" },
-    { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/4d/70/d59fa4261f5ce586f43d8716de1da33d813afc116f0bf9173bf4cdbfdb2a/ninja-1.13.2-py3-none-musllinux_1_2_aarch64.whl", hash = "sha256:0e083700470c02ca154a855ae6d692d03564f5064cae52e113896f9ccc078418", size = 525392, upload-time = "2026-08-30T15:49:38.136Z" },
-    { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/37/04/c8c2dc5b2f5fee79a1691d490256b178b7e1af97d56769117422ae8a23cc/ninja-1.13.2-py3-none-musllinux_1_2_armv7l.whl", hash = "sha256:59d71c3e15b6b6f3d903eb0c27285544e0747ca59925ada7037bb1af781ad4b3", size = 466268, upload-time = "2026-08-30T15:49:39.479Z" },
-    { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/f3/6d/fce288647e53e96e0f0929a3c5b23986aae1b7101ea8889a3090237c5d13/ninja-1.13.2-py3-none-musllinux_1_2_i686.whl", hash = "sha256:f90f84affc441e219f15fe52532806c1c9dbd22fb66c3addddce88a3deaabab7", size = 605088, upload-time = "2026-08-30T15:49:40.826Z" },
-    { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/10/a2/d8eedd25d0ae80b9e874aea362013e67416877c8f732eb4d5e7c971fdb9c/ninja-1.13.2-py3-none-musllinux_1_2_ppc64le.whl", hash = "sha256:b2f687437fac460b27b7eadc99039b1163016fb4ba7276e2782a192d9f24ee0e", size = 610806, upload-time = "2026-08-30T15:49:42.168Z" },
-    { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/14/0f/696d96821fad1b5767fd311c1569dde8881a57412369bfe7b11bcbfde036/ninja-1.13.2-py3-none-musllinux_1_2_riscv64.whl", hash = "sha256:09de9ab04f7352f51570c73fd4913acb1e6c24be0a72cd8b80243d4d3ed04925", size = 533978, upload-time = "2026-08-30T15:49:43.451Z" },
-    { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/5d/69/28844ca579156776a202217a7cd66f60d06a0710a935e879bb89ce396ecc/ninja-1.13.2-py3-none-musllinux_1_2_s390x.whl", hash = "sha256:6a87bf42b123abe2f37737300185f0a303a891899da85d73a3613ee80547e578", size = 653822, upload-time = "2026-08-30T15:49:44.724Z" },
-    { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/f5/5f/c511f2952f94ab2966d60edd9c34e744ea32f2724b1184b62270bde55b3a/ninja-1.13.2-py3-none-musllinux_1_2_x86_64.whl", hash = "sha256:915bd482c4be41c75120fd67a22e0bb3f0fbb3bbc5f95b89787deadd59e27ef2", size = 544460, upload-time = "2026-08-30T15:49:46.29Z" },
-    { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/79/e7/fb0e828e89ac77ef77183a0834f17c4108e66088732fed86a3cc3c776a7a/ninja-1.13.2-py3-none-win32.whl", hash = "sha256:792cadbb9decfd1f776d4d0a6930feb46d08302eb57c176bcf26b09de5748e9f", size = 270319, upload-time = "2026-08-30T15:49:47.942Z" },
-    { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/3f/dd/3766b5f4d32e8a9b97d195496b0b01fbbe2e1a41669dab0cd6492a6ce199/ninja-1.13.2-py3-none-win_amd64.whl", hash = "sha256:1293f4078278b70d0ee4b6cc8f3a9e030656c9b2f59909970343c4fe76070118", size = 311798, upload-time = "2026-08-30T15:49:49.351Z" },
-    { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/b7/8d/59a31fa508070d042571d9d226b541a21000756817313f397da22287ad34/ninja-1.13.2-py3-none-win_arm64.whl", hash = "sha256:1db9852e528efa7702f5123969f86678663e46d57ff28ab13f5fd84d64a85fb1", size = 290620, upload-time = "2026-08-30T15:49:50.639Z" },
 ]
 
 [[package]]
@@ -1592,7 +1606,7 @@ source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }
 dependencies = [
     { name = "numpy" },
     { name = "python-dateutil" },
-    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32' or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32'" },
 ]
 sdist = { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/be/4f/5f3422a2afec5ffc46308b79e53291365a93748b498ac2e58bead0197916/pandas-3.0.5.tar.gz", hash = "sha256:dca3734d6ab7c906e6730f0788b0a1dbb9f2467731f9711f77995c8e9d62d712", size = 4658219, upload-time = "2026-07-22T22:19:28.819Z" }
 wheels = [
@@ -1619,7 +1633,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "safetensors" },
     { name = "torch", version = "2.6.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra == 'group-21-latent-working-memory-cuda124'" },
-    { name = "torch", version = "2.14.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra == 'group-21-latent-working-memory-torch214' or extra != 'group-21-latent-working-memory-cuda124'" },
+    { name = "torch", version = "2.14.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra != 'group-21-latent-working-memory-cuda124' or extra == 'group-21-latent-working-memory-torch214'" },
     { name = "tqdm" },
     { name = "transformers" },
 ]
@@ -1989,7 +2003,7 @@ name = "pytest"
 version = "8.4.2"
 source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
     { name = "iniconfig" },
     { name = "packaging" },
     { name = "pluggy" },
@@ -2412,7 +2426,7 @@ dependencies = [
     { name = "starlette" },
     { name = "typing-extensions" },
     { name = "uvicorn" },
-    { name = "watchdog", marker = "sys_platform != 'darwin' or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "watchdog", marker = "sys_platform != 'darwin'" },
     { name = "websockets" },
 ]
 sdist = { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/35/a3/e1d5c76e9b09e7863763238529b20a8ea99116e2c28c464ad710a322e221/streamlit-1.66.0.tar.gz", hash = "sha256:8b79761394664035ff5d691b4502b70385a39123e6d78a051c79e8ae28c29f8c", size = 9826614, upload-time = "2026-10-14T16:07:53.564Z" }
@@ -2455,12 +2469,12 @@ version = "1.13.1"
 source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }
 resolution-markers = [
     "python_full_version >= '3.11.5' and sys_platform == 'linux'",
-    "python_full_version < '3.11.5' and sys_platform == 'linux'",
     "python_full_version >= '3.11.5' and sys_platform == 'win32'",
-    "python_full_version < '3.11.5' and sys_platform == 'win32'",
     "python_full_version >= '3.11.5' and sys_platform == 'emscripten'",
-    "python_full_version < '3.11.5' and sys_platform == 'emscripten'",
     "python_full_version >= '3.11.5' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
+    "python_full_version < '3.11.5' and sys_platform == 'linux'",
+    "python_full_version < '3.11.5' and sys_platform == 'win32'",
+    "python_full_version < '3.11.5' and sys_platform == 'emscripten'",
     "python_full_version < '3.11.5' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
 ]
 dependencies = [
@@ -2477,16 +2491,16 @@ version = "1.14.0"
 source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }
 resolution-markers = [
     "python_full_version >= '3.11.5' and sys_platform == 'linux'",
-    "python_full_version < '3.11.5' and sys_platform == 'linux'",
     "python_full_version >= '3.11.5' and sys_platform == 'win32'",
-    "python_full_version < '3.11.5' and sys_platform == 'win32'",
     "python_full_version >= '3.11.5' and sys_platform == 'emscripten'",
-    "python_full_version < '3.11.5' and sys_platform == 'emscripten'",
     "python_full_version >= '3.11.5' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
+    "python_full_version < '3.11.5' and sys_platform == 'linux'",
+    "python_full_version < '3.11.5' and sys_platform == 'win32'",
+    "python_full_version < '3.11.5' and sys_platform == 'emscripten'",
     "python_full_version < '3.11.5' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "mpmath", marker = "extra == 'group-21-latent-working-memory-torch214' or extra != 'group-21-latent-working-memory-cuda124'" },
+    { name = "mpmath", marker = "extra != 'group-21-latent-working-memory-cuda124' or extra == 'group-21-latent-working-memory-torch214'" },
 ]
 sdist = { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/83/d3/803453b36afefb7c2bb238361cd4ae6125a569b4db67cd9e79846ba2d68c/sympy-1.14.0.tar.gz", hash = "sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517", size = 7793921, upload-time = "2025-04-27T18:05:01.611Z" }
 wheels = [
@@ -2553,7 +2567,7 @@ dependencies = [
     { name = "packaging" },
     { name = "pyvers" },
     { name = "torch", version = "2.6.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra == 'group-21-latent-working-memory-cuda124'" },
-    { name = "torch", version = "2.14.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra == 'group-21-latent-working-memory-torch214' or extra != 'group-21-latent-working-memory-cuda124'" },
+    { name = "torch", version = "2.14.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra != 'group-21-latent-working-memory-cuda124' or extra == 'group-21-latent-working-memory-torch214'" },
 ]
 wheels = [
     { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/6c/c9/44d4106f288cef22962268b54ed2438afee32e4f8380f0ed91e7dacc9b80/tensordict-0.10.0-cp311-cp311-macosx_14_0_arm64.whl", hash = "sha256:37af5d60593c2439d81c2dbb7d0caa0018c50a3063da18b1d4d8b7d7d0503ee0", size = 800435, upload-time = "2025-09-08T10:07:12.581Z" },
@@ -2594,12 +2608,12 @@ version = "2.6.0"
 source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }
 resolution-markers = [
     "python_full_version >= '3.11.5' and sys_platform == 'linux'",
-    "python_full_version < '3.11.5' and sys_platform == 'linux'",
     "python_full_version >= '3.11.5' and sys_platform == 'win32'",
-    "python_full_version < '3.11.5' and sys_platform == 'win32'",
     "python_full_version >= '3.11.5' and sys_platform == 'emscripten'",
-    "python_full_version < '3.11.5' and sys_platform == 'emscripten'",
     "python_full_version >= '3.11.5' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
+    "python_full_version < '3.11.5' and sys_platform == 'linux'",
+    "python_full_version < '3.11.5' and sys_platform == 'win32'",
+    "python_full_version < '3.11.5' and sys_platform == 'emscripten'",
     "python_full_version < '3.11.5' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
 ]
 dependencies = [
@@ -2607,21 +2621,21 @@ dependencies = [
     { name = "fsspec", marker = "extra == 'group-21-latent-working-memory-cuda124'" },
     { name = "jinja2", marker = "extra == 'group-21-latent-working-memory-cuda124'" },
     { name = "networkx", marker = "extra == 'group-21-latent-working-memory-cuda124'" },
-    { name = "nvidia-cublas-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "nvidia-cuda-cupti-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "nvidia-cuda-nvrtc-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "nvidia-cuda-runtime-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "nvidia-cudnn-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "nvidia-cufft-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "nvidia-curand-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "nvidia-cusolver-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "nvidia-cusparse-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "nvidia-cusparselt-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "nvidia-nccl-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "nvidia-nvjitlink-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "nvidia-nvtx-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-cublas-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-cuda-cupti-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-cuda-nvrtc-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-cuda-runtime-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-cudnn-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-cufft-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-curand-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-cusolver-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-cusparse-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-cusparselt-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-nccl-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "nvidia-nvtx-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
     { name = "sympy", version = "1.13.1", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra == 'group-21-latent-working-memory-cuda124'" },
-    { name = "triton", version = "3.2.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (platform_machine != 'x86_64' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214') or (sys_platform != 'linux' and extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "triton", version = "3.2.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
     { name = "typing-extensions", marker = "extra == 'group-21-latent-working-memory-cuda124'" },
 ]
 wheels = [
@@ -2637,29 +2651,29 @@ version = "2.14.0"
 source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }
 resolution-markers = [
     "python_full_version >= '3.11.5' and sys_platform == 'linux'",
-    "python_full_version < '3.11.5' and sys_platform == 'linux'",
     "python_full_version >= '3.11.5' and sys_platform == 'win32'",
-    "python_full_version < '3.11.5' and sys_platform == 'win32'",
     "python_full_version >= '3.11.5' and sys_platform == 'emscripten'",
-    "python_full_version < '3.11.5' and sys_platform == 'emscripten'",
     "python_full_version >= '3.11.5' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
+    "python_full_version < '3.11.5' and sys_platform == 'linux'",
+    "python_full_version < '3.11.5' and sys_platform == 'win32'",
+    "python_full_version < '3.11.5' and sys_platform == 'emscripten'",
     "python_full_version < '3.11.5' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
 ]
 dependencies = [
     { name = "cuda-bindings", marker = "(sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
     { name = "cuda-toolkit", extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "(sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "filelock", marker = "extra == 'group-21-latent-working-memory-torch214' or extra != 'group-21-latent-working-memory-cuda124'" },
-    { name = "fsspec", marker = "extra == 'group-21-latent-working-memory-torch214' or extra != 'group-21-latent-working-memory-cuda124'" },
-    { name = "jinja2", marker = "extra == 'group-21-latent-working-memory-torch214' or extra != 'group-21-latent-working-memory-cuda124'" },
-    { name = "networkx", marker = "extra == 'group-21-latent-working-memory-torch214' or extra != 'group-21-latent-working-memory-cuda124'" },
+    { name = "filelock", marker = "extra != 'group-21-latent-working-memory-cuda124' or extra == 'group-21-latent-working-memory-torch214'" },
+    { name = "fsspec", marker = "extra != 'group-21-latent-working-memory-cuda124' or extra == 'group-21-latent-working-memory-torch214'" },
+    { name = "jinja2", marker = "extra != 'group-21-latent-working-memory-cuda124' or extra == 'group-21-latent-working-memory-torch214'" },
+    { name = "networkx", marker = "extra != 'group-21-latent-working-memory-cuda124' or extra == 'group-21-latent-working-memory-torch214'" },
     { name = "nvidia-cudnn-cu13", marker = "(sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
     { name = "nvidia-cusparselt-cu13", marker = "(sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
     { name = "nvidia-nccl-cu13", marker = "(sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
     { name = "nvidia-nvshmem-cu13", marker = "(sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "setuptools", marker = "extra == 'group-21-latent-working-memory-torch214' or extra != 'group-21-latent-working-memory-cuda124'" },
-    { name = "sympy", version = "1.14.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra == 'group-21-latent-working-memory-torch214' or extra != 'group-21-latent-working-memory-cuda124'" },
+    { name = "setuptools", marker = "extra != 'group-21-latent-working-memory-cuda124' or extra == 'group-21-latent-working-memory-torch214'" },
+    { name = "sympy", version = "1.14.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra != 'group-21-latent-working-memory-cuda124' or extra == 'group-21-latent-working-memory-torch214'" },
     { name = "triton", version = "3.8.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "(sys_platform == 'linux' and extra != 'group-21-latent-working-memory-cuda124') or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
-    { name = "typing-extensions", marker = "extra == 'group-21-latent-working-memory-torch214' or extra != 'group-21-latent-working-memory-cuda124'" },
+    { name = "typing-extensions", marker = "extra != 'group-21-latent-working-memory-cuda124' or extra == 'group-21-latent-working-memory-torch214'" },
 ]
 wheels = [
     { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/e6/2c/0c9757a1ea1fff8ccc4faff1d1c87e98a69542b5d4b606e50f7518f72e58/torch-2.14.0-cp311-cp311-macosx_14_0_arm64.whl", hash = "sha256:ae530ddd3f3b94248b77f1fd3313c4f3405bd0d17283d505b81574816767133a", size = 127277244, upload-time = "2026-09-02T13:42:57.855Z" },
@@ -2675,7 +2689,7 @@ source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }
 dependencies = [
     { name = "requests" },
     { name = "torch", version = "2.6.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra == 'group-21-latent-working-memory-cuda124'" },
-    { name = "torch", version = "2.14.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra == 'group-21-latent-working-memory-torch214' or extra != 'group-21-latent-working-memory-cuda124'" },
+    { name = "torch", version = "2.14.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "extra != 'group-21-latent-working-memory-cuda124' or extra == 'group-21-latent-working-memory-torch214'" },
     { name = "urllib3" },
 ]
 wheels = [
@@ -2687,7 +2701,7 @@ name = "tqdm"
 version = "4.70.0"
 source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'group-21-latent-working-memory-cuda124' and extra == 'group-21-latent-working-memory-torch214')" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
 ]
 sdist = { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/21/3b/6c24bec5be5e743ffd99576daa5cc077722fc7d5bbc00bd133fa0c698dc6/tqdm-4.70.0.tar.gz", hash = "sha256:55b0b0dbd97462d06ebee91e4dac24ed4d4702be82b24f07e6c1d27e08cea220", size = 795438, upload-time = "2026-07-27T11:33:15.271Z" }
 wheels = [

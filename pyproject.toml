@@ -42,6 +42,9 @@ cuda124 = [
     "torch==2.6.0",
     "flashinfer-python==0.2.5+cu124torch2.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
+fa2 = [
+    "flash-attn==2.7.4.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
 torch214 = ["torch==2.14.0"]
 
 [tool.uv]
@@ -49,6 +52,7 @@ default-groups = ["dev", "cuda124"]
 conflicts = [[{ group = "cuda124" }, { group = "torch214" }]]
 
 [tool.uv.sources]
+flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1%2Bcu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl" }
 flashinfer-python = [
     { index = "flashinfer-cu124", marker = "sys_platform == 'linux'" },
     { index = "pypi", marker = "sys_platform == 'darwin'" },

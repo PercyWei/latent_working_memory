@@ -20,7 +20,8 @@
   },
   "compute": {
     "dtype": "float32",
-    "gradient_checkpointing": true,
+    "attention_implementation": "sdpa",
+    "gradient_checkpointing": false,
     "mixed_precision": false,
     "save_on_cpu": false
   },

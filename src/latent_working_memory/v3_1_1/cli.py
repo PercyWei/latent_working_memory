@@ -26,6 +26,12 @@ def optional_positive_int(value):
     return None if value == "null" else positive_int(value)
 
 
+def boolean(value):
+    if value not in {"true", "false"}:
+        raise argparse.ArgumentTypeError("must be true or false")
+    return value == "true"
+
+
 def unit_interval(value):
     number = float(value)
     if not math.isfinite(number) or not 0 <= number <= 1:
@@ -82,10 +88,19 @@ def parse_run_args(argv=None):
                         help="长度课程历史补充数量相对本档样本数的比例，默认 0.2")
     parser.add_argument("--micro-batch-size-per-gpu", type=positive_int)
     parser.add_argument("--gradient-accumulation-steps", type=positive_int)
-    parser.add_argument("--mixed-precision", action="store_true",
-                        help="FP32 参数配合标准 BF16 autocast，默认关闭")
-    parser.add_argument("--save-on-cpu", action="store_true",
-                        help="将反向所需的保存张量暂存到 CPU，默认关闭")
+    parser.add_argument("--dtype", choices=("float32", "bfloat16"),
+                        help="基座参数精度，省略时沿用 JSON")
+    parser.add_argument("--attention-implementation", choices=("sdpa", "flash_attention_2"),
+                        help="attention 实现，省略时沿用 JSON")
+    for name, description in (
+        ("gradient-checkpointing", "Transformer 层梯度检查点"),
+        ("mixed-precision", "FP32 参数配合标准 BF16 autocast"),
+        ("save-on-cpu", "将反向所需的保存张量暂存到 CPU"),
+    ):
+        parser.add_argument(
+            f"--{name}", type=boolean, nargs="?", const=True, metavar="{true,false}",
+            help=f"{description}；仅传参数名表示开启，false 关闭，省略时沿用 JSON",
+        )
     parser.add_argument("--dev-every", type=save_frequency)
     parser.add_argument("--save-every", type=save_frequency)
     parser.add_argument("--save-total-limit", type=positive_int)
@@ -170,7 +185,9 @@ def config_overrides(args):
         overrides["seed"] = values["seed"]
     if "model_path" in values:
         overrides["model_name_or_path"] = values["model_path"]
-    compute = {name: values[name] for name in ("mixed_precision", "save_on_cpu") if name in values}
+    compute = {name: values[name] for name in (
+        "dtype", "attention_implementation", "gradient_checkpointing", "mixed_precision", "save_on_cpu",
+    ) if name in values}
     if compute:
         overrides["compute"] = compute
     training = {}

@@ -19,8 +19,9 @@
   },
   "compute": {
     "dtype": "float32",
-    "gradient_checkpointing": true,
-    "mixed_precision": false,
+    "attention_implementation": "flash_attention_2",
+    "gradient_checkpointing": false,
+    "mixed_precision": true,
     "save_on_cpu": false
   },
   "method": {

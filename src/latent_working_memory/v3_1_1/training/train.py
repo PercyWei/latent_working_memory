@@ -69,9 +69,10 @@ def _initialize_compressor(model, config):
     source_path = checkpoint_file(config.training.run.init_checkpoint)
     source = read_checkpoint(source_path)
     source_config = config_from_dict(source["config"])
-    # 初始化仅继承压缩器；精度和保存张量策略由后训练独立选择。
+    # 初始化仅继承压缩器；精度、attention 和保存张量策略由后训练独立选择。
     source_compute = replace(
         source_config.compute, dtype=config.compute.dtype,
+        attention_implementation=config.compute.attention_implementation,
         mixed_precision=config.compute.mixed_precision, save_on_cpu=config.compute.save_on_cpu,
     )
     if (

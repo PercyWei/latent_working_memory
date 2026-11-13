@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261112 20:36:37 Asia/Shanghai
+最后修订时间：20261113 12:54:11 Asia/Shanghai
 
 计算协议与数据格式见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256.json)中的基座与数据路径。
 
@@ -105,7 +105,7 @@ fineweb-factqa_q10_train1k_length3_20261112/
 新训练必须同时指定阶段 `--stage` 和配置文件 `--config`，配置中的 `stage` 必须与 `--stage` 一致。两阶段共用以下运行规则：
 
 - **配置覆盖**：显式 CLI 参数覆盖 JSON；模型结构和记忆更新设置直接修改 JSON，参数说明见[第 5 节](#5-调整参数)。
-- **计算设置**：统一使用 SDPA，参数默认 FP32。`--mixed-precision` 和 `--save-on-cpu` 分别开启标准 BF16 autocast（参数精度保持 FP32）和反向保存张量的 CPU 暂存，省略时沿用 JSON。恢复与独立评估沿用已保存设置，详细计算方式见[方法说明](../README.md#配置与运行)。
+- **计算设置**：FlashAttention2 需 BF16 基座或开启混合精度。恢复与独立评估沿用已保存设置，详细计算方式见[方法说明](../README.md#配置与运行)。
 - **训练批量**：`--micro-batch-size-per-gpu` 控制每卡 microbatch 的样本数；全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数。预训练按窗口、后训练按文档计数；两阶段示例均使用单卡 A800，预训练为 `1 × 16 × 2 = 32`，后训练为 `1 × 2 × 8 = 16`。
 - **长度课程**：K256 后训练配置已开启课程，每档训练 1 轮，并从此前各档尽量均衡地随机无放回补充本档数量的 20%。按档位从短到长推进，每轮完整遍历本档，历史补充数量四舍五入、不足时取全部；每轮重新抽取，混合打乱后统一切 batch，全部档位完成后结束，不额外执行 `--epochs` 全量训练。其他配置可通过 `--length-curriculum` 开启，以 `--curriculum-stage-epochs` 和 `--curriculum-replay-ratio` 调整轮数与比例。关闭课程时，各档合并后按 `--epochs` 全量随机训练；dev 和 test 保持原协议。
 - **执行流程**：先保存训练计划，再执行训练、dev 与 checkpoint 保存。
@@ -126,6 +126,7 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
 - **运行目录**：`run_id` 默认为 `pretrain_k{memory_slots}_{YYYYMMDD-HHMM}`，其中 `memory_slots` 为记忆槽位数。
 - **当前数据**：K256 配置读取 `data/fineweb_train5k_20261112`，5000 条训练样本按上述批量训练 1 轮，共 157 个 optimizer steps。每 40 步及训练结束时验证和保存，在第 40、80、120、157 步生成 checkpoint，最多保留 5 个。
 - **输入与目标**：读取准备后的完整 `text`，先按完整样本的实际 token 数执行长度筛选，再依据 seed 与文本内容标识固定选择 AE 或 LM，跨 epoch 不变。AE 压缩并重建完整样本；LM 以前缀为压缩输入，默认预测样本末尾的 512 tokens，若剩余前缀长度不大于 K 则改为 AE。默认 LM 概率 0.5，目标均追加 EOS。
+- **批量计算**：每次更新的本卡样本先按输入长度从长到短排序，再切 microbatch 并分 AE／LM，组内批量压缩和读取；每条样本先对目标 tokens 平均损失，累计后按实际全局样本数归约，padding 不计入目标。
 - **可训练参数**：压缩器 LoRA 和 memory embeddings；基座与读取器冻结，读取器保留损失到 memory 的梯度。预训练不更新边界模块。
 
 ### 3.2 后训练（QA／GRPO 联合训练）
@@ -142,7 +143,7 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
 
 - **运行目录**：`run_id` 默认为 `policy-post_k{memory_slots}_{YYYYMMDD-HHMM}`，其中 `memory_slots` 为记忆槽位数。
 - **当前数据**：K256 配置读取 `data/fineweb-factqa_q10_train1k_length3_20261112`，按 3 个长度档位依次训练，dev 读取该目录下的 `dev.jsonl`；课程已在配置中开启，无需额外传参。
-- **初始化**：后训练需通过 `--init-checkpoint` 指定预训练来源。源 checkpoint 阶段须为 `pretrain`，两阶段基座来源、记忆槽位数、LoRA 及梯度检查点设置须一致；精度、混合精度和 CPU 暂存可独立设置，可从 BF16 预训练初始化 FP32 后训练。边界模块隐藏维度由后训练独立设置；新 run 只继承压缩器，重新创建边界模块、optimizer、scheduler、游标和边界随机流。实际来源随训练记录保存。
+- **初始化**：后训练需通过 `--init-checkpoint` 指定预训练来源。源 checkpoint 阶段须为 `pretrain`，两阶段基座来源、记忆槽位数、LoRA 及梯度检查点设置须一致；精度、attention 实现、混合精度和 CPU 暂存可独立设置，可从 BF16 预训练初始化 FP32 后训练。边界模块隐藏维度由后训练独立设置；新 run 只继承压缩器，重新创建边界模块、optimizer、scheduler、游标和边界随机流。实际来源随训练记录保存。
 - **训练单位**：每行一篇文档及其全部 QA。一篇文档采样 G 条完整硬分段，每条路径共享 memory 评价同一套 QA；G 不计入全局 batch。
 - **一次联合更新**：固定参数采样并评价整组路径，逐路径回放；QA 逐题累积 memory 梯度并释放计算图，再与策略项一起回传压缩器，累计整批后更新一次。同一提交段内的边界判断共享因果前向，压缩排除仅用于判断的下一单元。QA 损失训练记忆内容，停止梯度后的组内优势训练边界选择。
 - **反传跨度**：在 JSON 中设置 `training.backward.bptt_steps`，支持 `null`（保留完整跨段反传）或正整数。例如设为 `2`，每两次实际写入为一组，组内正常反传，组间截断后续压缩与边界判断使用的历史梯度。全部历史 memory 仍参与前向，所有块保留直接 QA 监督；预训练、无梯度采样和评估不受影响。
@@ -321,8 +322,11 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 | `--micro-batch-size-per-gpu` | 每卡 microbatch 的样本数，默认 1 |
 | `--gradient-accumulation-steps` | 每次优化器更新前累积的 microbatch 数，默认 16 |
 | **计算设置** | |
-| `--mixed-precision` | FP32 参数与标准 BF16 autocast，默认不开启 |
-| `--save-on-cpu` | 反向所需的保存张量暂存到 CPU，默认不开启 |
+| `--dtype` | 基座参数精度，支持 `float32`（默认）和 `bfloat16` |
+| `--attention-implementation` | attention 实现，支持 `sdpa`（默认）和 `flash_attention_2` |
+| `--gradient-checkpointing` | Transformer 层内激活重算，默认关闭 |
+| `--mixed-precision` | FP32 参数与标准 BF16 autocast，默认关闭 |
+| `--save-on-cpu` | 反向所需的保存张量暂存到 CPU，默认关闭 |
 
 - **数据筛选**：预训练按完整样本 `text`、后训练按正文的实际 token 数筛选，不含系统提示、chat template 等。train 和 dev 的长度均须严格大于记忆槽位数 K；上限仅用于 train，超限样本整条排除，`null` 取消该上限。LM 划分后的压缩前缀若不大于 K 则改为 AE，实际编码／解码仍须满足模型窗口限制。
 

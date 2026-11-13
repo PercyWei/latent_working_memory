@@ -35,7 +35,7 @@ class MemoryModel(nn.Module):
         base = AutoModelForCausalLM.from_pretrained(
             source,
             torch_dtype=getattr(torch, compute_settings["dtype"]),
-            attn_implementation="sdpa",
+            attn_implementation=compute_settings["attention_implementation"],
         ).to(device)
         if base.config.model_type not in {"llama", "qwen2", "qwen3"}:
             raise ValueError("the memory writer supports Llama, Qwen2 and Qwen3 causal LMs")
@@ -119,6 +119,16 @@ class MemoryModel(nn.Module):
             return_dict=True,
         ).last_hidden_state[0]
 
+    def _hidden_batch(self, backbone, rows):
+        for row in rows:
+            self._check_length(len(row))
+        inputs, _, mask = pad_inputs(rows)
+        positions = (mask.long().cumsum(-1) - 1).clamp_min(0)
+        return backbone.model(
+            inputs_embeds=inputs, attention_mask=mask, position_ids=positions,
+            use_cache=False, return_dict=True,
+        ).last_hidden_state
+
     def compress(self, input_ids, memory_blocks=()):
         if not input_ids:
             raise ValueError("cannot compress an empty text block")
@@ -127,6 +137,17 @@ class MemoryModel(nn.Module):
         inputs = torch.cat((source, self.memory_embeddings.to(source.dtype)))
         self._check_length(len(inputs))
         return self._hidden(backbone, inputs)[-self.memory_slots :]
+
+    def compress_batch(self, input_ids):
+        """批量压缩独立正文，保留各行 memory 到 Writer 的梯度。"""
+        backbone = self.writer.get_base_model()
+        rows = []
+        for tokens in input_ids:
+            if not tokens:
+                raise ValueError("cannot compress an empty text block")
+            source = self._inputs(backbone, (), tokens)
+            rows.append(torch.cat((source, self.memory_embeddings.to(source.dtype))))
+        return self._hidden_batch(backbone, rows)[:, -self.memory_slots:]
 
     @torch.no_grad()
     def _source_hidden(self, inputs, cache=None):
@@ -267,38 +288,32 @@ class MemoryModel(nn.Module):
             )
         return torch.stack(losses).sum() / len(targets)
 
-    @torch.no_grad()
     def answer_nll_batch(self, memories, prompt_ids, target_ids):
-        """一次 decoder 前向评分多题；每行只平均该题实际 target tokens。"""
+        """批量 Reader 前向；各行损失只平均自身的实际 target tokens。"""
         if not memories or not len(memories) == len(prompt_ids) == len(target_ids):
             raise ValueError("memories, prompts and targets must have the same nonzero batch size")
         if any(not targets for targets in target_ids):
             raise ValueError("NLL targets must be nonempty")
         rows = [self._inputs(self.decoder, blocks, (*prompt, *target[:-1]))
                 for blocks, prompt, target in zip(memories, prompt_ids, target_ids, strict=True)]
-        for row in rows:
-            self._check_length(len(row))
-        inputs, _, mask = pad_inputs(rows)
-        positions = (mask.long().cumsum(-1) - 1).clamp_min(0)
-        was_training = self.decoder.training
-        self.decoder.eval()
-        try:
-            hidden = self.decoder.model(
-                inputs_embeds=inputs, attention_mask=mask, position_ids=positions,
-                use_cache=False, return_dict=True,
-            ).last_hidden_state
-        finally:
-            self.decoder.train(was_training)
+        hidden = self._hidden_batch(self.decoder, rows)
         # 左 padding 后每行最后 len(target) 个隐藏状态恰好预测该行的目标。
         lengths = [len(target) for target in target_ids]
         selected = torch.cat([hidden[index, -length:] for index, length in enumerate(lengths)])
         targets = torch.cat([self._tokens(target) for target in target_ids])
+
+        def token_loss(hidden, token_targets):
+            logits = self.decoder.get_output_embeddings()(hidden)
+            return F.cross_entropy(logits.float(), token_targets, reduction="none")
+
         losses = []
         for start in range(0, len(targets), 256):
-            logits = self.decoder.get_output_embeddings()(selected[start:start + 256])
-            losses.append(F.cross_entropy(
-                logits.float(), targets[start:start + 256], reduction="none",
-            ))
+            hidden, token_targets = selected[start:start + 256], targets[start:start + 256]
+            losses.append(
+                checkpoint(token_loss, hidden, token_targets, use_reentrant=False)
+                if torch.is_grad_enabled() and hidden.requires_grad
+                else token_loss(hidden, token_targets)
+            )
         return torch.stack([values.mean() for values in torch.cat(losses).split(lengths)])
 
     @torch.no_grad()

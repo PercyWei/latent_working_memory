@@ -61,18 +61,24 @@ class ModelLoraConfig:
 @dataclass(frozen=True)
 class ComputeConfig:
     dtype: str = "float32"
-    gradient_checkpointing: bool = True
+    attention_implementation: str = "sdpa"
+    gradient_checkpointing: bool = False
     mixed_precision: bool = False
     save_on_cpu: bool = False
 
     def __post_init__(self):
         if self.dtype not in {"bfloat16", "float32"}:
             raise ValueError("dtype must be bfloat16 or float32")
+        if self.attention_implementation not in {"sdpa", "flash_attention_2"}:
+            raise ValueError("attention_implementation must be sdpa or flash_attention_2")
         for name in ("gradient_checkpointing", "mixed_precision", "save_on_cpu"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be boolean")
         if self.mixed_precision and self.dtype != "float32":
             raise ValueError("mixed_precision requires compute.dtype=float32")
+        if (self.attention_implementation == "flash_attention_2"
+            and self.dtype == "float32" and not self.mixed_precision):
+            raise ValueError("flash_attention_2 requires compute.dtype=bfloat16 or mixed_precision=true")
 
 
 @dataclass(frozen=True)
