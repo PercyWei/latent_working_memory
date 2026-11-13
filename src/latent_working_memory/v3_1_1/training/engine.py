@@ -6,7 +6,7 @@ import math
 import torch
 import torch.distributed as dist
 
-from ..objective import post_backward
+from ..objective import post_backward_batch
 from ..rollout import execute, qa_nll
 
 
@@ -286,12 +286,14 @@ class TrainingEngine:
         totals = {}
         if self.experiment.stage == "post":
             method = asdict(self.experiment.method)
-            for document in documents:
-                loss, metrics = post_backward(
-                    self.model, document, method, boundary_generator,
+            for start in range(0, len(documents), self.config.loop.micro_batch_size):
+                results = post_backward_batch(
+                    self.model, documents[start:start + self.config.loop.micro_batch_size],
+                    method, boundary_generator,
                     bptt_steps=self.config.backward.bptt_steps,
                 )
-                _accumulate(totals, loss, metrics)
+                for loss, metrics in results:
+                    _accumulate(totals, loss, metrics)
         else:
             documents = sorted(documents, key=lambda document: len(document.input_ids), reverse=True)
             for start in range(0, len(documents), self.config.loop.micro_batch_size):

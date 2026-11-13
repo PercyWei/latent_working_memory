@@ -111,9 +111,69 @@ def execute(model, input_ids, unit_tokens, actions=None, generator=None, bptt_st
     )
 
 
+def execute_replay_batch(model, contexts, unit_tokens, actions, bptt_steps=None):
+    """按实际写入轮次批量回放，各行独立维护分段、历史及反传跨度。"""
+    plans = []
+    for context, decisions in zip(contexts, actions, strict=True):
+        units = tuple(context[start:start + unit_tokens]
+                      for start in range(0, len(context), unit_tokens))
+        if not units or len(decisions) != len(units) - 1:
+            raise ValueError("recorded actions must match nonempty source decision positions")
+        ends = [index + 1 for index, commit in enumerate(decisions) if commit] + [len(units)]
+        segments, start = [], 0
+        for end in ends:
+            pending = tuple(token for unit in units[start:end] for token in unit)
+            visible_end = end + (end < len(units))
+            positions, offset = [], len(units[start]) - 1
+            for unit in units[start + 1:visible_end]:
+                offset += len(unit)
+                positions.append(offset)
+            visible = pending + (tuple(units[end]) if end < len(units) else ())
+            segments.append((pending, visible, tuple(positions), decisions[start:visible_end - 1]))
+            start = end
+        plans.append(segments)
+    blocks, history, log_probs, entropies, lengths = ([[] for _ in plans] for _ in range(5))
+    for step in range(max(map(len, plans))):
+        active = [index for index, plan in enumerate(plans) if step < len(plan)]
+        boundary = [index for index in active if plans[index][step][2]]
+        if boundary:
+            memories = tuple(tuple(history[index]) for index in boundary)
+            visible = tuple(plans[index][step][1] for index in boundary)
+            positions = tuple(plans[index][step][2] for index in boundary)
+            arguments = (memories, visible, positions)
+            logits = (checkpoint(model.boundary_logits_batch, *arguments, use_reentrant=False)
+                      if any(sum(map(len, past)) + len(tokens) > 4096
+                             for past, tokens in zip(memories, visible, strict=True))
+                      else model.boundary_logits_batch(*arguments))
+            for index, values in zip(boundary, logits, strict=True):
+                chosen = torch.tensor(plans[index][step][3], device=values.device, dtype=torch.bool)
+                log_probs[index].append(F.logsigmoid(torch.where(chosen, values, -values)))
+                entropies[index].append(F.softplus(values) - values * values.sigmoid())
+        pending = tuple(plans[index][step][0] for index in active)
+        memories = tuple(tuple(history[index]) for index in active)
+        compressed = checkpoint(model.compress_batch, pending, memories, use_reentrant=False)
+        for row, index in enumerate(active):
+            memory = compressed[row]
+            blocks[index].append(memory)
+            history[index].append(memory)
+            if bptt_steps is not None and len(blocks[index]) % bptt_steps == 0:
+                history[index] = [block.detach() for block in history[index]]
+            lengths[index].append(len(pending[row]))
+    results = []
+    for index, memories in enumerate(blocks):
+        zero = memories[0].new_empty((0,), dtype=torch.float32)
+        results.append((
+            tuple(memories), tuple(actions[index]),
+            torch.cat(log_probs[index]) if log_probs[index] else zero,
+            torch.cat(entropies[index]) if entropies[index] else zero,
+            tuple(lengths[index]),
+        ))
+    return results
+
+
 @torch.no_grad()
-def execute_batch(model, contexts, unit_tokens):
-    """独立评估的确定性批量分段；各文档维护自己的有效 KV 与不可变记忆块。"""
+def execute_batch(model, contexts, unit_tokens, uniforms=None):
+    """批量分段；uniforms 给出各行随机判断量，省略时确定性判断。"""
     units = [tuple(context[start:start + unit_tokens]
                    for start in range(0, len(context), unit_tokens)) for context in contexts]
     if not units or any(not sequence for sequence in units):
@@ -138,8 +198,13 @@ def execute_batch(model, contexts, unit_tokens):
         previous = [caches[index] for index in active]
         arriving = [units[index][step] for index in active]
         logits, observed = model.observe_source_batch(previous, arriving)
-        commits = (logits >= 0).tolist()
-        probabilities = F.logsigmoid(torch.where(logits >= 0, logits, -logits))
+        if uniforms is None:
+            commits = (logits >= 0).tolist()
+        else:
+            commits = [uniforms[index][step - 1] < probability for index, probability in
+                       zip(active, logits.sigmoid().cpu().tolist(), strict=True)]
+        chosen_tensor = torch.tensor(commits, device=logits.device, dtype=torch.bool)
+        probabilities = F.logsigmoid(torch.where(chosen_tensor, logits, -logits))
         uncertainty = F.softplus(logits) - logits * logits.sigmoid()
         committed = []
         for row, index in enumerate(active):
@@ -159,14 +224,16 @@ def execute_batch(model, contexts, unit_tokens):
         if committed:
             # previous 尚未包含仅用于边界判断的 b；只提交此前的 a。
             memories = model.compress_source_batch([previous[row] for row in committed])
-            previous.clear()
             for row, memory in zip(committed, memories, strict=True):
+                # H 内容与位置未变，只保留其 KV，追加新 memory 与 b。
+                previous[row].crop(sum(map(len, blocks[active[row]])))
                 blocks[active[row]].append(memory)
-            # 提交后以新记忆块和 b 重建有效上下文，不能沿用 a+b 的 KV。
             refreshed = model.prefill_source_batch(
-                [blocks[active[row]] for row in committed],
+                [(memory,) for memory in memories],
                 [arriving[row] for row in committed],
+                [previous[row] for row in committed],
             )
+            previous.clear()
             for row, cache in zip(committed, refreshed, strict=True):
                 caches[active[row]] = cache
             del cache, refreshed
@@ -201,3 +268,40 @@ def sample_group(model, document, rollout, generator):
         loss = qa_nll(model, blocks, document)
         paths.append(Rollout(actions, log_probs.detach(), float(loss), lengths))
     return tuple(paths)
+
+
+@torch.no_grad()
+def sample_group_batch(model, documents, rollout, generator):
+    """按文档／路径原顺序分配随机数，每轮批量采样各文档的一条路径。"""
+    group_size, unit_tokens = rollout["group_size"], rollout["unit_tokens"]
+    uniforms = (None if generator is None else [
+        torch.rand((group_size, (len(document.input_ids) - 1) // unit_tokens),
+                   generator=generator).tolist()
+        for document in documents
+    ])
+    paths = [[] for _ in documents]
+    scores = [{} for _ in documents]
+    for path_index in range(group_size):
+        results = execute_batch(
+            model, [document.input_ids for document in documents], unit_tokens,
+            None if uniforms is None else [values[path_index] for values in uniforms],
+        )
+        losses = [[] for _ in documents]
+        for question in range(max(len(document.qas) for document in documents)):
+            active = [index for index, document in enumerate(documents)
+                      if question < len(document.qas)]
+            values = model.answer_nll_batch(
+                [results[index][0] for index in active],
+                [documents[index].qas[question].prompt_ids for index in active],
+                [documents[index].qas[question].target_ids for index in active],
+            )
+            for index, loss in zip(active, values, strict=True):
+                losses[index].append(loss)
+        for index, result in enumerate(results):
+            # 同篇相同动作是同一确定性轨迹，避免批量舍入噪声产生伪优势。
+            score = scores[index].setdefault(result[1], float(torch.stack(losses[index]).mean()))
+            paths[index].append(Rollout(
+                result[1], result[2].detach(), score, result[4],
+            ))
+        del results, result
+    return [tuple(group) for group in paths]

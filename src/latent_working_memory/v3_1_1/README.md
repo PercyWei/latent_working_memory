@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261113 12:54:11 Asia/Shanghai
+最后修订时间：20261113 16:33:09 Asia/Shanghai
 
 [运行指南](scripts/README.md) · [预训练配置](../../../configs/v3_1_1/pretrain_default.json) · [后训练配置](../../../configs/v3_1_1/post_default.json) · [K256 预训练](../../../configs/v3_1_1/pretrain_k256.json) · [K256 后训练](../../../configs/v3_1_1/post_k256.json)
 
@@ -52,7 +52,9 @@ reward_g = -stopgrad(QA_NLL_g) - slot_cost × K × blocks_g
 loss = mean(QA_NLL_g) + policy_weight × GRPO_loss
 ```
 
-奖励、组内优势和旧动作概率停止梯度；压缩器 QA 损失始终使用正权平均，不乘优势。每篇先固定参数无梯度采样并评价整组路径，再逐路径回放。每条路径的 QA 逐题反传到独立 memory 叶子并释放该题的 decoder 图；全部 QA 的 memory 梯度按原均值汇总，与策略项一起回传 writer 图，各路径按 G 归一。累计整批文档梯度后联合更新一次，下一批刷新轨迹。采样、dev 和独立评估复用原文增量 KV；提交前排除仅用于判断的 b，追加 memory tokens 压缩 a。训练采样与 dev 的单条流保留历史 memory 前缀 KV，只续算新 memory 与 b；批量评估按新上下文重建 KV。固定动作回放时，同一提交段内的判断点共享一次因果前向，各自读取对应单元末位置；压缩仍只包含所提交正文。压缩按提交段执行 activation checkpoint，可见前缀不超过 4096 tokens 的边界判断仅保留 Transformer 层重算，较长前缀额外按段重算；答案输出头继续分块重算，以减少重复计算并控制长文本显存。
+奖励、组内优势和旧动作概率停止梯度；压缩器 QA 损失始终使用正权平均，不乘优势。每卡按 microbatch 组文档，固定参数无梯度采样并评价各篇的 G 条路径，再逐轮批量回放各篇对应的路径。Writer 的边界判断与压缩按活跃文档组批；Reader 每轮从各篇选一道 QA 批量反传到独立 memory 叶子，然后释放本轮 decoder 图。各篇全部 QA 的 memory 梯度按自身题数与 G 归一，与策略项一起回传 Writer，随后释放这一轮路径图。累计全部 microbatch 后，按实际全局文档数归约并联合更新一次，下一批刷新轨迹。异长序列使用左侧 padding、attention mask 和真实位置，padding 不参与损失。
+
+采样、dev 和独立评估复用原文增量 KV；提交前排除仅用于判断的 b，追加 memory tokens 压缩 a。训练采样、dev 和独立评估均保留不变的历史 memory 前缀 KV，提交后只续算新 memory 与 b。固定动作回放时，同一提交段内的判断点共享一次因果前向，各自读取对应单元末位置；压缩仍只包含所提交正文。压缩按提交段执行 activation checkpoint，较长可见前缀的边界判断额外按段重算，答案输出头继续分块重算。
 
 后训练通过 JSON 的 `training.backward.bptt_steps` 控制跨段反传：`null`（默认）保留完整梯度，正整数 H 按每条路径的实际写入次数分组，每 H 次写入后截断供后续压缩与边界判断使用的历史梯度。`1` 表示每次写入之间截断，`2` 表示第1～2次写入为一组、第3～4次为下一组，组内正常反传，组间历史作为常量继续读取。计数包含末尾强制写入，不按正文 token 数或边界决策次数计算。
 
@@ -183,7 +185,7 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/run.sh \
 
 后训练初始化要求两阶段基座来源、压缩器的 `memory_slots`、LoRA 与 `gradient_checkpointing` 设置一致；`dtype`、attention 实现、混合精度和 CPU 暂存可独立设置。边界模块隐藏维度由后训练独立设置；只继承压缩器，重新创建边界模块、optimizer、scheduler、游标与边界随机流。恢复同阶段训练用 `--resume --checkpoint <最新完整checkpoint路径>`，沿用原计划、基座来源、精度、数据和 GPU 数量；其他已知实验设置忽略并提示。预算已完成时直接返回，不读取或启动评估计划。恢复后训练不依赖预训练来源文件。`--resume` 与 `--overwrite` 互斥，可搭配 `--evaluate-only` 续跑评估。
 
-关闭长度课程时，`training.loop.epochs` 控制完整训练轮数；开启时由 `training.loop.curriculum_stage_epochs` 控制每档轮数，不再额外全量训练。JSON 中可选 `training.loop.max_steps` 进一步限制总更新次数。全局 batch = 训练进程数 × 每进程 microbatch × 梯度累积次数。以上 K256 两阶段示例均使用单卡，预训练为 `1 × 16 × 2 = 32`，后训练为 `1 × 2 × 8 = 16`；每轮尾批按实际样本数归约，不补齐、不丢弃、不跨轮次拼接，空 rank 同样参与 collective。`training.scheduler.warmup_steps` 和 `training.scheduler.min_lr_ratio` 控制学习率线性预热及后续余弦衰减；各参数组使用相同倍率。更多参数和可复制命令见[运行指南](scripts/README.md)。
+关闭长度课程时，`training.loop.epochs` 控制完整训练轮数；开启时由 `training.loop.curriculum_stage_epochs` 控制每档轮数，不再额外全量训练。JSON 中可选 `training.loop.max_steps` 进一步限制总更新次数。全局 batch = 训练进程数 × 每进程 microbatch × 梯度累积次数。两阶段均按 microbatch 执行实际批量计算，各 microbatch 之间累积梯度。以上 K256 两阶段示例均使用单卡，预训练为 `1 × 16 × 2 = 32`，后训练为 `1 × 2 × 8 = 16`；每轮尾批按实际样本数归约，不补齐、不丢弃、不跨轮次拼接，空 rank 同样参与 collective。`training.scheduler.warmup_steps` 和 `training.scheduler.min_lr_ratio` 控制学习率线性预热及后续余弦衰减；各参数组使用相同倍率。更多参数和可复制命令见[运行指南](scripts/README.md)。
 
 ## 验证、独立评估与记录
 

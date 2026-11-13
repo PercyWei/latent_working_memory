@@ -138,14 +138,16 @@ class MemoryModel(nn.Module):
         self._check_length(len(inputs))
         return self._hidden(backbone, inputs)[-self.memory_slots :]
 
-    def compress_batch(self, input_ids):
-        """批量压缩独立正文，保留各行 memory 到 Writer 的梯度。"""
+    def compress_batch(self, input_ids, memory_blocks=None):
+        """各行读取自己的历史 memory，批量压缩当前正文。"""
         backbone = self.writer.get_base_model()
+        if memory_blocks is None:
+            memory_blocks = [() for _ in input_ids]
         rows = []
-        for tokens in input_ids:
+        for tokens, blocks in zip(input_ids, memory_blocks, strict=True):
             if not tokens:
                 raise ValueError("cannot compress an empty text block")
-            source = self._inputs(backbone, (), tokens)
+            source = self._inputs(backbone, blocks, tokens)
             rows.append(torch.cat((source, self.memory_embeddings.to(source.dtype))))
         return self._hidden_batch(backbone, rows)[:, -self.memory_slots:]
 
@@ -225,11 +227,11 @@ class MemoryModel(nn.Module):
         return output.last_hidden_state, split
 
     @torch.no_grad()
-    def prefill_source_batch(self, memories, inputs):
+    def prefill_source_batch(self, memories, inputs, caches=None):
         backbone = self.writer.get_base_model()
         rows = [self._inputs(backbone, blocks, tokens)
                 for blocks, tokens in zip(memories, inputs, strict=True)]
-        return self._source_hidden_batch(rows)[1]
+        return self._source_hidden_batch(rows, caches)[1]
 
     @torch.no_grad()
     def observe_source_batch(self, caches, new_units):
@@ -263,6 +265,16 @@ class MemoryModel(nn.Module):
         self._check_length(len(inputs))
         indices = self._tokens(positions) + sum(len(block) for block in memory_blocks)
         return self.boundary(self._hidden(backbone, inputs)[indices])
+
+    def boundary_logits_batch(self, memories, input_ids, positions):
+        """批量读取各行已到达正文的判断位置，返回各行的边界 logits。"""
+        backbone = self.writer.get_base_model()
+        rows = [self._inputs(backbone, blocks, tokens)
+                for blocks, tokens in zip(memories, input_ids, strict=True)]
+        hidden = self._hidden_batch(backbone, rows)
+        # 左 padding 后正文末尾对齐；positions 只相对本行正文计数。
+        return [self.boundary(hidden[index, self._tokens(selected) + hidden.shape[1] - len(tokens)])
+                for index, (tokens, selected) in enumerate(zip(input_ids, positions, strict=True))]
 
     def answer_nll(self, memory_blocks, prompt_ids, target_ids):
         if not memory_blocks or not prompt_ids or not target_ids:
