@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LaCT 复现与论文对比</title>
+  <style>
+    :root{color-scheme:light;--ink:#17243a;--muted:#617088;--line:#dfe5ed;--blue:#2463c8;--green:#168166;--gray:#818b99}
+    *{box-sizing:border-box}body{margin:0;background:#f4f6fa;color:var(--ink);font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+    main{max-width:1180px;margin:auto;padding:36px 28px 44px}h1,h2,h3,p{margin:0}h1{font-size:28px;letter-spacing:-.5px;line-height:1.3}h2{font-size:18px}h3{font-size:16px}
+    .subtitle{margin-top:9px;color:var(--muted);overflow-wrap:anywhere}
+    .panel{background:#fff;border:1px solid var(--line);border-radius:10px;padding:20px;margin-top:20px;min-width:0}.section-head{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:14px}.hint{color:var(--muted);font-size:12px}
+    .legend{display:flex;flex-wrap:wrap;gap:10px 22px;margin:14px 0 8px;color:var(--muted);font-size:12px}.legend span{display:inline-flex;align-items:center;gap:7px}.swatch{display:inline-block;width:23px;border-top:3px solid}.swatch.gray{border-top-style:dashed}
+    .ours{color:var(--blue)}.paper-main{color:var(--green)}.paper-extra{color:var(--gray)}.charts{display:grid;grid-template-columns:1fr 1fr;gap:24px}.chart{min-width:0}.chart svg{display:block;width:100%;height:auto}.chart h3{margin-top:8px}
+    .table-wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums;white-space:nowrap}th,td{padding:11px 12px;border-bottom:1px solid var(--line);text-align:right}th{font-size:12px;font-weight:600;color:var(--muted);background:#f8fafc}th:first-child,.group-name,.task-name{text-align:left}tbody tr:last-child td{border-bottom:0}.group-name{vertical-align:top;font-weight:600}.group-start td{border-top:1px solid var(--line)}.delta{margin-left:8px;font-size:12px}
+    label{display:flex;align-items:center;gap:9px;color:var(--muted);white-space:nowrap}select{border:1px solid #cdd5e0;background:#fff;border-radius:6px;padding:6px 28px 6px 10px;font:inherit;color:var(--ink)}select:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+    .unit-note{margin-top:12px;color:var(--muted);font-size:12px}
+    @media(max-width:760px){main{padding:24px 16px 32px}h1{font-size:24px}.charts{grid-template-columns:1fr;gap:8px}.panel{padding:15px}.section-head{align-items:flex-start;flex-wrap:wrap}th,td{padding:10px}table{min-width:640px}}
+    @media print{body{background:white}main{max-width:none;padding:0}.panel{break-inside:avoid}.table-wrap{overflow:visible}}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>LaCT 复现与论文对比</h1>
+      <p class="subtitle" id="model-label"></p>
+    </header>
+    <section class="panel" aria-labelledby="overview-title">
+      <h2 id="overview-title">分组均值</h2>
+      <div class="legend" aria-label="图表图例">
+        <span><i class="swatch ours"></i>本次评估</span>
+        <span><i class="swatch paper-main"></i>论文 · 2 heads</span>
+        <span><i class="swatch paper-extra gray"></i>论文 · 4 heads</span>
+      </div>
+      <div class="charts" id="charts"></div>
+      <p class="unit-note">纵轴为得分（%）；悬停数据点可查看数值。</p>
+    </section>
+    <section class="panel" aria-labelledby="comparison-title">
+      <div class="section-head"><h2 id="comparison-title">分组对比</h2><span class="hint">差值 = 论文 − 复现（百分点）</span></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>任务组</th><th>长度</th><th class="ours">复现（%）</th><th class="paper-main">论文 2 heads（%）</th><th class="paper-extra">论文 4 heads（%）</th></tr></thead>
+          <tbody id="group-rows"></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="panel" aria-labelledby="tasks-title">
+      <div class="section-head">
+        <h2 id="tasks-title">逐任务结果</h2>
+        <label for="length-select">评估长度 <select id="length-select"></select></label>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>任务</th><th class="ours">复现（%）</th><th class="paper-main">论文 2 heads（%）</th><th class="paper-extra">论文 4 heads（%）</th><th>样本数</th></tr></thead>
+          <tbody id="task-rows"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <script id="report-data" type="application/json">__REPORT_DATA__</script>
+  <script>
+    "use strict";
+    const data = JSON.parse(document.getElementById("report-data").textContent);
+    const byId = id => document.getElementById(id);
+    const node = (tag, text, className) => {
+      const el = document.createElement(tag);
+      if (text !== undefined) el.textContent = text;
+      if (className) el.className = className;
+      return el;
+    };
+    const score = value => value.toFixed(2);
+    const difference = (paper, ours) => {
+      const rounded = Math.round((paper - ours) * 100) / 100;
+      return (rounded >= 0 ? "+" : "-") + Math.abs(rounded).toFixed(2);
+    };
+    byId("model-label").textContent = data.model_label;
+    const svgNS = "http://www.w3.org/2000/svg";
+    const svgNode = (tag, attrs, text) => {
+      const el = document.createElementNS(svgNS, tag);
+      for (const [key, value] of Object.entries(attrs)) el.setAttribute(key, value);
+      if (text !== undefined) el.textContent = text;
+      return el;
+    };
+    const series = [
+      {key:"paper_four_heads", label:"论文 4 heads", color:"#818b99", dash:"6 5"},
+      {key:"paper_two_heads", label:"论文 2 heads", color:"#168166"},
+      {key:"ours", label:"本次评估", color:"#2463c8"}
+    ];
+    function chart(group) {
+      const container = node("div", undefined, "chart");
+      container.append(node("h3", group.label));
+      const svg = svgNode("svg", {viewBox:"0 0 520 270", role:"img", "aria-label":group.label + "按评估长度的得分对比"});
+      const x = index => 50 + index * 140, y = value => 226 - value * 1.88;
+      for (const tick of [0, 25, 50, 75, 100]) {
+        svg.append(svgNode("line", {x1:50, x2:470, y1:y(tick), y2:y(tick), stroke:"#e7ebf1"}));
+        svg.append(svgNode("text", {x:38, y:y(tick)+4, "text-anchor":"end", fill:"#617088", "font-size":12}, tick));
+      }
+      group.rows.forEach((row, index) => {
+        svg.append(svgNode("text", {x:x(index), y:249, "text-anchor":"middle", fill:"#617088", "font-size":12}, row.label));
+      });
+      for (const line of series) {
+        const attrs = {points:group.rows.map((row, index) => x(index)+","+y(row[line.key])).join(" "), fill:"none", stroke:line.color, "stroke-width":2.5};
+        if (line.dash) attrs["stroke-dasharray"] = line.dash;
+        svg.append(svgNode("polyline", attrs));
+        group.rows.forEach((row, index) => {
+          const point = svgNode("circle", {cx:x(index), cy:y(row[line.key]), r:4, fill:"white", stroke:line.color, "stroke-width":2});
+          point.append(svgNode("title", {}, line.label+" · "+row.label+"："+score(row[line.key])+"%"));
+          svg.append(point);
+        });
+      }
+      container.append(svg);
+      return container;
+    }
+    function appendScores(tr, row) {
+      tr.append(node("td", score(row.ours), "ours"));
+      for (const [key, className] of [["paper_two_heads", "paper-main"], ["paper_four_heads", "paper-extra"]]) {
+        const cell = node("td", score(row[key]), className);
+        const delta = node("span", difference(row[key], row.ours), "delta");
+        delta.title = "论文 − 复现（百分点）";
+        cell.append(delta);
+        tr.append(cell);
+      }
+    }
+    data.groups.forEach((group, groupIndex) => {
+      byId("charts").append(chart(group));
+      group.rows.forEach((row, index) => {
+        const tr = node("tr", undefined, groupIndex > 0 && index === 0 ? "group-start" : "");
+        if (index === 0) {
+          const label = node("td", group.label, "group-name");
+          label.rowSpan = group.rows.length;
+          tr.append(label);
+        }
+        tr.append(node("td", row.label));
+        appendScores(tr, row);
+        byId("group-rows").append(tr);
+      });
+    });
+    const select = byId("length-select");
+    for (const row of data.groups[0].rows) {
+      const option = node("option", row.label);
+      option.value = row.length;
+      select.append(option);
+    }
+    function renderTasks() {
+      byId("task-rows").replaceChildren();
+      for (const task of data.tasks) {
+        const row = task.rows.find(item => item.length === Number(select.value));
+        const tr = node("tr");
+        tr.append(node("td", task.label, "task-name"));
+        appendScores(tr, row);
+        tr.append(node("td", row.samples.toLocaleString("zh-CN")));
+        byId("task-rows").append(tr);
+      }
+    }
+    select.value = "4096";
+    select.addEventListener("change", renderTasks);
+    renderTasks();
+  </script>
+</body>
+</html>

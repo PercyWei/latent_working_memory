@@ -2,9 +2,9 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261110 20:22:59 Asia/Shanghai
+最后修订时间：20261113 17:10:54 Asia/Shanghai
 
-本目录使用 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现和作者公开 checkpoint，正式 RULER 评估尚未完成。
+本目录使用 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现和作者公开 checkpoint。Momentum 760M 已于 20261110 完成下表全部 12,000 条 RULER 样本的评估，结果查看方式见[查看结果](#查看结果)。
 
 源码与本地优化边界见 [UPSTREAM.md](UPSTREAM.md)，验证结论见[复现状态](../20261110_ttt_reproduction_status.md)，batch 设置与耗时依据见[运行参数测试](../20261110_ttt_evaluation_tuning.md)。
 
@@ -18,14 +18,16 @@
 |---|---|---:|---|
 | RULER | S-NIAH-1/2/3、MK-NIAH-1、MQ-NIAH、MV-NIAH；4K／8K／16K／32K；每项任务、每个长度 500 条 | 12,000 | `data/benchmarks/ruler-v1/reproductions/lact-760m` |
 
-论文 `tab:ruler-single` 和 `tab:ruler-multi` 的平均准确率如下，单位为 %，仅作原文参照：
+论文 [Table 8](https://arxiv.org/html/2505.23884v1#A3.T8) 和 [Table 9](https://arxiv.org/html/2505.23884v1#A3.T9) 中 **760M 参数规模模型**的平均准确率如下，单位为 %。原论文默认使用 4 个 fast-weight heads，当前公开 Momentum 的配置与权重均为两头，并且其是作者重训的 PreNorm 模型，并非原表格对应的同一次训练产物。
 
 | 指标 | 更新方式 | 4K | 8K | 16K | 32K |
 |---|---|---:|---:|---:|---:|
-| S-NIAH-1/2/3 平均准确率 | Momentum | 89.9 | 64.3 | 40.9 | 33.1 |
-| S-NIAH-1/2/3 平均准确率 | Muon | 77.9 | 60.5 | 40.0 | 35.1 |
-| MK-NIAH／MQ-NIAH／MV-NIAH 平均准确率 | Momentum | 41.7 | 29.7 | 18.5 | 9.1 |
-| MK-NIAH／MQ-NIAH／MV-NIAH 平均准确率 | Muon | 42.9 | 32.1 | 17.1 | 7.5 |
+| S-NIAH-1/2/3 平均准确率 | Momentum（两头） | 70.9 | 35.2 | 14.9 | 7.7 |
+| S-NIAH-1/2/3 平均准确率 | Momentum（四头） | 89.9 | 64.3 | 40.9 | 33.1 |
+| S-NIAH-1/2/3 平均准确率 | Muon（四头） | 77.9 | 60.5 | 40.0 | 35.1 |
+| MK-NIAH-1／MQ-NIAH／MV-NIAH 平均准确率 | Momentum（两头） | 40.3 | 25.1 | 14.4 | 7.7 |
+| MK-NIAH-1／MQ-NIAH／MV-NIAH 平均准确率 | Momentum（四头） | 41.7 | 29.7 | 18.5 | 9.1 |
+| MK-NIAH-1／MQ-NIAH／MV-NIAH 平均准确率 | Muon（四头） | 42.9 | 32.1 | 17.1 | 7.5 |
 
 ## 模型下载
 
@@ -88,6 +90,15 @@ Muon 变体暂用 `--inference-mode original --batch-size 1`，原因是本地�
 
 输入为 `input + answer_prefix`，greedy 生成最多 128 tokens，保留 EOS；输入加生成预算不得超过所选长度，不截断。评分沿用原 RULER。
 
+## 查看结果
+
+```bash
+uv run reproductions/lact/scripts/compare_results.py \
+  --eval-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-nheads4-chunk2048-760m_ruler
+```
+
+`--eval-dir` 指向完整评估根目录，输出同目录的 `comparison.html`。
+
 ## 来源记录与输出
 
 | 文件 | 内容 |
@@ -95,6 +106,7 @@ Muon 变体暂用 `--inference-mode original --batch-size 1`，原因是本地�
 | `summary.json` | 所选样本全部完成后的任务／长度分数 |
 | `predictions.jsonl` | 逐样本预测与评分 |
 | `plan.json`、`execution.json` | 运行配置、代码来源、状态与耗时 |
+| `comparison.html` | 执行对比脚本生成的图表与表格 |
 
 最终分数读取输出根目录的 `summary.json`；逐卡预测位于 `shards/shard-<i>/`。增量与批量验证入口见 [validate_incremental.py](scripts/validate_incremental.py) 和 [validate_batch.py](scripts/validate_batch.py)。
 

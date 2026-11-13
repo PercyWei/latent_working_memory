@@ -1,0 +1,39 @@
+{
+  "paper_url": "https://arxiv.org/html/2505.23884v1#A3.SS2",
+  "tables": {
+    "single": "https://arxiv.org/html/2505.23884v1#A3.T8",
+    "multi": "https://arxiv.org/html/2505.23884v1#A3.T9"
+  },
+  "checkpoint_release_url": "https://github.com/a1600012888/LaCT/issues/2#issuecomment-3282879455",
+  "lengths": [4096, 8192, 16384, 32768],
+  "score_unit": "percent",
+  "rows": {
+    "paper_two_heads": {
+      "label": "Momentum（760M，两头）",
+      "niah_single_1": [59.0, 30.0, 12.4, 8.4],
+      "niah_single_2": [93.4, 50.0, 18.2, 7.8],
+      "niah_single_3": [60.2, 25.6, 14.2, 6.8],
+      "s_niah_average": [70.9, 35.2, 14.9, 7.7],
+      "niah_multikey_1": [59.8, 37.8, 19.2, 8.8],
+      "niah_multiquery": [36.65, 20.45, 12.5, 7.4],
+      "niah_multivalue": [24.45, 16.95, 11.6, 6.8],
+      "multi_niah_average": [40.3, 25.1, 14.4, 7.7]
+    },
+    "paper_four_heads": {
+      "label": "Momentum（760M，四头）",
+      "niah_single_1": [95.6, 84.8, 83.4, 84.8],
+      "niah_single_2": [91.4, 73.4, 22.8, 7.8],
+      "niah_single_3": [82.6, 34.8, 16.6, 6.6],
+      "s_niah_average": [89.9, 64.3, 40.9, 33.1],
+      "niah_multikey_1": [62.0, 41.0, 21.2, 10.4],
+      "niah_multiquery": [35.3, 24.95, 17.7, 8.6],
+      "niah_multivalue": [27.9, 23.15, 16.65, 8.2],
+      "multi_niah_average": [41.7, 29.7, 18.5, 9.1]
+    }
+  },
+  "notes": [
+    "原论文默认使用 4 个 fast-weight heads，本地直接标注两头／四头。分组均值为三个任务的算术平均，论文保留一位小数；本次结果保留两位小数。",
+    "论文 MK-NIAH 对应 Appendix C.2 中的 NIAH-MultiKey-1，与本次 niah_multikey_1 对齐。本次 MQ-NIAH、MV-NIAH 使用原 RULER 多目标匹配评分。",
+    "公开 checkpoint 是作者重训的 760M 权重，并非论文表格对应的同一次训练产物。当前为 PreNorm；论文方法描述更新后归一化，但未逐行说明表中 Momentum 的归一化变体。同 head 数只作为参考，不表示完整训练与实现配置相同。"
+  ]
+}
