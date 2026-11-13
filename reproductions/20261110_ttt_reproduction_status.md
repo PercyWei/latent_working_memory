@@ -2,7 +2,7 @@
 
 创建时间：20261110 11:30:45 Asia/Shanghai
 
-最后修订时间：20261113 16:14:16 Asia/Shanghai
+最后修订时间：20261113 18:44:22 Asia/Shanghai
 
 ## 当前状态
 
@@ -10,7 +10,7 @@ LaCT、E²-TTT、In-Place TTT 的源码迁入、独立环境、本地数据接�
 
 各方法保留官方源码和独立 `eval.sh`，不接入统一训练框架。已有测量使用 `zcy-memory` 的单张 A800，显式设置 `CUDA_VISIBLE_DEVICES=0`。当前入口也支持 `CUDA_VISIBLE_DEVICES=0,1`：各卡独立加载模型，评估互斥样本，再按原规则汇总完整结果；此次仅做静态审查，未运行多卡评估。完整命令在各方法 README 中维护。数据下载、构造与共用范围见[数据准备](20261108_ttt_data_preparation.md)，依赖与安装命令见[评估环境](20261109_environment_setup.md)。
 
-LaCT 推荐每卡一个进程、batch size 上限 16；E²-TTT 的本地批量实现与测量见[批量推理记录](20261110_e2_ttt_batch_inference.md)，原始实现的并发对照保留在[运行参数测试](20261110_ttt_evaluation_tuning.md)；In-Place TTT 保持每卡一个进程、batch size 1。
+LaCT 三个公开模型均采用增量推理、每卡一个进程、batch size 上限 16；Momentum 已实测，两个 Muon 的 batch 设置仅按模型状态规模和现有显存测量估算，未进行新的 GPU 测试。E²-TTT 的本地批量实现与测量见[批量推理记录](20261110_e2_ttt_batch_inference.md)，原始实现的并发对照保留在[运行参数测试](20261110_ttt_evaluation_tuning.md)；In-Place TTT 保持每卡一个进程、batch size 1。
 
 | 模型 | 正式评估范围 | 当前使用方式 |
 |---|---|---|
@@ -29,7 +29,7 @@ LaCT 使用作者公开的重训权重；E²-TTT 使用作者官方 checkpoint�
 - Momentum：四长度各两条、共 8 条 128-token 生成与原始路径 IDs 一致；55 次 teacher-forced argmax、缓存进度与跨样本隔离检查通过。logits 仍有数值差异，不保证任意输入或不同执行上下文逐位等价。
 - Muon／PostNorm：仅通过 4K 两条生成检查。
 - Muon／PreNorm：两条 4K 样本中，完整生成 token IDs 为 1／2 一致，teacher-forced argmax 为 24／25 一致；`niah_multiquery` 的首次生成分歧位置记录为 86，两条路径的任务分数均为 75%。合成前缀续接至 4,098 tokens 时另有一次 argmax 差异，所测最大 logits 绝对差为 1.0546875。以上细节从清理前的 Git 记录 `eddb4708^:reproductions/20261109_lact_incremental_inference.md` 恢复，不是本次重新测量。
-- Muon／PreNorm 待查：本次仅静态对照代码，未发现明确的更新公式或读写时序偏差；编译函数拆分和 decode 矩阵形状不同可能改变浮点计算，但不能据此确定历史差异的原因。待 GPU 可用后，在固定相同前缀下定位首次中间结果分歧，检查 PreNorm 累计状态、Muon 更新量及 logits。当前保留原始评估路径。
+- Muon／PreNorm 待查：静态对照代码未发现明确的更新公式或读写时序偏差；编译函数拆分和 decode 矩阵形状不同可能改变浮点计算，但不能据此确定历史差异的原因。仍需在固定相同前缀下定位首次中间结果分歧，检查 PreNorm 累计状态、Muon 更新量及 logits。当前评估使用 `incremental`，上述差异及验证覆盖范围保持单独记录。
 - 此前单进程的 Momentum 32K 单样本均值从 97.08 秒降至 9.93 秒；单进程峰值分配显存约 6.60 GiB。
 - 当前推荐单进程 B16。32K S-NIAH-2 的 16 条同长度真实输入吞吐为 0.8266 样本／秒，全卡峰值 69,289 MiB（约 67.7 GiB）。此前 B1×8 独立进程在另一组 8 条输入上为 0.3513 样本／秒、68.8 GiB；样本量与输入不同，不作精确配对加速比。
 - B2／4／8／16 在同一组 16 条 32K 输入中，各有 15 条完整生成 IDs 与 B1 相同，逐条评分均为 16／16 相同；边界检查结构、有限值与更新进度为 45／45 通过，teacher-forced argmax 为 208／210 相同。不同 batch 形状仍有数值差异，当前标准允许这类差异，要求公式、因果时序和样本隔离不变。

@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261113 17:10:54 Asia/Shanghai
+最后修订时间：20261113 18:44:22 Asia/Shanghai
 
 本目录使用 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现和作者公开 checkpoint。Momentum 760M 已于 20261110 完成下表全部 12,000 条 RULER 样本的评估，结果查看方式见[查看结果](#查看结果)。
 
@@ -86,7 +86,7 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
   --resume
 ```
 
-Muon 变体暂用 `--inference-mode original --batch-size 1`，原因是本地增量优化尚未完成其适用性验证，详见[复现状态](../20261110_ttt_reproduction_status.md)。
+Muon 支持 `incremental` 运行但尚未完成其适用性验证，详见[复现状态](../20261110_ttt_reproduction_status.md)。
 
 输入为 `input + answer_prefix`，greedy 生成最多 128 tokens，保留 EOS；输入加生成预算不得超过所选长度，不截断。评分沿用原 RULER。
 
