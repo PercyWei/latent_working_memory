@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261113 18:44:22 Asia/Shanghai
+最后修订时间：20261114 12:23:43 Asia/Shanghai
 
 本目录使用 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现和作者公开 checkpoint。Momentum 760M 已于 20261110 完成下表全部 12,000 条 RULER 样本的评估，结果查看方式见[查看结果](#查看结果)。
 
@@ -100,6 +100,8 @@ uv run reproductions/lact/scripts/compare_results.py \
 `--eval-dir` 指向完整评估根目录，输出同目录的 `comparison.html`。
 
 ## 来源记录与输出
+
+双卡运行时，终端显示总体完成数、总样本数、完成百分比、吞吐和已耗时；详细日志保留在 `logs/shard-<i>.log`。
 
 | 文件 | 内容 |
 |---|---|

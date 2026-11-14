@@ -54,6 +54,69 @@ def stop_processes(processes):
         process.wait()
 
 
+def duration(seconds):
+    seconds = int(seconds)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+class EvaluationProgress:
+    """只读增量统计各分片已提交的样本，不转发详细模型日志。"""
+
+    def __init__(self, parts, started):
+        self.parts = parts
+        self.started = started
+        self.plans = [None] * len(parts)
+        self.offsets = [0] * len(parts)
+        self.completed = [0] * len(parts)
+        self.tty = sys.stdout.isatty()
+        self.last_print = float("-inf")
+        self.refresh()
+        self.initial_completed = sum(self.completed)
+
+    def refresh(self):
+        for index, part in enumerate(self.parts):
+            plan_path = part / "plan.json"
+            if self.plans[index] is None and plan_path.is_file():
+                self.plans[index] = json.loads(plan_path.read_text())
+            predictions = part / "predictions.jsonl"
+            if not predictions.is_file():
+                continue
+            with predictions.open("rb") as stream:
+                stream.seek(self.offsets[index])
+                while line := stream.readline():
+                    if not line.endswith(b"\n"):
+                        break
+                    self.completed[index] += 1
+                    self.offsets[index] = stream.tell()
+
+    def render(self, force=False):
+        now = time.monotonic()
+        if not force and now - self.last_print < (5 if self.tty else 30):
+            return
+        self.refresh()
+        elapsed = now - self.started
+        completed = sum(self.completed)
+        speed = (completed - self.initial_completed) / elapsed if elapsed else 0.0
+        total = None
+        if all(plan is not None for plan in self.plans):
+            total = sum(plan["assigned_samples"] for plan in self.plans)
+        count = (f"{completed}/{total} ({completed / total:.1%})"
+                 if total is not None else f"准备中，已完成 {completed}")
+        text = (f"[evaluate] {count} | {speed:.2f} samples/s | "
+                f"elapsed {duration(elapsed)}")
+        if self.tty:
+            print("\r" + text, end="\033[K", flush=True)
+        else:
+            print(text, flush=True)
+        self.last_print = now
+
+    def finish_line(self):
+        if self.tty:
+            print(flush=True)
+
+
 def execute(args, worker_args, interruption):
     def check_interruption():
         if interruption["signum"] is not None:
@@ -89,7 +152,11 @@ def execute(args, worker_args, interruption):
     processes, logs = [], []
     merge_process = None
     started = time.monotonic()
+    parts = [args.output_dir / "shards" / f"shard-{rank}" for rank in range(len(devices))]
     try:
+        progress = EvaluationProgress(parts, started)
+        print(f"[evaluate] {args.method} GPUs={','.join(devices)} | logs: {args.output_dir / 'logs'}", flush=True)
+        progress.render(force=True)
         for rank in range(len(devices)):
             part = args.output_dir / "shards" / f"shard-{rank}"
             if args.resume and part.exists() and not (part / "plan.json").is_file():
@@ -133,11 +200,15 @@ def execute(args, worker_args, interruption):
                     changed = True
             if changed:
                 write_json(execution_path, {"attempts": attempts})
+            progress.render()
             if any(worker["status"] == "failed" for worker in attempt["workers"]):
                 raise RuntimeError("An evaluation shard failed; see logs and execution.json")
             if all(worker["status"] == "completed" for worker in attempt["workers"]):
                 break
             time.sleep(0.2)
+        progress.render(force=True)
+        progress.finish_line()
+        print("[evaluate] 样本评估完成，正在合并结果...", flush=True)
         # The merge is derived from intact raw shards and is rebuilt on every attempt.
         merged = args.output_dir / "merged"
         if merged.exists():
@@ -169,8 +240,12 @@ def execute(args, worker_args, interruption):
         )
         write_json(args.output_dir / "summary.json", summary)
         attempt["status"] = "completed"
+        print(f"[evaluate] 完成 | elapsed {duration(time.monotonic() - started)} | summary: {args.output_dir / 'summary.json'}", flush=True)
     except BaseException as error:
         attempt.update(status="failed", error=f"{type(error).__name__}: {error}")
+        if sys.stdout.isatty():
+            print(flush=True)
+        print(f"[evaluate] 评估未完成：{error} | logs: {args.output_dir / 'logs'}", flush=True)
         raise
     finally:
         stop_processes(processes + ([] if merge_process is None else [merge_process]))

@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261110 20:22:59 Asia/Shanghai
+最后修订时间：20261114 12:23:43 Asia/Shanghai
 
 ## 评估目标
 
@@ -92,6 +92,8 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 本次正式评估不启用 MLP 分块。源码与优化适用范围见 [UPSTREAM.md](UPSTREAM.md) 及[复现状态](../20261110_ttt_reproduction_status.md)，训练与 checkpoint 转换见[官方说明](upstream/README.md)。
 
 ## 输出
+
+双卡运行时，终端显示总体完成数、总样本数、完成百分比、吞吐和已耗时；详细日志保留在 `logs/shard-<i>.log`。
 
 | 文件 | 内容 |
 |---|---|
