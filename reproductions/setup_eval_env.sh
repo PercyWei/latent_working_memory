@@ -20,7 +20,22 @@ fi
   'import sys; assert f"{sys.version_info.major}.{sys.version_info.minor}" == sys.argv[1]' \
   "$python_minor"
 
-install_args=(-r "$project_root/reproductions/$method/requirements-eval.txt")
+requirements_file="$project_root/reproductions/$method/requirements-eval.txt"
+wheel_url="$(sed -n 's/^# Official prebuilt wheel: //p' "$requirements_file")"
+wheel_name="${wheel_url##*/}"
+wheel_name="${wheel_name//%2B/+}"
+wheel_file="$wheel_dir/$wheel_name"
+mkdir -p "$wheel_dir"
+if [[ ! -f $wheel_file ]]; then
+  printf '下载 FlashAttention wheel：%s\n' "$wheel_name"
+  partial_file="$wheel_file.part"
+  trap 'rm -f -- "$partial_file"' EXIT
+  curl --fail --location --retry 3 --output "$partial_file" "$wheel_url"
+  mv -- "$partial_file" "$wheel_file"
+  trap - EXIT
+fi
+
+install_args=(-r "$requirements_file")
 if [[ $method == e2_ttt ]]; then
   install_args+=(-e "$project_root/reproductions/e2_ttt/upstream"
                 -e "$project_root/reproductions/e2_ttt/upstream/lm-evaluation-harness")

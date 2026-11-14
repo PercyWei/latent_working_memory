@@ -2,7 +2,7 @@
 
 创建时间：20261109 10:58:35 Asia/Shanghai
 
-最后修订时间：20261110 11:34:26 Asia/Shanghai
+最后修订时间：20261114 11:55:09 Asia/Shanghai
 
 ## 配置原则与实际版本
 
@@ -50,7 +50,7 @@
 
 ## 安装命令
 
-使用 uv 0.9.8，系统需已有 Python 3.11 和 3.12。三个 `requirements-eval.txt` 的注释记录了官方 FlashAttention 预编译 wheel 地址；预先准备与各环境 Python／Torch／CXX11 ABI 配套的 wheel，统一保存到 `~/rivermind-data/wheels/ttt/` 并保留原文件名。安装器使用该目录中的 wheel，不从源码编译。当前服务器无法直连 GitHub 发布页，已由可联网机器下载官方 wheel，再通过 SSH 传入。服务器 uv 安装于 `~/rivermind-data/tools/uv/bin/`，将该目录加入当前 shell 的 PATH 后，从项目根目录执行：
+使用 uv 0.9.8，系统需已有 Python 3.11 和 3.12。安装器从所选方法的 `requirements-eval.txt` 读取官方 FlashAttention wheel 地址，自动下载到 `~/rivermind-data/wheels/ttt/`；已有 wheel 直接复用，随后安装依赖。下载沿用当前 shell 的代理环境变量，FlashAttention 仅使用预编译 wheel。服务器 uv 安装于 `~/rivermind-data/tools/uv/bin/`，将该目录加入当前 shell 的 PATH 后，从项目根目录执行：
 
 ```bash
 export PATH="$HOME/rivermind-data/tools/uv/bin:$PATH"
