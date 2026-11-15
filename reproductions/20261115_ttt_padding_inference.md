@@ -2,7 +2,7 @@
 
 创建时间：20261115 20:45:30 Asia/Shanghai
 
-最后修订时间：20261115 21:33:19 Asia/Shanghai
+最后修订时间：20261116 00:37:12 Asia/Shanghai
 
 ## 实现范围
 
@@ -60,7 +60,7 @@ CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
 
 状态结构、有限值、真实更新进度、padding 内容忽略和同形状样本隔离是必要检查；跨 batch 的 logits、状态数值误差、argmax、完整生成 IDs 与评分分别记录。允许浮点舍入差异不等于承诺逐元素或逐 token 相同。脚本的 `passed` 只表示必要检查通过，需结合数值与生成字段判断适用性。
 
-默认编译设置下的结果如下。固定续接只统计混合长度 B3 与各自 B1 的比较；真实生成每模型三条，预算为 128 tokens。
+20261115 在先执行边界验证、再执行真实生成的调用流程中，默认编译设置下的结果如下。固定续接只统计混合长度 B3 与各自 B1 的比较；真实生成每模型三条，预算为 128 tokens。
 
 | 模型 | 状态、进度与严格隔离 | 固定续接 argmax 相同 | 完整生成 IDs 相同 | 逐题评分相同 |
 |---|---|---:|---:|---:|
@@ -70,7 +70,7 @@ CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
 | E²-TTT MLP 1.3B | 通过 | 34/34 | 3/3 | 3/3 |
 | E²-TTT SwiGLU 1.3B | 通过 | 34/34 | 3/3 | 3/3 |
 
-五个模型的跨 batch 逐元素 `allclose` 均未全部成立，不能据上表声称状态逐位相同。Muon PostNorm 的 `ruler/8192/niah_single_2/62` 在 B1 得分为 100，混合长度 B3 为 0，第二个生成 token 即出现差异。该模型尚不能视为通过生成评分一致性验证。
+五个模型的跨 batch 逐元素 `allclose` 均未全部成立，不能据上表声称状态逐位相同。Muon PostNorm 的 `ruler/8192/niah_single_2/62` 在 B1 得分为 100，混合长度 B3 为 0，第二个生成 token 即出现差异。这记录了该调用流程中的评分差异，不能据此把变化归因于 padding。后续完整输入控制实验见[Muon PostNorm 的 batch 数值差异](20261116_lact_muon_postnorm_batch_numerics.md)。
 
 ### LaCT 数值诊断
 
@@ -78,11 +78,11 @@ CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
 
 - 默认编译设置下，仅增加诊断调用就会改变后续路径的误差分布；日志记录到 `_ttt_read` 的编译缓存达到上限后回退，以及 stride／dtype guard 差异。因此不能将同形状的差异笼统解释为 batch 大小变化，也不能据此断言编译器有错误。
 - 在新进程设置 `TORCH_COMPILE_DISABLE=1` 后，Momentum 和 Muon PostNorm 在 2,047、4,095-token 两个长度的 B1、等长 B3 中，新旧路径的逐层状态与 logits 全部完全一致；同一 hidden 的逐算子重放也完全一致。这支持本次 padding 调度保持了原计算与状态逻辑。
-- Muon PostNorm 的真实混合长度生成在关闭编译后，IDs 为 2/3 相同、评分仍为 2/3 相同，仍是同一条样本从 100 变为 0。因此其跨 batch 评分变化不能仅归因于编译缓存，尚未完整定位所有数值差异来源。
+- Muon PostNorm 的真实混合长度生成在关闭编译后，IDs 为 2/3 相同、评分仍为 2/3 相同，仍是同一条样本从 100 变为 0。因此其跨 batch 评分变化不能仅归因于编译缓存。20261116 的完整输入对照进一步确认，旧无 padding batch 本身已足以改变该题评分，详见[后续定位](20261116_lact_muon_postnorm_batch_numerics.md)。
 
 另确认 [FlashAttention 2.7.4.post1](https://github.com/Dao-AILab/flash-attention/blob/v2.7.4.post1/csrc/flash_attn/flash_api.cpp#L608-L609) 会在窗口覆盖整批 `max_seqlen_k` 时切换计算分支。混合长度可能改变内核选择，即使某条短样本的数学注意力范围未变；这是一项已知数值路径差别，不是对全部生成差异的解释。
 
-本轮未默认关闭编译，也未为 Muon 增加自动降级或改变精度。Momentum、两个 E²-TTT 模型已有本轮小样本一致性依据；Muon PostNorm 的不等长结果不能直接替代 B1，Muon PreNorm 也不能承诺完整生成相同。本轮不是完整 benchmark，不据三条样本估计准确率变化。
+本轮未默认关闭编译，也未为 Muon 增加自动降级或改变精度。Momentum、两个 E²-TTT 模型已有本轮小样本一致性依据；Muon 跨 batch 的完整生成和评分仍不保证相同。后续定位没有发现该案例的 padding 状态逻辑错误，不能将此处评分变化作为 padding 降分的独立证据。本轮不是完整 benchmark，不据三条样本估计准确率变化。
 
 ### 环境与产物
 

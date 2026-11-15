@@ -2,7 +2,7 @@
 
 创建时间：20261110 11:30:45 Asia/Shanghai
 
-最后修订时间：20261115 21:25:30 Asia/Shanghai
+最后修订时间：20261116 00:41:02 Asia/Shanghai
 
 ## 当前状态
 
@@ -27,7 +27,7 @@ LaCT 使用作者公开的重训权重；E²-TTT 使用作者官方 checkpoint�
 独立的 `lact/incremental/` 缓存窗口 KV、fast weights、归一化累计状态与待写 chunk，保持原始先读后写及尾段延迟更新；原模型和更新函数未修改。非空前缀长为 \(L\)、chunk 大小为 2,048 时，更新次数仍为 \(\lfloor(L-1)/2048\rfloor\)。当前支持非 fused TTT 的等长批次与标准左 padding 输入；每条样本独立保存真实位置、KV 和 fast weights。常规评估仍在同一 RULER 长度内按精确 token 数分组。左 padding 的验证与数值限制见[padding 推理记录](20261115_ttt_padding_inference.md)。
 
 - Momentum：四长度各两条、共 8 条 128-token 生成与原始路径 IDs 一致；55 次 teacher-forced argmax、缓存进度与跨样本隔离检查通过。logits 仍有数值差异，不保证任意输入或不同执行上下文逐位等价。
-- Muon／PostNorm：original 与 incremental 的既有生成对照仅覆盖 4K 两条；本轮 padding 与优化 B1 对照另外检查了 8K 输入和 chunk 边界，有一条逐题评分变化，详见[padding 推理记录](20261115_ttt_padding_inference.md)。
+- Muon／PostNorm：original 与 incremental 的既有生成对照仅覆盖 4K 两条。后续完整 8K 输入控制实验确认，旧无 padding B1／B3 本身已能改变同一题得分；该输入无实际 padding 的同形状新旧路径生成一致，实际新混长 B3也与旧等长 B3一致。此前评分变化不能单独归因于 padding，详见[batch 数值定位](20261116_lact_muon_postnorm_batch_numerics.md)。
 - Muon／PreNorm：两条 4K 样本中，完整生成 token IDs 为 1／2 一致，teacher-forced argmax 为 24／25 一致；`niah_multiquery` 的首次生成分歧位置记录为 86，两条路径的任务分数均为 75%。合成前缀续接至 4,098 tokens 时另有一次 argmax 差异，所测最大 logits 绝对差为 1.0546875。以上细节从清理前的 Git 记录 `eddb4708^:reproductions/20261109_lact_incremental_inference.md` 恢复，不是本次重新测量。
 - Muon／PreNorm 待查：静态对照代码未发现明确的更新公式或读写时序偏差；编译函数拆分和 decode 矩阵形状不同可能改变浮点计算，但不能据此确定历史差异的原因。仍需在固定相同前缀下定位首次中间结果分歧，检查 PreNorm 累计状态、Muon 更新量及 logits。当前评估使用 `incremental`，上述差异及验证覆盖范围保持单独记录。
 - 此前单进程的 Momentum 32K 单样本均值从 97.08 秒降至 9.93 秒；单进程峰值分配显存约 6.60 GiB。
