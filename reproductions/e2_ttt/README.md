@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261110 21:56:52 Asia/Shanghai
+最后修订时间：20261115 21:16:26 Asia/Shanghai
 
 本目录接入 [E²-TTT 官方实现](https://github.com/zeyun-zhong/E2-TTT)及随附 lm-evaluation-harness，保留原始推理路径，另提供本地批量实现。论文为 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308)，源码边界见 [UPSTREAM.md](UPSTREAM.md)。公开权重加载、模型生成和计分检查已完成，尚未完成本轮计划的 benchmark 评估；详见[复现状态](../20261110_ttt_reproduction_status.md)。
 
@@ -73,6 +73,8 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 | `--resume` | 使用原输出目录继续评估，保持原运行设置 |
 
 `original` 对照使用 `--inference-mode original --batch-size 1`，并将输出目录改为独立的 `_original` 目录；不同 checkpoint 或推理模式不共用结果目录。
+
+本地模型也支持带左 padding 的不等长输入，验证入口和范围见[padding 推理记录](../20261115_ttt_padding_inference.md)。本页评估命令仍沿用精确长度组批，本轮未调整组批策略。
 
 中断后在原命令末尾追加 `--resume`，保持 GPU 顺序、输出目录与其余参数一致。例如继续 MLP：
 

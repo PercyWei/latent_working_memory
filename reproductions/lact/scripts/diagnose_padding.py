@@ -178,6 +178,9 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=False)
     plan = {
         "source": source_record(),
+        "environment": {"cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
+                        "torch_compile_disable": os.environ.get("TORCH_COMPILE_DISABLE", "0"),
+                        "torch": str(torch.__version__), "cuda": torch.version.cuda},
         "arguments": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
         "purpose": "Prefill-only numeric diagnosis: old/new paths at identical batch shapes and padded batches; focus row has identical real tokens",
     }

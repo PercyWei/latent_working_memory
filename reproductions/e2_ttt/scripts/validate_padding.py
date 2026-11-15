@@ -272,7 +272,9 @@ def main():
     for name in ("checkpoint", "ruler_data", "output_dir"):
         setattr(args, name, getattr(args, name).expanduser().resolve())
     args.output_dir.mkdir(parents=True, exist_ok=False)
-    plan = {"source": source_record(), "arguments": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
+    plan = {"source": source_record(), "environment": {"cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
+            "torch_compile_disable": os.environ.get("TORCH_COMPILE_DISABLE", "0"),
+            "torch": str(torch.__version__), "cuda": torch.version.cuda}, "arguments": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
             "acceptance": "Structure, finite values, logical progress, exact pad-value/focus isolation; cross-B numerics and greedy differences reported separately",
             "generation": "Real unmodified RULER prompts and original tokenizer; requested budget is a validation budget, not a benchmark run"}
     write_json(args.output_dir / "plan.json", plan)
