@@ -140,7 +140,7 @@ def padding_forward(layer, hidden_states, layout, past_key_values, previous_seen
         log_decay = torch.zeros_like(lr).float()
     log_momentum = F.logsigmoid(layer.momentum_proj(hidden_states).float()).unsqueeze(-1) / 16
     lr = lr * (1 / layer.ttt_chunk_size)
-    output = torch.zeros_like(v)
+    output = None
     kernels = swiglu if layer._swiglu else mlp
     for sample in layout.active:
         positions = layout.positions[sample]
@@ -158,9 +158,16 @@ def padding_forward(layer, hidden_states, layout, past_key_values, previous_seen
             chunk_size=layer.ttt_chunk_size, verbose=False,
             use_closed_form=layer.use_closed_form, **options,
         )
+        if output is None:
+            output = current_output.new_zeros(v.shape)
         output[sample].index_copy_(0, positions, current_output[0])
         rows[sample] = {**rows[sample], "recurrent_state": recurrent}
         seen[sample] += layout.lengths[sample]
+
+    if output is None:
+        # Both native kernels return the normalized query dtype, which may be
+        # FP32 under autocast even though the value projection is BF16.
+        output = q.new_zeros(v.shape)
 
     if layer.use_memory_gate:
         gate = rearrange(layer.memory_gate_proj(hidden_states), "b t (h d) -> b t h d", d=layer.head_v_dim).sigmoid()
