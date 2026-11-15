@@ -1,4 +1,4 @@
-"""Incremental unpadded batch inference alongside the unchanged upstream model."""
+"""Incremental batch inference alongside the unchanged upstream model."""
 
 from dataclasses import dataclass
 
@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from .ttt import TTTState
+from .padding import PaddedLaCTCache, attention_forward_padded
 
 
 @dataclass
@@ -212,7 +213,7 @@ class IncrementalLaCTForCausalLM(LaCTForCausalLM):
         if output_attentions or output_hidden_states or return_dict is False:
             raise ValueError("Incremental LaCT returns last logits and its cache")
         if input_ids is None or input_ids.ndim != 2 or 0 in input_ids.shape:
-            raise ValueError("Incremental LaCT requires a nonempty unpadded batch")
+            raise ValueError("Incremental LaCT requires a nonempty input batch")
         if self.config.use_fused_kernel:
             raise ValueError("Incremental LaCT preserves the non-fused TTT implementation")
         if kwargs.get("cu_seqlens") is not None:
@@ -220,10 +221,17 @@ class IncrementalLaCTForCausalLM(LaCTForCausalLM):
         if attention_mask is not None:
             if attention_mask.ndim != 2 or attention_mask.shape[0] != input_ids.shape[0]:
                 raise ValueError("Attention mask must match the input batch")
-            if not bool(attention_mask.all()):
-                raise ValueError("Padding is not supported by this incremental inference path")
+        padded = isinstance(past_key_values, PaddedLaCTCache) or (
+            attention_mask is not None and not bool(attention_mask.all())
+        )
         cache = past_key_values
-        if cache is None:
+        if padded:
+            if cache is None:
+                cache = PaddedLaCTCache(len(self.model.layers), input_ids.shape[0])
+            elif not isinstance(cache, PaddedLaCTCache):
+                cache = PaddedLaCTCache.from_unpadded(cache)
+            step = cache.prepare_step(input_ids, attention_mask)
+        elif cache is None:
             cache = LaCTCache(len(self.model.layers))
         elif (
             cache.layers[0].keys is not None
@@ -234,7 +242,10 @@ class IncrementalLaCTForCausalLM(LaCTForCausalLM):
         for block, layer_cache in zip(self.model.layers, cache.layers, strict=True):
             residual = hidden_states
             hidden_states = block.attn_norm(hidden_states)
-            hidden_states = attention_forward(block.attn, hidden_states, layer_cache)
+            hidden_states = (
+                attention_forward_padded(block.attn, hidden_states, layer_cache, step)
+                if padded else attention_forward(block.attn, hidden_states, layer_cache)
+            )
             if self.config.fuse_norm:
                 hidden_states, residual = block.mlp_norm(hidden_states, residual, True)
             else:
@@ -243,6 +254,8 @@ class IncrementalLaCTForCausalLM(LaCTForCausalLM):
                 hidden_states = block.mlp_norm(hidden_states)
             hidden_states = residual + block.mlp(hidden_states)
         hidden_states = self.model.norm(hidden_states)
+        if padded:
+            cache.physical_seen += input_ids.shape[1]
         indices = (
             slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         )

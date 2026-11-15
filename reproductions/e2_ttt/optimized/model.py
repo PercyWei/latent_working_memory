@@ -1,9 +1,11 @@
-"""Equal-length batch inference without changing the upstream model registry."""
+"""Batch inference with native equal-length and explicit left-padding paths."""
 
 from einops import rearrange
 from flash_attn import flash_attn_func
+from fla.models.utils import Cache
 import torch
 import torch.nn.functional as F
+from transformers.modeling_outputs import BaseModelOutputWithPast
 
 from e2_ttt.layers.e2_ttt_mlp import E2TTTMLP
 from e2_ttt.layers.e2_ttt_swiglu import E2TTTSwiGLU
@@ -11,6 +13,7 @@ from e2_ttt.models.e2_ttt_mlp.modeling import E2TTTMLPForCausalLM, E2TTTMLPModel
 from e2_ttt.models.e2_ttt_swiglu.modeling import E2TTTSwiGLUForCausalLM, E2TTTSwiGLUModel
 
 from . import mlp, swiglu
+from .padding import padding_forward, padding_layout
 
 
 class EqualLengthModel:
@@ -21,11 +24,25 @@ class EqualLengthModel:
     ):
         if self.training:
             raise ValueError("The optimized model is an inference-only implementation")
+        if input_ids is None and inputs_embeds is None:
+            raise ValueError("Specify input_ids or inputs_embeds")
         if kwargs.get("cu_seqlens") is not None:
             raise ValueError("The optimized model requires separate, unpacked batch rows")
+        shape = input_ids.shape if input_ids is not None else inputs_embeds.shape[:2]
         if attention_mask is not None:
-            if attention_mask.ndim != 2 or not bool(torch.all(attention_mask == 1)):
-                raise ValueError("The optimized model requires equal-length inputs without padding")
+            if (attention_mask.ndim != 2 or attention_mask.shape[0] != shape[0]
+                    or attention_mask.shape[1] < shape[1]
+                    or not bool(((attention_mask == 0) | (attention_mask == 1)).all())):
+                raise ValueError("attention_mask must be a binary matrix matching the input batch")
+        has_padding_state = (
+            past_key_values is not None and len(past_key_values) > 0
+            and "padding_state" in past_key_values[0]
+        )
+        if has_padding_state or (attention_mask is not None and not bool(attention_mask.all())):
+            return self._padding_forward(
+                input_ids, attention_mask, inputs_embeds, past_key_values,
+                use_cache, output_hidden_states, return_dict, **kwargs,
+            )
         # The upstream layer packs every non-None mask into a single row. A
         # validated all-one mask can be removed while preserving each B row.
         return super().forward(
@@ -33,6 +50,56 @@ class EqualLengthModel:
             past_key_values=past_key_values, use_cache=use_cache,
             output_attentions=output_attentions, output_hidden_states=output_hidden_states,
             return_dict=return_dict, **kwargs,
+        )
+
+    def _padding_forward(
+        self, input_ids, attention_mask, inputs_embeds, past_key_values,
+        use_cache, output_hidden_states, return_dict, **kwargs,
+    ):
+        if input_ids is not None and inputs_embeds is not None:
+            raise ValueError("Specify input_ids or inputs_embeds, not both")
+        if inputs_embeds is None:
+            inputs_embeds = self.embeddings(input_ids)
+        batch, width, _ = inputs_embeds.shape
+        use_cache = self.config.use_cache if use_cache is None else use_cache
+        if use_cache and not isinstance(past_key_values, Cache):
+            past_key_values = Cache.from_legacy_cache(past_key_values)
+        previous_seen = past_key_values.get_seq_length() if past_key_values is not None else 0
+        if previous_seen and width != 1:
+            raise ValueError("Padded continuation accepts one token per row")
+        mask = (
+            torch.ones((batch, width), device=inputs_embeds.device, dtype=torch.bool)
+            if attention_mask is None else attention_mask[:, -width:].bool()
+        )
+        if not previous_seen:
+            if not bool(mask.any(-1).all()) or bool((mask[:, :-1] & ~mask[:, 1:]).any()):
+                raise ValueError("Prefill requires nonempty rows with standard left padding")
+        layout = padding_layout(mask)
+        output_hidden_states = self.config.output_hidden_states if output_hidden_states is None else output_hidden_states
+        return_dict = self.config.use_return_dict if return_dict is None else return_dict
+        hidden_states = inputs_embeds
+        all_hidden = () if output_hidden_states else None
+        for block in self.layers:
+            if output_hidden_states:
+                all_hidden += (hidden_states,)
+            residual = hidden_states
+            hidden_states = padding_forward(
+                block.attn, block.attn_norm(hidden_states), layout, past_key_values, previous_seen,
+            )
+            if self.config.fuse_norm:
+                hidden_states, residual = block.mlp_norm(hidden_states, residual, True)
+            else:
+                hidden_states = residual + hidden_states
+                residual = hidden_states
+                hidden_states = block.mlp_norm(hidden_states)
+            hidden_states = residual + block.mlp(hidden_states, **kwargs)
+        hidden_states = self.norm(hidden_states)
+        if output_hidden_states:
+            all_hidden += (hidden_states,)
+        if not return_dict:
+            return tuple(value for value in (hidden_states, past_key_values, all_hidden) if value is not None)
+        return BaseModelOutputWithPast(
+            last_hidden_state=hidden_states, past_key_values=past_key_values, hidden_states=all_hidden,
         )
 
 
