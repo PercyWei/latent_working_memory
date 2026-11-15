@@ -2,16 +2,15 @@
 
 from collections import Counter
 import json
-import math
 from pathlib import Path
 import time
 
 from latent_working_memory.benchmarks.comparison import comparison_data
-from latent_working_memory.benchmarks.scoring import summarize_scores
+from ..io import write_json
 from .diagnostics import summarize_outputs
 from .records import (
     check_evaluation, completed_evaluation, length_request, read_details,
-    prepare_evaluation, write_details, write_json,
+    prepare_evaluation, write_details,
 )
 
 
@@ -79,23 +78,9 @@ def write_work(output_dir, samples, entries, num_workers):
     return work
 
 
-def _summary(request, entries, wall_seconds):
+def _summary(request, entries, wall_seconds, task_module):
     records = [entry["record"] for entry in entries]
-    if request["task"] == "test":
-        answers = [answer for row in records for answer in row["qas"]]
-        target_tokens = sum(row["target_tokens"] for row in answers)
-        nll = sum(row["nll"] * row["target_tokens"] for row in answers) / target_tokens
-        metrics = {
-            "documents": len(records), "questions": len(answers),
-            "qa_nll": sum(sum(answer["nll"] for answer in row["qas"]) / len(row["qas"])
-                          for row in records) / len(records),
-            "token_nll": nll, "perplexity": math.exp(nll),
-            "em": sum(row["em"] for row in answers) / len(answers),
-            "f1": sum(row["f1"] for row in answers) / len(answers),
-            "target_tokens": target_tokens,
-        }
-    else:
-        metrics = summarize_scores(request["task"], records)
+    metrics = task_module.summarize(records)
     peaks = [entry["peak_memory_bytes"] for entry in entries if entry["peak_memory_bytes"] is not None]
     return {
         **request, "metrics": {
@@ -122,7 +107,7 @@ def _summary(request, entries, wall_seconds):
     }
 
 
-def commit_results(output_dir, request, samples, entries):
+def commit_results(output_dir, request, samples, entries, task_module):
     """先提交齐全的 RULER 长度；所有样本齐全后才提交根目录完成标记。"""
     output_dir = Path(output_dir)
     work = json.loads((output_dir / "work.json").read_text(encoding="utf-8"))
@@ -139,14 +124,14 @@ def commit_results(output_dir, request, samples, entries):
             if completed_evaluation(directory, current) is not None:
                 continue
             ordered = [entries[sample.id] for sample in selected]
-            summary = _summary(current, ordered, wall_seconds)
+            summary = _summary(current, ordered, wall_seconds, task_module)
             summary["comparison_data"] = comparison_data(selected, "ruler")
             write_details(directory / "details.jsonl", [entry["record"] for entry in ordered])
             write_json(directory / "summary.json", summary)
     if len(entries) != len(samples):
         raise IncompleteEvaluationError(len(entries), len(samples))
     ordered = [entries[sample.id] for sample in samples]
-    summary = _summary(request, ordered, wall_seconds)
+    summary = _summary(request, ordered, wall_seconds, task_module)
     if request["task"] != "test":
         summary["comparison_data"] = comparison_data(samples, request["task"])
     write_details(output_dir / "details.jsonl", [entry["record"] for entry in ordered])

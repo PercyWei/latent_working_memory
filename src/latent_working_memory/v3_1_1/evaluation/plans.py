@@ -1,54 +1,11 @@
-"""训练与独立评估的永久计划：先保存设置，再启动计算。"""
+"""独立评估计划的创建、恢复与重建。"""
 
-from dataclasses import asdict, replace
+from dataclasses import asdict
 import json
 from pathlib import Path
 import shutil
 
-from .config import config_from_dict, config_to_dict
-from .evaluation.records import normalize_lengths, write_json
-from .training.engine import training_steps
-
-
-def save_training_plan(config):
-    directory = Path(config.training.run.output_dir).parent / "plan"
-    directory.mkdir(parents=True, exist_ok=False)
-    payload = config_to_dict(config)
-    write_json(directory / "config.json", {
-        key: payload[key] for key in ("stage", "seed", "model_name_or_path", "model", "compute", "method")
-    })
-    write_json(directory / "train.json", payload["training"])
-    return directory
-
-
-def load_training_plan(plan_dir):
-    directory = Path(plan_dir).expanduser().resolve()
-    common = json.loads((directory / "config.json").read_text(encoding="utf-8"))
-    training = json.loads((directory / "train.json").read_text(encoding="utf-8"))
-    if not isinstance(common, dict) or set(common) != {
-        "stage", "seed", "model_name_or_path", "model", "compute", "method",
-    }:
-        raise ValueError(
-            "common plan must contain exactly stage, seed, model_name_or_path, model, compute and method"
-        )
-    config = config_from_dict({**common, "training": training})
-    if directory != Path(config.training.run.output_dir).expanduser().resolve().parent / "plan":
-        raise ValueError("training plan directory differs from its saved run directory")
-    return config
-
-
-def validate_training_plan(config, checkpoint):
-    """请求预算留在计划中，checkpoint 记录选样后推导的实际总步数。"""
-    batch_size = len(checkpoint["rng"]) * config.training.loop.micro_batch_size * config.training.loop.gradient_accumulation_steps
-    statistics = checkpoint["binding"]["train"]
-    bin_sizes = ([bucket["samples"] for bucket in statistics["length_bins"]]
-                 if config.training.data.length_curriculum else None)
-    steps = training_steps(config.training.loop, statistics["episodes"], batch_size, bin_sizes)
-    expected = replace(config, training=replace(
-        config.training, loop=replace(config.training.loop, max_steps=steps),
-    ))
-    if config_to_dict(expected) != checkpoint["config"]:
-        raise ValueError("checkpoint configuration differs from its saved training plan")
+from ..io import write_json
 
 
 def prepare_evaluation_plan(run_dir, config, eval_id, task, options, overwrite=False, resume=False):
@@ -95,18 +52,14 @@ def prepare_evaluation_plan(run_dir, config, eval_id, task, options, overwrite=F
         "model": asdict(config.model), "seed": config.seed, "eval_id": eval_id, "task": task,
         "checkpoints": list(options["checkpoints"]),
         "data": str(Path(data).expanduser().resolve()),
-        "max_samples": options.get("max_samples") if task == "test" else None,
-        "max_new_tokens": (options.get("max_new_tokens", 128)
-                           if task == "test" else None),
-        "lengths": (list(normalize_lengths(options.get("lengths")))
-                    if task == "ruler" else None),
+        "max_samples": options["max_samples"],
+        "max_new_tokens": options["max_new_tokens"],
+        "lengths": options["lengths"],
     }
     for name in ("max_samples", "max_new_tokens"):
         value = settings[name]
         if value is not None and (type(value) is not int or value < 1):
             raise ValueError(f"{name} must be null or a positive integer")
-    if settings["max_new_tokens"] is None and task == "test":
-        raise ValueError("max_new_tokens must be a positive integer")
     if overwrite and not Path(settings["data"]).is_dir():
         raise FileNotFoundError(f"evaluation data directory does not exist: {settings['data']}")
     path.parent.mkdir(parents=True, exist_ok=True)

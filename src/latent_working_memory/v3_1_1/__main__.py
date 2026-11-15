@@ -1,4 +1,4 @@
-"""v3.1.1 训练、恢复和独立评估入口。"""
+"""v3.1.1 训练与恢复入口。"""
 
 from .training.run import main
 

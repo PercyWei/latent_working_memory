@@ -3,11 +3,9 @@
 import argparse
 from contextlib import ExitStack
 from dataclasses import asdict, replace
-from datetime import datetime
 import json
 from pathlib import Path
 import time
-from zoneinfo import ZoneInfo
 
 import torch
 import torch.distributed as dist
@@ -17,23 +15,12 @@ from transformers.utils.logging import disable_progress_bar
 from latent_working_memory.runtime import initialize_device
 from ..config import config_from_dict, config_to_dict
 from ..data import load_documents, load_pretraining, tokenization_identity
-from ..evaluation.records import write_json
+from ..io import write_json
 from ..modeling.compressor import MemoryModel
-from ..plans import load_training_plan, validate_training_plan
+from .plans import load_training_plan, validate_training_plan
 from .checkpoint import checkpoint_file, read_checkpoint, restore_training, save_checkpoint
 from .engine import SampleCursor, TrainingEngine, evaluate_dev, training_steps
 from .tracking import log_metrics, preserve_training_rng, tracking_run
-
-
-def _training_output_dir(config, checkpoint):
-    if checkpoint is not None:
-        return Path(checkpoint["config"]["training"]["run"]["output_dir"]).expanduser().resolve()
-    run_id = config.training.run.run_id
-    if run_id is None:
-        timestamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M")
-        prefix = "policy-post" if config.stage == "post" else "pretrain"
-        run_id = f"{prefix}_k{config.model.structure.memory_slots}_{timestamp}"
-    return Path(config.training.run.output_root).expanduser().resolve() / run_id / "train"
 
 
 def _restore_metrics(path, checkpoint_step):
@@ -69,18 +56,16 @@ def _initialize_compressor(model, config):
     source_path = checkpoint_file(config.training.run.init_checkpoint)
     source = read_checkpoint(source_path)
     source_config = config_from_dict(source["config"])
-    # 初始化仅继承压缩器；精度、attention 和保存张量策略由后训练独立选择。
-    source_compute = replace(
-        source_config.compute, dtype=config.compute.dtype,
-        attention_implementation=config.compute.attention_implementation,
-        mixed_precision=config.compute.mixed_precision, save_on_cpu=config.compute.save_on_cpu,
-    )
+    # 分段步长和边界模块由后训练独立设置；压缩器结构与 LoRA 须和来源一致。
+    source_model = replace(source_config.model, structure=replace(
+        source_config.model.structure,
+        unit_tokens=config.model.structure.unit_tokens,
+        boundary_hidden_size=config.model.structure.boundary_hidden_size,
+    ))
     if (
         source_config.stage != "pretrain"
         or source_config.model_name_or_path != config.model_name_or_path
-        or source_config.model.structure.memory_slots != config.model.structure.memory_slots
-        or source_config.model.lora != config.model.lora
-        or source_compute != config.compute
+        or source_model != config.model
     ):
         raise ValueError("post initialization requires a matching pretrain compressor")
     model.load_compressor_state_dict(source["model"])

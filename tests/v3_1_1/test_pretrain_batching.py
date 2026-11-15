@@ -15,6 +15,7 @@ from latent_working_memory.v3_1_1.config import (
     ModelConfig,
     ModelLoraConfig,
     ModelStructureConfig,
+    ObjectiveConfig,
     OptimizerConfig,
     SchedulerConfig,
     SwanLabConfig,
@@ -65,6 +66,7 @@ def make_models(folder, gradient_checkpointing):
         ),
         compute=ComputeConfig(gradient_checkpointing=gradient_checkpointing),
         training=TrainingConfig(
+            objective=ObjectiveConfig(),
             data=TrainingDataConfig(dataset_dir=str(folder)),
             loop=TrainingLoopConfig(
                 micro_batch_size=3, gradient_accumulation_steps=2, max_steps=3,

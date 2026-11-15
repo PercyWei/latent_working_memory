@@ -259,11 +259,11 @@ def qa_nll(model, blocks, document):
 
 
 @torch.no_grad()
-def sample_group(model, document, rollout, generator):
+def sample_group(model, document, unit_tokens, group_size, generator):
     paths = []
-    for _ in range(rollout["group_size"]):
+    for _ in range(group_size):
         blocks, actions, log_probs, _, lengths = execute(
-            model, document.input_ids, rollout["unit_tokens"], generator=generator,
+            model, document.input_ids, unit_tokens, generator=generator,
         )
         loss = qa_nll(model, blocks, document)
         paths.append(Rollout(actions, log_probs.detach(), float(loss), lengths))
@@ -271,9 +271,8 @@ def sample_group(model, document, rollout, generator):
 
 
 @torch.no_grad()
-def sample_group_batch(model, documents, rollout, generator):
+def sample_group_batch(model, documents, unit_tokens, group_size, generator):
     """按文档／路径原顺序分配随机数，每轮批量采样各文档的一条路径。"""
-    group_size, unit_tokens = rollout["group_size"], rollout["unit_tokens"]
     uniforms = (None if generator is None else [
         torch.rand((group_size, (len(document.input_ids) - 1) // unit_tokens),
                    generator=generator).tolist()

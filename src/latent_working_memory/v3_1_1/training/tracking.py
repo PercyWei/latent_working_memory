@@ -10,7 +10,7 @@ import torch.distributed as dist
 from latent_working_memory.runtime import capture_rng, restore_rng
 from latent_working_memory.tracking_credentials import swanlab_api_key
 from ..config import config_to_dict
-from ..evaluation.records import write_json
+from ..io import write_json
 
 
 @contextmanager

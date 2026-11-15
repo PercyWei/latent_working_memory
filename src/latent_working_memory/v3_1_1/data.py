@@ -147,7 +147,7 @@ def _metadata(path, split, examples, raw_documents, raw_texts, filtered, maximum
 def load_pretraining(settings, tokenizer, split):
     """完整文本只选 AE 或 LM；LM 预测末 N tokens，压缩前缀不足时转 AE。"""
     maximum = _limit(settings, split)
-    data, pretrain, seed = settings.training.data, settings.method.pretrain, settings.seed
+    data, objective, seed = settings.training.data, settings.training.objective, settings.seed
     data_path, sources, bins = _sources(data.dataset_dir, split, data.length_curriculum)
     if tokenizer.eos_token_id is None:
         raise ValueError("AE/LM pretraining requires an EOS token")
@@ -175,15 +175,15 @@ def load_pretraining(settings, tokenizer, split):
                 filtered += 1
                 continue
             rng = random.Random(f"{seed}:pretraining:{doc_id}")
-            task = "lm" if rng.random() < pretrain.lm_ratio else "ae"
+            task = "lm" if rng.random() < objective.lm_ratio else "ae"
             inputs = target = full_ids
             if task == "lm":
-                if len(full_ids) - pretrain.lm_target_tokens <= settings.model.structure.memory_slots:
+                if len(full_ids) - objective.lm_target_tokens <= settings.model.structure.memory_slots:
                     task = "ae"
                     short_lm_inputs += 1
                 else:
-                    inputs = full_ids[:-pretrain.lm_target_tokens]
-                    target = full_ids[-pretrain.lm_target_tokens:]
+                    inputs = full_ids[:-objective.lm_target_tokens]
+                    target = full_ids[-objective.lm_target_tokens:]
             example = PretrainExample(
                 f"{doc_id}:{sample_number}:{task}", doc_id, inputs,
                 (*target, tokenizer.eos_token_id), task, prompts[task],
@@ -204,7 +204,7 @@ def load_pretraining(settings, tokenizer, split):
         "lm_to_ae_sources": short_lm_inputs,
         "ae_samples": sum(row.task == "ae" for row in examples.values()),
         "lm_samples": sum(row.task == "lm" for row in examples.values()),
-        "lm_ratio": pretrain.lm_ratio, "lm_target_tokens": pretrain.lm_target_tokens,
+        "lm_ratio": objective.lm_ratio, "lm_target_tokens": objective.lm_target_tokens,
     })
     if length_bins is not None:
         metadata["length_bins"] = length_bins

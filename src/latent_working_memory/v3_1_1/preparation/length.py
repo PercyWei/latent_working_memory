@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
-from .cli import positive_int
+from ..cli import positive_int
 
 
 def _scan(path, tokenizer):

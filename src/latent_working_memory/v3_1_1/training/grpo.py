@@ -2,15 +2,16 @@
 
 import torch
 
-from .rollout import execute_replay_batch, sample_group_batch
+from ..rollout import execute_replay_batch, sample_group_batch
 
 
-def _paths_backward_batch(model, documents, method, paths, advantages, group_size, bptt_steps):
+def _paths_backward_batch(model, documents, unit_tokens, grpo, paths, advantages, bptt_steps):
     """各文档并行回放一条路径；所有 memory adjoint 与策略项一次回传。"""
+    group_size = grpo["group_size"]
     with model.forward_context():
         replays = execute_replay_batch(
             model, [document.input_ids for document in documents],
-            method["rollout"]["unit_tokens"], [path.actions for path in paths],
+            unit_tokens, [path.actions for path in paths],
             bptt_steps=bptt_steps,
         )
     memories = [tuple(block.detach().requires_grad_(True) for block in replay[0])
@@ -37,7 +38,6 @@ def _paths_backward_batch(model, documents, method, paths, advantages, group_siz
         del losses, loss
 
     outputs, gradients, values = [], [], []
-    grpo = method["grpo"]
     with model.forward_context():
         for document, replay, leaves, questions, path, advantage in zip(
             documents, replays, memories, question_losses, paths, advantages, strict=True,
@@ -69,12 +69,11 @@ def _paths_backward_batch(model, documents, method, paths, advantages, group_siz
     return torch.stack(values)
 
 
-def post_backward_batch(model, documents, method, generator, bptt_steps=None):
+def post_backward_batch(model, documents, unit_tokens, grpo, generator, bptt_steps=None):
     """microbatch 内并行文档，G 条路径依次反传；各篇仍独立归一化奖励与损失。"""
     # 采样和带图回放分开进入 autocast，避免复用无梯度的权重转换缓存。
     with torch.no_grad(), model.forward_context():
-        groups = sample_group_batch(model, documents, method["rollout"], generator)
-    grpo = method["grpo"]
+        groups = sample_group_batch(model, documents, unit_tokens, grpo["group_size"], generator)
     rewards, advantages = [], []
     for paths in groups:
         reward = torch.tensor([
@@ -85,11 +84,11 @@ def post_backward_batch(model, documents, method, generator, bptt_steps=None):
         advantages.append(((reward - reward.mean()) / (
             reward.std(unbiased=False) + grpo["advantage_epsilon"]
         )).detach())
-    group_size = method["rollout"]["group_size"]
+    group_size = grpo["group_size"]
     values = torch.stack([
         _paths_backward_batch(
-            model, documents, method, [paths[index] for paths in groups],
-            [advantage[index] for advantage in advantages], group_size, bptt_steps,
+            model, documents, unit_tokens, grpo, [paths[index] for paths in groups],
+            [advantage[index] for advantage in advantages], bptt_steps,
         ) for index in range(group_size)
     ]).mean(dim=0)
     results = []

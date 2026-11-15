@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
-from .cli import nonnegative_int, optional_positive_int
+from ..cli import nonnegative_int, optional_positive_int
 
 
 def _sample(line, path, line_number):

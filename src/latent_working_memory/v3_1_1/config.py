@@ -1,4 +1,4 @@
-"""v3.1.1 的三层模型、方法与训练配置。"""
+"""v3.1.1 的模型、计算与训练配置。"""
 
 from dataclasses import asdict, dataclass, field, replace
 import json
@@ -33,10 +33,13 @@ def _path(config, name, optional=False):
 @dataclass(frozen=True)
 class ModelStructureConfig:
     memory_slots: int = 128
+    unit_tokens: int | None = None
     boundary_hidden_size: int | None = None
 
     def __post_init__(self):
         _positive_ints(self, ("memory_slots",))
+        if self.unit_tokens is not None:
+            _positive_ints(self, ("unit_tokens",))
         if self.boundary_hidden_size is not None:
             _positive_ints(self, ("boundary_hidden_size",))
 
@@ -88,7 +91,7 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
-class PretrainConfig:
+class ObjectiveConfig:
     lm_ratio: float = 0.5
     lm_target_tokens: int = 512
 
@@ -100,37 +103,23 @@ class PretrainConfig:
 
 
 @dataclass(frozen=True)
-class RolloutConfig:
-    unit_tokens: int = 256
-    group_size: int = 4
-
-    def __post_init__(self):
-        _positive_ints(self, ("unit_tokens", "group_size"))
-        if self.group_size < 2:
-            raise ValueError("group_size must be at least 2")
-
-
-@dataclass(frozen=True)
 class GRPOConfig:
+    group_size: int = 4
     slot_cost: float = 0.001
     policy_weight: float = 1.0
     clip_epsilon: float = 0.2
     advantage_epsilon: float = 1e-6
 
     def __post_init__(self):
+        _positive_ints(self, ("group_size",))
+        if self.group_size < 2:
+            raise ValueError("group_size must be at least 2")
         for name in ("slot_cost", "policy_weight"):
             _number(getattr(self, name), name, inclusive=True)
         for name in ("clip_epsilon", "advantage_epsilon"):
             _number(getattr(self, name), name)
         if self.clip_epsilon >= 1:
             raise ValueError("clip_epsilon must be less than 1")
-
-
-@dataclass(frozen=True)
-class MethodConfig:
-    pretrain: PretrainConfig | None = None
-    rollout: RolloutConfig | None = None
-    grpo: GRPOConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -271,7 +260,9 @@ class TrainingConfig:
     loop: TrainingLoopConfig = field(default_factory=TrainingLoopConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    objective: ObjectiveConfig | None = None
     backward: BackwardConfig | None = None
+    grpo: GRPOConfig | None = None
     run: RunConfig = field(default_factory=RunConfig)
     swanlab: SwanLabConfig = field(default_factory=SwanLabConfig)
 
@@ -295,7 +286,6 @@ class ExperimentConfig:
     seed: int = 42
     model: ModelConfig = field(default_factory=ModelConfig)
     compute: ComputeConfig = field(default_factory=ComputeConfig)
-    method: MethodConfig = field(default_factory=lambda: MethodConfig(pretrain=PretrainConfig()))
 
     def __post_init__(self):
         if self.stage not in {"pretrain", "post"}:
@@ -311,23 +301,23 @@ class ExperimentConfig:
         if maximum is not None and maximum <= self.model.structure.memory_slots:
             raise ValueError("max_train_data_tokens must be greater than memory_slots")
         if self.stage == "pretrain":
-            if self.method.pretrain is None:
-                raise ValueError("pretrain requires method.pretrain")
+            if self.training.objective is None:
+                raise ValueError("pretrain requires training.objective")
             if any(value is not None for value in (
-                self.method.rollout, self.method.grpo, self.training.backward,
+                self.model.structure.unit_tokens, self.training.grpo, self.training.backward,
                 self.model.structure.boundary_hidden_size,
                 self.training.optimizer.boundary_learning_rate,
             )):
-                raise ValueError("pretrain cannot contain rollout, GRPO, boundary or BPTT settings")
+                raise ValueError("pretrain requires model.structure.unit_tokens=null and no GRPO, boundary or BPTT settings")
         else:
-            if self.method.pretrain is not None:
-                raise ValueError("post cannot contain method.pretrain")
+            if self.training.objective is not None:
+                raise ValueError("post cannot contain training.objective")
             if any(value is None for value in (
-                self.method.rollout, self.method.grpo, self.training.backward,
+                self.model.structure.unit_tokens, self.training.grpo, self.training.backward,
                 self.model.structure.boundary_hidden_size,
                 self.training.optimizer.boundary_learning_rate,
             )):
-                raise ValueError("post requires rollout, GRPO, boundary and BPTT settings")
+                raise ValueError("post requires model.structure.unit_tokens, training.grpo, boundary and BPTT settings")
         if self.stage == "pretrain" and self.training.run.init_checkpoint is not None:
             raise ValueError("pretrain starts from the base model; use --resume to continue it")
         if self.stage == "post" and self.training.run.init_checkpoint is None:
@@ -335,26 +325,24 @@ class ExperimentConfig:
 
 
 def config_from_dict(payload):
-    """只读取当前三层配置；未知字段由 dataclass 构造器直接报错。"""
-    required = {"stage", "model_name_or_path", "model", "compute", "method", "training"}
+    """只读取当前配置；未知字段由 dataclass 构造器直接报错。"""
+    required = {"stage", "model_name_or_path", "model", "compute", "training"}
     if (not isinstance(payload, dict) or not required <= payload.keys()
         or payload.keys() - required - {"seed"}):
         raise ValueError(
-            "config must contain stage, model_name_or_path, model, compute, method and training; seed is optional"
+            "config must contain stage, model_name_or_path, model, compute and training; seed is optional"
         )
-    model, method, training = payload["model"], payload["method"], payload["training"]
-    method_types = ({"pretrain": PretrainConfig} if payload["stage"] == "pretrain" else {
-        "rollout": RolloutConfig, "grpo": GRPOConfig,
-    })
-    if set(method) != set(method_types):
-        raise ValueError(f"{payload['stage']} method must contain exactly {', '.join(method_types)}")
+    model, training = payload["model"], payload["training"]
     training_types = {
         "data": TrainingDataConfig, "loop": TrainingLoopConfig,
         "optimizer": OptimizerConfig, "scheduler": SchedulerConfig,
         "run": RunConfig, "swanlab": SwanLabConfig,
     }
-    if payload["stage"] == "post":
+    if payload["stage"] == "pretrain":
+        training_types["objective"] = ObjectiveConfig
+    elif payload["stage"] == "post":
         training_types["backward"] = BackwardConfig
+        training_types["grpo"] = GRPOConfig
     if set(training) != set(training_types):
         raise ValueError(f"{payload['stage']} training must contain exactly {', '.join(training_types)}")
     return ExperimentConfig(
@@ -365,25 +353,22 @@ def config_from_dict(payload):
             "lora": ModelLoraConfig(**model["lora"]),
         }),
         compute=ComputeConfig(**payload["compute"]),
-        method=MethodConfig(**{name: cls(**method[name]) for name, cls in method_types.items()}),
         training=TrainingConfig(**{name: cls(**training[name]) for name, cls in training_types.items()}),
     )
 
 
 def config_to_dict(config):
-    """计划、checkpoint 与实验记录只保存当前阶段适用的配置。"""
+    """完整保留模型属性，训练配置只保存当前阶段适用的分组与参数。"""
     payload = asdict(config)
     payload = {key: payload[key] for key in (
-        "stage", "seed", "model_name_or_path", "model", "compute", "method", "training",
+        "stage", "seed", "model_name_or_path", "model", "compute", "training",
     )}
     if config.stage == "pretrain":
-        del payload["model"]["structure"]["boundary_hidden_size"]
-        del payload["method"]["rollout"], payload["method"]["grpo"]
-        del payload["training"]["backward"]
+        del payload["training"]["backward"], payload["training"]["grpo"]
         del payload["training"]["optimizer"]["boundary_learning_rate"]
         del payload["training"]["run"]["init_checkpoint"]
     else:
-        del payload["method"]["pretrain"]
+        del payload["training"]["objective"]
     return payload
 
 

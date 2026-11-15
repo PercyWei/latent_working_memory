@@ -7,6 +7,7 @@ from pathlib import Path
 
 from latent_working_memory.benchmarks.data import DEFAULT_RULER_LENGTHS
 from latent_working_memory.benchmarks.protocol import data_identity
+from ..io import write_json
 
 
 def normalize_lengths(lengths):
@@ -16,13 +17,6 @@ def normalize_lengths(lengths):
     if len(set(values)) != len(values):
         raise ValueError("RULER lengths must be unique")
     return tuple(sorted(values))
-
-
-def write_json(path, value):
-    path = Path(path)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(path)
 
 
 def write_details(path, records):

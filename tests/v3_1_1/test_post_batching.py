@@ -8,18 +8,17 @@ import torch
 
 import test_pretrain_batching as pretrain_tests
 
-from latent_working_memory.v3_1_1 import objective, rollout
+from latent_working_memory.v3_1_1 import rollout
+from latent_working_memory.v3_1_1.training import grpo as grpo_objective
 from latent_working_memory.v3_1_1.config import (
     BackwardConfig,
     ComputeConfig,
     ExperimentConfig,
     GRPOConfig,
-    MethodConfig,
     ModelConfig,
     ModelLoraConfig,
     ModelStructureConfig,
     OptimizerConfig,
-    RolloutConfig,
     RunConfig,
     SchedulerConfig,
     SwanLabConfig,
@@ -46,11 +45,13 @@ def _reference_qa_backward(model, memory_leaves, qa, normalizer):
     return loss.detach()
 
 
-def _reference_path_backward(model, document, method, path, advantage, group_size, bptt_steps=None):
+def _reference_path_backward(
+    model, document, unit_tokens, grpo, path, advantage, group_size, bptt_steps=None,
+):
     """反传后只返回无图统计，使本路径的中间张量在下一次前向前释放。"""
     with model.forward_context():
         blocks, _, log_probs, entropy, _ = execute(
-            model, document.input_ids, method["rollout"]["unit_tokens"], actions=path.actions,
+            model, document.input_ids, unit_tokens, actions=path.actions,
             bptt_steps=bptt_steps,
         )
     memory_leaves = tuple(block.detach().requires_grad_(True) for block in blocks)
@@ -63,7 +64,6 @@ def _reference_path_backward(model, document, method, path, advantage, group_siz
         )
     with model.forward_context():
         task_loss = torch.stack(question_losses).mean()
-        grpo = method["grpo"]
         if len(log_probs):
             ratios = (log_probs - path.old_log_probs).exp()
             clipped = ratios.clamp(1 - grpo["clip_epsilon"], 1 + grpo["clip_epsilon"])
@@ -92,13 +92,14 @@ def _reference_path_backward(model, document, method, path, advantage, group_siz
     ))
 
 
-def reference_post_backward(model, document, method, generator, bptt_steps=None, sampled_paths=None):
+def reference_post_backward(
+    model, document, unit_tokens, grpo, generator, bptt_steps=None, sampled_paths=None,
+):
     """采样完整组后逐路径累积梯度；文档归约与参数更新由 engine 执行。"""
     # 采样和带图回放使用独立 autocast 区域，避免复用无梯度的权重转换缓存。
     with torch.no_grad(), model.forward_context():
         paths = (sampled_paths if sampled_paths is not None
-                 else sample_group(model, document, method["rollout"], generator))
-    grpo = method["grpo"]
+                 else sample_group(model, document, unit_tokens, grpo["group_size"], generator))
     device = paths[0].old_log_probs.device
     rewards = torch.tensor([
         -path.qa_nll - grpo["slot_cost"] * model.memory_slots * len(path.block_lengths)
@@ -108,7 +109,9 @@ def reference_post_backward(model, document, method, generator, bptt_steps=None,
     advantages = ((rewards - rewards.mean()) / (std + grpo["advantage_epsilon"])).detach()
     group_size = len(paths)
     values = torch.stack([
-        _reference_path_backward(model, document, method, path, advantage, group_size, bptt_steps)
+        _reference_path_backward(
+            model, document, unit_tokens, grpo, path, advantage, group_size, bptt_steps,
+        )
         for path, advantage in zip(paths, advantages, strict=True)
     ])
     qa_loss, policy_loss = values[:, :2].mean(dim=0)
@@ -137,16 +140,13 @@ def make_post_models(folder, gradient_checkpointing=False, bptt_steps=2, policy_
     config = ExperimentConfig(
         stage="post", model_name_or_path=str(folder),
         model=ModelConfig(
-            structure=ModelStructureConfig(memory_slots=4, boundary_hidden_size=8),
+            structure=ModelStructureConfig(memory_slots=4, boundary_hidden_size=8, unit_tokens=4),
             lora=ModelLoraConfig(lora_rank=2, lora_alpha=4),
         ),
         compute=ComputeConfig(gradient_checkpointing=gradient_checkpointing),
-        method=MethodConfig(
-            rollout=RolloutConfig(unit_tokens=4, group_size=4),
-            grpo=GRPOConfig(slot_cost=0.01, policy_weight=policy_weight),
-        ),
         training=TrainingConfig(
             data=TrainingDataConfig(dataset_dir=str(folder)),
+            grpo=GRPOConfig(group_size=4, slot_cost=0.01, policy_weight=policy_weight),
             loop=TrainingLoopConfig(
                 micro_batch_size=4, gradient_accumulation_steps=2, max_steps=6,
             ),
@@ -197,20 +197,20 @@ def assert_gradients_close(reference, actual):
             torch.testing.assert_close(result, expected, rtol=4e-4, atol=4e-6, msg=name)
 
 
-def fixed_paths(model, rows, method):
+def fixed_paths(model, rows, unit_tokens, group_size):
     result = {}
     with torch.no_grad(), model.forward_context():
         for row in rows:
-            count = (len(row.input_ids) - 1) // method["rollout"]["unit_tokens"]
+            count = (len(row.input_ids) - 1) // unit_tokens
             paths = []
-            for path_index in range(method["rollout"]["group_size"]):
+            for path_index in range(group_size):
                 actions = tuple(
                     False if path_index == 0 else True if path_index == 1
                     else (index + path_index) % 2 == 0
                     for index in range(count)
                 )
                 blocks, _, log_probs, _, lengths = execute(
-                    model, row.input_ids, method["rollout"]["unit_tokens"], actions=actions,
+                    model, row.input_ids, unit_tokens, actions=actions,
                 )
                 # 固定非单位比率也覆盖 PPO clip 的两侧分支。
                 old_log_probs = log_probs.detach() + (-0.4, 0.4, 0.0, 0.15)[path_index]
@@ -263,16 +263,17 @@ def test_stochastic_sampling_preserves_document_major_random_draws(tiny_source, 
             for i, (length, count) in enumerate([(3, 1), (12, 3), (19, 2), (9, 10)])]
     generator = torch.Generator().manual_seed(417)
     other = torch.Generator().set_state(generator.get_state())
-    method = asdict(config.method)
+    unit_tokens = config.model.structure.unit_tokens
+    grpo = asdict(config.training.grpo)
     with torch.no_grad(), reference.forward_context():
-        expected = [sample_group(reference, row, method["rollout"], generator) for row in rows]
+        expected = [sample_group(reference, row, unit_tokens, grpo["group_size"], generator) for row in rows]
     shapes = []
     handle = actual.decoder.model.register_forward_pre_hook(
         lambda module, args, kwargs: shapes.append(kwargs["inputs_embeds"].shape[0]),
         with_kwargs=True,
     )
     with torch.no_grad(), actual.forward_context():
-        results = rollout.sample_group_batch(actual, rows, method["rollout"], other)
+        results = rollout.sample_group_batch(actual, rows, unit_tokens, grpo["group_size"], other)
     handle.remove()
     assert max(shapes) == len(rows)
     assert torch.equal(generator.get_state(), other.get_state())
@@ -287,9 +288,10 @@ def test_stochastic_sampling_preserves_document_major_random_draws(tiny_source, 
 def reference_update(engine, rows, paths):
     engine.model.train()
     engine.optimizer.zero_grad(set_to_none=True)
-    method = asdict(engine.experiment.method)
+    unit_tokens = engine.experiment.model.structure.unit_tokens
+    grpo = asdict(engine.config.grpo)
     outputs = [reference_post_backward(
-        engine.model, row, method, None, engine.config.backward.bptt_steps,
+        engine.model, row, unit_tokens, grpo, None, engine.config.backward.bptt_steps,
         sampled_paths=paths[row.id],
     ) for row in rows]
     for parameter in engine.parameters:
@@ -311,12 +313,14 @@ def test_engine_microbatch_accumulation_tail_and_state_restore_continuation(
     rows = [document(i, length, 10 if i == 3 else 1 + i % 3)
             for i, length in enumerate([3, 12, 19, 9, 14, 5, 10, 17])]
     tail = document(9, 7, 2)
-    paths = fixed_paths(reference, [*rows, tail], asdict(config.method))
+    paths = fixed_paths(
+        reference, [*rows, tail], config.model.structure.unit_tokens, config.training.grpo.group_size,
+    )
     calls, writer_shapes, reader_shapes, captured = [], [], [], []
-    def sampling(model, batch, rollout_config, generator):
+    def sampling(model, batch, unit_tokens, group_size, generator):
         calls.append([row.id for row in batch])
         return [paths[row.id] for row in batch]
-    monkeypatch.setattr(objective, "sample_group_batch", sampling)
+    monkeypatch.setattr(grpo_objective, "sample_group_batch", sampling)
     synchronize = engine._synchronize_gradients
     def capture(samples):
         synchronize(samples)
@@ -379,12 +383,13 @@ def test_no_decisions_and_zero_policy_weight_preserve_gradient_presence(
 ):
     reference, actual, config = make_post_models(tiny_source, policy_weight=policy_weight)
     rows = [document(0, 3 if no_actions else 9, 1), document(1, 2 if no_actions else 12, 3)]
-    method = asdict(config.method)
-    paths = fixed_paths(reference, rows, method)
-    monkeypatch.setattr(objective, "sample_group_batch",
-                        lambda model, docs, rollout_config, generator: [paths[row.id] for row in docs])
-    expected = [reference_post_backward(reference, row, method, None, 2, paths[row.id]) for row in rows]
-    results = objective.post_backward_batch(actual, rows, method, None, 2)
+    unit_tokens = config.model.structure.unit_tokens
+    grpo = asdict(config.training.grpo)
+    paths = fixed_paths(reference, rows, unit_tokens, grpo["group_size"])
+    monkeypatch.setattr(grpo_objective, "sample_group_batch",
+                        lambda model, docs, unit_tokens, group_size, generator: [paths[row.id] for row in docs])
+    expected = [reference_post_backward(reference, row, unit_tokens, grpo, None, 2, paths[row.id]) for row in rows]
+    results = grpo_objective.post_backward_batch(actual, rows, unit_tokens, grpo, None, 2)
     for (left_loss, left_metrics), (right_loss, right_metrics) in zip(expected, results, strict=True):
         torch.testing.assert_close(right_loss, left_loss, rtol=3e-5, atol=5e-6)
         assert right_metrics.keys() == left_metrics.keys()
@@ -414,7 +419,8 @@ def test_identical_sampled_paths_keep_identical_rewards_despite_batch_score_roun
         model.boundary.network[-1].weight.zero_()
         model.boundary.network[-1].bias.fill_(100.0)
     rows = [document(0, 9, 1), document(1, 14, 2)]
-    method = asdict(config.method)
+    unit_tokens = config.model.structure.unit_tokens
+    grpo = asdict(config.training.grpo)
     scoring = model.answer_nll_batch
     score_calls = []
 
@@ -426,15 +432,15 @@ def test_identical_sampled_paths_keep_identical_rewards_despite_batch_score_roun
     monkeypatch.setattr(model, "answer_nll_batch", rounded_score)
     with torch.no_grad(), model.forward_context():
         groups = rollout.sample_group_batch(
-            model, rows, method["rollout"], torch.Generator().manual_seed(417),
+            model, rows, unit_tokens, grpo["group_size"], torch.Generator().manual_seed(417),
         )
     # 保留各轮真实评分的批量形状，只复用同轨迹的确定性奖励。
-    assert score_calls == [2, 1] * method["rollout"]["group_size"]
+    assert score_calls == [2, 1] * grpo["group_size"]
     for group in groups:
         assert all(path.actions == group[0].actions for path in group)
         assert all(path.qa_nll == group[0].qa_nll for path in group)
         rewards = torch.tensor([
-            -path.qa_nll - method["grpo"]["slot_cost"] * model.memory_slots * len(path.block_lengths)
+            -path.qa_nll - grpo["slot_cost"] * model.memory_slots * len(path.block_lengths)
             for path in group
         ])
         assert rewards.std(unbiased=False) == 0

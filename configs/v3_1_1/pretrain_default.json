@@ -4,7 +4,9 @@
   "model_name_or_path": "~/models/Qwen3-4B-Instruct-2507",
   "model": {
     "structure": {
-      "memory_slots": 128
+      "memory_slots": 256,
+      "unit_tokens": null,
+      "boundary_hidden_size": null
     },
     "lora": {
       "lora_rank": 16,
@@ -24,12 +26,6 @@
     "mixed_precision": false,
     "save_on_cpu": false
   },
-  "method": {
-    "pretrain": {
-      "lm_ratio": 0.5,
-      "lm_target_tokens": 512
-    }
-  },
   "training": {
     "data": {
       "dataset_dir": "data/fineweb-4096-docall_20261104",
@@ -37,6 +33,10 @@
       "max_train_samples": null,
       "max_dev_samples": null,
       "length_curriculum": false
+    },
+    "objective": {
+      "lm_ratio": 0.5,
+      "lm_target_tokens": 512
     },
     "loop": {
       "epochs": 1,

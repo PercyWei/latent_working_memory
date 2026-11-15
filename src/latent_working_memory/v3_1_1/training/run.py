@@ -1,4 +1,4 @@
-"""训练、恢复与独立评估的控制进程，沿用 v4.1 的启动和记录流程。"""
+"""训练与恢复的控制进程，沿用 v4.1 的启动和记录流程。"""
 
 from dataclasses import replace
 from datetime import datetime
@@ -15,37 +15,21 @@ from zoneinfo import ZoneInfo
 
 import torch
 
-from ..cli import config_overrides, parse_run_args as parse_args
+from .cli import config_overrides, parse_run_args as parse_args
 from ..config import load_config
-from ..evaluation.records import write_json
-from ..evaluation.run import run_evaluations
-from ..execution import run_lock
-from ..plans import load_training_plan, save_training_plan, validate_training_plan
+from ..io import write_json
+from ..execution import run_lock, stop_process, visible_devices
+from .plans import load_training_plan, save_training_plan, validate_training_plan
 from .checkpoint import checkpoint_file, read_checkpoint
-from .train import _training_output_dir
 
 
-def _visible_devices():
-    devices = [value.strip() for value in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")]
-    if any(not value.isdecimal() for value in devices) or len(set(map(int, devices))) != len(devices):
-        raise ValueError("set CUDA_VISIBLE_DEVICES to distinct physical GPU indices")
-    return [str(int(value)) for value in devices]
-
-
-def _stop_process(process):
-    if process.poll() is not None:
-        return
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=5)
-    except ProcessLookupError:
-        return
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
+def _training_output_dir(config):
+    run_id = config.training.run.run_id
+    if run_id is None:
+        timestamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M")
+        prefix = "policy-post" if config.stage == "post" else "pretrain"
+        run_id = f"{prefix}_k{config.model.structure.memory_slots}_{timestamp}"
+    return Path(config.training.run.output_root).expanduser().resolve() / run_id / "train"
 
 
 def _execute(command, environment, log_path):
@@ -75,7 +59,7 @@ def _execute(command, environment, log_path):
         for signum in previous:
             signal.signal(signum, signal.SIG_IGN)
         if process is not None:
-            _stop_process(process)
+            stop_process(process)
         raise
     finally:
         if process is not None:
@@ -88,7 +72,7 @@ def _execute(command, environment, log_path):
 
 def _run_training(args, config, output_dir):
     resume = None
-    devices = _visible_devices()
+    devices = visible_devices()
     world_size = len(devices)
     if args.resume:
         resume = checkpoint_file(args.checkpoint)
@@ -179,8 +163,6 @@ def _run_training(args, config, output_dir):
 
 
 def run_job(args):
-    if args.evaluate_only:
-        return run_evaluations(args)
     if args.resume:
         checkpoint = checkpoint_file(args.checkpoint)
         if checkpoint.name != "state.pt" or re.fullmatch(r"global_step_[1-9][0-9]*", checkpoint.parent.name) is None:
@@ -191,7 +173,7 @@ def run_job(args):
         config = load_config(
             args.config, config_overrides(args), stage=args.stage,
         )
-        output_dir = _training_output_dir(config, None)
+        output_dir = _training_output_dir(config)
         config = replace(config, training=replace(
             config.training, run=replace(config.training.run, run_id=output_dir.parent.name),
         ))

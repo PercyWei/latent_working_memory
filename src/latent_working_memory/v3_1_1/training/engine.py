@@ -6,7 +6,7 @@ import math
 import torch
 import torch.distributed as dist
 
-from ..objective import post_backward_batch
+from .grpo import post_backward_batch
 from ..rollout import execute, qa_nll
 
 
@@ -166,7 +166,7 @@ def document_loss(model, document, config):
             "lm_fraction": (float(document.task == "lm"), 1),
         }
     blocks, actions, _, entropy, lengths = execute(
-        model, document.input_ids, config.method.rollout.unit_tokens,
+        model, document.input_ids, config.model.structure.unit_tokens,
     )
     loss = qa_nll(model, blocks, document)
     return loss, {
@@ -285,11 +285,12 @@ class TrainingEngine:
         self.optimizer.zero_grad(set_to_none=True)
         totals = {}
         if self.experiment.stage == "post":
-            method = asdict(self.experiment.method)
+            unit_tokens = self.experiment.model.structure.unit_tokens
+            grpo = asdict(self.config.grpo)
             for start in range(0, len(documents), self.config.loop.micro_batch_size):
                 results = post_backward_batch(
                     self.model, documents[start:start + self.config.loop.micro_batch_size],
-                    method, boundary_generator,
+                    unit_tokens, grpo, boundary_generator,
                     bptt_steps=self.config.backward.bptt_steps,
                 )
                 for loss, metrics in results:
