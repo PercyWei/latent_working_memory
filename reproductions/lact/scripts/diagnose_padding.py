@@ -11,6 +11,7 @@ import torch
 from transformers import AutoTokenizer
 
 from evaluate import load_checkpoint
+from incremental.padding import PaddedLaCTCache
 from validate_padding import (
     compare, forward, pad, snapshot, source_record, source_samples, write_json,
 )
@@ -81,7 +82,7 @@ def main():
     plan = {
         "source": source_record(),
         "arguments": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
-        "purpose": "Prefill-only numeric diagnosis: old equal-length B3 versus new padded B3; focus row has identical real tokens",
+        "purpose": "Prefill-only numeric diagnosis: old/new paths at identical batch shapes and padded batches; focus row has identical real tokens",
     }
     write_json(args.output_dir / "plan.json", plan)
     started = time.perf_counter()
@@ -105,19 +106,30 @@ def main():
             ids, mask = pad([rows[0][:length]], pad_id)
             baseline_output = forward(model, ids, mask)
             baseline = snapshot(baseline_output, 0, length, chunk, model)
+            equal_baseline = None
             report = {"focus_tokens": length, "reference": "b1_unpadded", "modes": {}}
-            for name, sizes, extra in (
-                ("old_equal_b3", [length] * 3, 0),
-                ("new_padded_equal_b3", [length] * 3, 3),
-                ("new_mixed_b3", [length, length + 1, length + 2], 0),
+            for name, sizes, extra, force_new in (
+                ("old_equal_b3", [length] * 3, 0, False),
+                ("forced_new_b1", [length], 0, True),
+                ("forced_new_equal_b3", [length] * 3, 0, True),
+                ("new_padded_equal_b3", [length] * 3, 3, False),
+                ("new_mixed_b3", [length, length + 1, length + 2], 0, False),
             ):
-                ids, mask = pad([row[:size] for row, size in zip(rows, sizes, strict=True)], pad_id, extra)
-                current = forward(model, ids, mask)
+                ids, mask = pad([
+                    row[:size] for row, size in zip(rows[:len(sizes)], sizes, strict=True)
+                ], pad_id, extra)
+                cache = PaddedLaCTCache(len(model.model.layers), len(sizes)) if force_new else None
+                current = forward(model, ids, mask, cache)
                 state = snapshot(current, 0, length, chunk, model)
+                reference = equal_baseline if name == "forced_new_equal_b3" else baseline
                 report["modes"][name] = {
                     "real_lengths": sizes, "physical_width": ids.shape[1],
-                    **comparison(state, baseline, len(model.model.layers), args.numeric_atol, args.numeric_rtol),
+                    "forced_new_path": force_new,
+                    "reference": "old_equal_b3" if name == "forced_new_equal_b3" else "b1_unpadded",
+                    **comparison(state, reference, len(model.model.layers), args.numeric_atol, args.numeric_rtol),
                 }
+                if name == "old_equal_b3":
+                    equal_baseline = state
                 del current, state
                 gc.collect()
             reports.append(report)
@@ -125,7 +137,7 @@ def main():
             print(json.dumps({"focus_tokens": length, "modes": {
                 name: item["summary"] for name, item in report["modes"].items()
             }}, ensure_ascii=False), flush=True)
-            del baseline, baseline_output
+            del baseline, baseline_output, equal_baseline
             gc.collect()
     write_json(args.output_dir / "execution.json", {"seconds": time.perf_counter() - started, "completed": True})
 
