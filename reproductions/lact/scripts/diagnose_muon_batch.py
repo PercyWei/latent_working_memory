@@ -88,7 +88,7 @@ def describe_logits(logits, tokenizer):
 
 def compare_reference(result, logits, reference_dir):
     reference = json.loads((reference_dir / "result.json").read_text())
-    previous = torch.load(reference_dir / "logits.pt", map_location="cpu", weights_only=True)
+    previous = torch.load(reference_dir / "logits.pt", map_location="cpu", weights_only=True) if result["record_logits"] else []
     actual_ids, expected_ids = result["token_ids"], reference["token_ids"]
     divergence = next((index for index, (actual, expected) in enumerate(zip(actual_ids, expected_ids))
                        if actual != expected), None)
@@ -119,6 +119,8 @@ def main():
     parser.add_argument("--mode", choices=MODES, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--reference-dir", type=Path, help="old_B1输出目录；其他mode必填")
+    parser.add_argument("--record-logits", action=argparse.BooleanOptionalAction, default=True,
+                        help="通过顶层hook记录真实生成前两步；关闭时完全不注册hook")
     args = parser.parse_args()
     if os.environ.get("CUDA_VISIBLE_DEVICES") not in {"0", "1"} or int(os.environ.get("WORLD_SIZE", "1")) != 1:
         parser.error("Use one fresh process on physical GPU 0 or 1 per mode")
@@ -141,16 +143,19 @@ def main():
         baseline_plan = json.loads((args.reference_dir / "plan.json").read_text())
         if baseline_plan["mode"] != "old_B1" or baseline_plan["identity"] != identity:
             raise ValueError("Reference must be old_B1 with the same checkpoint, data, samples and compile setting")
+        if baseline_plan["record_logits"] != args.record_logits:
+            raise ValueError("Reference must use the same record-logits setting")
     args.output_dir.mkdir(parents=True, exist_ok=False)
     plan = {
-        "identity": identity, "mode": args.mode,
+        "identity": identity, "mode": args.mode, "record_logits": args.record_logits,
         "source": capture_source(__file__, {"incremental": IncrementalLaCTForCausalLM}),
         "environment": {"cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
                         "torch": str(torch.__version__), "cuda": torch.version.cuda},
         "source_plan": str(args.source_plan),
         "reference_dir": str(args.reference_dir) if args.reference_dir else None,
         "equal_partners": "Three copies of the complete focus prompt",
-        "sequence": "One greedy128 generation only; top-level forward hook records its actual first two steps",
+        "sequence": "One greedy128 generation only; top-level forward hook records its actual first two steps"
+                    if args.record_logits else "One greedy128 generation only; no forward hook or logits artifact",
     }
     write_json(args.output_dir / "plan.json", plan)
     started = time.perf_counter()
@@ -195,7 +200,7 @@ def main():
                       "focus_input_last_tokens": actual_input[0, -8:].cpu().tolist(),
                       "cache": progress})
 
-    handle = model.register_forward_hook(collect, with_kwargs=True)
+    handle = model.register_forward_hook(collect, with_kwargs=True) if args.record_logits else None
     generation_kwargs = {}
     if force_new:
         generation_kwargs["past_key_values"] = PaddedLaCTCache(len(model.model.layers), input_ids.shape[0])
@@ -207,7 +212,8 @@ def main():
                 pad_token_id=pad_id, output_scores=False, **generation_kwargs,
             )
     finally:
-        handle.remove()
+        if handle is not None:
+            handle.remove()
     torch.cuda.synchronize()
     tokens = generated[0, input_ids.shape[1]:].cpu().tolist()
     eos = model.generation_config.eos_token_id
@@ -215,7 +221,7 @@ def main():
     end = next((index + 1 for index, token in enumerate(tokens) if token in eos), len(tokens))
     tokens = tokens[:end]
     text = tokenizer.decode(tokens, skip_special_tokens=True)
-    result = {"mode": args.mode, "focus_id": FOCUS_ID,
+    result = {"mode": args.mode, "focus_id": FOCUS_ID, "record_logits": args.record_logits,
               "reference_dir": str(args.reference_dir) if args.reference_dir else None,
               "token_ids": tokens, "prediction": text,
               "references": samples[0]["references"],
@@ -223,7 +229,8 @@ def main():
               "steps": [{**step, **describe_logits(value, tokenizer)}
                         for step, value in zip(steps, logits, strict=True)],
               "seconds": time.perf_counter() - started}
-    torch.save(logits, args.output_dir / "logits.pt")
+    if args.record_logits:
+        torch.save(logits, args.output_dir / "logits.pt")
     if args.reference_dir is not None:
         result["comparison"] = compare_reference(result, logits, args.reference_dir)
     write_json(args.output_dir / "result.json", result)
