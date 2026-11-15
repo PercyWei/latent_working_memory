@@ -11,6 +11,9 @@ import torch
 from transformers import AutoTokenizer
 
 from evaluate import load_checkpoint
+import incremental.model as incremental_model
+import incremental.padding as incremental_padding
+import incremental.ttt as incremental_ttt
 from incremental.padding import PaddedLaCTCache
 from validate_padding import (
     compare, forward, pad, snapshot, source_record, source_samples, write_json,
@@ -62,6 +65,99 @@ def comparison(actual, reference, layers, atol, rtol):
     }
 
 
+def capture_attention(layer, hidden, ids, mask, padded):
+    """只在单层重放时包装现有算子，保存瞬时比较值并在退出时恢复。"""
+    tensors, layouts, counts = {}, {}, {}
+    hooks, replacements = [], []
+
+    def record(name, value):
+        if isinstance(value, torch.Tensor):
+            layouts[name] = {"shape": list(value.shape), "dtype": str(value.dtype),
+                             "stride": list(value.stride()), "contiguous": value.is_contiguous()}
+            tensors[name] = value.detach().clone()
+        elif isinstance(value, (tuple, list)):
+            for index, item in enumerate(value):
+                record(f"{name}/{index}", item)
+
+    def event(name):
+        index = counts.get(name, 0)
+        counts[name] = index + 1
+        return f"{name}/{index}"
+
+    def module_hook(name):
+        def hook(module, args, kwargs, output):
+            prefix = event(name)
+            record(f"{prefix}/input", args)
+            record(f"{prefix}/output", output)
+        return hook
+
+    def replace(owner, name, label):
+        original = getattr(owner, name)
+
+        def wrapped(*args, **kwargs):
+            prefix = event(label)
+            record(f"{prefix}/input", args)
+            for key, value in kwargs.items():
+                record(f"{prefix}/keyword/{key}", value)
+            output = original(*args, **kwargs)
+            record(f"{prefix}/output", output)
+            return output
+
+        replacements.append((owner, name, original))
+        setattr(owner, name, wrapped)
+
+    try:
+        for name in ("qkv", "rotary", "lr_proj", "ttt_norm", "o_proj"):
+            hooks.append(getattr(layer, name).register_forward_hook(module_hook(name), with_kwargs=True))
+        if layer.attn_qk_norm:
+            for name in ("q_norm", "k_norm"):
+                hooks.append(getattr(layer, name).register_forward_hook(module_hook(name), with_kwargs=True))
+        if layer.use_momentum:
+            hooks.append(layer.momentum_proj.register_forward_hook(module_hook("momentum_proj"), with_kwargs=True))
+        if layer.learnable_ttt_scale:
+            hooks.append(layer.ttt_scale_proj.register_forward_hook(module_hook("ttt_scale_proj"), with_kwargs=True))
+        owner = incremental_padding if padded else incremental_model
+        replace(owner, "flash_attn_varlen_func", "flash_attention")
+        replace(owner, "l2_norm", "l2_norm")
+        for name in ("_ttt_initial_norms", "_ttt_read", "_ttt_commit"):
+            replace(incremental_ttt, name, name)
+        replace(incremental_ttt.TTTState, "forward", "ttt_forward")
+        record("hidden", hidden)
+        if padded:
+            cache = PaddedLaCTCache(1, ids.shape[0])
+            step = cache.prepare_step(ids, mask)
+            output = incremental_padding.attention_forward_padded(layer, hidden, cache.layers[0], step)
+        else:
+            output = incremental_model.attention_forward(layer, hidden, incremental_model.LayerCache())
+        record("final_output", output)
+    finally:
+        for hook in hooks:
+            hook.remove()
+        for owner, name, original in reversed(replacements):
+            setattr(owner, name, original)
+    return tensors, layouts
+
+
+def trace_attention(layer, hidden, ids, mask):
+    baseline, baseline_layout = capture_attention(layer, hidden, ids, mask, False)
+    measured, measured_layout = capture_attention(layer, hidden, ids, mask, True)
+    fields = {}
+    for name in baseline.keys() | measured.keys():
+        if name not in baseline or name not in measured:
+            fields[name] = {"structure": False, "present_old": name in baseline, "present_new": name in measured}
+        else:
+            fields[name] = {"old_layout": baseline_layout[name], "new_layout": measured_layout[name],
+                            **tensor_difference(measured[name], baseline[name])}
+    # 以新路径真实执行顺序寻找首差异，而非按字段名字排序。
+    order = list(measured)
+    return {
+        "purpose": "Replay old and forced-new B1 attention on the exact same normalized hidden tensor",
+        "structure": baseline.keys() == measured.keys(), "execution_order": order,
+        "first_nonexact_field": next((name for name in order if not fields[name].get("exact", False)), None),
+        "fields": fields,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
@@ -69,6 +165,7 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--length", type=int, default=8192)
     parser.add_argument("--teacher-steps", type=int, default=4, help="与原验证的源文本切片预算一致，不在本脚本执行decode")
+    parser.add_argument("--trace-layer", type=int, default=0, help="使用相同归一化hidden重放的层编号")
     parser.add_argument("--numeric-atol", type=float, default=0.03)
     parser.add_argument("--numeric-rtol", type=float, default=0.03)
     args = parser.parse_args()
@@ -87,6 +184,8 @@ def main():
     write_json(args.output_dir / "plan.json", plan)
     started = time.perf_counter()
     model, config = load_checkpoint(args.checkpoint, "incremental")
+    if not 0 <= args.trace_layer < len(model.model.layers):
+        raise ValueError("trace-layer must select an existing model layer")
     tokenizer = AutoTokenizer.from_pretrained(args.checkpoint, local_files_only=True)
     sources, _ = source_samples(args, tokenizer)
     chunk = config.lact_chunk_size
@@ -104,10 +203,23 @@ def main():
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
         for length in (chunk - 1, 2 * chunk - 1):
             ids, mask = pad([rows[0][:length]], pad_id)
-            baseline_output = forward(model, ids, mask)
+            trace_hidden = []
+            trace_block = model.model.layers[args.trace_layer]
+            handle = trace_block.attn_norm.register_forward_hook(
+                lambda module, inputs, output, saved=trace_hidden: saved.append(output.detach().clone())
+            )
+            try:
+                baseline_output = forward(model, ids, mask)
+            finally:
+                handle.remove()
             baseline = snapshot(baseline_output, 0, length, chunk, model)
             equal_baseline = None
-            report = {"focus_tokens": length, "reference": "b1_unpadded", "modes": {}}
+            report = {
+                "focus_tokens": length, "reference": "b1_unpadded", "modes": {},
+                "single_layer_replay": {"layer": args.trace_layer,
+                                        **trace_attention(trace_block.attn, trace_hidden[0], ids, mask)},
+            }
+            del trace_hidden
             for name, sizes, extra, force_new in (
                 ("old_equal_b3", [length] * 3, 0, False),
                 ("forced_new_b1", [length], 0, True),
