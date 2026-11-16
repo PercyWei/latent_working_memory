@@ -1,6 +1,6 @@
 """Local reference mlp TTT kernels with isolated batch state.
 
-Derived from upstream/e2_ttt/ops/e2_ttt_mlp/chunk_momentum.py. The
+Derived from source/e2_ttt/e2_ttt/ops/e2_ttt_mlp/chunk_momentum.py. The
 closed-form update and cache tuple stay native. Norm parameters expand before
 constructing decode targets; momentum tail pruning is per original sample.
 """

@@ -2,51 +2,53 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261116 16:00:57 Asia/Shanghai
+最后修订时间：20261116 22:12:29 Asia/Shanghai
 
-- 官方仓库：<https://github.com/zeyun-zhong/E2-TTT>。
-- 固定 revision：`0d1da370c7e3cea1642ba3af0477b7601849a1be`。
-- 论文：<https://arxiv.org/abs/2608.21308>。
-- 迁入方式：对固定 revision 执行 `git archive HEAD`，解包到 `upstream/`，保留官方模型、flame 与随附评估框架；不迁入 `.git`、模型、数据缓存或运行结果。
-- `upstream/` 的已跟踪文件原样保留，未修改模型、TTT 更新函数、训练框架或评估逻辑；本地批量实现单独位于 `optimized/`。
+## 来源与迁入范围
 
-## 许可证与依赖来源
+- 官方仓库：[zeyun-zhong/E2-TTT](https://github.com/zeyun-zhong/E2-TTT)，revision `0d1da370c7e3cea1642ba3af0477b7601849a1be`；[论文](https://arxiv.org/abs/2608.21308)。
+- 对固定 revision 执行 `git archive HEAD`，将官方模型、flame 和随附评估框架迁入 `source/e2_ttt/`。其中已跟踪源码原样保留，本地适配与优化位于目录外。
+- 主项目采用 [MIT](source/e2_ttt/LICENSE)；flame 和 harness 分别保留 [training/LICENSE](source/e2_ttt/training/LICENSE)、[LICENSE.md](source/e2_ttt/lm-evaluation-harness/LICENSE.md) 及来源声明。
 
-主项目为 MIT，见 [upstream/LICENSE](upstream/LICENSE)。随附 flame 保留 [training/LICENSE](upstream/training/LICENSE)，lm-evaluation-harness 保留 [LICENSE.md](upstream/lm-evaluation-harness/LICENSE.md) 与其他来源声明。
+随附 harness 基于 `c9772b90a8ee95b0df1ba76651443a0534c96aad`，包含四处作者修改，本地沿用这份上游实现。修改清单见 [Vendored lm-evaluation-harness](source/e2_ttt/training/README.md)。
 
-官方记录的 harness revision 为 `c9772b90a8ee95b0df1ba76651443a0534c96aad`，包含四处作者修改，见 [training/README.md](upstream/training/README.md) 的 “Vendored lm-evaluation-harness”。这些修改属于官方实现。
+## 代码职责
 
-## 本地代码边界
-
-| 文件 | 职责 |
+| 文件 | 本地职责 |
 |---|---|
-| `eval.sh`、`scripts/evaluate_parallel.py` | 按全局样本 ID 分配单卡／双卡任务；固定评估协议与 GPU／batch 设置分开记录，RULER 支持按长度设置 batch，产物按共同 output-id 与 benchmark 子目录组织 |
-| `scripts/evaluate.py` | 每个 worker 加载一次 checkpoint 后依次处理多个 benchmark，分别保存原始结果和缓存；保留随附 evaluator 和 CachingLM |
-| `scripts/evaluation_state.py` | 固定数据路径与评估协议，收集历史原始逐题记录，复制原生生成缓存并按原始样本顺序汇总 |
-| `scripts/batch_harness.py` | 保留生成参数及 BOS 分组，复用原 HFLM 的长度降序排列、相邻组批、左 padding、生成、停止与结果还原；尾批使用实际数量 |
-| `optimized/` | 本地 MLP／SwiGLU 批量推理，统一处理单样本、等长和混长输入，保持各样本的 attention 与 TTT 状态独立 |
-| `scripts/local_tasks.py` | 固定本地数据接入及原始行 ID 选择，保留原 prompt、生成参数及计分；RULER 拼接一次 answer_prefix 并严格检查 token 预算 |
-| `scripts/train_340m_gpu1.sh` | 适配物理 GPU 1，保持官方全局 batch、训练步数及其余参数，调用原 training/train.sh |
-| `requirements-eval.txt` | 固定独立评估环境依赖 |
+| `optimized/model.py`、`optimized/padding.py` | 接入 MLP／SwiGLU 批量推理，处理有效位置、变长 attention 和逐样本缓存 |
+| `optimized/mlp.py`、`optimized/swiglu.py`、`optimized/tail.py` | 基于 `source/e2_ttt/e2_ttt/ops/e2_ttt_{mlp,swiglu}/chunk_momentum.py` 保留 closed-form 更新、prefill 与缓存解码，适配归一化参数和逐样本尾部裁剪 |
+| `eval.sh`、`scripts/evaluate_parallel.py`、`scripts/batching.py` | 单卡／双卡调度、样本分配和按 RULER 长度设置 batch |
+| `scripts/evaluate.py` | 每个 worker 加载一次模型，依次执行分配到的多个 benchmark |
+| `scripts/batch_harness.py`、`scripts/local_tasks.py` | harness 组批、本地数据与全局样本 ID 接入 |
+| `scripts/evaluation_state.py` | 固定评估协议、续评、原生缓存合并、来源记录与结果汇总 |
+| `scripts/train_340m_gpu1.sh`、`requirements-eval.txt` | 单卡备用训练入口与独立评估环境依赖 |
 
-SQuAD／SWDE 沿用 HFLM 的 2048 总预算、48 输出预算和左截断；RULER 包含 128 输出预算且不截断。Bootstrap 为 0，仅省略标准误估计。原 task、harness 及模型源码不变，这些接入文件不构成统一训练框架。
+## 推理实现改进
 
-`original` 为默认模式，使用迁入模型的原始推理路径，仅允许 batch size 1；`optimized` 对加载后的同一模型实例应用本地实现。两种模式共用 checkpoint、prompt、精度、greedy 生成预算及原 task 评分，使用不同输出目录。运行记录分别保存本地 Git commit、未提交状态、模式与实现路径；续评保留首次计划来源，并记录当次执行来源。
+上游已实现 closed-form Momentum 和局部 attention。本地改动集中于批量推理接入，保留更新公式、chunk 边界、更新前读出、门控和归一化顺序。
 
-续评按全局样本 ID 复用已完成记录，仅重新分配未完成样本，允许更换 GPU 数量、顺序和 batch size。`--batch-size-by-length` 只覆盖 RULER 对应长度，其他长度及 SQuAD／SWDE 使用 `--batch-size`；覆盖值与有效值保存在当次执行记录中。尚未写出评分的生成结果通过原生 SQLite 缓存恢复，缓存 key 和响应原样保留；每次启动使用独立 worker 目录和数据库。输出位于 `<output-root>/eval/<output-id>/<benchmark>/`；父目录保留总协议和启动记录，各 benchmark 独立保存计划、记录、缓存与汇总。续评须显式指定原 ID，也可只选择原计划内的部分 benchmark。数据路径固定在 `scripts/evaluation_state.py`，具体目录见 README。
+- **实例适配**：`original`（默认）使用上游 batch size 1 路径；`optimized` 替换当前模型实例的 backbone 类并标记层类型，保留参数与 `state_dict` 键。支持范围为公开 MLP／SwiGLU checkpoint 的 closed-form Momentum、无 short convolution、非 fused TTT 配置。
+- **混长输入**：单样本、等长及左 padding 混长输入使用同一状态路径。投影、FFN 和变长 attention 批量执行，位置计算沿用固定 FLA 版本的原生 RoPE 规则。
+- **状态隔离**：TTT 按样本执行，分别保存原生状态 tuple、有效 KV 和真实长度；padding 位置跳过 attention 与 TTT 读写。
+- **归一化维度**：本地缓存解码函数先将归一化参数扩展至 `batch × heads`，再构造重建 target；归一化、梯度和时间权重等公共计算继续调用上游函数。
+- **Momentum 尾部裁剪**：按每个样本自身的 heads 确定裁剪范围，保留上游 batch size 1 的裁剪与累加语义。
 
-## 本地批量实现
+## 评估流程改进
 
-| 本地文件 | 上游来源与范围 |
+- **本地数据接入**：RULER 读取 JSONL，`input + answer_prefix` 拼接一次；SQuAD／SWDE 读取 validation Parquet。保留原 task 评分、HFLM 生成和文本处理，生成预算见下表。
+- **批量生成接入**：按生成参数和 BOS 状态分组，复用 HFLM 的长度排序、相邻组批、左 padding、停止及结果还原。尾批保留实际数量，RULER 可按评估长度设置 batch 上限。
+- **模型复用**：每张可见 GPU 启动一个 worker，一次加载模型后依次处理多个 benchmark。
+- **按样本续评**：按全局 ID 收集历史记录、重新分配未完成样本。支持调整 GPU 数量、顺序和 batch，也可选择原计划内的 benchmark 子集。
+- **原生生成缓存**：各 benchmark 使用原生 `CachingLM` SQLite 缓存。每次启动建立独立 worker 目录和数据库，复制历史缓存的原生 key／响应，用于恢复尚未保存评分的生成结果。
+- **协议与来源**：固定模型、数据、生成／评分设置和软件版本，逐轮记录 GPU 与 batch。目录锁和存活 worker 检查协调启动，记录保留 Git commit、未提交状态、模式及实现路径。
+- **产物组织**：结果保存到 `<output-root>/eval/<output-id>/<benchmark>/`，按原始样本顺序合并逐题记录。各 benchmark 独立汇总，父目录记录整体完成状态。
+
+| 评估 | 沿用的生成与文本处理 |
 |---|---|
-| `optimized/mlp.py` | 从 `upstream/e2_ttt/ops/e2_ttt_mlp/chunk_momentum.py` 复制 closed-form chunk 更新、prefill 和缓存解码函数 |
-| `optimized/swiglu.py` | 从 `upstream/e2_ttt/ops/e2_ttt_swiglu/chunk_momentum.py` 复制对应的三个函数 |
-| `optimized/tail.py` | 提取上述函数的 momentum 尾部裁剪与累加；按单一样本的 heads 确定裁剪范围，保留原 batch size 1 的规则 |
-| `optimized/model.py` | 两种模型的批量 backbone 接入；所有 batch 统一使用真实位置和逐样本状态调度 |
-| `optimized/padding.py` | 按真实位置计算变长 attention；逐样本保存原 TTT tuple、有效 KV 和真实长度，复用原读出与更新函数 |
+| RULER | greedy 最多生成 128 tokens；检查总长度预算，保留完整输入 |
+| SQuAD／SWDE | prompt 和 target 执行 `.strip()`，遇换行停止；总预算 2048、生成预算 48，prompt 按原规则左截断至 2000 tokens |
 
-归一化、梯度与时间权重等公共函数继续导入上游实现。缓存解码先将归一化参数扩展至 `batch × heads` 再构造 target；其余更新公式、chunk 边界、更新前读出、门控与归一化顺序保持原规则。当前范围限定为公开 MLP／SwiGLU 的 closed-form Momentum、无 short convolution、非 fused TTT 配置；其他配置明确拒绝。
+Bootstrap 设为 `0`，省略标准误估计；任务评分沿用原 evaluator。
 
-适配只替换当前模型实例的 backbone 类，并标记层的 MLP／SwiGLU 类型；不修改模型注册表、原层类或全局函数，不新增、删除或重排参数，`state_dict` 键保持不变。各样本保存独立 TTT tuple、有效 KV 和真实长度；单样本及等长输入也使用同一状态路径。
-
-正式评估按长度排序后相邻组批，生成、停止、截断、评分与 CachingLM 保留原行为。验证范围见[复现状态](../20261110_ttt_reproduction_status.md)，运行方式见 [README](README.md)。
+具体命令、参数和产物清单见 [README](README.md)，验证范围、数值差异与性能记录见[复现状态](../20261110_ttt_reproduction_status.md)。备用训练入口调用原 `source/e2_ttt/training/train.sh`，使用物理 GPU 1，保留官方 340M recipe 的全局 batch 256 与训练步数；训练设置见[官方训练说明](source/e2_ttt/training/README.md)。

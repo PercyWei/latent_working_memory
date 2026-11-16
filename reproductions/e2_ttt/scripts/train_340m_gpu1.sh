@@ -6,7 +6,7 @@ MODEL_CONFIG=${1:?usage: train_340m_gpu1.sh <model-config.json> <dump-folder>}
 DUMP=${2:?usage: train_340m_gpu1.sh <model-config.json> <dump-folder>}
 MODEL_CONFIG=$(python -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$MODEL_CONFIG")
 DUMP=$(python -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$DUMP")
-TRAINING_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../upstream/training" && pwd)
+TRAINING_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../source/e2_ttt/training" && pwd)
 cd "$TRAINING_DIR"
 
 export CUDA_VISIBLE_DEVICES=1

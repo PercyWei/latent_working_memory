@@ -2,7 +2,7 @@
 
 创建时间：20261109 10:58:35 Asia/Shanghai
 
-最后修订时间：20261114 11:55:09 Asia/Shanghai
+最后修订时间：20261116 22:12:29 Asia/Shanghai
 
 ## 配置原则与实际版本
 
@@ -30,9 +30,9 @@
 
 版本依据与统一范围：
 
-- LaCT 的 [原始依赖](lact/upstream/lact_llm/requirement.txt) 要求 PyTorch 2.6.x、FlashAttention 2.7.4.post1，因此保留 Torch 2.6.0 cu124／Triton 3.2.0；原仓库未固定的 FLA、Transformers 分别与 E²-TTT、In-Place TTT 统一。
-- E²-TTT 按 [environment.yml](e2_ttt/upstream/environment.yml) 保留 Python 3.12、Torch 2.8.0、FlashAttention 2.8.3、FLA 0.4.1、Transformers 4.57.1、NumPy 2.3.3、datasets 4.2.0 等明确版本。
-- In-Place TTT 按 [原安装说明](in_place_ttt/upstream/README.md#environment-setup) 保留 Python 3.11、Torch 2.8.0 cu128、FlashAttention 2.8.3、Transformers 4.57.3。原仓库未固定 OpenCompass，本轮选择 0.5.5，并安装其要求的 mmengine-lite 0.11.0rc3。
+- LaCT 的 [原始依赖](lact/source/lact/lact_llm/requirement.txt) 要求 PyTorch 2.6.x、FlashAttention 2.7.4.post1，因此保留 Torch 2.6.0 cu124／Triton 3.2.0；原仓库未固定的 FLA、Transformers 分别与 E²-TTT、In-Place TTT 统一。
+- E²-TTT 按 [environment.yml](e2_ttt/source/e2_ttt/environment.yml) 保留 Python 3.12、Torch 2.8.0、FlashAttention 2.8.3、FLA 0.4.1、Transformers 4.57.1、NumPy 2.3.3、datasets 4.2.0 等明确版本。
+- In-Place TTT 按 [原安装说明](in_place_ttt/source/in_place_ttt/README.md#environment-setup) 保留 Python 3.11、Torch 2.8.0 cu128、FlashAttention 2.8.3、Transformers 4.57.3。原仓库未固定 OpenCompass，本轮选择 0.5.5，并安装其要求的 mmengine-lite 0.11.0rc3。
 - OpenCompass 0.5.5 要求 NumPy <2、datasets <4，因此 In-Place TTT 使用 NumPy 1.26.4／datasets 3.6.0，不能与 E²-TTT 的两个固定版本统一。
 - 三个评估环境统一 einops 0.8.1、huggingface-hub 0.36.2、tokenizers 0.22.2、safetensors 0.8.0、setuptools 80.9.0；E²-TTT 和 In-Place TTT 统一 Accelerate 1.10.1、SciPy 1.16.3。其余显式依赖见各方法 `requirements-eval.txt`。
 
@@ -60,3 +60,5 @@ bash reproductions/setup_eval_env.sh in_place_ttt
 ```
 
 环境目录为 `~/rivermind-data/envs/ttt-lact/`、`ttt-e2_ttt/`、`ttt-in_place_ttt/`。运行评估前分别激活对应目录下的 `bin/activate`。安装器遵守各方法 `requirements-eval.txt`，只在 E²-TTT 环境安装其本地模型包和随附 harness。
+
+E²-TTT 的模型包和 harness 使用可编辑安装，路径分别为 `e2_ttt/source/e2_ttt/` 和其 `lm-evaluation-harness/`。源码目录变更后，在该环境的评估停止时重新执行 `bash reproductions/setup_eval_env.sh e2_ttt`，更新安装路径。

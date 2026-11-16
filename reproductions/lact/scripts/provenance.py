@@ -7,9 +7,9 @@ import subprocess
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 UPSTREAM_REVISION = "a648340f9798f173227a0626fde66a6e9b65879a"
-UPSTREAM_MODEL = "reproductions/lact/upstream/lact_llm/lact_model/modeling_lact.py"
-UPSTREAM_LAYER = "reproductions/lact/upstream/lact_llm/lact_model/layer_lact_swiglu.py"
-UPSTREAM_TTT = "reproductions/lact/upstream/lact_llm/lact_model/ttt_operation.py"
+UPSTREAM_MODEL = "reproductions/lact/source/lact/lact_llm/lact_model/modeling_lact.py"
+UPSTREAM_LAYER = "reproductions/lact/source/lact/lact_llm/lact_model/layer_lact_swiglu.py"
+UPSTREAM_TTT = "reproductions/lact/source/lact/lact_llm/lact_model/ttt_operation.py"
 OPTIMIZED_MODEL = "reproductions/lact/optimized/model.py"
 OPTIMIZED_TTT = "reproductions/lact/optimized/ttt.py"
 OPTIMIZED_PADDING = "reproductions/lact/optimized/padding.py"

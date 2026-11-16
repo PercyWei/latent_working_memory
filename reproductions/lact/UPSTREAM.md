@@ -2,47 +2,61 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261116 18:28:59 Asia/Shanghai
+最后修订时间：20261116 22:12:29 Asia/Shanghai
 
-## 代码职责
-
-| 层次 | 本地位置 | 职责 |
-|---|---|---|
-| 迁入源码（source） | `upstream/`、`upstream_flame/` | 保存固定 revision 的 LaCT 与 flame；下文逐项说明迁入范围和必要接入差异 |
-| 本地接入（adapters） | `scripts/`、`eval.sh`、`configs/` | 加载 checkpoint、准备运行环境、选择推理路径、评估、验证与记录结果 |
-| 本地优化（optimization） | `optimized/` | 实现 sliding-window KV 与 TTT 状态缓存，复用历史计算 |
-
-`original` 指迁入模型经本地评估接入运行的原始推理路径，不表示依赖、公开 checkpoint、数据构造和评估入口均与论文实验环境完全相同。`optimized` 使用本地缓存实现；本次缓存优化没有修改 `upstream/` 中的 LaCT 模型、配置或 TTT 更新函数，也没有改动 flame trainer。flame 注册所需的接入文件是下文单列的既有差异。
-
-新运行将固定上游 revision 与本地 commit、Git 改动状态、实际入口和实现路径分别记录；续评保留首次计划来源，并在每次执行中记录当前来源。字段含义及输出位置见 [来源记录与输出](README.md#来源记录与输出)。
-
-## 来源
+## 来源与迁入范围
 
 | 组件 | 官方来源 | 固定 revision | 本地目录 |
 |---|---|---|---|
-| LaCT | <https://github.com/a1600012888/LaCT> | `a648340f9798f173227a0626fde66a6e9b65879a` | `upstream/` |
-| flame | <https://github.com/fla-org/flame> | `24dea9133e2166da89a563afbdcefb7c55615646` | `upstream_flame/` |
+| LaCT | [a1600012888/LaCT](https://github.com/a1600012888/LaCT) | `a648340f9798f173227a0626fde66a6e9b65879a` | `source/lact/` |
+| flame | [fla-org/flame](https://github.com/fla-org/flame) | `24dea9133e2166da89a563afbdcefb7c55615646` | `source/flame/` |
 
-LaCT 来源由作者项目页 <https://tianyuanzhang.com/projects/ttt-done-right/> 的 Code 链接确认。论文版本为 [arXiv:2505.23884v1](https://arxiv.org/abs/2505.23884v1)。两份仓库的 MIT LICENSE 分别保存在各自根目录。
+LaCT 对应论文 [Test-Time Training Done Right v1](https://arxiv.org/abs/2505.23884v1)，官方来源由[作者项目页](https://tianyuanzhang.com/projects/ttt-done-right/)的 Code 链接确认。两份仓库的 MIT LICENSE 保存在各自根目录。
 
-LaCT 迁入范围为顶层 `README.md`、`LICENSE`、完整 `lact_llm/`、完整 `minimal_implementations/`。视频和视图合成不属于本次语言模型复现范围，未迁入；未迁入模型、样例图片或 `.git`。flame 保存该 revision 的完整 tracked 文件，除根 `.gitignore` 外；省略 `.gitignore` 是为了防止上游的 `*.sh` 等规则漏掉本仓库需要管理的源码。flame 的 `.gitmodules` 仅保留为上游元信息，当前快照没有引入额外 git submodule 或模型资源。
+迁入 LaCT 的语言模型相关内容：顶层 `README.md`、`LICENSE`、完整 `lact_llm/` 和 `minimal_implementations/`。flame 保存固定 revision 的 tracked 文件；根 `.gitignore` 由本仓库统一管理，`.gitmodules` 保留上游元信息。
 
-## 接入改动
+## 代码职责
 
-- LaCT 模型、配置和更新函数原样保存在 `upstream/`。flame 的 `custom_models/__init__.py` 通过 Transformers 注册 `lact_model`；本地训练入口调用原 trainer，不改训练逻辑。
-- `eval.sh` 经 `../evaluate_multi_gpu.py` 调度单卡／双卡，`scripts/evaluate.py` 严格加载 checkpoint。`--inference-mode original|optimized` 默认 `original`，保留官方完整前缀推理且只支持 B1；`optimized` 使用本地缓存实现。产物位于 `<output-root>/eval/<output-id>/ruler/`，新运行默认使用 checkpoint 目录名与上海分钟时间生成 ID，续评须显式指定原 ID。
-- `optimized/` 统一处理单样本、等长和混长 batch，保存每条样本的真实位置、窗口 KV、fast weights、Momentum、范数与待写 chunk；所有输入均复用同一状态路径。沿用原始 TTT 读出与更新公式，满尾段在下一真实 token 到来时提交；padding 不计入真实进度。投影、FFN 和 attention 批量执行；TTT 沿 batch 与 heads 维合并独立运算，按各样本真实 chunk 进度提交，保留原始 dtype 与 Momentum／Muon／PreNorm／PostNorm 公式。
-- padding 在入口解析成真实长度及整数索引，各层使用切片、整数 gather／scatter；HF 内部追加的全有效 decode mask 仅在对象及修改计数均匹配时免解析，外部新 mask 或原地修改仍按实际内容处理。固定 pending 缓冲避免逐 token 保留大量小张量；满 chunk 仍等下一真实 token 到来才提交。
-- 同一 RULER 长度内按实际 token 数稳定降序，相邻组批并左 padding 到批内最长输入。`--batch-size` 设置每卡上限，`--batch-size-by-length` 覆盖指定长度；输入、128-token 生成预算与评分不变，输出按物理宽度及各自 EOS 截取。
-- `scripts/scheduling.py` 将固定评估协议与 GPU／batch 设置分开记录；续评按全局样本 ID 只分配未完成输入。`scripts/records.py` 和 `scripts/merge_evaluation.py` 读取原始预测、核对覆盖并重新计分；每次执行保留代码来源和设置。RULER 路径固定在 `scripts/records.py`，具体目录见 README。
+| 位置 | 职责 |
+|---|---|
+| `source/lact/` | 官方模型、配置、TTT 计算函数和最小示例；`original` 调用此实现 |
+| `source/flame/`、`configs/760m_muon_paper_single_gpu.toml` | 原训练框架、Transformers 注册接入和单卡训练配置 |
+| `optimized/` | 本地增量缓存、混长输入调度及独立 TTT 状态的批量计算 |
+| `eval.sh`、`../evaluate_multi_gpu.py`、`../evaluation_runtime.py`、`scripts/` | checkpoint 加载、组批、多卡调度、进度与进程管理、续评、计分和结果比较 |
 
-验证范围和浮点数值限制见[复现状态](../20261110_ttt_reproduction_status.md)，运行方式见 [README](README.md)。
+训练侧接入集中于 `source/flame/custom_models/__init__.py` 导入并注册官方 `lact_model`，以及本地单卡配置和梯度累积。备用入口 [train_760m_muon.sh](scripts/train_760m_muon.sh) 调用原 `flame.train`；训练环境和使用方式见 [README](README.md#备用训练入口)。
+
+## 推理实现改进
+
+| 路径 | 行为 |
+|---|---|
+| `original`（默认） | 使用官方完整前缀推理，每个生成步骤重新计算历史 chunk；每卡 B1 |
+| `optimized` | 缓存窗口 KV、fast weights 和待提交 chunk，复用历史计算；单样本、等长和混长输入共用状态路径 |
+
+`optimized/` 面向公开 Momentum／Muon checkpoint 的非 fused TTT 推理，改进包括：
+
+- **真实进度与位置。** 左 padding 从 attention 的有效序列和 TTT 写入中排除；每条样本按真实 token 数维护 RoPE 位置、窗口 KV 与更新进度。
+- **批量 TTT。** 独立权重沿 batch × heads 合并读出，提交按各样本的 chunk 进度及状态 dtype 分组；沿用原始 Momentum／Muon、PreNorm／PostNorm 的计算公式与精度。
+- **减少同步。** mask 在入口解析为长度和整数索引，各层使用切片、整数 gather／scatter。HF 标准生成追加的全有效 decode mask 通过张量对象和修改计数确认后复用进度；外部 mask 按实际内容解析。
+- **固定待提交缓冲。** 缓冲复用替代逐 token 的小张量列表，保持原先读后写的边界。处理 $n>0$ 个真实 token 后，提交次数为 $\lfloor(n-1)/C\rfloor$，其中 $C$ 为 chunk 大小，恰好填满的末 chunk 在下一真实 token 到来时提交。
+
+两种路径均通过显式矩阵公式在 `torch.no_grad()` 下执行 TTT 更新。性能、数值差异与验证范围统一见[复现状态](../20261110_ttt_reproduction_status.md)。
+
+## 评估流程改进
+
+- **统一组批。** 同一 RULER 长度内按真实 token 数稳定降序，相邻组批，左 padding 到批内最长输入；可按长度分别设置每卡 batch 上限。
+- **保留评估协议。** 严格加载完整 checkpoint；输入为 `input + answer_prefix`，greedy 最多生成 128 tokens，按物理输入宽度与各自 EOS 截取，沿用 RULER 原生评分。数据路径固定在 `scripts/records.py`。
+- **多卡与续评。** 每卡评估互斥样本，按全局样本 ID 收集历史原始预测、分配未完成输入并核对完整覆盖；固定模型和评估协议，GPU 数量、顺序及 batch 设置可按轮调整。运行目录锁与存活 worker 检查协调并发启动。
+- **来源与汇总。** 分别记录上游 revision、本地 commit、Git 改动状态、实际实现路径及每轮执行设置，保留历史来源的组批信息；合并时读取原始预测重新计分。
+- **结果展示。** [compare_results.py](scripts/compare_results.py) 为公开两头 Momentum／RoPE／PreNorm 760M 的完整六任务、四长度 RULER 结果生成离线论文对比，包括分组均值、分组对比和逐任务图表。
+
+运行参数、输出命名与目录结构见 [README](README.md#环境与运行命令)。
 
 ## 公开语言模型权重
 
-作者在[官方发布回复](https://github.com/a1600012888/LaCT/issues/2#issuecomment-3282879455)中提供 [YunjinZhang/lact_llm](https://huggingface.co/YunjinZhang/lact_llm/tree/main)，说明按论文设置重训了 760M 模型；不代表原论文指标对应的同一次训练产物。
+作者在[官方发布回复](https://github.com/a1600012888/LaCT/issues/2#issuecomment-3282879455)中提供 [YunjinZhang/lact_llm](https://huggingface.co/YunjinZhang/lact_llm/tree/main)。这些 760M 模型按论文设置重新训练，与论文表格来自不同训练运行。
 
-20261109 仅读取三个 safetensors 文件的头部元数据，确认配置与实际权重的 fast-weight heads 一致，目录名则不一致：
+20261109 读取三个 safetensors 头部元数据，确认实际权重与配置的 fast-weight heads 一致。目录保留发布原名，加载以实际配置和权重形状为准：
 
 | 子目录 | `config.num_lact_heads` | 第 0 层 `attn.w1` | 第 0 层 `attn.w0.w_left` |
 |---|---:|---|---|
@@ -50,14 +64,8 @@ LaCT 迁入范围为顶层 `README.md`、`LICENSE`、完整 `lact_llm/`、完整
 | `lact-muon-nope-postnorm-nheads2-chunk2048-760m` | 4 | `[4,384,384]` | `[4,384,32]` |
 | `lact-muon-nope-prenorm-nheads2-chunk2048-760m` | 4 | `[4,384,384]` | `[4,384,32]` |
 
-评估按实际 checkpoint 配置构造并严格加载完整 state dict，不通过改 head 数、忽略 shape mismatch 或随机初始化使模型继续运行。读取元数据不是 GPU 模型加载或推理验证。
+### 与论文版本的已知差异
 
-官方 `prepare_inputs_for_generation` 与 `forward` 均禁用 cache，TTT 层每次根据完整前缀重新计算 chunk 状态；该行为仅对应 `original` 模式。原更新函数使用负内积梯度的显式矩阵运算，两种推理模式均在 `torch.no_grad()` 下执行记忆更新。`original` 的耗时不代表增量解码性能；`optimized` 的数值一致性、速度和支持范围单独记录。
+论文 Appendix 的 Muon 描述采用五轮相同的 `(a,b,c)=(3.4445,-4.7750,2.0315)`；迁入官方 [ttt_operation.py](source/lact/lact_llm/lact_model/ttt_operation.py) 的 `zeropower_via_newtonschulz5` 采用五组逐轮变化的系数，并注明参考后续实现。当前 Muon 评估沿用该固定源码；纯 Momentum 分支使用自身更新规则。
 
-## 与论文版本的已知差异
-
-论文 Appendix 的 Muon 描述使用五轮相同的 `(a,b,c)=(3.4445,-4.7750,2.0315)`。当前官方 `ttt_operation.py` 的 `zeropower_via_newtonschulz5` 使用五组不同系数，并说明参考了后续实现。当前源码 revision 没有在官方文档中标为论文训练的精确 revision。
-
-因此，本次先保留官方现状；不能将未来使用该快照训练的结果无条件称为精确重放论文 v1 的 Muon 设置。需进一步定位作者实验代码 revision 或明确记录差异。Momentum 分支不受该 Muon 系数差异影响。
-
-外部环境仍需解析 FLA、Transformers、torchtitan 的配套版本。当前保存的 flame revision 是本次接入的固定来源，不代表原论文使用的框架 revision 已经确认。
+这里记录的是本次迁入的固定快照；论文训练使用的精确 LaCT／flame revision 待确认。配套依赖版本见[评估环境](../20261109_environment_setup.md)。

@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261116 21:06:35 Asia/Shanghai
+最后修订时间：20261116 22:12:29 Asia/Shanghai
 
 ## 评估目标与数据
 
@@ -75,7 +75,7 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 - 输入为 `input + answer_prefix`，greedy 生成最多 64 tokens，保留 EOS；输入加生成预算不得超过所选长度，不截断。评分沿用原 OpenCompass evaluator，长度分数为 13 项任务得分的等权平均。
 - 单卡和多卡均经同一启动器调度，每卡一个进程，不提供 batch 参数。同一评估使用独占运行目录锁；已有评估或历史 worker 仍存活时拒绝重复启动。
 
-源码与优化适用范围见 [UPSTREAM.md](UPSTREAM.md) 及[复现状态](../20261110_ttt_reproduction_status.md)，训练与 checkpoint 转换见[官方说明](upstream/README.md)。
+源码与优化适用范围见 [UPSTREAM.md](UPSTREAM.md) 及[复现状态](../20261110_ttt_reproduction_status.md)，训练与 checkpoint 转换见[官方说明](source/in_place_ttt/README.md)。
 
 ## 来源记录与输出
 

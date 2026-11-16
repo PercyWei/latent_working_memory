@@ -11,6 +11,6 @@ case ${CUDA_VISIBLE_DEVICES-0} in
     ;;
 esac
 export TOKENIZERS_PARALLELISM=false
-export PYTHONPATH="$method_dir:$method_dir/upstream/lact_llm:$project_root/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$method_dir:$method_dir/source/lact/lact_llm:$project_root/src${PYTHONPATH:+:$PYTHONPATH}"
 cd "$project_root"
 exec python -u "$project_root/reproductions/evaluate_multi_gpu.py" lact "$@"

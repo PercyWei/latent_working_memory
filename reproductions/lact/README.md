@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261116 18:28:59 Asia/Shanghai
+最后修订时间：20261116 22:12:29 Asia/Shanghai
 
 本目录使用 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现和作者公开 checkpoint。Momentum 760M 已于 20261110 完成下表全部 12,000 条 RULER 样本的评估，结果查看方式见[查看结果](#查看结果)。
 
@@ -109,4 +109,4 @@ uv run reproductions/lact/scripts/compare_results.py \
 
 ## 备用训练入口
 
-本轮使用公开权重进行模型评估。备用训练入口为 [train_760m_muon.sh](scripts/train_760m_muon.sh)，训练环境与数据按[官方说明](upstream/README.md)准备；该入口尚未运行验证，设置及源码差异见 [UPSTREAM.md](UPSTREAM.md)。
+本轮使用公开权重进行模型评估。备用训练入口为 [train_760m_muon.sh](scripts/train_760m_muon.sh)，训练环境与数据按[官方说明](source/lact/README.md)准备；该入口尚未运行验证，设置及源码差异见 [UPSTREAM.md](UPSTREAM.md)。

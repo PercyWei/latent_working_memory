@@ -7,7 +7,7 @@ import subprocess
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 UPSTREAM_REVISION = "be2324829b0e91c8fd10a74d4b43714fde6676e1"
-UPSTREAM_MODEL = "reproductions/in_place_ttt/upstream/inference_model/hf_qwen3/modeling_qwen3.py"
+UPSTREAM_MODEL = "reproductions/in_place_ttt/source/in_place_ttt/inference_model/hf_qwen3/modeling_qwen3.py"
 OPTIMIZED_MODEL = "reproductions/in_place_ttt/optimized/model.py"
 RUNTIME = "reproductions/in_place_ttt/scripts/runtime.py"
 

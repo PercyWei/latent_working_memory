@@ -215,8 +215,8 @@ def execute_attempt(args, protocol, source):
             logs.append(log)
             environment = {**os.environ, "CUDA_VISIBLE_DEVICES": gpu, "WORLD_SIZE": "1",
                            "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "TOKENIZERS_PARALLELISM": "false"}
-            environment["PYTHONPATH"] = ":".join((str(METHOD_ROOT), str(METHOD_ROOT / "upstream"),
-                                                str(METHOD_ROOT / "upstream/lm-evaluation-harness"),
+            environment["PYTHONPATH"] = ":".join((str(METHOD_ROOT), str(METHOD_ROOT / "source/e2_ttt"),
+                                                str(METHOD_ROOT / "source/e2_ttt/lm-evaluation-harness"),
                                                 os.environ.get("PYTHONPATH", "")))
             process = subprocess.Popen(command, cwd=PROJECT_ROOT, env=environment,
                                        stdout=log, stderr=subprocess.STDOUT, start_new_session=True)

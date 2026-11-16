@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261116 16:00:57 Asia/Shanghai
+最后修订时间：20261116 22:12:29 Asia/Shanghai
 
 本目录使用 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308) 的官方实现和作者公开 checkpoint。公开权重加载、生成和计分检查已完成，尚未完成本轮计划的完整评估。
 
@@ -97,4 +97,4 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 
 ## 备用训练入口
 
-本轮使用公开权重进行模型评估。训练设置与备用入口见 [UPSTREAM.md](UPSTREAM.md) 和[官方训练说明](upstream/training/README.md)。
+本轮使用公开权重进行模型评估。训练设置与备用入口见 [UPSTREAM.md](UPSTREAM.md) 和[官方训练说明](source/e2_ttt/training/README.md)。

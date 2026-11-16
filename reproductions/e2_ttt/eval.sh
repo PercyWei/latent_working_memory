@@ -14,6 +14,6 @@ method_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd "$method_dir/../.." && pwd)"
 export CUDA_VISIBLE_DEVICES="$eval_gpu"
 export TOKENIZERS_PARALLELISM=false
-export PYTHONPATH="$method_dir:$method_dir/upstream:$method_dir/upstream/lm-evaluation-harness${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$method_dir:$method_dir/source/e2_ttt:$method_dir/source/e2_ttt/lm-evaluation-harness${PYTHONPATH:+:$PYTHONPATH}"
 cd "$project_root"
 exec python -u "$method_dir/scripts/evaluate_parallel.py" "$@"

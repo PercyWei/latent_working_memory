@@ -15,8 +15,8 @@ case ${CUDA_VISIBLE_DEVICES-0} in
     exit 2
     ;;
 esac
-export PYTHONPATH="$method_dir/upstream/lact_llm:$method_dir/upstream_flame${PYTHONPATH:+:$PYTHONPATH}"
-cd "$method_dir/upstream_flame"
+export PYTHONPATH="$method_dir/source/lact/lact_llm:$method_dir/source/flame${PYTHONPATH:+:$PYTHONPATH}"
+cd "$method_dir/source/flame"
 
 exec torchrun --standalone --nproc_per_node=1 -m flame.train \
   --job.config_file "$method_dir/configs/760m_muon_paper_single_gpu.toml" \

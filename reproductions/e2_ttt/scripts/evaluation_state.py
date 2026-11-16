@@ -43,7 +43,7 @@ def source_record(entrypoint, inference_mode):
             "entrypoint": str(Path(entrypoint).resolve().relative_to(PROJECT_ROOT)),
             "inference_mode": inference_mode,
             "implementation_path": "reproductions/e2_ttt/" + (
-                "optimized" if inference_mode == "optimized" else "upstream/e2_ttt")}
+                "optimized" if inference_mode == "optimized" else "source/e2_ttt/e2_ttt")}
 
 
 def runtime_versions():

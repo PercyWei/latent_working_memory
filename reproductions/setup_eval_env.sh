@@ -37,8 +37,8 @@ fi
 
 install_args=(-r "$requirements_file")
 if [[ $method == e2_ttt ]]; then
-  install_args+=(-e "$project_root/reproductions/e2_ttt/upstream"
-                -e "$project_root/reproductions/e2_ttt/upstream/lm-evaluation-harness")
+  install_args+=(-e "$project_root/reproductions/e2_ttt/source/e2_ttt"
+                -e "$project_root/reproductions/e2_ttt/source/e2_ttt/lm-evaluation-harness")
 fi
 uv --no-config pip install --python "$environment_dir/bin/python" \
   --index-url https://pypi.org/simple --find-links "$wheel_dir" \

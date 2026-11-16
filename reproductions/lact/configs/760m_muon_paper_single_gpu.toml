@@ -1,5 +1,5 @@
 [model]
-config = "../upstream/lact_llm/configs/760M_lact_swiglu_nh4_fwlow_rank_momentum_muon.json"
+config = "../lact/lact_llm/configs/760M_lact_swiglu_nh4_fwlow_rank_momentum_muon.json"
 
 [job]
 print_args = true
