@@ -2,7 +2,7 @@
 
 创建时间：20261110 11:30:45 Asia/Shanghai
 
-最后修订时间：20261116 02:18:13 Asia/Shanghai
+最后修订时间：20261116 10:47:03 Asia/Shanghai
 
 ## 当前状态
 
@@ -10,11 +10,11 @@ LaCT、E²-TTT、In-Place TTT 的源码迁入、独立环境、本地数据接�
 
 各方法保留官方源码和独立 `eval.sh`，不接入统一训练框架。已有测量使用 `zcy-memory` 的单张 A800，显式设置 `CUDA_VISIBLE_DEVICES=0`。当前入口也支持 `CUDA_VISIBLE_DEVICES=0,1`：各卡独立加载模型，评估互斥样本，再按原规则汇总完整结果；此次仅做静态审查，未运行多卡评估。完整命令在各方法 README 中维护。数据下载、构造与共用范围见[数据准备](20261108_ttt_data_preparation.md)，依赖与安装命令见[评估环境](20261109_environment_setup.md)。
 
-LaCT 三个公开模型均采用增量推理、每卡一个进程、batch size 上限 16；Momentum 已实测，两个 Muon 的 B16 设置仍是显存估算；另已进行左 padding 的 B3 小样本检查，未重新测量 B16 吞吐。E²-TTT 的本地批量实现与测量见[批量推理记录](20261110_e2_ttt_batch_inference.md)，原始实现的并发对照保留在[运行参数测试](20261110_ttt_evaluation_tuning.md)；In-Place TTT 保持每卡一个进程、batch size 1。
+LaCT 三个公开模型均采用增量推理、每卡一个进程，README 示例 batch 上限为 16；该上限的 Momentum 实测和两个 Muon 显存估算均来自此前等长路径。LaCT 与 E²-TTT 的正式入口现已接入长度排序、相邻组批和左 padding，并完成五个模型的小样本生成、计分和续评验证，见[混长组批记录](20261116_ttt_length_sorted_batching.md)；未重新测量混长吞吐或 batch 上限。E²-TTT 此前测量见[批量推理记录](20261110_e2_ttt_batch_inference.md)；In-Place TTT 保持每卡一个进程、batch size 1。
 
 | 模型 | 正式评估范围 | 当前使用方式 |
 |---|---|---|
-| LaCT Momentum 760M | 六项 RULER，4K／8K／16K／32K，每任务每长度 500 条，共 12,000 条 | [增量推理、单进程 batch size 16](lact/README.md#环境与运行命令)，按精确 token 数分组且无 padding；原始路径保留作对照 |
+| LaCT Momentum 760M | 六项 RULER，4K／8K／16K／32K，每任务每长度 500 条，共 12,000 条 | [增量推理、每卡 batch 上限 16](lact/README.md#环境与运行命令)，同档位内长度排序、相邻组批、左 padding；原始路径保留作对照 |
 | E²-TTT MLP／SwiGLU 1.3B | 每模型：两项 RULER，512–16K，共 6,000 条；SQuAD completion 2,984 条；SWDE 1,111 条 | [本地批量推理，每卡 batch 上限 8](e2_ttt/README.md#环境与评估命令)，保留原始 B1 对照；每个模型使用同一组 10,095 条样本 |
 | In-Place TTT 32K TTT／baseline | 每模型：十三项 RULER，4K–256K 七个长度，每任务每长度 100 条，共 9,100 条 | [完整 attention、单进程](in_place_ttt/README.md#ruler-评估)；TTT 仅压紧尾部缓存，baseline 使用原始路径 |
 
@@ -24,7 +24,7 @@ LaCT 使用作者公开的重训权重；E²-TTT 使用作者官方 checkpoint�
 
 ### LaCT
 
-独立的 `lact/incremental/` 缓存窗口 KV、fast weights、归一化累计状态与待写 chunk，保持原始先读后写及尾段延迟更新；原模型和更新函数未修改。非空前缀长为 \(L\)、chunk 大小为 2,048 时，更新次数仍为 \(\lfloor(L-1)/2048\rfloor\)。当前支持非 fused TTT 的等长批次与标准左 padding 输入；每条样本独立保存真实位置、KV 和 fast weights。常规评估仍在同一 RULER 长度内按精确 token 数分组。左 padding 的验证与数值限制见[padding 推理记录](20261115_ttt_padding_inference.md)。
+独立的 `lact/incremental/` 缓存窗口 KV、fast weights、归一化累计状态与待写 chunk，保持原始先读后写及尾段延迟更新；原模型和更新函数未修改。非空前缀长为 \(L\)、chunk 大小为 2,048 时，更新次数仍为 \(\lfloor(L-1)/2048\rfloor\)。当前支持非 fused TTT 的等长批次与标准左 padding 输入；每条样本独立保存真实位置、KV 和 fast weights。正式入口在同一 RULER 长度内按实际 token 数排序后相邻组批。左 padding 的验证与数值限制见[padding 推理记录](20261115_ttt_padding_inference.md)。
 
 - Momentum：四长度各两条、共 8 条 128-token 生成与原始路径 IDs 一致；55 次 teacher-forced argmax、缓存进度与跨样本隔离检查通过。logits 仍有数值差异，不保证任意输入或不同执行上下文逐位等价。
 - Muon／PostNorm：original 与 incremental 的既有生成对照仅覆盖 4K 两条。后续完整 8K 输入控制实验确认，旧无 padding B1／B3 本身已能改变同一题得分；该输入无实际 padding 的同形状新旧路径生成一致，实际新混长 B3也与旧等长 B3一致。此前评分变化不能单独归因于 padding，详见[batch 数值定位](20261116_lact_muon_postnorm_batch_numerics.md)。[首 decode 的投影重放](20261116_lact_muon_postnorm_second_token_trace.md)进一步确认，第 0 层 QKV 和输出投影在相同输入、相同权重下，B1／B3 形状本身即可产生数值差异；尚未将最终排序变化归因于某个单一元素。
@@ -53,7 +53,7 @@ TTT 256K 平均耗时约 127.82 → 127.38 秒，没有实质提速。128K／256
 
 ### E²-TTT
 
-保留官方增量推理、512-token SWA 和 TTT chunk；本地 `e2_ttt/optimized/` 提供等长与左 padding 批量推理，更新公式与时序保持原规则，上游文件不修改。常规评估仍按精确长度组批；左 padding 的 B1 对照见[padding 推理记录](20261115_ttt_padding_inference.md)。命令见 [README](e2_ttt/README.md#环境与评估命令)，验证、速度与数值差异见[批量推理记录](20261110_e2_ttt_batch_inference.md)。
+保留官方增量推理、512-token SWA 和 TTT chunk；本地 `e2_ttt/optimized/` 提供等长与左 padding 批量推理，更新公式与时序保持原规则，上游文件不修改。正式入口在相同生成参数与 BOS 状态内复用原生长度排序、相邻组批与左 padding；左 padding 的 B1 对照见[padding 推理记录](20261115_ttt_padding_inference.md)。命令见 [README](e2_ttt/README.md#环境与评估命令)，此前等长测量见[批量推理记录](20261110_e2_ttt_batch_inference.md)。
 
 - 批量验证：两个模型在 4K／16K 各检查 RULER 16 条及 SQuAD／SWDE 各 8 条。原始 B1 与优化 B1 的生成 IDs、评分一致；chunk 边界的结构、进度及固定 B4 的严格样本隔离检查通过。B8 存在少量生成和逐题评分差异，具体数量与固定前缀诊断见批量推理记录，不能声称跨 batch 逐项数值相同。
 - 初始 GPU 检查：每模型 SQuAD／SWDE 各两条、RULER 六长度各两条，共 16 条，生成与原生评分流程可执行。

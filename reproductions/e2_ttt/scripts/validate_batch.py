@@ -191,8 +191,10 @@ def generation_measurements(lm, samples, stream, run_name, group_name):
     generated_ids, batches = {}, []
 
     def measured_generate(context, *positional, **kwargs):
-        actual_batch, input_length = context.shape
-        ids = [queues[tuple(row)].popleft() for row in context.tolist()]
+        actual_batch, batch_input_width = context.shape
+        mask = kwargs["attention_mask"].bool()
+        real_inputs = [row[valid].tolist() for row, valid in zip(context, mask, strict=True)]
+        ids = [queues[tuple(row)].popleft() for row in real_inputs]
         prefill = []
         active = []
 
@@ -224,7 +226,7 @@ def generation_measurements(lm, samples, stream, run_name, group_name):
         finally:
             for hook in hooks:
                 hook.remove()
-        for sample_id, row in zip(ids, output[:, input_length:].tolist(), strict=True):
+        for sample_id, row in zip(ids, output[:, batch_input_width:].tolist(), strict=True):
             generated_ids[sample_id] = {"raw_generated_ids": row, "stop_sequences": kwargs["stop"]}
         record = {
             "record_type": "generation_batch",
@@ -232,10 +234,11 @@ def generation_measurements(lm, samples, stream, run_name, group_name):
             "group": group_name,
             "sample_ids": ids,
             "actual_batch_size": actual_batch,
-            "input_tokens_per_row": input_length,
+            "batch_input_width": batch_input_width,
+            "input_tokens": [len(row) for row in real_inputs],
             "prefill_cuda_seconds": prefill[0][0].elapsed_time(prefill[0][1]) / 1000,
             "generation_wall_seconds": elapsed,
-            "output_columns": output.shape[1] - input_length,
+            "output_columns": output.shape[1] - batch_input_width,
             "peak_cuda_allocated_bytes": torch.cuda.max_memory_allocated(),
             "peak_cuda_reserved_bytes": torch.cuda.max_memory_reserved(),
         }

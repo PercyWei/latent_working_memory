@@ -130,6 +130,8 @@ def main():
         and args.sample_id in row["sample_ids"]
     )
     batch_ids = batch["sample_ids"]
+    if any(length != batch["batch_input_width"] for length in batch["input_tokens"]):
+        raise ValueError("This diagnostic only replays equal-length batches without padding.")
     target_row = batch_ids.index(args.sample_id)
     sources = {
         mode: {
@@ -154,7 +156,7 @@ def main():
             original["generated_ids"][position],
             observed["generated_ids"][position],
         ],
-        "input_tokens": batch["input_tokens_per_row"],
+        "input_tokens": batch["batch_input_width"],
         "dtype": "bfloat16",
         "gpu": {
             "name": torch.cuda.get_device_name(0),

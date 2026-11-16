@@ -57,7 +57,7 @@ bash reproductions/setup_eval_env.sh lact
 source ~/rivermind-data/envs/ttt-lact/bin/activate
 ```
 
-Momentum 使用 `incremental`，每卡 batch 上限 16（经测试，16 是支持最长评估任务正常运行的最大 batch 设置）：
+Momentum 使用 `incremental`，以下示例每卡 batch 上限为 16。此前显存测量来自 A800 的等长输入，混长组批尚未重新测量 batch 上限：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/lact/eval.sh \
