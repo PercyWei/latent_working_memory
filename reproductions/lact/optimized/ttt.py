@@ -263,7 +263,7 @@ class BatchedTTTState:
     def _indices(self, rows):
         if rows == self._rows:
             return None, None
-        indices = torch.tensor(rows, device=self.device, dtype=torch.long)
+        indices = torch.tensor(rows, dtype=torch.long, device="cpu").to(self.device, non_blocking=True)
         heads = (indices[:, None] * self.heads + self._head_offsets).reshape(-1)
         return indices, heads
 
@@ -298,8 +298,8 @@ class BatchedTTTState:
     def _gather(self, values, rows, starts, count):
         if rows == self._rows and len(set(starts)) == 1:
             return [None if value is None else value[:, starts[0]:starts[0] + count] for value in values]
-        indices = torch.tensor(rows, device=self.device, dtype=torch.long)
-        positions = torch.tensor(starts, device=self.device)[:, None] + torch.arange(count, device=self.device)
+        indices = torch.tensor(rows, dtype=torch.long, device="cpu").to(self.device, non_blocking=True)
+        positions = torch.tensor(starts, dtype=torch.long, device="cpu").to(self.device, non_blocking=True)[:, None] + torch.arange(count, device=self.device)
         return [None if value is None else value[indices[:, None], positions] for value in values]
 
     def _commit_rows(self, rows, values, pending=False):
@@ -312,7 +312,7 @@ class BatchedTTTState:
             _, heads = self._indices(selected_rows)
             selected = values
             if len(group) != len(rows):
-                indices = torch.tensor([index for index, _ in group], device=self.device)
+                indices = torch.tensor([index for index, _ in group], dtype=torch.long, device="cpu").to(self.device, non_blocking=True)
                 selected = [None if value is None else value.index_select(0, indices) for value in values]
             if pending:
                 # 对齐旧pending的cat布局：K/LR为[H,C,D]连续，V随后transpose。
@@ -356,8 +356,8 @@ class BatchedTTTState:
                 if value is not None:
                     getattr(self, name)[:, starts[0]:starts[0] + count].copy_(value)
         else:
-            indices = torch.tensor(rows, device=self.device, dtype=torch.long)
-            positions = torch.tensor(starts, device=self.device)[:, None] + torch.arange(count, device=self.device)
+            indices = torch.tensor(rows, dtype=torch.long, device="cpu").to(self.device, non_blocking=True)
+            positions = torch.tensor(starts, dtype=torch.long, device="cpu").to(self.device, non_blocking=True)[:, None] + torch.arange(count, device=self.device)
             for name, value in zip(self._pending, values, strict=True):
                 if value is not None:
                     getattr(self, name)[indices[:, None], positions] = value
@@ -399,8 +399,8 @@ class BatchedTTTState:
                     output[:, starts[0]:starts[0] + count] = result
                 else:
                     if indices is None:
-                        indices = torch.tensor(rows, device=self.device, dtype=torch.long)
-                    positions = torch.tensor(starts, device=self.device)[:, None] + torch.arange(count, device=self.device)
+                        indices = torch.tensor(rows, dtype=torch.long, device="cpu").to(self.device, non_blocking=True)
+                    positions = torch.tensor(starts, dtype=torch.long, device="cpu").to(self.device, non_blocking=True)[:, None] + torch.arange(count, device=self.device)
                     output[indices[:, None], positions] = result
                 direct = [index for index, row in enumerate(rows)
                           if count == self.chunk_size and cursors[row] + count < lengths[row]]
@@ -410,7 +410,7 @@ class BatchedTTTState:
                     selected_rows = [rows[index] for index in chosen]
                     selected = values
                     if len(chosen) != len(rows):
-                        selection = torch.tensor(chosen, device=self.device)
+                        selection = torch.tensor(chosen, dtype=torch.long, device="cpu").to(self.device, non_blocking=True)
                         selected = [None if value is None else value.index_select(0, selection) for value in values]
                     if commit:
                         self._commit_rows(selected_rows, selected)
