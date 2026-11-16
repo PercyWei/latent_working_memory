@@ -230,10 +230,15 @@ def train(plan_dir, resume=None):
             record = {
                 "step": step, "epoch": cursor.epoch, "epoch_end": cursor.epoch_end,
                 **curriculum,
-                **{f"train/{key}": value for key, value in metrics.items()},
+                **{f"train/{key}": value for key, value in metrics.items()
+                   if config.stage != "post" or key != "samples"},
                 "resources/step_seconds": seconds,
                 "resources/peak_memory_gib": peak_memory,
             }
+            if config.stage == "post":
+                record["train/compression_ratio"] = (
+                    metrics["segment_tokens"] / config.model.structure.memory_slots
+                )
             dev_interval = training.loop.dev_every != "after_each_epoch" and step % training.loop.dev_every == 0
             if dev_documents and (dev_interval or cursor.epoch_end or step == training.loop.max_steps):
                 with preserve_training_rng(device, boundary_generator):

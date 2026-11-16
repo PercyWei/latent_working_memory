@@ -122,7 +122,7 @@ def reference_post_backward(
         "policy_loss": (float(policy_loss), 1),
         "reward": (float(rewards.mean()), 1),
         "reward_std": (float(std), 1),
-        "zero_advantage_groups": (float(bool(std == 0)), 1),
+        "zero_advantage_rate": (float(bool(std == 0)), 1),
         "blocks": (blocks, group_size),
         "memory_slots": (blocks * model.memory_slots, group_size),
         "segment_tokens": (len(document.input_ids) * group_size, blocks),

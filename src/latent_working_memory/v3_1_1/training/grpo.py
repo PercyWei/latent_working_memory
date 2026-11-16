@@ -101,7 +101,7 @@ def post_backward_batch(model, documents, unit_tokens, grpo, generator, bptt_ste
             "policy_loss": (float(policy_loss), 1),
             "reward": (float(reward.mean()), 1),
             "reward_std": (float(reward.std(unbiased=False)), 1),
-            "zero_advantage_groups": (float(bool(reward.std(unbiased=False) == 0)), 1),
+            "zero_advantage_rate": (float(bool(reward.std(unbiased=False) == 0)), 1),
             "blocks": (blocks, group_size),
             "memory_slots": (blocks * model.memory_slots, group_size),
             "segment_tokens": (len(document.input_ids) * group_size, blocks),
