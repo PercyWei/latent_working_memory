@@ -43,6 +43,18 @@ class OptimizedLaCTForCausalLM(LaCTForCausalLM):
             "logits_to_keep": logits_to_keep if logits_to_keep is not None else 1,
         }
 
+    def _update_model_kwargs_for_generation(
+        self, outputs, model_kwargs, is_encoder_decoder=False, num_new_tokens=1,
+    ):
+        model_kwargs = super()._update_model_kwargs_for_generation(
+            outputs, model_kwargs, is_encoder_decoder=is_encoder_decoder,
+            num_new_tokens=num_new_tokens,
+        )
+        cache = model_kwargs.get("past_key_values")
+        if isinstance(cache, PaddedLaCTCache) and not is_encoder_decoder:
+            cache.mark_generation_mask(model_kwargs.get("attention_mask"), num_new_tokens)
+        return model_kwargs
+
     def forward(
         self,
         input_ids=None,
@@ -101,7 +113,7 @@ class OptimizedLaCTForCausalLM(LaCTForCausalLM):
                 hidden_states = block.mlp_norm(hidden_states)
             hidden_states = residual + block.mlp(hidden_states)
         hidden_states = self.model.norm(hidden_states)
-        cache.physical_seen += input_ids.shape[1]
+        cache.advance(step)
         indices = (
             slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         )
