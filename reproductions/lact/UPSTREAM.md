@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261116 10:21:58 Asia/Shanghai
+最后修订时间：20261116 11:15:42 Asia/Shanghai
 
 ## 代码职责
 
@@ -10,9 +10,9 @@
 |---|---|---|
 | 迁入源码（source） | `upstream/`、`upstream_flame/` | 保存固定 revision 的 LaCT 与 flame；下文逐项说明迁入范围和必要接入差异 |
 | 本地接入（adapters） | `scripts/`、`eval.sh`、`configs/` | 加载 checkpoint、准备运行环境、选择推理路径、评估、验证与记录结果 |
-| 本地优化（optimization） | `incremental/` | 实现 sliding-window KV 与 TTT 状态缓存，复用历史计算 |
+| 本地优化（optimization） | `optimized/` | 实现 sliding-window KV 与 TTT 状态缓存，复用历史计算 |
 
-`original` 指迁入模型经本地评估接入运行的原始推理路径，不表示依赖、公开 checkpoint、数据构造和评估入口均与论文实验环境完全相同。`incremental` 使用本地缓存实现；本次缓存优化没有修改 `upstream/` 中的 LaCT 模型、配置或 TTT 更新函数，也没有改动 flame trainer。flame 注册所需的接入文件是下文单列的既有差异。
+`original` 指迁入模型经本地评估接入运行的原始推理路径，不表示依赖、公开 checkpoint、数据构造和评估入口均与论文实验环境完全相同。`optimized` 使用本地缓存实现；本次缓存优化没有修改 `upstream/` 中的 LaCT 模型、配置或 TTT 更新函数，也没有改动 flame trainer。flame 注册所需的接入文件是下文单列的既有差异。
 
 新运行将固定上游 revision 与本地 commit、Git 改动状态、实际入口和实现路径分别记录；续评保留首次计划来源，并在每次执行中记录当前来源。字段含义及输出位置见 [来源记录与输出](README.md#来源记录与输出)。
 
@@ -29,17 +29,13 @@ LaCT 迁入范围为顶层 `README.md`、`LICENSE`、完整 `lact_llm/`、完整
 
 ## 接入改动
 
-- LaCT 模型、配置和更新函数原样保存。
-- flame 新增 `custom_models/__init__.py`，内容为 `import lact_model`，通过 Transformers 的官方注册入口载入未修改的 LaCT 模型。原快照的 `custom_models/` 是 namespace package，仅复制文件并不能自动执行 LaCT 注册。
-- 新增单卡 TOML 和 shell 入口。shell 直接调用官方 `flame.train`，接受物理 GPU 0 或 1（默认 0）、一个进程、按调用目录解析的绝对输出路径与 `PYTHONPATH`，不修改 trainer。原 flame `train.sh` 保留供对照，本地入口不调用其中未注册自定义模型的配置探测及对不存在的 `3rdparty/` 的复制操作。
-- `eval.sh` 经 `../evaluate_multi_gpu.py` 统一调度单卡／双卡评估，`scripts/evaluate.py` 执行各卡分配的样本，严格拒绝缺失或额外权重。`--inference-mode original|incremental` 显式选择推理路径，默认 `original` 调用迁入模型的原始 `generate` 与完整前缀路径；两种模式共用 checkpoint、prompt、greedy、128-token 预算和评分。正式输入为每任务、每长度 500 条；`--resume` 固定评估协议，从所有历史原始预测中按样本 ID 恢复进度，仅重新分配尚未完成的样本。
-- 新增 `incremental/`，在上游源码之外实现每层 sliding-window KV 和 TTT 状态缓存。TTT 按官方非 fused 公式实现可复用的范数、读出与更新编译函数，并复用 `silu_backprop`、Muon helper；保存 PreNorm 累计量、初始行范数、Muon 前 Momentum 和待写 chunk，保持满尾段在下一 token 到来时才提交。支持非 fused TTT 的等长批次与标准左 padding 输入；attention 使用独立序列边界，等长路径沿 `B×heads` 更新，padding 路径逐样本维护真实位置、KV 和 TTT 状态，复用相同读写函数。QKV、学习率、Momentum、缩放和词表投影均使用原生批量计算，保持 float32 参数与 BF16 autocast。
-- 增量评估可通过 `--batch-size` 指定每卡上限，通过 `--batch-size-by-length LENGTH=BATCH ...` 覆盖指定长度；同一 RULER 长度内跨六任务按实际 token 数稳定降序，相邻样本组批，左 padding 到批内最长输入。输入文本、128-token 生成预算和评分不变；尾批使用实际数量，生成按物理批次宽度截取，再按各自首个 EOS 截去后续补齐 token。原始模式保持 B1；TTT 计算与 padding 状态调度不变。
-- `scripts/scheduling.py` 将固定评估协议与每轮 GPU／batch 设置分开记录；每轮使用独立 worker 目录，因此续评可改变 GPU 数量、顺序和 batch。`scripts/records.py` 在 CPU 上读取历史记录并核对样本覆盖，`scripts/merge_evaluation.py` 从全部原始预测按原规则重新计分；模型和更新代码不参与分片调度。
-- 新增 `scripts/validate_incremental.py`，比较 chunk 边界和真实样本 logits、独立 greedy 生成的 token IDs、缓存进度及跨样本隔离。支持范围与数值、耗时结论见[复现状态](../20261110_ttt_reproduction_status.md)。
-- `scripts/validate_batch.py` 记录不同 batch 的生成与评分差异、缓存结构、有限值和更新进度；`--strict-token-ids` 可额外要求与 B1 的 IDs、teacher-forced argmax 完全一致。当前接受标准为公式、因果时序与样本隔离不变，允许不同执行形状带来的浮点差异。固定 B4 的 focus 槽位，仅置换其他样本的独立验证中，prefill 与四步 decode 的 focus logits、KV、全部 TTT 状态逐字节一致；不据此声称不同 batch 形状逐位等价。
+- LaCT 模型、配置和更新函数原样保存在 `upstream/`。flame 的 `custom_models/__init__.py` 通过 Transformers 注册 `lact_model`；本地训练入口调用原 trainer，不改训练逻辑。
+- `eval.sh` 经 `../evaluate_multi_gpu.py` 调度单卡／双卡，`scripts/evaluate.py` 严格加载 checkpoint。`--inference-mode original|optimized` 默认 `optimized`；`original` 保留官方完整前缀推理，仅用于 B1 对照。
+- `optimized/` 统一处理单样本、等长和混长 batch，保存每条样本的真实位置、窗口 KV、fast weights、Momentum、范数与待写 chunk；所有输入均复用同一状态路径。沿用原始 TTT 读出与更新公式，满尾段在下一真实 token 到来时提交；padding 不计入真实进度。投影、FFN 和 attention 批量执行，TTT 按样本维护独立状态。
+- 同一 RULER 长度内按实际 token 数稳定降序，相邻组批并左 padding 到批内最长输入。`--batch-size` 设置每卡上限，`--batch-size-by-length` 覆盖指定长度；输入、128-token 生成预算与评分不变，输出按物理宽度及各自 EOS 截取。
+- `scripts/scheduling.py` 将固定评估协议与 GPU／batch 设置分开记录；续评按全局样本 ID 只分配未完成输入。`scripts/records.py` 和 `scripts/merge_evaluation.py` 读取原始预测、核对覆盖并重新计分；每次执行保留代码来源和设置。
 
-- `incremental/padding.py` 与 `scripts/validate_padding.py` 分别实现左 padding 调度和 B1 对照；`scripts/diagnose_padding.py` 用相同形状及逐算子重放区分逻辑与编译数值差异。模型参数、TTT 公式与上游文件不变，验证结果见[padding 推理记录](../20261115_ttt_padding_inference.md)。
+验证范围和浮点数值限制见[复现状态](../20261110_ttt_reproduction_status.md)，运行方式见 [README](README.md)。
 
 ## 公开语言模型权重
 
@@ -55,7 +51,7 @@ LaCT 迁入范围为顶层 `README.md`、`LICENSE`、完整 `lact_llm/`、完整
 
 评估按实际 checkpoint 配置构造并严格加载完整 state dict，不通过改 head 数、忽略 shape mismatch 或随机初始化使模型继续运行。读取元数据不是 GPU 模型加载或推理验证。
 
-官方 `prepare_inputs_for_generation` 与 `forward` 均禁用 cache，TTT 层每次根据完整前缀重新计算 chunk 状态；该行为仅对应 `original` 模式。原更新函数使用负内积梯度的显式矩阵运算，两种推理模式均在 `torch.no_grad()` 下执行记忆更新。`original` 的耗时不代表增量解码性能；`incremental` 的数值一致性、速度和支持范围单独记录。
+官方 `prepare_inputs_for_generation` 与 `forward` 均禁用 cache，TTT 层每次根据完整前缀重新计算 chunk 状态；该行为仅对应 `original` 模式。原更新函数使用负内积梯度的显式矩阵运算，两种推理模式均在 `torch.no_grad()` 下执行记忆更新。`original` 的耗时不代表增量解码性能；`optimized` 的数值一致性、速度和支持范围单独记录。
 
 ## 与论文版本的已知差异
 

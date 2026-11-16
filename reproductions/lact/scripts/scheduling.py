@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 def add_lact_arguments(parser):
-    parser.add_argument("--inference-mode", choices=("original", "incremental"))
+    parser.add_argument("--inference-mode", choices=("original", "optimized"))
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--batch-size-by-length", nargs="+", default=[], metavar="LENGTH=BATCH")
     parser.add_argument("--ruler-data", type=Path)
@@ -27,7 +27,7 @@ def add_lact_arguments(parser):
 
 def resolve_protocol_arguments(args, saved=None):
     defaults = saved if saved is not None else {
-        "inference_mode": "original", "lengths": list(LENGTHS),
+        "inference_mode": "optimized", "lengths": list(LENGTHS),
         "ruler_data": str(ROOT / "data/benchmarks/ruler-v1/reproductions/lact-760m"),
     }
     for field in ("inference_mode", "lengths", "ruler_data"):

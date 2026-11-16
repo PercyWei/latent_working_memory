@@ -10,7 +10,7 @@ import time
 
 from batching import parse_batch_size_by_length
 from lact_model import LaCTForCausalLM, LaCTSWIGLUConfig
-from incremental import IncrementalLaCTForCausalLM
+from optimized import OptimizedLaCTForCausalLM
 from provenance import capture_source
 from records import (
     BATCHING, GENERATION_BUDGET, LENGTHS, SAMPLES_PER_TASK_LENGTH, TASKS as TASKS,
@@ -58,9 +58,9 @@ def read_predictions(path, expected, logger, shard_index):
     return records
 
 
-def load_checkpoint(checkpoint, inference_mode="original"):
+def load_checkpoint(checkpoint, inference_mode="optimized"):
     config = LaCTSWIGLUConfig.from_pretrained(checkpoint, local_files_only=True)
-    model_class = IncrementalLaCTForCausalLM if inference_mode == "incremental" else LaCTForCausalLM
+    model_class = {"original": LaCTForCausalLM, "optimized": OptimizedLaCTForCausalLM}[inference_mode]
     model, loading = model_class.from_pretrained(
         checkpoint,
         config=config,
@@ -222,7 +222,7 @@ def run(args, output, logger, run_source, execution_attempt):
                     do_sample=False,
                     num_beams=1,
                     max_new_tokens=GENERATION_BUDGET,
-                    use_cache=args.inference_mode == "incremental",
+                    use_cache=args.inference_mode == "optimized",
                     logits_to_keep=1,
                     return_dict_in_generate=False,
                     output_scores=False,
@@ -285,7 +285,7 @@ def run(args, output, logger, run_source, execution_attempt):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--inference-mode", choices=("original", "incremental"), default="original")
+    parser.add_argument("--inference-mode", choices=("original", "optimized"), default="optimized")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=1, help="Maximum samples per length-sorted batch")
     parser.add_argument("--batch-size-by-length", nargs="+", default=[], metavar="LENGTH=BATCH")
@@ -309,8 +309,8 @@ def main():
     except ValueError as error:
         parser.error(str(error))
     effective_sizes = [args.batch_size_by_length.get(str(length), args.batch_size) for length in args.lengths]
-    if max(effective_sizes) > 1 and args.inference_mode != "incremental":
-        parser.error("--batch-size > 1 requires --inference-mode incremental")
+    if max(effective_sizes) > 1 and args.inference_mode != "optimized":
+        parser.error("--batch-size > 1 requires --inference-mode optimized")
     if not 1 <= args.num_shards <= SAMPLES_PER_TASK_LENGTH:
         parser.error(f"--num-shards must be between 1 and {SAMPLES_PER_TASK_LENGTH}")
     if not 0 <= args.shard_index < args.num_shards:
@@ -318,7 +318,7 @@ def main():
     if os.environ.get("CUDA_VISIBLE_DEVICES") not in {"0", "1"}:
         parser.error("CUDA_VISIBLE_DEVICES must be 0 or 1; select one physical GPU")
     model_class = (
-        IncrementalLaCTForCausalLM if args.inference_mode == "incremental" else LaCTForCausalLM
+        OptimizedLaCTForCausalLM if args.inference_mode == "optimized" else LaCTForCausalLM
     )
     run_source = capture_source(__file__, {args.inference_mode: model_class})
     output = args.output_dir.expanduser().resolve()

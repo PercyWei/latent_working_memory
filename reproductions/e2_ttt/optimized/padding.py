@@ -30,26 +30,6 @@ def padding_layout(mask):
     return PaddingLayout(mask, positions, lengths, active, indices, cu_seqlens)
 
 
-def _native_rows(layer, state, batch, previous_seen):
-    """将已有等长 cache 拆成逐样本视图，不改变任何权重或 buffer。"""
-    heads = layer.num_heads
-    rows = []
-    for sample in range(batch):
-        recurrent = None
-        attention = None
-        if state is not None:
-            if state["recurrent_state"] is not None:
-                recurrent = tuple(
-                    value[sample * heads : (sample + 1) * heads]
-                    if value is not None else None
-                    for value in state["recurrent_state"]
-                )
-            if state["attn_state"] is not None:
-                attention = tuple(value[sample : sample + 1] for value in state["attn_state"])
-        rows.append({"attn_state": attention, "recurrent_state": recurrent})
-    return {"seen": (previous_seen,) * batch, "rows": rows}
-
-
 def padding_forward(layer, hidden_states, layout, past_key_values, previous_seen):
     batch, width, _ = hidden_states.shape
     last = (
@@ -57,8 +37,10 @@ def padding_forward(layer, hidden_states, layout, past_key_values, previous_seen
         if past_key_values is not None and len(past_key_values) > layer.layer_idx else None
     )
     state = (
-        last["padding_state"] if last is not None and "padding_state" in last
-        else _native_rows(layer, last, batch, previous_seen)
+        last["padding_state"] if last is not None else {
+            "seen": (0,) * batch,
+            "rows": [{"attn_state": None, "recurrent_state": None} for _ in range(batch)],
+        }
     )
     if len(state["rows"]) != batch:
         raise ValueError("Padding cache batch size differs from the input batch")
@@ -176,10 +158,7 @@ def padding_forward(layer, hidden_states, layout, past_key_values, previous_seen
         output = output + attention_output
     if past_key_values is not None:
         cached = past_key_values.update(layer_idx=layer.layer_idx, offset=width)
-        cached.update(
-            recurrent_state=None, attn_state=None, conv_state=None, ffn_state=None,
-            padding_state={"seen": tuple(seen), "rows": rows},
-        )
+        cached["padding_state"] = {"seen": tuple(seen), "rows": rows}
     if layer.use_gate:
         gate = rearrange(layer.g_proj(hidden_states), "b t (h d) -> b t h d", d=layer.head_v_dim)
         output = layer.o_norm(output, gate)

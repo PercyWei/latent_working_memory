@@ -10,8 +10,9 @@ UPSTREAM_REVISION = "a648340f9798f173227a0626fde66a6e9b65879a"
 UPSTREAM_MODEL = "reproductions/lact/upstream/lact_llm/lact_model/modeling_lact.py"
 UPSTREAM_LAYER = "reproductions/lact/upstream/lact_llm/lact_model/layer_lact_swiglu.py"
 UPSTREAM_TTT = "reproductions/lact/upstream/lact_llm/lact_model/ttt_operation.py"
-INCREMENTAL_MODEL = "reproductions/lact/incremental/model.py"
-INCREMENTAL_TTT = "reproductions/lact/incremental/ttt.py"
+OPTIMIZED_MODEL = "reproductions/lact/optimized/model.py"
+OPTIMIZED_TTT = "reproductions/lact/optimized/ttt.py"
+OPTIMIZED_PADDING = "reproductions/lact/optimized/padding.py"
 
 
 def capture_source(entrypoint, model_classes):
@@ -33,16 +34,16 @@ def capture_source(entrypoint, model_classes):
     for mode, model_class in model_classes.items():
         model_path = str(Path(inspect.getfile(model_class)).resolve().relative_to(PROJECT_ROOT))
         paths = [model_path]
-        if mode == "incremental":
-            forward = f"{INCREMENTAL_MODEL}:IncrementalLaCTForCausalLM.forward"
-            paths.extend((INCREMENTAL_MODEL, INCREMENTAL_TTT))
+        if mode == "optimized":
+            forward = f"{OPTIMIZED_MODEL}:OptimizedLaCTForCausalLM.forward"
+            paths.extend((OPTIMIZED_MODEL, OPTIMIZED_PADDING, OPTIMIZED_TTT))
         else:
             forward = f"{UPSTREAM_MODEL}:LaCTForCausalLM.forward"
         paths.extend((UPSTREAM_MODEL, UPSTREAM_LAYER, UPSTREAM_TTT))
         implementations[mode] = {
             "model_class": f"{model_class.__module__}.{model_class.__qualname__}",
             "forward": forward,
-            "use_cache": mode == "incremental",
+            "use_cache": mode == "optimized",
             "code_path": list(dict.fromkeys(paths)),
         }
     return {

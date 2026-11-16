@@ -192,7 +192,7 @@ def build_protocol(checkpoint, ruler_data, lengths, inference_mode, samples):
         "prompt": "base; input + answer_prefix; tokenizer default special tokens; no truncation",
         "generation": {
             "do_sample": False, "num_beams": 1, "max_new_tokens": GENERATION_BUDGET,
-            "use_cache": inference_mode == "incremental", "logits_to_keep": 1,
+            "use_cache": inference_mode == "optimized", "logits_to_keep": 1,
             "recompute_complete_prefix_per_token": inference_mode == "original",
         },
         "parameter_dtype": "float32",
@@ -203,4 +203,6 @@ def build_protocol(checkpoint, ruler_data, lengths, inference_mode, samples):
 
 
 def protocol_identity(plan):
+    if plan["inference_mode"] not in ("original", "optimized"):
+        raise ValueError(f"Unknown LaCT inference mode: {plan['inference_mode']}")
     return {key: plan[key] for key in PROTOCOL_FIELDS}

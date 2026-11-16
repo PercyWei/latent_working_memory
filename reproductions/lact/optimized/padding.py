@@ -40,38 +40,6 @@ class PaddedLaCTCache:
     def get_seq_length(self, layer_idx=0):
         return self.physical_seen
 
-    @classmethod
-    def from_unpadded(cls, cache):
-        batch_size = cache.layers[0].keys.shape[0]
-        result = cls(len(cache.layers), batch_size)
-        result.physical_seen = cache.get_seq_length()
-        for source, destination in zip(cache.layers, result.layers, strict=True):
-            heads = source.ttt.w0.shape[0] // batch_size
-            for row in range(batch_size):
-                destination.seen[row] = source.seen
-                destination.keys[row] = source.keys[row:row + 1]
-                destination.values[row] = source.values[row:row + 1]
-                state = TTTState.__new__(TTTState)
-                for name in (
-                    "chunk_size", "prenorm", "use_muon", "use_momentum",
-                    "pending_length", "seen", "n_updates",
-                ):
-                    setattr(state, name, getattr(source.ttt, name))
-                selected = slice(row * heads, (row + 1) * heads)
-                for name in (
-                    "w0", "w1", "w2", "w0_norm", "w1_norm", "w2_norm",
-                    "w0_main", "w1_main", "w2_main",
-                    "dw0_momentum", "dw1_momentum", "dw2_momentum",
-                ):
-                    value = getattr(source.ttt, name)
-                    setattr(state, name, None if value is None else value[selected])
-                for name in (
-                    "pending_k", "pending_v", "pending_lr0", "pending_lr1", "pending_lr2", "pending_momentum",
-                ):
-                    setattr(state, name, [value[selected] for value in getattr(source.ttt, name)])
-                destination.ttt[row] = state
-        return result
-
     def prepare_step(self, input_ids, attention_mask):
         batch_size, width = input_ids.shape
         if batch_size != self.batch_size:
@@ -169,7 +137,7 @@ def attention_forward_padded(layer, hidden_states, cache, step):
     fast_k = rearrange(fast_k, "(b h) s d -> b s h d", b=batch_size, h=layer.num_fw_heads)
     fast_v = rearrange(fast_v, "(b h) s d -> b s h d", b=batch_size, h=layer.num_fw_heads)
     if layer.lr_parameterization != "mamba":
-        raise ValueError("Incremental inference requires the checkpoint's mamba LR rule")
+        raise ValueError("Optimized inference requires the checkpoint's mamba LR rule")
     learning_rates = F.softplus(layer.lr_proj(hidden_states).float() + layer.base_lr_inv)
     learning_rates = rearrange(learning_rates, "b s (h d) -> b s h d", h=layer.num_fw_heads)
     lr0, lr1, lr2 = learning_rates.chunk(3, dim=-1)

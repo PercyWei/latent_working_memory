@@ -2,11 +2,11 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261116 10:21:58 Asia/Shanghai
+最后修订时间：20261116 11:15:42 Asia/Shanghai
 
 本目录使用 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现和作者公开 checkpoint。Momentum 760M 已于 20261110 完成下表全部 12,000 条 RULER 样本的评估，结果查看方式见[查看结果](#查看结果)。
 
-源码与本地优化边界见 [UPSTREAM.md](UPSTREAM.md)，验证结论见[复现状态](../20261110_ttt_reproduction_status.md)，batch 设置与耗时依据见[运行参数测试](../20261110_ttt_evaluation_tuning.md)。
+源码与本地优化边界见 [UPSTREAM.md](UPSTREAM.md)，验证结论见[复现状态](../20261110_ttt_reproduction_status.md)。
 
 ## 评估目标与数据
 
@@ -57,42 +57,31 @@ bash reproductions/setup_eval_env.sh lact
 source ~/rivermind-data/envs/ttt-lact/bin/activate
 ```
 
-Momentum 使用 `incremental`，以下示例每卡 batch 上限为 16。此前显存测量来自 A800 的等长输入，混长组批尚未重新测量 batch 上限：
+Momentum 和 Muon 均支持 `optimized` 运行，但 Muon 尚未完成其适用性验证，详见[复现状态记录](../20261110_ttt_reproduction_status.md)：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/lact/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
   --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-nheads4-chunk2048-760m_ruler \
-  --inference-mode incremental \
-  --batch-size 16
+  --inference-mode optimized \
+  --batch-size 16 \
+  --batch-size-by-length 4096=64 8192=32 16384=32 32768=16
 ```
 
 | 参数 | 默认值与约定 |
 |---|---|
-| `--ruler-data` | `data/benchmarks/ruler-v1/reproductions/lact-760m` |
-| `--lengths` | `4096 8192 16384 32768` |
-| `--inference-mode` | `original`（新评估默认）或 `incremental`；续评沿用原模式 |
-| `--batch-size` | 每卡样本数上限，默认 `1`；大于 1 仅用于 `incremental`；同一评估长度内按实际 token 数降序，相邻样本组批 |
+| `--checkpoint` | 必需，本地完整 checkpoint 目录 |
+| `--output-dir` | 必需，首次运行时目录须不存在 |
+| `--inference-mode` | `optimized`（默认）或 `original`；后者仅支持 batch size 1 |
+| `--batch-size` | 每卡样本数上限，默认 `1`；只有 `optimized` 支持大于 1 |
 | `--batch-size-by-length` | 按评估长度覆盖每卡上限，例如 `4096=16 8192=16 16384=8 32768=4`；未指定的长度使用 `--batch-size` |
+| `--lengths` | `4096 8192 16384 32768` |
+| `--ruler-data` | `data/benchmarks/ruler-v1/reproductions/lact-760m` |
 | `--resume` | 沿用原评估协议，只补齐尚未完成的样本；允许更改 GPU 数量、顺序及 batch 设置 |
 
-首次运行的输出目录须不存在。原评估停止后，以相同输出目录追加 `--resume`；checkpoint、数据、长度及推理模式保持原计划不变。下面示例改用单卡，并为长输入降低 batch：
-
-```bash
-CUDA_VISIBLE_DEVICES=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/lact/eval.sh \
-  --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
-  --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-nheads4-chunk2048-760m_ruler \
-  --inference-mode incremental \
-  --batch-size 16 \
-  --batch-size-by-length 16384=8 32768=4 \
-  --resume
-```
-
-Muon 支持 `incremental` 运行但尚未完成其适用性验证，详见[复现状态](../20261110_ttt_reproduction_status.md)。
-
-输入为 `input + answer_prefix`，greedy 生成最多 128 tokens，保留 EOS；输入加生成预算不得超过所选长度，不截断。评分沿用原 RULER。
-
-每批左 padding 到该批最长输入，最后一批保留实际样本数。`input_tokens` 记录各样本的真实输入长度，生成从补齐后的批次宽度之后截取。padding 不推进真实位置或 TTT 更新；TTT 沿用逐样本状态调度。验证范围和 Muon 数值限制见[padding 推理记录](../20261115_ttt_padding_inference.md)。
+- 首次运行的输出目录须不存在。原评估停止后，以相同输出目录追加 `--resume`；checkpoint、数据、长度及推理模式保持原计划不变。
+- 输入为 `input + answer_prefix`，greedy 生成最多 128 tokens，保留 EOS；输入加生成预算不得超过所选长度，不截断。评分沿用原 RULER。
+- 每批左 padding 到该批最长输入，最后一批保留实际样本数。`input_tokens` 记录各样本的真实输入长度，生成从补齐后的批次宽度之后截取。padding 不推进真实位置或 TTT 更新；TTT 沿用逐样本状态调度。验证范围和 Muon 数值限制见[复现状态](../20261110_ttt_reproduction_status.md)。
 
 ## 查看结果
 
@@ -116,7 +105,7 @@ uv run reproductions/lact/scripts/compare_results.py \
 | `attempts/attempt-<编号>/merged/predictions.jsonl` | 本轮完成后按样本顺序汇总的全部预测 |
 | `comparison.html` | 执行对比脚本生成的图表与表格 |
 
-最终分数读取输出根目录的 `summary.json`，其中 `merged_summary_path` 指向本轮完整汇总。已有单卡根目录或 `shards/shard-<i>/` 中的原始结果也可续评，原文件保持不变。增量与批量验证入口见 [validate_incremental.py](scripts/validate_incremental.py) 和 [validate_batch.py](scripts/validate_batch.py)。
+最终分数读取输出根目录的 `summary.json`，其中 `merged_summary_path` 指向本轮完整汇总。已有单卡根目录或 `shards/shard-<i>/` 中的原始结果也可续评，原文件保持不变。
 
 ## 备用训练入口
 

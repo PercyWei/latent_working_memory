@@ -362,7 +362,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--inference-mode", choices=("original", "optimized"), default="original")
+    parser.add_argument("--inference-mode", choices=("original", "optimized"), default="optimized")
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--workers", type=int, default=1, help="Independent native workers per physical GPU")
     parser.add_argument("--resume", action="store_true")
