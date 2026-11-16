@@ -105,7 +105,8 @@ class ObjectiveConfig:
 @dataclass(frozen=True)
 class GRPOConfig:
     group_size: int = 4
-    slot_cost: float = 0.001
+    memory_cost_weight: float = 0.1
+    memory_cost_power: float = 1.0
     policy_weight: float = 1.0
     clip_epsilon: float = 0.2
     advantage_epsilon: float = 1e-6
@@ -114,9 +115,9 @@ class GRPOConfig:
         _positive_ints(self, ("group_size",))
         if self.group_size < 2:
             raise ValueError("group_size must be at least 2")
-        for name in ("slot_cost", "policy_weight"):
+        for name in ("memory_cost_weight", "policy_weight"):
             _number(getattr(self, name), name, inclusive=True)
-        for name in ("clip_epsilon", "advantage_epsilon"):
+        for name in ("memory_cost_power", "clip_epsilon", "advantage_epsilon"):
             _number(getattr(self, name), name)
         if self.clip_epsilon >= 1:
             raise ValueError("clip_epsilon must be less than 1")

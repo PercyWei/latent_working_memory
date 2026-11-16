@@ -102,7 +102,9 @@ def reference_post_backward(
                  else sample_group(model, document, unit_tokens, grpo["group_size"], generator))
     device = paths[0].old_log_probs.device
     rewards = torch.tensor([
-        -path.qa_nll - grpo["slot_cost"] * model.memory_slots * len(path.block_lengths)
+        -path.qa_nll - grpo["memory_cost_weight"] * (
+            model.memory_slots * len(path.block_lengths) / len(document.input_ids)
+        ) ** grpo["memory_cost_power"]
         for path in paths
     ], device=device, dtype=torch.float32)
     std = rewards.std(unbiased=False)
@@ -146,7 +148,7 @@ def make_post_models(folder, gradient_checkpointing=False, bptt_steps=2, policy_
         compute=ComputeConfig(gradient_checkpointing=gradient_checkpointing),
         training=TrainingConfig(
             data=TrainingDataConfig(dataset_dir=str(folder)),
-            grpo=GRPOConfig(group_size=4, slot_cost=0.01, policy_weight=policy_weight),
+            grpo=GRPOConfig(group_size=4, memory_cost_weight=0.01, policy_weight=policy_weight),
             loop=TrainingLoopConfig(
                 micro_batch_size=4, gradient_accumulation_steps=2, max_steps=6,
             ),
@@ -436,11 +438,13 @@ def test_identical_sampled_paths_keep_identical_rewards_despite_batch_score_roun
         )
     # 保留各轮真实评分的批量形状，只复用同轨迹的确定性奖励。
     assert score_calls == [2, 1] * grpo["group_size"]
-    for group in groups:
+    for row, group in zip(rows, groups, strict=True):
         assert all(path.actions == group[0].actions for path in group)
         assert all(path.qa_nll == group[0].qa_nll for path in group)
         rewards = torch.tensor([
-            -path.qa_nll - grpo["slot_cost"] * model.memory_slots * len(path.block_lengths)
+            -path.qa_nll - grpo["memory_cost_weight"] * (
+                model.memory_slots * len(path.block_lengths) / len(row.input_ids)
+            ) ** grpo["memory_cost_power"]
             for path in group
         ])
         assert rewards.std(unbiased=False) == 0

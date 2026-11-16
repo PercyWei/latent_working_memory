@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261116 11:42:53 Asia/Shanghai
+最后修订时间：20261116 17:59:42 Asia/Shanghai
 
 [运行指南](scripts/README.md) · [预训练配置](../../../configs/v3_1_1/pretrain_default.json) · [后训练配置](../../../configs/v3_1_1/post_default.json) · [K256 预训练](../../../configs/v3_1_1/pretrain_k256.json) · [K256 后训练](../../../configs/v3_1_1/post_k256.json)
 
@@ -48,9 +48,15 @@ train／dev 的长度筛选在预训练按完整样本 `text`、后训练按正�
 当前计算要求 full-attention 和固定 default RoPE。模型加载默认使用 SDPA，具体内核由 PyTorch 根据设备、精度和输入选择；也可通过配置或 CLI 强制使用 FlashAttention 2。Writer 与 Reader 的模块和训练状态独立，共享只读的冻结基座参数；LoRA 仅作用于 Writer，不合并到基座。`compute.dtype` 统一控制两者的参数加载精度，默认 FP32；混合精度与 CPU 暂存设置见[配置与运行](#配置与运行)。所有可训练参数、梯度和优化器状态使用 FP32。预训练不训练边界模块；后训练阶段的目标为：
 
 ```text
-reward_g = -stopgrad(QA_NLL_g) - slot_cost × K × blocks_g
+rho_g = K × blocks_g / input_tokens
+memory_cost_g = rho_g ** memory_cost_power
+reward_g = -stopgrad(QA_NLL_g) - memory_cost_weight × memory_cost_g
 loss = mean(QA_NLL_g) + policy_weight × GRPO_loss
 ```
+
+`input_tokens` 是每篇文档实际送入压缩器的 `input_ids` 长度，包含既有上下文提示前缀，不含 QA、padding 或追加的 memory tokens。保留比例 `rho_g` 按文档、按路径计算；`memory_cost_power`（p）为有限正数，默认 1.0；`memory_cost_weight`（α）为有限非负数，默认 0.1。QA NLL 使用原始数值，不做额外尺度归一化。p=1 时，同一文档每增加一块的奖励惩罚为 `α × K / input_tokens`。
+
+α=0.1 是基于 `policy-post_k256_20261113` 最后一个 checkpoint（step 69）的 118 篇 dev 配对结果选取的探索起点。在已保存的固定 1／2／4／8 块候选中，按参考答案逐文档选择目标最小项，α=0.1 保留无惩罚候选最优 NLL 收益的 90.72%，并使相对单块的额外保留比例减少 48.52%；平均块数由 2.551 降至 1.822，仍有 55 篇选择多块。这是冻结模型上的事后校准，不代表策略已达到该结果，也不证明重训最优权重或生成质量改善。完整重算记录保存在 `artifacts/v3-1/policy-post_k256_20261113/eval/boundary-cost_20261116/alpha-calibration.json`。
 
 奖励、组内优势和旧动作概率停止梯度；压缩器 QA 损失始终使用正权平均，不乘优势。每卡按 microbatch 组文档，固定参数无梯度采样并评价各篇的 G 条路径，再逐轮批量回放各篇对应的路径。Writer 的边界判断与压缩按活跃文档组批；Reader 每轮从各篇选一道 QA 批量反传到独立 memory 叶子，然后释放本轮 decoder 图。各篇全部 QA 的 memory 梯度按自身题数与 G 归一，与策略项一起回传 Writer，随后释放这一轮路径图。累计全部 microbatch 后，按实际全局文档数归约并联合更新一次，下一批刷新轨迹。异长序列使用左侧 padding、attention mask 和真实位置，padding 不参与损失。
 
@@ -117,7 +123,7 @@ loss = mean(QA_NLL_g) + policy_weight × GRPO_loss
 
 - **共用设置**：`model.structure.memory_slots=256`；`model.lora` 中 `lora_rank=16`、`lora_alpha=32`、`lora_target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]`；`compute` 中 `dtype="float32"`、`attention_implementation="sdpa"`、`gradient_checkpointing=false`、`mixed_precision=false`、`save_on_cpu=false`。`training.optimizer` 中 `weight_decay=0.01`、`beta1=0.9`、`beta2=0.999`、`adam_epsilon=1e-8`、`gradient_clip=1.0`；`training.scheduler` 中 `warmup_steps=50`、`min_lr_ratio=0.1`。
 - **预训练**：`model.structure.unit_tokens=null`、`model.structure.boundary_hidden_size=null`；`training.objective` 中 `lm_ratio=0.5`、`lm_target_tokens=512`；`training.optimizer.compressor_learning_rate=1e-4`。
-- **后训练**：`model.structure.boundary_hidden_size=128`、`model.structure.unit_tokens=256`；`training.grpo` 中 `group_size=4`、`slot_cost=0.001`、`policy_weight=1.0`、`clip_epsilon=0.2`、`advantage_epsilon=1e-6`；`training.optimizer` 中 `compressor_learning_rate=2e-5`、`boundary_learning_rate=1e-4`；`training.backward.bptt_steps=null`。
+- **后训练**：`model.structure.boundary_hidden_size=128`、`model.structure.unit_tokens=256`；`training.grpo` 中 `group_size=4`、`memory_cost_weight=0.1`、`memory_cost_power=1.0`、`policy_weight=1.0`、`clip_epsilon=0.2`、`advantage_epsilon=1e-6`；`training.optimizer` 中 `compressor_learning_rate=2e-5`、`boundary_learning_rate=1e-4`；`training.backward.bptt_steps=null`。
 
 例如，后训练每两次写入截断一次时，在现有配置中设置以下片段：
 

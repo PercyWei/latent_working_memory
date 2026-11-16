@@ -75,9 +75,11 @@ def post_backward_batch(model, documents, unit_tokens, grpo, generator, bptt_ste
     with torch.no_grad(), model.forward_context():
         groups = sample_group_batch(model, documents, unit_tokens, grpo["group_size"], generator)
     rewards, advantages = [], []
-    for paths in groups:
+    for document, paths in zip(documents, groups, strict=True):
         reward = torch.tensor([
-            -path.qa_nll - grpo["slot_cost"] * model.memory_slots * len(path.block_lengths)
+            -path.qa_nll - grpo["memory_cost_weight"] * (
+                model.memory_slots * len(path.block_lengths) / len(document.input_ids)
+            ) ** grpo["memory_cost_power"]
             for path in paths
         ], device=paths[0].old_log_probs.device, dtype=torch.float32)
         rewards.append(reward)
