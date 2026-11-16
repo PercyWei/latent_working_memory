@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261116 12:13:09 Asia/Shanghai
+最后修订时间：20261116 14:57:24 Asia/Shanghai
 
 本目录使用 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现和作者公开 checkpoint。Momentum 760M 已于 20261110 完成下表全部 12,000 条 RULER 样本的评估，结果查看方式见[查看结果](#查看结果)。
 
@@ -12,7 +12,7 @@
 
 首批评估作者公开重训的 **760M Momentum／RoPE／PreNorm**，两个 Muon 变体按需补充。这些模型按论文训练设置重训，其权重不是论文表格对应的同一次训练产物。
 
-三个公开模型的 tokenizer 和特殊 token 配置一致，可共用下表所列的 **12,000 条评估样本**。下载和构造命令见[评估数据准备](../20261108_ttt_data_preparation.md)。数据固定从下表路径读取，相对路径以项目根目录为准。
+三个公开模型的 tokenizer 和特殊 token 配置一致，可共用下表所列的 **12,000 条评估样本**。下载和构造命令见[评估数据准备](../20261108_ttt_data_preparation.md)。数据固定从下表路径读取。
 
 | benchmark | 任务与长度 | 样本数 | 固定数据路径 |
 |---|---|---:|---|
@@ -62,7 +62,6 @@ Momentum 和 Muon 均支持 `optimized` 运行，但 Muon 尚未完成其适用�
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/lact/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
-  --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-nheads4-chunk2048-760m_ruler \
   --inference-mode optimized \
   --batch-size 16 \
   --batch-size-by-length 4096=64 8192=32 16384=32 32768=16
@@ -70,30 +69,33 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 
 | 参数 | 默认值与约定 |
 |---|---|
-| `--resume` | 沿用原评估协议补齐未完成样本，默认不开启；允许调整 GPU 数量、顺序和 batch size |
+| `--resume` | 沿用原评估协议补齐未完成样本，默认不开启 |
 | `--checkpoint` | 必需，本地完整 checkpoint 目录 |
-| `--output-dir` | 必需，首次运行时目录须不存在 |
+| `--output-root` | 产物父目录，默认 `artifacts/reproductions/lact` |
+| `--output-id` | 默认 `<checkpoint_name>_<YYYYMMDD-HHMM>`，使用上海时间；续评时必须显式指定原 ID |
 | `--inference-mode` | 推理模式，支持 `original`（默认）和 `optimized` |
 | `--batch-size` | 每卡样本数上限，默认 `1`；只有 `optimized` 支持大于 1 |
 | `--batch-size-by-length` | 按评估长度覆盖每卡上限，未指定的长度使用 `--batch-size` |
 | `--lengths` | 默认 `4096 8192 16384 32768` |
 
-- 首次运行的输出目录须不存在。原评估停止后，以相同输出目录追加 `--resume`；checkpoint、数据、长度及推理模式保持原计划不变；未显式指定的长度和模式沿用原计划。
+- 新运行保存在 `<output-root>/<output-id>/ruler/`，终端显示实际 ID；已有同名 ID 时拒绝覆盖。原评估停止后，指定原 `--output-id` 并追加 `--resume`，可调整 GPU 数量、顺序及 batch 设置；自定义 `--output-root` 时仍需提供原值。checkpoint、长度及推理模式保持原计划不变，省略长度和模式时沿用原计划。
 - 输入为 `input + answer_prefix`，greedy 生成最多 128 tokens，保留 EOS；输入加生成预算不得超过所选长度，不截断。评分沿用原 RULER。
 - 每批左 padding 到该批最长输入，最后一批保留实际样本数。`input_tokens` 记录各样本的真实输入长度，生成从补齐后的批次宽度之后截取。padding 不推进真实位置或 TTT 更新；TTT 沿用逐样本状态调度。验证范围和 Muon 数值限制见[复现状态](../20261110_ttt_reproduction_status.md)。
 
 ## 查看结果
+
+新运行的 `--eval-dir` 指向 `<output-root>/<output-id>/ruler/`。已有 Momentum 完整结果可直接查看：
 
 ```bash
 uv run reproductions/lact/scripts/compare_results.py \
   --eval-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-nheads4-chunk2048-760m_ruler
 ```
 
-`--eval-dir` 指向完整评估根目录，输出同目录的 `comparison.html`。
+脚本在该 RULER 目录内生成 `comparison.html`。
 
 ## 来源记录与输出
 
-终端显示总体进度；每次启动的 GPU、batch、代码来源和日志分别保存在对应的 `attempts/attempt-<编号>/` 中。续评从历史逐样本预测中恢复进度，按当前 GPU 数量重新分配未完成的样本。
+以下文件均位于 `<output-root>/<output-id>/ruler/`。终端显示总体进度；续评复用历史逐样本预测，按当前 GPU 数量重新分配未完成的样本。
 
 | 文件 | 内容 |
 |---|---|
@@ -104,7 +106,7 @@ uv run reproductions/lact/scripts/compare_results.py \
 | `attempts/attempt-<编号>/merged/predictions.jsonl` | 本轮完成后按样本顺序汇总的全部预测 |
 | `comparison.html` | 执行对比脚本生成的图表与表格 |
 
-最终分数读取输出根目录的 `summary.json`，其中 `merged_summary_path` 指向本轮完整汇总。已有单卡根目录或 `shards/shard-<i>/` 中的原始结果也可续评，原文件保持不变。
+最终分数读取 RULER 目录内的 `summary.json`，其中 `merged_summary_path` 指向本轮完整汇总。
 
 ## 备用训练入口
 

@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261116 12:07:48 Asia/Shanghai
+最后修订时间：20261116 14:58:56 Asia/Shanghai
 
 ## 代码职责
 
@@ -30,7 +30,7 @@ LaCT 迁入范围为顶层 `README.md`、`LICENSE`、完整 `lact_llm/`、完整
 ## 接入改动
 
 - LaCT 模型、配置和更新函数原样保存在 `upstream/`。flame 的 `custom_models/__init__.py` 通过 Transformers 注册 `lact_model`；本地训练入口调用原 trainer，不改训练逻辑。
-- `eval.sh` 经 `../evaluate_multi_gpu.py` 调度单卡／双卡，`scripts/evaluate.py` 严格加载 checkpoint。`--inference-mode original|optimized` 默认 `original`，保留官方完整前缀推理且只支持 B1；`optimized` 使用本地缓存实现。
+- `eval.sh` 经 `../evaluate_multi_gpu.py` 调度单卡／双卡，`scripts/evaluate.py` 严格加载 checkpoint。`--inference-mode original|optimized` 默认 `original`，保留官方完整前缀推理且只支持 B1；`optimized` 使用本地缓存实现。产物位于 `<output-root>/<output-id>/ruler/`，新运行默认使用 checkpoint 目录名与上海分钟时间生成 ID，续评须显式指定原 ID。
 - `optimized/` 统一处理单样本、等长和混长 batch，保存每条样本的真实位置、窗口 KV、fast weights、Momentum、范数与待写 chunk；所有输入均复用同一状态路径。沿用原始 TTT 读出与更新公式，满尾段在下一真实 token 到来时提交；padding 不计入真实进度。投影、FFN 和 attention 批量执行，TTT 按样本维护独立状态。
 - 同一 RULER 长度内按实际 token 数稳定降序，相邻组批并左 padding 到批内最长输入。`--batch-size` 设置每卡上限，`--batch-size-by-length` 覆盖指定长度；输入、128-token 生成预算与评分不变，输出按物理宽度及各自 EOS 截取。
 - `scripts/scheduling.py` 将固定评估协议与 GPU／batch 设置分开记录；续评按全局样本 ID 只分配未完成输入。`scripts/records.py` 和 `scripts/merge_evaluation.py` 读取原始预测、核对覆盖并重新计分；每次执行保留代码来源和设置。RULER 路径固定在 `scripts/records.py`，具体目录见 README。

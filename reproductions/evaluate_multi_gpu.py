@@ -277,12 +277,14 @@ def execute_lact(args, interruption):
             raise SystemExit(128 + interruption["signum"])
 
     directory = args.output_dir
+    run_directory = directory.parent
     if args.resume:
         if not directory.is_dir():
-            raise ValueError("--resume requires an existing output directory")
+            raise ValueError(f"--resume requires the existing RULER directory: {directory}")
     else:
-        directory.mkdir(parents=True, exist_ok=False)
-    with evaluation_lock(directory):
+        run_directory.mkdir(parents=True, exist_ok=False)
+        directory.mkdir()
+    with evaluation_lock(run_directory):
         reject_live_workers(directory)
         saved = existing_protocol(directory) if args.resume else None
         resolve_protocol_arguments(args, saved)
@@ -417,7 +419,11 @@ def main():
     for method in ("lact", "in_place_ttt"):
         method_parser = methods.add_parser(method)
         method_parser.add_argument("--checkpoint", type=Path, required=True)
-        method_parser.add_argument("--output-dir", type=Path, required=True)
+        if method == "lact":
+            method_parser.add_argument("--output-root", type=Path, default=ROOT / "artifacts/reproductions/lact")
+            method_parser.add_argument("--output-id")
+        else:
+            method_parser.add_argument("--output-dir", type=Path, required=True)
         method_parser.add_argument("--resume", action="store_true")
         if method == "lact":
             add_lact_arguments(method_parser)
@@ -434,7 +440,21 @@ def main():
     if args.method == "lact" and worker_args:
         parser.error(f"Unknown LaCT evaluation arguments: {' '.join(worker_args)}")
     args.checkpoint = args.checkpoint.expanduser().resolve()
-    args.output_dir = args.output_dir.expanduser().resolve()
+    if args.method == "lact":
+        if args.resume and args.output_id is None:
+            parser.error("--resume requires the original --output-id")
+        if args.output_id is None:
+            current = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M")
+            args.output_id = f"{args.checkpoint.name}_{current}"
+        if not args.output_id.strip() or args.output_id in {".", ".."} or any(
+            separator in args.output_id for separator in ("/", "\\")
+        ):
+            parser.error("--output-id must be one nonempty directory name")
+        args.output_root = args.output_root.expanduser().resolve()
+        args.output_dir = args.output_root / args.output_id / "ruler"
+        print(f"[evaluate] output-id={args.output_id} | ruler: {args.output_dir}", flush=True)
+    else:
+        args.output_dir = args.output_dir.expanduser().resolve()
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
 
