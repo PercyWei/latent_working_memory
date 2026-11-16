@@ -302,7 +302,7 @@ class BatchedTTTState:
         positions = torch.tensor(starts, device=self.device)[:, None] + torch.arange(count, device=self.device)
         return [None if value is None else value[indices[:, None], positions] for value in values]
 
-    def _commit_rows(self, rows, values):
+    def _commit_rows(self, rows, values, pending=False):
         groups = {}
         for index, row in enumerate(rows):
             key = tuple(self._dtypes[name][row] for name in self._components if name in self._dtypes)
@@ -314,6 +314,10 @@ class BatchedTTTState:
             if len(group) != len(rows):
                 indices = torch.tensor([index for index, _ in group], device=self.device)
                 selected = [None if value is None else value.index_select(0, indices) for value in values]
+            if pending:
+                # 对齐旧pending的cat布局：K/LR为[H,C,D]连续，V随后transpose。
+                selected = [None if value is None else value.permute(0, 2, 1, 3).contiguous().permute(0, 2, 1, 3)
+                            for value in selected]
             count = len(selected_rows) * self.heads
             ki, vi, lr0, lr1, lr2, momentum = selected
             result = _ttt_commit(
@@ -337,7 +341,7 @@ class BatchedTTTState:
         values = [None if getattr(self, name) is None else (
             getattr(self, name) if indices is None else getattr(self, name).index_select(0, indices)
         ) for name in self._pending]
-        self._commit_rows(rows, values)
+        self._commit_rows(rows, values, pending=True)
         for row in rows:
             self.pending_length[row] = 0
 
