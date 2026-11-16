@@ -102,7 +102,7 @@ def validate_sample_ids(ids, expected):
 
 
 def worker_directories(directory):
-    return sorted(directory.glob("attempts/attempt-*/workers/worker-*"))
+    return sorted(path.parent for path in directory.glob("attempts/attempt-*/workers/worker-*/plan.json"))
 
 
 def collect_records(directory, protocol):
