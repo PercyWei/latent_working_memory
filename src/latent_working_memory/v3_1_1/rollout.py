@@ -172,12 +172,20 @@ def execute_replay_batch(model, contexts, unit_tokens, actions, bptt_steps=None)
 
 
 @torch.no_grad()
-def execute_batch(model, contexts, unit_tokens, uniforms=None):
-    """批量分段；uniforms 给出各行随机判断量，省略时确定性判断。"""
+def execute_batch(model, contexts, unit_tokens, uniforms=None, actions=None):
+    """批量分段；可指定随机判断量或固定动作，均省略时确定性判断。"""
     units = [tuple(context[start:start + unit_tokens]
                    for start in range(0, len(context), unit_tokens)) for context in contexts]
     if not units or any(not sequence for sequence in units):
         raise ValueError("a stream batch must contain nonempty inputs")
+    if actions is not None:
+        if uniforms is not None:
+            raise ValueError("fixed actions and random uniforms are mutually exclusive")
+        if len(actions) != len(units) or any(
+            len(decisions) != len(sequence) - 1
+            for decisions, sequence in zip(actions, units, strict=True)
+        ):
+            raise ValueError("fixed actions must match every source decision position")
     blocks = [[] for _ in units]
     pending = [len(sequence[0]) for sequence in units]
     chosen, log_probs, entropies, lengths = ([[] for _ in units] for _ in range(4))
@@ -198,7 +206,9 @@ def execute_batch(model, contexts, unit_tokens, uniforms=None):
         previous = [caches[index] for index in active]
         arriving = [units[index][step] for index in active]
         logits, observed = model.observe_source_batch(previous, arriving)
-        if uniforms is None:
+        if actions is not None:
+            commits = [actions[index][step - 1] for index in active]
+        elif uniforms is None:
             commits = (logits >= 0).tolist()
         else:
             commits = [uniforms[index][step - 1] < probability for index, probability in

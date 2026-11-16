@@ -36,7 +36,7 @@ def encode_context_question(context, question, tokenizer, max_new_tokens):
 
 
 @torch.no_grad()
-def compute_batch(samples, model, config, commit, encode, record):
+def compute_batch(samples, model, config, commit, encode, record, actions=None):
     """每个样本只压缩一次正文；具体任务负责输入适配、评分与结果字段。"""
     count = len(samples)
     device = model.memory_embeddings.device
@@ -47,7 +47,7 @@ def compute_batch(samples, model, config, commit, encode, record):
     contexts = [value.context_ids for value in inputs]
     preparation = time.perf_counter() - started
     started = time.perf_counter()
-    paths = execute_batch(model, contexts, config.model.structure.unit_tokens)
+    paths = execute_batch(model, contexts, config.model.structure.unit_tokens, actions=actions)
     torch.cuda.synchronize(device)
     compression = time.perf_counter() - started
     memories = [path[0] for path in paths]

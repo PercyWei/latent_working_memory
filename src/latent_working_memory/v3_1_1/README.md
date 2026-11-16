@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261116 11:42:53 Asia/Shanghai
+最后修订时间：20261116 15:03:08 Asia/Shanghai
 
 [运行指南](scripts/README.md) · [预训练配置](../../../configs/v3_1_1/pretrain_default.json) · [后训练配置](../../../configs/v3_1_1/post_default.json) · [K256 预训练](../../../configs/v3_1_1/pretrain_k256.json) · [K256 后训练](../../../configs/v3_1_1/post_k256.json)
 
@@ -204,6 +204,17 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
 K 为每块槽位数。压缩倍率按正文 token 总数除以 memory token 总数计算，等于先汇总分子、分母得到的 `segment_tokens / K`；例如 K256、平均段长 1024 对应 4× 压缩。后训练不记录独立的 `train/samples` 指标；`train/commit_rate`、`train/memory_slots` 和 `train/segment_tokens` 仅保存在本地 `metrics.jsonl`。图表与轴名在初始化时配置，运行中只追加本步标量，保留已有历史数据；dev 和资源指标分别展示在 `dev`、`resources` 区。
 
 训练完成后退出。独立评估仅接受后训练 checkpoint，分别通过 `eval_test.sh`、`eval_locomo.sh` 和 `eval_ruler.sh` 执行固定任务，新建时用 `--eval-data` 指定数据并保存固定协议与 checkpoint 范围。三者共用正文压缩与 Reader 回答流程：正文全部压缩为 memory，结束时强制提交剩余正文，再将问题和任务指令交给 Reader。
+
+边界成本诊断使用 `evaluation.boundary_compare`，在 checkpoint 绑定的同一批 dev 上比较当前确定性策略和固定 1、2、4、8 块。固定边界按处理单元网格等分，沿用相同的流式 Writer 和 Reader；问题与答案不参与边界选择。每题贪心生成，记录 QA NLL、标准化 EM／token F1、块数、槽位成本及完整答案。计划在计算前保存，数据身份必须与训练 dev 一致；中断后追加 `--resume` 按完整文档恢复。该诊断只写本地产物。
+
+```bash
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m latent_working_memory.v3_1_1.evaluation.boundary_compare \
+  --checkpoint <最后一个checkpoint> \
+  --output-dir <运行目录>/eval/boundary-cost_20261116 \
+  --batch-size 4 --max-new-tokens 128
+```
+
+比较时按同一文档配对。新增槽位的盈亏平衡成本为 `lambda_break_even = (NLL_base - NLL_candidate) / (slots_candidate - slots_base)`；额外记忆带来的 NLL 改善需要超过新增槽位成本，才能提高训练奖励。固定最终 checkpoint 的推理干预只刻画该模型当前的质量与成本关系，不能直接替代不同成本系数的重新训练对照。
 
 Test 固定读取数据目录下 `test.jsonl` 的完整正文，不应用训练长度筛选，同文档全部 QA 共用 memory。评分先对每题目标 tokens 平均，再对题目及文档等权平均得到 `qa_nll`；`token_nll` 另按全部目标 tokens 加权，目标含模板结束符。EM／F1 按题平均。LoCoMo 分离对话与问题，RULER 按各任务模板分离正文与指令、查询，评分均复用项目公共模块中的官方逻辑；评估范围仍为 LoCoMo 类别 1–4 与 RULER 全部 13 项任务。
 
