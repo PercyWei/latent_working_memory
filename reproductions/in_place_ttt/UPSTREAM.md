@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261110 17:31:44 Asia/Shanghai
+最后修订时间：20261116 21:06:35 Asia/Shanghai
 
 ## 来源
 
@@ -17,18 +17,21 @@
 | 位置 | 职责 |
 |---|---|
 | `upstream/` | 未修改的官方来源，保留训练、推理及导出入口 |
-| `scripts/evaluate.py`、`runtime.py`、`provenance.py` | 本地 JSONL 接入、严格加载、生成调度、原生评分、续评及代码来源记录 |
-| `eval.sh`、`../evaluate_multi_gpu.py`、`scripts/merge_evaluation.py` | 多卡独立进程调度、互斥行分片及完整结果合并，不修改模型计算 |
+| `scripts/` | 本地数据契约、严格加载、单样本生成、原生评分、续评、合并及代码来源记录 |
+| `eval.sh`、`scripts/evaluate_parallel.py` | 单卡／多卡独立进程调度、全局样本分配与执行记录，不修改模型计算 |
+| `../evaluation_runtime.py` | LaCT 与 In-Place TTT 共用的进度显示和子进程退出清理 |
 | `optimized/` | 独立的模型子类，压紧 TTT 尾部存储、可选 MLP 分块；不改 checkpoint keys、上游文件、全局 AutoModel 注册或 OpenCompass 安装 |
 | `scripts/validate_optimization.py` | 原始／优化生成、chunk 边界和样本隔离的配对验证 |
 
 `original` 调用官方模型及原 OpenCompass `HuggingFaceBaseModel.generate`。`optimized` 复用一次完整编码的输入，保持特殊 token、生成参数、解码和评分；缓存压紧不裁剪 attention KV 或 fast weights，MLP 分块保留原 TTT chunk 的先读后更新及尾段处理。
 
-`eval.sh` 默认 `original`、每进程 batch size 1，单卡运行一个进程；设置 `CUDA_VISIBLE_DEVICES=0,1` 或 `1,0` 时，每卡一个进程评估互斥样本，完成后从原始预测重新计分。优化模式的 `--mlp-chunk-size` 默认 `16384`，设为 `0` 时仅压紧 TTT 尾部缓存、保留原 MLP 计算形状。完整运行指令、数据规模和产物见 [README](README.md)，验证与性能结论统一见[复现状态记录](../20261110_ttt_reproduction_status.md)。
+`eval.sh` 统一经启动器运行，默认 `original`，每卡一个进程且 batch size 固定为 1；各卡评估互斥样本，完成后从原始预测重新计分。`--mlp-chunk-size` 默认 `0`，`original` 仅接受 `0`；`optimized` 设为 `0` 时仅压紧 TTT 尾部缓存、保留原 MLP 计算形状，正值同时启用 MLP 分块，TTT 模型要求分块长度为 TTT chunk 的整数倍。完整运行指令、数据规模和产物见 [README](README.md)，验证与性能结论统一见[复现状态记录](../20261110_ttt_reproduction_status.md)。
 
 本地 wrapper 使用本次最大评估长度作为 `max_seq_len`，通过 OpenCompass 实际支持的 `generation_kwargs` 和 `max_out_len=64` 传入生成设置；不使用原配置中不受支持的 `gen_config`／`engine_config`，也不把聊天模板参数 `enable_thinking` 传入 base 模型。每条完整编码输入加 64-token 预算必须在长度档位内，不截断、不自动改 RoPE 或添加 YaRN。
 
-运行计划记录 Git commit／dirty/status、上游 revision 和实现路径；执行与逐题结果关联实际运行来源。续评保留初始计划，逐次记录代码状态并核对模式、分块参数及 runtime，不能混用不同实现的结果。
+数据固定从本地 RULER 目录读取。产物保存在 `<output-root>/eval/<output-id>/ruler/`，默认 ID 为 checkpoint 目录名与上海时间的分钟时间戳。`evaluation_plan.json` 保存固定评估协议，`launcher_execution.json` 记录各次执行；各轮样本分配、日志、逐样本预测和合并结果分别存放在 `attempts/attempt-<编号>/`。
+
+运行计划记录 Git commit／dirty/status、上游 revision 和实现路径；执行与逐题结果关联实际运行来源。续评显式使用原 ID，保留 checkpoint、长度、推理模式、分块及生成／评分协议，按全局样本 ID 补齐未完成记录，允许调整 GPU 数量和顺序。运行目录独占锁及历史活跃 worker 检查防止重复启动。
 
 ## 资源与原文差异
 

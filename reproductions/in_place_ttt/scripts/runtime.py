@@ -13,22 +13,12 @@ from opencompass.models.huggingface_above_v4_33 import (
 from optimized.model import CompactTTTDynamicCache, OptimizedQwen3ForCausalLM
 from transformers.cache_utils import DynamicCache
 
+from in_place_ttt.scripts.records import GENERATION_KWARGS, MODEL_KWARGS, TOKENIZER_KWARGS
+
 
 MODEL_CLASSES = {
     "original": Qwen3ForCausalLM,
     "optimized": OptimizedQwen3ForCausalLM,
-}
-MODEL_KWARGS = {
-    "device_map": "cuda:0",
-    "torch_dtype": "torch.bfloat16",
-    "local_files_only": True,
-}
-TOKENIZER_KWARGS = {"local_files_only": True}
-GENERATION_KWARGS = {
-    "do_sample": False,
-    "top_k": 20,
-    "top_p": 0.95,
-    "use_cache": True,
 }
 
 
@@ -67,7 +57,7 @@ class EvaluationModel(HuggingFaceBaseModel):
             self.model.set_optimization(True, self.mlp_chunk_size)
 
 
-def load_model(checkpoint, inference_mode="original", mlp_chunk_size=16384, max_seq_len=262144):
+def load_model(checkpoint, inference_mode="original", mlp_chunk_size=0, max_seq_len=262144):
     if inference_mode not in MODEL_CLASSES:
         raise ValueError(f"Unknown inference mode: {inference_mode}")
     if mlp_chunk_size < 0:

@@ -2,9 +2,9 @@
 
 创建时间：20261110 11:51:20 Asia/Shanghai
 
-最后修订时间：20261116 11:15:42 Asia/Shanghai
+最后修订时间：20261116 21:06:35 Asia/Shanghai
 
-在 `zcy-memory` 的单张 A800-SXM4-80GB、物理 GPU 0 上测量，显式设置 `CUDA_VISIBLE_DEVICES=0`、`OMP_NUM_THREADS=1`、`MKL_NUM_THREADS=1`。下列均为单卡小样本外推，不是完整 benchmark 实测耗时；运行命令见 [README](in_place_ttt/README.md#ruler-评估)。
+在 `zcy-memory` 的单张 A800-SXM4-80GB、物理 GPU 0 上测量，显式设置 `CUDA_VISIBLE_DEVICES=0`、`OMP_NUM_THREADS=1`、`MKL_NUM_THREADS=1`。下列均为单卡小样本外推，不是完整 benchmark 实测耗时；运行命令见 [README](in_place_ttt/README.md#环境与运行命令)。
 
 | 模型 | 每进程 batch | 同卡进程数 | 所测整卡峰值 | 完整评估外推 |
 |---|---:|---:|---:|---:|

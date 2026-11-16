@@ -11,9 +11,6 @@ fi
 export CUDA_VISIBLE_DEVICES="$EVAL_GPU"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF-expandable_segments:True}"
 export TOKENIZERS_PARALLELISM=false
-export PYTHONPATH="$METHOD_DIR/upstream:$METHOD_DIR/scripts:$METHOD_DIR${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$PROJECT_ROOT/reproductions:$METHOD_DIR/upstream:$METHOD_DIR/scripts:$METHOD_DIR${PYTHONPATH:+:$PYTHONPATH}"
 cd "$PROJECT_ROOT"
-if [[ $CUDA_VISIBLE_DEVICES == *,* ]]; then
-  exec python -u "$PROJECT_ROOT/reproductions/evaluate_multi_gpu.py" in_place_ttt "$@"
-fi
-exec python -u "$METHOD_DIR/scripts/evaluate.py" "$@"
+exec python -u "$METHOD_DIR/scripts/evaluate_parallel.py" "$@"

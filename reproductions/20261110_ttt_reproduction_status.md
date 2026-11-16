@@ -2,7 +2,7 @@
 
 创建时间：20261110 11:30:45 Asia/Shanghai
 
-最后修订时间：20261116 18:32:19 Asia/Shanghai
+最后修订时间：20261116 21:03:11 Asia/Shanghai
 
 ## 当前状态
 
@@ -54,7 +54,9 @@ LaCT 使用作者公开重训权重，E²-TTT 使用作者官方权重；In-Plac
 
 ### In-Place TTT
 
-`in_place_ttt/optimized/` 独立实现 TTT 尾段存储压紧与 MLP 分块；attention KV 与 fast weights 不裁剪，保留 1,024-token chunk 的原读出／更新顺序。默认仍为 `original`；`optimized --mlp-chunk-size 0` 仅压紧尾段，`16384` 同时启用 MLP 分块。
+`in_place_ttt/optimized/` 独立实现 TTT 尾段存储压紧与 MLP 分块；attention KV 与 fast weights 不裁剪，保留 1,024-token chunk 的原读出／更新顺序。默认使用 `original`；新运行的 `--mlp-chunk-size` 默认为 `0`，`optimized` 仅压紧尾段，`16384` 同时启用 MLP 分块。
+
+单卡和多卡均经 `eval.sh` 的共同启动器运行，每卡固定 B1；数据路径在代码中固定。各轮执行按全局样本 ID 分配未完成样本，保留原生成与 OpenCompass 评分协议，续评允许调整 GPU 数量和顺序。本轮调度、产物组织及续评入口仅进行代码审查，未运行测试或 GPU 评估；下列一致性与资源数据来自此前的模型实现验证。
 
 - 两个 checkpoint 各覆盖七长度、每长度两条，共 14 条真实样本；原始／优化路径的完整生成 IDs、文本及原生评分一致。TTT 真实样本最终状态逐位一致，缓存隔离检查通过。
 - 仅尾段压紧在所测边界状态逐位一致；MLP 分块在 17,406-token 合成输入出现 logits／内部状态差异，最大 logits 绝对差为 0.25，不能保证任意输入的生成一致。
@@ -70,6 +72,6 @@ TTT 256K 平均耗时约 127.82 → 127.38 秒，没有实质提速。128K／256
 
 ## 结果记录
 
-LaCT 与 E²-TTT 的新评估保存在 `<output-root>/eval/<output-id>/<benchmark>/`，默认 root 为 `artifacts/reproductions/<method>/`，默认 ID 为 `<checkpoint_name>_<YYYYMMDD-HHMM>`（上海时间）；续评须显式指定原 ID。In-Place TTT 仍使用其 `--output-dir`。产物保留运行计划、代码来源、逐样本预测、执行状态和汇总。LaCT Momentum 的已有正式结果保留；优化诊断、选参和临时验证产物不作为 benchmark 分数。
+三个方法的评估保存在 `<output-root>/eval/<output-id>/<benchmark>/`，默认 root 为 `artifacts/reproductions/<method>/`，默认 ID 为 `<checkpoint_name>_<YYYYMMDD-HHMM>`（上海时间）；续评须显式指定原 ID。产物保留运行计划、代码来源、逐样本预测、执行状态和汇总。LaCT Momentum 的已有正式结果保留；优化诊断、选参和临时验证产物不作为 benchmark 分数。
 
-LaCT 与 E²-TTT 续评均按全局样本 ID 补齐未完成记录，允许调整 GPU 数量、顺序与 batch size；`original` 仍限 B1。E²-TTT 对尚未写出评分的样本复用原生生成缓存，再按原 task 评分。两者数据路径在代码中固定，目录见各自 README。In-Place TTT 按其 README 保持恢复设置。源码边界见各方法 `UPSTREAM.md`。
+三个方法续评均按全局样本 ID 补齐未完成记录，允许调整 GPU 数量和顺序。LaCT 与 E²-TTT 还允许调整 batch size，`original` 仍限 B1；In-Place TTT 每卡始终为 B1。E²-TTT 对尚未写出评分的样本复用原生生成缓存，再按原 task 评分。数据路径在代码中固定，目录见各自 README。源码边界见各方法 `UPSTREAM.md`。
