@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261116 12:07:48 Asia/Shanghai
+最后修订时间：20261116 12:13:09 Asia/Shanghai
 
 本目录使用 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308) 的官方实现和作者公开 checkpoint。公开权重加载、生成和计分检查已完成，尚未完成本轮计划的完整评估。
 
@@ -10,9 +10,9 @@
 
 ## 评估目标与数据
 
-MLP 和 SwiGLU 两个 1.3B 模型均使用下表所列的 **10,095 条样本**进行评估。下载和构造命令见[评估数据准备](../20261108_ttt_data_preparation.md)。数据固定从下表目录读取，路径相对于项目根目录。
+MLP 和 SwiGLU 两个 1.3B 模型均使用下表所列的 **10,095 条样本**进行评估。下载和构造命令见[评估数据准备](../20261108_ttt_data_preparation.md)。数据固定从下表路径读取，相对路径以项目根目录为准。
 
-| benchmark | 任务与长度 | 样本数 | 固定数据目录 |
+| benchmark | 任务与长度 | 样本数 | 固定数据路径 |
 |---|---|---:|---|
 | RULER | S-NIAH-1／2；512、1K、2K、4K、8K、16K；每项任务、每个长度 500 条 | 6,000 | `data/benchmarks/ruler-v1/reproductions/e2-ttt-1.3b` |
 | SQuAD completion | 完整 validation | 2,984 | `data/benchmarks/based-squad/data/validation-00000-of-00001.parquet` |
