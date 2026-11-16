@@ -216,6 +216,8 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m latent_working_memory.v3_1_1.evaluati
 
 比较时按同一文档配对。新增槽位的盈亏平衡成本为 `lambda_break_even = (NLL_base - NLL_candidate) / (slots_candidate - slots_base)`；额外记忆带来的 NLL 改善需要超过新增槽位成本，才能提高训练奖励。固定最终 checkpoint 的推理干预只刻画该模型当前的质量与成本关系，不能直接替代不同成本系数的重新训练对照。
 
+全部条件完成后运行 `python -m latent_working_memory.v3_1_1.evaluation.boundary_report --output-dir <评估目录>`，在 `comparison/` 生成配对统计 JSON／CSV 和独立 HTML 看板。95% bootstrap 区间按文档整体配对重采样；看板合并展示同题的各条件答案，并按输入长度三等分给出分层点估计。
+
 Test 固定读取数据目录下 `test.jsonl` 的完整正文，不应用训练长度筛选，同文档全部 QA 共用 memory。评分先对每题目标 tokens 平均，再对题目及文档等权平均得到 `qa_nll`；`token_nll` 另按全部目标 tokens 加权，目标含模板结束符。EM／F1 按题平均。LoCoMo 分离对话与问题，RULER 按各任务模板分离正文与指令、查询，评分均复用项目公共模块中的官方逻辑；评估范围仍为 LoCoMo 类别 1–4 与 RULER 全部 13 项任务。
 
 后续可考虑保留最近窗口内的原文、仅压缩窗口外历史作为独立推理设置；当前正文全部压缩，训练是否启用最近窗口待定。
