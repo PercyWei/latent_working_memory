@@ -81,9 +81,10 @@ def execute(args):
         raise ValueError("Workers require pending IDs grouped by planned benchmark")
     if plan["protocol"] != protocol or plan["batch_size"] != args.batch_size or set(plan["outputs"]) != set(assignments):
         raise ValueError("Worker routing differs from its persisted plan")
+    batch_size_by_length = plan["batch_size_by_length"]
     mode = protocol["inference_mode"]
-    if args.batch_size < 1 or (mode == "original" and args.batch_size != 1):
-        raise ValueError("Batch size must be positive; original inference requires batch size 1")
+    if args.batch_size < 1:
+        raise ValueError("Batch size must be positive")
     if protocol["versions"] != runtime_versions():
         raise ValueError("Worker software versions differ from the frozen evaluation protocol")
     source = source_record(__file__, mode)
@@ -91,9 +92,17 @@ def execute(args):
     write_json(plan_path, plan)
     for name, ids in assignments.items():
         child_protocol = benchmark_protocol(protocol, name)
-        validate_sample_ids(ids, sample_index(child_protocol))
+        expected = sample_index(child_protocol)
+        validate_sample_ids(ids, expected)
         if not ids:
             raise ValueError("Workers must not receive empty benchmark assignments")
+        if mode == "original":
+            effective_batches = {
+                batch_size_by_length.get(str(expected[key][2]["length"]), args.batch_size)
+                for key in ids
+            } if name == "ruler" else {args.batch_size}
+            if effective_batches != {1}:
+                raise ValueError("Original inference requires effective batch size 1 for every assigned sample")
         folder = Path(plan["outputs"][name])
         child_plan = json.loads((folder / "plan.json").read_text())
         if child_plan["protocol"] != child_protocol or child_plan["sample_ids"] != ids:
@@ -156,6 +165,7 @@ def execute(args):
                             ]
                             if not tasks:
                                 continue
+                            benchmark_lm.batch_size_per_gpu = batch_size_by_length.get(str(length), args.batch_size)
                             result = evaluate_tasks(cached, tasks)
                             child_state["completed_samples"] += save_result(result, f"ruler_{length}", native_dir, predictions, specs)
                     else:
