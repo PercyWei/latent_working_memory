@@ -178,6 +178,44 @@ def _policy_single_agreement(records):
     }
 
 
+def _fixed_budget_oracles(arrays, slot_cost):
+    """用参考答案的逐文档 NLL 选固定预算，只作为不可部署的事后诊断。"""
+    candidates = ("fixed-1", "fixed-2", "fixed-4", "fixed-8")
+    values = np.stack([arrays[condition] for condition in candidates])
+    baseline_nll = arrays["fixed-1"][:, 0].mean()
+    results = []
+    for selection_cost in (0.0, slot_cost):
+        objectives = values[:, :, 0] + selection_cost * values[:, :, 5]
+        # 候选按块数递增排列；目标精确相同时取较少块，避免把平局计作额外块胜出。
+        selected = values[np.argmin(objectives, axis=0), np.arange(values.shape[1])]
+        means = selected.mean(axis=0)
+        questions = selected[:, 3].sum()
+        extra = selected[:, 4] > arrays["fixed-1"][:, 4]
+        results.append({
+            "selection_slot_cost": selection_cost,
+            "selected_blocks_distribution": {
+                str(blocks): int((selected[:, 4] == blocks).sum()) for blocks in (1, 2, 4, 8)
+            },
+            "qa_nll": float(means[0]),
+            "em": float(selected[:, 1].sum() / questions),
+            "f1": float(selected[:, 2].sum() / questions),
+            "blocks": float(means[4]), "memory_slots": float(means[5]),
+            "memory_cost": float(selection_cost * means[5]),
+            "memory_cost_at_training_slot_cost": float(slot_cost * means[5]),
+            "reward": float(-means[0] - selection_cost * means[5]),
+            "reward_at_training_slot_cost": float(-means[0] - slot_cost * means[5]),
+            "nll_gain_vs_fixed_1": float(baseline_nll - means[0]),
+            "documents_extra_blocks_selected": int(extra.sum()),
+            "extra_blocks_selected_rate": float(extra.mean()),
+        })
+    return {
+        "candidates": list(candidates),
+        "selection": "Per-document minimum of reference-answer QA NLL plus selection_slot_cost times memory_slots; exact ties prefer fewer blocks.",
+        "scope": "Reference answers select the budget after evaluation; not deployable or an actual policy. Only the evaluated fixed segmentations are candidates. NLL-based selection does not optimize generation EM/F1.",
+        "results": results,
+    }
+
+
 def _csv(path, records):
     with path.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(records[0]))
@@ -281,6 +319,17 @@ def _dashboard(path, plan, summary, records):
                 f'<td>{stratum["documents"]}</td><td>{row["condition"]}</td><td>{row["qa_nll"]:.4f}</td>'
                 f'<td>{row["em"]:.2%}</td><td>{row["f1"]:.2%}</td><td>{threshold}</td></tr>'
             )
+    oracle_rows = []
+    for row in summary["fixed_budget_oracles"]["results"]:
+        distribution = " / ".join(str(row["selected_blocks_distribution"][str(blocks)])
+                                  for blocks in (1, 2, 4, 8))
+        oracle_rows.append(
+            f'<tr><th>{row["selection_slot_cost"]:g}</th><td>{distribution}</td>'
+            f'<td>{row["qa_nll"]:.4f}</td><td>{row["em"]:.2%}</td><td>{row["f1"]:.2%}</td>'
+            f'<td>{row["blocks"]:.3f}</td><td>{row["memory_cost"]:.4f}</td>'
+            f'<td>{row["memory_cost_at_training_slot_cost"]:.4f}</td>'
+            f'<td>{row["nll_gain_vs_fixed_1"]:.4f}</td><td>{row["extra_blocks_selected_rate"]:.1%}</td></tr>'
+        )
     examples = []
     for index, row in enumerate(records["policy"]):
         examples.append({
@@ -318,6 +367,10 @@ def _dashboard(path, plan, summary, records):
 <div class="scroll"><table><thead><tr><th>基线 → 候选</th><th>NLL 收益</th><th>EM 收益（pp）</th><th>F1 收益（pp）</th><th>每新增块 NLL 收益</th><th>临界 slot_cost</th><th>reward 收益</th><th>NLL 更好/更差/相同文档</th><th>reward 更好文档</th></tr></thead><tbody>__COMPARISONS__</tbody></table></div>
 <p class="meta">区间描述固定模型在这批 dev 上的文档抽样不确定性，不包含训练 seed 或模型选择的不确定性；多组比较没有多重检验校正。此实验冻结最终 checkpoint，仅在推理时干预分段：已适应单块的模型可能低估重新训练多块的潜力，不能直接推断调整 slot_cost 后的训练收益。若临界 slot_cost ≤ 0，表示额外块的平均 NLL 没有改善，不能据此建议更低的正成本；只有 NLL 收益为正但小于记忆成本时，才是当前成本抵消了这部分收益。</p>
 <p class="meta">policy 与 fixed-1：__AGREEMENT__</p>
+<h2>逐文档选择预算的 oracle 诊断</h2>
+<p>在已评估的 fixed-1／2／4／8 中，用每篇的参考答案 QA NLL 选择 <code>NLL + λ × memory_slots</code> 最小的预算；精确平局取较少块。分别令 λ=0 和当前 slot_cost，检查平均值是否掩盖了部分文档从额外块得到的收益。</p>
+<div class="scroll"><table><thead><tr><th>选择预算的 λ</th><th>1 / 2 / 4 / 8 块文档数</th><th>QA NLL</th><th>EM</th><th>F1</th><th>平均块数</th><th>选择 λ 下成本</th><th>训练 slot_cost 下成本</th><th>相对 fixed-1 NLL 收益</th><th>额外块胜出文档</th></tr></thead><tbody>__ORACLES__</tbody></table></div>
+<p class="meta">oracle 使用参考答案事后选预算，不能部署，也不是当前策略的实际表现；候选仅包含这些固定分段，不能代表任意自适应边界的最优结果。选择依据是 NLL 与成本，没有优化生成 EM／F1。</p>
 <h2>按输入长度分层</h2><p>按含提示前缀的压缩输入 token 数排序后，将同一批文档分成三个近等大组；同长度按文档 ID 排序。这些组不是训练课程档位。下表仅给出点估计，临界 slot_cost 以同组 fixed-1 为基线。</p>
 <div class="scroll"><table><thead><tr><th>长度分组</th><th>文档数</th><th>条件</th><th>QA NLL</th><th>EM</th><th>F1</th><th>临界 slot_cost</th></tr></thead><tbody>__STRATA__</tbody></table></div>
 <h2>同一输入的生成结果</h2>
@@ -353,6 +406,7 @@ document.getElementById('next').onclick=()=>{selector.value=Math.min(data.length
         "__SEED__": str(summary["bootstrap"]["seed"]),
         "__COMPARISONS__": "".join(comparison_rows),
         "__STRATA__": "".join(strata_rows),
+        "__ORACLES__": "".join(oracle_rows),
         "__AGREEMENT__": escape(
             f"动作完全相同 {summary['policy_single_agreement']['identical_action_documents']}/{plan['documents']} 篇；"
             f"生成文本完全相同 {summary['policy_single_agreement']['identical_prediction_questions']}/{plan['questions']} 题；"
@@ -395,6 +449,7 @@ def build_report(output_dir, bootstrap_samples=5000, seed=42):
         },
         "conditions": conditions, "comparisons": comparisons,
         "policy_single_agreement": _policy_single_agreement(records),
+        "fixed_budget_oracles": _fixed_budget_oracles(arrays, plan["slot_cost"]),
         "length_strata_definition": "Three near-equal document groups sorted by compressed input tokens including prefix, then document ID; not training curriculum bins; point estimates only.",
         "length_strata": _length_strata(records, arrays, plan),
     }
