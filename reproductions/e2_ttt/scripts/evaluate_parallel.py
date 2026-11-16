@@ -11,6 +11,7 @@ import sys
 import time
 from zoneinfo import ZoneInfo
 
+from batching import execution_parameters
 from evaluation_state import (
     BENCHMARKS, LENGTHS, PROJECT_ROOT, benchmark_protocol, build_protocol, collect_records,
     evaluation_lock, merge_generation_caches, refresh_benchmark, refresh_run_summary,
@@ -29,6 +30,7 @@ def parse_args():
     parser.add_argument("--output-id")
     parser.add_argument("--inference-mode", choices=("original", "optimized"))
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--batch-size-by-length", nargs="+", default=[], metavar="LENGTH=BATCH")
     parser.add_argument("--benchmarks", choices=BENCHMARKS, nargs="+")
     parser.add_argument("--lengths", choices=LENGTHS, type=int, nargs="+")
     parser.add_argument("--resume", action="store_true")
@@ -42,7 +44,7 @@ def parse_args():
     if (not args.output_id.strip() or args.output_id in (".", "..")
             or "/" in args.output_id or "\\" in args.output_id):
         parser.error("--output-id must be a single nonempty directory name")
-    args.run_dir = args.output_root / args.output_id
+    args.run_dir = args.output_root / "eval" / args.output_id
     devices = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")
     if not devices or len(devices) != len(set(devices)) or not set(devices) <= {"0", "1"}:
         parser.error("Use CUDA_VISIBLE_DEVICES=0, 1, 0,1 or 1,0")
@@ -85,8 +87,10 @@ def resolve_protocol(args, saved):
         raise ValueError("Resume benchmarks must be a subset of the original evaluation plan")
     if "ruler" in original_benchmarks and (not args.lengths or len(args.lengths) != len(set(args.lengths))):
         raise ValueError("RULER lengths must be nonempty and unique")
-    if args.batch_size < 1 or (args.inference_mode == "original" and args.batch_size != 1):
-        raise ValueError("Batch size must be positive; original inference requires batch size 1")
+    args.batch_parameters = execution_parameters(
+        args.batch_size, args.batch_size_by_length,
+        args.lengths if "ruler" in original_benchmarks else [], args.benchmarks, args.inference_mode,
+    )
     protocol = build_protocol(args.checkpoint, args.inference_mode, original_benchmarks, args.lengths, runtime_versions())
     if saved is not None and protocol != saved:
         different = [key for key in protocol.keys() | saved.keys() if protocol.get(key) != saved.get(key)]
@@ -142,12 +146,12 @@ def execute_attempt(args, protocol, source):
     ]
     write_json(directory / "plan.json", {
         "created_at": timestamp(), "evaluation_plan": str(root / "evaluation_plan.json"),
-        "benchmarks": args.benchmarks, "devices": args.devices, "batch_size": args.batch_size,
+        "benchmarks": args.benchmarks, "devices": args.devices, **args.batch_parameters,
         "completed_samples_before_attempt": completed,
         "pending_samples": {name: len(ids) for name, ids in pending.items()}, "source": source,
     })
     state = {"attempt": directory.name, "started_at": timestamp(), "status": "running",
-             "benchmarks": args.benchmarks, "devices": args.devices, "batch_size": args.batch_size, "workers": []}
+             "benchmarks": args.benchmarks, "devices": args.devices, **args.batch_parameters, "workers": []}
     launcher_path = root / "launcher_execution.json"
     history = json.loads(launcher_path.read_text()) if launcher_path.exists() else {"attempts": []}
     history["attempts"].append(state)
@@ -180,7 +184,7 @@ def execute_attempt(args, protocol, source):
                        for name in ids_by_benchmark}
             write_json(folder / "plan.json", {
                 "protocol": protocol, "outputs": {name: str(path) for name, path in outputs.items()},
-                "batch_size": args.batch_size, "physical_gpu": gpu, "source": source,
+                **args.batch_parameters, "physical_gpu": gpu, "source": source,
             })
             assignment = directory / f"worker-{index}-sample-ids.json"
             write_json(assignment, ids_by_benchmark)
@@ -189,7 +193,7 @@ def execute_attempt(args, protocol, source):
                 child_folder = outputs[name]
                 child_folder.mkdir(parents=True)
                 write_json(child_folder / "plan.json", {
-                    "protocol": children[name], "sample_ids": ids, "batch_size": args.batch_size,
+                    "protocol": children[name], "sample_ids": ids, **args.batch_parameters,
                     "physical_gpu": gpu, "source": source,
                 })
                 write_json(child_folder / "execution.json", {"status": "pending", "completed_samples": 0})

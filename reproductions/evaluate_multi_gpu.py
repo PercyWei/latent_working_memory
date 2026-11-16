@@ -451,7 +451,7 @@ def main():
         ):
             parser.error("--output-id must be one nonempty directory name")
         args.output_root = args.output_root.expanduser().resolve()
-        args.output_dir = args.output_root / args.output_id / "ruler"
+        args.output_dir = args.output_root / "eval" / args.output_id / "ruler"
         print(f"[evaluate] output-id={args.output_id} | ruler: {args.output_dir}", flush=True)
     else:
         args.output_dir = args.output_dir.expanduser().resolve()

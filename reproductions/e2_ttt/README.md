@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261116 15:14:21 Asia/Shanghai
+最后修订时间：20261116 16:00:57 Asia/Shanghai
 
 本目录使用 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308) 的官方实现和作者公开 checkpoint。公开权重加载、生成和计分检查已完成，尚未完成本轮计划的完整评估。
 
@@ -10,7 +10,7 @@
 
 ## 评估目标与数据
 
-MLP 和 SwiGLU 两个 1.3B 模型均使用下表所列的 **10,095 条样本**进行评估。下载和构造命令见[评估数据准备](../20261108_ttt_data_preparation.md)。数据固定从下表路径读取，相对路径以项目根目录为准。
+MLP 和 SwiGLU 两个 1.3B 模型均使用下表所列的 **10,095 条样本**进行评估。下载和构造命令见[评估数据准备](../20261108_ttt_data_preparation.md)。数据固定从下表路径读取。
 
 | benchmark | 任务与长度 | 样本数 | 固定数据路径 |
 |---|---|---:|---|
@@ -52,36 +52,39 @@ MLP 和 SwiGLU 分别执行：
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/e2_ttt/mlp-1.3b-15b \
+  --output-id mlp-1.3b-15b_20261116 \
   --inference-mode optimized \
-  --batch-size 8
+  --batch-size 8 \
+  --batch-size-by-length 8192=4 16384=2
 
 CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/e2_ttt/swiglu-1.3b-15b \
+  --output-id swiglu-1.3b-15b_20261116 \
   --inference-mode optimized \
-  --batch-size 8
+  --batch-size 8 \
+  --batch-size-by-length 8192=4 16384=2
 ```
 
 | 参数 | 默认值与约定 |
 |---|---|
 | `--resume` | 沿用原评估协议补齐未完成样本，默认不开启 |
-| `--benchmarks` | `ruler squad_completion swde`，可选择其中一项或多项 |
+| `--benchmarks` | 默认 `ruler squad_completion swde`，可选择其中一项或多项 |
 | `--checkpoint` | 必需，本地完整 checkpoint 目录 |
 | `--output-root` | 产物父目录，默认 `artifacts/reproductions/e2_ttt` |
-| `--output-id` | 默认 `<checkpoint_name>_<YYYYMMDD-HHMM>`，使用上海时间；续评时必须显式指定原 ID |
+| `--output-id` | 默认 `<checkpoint_name>_<YYYYMMDD-HHMM>` |
 | `--inference-mode` | 推理模式，支持 `original`（默认）和 `optimized` |
-| `--batch-size` | 每卡样本数上限，默认 `1`；只有 `optimized` 支持大于 1 |
+| `--batch-size` | 每卡样本数上限，默认 `1`；`original` 要求实际生效的 batch 为 `1` |
+| `--batch-size-by-length` | 按评估长度覆盖每卡上限，未指定的长度使用 `--batch-size`，仅作用于 RULER |
 | `--lengths` | 默认 `512 1024 2048 4096 8192 16384`，仅作用于 RULER |
 
-- 新运行保存在 `<output-root>/<output-id>/`，终端显示实际 ID；已有同名 ID 时拒绝覆盖。原评估停止后，指定原 `--output-id` 并追加 `--resume`，可调整 GPU 数量、顺序及 batch size；自定义 `--output-root` 时仍需提供原值。checkpoint、长度及推理模式保持原计划不变，省略长度和模式时沿用原计划。
-- 三个 benchmark 分别保存于 `ruler/`、`squad_completion/`、`swde/`。续评省略 `--benchmarks` 时恢复原计划全部项目，也可选择原计划内的部分 benchmark。
-- 续评复用已完成的逐题结果；尚未写出评分的样本可复用原生生成缓存，再按原 task 评分。
+- 评估产物保存在 `<output-root>/eval/<output-id>/<bench>`；新运行在已有同名目录时拒绝覆盖；原评估中断后，指定原 `--output-id` 并追加 `--resume` 可续评估，checkpoint、长度及推理模式保持原计划不变，支持调整 GPU 数量、顺序、`--batch-size` 和 `--batch-size-by-length`，也支持选择原计划内的部分 benchmark。
 - RULER 输入为 `input + answer_prefix`，greedy 最多生成 128 tokens；输入加生成预算不得超过所选长度，不截断。
 - SQuAD／SWDE 保留原文本 `.strip()` 和换行停止，最多生成 48 tokens；总预算 2048，prompt 超过 2000 tokens 时按原规则左截断。
 - 按长度降序排列后相邻组批，每批左 padding 到该批最长输入，最后一批保留实际样本数。各样本独立维护真实位置、attention 与 TTT 状态。
 
 ## 来源记录与输出
 
-最终分数分别读取 `<output-root>/<output-id>/<benchmark>/summary.json`。每个 worker 加载一次模型，依次处理分配到的多个 benchmark。
+最终分数分别读取 `<output-root>/eval/<output-id>/<benchmark>/summary.json`。每个 worker 加载一次模型，依次处理分配到的多个 benchmark。
 
 | 文件 | 内容 |
 |---|---|
