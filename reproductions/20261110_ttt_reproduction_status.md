@@ -2,11 +2,11 @@
 
 创建时间：20261110 11:30:45 Asia/Shanghai
 
-最后修订时间：20261116 11:31:52 Asia/Shanghai
+最后修订时间：20261116 12:07:48 Asia/Shanghai
 
 ## 当前状态
 
-LaCT、E²-TTT、In-Place TTT 的源码迁入、独立环境、数据接入及 checkpoint 运行检查已完成，均保留各自 `eval.sh`。LaCT 与 E²-TTT 默认使用 `optimized`，按长度排序后相邻组批，左 padding 到批内最长输入；单样本、等长和混长输入使用同一状态路径。`original` 保留上游 B1 对照。
+LaCT、E²-TTT、In-Place TTT 的源码迁入、独立环境、数据接入及 checkpoint 运行检查已完成，均保留各自 `eval.sh`。LaCT 与 E²-TTT 默认使用 `original`，保留上游 B1 路径；显式选择 `optimized` 时按长度排序后相邻组批，左 padding 到批内最长输入，单样本、等长和混长输入使用同一状态路径。
 
 | 方法 | 正式评估范围 | 当前进度 |
 |---|---|---|
@@ -20,7 +20,7 @@ LaCT 使用作者公开重训权重，E²-TTT 使用作者官方权重；In-Plac
 
 运行命令与参数以各方法 README 为准，数据准备见[数据准备](20261108_ttt_data_preparation.md)，依赖见[评估环境](20261109_environment_setup.md)。每卡独立加载模型、评估互斥样本并按原规则汇总；本轮没有重新测量混长吞吐、batch 上限或多卡性能。
 
-20261116 在 `zcy-memory-v4.2` 的物理 GPU 0（L40S 48GB）复核默认模式：LaCT 三个模型各三条完整 8K 输入，E²-TTT 两个模型各 11 条、覆盖三个 benchmark，生成、原生计分与同目录续评均通过。实际代码为 `662b1dc1`，服务器 Git 状态为 clean；临时验证产物已清理。
+20261116 在 `zcy-memory-v4.2` 的物理 GPU 0（L40S 48GB）复核当时的 `optimized` 模式：LaCT 三个模型各三条完整 8K 输入，E²-TTT 两个模型各 11 条、覆盖三个 benchmark，生成、原生计分与同目录续评均通过。实际代码为 `662b1dc1`，服务器 Git 状态为 clean；临时验证产物已清理。
 
 ## 实现与验证边界
 
@@ -56,4 +56,4 @@ TTT 256K 平均耗时约 127.82 → 127.38 秒，没有实质提速。128K／256
 
 正式评估保存在 `artifacts/reproductions/<method>/eval/<run>/`，保留运行计划、代码来源、逐样本预测、执行状态和汇总。LaCT Momentum 的已有正式结果保留；优化诊断、选参和临时验证产物不作为 benchmark 分数。
 
-LaCT 续评可调整 GPU 与 batch，只补齐未完成的样本；E²-TTT 和 In-Place TTT 按各自 README 保持恢复设置。源码边界见各方法 `UPSTREAM.md`。
+LaCT 与 E²-TTT 续评均按全局样本 ID 补齐未完成记录，允许调整 GPU 数量、顺序与 batch size；`original` 仍限 B1。E²-TTT 对尚未写出评分的样本复用原生生成缓存，再按原 task 评分。两者数据路径在代码中固定，目录见各自 README。In-Place TTT 按其 README 保持恢复设置。源码边界见各方法 `UPSTREAM.md`。

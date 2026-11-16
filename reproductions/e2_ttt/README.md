@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261116 11:15:42 Asia/Shanghai
+最后修订时间：20261116 12:07:48 Asia/Shanghai
 
 本目录使用 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308) 的官方实现和作者公开 checkpoint。公开权重加载、生成和计分检查已完成，尚未完成本轮计划的完整评估。
 
@@ -10,13 +10,13 @@
 
 ## 评估目标与数据
 
-MLP 和 SwiGLU 两个 1.3B 模型均使用下表所列的 **10,095 条样本**进行评估。下载和构造命令见[评估数据准备](../20261108_ttt_data_preparation.md)。
+MLP 和 SwiGLU 两个 1.3B 模型均使用下表所列的 **10,095 条样本**进行评估。下载和构造命令见[评估数据准备](../20261108_ttt_data_preparation.md)。数据固定从下表目录读取，路径相对于项目根目录。
 
-| benchmark | 任务与长度 | 样本数 | 默认数据目录 |
+| benchmark | 任务与长度 | 样本数 | 固定数据目录 |
 |---|---|---:|---|
 | RULER | S-NIAH-1／2；512、1K、2K、4K、8K、16K；每项任务、每个长度 500 条 | 6,000 | `data/benchmarks/ruler-v1/reproductions/e2-ttt-1.3b` |
-| SQuAD completion | 完整 validation | 2,984 | `data/benchmarks/based-squad` |
-| SWDE | 完整 validation | 1,111 | `data/benchmarks/based-swde` |
+| SQuAD completion | 完整 validation | 2,984 | `data/benchmarks/based-squad/data/validation-00000-of-00001.parquet` |
+| SWDE | 完整 validation | 1,111 | `data/benchmarks/based-swde/data/validation-00000-of-00001.parquet` |
 
 论文 `tab:incontext_retrieval_main` 中 **1.3B 参数规模模型**的准确率如下；RULER 参照原文长上下文主图及附录的 S-NIAH 数值表。
 
@@ -65,18 +65,16 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 
 | 参数 | 默认值与约定 |
 |---|---|
+| `--resume` | 沿用原评估协议补齐未完成样本，默认不开启；允许调整 GPU 数量、顺序和 batch size |
+| `--benchmarks` | `ruler squad_completion swde`，可选择其中一项或多项 |
 | `--checkpoint` | 必需，本地完整 checkpoint 目录 |
 | `--output-dir` | 必需，首次运行时目录须不存在 |
-| `--inference-mode` | `optimized`（默认）或 `original`；后者仅支持 batch size 1 |
+| `--inference-mode` | 推理模式，支持 `original`（默认）和 `optimized` |
 | `--batch-size` | 每卡样本数上限，默认 `1`；只有 `optimized` 支持大于 1 |
-| `--benchmarks` | `ruler squad_completion swde`，可选择其中一项或多项 |
-| `--lengths` | `512 1024 2048 4096 8192 16384`，仅作用于 RULER |
-| `--ruler-data` | `data/benchmarks/ruler-v1/reproductions/e2-ttt-1.3b` |
-| `--squad-data` | `data/benchmarks/based-squad` |
-| `--swde-data` | `data/benchmarks/based-swde` |
-| `--resume` | 使用原输出目录继续评估，保持 GPU 顺序与其余参数一致 |
+| `--lengths` | 默认 `512 1024 2048 4096 8192 16384`，仅作用于 RULER |
 
-- 首次运行的输出目录须不存在。中断后在原命令末尾追加 `--resume`；不同 checkpoint 或推理模式使用独立目录。
+- 首次运行的输出目录须不存在。原评估停止后，在原命令末尾追加 `--resume`，可调整 GPU 数量、顺序和 batch size；checkpoint、benchmark、长度及推理模式保持原计划不变；未显式指定的 benchmark、长度和模式沿用原计划。
+- 续评复用已完成的逐题结果；尚未写出评分的样本可复用原生生成缓存，再按原 task 评分。
 - RULER 输入为 `input + answer_prefix`，greedy 最多生成 128 tokens；输入加生成预算不得超过所选长度，不截断。
 - SQuAD／SWDE 保留原文本 `.strip()` 和换行停止，最多生成 48 tokens；总预算 2048，prompt 超过 2000 tokens 时按原规则左截断。
 - 按长度降序排列后相邻组批，每批左 padding 到该批最长输入，最后一批保留实际样本数。各样本独立维护真实位置、attention 与 TTT 状态。
@@ -88,9 +86,9 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 | 文件 | 内容 |
 |---|---|
 | `summary.json` | 所选样本全部完成后的任务／长度分数 |
-| `plan.json`、`execution.json` | 运行设置、代码来源、执行状态与耗时 |
-| `predictions.jsonl`、`native_harness/` | 单卡逐题预测、评分和原生结果 |
-| `manifest.json` | 并行评估各分片的结果位置 |
+| `evaluation_plan.json` | 固定 checkpoint、数据及生成／评分协议 |
+| `launcher_execution.json`、`attempts/attempt-*/` | 各次启动的 GPU、batch size、代码来源、状态与耗时；worker 保存原始逐题结果、原生评分和生成缓存 |
+| `predictions.jsonl`、`manifest.json` | 合并后的逐题结果及其原始记录位置 |
 
 ## 备用训练入口
 

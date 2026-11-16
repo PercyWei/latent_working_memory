@@ -5,7 +5,6 @@ from contextlib import contextmanager
 import fcntl
 import json
 import os
-from pathlib import Path
 
 from batching import parse_batch_size_by_length
 from records import (
@@ -14,26 +13,20 @@ from records import (
 )
 
 
-ROOT = Path(__file__).resolve().parents[3]
-
-
 def add_lact_arguments(parser):
     parser.add_argument("--inference-mode", choices=("original", "optimized"))
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--batch-size-by-length", nargs="+", default=[], metavar="LENGTH=BATCH")
-    parser.add_argument("--ruler-data", type=Path)
     parser.add_argument("--lengths", type=int, nargs="+", choices=LENGTHS)
 
 
 def resolve_protocol_arguments(args, saved=None):
     defaults = saved if saved is not None else {
-        "inference_mode": "optimized", "lengths": list(LENGTHS),
-        "ruler_data": str(ROOT / "data/benchmarks/ruler-v1/reproductions/lact-760m"),
+        "inference_mode": "original", "lengths": list(LENGTHS),
     }
-    for field in ("inference_mode", "lengths", "ruler_data"):
+    for field in ("inference_mode", "lengths"):
         if getattr(args, field) is None:
             setattr(args, field, defaults[field])
-    args.ruler_data = Path(args.ruler_data).expanduser().resolve()
 
 
 def execution_parameters(args, devices):
@@ -54,7 +47,7 @@ def execution_parameters(args, devices):
 
 def worker_arguments(args):
     arguments = [
-        "--inference-mode", args.inference_mode, "--ruler-data", str(args.ruler_data),
+        "--inference-mode", args.inference_mode,
         "--lengths", *map(str, args.lengths), "--batch-size", str(args.batch_size),
     ]
     if args.batch_size_by_length:
@@ -113,11 +106,8 @@ def existing_protocol(directory):
     add_lact_arguments(parser)
     args = parser.parse_args(plan["worker_arguments"])
     resolve_protocol_arguments(args)
-    data = args.ruler_data.expanduser()
-    if not data.is_absolute():
-        data = ROOT / data
-    samples = load_samples({"ruler_data": str(data), "lengths": args.lengths})
-    protocol = build_protocol(plan["checkpoint"], data, args.lengths, args.inference_mode, samples)
+    samples = load_samples({"lengths": args.lengths})
+    protocol = build_protocol(plan["checkpoint"], args.lengths, args.inference_mode, samples)
     protocol["checkpoint_config"] = plan["checkpoint_config"]
     return protocol
 

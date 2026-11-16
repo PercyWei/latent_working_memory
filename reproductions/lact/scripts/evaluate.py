@@ -26,9 +26,6 @@ from latent_working_memory.benchmarks.vendor.ruler import (
 )
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-
-
 def read_predictions(path, expected, logger, shard_index):
     records = {}
     if not path.exists():
@@ -58,7 +55,7 @@ def read_predictions(path, expected, logger, shard_index):
     return records
 
 
-def load_checkpoint(checkpoint, inference_mode="optimized"):
+def load_checkpoint(checkpoint, inference_mode="original"):
     config = LaCTSWIGLUConfig.from_pretrained(checkpoint, local_files_only=True)
     model_class = {"original": LaCTForCausalLM, "optimized": OptimizedLaCTForCausalLM}[inference_mode]
     model, loading = model_class.from_pretrained(
@@ -110,12 +107,11 @@ def prepare_batches(expected, records, tokenizer, batch_size, batch_size_by_leng
 
 def run(args, output, logger, run_source, execution_attempt):
     checkpoint = args.checkpoint.expanduser().resolve()
-    data = args.ruler_data.expanduser().resolve()
     if not checkpoint.is_dir():
         raise ValueError(f"Checkpoint directory does not exist: {checkpoint}")
     if not args.lengths or len(set(args.lengths)) != len(args.lengths):
         raise ValueError("lengths must be nonempty and unique")
-    samples = load_samples({"ruler_data": str(data), "lengths": args.lengths})
+    samples = load_samples({"lengths": args.lengths})
     all_samples = sample_index(samples)
     if args.sample_ids_file is not None:
         assigned = json.loads(args.sample_ids_file.read_text(encoding="utf-8"))
@@ -130,7 +126,7 @@ def run(args, output, logger, run_source, execution_attempt):
             if sample[2] % args.num_shards == args.shard_index
         }
     plan = {
-        **build_protocol(checkpoint, data, args.lengths, args.inference_mode, samples),
+        **build_protocol(checkpoint, args.lengths, args.inference_mode, samples),
         "created_at": timestamp(),
         "source": run_source,
         "batch_size": args.batch_size,
@@ -285,18 +281,13 @@ def run(args, output, logger, run_source, execution_attempt):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--inference-mode", choices=("original", "optimized"), default="optimized")
+    parser.add_argument("--inference-mode", choices=("original", "optimized"), default="original")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=1, help="Maximum samples per length-sorted batch")
     parser.add_argument("--batch-size-by-length", nargs="+", default=[], metavar="LENGTH=BATCH")
     parser.add_argument("--sample-ids-file", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--num-shards", type=int, default=1, help="Independent row shards per task and length")
     parser.add_argument("--shard-index", type=int, default=0, help="Zero-based row shard index")
-    parser.add_argument(
-        "--ruler-data",
-        type=Path,
-        default=PROJECT_ROOT / "data/benchmarks/ruler-v1/reproductions/lact-760m",
-    )
     parser.add_argument("--lengths", type=int, nargs="+", choices=LENGTHS, default=list(LENGTHS))
     parser.add_argument(
         "--resume", action="store_true", help="Continue an existing output directory"
