@@ -1,4 +1,4 @@
-"""Measure independent batch-one evaluation workers sharing physical GPU 0."""
+"""Measure In-Place TTT batch-one evaluation workers sharing physical GPU 0."""
 
 import argparse
 from datetime import datetime
@@ -12,8 +12,6 @@ from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[2]
 RULER = {
-    "lact": ("lact-760m", ("niah_single_1", "niah_multiquery")),
-    "e2_ttt": ("e2-ttt-1.3b", ("niah_single_1", "niah_single_2")),
     "in_place_ttt": ("in-place-ttt-qwen3-4b", ("niah_single_1", "niah_multiquery")),
 }
 
@@ -36,18 +34,11 @@ def source_record():
 
 
 def samples_for(args):
-    if args.dataset == "ruler":
-        directory, tasks = RULER[args.method]
-        return [{
-            "id": f"ruler/{args.length}/{tasks[i % 2]}/{1 + i // 2}",
-            "source": str(ROOT / "data/benchmarks/ruler-v1/reproductions" / directory / str(args.length) / tasks[i % 2] / "test.jsonl"),
-            "row_index": 1 + i // 2,
-        } for i in range(args.num_samples)]
-    count, directory = (2984, "based-squad") if args.dataset == "squad_completion" else (1111, "based-swde")
+    directory, tasks = RULER[args.method]
     return [{
-        "id": f"{args.dataset}/{round(i * (count - 1) / (args.num_samples - 1))}",
-        "source": str(ROOT / "data/benchmarks" / directory / "data/validation-00000-of-00001.parquet"),
-        "row_index": round(i * (count - 1) / (args.num_samples - 1)),
+        "id": f"ruler/{args.length}/{tasks[i % 2]}/{1 + i // 2}",
+        "source": str(ROOT / "data/benchmarks/ruler-v1/reproductions" / directory / str(args.length) / tasks[i % 2] / "test.jsonl"),
+        "row_index": 1 + i // 2,
     } for i in range(args.num_samples)]
 
 
@@ -138,39 +129,27 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--method", choices=list(RULER), required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--dataset", choices=("ruler", "squad_completion", "swde"), default="ruler")
+    parser.add_argument("--dataset", choices=("ruler",), default="ruler")
     parser.add_argument("--length", type=int, required=True)
     parser.add_argument("--workers", type=int, nargs="+", default=[1, 2, 4])
     parser.add_argument("--num-samples", type=int, default=8)
-    parser.add_argument("--inference-mode", choices=("original", "incremental", "optimized"))
+    parser.add_argument("--inference-mode", choices=("original", "optimized"), default="original")
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     if args.num_samples < 2 or min(args.workers) < 1 or max(args.workers) > args.num_samples or len(set(args.workers)) != len(args.workers):
         parser.error("Use distinct positive workers and at least two samples, with samples >= workers")
-    if args.dataset != "ruler" and args.method != "e2_ttt":
-        parser.error("Recall benchmarks apply only to E2-TTT")
-    inference_mode = args.inference_mode or ("incremental" if args.method == "lact" else "original")
-    allowed_modes = {"lact": ("original", "incremental"), "e2_ttt": ("original",), "in_place_ttt": ("original", "optimized")}
-    if inference_mode not in allowed_modes[args.method]:
-        parser.error("Inference mode does not apply to this method")
     args.checkpoint, args.output_dir = args.checkpoint.expanduser().resolve(), args.output_dir.expanduser().resolve()
     args.output_dir.mkdir(parents=True, exist_ok=False)
     method_root = ROOT / "reproductions" / args.method
     paths = [method_root / "scripts", method_root / "upstream", method_root]
-    paths += [ROOT / "src"] if args.method == "lact" else []
-    if args.method == "lact":
-        paths.append(method_root / "upstream/lact_llm")
-    if args.method == "e2_ttt":
-        paths.append(method_root / "upstream/lm-evaluation-harness")
     env = {**os.environ, "CUDA_VISIBLE_DEVICES": "0", "TOKENIZERS_PARALLELISM": "false", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "PYTHONPATH": os.pathsep.join(map(str, paths))}
-    if args.method == "in_place_ttt":
-        env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     python = Path.home() / "rivermind-data/envs" / f"ttt-{args.method}" / "bin/python"
     plan = {
         "created_at": timestamp(), "source": source_record(), "method": args.method,
         "checkpoint": str(args.checkpoint), "checkpoint_config": json.loads((args.checkpoint / "config.json").read_text()),
         "dataset": args.dataset, "length": args.length, "samples": samples_for(args),
-        "inference_mode": inference_mode,
+        "inference_mode": args.inference_mode,
         "mlp_chunk_size": 0, "workers_to_test": args.workers,
         "cuda_visible_devices": "0", "batch_size_per_worker": 1,
         "worker_python": str(python), "omp_num_threads": 1, "mkl_num_threads": 1,

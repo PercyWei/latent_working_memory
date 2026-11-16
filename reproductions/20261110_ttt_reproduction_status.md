@@ -2,7 +2,7 @@
 
 创建时间：20261110 11:30:45 Asia/Shanghai
 
-最后修订时间：20261116 11:15:42 Asia/Shanghai
+最后修订时间：20261116 11:31:52 Asia/Shanghai
 
 ## 当前状态
 
@@ -19,6 +19,8 @@ LaCT Momentum 的已有完整运行六任务、四长度宏平均为 **39.46%**�
 LaCT 使用作者公开重训权重，E²-TTT 使用作者官方权重；In-Place TTT 使用第三方 ProLong 32K／6,000 steps 权重，超过 32K 的结果属于长度外推。当前 checkpoint 评估不需要重新训练。
 
 运行命令与参数以各方法 README 为准，数据准备见[数据准备](20261108_ttt_data_preparation.md)，依赖见[评估环境](20261109_environment_setup.md)。每卡独立加载模型、评估互斥样本并按原规则汇总；本轮没有重新测量混长吞吐、batch 上限或多卡性能。
+
+20261116 在 `zcy-memory-v4.2` 的物理 GPU 0（L40S 48GB）复核默认模式：LaCT 三个模型各三条完整 8K 输入，E²-TTT 两个模型各 11 条、覆盖三个 benchmark，生成、原生计分与同目录续评均通过。实际代码为 `662b1dc1`，服务器 Git 状态为 clean；临时验证产物已清理。
 
 ## 实现与验证边界
 
