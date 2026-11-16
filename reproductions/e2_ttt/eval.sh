@@ -16,7 +16,4 @@ export CUDA_VISIBLE_DEVICES="$eval_gpu"
 export TOKENIZERS_PARALLELISM=false
 export PYTHONPATH="$method_dir:$method_dir/upstream:$method_dir/upstream/lm-evaluation-harness${PYTHONPATH:+:$PYTHONPATH}"
 cd "$project_root"
-if [[ $CUDA_VISIBLE_DEVICES == *,* ]]; then
-  exec bash "$method_dir/eval_parallel.sh" "$@"
-fi
-exec python -u "$method_dir/scripts/evaluate.py" "$@"
+exec python -u "$method_dir/scripts/evaluate_parallel.py" "$@"

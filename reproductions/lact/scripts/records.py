@@ -9,6 +9,10 @@ from latent_working_memory.benchmarks.vendor.ruler import postprocess_pred, stri
 from provenance import UPSTREAM_REVISION
 
 
+ROOT = Path(__file__).resolve().parents[3]
+RULER_DATA = ROOT / "data/benchmarks/ruler-v1/reproductions/lact-760m"
+
+
 TASKS = (
     "niah_single_1",
     "niah_single_2",
@@ -159,7 +163,7 @@ BATCHING = "Descending actual token length across tasks within each RULER length
 def load_samples(plan):
     return {
         (length, task): read_samples(
-            Path(plan["ruler_data"]) / str(length) / task / "test.jsonl"
+            RULER_DATA / str(length) / task / "test.jsonl"
         )
         for length in plan["lengths"]
         for task in TASKS
@@ -174,14 +178,13 @@ def sample_index(samples):
     }
 
 
-def build_protocol(checkpoint, ruler_data, lengths, inference_mode, samples):
+def build_protocol(checkpoint, lengths, inference_mode, samples):
     checkpoint = Path(checkpoint).expanduser().resolve()
-    ruler_data = Path(ruler_data).expanduser().resolve()
     return {
         "method": "lact",
         "checkpoint": str(checkpoint),
         "checkpoint_config": json.loads((checkpoint / "config.json").read_text()),
-        "ruler_data": str(ruler_data),
+        "ruler_data": str(RULER_DATA),
         "lengths": list(lengths),
         "tasks": list(TASKS),
         "samples_per_task_length": [
@@ -205,4 +208,6 @@ def build_protocol(checkpoint, ruler_data, lengths, inference_mode, samples):
 def protocol_identity(plan):
     if plan["inference_mode"] not in ("original", "optimized"):
         raise ValueError(f"Unknown LaCT inference mode: {plan['inference_mode']}")
+    if plan["ruler_data"] != str(RULER_DATA):
+        raise ValueError(f"Saved LaCT RULER path differs from the fixed data path: {plan['ruler_data']}")
     return {key: plan[key] for key in PROTOCOL_FIELDS}

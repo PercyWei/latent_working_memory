@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261116 11:15:42 Asia/Shanghai
+最后修订时间：20261116 12:07:48 Asia/Shanghai
 
 本目录使用 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现和作者公开 checkpoint。Momentum 760M 已于 20261110 完成下表全部 12,000 条 RULER 样本的评估，结果查看方式见[查看结果](#查看结果)。
 
@@ -12,9 +12,9 @@
 
 首批评估作者公开重训的 **760M Momentum／RoPE／PreNorm**，两个 Muon 变体按需补充。这些模型按论文训练设置重训，其权重不是论文表格对应的同一次训练产物。
 
-三个公开模型的 tokenizer 和特殊 token 配置一致，可共用下表所列的 **12,000 条评估样本**。下载和构造命令见[评估数据准备](../20261108_ttt_data_preparation.md)。
+三个公开模型的 tokenizer 和特殊 token 配置一致，可共用下表所列的 **12,000 条评估样本**。下载和构造命令见[评估数据准备](../20261108_ttt_data_preparation.md)。数据固定从下表目录读取，路径相对于项目根目录。
 
-| benchmark | 任务与长度 | 样本数 | 默认数据目录 |
+| benchmark | 任务与长度 | 样本数 | 固定数据目录 |
 |---|---|---:|---|
 | RULER | S-NIAH-1/2/3、MK-NIAH-1、MQ-NIAH、MV-NIAH；4K／8K／16K／32K；每项任务、每个长度 500 条 | 12,000 | `data/benchmarks/ruler-v1/reproductions/lact-760m` |
 
@@ -70,16 +70,15 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 
 | 参数 | 默认值与约定 |
 |---|---|
+| `--resume` | 沿用原评估协议补齐未完成样本，默认不开启；允许调整 GPU 数量、顺序和 batch size |
 | `--checkpoint` | 必需，本地完整 checkpoint 目录 |
 | `--output-dir` | 必需，首次运行时目录须不存在 |
-| `--inference-mode` | `optimized`（默认）或 `original`；后者仅支持 batch size 1 |
+| `--inference-mode` | 推理模式，支持 `original`（默认）和 `optimized` |
 | `--batch-size` | 每卡样本数上限，默认 `1`；只有 `optimized` 支持大于 1 |
-| `--batch-size-by-length` | 按评估长度覆盖每卡上限，例如 `4096=16 8192=16 16384=8 32768=4`；未指定的长度使用 `--batch-size` |
-| `--lengths` | `4096 8192 16384 32768` |
-| `--ruler-data` | `data/benchmarks/ruler-v1/reproductions/lact-760m` |
-| `--resume` | 沿用原评估协议，只补齐尚未完成的样本；允许更改 GPU 数量、顺序及 batch 设置 |
+| `--batch-size-by-length` | 按评估长度覆盖每卡上限，未指定的长度使用 `--batch-size` |
+| `--lengths` | 默认 `4096 8192 16384 32768` |
 
-- 首次运行的输出目录须不存在。原评估停止后，以相同输出目录追加 `--resume`；checkpoint、数据、长度及推理模式保持原计划不变。
+- 首次运行的输出目录须不存在。原评估停止后，以相同输出目录追加 `--resume`；checkpoint、数据、长度及推理模式保持原计划不变；未显式指定的长度和模式沿用原计划。
 - 输入为 `input + answer_prefix`，greedy 生成最多 128 tokens，保留 EOS；输入加生成预算不得超过所选长度，不截断。评分沿用原 RULER。
 - 每批左 padding 到该批最长输入，最后一批保留实际样本数。`input_tokens` 记录各样本的真实输入长度，生成从补齐后的批次宽度之后截取。padding 不推进真实位置或 TTT 更新；TTT 沿用逐样本状态调度。验证范围和 Muon 数值限制见[复现状态](../20261110_ttt_reproduction_status.md)。
 

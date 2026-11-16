@@ -13,9 +13,9 @@ from lm_eval.tasks.swde.task import SWDE
 class LocalParquetMixin:
     """Replace dataset loading while inheriting the original task behavior."""
 
-    def __init__(self, parquet_path, num_shards=1, shard_index=0):
+    def __init__(self, parquet_path, source_ids):
         self.parquet_path = Path(parquet_path)
-        self.num_shards, self.shard_index = num_shards, shard_index
+        self.source_ids = sorted(source_ids)
         # The original class initializers discard custom config kwargs.
         ConfigurableTask.__init__(
             self,
@@ -49,7 +49,7 @@ class LocalParquetMixin:
         if len(full) != self.source_samples:
             raise ValueError(f"{self.parquet_path}: expected {self.source_samples} samples, got {len(full)}")
         full = full.add_column("source_doc_id", list(range(len(full))))
-        self.dataset = {"validation": full.select(range(self.shard_index, len(full), self.num_shards))}
+        self.dataset = {"validation": full.select(self.source_ids)}
 
 
 class LocalSQuAD(LocalParquetMixin, SQUADCompletion):
@@ -63,12 +63,12 @@ class LocalSWDE(LocalParquetMixin, SWDE):
 
 
 class LocalRuler(ConfigurableTask):
-    def __init__(self, data_path, task_name, length, lm, num_shards=1, shard_index=0):
+    def __init__(self, data_path, task_name, length, lm, source_ids):
         self.data_path = Path(data_path)
         self.length = length
         self.lm = lm
         self.metric = str(length)
-        self.num_shards, self.shard_index = num_shards, shard_index
+        self.source_ids = sorted(source_ids)
         super().__init__(
             config={
                 "task": f"{task_name}_{length}",
@@ -105,7 +105,7 @@ class LocalRuler(ConfigurableTask):
             row["max_length"] = self.length
             row["source_doc_id"] = index
         full = Dataset.from_list(rows)
-        self.dataset = {"test": full.select(range(self.shard_index, len(full), self.num_shards))}
+        self.dataset = {"test": full.select(self.source_ids)}
 
     def doc_to_text(self, doc):
         prompt = doc["input"] + doc["answer_prefix"]

@@ -288,8 +288,8 @@ def execute_lact(args, interruption):
         resolve_protocol_arguments(args, saved)
         devices = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
         parameters = execution_parameters(args, devices)
-        samples = load_samples({"ruler_data": str(args.ruler_data), "lengths": args.lengths})
-        protocol = build_protocol(args.checkpoint, args.ruler_data, args.lengths, args.inference_mode, samples)
+        samples = load_samples({"lengths": args.lengths})
+        protocol = build_protocol(args.checkpoint, args.lengths, args.inference_mode, samples)
         if saved is not None:
             check_protocol(saved, protocol, directory)
         expected = sample_index(samples)
