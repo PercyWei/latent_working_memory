@@ -1,6 +1,7 @@
-"""E²-TTT 单／双卡统一调度；按全局样本 ID 续评，可更换 GPU 与 batch。"""
+"""E²-TTT 单／双卡统一调度；每个 benchmark 独立保存结果并按全局 ID 续评。"""
 
 import argparse
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -8,11 +9,13 @@ import signal
 import subprocess
 import sys
 import time
+from zoneinfo import ZoneInfo
 
 from evaluation_state import (
-    BENCHMARKS, LENGTHS, PROJECT_ROOT, build_protocol, collect_records,
-    evaluation_lock, merge_generation_caches, merge_results, reject_live_workers,
-    runtime_versions, sample_index, source_record, timestamp, worker_directories, write_json,
+    BENCHMARKS, LENGTHS, PROJECT_ROOT, benchmark_protocol, build_protocol, collect_records,
+    evaluation_lock, merge_generation_caches, refresh_benchmark, refresh_run_summary,
+    reject_live_workers, runtime_versions, sample_index, source_record, timestamp,
+    worker_directories, write_json,
 )
 
 
@@ -22,15 +25,24 @@ METHOD_ROOT = Path(__file__).resolve().parents[1]
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--output-root", type=Path, default=PROJECT_ROOT / "artifacts/reproductions/e2_ttt")
+    parser.add_argument("--output-id")
     parser.add_argument("--inference-mode", choices=("original", "optimized"))
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--benchmarks", choices=BENCHMARKS, nargs="+")
     parser.add_argument("--lengths", choices=LENGTHS, type=int, nargs="+")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
-    for name in ("checkpoint", "output_dir"):
-        setattr(args, name, getattr(args, name).expanduser().resolve())
+    args.checkpoint = args.checkpoint.expanduser().resolve()
+    args.output_root = args.output_root.expanduser().resolve()
+    if args.resume and args.output_id is None:
+        parser.error("--resume requires the original --output-id")
+    if args.output_id is None:
+        args.output_id = args.checkpoint.name + "_" + datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M")
+    if (not args.output_id.strip() or args.output_id in (".", "..")
+            or "/" in args.output_id or "\\" in args.output_id):
+        parser.error("--output-id must be a single nonempty directory name")
+    args.run_dir = args.output_root / args.output_id
     devices = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")
     if not devices or len(devices) != len(set(devices)) or not set(devices) <= {"0", "1"}:
         parser.error("Use CUDA_VISIBLE_DEVICES=0, 1, 0,1 or 1,0")
@@ -68,11 +80,14 @@ def resolve_protocol(args, saved):
             setattr(args, field, defaults[saved_field])
     if not args.benchmarks or len(args.benchmarks) != len(set(args.benchmarks)):
         raise ValueError("Benchmarks must be nonempty and unique")
-    if "ruler" in args.benchmarks and (not args.lengths or len(args.lengths) != len(set(args.lengths))):
+    original_benchmarks = saved["benchmarks"] if saved is not None else args.benchmarks
+    if not set(args.benchmarks) <= set(original_benchmarks):
+        raise ValueError("Resume benchmarks must be a subset of the original evaluation plan")
+    if "ruler" in original_benchmarks and (not args.lengths or len(args.lengths) != len(set(args.lengths))):
         raise ValueError("RULER lengths must be nonempty and unique")
     if args.batch_size < 1 or (args.inference_mode == "original" and args.batch_size != 1):
         raise ValueError("Batch size must be positive; original inference requires batch size 1")
-    protocol = build_protocol(args.checkpoint, args.inference_mode, args.benchmarks, args.lengths, runtime_versions())
+    protocol = build_protocol(args.checkpoint, args.inference_mode, original_benchmarks, args.lengths, runtime_versions())
     if saved is not None and protocol != saved:
         different = [key for key in protocol.keys() | saved.keys() if protocol.get(key) != saved.get(key)]
         raise ValueError(f"Frozen E²-TTT evaluation settings differ: {sorted(different)}")
@@ -80,43 +95,59 @@ def resolve_protocol(args, saved):
 
 
 def execute(args):
-    if args.resume:
-        saved = json.loads((args.output_dir / "evaluation_plan.json").read_text())["protocol"]
-    else:
-        saved = None
+    root = args.run_dir
+    saved = json.loads((root / "evaluation_plan.json").read_text())["protocol"] if args.resume else None
     protocol = resolve_protocol(args, saved)
     source = source_record(__file__, args.inference_mode)
     if not args.resume:
-        args.output_dir.mkdir(parents=True, exist_ok=False)
-    with evaluation_lock(args.output_dir):
-        reject_live_workers(args.output_dir)
+        root.mkdir(parents=True, exist_ok=False)
+    with evaluation_lock(root):
+        reject_live_workers(root)
+        for name in protocol["benchmarks"]:
+            child = root / name
+            child_protocol = benchmark_protocol(protocol, name)
+            if saved is None:
+                child.mkdir()
+                write_json(child / "evaluation_plan.json", {
+                    "created_at": timestamp(), "protocol": child_protocol, "source": source,
+                })
+                refresh_benchmark(child, child_protocol)
+            elif json.loads((child / "evaluation_plan.json").read_text())["protocol"] != child_protocol:
+                raise ValueError(f"Benchmark protocol differs: {name}")
         if saved is None:
-            write_json(args.output_dir / "evaluation_plan.json", {
+            write_json(root / "evaluation_plan.json", {
                 "created_at": timestamp(), "protocol": protocol, "source": source,
             })
+        print(f"E²-TTT output-id={args.output_id}; output-root={args.output_root}", flush=True)
         return execute_attempt(args, protocol, source)
 
 
 def execute_attempt(args, protocol, source):
-    root = args.output_dir
-    records, sources = collect_records(root, protocol)
-    expected = sample_index(protocol)
-    pending = [key for key in expected if key not in records]
-    historical_workers = worker_directories(root)
+    root = args.run_dir
+    children = {name: benchmark_protocol(protocol, name) for name in args.benchmarks}
+    pending, historical_workers, completed = {}, {}, {}
+    for name, child_protocol in children.items():
+        records, _ = collect_records(root / name, child_protocol)
+        pending[name] = [key for key in sample_index(child_protocol) if key not in records]
+        completed[name] = len(records)
+        historical_workers[name] = worker_directories(root / name)
     attempts_root = root / "attempts"
     attempts_root.mkdir(exist_ok=True)
-    number = len(list(attempts_root.glob("attempt-*")))
-    directory = attempts_root / f"attempt-{number:04d}"
+    directory = attempts_root / f"attempt-{len(list(attempts_root.glob('attempt-*'))):04d}"
     directory.mkdir()
     (directory / "workers").mkdir()
-    assignments = [pending[index::len(args.devices)] for index in range(len(args.devices))]
+    assignments = [
+        {name: ids[index::len(args.devices)] for name, ids in pending.items() if ids[index::len(args.devices)]}
+        for index in range(len(args.devices))
+    ]
     write_json(directory / "plan.json", {
         "created_at": timestamp(), "evaluation_plan": str(root / "evaluation_plan.json"),
-        "devices": args.devices, "batch_size": args.batch_size,
-        "completed_samples_before_attempt": len(records), "pending_samples": len(pending), "source": source,
+        "benchmarks": args.benchmarks, "devices": args.devices, "batch_size": args.batch_size,
+        "completed_samples_before_attempt": completed,
+        "pending_samples": {name: len(ids) for name, ids in pending.items()}, "source": source,
     })
     state = {"attempt": directory.name, "started_at": timestamp(), "status": "running",
-             "devices": args.devices, "batch_size": args.batch_size, "workers": []}
+             "benchmarks": args.benchmarks, "devices": args.devices, "batch_size": args.batch_size, "workers": []}
     launcher_path = root / "launcher_execution.json"
     history = json.loads(launcher_path.read_text()) if launcher_path.exists() else {"attempts": []}
     history["attempts"].append(state)
@@ -125,12 +156,14 @@ def execute_attempt(args, protocol, source):
         write_json(directory / "execution.json", state)
         write_json(launcher_path, history)
 
+    def refresh(names):
+        for name in names:
+            refresh_benchmark(root / name, children[name])
+        return refresh_run_summary(root, protocol)
+
     save()
-    write_json(root / "summary.json", {
-        "checkpoint": protocol["checkpoint"], "inference_mode": protocol["inference_mode"],
-        "completed": False, "samples": len(records), "expected_samples": len(expected),
-    })
-    processes, logs = [], []
+    refresh(args.benchmarks)
+    processes, logs, observed = [], [], set()
     started = time.monotonic()
 
     def interrupted(signum, frame):
@@ -138,26 +171,39 @@ def execute_attempt(args, protocol, source):
 
     previous_handlers = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
-        for index, (gpu, ids) in enumerate(zip(args.devices, assignments, strict=True)):
-            if not ids:
+        for index, (gpu, ids_by_benchmark) in enumerate(zip(args.devices, assignments, strict=True)):
+            if not ids_by_benchmark:
                 continue
             folder = directory / "workers" / f"worker-{index}"
             folder.mkdir()
+            outputs = {name: root / name / "attempts" / directory.name / "workers" / f"worker-{index}"
+                       for name in ids_by_benchmark}
             write_json(folder / "plan.json", {
-                "protocol": protocol, "sample_ids": ids, "batch_size": args.batch_size,
-                "physical_gpu": gpu, "source": source,
+                "protocol": protocol, "outputs": {name: str(path) for name, path in outputs.items()},
+                "batch_size": args.batch_size, "physical_gpu": gpu, "source": source,
             })
             assignment = directory / f"worker-{index}-sample-ids.json"
-            write_json(assignment, ids)
-            cache_sources = merge_generation_caches(historical_workers, folder / "generation_cache.sqlite")
+            write_json(assignment, ids_by_benchmark)
+            cache_sources = {}
+            for name, ids in ids_by_benchmark.items():
+                child_folder = outputs[name]
+                child_folder.mkdir(parents=True)
+                write_json(child_folder / "plan.json", {
+                    "protocol": children[name], "sample_ids": ids, "batch_size": args.batch_size,
+                    "physical_gpu": gpu, "source": source,
+                })
+                write_json(child_folder / "execution.json", {"status": "pending", "completed_samples": 0})
+                cache_sources[name] = merge_generation_caches(
+                    historical_workers[name], child_folder / "generation_cache.sqlite")
             worker = {"directory": str(folder.relative_to(root)), "physical_gpu": gpu,
-                      "samples": len(ids), "status": "starting", "cache_sources": cache_sources}
+                      "samples": {name: len(ids) for name, ids in ids_by_benchmark.items()},
+                      "status": "starting", "cache_sources": cache_sources}
             state["workers"].append(worker)
             save()
             command = [
                 sys.executable, "-u", str(METHOD_ROOT / "scripts/evaluate.py"),
                 "--protocol-file", str(root / "evaluation_plan.json"),
-                "--sample-ids-file", str(assignment), "--output-dir", str(folder),
+                "--sample-ids-file", str(assignment), "--worker-dir", str(folder),
                 "--batch-size", str(args.batch_size),
             ]
             worker["command"] = command
@@ -173,11 +219,18 @@ def execute_attempt(args, protocol, source):
             processes.append(process)
             worker.update(pid=process.pid, status="running")
             save()
-        print(f"E²-TTT: {len(records)}/{len(expected)} complete; {len(pending)} pending; "
-              f"GPUs={','.join(args.devices)} batch={args.batch_size}", flush=True)
+        print(f"E²-TTT: pending={ {name: len(ids) for name, ids in pending.items()} }; "
+              f"GPUs={','.join(args.devices)} batch={args.batch_size}; {root}", flush=True)
         active = list(zip(processes, state["workers"], strict=True))
         while active:
             for process, worker in active[:]:
+                execution = root / worker["directory"] / "execution.json"
+                if execution.exists():
+                    for name, child in json.loads(execution.read_text())["benchmarks"].items():
+                        event = (worker["directory"], name)
+                        if child["status"] == "completed" and event not in observed:
+                            observed.add(event)
+                            refresh([name])
                 code = process.poll()
                 if code is None:
                     continue
@@ -188,10 +241,13 @@ def execute_attempt(args, protocol, source):
                     raise RuntimeError(f"E²-TTT worker failed: {worker['directory']}; see its evaluation.log")
             if active:
                 time.sleep(0.2)
-        records, sources = collect_records(root, protocol)
-        summary = merge_results(root, protocol, records, sources)
+        for name in args.benchmarks:
+            summary = refresh_benchmark(root / name, children[name])
+            if not summary["completed"]:
+                raise ValueError(f"Predictions do not cover the planned benchmark: {name}")
+        summary = refresh_run_summary(root, protocol)
         state["status"] = "completed"
-        print(f"E²-TTT complete: {summary['samples']} samples; {root / 'summary.json'}", flush=True)
+        print(f"E²-TTT selected benchmarks complete; whole run completed={summary['completed']}; {root}", flush=True)
         return summary
     except BaseException as error:
         state.update(status="failed", error=repr(error))
@@ -205,8 +261,11 @@ def execute_attempt(args, protocol, source):
             log.close()
         for sig, handler in previous_handlers.items():
             signal.signal(sig, handler)
-        state.update(finished_at=timestamp(), seconds=time.monotonic() - started)
-        save()
+        try:
+            refresh(args.benchmarks)
+        finally:
+            state.update(finished_at=timestamp(), seconds=time.monotonic() - started)
+            save()
 
 
 if __name__ == "__main__":

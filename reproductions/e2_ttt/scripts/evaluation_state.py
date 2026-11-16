@@ -90,6 +90,35 @@ def task_specs(protocol):
     return specs
 
 
+def benchmark_protocol(protocol, benchmark):
+    return {**protocol, "benchmarks": [benchmark],
+            "ruler_lengths": protocol["ruler_lengths"] if benchmark == "ruler" else [],
+            "data": {benchmark: protocol["data"][benchmark]}}
+
+
+def refresh_benchmark(directory, protocol):
+    records, sources = collect_records(directory, protocol)
+    expected = sample_index(protocol)
+    if records.keys() == expected.keys():
+        return merge_results(directory, protocol, records, sources)
+    summary = {"checkpoint": protocol["checkpoint"], "inference_mode": protocol["inference_mode"],
+               "completed": False, "samples": len(records), "expected_samples": len(expected)}
+    write_json(directory / "summary.json", summary)
+    return summary
+
+
+def refresh_run_summary(directory, protocol):
+    benchmarks = {}
+    for name in protocol["benchmarks"]:
+        child = json.loads((directory / name / "summary.json").read_text())
+        benchmarks[name] = {"summary": f"{name}/summary.json", "completed": child["completed"],
+                            "samples": child["samples"]}
+    summary = {"checkpoint": protocol["checkpoint"], "inference_mode": protocol["inference_mode"],
+               "completed": all(child["completed"] for child in benchmarks.values()), "benchmarks": benchmarks}
+    write_json(directory / "summary.json", summary)
+    return summary
+
+
 def sample_index(protocol):
     return {f"{spec['prefix']}/{index}": (task, index, spec)
             for task, spec in task_specs(protocol).items() for index in range(spec["samples"])}

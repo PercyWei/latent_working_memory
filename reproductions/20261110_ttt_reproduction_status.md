@@ -2,7 +2,7 @@
 
 创建时间：20261110 11:30:45 Asia/Shanghai
 
-最后修订时间：20261116 12:13:09 Asia/Shanghai
+最后修订时间：20261116 14:58:56 Asia/Shanghai
 
 ## 当前状态
 
@@ -56,6 +56,6 @@ TTT 256K 平均耗时约 127.82 → 127.38 秒，没有实质提速。128K／256
 
 ## 结果记录
 
-正式评估保存在 `artifacts/reproductions/<method>/eval/<run>/`，保留运行计划、代码来源、逐样本预测、执行状态和汇总。LaCT Momentum 的已有正式结果保留；优化诊断、选参和临时验证产物不作为 benchmark 分数。
+LaCT 与 E²-TTT 的新评估保存在 `<output-root>/<output-id>/<benchmark>/`，默认 root 为 `artifacts/reproductions/<method>/`，默认 ID 为 `<checkpoint_name>_<YYYYMMDD-HHMM>`（上海时间）；续评须显式指定原 ID。In-Place TTT 仍使用其 `--output-dir`。产物保留运行计划、代码来源、逐样本预测、执行状态和汇总。LaCT Momentum 的已有正式结果保留；优化诊断、选参和临时验证产物不作为 benchmark 分数。
 
 LaCT 与 E²-TTT 续评均按全局样本 ID 补齐未完成记录，允许调整 GPU 数量、顺序与 batch size；`original` 仍限 B1。E²-TTT 对尚未写出评分的样本复用原生生成缓存，再按原 task 评分。两者数据路径在代码中固定，目录见各自 README。In-Place TTT 按其 README 保持恢复设置。源码边界见各方法 `UPSTREAM.md`。
