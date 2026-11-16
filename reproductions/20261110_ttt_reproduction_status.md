@@ -2,7 +2,7 @@
 
 创建时间：20261110 11:30:45 Asia/Shanghai
 
-最后修订时间：20261116 15:32:08 Asia/Shanghai
+最后修订时间：20261116 18:32:19 Asia/Shanghai
 
 ## 当前状态
 
@@ -31,6 +31,20 @@ LaCT 使用作者公开重训权重，E²-TTT 使用作者官方权重；In-Plac
 `lact/optimized/` 缓存窗口 KV、fast weights、范数、Momentum 和待提交 chunk，保留官方非 fused TTT 公式、先读后写与延迟提交规则。真实前缀长为 $L>0$、chunk 为 $C$ 时，提交次数仍为 $\lfloor(L-1)/C\rfloor$。padding 不计入位置、KV 或更新进度，模型参数保持 float32，计算使用 BF16 autocast。
 
 三个 checkpoint 均已完成混长小样本生成、原生计分和续评检查；chunk 边界、padding 忽略及固定 batch 形状下的样本隔离已有验证。不同 batch 形状仍可能改变浮点舍入、生成和逐题评分。Muon 与官方完整前缀路径的对照覆盖有限，不能声称任意输入逐 token 相同，也不能把已定位的 batch 数值差异归为 padding 状态错误。
+
+20261116 修复 decode 的动态布尔索引和逐样本 TTT 调用：HF 内部新增全有效 mask 使用可校验的缓存元数据，外部 mask 仍按实际内容解析；TTT 保持独立权重、dtype、Momentum 和真实进度，分组执行读出与 chunk 提交，使用固定 pending 缓冲。原读出／更新函数与上游源码未改。实现与验证代码为 `88db3efb`、`09b57930`、`b64fb853`。
+
+在同一张 L40S 48GB 上，Muon PostNorm、相同 16 条真实 4K 输入、greedy 最多生成 128 tokens，预热后各测两次：
+
+| 实现 | 每批耗时 | 吞吐 | 峰值 allocated | 峰值 reserved |
+|---|---:|---:|---:|---:|
+| 修复前 | 44.33／44.42 秒 | 0.361／0.360 samples/s | 22.76 GiB | 25.11 GiB |
+| 修复后 | 10.86／10.96 秒 | 1.473／1.460 samples/s | 22.75 GiB | 24.01 GiB |
+
+该小样本对照提速约 4.1 倍；16 条逐题评分全部一致，13 条完整生成 token 序列一致，另外 3 条存在生成差异。三个公开 checkpoint 在 2048／4096 chunk 边界附近的 18 条混长短生成均与旧实现一致。以上不是完整 benchmark 的分数或耗时。
+
+旧 `TTTState` 与新状态的真实 CUDA 对照覆盖四种 Momentum／Muon、PreNorm／PostNorm 组合，共 7,776 项检查，使用 `atol=0.001`、`rtol=0.01`；读写进度、冻结行、padding 与样本隔离另作严格检查。分片与整段调用的 Muon 浮点差异可由旧实现复现，新旧对应调用及差异对照通过。原地修改 mask、新 mask、全零 decode 行和 inference tensor 检查通过。实际 decode 的 CPU 操作轨迹中 `aten::nonzero`、`aten::_local_scalar_dense` 均为 0；B16 每步 TTT 读出从逐样本 384 次减少为 24 次，混长异步提交也按原边界执行。临时脚本、trace 与输出不作为正式评估产物。
+
 
 ### E²-TTT
 
