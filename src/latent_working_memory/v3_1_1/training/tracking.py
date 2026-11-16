@@ -36,11 +36,11 @@ def configure_post_panels(api, remote, metrics):
             ("train/reward", "reward", "#2b8cbe"),
             ("train/reward_std", "reward_std", "#d95f0e"),
         ), ()),
-        ("train/memory_usage", "blocks = memory_slots / K", (
-            ("train/blocks", "blocks", "#2b8cbe"),
+        ("train/memory_usage", "memory_blocks = memory_slots / K", (
+            ("train/blocks", "memory_blocks", "#2b8cbe"),
         ), ("train/memory_slots",)),
-        ("train/compression", "压缩倍率 = segment_tokens / K", (
-            ("train/compression_ratio", "compression_ratio", "#2b8cbe"),
+        ("train/compression", "compression_rate = segment_tokens / K", (
+            ("train/compression_ratio", "compression_rate", "#2b8cbe"),
         ), ("train/segment_tokens",)),
         ("train/learning_rate", "learning_rate", (
             ("train/compressor_learning_rate", "compressor", "#2b8cbe"),

@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261116 20:41:54 Asia/Shanghai
+最后修订时间：20261116 21:11:33 Asia/Shanghai
 
 [运行指南](scripts/README.md) · [预训练配置](../../../configs/v3_1_1/pretrain_default.json) · [后训练配置](../../../configs/v3_1_1/post_default.json) · [K256 预训练](../../../configs/v3_1_1/pretrain_k256.json) · [K256 后训练](../../../configs/v3_1_1/post_k256.json)
 
@@ -201,13 +201,13 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
 | 联合损失、QA 损失、策略损失 | `loss`、`qa_nll`、`policy_loss`，各自独立 |
 | 奖励 `reward` | `reward` 与 `reward_std` 两条曲线，共用纵轴；后者为各组奖励标准差的均值 |
 | 零优势比例 | `zero_advantage_rate`，组内奖励完全相同的样本比例 |
-| 记忆用量 `memory_usage` | 仅绘制平均块数 `blocks`，纵轴名称为 `blocks = memory_slots / K` |
-| 压缩程度 `compression` | 仅绘制 `compression_ratio`，纵轴名称为“压缩倍率 = segment_tokens / K” |
+| 记忆用量 `memory_usage` | 绘制平均块数 `blocks`，图例为 `memory_blocks`，纵轴名称为 `memory_blocks = memory_slots / K` |
+| 压缩程度 `compression` | 绘制 `compression_ratio`，图例为 `compression_rate`，纵轴名称为 `compression_rate = segment_tokens / K` |
 | 策略熵、回放概率偏差 | `policy_entropy`、`replay_log_probability_drift`，各自独立 |
 | 梯度范数 | `grad_norm`、`compressor_grad_norm`、`boundary_grad_norm`，各自独立，均为统一裁剪前的范数 |
 | 学习率 `learning_rate` | `compressor_learning_rate` 与 `boundary_learning_rate` 两条曲线，共用纵轴 |
 
-后训练的 dev 区域保留 QA NLL、记忆用量 `memory_usage`、压缩程度 `compression` 和策略熵四张图。记忆用量只绘制 `blocks`，压缩程度只绘制 `compression_ratio`，轴名和换算关系与 train 一致。`dev/loss` 与 `dev/qa_nll` 相同，仅后者上传；dev 不记录奖励组统计、策略损失、梯度范数或学习率。
+后训练的 dev 区域保留 QA NLL、记忆用量 `memory_usage`、压缩程度 `compression` 和策略熵四张图。记忆用量只绘制 `blocks`，压缩程度只绘制 `compression_ratio`，计算口径和换算关系与 train 一致。`dev/loss` 与 `dev/qa_nll` 相同，仅后者上传；dev 不记录奖励组统计、策略损失、梯度范数或学习率。
 
 K 为每块槽位数。train/dev 的压缩倍率均按输入 token 总数除以 memory token 总数计算，等于全局聚合后的 `segment_tokens / K`；例如 K256、平均段长 1024 对应 4× 压缩。后训练不记录独立的 `train/samples` 指标；`train/commit_rate`、`train/memory_slots`、`train/segment_tokens`，以及 `dev/loss`、`dev/samples`、`dev/commit_rate`、`dev/memory_slots`、`dev/segment_tokens` 仅保存在本地 `metrics.jsonl`。预训练继续展示其损失、样本数和 AE／LM 指标。
 
