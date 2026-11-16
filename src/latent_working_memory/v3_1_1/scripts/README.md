@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261116 11:42:53 Asia/Shanghai
+最后修订时间：20261116 20:41:54 Asia/Shanghai
 
 计算协议、数据格式与模块分工见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256.json)中的基座与数据路径。
 
@@ -458,4 +458,4 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 - **比较指纹**：Benchmark summary 的 `comparison_data` 按原始输入、参考答案、生成预算与任务生成，忽略执行顺序，RULER 按长度分组；仅供跨方法展示，不参与 `eval.json`、缓存或恢复校验。
 - **日志与状态**：日志同时写入文件和终端，评估输出带 GPU／分片前缀；任务 `status.json` 的 `eval_run` 指向运行根目录，`selected_checkpoints` 是本次调度范围，与计划 `checkpoints` 的累计范围区分。状态记录 checkpoint 与各分片的设备、命令、起止时间、返回码和错误，整体进度仅统计本轮选择。
 - **展示方式**：SwanLab 默认开启，记录 train/dev、训练资源及配置。project、group 和 tags 通过配置文件设置；project 默认为 `latent-working-memory-v3.1`，group 未指定时默认 `run_id`。`--tracking offline` 关闭 SwanLab 记录，仅保留本地产物；恢复训练沿用 `swanlab.json` 中的 run。评估由独立 dashboard 展示，不读取 SwanLab 身份或凭据。
-- **后训练图表**：后训练指标合为 13 张图，三项损失、零优势比例 `zero_advantage_rate`、策略熵、回放概率偏差及三项裁剪前梯度范数分别展示；奖励均值与组内标准差合并，两组学习率合并，均共用单 Y 轴。`memory_usage` 使用块数刻度并注明槽位数换算；`compression` 使用压缩倍率刻度并注明平均段长换算。后训练不记录独立的 `train/samples` 指标，`train/commit_rate`、`train/memory_slots` 和 `train/segment_tokens` 仅保存在本地。图表在初始化时配置，运行中只追加真实 optimizer step 的标量；详细定义见[方法说明](../README.md#验证独立评估与记录)。
+- **后训练图表**：train 区域合为 13 张图，三项损失、零优势比例 `zero_advantage_rate`、策略熵、回放概率偏差及三项裁剪前梯度范数分别展示；奖励均值与组内标准差合并，两组学习率合并，均共用单 Y 轴。dev 区域保留 QA NLL、记忆用量、压缩程度和策略熵四张图；train/dev 的 `memory_usage` 只画 `blocks` 并注明槽位数换算，`compression` 只画全局聚合后的 `segment_tokens / K`。后训练不记录独立的 `train/samples`；train 的 `commit_rate`、`memory_slots`、`segment_tokens`，以及 dev 的重复 `loss`、`samples`、`commit_rate`、`memory_slots`、`segment_tokens` 仅保存在本地，预训练的损失、样本数和 AE／LM 展示保留。首次出现真实记录时同步注册并配置原生图表，合并同一指标的展示；运行中只追加真实 optimizer step 的标量，不补零、不预置空 dev 曲线。详细定义见[方法说明](../README.md#验证独立评估与记录)。

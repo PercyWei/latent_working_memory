@@ -243,13 +243,15 @@ def train(plan_dir, resume=None):
             if dev_documents and (dev_interval or cursor.epoch_end or step == training.loop.max_steps):
                 with preserve_training_rng(device, boundary_generator):
                     dev = evaluate_dev(model, dev_documents[rank::world], config)
+                if config.stage == "post":
+                    dev["compression_ratio"] = dev["segment_tokens"] / config.model.structure.memory_slots
                 record.update({f"dev/{key}": value for key, value in dev.items()})
             if rank == 0:
                 stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
                 stream.flush()
                 if remote is not None:
                     with preserve_training_rng(device, boundary_generator):
-                        log_metrics(remote, record, step, registered)
+                        log_metrics(remote, record, step, registered, config.stage, output_dir)
                 print(
                     f"step {step}/{training.loop.max_steps} loss={metrics['loss']:.5f} "
                     f"grad={metrics['grad_norm']:.5f} samples={metrics['samples']} seconds={seconds:.1f}"
