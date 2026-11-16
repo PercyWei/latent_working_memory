@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261115 18:21:23 Asia/Shanghai
+最后修订时间：20261116 11:42:53 Asia/Shanghai
 
 [运行指南](scripts/README.md) · [预训练配置](../../../configs/v3_1_1/pretrain_default.json) · [后训练配置](../../../configs/v3_1_1/post_default.json) · [K256 预训练](../../../configs/v3_1_1/pretrain_k256.json) · [K256 后训练](../../../configs/v3_1_1/post_k256.json)
 
@@ -188,7 +188,20 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
 
 ## 验证、独立评估与记录
 
-训练内 dev 使用固定样本与确定性边界，不更新参数。train/dev 使用相同真实 optimizer step 横轴，没有执行的指标不补零。预训练保存实际 AE／LM 选样数量，并记录 `lm_fraction` 和分项 NLL；后训练阶段记录 QA、策略目标、记忆用量和边界统计。压缩器与边界模块分别记录实际学习率和统一裁剪前的梯度范数。
+训练内 dev 使用固定样本与确定性边界，不更新参数。train/dev 使用原生增量曲线，横轴为真实 optimizer step，没有执行的指标不补零。预训练保存实际 AE／LM 选样数量，并记录 `lm_fraction` 和分项 NLL。后训练指标合为以下 13 张图，均使用单 Y 轴：
+
+| 图表 | 指标与展示 |
+|---|---|
+| 联合损失、QA 损失、策略损失 | `loss`、`qa_nll`、`policy_loss`，各自独立 |
+| 奖励 `reward` | `reward` 与 `reward_std` 两条曲线，共用纵轴；后者为各组奖励标准差的均值 |
+| 零优势比例 | `zero_advantage_rate`，组内奖励完全相同的样本比例 |
+| 记忆用量 `memory_usage` | 仅绘制平均块数 `blocks`，纵轴名称为 `blocks = memory_slots / K` |
+| 压缩程度 `compression` | 仅绘制 `compression_ratio`，纵轴名称为“压缩倍率 = segment_tokens / K” |
+| 策略熵、回放概率偏差 | `policy_entropy`、`replay_log_probability_drift`，各自独立 |
+| 梯度范数 | `grad_norm`、`compressor_grad_norm`、`boundary_grad_norm`，各自独立，均为统一裁剪前的范数 |
+| 学习率 `learning_rate` | `compressor_learning_rate` 与 `boundary_learning_rate` 两条曲线，共用纵轴 |
+
+K 为每块槽位数。压缩倍率按正文 token 总数除以 memory token 总数计算，等于先汇总分子、分母得到的 `segment_tokens / K`；例如 K256、平均段长 1024 对应 4× 压缩。后训练不记录独立的 `train/samples` 指标；`train/commit_rate`、`train/memory_slots` 和 `train/segment_tokens` 仅保存在本地 `metrics.jsonl`。图表与轴名在初始化时配置，运行中只追加本步标量，保留已有历史数据；dev 和资源指标分别展示在 `dev`、`resources` 区。
 
 训练完成后退出。独立评估仅接受后训练 checkpoint，分别通过 `eval_test.sh`、`eval_locomo.sh` 和 `eval_ruler.sh` 执行固定任务，新建时用 `--eval-data` 指定数据并保存固定协议与 checkpoint 范围。三者共用正文压缩与 Reader 回答流程：正文全部压缩为 memory，结束时强制提交剩余正文，再将问题和任务指令交给 Reader。
 
