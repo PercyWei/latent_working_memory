@@ -1,18 +1,22 @@
 """使用 LaCT 的原始或增量推理路径评估本地 RULER 数据。"""
 
 import argparse
-from datetime import datetime
 import json
 import logging
 import os
 from pathlib import Path
 import signal
 import time
-from zoneinfo import ZoneInfo
 
+from batching import parse_batch_size_by_length
 from lact_model import LaCTForCausalLM, LaCTSWIGLUConfig
 from incremental import IncrementalLaCTForCausalLM
-from provenance import UPSTREAM_REVISION, capture_source
+from provenance import capture_source
+from records import (
+    GENERATION_BUDGET, LENGTHS, SAMPLES_PER_TASK_LENGTH, TASKS as TASKS,
+    build_protocol, build_summary, load_samples, sample_index,
+    read_samples as read_samples, timestamp, validate_prediction, write_json,
+)
 import torch
 from transformers import AutoTokenizer
 
@@ -23,69 +27,6 @@ from latent_working_memory.benchmarks.vendor.ruler import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-TASKS = (
-    "niah_single_1",
-    "niah_single_2",
-    "niah_single_3",
-    "niah_multikey_1",
-    "niah_multiquery",
-    "niah_multivalue",
-)
-LENGTHS = (4096, 8192, 16384, 32768)
-GENERATION_BUDGET = 128
-SAMPLES_PER_TASK_LENGTH = 500
-
-
-def timestamp():
-    return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d %H:%M:%S Asia/Shanghai")
-
-
-def write_json(path, value):
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8"
-    )
-    temporary.replace(path)
-
-
-def read_samples(path):
-    samples = []
-    with path.open(encoding="utf-8") as stream:
-        for line_number, line in enumerate(stream, 1):
-            row = json.loads(line)
-            prompt = row["input"]
-            prefix = row["answer_prefix"]
-            references = row["outputs"]
-            if not isinstance(prompt, str) or not prompt:
-                raise ValueError(f"{path}:{line_number}: input must be nonempty text")
-            if not isinstance(prefix, str):
-                raise ValueError(f"{path}:{line_number}: answer_prefix must be text")
-            if not isinstance(references, list) or not references:
-                raise ValueError(f"{path}:{line_number}: outputs must be a nonempty list")
-            if any(not isinstance(value, str) or not value for value in references):
-                raise ValueError(f"{path}:{line_number}: outputs must contain nonempty strings")
-            samples.append(row)
-    if len(samples) != SAMPLES_PER_TASK_LENGTH:
-        raise ValueError(f"{path}: expected {SAMPLES_PER_TASK_LENGTH} samples, got {len(samples)}")
-    return samples
-
-
-def validate_prediction(record, expected, shard_index):
-    sample_id = record["id"]
-    if sample_id not in expected:
-        raise ValueError(f"Prediction is outside the planned shard: {sample_id}")
-    length, task, position, row = expected[sample_id]
-    if (
-        record["length"] != length
-        or record["task"] != task
-        or record["sample_position"] != position
-        or record["source_index"] != row["index"]
-        or record["references"] != row["outputs"]
-        or record["shard_index"] != shard_index
-    ):
-        raise ValueError(f"Saved prediction does not match the current sample: {sample_id}")
-    # 重新计分时直接使用原始 prediction；已保存的 score 不是汇总依据。
-    postprocess_pred(record["prediction"])
 
 
 def read_predictions(path, expected, logger, shard_index):
@@ -117,69 +58,6 @@ def read_predictions(path, expected, logger, shard_index):
     return records
 
 
-def build_summary(plan, samples, records, output):
-    shard_index, num_shards = plan["shard_index"], plan["num_shards"]
-    positions = {
-        key: [
-            position
-            for position in range(len(rows))
-            if shard_index is None or position % num_shards == shard_index
-        ]
-        for key, rows in samples.items()
-    }
-    expected_ids = {
-        f"ruler/{length}/{task}/{position}"
-        for (length, task), selected in positions.items()
-        for position in selected
-    }
-    if records.keys() != expected_ids:
-        raise ValueError("Predictions do not exactly cover the planned samples")
-    group_scores = {}
-    for (length, task), rows in samples.items():
-        scores = [
-            string_match_all(
-                [postprocess_pred(records[f"ruler/{length}/{task}/{position}"]["prediction"])],
-                [rows[position]["outputs"]],
-            )
-            for position in positions[(length, task)]
-        ]
-        group_scores[(length, task)] = sum(scores) / len(scores)
-    by_length = []
-    for length in plan["lengths"]:
-        means = [group_scores[(length, task)] for task in TASKS]
-        by_length.append(
-            {
-                "length": length,
-                "tasks": {
-                    task: {
-                        "samples": len(positions[(length, task)]),
-                        "accuracy": round(group_scores[(length, task)], 2),
-                    }
-                    for task in TASKS
-                },
-                "s_niah_average": round(sum(means[:3]) / 3, 2),
-                "multi_niah_average": round(sum(means[3:]) / 3, 2),
-                "six_task_average": round(sum(means) / len(means), 2),
-            }
-        )
-    return {
-        "completed_at": timestamp(),
-        "benchmark": "ruler",
-        "plan_path": str(output / "plan.json"),
-        "execution_path": str(output / "execution.json"),
-        "checkpoint": plan["checkpoint"],
-        "batch_size": plan["batch_size"],
-        "batching": plan["batching"],
-        "num_shards": num_shards,
-        "shard_index": shard_index,
-        "samples": len(records),
-        "score_unit": "percent",
-        "task_length_macro_average": round(sum(group_scores.values()) / len(group_scores), 2),
-        "by_length": by_length,
-        "generation": plan["generation"],
-    }
-
-
 def load_checkpoint(checkpoint, inference_mode="original"):
     config = LaCTSWIGLUConfig.from_pretrained(checkpoint, local_files_only=True)
     model_class = IncrementalLaCTForCausalLM if inference_mode == "incremental" else LaCTForCausalLM
@@ -204,9 +82,10 @@ def load_checkpoint(checkpoint, inference_mode="original"):
     return model, config
 
 
-def prepare_batches(expected, records, tokenizer, batch_size):
+def prepare_batches(expected, records, tokenizer, batch_size, batch_size_by_length=None):
     """按长度档位及实际 token 数分组，保持原文、样本身份和无 padding 输入。"""
     for length in dict.fromkeys(sample[0] for sample in expected.values()):
+        limit = (batch_size_by_length or {}).get(str(length), batch_size)
         buckets = {}
         for sample_id, (sample_length, task, position, row) in expected.items():
             if sample_length != length or sample_id in records:
@@ -225,8 +104,8 @@ def prepare_batches(expected, records, tokenizer, batch_size):
             )
         for input_tokens in sorted(buckets, reverse=True):
             rows = buckets[input_tokens]
-            for start in range(0, len(rows), batch_size):
-                yield length, input_tokens, rows[start : start + batch_size]
+            for start in range(0, len(rows), limit):
+                yield length, input_tokens, rows[start : start + limit]
 
 
 def run(args, output, logger, run_source, execution_attempt):
@@ -236,56 +115,39 @@ def run(args, output, logger, run_source, execution_attempt):
         raise ValueError(f"Checkpoint directory does not exist: {checkpoint}")
     if not args.lengths or len(set(args.lengths)) != len(args.lengths):
         raise ValueError("lengths must be nonempty and unique")
-    samples = {
-        (length, task): read_samples(data / str(length) / task / "test.jsonl")
-        for length in args.lengths
-        for task in TASKS
-    }
-    expected = {
-        f"ruler/{length}/{task}/{position}": (length, task, position, row)
-        for (length, task), rows in samples.items()
-        for position, row in enumerate(rows)
-        if position % args.num_shards == args.shard_index
-    }
+    samples = load_samples({"ruler_data": str(data), "lengths": args.lengths})
+    all_samples = sample_index(samples)
+    if args.sample_ids_file is not None:
+        assigned = json.loads(args.sample_ids_file.read_text(encoding="utf-8"))
+        if not isinstance(assigned, list) or any(not isinstance(key, str) for key in assigned):
+            raise ValueError("Worker sample IDs must be a JSON list of strings")
+        if len(set(assigned)) != len(assigned) or any(key not in all_samples for key in assigned):
+            raise ValueError("Worker sample IDs must be unique and belong to this evaluation")
+        expected = {key: all_samples[key] for key in assigned}
+    else:
+        expected = {
+            key: sample for key, sample in all_samples.items()
+            if sample[2] % args.num_shards == args.shard_index
+        }
     plan = {
+        **build_protocol(checkpoint, data, args.lengths, args.inference_mode, samples),
         "created_at": timestamp(),
-        "method": "lact",
         "source": run_source,
-        "inference_mode": args.inference_mode,
         "batch_size": args.batch_size,
+        "batch_size_by_length": args.batch_size_by_length,
         "batching": "Exact input token length across tasks within each RULER length; no padding",
         "num_shards": args.num_shards,
         "shard_index": args.shard_index,
         "assigned_samples": len(expected),
-        "checkpoint": str(checkpoint),
-        "checkpoint_config": json.loads((checkpoint / "config.json").read_text()),
-        "ruler_data": str(data),
-        "lengths": args.lengths,
-        "tasks": list(TASKS),
-        "samples_per_task_length": [
-            {"length": length, "task": task, "samples": len(rows)}
-            for (length, task), rows in samples.items()
-        ],
-        "prompt": "base; input + answer_prefix; tokenizer default special tokens; no truncation",
-        "generation": {
-            "do_sample": False,
-            "num_beams": 1,
-            "max_new_tokens": GENERATION_BUDGET,
-            "use_cache": args.inference_mode == "incremental",
-            "logits_to_keep": 1,
-            "recompute_complete_prefix_per_token": args.inference_mode == "original",
-        },
         "cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
-        "parameter_dtype": "float32",
-        "compute_autocast_dtype": "bfloat16",
-        "upstream_revision": UPSTREAM_REVISION,
-        "scoring": "NVIDIA RULER string_match_all; case-insensitive reference recall, percent",
     }
+    if args.sample_ids_file is not None:
+        plan["assigned_sample_ids"] = list(expected)
     if args.resume:
         saved_plan = json.loads((output / "plan.json").read_text())
         for key, value in plan.items():
             if (
-                key not in {"created_at", "cuda_visible_devices", "source"}
+                key not in {"created_at", "cuda_visible_devices", "source", "batch_size", "batch_size_by_length"}
                 and saved_plan[key] != value
             ):
                 raise ValueError(f"Resume setting differs from saved plan: {key}")
@@ -336,7 +198,9 @@ def run(args, output, logger, run_source, execution_attempt):
     ) as predictions:
         eos_ids = model.generation_config.eos_token_id
         eos_ids = {eos_ids} if isinstance(eos_ids, int) else set(eos_ids)
-        batches = prepare_batches(expected, records, tokenizer, args.batch_size)
+        batches = prepare_batches(
+            expected, records, tokenizer, args.batch_size, args.batch_size_by_length
+        )
         for batch_index, (length, input_tokens, batch) in enumerate(batches):
             input_ids = torch.tensor(
                 [sample[4] for sample in batch], dtype=torch.long, device="cuda:0"
@@ -404,7 +268,10 @@ def run(args, output, logger, run_source, execution_attempt):
                     record["seconds"],
                 )
 
-    summary = build_summary(plan, samples, records, output)
+    summary = (
+        {"completed_at": timestamp(), "samples": len(records)}
+        if args.sample_ids_file is not None else build_summary(plan, samples, records, output)
+    )
     write_json(output / "summary.json", summary)
     logger.info("Completed %s samples; summary: %s", len(records), output / "summary.json")
 
@@ -415,6 +282,8 @@ def main():
     parser.add_argument("--inference-mode", choices=("original", "incremental"), default="original")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=1, help="Maximum equal-token-length batch")
+    parser.add_argument("--batch-size-by-length", nargs="+", default=[], metavar="LENGTH=BATCH")
+    parser.add_argument("--sample-ids-file", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--num-shards", type=int, default=1, help="Independent row shards per task and length")
     parser.add_argument("--shard-index", type=int, default=0, help="Zero-based row shard index")
     parser.add_argument(
@@ -429,7 +298,12 @@ def main():
     args = parser.parse_args()
     if args.batch_size < 1:
         parser.error("--batch-size must be positive")
-    if args.batch_size > 1 and args.inference_mode != "incremental":
+    try:
+        args.batch_size_by_length = parse_batch_size_by_length(args.batch_size_by_length, args.lengths)
+    except ValueError as error:
+        parser.error(str(error))
+    effective_sizes = [args.batch_size_by_length.get(str(length), args.batch_size) for length in args.lengths]
+    if max(effective_sizes) > 1 and args.inference_mode != "incremental":
         parser.error("--batch-size > 1 requires --inference-mode incremental")
     if not 1 <= args.num_shards <= SAMPLES_PER_TASK_LENGTH:
         parser.error(f"--num-shards must be between 1 and {SAMPLES_PER_TASK_LENGTH}")
@@ -470,6 +344,11 @@ def main():
         "resume": args.resume,
         "status": "running",
         "source": run_source,
+        "cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
+        "batch_size": args.batch_size,
+        "batch_size_by_length": args.batch_size_by_length,
+        "num_shards": args.num_shards,
+        "shard_index": args.shard_index,
     }
     execution["attempts"].append(attempt)
     write_json(execution_path, execution)

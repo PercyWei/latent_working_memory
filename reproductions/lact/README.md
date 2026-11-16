@@ -71,18 +71,20 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 |---|---|
 | `--ruler-data` | `data/benchmarks/ruler-v1/reproductions/lact-760m` |
 | `--lengths` | `4096 8192 16384 32768` |
-| `--inference-mode` | `original`（默认）或 `incremental` |
+| `--inference-mode` | `original`（新评估默认）或 `incremental`；续评沿用原模式 |
 | `--batch-size` | 每卡上限，默认 `1`；大于 1 仅用于 `incremental`，按实际 token 数分组 |
-| `--resume` | 同一设置与已有输出目录续评 |
+| `--batch-size-by-length` | 按评估长度覆盖每卡上限，例如 `4096=16 8192=16 16384=8 32768=4`；未指定的长度使用 `--batch-size` |
+| `--resume` | 沿用原评估协议，只补齐尚未完成的样本；允许更改 GPU 数量、顺序及 batch 设置 |
 
-首次运行的输出目录须不存在；中断后以相同 GPU 顺序、输出目录与参数追加 `--resume`：
+首次运行的输出目录须不存在。原评估停止后，以相同输出目录追加 `--resume`；checkpoint、数据、长度及推理模式保持原计划不变。下面示例改用单卡，并为长输入降低 batch：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/lact/eval.sh \
+CUDA_VISIBLE_DEVICES=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/lact/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
   --output-dir artifacts/reproductions/lact/eval/momentum-rope-prenorm-nheads4-chunk2048-760m_ruler \
   --inference-mode incremental \
   --batch-size 16 \
+  --batch-size-by-length 16384=8 32768=4 \
   --resume
 ```
 
@@ -103,16 +105,18 @@ uv run reproductions/lact/scripts/compare_results.py \
 
 ## 来源记录与输出
 
-双卡运行时，终端显示总体完成数、总样本数、完成百分比、吞吐和已耗时；详细日志保留在 `logs/shard-<i>.log`。
+终端显示总体进度；每次启动的 GPU、batch、代码来源和日志分别保存在对应的 `attempts/attempt-<编号>/` 中。续评从历史逐样本预测中恢复进度，按当前 GPU 数量重新分配未完成的样本。
 
 | 文件 | 内容 |
 |---|---|
 | `summary.json` | 所选样本全部完成后的任务／长度分数 |
-| `predictions.jsonl` | 逐样本预测与评分 |
-| `plan.json`、`execution.json` | 运行配置、代码来源、状态与耗时 |
+| `evaluation_plan.json` | 固定 checkpoint、数据及生成／评分协议 |
+| `launcher_execution.json` | 各次启动状态与执行参数 |
+| `attempts/attempt-<编号>/shards/shard-<i>/predictions.jsonl` | 本轮各卡实际完成的逐样本预测与评分 |
+| `attempts/attempt-<编号>/merged/predictions.jsonl` | 本轮完成后按样本顺序汇总的全部预测 |
 | `comparison.html` | 执行对比脚本生成的图表与表格 |
 
-最终分数读取输出根目录的 `summary.json`；逐卡预测位于 `shards/shard-<i>/`。增量与批量验证入口见 [validate_incremental.py](scripts/validate_incremental.py) 和 [validate_batch.py](scripts/validate_batch.py)。
+最终分数读取输出根目录的 `summary.json`，其中 `merged_summary_path` 指向本轮完整汇总。已有单卡根目录或 `shards/shard-<i>/` 中的原始结果也可续评，原文件保持不变。增量与批量验证入口见 [validate_incremental.py](scripts/validate_incremental.py) 和 [validate_batch.py](scripts/validate_batch.py)。
 
 ## 备用训练入口
 

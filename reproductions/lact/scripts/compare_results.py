@@ -23,11 +23,14 @@ GROUPS = {
 
 def build_comparison(directory):
     summary = json.loads((directory / "summary.json").read_text(encoding="utf-8"))
-    plan = json.loads((directory / "plan.json").read_text(encoding="utf-8"))
-    execution = json.loads((directory / "execution.json").read_text(encoding="utf-8"))
-    # 双卡根目录保存 launcher plan；完整评估配置由合并目录保存。
-    if "worker_arguments" in plan:
-        plan = json.loads((directory / "merged/plan.json").read_text(encoding="utf-8"))
+    if (directory / "evaluation_plan.json").is_file():
+        plan = json.loads((directory / "evaluation_plan.json").read_text(encoding="utf-8"))
+        execution = json.loads((directory / "launcher_execution.json").read_text(encoding="utf-8"))
+    else:
+        plan = json.loads((directory / "plan.json").read_text(encoding="utf-8"))
+        execution = json.loads((directory / "execution.json").read_text(encoding="utf-8"))
+        if "worker_arguments" in plan:
+            plan = json.loads((directory / "merged/plan.json").read_text(encoding="utf-8"))
     if execution["attempts"][-1]["status"] != "completed":
         raise ValueError("只为已完成的评估生成报告")
     if summary["benchmark"] != "ruler" or summary["score_unit"] != "percent":
