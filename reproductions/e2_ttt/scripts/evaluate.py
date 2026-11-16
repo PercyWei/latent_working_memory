@@ -23,7 +23,7 @@ from optimized import optimize_model
 import torch
 import transformers
 
-from batch_harness import EqualLengthHFLM
+from batch_harness import LengthSortedHFLM
 from local_tasks import LocalRuler, LocalSQuAD, LocalSWDE
 
 
@@ -60,7 +60,7 @@ def source_record(args):
         "implementation_path": "reproductions/e2_ttt/" + (
             "optimized" if args.inference_mode == "optimized" else "upstream/e2_ttt"
         ),
-        "harness_class": "batch_harness.EqualLengthHFLM" if args.inference_mode == "optimized"
+        "harness_class": "batch_harness.LengthSortedHFLM" if args.inference_mode == "optimized"
         else "lm_eval.models.huggingface.HFLM",
     }
 
@@ -150,7 +150,7 @@ def execute(args):
         "prompt_format": "base; RULER input + answer_prefix once",
         "inference_mode": args.inference_mode,
         "batch_size": args.batch_size,
-        "batching": "equal post-truncation token length" if args.inference_mode == "optimized"
+        "batching": "length-sorted adjacent batches with left padding" if args.inference_mode == "optimized"
         else "native single sample",
         "num_fewshot": 0,
         "dtype": "bfloat16",
@@ -198,7 +198,7 @@ def execute(args):
     started = time.monotonic()
     torch.cuda.reset_peak_memory_stats(0)
     try:
-        harness = EqualLengthHFLM if args.inference_mode == "optimized" else HFLM
+        harness = LengthSortedHFLM if args.inference_mode == "optimized" else HFLM
         lm = harness(
             pretrained=str(args.checkpoint),
             tokenizer=str(args.checkpoint),

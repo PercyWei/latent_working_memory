@@ -13,7 +13,7 @@ from lact_model import LaCTForCausalLM, LaCTSWIGLUConfig
 from incremental import IncrementalLaCTForCausalLM
 from provenance import capture_source
 from records import (
-    GENERATION_BUDGET, LENGTHS, SAMPLES_PER_TASK_LENGTH, TASKS as TASKS,
+    BATCHING, GENERATION_BUDGET, LENGTHS, SAMPLES_PER_TASK_LENGTH, TASKS as TASKS,
     build_protocol, build_summary, load_samples, sample_index,
     read_samples as read_samples, timestamp, validate_prediction, write_json,
 )
@@ -83,10 +83,10 @@ def load_checkpoint(checkpoint, inference_mode="original"):
 
 
 def prepare_batches(expected, records, tokenizer, batch_size, batch_size_by_length=None):
-    """按长度档位及实际 token 数分组，保持原文、样本身份和无 padding 输入。"""
+    """各评估长度内按实际 token 数稳定降序，相邻样本组成批次。"""
     for length in dict.fromkeys(sample[0] for sample in expected.values()):
         limit = (batch_size_by_length or {}).get(str(length), batch_size)
-        buckets = {}
+        pending = []
         for sample_id, (sample_length, task, position, row) in expected.items():
             if sample_length != length or sample_id in records:
                 continue
@@ -99,13 +99,13 @@ def prepare_batches(expected, records, tokenizer, batch_size, batch_size_by_leng
                     f"{sample_id}: prompt ({input_tokens}) + "
                     f"generation budget ({GENERATION_BUDGET}) exceeds {length}"
                 )
-            buckets.setdefault(input_tokens, []).append(
+            pending.append(
                 (sample_id, task, position, row, token_ids)
             )
-        for input_tokens in sorted(buckets, reverse=True):
-            rows = buckets[input_tokens]
-            for start in range(0, len(rows), limit):
-                yield length, input_tokens, rows[start : start + limit]
+        pending.sort(key=lambda sample: -len(sample[4]))
+        for start in range(0, len(pending), limit):
+            batch = pending[start : start + limit]
+            yield length, len(batch[0][4]), batch
 
 
 def run(args, output, logger, run_source, execution_attempt):
@@ -135,7 +135,7 @@ def run(args, output, logger, run_source, execution_attempt):
         "source": run_source,
         "batch_size": args.batch_size,
         "batch_size_by_length": args.batch_size_by_length,
-        "batching": "Exact input token length across tasks within each RULER length; no padding",
+        "batching": BATCHING,
         "num_shards": args.num_shards,
         "shard_index": args.shard_index,
         "assigned_samples": len(expected),
@@ -164,6 +164,8 @@ def run(args, output, logger, run_source, execution_attempt):
     logger.info("Loading checkpoint strictly: %s", checkpoint)
     model, config = load_checkpoint(checkpoint, args.inference_mode)
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, local_files_only=True)
+    tokenizer.padding_side = "left"
+    tokenizer.pad_token = tokenizer.eos_token
     first_layer = model.model.layers[0].attn
     loaded_model = {
         "num_lact_heads": config.num_lact_heads,
@@ -201,19 +203,22 @@ def run(args, output, logger, run_source, execution_attempt):
         batches = prepare_batches(
             expected, records, tokenizer, args.batch_size, args.batch_size_by_length
         )
-        for batch_index, (length, input_tokens, batch) in enumerate(batches):
-            input_ids = torch.tensor(
-                [sample[4] for sample in batch], dtype=torch.long, device="cuda:0"
-            )
+        for batch_index, (length, batch_width, batch) in enumerate(batches):
+            encoded = tokenizer.pad(
+                {"input_ids": [sample[4] for sample in batch]},
+                padding=True, return_tensors="pt",
+            ).to("cuda:0")
+            input_ids = encoded.input_ids
             logger.info(
-                "Evaluating length=%s input_tokens=%s batch=%s size=%s shard=%s/%s",
-                length, input_tokens, batch_index, len(batch), args.shard_index, args.num_shards,
+                "Evaluating length=%s batch_width=%s input_tokens=%s batch=%s size=%s shard=%s/%s",
+                length, batch_width, [len(sample[4]) for sample in batch],
+                batch_index, len(batch), args.shard_index, args.num_shards,
             )
             start = time.perf_counter()
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
                 generated = model.generate(
                     input_ids=input_ids,
-                    attention_mask=torch.ones_like(input_ids),
+                    attention_mask=encoded.attention_mask,
                     do_sample=False,
                     num_beams=1,
                     max_new_tokens=GENERATION_BUDGET,
@@ -223,11 +228,11 @@ def run(args, output, logger, run_source, execution_attempt):
                     output_scores=False,
                     pad_token_id=tokenizer.eos_token_id,
                 )
-            continuations = generated[:, input_tokens:].cpu().tolist()
+            continuations = generated[:, batch_width:].cpu().tolist()
             torch.cuda.synchronize()
             batch_seconds = time.perf_counter() - start
             for sample, continuation in zip(batch, continuations, strict=True):
-                sample_id, task, position, row, _ = sample
+                sample_id, task, position, row, token_ids = sample
                 # HF 在已结束行填充 pad；只保留该行截至首个 EOS 的真实生成。
                 end = next(
                     (index + 1 for index, token in enumerate(continuation) if token in eos_ids),
@@ -249,7 +254,8 @@ def run(args, output, logger, run_source, execution_attempt):
                     "prediction_for_scoring": cleaned,
                     "references": row["outputs"],
                     "score": score,
-                    "input_tokens": input_tokens,
+                    "input_tokens": len(token_ids),
+                    "batch_input_width": batch_width,
                     "generated_tokens": len(continuation),
                     "token_ids": continuation,
                     "batch_index": batch_index,
@@ -281,7 +287,7 @@ def main():
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--inference-mode", choices=("original", "incremental"), default="original")
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--batch-size", type=int, default=1, help="Maximum equal-token-length batch")
+    parser.add_argument("--batch-size", type=int, default=1, help="Maximum samples per length-sorted batch")
     parser.add_argument("--batch-size-by-length", nargs="+", default=[], metavar="LENGTH=BATCH")
     parser.add_argument("--sample-ids-file", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--num-shards", type=int, default=1, help="Independent row shards per task and length")
@@ -347,6 +353,7 @@ def main():
         "cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
         "batch_size": args.batch_size,
         "batch_size_by_length": args.batch_size_by_length,
+        "batching": BATCHING,
         "num_shards": args.num_shards,
         "shard_index": args.shard_index,
     }

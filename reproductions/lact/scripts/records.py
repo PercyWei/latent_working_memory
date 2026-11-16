@@ -153,7 +153,7 @@ PROTOCOL_FIELDS = (
     "samples_per_task_length", "inference_mode", "prompt", "generation",
     "parameter_dtype", "compute_autocast_dtype", "upstream_revision", "scoring",
 )
-BATCHING = "Exact input token length across tasks within each RULER length; no padding"
+BATCHING = "Descending actual token length across tasks within each RULER length; adjacent batches; left padding to batch maximum"
 
 
 def load_samples(plan):

@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261115 21:16:26 Asia/Shanghai
+最后修订时间：20261116 10:23:53 Asia/Shanghai
 
 本目录接入 [E²-TTT 官方实现](https://github.com/zeyun-zhong/E2-TTT)及随附 lm-evaluation-harness，保留原始推理路径，另提供本地批量实现。论文为 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308)，源码边界见 [UPSTREAM.md](UPSTREAM.md)。公开权重加载、模型生成和计分检查已完成，尚未完成本轮计划的 benchmark 评估；详见[复现状态](../20261110_ttt_reproduction_status.md)。
 
@@ -45,7 +45,7 @@ bash reproductions/setup_eval_env.sh e2_ttt
 source ~/rivermind-data/envs/ttt-e2_ttt/bin/activate
 ```
 
-MLP 和 SwiGLU 分别执行以下命令，使用 `optimized`，每卡 batch 上限为 8。已完成 4K／16K 的代表性对照，速度、显存及生成／评分差异见[批量推理记录](../20261110_e2_ttt_batch_inference.md)。
+MLP 和 SwiGLU 分别执行以下命令，使用 `optimized`，每卡 batch 上限为 8。相同生成参数与 BOS 状态的输入按 token 长度降序排列，相邻样本组成 batch，左 padding 至该批最长输入。此前等长 4K／16K 对照的速度、显存及生成／评分差异见[批量推理记录](../20261110_e2_ttt_batch_inference.md)。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/eval.sh \
@@ -65,8 +65,8 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 |---|---|
 | `--checkpoint` | 必需，本地完整 checkpoint 目录 |
 | `--output-dir` | 必需，首次运行时目录须不存在 |
-| `--inference-mode` | `original`（默认）或 `optimized`；后者用于本页两个公开 checkpoint 的等长批量推理 |
-| `--batch-size` | 每卡上限，默认 `1`；`original` 仅允许 `1`，`optimized` 按截断后的实际 token 数分组 |
+| `--inference-mode` | `original`（默认）或 `optimized`；后者支持本页两个公开 checkpoint 的等长／不等长批量推理 |
+| `--batch-size` | 每卡上限，默认 `1`；`original` 仅允许 `1`，`optimized` 按长度排序后相邻组批，尾批使用实际数量 |
 | `--benchmarks` | 默认 `ruler squad_completion swde`，可选择其中一项或多项 |
 | `--lengths` | RULER 默认 `512 1024 2048 4096 8192 16384`，可选择所需长度 |
 | `--ruler-data`／`--squad-data`／`--swde-data` | 默认分别使用评估范围表中的目录，可按需覆盖；相对路径以仓库根目录为准 |
@@ -74,9 +74,9 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 
 `original` 对照使用 `--inference-mode original --batch-size 1`，并将输出目录改为独立的 `_original` 目录；不同 checkpoint 或推理模式不共用结果目录。
 
-本地模型也支持带左 padding 的不等长输入，验证入口和范围见[padding 推理记录](../20261115_ttt_padding_inference.md)。本页评估命令仍沿用精确长度组批，本轮未调整组批策略。
+不等长输入的真实 token 位置、attention 与 TTT 状态独立维护；验证入口和范围见[padding 推理记录](../20261115_ttt_padding_inference.md)。
 
-中断后在原命令末尾追加 `--resume`，保持 GPU 顺序、输出目录与其余参数一致。例如继续 MLP：
+中断后在原命令末尾追加 `--resume`，保持 GPU 顺序、输出目录、组批策略与其余参数一致；组批策略不同的运行使用新目录。例：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/eval.sh \
@@ -91,6 +91,6 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 
 - RULER 使用 `input + answer_prefix`，不加 chat 模板，greedy 最多生成 128 tokens；输入加输出预算超限时报错，不截断。
 - SQuAD／SWDE 保留原文本 `.strip()` 和换行停止，最多生成 48 tokens；总预算 2048，prompt 超过 2000 tokens 时按原流程左截断。
-- `summary.json` 保存任务／长度汇总；逐题预测和原生结果文件见 `manifest.json`。`plan.json`、`execution.json` 保存参数、代码来源、运行状态与耗时。
+- `summary.json` 保存任务／长度汇总；单卡逐题预测与原生结果分别在 `predictions.jsonl`、`native_harness/`，并行结果通过 `manifest.json` 指向各分片。`plan.json`、`execution.json` 保存参数、代码来源、运行状态与耗时。
 
 本轮使用公开权重进行模型评估，无需重新训练。训练设置与备用入口见 [UPSTREAM.md](UPSTREAM.md) 和[官方训练说明](upstream/training/README.md)。

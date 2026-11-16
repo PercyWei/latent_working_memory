@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261115 21:16:26 Asia/Shanghai
+最后修订时间：20261116 10:23:53 Asia/Shanghai
 
 - 官方仓库：<https://github.com/zeyun-zhong/E2-TTT>。
 - 固定 revision：`0d1da370c7e3cea1642ba3af0477b7601849a1be`。
@@ -22,7 +22,7 @@
 |---|---|
 | `eval.sh`、`eval_parallel.sh`、`scripts/evaluate_parallel.py` | 选择推理模式、分配评估样本并汇总原始逐题指标 |
 | `scripts/evaluate.py` | 加载 checkpoint 并选择原始或批量推理，使用随附 evaluator 计分；原生 CachingLM 支持续评 |
-| `scripts/batch_harness.py` | 按原截断后的实际 token 长度、生成参数及 BOS 状态分组，复用原 HFLM 生成与停止逻辑，不补齐尾批 |
+| `scripts/batch_harness.py` | 保留生成参数及 BOS 分组，复用原 HFLM 的长度降序排列、相邻组批、左 padding、生成、停止与结果还原；尾批使用实际数量 |
 | `optimized/` | 本地 MLP／SwiGLU 批量推理，支持等长输入和标准左 padding，保持各样本的 attention 与 TTT 状态独立 |
 | `scripts/local_tasks.py` | 本地数据接入及互斥行分片，保留原 prompt、生成参数及计分；RULER 拼接一次 answer_prefix 并严格检查 token 预算 |
 | `scripts/train_340m_gpu1.sh` | 适配物理 GPU 1，保持官方全局 batch、训练步数及其余参数，调用原 training/train.sh |
@@ -46,4 +46,4 @@ SQuAD／SWDE 沿用 HFLM 的 2048 总预算、48 输出预算和左截断；RULE
 
 适配只替换当前实例的 backbone 和层类，不修改模型注册表或全局函数，不新增、删除或重排参数，`state_dict` 键保持不变。等长路径的缓存 tuple 不变；padding 路径逐样本保存相同的 TTT tuple，并单独记录真实长度。代表性验证结果与数值差异见[批量推理记录](../20261110_e2_ttt_batch_inference.md)。当前命令见 [README.md](README.md)，整体进度见[复现状态](../20261110_ttt_reproduction_status.md)。
 
-左 padding 的计算边界、验证命令和结果见[padding 推理记录](../20261115_ttt_padding_inference.md)。当前常规评估仍按精确 token 长度组批，本轮未修改组批策略。
+常规 `optimized` 评估允许相邻长度混合组批，复用上述 padding 路径；原 prompt、截断、生成预算、停止、评分与 CachingLM 不变。左 padding 的计算边界、验证命令和结果见[padding 推理记录](../20261115_ttt_padding_inference.md)。续评同时核对组批策略，策略不同的运行使用独立输出目录。

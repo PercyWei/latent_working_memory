@@ -274,6 +274,8 @@ def execute(args):
         "workers_per_gpu": args.workers, "slots": [list(slot) for slot in slots],
         "inference_mode": args.inference_mode,
         "batch_size_per_job": args.batch_size,
+        "batching": "length-sorted adjacent batches with left padding" if args.inference_mode == "optimized"
+        else "native single sample",
         "physical_gpus": args.devices,
         "cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
         "python": sys.executable, "omp_num_threads": "1", "mkl_num_threads": "1",

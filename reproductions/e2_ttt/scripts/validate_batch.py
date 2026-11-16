@@ -22,7 +22,7 @@ import numpy as np
 import torch
 import transformers
 
-from batch_harness import EqualLengthHFLM
+from batch_harness import LengthSortedHFLM
 from evaluate import PROJECT_ROOT, RULER_TASKS, source_record, timestamp, write_json
 from local_tasks import LocalRuler, LocalSQuAD, LocalSWDE
 from optimized import optimize_model
@@ -273,7 +273,7 @@ def run_generation(
     args, base_lm, groups, run_name, batch_size, optimized, predictions, measurements, original
 ):
     results, summaries = {}, {}
-    wrapper_class = EqualLengthHFLM if optimized else HFLM
+    wrapper_class = LengthSortedHFLM if optimized else HFLM
     for group in groups:
         lm = wrapper_class(
             pretrained=base_lm.model,
@@ -568,7 +568,7 @@ def execute(args):
             "cuda": torch.version.cuda,
         },
         "seeds": {"random": 0, "numpy": 1234, "torch": 1234},
-        "generation": "native HFLM B1; optimized EqualLengthHFLM B1/Bn, original task prompts/stops/scoring",
+        "generation": "native HFLM B1; optimized LengthSortedHFLM B1/Bn, original task prompts/stops/scoring",
         "sample_selection": "RULER: first exact-token-length bucket reaching requested 8/16 rows; recall: largest post-truncation length bucket (>=4 rows), plus up to two other-length rows interleaved, up to recall-samples total",
         "completion_ids": "raw IDs retained; comparison stops at first original EOS or singleton native until criterion, retaining its terminating token",
         "probe": "real fixed teacher tokens: prefill C-1 and 2C-1, then two one-token forwards; row0 fixed while other rows are permuted/replaced",

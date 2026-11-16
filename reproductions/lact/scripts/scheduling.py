@@ -9,7 +9,7 @@ from pathlib import Path
 
 from batching import parse_batch_size_by_length
 from records import (
-    LENGTHS, PROTOCOL_FIELDS, build_protocol, load_samples, protocol_identity,
+    BATCHING, LENGTHS, PROTOCOL_FIELDS, build_protocol, load_samples, protocol_identity,
     validate_prediction,
 )
 
@@ -48,6 +48,7 @@ def execution_parameters(args, devices):
     return {
         "devices": devices, "num_shards": len(devices), "batch_size": args.batch_size,
         "batch_size_by_length": mapping, "effective_batch_size_by_length": effective,
+        "batching": BATCHING,
     }
 
 
@@ -173,6 +174,7 @@ def collect_records(directory, protocol, expected, directories=None):
             "source": plan["source"], "num_shards": plan["num_shards"], "shard_index": plan["shard_index"],
             "sample_ids": seen, "samples": len(seen), "ignored_incomplete_tail": ignored_tail,
             "batch_size": plan["batch_size"], "batch_size_by_length": plan.get("batch_size_by_length", {}),
+            "batching": plan["batching"],
             "cuda_visible_devices": plan["cuda_visible_devices"],
             "seconds": execution["seconds"],
             "peak_cuda_memory_allocated_bytes": execution["peak_cuda_memory_allocated_bytes"],

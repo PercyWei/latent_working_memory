@@ -1,4 +1,4 @@
-"""LaCT 按评估长度设置 batch 上限；不改变精确 token 长度分组。"""
+"""LaCT 按评估长度设置 batch 上限。"""
 
 
 def parse_batch_size_by_length(values, lengths):
