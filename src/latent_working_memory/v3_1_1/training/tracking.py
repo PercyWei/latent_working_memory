@@ -14,7 +14,7 @@ from ..io import write_json
 
 
 def configure_post_panels(api, remote, metrics):
-    """先注册实际出现的指标，再整理原生图表，保留历史标量。"""
+    """为实际出现的当前指标注册原生图表并配置展示。"""
     def checked(response):
         if not response.ok:
             raise RuntimeError(response.errmsg)
@@ -35,24 +35,24 @@ def configure_post_panels(api, remote, metrics):
         ("train/reward", "reward", (
             ("train/reward", "reward", "#2b8cbe"),
             ("train/reward_std", "reward_std", "#d95f0e"),
-        ), ()),
+        )),
         ("train/memory_usage", "memory_blocks = memory_slots / K", (
             ("train/blocks", "memory_blocks", "#2b8cbe"),
-        ), ("train/memory_slots",)),
+        )),
         ("train/compression", "compression_rate = segment_tokens / K", (
             ("train/compression_ratio", "compression_rate", "#2b8cbe"),
-        ), ("train/segment_tokens",)),
+        )),
         ("train/learning_rate", "learning_rate", (
             ("train/compressor_learning_rate", "compressor", "#2b8cbe"),
             ("train/boundary_learning_rate", "boundary", "#d95f0e"),
-        ), ()),
+        )),
     ), "dev": (
-        ("dev/memory_usage", "blocks = memory_slots / K", (
-            ("dev/blocks", "blocks", "#2b8cbe"),
-        ), ("dev/memory_slots",)),
-        ("dev/compression", "压缩倍率 = segment_tokens / K", (
-            ("dev/compression_ratio", "compression_ratio", "#2b8cbe"),
-        ), ("dev/segment_tokens",)),
+        ("dev/memory_usage", "memory_blocks = memory_slots / K", (
+            ("dev/blocks", "memory_blocks", "#2b8cbe"),
+        )),
+        ("dev/compression", "compression_rate = segment_tokens / K", (
+            ("dev/compression_ratio", "compression_rate", "#2b8cbe"),
+        )),
     )}
     for split, split_panels in panels.items():
         if not any(metric.startswith(f"{split}/") for metric in metrics):
@@ -62,17 +62,14 @@ def configure_post_panels(api, remote, metrics):
             checked(api._get(f"{charts_path}/xxxxxx/{index}"))
             for index in section["chartIndex"]
         ]
-        for title, axis_name, series, replaced in split_panels:
+        for title, axis_name, series in split_panels:
             keys = {metric for metric, _, _ in series}
             if not keys & metrics:
                 continue
-            names = {title, *keys, *replaced}
-            # 优先复用 SDK 生成的主指标图；已有别名图的配色和图例合并到这张图。
-            existing = next((chart for chart in charts
-                             if chart["title"] == series[0][0] and chart["type"] == "LINE"), None)
-            if existing is None:
-                existing = next(chart for chart in charts
-                                if chart["title"] == title and chart["type"] == "LINE")
+            names = {title, *keys}
+            # 首次配置使用原生主指标图，后续运行复用同一项目中的当前面板。
+            existing = next(chart for chart in charts if chart["type"] == "LINE"
+                            and chart["title"] in {title, series[0][0]})
             custom = {}
             for chart in charts:
                 if chart["type"] == "LINE" and chart["title"] in names:
@@ -99,15 +96,8 @@ def configure_post_panels(api, remote, metrics):
                 if chart["index"] == existing["index"] or chart["type"] != "LINE":
                     continue
                 chart_keys = {axis["key"] for axis in chart["config"]["yAxis"]}
-                if chart["title"] in names and chart_keys and chart_keys <= keys | set(replaced):
+                if chart["title"] in names and chart_keys and chart_keys <= keys:
                     checked(api._delete(f"{charts_path}/{section['index']}/{chart['index']}"))
-        # loss/samples 还用于预训练，保留共享面板；后训练不上传重复 loss 和样本计数。
-        for chart in charts:
-            name = chart["title"]
-            if chart["type"] == "LINE" and name in {
-                f"{split}/commit_rate", "train/zero_advantage_groups",
-            } and {axis["key"] for axis in chart["config"]["yAxis"]} == {name}:
-                checked(api._delete(f"{charts_path}/{section['index']}/{chart['index']}"))
 
 
 @contextmanager
