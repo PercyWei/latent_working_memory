@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261117 18:26:53 Asia/Shanghai
+最后修订时间：20261117 19:02:32 Asia/Shanghai
 
 计算协议、数据格式与模块分工见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256.json)中的基座与数据路径。
 
@@ -198,9 +198,10 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/eval_rule
 - **评估数据格式**：`--eval-data` 指定评估数据根目录：Test 读取 `test.jsonl`，LoCoMo 读取 `locomo10.json`，RULER 按 `<长度>/<子任务>/test.jsonl` 读取各长度档位和子任务的数据。Benchmark 数据须提前准备，数据布局与准备入口见[公共 benchmark 指南](../../benchmarks/README.md#2-数据准备)。
 - **压缩与回答**：三者共用正文压缩与 Reader 回答流程：正文全部压缩，结束时提交剩余正文；问题和任务指令只交给 Reader，不参与压缩或边界判断。LoCoMo、RULER 沿用官方评分逻辑。
 - **Test 协议**：固定读取数据目录的完整 `test.jsonl`，不套用训练长度筛选，默认每题最多生成 128 tokens；同文档全部 QA 共用记忆。
+- **LoCoMo 协议**：同对话的全部题目共用一次正文压缩得到的记忆，各题独立生成并立即保存；官方指标按题目评分，记忆用量按对话平均。续评时只对尚有未完成题目的对话重新压缩，并补齐缺失答案。
 - **运行与范围**：`--eval-run` 必填，指向运行根目录。`--checkpoint` 可选，只填一个或多个 `global_step_<N>` 名称，自动查找 `<eval-run>/train/checkpoints/<名称>/state.pt`；省略时选择当时保存的全部完整 checkpoint。
 - **评估计划**：新建时须提供 `--eval-data`，默认先将选定范围与评估设置保存到 `<eval-run>/plan/eval-<eval-id>/<task>.json`，再执行评估，结果保存到 `<eval-run>/eval/<eval-id>/<task>/`。评估标识 `--eval-id` 默认 `YYYYMMDD-HHMMSS`，同一标识下各任务独立管理，目标任务计划已存在时直接报错。计划绑定基座、记忆架构、LoRA、计算设置和 seed。
-- **并行与批量**：checkpoint 按 step 升序依次评估，可见 GPU 分摊样本，每卡一份模型。`--batch-size-per-gpu` 设置每卡批量上限（默认 1）；RULER 可用 `--batch-size-by-length 长度=批量 ...` 覆盖指定档位，其余沿用通用值。按样本组批，RULER 各长度档位分别组批。
+- **并行与批量**：checkpoint 按 step 升序依次评估，可见 GPU 分摊样本，每卡一份模型。`--batch-size-per-gpu` 设置每卡批量上限（默认 1），Test 按文档、LoCoMo 按对话、RULER 按题目计数；LoCoMo 同一对话的剩余题目由同一 GPU 处理。RULER 各长度档位分别组批，可用 `--batch-size-by-length 长度=批量 ...` 覆盖指定档位，其余沿用通用值。
 - **覆盖评估**：追加 `--overwrite`，按本次参数重建当前评估任务（`<eval-run>` `<eval-id>` `<task>`）的计划和全部 checkpoint 结果，其他任务、其他 eval-id、其他运行的评估结果保留。目标正在使用时直接报错。
 
 ### 4.2 中断恢复或补充

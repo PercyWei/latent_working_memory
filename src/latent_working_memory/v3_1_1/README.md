@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261117 18:26:53 Asia/Shanghai
+最后修订时间：20261117 19:02:32 Asia/Shanghai
 
 v3.1.1 先通过文本重建（AE）和续写（LM）训练压缩器（Writer），再用问答（QA）与强化学习联合训练记忆内容和分段边界。每次提交将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆回答问题。
 
@@ -338,7 +338,7 @@ dev 保持模型参数不变，后训练使用确定性边界。train/dev 曲线
 
 ### 独立评估任务
 
-使用任务脚本独立评估后训练 checkpoint。各任务先将完整正文压缩为 memory，再由 Reader 回答。Test 同文档的全部 QA 共用记忆；LoCoMo 与 RULER 按题目处理。评估计划、日志、明细和汇总保存在本地。
+使用任务脚本独立评估后训练 checkpoint。各任务先将完整正文压缩为 memory，再由 Reader 回答。Test 同文档、LoCoMo 同对话的全部 QA 共用一次正文压缩得到的记忆，各题独立生成；RULER 按题目处理。评估计划、日志、明细和汇总保存在本地。
 
 | 任务与脚本 | 数据入口 | 范围与评分 |
 |---|---|---|
@@ -364,7 +364,9 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/eval_test
 
 新建评估必填 `--eval-run` 和 `--eval-data`；前者指向运行根目录。`--eval-id` 缺省生成 `YYYYMMDD-HHMMSS`。`--checkpoint` 接受一个或多个 `global_step_<N>` 名称，省略时选择当时全部完整 checkpoint；多个 checkpoint 按真实 step 串行执行。
 
-每卡批量上限由 `--batch-size-per-gpu` 控制，默认 1。RULER 通过 `--lengths` 选择长度，默认 `8192 16384 32768`；各长度单独组批，可用 `--batch-size-by-length 8192=8 16384=4 32768=2` 覆盖指定长度的批量，其余沿用通用值。GPU 数与批量属于本次执行设置，可在续评时调整。
+每卡批量上限由 `--batch-size-per-gpu` 控制，默认 1；Test 按文档、LoCoMo 按对话、RULER 按题目组批。LoCoMo 同一对话的未完成题目分配给同一 GPU，逐题保存与计数；续评时重新压缩尚有未完成题目的对话，只生成缺失答案，官方评分仍按题目汇总，记忆用量按对话平均。
+
+RULER 通过 `--lengths` 选择长度，默认 `8192 16384 32768`；各长度单独组批，可用 `--batch-size-by-length 8192=8 16384=4 32768=2` 覆盖指定长度的批量，其余沿用通用值。GPU 数与批量属于本次执行设置，可在续评时调整。
 
 续评使用原任务脚本，并传入 `--resume`、原 `--eval-run` 和 `--eval-id`；原任务重定向过输出目录时，同时传入原 `--output-root`。
 

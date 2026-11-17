@@ -1,14 +1,16 @@
 """执行独立 LoCoMo 评估，逐 checkpoint 保存本地结果。"""
 
 import argparse
+from collections import defaultdict
 import sys
 
 from latent_working_memory.benchmarks.data import load_samples
 from latent_working_memory.benchmarks.protocol import data_identity, protocol
 from latent_working_memory.benchmarks.scoring import score_sample, summarize_scores
+from latent_working_memory.v4_1.data import EpisodeEncoder
 from ..cli import ignore_resume_options, positive_int
 from . import DEFAULT_EVAL_BATCH_SIZE
-from .inference import compute_batch as compute_model_batch, encode_context_question
+from .inference import EvaluationInput, EvaluationQuestion, compute_batch as compute_model_batch
 from .run import run_evaluations
 
 
@@ -54,33 +56,50 @@ def load_data(config, tokenizer, model_window, data, max_samples, max_new_tokens
         ),
         "selection": "first max_samples overall",
         "max_samples": max_samples,
+        "memory_sharing": "compress each conversation once per attempt; answer and commit each pending question independently",
     })
     return samples, identity, evaluation_protocol
 
 
 def sample_batches(samples, execution):
-    ordered = sorted(samples, key=lambda sample: len(sample.prompt))
+    conversations = defaultdict(list)
+    for sample in samples:
+        conversations[sample.metadata["conversation_id"]].append(sample)
+    ordered = sorted(conversations.values(),
+                     key=lambda questions: len(questions[0].prompt.rsplit(QA_INSTRUCTION, 1)[0]))
     batch_size = execution["eval_batch_size_per_gpu"]
     for start in range(0, len(ordered), batch_size):
         yield ordered[start:start + batch_size]
 
 
-def compute_batch(samples, request, model, config, max_new_tokens, commit):
+def compute_batch(conversations, request, model, config, max_new_tokens, commit):
+    by_first_id = {questions[0].id: questions for questions in conversations}
+    encoder = EpisodeEncoder(model.tokenizer)
+
     def encode(sample):
-        context, question = sample.prompt.rsplit(QA_INSTRUCTION, 1)
-        return encode_context_question(
-            context, QA_INSTRUCTION + question, model.tokenizer, sample.max_new_tokens,
+        questions = by_first_id[sample.id]
+        context = sample.prompt.rsplit(QA_INSTRUCTION, 1)[0]
+        return EvaluationInput(
+            encoder.context(context),
+            tuple(EvaluationQuestion(
+                tuple(model.tokenizer.encode(
+                    f"\n\n{QA_INSTRUCTION}{question.prompt.rsplit(QA_INSTRUCTION, 1)[1]}{encoder.suffix}",
+                    add_special_tokens=False,
+                )), question.max_new_tokens,
+            ) for question in questions),
         )
 
     return compute_model_batch(
-        samples, model, config, commit,
-        encode, make_record,
+        [questions[0] for questions in conversations], model, config, commit, encode,
+        lambda sample, answers: make_record(by_first_id[sample.id][len(answers) - 1], [answers[-1]]),
+        commit_per_question=True,
     )
 
 
 def make_record(sample, answers):
     answer = answers[0]
     return {
+        "id": sample.id,
         "question": sample.metadata["question"],
         "references": list(sample.references), "metadata": sample.metadata,
         **answer, "score": score_sample(NAME, sample, answer["prediction"]),

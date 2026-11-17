@@ -36,8 +36,8 @@ def encode_context_question(context, question, tokenizer, max_new_tokens):
 
 
 @torch.no_grad()
-def compute_batch(samples, model, config, commit, encode, record):
-    """每个样本只压缩一次正文；具体任务负责输入适配、评分与结果字段。"""
+def compute_batch(samples, model, config, commit, encode, record, commit_per_question=False):
+    """正文只压缩一次；LoCoMo 逐题提交，其他任务在整篇回答完成后提交。"""
     count = len(samples)
     device = model.memory_embeddings.device
     torch.cuda.synchronize(device)
@@ -128,16 +128,18 @@ def compute_batch(samples, model, config, commit, encode, record):
             if index in nll_values:
                 answer.update(nll=nll_values[index], target_tokens=len(questions[position].target_ids))
             answers[index].append(answer)
-            complete = question_index + 1 == len(inputs[index].questions)
+            complete = commit_per_question or question_index + 1 == len(inputs[index].questions)
             if complete:
-                rows[index].update(record(samples[index], answers[index]))
-                rows[index]["generated_tokens"] = sum(value["generated_tokens"] for value in answers[index])
+                row = {**rows[index], **record(samples[index], answers[index])}
+                row["generated_tokens"] = (answer["generated_tokens"] if commit_per_question else
+                                           sum(value["generated_tokens"] for value in answers[index]))
             seconds[index] += time.perf_counter() - scored_at
             if complete:
-                rows[index].update(seconds=seconds[index], generation_seconds=generation_seconds[index],
-                                   nll_seconds=nll_seconds[index])
-                commit({"record": rows[index], "device": device_label,
+                row.update(seconds=seconds[index], generation_seconds=generation_seconds[index],
+                           nll_seconds=nll_seconds[index])
+                commit({"record": row, "device": device_label,
                         "peak_memory_bytes": torch.cuda.max_memory_allocated(device)})
+                seconds[index] = generation_seconds[index] = nll_seconds[index] = 0.0
             # 评分和写盘时间不重复计入仍活跃的 GPU 任务。
             last_finished = time.perf_counter()
 

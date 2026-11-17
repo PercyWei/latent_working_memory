@@ -63,15 +63,26 @@ def load_progress(output_dir, request, samples, repair=False):
     return entries
 
 
-def write_work(output_dir, samples, entries, num_workers):
+def write_work(output_dir, samples, entries, num_workers, task):
     if type(num_workers) is not int or num_workers < 1:
         raise ValueError("num_workers must be a positive integer")
     pending = [sample.id for sample in samples if sample.id not in entries]
-    count = min(num_workers, len(pending))
+    if task == "locomo":
+        conversations = {}
+        for sample in samples:
+            if sample.id not in entries:
+                conversations.setdefault(sample.metadata["conversation_id"], []).append(sample.id)
+        workers = [[] for _ in range(min(num_workers, len(conversations)))]
+        # 同一正文的剩余问题归属同一 worker；优先分配题数较多的会话。
+        for questions in sorted(conversations.values(), key=len, reverse=True):
+            min(workers, key=len).extend(questions)
+    else:
+        count = min(num_workers, len(pending))
+        workers = [pending[rank::count] for rank in range(count)]
     work = {
         "total_samples": len(samples), "completed_samples": len(entries),
         "pending_samples": len(pending),
-        "workers": [pending[rank::count] for rank in range(count)],
+        "workers": workers,
         "started_at": time.time(),
     }
     write_json(Path(output_dir) / "work.json", work)
@@ -81,12 +92,14 @@ def write_work(output_dir, samples, entries, num_workers):
 def _summary(request, entries, wall_seconds, task_module):
     records = [entry["record"] for entry in entries]
     metrics = task_module.summarize(records)
+    documents = (list({row["metadata"]["conversation_id"]: row for row in records}.values())
+                 if request["task"] == "locomo" else records)
     peaks = [entry["peak_memory_bytes"] for entry in entries if entry["peak_memory_bytes"] is not None]
     return {
         **request, "metrics": {
             **metrics,
-            "blocks": sum(row["blocks"] for row in records) / len(records),
-            "memory_slots": sum(row["memory_slots"] for row in records) / len(records),
+            "blocks": sum(row["blocks"] for row in documents) / len(documents),
+            "memory_slots": sum(row["memory_slots"] for row in documents) / len(documents),
         }, "outputs": summarize_outputs(records),
         "stop_reasons": dict(Counter(answer["stop_reason"] for row in records
                                      for answer in row.get("qas", [row]))),

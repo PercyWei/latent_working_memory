@@ -94,7 +94,7 @@ def prepare_sample_work(checkpoint_path, data, output_dir, task_module, max_new_
             return {"total_samples": len(samples), "completed_samples": len(samples),
                     "pending_samples": 0, "workers": []}
         entries = load_progress(output_dir, request, samples, repair=True)
-        return write_work(output_dir, samples, entries, num_workers)
+        return write_work(output_dir, samples, entries, num_workers, task_module.NAME)
 
 
 def evaluate_shard(checkpoint_path, data, output_dir, worker_rank, task_module, execution,
