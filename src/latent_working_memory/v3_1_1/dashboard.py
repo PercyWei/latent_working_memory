@@ -1,9 +1,7 @@
-"""v3.1.1 本地训练与独立评估看板，不加载模型或连接实验追踪服务。"""
+"""v3.1.1 独立评估看板：官方指标、压缩分布与逐文本分析。"""
 
 import argparse
-from itertools import islice
 import json
-import math
 from pathlib import Path
 
 from pyecharts import charts
@@ -13,6 +11,7 @@ from latent_working_memory.baselines.results import load_baseline_results
 from latent_working_memory.benchmarks.data import RULER_TASKS
 from latent_working_memory.benchmarks.protocol import protocol
 from latent_working_memory.v4.reporting import evaluation_charts, ruler_overall, ruler_task_chart
+from latent_working_memory.v3_1_1 import dashboard_compression as compression
 from latent_working_memory.v3_1_1.evaluation.diagnostics import output_flags, visible_text
 from latent_working_memory.v3_1_1.evaluation.records import completed_evaluation
 
@@ -22,8 +21,7 @@ TASK_LABELS = {"test": "Test", "ruler": "RULER", "locomo": "LoCoMo"}
 CHART_LABELS = {
     "evaluation/nll": "NLL",
     "evaluation/em_f1": "EM / F1",
-    "evaluation/memory": "平均记忆 slots",
-    "evaluation/ruler": "RULER 训练进度",
+    "evaluation/ruler": "RULER checkpoint 对比",
     "evaluation/ruler_lengths": "RULER 长度总览",
     "evaluation/locomo": "LoCoMo",
 }
@@ -137,11 +135,12 @@ def _baseline_selection(results, task, summaries, key):
 
 
 def _test_charts(summaries):
+    if len(summaries) == 1:
+        return {}
     steps = [summary["checkpoint_step"] for summary in summaries]
     panels = {}
     for name, metrics in (
         ("nll", ("qa_nll", "token_nll")), ("em_f1", ("em", "f1")),
-        ("memory", ("memory_slots",)),
     ):
         chart = charts.Line().add_xaxis(steps)
         for metric in metrics:
@@ -155,6 +154,7 @@ def _test_charts(summaries):
         )
         panels[f"evaluation/{name}"] = chart
     return panels
+
 
 def _summary_rows(summaries, baselines):
     rows = []
@@ -183,7 +183,7 @@ def _summary_rows(summaries, baselines):
         if summary["task"] == "test":
             row.update({"文档": metrics["documents"], "问题": metrics["questions"]})
             row.update({name: metrics[name] for name in (
-                "qa_nll", "token_nll", "em", "f1", "blocks", "memory_slots",
+                "qa_nll", "token_nll", "em", "f1",
             )})
         else:
             row["样本"] = metrics["samples"]
@@ -213,7 +213,8 @@ def _resource_rows(summaries, baselines):
                      if model.get("mixed_precision", False) else model["backbone_dtype"]),
             "设备记录": resources.get("device"),
             "实际评估批量": ", ".join(map(str, batch_sizes)) if batch_sizes is not None else None,
-            "批量单位": "文档" if result.get("task") == "test" else "题目",
+            "批量单位": ({"test": "文档", "locomo": "对话", "ruler": "题目"}[result["task"]]
+                         if step is not None else "题目"),
             "生成路径累计耗时（秒）": resources["generation_seconds"],
             "峰值 allocated（GiB）": peak / 1024 ** 3 if peak is not None else None,
             "本次调度墙钟（秒）": resources.get("wall_seconds"),
@@ -237,93 +238,159 @@ def _ruler_prompt(data_dir, record):
     raise ValueError(f"{path} 中不存在第 {position + 1} 行")
 
 
-def _details(records, key):
-    if not st.toggle("查看逐样本记录", key=f"{key}:details"):
+def _show_answer(answer, task, metric):
+    if task == "test":
+        quality = f"NLL {answer['nll']:.4f} · EM {answer['em']:.3f} · F1 {answer['f1']:.3f}"
+        references = [answer["reference"]]
+    else:
+        quality = f"{metric} {answer['score']:.3f}"
+        references = answer["references"]
+    st.caption(f"{quality} · {answer['generated_tokens']}/{answer['max_new_tokens']} generated tokens · "
+               f"{answer['stop_reason']}")
+    if task == "test" and "segment_id" in answer:
+        start, end = answer["segment_char_span"]
+        st.caption(f"来源段 {answer['segment_id']} · 完整正文字符区间 [{start}, {end})")
+    if answer["question"]:
+        st.write(answer["question"])
+    st.write("参考答案：" + " / ".join(references))
+    flags = " · ".join(OUTPUT_LABELS[name] for name, value in output_flags(answer).items() if value)
+    if flags:
+        st.warning(flags)
+    st.code(visible_text(answer["prediction"]), language=None, wrap_lines=True)
+
+
+def _document_answers(document, directory, summary, key):
+    if not st.toggle("查看问题与回答", key=f"{key}:answers"):
         return
-    checkpoints = {summary["checkpoint_step"]: (path, summary) for path, summary in records}
-    if len(checkpoints) > 1:
-        step = st.selectbox("记录 checkpoint", list(checkpoints), index=len(checkpoints) - 1,
-                            format_func=lambda value: f"global_step_{value}", key=f"{key}:details-step")
+    task = summary["task"]
+    questions = document["questions"]
+    if task == "locomo":
+        categories = {row["category"]: row["category_name"] for row in questions}
+        category = st.selectbox(
+            "问题分类", [None, *sorted(categories)],
+            format_func=lambda value: "全部分类" if value is None else categories[value],
+            key=f"{key}:category",
+        )
+        questions = [row for row in questions if category is None or row["category"] == category]
+        st.caption("分类筛选仅作用于下方问题；压缩统计按完整对话计算。")
+        chosen = st.selectbox(
+            "问题", range(len(questions)),
+            format_func=lambda index: f"{questions[index]['id']} · {questions[index]['category_name']}",
+            key=f"{key}:{category}:question",
+        )
     else:
-        step = next(iter(checkpoints))
-    directory, summary = checkpoints[step]
-    ruler = summary["task"] == "ruler"
-    length, task = None, None
-    if ruler:
-        with (directory / "details.jsonl").open(encoding="utf-8") as stream:
-            details = [json.loads(line) for line in stream]
-        length_column, task_column = st.columns(2)
-        with length_column:
-            length = st.selectbox(
-                "RULER 长度", [None, *sorted({row["metadata"]["length"] for row in details})],
-                format_func=lambda value: "全部长度" if value is None else f"{value:,} tokens",
-                key=f"{key}:{step}:details-length",
-            )
-        details = [row for row in details if length is None or row["metadata"]["length"] == length]
-        tasks = {row["metadata"]["task"] for row in details}
-        with task_column:
-            task = st.selectbox(
-                "RULER 子任务", [None, *(value for value in RULER_TASKS if value in tasks)],
-                format_func=lambda value: "全部子任务" if value is None else value,
-                key=f"{key}:{step}:{length}:details-task",
-            )
-        details = [row for row in details if task is None or row["metadata"]["task"] == task]
-        data_dir = st.text_input("RULER 数据目录", value=summary["data"]["directory"],
-                                 key=f"{key}:ruler-data-directory")
-    count = summary["metrics"]["documents"] if summary["task"] == "test" else summary["metrics"]["samples"]
-    if ruler:
-        count = len(details)
-    page_size = 20
-    pages = max(1, math.ceil(count / page_size))
-    page = st.number_input("页码", min_value=1, max_value=pages, value=1, step=1,
-                           key=f"{key}:{step}:{length}:{task}:details-page")
-    start = (page - 1) * page_size
-    if ruler:
-        rows = details[start:start + page_size]
+        chosen = 0
+    row = compression.read_record(directory / "details.jsonl", questions[chosen]["offset"])
+    if task == "test":
+        answer_index = st.selectbox(
+            "问题", range(len(row["qas"])),
+            format_func=lambda index: f"{index + 1}. {row['qas'][index]['question']}",
+            key=f"{key}:question",
+        )
+        answer = row["qas"][answer_index]
     else:
-        with (directory / "details.jsonl").open(encoding="utf-8") as stream:
-            rows = [json.loads(line) for line in islice(stream, start, start + page_size)]
-    st.caption(f"第 {page} / {pages} 页，每页 {page_size} 条，共 {count} 条")
-    for row in rows:
-        with st.container(border=True):
-            st.markdown(f"**{row['id']}**")
-            batch_unit = "文档" if summary["task"] == "test" else "题目"
-            st.caption(f"{row['blocks']} 个记忆块 · {row['memory_slots']} slots · "
-                       f"实际批量 {row['eval_batch_size']} {batch_unit}")
-            st.write({"block_lengths": row["block_lengths"], "actions": row["actions"]})
-            if ruler:
-                with st.expander("完整输入题面", key=f"{key}:{step}:{row['id']}:prompt",
-                                 on_change="rerun") as prompt_panel:
-                    if prompt_panel.open:
-                        try:
-                            prompt = _ruler_prompt(data_dir, row)
-                        except (OSError, ValueError) as error:
-                            st.warning(f"题面读取失败：{error}")
-                        else:
-                            st.code(prompt, language=None, wrap_lines=True, height=350)
-            answers = row["qas"] if summary["task"] == "test" else [row]
-            for answer in answers:
-                if summary["task"] == "test":
-                    quality = f"NLL {answer['nll']:.4f} · EM {answer['em']:.3f} · F1 {answer['f1']:.3f}"
-                    references = [answer["reference"]]
+        answer = row
+    _show_answer(answer, task, summary["metrics"].get("metric"))
+    if task == "ruler":
+        with st.expander("完整输入题面", key=f"{key}:prompt", on_change="rerun") as panel:
+            if panel.open:
+                data_dir = st.text_input("RULER 数据目录", value=summary["data"]["directory"],
+                                         key=f"{key}:ruler-data-directory")
+                try:
+                    prompt = _ruler_prompt(data_dir, row)
+                except (OSError, ValueError) as error:
+                    st.warning(f"题面读取失败：{error}")
                 else:
-                    quality = f"{summary['metrics']['metric']} {answer['score']:.3f}"
-                    references = answer["references"]
-                st.caption(f"{quality} · {answer['generated_tokens']}/{answer['max_new_tokens']} generated tokens · "
-                           f"{answer['stop_reason']}")
-                if summary["task"] == "test" and "segment_id" in answer:
-                    segment_start, segment_end = answer["segment_char_span"]
-                    st.caption(f"来源段 {answer['segment_id']} · 完整正文字符区间 "
-                               f"[{segment_start}, {segment_end})")
-                if answer["question"]:
-                    st.write(answer["question"])
-                st.write("参考答案：" + " / ".join(references))
-                flags = " · ".join(OUTPUT_LABELS[name] for name, value in output_flags(answer).items() if value)
-                if flags:
-                    st.warning(flags)
-                st.code(visible_text(answer["prediction"]), language=None, wrap_lines=True)
-            with st.expander("原始记录与 token IDs"):
-                st.json(row, expanded=1)
+                    st.code(prompt, language=None, wrap_lines=True, height=350)
+    with st.expander("原始记录与 token IDs", key=f"{key}:raw", on_change="rerun") as panel:
+        if panel.open:
+            st.json(row, expanded=1)
+
+
+def _document_details(documents, directory, summary, key):
+    st.subheader("逐文本分析")
+    order = st.selectbox("文本排序", ["压缩倍率：低到高", "压缩倍率：高到低", "输入长度：长到短", "记忆块数：多到少"],
+                         key=f"{key}:order")
+    field = {"压缩倍率：低到高": "compression_rate", "压缩倍率：高到低": "compression_rate",
+             "输入长度：长到短": "context_tokens", "记忆块数：多到少": "blocks"}[order]
+    documents = sorted(documents, key=lambda row: row[field], reverse=order != "压缩倍率：低到高")
+    rows = [{"文本": row["id"], "输入 tokens": row["context_tokens"], "记忆块数": row["blocks"],
+             "记忆 slots": row["memory_slots"], "压缩倍率": row["compression_rate"],
+             "问题数": row["question_count"]} for row in documents]
+    selection = st.dataframe(
+        rows, hide_index=True, height=280, on_select="rerun", selection_mode="single-row",
+        column_config={"压缩倍率": st.column_config.NumberColumn(format="%.2f×")},
+        key=f"{key}:{order}:documents",
+    )
+    selected = selection.selection.rows
+    document = documents[selected[0] if selected else 0]
+    document_key = f"{key}:{document['id']}"
+    st.markdown(f"**{document['id']}** · {document['compression_rate']:.2f}× · {document['blocks']} 个记忆块")
+    st.caption("点击表格行切换文本。分段宽度对应输入 token 数，颜色越深表示该文本内的压缩倍率越高；末块为末尾强制提交。")
+    st.echarts_chart(compression.segment_chart(document), height=190, theme=None,
+                     key=f"{document_key}:segments")
+    with st.expander("记忆块明细"):
+        st.dataframe(compression.block_rows(document), hide_index=True,
+                     column_config={"压缩倍率": st.column_config.NumberColumn(format="%.2f×")})
+    _document_answers(document, directory, summary, document_key)
+
+
+def _compression(directory, summary, key):
+    path = directory / "details.jsonl"
+    state = path.stat()
+    documents = compression.load_index(str(path), summary["task"], state.st_mtime_ns, state.st_size)
+    st.subheader("压缩概览")
+    scope = "all"
+    if summary["task"] == "ruler":
+        left, right = st.columns(2)
+        with left:
+            length = st.selectbox(
+                "压缩分析长度", [None, *sorted({row["length"] for row in documents})],
+                format_func=lambda value: "全部长度" if value is None else f"{value:,} tokens",
+                key=f"{key}:length",
+            )
+        documents = [row for row in documents if length is None or row["length"] == length]
+        tasks = {row["task"] for row in documents}
+        with right:
+            subtask = st.selectbox(
+                "压缩分析子任务", [None, *(task for task in RULER_TASKS if task in tasks)],
+                format_func=lambda value: "全部子任务" if value is None else value,
+                key=f"{key}:{length}:task",
+            )
+        documents = [row for row in documents if subtask is None or row["task"] == subtask]
+        scope = f"{length}:{subtask}"
+    if not documents:
+        st.info("当前范围没有文本。")
+        return
+    values = compression.statistics(documents)
+    st.caption(f"{len(documents):,} 篇文本 · {len(values['blocks']):,} 个记忆块 · "
+               f"{sum(row['question_count'] for row in documents):,} 个问题。"
+               + ("LoCoMo 同一对话计为一篇文本。" if summary["task"] == "locomo" else ""))
+    for label, name in (("按篇", "documents"), ("按记忆块", "blocks")):
+        rates = values[name]
+        for column, statistic, value in zip(st.columns(3), ("平均", "最低", "最高"),
+                                             (sum(rates) / len(rates), min(rates), max(rates)), strict=True):
+            column.metric(f"{label} · {statistic}压缩倍率", f"{value:.2f}×")
+    left, right = st.columns(2)
+    left.metric("平均记忆块数 / 篇", f"{values['mean_blocks']:.2f}")
+    right.metric("单块完成整篇压缩的文本比例", f"{values['single_block_fraction']:.1%}")
+    st.caption("按篇倍率 = 输入 tokens / 记忆 slots，各篇等权；按块倍率 = 该块输入 tokens / K，各块等权。"
+               "输入长度采用实际 Writer 输入，包含正文模板；统计包含末尾强制提交块。")
+    st.subheader("压缩分布")
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**整篇压缩倍率**")
+        st.echarts_chart(compression.histogram(values["documents"], "文本数"), height=330,
+                         theme=None, key=f"{key}:document-histogram")
+    with right:
+        st.markdown("**单块压缩倍率**")
+        st.echarts_chart(compression.histogram(values["blocks"], "记忆块数"), height=330,
+                         theme=None, key=f"{key}:block-histogram")
+    st.markdown("**输入长度—记忆块数**")
+    st.echarts_chart(compression.length_scatter(documents), height=350,
+                     theme=None, key=f"{key}:length-scatter")
+    _document_details(documents, directory, summary, f"{key}:{scope}")
+
 
 def _render_task(directory, task, baseline_results):
     records = load_completed_evaluations(directory / task)
@@ -331,93 +398,67 @@ def _render_task(directory, task, baseline_results):
         st.info(f"暂无已完成的 {TASK_LABELS[task]} 评估。")
         return
     key = f"{directory}:{task}"
-    if len(records) == 1 or st.toggle("全部 checkpoint", value=True, key=f"{key}:all-checkpoints"):
-        selected = records
+    steps = [summary["checkpoint_step"] for _, summary in records]
+    if len(records) > 1:
+        step = st.selectbox("Checkpoint", steps, index=len(steps) - 1,
+                            format_func=lambda value: f"global_step_{value}", key=f"{key}:step")
     else:
-        steps = [summary["checkpoint_step"] for _, summary in records]
-        chosen = st.multiselect("Checkpoint", steps, default=steps,
-                                format_func=lambda value: f"global_step_{value}", key=f"{key}:steps")
-        selected = [(path, summary) for path, summary in records if summary["checkpoint_step"] in chosen]
-    if not selected:
-        st.info("请选择至少一个 checkpoint。")
-        return
+        step = steps[0]
+        st.caption(f"global_step_{step}")
+    current = next(pair for pair in records if pair[1]["checkpoint_step"] == step)
+    selected = [current]
+    if len(records) > 1 and st.toggle("比较 checkpoint", key=f"{key}:compare"):
+        others = st.multiselect(
+            "对比项", [value for value in steps if value != step],
+            default=[value for value in steps if value != step],
+            format_func=lambda value: f"global_step_{value}", key=f"{key}:{step}:compare-steps",
+        )
+        selected = [pair for pair in records if pair[1]["checkpoint_step"] in [step, *others]]
     summaries = [summary for _, summary in selected]
     views = [_benchmark_view(summary) for summary in summaries] if task != "test" else []
     baselines = _baseline_selection(baseline_results, task, views, key) if views else {}
     st.subheader("质量指标")
     st.dataframe(_summary_rows(summaries, baselines), hide_index=True)
     if task == "ruler" and baselines:
-        st.caption("基线 Overall 按对应 checkpoint 的长度范围重算；缺少任一长度时不显示总体分数。")
+        st.caption("基线 Overall 按对应 checkpoint 的长度范围计算。")
     ruler_length = None
     if task == "ruler" and len(summaries) > 1:
         lengths = sorted({row["length"] for summary in summaries for row in summary["metrics"]["by_length"]})
-        ruler_length = st.selectbox("训练进度长度", [None, *lengths],
+        ruler_length = st.selectbox("对比长度", [None, *lengths],
                                     format_func=lambda value: "Overall" if value is None else f"{value:,} tokens",
-                                    key=f"{key}:progress-length")
+                                    key=f"{key}:compare-length")
     panels = (_test_charts(summaries) if task == "test"
               else evaluation_charts(views, baselines, ruler_length=ruler_length))
-    for name, chart in panels.items():
-        st.subheader(CHART_LABELS[name])
-        st.echarts_chart(chart, height=460, theme=None, key=f"{key}:{name}")
-    if len(summaries) > 1:
-        selected_step = st.selectbox(
-            "明细 checkpoint", [summary["checkpoint_step"] for summary in summaries], index=len(summaries) - 1,
-            format_func=lambda value: f"global_step_{value}", key=f"{key}:summary-step",
-        )
-    else:
-        selected_step = summaries[0]["checkpoint_step"]
-    summary = next(value for value in summaries if value["checkpoint_step"] == selected_step)
+    if panels:
+        containers = st.columns(len(panels)) if len(panels) > 1 else [st.container()]
+        for container, (name, chart) in zip(containers, panels.items(), strict=True):
+            with container:
+                st.subheader(CHART_LABELS[name])
+                st.echarts_chart(chart, height=400, theme=None, key=f"{key}:{name}")
+    current_directory, summary = current
     if task == "ruler":
         view = _benchmark_view(summary)
         if len(summaries) > 1:
-            st.subheader("RULER 长度总览")
+            st.subheader(f"RULER 长度总览 · global_step_{step}")
             st.echarts_chart(evaluation_charts([view], baselines)["evaluation/ruler_lengths"],
-                             height=460, theme=None, key=f"{key}:{selected_step}:lengths")
+                             height=400, theme=None, key=f"{key}:{step}:lengths")
         length = st.selectbox("任务明细长度", summary["protocol"]["lengths"],
-                              format_func=lambda value: f"{value:,} tokens",
-                              key=f"{key}:{selected_step}:task-length")
+                              format_func=lambda value: f"{value:,} tokens", key=f"{key}:{step}:task-length")
         st.subheader(f"RULER 任务明细 · {length:,} tokens")
-        st.echarts_chart(ruler_task_chart(view, length, baselines), height=460, theme=None,
-                         key=f"{key}:{selected_step}:tasks:{length}")
-    st.subheader("资源测量与执行设置")
-    st.dataframe(_resource_rows(summaries, baselines), hide_index=True)
-    st.caption(
-        "资源保留各运行的原始测量范围，未按质量共同范围裁剪。生成路径含 prefill、方法自身的压缩／写入和 decode；"
-        "累计耗时与多卡墙钟不同。本次调度墙钟包含模型加载，缓存重试只统计本次执行，"
-        "不能作为完整运行速度。批处理阶段耗时分摊到参与样本，decode 仅计入当轮活跃样本，不能解释为单条请求时延。"
-        "峰值显存是 worker 在该批次的共享观测，不表示单样本独占需求。硬件与实际批量、测量范围不一致时不计算加速比。"
-    )
-    st.subheader("输出诊断")
-    st.dataframe([{"累计 step": value["checkpoint_step"],
-                   **{OUTPUT_LABELS[name]: count for name, count in value["outputs"].items()}}
-                  for value in summaries], hide_index=True)
-    st.caption("字符标记仅用于展示，不改变保存的原文或评分；连续空白按至少 12 个字符统计。")
+        st.echarts_chart(ruler_task_chart(view, length, baselines), height=400, theme=None,
+                         key=f"{key}:{step}:tasks:{length}")
+    st.caption(f"以下压缩分析与逐文本记录：global_step_{step}")
+    _compression(current_directory, summary, f"{key}:{step}")
+    with st.expander("资源测量与执行设置"):
+        st.dataframe(_resource_rows(summaries, baselines), hide_index=True)
+        st.caption("生成路径包含正文压缩与回答，耗时按批内参与项分摊；多卡累计耗时与调度墙钟分别展示。"
+                   "峰值显存为 worker 的批次观测。本次调度墙钟包含模型加载，续跑时仅覆盖本次执行。")
+    with st.expander("输出诊断"):
+        st.dataframe([{"累计 step": value["checkpoint_step"],
+                       **{OUTPUT_LABELS[name]: count for name, count in value["outputs"].items()}}
+                      for value in summaries], hide_index=True)
     with st.expander("评估配置与统计"):
         st.json(summary, expanded=1)
-    _details(selected, key)
-
-
-def _training(run):
-    path = run / "train/metrics.jsonl"
-    if not path.is_file():
-        st.info("尚未写入训练指标。")
-        return
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    if lines and not lines[-1].endswith("\n"):
-        lines.pop()
-    records = [json.loads(line) for line in lines]
-    names = sorted({key.split("/", 1)[1] for row in records for key in row if "/" in key})
-    primary = ("loss", "qa_nll", "ae_nll", "lm_nll", "reward", "memory_slots")
-    selected = st.multiselect("训练指标", names, default=[name for name in primary if name in names])
-    for name in selected:
-        phases = [phase for phase in ("train", "dev", "resources") if any(f"{phase}/{name}" in row for row in records)]
-        values = [{"step": row["step"], **{
-            phase: row[f"{phase}/{name}"] for phase in phases if f"{phase}/{name}" in row
-        }} for row in records if any(f"{phase}/{name}" in row for phase in phases)]
-        st.caption(name)
-        st.line_chart(values, x="step", y=phases,
-                      color=[{"train": "#2563eb", "dev": "#93c5fd", "resources": "#64748b"}[phase] for phase in phases],
-                      x_label="optimizer step", y_label=name)
 
 
 def _evaluations(args):
@@ -431,13 +472,14 @@ def _evaluations(args):
     eval_ids = list(evaluations)
     eval_id = st.selectbox(
         "Eval ID", eval_ids,
-        index=eval_ids.index(args.dashboard_eval_id) if args.dashboard_eval_id is not None else 0,
+        index=eval_ids.index(args.dashboard_eval_id) if args.dashboard_eval_id is not None else len(eval_ids) - 1,
         key=f"{args.dashboard_run_dir}:{args.dashboard_eval_id}:eval-id",
     )
     directory = evaluations[eval_id]
     st.caption(f"{args.dashboard_run_dir.name} / {eval_id}")
-    tabs = st.tabs([TASK_LABELS[task] for task in TASKS], key=f"{directory}:task", on_change="rerun")
-    for task, tab in zip(TASKS, tabs):
+    tasks = [task for task in TASKS if next((directory / task).glob("global_step_*/summary.json"), None)]
+    tabs = st.tabs([TASK_LABELS[task] for task in tasks], key=f"{directory}:task", on_change="rerun")
+    for task, tab in zip(tasks, tabs):
         if not tab.open:
             continue
         with tab:
@@ -450,17 +492,12 @@ def _evaluations(args):
 
 def main():
     args = parse_args()
-    st.set_page_config(page_title="v3.1.1 本地实验", layout="wide")
-    st.title("v3.1.1 训练与评估")
+    st.set_page_config(page_title="v3.1.1 独立评估", layout="wide")
+    st.title("v3.1.1 独立评估")
     st.sidebar.caption(str(args.dashboard_run_dir))
     st.sidebar.button("刷新结果")
-    training, evaluation = st.tabs(["训练与验证", "独立评估"], key="view", on_change="rerun")
-    if training.open:
-        with training:
-            _training(args.dashboard_run_dir)
-    if evaluation.open:
-        with evaluation:
-            _evaluations(args)
+    _evaluations(args)
+
 
 if __name__ == "__main__":
     main()
