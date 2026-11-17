@@ -118,6 +118,7 @@ def segment_chart(document):
     rows = block_rows(document)
     rates = [row["压缩倍率"] for row in rows]
     lower, upper = min(rates), max(rates)
+    track = {"left": 24, "right": 40, "top": 16, "height": 42}
     series = []
     for row in rows:
         fraction = (row["压缩倍率"] - lower) / (upper - lower) if upper != lower else 0.5
@@ -128,17 +129,22 @@ def segment_chart(document):
                    f"<br>输入：{row['输入 tokens']:,} tokens → {row['记忆 slots']} slots"
                    f"<br>压缩倍率：{row['压缩倍率']:.2f}×")
         series.append({
-            "name": f"块 {row['块']}", "type": "bar", "stack": "document", "barWidth": 42,
+            "name": f"块 {row['块']}", "type": "bar", "stack": "document", "barWidth": track["height"],
+            "z": 2, "emphasis": {"disabled": True},
             "data": [row["输入 tokens"]], "tooltip": {"formatter": tooltip},
             "itemStyle": {"color": color, "borderColor": "#ffffff", "borderWidth": 1},
         })
     return {
-        "animation": False, "grid": {"left": 20, "right": 30, "top": 10, "bottom": 80},
+        "animation": False, "grid": track,
         "tooltip": {"trigger": "item"},
         "xAxis": {"type": "value", "min": 0, "max": document["context_tokens"],
                   "name": "输入 token 位置", "nameLocation": "middle", "nameGap": 28},
         "yAxis": {"type": "category", "data": ["正文"], "show": False},
-        "dataZoom": [{"type": "slider", "xAxisIndex": 0, "filterMode": "none", "bottom": 0},
+        # 同层时色块高于透明滑轨、低于手柄；关闭色块高亮，避免悬停时盖住手柄。
+        "dataZoom": [{"type": "slider", "xAxisIndex": 0, "filterMode": "none", **track,
+                      "z": 2, "backgroundColor": "transparent", "fillerColor": "transparent",
+                      "borderColor": "transparent", "showDataShadow": False, "showDetail": False,
+                      "brushSelect": False, "handleStyle": {"color": "#ffffff", "borderColor": "#31688e"}},
                      {"type": "inside", "xAxisIndex": 0, "filterMode": "none"}],
         "series": series,
     }

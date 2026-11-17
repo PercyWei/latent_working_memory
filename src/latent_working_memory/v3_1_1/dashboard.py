@@ -325,8 +325,8 @@ def _document_details(documents, directory, summary, key):
     document = documents[selection.selection.rows[0]]
     document_key = f"{key}:{document['id']}"
     st.markdown(f"**{document['id']}** · {document['compression_rate']:.2f}× · {document['blocks']} 个记忆块")
-    st.caption("点击表格行切换文本。分段宽度对应输入 token 数，颜色越深表示该文本内的压缩倍率越高；末块为末尾强制提交。")
-    st.echarts_chart(compression.segment_chart(document), height=190, theme=None,
+    st.caption("分段宽度对应输入 token 数，颜色越深表示该文本内的压缩倍率越高。拖动条内手柄调整显示范围，放大后拖动色块平移，悬停查看块信息；末块为末尾强制提交。")
+    st.echarts_chart(compression.segment_chart(document), height=120, theme=None,
                      key=f"{document_key}:segments")
     with st.expander("记忆块明细"):
         st.dataframe(compression.block_rows(document), hide_index=True,
