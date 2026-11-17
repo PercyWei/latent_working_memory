@@ -147,6 +147,66 @@ def aggregate(rows):
             "task_length_macro_average": sum(value["score"] for value in scores.values()) / len(scores)}
 
 
+def inspect_batch_difference(wrapper, rows, selected):
+    """在首个等长 B2 分歧点比较同历史的 logits 和第一层投影。"""
+    references = {row["id"]: row for row in rows if row["condition"] == "optimized_b1"}
+    for row in rows:
+        if row["condition"] == "equal_b2" and row["token_ids"] != references[row["id"]]["token_ids"]:
+            break
+    else:
+        return None
+    reference = references[row["id"]]
+    first = compare(row, reference)["first_different_token"]
+    batch = selected[row["length"]][:2]
+    sample_index = next(i for i, item in enumerate(batch) if item["id"] == row["id"])
+
+    def capture(items, index):
+        step, saved = [-1], {}
+
+        def begin(module, args):
+            step[0] += 1
+
+        def projection(module, args, output):
+            if step[0] == first:
+                saved["input"] = args[0][index, -1].detach().cpu().clone()
+                saved["projection"] = output[index, -1].detach().cpu().clone()
+
+        def logits(module, args, output):
+            if step[0] == first:
+                saved["logits"] = output.logits[index, -1].detach().float().cpu().clone()
+
+        handles = [wrapper.model.register_forward_pre_hook(begin),
+                   wrapper.model.model.layers[0].self_attn.q_proj.register_forward_hook(projection),
+                   wrapper.model.register_forward_hook(logits)]
+        try:
+            outputs = generate_batch(
+                wrapper, [item["sample"][4]["input"] + item["sample"][4]["answer_prefix"] for item in items],
+                GENERATION_BUDGET, row["length"], token_ids=[item["token_ids"] for item in items],
+            )
+        finally:
+            for handle in handles:
+                handle.remove()
+        saved["token_ids"] = outputs[index]["token_ids"]
+        return saved
+
+    single = capture([batch[sample_index]], 0)
+    multiple = capture(batch, sample_index)
+    top = torch.topk(single["logits"], 5).indices.tolist()
+    top = list(dict.fromkeys(top + torch.topk(multiple["logits"], 5).indices.tolist()))
+    return {
+        "id": row["id"], "first_different_token": first,
+        "common_generated_prefix_equal": single["token_ids"][:first] == multiple["token_ids"][:first],
+        "reproduced_b1": single["token_ids"] == reference["token_ids"],
+        "reproduced_b2": multiple["token_ids"] == row["token_ids"],
+        "first_layer_q_proj_input_equal": torch.equal(single["input"], multiple["input"]),
+        "first_layer_q_proj_max_abs": (single["projection"].float() - multiple["projection"].float()).abs().max().item(),
+        "logits_max_abs": (single["logits"] - multiple["logits"]).abs().max().item(),
+        "b1_argmax": single["logits"].argmax().item(), "b2_argmax": multiple["logits"].argmax().item(),
+        "candidate_logits": [{"token_id": token, "text": wrapper.tokenizer.decode([token]),
+                              "b1": single["logits"][token].item(), "b2": multiple["logits"][token].item()} for token in top],
+    }
+
+
 def run(args, plan, execution):
     protocol = build_protocol(args.checkpoint, LENGTHS, "original", 0)
     expected = load_samples(protocol)
@@ -158,7 +218,7 @@ def run(args, plan, execution):
         for role, item in zip(("A", "B", "C"), batch, strict=True)
     ] for length, batch in selected.items()})
     write_json(args.output_dir / "plan.json", plan)
-    rows, calls, runtimes = [], [], {}
+    rows, calls, runtimes, difference = [], [], {}, None
     with (args.output_dir / "predictions.jsonl").open("x", encoding="utf-8") as stream:
         for mode in ("original", "optimized"):
             wrapper = load_model(args.checkpoint, mode, mlp_chunk_size=0, max_seq_len=max(LENGTHS))
@@ -192,6 +252,8 @@ def run(args, plan, execution):
                         rows.append(row)
                         stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
                         stream.flush()
+            if mode == "optimized":
+                difference = inspect_batch_difference(wrapper, rows, selected)
             del wrapper
             gc.collect()
             torch.cuda.empty_cache()
@@ -208,6 +270,7 @@ def run(args, plan, execution):
     }} for condition, group in grouped.items()}
     write_json(args.output_dir / "summary.json", {
         "runtime": runtimes, "calls": calls, "comparisons": comparisons, "aggregates": aggregates,
+        "first_equal_batch_difference": difference,
         "cache_checks_passed": all(call["cache"]["passed"] for call in calls),
         "note": "Small-sample validation; token, text and score differences are reported separately; not a benchmark speed measurement.",
     })
