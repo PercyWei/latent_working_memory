@@ -45,20 +45,15 @@ bash reproductions/setup_eval_env.sh in_place_ttt
 source ~/rivermind-data/envs/ttt-in_place_ttt/bin/activate
 ```
 
-TTT 和 baseline 均支持 `optimized`，以下命令采用 batch size 1，不启用 MLP 分块；各长度的 batch 上限按显存调整，验证范围见[复现状态](../20261110_ttt_reproduction_status.md#in-place-ttt)。
+TTT 和 baseline 均支持 `optimized` 运行，验证范围见[复现状态记录](../20261110_ttt_reproduction_status.md#in-place-ttt)。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in_place_ttt/scripts/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
   --output-id qwen3-4b-32k-ttt_20261117 \
   --inference-mode optimized \
-  --batch-size 1
-
-CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in_place_ttt/scripts/eval.sh \
-  --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-baseline \
-  --output-id qwen3-4b-32k-baseline_20261117 \
-  --inference-mode optimized \
-  --batch-size 1
+  --batch-size 1 \
+  --batch-size-by-length 4096=8 8192=8 16384=4 32768=2
 ```
 
 | 参数 | 默认值与约定 |

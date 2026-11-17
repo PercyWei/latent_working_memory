@@ -47,22 +47,15 @@ bash reproductions/setup_eval_env.sh e2_ttt
 source ~/rivermind-data/envs/ttt-e2_ttt/bin/activate
 ```
 
-MLP 和 SwiGLU 分别执行：
+MLP 和 SwiGLU 均支持 `optimized` 运行，验证范围见[复现状态记录](../20261110_ttt_reproduction_status.md#e-ttt)：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/scripts/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/e2_ttt/mlp-1.3b-15b \
-  --output-id mlp-1.3b-15b_20261116 \
+  --output-id mlp-1.3b-15b_20261117 \
   --inference-mode optimized \
-  --batch-size 8 \
-  --batch-size-by-length 8192=4 16384=2
-
-CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/scripts/eval.sh \
-  --checkpoint ~/rivermind-data/models/reproductions/e2_ttt/swiglu-1.3b-15b \
-  --output-id swiglu-1.3b-15b_20261116 \
-  --inference-mode optimized \
-  --batch-size 8 \
-  --batch-size-by-length 8192=4 16384=2
+  --batch-size 32 \
+  --batch-size-by-length 512=64 1024=32 2048=32 4096=16 8192=16 16384=8
 ```
 
 | 参数 | 默认值与约定 |
@@ -86,7 +79,7 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 
 ```bash
 uv run reproductions/e2_ttt/evaluation/compare_results.py \
-  --eval-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b_20261116
+  --eval-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b_20261117
 ```
 
 `--eval-dir` 指向 `<output-root>/eval/<output-id>`，报告保存为 `<eval-dir>/comparison.html`。

@@ -57,7 +57,7 @@ bash reproductions/setup_eval_env.sh lact
 source ~/rivermind-data/envs/ttt-lact/bin/activate
 ```
 
-Momentum 和 Muon 均支持 `optimized` 运行，验证范围与批量计算的数值差异见[复现状态记录](../20261110_ttt_reproduction_status.md)：
+Momentum 和 Muon 均支持 `optimized` 运行，验证范围见[复现状态记录](../20261110_ttt_reproduction_status.md#lact)：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/lact/scripts/eval.sh \
