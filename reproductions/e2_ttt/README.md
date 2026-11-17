@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261117 11:42:23 Asia/Shanghai
+最后修订时间：20261117 13:06:59 Asia/Shanghai
 
 本目录使用 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308) 的官方实现和作者公开 checkpoint。公开权重加载、生成和计分检查已完成，尚未完成本轮计划的完整评估。
 
@@ -84,11 +84,12 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 
 ## 来源记录与输出
 
-最终分数分别读取 `<output-root>/eval/<output-id>/<benchmark>/summary.json`。`scripts/eval.sh` 调用 `evaluation/evaluate_parallel.py` 统一调度，每个 worker 加载一次模型，依次处理分配到的多个 benchmark。终端根据已评分 JSONL 显示总体完成数、百分比、吞吐和耗时；进度随各任务评分记录的写出成批更新。
+最终分数分别读取 `<output-root>/eval/<output-id>/<benchmark>/summary.json`。`scripts/eval.sh` 调用 `evaluation/evaluate_parallel.py` 统一调度，每个 worker 加载一次模型，依次处理分配到的多个 benchmark。[进度展示](../README.md#进度展示)采用三方法的共同规则。
 
 | 文件 | 内容 |
 |---|---|
 | `evaluation_plan.json`、`launcher_execution.json`、`attempts/` | 父目录内的总评估计划、各次启动设置、代码来源与 worker 日志 |
+| `attempts/attempt-<编号>/workers/worker-<i>/progress.json` | 父目录内当前 worker 的独立进度快照，仅用于展示 |
 | `summary.json` | 各 benchmark 的汇总位置及整次运行的完成状态 |
 | `<benchmark>/evaluation_plan.json` | 该 benchmark 的固定数据及生成／评分协议 |
 | `<benchmark>/summary.json` | 该 benchmark 全部样本完成后的任务／长度分数 |

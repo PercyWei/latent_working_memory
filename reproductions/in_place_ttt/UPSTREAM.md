@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261117 11:42:23 Asia/Shanghai
+最后修订时间：20261117 13:06:59 Asia/Shanghai
 
 ## 来源与迁入范围
 
@@ -25,7 +25,7 @@
 | `evaluation/batching.py` | 各长度 batch 上限、长度排序与相邻组批 |
 | `evaluation/records.py`、`evaluation/merge_evaluation.py` | 数据与协议、全局样本 ID、记录收集和原生评分汇总 |
 | `evaluation/provenance.py` | 模型、缓存及计算实现的代码来源记录 |
-| `../evaluation_runtime.py` | 三方法共用的进程清理、时间、严格 JSON、基础 Git 来源和总体进度 |
+| `../evaluation_runtime.py` | 三方法共用的进程清理、时间、严格 JSON、基础 Git 来源，以及 `WorkerProgress` 快照和 `EvaluationProgress` 展示 |
 | `evaluation/validate_optimization.py` | 此前 B1 优化的生成与状态对照 |
 | `evaluation/validate_batch.py`、`evaluation/validate_batch_boundaries.py` | 原始 B1 与优化 B1／等长／混长生成、评分，以及 TTT 边界和冻结行验证 |
 
@@ -55,6 +55,7 @@
 - **按样本续评。** 以长度、任务、原始行构成全局 ID，重新分配未完成样本。模型、数据及生成／评分协议固定，GPU 数量、顺序和 batch 设置可调整。
 - **产物与溯源。** 结果保存到 `<output-root>/eval/<output-id>/ruler/`，各轮记录放在 `attempts/`。保存完整生成 IDs、耗时和峰值显存，以及 Git 状态、上游 revision、实现路径和依赖版本。
 - **执行控制。** 先核对协议和历史记录，再创建本轮记录；目录锁与存活 worker 检查协调同目录执行。各 worker 在生成前核对共享 runtime。
+- **进度上报。** 使用公共 `WorkerProgress` 和展示器保存独立观测快照，不改变模型计算、生成、评分或续评流程；展示规则见[公共说明](../README.md#进度展示)。
 - **原生生成与评分。** `input + answer_prefix` 使用 greedy 生成最多 64 tokens，保留各行 EOS 和原停止条件，并检查总长度预算。合并时对每个任务／长度的完整预测调用 OpenCompass evaluator，再计算 13 项任务的等权平均。
 
 评估及验证入口使用 `python -m in_place_ttt.evaluation.<模块名>`，以包方式导入本地评估代码。批量停止状态复用 OpenCompass 工厂创建的停止条件，不依赖其内部类的模块导出。

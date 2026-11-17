@@ -1,6 +1,7 @@
 """按评估长度设置 batch，并按真实 token 数排序后相邻组批。"""
 
 from array import array
+from collections import Counter
 
 
 BATCHING = "Descending actual token length across tasks within each RULER length; adjacent batches; left padding to batch maximum"
@@ -34,12 +35,21 @@ def execution_parameters(batch_size, values, lengths, inference_mode):
     }
 
 
-def prepare_batches(assigned, tokenizer, parameters, inference_mode, generation_budget):
+def prepare_batches(assigned, tokenizer, parameters, inference_mode, generation_budget, progress):
+    group_totals = Counter(sample[0] for sample in assigned.values())
     if inference_mode == "original":
+        current_length = None
         for sample_id, sample in assigned.items():
+            if current_length != sample[0]:
+                current_length = sample[0]
+                progress.start_group("ruler", current_length, group_totals[current_length], 1)
             yield sample[0], [(sample_id, sample, None)]
         return
     for length in dict.fromkeys(sample[0] for sample in assigned.values()):
+        progress.start_group(
+            "ruler", length, group_totals[length],
+            parameters["effective_batch_size_by_length"][str(length)],
+        )
         pending = []
         for sample_id, sample in assigned.items():
             if sample[0] != length:

@@ -155,9 +155,16 @@ def execute_attempt(args, protocol, source):
         root / name / "attempts" / directory.name / "workers" / f"worker-{index}"
         for index, assigned in enumerate(assignments) for name in assigned
     ]
+    workers = [
+        {"physical_gpu": gpu, "directory": directory / "workers" / f"worker-{index}",
+         "log": directory / "workers" / f"worker-{index}" / "evaluation.log"}
+        for index, (gpu, assigned) in enumerate(zip(args.devices, assignments, strict=True)) if assigned
+    ]
     progress = EvaluationProgress(
         parts, started, history_completed=sum(completed.values()),
         total=sum(completed[name] + len(ids) for name, ids in pending.items()),
+        workers=workers, method="E²-TTT", checkpoint=args.checkpoint.name,
+        inference_mode=args.inference_mode,
     )
 
     def interrupted(signum, frame):
@@ -165,8 +172,6 @@ def execute_attempt(args, protocol, source):
 
     previous_handlers = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
-        print(f"E²-TTT: pending={ {name: len(ids) for name, ids in pending.items()} }; "
-              f"GPUs={','.join(args.devices)} batch={args.batch_size}; {root}", flush=True)
         progress.render(force=True)
         for index, (gpu, ids_by_benchmark) in enumerate(zip(args.devices, assignments, strict=True)):
             if not ids_by_benchmark:
@@ -234,11 +239,12 @@ def execute_attempt(args, protocol, source):
                 active.remove((process, worker))
                 save()
                 if code:
+                    progress.fail_worker(worker["physical_gpu"], f"Worker exit code {code}")
                     raise RuntimeError(f"E²-TTT worker failed: {worker['directory']}; see its evaluation.log")
             if active:
                 progress.render()
                 time.sleep(0.2)
-        progress.render(force=True)
+        progress.set_stage("merging")
         progress.finish_line()
         for name in args.benchmarks:
             summary = refresh_benchmark(root / name, children[name])
@@ -246,9 +252,12 @@ def execute_attempt(args, protocol, source):
                 raise ValueError(f"Predictions do not cover the planned benchmark: {name}")
         summary = refresh_run_summary(root, protocol)
         state["status"] = "completed"
+        progress.set_stage("completed")
+        progress.finish_line()
         print(f"E²-TTT selected benchmarks complete; whole run completed={summary['completed']}; {root}", flush=True)
         return summary
     except BaseException as error:
+        progress.set_stage("failed", error=repr(error))
         progress.finish_line()
         state.update(status="failed", error=repr(error))
         raise

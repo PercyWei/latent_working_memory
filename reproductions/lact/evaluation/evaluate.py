@@ -9,6 +9,7 @@ import signal
 import time
 
 from batching import parse_batch_size_by_length
+from evaluation_runtime import WorkerProgress
 from lact_model import LaCTForCausalLM, LaCTSWIGLUConfig
 from optimized import OptimizedLaCTForCausalLM
 from provenance import capture_source
@@ -79,10 +80,17 @@ def load_checkpoint(checkpoint, inference_mode="original"):
     return model, config
 
 
-def prepare_batches(expected, records, tokenizer, batch_size, batch_size_by_length=None):
+def prepare_batches(expected, records, tokenizer, batch_size, batch_size_by_length, progress):
     """各评估长度内按实际 token 数稳定降序，相邻样本组成批次。"""
     for length in dict.fromkeys(sample[0] for sample in expected.values()):
         limit = (batch_size_by_length or {}).get(str(length), batch_size)
+        remaining = sum(
+            sample[0] == length and sample_id not in records
+            for sample_id, sample in expected.items()
+        )
+        if remaining:
+            progress.start_group("ruler", length, remaining, limit)
+            progress.set_stage("preparing")
         pending = []
         for sample_id, (sample_length, task, position, row) in expected.items():
             if sample_length != length or sample_id in records:
@@ -105,7 +113,7 @@ def prepare_batches(expected, records, tokenizer, batch_size, batch_size_by_leng
             yield length, len(batch[0][4]), batch
 
 
-def run(args, output, logger, run_source, execution_attempt):
+def run(args, output, logger, run_source, execution_attempt, progress):
     checkpoint = args.checkpoint.expanduser().resolve()
     if not checkpoint.is_dir():
         raise ValueError(f"Checkpoint directory does not exist: {checkpoint}")
@@ -157,6 +165,7 @@ def run(args, output, logger, run_source, execution_attempt):
     if not torch.cuda.is_available():
         raise RuntimeError("LaCT evaluation requires the native CUDA method environment")
 
+    progress.set_stage("loading")
     logger.info("Loading checkpoint strictly: %s", checkpoint)
     model, config = load_checkpoint(checkpoint, args.inference_mode)
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, local_files_only=True)
@@ -197,9 +206,10 @@ def run(args, output, logger, run_source, execution_attempt):
         eos_ids = model.generation_config.eos_token_id
         eos_ids = {eos_ids} if isinstance(eos_ids, int) else set(eos_ids)
         batches = prepare_batches(
-            expected, records, tokenizer, args.batch_size, args.batch_size_by_length
+            expected, records, tokenizer, args.batch_size, args.batch_size_by_length, progress
         )
         for batch_index, (length, batch_width, batch) in enumerate(batches):
+            progress.set_stage("preparing")
             encoded = tokenizer.pad(
                 {"input_ids": [sample[4] for sample in batch]},
                 padding=True, return_tensors="pt",
@@ -210,6 +220,7 @@ def run(args, output, logger, run_source, execution_attempt):
                 length, batch_width, [len(sample[4]) for sample in batch],
                 batch_index, len(batch), args.shard_index, args.num_shards,
             )
+            progress.set_stage("generating")
             start = time.perf_counter()
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
                 generated = model.generate(
@@ -227,6 +238,8 @@ def run(args, output, logger, run_source, execution_attempt):
             continuations = generated[:, batch_width:].cpu().tolist()
             torch.cuda.synchronize()
             batch_seconds = time.perf_counter() - start
+            progress.advance_generated(len(batch))
+            progress.set_stage("scoring")
             for sample, continuation in zip(batch, continuations, strict=True):
                 sample_id, task, position, row, token_ids = sample
                 # HF 在已结束行填充 pad；只保留该行截至首个 EOS 的真实生成。
@@ -262,6 +275,7 @@ def run(args, output, logger, run_source, execution_attempt):
                 predictions.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
                 predictions.flush()
                 records[sample_id] = record
+                progress.advance_completed(1)
                 logger.info(
                     "%s: score=%.4f, tokens=%s, seconds=%.3f",
                     record["id"],
@@ -270,6 +284,7 @@ def run(args, output, logger, run_source, execution_attempt):
                     record["seconds"],
                 )
 
+    progress.set_stage("merging")
     summary = (
         {"completed_at": timestamp(), "samples": len(records)}
         if args.sample_ids_file is not None else build_summary(plan, samples, records, output)
@@ -318,74 +333,82 @@ def main():
             parser.error("--resume requires an existing output directory")
     else:
         output.mkdir(parents=True, exist_ok=False)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        handlers=[logging.StreamHandler(), logging.FileHandler(output / "evaluation.log")],
-    )
-    logger = logging.getLogger("lact-evaluation")
-    execution_path = output / "execution.json"
-    execution = (
-        json.loads(execution_path.read_text())
-        if args.resume and execution_path.exists()
-        else {
-            "attempts": [],
-            "seconds": 0.0,
-            "peak_cuda_memory_allocated_bytes": 0,
-        }
-    )
-    execution_attempt = len(execution["attempts"])
-    attempt = {
-        "execution_attempt": execution_attempt,
-        "started_at": timestamp(),
-        "resume": args.resume,
-        "status": "running",
-        "source": run_source,
-        "cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
-        "batch_size": args.batch_size,
-        "batch_size_by_length": args.batch_size_by_length,
-        "batching": BATCHING,
-        "num_shards": args.num_shards,
-        "shard_index": args.shard_index,
-    }
-    execution["attempts"].append(attempt)
-    write_json(execution_path, execution)
-    start = time.perf_counter()
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
-
-    def terminate(signum, frame):
-        raise SystemExit(128 + signum)
-
-    signal.signal(signal.SIGTERM, terminate)
+    progress = WorkerProgress(output, os.environ["CUDA_VISIBLE_DEVICES"])
     try:
-        run(args, output, logger, run_source, execution_attempt)
-        attempt["status"] = "completed"
-    except BaseException as error:
-        attempt["status"] = "failed"
-        attempt["error"] = f"{type(error).__name__}: {error}"
-        logger.exception("Evaluation failed; partial predictions are not a completed result")
-        raise
-    finally:
-        attempt["finished_at"] = timestamp()
-        attempt["seconds"] = time.perf_counter() - start
-        attempt["peak_cuda_memory_allocated_bytes"] = (
-            torch.cuda.max_memory_allocated() if torch.cuda.is_available() else 0
+        progress.set_stage("preparing")
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s",
+            handlers=[logging.StreamHandler(), logging.FileHandler(output / "evaluation.log")],
         )
-        execution["seconds"] += attempt["seconds"]
-        execution["peak_cuda_memory_allocated_bytes"] = max(
-            execution["peak_cuda_memory_allocated_bytes"],
-            attempt["peak_cuda_memory_allocated_bytes"],
+        logger = logging.getLogger("lact-evaluation")
+        execution_path = output / "execution.json"
+        execution = (
+            json.loads(execution_path.read_text())
+            if args.resume and execution_path.exists()
+            else {
+                "attempts": [],
+                "seconds": 0.0,
+                "peak_cuda_memory_allocated_bytes": 0,
+            }
         )
+        execution_attempt = len(execution["attempts"])
+        attempt = {
+            "execution_attempt": execution_attempt,
+            "started_at": timestamp(),
+            "resume": args.resume,
+            "status": "running",
+            "source": run_source,
+            "cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
+            "batch_size": args.batch_size,
+            "batch_size_by_length": args.batch_size_by_length,
+            "batching": BATCHING,
+            "num_shards": args.num_shards,
+            "shard_index": args.shard_index,
+        }
+        execution["attempts"].append(attempt)
         write_json(execution_path, execution)
-        if attempt["status"] == "completed":
-            summary_path = output / "summary.json"
-            summary = json.loads(summary_path.read_text())
-            summary["seconds"] = execution["seconds"]
-            summary["peak_cuda_memory_allocated_bytes"] = execution[
-                "peak_cuda_memory_allocated_bytes"
-            ]
-            write_json(summary_path, summary)
+        start = time.perf_counter()
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+
+        def terminate(signum, frame):
+            raise SystemExit(128 + signum)
+
+        signal.signal(signal.SIGTERM, terminate)
+        try:
+            run(args, output, logger, run_source, execution_attempt, progress)
+            attempt["status"] = "completed"
+        except BaseException as error:
+            attempt["status"] = "failed"
+            attempt["error"] = f"{type(error).__name__}: {error}"
+            logger.exception("Evaluation failed; partial predictions are not a completed result")
+            raise
+        finally:
+            attempt["finished_at"] = timestamp()
+            attempt["seconds"] = time.perf_counter() - start
+            attempt["peak_cuda_memory_allocated_bytes"] = (
+                torch.cuda.max_memory_allocated() if torch.cuda.is_available() else 0
+            )
+            execution["seconds"] += attempt["seconds"]
+            execution["peak_cuda_memory_allocated_bytes"] = max(
+                execution["peak_cuda_memory_allocated_bytes"],
+                attempt["peak_cuda_memory_allocated_bytes"],
+            )
+            write_json(execution_path, execution)
+            if attempt["status"] == "completed":
+                summary_path = output / "summary.json"
+                summary = json.loads(summary_path.read_text())
+                summary["seconds"] = execution["seconds"]
+                summary["peak_cuda_memory_allocated_bytes"] = execution[
+                    "peak_cuda_memory_allocated_bytes"
+                ]
+                write_json(summary_path, summary)
+    except BaseException as error:
+        progress.set_stage("failed", error=f"{type(error).__name__}: {error}")
+        raise
+    else:
+        progress.set_stage("completed")
 
 
 if __name__ == "__main__":

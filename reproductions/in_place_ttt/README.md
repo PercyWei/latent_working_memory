@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261117 11:42:23 Asia/Shanghai
+最后修订时间：20261117 13:06:59 Asia/Shanghai
 
 ## 评估目标与数据
 
@@ -83,7 +83,7 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 
 ## 来源记录与输出
 
-以下文件均位于 `<output-root>/eval/<output-id>/ruler/`。`scripts/eval.sh` 调用 `evaluation/evaluate_parallel.py` 统一调度，终端显示总体完成数、百分比、吞吐和耗时；续评按全局样本 ID 重新分配未完成样本。
+以下文件均位于 `<output-root>/eval/<output-id>/ruler/`。`scripts/eval.sh` 调用 `evaluation/evaluate_parallel.py` 统一调度，[进度展示](../README.md#进度展示)采用三方法的共同规则；续评按全局样本 ID 重新分配未完成样本。
 
 | 文件 | 内容 |
 |---|---|
@@ -91,6 +91,7 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 | `evaluation_plan.json` | 固定 checkpoint、数据及生成／评分协议 |
 | `launcher_execution.json` | 各次启动状态与执行参数 |
 | `runtime.json` | 模型加载信息与运行环境 |
+| `attempts/attempt-<编号>/shards/shard-<i>/progress.json` | 当前 worker 的独立进度快照，仅用于展示 |
 | `attempts/attempt-<编号>/plan.json`、`execution.json` | 本轮计划、来源和执行状态 |
 | `attempts/attempt-<编号>/logs/shard-<i>.log`、`assignments/shard-<i>.json` | 各卡日志和样本分配 |
 | `attempts/attempt-<编号>/shards/shard-<i>/` | 各卡的计划、执行状态、环境及 `predictions.jsonl` |

@@ -10,7 +10,6 @@ import time
 
 import e2_ttt  # noqa: F401 -- registers the original checkpoint model types
 from lm_eval import evaluator
-from lm_eval.api.model import CachingLM
 from lm_eval.models.huggingface import HFLM
 from lm_eval.utils import handle_non_serializable, set_torch_seed
 import numpy as np
@@ -18,11 +17,13 @@ from optimized import optimize_model
 import torch
 
 from batch_harness import LengthSortedHFLM
+from evaluation_runtime import WorkerProgress
 from evaluation_state import (
     RULER_DATA, SQUAD_DATA, SWDE_DATA, benchmark_protocol, runtime_versions, sample_index,
     source_record, task_specs, timestamp, validate_sample_ids, write_json,
 )
 from local_tasks import LocalRuler, LocalSQuAD, LocalSWDE
+from progress_caching import ProgressCachingLM
 
 
 def parse_args():
@@ -72,6 +73,7 @@ def save_result(result, name, native_dir, predictions, specs):
 
 
 def execute(args):
+    progress = WorkerProgress(args.worker_dir, os.environ["CUDA_VISIBLE_DEVICES"])
     protocol = json.loads(args.protocol_file.read_text())["protocol"]
     assignments = json.loads(args.sample_ids_file.read_text())
     plan_path = args.worker_dir / "plan.json"
@@ -114,10 +116,11 @@ def execute(args):
              "benchmarks": {name: {"status": "pending", "completed_samples": 0} for name in assignments}}
     write_json(args.worker_dir / "execution.json", state)
     started = time.monotonic()
-    if not torch.cuda.is_available():
-        raise RuntimeError("E²-TTT workers require CUDA")
-    torch.cuda.reset_peak_memory_stats(0)
     try:
+        if not torch.cuda.is_available():
+            raise RuntimeError("E²-TTT workers require CUDA")
+        torch.cuda.reset_peak_memory_stats(0)
+        progress.set_stage("loading")
         harness = LengthSortedHFLM if mode == "optimized" else HFLM
         # Only this call loads checkpoint weights; every benchmark reuses lm.model.
         lm = harness(
@@ -132,6 +135,7 @@ def execute(args):
         for name in ("squad_completion", "swde", "ruler"):
             if name not in assignments:
                 continue
+            progress.set_stage("preparing")
             ids = assignments[name]
             folder = Path(plan["outputs"][name])
             child_protocol = benchmark_protocol(protocol, name)
@@ -152,12 +156,19 @@ def execute(args):
                     pretrained=lm.model, tokenizer=lm.tokenizer, device="cuda:0", batch_size=args.batch_size,
                     max_length=max(protocol["ruler_lengths"]), truncation=False, add_bos_token=lm.add_bos_token,
                 )
-            # Activate one native cache at a time: CachingLM binds the LM's cache hook.
-            cached = CachingLM(benchmark_lm, str(folder / "generation_cache.sqlite"))
+            # Activate one native cache at a time, preserving its original writes.
+            cached = ProgressCachingLM(benchmark_lm, str(folder / "generation_cache.sqlite"), progress)
             try:
                 with (folder / "predictions.jsonl").open("x") as predictions:
                     if name == "ruler":
                         for length in protocol["ruler_lengths"]:
+                            total = sum(len(selected[task]) for task, spec in specs.items()
+                                        if spec["length"] == length)
+                            if total:
+                                progress.start_group(
+                                    "ruler", length, total,
+                                    batch_size_by_length.get(str(length), args.batch_size),
+                                )
                             tasks = [
                                 LocalRuler(RULER_DATA / str(length) / spec["task_name"] / "test.jsonl",
                                            spec["task_name"], length, cached, selected[task])
@@ -167,12 +178,17 @@ def execute(args):
                                 continue
                             benchmark_lm.batch_size_per_gpu = batch_size_by_length.get(str(length), args.batch_size)
                             result = evaluate_tasks(cached, tasks)
-                            child_state["completed_samples"] += save_result(result, f"ruler_{length}", native_dir, predictions, specs)
+                            count = save_result(result, f"ruler_{length}", native_dir, predictions, specs)
+                            child_state["completed_samples"] += count
+                            progress.advance_completed(count)
                     else:
                         task_class, data = (LocalSQuAD, SQUAD_DATA) if name == "squad_completion" else (LocalSWDE, SWDE_DATA)
+                        progress.start_group(name, None, len(ids), args.batch_size)
                         task = task_class(data / "data/validation-00000-of-00001.parquet", selected[name])
                         result = evaluate_tasks(cached, [task])
-                        child_state["completed_samples"] += save_result(result, name, native_dir, predictions, specs)
+                        count = save_result(result, name, native_dir, predictions, specs)
+                        child_state["completed_samples"] += count
+                        progress.advance_completed(count)
             finally:
                 cached.dbdict.close()
             if child_state["completed_samples"] != len(ids):
@@ -183,6 +199,7 @@ def execute(args):
         torch.cuda.synchronize(0)
         state.update(status="completed", exit_code=0)
     except BaseException as error:
+        progress.set_stage("failed", error=f"{type(error).__name__}: {error}")
         state.update(status="failed", exit_code=1, error=repr(error))
         for name, child_state in state["benchmarks"].items():
             if child_state["status"] == "running":
@@ -191,9 +208,12 @@ def execute(args):
         raise
     finally:
         state.update(finished_at=timestamp(), seconds=time.monotonic() - started,
-                     peak_cuda_allocated_bytes=torch.cuda.max_memory_allocated(0),
-                     peak_cuda_reserved_bytes=torch.cuda.max_memory_reserved(0))
+                     peak_cuda_allocated_bytes=(torch.cuda.max_memory_allocated(0)
+                                                if torch.cuda.is_initialized() else 0),
+                     peak_cuda_reserved_bytes=(torch.cuda.max_memory_reserved(0)
+                                               if torch.cuda.is_initialized() else 0))
         write_json(args.worker_dir / "execution.json", state)
+    progress.set_stage("completed")
 
 
 if __name__ == "__main__":

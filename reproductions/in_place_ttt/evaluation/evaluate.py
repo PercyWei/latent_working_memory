@@ -9,6 +9,7 @@ import signal
 import tempfile
 import time
 
+from evaluation_runtime import WorkerProgress
 from in_place_ttt.evaluation.provenance import capture_source
 from in_place_ttt.evaluation.batching import execution_parameters, prepare_batches
 from in_place_ttt.evaluation.records import (
@@ -52,13 +53,14 @@ def check_runtime(path, runtime):
 
 def evaluate(
     protocol, wrapper, assigned, output, execution, execution_attempt, shard_index,
-    worker_started, batch_parameters,
+    worker_started, batch_parameters, progress,
 ):
     current_group = None
+    progress.set_stage("preparing")
     with (output / "predictions.jsonl").open("x", encoding="utf-8") as predictions:
         batches = prepare_batches(
             assigned, wrapper.tokenizer, batch_parameters,
-            protocol["inference_mode"], protocol["tokens_to_generate"],
+            protocol["inference_mode"], protocol["tokens_to_generate"], progress,
         )
         for batch_index, (length, batch) in enumerate(batches):
             prompts = [sample[4]["input"] + sample[4]["answer_prefix"] for _, sample, _ in batch]
@@ -67,6 +69,7 @@ def evaluate(
                 length, batch_index, len(batch),
                 [len(token_ids) for _, _, token_ids in batch] if protocol["inference_mode"] == "optimized" else None,
             )
+            progress.set_stage("generating")
             started = time.perf_counter()
             # 每次生成创建新 cache；批内各条样本的 KV 和 TTT 状态独立。
             if protocol["inference_mode"] == "original":
@@ -77,6 +80,8 @@ def evaluate(
                     token_ids=[token_ids for _, _, token_ids in batch],
                 )
             batch_generation_seconds = time.perf_counter() - started
+            progress.advance_generated(len(batch))
+            progress.set_stage("scoring")
             for (sample_id, sample, _), generated in zip(batch, outputs, strict=True):
                 _, task, index, source, row = sample
                 score_started = time.perf_counter()
@@ -105,6 +110,7 @@ def evaluate(
                 }
                 predictions.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
                 predictions.flush()
+                progress.advance_completed(1)
                 execution["completed_samples"] += 1
                 execution.update(
                     seconds=time.perf_counter() - worker_started,
@@ -116,6 +122,7 @@ def evaluate(
                     sample_id, record["generated_tokens"], record["native_score"],
                     record["seconds"], batch_index, len(batch), shard_index,
                 )
+            progress.set_stage("preparing")
 
 
 def main():
@@ -148,6 +155,8 @@ def main():
     source = capture_source(__file__, {protocol["inference_mode"]: MODEL_CLASSES[protocol["inference_mode"]]})
     output = args.output_dir.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=False)
+    progress = WorkerProgress(output, physical_gpu)
+    progress.set_stage("preparing")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
@@ -179,6 +188,7 @@ def main():
 
     signal.signal(signal.SIGTERM, terminate)
     try:
+        progress.set_stage("loading")
         torch.cuda.init()
         torch.cuda.reset_peak_memory_stats(0)
         wrapper = load_model(
@@ -194,10 +204,11 @@ def main():
         logging.info("Starting evaluation; assigned_samples=%s batch_parameters=%s", len(assigned), batch_parameters)
         evaluate(
             protocol, wrapper, assigned, output, execution,
-            args.execution_attempt, args.shard_index, started, batch_parameters,
+            args.execution_attempt, args.shard_index, started, batch_parameters, progress,
         )
         execution.update(status="completed", exit_code=0)
     except BaseException as error:
+        progress.set_stage("failed", error=f"{type(error).__name__}: {error}")
         execution.update(
             status="interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "failed",
             exit_code=(
@@ -216,6 +227,7 @@ def main():
             ),
         )
         write_json(execution_path, execution)
+    progress.set_stage("completed")
 
 
 if __name__ == "__main__":

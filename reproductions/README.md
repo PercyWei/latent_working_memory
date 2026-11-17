@@ -19,7 +19,7 @@
 | [评估环境](20261109_environment_setup.md) | 三种 TTT 方法的依赖版本、环境安装及安装记录 |
 | [复现状态](20261110_ttt_reproduction_status.md) | 正式评估进度、小样本验证结论、数值差异、资源测量及历史 B1 耗时外推 |
 | [setup_eval_env.sh](setup_eval_env.sh) | 安装 LaCT、E²-TTT 或 In-Place TTT 的独立评估环境 |
-| [evaluation_runtime.py](evaluation_runtime.py) | 三方法共用的进程清理、时间、严格 JSON、基础 Git 来源和总体进度 |
+| [evaluation_runtime.py](evaluation_runtime.py) | 三方法共用的进程清理、时间、严格 JSON、基础 Git 来源、worker 进度快照与统一展示 |
 
 运行命令和当前参数由各方法 README 维护，来源与实现改进由各方法 `UPSTREAM.md` 维护；公共文档按上表分工。
 
@@ -50,6 +50,18 @@ LaCT 的来源目录为 `source/lact/`、`source/flame/`；E²-TTT 为 `source/e
 三个方法默认使用 `original`，保留 B1 路径；`optimized` 支持单样本、等长及混长左 padding batch，通过 `--batch-size` 和 `--batch-size-by-length` 设置每卡上限。各样本的 attention／TTT 状态独立，验证范围见[复现状态](20261110_ttt_reproduction_status.md)。
 
 三个方法的新运行均使用 `--output-root`／`--output-id`，各 benchmark 分别保存在 `<output-root>/eval/<output-id>/<benchmark>/`；续评须指定原 ID 并追加 `--resume`，GPU 数量、顺序及 batch 设置可调整。模型目录为 `~/rivermind-data/models/reproductions/<method>/`，数据位于 `data/`，结果位于 `artifacts/reproductions/<method>/`。
+
+## 进度展示
+
+三个 TTT 方法使用同一展示方式：
+
+- 启动时显示一次方法、checkpoint、推理模式和物理 GPU。
+- 总体完成数统计本次选择的 benchmark／长度范围，以已评分 JSONL 为准，显示总量、百分比、历史完成数与本轮完成数，以及阶段和耗时。
+- 每个物理 GPU 一行，显示当前 benchmark、RULER 长度档位、阶段、生成数、完成数、当前 batch 上限、近期处理速度和当前 benchmark／长度档位的生成剩余时间；不估算跨长度的总剩余时间。`B` 表示当前上限，尾批可小于该值。
+
+生成数按本轮待评请求逐条统计，包含原生缓存复用，重复 prompt 不合并计数。E²-TTT 的生成数随原生 batch 实时更新，完成数在原生任务评分并写出后成批增加；两者暂时不同是正常现象。处理速度包含缓存复用，不等同于模型推理吞吐。
+
+阶段变化及时刷新；常规刷新间隔为交互终端 5 秒、重定向输出 30 秒。worker 的 `progress.json` 仅为观测快照，不作为续评依据。
 
 ## 模型下载约定
 

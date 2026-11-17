@@ -154,7 +154,19 @@ def execute(args, interruption):
                        for rank, device in enumerate(devices)]
         assignments = [item for item in assignments if item[2]]
         parts = [attempt_dir / "shards" / f"shard-{rank}" for rank, _, _ in assignments]
-        progress = EvaluationProgress(parts, started, history_completed=len(records), total=len(expected))
+        progress_workers = [
+            {
+                "physical_gpu": device,
+                "directory": attempt_dir / "shards" / f"shard-{rank}",
+                "log": attempt_dir / "logs" / f"shard-{rank}.log",
+            }
+            for rank, device, _ in assignments
+        ]
+        progress = EvaluationProgress(
+            parts, started, history_completed=len(records), total=len(expected),
+            workers=progress_workers, method="In-Place TTT",
+            checkpoint=args.checkpoint.name, inference_mode=args.inference_mode,
+        )
         print(f"[evaluate] in_place_ttt GPUs={','.join(devices)} | logs: {attempt_dir / 'logs'}", flush=True)
         progress.render(force=True)
         try:
@@ -194,6 +206,11 @@ def execute(args, interruption):
                     if code is not None and worker["status"] == "running":
                         worker.update(exit_code=code, finished_at=timestamp(),
                                       status="completed" if code == 0 else "failed")
+                        if code != 0:
+                            progress.fail_worker(
+                                worker["physical_gpu"],
+                                f"Worker exited with code {code}; see {worker['log']}",
+                            )
                         changed = True
                 if changed:
                     save_execution()
@@ -203,7 +220,7 @@ def execute(args, interruption):
                 if all(worker["status"] == "completed" for worker in attempt["workers"]):
                     break
                 time.sleep(0.2)
-            progress.render(force=True)
+            progress.set_stage("merging")
             progress.finish_line()
             check_interruption()
             print("[evaluate] 样本评估完成，正在合并结果...", flush=True)
@@ -218,9 +235,12 @@ def execute(args, interruption):
             )
             write_json(directory / "summary.json", summary)
             attempt.update(status="completed", merged_summary_path=str(merged / "summary.json"))
+            progress.set_stage("completed")
+            progress.finish_line()
             print(f"[evaluate] 完成 | elapsed {duration(time.monotonic() - started)} | summary: {directory / 'summary.json'}", flush=True)
         except BaseException as error:
             attempt.update(status="failed", error=f"{type(error).__name__}: {error}")
+            progress.set_stage("failed", error=f"{type(error).__name__}: {error}")
             progress.finish_line()
             print(f"[evaluate] 评估未完成：{error} | logs: {attempt_dir / 'logs'}", flush=True)
             raise

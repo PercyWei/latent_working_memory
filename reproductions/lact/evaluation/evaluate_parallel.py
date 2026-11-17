@@ -94,7 +94,17 @@ def execute_lact(args, interruption):
         assignments = [(rank, device, pending[rank::len(devices)]) for rank, device in enumerate(devices)]
         assignments = [item for item in assignments if item[2]]
         parts = [attempt_dir / "shards" / f"shard-{rank}" for rank, _, _ in assignments]
-        progress = EvaluationProgress(parts, started, history_completed=len(records), total=len(expected))
+        workers = [{
+            "physical_gpu": device,
+            "directory": attempt_dir / "shards" / f"shard-{rank}",
+            "log": attempt_dir / "logs" / f"shard-{rank}.log",
+        } for rank, device, _ in assignments]
+        progress = EvaluationProgress(
+            parts, started, history_completed=len(records), total=len(expected),
+            workers=workers, method="LaCT", checkpoint=args.checkpoint,
+            inference_mode=args.inference_mode,
+        )
+        progress.finish_line()
         print(f"[evaluate] lact GPUs={','.join(devices)} | logs: {attempt_dir / 'logs'}", flush=True)
         progress.render(force=True)
         try:
@@ -130,6 +140,11 @@ def execute_lact(args, interruption):
                     code = process.poll()
                     if code is not None and worker["status"] == "running":
                         worker.update(exit_code=code, finished_at=timestamp(), status="completed" if code == 0 else "failed")
+                        if code != 0:
+                            progress.fail_worker(
+                                worker["physical_gpu"],
+                                f"Worker exited with code {code}; see {worker['log']}",
+                            )
                         changed = True
                 if changed:
                     save_execution()
@@ -140,10 +155,12 @@ def execute_lact(args, interruption):
                     break
                 time.sleep(0.2)
             progress.render(force=True)
+            progress.set_stage("merging")
             progress.finish_line()
             check_interruption()
             print("[evaluate] 样本评估完成，正在合并结果...", flush=True)
             merged = attempt_dir / "merged"
+            progress.finish_line()
             plan, summary = merge_records(directory, protocol, merged)
             write_json(global_plan, plan)
             summary.update(
@@ -153,9 +170,12 @@ def execute_lact(args, interruption):
             )
             attempt.update(status="completed", merged_summary_path=str(merged / "summary.json"))
             write_json(directory / "summary.json", summary)
+            progress.set_stage("completed")
+            progress.finish_line()
             print(f"[evaluate] 完成 | elapsed {duration(time.monotonic() - started)} | summary: {directory / 'summary.json'}", flush=True)
         except BaseException as error:
             attempt.update(status="failed", error=f"{type(error).__name__}: {error}")
+            progress.set_stage("failed", error=f"{type(error).__name__}: {error}")
             progress.finish_line()
             print(f"[evaluate] 评估未完成：{error} | logs: {attempt_dir / 'logs'}", flush=True)
             raise
