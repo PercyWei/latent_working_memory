@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-method_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+method_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 project_root="$(cd "$method_dir/../.." && pwd)"
 case ${CUDA_VISIBLE_DEVICES-0} in
   0|1|0,1|1,0) export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES-0} ;;
@@ -11,6 +11,6 @@ case ${CUDA_VISIBLE_DEVICES-0} in
     ;;
 esac
 export TOKENIZERS_PARALLELISM=false
-export PYTHONPATH="$method_dir:$method_dir/source/lact/lact_llm:$project_root/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$project_root/reproductions:$method_dir:$method_dir/source/lact/lact_llm:$project_root/src${PYTHONPATH:+:$PYTHONPATH}"
 cd "$project_root"
-exec python -u "$project_root/reproductions/evaluate_multi_gpu.py" lact "$@"
+exec python -u "$method_dir/evaluation/evaluate_parallel.py" "$@"

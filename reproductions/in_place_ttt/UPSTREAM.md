@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261117 11:00:12 Asia/Shanghai
+最后修订时间：20261117 11:42:23 Asia/Shanghai
 
 ## 来源与迁入范围
 
@@ -20,13 +20,14 @@
 | `optimized/model.py` | 独立模型子类、生成入口和可选 MLP 分块 |
 | `optimized/padding.py` | 真实位置、独立有效 KV、原生 SDPA 分组及结束行的状态冻结 |
 | `optimized/ttt.py` | 原 TTT 公式的分组计算、独立尾段和适配权重 |
-| `scripts/runtime.py` | checkpoint 严格加载、原始与优化路径的生成 |
-| `eval.sh`、`scripts/evaluate_parallel.py`、`scripts/evaluate.py` | 统一启动、单卡／多卡调度与各卡批量评估 |
-| `scripts/batching.py` | 各长度 batch 上限、长度排序与相邻组批 |
-| `scripts/records.py`、`scripts/merge_evaluation.py` | 数据与协议、全局样本 ID、记录收集和原生评分汇总 |
-| `scripts/provenance.py`、`../evaluation_runtime.py` | 代码来源记录、终端进度和子进程退出清理 |
-| `scripts/validate_optimization.py` | 此前 B1 优化的生成与状态对照 |
-| `scripts/validate_batch.py`、`scripts/validate_batch_boundaries.py` | 原始 B1 与优化 B1／等长／混长生成、评分，以及 TTT 边界和冻结行验证 |
+| `evaluation/runtime.py` | checkpoint 严格加载、原始与优化路径的生成 |
+| `scripts/eval.sh`、`evaluation/evaluate_parallel.py`、`evaluation/evaluate.py` | 统一启动、单卡／多卡调度与各卡批量评估 |
+| `evaluation/batching.py` | 各长度 batch 上限、长度排序与相邻组批 |
+| `evaluation/records.py`、`evaluation/merge_evaluation.py` | 数据与协议、全局样本 ID、记录收集和原生评分汇总 |
+| `evaluation/provenance.py` | 模型、缓存及计算实现的代码来源记录 |
+| `../evaluation_runtime.py` | 三方法共用的进程清理、时间、严格 JSON、基础 Git 来源和总体进度 |
+| `evaluation/validate_optimization.py` | 此前 B1 优化的生成与状态对照 |
+| `evaluation/validate_batch.py`、`evaluation/validate_batch_boundaries.py` | 原始 B1 与优化 B1／等长／混长生成、评分，以及 TTT 边界和冻结行验证 |
 
 ## 推理实现改进
 
@@ -50,13 +51,13 @@
 
 ## 评估流程改进
 
-- **统一入口与组批。** 单卡和多卡均由 `eval.sh` 启动，每卡一个进程。各 RULER 长度内按真实 token 数稳定降序，相邻组批并左 padding；`--batch-size` 默认 `1`，`--batch-size-by-length` 覆盖指定长度的上限。RULER 数据路径固定在 `scripts/records.py`。
+- **统一入口与组批。** 单卡和多卡均由 `scripts/eval.sh` 启动，每卡一个进程。各 RULER 长度内按真实 token 数稳定降序，相邻组批并左 padding；`--batch-size` 默认 `1`，`--batch-size-by-length` 覆盖指定长度的上限。RULER 数据路径固定在 `evaluation/records.py`。
 - **按样本续评。** 以长度、任务、原始行构成全局 ID，重新分配未完成样本。模型、数据及生成／评分协议固定，GPU 数量、顺序和 batch 设置可调整。
 - **产物与溯源。** 结果保存到 `<output-root>/eval/<output-id>/ruler/`，各轮记录放在 `attempts/`。保存完整生成 IDs、耗时和峰值显存，以及 Git 状态、上游 revision、实现路径和依赖版本。
 - **执行控制。** 先核对协议和历史记录，再创建本轮记录；目录锁与存活 worker 检查协调同目录执行。各 worker 在生成前核对共享 runtime。
 - **原生生成与评分。** `input + answer_prefix` 使用 greedy 生成最多 64 tokens，保留各行 EOS 和原停止条件，并检查总长度预算。合并时对每个任务／长度的完整预测调用 OpenCompass evaluator，再计算 13 项任务的等权平均。
 
-评估及验证入口使用 `python -m in_place_ttt.scripts.<模块名>`，不把 `scripts/` 加入 `PYTHONPATH`，避免本地 `evaluate.py` 遮蔽第三方 `evaluate` 库。批量停止状态复用 OpenCompass 工厂创建的停止条件，不依赖其内部类的模块导出。
+评估及验证入口使用 `python -m in_place_ttt.evaluation.<模块名>`，以包方式导入本地评估代码。批量停止状态复用 OpenCompass 工厂创建的停止条件，不依赖其内部类的模块导出。
 
 具体命令、参数与输出文件见 [README](README.md)，环境版本见[评估环境](../20261109_environment_setup.md)。
 

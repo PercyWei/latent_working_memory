@@ -7,12 +7,12 @@ from pathlib import Path
 import time
 
 from inference_model.hf_qwen3.modeling_qwen3 import TTTDynamicCache
-from in_place_ttt.scripts.provenance import capture_source
-from in_place_ttt.scripts.records import (
+from in_place_ttt.evaluation.provenance import capture_source
+from in_place_ttt.evaluation.records import (
     RULER_DATA, SAMPLES_PER_TASK_LENGTH, TASKS, TOKENIZER_KWARGS,
     read_rows, timestamp, write_json,
 )
-from in_place_ttt.scripts.runtime import MODEL_CLASSES, load_model, runtime_info
+from in_place_ttt.evaluation.runtime import MODEL_CLASSES, load_model, runtime_info
 import torch
 from transformers import AutoTokenizer
 

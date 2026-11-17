@@ -1,16 +1,14 @@
 """E²-TTT 固定评估协议、全局样本记录及原生生成缓存的 CPU 读写。"""
 
 from contextlib import contextmanager
-from datetime import datetime
 import fcntl
 from importlib.metadata import version
 import json
 import math
 import os
 from pathlib import Path
-import subprocess
-from zoneinfo import ZoneInfo
 
+from evaluation_runtime import source_record as git_source_record, timestamp, write_json
 from sqlitedict import SqliteDict
 
 
@@ -24,22 +22,8 @@ RULER_TASKS = ("niah_single_1", "niah_single_2")
 RECALL_COUNTS = {"squad_completion": 2984, "swde": 1111}
 
 
-def timestamp():
-    return datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
-
-
-def write_json(path, value):
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
-    temporary.replace(path)
-
-
 def source_record(entrypoint, inference_mode):
-    def git(*command):
-        return subprocess.run(["git", *command], cwd=PROJECT_ROOT, check=True,
-                              capture_output=True, text=True).stdout.strip()
-    status = git("status", "--porcelain=v1").splitlines()
-    return {"git_commit": git("rev-parse", "HEAD"), "git_dirty": bool(status), "git_status": status,
+    return {**git_source_record(),
             "entrypoint": str(Path(entrypoint).resolve().relative_to(PROJECT_ROOT)),
             "inference_mode": inference_mode,
             "implementation_path": "reproductions/e2_ttt/" + (

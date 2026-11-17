@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261116 22:12:29 Asia/Shanghai
+最后修订时间：20261117 11:48:12 Asia/Shanghai
 
 ## 来源与迁入范围
 
@@ -22,7 +22,9 @@ LaCT 对应论文 [Test-Time Training Done Right v1](https://arxiv.org/abs/2505.
 | `source/lact/` | 官方模型、配置、TTT 计算函数和最小示例；`original` 调用此实现 |
 | `source/flame/`、`configs/760m_muon_paper_single_gpu.toml` | 原训练框架、Transformers 注册接入和单卡训练配置 |
 | `optimized/` | 本地增量缓存、混长输入调度及独立 TTT 状态的批量计算 |
-| `eval.sh`、`../evaluate_multi_gpu.py`、`../evaluation_runtime.py`、`scripts/` | checkpoint 加载、组批、多卡调度、进度与进程管理、续评、计分和结果比较 |
+| `scripts/eval.sh`、`evaluation/evaluate_parallel.py` | 单卡／多卡启动、样本分配与续评调度 |
+| `evaluation/` | checkpoint 加载、组批、评估协议、记录收集、计分和结果比较，包含报告模板 `comparison_template.html` 和[论文对照数据](evaluation/ruler_paper_reference.json) |
+| `../evaluation_runtime.py` | 三方法共用的进程清理、时间、严格 JSON、基础 Git 来源和总体进度 |
 
 训练侧接入集中于 `source/flame/custom_models/__init__.py` 导入并注册官方 `lact_model`，以及本地单卡配置和梯度累积。备用入口 [train_760m_muon.sh](scripts/train_760m_muon.sh) 调用原 `flame.train`；训练环境和使用方式见 [README](README.md#备用训练入口)。
 
@@ -45,10 +47,10 @@ LaCT 对应论文 [Test-Time Training Done Right v1](https://arxiv.org/abs/2505.
 ## 评估流程改进
 
 - **统一组批。** 同一 RULER 长度内按真实 token 数稳定降序，相邻组批，左 padding 到批内最长输入；可按长度分别设置每卡 batch 上限。
-- **保留评估协议。** 严格加载完整 checkpoint；输入为 `input + answer_prefix`，greedy 最多生成 128 tokens，按物理输入宽度与各自 EOS 截取，沿用 RULER 原生评分。数据路径固定在 `scripts/records.py`。
+- **保留评估协议。** 严格加载完整 checkpoint；输入为 `input + answer_prefix`，greedy 最多生成 128 tokens，按物理输入宽度与各自 EOS 截取，沿用 RULER 原生评分。数据路径固定在 `evaluation/records.py`。
 - **多卡与续评。** 每卡评估互斥样本，按全局样本 ID 收集历史原始预测、分配未完成输入并核对完整覆盖；固定模型和评估协议，GPU 数量、顺序及 batch 设置可按轮调整。运行目录锁与存活 worker 检查协调并发启动。
 - **来源与汇总。** 分别记录上游 revision、本地 commit、Git 改动状态、实际实现路径及每轮执行设置，保留历史来源的组批信息；合并时读取原始预测重新计分。
-- **结果展示。** [compare_results.py](scripts/compare_results.py) 为公开两头 Momentum／RoPE／PreNorm 760M 的完整六任务、四长度 RULER 结果生成离线论文对比，包括分组均值、分组对比和逐任务图表。
+- **结果展示。** [compare_results.py](evaluation/compare_results.py) 读取同目录的 [ruler_paper_reference.json](evaluation/ruler_paper_reference.json)，为公开两头 Momentum／RoPE／PreNorm 760M 的完整六任务、四长度 RULER 结果生成离线论文对比，包括分组均值、分组对比和逐任务图表。
 
 运行参数、输出命名与目录结构见 [README](README.md#环境与运行命令)。
 

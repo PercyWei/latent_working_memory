@@ -6,6 +6,7 @@ from pathlib import Path
 import time
 from zoneinfo import ZoneInfo
 
+from evaluation_runtime import write_json
 from opencompass.datasets.ruler.ruler_cwe import RulerCweEvaluator
 from opencompass.datasets.ruler.ruler_fwe import RulerFweEvaluator
 from opencompass.datasets.ruler.ruler_niah import RulerNiahEvaluator
@@ -13,7 +14,7 @@ from opencompass.datasets.ruler.ruler_qa import RulerQaEvaluator
 from opencompass.datasets.ruler.ruler_vt import RulerVtEvaluator
 from opencompass.utils.text_postprocessors import extract_non_reasoning_content
 
-from in_place_ttt.scripts.provenance import UPSTREAM_REVISION, capture_source
+from in_place_ttt.evaluation.provenance import UPSTREAM_REVISION, capture_source
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -54,14 +55,6 @@ def timestamp():
     return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d %H:%M:%S Asia/Shanghai")
 
 
-def write_json(path, value):
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8"
-    )
-    temporary.replace(path)
-
-
 def build_protocol(checkpoint, lengths, inference_mode, mlp_chunk_size):
     checkpoint = Path(checkpoint).expanduser().resolve()
     lengths = list(lengths)
@@ -85,11 +78,11 @@ def build_protocol(checkpoint, lengths, inference_mode, mlp_chunk_size):
         "samples_per_task": SAMPLES_PER_TASK_LENGTH,
         "tokens_to_generate": GENERATION_BUDGET,
         "prompt": "input + answer_prefix; base completion; no chat template",
-        "model_wrapper": "in_place_ttt.scripts.runtime.EvaluationModel",
+        "model_wrapper": "in_place_ttt.evaluation.runtime.EvaluationModel",
         "generation_path": (
             "OpenCompass HuggingFaceBaseModel.generate"
             if inference_mode == "original"
-            else "in_place_ttt.scripts.runtime.generate_batch; single tokenization, left padding and native generation parameters"
+            else "in_place_ttt.evaluation.runtime.generate_batch; single tokenization, left padding and native generation parameters"
         ),
         "model_kwargs": MODEL_KWARGS.copy(),
         "tokenizer_kwargs": TOKENIZER_KWARGS.copy(),

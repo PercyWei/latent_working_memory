@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261117 10:05:38 Asia/Shanghai
+最后修订时间：20261117 11:42:23 Asia/Shanghai
 
 本目录使用 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308) 的官方实现和作者公开 checkpoint。公开权重加载、生成和计分检查已完成，尚未完成本轮计划的完整评估。
 
@@ -50,14 +50,14 @@ source ~/rivermind-data/envs/ttt-e2_ttt/bin/activate
 MLP 和 SwiGLU 分别执行：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/eval.sh \
+CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/scripts/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/e2_ttt/mlp-1.3b-15b \
   --output-id mlp-1.3b-15b_20261116 \
   --inference-mode optimized \
   --batch-size 8 \
   --batch-size-by-length 8192=4 16384=2
 
-CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/eval.sh \
+CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/scripts/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/e2_ttt/swiglu-1.3b-15b \
   --output-id swiglu-1.3b-15b_20261116 \
   --inference-mode optimized \
@@ -84,7 +84,7 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 
 ## 来源记录与输出
 
-最终分数分别读取 `<output-root>/eval/<output-id>/<benchmark>/summary.json`。每个 worker 加载一次模型，依次处理分配到的多个 benchmark。
+最终分数分别读取 `<output-root>/eval/<output-id>/<benchmark>/summary.json`。`scripts/eval.sh` 调用 `evaluation/evaluate_parallel.py` 统一调度，每个 worker 加载一次模型，依次处理分配到的多个 benchmark。终端根据已评分 JSONL 显示总体完成数、百分比、吞吐和耗时；进度随各任务评分记录的写出成批更新。
 
 | 文件 | 内容 |
 |---|---|

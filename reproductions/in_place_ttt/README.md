@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261117 10:05:38 Asia/Shanghai
+最后修订时间：20261117 11:42:23 Asia/Shanghai
 
 ## 评估目标与数据
 
@@ -48,13 +48,13 @@ source ~/rivermind-data/envs/ttt-in_place_ttt/bin/activate
 TTT 和 baseline 均支持 `optimized`，以下命令采用 batch size 1，不启用 MLP 分块；各长度的 batch 上限按显存调整，验证范围见[复现状态](../20261110_ttt_reproduction_status.md#in-place-ttt)。
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in_place_ttt/eval.sh \
+CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in_place_ttt/scripts/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
   --output-id qwen3-4b-32k-ttt_20261117 \
   --inference-mode optimized \
   --batch-size 1
 
-CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in_place_ttt/eval.sh \
+CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in_place_ttt/scripts/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-baseline \
   --output-id qwen3-4b-32k-baseline_20261117 \
   --inference-mode optimized \
@@ -83,7 +83,7 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 
 ## 来源记录与输出
 
-以下文件均位于 `<output-root>/eval/<output-id>/ruler/`。终端显示总体完成数、百分比、吞吐和已耗时；续评按全局样本 ID 重新分配未完成样本。
+以下文件均位于 `<output-root>/eval/<output-id>/ruler/`。`scripts/eval.sh` 调用 `evaluation/evaluate_parallel.py` 统一调度，终端显示总体完成数、百分比、吞吐和耗时；续评按全局样本 ID 重新分配未完成样本。
 
 | 文件 | 内容 |
 |---|---|
@@ -96,4 +96,4 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 | `attempts/attempt-<编号>/shards/shard-<i>/` | 各卡的计划、执行状态、环境及 `predictions.jsonl` |
 | `attempts/attempt-<编号>/merged/` | 全部预测、来源 `manifest.json`、汇总及 OpenCompass `results/` |
 
-最终分数读取 RULER 目录内的 `summary.json`，其中 `merged_summary_path` 指向本轮完整汇总。耗时估算见[运行参数测试](../20261110_ttt_evaluation_tuning.md)。
+最终分数读取 RULER 目录内的 `summary.json`，其中 `merged_summary_path` 指向本轮完整汇总。此前 A800 的 B1 测量及外推见[历史 B1 测量](../20261110_ttt_reproduction_status.md#历史-b1-测量)。

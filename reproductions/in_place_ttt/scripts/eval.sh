@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-METHOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+METHOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT_ROOT="$(cd "$METHOD_DIR/../.." && pwd)"
 EVAL_GPU="${CUDA_VISIBLE_DEVICES-0}"
 if [[ $EVAL_GPU != 0 && $EVAL_GPU != 1 && $EVAL_GPU != 0,1 && $EVAL_GPU != 1,0 ]]; then
@@ -13,4 +13,4 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF-expandable_segments:Tr
 export TOKENIZERS_PARALLELISM=false
 export PYTHONPATH="$PROJECT_ROOT/reproductions:$METHOD_DIR/source/in_place_ttt:$METHOD_DIR${PYTHONPATH:+:$PYTHONPATH}"
 cd "$PROJECT_ROOT"
-exec python -u -m in_place_ttt.scripts.evaluate_parallel "$@"
+exec python -u -m in_place_ttt.evaluation.evaluate_parallel "$@"

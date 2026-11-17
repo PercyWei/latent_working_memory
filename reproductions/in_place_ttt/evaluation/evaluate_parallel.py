@@ -21,8 +21,8 @@ from evaluation_runtime import (
     timestamp,
     write_json,
 )
-from in_place_ttt.scripts import records as state
-from in_place_ttt.scripts.batching import execution_parameters
+from in_place_ttt.evaluation import records as state
+from in_place_ttt.evaluation.batching import execution_parameters
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -93,9 +93,16 @@ def execute(args, interruption):
         protocol = state.build_protocol(
             args.checkpoint, args.lengths, args.inference_mode, args.mlp_chunk_size
         )
-        if saved is not None and saved != protocol:
-            changed = [field for field in protocol if saved[field] != protocol[field]]
-            raise ValueError(f"Frozen In-Place TTT evaluation settings differ: {', '.join(changed)}")
+        if saved is not None:
+            # 模块位置属于来源说明；续评保留原计划，科学设置仍逐项核对。
+            fields = (saved.keys() | protocol.keys()) - {"model_wrapper", "generation_path"}
+            changed = [
+                field for field in sorted(fields)
+                if field not in saved or field not in protocol or saved[field] != protocol[field]
+            ]
+            if changed:
+                raise ValueError(f"Frozen In-Place TTT evaluation settings differ: {', '.join(changed)}")
+            protocol = saved
         batch_parameters = execution_parameters(
             args.batch_size, args.batch_size_by_length, args.lengths, args.inference_mode
         )
@@ -157,7 +164,7 @@ def execute(args, interruption):
                 ids_file = attempt_dir / "assignments" / f"shard-{rank}.json"
                 write_json(ids_file, assigned)
                 command = [
-                    sys.executable, "-u", "-m", "in_place_ttt.scripts.evaluate",
+                    sys.executable, "-u", "-m", "in_place_ttt.evaluation.evaluate",
                     "--protocol-file", str(plan_path), "--output-dir", str(part),
                     "--sample-ids-file", str(ids_file), "--execution-attempt", str(number),
                     "--shard-index", str(rank), "--runtime-file", str(directory / "runtime.json"),

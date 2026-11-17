@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from in_place_ttt.scripts.records import collect_records, load_samples, merge_records
+from in_place_ttt.evaluation.records import collect_records, load_samples, merge_records
 
 
 def main():

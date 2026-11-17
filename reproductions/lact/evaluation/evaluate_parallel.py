@@ -12,8 +12,8 @@ import time
 from zoneinfo import ZoneInfo
 
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "reproductions/lact/scripts"))
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "reproductions"))
 sys.path.insert(0, str(ROOT / "src"))
 
 from evaluation_runtime import (  # noqa: E402
@@ -104,7 +104,7 @@ def execute_lact(args, interruption):
                 ids_file = attempt_dir / "assignments" / f"shard-{rank}.json"
                 write_json(ids_file, assigned)
                 command = [
-                    sys.executable, "-u", str(ROOT / "reproductions/lact/scripts/evaluate.py"),
+                    sys.executable, "-u", str(ROOT / "reproductions/lact/evaluation/evaluate.py"),
                     "--checkpoint", str(args.checkpoint), "--output-dir", str(part),
                     "--num-shards", str(len(devices)), "--shard-index", str(rank),
                     "--sample-ids-file", str(ids_file), *worker_arguments(args),
@@ -172,13 +172,11 @@ def execute_lact(args, interruption):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    methods = parser.add_subparsers(dest="method", required=True)
-    method_parser = methods.add_parser("lact")
-    method_parser.add_argument("--checkpoint", type=Path, required=True)
-    method_parser.add_argument("--output-root", type=Path, default=ROOT / "artifacts/reproductions/lact")
-    method_parser.add_argument("--output-id")
-    method_parser.add_argument("--resume", action="store_true")
-    add_lact_arguments(method_parser)
+    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--output-root", type=Path, default=ROOT / "artifacts/reproductions/lact")
+    parser.add_argument("--output-id")
+    parser.add_argument("--resume", action="store_true")
+    add_lact_arguments(parser)
     args, worker_args = parser.parse_known_args()
     allowed_devices = ("0", "1", "0,1", "1,0")
     if os.environ.get("CUDA_VISIBLE_DEVICES") not in allowed_devices:

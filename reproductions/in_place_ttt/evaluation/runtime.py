@@ -14,7 +14,7 @@ from optimized.model import OptimizedQwen3ForCausalLM
 from optimized.padding import PaddedTTTDynamicCache
 from transformers.cache_utils import DynamicCache
 
-from in_place_ttt.scripts.records import GENERATION_KWARGS, MODEL_KWARGS, TOKENIZER_KWARGS
+from in_place_ttt.evaluation.records import GENERATION_KWARGS, MODEL_KWARGS, TOKENIZER_KWARGS
 
 
 MODEL_CLASSES = {

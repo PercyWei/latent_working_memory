@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261116 22:12:29 Asia/Shanghai
+最后修订时间：20261117 11:42:23 Asia/Shanghai
 
 ## 来源与迁入范围
 
@@ -18,10 +18,11 @@
 |---|---|
 | `optimized/model.py`、`optimized/padding.py` | 接入 MLP／SwiGLU 批量推理，处理有效位置、变长 attention 和逐样本缓存 |
 | `optimized/mlp.py`、`optimized/swiglu.py`、`optimized/tail.py` | 基于 `source/e2_ttt/e2_ttt/ops/e2_ttt_{mlp,swiglu}/chunk_momentum.py` 保留 closed-form 更新、prefill 与缓存解码，适配归一化参数和逐样本尾部裁剪 |
-| `eval.sh`、`scripts/evaluate_parallel.py`、`scripts/batching.py` | 单卡／双卡调度、样本分配和按 RULER 长度设置 batch |
-| `scripts/evaluate.py` | 每个 worker 加载一次模型，依次执行分配到的多个 benchmark |
-| `scripts/batch_harness.py`、`scripts/local_tasks.py` | harness 组批、本地数据与全局样本 ID 接入 |
-| `scripts/evaluation_state.py` | 固定评估协议、续评、原生缓存合并、来源记录与结果汇总 |
+| `scripts/eval.sh`、`evaluation/evaluate_parallel.py`、`evaluation/batching.py` | 单卡／多卡调度、样本分配和按 RULER 长度设置 batch |
+| `evaluation/evaluate.py` | 每个 worker 加载一次模型，依次执行分配到的多个 benchmark |
+| `evaluation/batch_harness.py`、`evaluation/local_tasks.py` | harness 组批、本地数据与全局样本 ID 接入 |
+| `evaluation/evaluation_state.py` | 固定评估协议、续评、原生缓存合并、来源记录与结果汇总 |
+| `../evaluation_runtime.py` | 三方法共用的进程清理、时间、严格 JSON、基础 Git 来源和总体进度 |
 | `scripts/train_340m_gpu1.sh`、`requirements-eval.txt` | 单卡备用训练入口与独立评估环境依赖 |
 
 ## 推理实现改进
@@ -43,6 +44,7 @@
 - **原生生成缓存**：各 benchmark 使用原生 `CachingLM` SQLite 缓存。每次启动建立独立 worker 目录和数据库，复制历史缓存的原生 key／响应，用于恢复尚未保存评分的生成结果。
 - **协议与来源**：固定模型、数据、生成／评分设置和软件版本，逐轮记录 GPU 与 batch。目录锁和存活 worker 检查协调启动，记录保留 Git commit、未提交状态、模式及实现路径。
 - **产物组织**：结果保存到 `<output-root>/eval/<output-id>/<benchmark>/`，按原始样本顺序合并逐题记录。各 benchmark 独立汇总，父目录记录整体完成状态。
+- **总体进度**：只读各 worker 已评分 JSONL 的完整行累计完成数，随各任务评分记录的写出成批更新。
 
 | 评估 | 沿用的生成与文本处理 |
 |---|---|

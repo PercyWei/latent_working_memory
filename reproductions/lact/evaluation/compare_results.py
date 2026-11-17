@@ -46,7 +46,7 @@ def build_comparison(directory):
     if any(config[key] != value for key, value in expected.items()):
         raise ValueError("当前论文参照仅用于公开两头 Momentum/RoPE/PreNorm 760M")
     paper = json.loads(
-        (METHOD_ROOT / "configs/ruler_paper_reference.json").read_text(encoding="utf-8")
+        (METHOD_ROOT / "evaluation/ruler_paper_reference.json").read_text(encoding="utf-8")
     )
     lengths = paper["lengths"]
     if [row["length"] for row in summary["by_length"]] != lengths:
@@ -77,7 +77,7 @@ def build_comparison(directory):
         "groups": [{"key": key, "label": label, "rows": comparison_rows(key)} for key, label in GROUPS.items()],
         "tasks": [{"key": key, "label": label, "rows": comparison_rows(key)} for key, label in TASKS.items()],
     }
-    template = (METHOD_ROOT / "scripts/comparison_template.html").read_text(encoding="utf-8")
+    template = (METHOD_ROOT / "evaluation/comparison_template.html").read_text(encoding="utf-8")
     payload = json.dumps(data, ensure_ascii=False, allow_nan=False).replace("<", "\\u003c")
     output = directory / "comparison.html"
     output.write_text(template.replace("__REPORT_DATA__", payload), encoding="utf-8")

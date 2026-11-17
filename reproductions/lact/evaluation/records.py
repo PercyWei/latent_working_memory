@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from evaluation_runtime import write_json
 from latent_working_memory.benchmarks.vendor.ruler import postprocess_pred, string_match_all
 from provenance import UPSTREAM_REVISION
 
@@ -34,14 +35,6 @@ SAMPLES_PER_TASK_LENGTH = 500
 
 def timestamp():
     return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d %H:%M:%S Asia/Shanghai")
-
-
-def write_json(path, value):
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8"
-    )
-    temporary.replace(path)
 
 
 def read_samples(path):

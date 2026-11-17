@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261116 22:12:29 Asia/Shanghai
+最后修订时间：20261117 11:48:12 Asia/Shanghai
 
 本目录使用 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现和作者公开 checkpoint。Momentum 760M 已于 20261110 完成下表全部 12,000 条 RULER 样本的评估，结果查看方式见[查看结果](#查看结果)。
 
@@ -60,7 +60,7 @@ source ~/rivermind-data/envs/ttt-lact/bin/activate
 Momentum 和 Muon 均支持 `optimized` 运行，验证范围与批量计算的数值差异见[复现状态记录](../20261110_ttt_reproduction_status.md)：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/lact/eval.sh \
+CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/lact/scripts/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
   --output-id lact-momentum-rope-prenorm-nheads4-chunk2048-760m_20261116 \
   --inference-mode optimized \
@@ -86,15 +86,15 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 ## 查看结果
 
 ```bash
-uv run reproductions/lact/scripts/compare_results.py \
+uv run reproductions/lact/evaluation/compare_results.py \
   --eval-dir artifacts/reproductions/lact/eval/lact-momentum-rope-prenorm-nheads4-chunk2048-760m_20261116/ruler
 ```
 
-脚本在该 RULER 目录内生成 `comparison.html`。
+脚本读取[论文对照数据](evaluation/ruler_paper_reference.json)，在该 RULER 目录内生成 `comparison.html`。
 
 ## 来源记录与输出
 
-以下文件均位于 `<output-root>/eval/<output-id>/ruler/`。终端显示总体进度；续评复用历史逐样本预测，按当前 GPU 数量重新分配未完成的样本。
+以下文件均位于 `<output-root>/eval/<output-id>/ruler/`。`scripts/eval.sh` 调用 `evaluation/evaluate_parallel.py` 统一调度，终端显示总体完成数、百分比、吞吐和耗时；续评复用历史逐样本预测，按当前 GPU 数量重新分配未完成的样本。
 
 | 文件 | 内容 |
 |---|---|

@@ -10,9 +10,9 @@ from pathlib import Path
 import time
 from zoneinfo import ZoneInfo
 
-from in_place_ttt.scripts.records import TASKS as EVALUATORS
-from in_place_ttt.scripts.provenance import capture_source
-from in_place_ttt.scripts.runtime import MODEL_CLASSES, generate_one, load_model, runtime_info
+from in_place_ttt.evaluation.records import TASKS as EVALUATORS
+from in_place_ttt.evaluation.provenance import capture_source
+from in_place_ttt.evaluation.runtime import MODEL_CLASSES, generate_one, load_model, runtime_info
 from inference_model.hf_qwen3.modeling_qwen3 import TTTDynamicCache
 from opencompass.utils.text_postprocessors import extract_non_reasoning_content
 from optimized.padding import PaddedTTTDynamicCache

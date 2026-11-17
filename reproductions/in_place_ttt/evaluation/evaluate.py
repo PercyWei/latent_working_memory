@@ -9,16 +9,16 @@ import signal
 import tempfile
 import time
 
-from in_place_ttt.scripts.provenance import capture_source
-from in_place_ttt.scripts.batching import execution_parameters, prepare_batches
-from in_place_ttt.scripts.records import (
+from in_place_ttt.evaluation.provenance import capture_source
+from in_place_ttt.evaluation.batching import execution_parameters, prepare_batches
+from in_place_ttt.evaluation.records import (
     TASKS as TASKS,
     load_samples,
     timestamp,
     validate_sample_ids,
     write_json,
 )
-from in_place_ttt.scripts.runtime import MODEL_CLASSES, generate_batch, generate_one, load_model, runtime_info
+from in_place_ttt.evaluation.runtime import MODEL_CLASSES, generate_batch, generate_one, load_model, runtime_info
 from opencompass.utils.text_postprocessors import extract_non_reasoning_content
 import torch
 

@@ -10,7 +10,7 @@ import platform
 import time
 import traceback
 
-from in_place_ttt.scripts.runtime import generate_one, load_model
+from in_place_ttt.evaluation.runtime import generate_one, load_model
 import torch
 
 

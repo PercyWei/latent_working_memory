@@ -11,7 +11,7 @@ UPSTREAM_MODEL = "reproductions/in_place_ttt/source/in_place_ttt/inference_model
 OPTIMIZED_MODEL = "reproductions/in_place_ttt/optimized/model.py"
 OPTIMIZED_PADDING = "reproductions/in_place_ttt/optimized/padding.py"
 OPTIMIZED_TTT = "reproductions/in_place_ttt/optimized/ttt.py"
-RUNTIME = "reproductions/in_place_ttt/scripts/runtime.py"
+RUNTIME = "reproductions/in_place_ttt/evaluation/runtime.py"
 
 
 def capture_source(entrypoint, model_classes):

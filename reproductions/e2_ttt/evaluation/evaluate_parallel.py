@@ -12,6 +12,7 @@ import time
 from zoneinfo import ZoneInfo
 
 from batching import execution_parameters
+from evaluation_runtime import EvaluationProgress, stop_processes
 from evaluation_state import (
     BENCHMARKS, LENGTHS, PROJECT_ROOT, benchmark_protocol, build_protocol, collect_records,
     evaluation_lock, merge_generation_caches, refresh_benchmark, refresh_run_summary,
@@ -52,25 +53,6 @@ def parse_args():
         parser.error("Use one launcher process")
     args.devices = devices
     return args
-
-
-def stop_workers(processes):
-    active = [process for process in processes if process.poll() is None]
-    for process in active:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-    deadline = time.monotonic() + 5
-    for process in active:
-        try:
-            process.wait(timeout=max(0, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
 
 
 def resolve_protocol(args, saved):
@@ -169,12 +151,23 @@ def execute_attempt(args, protocol, source):
     refresh(args.benchmarks)
     processes, logs, observed = [], [], set()
     started = time.monotonic()
+    parts = [
+        root / name / "attempts" / directory.name / "workers" / f"worker-{index}"
+        for index, assigned in enumerate(assignments) for name in assigned
+    ]
+    progress = EvaluationProgress(
+        parts, started, history_completed=sum(completed.values()),
+        total=sum(completed[name] + len(ids) for name, ids in pending.items()),
+    )
 
     def interrupted(signum, frame):
         raise KeyboardInterrupt(f"Received signal {signum}")
 
     previous_handlers = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
+        print(f"E²-TTT: pending={ {name: len(ids) for name, ids in pending.items()} }; "
+              f"GPUs={','.join(args.devices)} batch={args.batch_size}; {root}", flush=True)
+        progress.render(force=True)
         for index, (gpu, ids_by_benchmark) in enumerate(zip(args.devices, assignments, strict=True)):
             if not ids_by_benchmark:
                 continue
@@ -205,7 +198,7 @@ def execute_attempt(args, protocol, source):
             state["workers"].append(worker)
             save()
             command = [
-                sys.executable, "-u", str(METHOD_ROOT / "scripts/evaluate.py"),
+                sys.executable, "-u", str(METHOD_ROOT / "evaluation/evaluate.py"),
                 "--protocol-file", str(root / "evaluation_plan.json"),
                 "--sample-ids-file", str(assignment), "--worker-dir", str(folder),
                 "--batch-size", str(args.batch_size),
@@ -215,7 +208,8 @@ def execute_attempt(args, protocol, source):
             logs.append(log)
             environment = {**os.environ, "CUDA_VISIBLE_DEVICES": gpu, "WORLD_SIZE": "1",
                            "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "TOKENIZERS_PARALLELISM": "false"}
-            environment["PYTHONPATH"] = ":".join((str(METHOD_ROOT), str(METHOD_ROOT / "source/e2_ttt"),
+            environment["PYTHONPATH"] = ":".join((str(METHOD_ROOT), str(PROJECT_ROOT / "reproductions"),
+                                                str(METHOD_ROOT / "source/e2_ttt"),
                                                 str(METHOD_ROOT / "source/e2_ttt/lm-evaluation-harness"),
                                                 os.environ.get("PYTHONPATH", "")))
             process = subprocess.Popen(command, cwd=PROJECT_ROOT, env=environment,
@@ -223,8 +217,6 @@ def execute_attempt(args, protocol, source):
             processes.append(process)
             worker.update(pid=process.pid, status="running")
             save()
-        print(f"E²-TTT: pending={ {name: len(ids) for name, ids in pending.items()} }; "
-              f"GPUs={','.join(args.devices)} batch={args.batch_size}; {root}", flush=True)
         active = list(zip(processes, state["workers"], strict=True))
         while active:
             for process, worker in active[:]:
@@ -244,7 +236,10 @@ def execute_attempt(args, protocol, source):
                 if code:
                     raise RuntimeError(f"E²-TTT worker failed: {worker['directory']}; see its evaluation.log")
             if active:
+                progress.render()
                 time.sleep(0.2)
+        progress.render(force=True)
+        progress.finish_line()
         for name in args.benchmarks:
             summary = refresh_benchmark(root / name, children[name])
             if not summary["completed"]:
@@ -254,10 +249,11 @@ def execute_attempt(args, protocol, source):
         print(f"E²-TTT selected benchmarks complete; whole run completed={summary['completed']}; {root}", flush=True)
         return summary
     except BaseException as error:
+        progress.finish_line()
         state.update(status="failed", error=repr(error))
         raise
     finally:
-        stop_workers(processes)
+        stop_processes(processes, timeout=5)
         for process, worker in zip(processes, state["workers"]):
             if worker["status"] == "running":
                 worker.update(exit_code=process.returncode, status="interrupted")

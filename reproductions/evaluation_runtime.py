@@ -1,4 +1,4 @@
-"""复现评估的进程清理、来源记录与增量终端进度。"""
+"""三种 TTT 复现评估共用的进程清理、来源记录与终端进度。"""
 
 from datetime import datetime
 import json
@@ -19,8 +19,10 @@ def timestamp():
 
 
 def write_json(path, value):
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+    )
     temporary.replace(path)
 
 
@@ -33,14 +35,14 @@ def source_record():
     return {"git_commit": git("rev-parse", "HEAD"), "git_dirty": bool(status), "git_status": status}
 
 
-def stop_processes(processes):
+def stop_processes(processes, timeout=10):
     running = [process for process in processes if process.poll() is None]
     for process in running:
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + timeout
     while any(process.poll() is None for process in running) and time.monotonic() < deadline:
         time.sleep(0.1)
     for process in running:
