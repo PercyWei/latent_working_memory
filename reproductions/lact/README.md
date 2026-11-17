@@ -64,7 +64,6 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
   --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
   --output-id lact-momentum-rope-prenorm-nheads4-chunk2048-760m_20261116 \
   --inference-mode optimized \
-  --batch-size 16 \
   --batch-size-by-length 4096=64 8192=32 16384=32 32768=16
 ```
 

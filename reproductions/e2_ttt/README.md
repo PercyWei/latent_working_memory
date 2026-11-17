@@ -55,7 +55,7 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
   --output-id mlp-1.3b-15b_20261117 \
   --inference-mode optimized \
   --batch-size 32 \
-  --batch-size-by-length 512=64 1024=32 2048=32 4096=16 8192=16 16384=8
+  --batch-size-by-length 512=64 1024=32 2048=32 4096=16 8192=8 16384=8
 ```
 
 | 参数 | 默认值与约定 |
