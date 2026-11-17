@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261117 19:18:02 Asia/Shanghai
+最后修订时间：20261117 20:32:01 Asia/Shanghai
 
 v3.1.1 先通过文本重建（AE）和续写（LM）训练压缩器（Writer），再用问答（QA）与强化学习联合训练记忆内容和分段边界。每次提交将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆回答问题。
 
@@ -391,7 +391,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
   --dashboard-eval-id standard_20261112
 ```
 
-看板展示独立评估，按 Test、RULER、LoCoMo 分页，默认选择最新完成的 checkpoint；多个 checkpoint 可按实际 optimizer step 比较。质量区展示官方指标，Benchmark 支持接入本地基线，按实际输入、参考答案、基座和评估协议对齐。训练与 dev 指标在 SwanLab 查看。
+看板展示独立评估，按 Test、RULER、LoCoMo 分页。页面上方是“多 checkpoint 比较”：展示全部已完成 checkpoint 的指标表、按实际 optimizer step 排列的变化曲线，以及折叠的资源测量与输出诊断。下方是“单 checkpoint 详情”：“明细 checkpoint”默认选择最新完成的一项，选择器下方依次展示折叠的评估配置、RULER 单步明细、压缩分析与问答。只有一个 checkpoint 时，上方展示其评估概览。Benchmark 支持接入本地基线，按实际输入、参考答案、基座和评估协议对齐。训练与 dev 指标在 SwanLab 查看。
 
 压缩区按篇和记忆块分别展示平均、最低、最高压缩倍率，另列每篇平均记忆块数及单块完成整篇压缩的比例。输入长度 N 取实际 Writer 输入 token 数（含模板前缀），B 为记忆块数，K 为每块槽位数：
 
@@ -400,9 +400,9 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 | 整篇文本 | `N / (B × K)` | 每篇等权；LoCoMo 每段对话只计一次 |
 | 单个记忆块 | `block_length / K` | 每块等权，包含末尾强制提交块 |
 
-整篇倍率分布、单块倍率分布和“输入长度—记忆块数”散点图使用当前 checkpoint；RULER 可按长度和子任务筛选。逐文本列表支持排序，选中一篇后展示沿 token 位置排列的压缩分段条、块信息及该文本的 QA。分段条按需生成，不保存图片；首次读取当前 checkpoint 时仅缓存压缩统计和记录位置，完整回答按所选文本读取。
+整篇倍率分布、单块倍率分布和“输入长度—记忆块数”散点图使用当前 checkpoint；RULER 可按长度和子任务筛选。逐文本列表支持排序，默认选中首行，表格高亮与下方的压缩分段条、块信息及 QA 始终对应同一篇文本。分段条按需生成，不保存图片；首次读取当前 checkpoint 时仅缓存压缩统计和记录位置，完整回答按所选文本读取。
 
-资源测量、输出诊断和评估配置收在展开区。批次耗时按参与样本分摊，decode 耗时按当轮活跃样本分摊，汇总只累计一次批次 GPU 时间；峰值显存为 worker／batch 共享观测。
+批次耗时按参与样本分摊，decode 耗时按当轮活跃样本分摊，汇总只累计一次批次 GPU 时间；峰值显存为 worker／batch 共享观测。
 
 ## 实现细节
 

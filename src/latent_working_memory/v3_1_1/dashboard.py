@@ -318,12 +318,11 @@ def _document_details(documents, directory, summary, key):
              "记忆 slots": row["memory_slots"], "压缩倍率": row["compression_rate"],
              "问题数": row["question_count"]} for row in documents]
     selection = st.dataframe(
-        rows, hide_index=True, height=280, on_select="rerun", selection_mode="single-row",
+        rows, hide_index=True, height=280, on_select="rerun", selection_mode="single-row-required",
         column_config={"压缩倍率": st.column_config.NumberColumn(format="%.2f×")},
         key=f"{key}:{order}:documents",
     )
-    selected = selection.selection.rows
-    document = documents[selected[0] if selected else 0]
+    document = documents[selection.selection.rows[0]]
     document_key = f"{key}:{document['id']}"
     st.markdown(f"**{document['id']}** · {document['compression_rate']:.2f}× · {document['blocks']} 个记忆块")
     st.caption("点击表格行切换文本。分段宽度对应输入 token 数，颜色越深表示该文本内的压缩倍率越高；末块为末尾强制提交。")
@@ -399,23 +398,9 @@ def _render_task(directory, task, baseline_results):
         return
     key = f"{directory}:{task}"
     steps = [summary["checkpoint_step"] for _, summary in records]
-    if len(records) > 1:
-        step = st.selectbox("Checkpoint", steps, index=len(steps) - 1,
-                            format_func=lambda value: f"global_step_{value}", key=f"{key}:step")
-    else:
-        step = steps[0]
-        st.caption(f"global_step_{step}")
-    current = next(pair for pair in records if pair[1]["checkpoint_step"] == step)
-    selected = [current]
-    if len(records) > 1 and st.toggle("比较 checkpoint", key=f"{key}:compare"):
-        others = st.multiselect(
-            "对比项", [value for value in steps if value != step],
-            default=[value for value in steps if value != step],
-            format_func=lambda value: f"global_step_{value}", key=f"{key}:{step}:compare-steps",
-        )
-        selected = [pair for pair in records if pair[1]["checkpoint_step"] in [step, *others]]
-    summaries = [summary for _, summary in selected]
+    summaries = [summary for _, summary in records]
     views = [_benchmark_view(summary) for summary in summaries] if task != "test" else []
+    st.header("多 checkpoint 比较" if len(records) > 1 else "评估概览")
     baselines = _baseline_selection(baseline_results, task, views, key) if views else {}
     st.subheader("质量指标")
     st.dataframe(_summary_rows(summaries, baselines), hide_index=True)
@@ -435,7 +420,25 @@ def _render_task(directory, task, baseline_results):
             with container:
                 st.subheader(CHART_LABELS[name])
                 st.echarts_chart(chart, height=400, theme=None, key=f"{key}:{name}")
-    current_directory, summary = current
+    with st.expander("资源测量与执行设置"):
+        st.dataframe(_resource_rows(summaries, baselines), hide_index=True)
+        st.caption("生成路径包含正文压缩与回答，耗时按批内参与项分摊；多卡累计耗时与调度墙钟分别展示。"
+                   "峰值显存为 worker 的批次观测。本次调度墙钟包含模型加载，续跑时仅覆盖本次执行。")
+    with st.expander("输出诊断"):
+        st.dataframe([{"累计 step": value["checkpoint_step"],
+                       **{OUTPUT_LABELS[name]: count for name, count in value["outputs"].items()}}
+                      for value in summaries], hide_index=True)
+    st.divider()
+    st.header("单 checkpoint 详情")
+    if len(records) > 1:
+        step = st.selectbox("明细 checkpoint", steps, index=len(steps) - 1,
+                            format_func=lambda value: f"global_step_{value}", key=f"{key}:step")
+    else:
+        step = steps[0]
+        st.caption(f"global_step_{step}")
+    current_directory, summary = next(pair for pair in records if pair[1]["checkpoint_step"] == step)
+    with st.expander("评估配置与统计"):
+        st.json(summary, expanded=1)
     if task == "ruler":
         view = _benchmark_view(summary)
         if len(summaries) > 1:
@@ -449,16 +452,6 @@ def _render_task(directory, task, baseline_results):
                          key=f"{key}:{step}:tasks:{length}")
     st.caption(f"以下压缩分析与逐文本记录：global_step_{step}")
     _compression(current_directory, summary, f"{key}:{step}")
-    with st.expander("资源测量与执行设置"):
-        st.dataframe(_resource_rows(summaries, baselines), hide_index=True)
-        st.caption("生成路径包含正文压缩与回答，耗时按批内参与项分摊；多卡累计耗时与调度墙钟分别展示。"
-                   "峰值显存为 worker 的批次观测。本次调度墙钟包含模型加载，续跑时仅覆盖本次执行。")
-    with st.expander("输出诊断"):
-        st.dataframe([{"累计 step": value["checkpoint_step"],
-                       **{OUTPUT_LABELS[name]: count for name, count in value["outputs"].items()}}
-                      for value in summaries], hide_index=True)
-    with st.expander("评估配置与统计"):
-        st.json(summary, expanded=1)
 
 
 def _evaluations(args):
