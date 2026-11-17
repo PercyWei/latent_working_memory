@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 from evaluate import TASKS as EVALUATORS
 from inference_model.hf_qwen3.modeling_qwen3 import TTTDynamicCache
 from opencompass.utils.text_postprocessors import extract_non_reasoning_content
-from optimized.model import CompactTTTDynamicCache
+from optimized.padding import PaddedTTTDynamicCache
 from provenance import capture_source
 from runtime import MODEL_CLASSES, generate_one, load_model, runtime_info
 import torch
@@ -46,6 +46,8 @@ def select_mode(wrapper, mode, chunk_size):
 
 
 def cache_metadata(cache, config):
+    if isinstance(cache, PaddedTTTDynamicCache):
+        cache = cache.rows[0]
     seen = cache.get_seq_length()
     storages = {}
     for layer in cache.layers:
@@ -93,6 +95,8 @@ def cache_metadata(cache, config):
 def snapshot_ttt(cache, config):
     if not config.ttt_mode:
         return []
+    if isinstance(cache, PaddedTTTDynamicCache):
+        cache = cache.rows[0]
     return [
         tuple(
             None if value is None else value.detach().cpu().clone() for value in cache.ttt_states[i]
@@ -240,7 +244,7 @@ def boundary_checks(wrapper, modes, chunk_size, output, logger):
             select_mode(wrapper, mode, chunk_size)
             cache = None
             if wrapper.model.config.ttt_mode:
-                cache = TTTDynamicCache() if mode == "original" else CompactTTTDynamicCache()
+                cache = TTTDynamicCache() if mode == "original" else PaddedTTTDynamicCache(1, prefix.device)
             for step in range(5):
                 inputs = (
                     prefix

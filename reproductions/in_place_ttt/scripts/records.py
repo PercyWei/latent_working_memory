@@ -89,7 +89,7 @@ def build_protocol(checkpoint, lengths, inference_mode, mlp_chunk_size):
         "generation_path": (
             "OpenCompass HuggingFaceBaseModel.generate"
             if inference_mode == "original"
-            else "in_place_ttt.scripts.runtime.generate_one; single tokenization and native generation parameters"
+            else "in_place_ttt.scripts.runtime.generate_batch; single tokenization, left padding and native generation parameters"
         ),
         "model_kwargs": MODEL_KWARGS.copy(),
         "tokenizer_kwargs": TOKENIZER_KWARGS.copy(),

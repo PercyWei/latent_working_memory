@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261116 22:12:29 Asia/Shanghai
+最后修订时间：20261117 10:05:38 Asia/Shanghai
 
 ## 评估目标与数据
 
@@ -37,7 +37,7 @@ RULER 固定从表中路径读取，下载与构造命令见[评估数据准备]
 
 ## 环境与运行命令
 
-从服务器项目根目录安装并激活独立环境；已安装时仅需激活：
+从服务器项目根目录安装并激活独立评估环境，版本见[评估环境](../20261109_environment_setup.md)：
 
 ```bash
 export PATH="$HOME/rivermind-data/tools/uv/bin:$PATH"
@@ -45,35 +45,39 @@ bash reproductions/setup_eval_env.sh in_place_ttt
 source ~/rivermind-data/envs/ttt-in_place_ttt/bin/activate
 ```
 
-依赖由 [requirements-eval.txt](requirements-eval.txt) 固定，版本及安装说明见[评估环境](../20261109_environment_setup.md)。
-
-每卡逐条评估，batch size 固定为 1。TTT 使用仅压紧尾部缓存的路径，baseline 使用原始路径，MLP 均不分块：
+TTT 和 baseline 均支持 `optimized`，以下命令采用 batch size 1，不启用 MLP 分块；各长度的 batch 上限按显存调整，验证范围见[复现状态](../20261110_ttt_reproduction_status.md#in-place-ttt)。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in_place_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
-  --output-id qwen3-4b-32k-ttt_20261116 \
-  --inference-mode optimized
+  --output-id qwen3-4b-32k-ttt_20261117 \
+  --inference-mode optimized \
+  --batch-size 1
 
 CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in_place_ttt/eval.sh \
   --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-baseline \
-  --output-id qwen3-4b-32k-baseline_20261116 \
-  --inference-mode original
+  --output-id qwen3-4b-32k-baseline_20261117 \
+  --inference-mode optimized \
+  --batch-size 1
 ```
 
 | 参数 | 默认值与约定 |
 |---|---|
 | `--resume` | 沿用原评估协议补齐未完成样本的评估，默认不开启 |
-| `--checkpoint` | 必需，本地完整 Hugging Face checkpoint 目录 |
+| `--checkpoint` | 必需，本地完整 checkpoint 目录 |
 | `--output-root` | 产物父目录，默认 `artifacts/reproductions/in_place_ttt` |
-| `--output-id` | 默认 `<checkpoint_name>_<YYYYMMDD-HHMM>`，时间采用 `Asia/Shanghai` |
-| `--inference-mode` | `original`（默认）或 `optimized` |
-| `--mlp-chunk-size` | 默认 `0`；`original` 仅接受 `0`；`optimized` 设为 `0` 时仅压紧尾部缓存，正值同时启用 MLP 分块，TTT 模型的分块长度须为 TTT chunk 的整数倍 |
+| `--output-id` | 默认 `<checkpoint_name>_<YYYYMMDD-HHMM>` |
+| `--inference-mode` | 推理模式，支持 `original`（默认）或 `optimized` |
+| `--batch-size` | 每卡样本数上限，默认 `1`；只有 `optimized` 支持大于 1 |
+| `--batch-size-by-length` | 按评估长度覆盖每卡上限，未指定的长度使用 `--batch-size` |
+| `--mlp-chunk-size` | MLP 分块长度（token 数），默认 `0` 不启用；只有 `optimized` 支持正值，TTT 模型要求其为 TTT chunk 的整数倍 |
 | `--lengths` | 默认 `4096 8192 16384 32768 65536 131072 262144` |
 
-- 评估产物保存在 `<output-root>/eval/<output-id>/ruler/`；新运行在已有同名目录时拒绝覆盖。续评指定原 `--output-id` 并追加 `--resume`，checkpoint、长度、推理模式、分块和生成／评分协议保持原计划不变，允许调整 GPU 数量和顺序。
-- 输入为 `input + answer_prefix`，greedy 生成最多 64 tokens，保留 EOS；输入加生成预算不得超过所选长度，不截断。评分沿用原 OpenCompass evaluator，长度分数为 13 项任务得分的等权平均。
-- 单卡和多卡均经同一启动器调度，每卡一个进程，不提供 batch 参数。同一评估使用独占运行目录锁；已有评估或历史 worker 仍存活时拒绝重复启动。
+- 评估产物保存在 `<output-root>/eval/<output-id>/ruler/`；新运行在已有同名目录时拒绝覆盖。续评指定原 `--output-id` 并追加 `--resume`，checkpoint、长度、推理模式、分块和生成／评分协议保持原计划不变，允许调整 GPU 数量、顺序与 batch 设置。
+- 输入为 `input + answer_prefix`，greedy 生成最多 64 tokens，沿用原停止条件；各行在首次结束后冻结状态，生成 IDs 截至各自结束位置，保留 EOS。输入加生成预算不得超过所选长度，不截断。评分沿用原 OpenCompass evaluator，长度分数为 13 项任务得分的等权平均。
+- 每个 RULER 长度内按实际 token 数稳定降序，相邻组批并左 padding 到批内最长输入，尾批保留实际样本数。每条样本独立维护真实位置、attention KV 和 TTT 状态；padding 不参与记忆读写或推进更新。完整 attention、原 TTT chunk 的读写顺序及卷积边界保持不变。
+- `optimized` 使用原生 SDPA 的完整 attention，支持 `default`、`linear`、`yarn`、`llama3` RoPE；不支持 `dynamic` 或 `longrope`。
+- 单卡和多卡均经同一启动器调度，每卡一个进程。同一评估使用独占运行目录锁；已有评估或历史 worker 仍存活时拒绝重复启动。
 
 源码与优化适用范围见 [UPSTREAM.md](UPSTREAM.md) 及[复现状态](../20261110_ttt_reproduction_status.md)，训练与 checkpoint 转换见[官方说明](source/in_place_ttt/README.md)。
 

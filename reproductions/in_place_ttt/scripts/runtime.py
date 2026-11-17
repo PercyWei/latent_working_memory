@@ -1,4 +1,4 @@
-"""本地评估加载与单样本生成，保留 OpenCompass 原始路径作为对照。"""
+"""本地评估加载与批量生成，保留 OpenCompass 原始 B1 路径作为对照。"""
 
 import importlib.metadata
 import inspect
@@ -10,7 +10,8 @@ from opencompass.models.huggingface_above_v4_33 import (
     _get_stopping_criteria,
     _set_model_kwargs_torch_dtype,
 )
-from optimized.model import CompactTTTDynamicCache, OptimizedQwen3ForCausalLM
+from optimized.model import OptimizedQwen3ForCausalLM
+from optimized.padding import PaddedTTTDynamicCache
 from transformers.cache_utils import DynamicCache
 
 from in_place_ttt.scripts.records import GENERATION_KWARGS, MODEL_KWARGS, TOKENIZER_KWARGS
@@ -33,6 +34,8 @@ class EvaluationModel(HuggingFaceBaseModel):
             generation_kwargs=GENERATION_KWARGS.copy(),
             max_seq_len=max_seq_len,
         )
+        if inference_mode == "optimized":
+            self.tokenizer.padding_side = "left"
 
     def _load_model(self, path, kwargs, peft_path=None, peft_kwargs=None):
         if peft_path is not None:
@@ -97,35 +100,7 @@ def generate_one(wrapper, prompt, max_out_len=64, max_total_tokens=262144):
                 wrapper.model.generate = instance_generate
         token_ids = captured["token_ids"]
     elif wrapper.inference_mode == "optimized":
-        # Valid inputs never reach native truncation; encode once and reuse exactly these IDs.
-        tokens = wrapper.tokenizer.batch_encode_plus(
-            [prompt],
-            return_tensors="pt",
-            padding=True,
-            truncation=False,
-            add_special_tokens=True,
-        )
-        input_tokens = tokens["input_ids"].shape[1]
-        if input_tokens + max_out_len > max_total_tokens or input_tokens > wrapper.max_seq_len:
-            raise ValueError(
-                "Prompt plus generation budget exceeds the requested length; truncation is forbidden"
-            )
-        tokens = {name: value.to(wrapper.model.device) for name, value in tokens.items()}
-        generation_kwargs = wrapper.generation_kwargs.copy()
-        stop_words = list(set(wrapper.stop_words))
-        if stop_words:
-            generation_kwargs["stopping_criteria"] = _get_stopping_criteria(
-                stop_words, wrapper.tokenizer, 1
-            )
-        generation_kwargs["max_new_tokens"] = max_out_len
-        generation_kwargs["pad_token_id"] = wrapper.tokenizer.pad_token_id
-        tokens.pop("token_type_ids", None)
-        outputs = wrapper.model.generate(**tokens, **generation_kwargs)
-        continuation = outputs[:, input_tokens:]
-        token_ids = continuation[0].detach().cpu().tolist()
-        raw_prediction = wrapper.tokenizer.batch_decode(continuation, skip_special_tokens=True)[0]
-        for stop in stop_words:
-            raw_prediction = raw_prediction.split(stop)[0]
+        return generate_batch(wrapper, [prompt], max_out_len, max_total_tokens)[0]
     else:
         raise ValueError(f"Unknown inference mode: {wrapper.inference_mode}")
     return {
@@ -136,6 +111,65 @@ def generate_one(wrapper, prompt, max_out_len=64, max_total_tokens=262144):
     }
 
 
+def generate_batch(wrapper, prompts, max_out_len=64, max_total_tokens=262144, token_ids=None):
+    """每条输入编码一次；已排序的评估批次可复用组批时得到的 token IDs。"""
+    if wrapper.inference_mode != "optimized":
+        raise ValueError("generate_batch requires optimized inference")
+    if not prompts:
+        raise ValueError("A generation batch must contain prompts")
+    if token_ids is None:
+        token_ids = wrapper.tokenizer.batch_encode_plus(
+            prompts, padding=False, truncation=False, add_special_tokens=True
+        )["input_ids"]
+    if len(token_ids) != len(prompts):
+        raise ValueError("The encoded input count differs from the prompt count")
+    input_lengths = [len(row) for row in token_ids]
+    if any(
+        length + max_out_len > max_total_tokens or length > wrapper.max_seq_len
+        for length in input_lengths
+    ):
+        raise ValueError(
+            "Prompt plus generation budget exceeds the requested length; truncation is forbidden"
+        )
+    tokens = wrapper.tokenizer.pad(
+        {"input_ids": token_ids}, padding=True, return_attention_mask=True, return_tensors="pt"
+    )
+    prefix_width = tokens["input_ids"].shape[1]
+    tokens = {name: value.to(wrapper.model.device) for name, value in tokens.items()}
+    generation_kwargs = wrapper.generation_kwargs.copy()
+    stop_words = list(set(wrapper.stop_words))
+    if stop_words:
+        generation_kwargs["stopping_criteria"] = _get_stopping_criteria(
+            stop_words, wrapper.tokenizer, len(prompts)
+        )
+    generation_kwargs.update(
+        max_new_tokens=max_out_len,
+        pad_token_id=wrapper.tokenizer.pad_token_id,
+        return_dict_in_generate=True,
+        output_scores=False,
+    )
+    tokens.pop("token_type_ids", None)
+    result = wrapper.model.generate(**tokens, **generation_kwargs)
+    continuations = result.sequences[:, prefix_width:].detach().cpu().tolist()
+    generated_lengths = result.past_key_values.generated_lengths.detach().cpu().tolist()
+    # HF 原生停止条件给出各行的真实结束点，包含 EOS，不计其他行继续生成时补入的 pad。
+    continuations = [row[:length] for row, length in zip(continuations, generated_lengths, strict=True)]
+    raw_predictions = wrapper.tokenizer.batch_decode(continuations, skip_special_tokens=True)
+    results = []
+    for input_tokens, continuation, raw_prediction in zip(
+        input_lengths, continuations, raw_predictions, strict=True
+    ):
+        for stop in stop_words:
+            raw_prediction = raw_prediction.split(stop)[0]
+        results.append({
+            "input_tokens": input_tokens,
+            "raw_prediction": raw_prediction,
+            "token_ids": continuation,
+            "generated_tokens": len(continuation),
+        })
+    return results
+
+
 def runtime_info(wrapper):
     config = wrapper.model.config
     if isinstance(wrapper.model, OptimizedQwen3ForCausalLM):
@@ -144,10 +178,8 @@ def runtime_info(wrapper):
     else:
         compact_tails = False
         mlp_chunk_size = 0
-    cache_class = (
-        (CompactTTTDynamicCache if compact_tails else TTTDynamicCache)
-        if config.ttt_mode
-        else DynamicCache
+    cache_class = PaddedTTTDynamicCache if wrapper.inference_mode == "optimized" else (
+        TTTDynamicCache if config.ttt_mode else DynamicCache
     )
     mlp_class = type(wrapper.model.model.layers[0].mlp)
     return {

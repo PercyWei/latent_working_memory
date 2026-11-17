@@ -2,17 +2,17 @@
 
 创建时间：20261110 11:30:45 Asia/Shanghai
 
-最后修订时间：20261116 21:03:11 Asia/Shanghai
+最后修订时间：20261117 01:10:58 Asia/Shanghai
 
 ## 当前状态
 
-LaCT、E²-TTT、In-Place TTT 的源码迁入、独立环境、数据接入及 checkpoint 运行检查已完成，均保留各自 `eval.sh`。LaCT 与 E²-TTT 默认使用 `original`，保留上游 B1 路径；显式选择 `optimized` 时按长度排序后相邻组批，左 padding 到批内最长输入，单样本、等长和混长输入使用同一状态路径。
+LaCT、E²-TTT、In-Place TTT 的源码迁入、独立环境、数据接入及此前 checkpoint 运行检查已完成，均保留各自 `eval.sh`。三个方法默认使用 `original`，保留上游 B1 路径；显式选择 `optimized` 时按长度排序后相邻组批，左 padding 到批内最长输入，单样本、等长和混长输入使用同一状态路径。In-Place TTT 的本轮批量实现仅完成本地代码审查，尚未测试。
 
 | 方法 | 正式评估范围 | 当前进度 |
 |---|---|---|
 | LaCT 760M | 六项 RULER，4K／8K／16K／32K，每任务每长度 500 条，共 12,000 条 | Momentum 已完成；两个 Muon 按需评估 |
 | E²-TTT MLP／SwiGLU 1.3B | 每模型 RULER 6,000 条、SQuAD completion 2,984 条、SWDE 1,111 条，共 10,095 条 | 已完成运行检查，完整评估尚未记录 |
-| In-Place TTT 32K TTT／baseline | 每模型十三项 RULER，4K–256K 七长度，每任务每长度 100 条，共 9,100 条 | 已完成运行检查，完整评估尚未记录 |
+| In-Place TTT 32K TTT／baseline | 每模型十三项 RULER，4K–256K 七长度，每任务每长度 100 条，共 9,100 条 | 此前 B1 实现已通过运行检查；混长 batch 实现尚未测试，完整评估尚未记录 |
 
 LaCT Momentum 的已有完整运行六任务、四长度宏平均为 **39.46%**，累计执行约 3.47 小时，[离线报告](lact/README.md#查看结果)保留逐任务分数和论文比较。公开权重实际为两头，是作者重训产物；它不是原论文表格对应的同一次训练结果。两个 Muon 公开权重实际为四头。
 
@@ -54,13 +54,19 @@ LaCT 使用作者公开重训权重，E²-TTT 使用作者官方权重；In-Plac
 
 ### In-Place TTT
 
-`in_place_ttt/optimized/` 独立实现 TTT 尾段存储压紧与 MLP 分块；attention KV 与 fast weights 不裁剪，保留 1,024-token chunk 的原读出／更新顺序。默认使用 `original`；新运行的 `--mlp-chunk-size` 默认为 `0`，`optimized` 仅压紧尾段，`16384` 同时启用 MLP 分块。
+`in_place_ttt/optimized/` 支持 TTT 和 baseline 的单样本、等长和混长左 padding 推理。各样本独立维护真实位置、完整有效 attention KV 与 TTT 状态，按真实 chunk 进度分组执行；padding 不参与读写或更新。保留原始 TTT 公式、1,024-token chunk 的先读后更新规则和逐 chunk 的卷积零填充边界，满 chunk 在当次读出后更新。默认使用 `original`；`--mlp-chunk-size` 默认 `0`，正值启用额外 MLP 分块，TTT 模型要求其为 TTT chunk 的整数倍。
 
-单卡和多卡均经 `eval.sh` 的共同启动器运行，每卡固定 B1；数据路径在代码中固定。各轮执行按全局样本 ID 分配未完成样本，保留原生成与 OpenCompass 评分协议，续评允许调整 GPU 数量和顺序。本轮调度、产物组织及续评入口仅进行代码审查，未运行测试或 GPU 评估；下列一致性与资源数据来自此前的模型实现验证。
+单卡和多卡均经 `eval.sh` 的共同启动器运行，每卡一个进程；数据路径在代码中固定。`--batch-size` 默认 `1`，`--batch-size-by-length` 覆盖指定长度；按真实 token 数降序排列后相邻组批。各轮执行按全局样本 ID 分配未完成样本，保留原 EOS、64-token 生成预算和 OpenCompass 评分协议，续评允许调整 GPU 数量、顺序与 batch 设置。
+
+attention 沿用原生 SDPA，按真实 query／key 长度分组；TTT 按读出长度、是否更新及适配权重状态分组，不要求混长样本同步提交。HF 原停止条件保留，结束行冻结状态，生成 IDs 按各行首次结束位置截取。批量路径支持 `default`、`linear`、`yarn`、`llama3` RoPE，不支持 `dynamic`、`longrope`。
+
+20261117 的混长 batch、批量 TTT 及评估接入仅完成本地代码审查，未运行测试、GPU 验证或性能测量。当前没有本轮 batch 上限、吞吐或全量耗时的实测结论。
+
+以下一致性与资源数据来自此前 B1 实现，不能视为本轮混长 batch 的验证或显存测量：
 
 - 两个 checkpoint 各覆盖七长度、每长度两条，共 14 条真实样本；原始／优化路径的完整生成 IDs、文本及原生评分一致。TTT 真实样本最终状态逐位一致，缓存隔离检查通过。
 - 仅尾段压紧在所测边界状态逐位一致；MLP 分块在 17,406-token 合成输入出现 logits／内部状态差异，最大 logits 绝对差为 0.25，不能保证任意输入的生成一致。
-- 独立 FA2／cuDNN 后端对照未通过完整生成一致性；cuDNN 还更慢，均未采用。正式路径保留 SDPA，实际调用 PyTorch FlashAttention。
+- 此前独立 FA2／cuDNN 后端对照未通过完整生成一致性；cuDNN 还更慢，均未采用；当时保留 SDPA，实际调用 PyTorch FlashAttention。
 
 | 256K 路径 | TTT 峰值显存 | baseline 峰值显存 |
 |---|---:|---:|
@@ -68,10 +74,10 @@ LaCT 使用作者公开重训权重，E²-TTT 使用作者官方权重；In-Plac
 | 仅压紧尾段 | 63.28 GiB | 不适用 |
 | 压紧尾段并分块 MLP | 56.84 GiB | 56.43 GiB |
 
-TTT 256K 平均耗时约 127.82 → 127.38 秒，没有实质提速。128K／256K 原 attention kernel 分别占所测真实 GPU 活动时间约 80.3%／89.4%，完整 attention 的提速探索暂告一段落。入口默认启用 `expandable_segments:True`，用于缓解已遇到的显存碎片问题。
+此前 B1 的 TTT 256K 平均耗时约 127.82 → 127.38 秒，没有实质提速。128K／256K 原 attention kernel 分别占所测真实 GPU 活动时间约 80.3%／89.4%；该单样本内核对照不能用于估计本轮批量推理速度。入口默认启用 `expandable_segments:True`，用于缓解已遇到的显存碎片问题。
 
 ## 结果记录
 
 三个方法的评估保存在 `<output-root>/eval/<output-id>/<benchmark>/`，默认 root 为 `artifacts/reproductions/<method>/`，默认 ID 为 `<checkpoint_name>_<YYYYMMDD-HHMM>`（上海时间）；续评须显式指定原 ID。产物保留运行计划、代码来源、逐样本预测、执行状态和汇总。LaCT Momentum 的已有正式结果保留；优化诊断、选参和临时验证产物不作为 benchmark 分数。
 
-三个方法续评均按全局样本 ID 补齐未完成记录，允许调整 GPU 数量和顺序。LaCT 与 E²-TTT 还允许调整 batch size，`original` 仍限 B1；In-Place TTT 每卡始终为 B1。E²-TTT 对尚未写出评分的样本复用原生生成缓存，再按原 task 评分。数据路径在代码中固定，目录见各自 README。源码边界见各方法 `UPSTREAM.md`。
+三个方法续评均按全局样本 ID 补齐未完成记录，允许调整 GPU 数量、顺序和 batch 设置；`original` 仍限 B1。E²-TTT 对尚未写出评分的样本复用原生生成缓存，再按原 task 评分。数据路径在代码中固定，目录见各自 README。源码边界见各方法 `UPSTREAM.md`。

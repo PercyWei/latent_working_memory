@@ -1,25 +1,15 @@
-"""保持官方更新公式和 checkpoint key 的 Qwen3 推理内存优化。"""
+"""保留官方计算公式和参数结构的 Qwen3 混长批量推理。"""
 
-from einops import rearrange
 from inference_model.hf_qwen3.modeling_qwen3 import (
     Qwen3ForCausalLM,
     Qwen3MLP,
-    TTTDynamicCache,
+    Qwen3Model,
 )
-from opt_einsum import contract
-import torch
 from torch import nn
+from transformers.generation import GenerationMixin
 
-
-class CompactTTTDynamicCache(TTTDynamicCache):
-    def TTT_update(self, ttt_state, layer_idx):
-        past_h, past_t, past_w = ttt_state
-        if past_h is not None:
-            if past_h.untyped_storage().nbytes() > past_h.numel() * past_h.element_size():
-                past_h = past_h.clone()
-            if past_t.untyped_storage().nbytes() > past_t.numel() * past_t.element_size():
-                past_t = past_t.clone()
-        super().TTT_update((past_h, past_t, past_w), layer_idx)
+from .padding import CacheStoppingCriteriaList, PaddedQwen3Model, PaddedTTTDynamicCache
+from .ttt import grouped_mlp_forward
 
 
 class OptimizedQwen3MLP(Qwen3MLP):
@@ -42,66 +32,18 @@ class OptimizedQwen3MLP(Qwen3MLP):
         self.mlp_chunk_size = 0
 
     def forward(self, x, t=None, past_w=None):
-        seq_len = x.shape[1]
-        if self.mlp_chunk_size == 0 or seq_len <= self.mlp_chunk_size:
+        if self.mlp_chunk_size == 0 or x.shape[1] <= self.mlp_chunk_size:
             return super().forward(x, t, past_w)
-
-        ttt = hasattr(self, "ttt_conv")
-        if not ttt or t is None or seq_len < self.ttt_chunk:
-            current_w = (
-                (self.down_proj.weight.clone() if past_w is None else past_w) if ttt else None
-            )
-            output = None
-            for start in range(0, seq_len, self.mlp_chunk_size):
-                end = min(start + self.mlp_chunk_size, seq_len)
-                part = x[:, start:end, :]
-                h = self.act_fn(self.gate_proj(part)) * self.up_proj(part)
-                y = (
-                    nn.functional.linear(h, current_w, self.down_proj.bias)
-                    if ttt
-                    else self.down_proj(h)
-                )
-                if output is None:
-                    output = y.new_empty((x.shape[0], seq_len, self.hidden_size))
-                output[:, start:end, :] = y
-            return (output, current_w) if ttt else output
-
+        if not hasattr(self, "ttt_conv"):
+            return grouped_mlp_forward(self, x)
+        # The upstream decoder uses the original single-row MLP signature.
+        # Mixed batches enter ttt_forward with independent sample states.
         if x.shape[0] != 1:
-            raise ValueError("TTT inference supports batch size 1")
-        current_w = self.down_proj.weight.clone() if past_w is None else past_w
-        # 保持官方卷积输入形状，一次计算各自独立、以零填充边界的 TTT chunk。
-        t_padded = self.padding(t)
-        bs, chunk_num, chunk_size, _ = t_padded.shape
-        t_conv = (
-            self.ttt_conv(t_padded.transpose(-1, -2).reshape(bs * chunk_num, -1, chunk_size))
-            .transpose(-1, -2)
-            .reshape(bs, chunk_num, chunk_size, -1)
+            raise ValueError("TTT batches require the optimized sample-state scheduler")
+        values, weights = grouped_mlp_forward(
+            self, x, t, None if past_w is None else past_w.unsqueeze(0)
         )
-        y = torch.zeros_like(t_conv)
-        for start in range(0, seq_len, self.mlp_chunk_size):
-            end = min(start + self.mlp_chunk_size, seq_len)
-            part = x[:, start:end, :]
-            h = self.act_fn(self.gate_proj(part)) * self.up_proj(part)
-            h_padded = self.padding(h)
-            first_chunk = start // self.ttt_chunk
-            for offset, current_h in enumerate(h_padded[0]):
-                index = first_chunk + offset
-                current_t = t_conv[0][index]
-                current_y = contract("d h, c h -> c d", current_w, current_h)
-                y[0][index] = current_y
-                if seq_len % self.ttt_chunk == 0 or index != chunk_num - 1:
-                    if self.ttt_proj is not None:
-                        dw = (
-                            contract(
-                                "c h, c d, d e -> e h", current_h, current_t, self.ttt_proj.weight
-                            )
-                            * self.ttt_lr
-                        )
-                    else:
-                        dw = contract("c h, c d -> d h", current_h, current_t) * self.ttt_lr
-                    current_w = current_w + dw
-        out = rearrange(y, "b t c d -> b (t c) d")[:, :seq_len, :]
-        return out, current_w
+        return values, weights[0]
 
 
 class OptimizedQwen3ForCausalLM(Qwen3ForCausalLM):
@@ -122,12 +64,37 @@ class OptimizedQwen3ForCausalLM(Qwen3ForCausalLM):
             ):
                 raise ValueError("mlp_chunk_size must be a multiple of each TTT chunk size")
         self.compact_tails = compact_tails
+        self.model.__class__ = PaddedQwen3Model if compact_tails else Qwen3Model
         for layer in self.model.layers:
             layer.mlp.mlp_chunk_size = mlp_chunk_size
 
+    @classmethod
+    def _supports_default_dynamic_cache(cls):
+        return False
+
+    def _get_stopping_criteria(self, generation_config, stopping_criteria, tokenizer=None):
+        criteria = super()._get_stopping_criteria(generation_config, stopping_criteria, tokenizer)
+        if self.compact_tails:
+            return CacheStoppingCriteriaList(criteria, self._generation_cache)
+        return criteria
+
     def generate(self, **kwargs):
-        if self.compact_tails and self.model.ttt_mode:
-            if kwargs.get("past_key_values") is not None:
-                raise ValueError("Each compact-tail generate call starts with a fresh cache")
-            kwargs["past_key_values"] = CompactTTTDynamicCache()
-        return super().generate(**kwargs)
+        if not self.compact_tails:
+            return super().generate(**kwargs)
+        if kwargs.get("past_key_values") is not None:
+            raise ValueError("Each optimized generate call starts with fresh sample states")
+        input_ids = kwargs["input_ids"]
+        generation_config = kwargs.get("generation_config", self.generation_config)
+        if (kwargs.get("num_beams", generation_config.num_beams) != 1
+                or kwargs.get("num_return_sequences", generation_config.num_return_sequences) != 1
+                or kwargs.get("do_sample", generation_config.do_sample)):
+            raise ValueError("Optimized evaluation supports greedy, single-beam generation")
+        cache = PaddedTTTDynamicCache(input_ids.shape[0], input_ids.device)
+        cache.prompt_width = input_ids.shape[1]
+        kwargs["past_key_values"] = cache
+        self._generation_cache = cache
+        try:
+            # Invoke the HF loop with our sample cache, bypassing the upstream B1 guard.
+            return GenerationMixin.generate(self, **kwargs)
+        finally:
+            del self._generation_cache

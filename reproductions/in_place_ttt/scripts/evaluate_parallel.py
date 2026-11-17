@@ -1,4 +1,4 @@
-"""In-Place TTT 的单卡、多卡 B1 评估及跨设备续评。"""
+"""In-Place TTT 的单卡、多卡评估及跨设备、batch 设置续评。"""
 
 import argparse
 from contextlib import contextmanager
@@ -22,6 +22,7 @@ from evaluation_runtime import (
     write_json,
 )
 from in_place_ttt.scripts import records as state
+from in_place_ttt.scripts.batching import execution_parameters
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -95,6 +96,9 @@ def execute(args, interruption):
         if saved is not None and saved != protocol:
             changed = [field for field in protocol if saved[field] != protocol[field]]
             raise ValueError(f"Frozen In-Place TTT evaluation settings differ: {', '.join(changed)}")
+        batch_parameters = execution_parameters(
+            args.batch_size, args.batch_size_by_length, args.lengths, args.inference_mode
+        )
         expected = state.load_samples(protocol)
         records, sources = state.collect_records(directory, protocol, expected)
         pending = [sample_id for sample_id in expected if sample_id not in records]
@@ -102,7 +106,7 @@ def execute(args, interruption):
 
         devices = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
         parameters = {
-            "devices": devices, "num_shards": len(devices), "batch_size": 1,
+            "devices": devices, "num_shards": len(devices), **batch_parameters,
             "python": sys.executable,
             "omp_num_threads": os.environ["OMP_NUM_THREADS"],
             "mkl_num_threads": os.environ["MKL_NUM_THREADS"],
@@ -157,7 +161,10 @@ def execute(args, interruption):
                     "--protocol-file", str(plan_path), "--output-dir", str(part),
                     "--sample-ids-file", str(ids_file), "--execution-attempt", str(number),
                     "--shard-index", str(rank), "--runtime-file", str(directory / "runtime.json"),
+                    "--batch-size", str(args.batch_size),
                 ]
+                if args.batch_size_by_length:
+                    command.extend(["--batch-size-by-length", *args.batch_size_by_length])
                 log_path = attempt_dir / "logs" / f"shard-{rank}.log"
                 log = log_path.open("x")
                 logs.append(log)
@@ -230,6 +237,8 @@ def main():
     parser.add_argument("--inference-mode", choices=("original", "optimized"))
     parser.add_argument("--mlp-chunk-size", type=int)
     parser.add_argument("--lengths", type=int, nargs="+", choices=state.LENGTHS)
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--batch-size-by-length", nargs="+", default=[], metavar="LENGTH=BATCH")
     args = parser.parse_args()
     if os.environ.get("CUDA_VISIBLE_DEVICES") not in ("0", "1", "0,1", "1,0"):
         parser.error("Select physical GPUs 0 and/or 1 with CUDA_VISIBLE_DEVICES")

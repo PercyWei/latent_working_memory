@@ -33,7 +33,9 @@ LaCT 的来源目录为 `source/lact/`、`source/flame/`；E²-TTT 为 `source/e
 | E²-TTT | [e2_ttt/eval.sh](e2_ttt/eval.sh) | 两项 RULER，512–16K；SQuAD completion、SWDE | [E²-TTT 说明](e2_ttt/README.md) |
 | In-Place TTT | [in_place_ttt/eval.sh](in_place_ttt/eval.sh) | 十三项 RULER，4K–256K | [In-Place TTT 说明](in_place_ttt/README.md) |
 
-三个方法的新运行均使用 `--output-root`／`--output-id`，各 benchmark 分别保存在 `<output-root>/eval/<output-id>/<benchmark>/`；续评须指定原 ID 并追加 `--resume`。各方法允许调整的设置见对应 README。模型目录为 `~/rivermind-data/models/reproductions/<method>/`，数据位于 `data/`，结果位于 `artifacts/reproductions/<method>/`。
+三个方法默认使用 `original`，保留 B1 路径；`optimized` 支持单样本、等长及混长左 padding batch，通过 `--batch-size` 和 `--batch-size-by-length` 设置每卡上限。各样本的 attention／TTT 状态独立，验证范围见[复现状态](20261110_ttt_reproduction_status.md)。
+
+三个方法的新运行均使用 `--output-root`／`--output-id`，各 benchmark 分别保存在 `<output-root>/eval/<output-id>/<benchmark>/`；续评须指定原 ID 并追加 `--resume`，GPU 数量、顺序及 batch 设置可调整。模型目录为 `~/rivermind-data/models/reproductions/<method>/`，数据位于 `data/`，结果位于 `artifacts/reproductions/<method>/`。
 
 环境安装见[评估环境](20261109_environment_setup.md)，数据下载与构造见[评估数据准备](20261108_ttt_data_preparation.md)。验证结论见[复现状态](20261110_ttt_reproduction_status.md)，当前参数见各方法 README，源码来源与本地实现边界见各方法 `UPSTREAM.md`。
 

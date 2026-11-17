@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261116 22:12:29 Asia/Shanghai
+最后修订时间：20261117 10:05:38 Asia/Shanghai
 
 本目录使用 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308) 的官方实现和作者公开 checkpoint。公开权重加载、生成和计分检查已完成，尚未完成本轮计划的完整评估。
 
@@ -67,13 +67,13 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 
 | 参数 | 默认值与约定 |
 |---|---|
-| `--resume` | 沿用原评估协议补齐未完成样本，默认不开启 |
+| `--resume` | 沿用原评估协议补齐未完成样本的评估，默认不开启 |
 | `--benchmarks` | 默认 `ruler squad_completion swde`，可选择其中一项或多项 |
 | `--checkpoint` | 必需，本地完整 checkpoint 目录 |
 | `--output-root` | 产物父目录，默认 `artifacts/reproductions/e2_ttt` |
 | `--output-id` | 默认 `<checkpoint_name>_<YYYYMMDD-HHMM>` |
 | `--inference-mode` | 推理模式，支持 `original`（默认）和 `optimized` |
-| `--batch-size` | 每卡样本数上限，默认 `1`；`original` 要求实际生效的 batch 为 `1` |
+| `--batch-size` | 每卡样本数上限，默认 `1`；只有 `optimized` 支持大于 1 |
 | `--batch-size-by-length` | 按评估长度覆盖每卡上限，未指定的长度使用 `--batch-size`，仅作用于 RULER |
 | `--lengths` | 默认 `512 1024 2048 4096 8192 16384`，仅作用于 RULER |
 
