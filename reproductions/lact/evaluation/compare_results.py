@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""从已有评估结果生成 LaCT Momentum 760M 的离线对比图表。"""
+"""从已有评估结果生成 LaCT Momentum／Muon 760M 的离线论文对比图表。"""
 
 import argparse
 import json
@@ -39,15 +39,29 @@ def build_comparison(directory):
         raise ValueError("请提供完整评估根目录，而非某一卡的分片目录")
     config = plan["checkpoint_config"]
     expected = {
-        "num_lact_heads": 2, "num_hidden_layers": 24, "hidden_size": 1536,
-        "use_momentum": True, "use_muon": False, "ttt_prenorm": True,
-        "ttt_nope": False,
+        "num_hidden_layers": 24, "hidden_size": 1536,
+        "lact_chunk_size": 2048, "use_momentum": True,
     }
     if any(config[key] != value for key, value in expected.items()):
-        raise ValueError("当前论文参照仅用于公开两头 Momentum/RoPE/PreNorm 760M")
+        raise ValueError("当前论文参照用于 24 层、hidden size 1536、chunk 2048 的公开 760M 模型")
+    # Muon 公开权重同时启用 Momentum；按 use_muon 区分论文参考。
+    if config["use_muon"]:
+        if config["num_lact_heads"] != 4 or not config["ttt_nope"]:
+            raise ValueError("Muon 论文对照支持公开四头 NoPE 的 PreNorm／PostNorm 760M 配置")
+        references = [{"key": "paper_muon_four_heads", "label": "论文 Muon 4 heads"}]
+        variant = "Muon／NoPE／" + ("PreNorm" if config["ttt_prenorm"] else "PostNorm")
+    else:
+        if config["num_lact_heads"] != 2 or config["ttt_nope"] or not config["ttt_prenorm"]:
+            raise ValueError("Momentum 论文对照支持公开两头 RoPE／PreNorm 760M 配置")
+        references = [
+            {"key": "paper_two_heads", "label": "论文 2 heads"},
+            {"key": "paper_four_heads", "label": "论文 4 heads"},
+        ]
+        variant = "Momentum／RoPE／PreNorm"
     paper = json.loads(
         (METHOD_ROOT / "evaluation/ruler_paper_reference.json").read_text(encoding="utf-8")
     )
+    reference_rows = {reference["key"]: paper["rows"][reference["key"]] for reference in references}
     lengths = paper["lengths"]
     if [row["length"] for row in summary["by_length"]] != lengths:
         raise ValueError("完整对比要求 4K、8K、16K、32K 四个长度")
@@ -65,7 +79,7 @@ def build_comparison(directory):
             row = {
                 "length": item["length"], "label": f"{item['length'] // 1024}K",
                 "ours": item["tasks"][key]["accuracy"] if key in TASKS else item[key],
-                **{name: reference[key][index] for name, reference in paper["rows"].items()},
+                **{name: reference[key][index] for name, reference in reference_rows.items()},
             }
             if key in TASKS:
                 row["samples"] = item["tasks"][key]["samples"]
@@ -73,7 +87,11 @@ def build_comparison(directory):
         return rows
 
     data = {
-        "model_label": Path(summary["checkpoint"]).name,
+        "model_label": (
+            f"{Path(summary['checkpoint']).name} · {variant}"
+            f"（760M，实际 {config['num_lact_heads']} heads）"
+        ),
+        "references": references,
         "groups": [{"key": key, "label": label, "rows": comparison_rows(key)} for key, label in GROUPS.items()],
         "tasks": [{"key": key, "label": label, "rows": comparison_rows(key)} for key, label in TASKS.items()],
     }

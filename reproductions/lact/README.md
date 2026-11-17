@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261117 13:06:59 Asia/Shanghai
+最后修订时间：20261117 14:52:39 Asia/Shanghai
 
 本目录使用 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现和作者公开 checkpoint。Momentum 760M 已于 20261110 完成下表全部 12,000 条 RULER 样本的评估，结果查看方式见[查看结果](#查看结果)。
 
@@ -90,7 +90,18 @@ uv run reproductions/lact/evaluation/compare_results.py \
   --eval-dir artifacts/reproductions/lact/eval/lact-momentum-rope-prenorm-nheads4-chunk2048-760m_20261116/ruler
 ```
 
-脚本读取[论文对照数据](evaluation/ruler_paper_reference.json)，在该 RULER 目录内生成 `comparison.html`。
+两个 Muon 使用同一命令，只需替换 `--eval-dir`。例如，查看本次 PostNorm 结果：
+
+```bash
+uv run reproductions/lact/evaluation/compare_results.py \
+  --eval-dir artifacts/reproductions/lact/eval/lact-muon-nope-postnorm-nheads2-chunk2048-760m_20261116/ruler
+```
+
+PreNorm 使用 `lact-muon-nope-prenorm-nheads2-chunk2048-760m` 对应的实际 `output-id`，同样指向其 `ruler/` 子目录。
+
+脚本依据评估计划保存的 `checkpoint_config`，识别实际两头 Momentum／RoPE／PreNorm，以及实际四头 Muon／NoPE 的 PreNorm 和 PostNorm。读取[论文对照数据](evaluation/ruler_paper_reference.json)后，在评估目录生成 `comparison.html`，保留分组均值、分组对比和逐任务结果，论文数值旁显示差值（论文 − 复现，百分点）。
+
+Momentum 对照论文 760M 的两头和四头结果；两个 Muon 共用论文 760M Muon 四头的一套结果。原文未单列公开权重的 PreNorm／PostNorm／NoPE 配置，Muon 报告中的论文结果仅作参照。
 
 ## 来源记录与输出
 

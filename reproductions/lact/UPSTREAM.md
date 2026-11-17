@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261117 13:06:59 Asia/Shanghai
+最后修订时间：20261117 14:52:39 Asia/Shanghai
 
 ## 来源与迁入范围
 
@@ -51,7 +51,7 @@ LaCT 对应论文 [Test-Time Training Done Right v1](https://arxiv.org/abs/2505.
 - **多卡与续评。** 每卡评估互斥样本，按全局样本 ID 收集历史原始预测、分配未完成输入并核对完整覆盖；固定模型和评估协议，GPU 数量、顺序及 batch 设置可按轮调整。运行目录锁与存活 worker 检查协调并发启动。
 - **来源与汇总。** 分别记录上游 revision、本地 commit、Git 改动状态、实际实现路径及每轮执行设置，保留历史来源的组批信息；合并时读取原始预测重新计分。
 - **进度上报。** 使用公共 `WorkerProgress` 和展示器保存独立观测快照，不改变生成、TTT 更新、评分或续评流程；展示规则见[公共说明](../README.md#进度展示)。
-- **结果展示。** [compare_results.py](evaluation/compare_results.py) 读取同目录的 [ruler_paper_reference.json](evaluation/ruler_paper_reference.json)，为公开两头 Momentum／RoPE／PreNorm 760M 的完整六任务、四长度 RULER 结果生成离线论文对比，包括分组均值、分组对比和逐任务图表。
+- **结果展示。** [compare_results.py](evaluation/compare_results.py) 按保存的模型配置，为三个公开 760M checkpoint 的完整六任务、四长度 RULER 结果生成分组均值、分组对比和逐任务图表。Momentum 对照论文两头／四头结果，两个 Muon 共用论文 Muon 四头结果；参照数据与适用范围见 [ruler_paper_reference.json](evaluation/ruler_paper_reference.json)。
 
 运行参数、输出命名与目录结构见 [README](README.md#环境与运行命令)。
 
