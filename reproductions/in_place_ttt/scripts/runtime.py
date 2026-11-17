@@ -138,15 +138,19 @@ def generate_batch(wrapper, prompts, max_out_len=64, max_total_tokens=262144, to
     tokens = {name: value.to(wrapper.model.device) for name, value in tokens.items()}
     generation_kwargs = wrapper.generation_kwargs.copy()
     stop_words = list(set(wrapper.stop_words))
+    row_stop_trackers = []
     if stop_words:
-        generation_kwargs["stopping_criteria"] = _get_stopping_criteria(
+        criteria = _get_stopping_criteria(
             stop_words, wrapper.tokenizer, len(prompts)
         )
+        generation_kwargs["stopping_criteria"] = criteria
+        row_stop_trackers = [criterion.done_tracker for criterion in criteria]
     generation_kwargs.update(
         max_new_tokens=max_out_len,
         pad_token_id=wrapper.tokenizer.pad_token_id,
         return_dict_in_generate=True,
         output_scores=False,
+        row_stop_trackers=row_stop_trackers,
     )
     tokens.pop("token_type_ids", None)
     result = wrapper.model.generate(**tokens, **generation_kwargs)

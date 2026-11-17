@@ -11,6 +11,6 @@ fi
 export CUDA_VISIBLE_DEVICES="$EVAL_GPU"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF-expandable_segments:True}"
 export TOKENIZERS_PARALLELISM=false
-export PYTHONPATH="$PROJECT_ROOT/reproductions:$METHOD_DIR/source/in_place_ttt:$METHOD_DIR/scripts:$METHOD_DIR${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$PROJECT_ROOT/reproductions:$METHOD_DIR/source/in_place_ttt:$METHOD_DIR${PYTHONPATH:+:$PYTHONPATH}"
 cd "$PROJECT_ROOT"
-exec python -u "$METHOD_DIR/scripts/evaluate_parallel.py" "$@"
+exec python -u -m in_place_ttt.scripts.evaluate_parallel "$@"

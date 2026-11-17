@@ -157,7 +157,7 @@ def execute(args, interruption):
                 ids_file = attempt_dir / "assignments" / f"shard-{rank}.json"
                 write_json(ids_file, assigned)
                 command = [
-                    sys.executable, "-u", str(ROOT / "reproductions/in_place_ttt/scripts/evaluate.py"),
+                    sys.executable, "-u", "-m", "in_place_ttt.scripts.evaluate",
                     "--protocol-file", str(plan_path), "--output-dir", str(part),
                     "--sample-ids-file", str(ids_file), "--execution-attempt", str(number),
                     "--shard-index", str(rank), "--runtime-file", str(directory / "runtime.json"),

@@ -7,7 +7,6 @@ from inference_model.hf_qwen3.modeling_qwen3 import (
     TTTDynamicCache,
     apply_rotary_pos_emb,
 )
-from opencompass.models.huggingface_above_v4_33 import MultiTokenEOSCriteria
 import torch
 from transformers.generation.stopping_criteria import StoppingCriteriaList
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
@@ -32,6 +31,7 @@ class PaddedTTTDynamicCache(TTTDynamicCache):
         self.finished = torch.zeros(batch_size, device=device, dtype=torch.bool)
         self.generated_lengths = torch.zeros(batch_size, device=device, dtype=torch.long)
         self.prompt_width = None
+        self.stop_trackers = []
 
     def get_seq_length(self, layer_idx=0):
         # HF uses the padded width to slice newly appended input IDs.
@@ -93,11 +93,10 @@ class CacheStoppingCriteriaList(StoppingCriteriaList):
         finished = stopped.clone()
         # OpenCompass tracks rows separately but returns an all-rows scalar.
         # Observe its existing matches without changing HF's stop decision.
-        for criterion in self:
-            if isinstance(criterion, MultiTokenEOSCriteria):
-                finished = finished | torch.tensor(
-                    criterion.done_tracker, device=finished.device, dtype=torch.bool
-                )
+        for tracker in self.cache.stop_trackers:
+            finished = finished | torch.tensor(
+                tracker, device=finished.device, dtype=torch.bool
+            )
         self.cache.finish_rows(finished, input_ids.shape[1])
         return stopped
 

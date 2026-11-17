@@ -79,6 +79,7 @@ class OptimizedQwen3ForCausalLM(Qwen3ForCausalLM):
         return criteria
 
     def generate(self, **kwargs):
+        row_stop_trackers = kwargs.pop("row_stop_trackers", [])
         if not self.compact_tails:
             return super().generate(**kwargs)
         if kwargs.get("past_key_values") is not None:
@@ -91,6 +92,7 @@ class OptimizedQwen3ForCausalLM(Qwen3ForCausalLM):
             raise ValueError("Optimized evaluation supports greedy, single-beam generation")
         cache = PaddedTTTDynamicCache(input_ids.shape[0], input_ids.device)
         cache.prompt_width = input_ids.shape[1]
+        cache.stop_trackers = row_stop_trackers
         kwargs["past_key_values"] = cache
         self._generation_cache = cache
         try:

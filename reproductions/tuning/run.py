@@ -141,7 +141,7 @@ def main():
     args.checkpoint, args.output_dir = args.checkpoint.expanduser().resolve(), args.output_dir.expanduser().resolve()
     args.output_dir.mkdir(parents=True, exist_ok=False)
     method_root = ROOT / "reproductions" / args.method
-    paths = [ROOT / "reproductions", method_root / "scripts", method_root / "source" / args.method, method_root]
+    paths = [ROOT / "reproductions", method_root / "source" / args.method, method_root]
     env = {**os.environ, "CUDA_VISIBLE_DEVICES": "0", "TOKENIZERS_PARALLELISM": "false", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "PYTHONPATH": os.pathsep.join(map(str, paths))}
     env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     python = Path.home() / "rivermind-data/envs" / f"ttt-{args.method}" / "bin/python"
