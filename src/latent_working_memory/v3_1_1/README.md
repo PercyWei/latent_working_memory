@@ -189,8 +189,9 @@ done
 | [pretrain_default.json](../../../configs/v3_1_1/pretrain_default.json) | 通用 K256 AE／LM 预训练 |
 | [post_default.json](../../../configs/v3_1_1/post_default.json) | 通用 K256 GRPO 后训练，4 路采样、固定 T=1 |
 | [pretrain_k256.json](../../../configs/v3_1_1/pretrain_k256.json) | FineWeb 5k 预训练与服务器计算设置 |
-| [post_k256.json](../../../configs/v3_1_1/post_k256.json) | FactQA 长度课程、GRPO 与截断反传 |
-| [post_scst_k256.json](../../../configs/v3_1_1/post_scst_k256.json) | 同套后训练数据与执行设置，使用 SCST 单随机路径及线性退火 |
+| [post_k256.json](../../../configs/v3_1_1/post_k256.json) | FactQA 长度课程与截断反传，GRPO 4 路采样、固定 T=1 |
+| [post_k256_temp.json](../../../configs/v3_1_1/post_k256_temp.json) | 同套后训练数据与执行设置，GRPO 4 路采样、线性温度退火 |
+| [post_k256_scst_temp.json](../../../configs/v3_1_1/post_k256_scst_temp.json) | 同套后训练数据与执行设置，SCST 单随机路径加 greedy 基线、线性温度退火 |
 
 两份 `*_default.json` 的主要设置如下：
 
@@ -206,7 +207,7 @@ done
 | 调度 | warmup 50 steps，`min_lr_ratio=0.1` | 相同 |
 | 跨段反传 | — | `bptt_steps=null`，完整反传 |
 
-三份 K256 实验预设使用 `/root/rivermind-data/models/Qwen3-4B-Instruct-2507`，开启 FA2、BF16 autocast 和层内重算。它们的执行设置为：
+K256 实验预设使用 `/root/rivermind-data/models/Qwen3-4B-Instruct-2507`，开启 FA2、BF16 autocast 和层内重算。它们的执行设置为：
 
 | 设置 | K256 预训练 | K256 后训练（GRPO／SCST） |
 |---|---|---|
@@ -219,7 +220,7 @@ done
 | checkpoint 保留上限 | 5 | 6 |
 | 跨段反传 | — | `bptt_steps=2` |
 
-SCST 预设使用 `num_samples=1`，温度在进度 0.3～0.9 从 1.0 线性降至 0.2。通过 `--config configs/v3_1_1/post_scst_k256.json` 选择。
+两份 `*_temp.json` 均启用线性温度退火：前 30% 进度保持 T=1.0，30%～90% 从 1.0 降至 0.2，最后 10% 保持 T=0.2。进度按整个训练的实际 optimizer steps 计算，跨长度课程档位连续推进。GRPO 使用 `group_size=4`；SCST 使用 `num_samples=1`，每篇另计算一条 greedy 路径作为奖励基线，仅随机路径参与反向传播。
 
 ### 计算精度与显存
 
@@ -279,7 +280,7 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
   --gradient-accumulation-steps 8
 ```
 
-预训练来源与后训练须使用相同基座、K 和 LoRA 设置（rank、alpha、目标模块）。切换为 SCST 时选择上面的 SCST 配置，另设本次 `--run-id`。
+预训练来源与后训练须使用相同基座、K 和 LoRA 设置（rank、alpha、目标模块）。启用 GRPO 温度退火时，将 `--config` 改为 `configs/v3_1_1/post_k256_temp.json`；使用 SCST 温度退火时，改为 `configs/v3_1_1/post_k256_scst_temp.json`。每次新训练分别设置 `--run-id`，并通过 `--init-checkpoint` 指定预训练来源。
 
 运行根目录为 `<output_root>/<run_id>/`。显式 `run_id` 原样使用；为 `null` 或省略时，生成 `pretrain_k{K}_{YYYYMMDD-HHMM}` 或 `policy-post_k{K}_{YYYYMMDD-HHMM}`，时间采用 `Asia/Shanghai`，精确到分钟。
 
@@ -291,7 +292,7 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
 - 长度课程由 `curriculum_stage_epochs` 控制每档轮数，完成全部档位后结束。
 - `training.loop.max_steps` 可进一步限制总更新数；解析后的实际步数写入训练配置和 checkpoint。
 - `dev_every`、`save_every` 可设步数间隔或 `after_each_epoch`；每轮结束和最终步也执行 dev 与保存。dev 使用固定验证集。
-- `warmup_steps` 和 `min_lr_ratio` 控制线性预热与余弦衰减，各参数组共用调度倍率。
+- `warmup_steps` 和 `min_lr_ratio` 控制线性预热与余弦衰减，各参数组共用调度倍率；`min_lr_ratio=1.0` 时，预热后保持恒定学习率。
 
 恢复同阶段训练使用原 run 最新完整 checkpoint：
 
