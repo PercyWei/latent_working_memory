@@ -2,7 +2,7 @@
 
 创建时间：20261110 11:30:45 Asia/Shanghai
 
-最后修订时间：20261117 11:42:23 Asia/Shanghai
+最后修订时间：20261117 18:19:46 Asia/Shanghai
 
 ## 当前状态
 
@@ -79,7 +79,7 @@ attention 沿用原生 SDPA，按真实 query／key 长度分组；TTT 按读出
 
 主生成对照使用 `ffca4e08`，边界检查使用 `0401d1d7`，分歧定位使用 `c3efaadd`，服务器运行前 Git 均为 clean。修复了 OpenCompass 内部停止类的错误导入，以及本地 `evaluate.py` 遮蔽第三方库的问题；官方源码和模型公式未改。
 
-产物位于 `artifacts/reproductions/in_place_ttt/validation/optimized-batch-4k-8k_20261117-1052/`：`ttt/`、`baseline/` 保存计划、逐条预测及汇总，`boundaries/` 和 `numerical/` 保存边界与分歧定位结果。生成对照的 B2 峰值 allocated 分别约 11.74 GiB（TTT）、10.86 GiB（baseline）；未测 batch 上限或完整评估耗时。
+生成对照的 B2 峰值 allocated 分别约 11.74 GiB（TTT）、10.86 GiB（baseline）；未测 batch 上限或完整评估耗时。
 
 #### 历史 B1 测量
 
@@ -104,7 +104,7 @@ attention 沿用原生 SDPA，按真实 query／key 长度分组；TTT 按读出
 | In-Place TTT 32K TTT | 67.8 GiB | 68.92 小时 | 45.9 小时 | 59–80 小时 |
 | In-Place TTT 32K baseline | 69.0 GiB | 68.62 小时 | 45.7 小时 | 58–79 小时 |
 
-整卡峰值来自 `nvidia-smi`，包含模型载入与预热。耗时均为独占 GPU、环境和生成设置固定时的小样本外推；余量用于规划，不是统计置信区间。128K 同卡双进程使 TTT／baseline 的整池吞吐分别下降约 10.0%／9.2%，因此当时采用单进程。原始测量及选参产物位于 `artifacts/reproductions/in_place_ttt/evaluation-tuning_20261110/`。
+整卡峰值来自 `nvidia-smi`，包含模型载入与预热。耗时均为独占 GPU、环境和生成设置固定时的小样本外推；余量用于规划，不是统计置信区间。128K 同卡双进程使 TTT／baseline 的整池吞吐分别下降约 10.0%／9.2%，因此当时采用单进程。
 
 ## 结果记录
 
