@@ -2,17 +2,17 @@
 
 创建时间：20261110 11:30:45 Asia/Shanghai
 
-最后修订时间：20261117 01:10:58 Asia/Shanghai
+最后修订时间：20261117 11:00:12 Asia/Shanghai
 
 ## 当前状态
 
-LaCT、E²-TTT、In-Place TTT 的源码迁入、独立环境、数据接入及此前 checkpoint 运行检查已完成，均保留各自 `eval.sh`。三个方法默认使用 `original`，保留上游 B1 路径；显式选择 `optimized` 时按长度排序后相邻组批，左 padding 到批内最长输入，单样本、等长和混长输入使用同一状态路径。In-Place TTT 的本轮批量实现仅完成本地代码审查，尚未测试。
+LaCT、E²-TTT、In-Place TTT 的源码迁入、独立环境、数据接入及 checkpoint 运行检查已完成，均保留各自 `eval.sh`。三个方法默认使用 `original`，保留上游 B1 路径；显式选择 `optimized` 时按长度排序后相邻组批，左 padding 到批内最长输入，单样本、等长和混长输入使用同一状态路径。In-Place TTT 已完成 4K／8K 的 B1、等长和混长 B2 小样本验证。
 
 | 方法 | 正式评估范围 | 当前进度 |
 |---|---|---|
 | LaCT 760M | 六项 RULER，4K／8K／16K／32K，每任务每长度 500 条，共 12,000 条 | Momentum 已完成；两个 Muon 按需评估 |
 | E²-TTT MLP／SwiGLU 1.3B | 每模型 RULER 6,000 条、SQuAD completion 2,984 条、SWDE 1,111 条，共 10,095 条 | 已完成运行检查，完整评估尚未记录 |
-| In-Place TTT 32K TTT／baseline | 每模型十三项 RULER，4K–256K 七长度，每任务每长度 100 条，共 9,100 条 | 此前 B1 实现已通过运行检查；混长 batch 实现尚未测试，完整评估尚未记录 |
+| In-Place TTT 32K TTT／baseline | 每模型十三项 RULER，4K–256K 七长度，每任务每长度 100 条，共 9,100 条 | 4K／8K 的优化 B1、等长及混长 B2 已验证；完整评估尚未记录 |
 
 LaCT Momentum 的已有完整运行六任务、四长度宏平均为 **39.46%**，累计执行约 3.47 小时，[离线报告](lact/README.md#查看结果)保留逐任务分数和论文比较。公开权重实际为两头，是作者重训产物；它不是原论文表格对应的同一次训练结果。两个 Muon 公开权重实际为四头。
 
@@ -60,7 +60,26 @@ LaCT 使用作者公开重训权重，E²-TTT 使用作者官方权重；In-Plac
 
 attention 沿用原生 SDPA，按真实 query／key 长度分组；TTT 按读出长度、是否更新及适配权重状态分组，不要求混长样本同步提交。HF 原停止条件保留，结束行冻结状态，生成 IDs 按各行首次结束位置截取。批量路径支持 `default`、`linear`、`yarn`、`llama3` RoPE，不支持 `dynamic`、`longrope`。
 
-20261117 的混长 batch、批量 TTT 及评估接入仅完成本地代码审查，未运行测试、GPU 验证或性能测量。当前没有本轮 batch 上限、吞吐或全量耗时的实测结论。
+20261117 在 `zcy-memory-v4.2` 的物理 GPU 0（L40S 48GB）验证两份 checkpoint，MLP 分块为 `0`。每模型使用 `niah_single_1` 的六条真实样本：4K 和 8K 各三条；各长度中 A／B 自然等长，C 比 A 短 12 tokens。保留原提示词、greedy、64-token 预算和 OpenCompass 评分。
+
+下表为完整生成 token 序列与同一条样本的 `original B1` 一致的条数；文本一致条数相同。**所有条件的逐题评分均一致，所选样本均为 100%。**
+
+| checkpoint | 优化条件 | 4K 生成一致 | 8K 生成一致 | 两长度逐题评分一致 |
+|---|---|---:|---:|---:|
+| TTT | B1 | 3/3 | 3/3 | 6/6 |
+| TTT | 等长 B2 | 0/2 | 1/2 | 4/4 |
+| TTT | 混长 B2 | 1/2 | 2/2 | 4/4 |
+| baseline | B1 | 3/3 | 3/3 | 6/6 |
+| baseline | 等长 B2 | 0/2 | 2/2 | 4/4 |
+| baseline | 混长 B2 | 0/2 | 2/2 | 4/4 |
+
+- 混长 B2 交换槽位后，两个模型各四条生成均与交换前一致；各长度最后重放 A，均与对应 B1 一致。各次调用的有效 KV、真实进度和 TTT 尾段长度检查通过。
+- TTT 的 `C−1`、`C`、`C+1`、`2C`（`C=1024`）前缀分别执行 prefill 和一步 decode，原始／优化 B1 的 logits、尾段和 fast weights 逐位一致。混批 `[C−1,C+1]` 再输入一个 token 时只有首行提交；将首行标记为结束后再 decode，其 KV、尾段、权重及真实进度保持不变。真实生成样本均达到 64-token 预算，本轮未覆盖真实 EOS 提前结束。
+- 首个等长 B2 分歧分别出现在 TTT 的第 19 个、baseline 的第 21 个生成 token。共同生成历史相同，第一层 Q 投影输入逐位相同，仅改变 batch 后，投影最大绝对差分别为 `1.91e-6` 和 `4.88e-4`；最终 logits 最大绝对差均为 `0.25`，候选由相差 `0.25` 变为同分，从而改变 greedy 选择。这确认了 batch 形状可以引入浮点差异；所测差异均发生在正确数字之后的解释文字中，不能据此保证全量评分不变。
+
+主生成对照使用 `ffca4e08`，边界检查使用 `0401d1d7`，分歧定位使用 `c3efaadd`，服务器运行前 Git 均为 clean。修复了 OpenCompass 内部停止类的错误导入，以及本地 `evaluate.py` 遮蔽第三方库的问题；官方源码和模型公式未改。
+
+产物位于 `artifacts/reproductions/in_place_ttt/validation/optimized-batch-4k-8k_20261117-1052/`：`ttt/`、`baseline/` 保存计划、逐条预测及汇总，`boundaries/` 和 `numerical/` 保存边界与分歧定位结果。生成对照的 B2 峰值 allocated 分别约 11.74 GiB（TTT）、10.86 GiB（baseline）；未测 batch 上限或完整评估耗时。
 
 以下一致性与资源数据来自此前 B1 实现，不能视为本轮混长 batch 的验证或显存测量：
 
