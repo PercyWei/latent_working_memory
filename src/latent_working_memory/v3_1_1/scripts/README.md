@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261117 16:23:09 Asia/Shanghai
+最后修订时间：20261117 18:26:53 Asia/Shanghai
 
 计算协议、数据格式与模块分工见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256.json)中的基座与数据路径。
 
@@ -224,6 +224,8 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/eval_test.s
 
 ### 4.3 评估结果与看板
 
+- **终端进度**：主进程统一显示当前 checkpoint 的总体进度（历史缓存 + 本轮完成）及各卡本轮分片进度，包括阶段、批量、RULER 长度、已提交样本速率和预计剩余时间。Test 按完整文档计数，LoCoMo 与 RULER 按题目计数。交互终端每 5 秒原地刷新，重定向输出时每 30 秒记录快照，阶段变化和失败立即显示。逐样本明细和 worker 完整输出保存在 `eval.log`。
+
 - **产物路径**：下表路径均相对于运行根目录。
 
 | 评估产物 | 内容 |
@@ -234,11 +236,12 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/eval_test.s
 | `eval/<eval-id>/<task>/global_step_<N>/details.jsonl` | 按原始样本顺序汇总的回答与评分 |
 | `eval/<eval-id>/<task>/global_step_<N>/work.json` | 本次执行的待评估样本分工 |
 | `eval/<eval-id>/<task>/global_step_<N>/progress/worker_<rank>.jsonl` | 各分片逐文档／题目保存的完成进度与资源记录 |
+| `eval/<eval-id>/<task>/global_step_<N>/progress/worker_<rank>.json` | 阶段、批量与长度的展示快照，每次续评重建 |
 
 - **结果管理**：
 
   - **结果提交**：各分片在一篇 Test 文档的全部 QA 或一道 benchmark 题目完成后保存进度，样本齐全并通过校验后才提交最终 details 与 summary。RULER 另在 `lengths/<长度>/` 保存计划中各长度的完成结果，续跑复用已有记录。
-  - **运行关联**：Summary 的 `checkpoint` 指向绝对 `state.pt` 路径，`training_run.directory` 记录实际 `train/` 路径；执行进度直接打印到终端。
+  - **运行关联**：Summary 的 `checkpoint` 指向绝对 `state.pt` 路径，`training_run.directory` 记录实际 `train/` 路径。
 
 - **启动看板**：通过 Streamlit + ECharts 查看本地结果，`--dashboard-run-dir` 指向运行根目录；启动后访问 `http://127.0.0.1:8501`。
 
@@ -445,6 +448,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
             ├── eval.log                      各 GPU／分片的评估命令与日志
             ├── work.json                     本轮待评估样本分工
             ├── progress/worker_<rank>.jsonl    已完成样本与资源记录
+            ├── progress/worker_<rank>.json     本轮展示快照
             ├── summary.json                  指标、数据、比较指纹与资源统计
             ├── details.jsonl                 逐文档／题目回答与评分
             └── lengths/<长度>/               RULER 各长度的评估结果
@@ -456,6 +460,6 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 - **训练与恢复**：Rank 0 统一写入产物，train/dev 指标汇总全部 GPU 的实际样本。`state.pt` 保存可训练的压缩器 LoRA、memory embeddings、边界参数、优化器、scheduler、数据游标及各 rank 随机状态；恢复时严格核对训练计划与绑定状态，不依赖评估计划。完整格式见[方法说明](../README.md#代码与产物)。
 - **评估结果**：各卡结果按原始样本顺序汇总；Test 的 `qa_nll` 先按题、再按文档平均，`token_nll` 按答案 token 加权，EM／F1 按题平均，benchmark 沿用官方汇总。评估续跑复用完整结果；未完成时保留逐文档／题目进度，可调整 GPU 数和评估批量，只重新分片、组批剩余样本。RULER 继续复用已完成长度。
 - **比较指纹**：Benchmark summary 的 `comparison_data` 按原始输入、参考答案、生成预算与任务生成，忽略执行顺序，RULER 按长度分组；仅供跨方法展示，不参与 `eval.json`、缓存或恢复校验。
-- **日志与状态**：日志同时写入文件和终端，评估输出带 GPU／分片前缀；任务 `status.json` 的 `eval_run` 指向运行根目录，`selected_checkpoints` 是本次调度范围，与计划 `checkpoints` 的累计范围区分。状态记录 checkpoint 与各分片的设备、命令、起止时间、返回码和错误，整体进度仅统计本轮选择。
+- **日志与状态**：训练日志同步写入文件和终端；评估 worker 的完整输出合并到 `eval.log`，带 step、GPU 和 rank 前缀，终端由主进程统一展示进度。任务 `status.json` 的 `eval_run` 指向运行根目录，`selected_checkpoints` 是本次调度范围，与计划 `checkpoints` 的累计范围区分。状态记录 checkpoint 与各分片的设备、命令、起止时间、返回码和错误，整体进度仅统计本轮选择。
 - **展示方式**：SwanLab 默认开启，记录 train/dev、训练资源及配置。project、group 和 tags 通过配置文件设置；project 默认为 `latent-working-memory-v3.1`，group 未指定时默认 `run_id`。`--tracking offline` 关闭 SwanLab 记录，仅保留本地产物；恢复训练沿用 `swanlab.json` 中的 run。评估由独立 dashboard 展示，不读取 SwanLab 身份或凭据。
 - **后训练图表**：train 按实际指标生成损失、奖励、零优势比例、记忆用量、压缩程度、策略熵、回放概率偏差、梯度范数和学习率面板，均使用单 Y 轴。SCST 的 greedy 基线并入奖励图，单随机路径时 `reward_std` 仅保留本地；启用退火时增加 `policy_temperature` 图。dev 显示 QA NLL、记忆用量、压缩程度和策略熵四张图。train/dev 的 `memory_usage` 绘制 `blocks`，图例为 `memory_blocks`；`compression` 绘制全局聚合后的 `segment_tokens / K`，图例为 `compression_rate`。首次出现真实记录时注册并配置原生面板，运行中只追加真实 optimizer step 的标量，dev 在实际验证步记录。辅助统计保存在本地，完整指标口径与展示规则见[方法说明](../README.md#验证独立评估与记录)。

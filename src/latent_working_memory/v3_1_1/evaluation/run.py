@@ -1,6 +1,6 @@
 """逐 checkpoint 执行多卡样本分片，汇总结果并复用已完成样本。"""
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import ExitStack
 from datetime import datetime
 import json
@@ -19,6 +19,7 @@ import torch
 from ..config import config_from_dict
 from ..execution import evaluation_lock, run_lock, stop_process, visible_devices
 from .plans import prepare_evaluation_plan
+from .progress import EvaluationProgress
 from ..training.checkpoint import read_checkpoint
 from .evaluate import (
     finalize_sample_work, load_cached_evaluation, prepare_sample_work,
@@ -85,7 +86,6 @@ def _compute(results, summary, status_path, settings, task_module):
                 shard.update(status="running", started_at=_now())
                 _write_status(status_path, summary, results)
                 invocation = "$ " + shlex.join(shard["command"]) + "\n"
-                print(prefix + invocation, end="", flush=True)
                 log.write(prefix + invocation)
                 log.flush()
                 process = subprocess.Popen(
@@ -98,7 +98,6 @@ def _compute(results, summary, status_path, settings, task_module):
             try:
                 for line in process.stdout:
                     with lock:
-                        print(prefix + line, end="", flush=True)
                         log.write(prefix + line)
                         log.flush()
                 code = process.wait()
@@ -111,7 +110,9 @@ def _compute(results, summary, status_path, settings, task_module):
                 raise subprocess.CalledProcessError(code, shard["command"])
         except Exception as caught:
             error = caught
-            print(f"{prefix}failed: {error}", flush=True)
+            with lock:
+                log.write(f"{prefix}failed: {error}\n")
+                log.flush()
         with lock:
             shard.update(
                 status="stopped" if stopping.is_set() else "failed" if error else "finished",
@@ -120,7 +121,9 @@ def _compute(results, summary, status_path, settings, task_module):
                 finished_at=_now(),
             )
             if error:
-                shard["error"] = f"{type(error).__name__}: {error}"
+                shard["error"] = (f"process exited with code {error.returncode}"
+                                  if isinstance(error, subprocess.CalledProcessError)
+                                  else f"{type(error).__name__}: {error}")
             _write_status(status_path, summary, results)
 
     def stop_workers():
@@ -138,11 +141,12 @@ def _compute(results, summary, status_path, settings, task_module):
     handlers = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
     for signum in handlers:
         signal.signal(signum, interrupted)
-    executor = None
+    executor, progress = None, None
     try:
         for result in results:
             if result["status"] != "pending":
                 continue
+            progress = None
             result.update(status="running", started_at=_now())
             _write_status(status_path, summary, results)
             try:
@@ -173,13 +177,21 @@ def _compute(results, summary, status_path, settings, task_module):
                         })
                 result["workers"] = shards
                 _write_status(status_path, summary, results)
+                progress = EvaluationProgress(
+                    result["output_dir"], task_module.NAME, result["step"], work, shards,
+                )
+                progress.render(force=True)
                 if shards:
                     with Path(result["log_path"]).open("a", encoding="utf-8") as log:
                         executor = ThreadPoolExecutor(max_workers=len(shards))
                         try:
-                            futures = [executor.submit(worker, result, shard, log) for shard in shards]
-                            for future in as_completed(futures):
-                                future.result()
+                            pending = {executor.submit(worker, result, shard, log) for shard in shards}
+                            while pending:
+                                finished, pending = wait(pending, timeout=0.2, return_when=FIRST_COMPLETED)
+                                for future in finished:
+                                    future.result()
+                                with lock:
+                                    progress.render()
                         except BaseException:
                             stop_workers()
                             executor.shutdown(wait=True, cancel_futures=True)
@@ -189,6 +201,7 @@ def _compute(results, summary, status_path, settings, task_module):
                         executor = None
                 errors = [f"worker {shard['rank']}: {shard['error']}" for shard in shards
                           if shard["status"] != "finished"]
+                progress.set_stage("merging")
                 try:
                     finalize_sample_work(
                         result["checkpoint"], settings["data"], result["output_dir"],
@@ -212,10 +225,15 @@ def _compute(results, summary, status_path, settings, task_module):
                 if stopping.is_set():
                     raise
                 result.update(status="failed", return_code=1, error=f"{type(error).__name__}: {error}")
-                print(f"[evaluate step={result['step']}] failed: {error}", flush=True)
             result["finished_at"] = _now()
             _write_status(status_path, summary, results)
-    except BaseException:
+            if progress is not None:
+                progress.set_stage("completed" if result["status"] == "finished" else "failed")
+                progress.finish_line()
+            if result["status"] == "failed":
+                print(f"[evaluate step={result['step']}] failed: {result['error']} | log: {result['log_path']}",
+                      flush=True)
+    except BaseException as error:
         stop_workers()
         if executor is not None:
             executor.shutdown(wait=True, cancel_futures=True)
@@ -224,6 +242,9 @@ def _compute(results, summary, status_path, settings, task_module):
             for shard in result.get("workers", []):
                 if shard["status"] in {"pending", "running"}:
                     shard.update(status="stopped", finished_at=_now())
+        if progress is not None:
+            progress.set_stage("stopped" if isinstance(error, KeyboardInterrupt) else "failed")
+            progress.finish_line()
         raise
     finally:
         if executor is not None:

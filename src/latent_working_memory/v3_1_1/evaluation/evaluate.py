@@ -18,6 +18,7 @@ from .records import (
     prepare_evaluation, read_details,
 )
 from .shards import commit_results, load_progress, write_work
+from .progress import WorkerProgress
 
 
 def _evaluation_inputs(checkpoint_path, data, task_module, max_new_tokens, max_samples, lengths,
@@ -103,6 +104,7 @@ def evaluate_shard(checkpoint_path, data, output_dir, worker_rank, task_module, 
     if type(worker_rank) is not int or worker_rank < 0:
         raise ValueError("worker_rank must be a non-negative integer")
     output_dir = Path(output_dir).expanduser().resolve()
+    progress = WorkerProgress(output_dir, worker_rank)
     state, config, tokenizer, request, samples = _evaluation_inputs(
         checkpoint_path, data, task_module, max_new_tokens, max_samples, lengths, eval_id,
     )
@@ -114,13 +116,13 @@ def evaluate_shard(checkpoint_path, data, output_dir, worker_rank, task_module, 
         raise RuntimeError("CUDA is required to run v3.1.1 evaluation")
     device = initialize_device("cuda")
     set_seed(config.seed)
+    progress.set_stage("loading")
     model = MemoryModel(config.model_name_or_path, asdict(config.model), asdict(config.compute), device)
     model.load_trainable_state_dict(state["model"])
     model.eval()
     del state, tokenizer
-    progress = output_dir / "progress"
-    progress.mkdir(parents=True, exist_ok=True)
-    with (progress / f"worker_{worker_rank}.jsonl").open("a", encoding="utf-8") as stream:
+    progress_directory = output_dir / "progress"
+    with (progress_directory / f"worker_{worker_rank}.jsonl").open("a", encoding="utf-8") as stream:
         completed = 0
 
         def commit(entry):
@@ -136,9 +138,14 @@ def evaluate_shard(checkpoint_path, data, output_dir, worker_rank, task_module, 
         for batch in task_module.sample_batches(
             [by_id[sample_id] for sample_id in selected_ids], execution,
         ):
+            progress.set_stage(
+                "evaluating", batch_size=len(batch),
+                length=batch[0].metadata["length"] if task_module.NAME == "ruler" else None,
+            )
             with torch.no_grad(), model.forward_context():
                 task_module.compute_batch(batch, request, model, config, max_new_tokens, commit)
     del model
+    progress.set_stage("completed")
 
 
 def finalize_sample_work(checkpoint_path, data, output_dir, task_module, max_new_tokens=None,

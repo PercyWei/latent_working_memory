@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261117 16:19:25 Asia/Shanghai
+最后修订时间：20261117 18:26:53 Asia/Shanghai
 
 v3.1.1 先通过文本重建（AE）和续写（LM）训练压缩器（Writer），再用问答（QA）与强化学习联合训练记忆内容和分段边界。每次提交将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆回答问题。
 
@@ -375,6 +375,12 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/eval_test
 | 执行进度 | 复用已提交记录，将未完成样本按当前 GPU 数与批量重新分配 |
 | 修改协议 | 使用新的 eval-id，或以 `--overwrite` 重建当前任务的计划与全部 checkpoint 结果 |
 
+### 终端进度
+
+主进程按 checkpoint 统一显示总体完成数（历史缓存 + 本轮完成）、百分比、耗时和各 GPU 的进度。每卡显示本轮分片的完成数、阶段、当前批量，RULER 另显示长度；速率和剩余时间按本轮已提交样本估算。Test 在一篇文档的全部 QA 完成后计数，LoCoMo 与 RULER 按题目计数。
+
+交互终端每 5 秒原地刷新，重定向输出时每 30 秒记录一次快照，阶段变化和失败立即显示。逐样本明细与 worker 的完整输出保存在 `eval.log`，带 checkpoint step、GPU 和 rank 前缀。
+
 ### 本地看板
 
 ```bash
@@ -473,4 +479,4 @@ v3_1_1/
 
 Checkpoint 固定包含 `config`、`model`、`optimizer`、`scheduler`、`cursor`、`rng`、`boundary_rng`、`binding`。其中 `model` 包含 `memory_embeddings`、`adapter`、`boundary`，预训练的 `boundary` 为 `null`；`cursor.step` 表示已完成的 optimizer steps，随机状态按 rank 保存。恢复核对原配置、数据身份与游标。
 
-评估计划绑定基座、模型结构（含 U）、LoRA、计算设置和 seed，并保存固定数据与协议。任务 `status.json` 的 `selected_checkpoints` 记录本次执行范围，与计划的累计列表分别保存。逐文档／题目进度 flush 后可续评，完整 details 提交后生成最终 summary。
+评估计划绑定基座、模型结构（含 U）、LoRA、计算设置和 seed，并保存固定数据与协议。任务 `status.json` 的 `selected_checkpoints` 记录本次执行范围，与计划的累计列表分别保存。`progress/worker_<rank>.jsonl` 持续保存已完成样本，flush 后可续评；同目录的 `worker_<rank>.json` 是阶段、批量和长度的展示快照，每次续评重建。完整 details 提交后生成最终 summary。
