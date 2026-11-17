@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261117 13:06:59 Asia/Shanghai
+最后修订时间：20261117 15:35:23 Asia/Shanghai
 
 ## 评估目标与数据
 
@@ -81,9 +81,20 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 
 源码与优化适用范围见 [UPSTREAM.md](UPSTREAM.md) 及[复现状态](../20261110_ttt_reproduction_status.md)，训练与 checkpoint 转换见[官方说明](source/in_place_ttt/README.md)。
 
+## 查看结果
+
+```bash
+uv run reproductions/in_place_ttt/evaluation/compare_results.py \
+  --eval-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt_20261117
+```
+
+`--eval-dir` 指向 `<output-root>/eval/<output-id>`，报告保存为 `<eval-dir>/comparison.html`。
+
+TTT／baseline 自动匹配论文参照；要求本次 RULER 计划完成，论文仅有 13 项任务平均分。
+
 ## 来源记录与输出
 
-以下文件均位于 `<output-root>/eval/<output-id>/ruler/`。`scripts/eval.sh` 调用 `evaluation/evaluate_parallel.py` 统一调度，[进度展示](../README.md#进度展示)采用三方法的共同规则；续评按全局样本 ID 重新分配未完成样本。
+以下评估记录位于 `<output-root>/eval/<output-id>/ruler/`，对比报告 `comparison.html` 位于父目录 `<output-id>/`。`scripts/eval.sh` 调用 `evaluation/evaluate_parallel.py` 统一调度，[进度展示](../README.md#进度展示)采用三方法的共同规则；续评按全局样本 ID 重新分配未完成样本。
 
 | 文件 | 内容 |
 |---|---|
@@ -96,5 +107,6 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 | `attempts/attempt-<编号>/logs/shard-<i>.log`、`assignments/shard-<i>.json` | 各卡日志和样本分配 |
 | `attempts/attempt-<编号>/shards/shard-<i>/` | 各卡的计划、执行状态、环境及 `predictions.jsonl` |
 | `attempts/attempt-<编号>/merged/` | 全部预测、来源 `manifest.json`、汇总及 OpenCompass `results/` |
+| `comparison.html` | 执行对比脚本后在父目录生成的图表与表格 |
 
 最终分数读取 RULER 目录内的 `summary.json`，其中 `merged_summary_path` 指向本轮完整汇总。此前 A800 的 B1 测量及外推见[历史 B1 测量](../20261110_ttt_reproduction_status.md#历史-b1-测量)。

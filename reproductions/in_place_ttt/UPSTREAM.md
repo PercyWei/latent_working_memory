@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261117 13:06:59 Asia/Shanghai
+最后修订时间：20261117 15:30:12 Asia/Shanghai
 
 ## 来源与迁入范围
 
@@ -25,6 +25,7 @@
 | `evaluation/batching.py` | 各长度 batch 上限、长度排序与相邻组批 |
 | `evaluation/records.py`、`evaluation/merge_evaluation.py` | 数据与协议、全局样本 ID、记录收集和原生评分汇总 |
 | `evaluation/provenance.py` | 模型、缓存及计算实现的代码来源记录 |
+| `evaluation/compare_results.py`、`evaluation/paper_reference.json` | 已完成 RULER 结果的论文对比，复用公共图表模板 |
 | `../evaluation_runtime.py` | 三方法共用的进程清理、时间、严格 JSON、基础 Git 来源，以及 `WorkerProgress` 快照和 `EvaluationProgress` 展示 |
 | `evaluation/validate_optimization.py` | 此前 B1 优化的生成与状态对照 |
 | `evaluation/validate_batch.py`、`evaluation/validate_batch_boundaries.py` | 原始 B1 与优化 B1／等长／混长生成、评分，以及 TTT 边界和冻结行验证 |
@@ -57,6 +58,7 @@
 - **执行控制。** 先核对协议和历史记录，再创建本轮记录；目录锁与存活 worker 检查协调同目录执行。各 worker 在生成前核对共享 runtime。
 - **进度上报。** 使用公共 `WorkerProgress` 和展示器保存独立观测快照，不改变模型计算、生成、评分或续评流程；展示规则见[公共说明](../README.md#进度展示)。
 - **原生生成与评分。** `input + answer_prefix` 使用 greedy 生成最多 64 tokens，保留各行 EOS 和原停止条件，并检查总长度预算。合并时对每个任务／长度的完整预测调用 OpenCompass evaluator，再计算 13 项任务的等权平均。
+- **结果展示。** 从 `output-id` 总目录读取 `ruler/` 中已完成的完整计划，按保存的 `ttt_mode` 选择论文 TTT／baseline 平均分，在总目录生成 `comparison.html`；计划可包含部分长度。原文未提供逐任务分数，相应论文列显示 `—`；第三方权重与原文的配置差异见下节。
 
 评估及验证入口使用 `python -m in_place_ttt.evaluation.<模块名>`，以包方式导入本地评估代码。批量停止状态复用 OpenCompass 工厂创建的停止条件，不依赖其内部类的模块导出。
 

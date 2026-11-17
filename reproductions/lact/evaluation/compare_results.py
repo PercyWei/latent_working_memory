@@ -4,6 +4,10 @@
 import argparse
 import json
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from reporting.comparison import write_comparison
 
 
 METHOD_ROOT = Path(__file__).resolve().parents[1]
@@ -22,15 +26,16 @@ GROUPS = {
 
 
 def build_comparison(directory):
-    summary = json.loads((directory / "summary.json").read_text(encoding="utf-8"))
-    if (directory / "evaluation_plan.json").is_file():
-        plan = json.loads((directory / "evaluation_plan.json").read_text(encoding="utf-8"))
-        execution = json.loads((directory / "launcher_execution.json").read_text(encoding="utf-8"))
+    ruler_directory = directory / "ruler"
+    summary = json.loads((ruler_directory / "summary.json").read_text(encoding="utf-8"))
+    if (ruler_directory / "evaluation_plan.json").is_file():
+        plan = json.loads((ruler_directory / "evaluation_plan.json").read_text(encoding="utf-8"))
+        execution = json.loads((ruler_directory / "launcher_execution.json").read_text(encoding="utf-8"))
     else:
-        plan = json.loads((directory / "plan.json").read_text(encoding="utf-8"))
-        execution = json.loads((directory / "execution.json").read_text(encoding="utf-8"))
+        plan = json.loads((ruler_directory / "plan.json").read_text(encoding="utf-8"))
+        execution = json.loads((ruler_directory / "execution.json").read_text(encoding="utf-8"))
         if "worker_arguments" in plan:
-            plan = json.loads((directory / "merged/plan.json").read_text(encoding="utf-8"))
+            plan = json.loads((ruler_directory / "merged/plan.json").read_text(encoding="utf-8"))
     if execution["attempts"][-1]["status"] != "completed":
         raise ValueError("只为已完成的评估生成报告")
     if summary["benchmark"] != "ruler" or summary["score_unit"] != "percent":
@@ -87,6 +92,7 @@ def build_comparison(directory):
         return rows
 
     data = {
+        "title": "LaCT 复现与论文对比",
         "model_label": (
             f"{Path(summary['checkpoint']).name} · {variant}"
             f"（760M，实际 {config['num_lact_heads']} heads）"
@@ -94,17 +100,15 @@ def build_comparison(directory):
         "references": references,
         "groups": [{"key": key, "label": label, "rows": comparison_rows(key)} for key, label in GROUPS.items()],
         "tasks": [{"key": key, "label": label, "rows": comparison_rows(key)} for key, label in TASKS.items()],
+        "benchmarks": [],
+        "task_note": "",
     }
-    template = (METHOD_ROOT / "evaluation/comparison_template.html").read_text(encoding="utf-8")
-    payload = json.dumps(data, ensure_ascii=False, allow_nan=False).replace("<", "\\u003c")
-    output = directory / "comparison.html"
-    output.write_text(template.replace("__REPORT_DATA__", payload), encoding="utf-8")
-    return output
+    return write_comparison(directory, data)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--eval-dir", type=Path, required=True)
+    parser.add_argument("--eval-dir", type=Path, required=True, help="<output-root>/eval/<output-id> 运行目录")
     args = parser.parse_args()
     print(build_comparison(args.eval_dir.expanduser().resolve()))
 

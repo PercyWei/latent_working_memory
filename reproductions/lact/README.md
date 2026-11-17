@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261117 14:52:39 Asia/Shanghai
+最后修订时间：20261117 15:35:23 Asia/Shanghai
 
 本目录使用 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现和作者公开 checkpoint。Momentum 760M 已于 20261110 完成下表全部 12,000 条 RULER 样本的评估，结果查看方式见[查看结果](#查看结果)。
 
@@ -87,25 +87,16 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 
 ```bash
 uv run reproductions/lact/evaluation/compare_results.py \
-  --eval-dir artifacts/reproductions/lact/eval/lact-momentum-rope-prenorm-nheads4-chunk2048-760m_20261116/ruler
+  --eval-dir artifacts/reproductions/lact/eval/lact-momentum-rope-prenorm-nheads4-chunk2048-760m_20261116
 ```
 
-两个 Muon 使用同一命令，只需替换 `--eval-dir`。例如，查看本次 PostNorm 结果：
+`--eval-dir` 指向 `<output-root>/eval/<output-id>`，报告保存为 `<eval-dir>/comparison.html`。
 
-```bash
-uv run reproductions/lact/evaluation/compare_results.py \
-  --eval-dir artifacts/reproductions/lact/eval/lact-muon-nope-postnorm-nheads2-chunk2048-760m_20261116/ruler
-```
-
-PreNorm 使用 `lact-muon-nope-prenorm-nheads2-chunk2048-760m` 对应的实际 `output-id`，同样指向其 `ruler/` 子目录。
-
-脚本依据评估计划保存的 `checkpoint_config`，识别实际两头 Momentum／RoPE／PreNorm，以及实际四头 Muon／NoPE 的 PreNorm 和 PostNorm。读取[论文对照数据](evaluation/ruler_paper_reference.json)后，在评估目录生成 `comparison.html`，保留分组均值、分组对比和逐任务结果，论文数值旁显示差值（论文 − 复现，百分点）。
-
-Momentum 对照论文 760M 的两头和四头结果；两个 Muon 共用论文 760M Muon 四头的一套结果。原文未单列公开权重的 PreNorm／PostNorm／NoPE 配置，Muon 报告中的论文结果仅作参照。
+Momentum 和两个 Muon 均自动匹配论文参照；需完成六任务、四长度 RULER 评估。
 
 ## 来源记录与输出
 
-以下文件均位于 `<output-root>/eval/<output-id>/ruler/`。`scripts/eval.sh` 调用 `evaluation/evaluate_parallel.py` 统一调度，[进度展示](../README.md#进度展示)采用三方法的共同规则；续评复用历史逐样本预测，按当前 GPU 数量重新分配未完成的样本。
+以下评估记录位于 `<output-root>/eval/<output-id>/ruler/`，对比报告 `comparison.html` 位于父目录 `<output-id>/`。`scripts/eval.sh` 调用 `evaluation/evaluate_parallel.py` 统一调度，[进度展示](../README.md#进度展示)采用三方法的共同规则；续评复用历史逐样本预测，按当前 GPU 数量重新分配未完成的样本。
 
 | 文件 | 内容 |
 |---|---|
@@ -115,7 +106,7 @@ Momentum 对照论文 760M 的两头和四头结果；两个 Muon 共用论文 7
 | `attempts/attempt-<编号>/shards/shard-<i>/progress.json` | 当前 worker 的独立进度快照，仅用于展示 |
 | `attempts/attempt-<编号>/shards/shard-<i>/predictions.jsonl` | 本轮各卡实际完成的逐样本预测与评分 |
 | `attempts/attempt-<编号>/merged/predictions.jsonl` | 本轮完成后按样本顺序汇总的全部预测 |
-| `comparison.html` | 执行对比脚本生成的图表与表格 |
+| `comparison.html` | 执行对比脚本后在父目录生成的图表与表格 |
 
 最终分数读取 RULER 目录内的 `summary.json`，其中 `merged_summary_path` 指向本轮完整汇总。
 

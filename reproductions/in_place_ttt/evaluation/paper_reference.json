@@ -1,0 +1,21 @@
+{
+  "paper_url": "https://arxiv.org/abs/2604.06169v1",
+  "table_url": "https://arxiv.org/html/2604.06169v1#S4.T1",
+  "table_label": "tab:ruler128k_longct",
+  "lengths": [4096, 8192, 16384, 32768, 65536, 131072, 262144],
+  "score_unit": "percent",
+  "rows": {
+    "baseline": {
+      "label": "论文 baseline",
+      "ruler_average": [96.6, 94.1, 92.1, 88.7, 74.3, 74.8, 41.7]
+    },
+    "ttt": {
+      "label": "论文 In-Place TTT",
+      "ruler_average": [96.1, 95.6, 92.7, 89.3, 78.7, 77.0, 43.9]
+    }
+  },
+  "notes": [
+    "数值来自论文 v1 Table 1 的 Qwen3-4B Baseline／In-Place TTT 行，为 13 项 RULER 任务的平均准确率；原文未提供逐任务分数。",
+    "论文模型经过 32K 和 128K 两阶段继续预训练并使用 YaRN；当前评估使用第三方 32K TTT／baseline 权重，训练语料、预算和 RoPE 配置不同。论文分数仅作参照，不代表同一训练配置的精确复现。"
+  ]
+}

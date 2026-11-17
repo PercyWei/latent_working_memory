@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261117 13:06:59 Asia/Shanghai
+最后修订时间：20261117 15:30:12 Asia/Shanghai
 
 ## 来源与迁入范围
 
@@ -23,6 +23,7 @@
 | `evaluation/batch_harness.py`、`evaluation/local_tasks.py` | harness 组批、本地数据与全局样本 ID 接入 |
 | `evaluation/progress_caching.py` | 基于原生 `CachingLM`／`CacheHook` 观察逐请求生成与缓存复用，重复请求分别计数，不修改 vendor |
 | `evaluation/evaluation_state.py` | 固定评估协议、续评、原生缓存合并、来源记录与结果汇总 |
+| `evaluation/compare_results.py`、`evaluation/paper_reference.json` | 读取各 benchmark 汇总，按 MLP／SwiGLU 配置选择论文 1.3B 参照，调用公共报告渲染 |
 | `../evaluation_runtime.py` | 三方法共用的进程清理、时间、严格 JSON、基础 Git 来源，以及 `WorkerProgress` 快照和 `EvaluationProgress` 展示 |
 | `scripts/train_340m_gpu1.sh`、`requirements-eval.txt` | 单卡备用训练入口与独立评估环境依赖 |
 
@@ -46,6 +47,7 @@
 - **协议与来源**：固定模型、数据、生成／评分设置和软件版本，逐轮记录 GPU 与 batch。目录锁和存活 worker 检查协调启动，记录保留 Git commit、未提交状态、模式及实现路径。
 - **产物组织**：结果保存到 `<output-root>/eval/<output-id>/<benchmark>/`，按原始样本顺序合并逐题记录。各 benchmark 独立汇总，父目录记录整体完成状态。
 - **进度上报**：使用公共 `WorkerProgress` 和展示器，生成按原生 batch 实时观察，完成数仍随原生任务评分后成批写出；不改变请求分组、生成、缓存语义、评分或续评。展示规则见[公共说明](../README.md#进度展示)。
+- **结果展示**：从 `output-id` 总目录读取汇总，固定展示 RULER、SQuAD completion 和 SWDE，在总目录生成 `comparison.html`。未计划、尚无汇总或未完成的 benchmark 复现分数为空；RULER 整项完成后才显示复现分数。渲染复用公共模板，两任务均值由逐任务分数取算术平均，论文数值旁显示论文 − 复现的差值。
 
 | 评估 | 沿用的生成与文本处理 |
 |---|---|

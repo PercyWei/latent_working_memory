@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261117 13:06:59 Asia/Shanghai
+最后修订时间：20261117 15:35:23 Asia/Shanghai
 
 本目录使用 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308) 的官方实现和作者公开 checkpoint。公开权重加载、生成和计分检查已完成，尚未完成本轮计划的完整评估。
 
@@ -82,6 +82,17 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 - SQuAD／SWDE 保留原文本 `.strip()` 和换行停止，最多生成 48 tokens；总预算 2048，prompt 超过 2000 tokens 时按原规则左截断。
 - 按长度降序排列后相邻组批，每批左 padding 到该批最长输入，最后一批保留实际样本数。各样本独立维护真实位置、attention 与 TTT 状态。
 
+## 查看结果
+
+```bash
+uv run reproductions/e2_ttt/evaluation/compare_results.py \
+  --eval-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b_20261116
+```
+
+`--eval-dir` 指向 `<output-root>/eval/<output-id>`，报告保存为 `<eval-dir>/comparison.html`。
+
+MLP／SwiGLU 自动匹配论文参照；未评估完成的 benchmark 显示 `—`。
+
 ## 来源记录与输出
 
 最终分数分别读取 `<output-root>/eval/<output-id>/<benchmark>/summary.json`。`scripts/eval.sh` 调用 `evaluation/evaluate_parallel.py` 统一调度，每个 worker 加载一次模型，依次处理分配到的多个 benchmark。[进度展示](../README.md#进度展示)采用三方法的共同规则。
@@ -95,6 +106,7 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 | `<benchmark>/summary.json` | 该 benchmark 全部样本完成后的任务／长度分数 |
 | `<benchmark>/attempts/` | 各次 worker 的原始逐题结果、原生评分和生成缓存 |
 | `<benchmark>/predictions.jsonl`、`<benchmark>/manifest.json` | 该 benchmark 合并后的逐题结果及其原始记录位置 |
+| `comparison.html` | 执行对比脚本后在总目录生成的图表与表格 |
 
 ## 备用训练入口
 

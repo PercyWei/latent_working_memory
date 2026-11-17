@@ -1,0 +1,30 @@
+{
+  "paper_url": "https://arxiv.org/abs/2608.21308v2",
+  "sources": {
+    "ruler": "附录 Detailed S-NIAH Results，tables/sniah.tex",
+    "retrieval": "正文 Evaluating In-Context Retrieval Abilities，tab:incontext_retrieval_main"
+  },
+  "lengths": [512, 1024, 2048, 4096, 8192, 16384],
+  "score_unit": "percent",
+  "rows": {
+    "e2_ttt_mlp": {
+      "label": "MLP（1.3B）",
+      "niah_single_1": [100.0, 95.6, 93.2, 89.2, 88.2, 85.0],
+      "niah_single_2": [100.0, 94.2, 79.6, 32.6, 9.8, 4.0],
+      "squad_completion": 45.6,
+      "swde": 37.2
+    },
+    "e2_ttt_swiglu": {
+      "label": "SwiGLU（1.3B）",
+      "niah_single_1": [100.0, 96.8, 95.6, 95.0, 95.4, 93.6],
+      "niah_single_2": [100.0, 99.0, 96.8, 87.6, 40.6, 6.0],
+      "squad_completion": 44.4,
+      "swde": 47.3
+    }
+  },
+  "notes": [
+    "参照为主实验 1.3B、15B-token 模型，不使用附录另列的 100B-token 模型。",
+    "RULER 原文分别报告 S-NIAH-1、S-NIAH-2；报告中的两任务均值由这两项取算术平均得到。",
+    "SQuAD／SWDE 对照原文准确率；原文 Retrieval Avg. 还包含 FDA，本次不计算该平均值。"
+  ]
+}

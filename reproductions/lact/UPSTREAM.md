@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261117 14:52:39 Asia/Shanghai
+最后修订时间：20261117 15:30:12 Asia/Shanghai
 
 ## 来源与迁入范围
 
@@ -23,7 +23,7 @@ LaCT 对应论文 [Test-Time Training Done Right v1](https://arxiv.org/abs/2505.
 | `source/flame/`、`configs/760m_muon_paper_single_gpu.toml` | 原训练框架、Transformers 注册接入和单卡训练配置 |
 | `optimized/` | 本地增量缓存、混长输入调度及独立 TTT 状态的批量计算 |
 | `scripts/eval.sh`、`evaluation/evaluate_parallel.py` | 单卡／多卡启动、样本分配与续评调度 |
-| `evaluation/` | checkpoint 加载、组批、评估协议、记录收集、计分和结果比较，包含报告模板 `comparison_template.html` 和[论文对照数据](evaluation/ruler_paper_reference.json) |
+| `evaluation/` | checkpoint 加载、组批、评估协议、记录收集、计分和结果比较，包含[论文对照数据](evaluation/ruler_paper_reference.json) |
 | `../evaluation_runtime.py` | 三方法共用的进程清理、时间、严格 JSON、基础 Git 来源，以及 `WorkerProgress` 快照和 `EvaluationProgress` 展示 |
 
 训练侧接入集中于 `source/flame/custom_models/__init__.py` 导入并注册官方 `lact_model`，以及本地单卡配置和梯度累积。备用入口 [train_760m_muon.sh](scripts/train_760m_muon.sh) 调用原 `flame.train`；训练环境和使用方式见 [README](README.md#备用训练入口)。
@@ -51,7 +51,7 @@ LaCT 对应论文 [Test-Time Training Done Right v1](https://arxiv.org/abs/2505.
 - **多卡与续评。** 每卡评估互斥样本，按全局样本 ID 收集历史原始预测、分配未完成输入并核对完整覆盖；固定模型和评估协议，GPU 数量、顺序及 batch 设置可按轮调整。运行目录锁与存活 worker 检查协调并发启动。
 - **来源与汇总。** 分别记录上游 revision、本地 commit、Git 改动状态、实际实现路径及每轮执行设置，保留历史来源的组批信息；合并时读取原始预测重新计分。
 - **进度上报。** 使用公共 `WorkerProgress` 和展示器保存独立观测快照，不改变生成、TTT 更新、评分或续评流程；展示规则见[公共说明](../README.md#进度展示)。
-- **结果展示。** [compare_results.py](evaluation/compare_results.py) 按保存的模型配置，为三个公开 760M checkpoint 的完整六任务、四长度 RULER 结果生成分组均值、分组对比和逐任务图表。Momentum 对照论文两头／四头结果，两个 Muon 共用论文 Muon 四头结果；参照数据与适用范围见 [ruler_paper_reference.json](evaluation/ruler_paper_reference.json)。
+- **结果展示。** [compare_results.py](evaluation/compare_results.py) 从 `output-id` 总目录读取 `ruler/` 中已完成的完整六任务、四长度结果，在总目录生成 `comparison.html`，渲染复用 [reporting/](../reporting/comparison.py)。Momentum 对照论文两头／四头结果，两个 Muon 共用论文 Muon 四头结果；参照数据与适用范围见 [ruler_paper_reference.json](evaluation/ruler_paper_reference.json)。
 
 运行参数、输出命名与目录结构见 [README](README.md#环境与运行命令)。
 

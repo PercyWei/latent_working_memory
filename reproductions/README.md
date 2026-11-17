@@ -1,5 +1,7 @@
 # 论文复现
 
+最后修订时间：20261117 15:30:12 Asia/Shanghai
+
 本目录保存论文方法的独立复现。训练和评估入口、依赖环境、源码来源及结果分别在各方法目录维护。
 
 | 方法 | 入口 | 范围 |
@@ -20,6 +22,7 @@
 | [复现状态](20261110_ttt_reproduction_status.md) | 正式评估进度、小样本验证结论、数值差异、资源测量及历史 B1 耗时外推 |
 | [setup_eval_env.sh](setup_eval_env.sh) | 安装 LaCT、E²-TTT 或 In-Place TTT 的独立评估环境 |
 | [evaluation_runtime.py](evaluation_runtime.py) | 三方法共用的进程清理、时间、严格 JSON、基础 Git 来源、worker 进度快照与统一展示 |
+| [reporting/](reporting/comparison.py) | 三方法共用的论文对比图表与 HTML 渲染 |
 
 运行命令和当前参数由各方法 README 维护，来源与实现改进由各方法 `UPSTREAM.md` 维护；公共文档按上表分工。
 
@@ -33,7 +36,7 @@
 |---|---|
 | `source/<repo>/` | 按来源仓库保存迁入源码，保留仓库内部布局 |
 | `optimized/` | 本地推理优化 |
-| `evaluation/` | 各方法的 Python 评估模块，包含 `evaluate_parallel.py` 启动器、加载、续评、结果处理及报告模板 |
+| `evaluation/` | 各方法的 Python 评估模块，包含 `evaluate_parallel.py` 启动器、加载、续评、结果处理及论文参照数据 |
 | `scripts/` | Shell 评估入口 `eval.sh` 和实际使用的训练启动脚本 |
 | `configs/` | 实际使用的本地配置，按需设置 |
 | `requirements-eval.txt` | 方法独立评估环境的依赖 |
@@ -62,6 +65,12 @@ LaCT 的来源目录为 `source/lact/`、`source/flame/`；E²-TTT 为 `source/e
 生成数按本轮待评请求逐条统计，包含原生缓存复用，重复 prompt 不合并计数。E²-TTT 的生成数随原生 batch 实时更新，完成数在原生任务评分并写出后成批增加；两者暂时不同是正常现象。处理速度包含缓存复用，不等同于模型推理吞吐。
 
 阶段变化及时刷新；常规刷新间隔为交互终端 5 秒、重定向输出 30 秒。worker 的 `progress.json` 仅为观测快照，不作为续评依据。
+
+## 结果对比
+
+三个 TTT 方法各自通过 `evaluation/compare_results.py` 读取汇总和模型配置，`--eval-dir` 均指向 `<output-root>/eval/<output-id>/`，使用 [reporting/](reporting/comparison.py) 在该目录生成离线 `comparison.html`。图表展示复现与论文分数，论文数值旁标注差值（论文 − 复现，百分点）；论文未报告的数值显示为 `—`。
+
+LaCT、In-Place TTT 读取 `ruler/` 中已完成的完整评估结果。E²-TTT 固定展示 RULER、SQuAD completion、SWDE；未计划、尚无汇总或未完成的 benchmark，复现分数显示 `—`，不计算差值或绘制复现数据点。RULER 整项完成后才展示复现分数。命令和论文参照范围见各方法 README。
 
 ## 模型下载约定
 
