@@ -103,21 +103,72 @@ class ObjectiveConfig:
 
 
 @dataclass(frozen=True)
-class GRPOConfig:
-    group_size: int = 4
+class PolicyTransitionConfig:
+    method: str
+    schedule: str
+    start_temperature: float
+    end_temperature: float
+    start_progress: float
+    end_progress: float
+
+    def __post_init__(self):
+        if self.method != "temperature_annealing":
+            raise ValueError("policy_transition.method must be temperature_annealing")
+        if self.schedule != "linear":
+            raise ValueError("policy_transition.schedule must be linear")
+        for name in ("start_temperature", "end_temperature"):
+            _number(getattr(self, name), name)
+        if self.start_temperature <= self.end_temperature:
+            raise ValueError("start_temperature must be greater than end_temperature")
+        for name in ("start_progress", "end_progress"):
+            _number(getattr(self, name), name, inclusive=True)
+        if not self.start_progress < self.end_progress <= 1:
+            raise ValueError("progress must satisfy 0 <= start_progress < end_progress <= 1")
+
+    def temperature(self, step, total_steps):
+        """按从 1 开始的 optimizer update 编号计算温度，首尾进度分别为 0、1。"""
+        if type(total_steps) is not int or total_steps < 2:
+            raise ValueError("temperature annealing requires at least two optimizer steps")
+        if type(step) is not int or not 1 <= step <= total_steps:
+            raise ValueError("temperature step must be between 1 and total_steps")
+        progress = (step - 1) / (total_steps - 1)
+        fraction = min(1.0, max(0.0, (progress - self.start_progress)
+                                / (self.end_progress - self.start_progress)))
+        return ((1 - fraction) * self.start_temperature
+                + fraction * self.end_temperature)
+
+
+@dataclass(frozen=True)
+class RLConfig:
+    strategy: str
+    group_size: int | None = None
+    num_samples: int | None = None
+    policy_transition: PolicyTransitionConfig | None = None
     memory_cost_weight: float = 0.1
     memory_cost_power: float = 1.0
     policy_weight: float = 1.0
     clip_epsilon: float = 0.2
-    advantage_epsilon: float = 1e-6
+    advantage_epsilon: float | None = None
 
     def __post_init__(self):
-        _positive_ints(self, ("group_size",))
-        if self.group_size < 2:
-            raise ValueError("group_size must be at least 2")
+        if self.strategy not in {"grpo", "scst"}:
+            raise ValueError("rl.strategy must be grpo or scst")
+        if self.strategy == "grpo":
+            if self.num_samples is not None:
+                raise ValueError("GRPO configuration cannot contain num_samples")
+            _positive_ints(self, ("group_size",))
+            if self.group_size < 2:
+                raise ValueError("GRPO group_size must be at least 2")
+            _number(self.advantage_epsilon, "advantage_epsilon")
+        else:
+            if self.group_size is not None:
+                raise ValueError("SCST configuration cannot contain group_size")
+            _positive_ints(self, ("num_samples",))
+            if self.advantage_epsilon is not None:
+                raise ValueError("SCST does not use advantage_epsilon")
         for name in ("memory_cost_weight", "policy_weight"):
             _number(getattr(self, name), name, inclusive=True)
-        for name in ("memory_cost_power", "clip_epsilon", "advantage_epsilon"):
+        for name in ("memory_cost_power", "clip_epsilon"):
             _number(getattr(self, name), name)
         if self.clip_epsilon >= 1:
             raise ValueError("clip_epsilon must be less than 1")
@@ -263,7 +314,7 @@ class TrainingConfig:
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     objective: ObjectiveConfig | None = None
     backward: BackwardConfig | None = None
-    grpo: GRPOConfig | None = None
+    rl: RLConfig | None = None
     run: RunConfig = field(default_factory=RunConfig)
     swanlab: SwanLabConfig = field(default_factory=SwanLabConfig)
 
@@ -305,20 +356,20 @@ class ExperimentConfig:
             if self.training.objective is None:
                 raise ValueError("pretrain requires training.objective")
             if any(value is not None for value in (
-                self.model.structure.unit_tokens, self.training.grpo, self.training.backward,
+                self.model.structure.unit_tokens, self.training.rl, self.training.backward,
                 self.model.structure.boundary_hidden_size,
                 self.training.optimizer.boundary_learning_rate,
             )):
-                raise ValueError("pretrain requires model.structure.unit_tokens=null and no GRPO, boundary or BPTT settings")
+                raise ValueError("pretrain requires model.structure.unit_tokens=null and no RL, boundary or BPTT settings")
         else:
             if self.training.objective is not None:
                 raise ValueError("post cannot contain training.objective")
             if any(value is None for value in (
-                self.model.structure.unit_tokens, self.training.grpo, self.training.backward,
+                self.model.structure.unit_tokens, self.training.rl, self.training.backward,
                 self.model.structure.boundary_hidden_size,
                 self.training.optimizer.boundary_learning_rate,
             )):
-                raise ValueError("post requires model.structure.unit_tokens, training.grpo, boundary and BPTT settings")
+                raise ValueError("post requires model.structure.unit_tokens, training.rl, boundary and BPTT settings")
         if self.stage == "pretrain" and self.training.run.init_checkpoint is not None:
             raise ValueError("pretrain starts from the base model; use --resume to continue it")
         if self.stage == "post" and self.training.run.init_checkpoint is None:
@@ -343,9 +394,25 @@ def config_from_dict(payload):
         training_types["objective"] = ObjectiveConfig
     elif payload["stage"] == "post":
         training_types["backward"] = BackwardConfig
-        training_types["grpo"] = GRPOConfig
+        training_types["rl"] = RLConfig
     if set(training) != set(training_types):
         raise ValueError(f"{payload['stage']} training must contain exactly {', '.join(training_types)}")
+    groups = {name: cls(**training[name])
+              for name, cls in training_types.items() if name != "rl"}
+    if payload["stage"] == "post":
+        rl = training["rl"]
+        if rl["strategy"] == "grpo" and "num_samples" in rl:
+            raise ValueError("GRPO configuration cannot contain num_samples")
+        if rl["strategy"] == "scst" and "group_size" in rl:
+            raise ValueError("SCST configuration cannot contain group_size")
+        if rl["strategy"] == "scst" and "advantage_epsilon" in rl:
+            raise ValueError("SCST configuration cannot contain advantage_epsilon")
+        transition = rl.get("policy_transition")
+        groups["rl"] = RLConfig(**{
+            **rl,
+            "policy_transition": (None if transition is None
+                                  else PolicyTransitionConfig(**transition)),
+        })
     return ExperimentConfig(
         stage=payload["stage"], seed=payload.get("seed", 42), model_name_or_path=payload["model_name_or_path"],
         model=ModelConfig(**{
@@ -354,7 +421,7 @@ def config_from_dict(payload):
             "lora": ModelLoraConfig(**model["lora"]),
         }),
         compute=ComputeConfig(**payload["compute"]),
-        training=TrainingConfig(**{name: cls(**training[name]) for name, cls in training_types.items()}),
+        training=TrainingConfig(**groups),
     )
 
 
@@ -365,11 +432,16 @@ def config_to_dict(config):
         "stage", "seed", "model_name_or_path", "model", "compute", "training",
     )}
     if config.stage == "pretrain":
-        del payload["training"]["backward"], payload["training"]["grpo"]
+        del payload["training"]["backward"], payload["training"]["rl"]
         del payload["training"]["optimizer"]["boundary_learning_rate"]
         del payload["training"]["run"]["init_checkpoint"]
     else:
         del payload["training"]["objective"]
+        if config.training.rl.strategy == "grpo":
+            del payload["training"]["rl"]["num_samples"]
+        else:
+            del payload["training"]["rl"]["group_size"]
+            del payload["training"]["rl"]["advantage_epsilon"]
     return payload
 
 

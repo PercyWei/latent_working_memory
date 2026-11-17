@@ -34,8 +34,10 @@
       "max_dev_samples": null,
       "length_curriculum": false
     },
-    "grpo": {
+    "rl": {
+      "strategy": "grpo",
       "group_size": 4,
+      "policy_transition": null,
       "memory_cost_weight": 0.1,
       "memory_cost_power": 1.0,
       "policy_weight": 1.0,

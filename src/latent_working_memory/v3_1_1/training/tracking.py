@@ -35,6 +35,7 @@ def configure_post_panels(api, remote, metrics):
         ("train/reward", "reward", (
             ("train/reward", "reward", "#2b8cbe"),
             ("train/reward_std", "reward_std", "#d95f0e"),
+            ("train/baseline_reward", "greedy_reward", "#74a9cf"),
         )),
         ("train/memory_usage", "memory_blocks = memory_slots / K", (
             ("train/blocks", "memory_blocks", "#2b8cbe"),
@@ -75,10 +76,17 @@ def configure_post_panels(api, remote, metrics):
                 if chart["type"] == "LINE" and chart["title"] in names:
                     custom.update(chart.get("custom") or {})
             custom.update(existing.get("custom") or {})
+            # 项目面板跨运行共享：保留其他策略已有的序列，只添加实际出现的新指标。
+            displayed = keys & (set(metrics) | {
+                axis["key"] for chart in charts
+                if chart["type"] == "LINE" and chart["title"] in names
+                for axis in chart["config"]["yAxis"]
+            })
             for metric, label, color in series:
-                custom[f"{remote.run_id}-{metric}"] = {
-                    "name": f"{remote.name}/{label}", "colors": [color, color],
-                }
+                if metric in metrics:
+                    custom[f"{remote.run_id}-{metric}"] = {
+                        "name": f"{remote.name}/{label}", "colors": [color, color],
+                    }
             body = {
                 "type": "LINE", "title": title, "custom": custom,
                 "config": {
@@ -87,7 +95,7 @@ def configure_post_panels(api, remote, metrics):
                     "yName": axis_name,
                     "yAxis": [
                         {"key": metric, "type": "FLOAT", "class": "SCALAR"}
-                        for metric, _, _ in series
+                        for metric, _, _ in series if metric in displayed
                     ],
                 },
             }
@@ -129,6 +137,9 @@ def tracking_run(config, output_dir, resume, device, boundary_generator=None):
             if project != training.swanlab.project or run_id != identity["id"]:
                 raise ValueError("SwanLab URL differs from the saved project or run id")
         world = dist.get_world_size() if dist.is_initialized() else 1
+        tags = {f"stage:{config.stage}", *training.swanlab.tags}
+        if config.stage == "post":
+            tags.add(f"method:adaptive-boundary-{training.rl.strategy}")
         with preserve_training_rng(device, boundary_generator):
             api_key = swanlab_api_key()
             run = swanlab.init(
@@ -140,7 +151,7 @@ def tracking_run(config, output_dir, resume, device, boundary_generator=None):
                     * training.loop.gradient_accumulation_steps,
                 },
                 group=training.swanlab.group, job_type="train",
-                tags=sorted({"method:adaptive-boundary-grpo", f"stage:{config.stage}", *training.swanlab.tags}),
+                tags=sorted(tags),
                 mode="online", public=False, log_dir=str(output_dir / "swanlab"),
                 id=identity["id"] if identity else None,
                 resume="must" if identity else "never",
@@ -158,7 +169,7 @@ def tracking_run(config, output_dir, resume, device, boundary_generator=None):
                 run.finish()
 
 
-def log_metrics(run, record, step, registered, stage, output_dir):
+def log_metrics(run, record, step, registered, stage, output_dir, rl=None):
     """只注册实际出现的指标，不为未执行的目标和 dev 创建空曲线。"""
     metrics = {name: value for name, value in record.items()
                if "/" in name and (stage != "post" or name not in {
@@ -166,6 +177,8 @@ def log_metrics(run, record, step, registered, stage, output_dir):
                    "dev/loss", "dev/samples", "dev/commit_rate",
                    "dev/memory_slots", "dev/segment_tokens",
                })}
+    if stage == "post" and rl.strategy == "scst" and rl.num_samples == 1:
+        del metrics["train/reward_std"]
     new_metrics = metrics.keys() - registered
     if new_metrics:
         if stage == "post":

@@ -233,11 +233,11 @@ def test_sorted_engine_accumulation_and_single_tail_match_sequential(
         (rows, [[rows[0], rows[4]], [rows[3]], [rows[1]], [rows[2], rows[5]]]),
         ([tail], [[tail]]),
     )
-    for batch, groups in cases:
+    for step, (batch, groups) in enumerate(cases, 1):
         original = list(batch)
         compressed.clear()
         loss, raw_gradients = sequential_update(reference, batch)
-        metrics = engine.train_batch(batch, None)
+        metrics = engine.train_batch(batch, None, step)
         assert batch == original
         assert compressed == [[row.input_ids for row in group] for group in groups]
         assert metrics["samples"] == len(batch)

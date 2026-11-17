@@ -130,6 +130,9 @@ def train(plan_dir, resume=None):
         ),
     ))
     config = replace(config, training=training)
+    if (config.stage == "post" and training.rl.policy_transition is not None
+        and training.loop.max_steps < 2):
+        raise ValueError("temperature annealing requires at least two optimizer steps")
     if checkpoint is not None and checkpoint["config"] != config_to_dict(config):
         raise ValueError("resume requires the original run configuration and output directory")
     model = MemoryModel(
@@ -217,6 +220,7 @@ def train(plan_dir, resume=None):
             indices = cursor.next_batch(global_batch)
             metrics = engine.train_batch(
                 [train_documents[index] for index in indices[rank::world]], boundary_generator,
+                step + 1,
             )
             step += 1
             torch.cuda.synchronize(device)
@@ -242,7 +246,10 @@ def train(plan_dir, resume=None):
             dev_interval = training.loop.dev_every != "after_each_epoch" and step % training.loop.dev_every == 0
             if dev_documents and (dev_interval or cursor.epoch_end or step == training.loop.max_steps):
                 with preserve_training_rng(device, boundary_generator):
-                    dev = evaluate_dev(model, dev_documents[rank::world], config)
+                    dev = evaluate_dev(
+                        model, dev_documents[rank::world], config,
+                        temperature=metrics.get("policy_temperature", 1.0),
+                    )
                 if config.stage == "post":
                     dev["compression_ratio"] = dev["segment_tokens"] / config.model.structure.memory_slots
                 record.update({f"dev/{key}": value for key, value in dev.items()})
@@ -251,7 +258,9 @@ def train(plan_dir, resume=None):
                 stream.flush()
                 if remote is not None:
                     with preserve_training_rng(device, boundary_generator):
-                        log_metrics(remote, record, step, registered, config.stage, output_dir)
+                        log_metrics(
+                            remote, record, step, registered, config.stage, output_dir, training.rl,
+                        )
                 print(
                     f"step {step}/{training.loop.max_steps} loss={metrics['loss']:.5f} "
                     f"grad={metrics['grad_norm']:.5f} samples={metrics['samples']} seconds={seconds:.1f}"

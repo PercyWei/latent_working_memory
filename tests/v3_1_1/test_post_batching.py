@@ -1,7 +1,7 @@
 """真实 Qwen3 的后训练批量前向、梯度归约与随机数映射回归。"""
 
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import pytest
 import torch
@@ -9,16 +9,17 @@ import torch
 import test_pretrain_batching as pretrain_tests
 
 from latent_working_memory.v3_1_1 import rollout
-from latent_working_memory.v3_1_1.training import grpo as grpo_objective
+from latent_working_memory.v3_1_1.training import rl as rl_objective
 from latent_working_memory.v3_1_1.config import (
     BackwardConfig,
     ComputeConfig,
     ExperimentConfig,
-    GRPOConfig,
+    RLConfig,
     ModelConfig,
     ModelLoraConfig,
     ModelStructureConfig,
     OptimizerConfig,
+    PolicyTransitionConfig,
     RunConfig,
     SchedulerConfig,
     SwanLabConfig,
@@ -30,7 +31,7 @@ from latent_working_memory.v3_1_1.data import Document, QA
 from latent_working_memory.v3_1_1.modeling.compressor import MemoryModel
 from latent_working_memory.v3_1_1.training.engine import TrainingEngine
 
-from latent_working_memory.v3_1_1.rollout import execute, sample_group
+from latent_working_memory.v3_1_1.rollout import execute, sample_paths
 
 
 one_cpu_thread = pretrain_tests.one_cpu_thread
@@ -46,13 +47,14 @@ def _reference_qa_backward(model, memory_leaves, qa, normalizer):
 
 
 def _reference_path_backward(
-    model, document, unit_tokens, grpo, path, advantage, group_size, bptt_steps=None,
+    model, document, unit_tokens, grpo, path, advantage, num_samples, bptt_steps=None,
+    temperature=1.0,
 ):
     """反传后只返回无图统计，使本路径的中间张量在下一次前向前释放。"""
     with model.forward_context():
         blocks, _, log_probs, entropy, _ = execute(
             model, document.input_ids, unit_tokens, actions=path.actions,
-            bptt_steps=bptt_steps,
+            bptt_steps=bptt_steps, temperature=temperature,
         )
     memory_leaves = tuple(block.detach().requires_grad_(True) for block in blocks)
     question_count = len(document.qas)
@@ -60,7 +62,7 @@ def _reference_path_backward(
     # 旧 stack(...).mean().backward() 按后建图的题目先执行，保持同样的累加顺序。
     for index in reversed(range(question_count)):
         question_losses[index] = _reference_qa_backward(
-            model, memory_leaves, document.qas[index], question_count * group_size,
+            model, memory_leaves, document.qas[index], question_count * num_samples,
         )
     with model.forward_context():
         task_loss = torch.stack(question_losses).mean()
@@ -77,7 +79,7 @@ def _reference_path_backward(
         loss = task_loss + grpo["policy_weight"] * policy_loss
         if not bool(torch.isfinite(loss)):
             raise RuntimeError(f"non-finite training loss: {document.id}")
-        policy_backward = (grpo["policy_weight"] * policy_loss / group_size
+        policy_backward = (grpo["policy_weight"] * policy_loss / num_samples
                            if policy_loss.requires_grad else None)
     outputs = list(blocks)
     gradients = [leaf.grad for leaf in memory_leaves]
@@ -94,12 +96,20 @@ def _reference_path_backward(
 
 def reference_post_backward(
     model, document, unit_tokens, grpo, generator, bptt_steps=None, sampled_paths=None,
+    temperature=1.0,
 ):
     """采样完整组后逐路径累积梯度；文档归约与参数更新由 engine 执行。"""
     # 采样和带图回放使用独立 autocast 区域，避免复用无梯度的权重转换缓存。
+    sample_count = grpo["num_samples"] if grpo["strategy"] == "scst" else grpo["group_size"]
     with torch.no_grad(), model.forward_context():
         paths = (sampled_paths if sampled_paths is not None
-                 else sample_group(model, document, unit_tokens, grpo["group_size"], generator))
+                 else sample_paths(model, document, unit_tokens, sample_count, generator, temperature))
+        if grpo["strategy"] == "scst":
+            greedy = sample_paths(model, document, unit_tokens, 1, None, temperature)[0]
+            greedy_nll = next((path.qa_nll for path in paths if path.actions == greedy.actions), greedy.qa_nll)
+            baseline = -greedy_nll - grpo["memory_cost_weight"] * (
+                model.memory_slots * len(greedy.block_lengths) / len(document.input_ids)
+            ) ** grpo["memory_cost_power"]
     device = paths[0].old_log_probs.device
     rewards = torch.tensor([
         -path.qa_nll - grpo["memory_cost_weight"] * (
@@ -108,11 +118,12 @@ def reference_post_backward(
         for path in paths
     ], device=device, dtype=torch.float32)
     std = rewards.std(unbiased=False)
-    advantages = ((rewards - rewards.mean()) / (std + grpo["advantage_epsilon"])).detach()
-    group_size = len(paths)
+    advantages = ((rewards - rewards.new_tensor(baseline)) if grpo["strategy"] == "scst"
+                  else (rewards - rewards.mean()) / (std + grpo["advantage_epsilon"])).detach()
+    num_samples = len(paths)
     values = torch.stack([
         _reference_path_backward(
-            model, document, unit_tokens, grpo, path, advantage, group_size, bptt_steps,
+            model, document, unit_tokens, grpo, path, advantage, num_samples, bptt_steps, temperature,
         )
         for path, advantage in zip(paths, advantages, strict=True)
     ])
@@ -124,17 +135,19 @@ def reference_post_backward(
         "policy_loss": (float(policy_loss), 1),
         "reward": (float(rewards.mean()), 1),
         "reward_std": (float(std), 1),
-        "zero_advantage_rate": (float(bool(std == 0)), 1),
-        "blocks": (blocks, group_size),
-        "memory_slots": (blocks * model.memory_slots, group_size),
-        "segment_tokens": (len(document.input_ids) * group_size, blocks),
+        "zero_advantage_rate": (float(bool((advantages == 0).all())), 1),
+        "blocks": (blocks, num_samples),
+        "memory_slots": (blocks * model.memory_slots, num_samples),
+        "segment_tokens": (len(document.input_ids) * num_samples, blocks),
         "commit_rate": (sum(sum(path.actions) for path in paths), decisions),
         "policy_entropy": (
             float(values[:, 2].sum()) * len(paths[0].actions) if decisions else 0,
             decisions,
         ),
-        "replay_log_probability_drift": (float(values[:, 3].sum()), group_size),
+        "replay_log_probability_drift": (float(values[:, 3].sum()), num_samples),
     }
+    if grpo["strategy"] == "scst":
+        metrics["baseline_reward"] = (float(rewards.new_tensor(baseline)), 1)
     return qa_loss + grpo["policy_weight"] * policy_loss, metrics
 
 
@@ -148,7 +161,8 @@ def make_post_models(folder, gradient_checkpointing=False, bptt_steps=2, policy_
         compute=ComputeConfig(gradient_checkpointing=gradient_checkpointing),
         training=TrainingConfig(
             data=TrainingDataConfig(dataset_dir=str(folder)),
-            grpo=GRPOConfig(group_size=4, memory_cost_weight=0.01, policy_weight=policy_weight),
+            rl=RLConfig(strategy="grpo", group_size=4, memory_cost_weight=0.01,
+                        policy_weight=policy_weight, advantage_epsilon=1e-6),
             loop=TrainingLoopConfig(
                 micro_batch_size=4, gradient_accumulation_steps=2, max_steps=6,
             ),
@@ -199,13 +213,13 @@ def assert_gradients_close(reference, actual):
             torch.testing.assert_close(result, expected, rtol=4e-4, atol=4e-6, msg=name)
 
 
-def fixed_paths(model, rows, unit_tokens, group_size):
+def fixed_paths(model, rows, unit_tokens, num_samples):
     result = {}
     with torch.no_grad(), model.forward_context():
         for row in rows:
             count = (len(row.input_ids) - 1) // unit_tokens
             paths = []
-            for path_index in range(group_size):
+            for path_index in range(num_samples):
                 actions = tuple(
                     False if path_index == 0 else True if path_index == 1
                     else (index + path_index) % 2 == 0
@@ -224,20 +238,21 @@ def fixed_paths(model, rows, unit_tokens, group_size):
 
 @pytest.mark.parametrize("gradient_checkpointing", [False, True])
 @pytest.mark.parametrize("bptt_steps", [None, 1, 2])
+@pytest.mark.parametrize("temperature", [1.0, 0.35])
 def test_ragged_replay_preserves_memories_gradients_and_truncation(
-    tiny_source, gradient_checkpointing, bptt_steps,
+    tiny_source, gradient_checkpointing, bptt_steps, temperature,
 ):
     reference, actual, _ = make_post_models(tiny_source, gradient_checkpointing, bptt_steps)
     contexts = [document(i, length, 1).input_ids for i, length in enumerate([3, 12, 19, 9])]
     actions = [(), (False, False), (True, False, True, True), (True, True)]
-    expected = [execute(reference, ids, 4, actions=path, bptt_steps=bptt_steps)
+    expected = [execute(reference, ids, 4, actions=path, bptt_steps=bptt_steps, temperature=temperature)
                 for ids, path in zip(contexts, actions, strict=True)]
     shapes = []
     handle = actual.writer.get_base_model().model.register_forward_pre_hook(
         lambda module, args, kwargs: shapes.append(kwargs["inputs_embeds"].shape[0]),
         with_kwargs=True,
     )
-    results = rollout.execute_replay_batch(actual, contexts, 4, actions, bptt_steps)
+    results = rollout.execute_replay_batch(actual, contexts, 4, actions, bptt_steps, temperature)
     for left, right in zip(expected, results, strict=True):
         assert left[1] == right[1] and left[4] == right[4]
         for a, b in zip(left[0], right[0], strict=True):
@@ -256,7 +271,8 @@ def test_ragged_replay_preserves_memories_gradients_and_truncation(
 
 
 @pytest.mark.parametrize("gradient_checkpointing", [False, True])
-def test_stochastic_sampling_preserves_document_major_random_draws(tiny_source, gradient_checkpointing):
+@pytest.mark.parametrize("temperature", [1.0, 0.35])
+def test_stochastic_sampling_preserves_document_major_random_draws(tiny_source, gradient_checkpointing, temperature):
     reference, actual, config = make_post_models(tiny_source, gradient_checkpointing)
     with torch.no_grad():
         reference.boundary.network[-1].weight.zero_()
@@ -266,16 +282,16 @@ def test_stochastic_sampling_preserves_document_major_random_draws(tiny_source, 
     generator = torch.Generator().manual_seed(417)
     other = torch.Generator().set_state(generator.get_state())
     unit_tokens = config.model.structure.unit_tokens
-    grpo = asdict(config.training.grpo)
+    grpo = asdict(config.training.rl)
     with torch.no_grad(), reference.forward_context():
-        expected = [sample_group(reference, row, unit_tokens, grpo["group_size"], generator) for row in rows]
+        expected = [sample_paths(reference, row, unit_tokens, grpo["group_size"], generator, temperature) for row in rows]
     shapes = []
     handle = actual.decoder.model.register_forward_pre_hook(
         lambda module, args, kwargs: shapes.append(kwargs["inputs_embeds"].shape[0]),
         with_kwargs=True,
     )
     with torch.no_grad(), actual.forward_context():
-        results = rollout.sample_group_batch(actual, rows, unit_tokens, grpo["group_size"], other)
+        results = rollout.sample_paths_batch(actual, rows, unit_tokens, grpo["group_size"], other, temperature)
     handle.remove()
     assert max(shapes) == len(rows)
     assert torch.equal(generator.get_state(), other.get_state())
@@ -287,14 +303,16 @@ def test_stochastic_sampling_preserves_document_major_random_draws(tiny_source, 
             assert right.qa_nll == pytest.approx(left.qa_nll, rel=2e-5, abs=3e-6)
 
 
-def reference_update(engine, rows, paths):
+def reference_update(engine, rows, paths, step):
     engine.model.train()
     engine.optimizer.zero_grad(set_to_none=True)
     unit_tokens = engine.experiment.model.structure.unit_tokens
-    grpo = asdict(engine.config.grpo)
+    grpo = asdict(engine.config.rl)
+    transition = engine.config.rl.policy_transition
+    temperature = transition.temperature(step, engine.config.loop.max_steps) if transition else 1.0
     outputs = [reference_post_backward(
         engine.model, row, unit_tokens, grpo, None, engine.config.backward.bptt_steps,
-        sampled_paths=paths[row.id],
+        sampled_paths=paths[row.id], temperature=temperature,
     ) for row in rows]
     for parameter in engine.parameters:
         if parameter.grad is not None:
@@ -307,22 +325,31 @@ def reference_update(engine, rows, paths):
 
 
 @pytest.mark.parametrize("gradient_checkpointing", [False, True])
+@pytest.mark.parametrize("annealing", [False, True])
 def test_engine_microbatch_accumulation_tail_and_state_restore_continuation(
-    tiny_source, gradient_checkpointing, monkeypatch,
+    tiny_source, gradient_checkpointing, monkeypatch, annealing,
 ):
     reference, actual, config = make_post_models(tiny_source, gradient_checkpointing)
+    if annealing:
+        config = replace(config, training=replace(config.training, rl=replace(
+            config.training.rl, policy_transition=PolicyTransitionConfig(
+                method="temperature_annealing", schedule="linear",
+                start_temperature=1.0, end_temperature=0.2,
+                start_progress=0.0, end_progress=1.0,
+            ),
+        )))
     expected_engine, engine = TrainingEngine(reference, config), TrainingEngine(actual, config)
     rows = [document(i, length, 10 if i == 3 else 1 + i % 3)
             for i, length in enumerate([3, 12, 19, 9, 14, 5, 10, 17])]
     tail = document(9, 7, 2)
     paths = fixed_paths(
-        reference, [*rows, tail], config.model.structure.unit_tokens, config.training.grpo.group_size,
+        reference, [*rows, tail], config.model.structure.unit_tokens, config.training.rl.group_size,
     )
     calls, writer_shapes, reader_shapes, captured = [], [], [], []
-    def sampling(model, batch, unit_tokens, group_size, generator):
+    def sampling(model, batch, unit_tokens, num_samples, generator, temperature=1.0, score_cache=None):
         calls.append([row.id for row in batch])
         return [paths[row.id] for row in batch]
-    monkeypatch.setattr(grpo_objective, "sample_group_batch", sampling)
+    monkeypatch.setattr(rl_objective, "sample_paths_batch", sampling)
     synchronize = engine._synchronize_gradients
     def capture(samples):
         synchronize(samples)
@@ -338,10 +365,14 @@ def test_engine_microbatch_accumulation_tail_and_state_restore_continuation(
             with_kwargs=True,
         ),
     ]
-    for batch in [rows, [tail]]:
+    for step, batch in enumerate([rows, [tail]], 1):
         before_calls = len(calls)
-        expected, raw_gradients = reference_update(expected_engine, batch, paths)
-        metrics = engine.train_batch(batch, torch.Generator().manual_seed(415))
+        expected, raw_gradients = reference_update(expected_engine, batch, paths, step)
+        metrics = engine.train_batch(batch, torch.Generator().manual_seed(415), step)
+        if annealing:
+            assert metrics["policy_temperature"] == pytest.approx(1 - (step - 1) * 0.16)
+        else:
+            assert "policy_temperature" not in metrics
         assert calls[before_calls:] == [[row.id for row in batch[start:start + 4]]
                                         for start in range(0, len(batch), 4)]
         assert metrics["samples"] == len(batch)
@@ -371,9 +402,11 @@ def test_engine_microbatch_accumulation_tail_and_state_restore_continuation(
     expected_engine = TrainingEngine(actual, config)
     expected_engine.optimizer.load_state_dict(deepcopy(engine.optimizer.state_dict()))
     expected_engine.scheduler.load_state_dict(engine.scheduler.state_dict())
-    first = expected_engine.train_batch([tail], torch.Generator().manual_seed(123))
-    second = restored_engine.train_batch([tail], torch.Generator().manual_seed(123))
+    first = expected_engine.train_batch([tail], torch.Generator().manual_seed(123), 3)
+    second = restored_engine.train_batch([tail], torch.Generator().manual_seed(123), 3)
     assert first == second
+    if annealing:
+        assert first["policy_temperature"] == pytest.approx(0.68)
     assert_gradients_close(gradients(actual), gradients(restored))
     for left, right in zip(actual.parameters(), restored.parameters(), strict=True):
         torch.testing.assert_close(right, left, rtol=0, atol=0)
@@ -386,12 +419,12 @@ def test_no_decisions_and_zero_policy_weight_preserve_gradient_presence(
     reference, actual, config = make_post_models(tiny_source, policy_weight=policy_weight)
     rows = [document(0, 3 if no_actions else 9, 1), document(1, 2 if no_actions else 12, 3)]
     unit_tokens = config.model.structure.unit_tokens
-    grpo = asdict(config.training.grpo)
+    grpo = asdict(config.training.rl)
     paths = fixed_paths(reference, rows, unit_tokens, grpo["group_size"])
-    monkeypatch.setattr(grpo_objective, "sample_group_batch",
-                        lambda model, docs, unit_tokens, group_size, generator: [paths[row.id] for row in docs])
+    monkeypatch.setattr(rl_objective, "sample_paths_batch",
+                        lambda model, docs, unit_tokens, num_samples, generator, temperature=1.0, score_cache=None: [paths[row.id] for row in docs])
     expected = [reference_post_backward(reference, row, unit_tokens, grpo, None, 2, paths[row.id]) for row in rows]
-    results = grpo_objective.post_backward_batch(actual, rows, unit_tokens, grpo, None, 2)
+    results = rl_objective.post_backward_batch(actual, rows, unit_tokens, grpo, None, 2)
     for (left_loss, left_metrics), (right_loss, right_metrics) in zip(expected, results, strict=True):
         torch.testing.assert_close(right_loss, left_loss, rtol=3e-5, atol=5e-6)
         assert right_metrics.keys() == left_metrics.keys()
@@ -422,7 +455,7 @@ def test_identical_sampled_paths_keep_identical_rewards_despite_batch_score_roun
         model.boundary.network[-1].bias.fill_(100.0)
     rows = [document(0, 9, 1), document(1, 14, 2)]
     unit_tokens = config.model.structure.unit_tokens
-    grpo = asdict(config.training.grpo)
+    grpo = asdict(config.training.rl)
     scoring = model.answer_nll_batch
     score_calls = []
 
@@ -433,7 +466,7 @@ def test_identical_sampled_paths_keep_identical_rewards_despite_batch_score_roun
 
     monkeypatch.setattr(model, "answer_nll_batch", rounded_score)
     with torch.no_grad(), model.forward_context():
-        groups = rollout.sample_group_batch(
+        groups = rollout.sample_paths_batch(
             model, rows, unit_tokens, grpo["group_size"], torch.Generator().manual_seed(417),
         )
     # 保留各轮真实评分的批量形状，只复用同轨迹的确定性奖励。
@@ -448,3 +481,46 @@ def test_identical_sampled_paths_keep_identical_rewards_despite_batch_score_roun
             for path in group
         ])
         assert rewards.std(unbiased=False) == 0
+    scst = asdict(replace(config.training.rl, strategy="scst", group_size=None,
+                         num_samples=1, advantage_epsilon=None))
+    results = rl_objective.post_backward_batch(
+        model, rows, unit_tokens, scst, torch.Generator().manual_seed(417), temperature=0.5,
+    )
+    for _, metrics in results:
+        assert metrics["reward"] == metrics["baseline_reward"]
+        assert metrics["zero_advantage_rate"] == (1.0, 1)
+    for parameter in model.boundary.parameters():
+        assert parameter.grad is not None and torch.count_nonzero(parameter.grad) == 0
+
+
+@pytest.mark.parametrize("num_samples", [1, 4])
+@pytest.mark.parametrize("temperature", [1.0, 0.35])
+def test_scst_matches_independent_path_gradients_and_preserves_sampling_rng(
+    tiny_source, num_samples, temperature,
+):
+    reference, actual, config = make_post_models(tiny_source)
+    with torch.no_grad():
+        reference.boundary.network[-1].weight.zero_()
+        actual.load_state_dict(reference.state_dict())
+    rl = asdict(replace(config.training.rl, strategy="scst", group_size=None, num_samples=num_samples,
+                        advantage_epsilon=None))
+    rows = [document(0, 19, 1), document(1, 12, 3)]
+    generator = torch.Generator().manual_seed(417)
+    other = torch.Generator().set_state(generator.get_state())
+    expected = [reference_post_backward(
+        reference, row, 4, rl, generator, 2, temperature=temperature,
+    ) for row in rows]
+    results = rl_objective.post_backward_batch(actual, rows, 4, rl, other, 2, temperature)
+    assert torch.equal(generator.get_state(), other.get_state())
+    assert any(metrics["zero_advantage_rate"][0] == 0 for _, metrics in results)
+    for (left_loss, left_metrics), (right_loss, right_metrics) in zip(expected, results, strict=True):
+        torch.testing.assert_close(right_loss, left_loss, rtol=3e-5, atol=5e-6)
+        assert right_metrics.keys() == left_metrics.keys()
+        for name in left_metrics:
+            left_numerator, left_denominator = left_metrics[name]
+            right_numerator, right_denominator = right_metrics[name]
+            assert right_denominator == left_denominator
+            assert right_numerator == pytest.approx(left_numerator, rel=4e-4, abs=1e-5), name
+        if num_samples == 1:
+            assert right_metrics["reward_std"] == (0.0, 1)
+    assert_gradients_close(gradients(reference), gradients(actual))

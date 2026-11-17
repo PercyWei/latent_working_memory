@@ -26,7 +26,7 @@ def _boundary_segment(model, visible, positions, *memory_blocks):
     return model.boundary_logits(memory_blocks, visible, positions)
 
 
-def _replay_fixed(model, units, actions, bptt_steps):
+def _replay_fixed(model, units, actions, bptt_steps, temperature=1.0):
     """同一提交段的边界共享因果前向，压缩时排除仅用于判断的新单元。"""
     blocks, log_probs, entropies, lengths = [], [], [], []
     history = []
@@ -56,6 +56,7 @@ def _replay_fixed(model, units, actions, bptt_steps):
         )
         if positions:
             # 较早位置不能读取同段中较晚的原文；lookahead 只参与本段最后的判断。
+            logits = logits / temperature
             chosen = torch.tensor(actions[start:visible_end - 1], device=logits.device, dtype=torch.bool)
             log_probs.append(F.logsigmoid(torch.where(chosen, logits, -logits)))
             entropies.append(F.softplus(logits) - logits * logits.sigmoid())
@@ -75,7 +76,8 @@ def _replay_fixed(model, units, actions, bptt_steps):
     )
 
 
-def execute(model, input_ids, unit_tokens, actions=None, generator=None, bptt_steps=None):
+def execute(model, input_ids, unit_tokens, actions=None, generator=None, bptt_steps=None,
+            temperature=1.0):
     """actions=None 时采样（无 generator 则确定性判断），否则回放既定硬动作。"""
     units = tuple(input_ids[i:i + unit_tokens] for i in range(0, len(input_ids), unit_tokens))
     if not units:
@@ -83,20 +85,21 @@ def execute(model, input_ids, unit_tokens, actions=None, generator=None, bptt_st
     if actions is not None and len(actions) != len(units) - 1:
         raise ValueError("recorded actions must match the fixed decision positions")
     if actions is not None and torch.is_grad_enabled():
-        return _replay_fixed(model, units, actions, bptt_steps)
+        return _replay_fixed(model, units, actions, bptt_steps, temperature)
     stream = SourceStream(model, units[0])
     chosen, log_probs, entropies, lengths = [], [], [], []
     for index, unit in enumerate(units[1:]):
         logit = stream.logit(unit)
+        policy_logit = logit / temperature
         if actions is not None:
             commit = actions[index]
         elif generator is None:
             commit = bool(logit.detach() >= 0)
         else:
-            commit = bool(torch.rand((), generator=generator) < logit.detach().sigmoid().cpu())
+            commit = bool(torch.rand((), generator=generator) < policy_logit.detach().sigmoid().cpu())
         chosen.append(commit)
-        log_probs.append(F.logsigmoid(logit if commit else -logit))
-        entropies.append(F.softplus(logit) - logit * logit.sigmoid())
+        log_probs.append(F.logsigmoid(policy_logit if commit else -policy_logit))
+        entropies.append(F.softplus(policy_logit) - policy_logit * policy_logit.sigmoid())
         if commit:
             lengths.append(len(stream.pending_ids))
         stream.advance(unit, commit)
@@ -111,7 +114,7 @@ def execute(model, input_ids, unit_tokens, actions=None, generator=None, bptt_st
     )
 
 
-def execute_replay_batch(model, contexts, unit_tokens, actions, bptt_steps=None):
+def execute_replay_batch(model, contexts, unit_tokens, actions, bptt_steps=None, temperature=1.0):
     """按实际写入轮次批量回放，各行独立维护分段、历史及反传跨度。"""
     plans = []
     for context, decisions in zip(contexts, actions, strict=True):
@@ -146,6 +149,7 @@ def execute_replay_batch(model, contexts, unit_tokens, actions, bptt_steps=None)
                              for past, tokens in zip(memories, visible, strict=True))
                       else model.boundary_logits_batch(*arguments))
             for index, values in zip(boundary, logits, strict=True):
+                values = values / temperature
                 chosen = torch.tensor(plans[index][step][3], device=values.device, dtype=torch.bool)
                 log_probs[index].append(F.logsigmoid(torch.where(chosen, values, -values)))
                 entropies[index].append(F.softplus(values) - values * values.sigmoid())
@@ -172,7 +176,7 @@ def execute_replay_batch(model, contexts, unit_tokens, actions, bptt_steps=None)
 
 
 @torch.no_grad()
-def execute_batch(model, contexts, unit_tokens, uniforms=None):
+def execute_batch(model, contexts, unit_tokens, uniforms=None, temperature=1.0):
     """批量分段；uniforms 给出各行随机判断量，省略时确定性判断。"""
     units = [tuple(context[start:start + unit_tokens]
                    for start in range(0, len(context), unit_tokens)) for context in contexts]
@@ -198,14 +202,15 @@ def execute_batch(model, contexts, unit_tokens, uniforms=None):
         previous = [caches[index] for index in active]
         arriving = [units[index][step] for index in active]
         logits, observed = model.observe_source_batch(previous, arriving)
+        policy_logits = logits / temperature
         if uniforms is None:
             commits = (logits >= 0).tolist()
         else:
             commits = [uniforms[index][step - 1] < probability for index, probability in
-                       zip(active, logits.sigmoid().cpu().tolist(), strict=True)]
+                       zip(active, policy_logits.sigmoid().cpu().tolist(), strict=True)]
         chosen_tensor = torch.tensor(commits, device=logits.device, dtype=torch.bool)
-        probabilities = F.logsigmoid(torch.where(chosen_tensor, logits, -logits))
-        uncertainty = F.softplus(logits) - logits * logits.sigmoid()
+        probabilities = F.logsigmoid(torch.where(chosen_tensor, policy_logits, -policy_logits))
+        uncertainty = F.softplus(policy_logits) - policy_logits * policy_logits.sigmoid()
         committed = []
         for row, index in enumerate(active):
             chosen[index].append(commits[row])
@@ -259,11 +264,11 @@ def qa_nll(model, blocks, document):
 
 
 @torch.no_grad()
-def sample_group(model, document, unit_tokens, group_size, generator):
+def sample_paths(model, document, unit_tokens, num_samples, generator, temperature=1.0):
     paths = []
-    for _ in range(group_size):
+    for _ in range(num_samples):
         blocks, actions, log_probs, _, lengths = execute(
-            model, document.input_ids, unit_tokens, generator=generator,
+            model, document.input_ids, unit_tokens, generator=generator, temperature=temperature,
         )
         loss = qa_nll(model, blocks, document)
         paths.append(Rollout(actions, log_probs.detach(), float(loss), lengths))
@@ -271,19 +276,21 @@ def sample_group(model, document, unit_tokens, group_size, generator):
 
 
 @torch.no_grad()
-def sample_group_batch(model, documents, unit_tokens, group_size, generator):
-    """按文档／路径原顺序分配随机数，每轮批量采样各文档的一条路径。"""
+def sample_paths_batch(model, documents, unit_tokens, num_samples, generator, temperature=1.0,
+                       score_cache=None):
+    """按文档／路径分配随机数；同批文档的随机与 greedy 路径可共享评分缓存。"""
     uniforms = (None if generator is None else [
-        torch.rand((group_size, (len(document.input_ids) - 1) // unit_tokens),
+        torch.rand((num_samples, (len(document.input_ids) - 1) // unit_tokens),
                    generator=generator).tolist()
         for document in documents
     ])
     paths = [[] for _ in documents]
-    scores = [{} for _ in documents]
-    for path_index in range(group_size):
+    scores = [{} for _ in documents] if score_cache is None else score_cache
+    for path_index in range(num_samples):
         results = execute_batch(
             model, [document.input_ids for document in documents], unit_tokens,
             None if uniforms is None else [values[path_index] for values in uniforms],
+            temperature=temperature,
         )
         losses = [[] for _ in documents]
         for question in range(max(len(document.qas) for document in documents)):

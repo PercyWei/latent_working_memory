@@ -6,7 +6,7 @@ import math
 import torch
 import torch.distributed as dist
 
-from .grpo import post_backward_batch
+from .rl import post_backward_batch
 from ..rollout import execute, qa_nll
 
 
@@ -156,7 +156,7 @@ class SampleCursor:
         self.generator.set_state(state["generator"])
 
 
-def document_loss(model, document, config):
+def document_loss(model, document, config, temperature=1.0):
     """预训练目标或后训练的确定性 dev 评分；不执行反向传播。"""
     if config.stage == "pretrain":
         memory = model.compress(document.input_ids)
@@ -167,6 +167,7 @@ def document_loss(model, document, config):
         }
     blocks, actions, _, entropy, lengths = execute(
         model, document.input_ids, config.model.structure.unit_tokens,
+        temperature=temperature,
     )
     loss = qa_nll(model, blocks, document)
     return loss, {
@@ -280,18 +281,22 @@ class TrainingEngine:
             parameter.grad = flat[offset:offset + count].view_as(parameter).clone() if used else None
             offset += count
 
-    def train_batch(self, documents, boundary_generator):
+    def train_batch(self, documents, boundary_generator, step):
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
         totals = {}
+        transition = None
         if self.experiment.stage == "post":
             unit_tokens = self.experiment.model.structure.unit_tokens
-            grpo = asdict(self.config.grpo)
+            rl = asdict(self.config.rl)
+            transition = self.config.rl.policy_transition
+            temperature = (1.0 if transition is None
+                           else transition.temperature(step, self.config.loop.max_steps))
             for start in range(0, len(documents), self.config.loop.micro_batch_size):
                 results = post_backward_batch(
                     self.model, documents[start:start + self.config.loop.micro_batch_size],
-                    unit_tokens, grpo, boundary_generator,
-                    bptt_steps=self.config.backward.bptt_steps,
+                    unit_tokens, rl, boundary_generator,
+                    bptt_steps=self.config.backward.bptt_steps, temperature=temperature,
                 )
                 for loss, metrics in results:
                     _accumulate(totals, loss, metrics)
@@ -321,6 +326,8 @@ class TrainingEngine:
                         batch_loss = losses.sum()
                     batch_loss.backward()
         metrics = _aggregate_metrics(totals, len(documents))
+        if transition is not None:
+            metrics["policy_temperature"] = temperature
         self._synchronize_gradients(metrics["samples"])
         for group in self.optimizer.param_groups:
             gradients = [parameter.grad.detach().norm() for parameter in group["params"]
@@ -338,12 +345,12 @@ class TrainingEngine:
 
 
 @torch.no_grad()
-def evaluate_dev(model, documents, config):
+def evaluate_dev(model, documents, config, temperature=1.0):
     model.eval()
     totals = {}
     for document in documents:
         with model.forward_context():
-            loss, metrics = document_loss(model, document, config)
+            loss, metrics = document_loss(model, document, config, temperature)
         if not bool(torch.isfinite(loss)):
             raise RuntimeError(f"non-finite dev loss: {document.id}")
         _accumulate(totals, loss, metrics)
