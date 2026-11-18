@@ -55,6 +55,27 @@ def configure_post_panels(api, remote, metrics):
             ("dev/compression_ratio", "compression_rate", "#2b8cbe"),
         )),
     )}
+    conditions = sorted(
+        {name.split("/")[1] for name in metrics
+         if name.startswith("dev/") and name.count("/") == 2},
+        key=lambda name: (name != "policy", int(name[6:]) if name.startswith("ratio_") else 0, name),
+    )
+    colors = {"policy": "#d62728", "single": "#2b8cbe", "sampled": "#2b8cbe"}
+    palette = ("#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd", "#8c564b")
+    ratios = [name for name in conditions if name.startswith("ratio_")]
+    ratio_colors = dict(zip((2, 4, 8, 16), palette))
+    colors.update({name: ratio_colors.get(int(name[6:]), palette[int(name[6:]) % len(palette)])
+                   for name in ratios})
+    comparisons = []
+    for metric in (
+        "qa_nll", "ae_nll", "lm_nll", "em", "f1", "prefix_retention_ratio",
+        "retention_ratio", "blocks", "objective",
+    ):
+        series = tuple((f"dev/{condition}/{metric}", condition, colors[condition])
+                       for condition in conditions if f"dev/{condition}/{metric}" in metrics)
+        if series:
+            comparisons.append((f"dev/conditions/{metric}", metric, series))
+    panels["dev"] += tuple(comparisons)
     for split, split_panels in panels.items():
         if not any(metric.startswith(f"{split}/") for metric in metrics):
             continue
@@ -71,6 +92,14 @@ def configure_post_panels(api, remote, metrics):
             # 首次配置使用原生主指标图，后续运行复用同一项目中的当前面板。
             existing = next(chart for chart in charts if chart["type"] == "LINE"
                             and chart["title"] in {title, series[0][0]})
+            if title.startswith("dev/conditions/"):
+                retained = {axis["key"] for axis in existing["config"]["yAxis"]} - keys
+                series += tuple((key, key.split("/")[1], None) for key in sorted(retained))
+                series = tuple(sorted(series, key=lambda row: (
+                    row[1] != "policy",
+                    int(row[1][6:]) if row[1].startswith("ratio_") else 0, row[1],
+                )))
+                keys.update(retained)
             custom = {}
             for chart in charts:
                 if chart["type"] == "LINE" and chart["title"] in names:
@@ -139,7 +168,16 @@ def tracking_run(config, output_dir, resume, device, boundary_generator=None):
         world = dist.get_world_size() if dist.is_initialized() else 1
         tags = {f"stage:{config.stage}", *training.swanlab.tags}
         if config.stage == "post":
-            tags.add(f"method:adaptive-boundary-{training.rl.strategy}")
+            tags.add(f"method:update-{training.update_mode}")
+        if config.uses_boundary_policy:
+            tags.add("method:compression-policy")
+            tags.add("method:tail-fixed-recent")
+            tags.add(f"method:adaptive-boundary-{training.objective.strategy}")
+        else:
+            tags.update((f"method:compression-{training.compression.mode}",
+                         f"method:objective-{training.objective.type}"))
+            if training.compression.mode == "multi":
+                tags.add("method:tail-fixed-recent")
         with preserve_training_rng(device, boundary_generator):
             api_key = swanlab_api_key()
             run = swanlab.init(
@@ -169,19 +207,25 @@ def tracking_run(config, output_dir, resume, device, boundary_generator=None):
                 run.finish()
 
 
-def log_metrics(run, record, step, registered, stage, output_dir, rl=None):
+def log_metrics(run, record, step, registered, stage, output_dir, objective=None):
     """只注册实际出现的指标，不为未执行的目标和 dev 创建空曲线。"""
+    auxiliary = {
+        "memory_slots", "recent_tokens", "pending_tokens", "segment_tokens", "memory_cost", "samples",
+    }
     metrics = {name: value for name, value in record.items()
-               if "/" in name and (stage != "post" or name not in {
+               if "/" in name and name.rsplit("/", 1)[-1] not in auxiliary
+               and (stage != "post" or name not in {
                    "train/commit_rate", "train/memory_slots", "train/segment_tokens",
                    "dev/loss", "dev/samples", "dev/commit_rate",
                    "dev/memory_slots", "dev/segment_tokens",
                })}
-    if stage == "post" and rl.strategy == "scst" and rl.num_samples == 1:
+    if (objective is not None and objective.strategy == "scst" and objective.num_samples == 1
+        and "train/reward_std" in metrics):
         del metrics["train/reward_std"]
     new_metrics = metrics.keys() - registered
     if new_metrics:
-        if stage == "post":
+        if stage == "post" or any(name.startswith("dev/") and name.count("/") == 2
+                                  for name in new_metrics):
             with (output_dir.parents[1] / ".swanlab-panels.lock").open("a") as panel_lock:
                 fcntl.flock(panel_lock, fcntl.LOCK_EX)
                 api = swanlab.Api(api_key=swanlab_api_key())

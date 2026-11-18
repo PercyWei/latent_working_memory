@@ -94,12 +94,20 @@ def _summary(request, entries, wall_seconds, task_module):
     metrics = task_module.summarize(records)
     documents = (list({row["metadata"]["conversation_id"]: row for row in records}.values())
                  if request["task"] == "locomo" else records)
+    if "qa_nll" in metrics:
+        metrics["objective"] = sum(row["objective"] for row in documents) / len(documents)
     peaks = [entry["peak_memory_bytes"] for entry in entries if entry["peak_memory_bytes"] is not None]
     return {
         **request, "metrics": {
             **metrics,
             "blocks": sum(row["blocks"] for row in documents) / len(documents),
             "memory_slots": sum(row["memory_slots"] for row in documents) / len(documents),
+            "recent_tokens": sum(row["recent_tokens"] for row in documents) / len(documents),
+            "pending_tokens": sum(row["pending_tokens"] for row in documents) / len(documents),
+            "retained_tokens": sum(row["retained_tokens"] for row in documents) / len(documents),
+            "retention_ratio": sum(row["retention_ratio"] for row in documents) / len(documents),
+            "prefix_retention_ratio": sum(row["prefix_retention_ratio"] for row in documents) / len(documents),
+            "memory_cost": sum(row["memory_cost"] for row in documents) / len(documents),
         }, "outputs": summarize_outputs(records),
         "stop_reasons": dict(Counter(answer["stop_reason"] for row in records
                                      for answer in row.get("qas", [row]))),

@@ -31,10 +31,10 @@ def read_checkpoint(path):
         not isinstance(state["rng"], list) or not state["rng"]
         or not isinstance(state["boundary_rng"], list)
         or len(state["rng"]) != len(state["boundary_rng"])
-        or any((not isinstance(value, torch.Tensor) if config.stage == "post" else value is not None)
+        or any((not isinstance(value, torch.Tensor) if config.uses_boundary_policy else value is not None)
                for value in state["boundary_rng"])
     ):
-        raise ValueError("checkpoint random states must contain one stage-appropriate entry per rank")
+        raise ValueError("checkpoint random states must contain one mode-appropriate entry per rank")
     return state
 
 
@@ -120,6 +120,6 @@ def restore_training(state, model, engine, cursor, boundary_generator, device):
     if boundary_generator is not None:
         boundary_generator.set_state(boundary_state)
     elif boundary_state is not None:
-        raise ValueError("pretraining cannot restore a boundary sampling stream")
+        raise ValueError("training without a boundary policy cannot restore a boundary sampling stream")
     restore_rng(state["rng"][rank], device)
     return step

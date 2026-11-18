@@ -14,12 +14,13 @@ from latent_working_memory.v3_1_1.config import (
     BackwardConfig,
     ComputeConfig,
     ExperimentConfig,
-    RLConfig,
+    PolicyObjectiveConfig,
     ModelConfig,
     ModelLoraConfig,
     ModelStructureConfig,
     OptimizerConfig,
     PolicyTransitionConfig,
+    CompressionConfig,
     RunConfig,
     SchedulerConfig,
     SwanLabConfig,
@@ -37,32 +38,34 @@ from latent_working_memory.v3_1_1.rollout import execute, sample_paths
 one_cpu_thread = pretrain_tests.one_cpu_thread
 tiny_source = pretrain_tests.tiny_source
 
-def _reference_qa_backward(model, memory_leaves, qa, normalizer):
+def _reference_qa_backward(model, memory_leaves, qa, normalizer, retained_ids):
     """单题只反传到独立 memory 叶子；返回统计时释放本题的 decoder 图。"""
     with model.forward_context():
-        loss = model.answer_nll(memory_leaves, qa.prompt_ids, qa.target_ids)
+        loss = model.answer_nll(memory_leaves, retained_ids + qa.prompt_ids, qa.target_ids)
         normalized_loss = loss / normalizer
-    normalized_loss.backward()
+    if normalized_loss.requires_grad:
+        normalized_loss.backward()
     return loss.detach()
 
 
 def _reference_path_backward(
-    model, document, unit_tokens, grpo, path, advantage, num_samples, bptt_steps=None,
+    model, document, pending_stride, grpo, path, advantage, num_samples, bptt_steps=None,
     temperature=1.0,
 ):
     """反传后只返回无图统计，使本路径的中间张量在下一次前向前释放。"""
     with model.forward_context():
-        blocks, _, log_probs, entropy, _ = execute(
-            model, document.input_ids, unit_tokens, actions=path.actions,
+        replay = execute(
+            model, document.input_ids, pending_stride, actions=path.actions,
             bptt_steps=bptt_steps, temperature=temperature,
         )
+        blocks, log_probs, entropy = replay.blocks, replay.log_probs, replay.entropy
     memory_leaves = tuple(block.detach().requires_grad_(True) for block in blocks)
     question_count = len(document.qas)
     question_losses = [None] * question_count
     # 旧 stack(...).mean().backward() 按后建图的题目先执行，保持同样的累加顺序。
     for index in reversed(range(question_count)):
         question_losses[index] = _reference_qa_backward(
-            model, memory_leaves, document.qas[index], question_count * num_samples,
+            model, memory_leaves, document.qas[index], question_count * num_samples, replay.retained_ids,
         )
     with model.forward_context():
         task_loss = torch.stack(question_losses).mean()
@@ -88,14 +91,15 @@ def _reference_path_backward(
         outputs.append(policy_backward)
         gradients.append(None)
     # 同时注入所有直接 QA adjoint 与策略梯度，让共享 history 只反传一次。
-    torch.autograd.backward(outputs, gradients)
+    if outputs:
+        torch.autograd.backward(outputs, gradients)
     return torch.stack((
         task_loss.detach(), policy_loss.detach(), policy_entropy.detach(), drift.detach(),
     ))
 
 
 def reference_post_backward(
-    model, document, unit_tokens, grpo, generator, bptt_steps=None, sampled_paths=None,
+    model, document, pending_stride, grpo, generator, bptt_steps=None, sampled_paths=None,
     temperature=1.0,
 ):
     """采样完整组后逐路径累积梯度；文档归约与参数更新由 engine 执行。"""
@@ -103,17 +107,17 @@ def reference_post_backward(
     sample_count = grpo["num_samples"] if grpo["strategy"] == "scst" else grpo["group_size"]
     with torch.no_grad(), model.forward_context():
         paths = (sampled_paths if sampled_paths is not None
-                 else sample_paths(model, document, unit_tokens, sample_count, generator, temperature))
+                 else sample_paths(model, document, pending_stride, sample_count, generator, temperature))
         if grpo["strategy"] == "scst":
-            greedy = sample_paths(model, document, unit_tokens, 1, None, temperature)[0]
+            greedy = sample_paths(model, document, pending_stride, 1, None, temperature)[0]
             greedy_nll = next((path.qa_nll for path in paths if path.actions == greedy.actions), greedy.qa_nll)
             baseline = -greedy_nll - grpo["memory_cost_weight"] * (
-                model.memory_slots * len(greedy.block_lengths) / len(document.input_ids)
+                greedy.prefix_retained_counts[-1] / (len(document.input_ids) - len(greedy.recent_ids))
             ) ** grpo["memory_cost_power"]
     device = paths[0].old_log_probs.device
     rewards = torch.tensor([
         -path.qa_nll - grpo["memory_cost_weight"] * (
-            model.memory_slots * len(path.block_lengths) / len(document.input_ids)
+            path.prefix_retained_counts[-1] / (len(document.input_ids) - len(path.recent_ids))
         ) ** grpo["memory_cost_power"]
         for path in paths
     ], device=device, dtype=torch.float32)
@@ -123,7 +127,7 @@ def reference_post_backward(
     num_samples = len(paths)
     values = torch.stack([
         _reference_path_backward(
-            model, document, unit_tokens, grpo, path, advantage, num_samples, bptt_steps, temperature,
+            model, document, pending_stride, grpo, path, advantage, num_samples, bptt_steps, temperature,
         )
         for path, advantage in zip(paths, advantages, strict=True)
     ])
@@ -138,7 +142,7 @@ def reference_post_backward(
         "zero_advantage_rate": (float(bool((advantages == 0).all())), 1),
         "blocks": (blocks, num_samples),
         "memory_slots": (blocks * model.memory_slots, num_samples),
-        "segment_tokens": (len(document.input_ids) * num_samples, blocks),
+        "segment_tokens": (sum(sum(path.block_lengths) for path in paths), blocks),
         "commit_rate": (sum(sum(path.actions) for path in paths), decisions),
         "policy_entropy": (
             float(values[:, 2].sum()) * len(paths[0].actions) if decisions else 0,
@@ -146,6 +150,28 @@ def reference_post_backward(
         ),
         "replay_log_probability_drift": (float(values[:, 3].sum()), num_samples),
     }
+    peaks = []
+    for path in paths:
+        pending = min(pending_stride, len(document.input_ids))
+        peak = pending
+        for index, commit in enumerate(path.actions):
+            arriving = min(pending_stride, len(document.input_ids) - (index + 1) * pending_stride)
+            peak = max(peak, pending + arriving)
+            pending = arriving if commit else pending + arriving
+        peaks.append(peak)
+    retention = [(path.prefix_retained_counts[-1] + len(path.recent_ids)) / len(document.input_ids)
+                 for path in paths]
+    prefix_retention = [path.prefix_retained_counts[-1] / (len(document.input_ids) - len(path.recent_ids))
+                        for path in paths]
+    metrics.update({
+        "recent_tokens": (sum(len(path.recent_ids) for path in paths), num_samples),
+        "pending_tokens": (sum(len(path.pending_ids) for path in paths), num_samples),
+        "retention_ratio": (sum(retention), num_samples),
+        "prefix_retention_ratio": (sum(prefix_retention), num_samples),
+        "memory_cost": (sum(value ** grpo["memory_cost_power"] for value in prefix_retention), num_samples),
+        "pending_peak": (sum(peaks), num_samples),
+        "advantage_abs_mean": (float(advantages.abs().sum()), advantages.numel()),
+    })
     if grpo["strategy"] == "scst":
         metrics["baseline_reward"] = (float(rewards.new_tensor(baseline)), 1)
     return qa_loss + grpo["policy_weight"] * policy_loss, metrics
@@ -155,14 +181,19 @@ def make_post_models(folder, gradient_checkpointing=False, bptt_steps=2, policy_
     config = ExperimentConfig(
         stage="post", model_name_or_path=str(folder),
         model=ModelConfig(
-            structure=ModelStructureConfig(memory_slots=4, boundary_hidden_size=8, unit_tokens=4),
+            structure=ModelStructureConfig(memory_slots=4, pending_stride=4, pending_size=4,
+                                           recent_size=0, boundary_hidden_size=8),
             lora=ModelLoraConfig(lora_rank=2, lora_alpha=4),
         ),
         compute=ComputeConfig(gradient_checkpointing=gradient_checkpointing),
         training=TrainingConfig(
             data=TrainingDataConfig(dataset_dir=str(folder)),
-            rl=RLConfig(strategy="grpo", group_size=4, memory_cost_weight=0.01,
-                        policy_weight=policy_weight, advantage_epsilon=1e-6),
+            compression=CompressionConfig(mode="policy"),
+            update_mode="joint",
+            objective=PolicyObjectiveConfig(
+                strategy="grpo", group_size=4, memory_cost_weight=0.01,
+                policy_weight=policy_weight, advantage_epsilon=1e-6,
+            ),
             loop=TrainingLoopConfig(
                 micro_batch_size=4, gradient_accumulation_steps=2, max_steps=6,
             ),
@@ -213,11 +244,11 @@ def assert_gradients_close(reference, actual):
             torch.testing.assert_close(result, expected, rtol=4e-4, atol=4e-6, msg=name)
 
 
-def fixed_paths(model, rows, unit_tokens, num_samples):
+def fixed_paths(model, rows, pending_stride, num_samples):
     result = {}
     with torch.no_grad(), model.forward_context():
         for row in rows:
-            count = (len(row.input_ids) - 1) // unit_tokens
+            count = (len(row.input_ids) - 1) // pending_stride
             paths = []
             for path_index in range(num_samples):
                 actions = tuple(
@@ -225,13 +256,15 @@ def fixed_paths(model, rows, unit_tokens, num_samples):
                     else (index + path_index) % 2 == 0
                     for index in range(count)
                 )
-                blocks, _, log_probs, _, lengths = execute(
-                    model, row.input_ids, unit_tokens, actions=actions,
-                )
+                replay = execute(model, row.input_ids, pending_stride, actions=actions)
+                blocks, log_probs, lengths = replay.blocks, replay.log_probs, replay.block_lengths
                 # 固定非单位比率也覆盖 PPO clip 的两侧分支。
                 old_log_probs = log_probs.detach() + (-0.4, 0.4, 0.0, 0.15)[path_index]
-                nll = rollout.qa_nll(model, blocks, row) + path_index * 0.03
-                paths.append(rollout.Rollout(actions, old_log_probs, float(nll), lengths))
+                nll = rollout.qa_nll(model, blocks, row, replay.retained_ids) + path_index * 0.03
+                paths.append(rollout.Rollout(
+                    actions, old_log_probs, float(nll), lengths,
+                    replay.recent_ids, replay.decision_mask, replay.prefix_retained_counts, replay.pending_ids,
+                ))
             result[row.id] = tuple(paths)
     return result
 
@@ -266,7 +299,7 @@ def test_ragged_replay_preserves_memories_gradients_and_truncation(
     loss(expected).backward()
     loss(results).backward()
     handle.remove()
-    assert max(shapes) == len(contexts)
+    assert max(shapes) == len(contexts) - 1
     assert_gradients_close(gradients(reference), gradients(actual))
 
 
@@ -281,17 +314,17 @@ def test_stochastic_sampling_preserves_document_major_random_draws(tiny_source, 
             for i, (length, count) in enumerate([(3, 1), (12, 3), (19, 2), (9, 10)])]
     generator = torch.Generator().manual_seed(417)
     other = torch.Generator().set_state(generator.get_state())
-    unit_tokens = config.model.structure.unit_tokens
-    grpo = asdict(config.training.rl)
+    pending_stride = config.model.structure.pending_stride
+    grpo = asdict(config.training.objective)
     with torch.no_grad(), reference.forward_context():
-        expected = [sample_paths(reference, row, unit_tokens, grpo["group_size"], generator, temperature) for row in rows]
+        expected = [sample_paths(reference, row, pending_stride, grpo["group_size"], generator, temperature) for row in rows]
     shapes = []
     handle = actual.decoder.model.register_forward_pre_hook(
         lambda module, args, kwargs: shapes.append(kwargs["inputs_embeds"].shape[0]),
         with_kwargs=True,
     )
     with torch.no_grad(), actual.forward_context():
-        results = rollout.sample_paths_batch(actual, rows, unit_tokens, grpo["group_size"], other, temperature)
+        results = rollout.sample_paths_batch(actual, rows, pending_stride, grpo["group_size"], other, temperature)
     handle.remove()
     assert max(shapes) == len(rows)
     assert torch.equal(generator.get_state(), other.get_state())
@@ -306,12 +339,12 @@ def test_stochastic_sampling_preserves_document_major_random_draws(tiny_source, 
 def reference_update(engine, rows, paths, step):
     engine.model.train()
     engine.optimizer.zero_grad(set_to_none=True)
-    unit_tokens = engine.experiment.model.structure.unit_tokens
-    grpo = asdict(engine.config.rl)
-    transition = engine.config.rl.policy_transition
+    pending_stride = engine.experiment.model.structure.pending_stride
+    grpo = asdict(engine.config.objective)
+    transition = engine.config.objective.policy_transition
     temperature = transition.temperature(step, engine.config.loop.max_steps) if transition else 1.0
     outputs = [reference_post_backward(
-        engine.model, row, unit_tokens, grpo, None, engine.config.backward.bptt_steps,
+        engine.model, row, pending_stride, grpo, None, engine.config.backward.bptt_steps,
         sampled_paths=paths[row.id], temperature=temperature,
     ) for row in rows]
     for parameter in engine.parameters:
@@ -331,8 +364,8 @@ def test_engine_microbatch_accumulation_tail_and_state_restore_continuation(
 ):
     reference, actual, config = make_post_models(tiny_source, gradient_checkpointing)
     if annealing:
-        config = replace(config, training=replace(config.training, rl=replace(
-            config.training.rl, policy_transition=PolicyTransitionConfig(
+        config = replace(config, training=replace(config.training, objective=replace(
+            config.training.objective, policy_transition=PolicyTransitionConfig(
                 method="temperature_annealing", schedule="linear",
                 start_temperature=1.0, end_temperature=0.2,
                 start_progress=0.0, end_progress=1.0,
@@ -343,10 +376,11 @@ def test_engine_microbatch_accumulation_tail_and_state_restore_continuation(
             for i, length in enumerate([3, 12, 19, 9, 14, 5, 10, 17])]
     tail = document(9, 7, 2)
     paths = fixed_paths(
-        reference, [*rows, tail], config.model.structure.unit_tokens, config.training.rl.group_size,
+        reference, [*rows, tail], config.model.structure.pending_stride, config.training.objective.group_size,
     )
     calls, writer_shapes, reader_shapes, captured = [], [], [], []
-    def sampling(model, batch, unit_tokens, num_samples, generator, temperature=1.0, score_cache=None):
+    def sampling(model, batch, pending_stride, num_samples, generator, temperature=1.0,
+                 score_cache=None, pending_size=None, recent_size=0):
         calls.append([row.id for row in batch])
         return [paths[row.id] for row in batch]
     monkeypatch.setattr(rl_objective, "sample_paths_batch", sampling)
@@ -418,13 +452,14 @@ def test_no_decisions_and_zero_policy_weight_preserve_gradient_presence(
 ):
     reference, actual, config = make_post_models(tiny_source, policy_weight=policy_weight)
     rows = [document(0, 3 if no_actions else 9, 1), document(1, 2 if no_actions else 12, 3)]
-    unit_tokens = config.model.structure.unit_tokens
-    grpo = asdict(config.training.rl)
-    paths = fixed_paths(reference, rows, unit_tokens, grpo["group_size"])
+    pending_stride = config.model.structure.pending_stride
+    grpo = asdict(config.training.objective)
+    paths = fixed_paths(reference, rows, pending_stride, grpo["group_size"])
     monkeypatch.setattr(rl_objective, "sample_paths_batch",
-                        lambda model, docs, unit_tokens, num_samples, generator, temperature=1.0, score_cache=None: [paths[row.id] for row in docs])
-    expected = [reference_post_backward(reference, row, unit_tokens, grpo, None, 2, paths[row.id]) for row in rows]
-    results = rl_objective.post_backward_batch(actual, rows, unit_tokens, grpo, None, 2)
+                        lambda model, docs, pending_stride, num_samples, generator, temperature=1.0,
+                        score_cache=None, pending_size=None, recent_size=0: [paths[row.id] for row in docs])
+    expected = [reference_post_backward(reference, row, pending_stride, grpo, None, 2, paths[row.id]) for row in rows]
+    results = rl_objective.post_backward_batch(actual, rows, pending_stride, grpo, None, 2)
     for (left_loss, left_metrics), (right_loss, right_metrics) in zip(expected, results, strict=True):
         torch.testing.assert_close(right_loss, left_loss, rtol=3e-5, atol=5e-6)
         assert right_metrics.keys() == left_metrics.keys()
@@ -454,8 +489,8 @@ def test_identical_sampled_paths_keep_identical_rewards_despite_batch_score_roun
         model.boundary.network[-1].weight.zero_()
         model.boundary.network[-1].bias.fill_(100.0)
     rows = [document(0, 9, 1), document(1, 14, 2)]
-    unit_tokens = config.model.structure.unit_tokens
-    grpo = asdict(config.training.rl)
+    pending_stride = config.model.structure.pending_stride
+    grpo = asdict(config.training.objective)
     scoring = model.answer_nll_batch
     score_calls = []
 
@@ -467,7 +502,7 @@ def test_identical_sampled_paths_keep_identical_rewards_despite_batch_score_roun
     monkeypatch.setattr(model, "answer_nll_batch", rounded_score)
     with torch.no_grad(), model.forward_context():
         groups = rollout.sample_paths_batch(
-            model, rows, unit_tokens, grpo["group_size"], torch.Generator().manual_seed(417),
+            model, rows, pending_stride, grpo["group_size"], torch.Generator().manual_seed(417),
         )
     # 保留各轮真实评分的批量形状，只复用同轨迹的确定性奖励。
     assert score_calls == [2, 1] * grpo["group_size"]
@@ -476,15 +511,15 @@ def test_identical_sampled_paths_keep_identical_rewards_despite_batch_score_roun
         assert all(path.qa_nll == group[0].qa_nll for path in group)
         rewards = torch.tensor([
             -path.qa_nll - grpo["memory_cost_weight"] * (
-                model.memory_slots * len(path.block_lengths) / len(row.input_ids)
+                path.prefix_retained_counts[-1] / (len(row.input_ids) - len(path.recent_ids))
             ) ** grpo["memory_cost_power"]
             for path in group
         ])
         assert rewards.std(unbiased=False) == 0
-    scst = asdict(replace(config.training.rl, strategy="scst", group_size=None,
+    scst = asdict(replace(config.training.objective, strategy="scst", group_size=None,
                          num_samples=1, advantage_epsilon=None))
     results = rl_objective.post_backward_batch(
-        model, rows, unit_tokens, scst, torch.Generator().manual_seed(417), temperature=0.5,
+        model, rows, pending_stride, scst, torch.Generator().manual_seed(417), temperature=0.5,
     )
     for _, metrics in results:
         assert metrics["reward"] == metrics["baseline_reward"]
@@ -502,7 +537,7 @@ def test_scst_matches_independent_path_gradients_and_preserves_sampling_rng(
     with torch.no_grad():
         reference.boundary.network[-1].weight.zero_()
         actual.load_state_dict(reference.state_dict())
-    rl = asdict(replace(config.training.rl, strategy="scst", group_size=None, num_samples=num_samples,
+    rl = asdict(replace(config.training.objective, strategy="scst", group_size=None, num_samples=num_samples,
                         advantage_epsilon=None))
     rows = [document(0, 19, 1), document(1, 12, 3)]
     generator = torch.Generator().manual_seed(417)

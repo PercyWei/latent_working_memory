@@ -47,22 +47,35 @@ def compute_batch(samples, model, config, commit, encode, record, commit_per_que
     contexts = [value.context_ids for value in inputs]
     preparation = time.perf_counter() - started
     started = time.perf_counter()
-    paths = execute_batch(model, contexts, config.model.structure.unit_tokens)
+    paths = execute_batch(
+        model, contexts, config.model.structure.pending_stride,
+        pending_size=config.model.structure.pending_size,
+        recent_size=config.recent_size(),
+    )
     torch.cuda.synchronize(device)
     compression = time.perf_counter() - started
-    memories = [path[0] for path in paths]
+    memories = [path.blocks for path in paths]
     generation_seconds = [compression / count] * count
     nll_seconds = [0.0] * count
     seconds = [(preparation + compression) / count] * count
     rows, answers = [], [[] for _ in samples]
     started = time.perf_counter()
     for sample, context, path in zip(samples, contexts, paths, strict=True):
-        blocks, actions, log_probs, entropy, lengths = path
+        slots = len(path.blocks) * model.memory_slots
+        retained = slots + len(path.retained_ids)
+        prefix_length = len(context) - len(path.recent_ids)
+        prefix_retention = (slots + len(path.pending_ids)) / prefix_length if prefix_length else 0.0
         rows.append({
             "id": sample.id, "context_tokens": len(context),
-            "actions": list(actions), "block_lengths": list(lengths),
-            "blocks": len(blocks), "memory_slots": len(blocks) * model.memory_slots,
-            "policy_log_probs": log_probs.tolist(), "policy_entropies": entropy.tolist(),
+            "actions": list(path.actions), "block_lengths": list(path.block_lengths),
+            "blocks": len(path.blocks), "memory_slots": slots,
+            "slots_per_block": model.memory_slots, "recent_tokens": len(path.recent_ids),
+            "pending_tokens": len(path.pending_ids),
+            "retained_tokens": retained, "retention_ratio": retained / len(context),
+            "prefix_retention_ratio": prefix_retention,
+            "memory_cost": prefix_retention ** config.training.objective.memory_cost_power,
+            "policy_log_probs": path.log_probs.tolist(), "policy_entropies": path.entropy.tolist(),
+            "policy_decision_mask": list(path.decision_mask),
             "eval_batch_size": count,
         })
     metadata_seconds = (time.perf_counter() - started) / count
@@ -72,7 +85,8 @@ def compute_batch(samples, model, config, commit, encode, record, commit_per_que
     for question_index in range(max(len(value.questions) for value in inputs)):
         indices = [index for index, value in enumerate(inputs) if question_index < len(value.questions)]
         questions = [inputs[index].questions[question_index] for index in indices]
-        prompts = [question.prompt_ids for question in questions]
+        prompts = [paths[index].retained_ids + question.prompt_ids
+                   for index, question in zip(indices, questions, strict=True)]
         requested = [question.max_new_tokens for question in questions]
         capacities = [model.max_positions - rows[index]["memory_slots"] - len(prompt)
                       for index, prompt in zip(indices, prompts, strict=True)]
@@ -89,7 +103,8 @@ def compute_batch(samples, model, config, commit, encode, record, commit_per_que
             started = time.perf_counter()
             values = model.answer_nll_batch(
                 [memories[index] for index in nll_indices],
-                [inputs[index].questions[question_index].prompt_ids for index in nll_indices],
+                [paths[index].retained_ids + inputs[index].questions[question_index].prompt_ids
+                 for index in nll_indices],
                 [inputs[index].questions[question_index].target_ids for index in nll_indices],
             )
             torch.cuda.synchronize(device)
@@ -131,6 +146,9 @@ def compute_batch(samples, model, config, commit, encode, record, commit_per_que
             complete = commit_per_question or question_index + 1 == len(inputs[index].questions)
             if complete:
                 row = {**rows[index], **record(samples[index], answers[index])}
+                if all("nll" in value for value in answers[index]):
+                    nll = sum(value["nll"] for value in answers[index]) / len(answers[index])
+                    row["objective"] = nll + config.training.objective.memory_cost_weight * row["memory_cost"]
                 row["generated_tokens"] = (answer["generated_tokens"] if commit_per_question else
                                            sum(value["generated_tokens"] for value in answers[index]))
             seconds[index] += time.perf_counter() - scored_at

@@ -1,4 +1,4 @@
-"""单次 AE／LM 样本与按文档分组的 QA；选样由稳定 ID 决定。"""
+"""AE／LM 样本与按文档分组的 QA；选样由稳定 ID 决定。"""
 
 from dataclasses import asdict, dataclass
 import hashlib
@@ -144,8 +144,18 @@ def _metadata(path, split, examples, raw_documents, raw_texts, filtered, maximum
     }
 
 
+def _minimum_input_tokens(settings, split):
+    compression = settings.training.compression
+    slots = settings.model.structure.memory_slots
+    if not settings.uses_boundary_policy:
+        if compression.mode == "single":
+            return slots + 1
+        return settings.recent_size(training=split == "train") + min(compression.ratios) * slots
+    return settings.recent_size(training=split == "train") + settings.model.structure.pending_size
+
+
 def load_pretraining(settings, tokenizer, split):
-    """完整文本只选 AE 或 LM；LM 预测末 N tokens，压缩前缀不足时转 AE。"""
+    """读取 AE／LM 预训练样本；LM 的压缩前缀不足时使用 AE。"""
     maximum = _limit(settings, split)
     data, objective, seed = settings.training.data, settings.training.objective, settings.seed
     data_path, sources, bins = _sources(data.dataset_dir, split, data.length_curriculum)
@@ -157,6 +167,7 @@ def load_pretraining(settings, tokenizer, split):
     }
     examples, raw_documents, bin_by_id = [], set(), {}
     raw_samples, filtered, short_lm_inputs = 0, 0, 0
+    minimum = _minimum_input_tokens(settings, split)
     for path, line_number, sample_number, bin_index, line in _lines(sources):
         try:
             row = json.loads(line)
@@ -168,7 +179,7 @@ def load_pretraining(settings, tokenizer, split):
             raw_documents.add(doc_id)
             raw_samples += 1
             full_ids = tuple(tokenizer.encode(row["text"], add_special_tokens=False))
-            if len(full_ids) <= settings.model.structure.memory_slots or (
+            if len(full_ids) < minimum or (
                 split == "train" and data.max_train_data_tokens is not None
                 and len(full_ids) > data.max_train_data_tokens
             ):
@@ -178,7 +189,7 @@ def load_pretraining(settings, tokenizer, split):
             task = "lm" if rng.random() < objective.lm_ratio else "ae"
             inputs = target = full_ids
             if task == "lm":
-                if len(full_ids) - objective.lm_target_tokens <= settings.model.structure.memory_slots:
+                if len(full_ids) - objective.lm_target_tokens < minimum:
                     task = "ae"
                     short_lm_inputs += 1
                 else:
@@ -201,6 +212,7 @@ def load_pretraining(settings, tokenizer, split):
     )
     metadata.update({
         "raw_samples": raw_samples,
+        "minimum_input_tokens": minimum,
         "lm_to_ae_sources": short_lm_inputs,
         "ae_samples": sum(row.task == "ae" for row in examples.values()),
         "lm_samples": sum(row.task == "lm" for row in examples.values()),
@@ -276,7 +288,12 @@ def _load_documents(directory, tokenizer, split, minimum, upper, maximum, seed,
     metadata = _metadata(
         data_path, split, examples, raw_documents, raw_documents, filtered, maximum, seed,
     )
-    metadata.update({"raw_qas": raw_qas, "selected_qas": sum(len(x.qas) for x in examples.values())})
+    metadata.update({
+        "raw_qas": raw_qas,
+        "selected_qas": sum(len(x.qas) for x in examples.values()),
+        "minimum_body_tokens": minimum,
+        "maximum_body_tokens": upper,
+    })
     if length_bins is not None:
         metadata["length_bins"] = length_bins
     return examples, metadata
@@ -285,7 +302,7 @@ def _load_documents(directory, tokenizer, split, minimum, upper, maximum, seed,
 def load_documents(settings, tokenizer, split):
     data = settings.training.data
     return _load_documents(
-        data.dataset_dir, tokenizer, split, settings.model.structure.memory_slots + 1,
+        data.dataset_dir, tokenizer, split, _minimum_input_tokens(settings, split),
         data.max_train_data_tokens if split == "train" else None,
         _limit(settings, split), settings.seed, allow_empty=split == "dev",
         length_curriculum=data.length_curriculum,

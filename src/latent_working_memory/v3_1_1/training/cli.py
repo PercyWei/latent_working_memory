@@ -16,16 +16,15 @@ def parse_run_args(argv=None):
     restart = parser.add_mutually_exclusive_group()
     restart.add_argument("--resume", action="store_true", help="恢复已有训练计划")
     restart.add_argument("--overwrite", action="store_true", help="清理目标 run 后重建")
-    parser.add_argument("--stage", choices=("pretrain", "post"),
-                        help="新训练必填，选择 pretrain 或 post；恢复从 checkpoint 读取")
-    parser.add_argument("--config", help="新训练必填，指定基础 JSON 配置；恢复从 checkpoint 读取")
+    parser.add_argument("--config", help="新训练必填，从 JSON 配置读取 stage；恢复从 checkpoint 读取")
     parser.add_argument("--output-root", help="实验产物父目录")
     parser.add_argument("--run-id", help=(
         "运行目录名，显式值原样使用；预训练默认 pretrain_k{memory_slots}_{YYYYMMDD-HHMM}，"
-        "后训练默认 policy-post_k{memory_slots}_{YYYYMMDD-HHMM}，时间采用 Asia/Shanghai"
+        "压缩器后训练默认 compressor-post_k{memory_slots}_{YYYYMMDD-HHMM}，"
+        "边界／联合后训练默认 policy-post_k{memory_slots}_{YYYYMMDD-HHMM}，时间采用 Asia/Shanghai"
     ))
     parser.add_argument("--checkpoint", help="训练恢复用的单个 checkpoint 路径")
-    parser.add_argument("--init-checkpoint", help="后训练阶段的预训练来源 checkpoint")
+    parser.add_argument("--init-checkpoint", help="后训练的压缩器来源 checkpoint，可来自预训练或 compressor_only 后训练")
     parser.add_argument("--model-path")
     parser.add_argument("--seed", type=nonnegative_int)
     parser.add_argument("--train-data")
@@ -69,8 +68,6 @@ def parse_run_args(argv=None):
         if args.checkpoint is None:
             parser.error("--resume requires --checkpoint")
     else:
-        if "stage" not in supplied:
-            parser.error("new training requires --stage pretrain or --stage post")
         if "config" not in supplied:
             parser.error("new training requires --config")
         if args.checkpoint is not None:

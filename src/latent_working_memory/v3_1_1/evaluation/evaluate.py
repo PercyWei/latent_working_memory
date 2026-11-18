@@ -29,8 +29,8 @@ def _evaluation_inputs(checkpoint_path, data, task_module, max_new_tokens, max_s
     checkpoint_path = checkpoint_file(checkpoint_path)
     state = read_checkpoint(checkpoint_path)
     config = config_from_dict(state["config"])
-    if config.stage != "post":
-        raise ValueError("independent QA and benchmark evaluation requires a post checkpoint")
+    if not config.uses_boundary_policy:
+        raise ValueError("independent QA and benchmark evaluation requires a joint or boundary_only checkpoint")
     tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path)
     model_window = AutoConfig.from_pretrained(
         config.model_name_or_path,
@@ -39,10 +39,20 @@ def _evaluation_inputs(checkpoint_path, data, task_module, max_new_tokens, max_s
         config, tokenizer, model_window, data, max_samples, max_new_tokens, lengths,
     )
     evaluation_protocol.update({
-        "boundary": "commit at probability >= 0.5; forced final pending flush",
-        "unit_tokens": config.model.structure.unit_tokens,
+        "boundary": "reserve fixed recent before policy decisions; commit at probability >= 0.5 when pending reaches pending_size; force final commit only if pending reaches pending_size",
+        "pending_stride": config.model.structure.pending_stride,
+        "pending_size": config.model.structure.pending_size,
+        "recent_size": config.recent_size(),
+        "retention": "memory slots plus uncompressed pending and recent tokens, divided by complete context length",
+        "memory_cost": {
+            "formula": "((memory slots + uncompressed pending tokens) / (context tokens - recent tokens)) ** power",
+            "empty_prefix": 0.0,
+            "power": config.training.objective.memory_cost_power,
+        },
         "tokenization": tokenization_identity(tokenizer),
     })
+    if task_module.NAME == "test":
+        evaluation_protocol["memory_cost"]["weight"] = config.training.objective.memory_cost_weight
     request = json.loads(json.dumps({
         "eval_id": eval_id, "task": task_module.NAME, "checkpoint": str(checkpoint_path),
         "checkpoint_step": state["cursor"]["step"],

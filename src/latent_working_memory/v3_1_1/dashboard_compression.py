@@ -25,9 +25,12 @@ def load_index(path, task, modified_ns, size):
                 documents[identity] = {
                     "id": identity, "context_tokens": row["context_tokens"],
                     "blocks": row["blocks"], "memory_slots": row["memory_slots"],
+                    "recent_tokens": row["recent_tokens"],
+                    "pending_tokens": row["pending_tokens"],
                     "block_lengths": row["block_lengths"],
-                    "compression_rate": row["context_tokens"] / row["memory_slots"],
-                    "slots_per_block": row["memory_slots"] // row["blocks"],
+                    "compression_rate": row["context_tokens"] / row["retained_tokens"],
+                    "slots_per_block": row["slots_per_block"],
+                    "policy_blocks": sum(row["actions"]),
                     "length": metadata.get("length"), "task": metadata.get("task"),
                     "questions": [], "question_count": 0,
                 }
@@ -87,7 +90,9 @@ def length_scatter(documents):
         "value": [row["context_tokens"], row["blocks"]],
         "tooltip": {"formatter": (
             f"{escape(str(row['id']))}<br>输入：{row['context_tokens']:,} tokens"
-            f"<br>记忆块：{row['blocks']}<br>压缩倍率：{row['compression_rate']:.2f}×"
+            f"<br>记忆块：{row['blocks']}<br>pending：{row['pending_tokens']} tokens"
+            f"<br>recent：{row['recent_tokens']} tokens"
+            f"<br>整篇压缩倍率（含未压缩原文）：{row['compression_rate']:.2f}×"
         )},
     } for row in documents]
     return {
@@ -108,7 +113,7 @@ def block_rows(document):
         rows.append({
             "块": index + 1, "起始 token": start, "结束 token": start + length,
             "输入 tokens": length, "记忆 slots": slots, "压缩倍率": length / slots,
-            "提交方式": "末尾强制提交" if index + 1 == document["blocks"] else "策略提交",
+            "提交方式": "策略提交" if index < document["policy_blocks"] else "末尾强制提交",
         })
         start += length
     return rows
@@ -117,7 +122,7 @@ def block_rows(document):
 def segment_chart(document):
     rows = block_rows(document)
     rates = [row["压缩倍率"] for row in rows]
-    lower, upper = min(rates), max(rates)
+    lower, upper = (min(rates), max(rates)) if rates else (0, 0)
     track = {"left": 24, "right": 40, "top": 16, "height": 42}
     series = []
     for row in rows:
@@ -134,6 +139,21 @@ def segment_chart(document):
             "data": [row["输入 tokens"]], "tooltip": {"formatter": tooltip},
             "itemStyle": {"color": color, "borderColor": "#ffffff", "borderWidth": 1},
         })
+    start = sum(document["block_lengths"])
+    for name, color in (("pending", "#d8b365"), ("recent", "#b9b9b9")):
+        length = document[f"{name}_tokens"]
+        if not length:
+            continue
+        series.append({
+            "name": name, "type": "bar", "stack": "document", "barWidth": track["height"],
+            "z": 2, "emphasis": {"disabled": True}, "data": [length],
+            "tooltip": {"formatter": (
+                f"{name} 原文尾段<br>token 区间：[{start:,}, {start + length:,})"
+                f"<br>保留：{length:,} tokens"
+            )},
+            "itemStyle": {"color": color, "borderColor": "#ffffff", "borderWidth": 1},
+        })
+        start += length
     return {
         "animation": False, "grid": track,
         "tooltip": {"trigger": "item"},

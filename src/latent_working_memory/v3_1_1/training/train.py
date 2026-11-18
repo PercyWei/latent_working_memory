@@ -1,4 +1,4 @@
-"""单机多卡两阶段训练；执行组织沿用 v4.1。"""
+"""单机多卡预训练与后训练；执行组织沿用 v4.1。"""
 
 import argparse
 from contextlib import ExitStack
@@ -19,7 +19,7 @@ from ..io import write_json
 from ..modeling.compressor import MemoryModel
 from .plans import load_training_plan, validate_training_plan
 from .checkpoint import checkpoint_file, read_checkpoint, restore_training, save_checkpoint
-from .engine import SampleCursor, TrainingEngine, evaluate_dev, training_steps
+from .engine import SampleCursor, TrainingEngine, evaluate_dev, training_steps, uses_condition_dev
 from .tracking import log_metrics, preserve_training_rng, tracking_run
 
 
@@ -42,7 +42,7 @@ def _restore_metrics(path, checkpoint_step):
 
 
 def _load_data(config, tokenizer):
-    loader = load_pretraining if config.stage == "pretrain" else load_documents
+    loader = load_pretraining if config.training.objective.type == "ae_lm" else load_documents
     train, train_statistics = loader(config, tokenizer, "train")
     dev, dev_statistics = loader(config, tokenizer, "dev")
     if not train:
@@ -51,28 +51,63 @@ def _load_data(config, tokenizer):
 
 
 def _initialize_compressor(model, config):
-    if config.stage == "pretrain":
+    if config.training.run.init_checkpoint is None:
         return None
     source_path = checkpoint_file(config.training.run.init_checkpoint)
     source = read_checkpoint(source_path)
     source_config = config_from_dict(source["config"])
-    # 分段步长和边界模块由后训练独立设置；压缩器结构与 LoRA 须和来源一致。
+    # 分段窗口和边界模块由后训练独立设置；压缩器结构与 LoRA 须和来源一致。
     source_model = replace(source_config.model, structure=replace(
         source_config.model.structure,
-        unit_tokens=config.model.structure.unit_tokens,
+        pending_stride=config.model.structure.pending_stride,
+        pending_size=config.model.structure.pending_size,
+        recent_size=config.model.structure.recent_size,
         boundary_hidden_size=config.model.structure.boundary_hidden_size,
     ))
     if (
-        source_config.stage != "pretrain"
+        source_config.uses_boundary_policy
         or source_config.model_name_or_path != config.model_name_or_path
         or source_model != config.model
     ):
-        raise ValueError("post initialization requires a matching pretrain compressor")
+        raise ValueError("initialization requires a matching pretrain or compressor_only checkpoint")
     model.load_compressor_state_dict(source["model"])
     return {
         "checkpoint": str(source_path), "step": source["cursor"]["step"],
         "binding": source["binding"],
     }
+
+
+def _validate_context_lengths(model, documents, config, training=False):
+    """边界策略可一直等待，需容纳除固定 recent 外的完整前缀。"""
+    if not config.uses_boundary_policy:
+        return
+    for document in documents:
+        model._check_length(
+            len(document.input_ids) - config.recent_size(training) + model.memory_slots,
+        )
+
+
+def _run_dev(model, documents, config, device, boundary_generator, output_dir, step,
+             baseline_cache, temperature=1.0):
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    world = dist.get_world_size() if dist.is_initialized() else 1
+    records = []
+    with preserve_training_rng(device, boundary_generator):
+        metrics = evaluate_dev(
+            model, documents[rank::world], config, temperature=temperature,
+            baseline_cache=baseline_cache, records=records,
+        )
+    if "segment_tokens" in metrics:
+        metrics["compression_ratio"] = metrics["segment_tokens"] / model.memory_slots
+    if uses_condition_dev(config):
+        folder = output_dir / "dev" / f"global_step_{step}"
+        folder.mkdir(parents=True, exist_ok=True)
+        with (folder / f"rank_{rank}.jsonl").open("w", encoding="utf-8") as stream:
+            for record in records:
+                stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+        if rank == 0:
+            write_json(folder / "summary.json", {"step": step, **metrics})
+    return metrics
 
 
 def _summary(output_dir, step, checkpoint):
@@ -130,7 +165,7 @@ def train(plan_dir, resume=None):
         ),
     ))
     config = replace(config, training=training)
-    if (config.stage == "post" and training.rl.policy_transition is not None
+    if (config.uses_boundary_policy and training.objective.policy_transition is not None
         and training.loop.max_steps < 2):
         raise ValueError("temperature annealing requires at least two optimizer steps")
     if checkpoint is not None and checkpoint["config"] != config_to_dict(config):
@@ -138,7 +173,9 @@ def train(plan_dir, resume=None):
     model = MemoryModel(
         config.model_name_or_path, asdict(config.model), asdict(config.compute), device,
     )
-    # 每个 rank 都在参数广播之前加载预训练压缩器，包括没有本地样本的空 rank。
+    _validate_context_lengths(model, train_documents.values(), config, training=True)
+    _validate_context_lengths(model, dev_documents.values(), config)
+    # 每个 rank 都在参数广播之前加载来源压缩器，包括没有本地样本的空 rank。
     pretraining = (_initialize_compressor(model, config) if checkpoint is None
                    else checkpoint["binding"]["pretraining"])
     binding = {
@@ -156,7 +193,7 @@ def train(plan_dir, resume=None):
     )
     boundary_generator = (
         torch.Generator().manual_seed((config.seed + rank) % 2**32)
-        if config.stage == "post" else None
+        if config.uses_boundary_policy else None
     )
     set_seed((config.seed + rank) % 2**32)
     step = restore_training(checkpoint, model, engine, cursor, boundary_generator, device) if checkpoint else 0
@@ -172,6 +209,10 @@ def train(plan_dir, resume=None):
             write_json(output_dir / "config.json", config_to_dict(config))
             write_json(output_dir / "data.json", {
                 "binding": binding, "train": train_statistics, "dev": dev_statistics,
+                "compression_windows": {
+                    "train_recent_size": config.recent_size(training=True),
+                    "dev_recent_size": config.recent_size(),
+                },
             })
             print(
                 f"train stage={config.stage} output_dir={output_dir} world_size={world} "
@@ -209,6 +250,21 @@ def train(plan_dir, resume=None):
             dist.broadcast_object_list(status, src=0)
         if status[0] is not None:
             raise RuntimeError(status[0])
+        baseline_cache = {}
+        if not resume and dev_documents and uses_condition_dev(config):
+            dev = _run_dev(
+                model, dev_documents, config, device, boundary_generator, output_dir, 0,
+                baseline_cache,
+            )
+            if rank == 0:
+                baseline = {"step": 0, **{f"dev/{key}": value for key, value in dev.items()}}
+                write_json(output_dir / "dev_baseline.json", baseline)
+                if remote is not None:
+                    with preserve_training_rng(device, boundary_generator):
+                        log_metrics(
+                            remote, baseline, 0, registered, config.stage, output_dir,
+                            training.objective,
+                        )
         while step < training.loop.max_steps:
             torch.cuda.synchronize(device)
             torch.cuda.reset_peak_memory_stats(device)
@@ -239,19 +295,16 @@ def train(plan_dir, resume=None):
                 "resources/step_seconds": seconds,
                 "resources/peak_memory_gib": peak_memory,
             }
-            if config.stage == "post":
+            if "segment_tokens" in metrics:
                 record["train/compression_ratio"] = (
                     metrics["segment_tokens"] / config.model.structure.memory_slots
                 )
             dev_interval = training.loop.dev_every != "after_each_epoch" and step % training.loop.dev_every == 0
             if dev_documents and (dev_interval or cursor.epoch_end or step == training.loop.max_steps):
-                with preserve_training_rng(device, boundary_generator):
-                    dev = evaluate_dev(
-                        model, dev_documents[rank::world], config,
-                        temperature=metrics.get("policy_temperature", 1.0),
-                    )
-                if config.stage == "post":
-                    dev["compression_ratio"] = dev["segment_tokens"] / config.model.structure.memory_slots
+                dev = _run_dev(
+                    model, dev_documents, config, device, boundary_generator, output_dir, step,
+                    baseline_cache, metrics.get("policy_temperature", 1.0),
+                )
                 record.update({f"dev/{key}": value for key, value in dev.items()})
             if rank == 0:
                 stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
@@ -259,7 +312,8 @@ def train(plan_dir, resume=None):
                 if remote is not None:
                     with preserve_training_rng(device, boundary_generator):
                         log_metrics(
-                            remote, record, step, registered, config.stage, output_dir, training.rl,
+                            remote, record, step, registered, config.stage, output_dir,
+                            training.objective,
                         )
                 print(
                     f"step {step}/{training.loop.max_steps} loss={metrics['loss']:.5f} "

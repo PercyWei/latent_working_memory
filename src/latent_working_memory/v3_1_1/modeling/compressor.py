@@ -277,8 +277,8 @@ class MemoryModel(nn.Module):
                 for index, (tokens, selected) in enumerate(zip(input_ids, positions, strict=True))]
 
     def answer_nll(self, memory_blocks, prompt_ids, target_ids):
-        if not memory_blocks or not prompt_ids or not target_ids:
-            raise ValueError("answer scoring requires memory, a prompt and nonempty targets")
+        if not prompt_ids or not target_ids:
+            raise ValueError("answer scoring requires a prompt and nonempty targets")
         inputs = self._inputs(self.decoder, memory_blocks, (*prompt_ids, *target_ids[:-1]))
         self._check_length(len(inputs))
         offset = sum(len(block) for block in memory_blocks) + len(prompt_ids) - 1

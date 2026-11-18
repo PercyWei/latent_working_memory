@@ -1,10 +1,10 @@
-# 20261102_单次压缩预训练与自适应边界后训练
+# 20261102_压缩预训练与 QA 后训练
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261117 20:32:01 Asia/Shanghai
+最后修订时间：20261118 21:47:19 Asia/Shanghai
 
-v3.1.1 先通过文本重建（AE）和续写（LM）训练压缩器（Writer），再用问答（QA）与强化学习联合训练记忆内容和分段边界。每次提交将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆回答问题。
+v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=post` 使用问答（QA），由 `training.update_mode` 选择仅更新压缩器（`compressor_only`）、仅更新边界（`boundary_only`）或联合更新（`joint`）。每次写入将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆及未压缩的 pending 和 recent 尾段回答问题。
 
 本文说明方法、配置和执行协议；完整 CLI 参数与各任务命令见[运行指南](scripts/README.md)。
 
@@ -17,14 +17,22 @@ v3.1.1 先通过文本重建（AE）和续写（LM）训练压缩器（Writer）
 | 符号 | 配置 | 含义 |
 |---|---|---|
 | K | `model.structure.memory_slots` | 每次提交生成的记忆槽位数 |
-| U | `model.structure.unit_tokens` | 后训练与评估的正文处理单元长度，决定边界判断粒度 |
-| G | GRPO 的 `training.rl.group_size`；SCST 的 `training.rl.num_samples` | 每篇文档的随机分段路径数 |
+| L | `model.structure.pending_stride` | 每次读入的 token 步长，决定边界判断间隔 |
+| H | `model.structure.pending_size` | 允许压缩的最短 pending 长度，至少为 K |
+| R | `model.structure.recent_size` | 方法默认保留的尾部 token 数 |
+| G | GRPO 的 `training.objective.group_size`；SCST 的 `training.objective.num_samples` | 每篇文档的随机分段路径数 |
 
-后训练按 U 将正文分成处理单元。在线状态由历史 memory、待提交原文 a 和新到达单元 b 组成。边界模块读取这些已到达的内容，选择继续积累 ab，或将 a 压缩为 K 个 slots，再以 b 开始下一块。正文末尾的剩余内容强制提交，这次写入不计为策略动作。
+`joint` 和 `boundary_only` 使用 `compression.mode=policy`。先预留正文末尾固定 recent，其余前缀按 L 分成处理单元。在线状态由历史 memory、待提交原文 a 和新到达单元 b 组成。边界模块读取这些已到达的内容，选择继续积累 ab，或将 a 压缩为 K 个 slots，再以 b 开始下一块。a 小于 H 时强制继续；达到 H 后允许策略判断，不限制最大段长。最后一个不足 L 的单元也按实际长度读入，固定 recent 不参与判断。
+
+前缀读取完毕后，若剩余 pending 长度至少为 H，则一次压缩为 K 个 slots；不足 H 则保留原文。收尾由规则决定，不计策略动作。Reader 输入顺序为历史 memory、未压缩 pending、固定 recent、问题提示。`recent_size=0` 只表示不预留 recent，最终仍可能保留短 pending。
+
+预训练的默认 recent 长度为 0，后训练取 `model.structure.recent_size`。multi／policy 的 `training.compression.recent_size` 只覆盖训练，`null` 沿用默认长度，0 不预留，正整数指定训练长度。训练中的 dev 和独立评估均使用默认长度。single 的 `compression` 仅含 `mode`，在训练和验证中都强制 recent 为 0。
 
 问题和任务指令交给 Reader，正文分段独立于 QA。Reader 在正文压缩完成后回答，生成期间保持 memory 不变。Writer 与 Reader 的模块及训练状态独立，共享冻结的基座参数；LoRA 仅作用于 Writer。
 
 ### 单次压缩预训练
+
+`stage=pretrain` 使用 `training.update_mode=compressor_only`，目标配置为 `training.objective={"type":"ae_lm","strategy":"sft","lm_ratio":0.5,"lm_target_tokens":512}`。本节的单块预设使用 `training.compression={"mode":"single"}`，将完整压缩输入一次写入 K 个 slots，不保留 recent；预训练也支持后文所述的 multi 分段规则。
 
 每条完整 `text` 是一个样本，按 seed 和文本内容固定选择 AE 或 LM，跨 epoch 保持一致。
 
@@ -33,41 +41,78 @@ v3.1.1 先通过文本重建（AE）和续写（LM）训练压缩器（Writer）
 | AE | 完整文本 | 重建完整文本 |
 | LM | 去掉末尾目标 tokens 后的前缀 | 文本末尾的 `lm_target_tokens` 个 tokens |
 
-`training.objective.lm_ratio` 默认 0.5，`lm_target_tokens` 默认 512。LM 前缀长度不大于 K 时改用 AE；两个目标均追加 EOS 结束标记。每个样本按目标 tokens 平均负对数似然（NLL），再对样本等权平均。
+预设中 `training.objective.lm_ratio=0.5`、`lm_target_tokens=512`。LM 前缀长度不大于 K 时改用 AE；两个目标均追加 EOS 结束标记。每个样本按目标 tokens 平均负对数似然（NLL），再对样本等权平均。
 
 预训练只更新 Writer LoRA 和可学习 memory embeddings。冻结的 Reader 保留损失到 memory 的梯度，边界模块在后训练阶段训练。
 
-### QA 与策略联合训练
+### 仅压缩器 QA 后训练
+
+`stage=post`、`training.update_mode=compressor_only` 使用完整正文及 QA，只更新 Writer LoRA 和 memory embeddings。目标配置为 `training.objective={"type":"qa","strategy":"sft"}`，不配置 `backward`，`model.structure.pending_stride`、`pending_size` 与 `boundary_hidden_size` 均为 `null`。多块压缩配置为：
+
+```json
+{"mode":"multi","ratios":[2,4,8,16],"recent_size":null}
+```
+
+预设的 `model.structure.recent_size=256`，训练覆盖值为 `null`。先固定保留正文末尾实际生效的 recent tokens，其余前缀全部压缩；生效值为 0 时不保留原文。最小压缩段长由 `min(ratios) × K` 确定，示例中为 2K。每一步从 `ratios` 中筛选能放入当前剩余前缀、且压缩后剩余长度为 0 或至少最小段长的倍率。合法候选非空时等概率采样；只有候选为空，才将全部剩余前缀一次压成 K 个 slots 并结束。收尾倍率不加入常规采样集合。
+
+例如还剩 5K 时，4× 会遗留不足 2K 的尾块，只有 2× 合法；先压缩 2K，再将余下 3K 一次收尾。每篇每次训练采样一条路径，各题共享全部记忆和固定 recent。
+
+训练目标仅为原始 QA NLL，先对每题答案 tokens 平均，再对题目、文档平均；不含记忆成本。Reader 冻结并保留到 memory 的梯度，不创建或训练边界模块。`compression.mode=single` 时整篇写入一个记忆块，不保留 recent。
+
+配置的 `init_checkpoint=null` 表示从基座初始化 Writer LoRA 和 memory embeddings；也可加载 AE／LM 预训练或 `compressor_only` checkpoint 中的压缩器。阶段 A 按 `epochs=N` 训练压缩器后，可用该 checkpoint 新建阶段 B 的 `boundary_only` run。阶段切换只加载 Writer 和 memory，新建边界模块、optimizer 和 scheduler；只有 `--resume` 恢复完整运行状态。两段分别设置轮数，不自动判断收敛或交替切换。
+
+### QA 与边界后训练
+
+本节适用于 `joint` 和 `boundary_only`，二者均使用边界策略；`training.objective.type=qa`，`strategy` 为 `grpo` 或 `scst`，其余奖励与策略损失参数放在同一 `objective` 分组中。
 
 一篇完整文档及其固定 QA 集合是一个训练单位。每条随机路径处理整篇正文，各题共享该路径的记忆。QA NLL 先在每题的答案 tokens 内平均，再依次对题目、随机路径和文档等权平均。
 
 每条路径 g 的奖励及联合目标为：
 
 ```text
-rho_g = K × blocks_g / input_tokens
-memory_cost_g = rho_g ** memory_cost_power
+prefix_tokens = input_tokens - recent_tokens
+prefix_retention_ratio_g = (K × blocks_g + pending_tokens_g) / prefix_tokens
+memory_cost_g = prefix_retention_ratio_g ** memory_cost_power
 reward_g = -stopgrad(QA_NLL_g) - memory_cost_weight × memory_cost_g
-loss = mean(QA_NLL_g) + policy_weight × policy_loss
+joint:         loss = mean(QA_NLL_g) + policy_weight × policy_loss
+boundary_only: loss = policy_weight × policy_loss
 ```
 
-`input_tokens` 是实际送入压缩器的 `input_ids` 长度，含上下文提示前缀；QA、padding 和追加的 memory tokens 不计入。`rho_g` 表示记忆保留比例。`memory_cost_power`（p）为正数，默认 1.0；`memory_cost_weight`（α）为非负数，默认 0.1。p=1 时，同一文档每增加一块的惩罚为 `α × K / input_tokens`。
+`input_tokens` 是预留 recent 之前完整 `input_ids` 的长度，含上下文提示前缀；QA、padding 和追加的 memory tokens 不计入。令 D 为该长度，R 为实际保留的 recent 长度，则记忆成本只衡量 D−R 个前缀 tokens 的保留比例：`c=((K×B+P)/(D−R))^p`，其中 B 为记忆块数，P 为未压缩 pending 长度。固定 recent 不参与成本的分子和分母，但仍供 Reader 回答。`memory_cost_power`（p）为正数，默认 1.0；`memory_cost_weight`（α）为非负数，默认 0.1。p=1 且 pending 长度相同时，同一文档每增加一块的惩罚为 `α × K / (D−R)`。
 
-`training.rl.strategy` 决定优势的计算方式：
+完整保留比例 `retention_ratio=(K×B+P+R)/D` 单独统计，不用于记忆成本。独立评估若正文全部属于 recent，即 D=R，则没有待压缩前缀，`prefix_retention_ratio` 和 `memory_cost` 均记为 0，完整保留比例为 1；训练长度筛选保证 D−R 为正。
 
-| 策略 | 随机路径数 | 优势 |
-|---|---|---|
-| `grpo` | `group_size >= 2` | `(reward_g - mean(reward)) / (std(reward) + advantage_epsilon)`，使用总体标准差 |
-| `scst` | `num_samples >= 1` | `reward_g - greedy_reward`，直接使用奖励差 |
+`training.update_mode=joint` 更新 Writer LoRA、memory embeddings 和边界模块；`boundary_only` 冻结 Writer、memory embeddings 和 Reader，优化器仅包含边界模块。冻结后的 QA NLL 只参与奖励结算，不执行 QA 反传。
 
-SCST 每篇额外执行一次 greedy 评分，与随机路径共用参数、输入和奖励公式。greedy 路径只提供基线，随机路径承担 QA 与策略反传；`num_samples` 只统计随机路径。greedy 评分保持边界采样随机流不变，同篇相同动作共用 QA 评分。SCST 优势保留原始奖励差，`advantage_epsilon` 仅用于 GRPO。
+`training.objective.reward_mode=terminal` 在终局结算上述奖励；`retention_delta` 在完整轨迹结束后，为初次读入、每次读入与判断、强制收尾分别结算占用差分：
 
-两种策略均使用 clipped policy loss。对路径中的决策求平均，再对路径和文档平均；奖励、优势及旧动作概率均停止梯度。QA 损失独立按正权平均，策略损失由 `policy_weight` 加权。每次 optimizer update 重新采样，全部 microbatch 完成后统一更新参数。
+```text
+prefix_tokens = D - R
+m_t = 已生成的 memory slots 数 + 当前 pending tokens 数
+r_t = -α × [(m_t/prefix_tokens)^p - (m_{t-1}/prefix_tokens)^p]
+最后一个事件额外加入 -QA_NLL
+```
+
+从 `m_0=0` 开始，首次只计入新读入的 pending，终局 `m_T=memory slots + 未压缩 pending tokens`，各事件均不计 recent。继续动作增加待保留原文，获得负成本奖励；压缩判断同时读入新单元，只有净占用减少时才获得返还。强制收尾也结算差分，并通过后续回报影响先前自主动作，但自身没有 log-prob 或策略损失。各事件奖励相加严格等于 `-QA_NLL-α×(m_T/(D−R))^p`，不再重复扣一次成本。D−R 只在轨迹完成后用于奖励归一化，策略观察和动作约束不读取该长度。
+
+`training.objective.advantage_mode=trajectory` 为路径 g 的所有自主决策分配同一优势。`reward_to_go` 为每个判断位置 t 计算优势，其中 `U[g,t]` 是路径 g 从当前位置的事件到强制收尾及 QA 评分的奖励总和，不使用折扣。
+
+| 策略 | 每篇随机路径数 | `trajectory` 优势 | `reward_to_go` 优势 |
+|---|---|---|---|
+| `grpo` | `group_size >= 2` | `(reward_g - mean(reward)) / (std(reward) + advantage_epsilon)`，使用总体标准差 | `U[g,t]` 减去同篇其余随机路径在 t 的平均回报 |
+| `scst` | `num_samples >= 1` | `reward_g - greedy_reward` | `U[g,t] - U[greedy,t]` |
+
+SCST 每篇额外从文首运行一条 greedy 路径，供所有随机路径、所有判断位置共用。它与随机路径共用参数、输入和奖励公式，只用于计算基线。greedy 评分独立于边界采样的随机数，同篇动作序列相同的路径共用 QA 评分。`advantage_epsilon` 仅用于 GRPO 的 `trajectory` 优势。
+
+`reward_to_go` 按同一正文读取位置对齐各路径，允许各自的 memory 和 pending 不同。每条路径都保留强制等待事件的回报，因此即使 greedy 在 t 强制等待，也能为该位置提供基线。只有随机路径的自主决策进入策略损失。SCST 配合 `terminal` 时，各位置优势与 `trajectory` 相同。配合 `retention_delta` 时，记忆成本只计入从 t 开始的净变化，各位置优势可以不同。
+
+两种优势模式均使用 clipped policy loss，默认裁剪范围 0.2。`trajectory` 对路径中的自主决策平均，`reward_to_go` 对自主决策求和，再对路径和文档平均。因此即使各位置的优势相同，单条路径的损失尺度也可能不同。奖励、优势及旧动作概率均停止梯度。每次 optimizer update 重新采样，全部 microbatch 完成后统一更新参数。
 
 默认 α=0.1 来自 `policy-post_k256_20261113` 的 step 69 checkpoint：对 118 篇 dev 文档的固定 1／2／4／8 块候选，按参考答案逐文档选择目标最小项。该冻结模型校准保留了无惩罚候选最优 NLL 收益的 90.72%，相对单块的额外保留比例减少 48.52%，平均块数从 2.551 降至 1.822，其中 55 篇选择多块。记录位于 `artifacts/v3-1/policy-post_k256_20261113/eval/boundary-cost_20261116/alpha-calibration.json`。
 
 ### 温度退火
 
-`training.rl.policy_transition` 控制随机策略向确定性策略的过渡，GRPO 和 SCST 均可使用。`null` 表示固定 T=1；线性退火配置如下：
+`training.objective.policy_transition` 控制随机策略向确定性策略的过渡，GRPO 和 SCST 均可使用。`null` 表示固定 T=1；线性退火配置如下：
 
 ```json
 {
@@ -92,7 +137,7 @@ SCST 每篇额外执行一次 greedy 评分，与随机路径共用参数、输�
 
 ### 数据格式与计长
 
-预训练与后训练均读取准备后的 `train.jsonl`、`dev.jsonl`，每行分别为：
+两阶段均读取准备后的 `train.jsonl`、`dev.jsonl`。AE／LM 预训练和 QA 训练的数据行分别为：
 
 ```json
 {"text":"完整预训练文本"}
@@ -102,9 +147,11 @@ SCST 每篇额外执行一次 greedy 评分，与随机路径共用参数、输�
 {"text":"完整正文","qas":[{"question":"问题","answer":"答案"}]}
 ```
 
-后训练每题必填 `question`、`answer`，可成对附带来源字段 `segment_id`、`segment_char_span`，例如 `"segment_id":"seg0","segment_char_span":[0,4]`。区间是相对当前正文的左闭右开字符下标，用于来源与位置分析，并随逐题结果展示。QASPER 的 question/answer 数据同样可读。
+QA 后训练每题必填 `question`、`answer`，可成对附带来源字段 `segment_id`、`segment_char_span`，例如 `"segment_id":"seg0","segment_char_span":[0,4]`。区间是相对当前正文的左闭右开字符下标，用于来源与位置分析，并随逐题结果展示。QASPER 的 question/answer 数据同样可读。
 
-数据准备和 train/dev 长度筛选均使用 tokenizer 对完整正文计算的 token 数，不添加 special tokens、系统提示或 chat 前缀。训练筛选要求正文长度严格大于 K；`training.data.max_train_data_tokens` 只限制 train，超限样本整条排除。筛选与限量在内存中完成，独立 test 读取完整正文。
+数据准备和 train/dev 长度筛选均使用 tokenizer 对完整正文计算的 token 数，不添加 special tokens、系统提示或 chat 前缀。AE／LM 与 `compressor_only` 使用固定分段规则：single 要求正文长度严格大于 K；multi 要求至少 `recent_size + min(ratios) × K`，保证固定保留 recent 后仍有一块合法压缩输入。AE／LM 的 LM 前缀也须满足对应下限，不足时改用 AE。policy 要求至少 `recent_size + pending_size`。train 下限采用训练实际 recent，dev 下限采用模型默认 recent。
+
+`training.data.max_train_data_tokens` 只限制 train，超限样本整条排除。筛选与限量在内存中完成，独立 test 读取完整正文。分段和成本的 D 则采用实际编码后的完整正文长度，包含既有上下文前缀。
 
 ### 准备预训练与后训练数据
 
@@ -167,20 +214,34 @@ done
 
 | 分组 | 职责与主要参数 |
 |---|---|
-| `model.structure` | K、U 和 `boundary_hidden_size`；预训练的后两项为 `null`，后训练为正整数 |
+| `model.structure` | 预训练仅 `memory_slots` 为正整数，其余四项均为 `null`。后训练的 `recent_size` 为非负整数。`pending_stride`、`pending_size` 和 `boundary_hidden_size` 在 policy 模式下为正整数，其余模式均为 `null`。 |
 | `model.lora` | `lora_rank`、`lora_alpha`、`lora_target_modules` |
 | `compute` | 加载精度、attention、混合精度、层内重算、CPU 暂存 |
 | `training.data` | 数据目录、长度和数量筛选、课程开关 |
 | `training.loop` | 轮数或更新数、课程参数、batch、验证与保存频率、checkpoint 保留数 |
-| `training.objective` | 预训练专用：AE／LM 比例和 LM 目标长度 |
-| `training.rl` | 后训练专用：`strategy`、GRPO 的 `group_size` 或 SCST 的 `num_samples`、`policy_transition`、成本与损失参数；`advantage_epsilon` 仅用于 GRPO |
-| `training.backward` | 后训练专用：跨段反传长度 `bptt_steps` |
-| `training.optimizer` | 压缩器学习率、AdamW 参数、梯度范数裁剪；后训练另含边界学习率 |
+| `training.compression` | single 仅含 `mode`；multi 含 `mode`、`ratios`、训练 recent 覆盖值；policy 含 `mode`、训练 recent 覆盖值 |
+| `training.objective` | 所有模式均含 `type`（`ae_lm/qa`）、`strategy`（`sft/grpo/scst`），以及该目标适用的参数 |
+| `training.update_mode` | 参数更新范围：`compressor_only/boundary_only/joint`；预训练固定为 `compressor_only` |
+| `training.dev` | 固定验证倍率 `fixed_ratios`，QA 生成上限 `max_new_tokens` |
+| `training.backward` | 边界策略专用：跨段反传长度 `bptt_steps` |
+| `training.optimizer` | 压缩器学习率、AdamW 参数、梯度范数裁剪；边界策略模式另含边界学习率 |
 | `training.scheduler` | 学习率 warmup 与余弦衰减比例 |
 | `training.run` | `output_root`、`run_id`；后训练另含 `init_checkpoint` |
 | `training.swanlab` | `tracking`、`project`、`group`、`tags` |
 
-模型结构、目标、RL、优化器及调度参数通过 JSON 设置。新训练的显式 CLI 参数覆盖 JSON，省略时沿用配置。覆盖后的配置保存到计划；解析训练预算后的实际配置写入训练目录、checkpoint 和启用时的 SwanLab config。两阶段均保存完整 `model`，`training` 只保存本阶段适用的字段。源 JSON 保持原样，实际 `training.run.output_dir` 由启动流程生成。
+multi／policy 的训练 recent 覆盖值为 `null` 时沿用模型默认值，0 或正整数只改变训练；dev 和独立评估始终采用模型默认值。single 强制 recent 为 0。
+
+支持以下组合，`type` 指定监督任务，`strategy` 指定训练方法，`update_mode` 指定可更新的参数：
+
+| `stage` | `objective.type` | `objective.strategy` | `update_mode` |
+|---|---|---|---|
+| `pretrain` | `ae_lm` | `sft` | `compressor_only` |
+| `post` | `qa` | `sft` | `compressor_only` |
+| `post` | `qa` | `grpo` 或 `scst` | `joint` 或 `boundary_only` |
+
+AE／LM 的 `objective` 还包含 `lm_ratio` 和 `lm_target_tokens`；QA SFT 只需 `type` 和 `strategy`。策略训练的 `objective` 另含路径数、`reward_mode`、`advantage_mode`、`policy_transition`、成本与损失参数，`advantage_epsilon` 仅用于 GRPO 的 trajectory 优势。`joint` 在策略损失之外保留 QA NLL 的直接反传；`boundary_only` 仅通过奖励使用 QA NLL。
+
+模型结构、目标、优化器及调度参数通过 JSON 设置。新训练的显式 CLI 参数覆盖 JSON，省略时沿用配置。覆盖后的配置保存到计划；解析训练预算后的实际配置写入训练目录、checkpoint 和启用时的 SwanLab config。两阶段均保存完整 `model`，`training` 只保存本阶段适用的字段。源 JSON 保持原样，实际 `training.run.output_dir` 由启动流程生成。
 
 ### 配置预设
 
@@ -192,15 +253,17 @@ done
 | [post_k256.json](../../../configs/v3_1_1/post_k256.json) | FactQA 长度课程与截断反传，GRPO 4 路采样、固定 T=1 |
 | [post_k256_temp.json](../../../configs/v3_1_1/post_k256_temp.json) | 同套后训练数据与执行设置，GRPO 4 路采样、线性温度退火 |
 | [post_k256_scst_temp.json](../../../configs/v3_1_1/post_k256_scst_temp.json) | 同套后训练数据与执行设置，SCST 单随机路径加 greedy 基线、线性温度退火 |
+| [post_k256_compressor_only.json](../../../configs/v3_1_1/post_k256_compressor_only.json) | FactQA 仅压缩器后训练，从合法倍率采样，固定保留 256 tokens recent |
+| [post_k256_boundary_only.json](../../../configs/v3_1_1/post_k256_boundary_only.json) | 冻结压缩器、仅训练边界，4 路采样、占用差分奖励和 reward-to-go |
 
 两份 `*_default.json` 的主要设置如下：
 
 | 设置 | 预训练 | 后训练 |
 |---|---|---|
-| K／U／边界隐藏维度 | `256 / null / null` | `256 / 256 / 128` |
+| K／pending 步长／最短 pending／recent／边界维度 | `256 / null / null / 0 / null` | `256 / 256 / 256 / 0 / 128` |
 | Writer LoRA | rank 16，alpha 32，目标 `q_proj/k_proj/v_proj/o_proj` | 相同 |
 | 计算 | FP32、SDPA；混合精度、层内重算、CPU 暂存均关闭 | 相同 |
-| 目标 | `lm_ratio=0.5`，`lm_target_tokens=512` | `strategy=grpo`，`group_size=4`，`policy_transition=null` |
+| 目标 | `type=ae_lm`、`strategy=sft`，`lm_ratio=0.5`、`lm_target_tokens=512` | `type=qa`、`strategy=grpo`，`group_size=4`、`policy_transition=null` |
 | 策略参数 | — | 成本权重 0.1，成本幂 1.0，策略权重 1.0，`clip_epsilon=0.2`，`advantage_epsilon=1e-6` |
 | 学习率 | 压缩器 `1e-4` | 压缩器 `2e-5`，边界 `1e-4` |
 | AdamW／裁剪 | `weight_decay=0.01`，`beta1=0.9`，`beta2=0.999`，`adam_epsilon=1e-8`，梯度范数上限 1.0 | 相同 |
@@ -209,7 +272,7 @@ done
 
 K256 实验预设使用 `/root/rivermind-data/models/Qwen3-4B-Instruct-2507`，开启 FA2、BF16 autocast 和层内重算。它们的执行设置为：
 
-| 设置 | K256 预训练 | K256 后训练（GRPO／SCST） |
+| 设置 | K256 单块预训练 | K256 后训练（GRPO／SCST） |
 |---|---|---|
 | 数据目录 | `data/fineweb_train5k_20261112` | `data/fineweb-factqa_q10_train1k_length3_20261112` |
 | 预算 | 普通训练 1 轮 | 3 个长度档位，每档 1 轮，历史回放 20% |
@@ -219,6 +282,12 @@ K256 实验预设使用 `/root/rivermind-data/models/Qwen3-4B-Instruct-2507`，�
 | dev／checkpoint 间隔 | 每 40 steps | 每 20 steps |
 | checkpoint 保留上限 | 5 | 6 |
 | 跨段反传 | — | `bptt_steps=2` |
+
+仅压缩器 QA 后训练配置 `post_k256_compressor_only.json` 使用 `compressor_learning_rate=1e-4`、`warmup_steps=4`、`min_lr_ratio=0.1`。每卡 `micro_batch_size=4`、`gradient_accumulation_steps=8`，每次更新每卡累计 32 篇文档，全局 batch 为 GPU 进程数乘 32；同篇全部 QA 不额外增加文档 batch。该配置的模型默认 `recent_size=256`，训练覆盖为 `null`，默认训练 1 轮，关闭长度课程。
+
+当前数据含 train 1002 篇／10020 道 QA、dev 118 篇／1180 道 QA，现有长度筛选保留全部样本。按下面的单卡命令运行 1 轮，共 `ceil(1002 / 32)=32` 个 optimizer steps。`dev_every=8`、`save_every=8`：在 step 0、8、16、24、32 验证，在 step 8、16、24、32 保存 checkpoint；每轮末与最终步也执行验证和保存。4 步 warmup 与 8 步间隔分别约占总步数的 1/8、1/4，与单块 157 步训练的 20 步 warmup、40 步间隔比例相近。改变 GPU 数或训练轮数时，应重新换算这些固定步数。
+
+边界策略预设均设置 `pending_stride=256`、`pending_size=256`。联合更新预设的模型默认 recent 为 0，`boundary_only` 预设为 256，训练覆盖均为 `null`。
 
 两份 `*_temp.json` 均启用线性温度退火：前 30% 进度保持 T=1.0，30%～90% 从 1.0 降至 0.2，最后 10% 保持 T=0.2。进度按整个训练的实际 optimizer steps 计算，跨长度课程档位连续推进。GRPO 使用 `group_size=4`；SCST 使用 `num_samples=1`，每篇另计算一条 greedy 路径作为奖励基线，仅随机路径参与反向传播。
 
@@ -254,11 +323,10 @@ FA2 需要 `flash-attn`，并使用 BF16 基座或 BF16 autocast。项目默认�
 
 从项目根目录运行，使用根目录 `.venv/`。训练与评估脚本默认设置 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`，外部已设置时沿用。`CUDA_VISIBLE_DEVICES` 显式指定使用的 GPU，每卡一个进程。
 
-新训练同时指定 `--stage` 与 `--config`，两者阶段一致。下面先启动 K256 预训练：
+新训练指定 `--config`，训练阶段直接读取 JSON 中的 `stage`。下面先启动 K256 AE／LM 预训练：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
-  --stage pretrain \
   --config configs/v3_1_1/pretrain_k256.json \
   --run-id pretrain_k256_20261112 \
   --epochs 1 \
@@ -268,11 +336,10 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
 
 以筛选后 5000 条样本计算，该设置训练 1 轮共 157 个 optimizer steps，在第 40、80、120、157 步验证并保存。最终 checkpoint 记录在 `train/summary.json`。
 
-后训练使用新的 run，通过 `--init-checkpoint` 指定预训练来源：
+联合后训练使用新的 run，通过 `--init-checkpoint` 指定压缩器来源：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
-  --stage post \
   --config configs/v3_1_1/post_k256.json \
   --run-id policy-post_k256_20261112 \
   --init-checkpoint artifacts/v3-1/pretrain_k256_20261112/train/checkpoints/global_step_157 \
@@ -280,9 +347,24 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
   --gradient-accumulation-steps 8
 ```
 
-预训练来源与后训练须使用相同基座、K 和 LoRA 设置（rank、alpha、目标模块）。启用 GRPO 温度退火时，将 `--config` 改为 `configs/v3_1_1/post_k256_temp.json`；使用 SCST 温度退火时，改为 `configs/v3_1_1/post_k256_scst_temp.json`。每次新训练分别设置 `--run-id`，并通过 `--init-checkpoint` 指定预训练来源。
+初始化来源与目标 run 须使用相同基座、K 和 LoRA 设置（rank、alpha、目标模块）。`joint/boundary_only` 均可从 AE／LM 预训练或 `compressor_only` checkpoint 加载压缩器。启用 GRPO 温度退火时，将 `--config` 改为 `configs/v3_1_1/post_k256_temp.json`；使用 SCST 温度退火时，改为 `configs/v3_1_1/post_k256_scst_temp.json`。每次新训练分别设置 `--run-id`，并通过 `--init-checkpoint` 指定初始化来源。
 
-运行根目录为 `<output_root>/<run_id>/`。显式 `run_id` 原样使用；为 `null` 或省略时，生成 `pretrain_k{K}_{YYYYMMDD-HHMM}` 或 `policy-post_k{K}_{YYYYMMDD-HHMM}`，时间采用 `Asia/Shanghai`，精确到分钟。
+阶段 A（`compressor_only`）→ 阶段 B（`boundary_only`）使用以下两个后训练配置，分别通过 `--epochs` 设置 N、M 轮；默认均为 1 轮，关闭长度课程。阶段 A 在开始、每 8 步及每轮末／最终步验证，保存间隔为 8 步；阶段 B 在开始及每轮结束验证。阶段 A 默认 `init_checkpoint=null`，从基座初始化；也可通过 `--init-checkpoint` 指定 AE／LM 或 `compressor_only` checkpoint。阶段切换新建 run，只载入压缩器权重，不沿用 optimizer 或 scheduler：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
+  --config configs/v3_1_1/post_k256_compressor_only.json \
+  --run-id compressor-post_k256_20261118 --epochs 1
+
+CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
+  --config configs/v3_1_1/post_k256_boundary_only.json \
+  --run-id boundary-only_k256_20261118 --epochs 1 \
+  --init-checkpoint 'artifacts/v3-1/compressor-post_k256_20261118/train/checkpoints/global_step_<N>'
+```
+
+将 `<N>` 替换为阶段 A 的 `train/summary.json` 中的真实 checkpoint step。边界策略允许一直等待到末尾，因此训练前检查去掉固定 recent 后的完整前缀能否放入 Writer 窗口；固定分段模式在实际 Writer／Reader 前向检查长度。
+
+运行根目录为 `<output_root>/<run_id>/`。显式 `run_id` 原样使用；为 `null` 或省略时，AE／LM 预训练生成 `pretrain_k{K}_{YYYYMMDD-HHMM}`，`compressor_only` 生成 `compressor-post_k{K}_{YYYYMMDD-HHMM}`，`joint/boundary_only` 生成 `policy-post_k{K}_{YYYYMMDD-HHMM}`。时间采用 `Asia/Shanghai`，精确到分钟。
 
 ### 训练预算与恢复
 
@@ -310,18 +392,33 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
 
 `training.swanlab.tracking` 默认 `true`。`--tracking online` 开启 SwanLab，`--tracking offline` 仅保存本地产物。project、group、tags 通过 JSON 设置；默认 project 为 `latent-working-memory-v3.1`，group 缺省使用 `run_id`，`job_type=train`。
 
-train 与 dev 共用一个 run，恢复沿用原身份。两阶段自动追加 `stage:*`，后训练再添加 `method:adaptive-boundary-grpo` 或 `method:adaptive-boundary-scst`；具体超参数记录在 config。
+train 与 dev 共用一个 run，恢复沿用原身份。自动记录阶段、压缩／目标模式及后训练更新方式等 tags；具体超参数记录在 config。
 
-dev 保持模型参数不变，后训练使用确定性边界。train/dev 曲线横轴为真实 optimizer step，只在实际产生结果时追加标量。首次记录某个指标时注册原生图表并配置标题、坐标轴、配色和合并关系；后续复用面板及历史数据。资源统计放在 `resources/*`。
+dev 保持模型参数不变，边界策略使用确定性判断。train/dev 曲线横轴为真实 optimizer step，只在实际产生结果时追加标量。首次记录某个指标时注册原生图表并配置标题、坐标轴、配色和合并关系；后续复用面板及历史数据。资源统计放在 `resources/*`。
+
+### 固定倍率与策略验证
+
+`training.dev.fixed_ratios=[2,4,8,16]` 使用同一批 dev；`max_new_tokens=128` 控制 greedy 生成上限。固定倍率验证按压缩模式采用对应尾段协议：
+
+- AE／LM 或 `compressor_only` 的 multi：四个倍率使用相同的 recent 长度，预训练取 0，后训练取 `model.structure.recent_size`。对剩余前缀按当前固定倍率写入；若剩余长度不足一个固定倍率块，或写入一块会遗留不足 `min(ratios) × K` 的非空尾块，就将当前剩余前缀整体收尾。例如前缀 5K、固定倍率 4× 时，一次压缩 5K；最后一块实际倍率可略大于主倍率。single 若指定固定倍率对照，不保留 recent。
+- policy 的固定倍率基线：同样保留模型默认 recent；按固定倍率处理其余前缀，写入后若会遗留不足 `pending_size` 的非空尾块，就将当前剩余前缀整体收尾。各固定倍率块长至少为 `pending_size`。基线将 recent 之外的前缀全部压缩。
+
+各条件均记录实际段长和倍率。`fixed_ratios=[]` 不关闭 dev：AE／LM 和 `compressor_only` 的 single 验证单块压缩，multi 为每篇固定种子采样一条路径；`joint/boundary_only` 只验证 greedy 边界策略：模型默认 recent 为 0 时仅评 NLL，正数时额外生成答案并计算 EM／F1。
+
+阶段 A 分别验证四个固定倍率；阶段 B 额外验证 greedy 边界策略。策略与固定倍率基线使用相同 recent，策略收尾可额外保留不足 `pending_size` 的 pending。进入条件验证的 QA 设置均报告 NLL、EM／F1、块数、未压缩 pending、recent、前缀保留比例及完整保留比例；边界策略模式另报告记忆成本及 `QA NLL + α × cost`，其中成本采用前缀保留比例的 p 次幂。NLL 按题目再文档平均，EM／F1 按题目平均。AE／LM 条件只评价对应重建／续写 NLL，不生成 QA 答案。
+
+这些条件在 step 0、配置的验证间隔、每轮末和最终步计算。`boundary_only` 的固定倍率基线在本次进程内复用，联合更新时每次重算；恢复运行后首次验证重新建立基线缓存。所有验证保留训练 RNG，不改变后续采样。逐篇分段、逐题生成和汇总写入 `train/dev/global_step_<step>/rank_<rank>.jsonl` 与 `summary.json`。
+
+SwanLab 使用 `dev/ratio_2/*`、`dev/ratio_4/*`、`dev/ratio_8/*`、`dev/ratio_16/*` 和 `dev/policy/*`，按同一指标合并条件并固定配色。前缀保留比例与完整保留比例分别展示，`memory_cost` 作为本地辅助统计，包含该成本的 `objective` 单独展示。
 
 ### 指标口径与面板
 
-预训练保存 AE／LM 的实际选样数量，并记录 `loss`、`lm_fraction`、分项 NLL 和样本数。后训练 train 面板如下，均使用单 Y 轴；表中指标省略 `train/` 前缀。
+AE／LM 预训练保存实际选样数量、`loss`、`lm_fraction` 和分项 NLL；`compressor_only` 记录 `loss`、`qa_nll`、块数和保留比例。边界策略模式的 train 面板如下，均使用单 Y 轴；表中指标省略 `train/` 前缀。
 
 | 图表 | 指标与展示 |
 |---|---|
-| 联合、QA、策略损失 | `loss`、`qa_nll`、`policy_loss` 分别展示 |
-| 奖励 `reward` | 随机路径 `reward` 与多样本 `reward_std`；SCST 加入 `baseline_reward`，图例为 `greedy_reward` |
+| 训练、QA、策略损失 | `loss`、`qa_nll`、`policy_loss` 分别展示；仅边界模式的 `loss` 不含 QA 项 |
+| 奖励 `reward` | 随机路径 `reward` 与多样本 `reward_std`。SCST 的 `baseline_reward` 记录 greedy 路径的整轨总奖励，图例为 `greedy_reward` |
 | 零优势比例 | `zero_advantage_rate`：实际优势全部为零的文档比例 |
 | 记忆用量 `memory_usage` | 平均块数 `blocks`，图例 `memory_blocks`，轴名 `memory_blocks = memory_slots / K` |
 | 压缩程度 `compression` | `compression_ratio`，图例 `compression_rate`，轴名 `compression_rate = segment_tokens / K` |
@@ -331,15 +428,17 @@ dev 保持模型参数不变，后训练使用确定性边界。train/dev 曲线
 | 梯度范数 | `grad_norm`、`compressor_grad_norm`、`boundary_grad_norm` 分别展示，均为统一裁剪前的范数 |
 | 学习率 `learning_rate` | `compressor_learning_rate`、`boundary_learning_rate` 共用纵轴 |
 
-后训练 dev 显示四张图：QA NLL、记忆用量、压缩程度、策略熵。记忆与压缩图沿用 train 的图例、轴名和口径。
+policy 未配置固定倍率且模型默认 recent 为 0 时，dev 只执行 greedy 路径的 NLL 评分，记录 QA NLL、记忆用量、压缩程度、策略熵、两种保留比例、记忆成本和 `objective`，不生成答案。其余 policy 设置进入条件验证，按上一节组织 `dev/policy/*` 和固定倍率指标。
 
-压缩倍率按全局输入 token 总数除以 memory token 总数计算，等于聚合后的 `segment_tokens / K`。例如 K256、平均段长 1024 对应 4× 压缩。train 的 QA、块数、压缩率和奖励只统计随机路径，greedy 奖励单独记录。
+`compression_ratio=segment_tokens/K` 表示已压缩段的整体压缩倍率，未压缩 pending 和 recent 不计入分子或分母。`prefix_retention_ratio=(memory slots+pending)/(D−R)` 衡量待压缩前缀的保留比例，`memory_cost=prefix_retention_ratio^p`；`retention_ratio=(memory slots+pending+recent)/D` 独立记录整篇最终保留比例。没有未压缩 pending 时，压缩倍率与前缀保留比例在单篇上互为倒数。train 的 QA、块数、压缩率和奖励只统计随机路径，greedy 奖励单独记录。同时记录 pending 原文峰值和自主动作的平均绝对优势。
 
-本地 `metrics.jsonl` 还保留辅助统计：train 的 `commit_rate`、`memory_slots`、`segment_tokens`，dev 的 `loss`、`samples`、`commit_rate`、`memory_slots`、`segment_tokens`。`dev/loss` 等于 `dev/qa_nll`，云端展示后者。SCST 单样本的 `reward_std` 为零，仅写本地；后训练不单独记录 `train/samples`。
+边界策略模式的本地 `metrics.jsonl` 还保留辅助统计：train 的 `commit_rate`、`memory_slots`、`segment_tokens`，dev 的 `loss`、`samples`、`commit_rate`、`memory_slots`、`segment_tokens`。`dev/loss` 等于 `dev/qa_nll`，云端展示后者。SCST 单样本的 `reward_std` 为零，仅写本地；边界策略模式不单独记录 `train/samples`。
 
 ### 独立评估任务
 
-使用任务脚本独立评估后训练 checkpoint。各任务先将完整正文压缩为 memory，再由 Reader 回答。Test 同文档、LoCoMo 同对话的全部 QA 共用一次正文压缩得到的记忆，各题独立生成；RULER 按题目处理。评估计划、日志、明细和汇总保存在本地。
+任务脚本只接受具有边界策略的 `joint/boundary_only` checkpoint；`compressor_only` 当前使用训练内 dev 验证。各任务按 checkpoint 中 `model.structure` 的边界参数和默认 recent 处理完整正文，忽略训练 recent 覆盖值，再由 Reader 根据 memory、未压缩 pending 和 recent 回答。Test 同文档、LoCoMo 同对话的全部 QA 共用一次压缩结果，各题独立生成；RULER 按题目处理。评估计划、日志、明细和汇总保存在本地。
+
+逐篇记录和汇总分别保留 `prefix_retention_ratio`、`memory_cost` 和完整 `retention_ratio`，均按文档等权平均；LoCoMo 每段对话只计一次。同文档各题共用压缩成本，不按 QA 数重复累计。
 
 | 任务与脚本 | 数据入口 | 范围与评分 |
 |---|---|---|
@@ -394,11 +493,11 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 
 看板展示独立评估，按 Test、RULER、LoCoMo 分页。页面上方是“多 checkpoint 比较”：展示全部已完成 checkpoint 的指标表、按实际 optimizer step 排列的变化曲线，以及折叠的资源测量与输出诊断。下方是“单 checkpoint 详情”：“明细 checkpoint”默认选择最新完成的一项，选择器下方依次展示折叠的评估配置、RULER 单步明细、压缩分析与问答。只有一个 checkpoint 时，上方展示其评估概览。Benchmark 支持接入本地基线，按实际输入、参考答案、基座和评估协议对齐。训练与 dev 指标在 SwanLab 查看。
 
-压缩区按篇和记忆块分别展示平均、最低、最高压缩倍率，另列每篇平均记忆块数及单块完成整篇压缩的比例。输入长度 N 取实际 Writer 输入 token 数（含模板前缀），B 为记忆块数，K 为每块槽位数：
+压缩区按篇和记忆块分别展示平均、最低、最高压缩倍率，另列每篇平均记忆块数及只生成一个记忆块的比例。输入长度 N 取实际编码后的完整正文 token 数（含模板前缀），B 为记忆块数，K 为每块槽位数，P 为未压缩 pending 长度，R 为固定 recent 长度：
 
 | 统计单位 | 压缩倍率 | 平均方式 |
 |---|---|---|
-| 整篇文本 | `N / (B × K)` | 每篇等权；LoCoMo 每段对话只计一次 |
+| 整篇文本 | `N / (B × K + P + R)` | 每篇等权；LoCoMo 每段对话只计一次 |
 | 单个记忆块 | `block_length / K` | 每块等权，包含末尾强制提交块 |
 
 整篇倍率分布、单块倍率分布和“输入长度—记忆块数”散点图使用当前 checkpoint；RULER 可按长度和子任务筛选。逐文本列表支持排序，默认选中首行，表格高亮与下方的压缩分段条、块信息及 QA 始终对应同一篇文本。分段条内置范围手柄，支持缩放、拖动平移和悬停查看块信息。图表按需生成，不保存图片；首次读取当前 checkpoint 时仅缓存压缩统计和记录位置，完整回答按所选文本读取。
@@ -409,9 +508,11 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 
 ### 批量计算与梯度归约
 
-预训练在一次更新的本卡样本内按 Writer 输入长度降序排列，再切 microbatch 并按 AE／LM 分组，减少 padding。各组损失求和反传，全部 microbatch 完成后按实际全局样本数归约。该排序只作用于当前更新的样本集合。
+AE／LM 和 `compressor_only` 在一次更新的本卡样本内按 Writer 输入长度降序排列，再切 microbatch。单块 AE／LM 按目标分组前向；多块模式按写入轮次批量压缩，Reader 先向独立 memory 叶子累积梯度，再回传完整 Writer 图；QA 对同篇各题平均。全部 microbatch 完成后按实际全局样本数归约。该排序只作用于当前更新的样本集合。
 
-后训练先固定参数、无梯度地采样和评分，再逐轮批量回放各文档的随机路径。Writer 按活跃文档批量执行边界判断与压缩；Reader 每轮从各文档取一道 QA，将梯度反传至独立 memory 叶子后释放 decoder 图。全部题目的 memory 梯度按题数与 G 归一，再与策略项一起回传 Writer，随后释放本轮路径图。
+联合后训练先固定参数、无梯度地采样和评分，再逐轮批量回放各文档的随机路径。Writer 按活跃文档批量执行边界判断与压缩；Reader 每轮从各文档取一道 QA，将梯度反传至独立 memory 叶子后释放 decoder 图。全部题目的 memory 梯度按题数与 G 归一，再与策略项一起回传 Writer，随后释放本轮路径图。
+
+仅边界模式使用冻结 Writer 的状态回放边界 log-prob，跳过 Reader 反传和 memory 梯度回注；固定 Writer 保持 eval 状态，边界模块保持 train 状态。
 
 Writer 与 Reader 均使用左侧 padding、attention mask 和各样本真实位置，损失只统计有效 tokens。分布式归约使用实际全局样本数；尾批中的空 rank 也参与 collective。多卡 CUDA 进程组由公共 runtime 中的 verl 初始化，训练循环、采样回放和 optimizer 更新由本模块执行。
 
@@ -425,7 +526,7 @@ Writer 与 Reader 均使用左侧 padding、attention mask 和各样本真实位
 
 ### 跨段反传
 
-`training.backward.bptt_steps` 控制后训练回放的梯度跨度：
+`training.backward.bptt_steps` 控制边界策略回放的梯度跨度：
 
 | 值 | 梯度传播 |
 |---|---|
@@ -452,12 +553,14 @@ v3_1_1/
     pretrain.py / post.py   预训练裁剪与后训练 QA 选择
     length.py               正文长度分档与统计
   data.py                   AE／LM 样本与完整文档 QA
+  compression.py            单块、多倍率随机与固定倍率分段
   modeling/                 压缩器、边界模块、流式状态与组批
   rollout.py                因果分段、采样与回放
   training/
     cli.py / plans.py       训练参数与计划
     run.py / train.py       启动调度与训练执行
     engine.py               预算、游标、梯度更新与 dev
+    dev.py                  固定倍率／策略验证、逐题生成与冻结基线缓存
     rl.py                   QA／GRPO／SCST 联合目标与反传
     checkpoint.py           checkpoint 保存与恢复
     tracking.py             SwanLab 指标与面板
@@ -481,15 +584,15 @@ v3_1_1/
 | 路径 | 内容 |
 |---|---|
 | `plan/config.json` | `stage`、`seed`、基座、模型与计算设置 |
-| `plan/train.json` | 本阶段训练配置和执行安排；预训练含 `objective`，后训练含 `rl` |
+| `plan/train.json` | 本阶段训练配置和执行安排，均含 `objective`、`update_mode` 和 `compression` |
 | `train/config.json` | 实际训练配置，含解析后的总步数 |
-| `train/data.json` | 选样统计及数据、tokenizer、模型和预训练来源绑定信息 |
+| `train/data.json` | 选样统计及数据、tokenizer、模型和初始化来源绑定信息；`compression_windows.train_recent_size/dev_recent_size` 记录实际生效的 recent 长度 |
 | `train/metrics.jsonl` | 逐 optimizer step 的训练、dev 与资源指标 |
 | `train/summary.json` | 已完成步数与最终 checkpoint 路径 |
 | `train/checkpoints/global_step_<N>/state.pt` | 可恢复的训练状态 |
 | `plan/eval-<eval-id>/<task>.json` | 独立评估协议及累计 `checkpoints` 列表 |
 | `eval/<eval-id>/<task>/global_step_<N>/` | 对应 checkpoint 的评估进度、明细和汇总 |
 
-Checkpoint 固定包含 `config`、`model`、`optimizer`、`scheduler`、`cursor`、`rng`、`boundary_rng`、`binding`。其中 `model` 包含 `memory_embeddings`、`adapter`、`boundary`，预训练的 `boundary` 为 `null`；`cursor.step` 表示已完成的 optimizer steps，随机状态按 rank 保存。恢复核对原配置、数据身份与游标。
+Checkpoint 固定包含 `config`、`model`、`optimizer`、`scheduler`、`cursor`、`rng`、`boundary_rng`、`binding`。其中 `model` 包含 `memory_embeddings`、`adapter`、`boundary`，AE／LM 和 `compressor_only` 的 `boundary` 为 `null`；`cursor.step` 表示已完成的 optimizer steps，随机状态按 rank 保存。恢复核对原配置、数据身份与游标。
 
-评估计划绑定基座、模型结构（含 U）、LoRA、计算设置和 seed，并保存固定数据与协议。任务 `status.json` 的 `selected_checkpoints` 记录本次执行范围，与计划的累计列表分别保存。`progress/worker_<rank>.jsonl` 持续保存已完成样本，flush 后可续评；同目录的 `worker_<rank>.json` 是阶段、批量和长度的展示快照，每次续评重建。完整 details 提交后生成最终 summary。
+评估计划绑定基座、模型结构（含 pending 步长、最短长度和默认 recent）、LoRA、计算设置和 seed，并保存固定数据与协议。任务 `status.json` 的 `selected_checkpoints` 记录本次执行范围，与计划的累计列表分别保存。`progress/worker_<rank>.jsonl` 持续保存已完成样本，flush 后可续评；同目录的 `worker_<rank>.json` 是阶段、批量和长度的展示快照，每次续评重建。完整 details 提交后生成最终 summary。

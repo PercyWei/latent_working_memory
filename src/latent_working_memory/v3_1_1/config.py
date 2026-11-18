@@ -33,13 +33,19 @@ def _path(config, name, optional=False):
 @dataclass(frozen=True)
 class ModelStructureConfig:
     memory_slots: int = 128
-    unit_tokens: int | None = None
+    pending_stride: int | None = None
+    pending_size: int | None = None
+    recent_size: int | None = None
     boundary_hidden_size: int | None = None
 
     def __post_init__(self):
         _positive_ints(self, ("memory_slots",))
-        if self.unit_tokens is not None:
-            _positive_ints(self, ("unit_tokens",))
+        if self.pending_stride is not None:
+            _positive_ints(self, ("pending_stride",))
+        if self.pending_size is not None:
+            _positive_ints(self, ("pending_size",))
+            if self.pending_size < self.memory_slots:
+                raise ValueError("pending_size must be at least memory_slots")
         if self.boundary_hidden_size is not None:
             _positive_ints(self, ("boundary_hidden_size",))
 
@@ -91,15 +97,64 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
-class ObjectiveConfig:
-    lm_ratio: float = 0.5
-    lm_target_tokens: int = 512
+class SFTObjectiveConfig:
+    type: str
+    strategy: str = "sft"
+    lm_ratio: float | None = None
+    lm_target_tokens: int | None = None
 
     def __post_init__(self):
-        _positive_ints(self, ("lm_target_tokens",))
-        _number(self.lm_ratio, "lm_ratio", inclusive=True)
-        if self.lm_ratio > 1:
-            raise ValueError("lm_ratio must not exceed 1")
+        if self.strategy != "sft":
+            raise ValueError("SFT objective.strategy must be sft")
+        if self.type not in {"ae_lm", "qa"}:
+            raise ValueError("SFT objective.type must be ae_lm or qa")
+        if self.type == "ae_lm":
+            _positive_ints(self, ("lm_target_tokens",))
+            _number(self.lm_ratio, "lm_ratio", inclusive=True)
+            if self.lm_ratio > 1:
+                raise ValueError("lm_ratio must not exceed 1")
+        elif self.lm_ratio is not None or self.lm_target_tokens is not None:
+            raise ValueError("QA objective cannot contain lm_ratio or lm_target_tokens")
+
+
+@dataclass(frozen=True)
+class CompressionConfig:
+    mode: str = "single"
+    ratios: list[int] | None = None
+    recent_size: int | None = None
+
+    def __post_init__(self):
+        if self.mode not in {"single", "multi", "policy"}:
+            raise ValueError("compression.mode must be single, multi or policy")
+        if self.mode == "single":
+            if self.ratios is not None or self.recent_size is not None:
+                raise ValueError("single compression cannot contain ratios or recent_size")
+        elif self.mode == "multi":
+            if (not isinstance(self.ratios, list) or not self.ratios
+                or any(type(ratio) is not int or ratio < 1 for ratio in self.ratios)
+                or len(set(self.ratios)) != len(self.ratios)):
+                raise ValueError(
+                    "multi compression ratios must be a nonempty list of distinct positive integers"
+                )
+        elif self.ratios is not None:
+            raise ValueError("policy compression cannot contain ratios")
+        if self.recent_size is not None and (
+            type(self.recent_size) is not int or self.recent_size < 0
+        ):
+            raise ValueError("compression.recent_size must be null or a nonnegative integer")
+
+
+@dataclass(frozen=True)
+class DevConfig:
+    fixed_ratios: list[int] = field(default_factory=list)
+    max_new_tokens: int = 128
+
+    def __post_init__(self):
+        if (not isinstance(self.fixed_ratios, list)
+            or any(type(ratio) is not int or ratio < 1 for ratio in self.fixed_ratios)
+            or len(set(self.fixed_ratios)) != len(self.fixed_ratios)):
+            raise ValueError("dev.fixed_ratios must be a list of distinct positive integers")
+        _positive_ints(self, ("max_new_tokens",))
 
 
 @dataclass(frozen=True)
@@ -139,8 +194,11 @@ class PolicyTransitionConfig:
 
 
 @dataclass(frozen=True)
-class RLConfig:
+class PolicyObjectiveConfig:
     strategy: str
+    type: str = "qa"
+    reward_mode: str = "terminal"
+    advantage_mode: str = "trajectory"
     group_size: int | None = None
     num_samples: int | None = None
     policy_transition: PolicyTransitionConfig | None = None
@@ -151,15 +209,24 @@ class RLConfig:
     advantage_epsilon: float | None = None
 
     def __post_init__(self):
+        if self.type != "qa":
+            raise ValueError("policy objective.type must be qa")
         if self.strategy not in {"grpo", "scst"}:
-            raise ValueError("rl.strategy must be grpo or scst")
+            raise ValueError("policy objective.strategy must be grpo or scst")
+        if self.reward_mode not in {"terminal", "retention_delta"}:
+            raise ValueError("objective.reward_mode must be terminal or retention_delta")
+        if self.advantage_mode not in {"trajectory", "reward_to_go"}:
+            raise ValueError("objective.advantage_mode must be trajectory or reward_to_go")
         if self.strategy == "grpo":
             if self.num_samples is not None:
                 raise ValueError("GRPO configuration cannot contain num_samples")
             _positive_ints(self, ("group_size",))
             if self.group_size < 2:
                 raise ValueError("GRPO group_size must be at least 2")
-            _number(self.advantage_epsilon, "advantage_epsilon")
+            if self.advantage_mode == "trajectory":
+                _number(self.advantage_epsilon, "advantage_epsilon")
+            elif self.advantage_epsilon is not None:
+                raise ValueError("reward_to_go does not use advantage_epsilon")
         else:
             if self.group_size is not None:
                 raise ValueError("SCST configuration cannot contain group_size")
@@ -309,16 +376,25 @@ class SwanLabConfig:
 @dataclass(frozen=True)
 class TrainingConfig:
     data: TrainingDataConfig
+    objective: SFTObjectiveConfig | PolicyObjectiveConfig
+    compression: CompressionConfig = field(default_factory=CompressionConfig)
+    dev: DevConfig = field(default_factory=DevConfig)
+    update_mode: str = "compressor_only"
     loop: TrainingLoopConfig = field(default_factory=TrainingLoopConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
-    objective: ObjectiveConfig | None = None
     backward: BackwardConfig | None = None
-    rl: RLConfig | None = None
     run: RunConfig = field(default_factory=RunConfig)
     swanlab: SwanLabConfig = field(default_factory=SwanLabConfig)
 
     def __post_init__(self):
+        if self.update_mode not in {"compressor_only", "joint", "boundary_only"}:
+            raise ValueError("update_mode must be compressor_only, joint or boundary_only")
+        if self.objective.strategy == "sft":
+            if self.update_mode != "compressor_only":
+                raise ValueError("SFT requires update_mode=compressor_only")
+        elif self.update_mode == "compressor_only":
+            raise ValueError("policy objectives require update_mode=joint or boundary_only")
         if (not self.data.length_curriculum
             and self.loop.epochs is None and self.loop.max_steps is None):
             raise ValueError("ordinary training requires epochs or max_steps")
@@ -339,6 +415,19 @@ class ExperimentConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     compute: ComputeConfig = field(default_factory=ComputeConfig)
 
+    @property
+    def uses_boundary_policy(self):
+        return self.training.objective.strategy in {"grpo", "scst"}
+
+    def recent_size(self, training=False):
+        """single 的窗口固定为 0，multi／policy 在训练时可覆盖阶段默认窗口。"""
+        compression = self.training.compression
+        if compression.mode == "single":
+            return 0
+        if training and compression.recent_size is not None:
+            return compression.recent_size
+        return self.model.structure.recent_size or 0
+
     def __post_init__(self):
         if self.stage not in {"pretrain", "post"}:
             raise ValueError("stage must be pretrain or post")
@@ -349,31 +438,55 @@ class ExperimentConfig:
             raise ValueError("model_name_or_path must be a nonempty string")
         if source.startswith(("/", "~", ".")) or Path(source).is_dir():
             object.__setattr__(self, "model_name_or_path", str(Path(source).expanduser().resolve()))
-        maximum = self.training.data.max_train_data_tokens
-        if maximum is not None and maximum <= self.model.structure.memory_slots:
-            raise ValueError("max_train_data_tokens must be greater than memory_slots")
+        objective = self.training.objective
+        recent_size = self.model.structure.recent_size
         if self.stage == "pretrain":
-            if self.training.objective is None:
-                raise ValueError("pretrain requires training.objective")
-            if any(value is not None for value in (
-                self.model.structure.unit_tokens, self.training.rl, self.training.backward,
-                self.model.structure.boundary_hidden_size,
-                self.training.optimizer.boundary_learning_rate,
-            )):
-                raise ValueError("pretrain requires model.structure.unit_tokens=null and no RL, boundary or BPTT settings")
+            if recent_size is not None:
+                raise ValueError("pretrain requires model.structure.recent_size=null")
+            if objective.type != "ae_lm" or objective.strategy != "sft":
+                raise ValueError("pretrain requires objective.type=ae_lm and strategy=sft")
         else:
-            if self.training.objective is not None:
-                raise ValueError("post cannot contain training.objective")
-            if any(value is None for value in (
-                self.model.structure.unit_tokens, self.training.rl, self.training.backward,
-                self.model.structure.boundary_hidden_size,
-                self.training.optimizer.boundary_learning_rate,
-            )):
-                raise ValueError("post requires model.structure.unit_tokens, training.rl, boundary and BPTT settings")
+            if type(recent_size) is not int or recent_size < 0:
+                raise ValueError("post requires model.structure.recent_size to be a nonnegative integer")
+            if objective.type != "qa":
+                raise ValueError("post requires objective.type=qa")
+        maximum = self.training.data.max_train_data_tokens
+        compression = self.training.compression
+        slots = self.model.structure.memory_slots
+        if not self.uses_boundary_policy:
+            if compression.mode == "policy":
+                raise ValueError("SFT requires compression.mode=single or multi")
+            minimum_ratio = min(compression.ratios) if compression.mode == "multi" else 1
+            minimum = (self.recent_size(training=True) + minimum_ratio * slots
+                       if compression.mode == "multi" else slots + 1)
+            if any(ratio < minimum_ratio for ratio in self.training.dev.fixed_ratios):
+                raise ValueError("dev.fixed_ratios cannot be below the minimum training ratio")
+        else:
+            if compression.mode != "policy":
+                raise ValueError("boundary policy training requires compression.mode=policy")
+            if self.model.structure.pending_size is None:
+                raise ValueError("boundary policy training requires pending_size")
+            minimum = self.recent_size(training=True) + self.model.structure.pending_size
+            if any(ratio * slots < self.model.structure.pending_size
+                   for ratio in self.training.dev.fixed_ratios):
+                raise ValueError("dev.fixed_ratios must produce segments at least pending_size tokens long")
+        if maximum is not None and maximum < minimum:
+            raise ValueError("max_train_data_tokens is shorter than the minimum input length")
+        policy_settings = (
+            self.model.structure.pending_stride, self.model.structure.pending_size,
+            self.training.backward,
+            self.model.structure.boundary_hidden_size,
+            self.training.optimizer.boundary_learning_rate,
+        )
+        if self.uses_boundary_policy:
+            if any(value is None for value in policy_settings):
+                raise ValueError("boundary policy training requires pending_stride, pending_size, boundary and BPTT settings")
+        elif any(value is not None for value in policy_settings):
+            raise ValueError("compressor training requires pending_stride=null, pending_size=null and no boundary or BPTT settings")
         if self.stage == "pretrain" and self.training.run.init_checkpoint is not None:
             raise ValueError("pretrain starts from the base model; use --resume to continue it")
-        if self.stage == "post" and self.training.run.init_checkpoint is None:
-            raise ValueError("post requires a pretrain init_checkpoint")
+        if self.uses_boundary_policy and self.training.run.init_checkpoint is None:
+            raise ValueError("boundary policy training requires a compressor init_checkpoint")
 
 
 def config_from_dict(payload):
@@ -385,34 +498,54 @@ def config_from_dict(payload):
             "config must contain stage, model_name_or_path, model, compute and training; seed is optional"
         )
     model, training = payload["model"], payload["training"]
+    objective = training.get("objective")
+    if not isinstance(objective, dict) or not {"type", "strategy"} <= objective.keys():
+        raise ValueError("training.objective must contain type and strategy")
+    uses_boundary_policy = objective["strategy"] in {"grpo", "scst"}
     training_types = {
         "data": TrainingDataConfig, "loop": TrainingLoopConfig,
         "optimizer": OptimizerConfig, "scheduler": SchedulerConfig,
         "run": RunConfig, "swanlab": SwanLabConfig,
+        "compression": CompressionConfig, "dev": DevConfig,
     }
-    if payload["stage"] == "pretrain":
-        training_types["objective"] = ObjectiveConfig
-    elif payload["stage"] == "post":
+    if uses_boundary_policy:
         training_types["backward"] = BackwardConfig
-        training_types["rl"] = RLConfig
-    if set(training) != set(training_types):
-        raise ValueError(f"{payload['stage']} training must contain exactly {', '.join(training_types)}")
-    groups = {name: cls(**training[name])
-              for name, cls in training_types.items() if name != "rl"}
-    if payload["stage"] == "post":
-        rl = training["rl"]
-        if rl["strategy"] == "grpo" and "num_samples" in rl:
+    expected = set(training_types) | {"objective", "update_mode"}
+    if set(training) != expected:
+        raise ValueError(f"{payload['stage']} training must contain exactly {', '.join(sorted(expected))}")
+    compression = training["compression"]
+    compression_keys = {"mode"}
+    if compression.get("mode") in {"multi", "policy"}:
+        compression_keys.add("recent_size")
+    if compression.get("mode") == "multi":
+        compression_keys.add("ratios")
+    if not uses_boundary_policy:
+        objective_keys = {"type", "strategy"}
+        if objective["type"] == "ae_lm":
+            objective_keys.update(("lm_ratio", "lm_target_tokens"))
+        if set(objective) != objective_keys:
+            raise ValueError("SFT objective fields must match its type")
+    if set(compression) != compression_keys:
+        raise ValueError("compression fields must match stage and mode")
+    groups = {name: cls(**training[name]) for name, cls in training_types.items()}
+    groups["update_mode"] = training["update_mode"]
+    if uses_boundary_policy:
+        if objective["strategy"] == "grpo" and "num_samples" in objective:
             raise ValueError("GRPO configuration cannot contain num_samples")
-        if rl["strategy"] == "scst" and "group_size" in rl:
+        if objective["strategy"] == "scst" and "group_size" in objective:
             raise ValueError("SCST configuration cannot contain group_size")
-        if rl["strategy"] == "scst" and "advantage_epsilon" in rl:
+        if objective["strategy"] == "scst" and "advantage_epsilon" in objective:
             raise ValueError("SCST configuration cannot contain advantage_epsilon")
-        transition = rl.get("policy_transition")
-        groups["rl"] = RLConfig(**{
-            **rl,
+        if objective.get("advantage_mode") == "reward_to_go" and "advantage_epsilon" in objective:
+            raise ValueError("reward_to_go configuration cannot contain advantage_epsilon")
+        transition = objective.get("policy_transition")
+        groups["objective"] = PolicyObjectiveConfig(**{
+            **objective,
             "policy_transition": (None if transition is None
                                   else PolicyTransitionConfig(**transition)),
         })
+    else:
+        groups["objective"] = SFTObjectiveConfig(**objective)
     return ExperimentConfig(
         stage=payload["stage"], seed=payload.get("seed", 42), model_name_or_path=payload["model_name_or_path"],
         model=ModelConfig(**{
@@ -431,25 +564,32 @@ def config_to_dict(config):
     payload = {key: payload[key] for key in (
         "stage", "seed", "model_name_or_path", "model", "compute", "training",
     )}
-    if config.stage == "pretrain":
-        del payload["training"]["backward"], payload["training"]["rl"]
+    if config.training.compression.mode != "multi":
+        del payload["training"]["compression"]["ratios"]
+    if config.training.compression.mode == "single":
+        del payload["training"]["compression"]["recent_size"]
+    if not config.uses_boundary_policy:
+        del payload["training"]["backward"]
         del payload["training"]["optimizer"]["boundary_learning_rate"]
-        del payload["training"]["run"]["init_checkpoint"]
+        if config.training.objective.type == "qa":
+            del payload["training"]["objective"]["lm_ratio"]
+            del payload["training"]["objective"]["lm_target_tokens"]
     else:
-        del payload["training"]["objective"]
-        if config.training.rl.strategy == "grpo":
-            del payload["training"]["rl"]["num_samples"]
+        if config.training.objective.strategy == "grpo":
+            del payload["training"]["objective"]["num_samples"]
         else:
-            del payload["training"]["rl"]["group_size"]
-            del payload["training"]["rl"]["advantage_epsilon"]
+            del payload["training"]["objective"]["group_size"]
+        if (config.training.objective.strategy == "scst"
+            or config.training.objective.advantage_mode == "reward_to_go"):
+            del payload["training"]["objective"]["advantage_epsilon"]
+    if config.stage == "pretrain":
+        del payload["training"]["run"]["init_checkpoint"]
     return payload
 
 
-def load_config(path, overrides=None, stage=None):
-    """校验显式阶段，按分组覆盖显式提供的参数。"""
+def load_config(path, overrides=None):
+    """从配置读取阶段，按分组覆盖显式提供的参数。"""
     payload = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
-    if stage is not None and payload["stage"] != stage:
-        raise ValueError(f"--stage {stage} differs from configuration stage {payload['stage']}")
     for section, groups in (overrides or {}).items():
         if section in {"seed", "model_name_or_path"}:
             payload[section] = groups
@@ -458,6 +598,9 @@ def load_config(path, overrides=None, stage=None):
             payload[section] = {**payload[section], **groups}
             continue
         for group, values in groups.items():
+            if section == "training" and group == "update_mode":
+                payload[section][group] = values
+                continue
             merged = {**payload[section][group], **values}
             payload[section][group] = merged
     return config_from_dict(payload)

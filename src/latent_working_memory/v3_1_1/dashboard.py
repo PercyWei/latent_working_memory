@@ -315,7 +315,9 @@ def _document_details(documents, directory, summary, key):
              "输入长度：长到短": "context_tokens", "记忆块数：多到少": "blocks"}[order]
     documents = sorted(documents, key=lambda row: row[field], reverse=order != "压缩倍率：低到高")
     rows = [{"文本": row["id"], "输入 tokens": row["context_tokens"], "记忆块数": row["blocks"],
-             "记忆 slots": row["memory_slots"], "压缩倍率": row["compression_rate"],
+             "记忆 slots": row["memory_slots"], "pending tokens": row["pending_tokens"],
+             "recent tokens": row["recent_tokens"],
+             "压缩倍率": row["compression_rate"],
              "问题数": row["question_count"]} for row in documents]
     selection = st.dataframe(
         rows, hide_index=True, height=280, on_select="rerun", selection_mode="single-row-required",
@@ -325,7 +327,7 @@ def _document_details(documents, directory, summary, key):
     document = documents[selection.selection.rows[0]]
     document_key = f"{key}:{document['id']}"
     st.markdown(f"**{document['id']}** · {document['compression_rate']:.2f}× · {document['blocks']} 个记忆块")
-    st.caption("分段宽度对应输入 token 数，颜色越深表示该文本内的压缩倍率越高。拖动条内手柄调整显示范围，放大后拖动色块平移，悬停查看块信息；末块为末尾强制提交。")
+    st.caption("分段宽度对应输入 token 数，蓝色越深表示该文本内的块压缩倍率越高，黄色表示未压缩 pending，灰色表示固定 recent。拖动条内手柄调整显示范围，放大后拖动色块平移，悬停查看块信息。")
     st.echarts_chart(compression.segment_chart(document), height=120, theme=None,
                      key=f"{document_key}:segments")
     with st.expander("记忆块明细"):
@@ -367,14 +369,16 @@ def _compression(directory, summary, key):
                + ("LoCoMo 同一对话计为一篇文本。" if summary["task"] == "locomo" else ""))
     for label, name in (("按篇", "documents"), ("按记忆块", "blocks")):
         rates = values[name]
+        if not rates:
+            continue
         for column, statistic, value in zip(st.columns(3), ("平均", "最低", "最高"),
                                              (sum(rates) / len(rates), min(rates), max(rates)), strict=True):
             column.metric(f"{label} · {statistic}压缩倍率", f"{value:.2f}×")
     left, right = st.columns(2)
     left.metric("平均记忆块数 / 篇", f"{values['mean_blocks']:.2f}")
-    right.metric("单块完成整篇压缩的文本比例", f"{values['single_block_fraction']:.1%}")
-    st.caption("按篇倍率 = 输入 tokens / 记忆 slots，各篇等权；按块倍率 = 该块输入 tokens / K，各块等权。"
-               "输入长度采用实际 Writer 输入，包含正文模板；统计包含末尾强制提交块。")
+    right.metric("生成单个记忆块的文本比例", f"{values['single_block_fraction']:.1%}")
+    st.caption("按篇倍率 = 输入 tokens /（记忆 slots + pending tokens + recent tokens），各篇等权；按块倍率 = 该块输入 tokens / K，各块等权。"
+               "输入长度采用实际编码后的完整正文，包含正文模板；统计包含末尾强制提交块。")
     st.subheader("压缩分布")
     left, right = st.columns(2)
     with left:
@@ -383,8 +387,11 @@ def _compression(directory, summary, key):
                          theme=None, key=f"{key}:document-histogram")
     with right:
         st.markdown("**单块压缩倍率**")
-        st.echarts_chart(compression.histogram(values["blocks"], "记忆块数"), height=330,
-                         theme=None, key=f"{key}:block-histogram")
+        if values["blocks"]:
+            st.echarts_chart(compression.histogram(values["blocks"], "记忆块数"), height=330,
+                             theme=None, key=f"{key}:block-histogram")
+        else:
+            st.info("当前范围的正文均以 pending 和 recent 原文保留，未生成记忆块。")
     st.markdown("**输入长度—记忆块数**")
     st.echarts_chart(compression.length_scatter(documents), height=350,
                      theme=None, key=f"{key}:length-scatter")

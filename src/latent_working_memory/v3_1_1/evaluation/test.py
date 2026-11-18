@@ -41,6 +41,7 @@ def load_data(config, tokenizer, model_window, data, max_samples, max_new_tokens
     )
     evaluation_protocol = {
         "input": "complete document; separately encoded question; no writes during QA",
+        "tail": "fixed recent is reserved before policy decisions; final pending below pending_size stays raw; pending then recent precede the reader question",
         "generation": "greedy; fresh generation config; all QA share one document memory",
         "generation_budget": max_new_tokens or 128,
         "max_samples": max_samples,

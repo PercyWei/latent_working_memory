@@ -135,8 +135,8 @@ def load_data(config, tokenizer, model_window, data, max_samples, max_new_tokens
     evaluation_protocol.update({
         "input": "complete body; separately encoded task instructions and question; no truncation or training length filtering",
         "write_boundary": (
-            "complete body is compressed; task instructions and query are passed to the reader; "
-            "forced final pending flush; no raw tail or writes during generation"
+            "fixed recent is reserved before policy decisions; short final pending and recent precede task instructions "
+            "and query in the reader; no writes during generation"
         ),
         "selection": "first max_samples per task/length",
         "max_samples": max_samples,

@@ -3,6 +3,12 @@
 import torch
 
 
+def split_recent(input_ids, recent_size):
+    """先预留固定尾窗；短于窗口的正文整体作为 recent。"""
+    end = max(0, len(input_ids) - recent_size)
+    return tuple(input_ids[:end]), tuple(input_ids[end:])
+
+
 class SourceStream:
     def __init__(self, model, first_unit_ids):
         if not first_unit_ids:
@@ -52,16 +58,20 @@ class SourceStream:
             self.pending_ids += tuple(new_unit_ids)
         self._observed_unit = None
 
-    def finish(self):
+    def finish(self, pending_size):
         self._check_cache_mode()
         if self._observed_unit is not None:
             raise RuntimeError("advance the observed unit before finishing the stream")
-        if self.pending_ids:
+        pending = self.pending_ids
+        compressed_size = 0
+        if len(pending) >= pending_size:
             self.blocks.append(
                 self.model.compress_source(self._cache)
                 if self._cached
-                else self.model.compress(self.pending_ids, self.blocks)
+                else self.model.compress(pending, self.blocks)
             )
-            self.pending_ids = ()
-            self._cache = None
-        return tuple(self.blocks)
+            compressed_size = len(pending)
+            pending = ()
+        self.pending_ids = ()
+        self._cache = None
+        return tuple(self.blocks), pending, compressed_size

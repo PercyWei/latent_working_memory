@@ -7,6 +7,8 @@ import torch
 import torch.distributed as dist
 
 from .rl import post_backward_batch
+from .dev import evaluate_dev_conditions
+from ..compression import compress_document, compress_documents_batch
 from ..rollout import execute, qa_nll
 
 
@@ -158,24 +160,48 @@ class SampleCursor:
 
 def document_loss(model, document, config, temperature=1.0):
     """预训练目标或后训练的确定性 dev 评分；不执行反向传播。"""
-    if config.stage == "pretrain":
-        memory = model.compress(document.input_ids)
-        loss = model.answer_nll((memory,), document.prompt_ids, document.target_ids)
+    if not config.uses_boundary_policy:
+        result = compress_document(
+            model, document.input_ids, config.training.compression,
+            recent_size=config.recent_size(),
+        )
+        if config.training.objective.type == "qa":
+            loss = qa_nll(model, result.blocks, document, result.recent_ids)
+            return loss, {"qa_nll": (float(loss.detach()), 1)}
+        loss = model.answer_nll(
+            result.blocks, (*result.recent_ids, *document.prompt_ids), document.target_ids,
+        )
         return loss, {
             f"{document.task}_nll": (float(loss.detach()), 1),
             "lm_fraction": (float(document.task == "lm"), 1),
         }
-    blocks, actions, _, entropy, lengths = execute(
-        model, document.input_ids, config.model.structure.unit_tokens,
+    result = execute(
+        model, document.input_ids, config.model.structure.pending_stride,
         temperature=temperature,
+        pending_size=config.model.structure.pending_size,
+        recent_size=config.recent_size(),
     )
-    loss = qa_nll(model, blocks, document)
+    loss = qa_nll(model, result.blocks, document, result.retained_ids)
+    decisions = sum(result.decision_mask)
+    slots = len(result.blocks) * model.memory_slots
+    prefix_length = len(document.input_ids) - len(result.recent_ids)
+    prefix_retention = ((slots + len(result.pending_ids)) / prefix_length
+                        if prefix_length else 0.0)
+    objective = config.training.objective
+    cost = prefix_retention ** objective.memory_cost_power
     return loss, {
-        "qa_nll": (float(loss), 1), "blocks": (len(blocks), 1),
-        "memory_slots": (len(blocks) * model.memory_slots, 1),
-        "segment_tokens": (sum(lengths), len(lengths)),
-        "commit_rate": (sum(actions), len(actions)),
-        "policy_entropy": (float(entropy.sum()), len(actions)),
+        "qa_nll": (float(loss), 1), "blocks": (len(result.blocks), 1),
+        "memory_slots": (slots, 1),
+        "recent_tokens": (len(result.recent_ids), 1),
+        "pending_tokens": (len(result.pending_ids), 1),
+        "prefix_retention_ratio": (prefix_retention, 1),
+        "memory_cost": (cost, 1),
+        "objective": (float(loss) + objective.memory_cost_weight * cost, 1),
+        "retention_ratio": ((slots + len(result.retained_ids))
+                            / len(document.input_ids), 1),
+        "segment_tokens": (sum(result.block_lengths), len(result.block_lengths)),
+        "commit_rate": (sum(result.actions), decisions),
+        "policy_entropy": (float(result.entropy.sum()), decisions),
     }
 
 
@@ -212,13 +238,17 @@ def _aggregate_metrics(totals, samples):
 class TrainingEngine:
     def __init__(self, model, config):
         self.model, self.experiment, self.config = model, config, config.training
-        if config.stage == "post":
+        boundary_only = config.uses_boundary_policy and self.config.update_mode == "boundary_only"
+        if boundary_only:
+            model.writer.requires_grad_(False)
+            model.memory_embeddings.requires_grad_(False)
+        if config.uses_boundary_policy:
             model.boundary.requires_grad_(True)
-        groups = [{
+        groups = [] if boundary_only else [{
             "name": "compressor", "params": list(model.compressor_parameters()),
             "lr": self.config.optimizer.compressor_learning_rate,
         }]
-        if config.stage == "post":
+        if config.uses_boundary_policy:
             groups.append({
                 "name": "boundary", "params": list(model.boundary_parameters()),
                 "lr": self.config.optimizer.boundary_learning_rate,
@@ -282,24 +312,38 @@ class TrainingEngine:
             offset += count
 
     def train_batch(self, documents, boundary_generator, step):
-        self.model.train()
+        if self.experiment.uses_boundary_policy and self.config.update_mode == "boundary_only":
+            self.model.eval()
+            self.model.boundary.train()
+        else:
+            self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
         totals = {}
         transition = None
-        if self.experiment.stage == "post":
-            unit_tokens = self.experiment.model.structure.unit_tokens
-            rl = asdict(self.config.rl)
-            transition = self.config.rl.policy_transition
+        if self.experiment.uses_boundary_policy:
+            pending_stride = self.experiment.model.structure.pending_stride
+            objective = asdict(self.config.objective)
+            transition = self.config.objective.policy_transition
             temperature = (1.0 if transition is None
                            else transition.temperature(step, self.config.loop.max_steps))
             for start in range(0, len(documents), self.config.loop.micro_batch_size):
                 results = post_backward_batch(
                     self.model, documents[start:start + self.config.loop.micro_batch_size],
-                    unit_tokens, rl, boundary_generator,
+                    pending_stride, objective, boundary_generator,
                     bptt_steps=self.config.backward.bptt_steps, temperature=temperature,
+                    pending_size=self.experiment.model.structure.pending_size,
+                    recent_size=self.experiment.recent_size(training=True),
+                    update_mode=self.config.update_mode,
                 )
                 for loss, metrics in results:
                     _accumulate(totals, loss, metrics)
+        elif (self.config.objective.type == "qa"
+              or self.config.compression.mode != "single"):
+            documents = sorted(documents, key=lambda document: len(document.input_ids), reverse=True)
+            for start in range(0, len(documents), self.config.loop.micro_batch_size):
+                self._compressor_batch(
+                    documents[start:start + self.config.loop.micro_batch_size], totals,
+                )
         else:
             documents = sorted(documents, key=lambda document: len(document.input_ids), reverse=True)
             for start in range(0, len(documents), self.config.loop.micro_batch_size):
@@ -343,10 +387,74 @@ class TrainingEngine:
         self.scheduler.step()
         return {**metrics, "grad_norm": float(norm)}
 
+    def _compressor_batch(self, documents, totals):
+        """每篇采样一次压缩路径，逐题反传 Reader 后统一回传记忆梯度。"""
+        with self.model.forward_context():
+            results = compress_documents_batch(
+                self.model, [document.input_ids for document in documents], self.config.compression,
+                recent_size=self.experiment.recent_size(training=True),
+            )
+        leaves = [tuple(block.detach().requires_grad_(True) for block in result.blocks)
+                  for result in results]
+        qa_objective = self.config.objective.type == "qa"
+        questions = [document.qas if qa_objective else (document,) for document in documents]
+        document_losses = [0.0] * len(documents)
+        for question_index in range(max(map(len, questions))):
+            active = [index for index, rows in enumerate(questions) if question_index < len(rows)]
+            selected = [questions[index][question_index] for index in active]
+            with self.model.forward_context():
+                losses = self.model.answer_nll_batch(
+                    [leaves[index] for index in active],
+                    [(*results[index].recent_ids, *question.prompt_ids)
+                     for index, question in zip(active, selected, strict=True)],
+                    [question.target_ids for question in selected],
+                )
+                if not bool(torch.isfinite(losses).all()):
+                    raise RuntimeError("non-finite compressor training loss")
+                normalized = losses / losses.new_tensor([len(questions[index]) for index in active])
+            normalized.sum().backward()
+            for index, value in zip(active, normalized.detach().tolist(), strict=True):
+                document_losses[index] += value
+        outputs, gradients = [], []
+        for result, memories in zip(results, leaves, strict=True):
+            for block, memory in zip(result.blocks, memories, strict=True):
+                outputs.append(block)
+                gradients.append(memory.grad)
+        if outputs:
+            torch.autograd.backward(outputs, gradients)
+        for document, result, loss in zip(documents, results, document_losses, strict=True):
+            task = "qa" if qa_objective else document.task
+            slots = len(result.blocks) * self.model.memory_slots
+            prefix_length = len(document.input_ids) - len(result.recent_ids)
+            metrics = {
+                f"{task}_nll": (loss, 1), "blocks": (len(result.blocks), 1),
+                "recent_tokens": (len(result.recent_ids), 1),
+                "prefix_retention_ratio": (slots / prefix_length, 1),
+                "retention_ratio": ((slots + len(result.recent_ids)) / len(document.input_ids), 1),
+                "segment_tokens": (sum(result.block_lengths), len(result.block_lengths)),
+            }
+            if not qa_objective:
+                metrics["lm_fraction"] = (float(task == "lm"), 1)
+            _accumulate(totals, self.model.memory_embeddings.new_tensor(loss), metrics)
+
+
+def uses_condition_dev(config):
+    if config.training.dev.fixed_ratios:
+        return True
+    if config.uses_boundary_policy:
+        return config.recent_size() > 0
+    return (config.training.compression.mode == "multi"
+            or config.training.objective.type == "qa")
+
 
 @torch.no_grad()
-def evaluate_dev(model, documents, config, temperature=1.0):
+def evaluate_dev(model, documents, config, temperature=1.0, baseline_cache=None, records=None):
     model.eval()
+    if uses_condition_dev(config):
+        totals, details = evaluate_dev_conditions(model, documents, config, baseline_cache)
+        if records is not None:
+            records.extend(details)
+        return _aggregate_metrics(totals, len(documents))
     totals = {}
     for document in documents:
         with model.forward_context():

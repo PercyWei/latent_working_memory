@@ -27,7 +27,8 @@ def _training_output_dir(config):
     run_id = config.training.run.run_id
     if run_id is None:
         timestamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M")
-        prefix = "policy-post" if config.stage == "post" else "pretrain"
+        prefix = ("policy-post" if config.uses_boundary_policy else
+                  "compressor-post" if config.stage == "post" else "pretrain")
         run_id = f"{prefix}_k{config.model.structure.memory_slots}_{timestamp}"
     return Path(config.training.run.output_root).expanduser().resolve() / run_id / "train"
 
@@ -170,9 +171,7 @@ def run_job(args):
         output_dir = checkpoint.parent.parent.parent
         config = None
     else:
-        config = load_config(
-            args.config, config_overrides(args), stage=args.stage,
-        )
+        config = load_config(args.config, config_overrides(args))
         output_dir = _training_output_dir(config)
         config = replace(config, training=replace(
             config.training, run=replace(config.training.run, run_id=output_dir.parent.name),
