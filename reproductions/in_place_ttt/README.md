@@ -53,7 +53,7 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
   --output-id qwen3-4b-32k-ttt_20261117 \
   --inference-mode optimized \
   --batch-size 1 \
-  --batch-size-by-length 4096=8 8192=8 16384=4 32768=2
+  --batch-size-by-length 4096=8 8192=4 16384=4 32768=2
 ```
 
 | 参数 | 默认值与约定 |
