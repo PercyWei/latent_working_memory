@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261119 17:18:32 Asia/Shanghai
+最后修订时间：20261119 20:39:45 Asia/Shanghai
 
 计算协议、数据格式与模块分工见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256_grpo.json)中的基座与数据路径。
 
@@ -162,7 +162,16 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
 
 `training.objective` 包含 `type=qa`、`strategy=scst/grpo/ppo`，以及 `group_size`、奖励与策略损失参数。SCST／GRPO 的 `training.update_mode` 取 `joint` 或 `boundary_only`，PPO 取 `boundary_only`。`compression={"mode":"policy","recent_size":null}` 沿用模型默认 recent；`pending_stride=256`、`pending_size=256` 位于 `model.structure`。预留固定 recent 后，每个步长检查一次已有 pending，达到最短长度才允许策略压缩；结束时达到阈值强制压缩，否则保留原文。
 
-记忆成本为 `c=((K×B+P)/(D−R))^p`：D 为完整输入长度，R 为实际 recent 长度，B 为记忆块数，P 为最终未压缩 pending 长度。`terminal` 在末尾结算 `-QA_NLL-αc`；`stepwise` 的账本为 `m_t=K×B_t+P_t`，每个事件奖励为 `-α×[(m_t/(D−R))^p−(m_{t-1}/(D−R))^p]`，末尾加入 QA 奖励。账本从 0 开始，recent 不收费，两种模式的奖励总和相同。
+实际最终记忆成本为 `c=((K×B+P)/(D−R))^p`：D 为完整输入长度，R 为实际 recent 长度，B 为最终记忆块数，P 为最终未压缩 pending 长度。`terminal` 在末尾结算 `Z=-QA_NLL-αc`。
+
+仅 `reward_mode=stepwise` 允许配置 `training.objective.stepwise_cost_basis`，支持 `observed` 和 `full`，省略时默认 `observed`；terminal 和 SFT 配置不能包含该字段。两份 stepwise 预设 `post_k256_bonly.json` 和 `post_k256_ppo.json` 显式使用 `observed`。逐事件奖励为 `-α×(c_t−c_{t-1})`，最终额外加入一次 `-QA_NLL`：
+
+| 成本基准 | 过程成本 | 即时记忆奖励 |
+|---|---|---|
+| `observed` | `c_t=((K×B_t+P_t)/(D−R))^p`，初始成本 0 | 读取增加占用，压缩按净占用变化返还成本 |
+| `full` | `c_t=((K×B_t+P_t+U_t)/(D−R))^p`，初始成本 1 | U 为未读前缀原文长度；两类等待均为 0，自主及强制压缩均按实际节省返还成本 |
+
+recent 不收费，强制收尾不重复扣完整成本。D>R 时，未折扣原始总奖励在 `observed` 下为 Z，在 `full` 下为 Z+α；D=R 时两种基准均只结算 QA 奖励。两种基准共用实际最终成本及保留比例指标，dev／独立评估口径不变。
 
 `group_size` 是每篇正文的随机轨迹数，SCST／PPO 至少为 1，GRPO 至少为 2；SCST 每篇额外计算一条 greedy 轨迹。`reward_mode=terminal` 对所有策略使用有效折扣率 1，覆盖配置中的 `gamma`；`stepwise` 使用配置中的 `gamma`，默认 1.0。优势计算由策略和奖励模式确定，完整公式见[方法说明](../README.md#qa-与边界后训练)。
 

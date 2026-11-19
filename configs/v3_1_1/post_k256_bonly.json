@@ -50,6 +50,7 @@
       "type": "qa",
       "strategy": "grpo",
       "reward_mode": "stepwise",
+      "stepwise_cost_basis": "observed",
       "group_size": 4,
       "gamma": 1.0,
       "policy_transition": null,

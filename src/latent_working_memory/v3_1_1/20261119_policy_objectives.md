@@ -2,7 +2,7 @@
 
 创建时间：20261119 14:52:11 Asia/Shanghai
 
-最后修订时间：20261119 17:18:32 Asia/Shanghai
+最后修订时间：20261119 20:39:45 Asia/Shanghai
 
 ## 范围与约束
 
@@ -10,7 +10,7 @@
 
 ## verl 接入执行计划
 
-本轮将 SCST／GRPO／PPO 的通用算法与执行能力接入已安装的 verl 0.8.0。SCST terminal 使用原生 ReMax，GRPO terminal 使用原生 GRPO，PPO 使用原生 GAE 与优势白化；两种 stepwise 相对优势保留任务适配。策略损失采用原生 vanilla，包含 dual-clip 与 log 概率比截断；价值损失采用原生 value clipping。奖励定义、优势算法、分段、recent／pending、两种 mask、损失权重、数据和其他超参数保持原设置。
+本轮将 SCST／GRPO／PPO 的通用算法与执行能力接入已安装的 verl 0.8.0。SCST terminal 使用原生 ReMax，GRPO terminal 使用原生 GRPO，PPO 使用原生 GAE 与优势白化；两种 stepwise 相对优势保留任务适配。策略损失采用原生 vanilla，包含 dual-clip 与 log 概率比截断；价值损失采用原生 value clipping。逐步奖励的成本基准由 `stepwise_cost_basis` 选择，默认 `observed`；优势算法、分段、recent／pending、两种 mask、损失权重、数据和其他超参数保持原设置。
 
 PPO 采用原生 actor／critic 独立更新组织：先执行 critic 的全部内轮，再执行 actor 的全部内轮，分别优化和裁剪；同批旧概率、旧价值、优势和价值目标固定。`training.loop.critic_warmup` 默认 0，沿用从 1 开始的 rollout 批次阈值：0／1 从首批更新 actor，11 表示前 10 批只更新 critic。仅 PPO 配置可以包含该字段。恢复保存 rollout、actor 和 critic 的实际更新进度。PPO 以 critic 实际更新数为主步数，其他策略以 actor 更新数为主步数；两个 PPO scheduler 各自推进，温度、dev、保存和图表沿用训练主步数，预热占原预算。
 
@@ -18,7 +18,18 @@ PPO 采用原生 actor／critic 独立更新组织：先执行 critic 的全部�
 
 ## 奖励和优势
 
-固定 recent 先从正文移出，成本使用 `c=((BK+P)/(D−R))^p`；完整保留比例独立记录。terminal 仅在最终事件给出 `Z=−QA_NLL−αc`。stepwise 对各真实事件给出 `−α(c_t−c_{t−1})`，最终再加入 QA 奖励；强制收尾不重复扣完整成本。
+固定 recent 先从正文移出，实际最终成本使用 `c=((BK+P)/(D−R))^p`；完整保留比例独立记录。terminal 仅在最终事件给出 `Z=−QA_NLL−αc`。stepwise 对各真实事件给出 `−α(c_t−c_{t−1})`，最终再加入 QA 奖励；强制收尾不重复扣完整成本。
+
+`training.objective.stepwise_cost_basis` 仅允许用于 stepwise，支持 `observed` 和 `full`，默认 `observed`；terminal 和 SFT 配置禁止出现该字段。令 S=D−R，Uₜ 为尚未读入的前缀原文长度：
+
+| 基准 | 过程成本 | 初始成本 |
+|---|---|---|
+| `observed` | `c_t=((KB_t+P_t)/S)^p` | 0 |
+| `full` | `c_t=((KB_t+P_t+U_t)/S)^p` | 1 |
+
+`observed` 在读取时结算已读占用增长；`full` 的读取只使 U 转为 P，两类等待的即时记忆奖励均为 0，自主及末尾强制压缩均获得实际节省奖励，p=1 时为 `α(n−K)/S`。S>0 时，未折扣原始总奖励分别为 Z 和 Z+α；S=0 时均只保留最终 QA。两者共用实际最终记忆成本和保留比例指标，验证口径不变。
+
+p=1 时，两种基准每步奖励之差只取决于正文读取位置，SCST 的同位置 greedy 回报差在任意 gamma 下均抵消该差异；GRPO 的标准化奖励以及 PPO 的价值目标与 GAE 仍可能变化。事件时间轴、强制事件统计与 actor 掩码保持相同。
 
 | 策略 | terminal | stepwise |
 |---|---|---|
@@ -33,7 +44,7 @@ SCST 按正文读取位置对齐，不按自主动作或记忆块序号对齐。
 ## 配置与实现分工
 
 - objective 使用统一 group_size 表示每正文随机轨迹数。SCST／PPO 至少为 1，GRPO 至少为 2；greedy 不计入 group_size。
-- strategy 支持 scst、grpo、ppo，reward_mode 为 terminal 或 stepwise，优势算法由二者确定。
+- strategy 支持 scst、grpo、ppo，reward_mode 为 terminal 或 stepwise，优势算法由二者确定。仅 stepwise 配置 stepwise_cost_basis，值为 observed 或 full；post_k256_bonly.json 和 post_k256_ppo.json 显式使用 observed。
 - GRPO 的两种奖励均配置 advantage_epsilon，预设沿用 1e-6。
 - PPO 仅支持 boundary_only，独立创建 value head，冻结 Writer、memory embeddings 和 Reader。value head 复用 boundary_learning_rate。
 - PPO 的 ppo_epochs 默认 4，value_loss_weight 默认 0.5。post_k256_ppo.json 使用 group_size=1、gae_lambda=0.95；0.95 是预设值，不是系统默认。

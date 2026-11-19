@@ -198,6 +198,7 @@ class PolicyObjectiveConfig:
     strategy: str
     type: str = "qa"
     reward_mode: str = "terminal"
+    stepwise_cost_basis: str = "observed"
     group_size: int | None = None
     gamma: float = 1.0
     gae_lambda: float | None = None
@@ -217,6 +218,10 @@ class PolicyObjectiveConfig:
             raise ValueError("policy objective.strategy must be grpo, scst or ppo")
         if self.reward_mode not in {"terminal", "stepwise"}:
             raise ValueError("objective.reward_mode must be terminal or stepwise")
+        if self.stepwise_cost_basis not in {"observed", "full"}:
+            raise ValueError("objective.stepwise_cost_basis must be observed or full")
+        if self.reward_mode != "stepwise" and self.stepwise_cost_basis != "observed":
+            raise ValueError("only stepwise uses stepwise_cost_basis=full")
         _positive_ints(self, ("group_size",))
         _number(self.gamma, "gamma", inclusive=True)
         if self.gamma > 1:
@@ -564,6 +569,8 @@ def config_from_dict(payload):
     groups = {name: cls(**training[name]) for name, cls in training_types.items()}
     groups["update_mode"] = training["update_mode"]
     if uses_boundary_policy:
+        if objective.get("reward_mode", "terminal") != "stepwise" and "stepwise_cost_basis" in objective:
+            raise ValueError("only stepwise configuration can contain stepwise_cost_basis")
         if objective["strategy"] != "grpo" and "advantage_epsilon" in objective:
             raise ValueError("only GRPO configuration can contain advantage_epsilon")
         if objective["strategy"] != "ppo" and objective.keys() & {
@@ -614,6 +621,8 @@ def config_to_dict(config):
             del payload["training"]["objective"]["lm_ratio"]
             del payload["training"]["objective"]["lm_target_tokens"]
     else:
+        if config.training.objective.reward_mode != "stepwise":
+            del payload["training"]["objective"]["stepwise_cost_basis"]
         if config.training.objective.strategy != "grpo":
             del payload["training"]["objective"]["advantage_epsilon"]
         if config.training.objective.strategy != "ppo":

@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261119 17:18:32 Asia/Shanghai
+最后修订时间：20261119 20:39:45 Asia/Shanghai
 
 v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=post` 使用问答（QA），由 `training.update_mode` 选择仅更新压缩器（`compressor_only`）、仅更新边界（`boundary_only`）或联合更新（`joint`）。每次写入将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆及未压缩的 pending 和 recent 尾段回答问题。
 
@@ -67,18 +67,27 @@ v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=po
 
 一篇完整文档及其固定 QA 集合是一个训练单位。每条随机路径处理整篇正文，各题共享该路径的记忆。QA NLL 先在每题的答案 tokens 内平均，再依次对题目、随机路径和文档等权平均。
 
-令轨迹编号为 i，奖励事件编号为 t，最后一个事件为 T。D 是完整 `input_ids` 长度，包含上下文提示前缀，不含 QA、padding 和追加的 memory tokens；R 是实际保留的 recent 长度。事件 t 之后的记忆块数和 pending 长度分别记为 Bᵢₜ 和 Pᵢₜ。记忆成本及最终得分为：
+令轨迹编号为 i，奖励事件编号为 t，最后一个事件为 T。D 是完整 `input_ids` 长度，包含上下文提示前缀，不含 QA、padding 和追加的 memory tokens；R 是实际保留的 recent 长度。事件 t 之后的记忆块数和 pending 长度分别记为 Bᵢₜ 和 Pᵢₜ。令 S=D−R，实际最终记忆成本及最终得分为：
 
 \[
-c_{i,t}=\left(\frac{K B_{i,t}+P_{i,t}}{D-R}\right)^p,
-\qquad Z_i=-\ell_i-\alpha c_{i,T},\qquad c_{i,0}=0.
+c_{i,T}=\left(\frac{K B_{i,T}+P_{i,T}}{S}\right)^p,
+\qquad Z_i=-\ell_i-\alpha c_{i,T}.
 \]
 
 其中 ℓᵢ 为最终 QA NLL，`memory_cost_power`（p）为正数，默认 1.0；`memory_cost_weight`（α）为非负数，默认 0.1。固定 recent 不参与成本的分子和分母，但仍供 Reader 回答。p=1 且 pending 长度相同时，同一文档每增加一块的惩罚为 `α × K / (D−R)`。D−R 只在完整轨迹结束后用于奖励结算，策略观察和动作约束不读取该长度。
 
-完整保留比例 `retention_ratio=(K×B+P+R)/D` 独立统计。若正文全部属于 recent，即 D=R，则 `prefix_retention_ratio` 和 `memory_cost` 为 0，完整保留比例为 1；训练长度筛选保证 D−R 为正。
+完整保留比例 `retention_ratio=(K×B+P+R)/D` 独立统计。若正文全部属于 recent，即 D=R，则 `prefix_retention_ratio` 和 `memory_cost` 为 0，完整保留比例为 1，奖励只包含最终 QA NLL；训练长度筛选保证 D−R 为正。
 
-`reward_mode` 决定原始奖励的分配，`gamma` 默认 1.0。有效折扣率为：
+`reward_mode` 决定原始奖励的分配。仅 `reward_mode=stepwise` 可配置 `training.objective.stepwise_cost_basis`，支持 `observed` 和 `full`，省略时默认 `observed`；terminal 和 SFT 配置不允许出现该字段。令 Uₜ 为事件 t 后尚未读入的前缀原文长度，不含 recent：
+
+| `stepwise_cost_basis` | 过程成本 cᵢₜ | 初始成本 cᵢ₀ |
+|---|---|---|
+| `observed` | `((K×Bᵢₜ+Pᵢₜ)/S)^p`，只计已读取文本的保留量 | 0 |
+| `full` | `((K×Bᵢₜ+Pᵢₜ+Uₜ)/S)^p`，未读文本按原长计入 | 1 |
+
+两种基准在终局均有 Uₜ=0，最终成本相同；`memory_cost`、`prefix_retention_ratio`、完整保留比例和 dev／独立评估指标始终使用实际终局保留量。初始成本只用于计算差分，不是一个奖励事件。
+
+`gamma` 默认 1.0，有效折扣率为：
 
 \[
 \bar\gamma=\begin{cases}1,&\text{terminal}\\\gamma,&\text{stepwise}.\end{cases}
@@ -93,7 +102,9 @@ r_{i,t}^{\mathrm{stepwise}}
 =-\alpha(c_{i,t}-c_{i,t-1})-\mathbf1_{\{t=T\}}\ell_i.
 \]
 
-stepwise 为初次读入、每次读入与判断、强制收尾分别结算占用变化。继续积累通常增加成本；压缩判断同时读入新单元，只有净占用减少时才获得成本返还。强制收尾也结算差分，最终只额外加入一次 QA 奖励。未折扣原始奖励总和等于 Zᵢ，不重复扣除完整成本。
+stepwise 为初次读入、每次读入与判断、强制收尾分别结算成本差分。`observed` 下，继续积累增加已读占用；压缩判断同时读入新单元，只有净占用减少时才获得成本返还。`full` 下，读入使 U 减少、P 等量增加，自主等待和强制等待的即时记忆奖励均为 0；自主压缩及末尾强制压缩都按实际节省返还成本。p=1 时，把 n 个 pending tokens 压成 K 个 slots 的记忆奖励为 `α×(n−K)/S`。
+
+两种基准都在强制收尾后额外加入一次 QA 奖励，不重复扣完整成本。S>0 时，未折扣原始奖励总和在 `observed` 下为 Zᵢ，在 `full` 下为 Zᵢ+α；γ=1 时评价的最终目标相同。p=1 时，两种基准每步奖励之差只由该位置读入的文本长度决定，SCST 在任意 γ 下的同位置 greedy 回报差均会抵消这部分；GRPO 的奖励标准化和 PPO 的价值目标／GAE 仍可能随基准变化。p≠1 且 γ≠1 时，两种基准还可能改变原始折扣回报的路径排序。
 
 优势算法由 `strategy × reward_mode` 确定。定义从正文位置 t 到终局的折扣回报：
 
@@ -305,7 +316,7 @@ multi／policy 的训练 recent 覆盖值为 `null` 时沿用模型默认值，0
 | `post` | `qa` | `grpo` 或 `scst` | `joint` 或 `boundary_only` |
 | `post` | `qa` | `ppo` | `boundary_only` |
 
-AE／LM 的 `objective` 还包含 `lm_ratio` 和 `lm_target_tokens`；QA SFT 只需 `type` 和 `strategy`。策略训练的 `objective` 另含 `group_size`、`reward_mode`、`gamma`、`policy_transition`、成本与损失参数。GRPO 配置 `advantage_epsilon`；PPO 配置独立的 `gae_lambda`、`ppo_epochs` 和 `value_loss_weight`。`joint` 在策略损失之外保留 QA NLL 的直接反传；`boundary_only` 仅通过奖励使用 QA NLL。
+AE／LM 的 `objective` 还包含 `lm_ratio` 和 `lm_target_tokens`；QA SFT 只需 `type` 和 `strategy`。策略训练的 `objective` 另含 `group_size`、`reward_mode`、`gamma`、`policy_transition`、成本与损失参数。仅 stepwise 允许配置 `stepwise_cost_basis=observed/full`，默认 `observed`。GRPO 配置 `advantage_epsilon`；PPO 配置独立的 `gae_lambda`、`ppo_epochs` 和 `value_loss_weight`。`joint` 在策略损失之外保留 QA NLL 的直接反传；`boundary_only` 仅通过奖励使用 QA NLL。
 
 `training.optimizer` 的学习率字段由更新范围决定：`compressor_only` 仅含 `compressor_learning_rate`，`boundary_only` 仅含 `boundary_learning_rate`，`joint` 同时包含两者。PPO 的 critic 与边界共用 `boundary_learning_rate` 数值，分别使用独立 optimizer。仅 `joint` 策略训练包含 `training.backward`；其他模式省略整个分组。
 
@@ -322,8 +333,8 @@ AE／LM 的 `objective` 还包含 `lm_ratio` 和 `lm_target_tokens`；QA SFT 只
 | [post_k256_grpo_temp.json](../../../configs/v3_1_1/post_k256_grpo_temp.json) | 同套后训练数据与执行设置，GRPO 4 路采样、线性温度退火 |
 | [post_k256_scst_temp.json](../../../configs/v3_1_1/post_k256_scst_temp.json) | 同套后训练数据与执行设置，SCST 单随机路径加 greedy 基线、线性温度退火 |
 | [post_k256_conly.json](../../../configs/v3_1_1/post_k256_conly.json) | FactQA 仅压缩器后训练，从合法倍率采样，固定保留 256 tokens recent |
-| [post_k256_bonly.json](../../../configs/v3_1_1/post_k256_bonly.json) | 冻结压缩器、仅训练边界，GRPO 4 路采样、stepwise 奖励 |
-| [post_k256_ppo.json](../../../configs/v3_1_1/post_k256_ppo.json) | 冻结压缩器，PPO 单随机路径、stepwise 奖励、GAE |
+| [post_k256_bonly.json](../../../configs/v3_1_1/post_k256_bonly.json) | 冻结压缩器、仅训练边界，GRPO 4 路采样、stepwise 奖励，成本基准 `observed` |
+| [post_k256_ppo.json](../../../configs/v3_1_1/post_k256_ppo.json) | 冻结压缩器，PPO 单随机路径、stepwise 奖励、GAE，成本基准 `observed` |
 
 `post_k256_ppo.json` 沿用仅边界预设的数据和优化器设置，显式设置 `group_size=1`、`gae_lambda=0.95`、`ppo_epochs=4`、`value_loss_weight=0.5` 和 `critic_warmup=0`。0.95 是该预设的选择，不是系统默认值；terminal 同样读取这一 λ。
 

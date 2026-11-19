@@ -42,7 +42,7 @@ def collect_rollouts(model, documents, pending_stride, objective, generator, tem
         batches = []
         for document, paths in zip(documents, groups, strict=True):
             rewards = torch.stack([
-                path_rewards(path, len(document.input_ids), objective).float() for path in paths
+                path_rewards(path, len(document.input_ids), objective, pending_stride).float() for path in paths
             ])
             old_values = model.value_head(torch.stack([path.event_features for path in paths])).float()
             batches.append(PPORolloutGroup(document, tuple(paths), rewards, old_values))

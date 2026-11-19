@@ -38,7 +38,7 @@ def boundary_policy_loss(log_probs, old_log_probs, advantages, objective):
     )
 
 
-def path_rewards(path, document_length, rl):
+def path_rewards(path, document_length, rl, pending_stride):
     """事后按待压缩前缀结算各事件的奖励；固定 recent 不参与成本。"""
     rewards = torch.zeros(len(path.prefix_retained_counts) - 1,
                           device=path.old_log_probs.device, dtype=torch.float32)
@@ -49,6 +49,10 @@ def path_rewards(path, document_length, rl):
         return rewards
     if rl["reward_mode"] == "stepwise":
         retained = torch.tensor(path.prefix_retained_counts, device=rewards.device, dtype=torch.float64)
+        if rl["stepwise_cost_basis"] == "full":
+            # 账本依次为初始值、固定步长的各次读入、EOF；最后两项的未读长度均为 0。
+            read_tokens = torch.arange(retained.numel(), device=rewards.device) * pending_stride
+            retained += (prefix_length - read_tokens).clamp_min(0)
         potential = (retained / prefix_length).pow(power)
         rewards = (-weight * potential.diff()).to(rewards.dtype)
         rewards[-1] -= path.qa_nll
@@ -152,7 +156,9 @@ def collect_relative_rollouts(model, documents, pending_stride, rl, generator, t
     batches = []
     for index, (document, paths) in enumerate(zip(documents, groups, strict=True)):
         scored_paths = (*paths, greedy[index][0]) if self_critical else paths
-        events = torch.stack([path_rewards(path, len(document.input_ids), rl) for path in scored_paths])
+        events = torch.stack([
+            path_rewards(path, len(document.input_ids), rl, pending_stride) for path in scored_paths
+        ])
         reward = events.sum(dim=1)
         advantage = relative_advantages(events, rl)
         batches.append(RLGroup(
