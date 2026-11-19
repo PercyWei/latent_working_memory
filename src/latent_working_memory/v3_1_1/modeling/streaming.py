@@ -17,7 +17,8 @@ class SourceStream:
         self.blocks = []
         self.pending_ids = tuple(first_unit_ids)
         self._cached = not torch.is_grad_enabled()
-        self._cache = model.prefill_source(self.blocks, self.pending_ids) if self._cached else None
+        self._cache, self.source_features = (model.prefill_source(self.blocks, self.pending_ids)
+                                            if self._cached else (None, None))
         self._observed_unit = None
         self._pending_prefix_length = 0
 
@@ -31,7 +32,9 @@ class SourceStream:
             if self._observed_unit is not None:
                 raise RuntimeError("advance the previous observed unit before observing another")
             self._pending_prefix_length = self._cache.get_seq_length()
-            logit, self._cache = self.model.observe_source(self._cache, new_unit_ids)
+            logit, self._cache, self.source_features = self.model.observe_source(
+                self._cache, new_unit_ids,
+            )
             self._observed_unit = tuple(new_unit_ids)
             return logit
         return self.model.boundary_logit(self.blocks, self.pending_ids, new_unit_ids)
@@ -53,7 +56,9 @@ class SourceStream:
             self.pending_ids = tuple(new_unit_ids)
             if self._cached:
                 # 仅追加新 memory 和新单元，沿用同一缓存，避免整套新旧 KV 并存。
-                self._cache = self.model.prefill_source(self.blocks[-1:], self.pending_ids, self._cache)
+                self._cache, self.source_features = self.model.prefill_source(
+                    self.blocks[-1:], self.pending_ids, self._cache,
+                )
         else:
             self.pending_ids += tuple(new_unit_ids)
         self._observed_unit = None

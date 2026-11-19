@@ -21,7 +21,8 @@ from .boundary import BoundaryHead
 
 
 class MemoryModel(nn.Module):
-    def __init__(self, model_name_or_path, model_settings, compute_settings, device):
+    def __init__(self, model_name_or_path, model_settings, compute_settings, device,
+                 with_value_head=False):
         super().__init__()
         structure, lora = model_settings["structure"], model_settings["lora"]
         self.mixed_precision = compute_settings["mixed_precision"]
@@ -83,6 +84,8 @@ class MemoryModel(nn.Module):
         boundary_hidden_size = structure["boundary_hidden_size"]
         self.boundary = (None if boundary_hidden_size is None
                          else BoundaryHead(self.width, boundary_hidden_size, device))
+        self.value_head = (BoundaryHead(self.width, boundary_hidden_size, device)
+                           if with_value_head else None)
         self.train()
 
     @contextmanager
@@ -180,13 +183,14 @@ class MemoryModel(nn.Module):
     def prefill_source(self, memory_blocks, input_ids, cache=None):
         backbone = self.writer.get_base_model()
         inputs = self._inputs(backbone, memory_blocks, input_ids)
-        return self._source_hidden(inputs, cache)[1]
+        hidden, cache = self._source_hidden(inputs, cache)
+        return cache, hidden[-1].clone()
 
     @torch.no_grad()
     def observe_source(self, cache, new_unit_ids):
         embed = self.writer.get_input_embeddings()
         hidden, cache = self._source_hidden(embed(self._tokens(new_unit_ids)), cache)
-        return self.boundary(hidden[-1]), cache
+        return self.boundary(hidden[-1]), cache, hidden[-1].clone()
 
     @torch.no_grad()
     def compress_source(self, cache):
@@ -231,14 +235,15 @@ class MemoryModel(nn.Module):
         backbone = self.writer.get_base_model()
         rows = [self._inputs(backbone, blocks, tokens)
                 for blocks, tokens in zip(memories, inputs, strict=True)]
-        return self._source_hidden_batch(rows, caches)[1]
+        hidden, updated = self._source_hidden_batch(rows, caches)
+        return updated, hidden[:, -1].clone()
 
     @torch.no_grad()
     def observe_source_batch(self, caches, new_units):
         embed = self.writer.get_input_embeddings()
         rows = [embed(self._tokens(tokens)) for tokens in new_units]
         hidden, updated = self._source_hidden_batch(rows, caches)
-        return self.boundary(hidden[:, -1]), updated
+        return self.boundary(hidden[:, -1]), updated, hidden[:, -1].clone()
 
     @torch.no_grad()
     def compress_source_batch(self, caches):
@@ -439,11 +444,14 @@ class MemoryModel(nn.Module):
             "boundary": None if self.boundary is None else {
                 key: value.detach().cpu().clone() for key, value in self.boundary.state_dict().items()
             },
+            "value_head": None if self.value_head is None else {
+                key: value.detach().cpu().clone() for key, value in self.value_head.state_dict().items()
+            },
         }
 
     def load_compressor_state_dict(self, state):
-        if set(state) != {"memory_embeddings", "adapter", "boundary"}:
-            raise ValueError("model state must contain exactly memory_embeddings, adapter and boundary")
+        if set(state) != {"memory_embeddings", "adapter", "boundary", "value_head"}:
+            raise ValueError("model state must contain exactly memory_embeddings, adapter, boundary and value_head")
         if state["memory_embeddings"].shape != self.memory_embeddings.shape:
             raise ValueError("checkpoint memory embedding shape differs from this model")
         expected = get_peft_model_state_dict(self.writer, save_embedding_layers=False)
@@ -459,6 +467,10 @@ class MemoryModel(nn.Module):
     def load_trainable_state_dict(self, state):
         if (self.boundary is None) != (state["boundary"] is None):
             raise ValueError("checkpoint boundary state differs from this model's training stage")
+        if (self.value_head is None) != (state["value_head"] is None):
+            raise ValueError("checkpoint value head differs from this model's objective")
         self.load_compressor_state_dict(state)
         if self.boundary is not None:
             self.boundary.load_state_dict(state["boundary"], strict=True)
+        if self.value_head is not None:
+            self.value_head.load_state_dict(state["value_head"], strict=True)

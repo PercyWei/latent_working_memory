@@ -198,9 +198,11 @@ class PolicyObjectiveConfig:
     strategy: str
     type: str = "qa"
     reward_mode: str = "terminal"
-    advantage_mode: str = "trajectory"
     group_size: int | None = None
-    num_samples: int | None = None
+    gamma: float = 1.0
+    gae_lambda: float | None = None
+    ppo_epochs: int | None = None
+    value_loss_weight: float | None = None
     policy_transition: PolicyTransitionConfig | None = None
     memory_cost_weight: float = 0.1
     memory_cost_power: float = 1.0
@@ -211,34 +213,44 @@ class PolicyObjectiveConfig:
     def __post_init__(self):
         if self.type != "qa":
             raise ValueError("policy objective.type must be qa")
-        if self.strategy not in {"grpo", "scst"}:
-            raise ValueError("policy objective.strategy must be grpo or scst")
-        if self.reward_mode not in {"terminal", "retention_delta"}:
-            raise ValueError("objective.reward_mode must be terminal or retention_delta")
-        if self.advantage_mode not in {"trajectory", "reward_to_go"}:
-            raise ValueError("objective.advantage_mode must be trajectory or reward_to_go")
+        if self.strategy not in {"grpo", "scst", "ppo"}:
+            raise ValueError("policy objective.strategy must be grpo, scst or ppo")
+        if self.reward_mode not in {"terminal", "stepwise"}:
+            raise ValueError("objective.reward_mode must be terminal or stepwise")
+        _positive_ints(self, ("group_size",))
+        _number(self.gamma, "gamma", inclusive=True)
+        if self.gamma > 1:
+            raise ValueError("gamma must not exceed 1")
         if self.strategy == "grpo":
-            if self.num_samples is not None:
-                raise ValueError("GRPO configuration cannot contain num_samples")
-            _positive_ints(self, ("group_size",))
             if self.group_size < 2:
                 raise ValueError("GRPO group_size must be at least 2")
-            if self.advantage_mode == "trajectory":
-                _number(self.advantage_epsilon, "advantage_epsilon")
-            elif self.advantage_epsilon is not None:
-                raise ValueError("reward_to_go does not use advantage_epsilon")
-        else:
-            if self.group_size is not None:
-                raise ValueError("SCST configuration cannot contain group_size")
-            _positive_ints(self, ("num_samples",))
-            if self.advantage_epsilon is not None:
-                raise ValueError("SCST does not use advantage_epsilon")
+            _number(self.advantage_epsilon, "advantage_epsilon")
+        elif self.advantage_epsilon is not None:
+            raise ValueError("only GRPO uses advantage_epsilon")
+        if self.strategy == "ppo":
+            _number(self.gae_lambda, "gae_lambda", inclusive=True)
+            if self.gae_lambda > 1:
+                raise ValueError("gae_lambda must not exceed 1")
+            if self.ppo_epochs is None:
+                object.__setattr__(self, "ppo_epochs", 4)
+            if self.value_loss_weight is None:
+                object.__setattr__(self, "value_loss_weight", 0.5)
+            _positive_ints(self, ("ppo_epochs",))
+            _number(self.value_loss_weight, "value_loss_weight", inclusive=True)
+        elif any(value is not None for value in (
+            self.gae_lambda, self.ppo_epochs, self.value_loss_weight,
+        )):
+            raise ValueError("only PPO uses gae_lambda, ppo_epochs and value_loss_weight")
         for name in ("memory_cost_weight", "policy_weight"):
             _number(getattr(self, name), name, inclusive=True)
         for name in ("memory_cost_power", "clip_epsilon"):
             _number(getattr(self, name), name)
         if self.clip_epsilon >= 1:
             raise ValueError("clip_epsilon must be less than 1")
+
+    @property
+    def effective_gamma(self):
+        return 1.0 if self.reward_mode == "terminal" else self.gamma
 
 
 @dataclass(frozen=True)
@@ -267,6 +279,7 @@ class TrainingLoopConfig:
     max_steps: int | None = None
     micro_batch_size: int = 1
     gradient_accumulation_steps: int = 16
+    critic_warmup: int = 0
     dev_every: int | str = "after_each_epoch"
     save_every: int | str = "after_each_epoch"
     save_total_limit: int = 2
@@ -277,6 +290,8 @@ class TrainingLoopConfig:
             "save_total_limit",
         ))
         _number(self.curriculum_replay_ratio, "curriculum_replay_ratio", inclusive=True)
+        if type(self.critic_warmup) is not int or self.critic_warmup < 0:
+            raise ValueError("critic_warmup must be a nonnegative integer")
         if self.curriculum_replay_ratio > 1:
             raise ValueError("curriculum_replay_ratio must not exceed 1")
         for name in ("epochs", "max_steps"):
@@ -387,6 +402,10 @@ class TrainingConfig:
     run: RunConfig = field(default_factory=RunConfig)
     swanlab: SwanLabConfig = field(default_factory=SwanLabConfig)
 
+    @property
+    def updates_per_batch(self):
+        return self.objective.ppo_epochs if self.objective.strategy == "ppo" else 1
+
     def __post_init__(self):
         if self.update_mode not in {"compressor_only", "joint", "boundary_only"}:
             raise ValueError("update_mode must be compressor_only, joint or boundary_only")
@@ -395,6 +414,12 @@ class TrainingConfig:
                 raise ValueError("SFT requires update_mode=compressor_only")
         elif self.update_mode == "compressor_only":
             raise ValueError("policy objectives require update_mode=joint or boundary_only")
+        if self.objective.strategy == "ppo" and self.update_mode != "boundary_only":
+            raise ValueError("PPO requires update_mode=boundary_only")
+        if (self.backward is not None) != (self.update_mode == "joint"):
+            raise ValueError("only joint training requires backward settings")
+        if self.objective.strategy != "ppo" and self.loop.critic_warmup:
+            raise ValueError("critic_warmup must be 0 for non-PPO training")
         if (not self.data.length_curriculum
             and self.loop.epochs is None and self.loop.max_steps is None):
             raise ValueError("ordinary training requires epochs or max_steps")
@@ -417,7 +442,7 @@ class ExperimentConfig:
 
     @property
     def uses_boundary_policy(self):
-        return self.training.objective.strategy in {"grpo", "scst"}
+        return self.training.objective.strategy in {"grpo", "scst", "ppo"}
 
     def recent_size(self, training=False):
         """single 的窗口固定为 0，multi／policy 在训练时可覆盖阶段默认窗口。"""
@@ -474,15 +499,14 @@ class ExperimentConfig:
             raise ValueError("max_train_data_tokens is shorter than the minimum input length")
         policy_settings = (
             self.model.structure.pending_stride, self.model.structure.pending_size,
-            self.training.backward,
             self.model.structure.boundary_hidden_size,
             self.training.optimizer.boundary_learning_rate,
         )
         if self.uses_boundary_policy:
             if any(value is None for value in policy_settings):
-                raise ValueError("boundary policy training requires pending_stride, pending_size, boundary and BPTT settings")
+                raise ValueError("boundary policy training requires pending_stride, pending_size and boundary settings")
         elif any(value is not None for value in policy_settings):
-            raise ValueError("compressor training requires pending_stride=null, pending_size=null and no boundary or BPTT settings")
+            raise ValueError("compressor training requires pending_stride=null, pending_size=null and no boundary settings")
         if self.stage == "pretrain" and self.training.run.init_checkpoint is not None:
             raise ValueError("pretrain starts from the base model; use --resume to continue it")
         if self.uses_boundary_policy and self.training.run.init_checkpoint is None:
@@ -501,14 +525,14 @@ def config_from_dict(payload):
     objective = training.get("objective")
     if not isinstance(objective, dict) or not {"type", "strategy"} <= objective.keys():
         raise ValueError("training.objective must contain type and strategy")
-    uses_boundary_policy = objective["strategy"] in {"grpo", "scst"}
+    uses_boundary_policy = objective["strategy"] in {"grpo", "scst", "ppo"}
     training_types = {
         "data": TrainingDataConfig, "loop": TrainingLoopConfig,
         "optimizer": OptimizerConfig, "scheduler": SchedulerConfig,
         "run": RunConfig, "swanlab": SwanLabConfig,
         "compression": CompressionConfig, "dev": DevConfig,
     }
-    if uses_boundary_policy:
+    if training["update_mode"] == "joint":
         training_types["backward"] = BackwardConfig
     expected = set(training_types) | {"objective", "update_mode"}
     if set(training) != expected:
@@ -527,17 +551,25 @@ def config_from_dict(payload):
             raise ValueError("SFT objective fields must match its type")
     if set(compression) != compression_keys:
         raise ValueError("compression fields must match stage and mode")
+    if objective["strategy"] != "ppo" and "critic_warmup" in training["loop"]:
+        raise ValueError("only PPO configuration can contain critic_warmup")
+    if (training["update_mode"] == "boundary_only"
+        and "compressor_learning_rate" in training["optimizer"]):
+        raise ValueError("boundary_only configuration cannot contain compressor_learning_rate")
+    if (training["update_mode"] == "compressor_only"
+        and "boundary_learning_rate" in training["optimizer"]):
+        raise ValueError("compressor_only configuration cannot contain boundary_learning_rate")
+    if objective["type"] != "qa" and "max_new_tokens" in training["dev"]:
+        raise ValueError("only QA configuration can contain dev.max_new_tokens")
     groups = {name: cls(**training[name]) for name, cls in training_types.items()}
     groups["update_mode"] = training["update_mode"]
     if uses_boundary_policy:
-        if objective["strategy"] == "grpo" and "num_samples" in objective:
-            raise ValueError("GRPO configuration cannot contain num_samples")
-        if objective["strategy"] == "scst" and "group_size" in objective:
-            raise ValueError("SCST configuration cannot contain group_size")
-        if objective["strategy"] == "scst" and "advantage_epsilon" in objective:
-            raise ValueError("SCST configuration cannot contain advantage_epsilon")
-        if objective.get("advantage_mode") == "reward_to_go" and "advantage_epsilon" in objective:
-            raise ValueError("reward_to_go configuration cannot contain advantage_epsilon")
+        if objective["strategy"] != "grpo" and "advantage_epsilon" in objective:
+            raise ValueError("only GRPO configuration can contain advantage_epsilon")
+        if objective["strategy"] != "ppo" and objective.keys() & {
+            "gae_lambda", "ppo_epochs", "value_loss_weight",
+        }:
+            raise ValueError("only PPO configuration can contain gae_lambda, ppo_epochs and value_loss_weight")
         transition = objective.get("policy_transition")
         groups["objective"] = PolicyObjectiveConfig(**{
             **objective,
@@ -564,24 +596,29 @@ def config_to_dict(config):
     payload = {key: payload[key] for key in (
         "stage", "seed", "model_name_or_path", "model", "compute", "training",
     )}
+    if config.training.objective.strategy != "ppo":
+        del payload["training"]["loop"]["critic_warmup"]
+    if config.training.update_mode != "joint":
+        del payload["training"]["backward"]
+    if config.training.update_mode == "boundary_only":
+        del payload["training"]["optimizer"]["compressor_learning_rate"]
+    if config.training.objective.type != "qa":
+        del payload["training"]["dev"]["max_new_tokens"]
     if config.training.compression.mode != "multi":
         del payload["training"]["compression"]["ratios"]
     if config.training.compression.mode == "single":
         del payload["training"]["compression"]["recent_size"]
     if not config.uses_boundary_policy:
-        del payload["training"]["backward"]
         del payload["training"]["optimizer"]["boundary_learning_rate"]
         if config.training.objective.type == "qa":
             del payload["training"]["objective"]["lm_ratio"]
             del payload["training"]["objective"]["lm_target_tokens"]
     else:
-        if config.training.objective.strategy == "grpo":
-            del payload["training"]["objective"]["num_samples"]
-        else:
-            del payload["training"]["objective"]["group_size"]
-        if (config.training.objective.strategy == "scst"
-            or config.training.objective.advantage_mode == "reward_to_go"):
+        if config.training.objective.strategy != "grpo":
             del payload["training"]["objective"]["advantage_epsilon"]
+        if config.training.objective.strategy != "ppo":
+            for name in ("gae_lambda", "ppo_epochs", "value_loss_weight"):
+                del payload["training"]["objective"][name]
     if config.stage == "pretrain":
         del payload["training"]["run"]["init_checkpoint"]
     return payload

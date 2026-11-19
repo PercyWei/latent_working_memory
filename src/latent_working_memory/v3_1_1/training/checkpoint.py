@@ -1,6 +1,7 @@
 """完整 optimizer step 的单文件 checkpoint 与各 rank 随机流。"""
 
 import os
+import math
 from pathlib import Path
 import shutil
 import tempfile
@@ -23,6 +24,10 @@ def read_checkpoint(path):
     expected = {"config", "model", "optimizer", "scheduler", "cursor", "rng", "boundary_rng", "binding"}
     if not isinstance(state, dict) or set(state) != expected:
         raise ValueError(f"{path}: not a v3.1.1 training checkpoint")
+    if (set(state["optimizer"]) != {"actor", "critic"}
+        or set(state["scheduler"]) != {"actor", "critic"}
+        or set(state["cursor"]) != {"step", "rollout_step", "samples"}):
+        raise ValueError("checkpoint requires separate actor/critic states and a rollout cursor")
     config = config_from_dict(state["config"])
     step = state["cursor"]["step"]
     if type(step) is not int or step < 1 or path.parent.name != f"global_step_{step}":
@@ -70,9 +75,18 @@ def save_checkpoint(output_dir, step, config, model, engine, cursor, boundary_ge
             destination.parent.mkdir(parents=True, exist_ok=True)
             state = {
                 "config": config_to_dict(config), "model": model.trainable_state_dict(),
-                "optimizer": _cpu_state(engine.optimizer.state_dict()),
-                "scheduler": engine.scheduler.state_dict(),
-                "cursor": {"step": step, "samples": cursor.state_dict()},
+                "optimizer": _cpu_state({
+                    "actor": engine.optimizer.state_dict(),
+                    "critic": (None if engine.critic_optimizer is None
+                               else engine.critic_optimizer.state_dict()),
+                }),
+                "scheduler": {
+                    "actor": engine.scheduler.state_dict(),
+                    "critic": (None if engine.critic_scheduler is None
+                               else engine.critic_scheduler.state_dict()),
+                },
+                "cursor": {"step": step, "rollout_step": engine.rollout_step,
+                           "samples": cursor.state_dict()},
                 "rng": [rng for rng, _ in states],
                 "boundary_rng": [boundary for _, boundary in states], "binding": binding,
             }
@@ -109,13 +123,27 @@ def restore_training(state, model, engine, cursor, boundary_generator, device):
     if any(len(values) != world for values in (state["rng"], state["boundary_rng"])):
         raise ValueError("resume requires the original number of training processes")
     step = state["cursor"]["step"]
-    if not 0 <= step <= engine.config.loop.max_steps or state["scheduler"]["last_epoch"] != step:
+    ppo = engine.config.objective.strategy == "ppo"
+    primary = "critic" if ppo else "actor"
+    if (not 0 <= step <= engine.config.loop.max_steps
+        or state["scheduler"][primary]["last_epoch"] != step):
         raise ValueError("checkpoint step or scheduler differs from the training budget")
+    rollout_step = state["cursor"]["rollout_step"]
+    if (type(rollout_step) is not int
+        or rollout_step != math.ceil(step / engine.config.updates_per_batch)
+        or not 0 <= state["scheduler"]["actor"]["last_epoch"] <= step
+        or ((state["optimizer"]["critic"] is None) == ppo)
+        or ((state["scheduler"]["critic"] is None) == ppo)):
+        raise ValueError("checkpoint actor/critic updates or rollout cursor disagree")
     batch = world * engine.config.loop.micro_batch_size * engine.config.loop.gradient_accumulation_steps
-    cursor.load_state_dict(state["cursor"]["samples"], step, batch)
+    cursor.load_state_dict(state["cursor"]["samples"], rollout_step, batch)
     model.load_trainable_state_dict(state["model"])
-    engine.optimizer.load_state_dict(state["optimizer"])
-    engine.scheduler.load_state_dict(state["scheduler"])
+    engine.optimizer.load_state_dict(state["optimizer"]["actor"])
+    engine.scheduler.load_state_dict(state["scheduler"]["actor"])
+    if ppo:
+        engine.critic_optimizer.load_state_dict(state["optimizer"]["critic"])
+        engine.critic_scheduler.load_state_dict(state["scheduler"]["critic"])
+    engine.rollout_step = rollout_step
     boundary_state = state["boundary_rng"][rank]
     if boundary_generator is not None:
         boundary_generator.set_state(boundary_state)

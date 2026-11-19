@@ -127,7 +127,8 @@ def evaluate_shard(checkpoint_path, data, output_dir, worker_rank, task_module, 
     device = initialize_device("cuda")
     set_seed(config.seed)
     progress.set_stage("loading")
-    model = MemoryModel(config.model_name_or_path, asdict(config.model), asdict(config.compute), device)
+    model = MemoryModel(config.model_name_or_path, asdict(config.model), asdict(config.compute), device,
+                        with_value_head=config.training.objective.strategy == "ppo")
     model.load_trainable_state_dict(state["model"])
     model.eval()
     del state, tokenizer

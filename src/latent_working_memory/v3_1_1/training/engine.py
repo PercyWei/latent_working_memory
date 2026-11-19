@@ -6,7 +6,15 @@ import math
 import torch
 import torch.distributed as dist
 
-from .rl import post_backward_batch
+from tensordict import TensorDict
+from verl.utils.torch_functional import get_cosine_schedule_with_warmup
+from verl.workers.config import FSDPOptimizerConfig
+from verl.workers.config.optimizer import build_optimizer
+from verl.workers.engine import BaseEngine
+
+from .rl import backward_relative_batch, collect_relative_rollouts
+from .ppo import backward_actor_group, backward_critic_group, collect_rollouts, prepare_advantages
+from .verl_runtime import BoundaryBatch, BoundaryTrainer
 from .dev import evaluate_dev_conditions
 from ..compression import compress_document, compress_documents_batch
 from ..rollout import execute, qa_nll
@@ -21,15 +29,15 @@ def _curriculum_sizes(bin_sizes, replay_ratio):
     return sizes
 
 
-def training_steps(config, sample_count, global_batch_size, bin_sizes=None):
+def training_steps(config, sample_count, global_batch_size, bin_sizes=None, updates_per_batch=1):
     budgets = []
     if bin_sizes is not None:
         sizes = _curriculum_sizes(bin_sizes, config.curriculum_replay_ratio)
-        budgets.append(config.curriculum_stage_epochs * sum(
+        budgets.append(updates_per_batch * config.curriculum_stage_epochs * sum(
             math.ceil(size / global_batch_size) for size in sizes
         ))
     elif config.epochs is not None:
-        budgets.append(config.epochs * math.ceil(sample_count / global_batch_size))
+        budgets.append(updates_per_batch * config.epochs * math.ceil(sample_count / global_batch_size))
     if config.max_steps is not None:
         budgets.append(config.max_steps)
     return min(budgets)
@@ -235,7 +243,7 @@ def _aggregate_metrics(totals, samples):
     }
 
 
-class TrainingEngine:
+class TrainingEngine(BaseEngine):
     def __init__(self, model, config):
         self.model, self.experiment, self.config = model, config, config.training
         boundary_only = config.uses_boundary_policy and self.config.update_mode == "boundary_only"
@@ -253,52 +261,81 @@ class TrainingEngine:
                 "name": "boundary", "params": list(model.boundary_parameters()),
                 "lr": self.config.optimizer.boundary_learning_rate,
             })
+        critic_groups = []
+        if self.config.objective.strategy == "ppo":
+            critic_groups.append({
+                "name": "value", "params": list(model.value_head.parameters()),
+                "lr": self.config.optimizer.boundary_learning_rate,
+            })
         self.parameters = [parameter for group in groups for parameter in group["params"]]
-        if any(parameter.dtype != torch.float32 for parameter in self.parameters):
+        self.critic_parameters = [parameter for group in critic_groups for parameter in group["params"]]
+        if any(parameter.dtype != torch.float32
+               for parameter in (*self.parameters, *self.critic_parameters)):
             raise ValueError("all trainable compressor and boundary parameters must use FP32")
         if dist.is_initialized():
             self._broadcast_parameters()
-        self.optimizer = torch.optim.AdamW(
-            groups, betas=(self.config.optimizer.beta1, self.config.optimizer.beta2),
-            eps=self.config.optimizer.adam_epsilon, weight_decay=self.config.optimizer.weight_decay,
+        optimizer_config = FSDPOptimizerConfig(
+            lr=groups[0]["lr"],
+            betas=(self.config.optimizer.beta1, self.config.optimizer.beta2),
+            weight_decay=self.config.optimizer.weight_decay,
+            override_optimizer_config={"eps": self.config.optimizer.adam_epsilon},
         )
-        self.scheduler = torch.optim.lr_scheduler.LambdaLR(
-            self.optimizer, lambda completed: self._lr_factor(completed + 1),
+        self.optimizer = build_optimizer(groups, optimizer_config)
+        self.scheduler = self._build_scheduler(self.optimizer)
+        self.critic_optimizer = build_optimizer(critic_groups, optimizer_config) if critic_groups else None
+        self.critic_scheduler = self._build_scheduler(self.critic_optimizer) if critic_groups else None
+        self.rollout_step = 0
+        self._role = "actor"
+        self.trainer = BoundaryTrainer(self) if self.experiment.uses_boundary_policy else None
+
+    def _build_scheduler(self, optimizer):
+        return get_cosine_schedule_with_warmup(
+            optimizer, self.config.scheduler.warmup_steps, self.config.loop.max_steps,
+            min_lr_ratio=self.config.scheduler.min_lr_ratio, zero_indexed_step=False,
         )
 
-    def _lr_factor(self, step):
-        if self.config.scheduler.warmup_steps and step <= self.config.scheduler.warmup_steps:
-            return step / self.config.scheduler.warmup_steps
-        progress = min(1.0, (step - self.config.scheduler.warmup_steps)
-                       / max(1, self.config.loop.max_steps - self.config.scheduler.warmup_steps))
-        return self.config.scheduler.min_lr_ratio + (1 - self.config.scheduler.min_lr_ratio) * (
-            1 + math.cos(math.pi * progress)
-        ) / 2
+    @property
+    def completed_steps(self):
+        scheduler = self.critic_scheduler if self.critic_scheduler is not None else self.scheduler
+        return scheduler.last_epoch
+
+    @property
+    def is_param_offload_enabled(self):
+        return False
+
+    @property
+    def is_optimizer_offload_enabled(self):
+        return False
+
+    def is_mp_src_rank_with_outputs(self):
+        return True
 
     @torch.no_grad()
     def _broadcast_parameters(self):
-        flat = torch.cat([parameter.reshape(-1) for parameter in self.parameters])
+        parameters = (*self.parameters, *self.critic_parameters)
+        flat = torch.cat([parameter.reshape(-1) for parameter in parameters])
         dist.broadcast(flat, src=0)
         offset = 0
-        for parameter in self.parameters:
+        for parameter in parameters:
             size = parameter.numel()
             parameter.copy_(flat[offset:offset + size].view_as(parameter))
             offset += size
 
     @torch.no_grad()
     def _synchronize_gradients(self, samples):
+        parameters = self.critic_parameters if self._role == "critic" else self.parameters
         if not dist.is_initialized():
-            for parameter in self.parameters:
+            for parameter in parameters:
                 if parameter.grad is not None:
                     parameter.grad.div_(samples)
             return
-        size = sum(parameter.numel() for parameter in self.parameters)
-        flat = torch.zeros(size + len(self.parameters), device=self.parameters[0].device)
+        size = sum(parameter.numel() for parameter in parameters)
+        flat = torch.zeros(size + len(parameters), device=parameters[0].device)
         flat[size:] = torch.tensor(
-            [parameter.grad is not None for parameter in self.parameters], device=flat.device,
+            [parameter.grad is not None for parameter in parameters], device=flat.device,
         )
         offset = 0
-        for parameter in self.parameters:
+        for parameter in parameters:
             count = parameter.numel()
             if parameter.grad is not None:
                 flat[offset:offset + count].copy_(parameter.grad.reshape(-1))
@@ -306,38 +343,39 @@ class TrainingEngine:
         dist.all_reduce(flat)
         flat[:size].div_(samples)
         offset = 0
-        for parameter, used in zip(self.parameters, flat[size:].tolist(), strict=True):
+        for parameter, used in zip(parameters, flat[size:].tolist(), strict=True):
             count = parameter.numel()
             parameter.grad = flat[offset:offset + count].view_as(parameter).clone() if used else None
             offset += count
 
     def train_batch(self, documents, boundary_generator, step):
+        self.rollout_step += 1
         if self.experiment.uses_boundary_policy and self.config.update_mode == "boundary_only":
             self.model.eval()
             self.model.boundary.train()
         else:
             self.model.train()
-        self.optimizer.zero_grad(set_to_none=True)
-        totals = {}
-        transition = None
         if self.experiment.uses_boundary_policy:
-            pending_stride = self.experiment.model.structure.pending_stride
-            objective = asdict(self.config.objective)
+            self._boundary_generator = boundary_generator
+            self._batch_step = step
             transition = self.config.objective.policy_transition
             temperature = (1.0 if transition is None
                            else transition.temperature(step, self.config.loop.max_steps))
-            for start in range(0, len(documents), self.config.loop.micro_batch_size):
-                results = post_backward_batch(
-                    self.model, documents[start:start + self.config.loop.micro_batch_size],
-                    pending_stride, objective, boundary_generator,
-                    bptt_steps=self.config.backward.bptt_steps, temperature=temperature,
-                    pending_size=self.experiment.model.structure.pending_size,
-                    recent_size=self.experiment.recent_size(training=True),
-                    update_mode=self.config.update_mode,
-                )
-                for loss, metrics in results:
-                    _accumulate(totals, loss, metrics)
-        elif (self.config.objective.type == "qa"
+            before = self.completed_steps
+            metrics = self.trainer.run(documents, self.rollout_step, temperature)
+            metrics.update({
+                "rollout_step": self.rollout_step,
+                "actor_optimizer_step": self.scheduler.last_epoch,
+                "optimizer_updates": self.completed_steps - before,
+            })
+            if self.critic_scheduler is not None:
+                metrics["critic_optimizer_step"] = self.critic_scheduler.last_epoch
+            if transition is not None:
+                metrics["rollout_temperature"] = temperature
+            return metrics
+        self.optimizer.zero_grad(set_to_none=True)
+        totals = {}
+        if (self.config.objective.type == "qa"
               or self.config.compression.mode != "single"):
             documents = sorted(documents, key=lambda document: len(document.input_ids), reverse=True)
             for start in range(0, len(documents), self.config.loop.micro_batch_size):
@@ -370,10 +408,19 @@ class TrainingEngine:
                         batch_loss = losses.sum()
                     batch_loss.backward()
         metrics = _aggregate_metrics(totals, len(documents))
-        if transition is not None:
-            metrics["policy_temperature"] = temperature
+        return self._optimizer_step(metrics)
+
+    def optimizer_zero_grad(self):
+        optimizer = self.critic_optimizer if self._role == "critic" else self.optimizer
+        optimizer.zero_grad(set_to_none=True)
+
+    def optimizer_step(self):
+        metrics = self._update_metrics
+        optimizer = self.critic_optimizer if self._role == "critic" else self.optimizer
+        scheduler = self.critic_scheduler if self._role == "critic" else self.scheduler
+        parameters = self.critic_parameters if self._role == "critic" else self.parameters
         self._synchronize_gradients(metrics["samples"])
-        for group in self.optimizer.param_groups:
+        for group in optimizer.param_groups:
             gradients = [parameter.grad.detach().norm() for parameter in group["params"]
                          if parameter.grad is not None]
             metrics[f"{group['name']}_grad_norm"] = (
@@ -381,11 +428,109 @@ class TrainingEngine:
             )
             metrics[f"{group['name']}_learning_rate"] = group["lr"]
         norm = torch.nn.utils.clip_grad_norm_(
-            self.parameters, self.config.optimizer.gradient_clip, error_if_nonfinite=True,
+            parameters, self.config.optimizer.gradient_clip, error_if_nonfinite=True,
         )
-        self.optimizer.step()
-        self.scheduler.step()
-        return {**metrics, "grad_norm": float(norm)}
+        optimizer.step()
+        scheduler.step()
+        return float(norm)
+
+    def _optimizer_step(self, metrics):
+        self._role = "actor"
+        self._update_metrics = metrics
+        norm = self.optimizer_step()
+        return {**metrics, "grad_norm": norm}
+
+    def _collect_policy_batch(self, documents, global_steps, temperature):
+        objective = asdict(self.config.objective)
+        structure = self.experiment.model.structure
+        collect = collect_rollouts if objective["strategy"] == "ppo" else collect_relative_rollouts
+        groups = []
+        for start in range(0, len(documents), self.config.loop.micro_batch_size):
+            groups.extend(collect(
+                self.model, documents[start:start + self.config.loop.micro_batch_size],
+                structure.pending_stride, objective, self._boundary_generator,
+                temperature=temperature, pending_size=structure.pending_size,
+                recent_size=self.experiment.recent_size(training=True),
+            ))
+        return BoundaryBatch(documents, groups, {"temperature": temperature})
+
+    def _prepare_policy_batch(self, batch):
+        if self.config.objective.strategy == "ppo":
+            batch.groups = prepare_advantages(
+                batch.groups, asdict(self.config.objective), self.parameters[0].device,
+            )
+        return batch
+
+    def forward_backward_batch(self, data, loss_function, forward_only=False):
+        batch = data.get_non_tensor("batch")
+        objective = asdict(self.config.objective)
+        stride = self.experiment.model.structure.pending_stride
+        totals = {}
+        if objective["strategy"] == "ppo":
+            backward = backward_critic_group if self._role == "critic" else backward_actor_group
+            for group in batch.groups:
+                arguments = (self.model, group, objective, stride)
+                loss, metrics = (backward(*arguments) if self._role == "critic"
+                                 else backward(*arguments, self._update_temperature))
+                _accumulate(totals, loss, metrics)
+        else:
+            for start in range(0, len(batch.groups), self.config.loop.micro_batch_size):
+                for loss, metrics in backward_relative_batch(
+                    self.model, batch.groups[start:start + self.config.loop.micro_batch_size],
+                    stride, objective, bptt_steps=(self.config.backward.bptt_steps
+                                                 if self.config.update_mode == "joint" else None),
+                    temperature=self._update_temperature,
+                    pending_size=self.experiment.model.structure.pending_size,
+                    recent_size=self.experiment.recent_size(training=True),
+                    update_mode=self.config.update_mode,
+                ):
+                    _accumulate(totals, loss, metrics)
+        self._update_metrics = _aggregate_metrics(totals, len(batch.documents))
+        return {"metrics": self._update_metrics}
+
+    def _policy_updates(self, batch, role, updates):
+        self._role = role
+        transition = self.config.objective.policy_transition
+        metrics = {}
+        data = TensorDict({}, batch_size=[])
+        data.set_non_tensor("batch", batch)
+        for update in range(updates):
+            self._update_temperature = (1.0 if transition is None else transition.temperature(
+                self._batch_step + update, self.config.loop.max_steps,
+            ))
+            # 原生 BaseEngine 管理 zero_grad → forward/backward → optimizer_step。
+            metrics = super().train_batch(data, loss_function=None)["metrics"]
+        if transition is not None:
+            metrics["policy_temperature"] = self._update_temperature
+        return metrics
+
+    def _update_policy_critic(self, batch, metrics):
+        self.model.value_head.train()
+        updates = min(self.config.objective.ppo_epochs,
+                      self.config.loop.max_steps - self._batch_step + 1)
+        row = self._policy_updates(batch, "critic", updates)
+        row["critic_grad_norm"] = row["grad_norm"]
+        row["critic_loss"] = row["loss"]
+        metrics.update(row)
+        return batch
+
+    def _update_policy_actor(self, batch, metrics):
+        ppo = self.config.objective.strategy == "ppo"
+        updates = (min(self.config.objective.ppo_epochs,
+                       self.config.loop.max_steps - self._batch_step + 1) if ppo else 1)
+        if ppo:
+            decisions = torch.tensor(sum(sum(path.decision_mask) for group in batch.groups
+                                         for path in group.paths), device=self.parameters[0].device)
+            if dist.is_initialized():
+                dist.all_reduce(decisions)
+            if not int(decisions):
+                return batch
+        row = self._policy_updates(batch, "actor", updates)
+        if ppo:
+            row["actor_loss"] = row["loss"]
+            row["loss"] += metrics["critic_loss"]
+        metrics.update(row)
+        return batch
 
     def _compressor_batch(self, documents, totals):
         """每篇采样一次压缩路径，逐题反传 Reader 后统一回传记忆梯度。"""

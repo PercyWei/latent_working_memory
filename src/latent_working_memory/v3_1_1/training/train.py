@@ -23,7 +23,7 @@ from .engine import SampleCursor, TrainingEngine, evaluate_dev, training_steps, 
 from .tracking import log_metrics, preserve_training_rng, tracking_run
 
 
-def _restore_metrics(path, checkpoint_step):
+def _restore_metrics(path, checkpoint_step, updates_per_batch):
     kept = []
     for raw_line in path.read_bytes().split(b"\n")[:-1]:
         line = raw_line.decode("utf-8")
@@ -31,10 +31,11 @@ def _restore_metrics(path, checkpoint_step):
         if type(row["step"]) is not int or row["step"] < 1:
             raise ValueError("training metrics contain an invalid optimizer step")
         if row["step"] <= checkpoint_step:
-            if row["step"] != len(kept) + 1 or "train/loss" not in row:
-                raise ValueError("training metrics must contain each completed checkpoint step once")
+            expected = min((len(kept) + 1) * updates_per_batch, checkpoint_step)
+            if row["step"] != expected or "train/loss" not in row:
+                raise ValueError("training metrics must contain each completed rollout batch once")
             kept.append(line + "\n")
-    if len(kept) != checkpoint_step:
+    if not kept or json.loads(kept[-1])["step"] != checkpoint_step:
         raise ValueError("training metrics do not cover all completed checkpoint steps")
     temporary = path.with_suffix(".tmp")
     temporary.write_text("".join(kept), encoding="utf-8")
@@ -162,6 +163,7 @@ def train(plan_dir, resume=None):
     training = replace(training, loop=replace(
         training.loop, max_steps=training_steps(
             training.loop, len(train_documents), global_batch, bin_sizes,
+            training.updates_per_batch,
         ),
     ))
     config = replace(config, training=training)
@@ -172,6 +174,7 @@ def train(plan_dir, resume=None):
         raise ValueError("resume requires the original run configuration and output directory")
     model = MemoryModel(
         config.model_name_or_path, asdict(config.model), asdict(config.compute), device,
+        with_value_head=training.objective.strategy == "ppo",
     )
     _validate_context_lengths(model, train_documents.values(), config, training=True)
     _validate_context_lengths(model, dev_documents.values(), config)
@@ -204,7 +207,7 @@ def train(plan_dir, resume=None):
     if rank == 0:
         try:
             if resume:
-                _restore_metrics(metrics_path, step)
+                _restore_metrics(metrics_path, step, training.updates_per_batch)
             output_dir.mkdir(parents=True, exist_ok=True)
             write_json(output_dir / "config.json", config_to_dict(config))
             write_json(output_dir / "data.json", {
@@ -274,11 +277,12 @@ def train(plan_dir, resume=None):
                 "curriculum_epoch": cursor.stage_epoch + 1,
             } if training.data.length_curriculum else {})
             indices = cursor.next_batch(global_batch)
+            previous_step = step
             metrics = engine.train_batch(
                 [train_documents[index] for index in indices[rank::world]], boundary_generator,
                 step + 1,
             )
-            step += 1
+            step = engine.completed_steps
             torch.cuda.synchronize(device)
             resources = torch.tensor([
                 time.perf_counter() - started,
@@ -292,14 +296,15 @@ def train(plan_dir, resume=None):
                 **curriculum,
                 **{f"train/{key}": value for key, value in metrics.items()
                    if config.stage != "post" or key != "samples"},
-                "resources/step_seconds": seconds,
+                "resources/step_seconds": seconds / (step - previous_step),
                 "resources/peak_memory_gib": peak_memory,
             }
             if "segment_tokens" in metrics:
                 record["train/compression_ratio"] = (
                     metrics["segment_tokens"] / config.model.structure.memory_slots
                 )
-            dev_interval = training.loop.dev_every != "after_each_epoch" and step % training.loop.dev_every == 0
+            dev_interval = (training.loop.dev_every != "after_each_epoch"
+                            and step // training.loop.dev_every > previous_step // training.loop.dev_every)
             if dev_documents and (dev_interval or cursor.epoch_end or step == training.loop.max_steps):
                 dev = _run_dev(
                     model, dev_documents, config, device, boundary_generator, output_dir, step,
@@ -323,7 +328,8 @@ def train(plan_dir, resume=None):
                     + (f" dev={record['dev/loss']:.5f}" if "dev/loss" in record else ""),
                     flush=True,
                 )
-            save_interval = training.loop.save_every != "after_each_epoch" and step % training.loop.save_every == 0
+            save_interval = (training.loop.save_every != "after_each_epoch"
+                             and step // training.loop.save_every > previous_step // training.loop.save_every)
             if save_interval or cursor.epoch_end or step == training.loop.max_steps:
                 last_checkpoint = str(save_checkpoint(
                     output_dir, step, config, model, engine, cursor, boundary_generator, binding, device,

@@ -74,8 +74,7 @@
       "min_lr_ratio": 0.1
     },
     "dev": {
-      "fixed_ratios": [],
-      "max_new_tokens": 128
+      "fixed_ratios": []
     },
     "swanlab": {
       "tracking": true,

@@ -50,8 +50,8 @@
       "type": "qa",
       "strategy": "scst",
       "reward_mode": "terminal",
-      "advantage_mode": "trajectory",
-      "num_samples": 1,
+      "group_size": 1,
+      "gamma": 1.0,
       "policy_transition": {
         "method": "temperature_annealing",
         "schedule": "linear",

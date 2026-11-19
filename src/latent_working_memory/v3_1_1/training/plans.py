@@ -42,7 +42,8 @@ def validate_training_plan(config, checkpoint):
     statistics = checkpoint["binding"]["train"]
     bin_sizes = ([bucket["samples"] for bucket in statistics["length_bins"]]
                  if config.training.data.length_curriculum else None)
-    steps = training_steps(config.training.loop, statistics["episodes"], batch_size, bin_sizes)
+    steps = training_steps(config.training.loop, statistics["episodes"], batch_size, bin_sizes,
+                           config.training.updates_per_batch)
     expected = replace(config, training=replace(
         config.training, loop=replace(config.training.loop, max_steps=steps),
     ))

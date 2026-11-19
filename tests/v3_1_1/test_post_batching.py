@@ -49,7 +49,7 @@ def _reference_qa_backward(model, memory_leaves, qa, normalizer, retained_ids):
 
 
 def _reference_path_backward(
-    model, document, pending_stride, grpo, path, advantage, num_samples, bptt_steps=None,
+    model, document, pending_stride, grpo, path, advantage, group_size, bptt_steps=None,
     temperature=1.0,
 ):
     """反传后只返回无图统计，使本路径的中间张量在下一次前向前释放。"""
@@ -65,14 +65,15 @@ def _reference_path_backward(
     # 旧 stack(...).mean().backward() 按后建图的题目先执行，保持同样的累加顺序。
     for index in reversed(range(question_count)):
         question_losses[index] = _reference_qa_backward(
-            model, memory_leaves, document.qas[index], question_count * num_samples, replay.retained_ids,
+            model, memory_leaves, document.qas[index], question_count * group_size, replay.retained_ids,
         )
     with model.forward_context():
         task_loss = torch.stack(question_losses).mean()
         if len(log_probs):
-            ratios = (log_probs - path.old_log_probs).exp()
+            ratios = (log_probs - path.old_log_probs).clamp(-20, 20).exp()
             clipped = ratios.clamp(1 - grpo["clip_epsilon"], 1 + grpo["clip_epsilon"])
-            policy_loss = -torch.minimum(ratios * advantage, clipped * advantage).mean()
+            terms = -torch.minimum(ratios * advantage, clipped * advantage)
+            policy_loss = torch.where(advantage < 0, torch.minimum(terms, -3 * advantage), terms).mean()
             policy_entropy = entropy.mean()
             drift = (log_probs - path.old_log_probs).abs().max()
         else:
@@ -82,7 +83,7 @@ def _reference_path_backward(
         loss = task_loss + grpo["policy_weight"] * policy_loss
         if not bool(torch.isfinite(loss)):
             raise RuntimeError(f"non-finite training loss: {document.id}")
-        policy_backward = (grpo["policy_weight"] * policy_loss / num_samples
+        policy_backward = (grpo["policy_weight"] * policy_loss / group_size
                            if policy_loss.requires_grad else None)
     outputs = list(blocks)
     gradients = [leaf.grad for leaf in memory_leaves]
@@ -104,7 +105,7 @@ def reference_post_backward(
 ):
     """采样完整组后逐路径累积梯度；文档归约与参数更新由 engine 执行。"""
     # 采样和带图回放使用独立 autocast 区域，避免复用无梯度的权重转换缓存。
-    sample_count = grpo["num_samples"] if grpo["strategy"] == "scst" else grpo["group_size"]
+    sample_count = grpo["group_size"]
     with torch.no_grad(), model.forward_context():
         paths = (sampled_paths if sampled_paths is not None
                  else sample_paths(model, document, pending_stride, sample_count, generator, temperature))
@@ -123,11 +124,13 @@ def reference_post_backward(
     ], device=device, dtype=torch.float32)
     std = rewards.std(unbiased=False)
     advantages = ((rewards - rewards.new_tensor(baseline)) if grpo["strategy"] == "scst"
-                  else (rewards - rewards.mean()) / (std + grpo["advantage_epsilon"])).detach()
-    num_samples = len(paths)
+                  else (rewards - rewards.mean()) / (
+                      rewards.std(unbiased=True) + grpo["advantage_epsilon"]
+                  )).detach()
+    group_size = len(paths)
     values = torch.stack([
         _reference_path_backward(
-            model, document, pending_stride, grpo, path, advantage, num_samples, bptt_steps, temperature,
+            model, document, pending_stride, grpo, path, advantage, group_size, bptt_steps, temperature,
         )
         for path, advantage in zip(paths, advantages, strict=True)
     ])
@@ -140,15 +143,15 @@ def reference_post_backward(
         "reward": (float(rewards.mean()), 1),
         "reward_std": (float(std), 1),
         "zero_advantage_rate": (float(bool((advantages == 0).all())), 1),
-        "blocks": (blocks, num_samples),
-        "memory_slots": (blocks * model.memory_slots, num_samples),
+        "blocks": (blocks, group_size),
+        "memory_slots": (blocks * model.memory_slots, group_size),
         "segment_tokens": (sum(sum(path.block_lengths) for path in paths), blocks),
         "commit_rate": (sum(sum(path.actions) for path in paths), decisions),
         "policy_entropy": (
             float(values[:, 2].sum()) * len(paths[0].actions) if decisions else 0,
             decisions,
         ),
-        "replay_log_probability_drift": (float(values[:, 3].sum()), num_samples),
+        "replay_log_probability_drift": (float(values[:, 3].sum()), group_size),
     }
     peaks = []
     for path in paths:
@@ -164,12 +167,12 @@ def reference_post_backward(
     prefix_retention = [path.prefix_retained_counts[-1] / (len(document.input_ids) - len(path.recent_ids))
                         for path in paths]
     metrics.update({
-        "recent_tokens": (sum(len(path.recent_ids) for path in paths), num_samples),
-        "pending_tokens": (sum(len(path.pending_ids) for path in paths), num_samples),
-        "retention_ratio": (sum(retention), num_samples),
-        "prefix_retention_ratio": (sum(prefix_retention), num_samples),
-        "memory_cost": (sum(value ** grpo["memory_cost_power"] for value in prefix_retention), num_samples),
-        "pending_peak": (sum(peaks), num_samples),
+        "recent_tokens": (sum(len(path.recent_ids) for path in paths), group_size),
+        "pending_tokens": (sum(len(path.pending_ids) for path in paths), group_size),
+        "retention_ratio": (sum(retention), group_size),
+        "prefix_retention_ratio": (sum(prefix_retention), group_size),
+        "memory_cost": (sum(value ** grpo["memory_cost_power"] for value in prefix_retention), group_size),
+        "pending_peak": (sum(peaks), group_size),
         "advantage_abs_mean": (float(advantages.abs().sum()), advantages.numel()),
     })
     if grpo["strategy"] == "scst":
@@ -244,13 +247,13 @@ def assert_gradients_close(reference, actual):
             torch.testing.assert_close(result, expected, rtol=4e-4, atol=4e-6, msg=name)
 
 
-def fixed_paths(model, rows, pending_stride, num_samples):
+def fixed_paths(model, rows, pending_stride, group_size):
     result = {}
     with torch.no_grad(), model.forward_context():
         for row in rows:
             count = (len(row.input_ids) - 1) // pending_stride
             paths = []
-            for path_index in range(num_samples):
+            for path_index in range(group_size):
                 actions = tuple(
                     False if path_index == 0 else True if path_index == 1
                     else (index + path_index) % 2 == 0
@@ -379,7 +382,7 @@ def test_engine_microbatch_accumulation_tail_and_state_restore_continuation(
         reference, [*rows, tail], config.model.structure.pending_stride, config.training.objective.group_size,
     )
     calls, writer_shapes, reader_shapes, captured = [], [], [], []
-    def sampling(model, batch, pending_stride, num_samples, generator, temperature=1.0,
+    def sampling(model, batch, pending_stride, group_size, generator, temperature=1.0,
                  score_cache=None, pending_size=None, recent_size=0):
         calls.append([row.id for row in batch])
         return [paths[row.id] for row in batch]
@@ -456,7 +459,7 @@ def test_no_decisions_and_zero_policy_weight_preserve_gradient_presence(
     grpo = asdict(config.training.objective)
     paths = fixed_paths(reference, rows, pending_stride, grpo["group_size"])
     monkeypatch.setattr(rl_objective, "sample_paths_batch",
-                        lambda model, docs, pending_stride, num_samples, generator, temperature=1.0,
+                        lambda model, docs, pending_stride, group_size, generator, temperature=1.0,
                         score_cache=None, pending_size=None, recent_size=0: [paths[row.id] for row in docs])
     expected = [reference_post_backward(reference, row, pending_stride, grpo, None, 2, paths[row.id]) for row in rows]
     results = rl_objective.post_backward_batch(actual, rows, pending_stride, grpo, None, 2)
@@ -516,8 +519,7 @@ def test_identical_sampled_paths_keep_identical_rewards_despite_batch_score_roun
             for path in group
         ])
         assert rewards.std(unbiased=False) == 0
-    scst = asdict(replace(config.training.objective, strategy="scst", group_size=None,
-                         num_samples=1, advantage_epsilon=None))
+    scst = asdict(replace(config.training.objective, strategy="scst", group_size=1, advantage_epsilon=None))
     results = rl_objective.post_backward_batch(
         model, rows, pending_stride, scst, torch.Generator().manual_seed(417), temperature=0.5,
     )
@@ -528,16 +530,16 @@ def test_identical_sampled_paths_keep_identical_rewards_despite_batch_score_roun
         assert parameter.grad is not None and torch.count_nonzero(parameter.grad) == 0
 
 
-@pytest.mark.parametrize("num_samples", [1, 4])
+@pytest.mark.parametrize("group_size", [1, 4])
 @pytest.mark.parametrize("temperature", [1.0, 0.35])
 def test_scst_matches_independent_path_gradients_and_preserves_sampling_rng(
-    tiny_source, num_samples, temperature,
+    tiny_source, group_size, temperature,
 ):
     reference, actual, config = make_post_models(tiny_source)
     with torch.no_grad():
         reference.boundary.network[-1].weight.zero_()
         actual.load_state_dict(reference.state_dict())
-    rl = asdict(replace(config.training.objective, strategy="scst", group_size=None, num_samples=num_samples,
+    rl = asdict(replace(config.training.objective, strategy="scst", group_size=group_size,
                         advantage_epsilon=None))
     rows = [document(0, 19, 1), document(1, 12, 3)]
     generator = torch.Generator().manual_seed(417)
@@ -556,6 +558,6 @@ def test_scst_matches_independent_path_gradients_and_preserves_sampling_rng(
             right_numerator, right_denominator = right_metrics[name]
             assert right_denominator == left_denominator
             assert right_numerator == pytest.approx(left_numerator, rel=4e-4, abs=1e-5), name
-        if num_samples == 1:
+        if group_size == 1:
             assert right_metrics["reward_std"] == (0.0, 1)
     assert_gradients_close(gradients(reference), gradients(actual))

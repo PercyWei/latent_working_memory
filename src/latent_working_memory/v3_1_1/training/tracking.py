@@ -46,6 +46,7 @@ def configure_post_panels(api, remote, metrics):
         ("train/learning_rate", "learning_rate", (
             ("train/compressor_learning_rate", "compressor", "#2b8cbe"),
             ("train/boundary_learning_rate", "boundary", "#d95f0e"),
+            ("train/value_learning_rate", "value", "#31a354"),
         )),
     ), "dev": (
         ("dev/memory_usage", "memory_blocks = memory_slots / K", (
@@ -211,6 +212,8 @@ def log_metrics(run, record, step, registered, stage, output_dir, objective=None
     """只注册实际出现的指标，不为未执行的目标和 dev 创建空曲线。"""
     auxiliary = {
         "memory_slots", "recent_tokens", "pending_tokens", "segment_tokens", "memory_cost", "samples",
+        "rollout_step", "actor_optimizer_step", "critic_optimizer_step", "optimizer_updates",
+        "actor_loss", "critic_loss",
     }
     metrics = {name: value for name, value in record.items()
                if "/" in name and name.rsplit("/", 1)[-1] not in auxiliary
@@ -219,7 +222,7 @@ def log_metrics(run, record, step, registered, stage, output_dir, objective=None
                    "dev/loss", "dev/samples", "dev/commit_rate",
                    "dev/memory_slots", "dev/segment_tokens",
                })}
-    if (objective is not None and objective.strategy == "scst" and objective.num_samples == 1
+    if (objective is not None and objective.strategy in {"scst", "ppo"} and objective.group_size == 1
         and "train/reward_std" in metrics):
         del metrics["train/reward_std"]
     new_metrics = metrics.keys() - registered

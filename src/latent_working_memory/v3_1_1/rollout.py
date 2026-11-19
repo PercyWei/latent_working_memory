@@ -20,6 +20,7 @@ class ExecutionResult(NamedTuple):
     decision_mask: tuple[bool, ...]
     prefix_retained_counts: tuple[int, ...]
     pending_ids: tuple[int, ...] = ()
+    event_features: torch.Tensor | None = None
 
     @property
     def retained_ids(self):
@@ -36,6 +37,7 @@ class Rollout:
     decision_mask: tuple[bool, ...]
     prefix_retained_counts: tuple[int, ...]
     pending_ids: tuple[int, ...] = ()
+    event_features: torch.Tensor | None = None
 
     @property
     def retained_ids(self):
@@ -59,7 +61,9 @@ def _source_units(input_ids, pending_stride, recent_size):
 
 def _path_metadata(units, actions, slots, pending_size):
     """固定前缀读取位置的 memory 与 pending 占用，排除固定 recent。"""
-    pending, block_count = len(units[0]) if units else 0, 0
+    if not units:
+        return (), (), (0, 0)
+    pending, block_count = len(units[0]), 0
     retained = [0, pending]
     mask, lengths = [], []
     for unit, commit in zip(units[1:], actions, strict=True):
@@ -137,23 +141,30 @@ def _replay_fixed(model, units, actions, bptt_steps, temperature, pending_size, 
 
 
 def execute(model, input_ids, pending_stride, actions=None, generator=None, bptt_steps=None,
-            temperature=1.0, pending_size=None, recent_size=0):
+            temperature=1.0, pending_size=None, recent_size=0, collect_features=False):
     """先保留 recent，再采样或回放前缀的硬动作；不足阈值的最终 pending 保留原文。"""
     pending_size = model.memory_slots if pending_size is None else pending_size
     units, recent = _source_units(input_ids, pending_stride, recent_size)
     if not input_ids:
         raise ValueError("stream input must be nonempty")
+    if collect_features and torch.is_grad_enabled():
+        raise ValueError("event features are collected during no-grad rollouts")
     if actions is not None and len(actions) != max(0, len(units) - 1):
         raise ValueError("recorded actions must match the fixed prefix decision positions")
     if actions is not None and torch.is_grad_enabled():
         return _replay_fixed(model, units, actions, bptt_steps, temperature, pending_size, recent)
     zero = model.memory_embeddings.new_empty((0,), dtype=torch.float32)
+    initial_features = model.memory_embeddings.new_zeros(model.width) if collect_features else None
     if not units:
-        return ExecutionResult((), (), zero, zero, (), recent, (), (0, 0, 0))
+        features = initial_features[None] if collect_features else None
+        return ExecutionResult((), (), zero, zero, (), recent, (), (0, 0), (), features)
     stream = SourceStream(model, units[0])
     chosen, log_probs, entropies = [], [], []
+    features = [initial_features] if collect_features else None
     for index, unit in enumerate(units[1:]):
         logit = stream.logit(unit) / temperature
+        if collect_features:
+            features.append(stream.source_features.detach().clone())
         allowed = len(stream.pending_ids) >= pending_size
         if actions is not None:
             commit = actions[index]
@@ -169,11 +180,14 @@ def execute(model, input_ids, pending_stride, actions=None, generator=None, bptt
         log_probs.append(F.logsigmoid(logit if commit else -logit) if allowed else logit.new_zeros(()))
         entropies.append(F.softplus(logit) - logit * logit.sigmoid() if allowed else logit.new_zeros(()))
         stream.advance(unit, commit)
+    if collect_features:
+        features.append(stream.source_features.detach().clone())
     blocks, pending, _ = stream.finish(pending_size)
     mask, lengths, retained = _path_metadata(units, chosen, model.memory_slots, pending_size)
     return ExecutionResult(
         blocks, tuple(chosen), torch.stack(log_probs) if log_probs else zero,
         torch.stack(entropies) if entropies else zero, lengths, recent, mask, retained, pending,
+        torch.stack(features) if collect_features else None,
     )
 
 
@@ -237,7 +251,7 @@ def execute_replay_batch(model, contexts, pending_stride, actions, bptt_steps=No
 
 @torch.no_grad()
 def execute_batch(model, contexts, pending_stride, uniforms=None, temperature=1.0,
-                  pending_size=None, recent_size=0):
+                  pending_size=None, recent_size=0, collect_features=False):
     """批量分段；uniforms 按正文固定位置索引，强制等待不产生策略概率。"""
     pending_size = model.memory_slots if pending_size is None else pending_size
     sources = [_source_units(context, pending_stride, recent_size) for context in contexts]
@@ -251,16 +265,22 @@ def execute_batch(model, contexts, pending_stride, uniforms=None, temperature=1.
     chosen, log_probs, entropies = ([[] for _ in units] for _ in range(3))
     pending_tails = [() for _ in units]
     caches = [None] * len(units)
+    source_features = [model.memory_embeddings.new_zeros(model.width) for _ in units]
+    event_features = ([([source_features[index].clone()] if sequence else [])
+                       for index, sequence in enumerate(units)] if collect_features else None)
     initial = [index for index, sequence in enumerate(units) if sequence]
     if initial:
-        values = model.prefill_source_batch([blocks[index] for index in initial],
-                                           [units[index][0] for index in initial])
-        for index, value in zip(initial, values, strict=True):
+        values, hidden = model.prefill_source_batch([blocks[index] for index in initial],
+                                                   [units[index][0] for index in initial])
+        for index, value, features in zip(initial, values, hidden, strict=True):
             caches[index] = value
+            source_features[index] = features
 
     def flush(indices):
         compressed_indices = []
         for index in indices:
+            if collect_features:
+                event_features[index].append(source_features[index].detach().clone())
             if pending[index] >= pending_size:
                 compressed_indices.append(index)
             else:
@@ -277,7 +297,11 @@ def execute_batch(model, contexts, pending_stride, uniforms=None, temperature=1.
         active = [index for index, sequence in enumerate(units) if step < len(sequence)]
         previous = [caches[index] for index in active]
         arriving = [units[index][step] for index in active]
-        logits, observed = model.observe_source_batch(previous, arriving)
+        logits, observed, hidden = model.observe_source_batch(previous, arriving)
+        for index, features in zip(active, hidden, strict=True):
+            source_features[index] = features
+            if collect_features:
+                event_features[index].append(features.detach().clone())
         policy_logits = logits / temperature
         allowed = [pending[index] >= pending_size for index in active]
         if uniforms is None:
@@ -313,13 +337,14 @@ def execute_batch(model, contexts, pending_stride, uniforms=None, temperature=1.
             for row, memory in zip(committed, memories, strict=True):
                 previous[row].crop(sum(map(len, blocks[active[row]])))
                 blocks[active[row]].append(memory)
-            refreshed = model.prefill_source_batch(
+            refreshed, hidden = model.prefill_source_batch(
                 [(memory,) for memory in memories], [arriving[row] for row in committed],
                 [previous[row] for row in committed],
             )
             previous.clear()
-            for row, cache in zip(committed, refreshed, strict=True):
+            for row, cache, features in zip(committed, refreshed, hidden, strict=True):
                 caches[active[row]] = cache
+                source_features[active[row]] = features
             del cache, refreshed
         del previous, observed
         flush([index for index in active if step + 1 == len(units[index])])
@@ -334,6 +359,7 @@ def execute_batch(model, contexts, pending_stride, uniforms=None, temperature=1.
             torch.stack(log_probs[index]) if log_probs[index] else zero,
             torch.stack(entropies[index]) if entropies[index] else zero,
             lengths, recent[index], mask, retained, pending_tails[index],
+            torch.stack(event_features[index]) if collect_features else None,
         ))
     return results
 
@@ -346,34 +372,36 @@ def qa_nll(model, blocks, document, retained_ids=()):
 
 
 @torch.no_grad()
-def sample_paths(model, document, pending_stride, num_samples, generator, temperature=1.0,
-                 pending_size=None, recent_size=0):
+def sample_paths(model, document, pending_stride, group_size, generator, temperature=1.0,
+                 pending_size=None, recent_size=0, collect_features=False):
     paths = []
-    for _ in range(num_samples):
+    for _ in range(group_size):
         result = execute(model, document.input_ids, pending_stride, generator=generator,
-                         temperature=temperature, pending_size=pending_size, recent_size=recent_size)
+                         temperature=temperature, pending_size=pending_size, recent_size=recent_size,
+                         collect_features=collect_features)
         loss = qa_nll(model, result.blocks, document, result.retained_ids)
         paths.append(Rollout(result.actions, result.log_probs.detach(), float(loss),
                              result.block_lengths, result.recent_ids, result.decision_mask,
-                             result.prefix_retained_counts, result.pending_ids))
+                             result.prefix_retained_counts, result.pending_ids, result.event_features))
     return tuple(paths)
 
 
 @torch.no_grad()
-def sample_paths_batch(model, documents, pending_stride, num_samples, generator, temperature=1.0,
-                       score_cache=None, pending_size=None, recent_size=0):
+def sample_paths_batch(model, documents, pending_stride, group_size, generator, temperature=1.0,
+                       score_cache=None, pending_size=None, recent_size=0, collect_features=False):
     """按文档／路径分配随机数；同批文档的随机与 greedy 路径共享确定性评分。"""
     uniforms = (None if generator is None else [
-        torch.rand((num_samples, max(0, (len(document.input_ids) - recent_size - 1) // pending_stride)), generator=generator).tolist()
+        torch.rand((group_size, max(0, (len(document.input_ids) - recent_size - 1) // pending_stride)), generator=generator).tolist()
         for document in documents
     ])
     paths = [[] for _ in documents]
     scores = [{} for _ in documents] if score_cache is None else score_cache
-    for path_index in range(num_samples):
+    for path_index in range(group_size):
         results = execute_batch(
             model, [document.input_ids for document in documents], pending_stride,
             None if uniforms is None else [values[path_index] for values in uniforms],
             temperature=temperature, pending_size=pending_size, recent_size=recent_size,
+            collect_features=collect_features,
         )
         losses = [[] for _ in documents]
         for question in range(max(len(document.qas) for document in documents)):
@@ -390,6 +418,7 @@ def sample_paths_batch(model, documents, pending_stride, num_samples, generator,
             paths[index].append(Rollout(
                 result.actions, result.log_probs.detach(), score, result.block_lengths,
                 result.recent_ids, result.decision_mask, result.prefix_retained_counts, result.pending_ids,
+                result.event_features,
             ))
         del results, result
     return [tuple(group) for group in paths]

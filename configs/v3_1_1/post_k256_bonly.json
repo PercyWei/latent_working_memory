@@ -49,14 +49,15 @@
     "objective": {
       "type": "qa",
       "strategy": "grpo",
-      "reward_mode": "retention_delta",
-      "advantage_mode": "reward_to_go",
+      "reward_mode": "stepwise",
       "group_size": 4,
+      "gamma": 1.0,
       "policy_transition": null,
       "memory_cost_weight": 0.1,
       "memory_cost_power": 1.0,
       "policy_weight": 1.0,
-      "clip_epsilon": 0.2
+      "clip_epsilon": 0.2,
+      "advantage_epsilon": 1e-06
     },
     "loop": {
       "epochs": 1,
@@ -70,7 +71,6 @@
       "save_total_limit": 6
     },
     "optimizer": {
-      "compressor_learning_rate": 2e-05,
       "boundary_learning_rate": 0.0001,
       "weight_decay": 0.01,
       "beta1": 0.9,
@@ -81,9 +81,6 @@
     "scheduler": {
       "warmup_steps": 5,
       "min_lr_ratio": 1.0
-    },
-    "backward": {
-      "bptt_steps": null
     },
     "dev": {
       "fixed_ratios": [

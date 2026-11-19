@@ -50,9 +50,16 @@
       "type": "qa",
       "strategy": "grpo",
       "reward_mode": "terminal",
-      "advantage_mode": "trajectory",
       "group_size": 4,
-      "policy_transition": null,
+      "gamma": 1.0,
+      "policy_transition": {
+        "method": "temperature_annealing",
+        "schedule": "linear",
+        "start_temperature": 1.0,
+        "end_temperature": 0.2,
+        "start_progress": 0.3,
+        "end_progress": 0.9
+      },
       "memory_cost_weight": 0.1,
       "memory_cost_power": 1.0,
       "policy_weight": 1.0,
