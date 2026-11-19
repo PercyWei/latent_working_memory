@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261119 16:38:33 Asia/Shanghai
+最后修订时间：20261119 17:18:32 Asia/Shanghai
 
 计算协议、数据格式与模块分工见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256_grpo.json)中的基座与数据路径。
 
@@ -170,7 +170,7 @@ SCST terminal 调用 verl 原生 ReMax 得到完整得分差，stepwise 使用�
 
 PPO 使用独立 value head 和 verl 原生 GAE，`gae_lambda` 必须显式设置，两种奖励模式都读取该值。原生 GAE 对完整 rollout 批次的真实事件优势做白化，critic 目标仍使用白化前的优势。预设 [post_k256_ppo.json](../../../../configs/v3_1_1/post_k256_ppo.json) 使用 `group_size=1`、`gae_lambda=0.95`、`ppo_epochs=4`、`value_loss_weight=0.5`；0.95 仅为预设值。Writer 和 memory 冻结，每批 rollout 固定特征、旧概率、旧价值、优势及价值目标。actor／critic 使用独立 optimizer 和梯度裁剪，先完成 critic 的全部内轮，再完成 actor 的全部内轮；value head 与边界沿用同一学习率数值。将下面命令的配置路径换为该 PPO 预设即可启动。
 
-三种策略复用 verl vanilla 策略损失，采用原生 dual-clip 系数 3 和 log 概率比 `[-20,20]` 截断；PPO 采用范围为 0.5 的原生 value clipping。`clip_epsilon`、损失权重、动作／路径／文档归约与其他超参数保持配置值。
+三种策略在 terminal 和 stepwise 下都使用 verl vanilla 策略损失：轨迹内对自主动作求和，再按完整 `group_size` 和实际全局文档数平均。零自主动作轨迹贡献 0，仍保留在轨迹和文档的平均分母中。策略项采用原生 dual-clip 系数 3 和 log 概率比 `[-20,20]` 截断；critic 保持每条轨迹的真实事件平均，再对轨迹和文档平均，并采用范围为 0.5 的原生 value clipping。求和归约会影响 actor 损失尺度，`clip_epsilon`、损失权重、学习率与其他超参数沿用配置值。
 
 `training.loop.critic_warmup` 默认 0，直接使用原生 rollout 批次阈值；仅 PPO 配置可以包含该字段。批次从 1 开始，0／1 均从首批更新 actor，11 表示前 10 批只更新 critic。预热期间继续采样新轨迹，使用相同 GAE 目标；该参数与学习率的 `scheduler.warmup_steps` 不同。
 

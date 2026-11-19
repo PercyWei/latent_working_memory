@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261119 16:38:33 Asia/Shanghai
+最后修订时间：20261119 17:18:32 Asia/Shanghai
 
 v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=post` 使用问答（QA），由 `training.update_mode` 选择仅更新压缩器（`compressor_only`）、仅更新边界（`boundary_only`）或联合更新（`joint`）。每次写入将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆及未压缩的 pending 和 recent 尾段回答问题。
 
@@ -140,11 +140,22 @@ A_{i,t}=\frac{\hat A_{i,t}-\operatorname{mean}(\hat A)}
 
 固定读取事件与自主动作分开处理。当前判断检查新单元加入之前的 pending 长度，达到 H 才允许选择压缩或继续积累；未达到阈值及末尾强制收尾均不产生 actor 损失。自主选择继续积累仍参与 actor 更新。SCST 的位置匹配、回报折扣和 GAE 使用完整真实事件序列，不能先删除强制事件再累计。
 
-奖励结算与优势统计使用 FP32。所有策略的奖励、优势和旧动作概率均停止梯度。三种策略都调用 verl 原生 vanilla 策略损失，仅自主动作参与；沿用配置中的 `clip_epsilon`（预设 0.2），采用原生 dual-clip 系数 3，以及 log 概率比 `[-20,20]` 截断。SCST／GRPO 的 terminal 对每条轨迹的自主动作平均，stepwise 对自主动作求和，再对轨迹和文档平均；零自主动作路径以零损失保留在平均分母中。`joint` 另保留 QA NLL 的直接梯度；`boundary_only` 通过奖励使用 QA NLL。
+奖励结算与优势统计使用 FP32。所有策略的奖励、优势和旧动作概率均停止梯度。三种策略都调用 verl 原生 vanilla 策略损失，仅自主动作参与；沿用配置中的 `clip_epsilon`（预设 0.2），采用原生 dual-clip 系数 3，以及 log 概率比 `[-20,20]` 截断。
+
+SCST／GRPO／PPO 在 terminal 和 stepwise 下统一对每条轨迹的自主动作求和，再对采样轨迹和文档平均：
+
+\[
+L_{\pi}=\frac{1}{M}\sum_{d=1}^{M}\frac{1}{G}\sum_{i=1}^{G}
+\sum_t m_{d,i,t}\,\ell^{\mathrm{actor}}_{d,i,t}.
+\]
+
+\(M\) 为本次更新的实际全局文档数，\(G\) 为 `group_size`，\(m_{d,i,t}\) 为采样路径自己的 `decision_mask`；\(\ell^{\mathrm{actor}}_{d,i,t}\) 为包含上述概率比裁剪和 dual-clip 的单动作策略损失。轨迹内不除以自主动作数。零自主动作路径贡献 0，仍计入 G；整篇没有自主动作的文档仍计入 M。SCST 的 greedy 路径只提供基线，不计入 G。
+
+轨迹内求和会影响 actor 损失及梯度的尺度；`policy_weight`、学习率和其他超参数沿用配置数值。`joint` 另保留 QA NLL 的直接梯度；`boundary_only` 通过奖励使用 QA NLL。
 
 PPO 在完整 rollout 后缓存冻结 Writer 产生的状态特征、旧动作概率、旧价值预测、优势和价值目标。actor 与 critic 分别使用 AdamW、分别裁剪梯度；先完成 critic 的全部内轮，再完成 actor 的全部内轮，两者的内轮数均为 `ppo_epochs`，默认 4。轮内不重算优势或价值目标，不重跑 Writer 和 Reader。`value_loss_weight` 默认 0.5，value head 使用 `boundary_learning_rate`；`policy_weight` 仍控制 actor 损失权重。critic 在包含强制事件的真实状态上学习，actor 只学习自主决策。新一批 rollout 使用更新后的模型。
 
-PPO actor 对每条轨迹的自主动作平均，再对轨迹和文档平均，两种奖励模式使用相同归约。critic 调用 verl 原生 value clipping，裁剪范围为 0.5：
+PPO critic 调用 verl 原生 value clipping，裁剪范围为 0.5：
 
 \[
 V_{\mathrm{clip}}=V_{\mathrm{old}}+\operatorname{clip}(V-V_{\mathrm{old}},-0.5,0.5),

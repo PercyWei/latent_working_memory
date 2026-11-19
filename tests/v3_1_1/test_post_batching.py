@@ -73,7 +73,7 @@ def _reference_path_backward(
             ratios = (log_probs - path.old_log_probs).clamp(-20, 20).exp()
             clipped = ratios.clamp(1 - grpo["clip_epsilon"], 1 + grpo["clip_epsilon"])
             terms = -torch.minimum(ratios * advantage, clipped * advantage)
-            policy_loss = torch.where(advantage < 0, torch.minimum(terms, -3 * advantage), terms).mean()
+            policy_loss = torch.where(advantage < 0, torch.minimum(terms, -3 * advantage), terms).sum()
             policy_entropy = entropy.mean()
             drift = (log_probs - path.old_log_probs).abs().max()
         else:

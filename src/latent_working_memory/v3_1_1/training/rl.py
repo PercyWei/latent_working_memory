@@ -21,9 +21,7 @@ class RLGroup:
 
 
 def boundary_policy_loss(log_probs, old_log_probs, advantages, objective):
-    """原生 vanilla loss；一条路径的动作归约后由调用方平均路径和文档。"""
-    reduction = ("seq-mean-token-sum" if objective["strategy"] != "ppo"
-                 and objective["reward_mode"] == "stepwise" else "seq-mean-token-mean")
+    """原生 vanilla loss 对自主动作求和；调用方按全部采样路径和文档平均。"""
     config = OmegaConf.create({
         "clip_ratio": objective["clip_epsilon"],
         "clip_ratio_low": None,
@@ -35,7 +33,7 @@ def boundary_policy_loss(log_probs, old_log_probs, advantages, objective):
         log_prob=log_probs.float().unsqueeze(0),
         advantages=advantages.float().expand_as(log_probs).unsqueeze(0),
         response_mask=torch.ones_like(log_probs).unsqueeze(0),
-        loss_agg_mode=reduction,
+        loss_agg_mode="seq-mean-token-sum",
         config=config,
     )
 

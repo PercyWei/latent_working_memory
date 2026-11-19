@@ -2,15 +2,15 @@
 
 创建时间：20261119 14:52:11 Asia/Shanghai
 
-最后修订时间：20261119 16:38:33 Asia/Shanghai
+最后修订时间：20261119 17:18:32 Asia/Shanghai
 
 ## 范围与约束
 
-本次在 dev 分支修改 v3.1.1 的配置、边界策略训练和现行文档。预训练与 compressor_only QA 训练保持原有逻辑；SCST／GRPO 的数据、学习率、batch、记忆成本权重及现有终端损失归约不变。完整方法公式见[方法说明](README.md#qa-与边界后训练)。
+本次在 dev 分支修改 v3.1.1 的配置、边界策略训练和现行文档。预训练与 compressor_only QA 训练保持原有逻辑；SCST／GRPO／PPO 的 actor 统一为轨迹内自主动作求和，再对轨迹和文档平均；数据、学习率、batch、记忆成本权重及其他超参数不变。完整方法公式见[方法说明](README.md#qa-与边界后训练)。
 
 ## verl 接入执行计划
 
-本轮将 SCST／GRPO／PPO 的通用算法与执行能力接入已安装的 verl 0.8.0。SCST terminal 使用原生 ReMax，GRPO terminal 使用原生 GRPO，PPO 使用原生 GAE 与优势白化；两种 stepwise 相对优势保留任务适配。策略损失采用原生 vanilla，包含 dual-clip 与 log 概率比截断；价值损失采用原生 value clipping。奖励定义、分段、recent／pending、两种 mask、损失权重与归约、数据和其他超参数保持原设置。
+本轮将 SCST／GRPO／PPO 的通用算法与执行能力接入已安装的 verl 0.8.0。SCST terminal 使用原生 ReMax，GRPO terminal 使用原生 GRPO，PPO 使用原生 GAE 与优势白化；两种 stepwise 相对优势保留任务适配。策略损失采用原生 vanilla，包含 dual-clip 与 log 概率比截断；价值损失采用原生 value clipping。奖励定义、优势算法、分段、recent／pending、两种 mask、损失权重、数据和其他超参数保持原设置。
 
 PPO 采用原生 actor／critic 独立更新组织：先执行 critic 的全部内轮，再执行 actor 的全部内轮，分别优化和裁剪；同批旧概率、旧价值、优势和价值目标固定。`training.loop.critic_warmup` 默认 0，沿用从 1 开始的 rollout 批次阈值：0／1 从首批更新 actor，11 表示前 10 批只更新 critic。仅 PPO 配置可以包含该字段。恢复保存 rollout、actor 和 critic 的实际更新进度。PPO 以 critic 实际更新数为主步数，其他策略以 actor 更新数为主步数；两个 PPO scheduler 各自推进，温度、dev、保存和图表沿用训练主步数，预热占原预算。
 
@@ -46,7 +46,9 @@ SCST 按正文读取位置对齐，不按自主动作或记忆块序号对齐。
 
 PPO 从完整 rollout 缓存冻结特征，固定旧动作概率、旧价值预测、优势和价值目标，多轮优化只重算边界与 value head。优势停止梯度，critic 固定目标为 `Y=V_old+未白化GAE`，调用原生范围为 0.5 的 value clipping。三种策略的 actor 调用原生 vanilla 策略损失，包含 dual-clip 系数 3 与 log 概率比 `[-20,20]` 截断。原有 policy_weight、value_loss_weight 保持不变。
 
-PPO actor／critic 分别使用 optimizer 和梯度裁剪，先完成 critic 的全部内轮，再完成 actor 的全部内轮；每次实际更新推进相应 scheduler。两种奖励模式均对每条轨迹的自主动作平均后再平均轨迹；critic 对真实事件、轨迹、文档依次平均。零自主动作路径保留在平均分母。完整 rollout 更新批次完成后记录、验证和保存；恢复沿用真实更新计数与 rollout 预热进度。
+SCST／GRPO／PPO 的两种奖励模式均在轨迹内对自主动作求和，再按完整 group_size 和实际全局文档数平均，不除以各路径的自主动作数。零自主动作路径贡献 0，仍计入 group_size；整篇无自主动作的文档仍计入文档分母。critic 保持每条轨迹的真实事件平均，再对轨迹和文档平均。actor 求和归约会改变损失及梯度的尺度，policy_weight、学习率和其他超参数沿用原配置。
+
+PPO actor／critic 分别使用 optimizer 和梯度裁剪，先完成 critic 的全部内轮，再完成 actor 的全部内轮；每次实际更新推进相应 scheduler。完整 rollout 更新批次完成后记录、验证和保存；恢复沿用真实更新计数与 rollout 预热进度。
 
 ## 原生接入边界
 
@@ -65,7 +67,7 @@ PPO 保留原 `approx_kl=mean(q−1−log q)`，另记原生 `ppo_kl=−mean(cli
 | 检查 | 结果 |
 |---|---|
 | 配置契约 | 9 份预设往返解析通过；critic_warmup 类型、范围和策略限制校验通过 |
-| 现有测试 | `tests/v3_1_1` 共 31 项通过；参考结果按已采用的 GRPO 样本标准差和 dual-clip 修订，未新增用例 |
+| 现有测试 | `tests/v3_1_1` 共 31 项通过；参考结果按统一 actor 求和、GRPO 样本标准差和 dual-clip 修订，未新增用例 |
 | 算法数值 | 原生优势／损失调用及任务适配通过临时数值检查，奖励成本与两种 mask 正确 |
 | CPU 小型 Qwen3 | 六种策略／奖励组合通过；覆盖 critic_warmup=0／1／2／11、critic 全部内轮后 actor、Writer 冻结及固定旧价值／优势／目标 |
 | 边界情况 | group_size=1、单 EOF 事件、无自主动作批通过；无动作批的 actor 参数、动量和 scheduler 均保持不变 |
