@@ -290,7 +290,8 @@ class TrainingEngine(BaseEngine):
 
     def _build_scheduler(self, optimizer):
         return get_cosine_schedule_with_warmup(
-            optimizer, self.config.scheduler.warmup_steps, self.config.loop.max_steps,
+            optimizer, self.config.scheduler.warmup_updates(self.config.loop.max_steps),
+            self.config.loop.max_steps,
             min_lr_ratio=self.config.scheduler.min_lr_ratio, zero_indexed_step=False,
         )
 

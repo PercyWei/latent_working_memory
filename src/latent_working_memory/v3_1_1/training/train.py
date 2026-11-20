@@ -222,7 +222,10 @@ def train(plan_dir, resume=None):
                 f"microbatch_per_gpu={training.loop.micro_batch_size} "
                 f"gradient_accumulation_steps={training.loop.gradient_accumulation_steps} "
                 f"effective_batch_size={global_batch} documents={len(train_documents)} "
-                f"total_steps={training.loop.max_steps}", flush=True,
+                f"total_steps={training.loop.max_steps} "
+                f"warmup_ratio={training.scheduler.warmup_ratio} "
+                f"warmup_updates={training.scheduler.warmup_updates(training.loop.max_steps)}",
+                flush=True,
             )
         except Exception as error:
             setup_error = f"training output setup failed: {error}"

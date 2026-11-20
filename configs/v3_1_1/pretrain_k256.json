@@ -1,7 +1,7 @@
 {
   "stage": "pretrain",
   "seed": 42,
-  "model_name_or_path": "/root/rivermind-data/models/Qwen3-4B-Instruct-2507",
+  "model_name_or_path": "~/models/Qwen3-4B-Instruct-2507",
   "model": {
     "structure": {
       "memory_slots": 256,
@@ -70,7 +70,7 @@
       "gradient_clip": 1.0
     },
     "scheduler": {
-      "warmup_steps": 20,
+      "warmup_ratio": 0.1,
       "min_lr_ratio": 0.1
     },
     "dev": {

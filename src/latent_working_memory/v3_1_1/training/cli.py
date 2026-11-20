@@ -39,6 +39,8 @@ def parse_run_args(argv=None):
                         help="长度课程历史补充数量相对本档样本数的比例，默认 0.2")
     parser.add_argument("--micro-batch-size-per-gpu", type=positive_int)
     parser.add_argument("--gradient-accumulation-steps", type=positive_int)
+    parser.add_argument("--warmup-ratio", type=unit_interval,
+                        help="学习率预热占实际总更新步数的比例，范围 [0,1)，步数向上取整")
     parser.add_argument("--dtype", choices=("float32", "bfloat16"),
                         help="基座参数精度，省略时沿用 JSON")
     parser.add_argument("--attention-implementation", choices=("sdpa", "flash_attention_2"),
@@ -102,6 +104,7 @@ def config_overrides(args):
         ("curriculum_stage_epochs", "loop", "curriculum_stage_epochs"),
         ("curriculum_replay_ratio", "loop", "curriculum_replay_ratio"),
         ("gradient_accumulation_steps", "loop", "gradient_accumulation_steps"),
+        ("warmup_ratio", "scheduler", "warmup_ratio"),
         ("dev_every", "loop", "dev_every"), ("save_every", "loop", "save_every"),
         ("save_total_limit", "loop", "save_total_limit"),
     ):

@@ -70,7 +70,7 @@
       "gradient_clip": 1.0
     },
     "scheduler": {
-      "warmup_steps": 50,
+      "warmup_ratio": 0.1,
       "min_lr_ratio": 0.1
     },
     "dev": {

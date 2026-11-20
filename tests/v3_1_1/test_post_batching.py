@@ -201,7 +201,7 @@ def make_post_models(folder, gradient_checkpointing=False, bptt_steps=2, policy_
                 micro_batch_size=4, gradient_accumulation_steps=2, max_steps=6,
             ),
             optimizer=OptimizerConfig(boundary_learning_rate=1e-4, gradient_clip=0.5),
-            scheduler=SchedulerConfig(warmup_steps=0),
+            scheduler=SchedulerConfig(warmup_ratio=0),
             backward=BackwardConfig(bptt_steps=bptt_steps),
             run=RunConfig(init_checkpoint=str(folder)),
             swanlab=SwanLabConfig(tracking=False),

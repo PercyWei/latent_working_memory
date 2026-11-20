@@ -332,15 +332,22 @@ class OptimizerConfig:
 
 @dataclass(frozen=True)
 class SchedulerConfig:
-    warmup_steps: int = 50
+    warmup_ratio: float = 0.1
     min_lr_ratio: float = 0.1
 
     def __post_init__(self):
-        if type(self.warmup_steps) is not int or self.warmup_steps < 0:
-            raise ValueError("warmup_steps must be a non-negative integer")
+        _number(self.warmup_ratio, "warmup_ratio", inclusive=True)
+        if self.warmup_ratio >= 1:
+            raise ValueError("warmup_ratio must be less than 1")
         _number(self.min_lr_ratio, "min_lr_ratio", inclusive=True)
         if self.min_lr_ratio > 1:
             raise ValueError("min_lr_ratio must be <= 1")
+
+    def warmup_updates(self, total_steps):
+        updates = math.ceil(self.warmup_ratio * total_steps)
+        if updates >= total_steps:
+            raise ValueError("warmup_ratio must produce fewer warmup updates than total steps")
+        return updates
 
 
 @dataclass(frozen=True)
@@ -428,8 +435,8 @@ class TrainingConfig:
         if (not self.data.length_curriculum
             and self.loop.epochs is None and self.loop.max_steps is None):
             raise ValueError("ordinary training requires epochs or max_steps")
-        if self.loop.max_steps is not None and self.scheduler.warmup_steps >= self.loop.max_steps:
-            raise ValueError("warmup_steps must be less than max_steps")
+        if self.loop.max_steps is not None:
+            self.scheduler.warmup_updates(self.loop.max_steps)
         if self.swanlab.group is None and self.run.output_dir is not None:
             object.__setattr__(self, "swanlab", replace(
                 self.swanlab, group=Path(self.run.output_dir).parent.name,

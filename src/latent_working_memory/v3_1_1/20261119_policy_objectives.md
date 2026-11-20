@@ -2,7 +2,7 @@
 
 创建时间：20261119 14:52:11 Asia/Shanghai
 
-最后修订时间：20261119 20:39:45 Asia/Shanghai
+最后修订时间：20261120 16:05:16 Asia/Shanghai
 
 ## 范围与约束
 
@@ -50,6 +50,7 @@ SCST 按正文读取位置对齐，不按自主动作或记忆块序号对齐。
 - PPO 的 ppo_epochs 默认 4，value_loss_weight 默认 0.5。post_k256_ppo.json 使用 group_size=1、gae_lambda=0.95；0.95 是预设值，不是系统默认。
 - training.loop.critic_warmup 默认 0，仅 PPO 配置可以包含该字段。原生批次从 1 开始，0／1 首批更新 actor，11 表示前 10 批只更新 critic。
 - optimizer 的学习率字段按 update_mode 区分：compressor_only 仅含 compressor_learning_rate，boundary_only 仅含 boundary_learning_rate，joint 同时包含两者。PPO 的 critic 与边界共用后者的数值，各自独立更新。
+- training.scheduler.warmup_ratio 的范围为 [0,1)，全部预设统一为 0.1。数据、GPU 数量与预算解析后，预热步数为 `ceil(warmup_ratio × 总 optimizer steps)`，必须小于总步数；比例为 0 时不预热。PPO 总预算包含 ppo_epochs，actor／critic 使用同一预热长度，各自按实际更新次数推进；critic_warmup 仍独立按 rollout 批次控制。
 - training.backward 仅用于 joint 策略训练，以 bptt_steps 控制压缩器跨段梯度；其他模式省略该分组。training.dev.max_new_tokens 仅用于 QA 生成验证，AE／LM 不配置。
 - checkpoint 的 model 状态保存 memory_embeddings、adapter、boundary、value_head；非 PPO 的 value_head 为 null。恢复严格按当前格式读取，无旧格式自动转换。
 
@@ -90,5 +91,7 @@ PPO 保留原 `approx_kl=mean(q−1−log q)`，另记原生 `ppo_kl=−mean(cli
 新增验证均使用 `/tmp` 下的临时脚本，没有新增持久化测试。未启动 GPU 或服务器训练；CPU 数值和分布式检查不替代 GPU 运行验证。
 
 ## 既有产物的手动对齐
+
+旧配置中的 `training.scheduler.warmup_steps` 必须手动替换为 `warmup_ratio`，不保留字段别名。若要保留既有运行的学习率曲线，应依据该运行实际总 optimizer steps 选择比例，并核对向上取整后的预热步数与原值一致；完整恢复还须保留原 scheduler 状态和训练预算，不能直接套用新预设比例。
 
 内部产物按当前唯一格式读取。使用本次修改之前的 checkpoint 时，先手动对齐其配置：`retention_delta` 改为 `stepwise`，移除 `advantage_mode`，SCST 的 `num_samples` 改为 `group_size`，策略目标补充 `gamma`；GRPO 两种奖励均需 `advantage_epsilon`。配置中的学习率、`backward`、`dev.max_new_tokens` 和 `critic_warmup` 字段须符合上述更新范围与目标限制。模型状态补充 `value_head=null`，包括仅用于初始化压缩器的预训练 checkpoint。用于完整恢复的 optimizer／scheduler 必须分别整理为 `actor`、`critic` 两个状态，非 PPO 的 critic 为 null；cursor 补充真实 rollout_step。旧 PPO 联合优化器需按参数身份拆分对应状态并核对双方步数，不能只增加一个空字段。代码不自动转换旧格式，既有运行结果也不会因配置改名而成为新算法的实验结果。

@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261119 20:39:45 Asia/Shanghai
+最后修订时间：20261120 16:05:16 Asia/Shanghai
 
 计算协议、数据格式与模块分工见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256_grpo.json)中的基座与数据路径。
 
@@ -16,7 +16,7 @@
 
 | 内容 | 路径 |
 |---|---|
-| 基座与 tokenizer | `/root/rivermind-data/models/Qwen3-4B-Instruct-2507` |
+| 基座与 tokenizer | `~/models/Qwen3-4B-Instruct-2507` |
 | AE / LM 数据来源 | `data/fineweb-multisegment-k512-seg1to3x_train32k_20261008/{train,dev,test}.jsonl` |
 | QA 数据来源 | `data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008/{train,dev,test}.jsonl` |
 | 产物父目录 | `artifacts/v3-1` |
@@ -38,7 +38,7 @@
 bash src/latent_working_memory/v3_1_1/scripts/prepare_pre.sh \
   --prepare-data data/fineweb-multisegment-k512-seg1to3x_train32k_20261008/train.jsonl \
   --output-file data/fineweb_train5k_20261112/train.jsonl \
-  --model-path /root/rivermind-data/models/Qwen3-4B-Instruct-2507 \
+  --model-path ~/models/Qwen3-4B-Instruct-2507 \
   --target-samples 5000 \
   --min-tokens null \
   --max-tokens 4096 \
@@ -57,7 +57,7 @@ bash src/latent_working_memory/v3_1_1/scripts/prepare_pre.sh \
 bash src/latent_working_memory/v3_1_1/scripts/prepare_post.sh \
   --prepare-data data/fineweb-factqa-k512-seg1to3x_train1000_01-20261008/train.jsonl \
   --output-file data/fineweb-factqa_q10_train1k_20261112/train.jsonl \
-  --model-path /root/rivermind-data/models/Qwen3-4B-Instruct-2507 \
+  --model-path ~/models/Qwen3-4B-Instruct-2507 \
   --target-samples null \
   --min-tokens null \
   --max-tokens 10000 \
@@ -77,7 +77,7 @@ bash src/latent_working_memory/v3_1_1/scripts/prepare_post.sh \
 bash src/latent_working_memory/v3_1_1/scripts/prepare_length.sh \
   --prepare-data data/fineweb-factqa_q10_train1k_20261112/ \
   --output-dir data/fineweb-factqa_q10_train1k_length3_20261112 \
-  --model-path /root/rivermind-data/models/Qwen3-4B-Instruct-2507 \
+  --model-path ~/models/Qwen3-4B-Instruct-2507 \
   --split train \
   --length-bins 3
 ```
@@ -110,6 +110,8 @@ fineweb-factqa_q10_train1k_length3_20261112/
 `type` 指定监督任务，`strategy` 指定训练方法，`update_mode` 指定更新范围。`joint` 同时保留 QA NLL 的直接反传和策略梯度；`boundary_only` 冻结压缩器，QA NLL 只用于奖励。
 
 `training.optimizer` 的学习率按更新范围配置：`compressor_only` 仅含 `compressor_learning_rate`，`boundary_only` 仅含 `boundary_learning_rate`，`joint` 同时包含两者。PPO 的 critic 沿用边界学习率数值。仅 `joint` 策略训练包含 `training.backward`，通过 `bptt_steps` 设置跨段反传；其他模式省略该分组。`training.dev.max_new_tokens` 仅用于 QA 生成验证，AE／LM 不配置。
+
+所有 v3.1.1 预设统一使用 `training.scheduler.warmup_ratio=0.1`，允许范围为 `[0,1)`。实际预热步数为 `ceil(warmup_ratio × 总 optimizer steps)`，必须小于总步数；比例为 0 时不预热。PPO 的总预算包含 `ppo_epochs`，actor／critic 各自按实际更新次数推进同一预热长度的 scheduler。启动日志同时报告预热比例和换算后的步数。
 
 各模式共用以下运行规则：
 
@@ -150,11 +152,11 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
   --epochs 1
 ```
 
-[post_k256_conly.json](../../../../configs/v3_1_1/post_k256_conly.json) 使用 `stage=post`、`update_mode=compressor_only`，目标配置为 `training.objective={"type":"qa","strategy":"sft"}`，不配置 `backward`，`pending_stride`、`pending_size` 与 `boundary_hidden_size` 均为 `null`。该预设的压缩器学习率为 `1e-4`，warmup 为 4 steps，`min_lr_ratio=0.1`；每卡 `micro_batch_size=4`、`gradient_accumulation_steps=8`，每次更新累计 `4 × 8 = 32` 篇文档，全局 batch 再乘 GPU 进程数，同篇 QA 数不计入文档 batch。默认运行名为 `compressor-post_k{memory_slots}_{YYYYMMDD-HHMM}`。
+[post_k256_conly.json](../../../../configs/v3_1_1/post_k256_conly.json) 使用 `stage=post`、`update_mode=compressor_only`，目标配置为 `training.objective={"type":"qa","strategy":"sft"}`，不配置 `backward`，`pending_stride`、`pending_size` 与 `boundary_hidden_size` 均为 `null`。该预设的压缩器学习率为 `1e-4`，`warmup_ratio=0.1`，`min_lr_ratio=0.1`；每卡 `micro_batch_size=4`、`gradient_accumulation_steps=8`，每次更新累计 `4 × 8 = 32` 篇文档，全局 batch 再乘 GPU 进程数，同篇 QA 数不计入文档 batch。默认运行名为 `compressor-post_k{memory_slots}_{YYYYMMDD-HHMM}`。
 
 该模式只更新 Writer LoRA 和 memory embeddings，Reader 冻结并保留输入梯度。`init_checkpoint=null` 从基座初始化，也可通过 `--init-checkpoint` 加载 AE／LM 或 `compressor_only` checkpoint 中的压缩器；新 run 使用新的 optimizer 和 scheduler。
 
-多块 QA 数据包含 train 1002 篇／10020 道 QA、dev 118 篇／1180 道 QA，当前筛选保留全量；单卡训练 1 轮共 32 steps。配置每 8 步验证和保存，并保留每轮末与最终步检查：dev 在 step 0、8、16、24、32 执行，checkpoint 在 step 8、16、24、32 保存。4 步 warmup、8 步间隔约保持单块 157 步设置中 20 步 warmup、40 步间隔的比例；改变 GPU 数或轮数后需重新换算固定步数。
+多块 QA 数据包含 train 1002 篇／10020 道 QA、dev 118 篇／1180 道 QA，当前筛选保留全量；单卡训练 1 轮共 32 steps，预热为 `ceil(0.1 × 32)=4` 步。配置每 8 步验证和保存，并保留每轮末与最终步检查：dev 在 step 0、8、16、24、32 执行，checkpoint 在 step 8、16、24、32 保存。改变 GPU 数或轮数后，预热随实际总 optimizer steps 自动换算，验证和保存的整数间隔保持配置值。
 
 多块预设的模型默认 `recent_size=256`，训练使用 `{"mode":"multi","ratios":[2,4,8,16],"recent_size":null}`：先固定保留末尾 256 tokens，再从不会遗留过短尾块的合法倍率中逐段采样，仅在候选为空时将全部剩余前缀一次压缩。完整分段和固定倍率 dev 协议见[仅压缩器 QA 后训练](../README.md#仅压缩器-qa-后训练)与[固定倍率验证](../README.md#固定倍率与策略验证)。
 
@@ -181,7 +183,7 @@ PPO 使用独立 value head 和 verl 原生 GAE，`gae_lambda` 必须显式设�
 
 三种策略在 terminal 和 stepwise 下都使用 verl vanilla 策略损失：轨迹内对自主动作求和，再按完整 `group_size` 和实际全局文档数平均。零自主动作轨迹贡献 0，仍保留在轨迹和文档的平均分母中。策略项采用原生 dual-clip 系数 3 和 log 概率比 `[-20,20]` 截断；critic 保持每条轨迹的真实事件平均，再对轨迹和文档平均，并采用范围为 0.5 的原生 value clipping。求和归约会影响 actor 损失尺度，`clip_epsilon`、损失权重、学习率与其他超参数沿用配置值。
 
-`training.loop.critic_warmup` 默认 0，直接使用原生 rollout 批次阈值；仅 PPO 配置可以包含该字段。批次从 1 开始，0／1 均从首批更新 actor，11 表示前 10 批只更新 critic。预热期间继续采样新轨迹，使用相同 GAE 目标；该参数与学习率的 `scheduler.warmup_steps` 不同。
+`training.loop.critic_warmup` 默认 0，直接使用原生 rollout 批次阈值；仅 PPO 配置可以包含该字段。批次从 1 开始，0／1 均从首批更新 actor，11 表示前 10 批只更新 critic。预热期间继续采样新轨迹，使用相同 GAE 目标；该参数与学习率的 `scheduler.warmup_ratio` 独立。
 
 PPO 的 `max_steps`、checkpoint 和 SwanLab 横轴使用 critic 实际更新数作为主步数；其他策略使用 actor 实际更新数。完整数据轮数对应的文档批次数乘 `ppo_epochs` 为 PPO 预算，critic 预热占用原预算。两个 optimizer 的学习率 scheduler 分别按自身实际更新次数推进，温度按训练主步数计算；actor 在预热或全局无自主动作时不更新。`rollout_step`、`actor_optimizer_step` 和 `critic_optimizer_step` 分别记录在本地辅助指标中，不能将原生预热的批次阈值当成 optimizer 步数。记录、dev 与保存位于完整 rollout 更新批次结束处，跨过整数间隔阈值时触发，恢复从下一批 rollout 继续。
 
@@ -421,6 +423,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 | `--length-curriculum` | 按长度档位从短到长分阶段训练，默认不开启 |
 | `--curriculum-stage-epochs` | 长度课程每阶段完整遍历本档数据的轮数，默认 1 |
 | `--curriculum-replay-ratio` | 长度课程的历史补充数量／本档样本数，支持 `[0, 1]`，默认 0.2 |
+| `--warmup-ratio` | 学习率预热占实际总 optimizer steps 的比例，支持 `[0,1)`；省略时沿用配置，预设为 0.1 |
 | **批处理** | |
 | `--micro-batch-size-per-gpu` | 每卡 microbatch 的样本数，默认 1 |
 | `--gradient-accumulation-steps` | 每次优化器更新前累积的 microbatch 数，默认 16 |

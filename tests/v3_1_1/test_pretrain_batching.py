@@ -72,7 +72,7 @@ def make_models(folder, gradient_checkpointing):
                 micro_batch_size=3, gradient_accumulation_steps=2, max_steps=3,
             ),
             optimizer=OptimizerConfig(gradient_clip=0.5),
-            scheduler=SchedulerConfig(warmup_steps=0),
+            scheduler=SchedulerConfig(warmup_ratio=0),
             swanlab=SwanLabConfig(tracking=False),
         ),
     )

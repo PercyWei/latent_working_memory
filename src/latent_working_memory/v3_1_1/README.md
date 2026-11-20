@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261120 11:29:27 Asia/Shanghai
+最后修订时间：20261120 16:05:16 Asia/Shanghai
 
 v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=post` 使用问答（QA），由 `training.update_mode` 选择仅更新压缩器（`compressor_only`）、仅更新边界（`boundary_only`）或联合更新（`joint`）。每次写入将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆及未压缩的 pending 和 recent 尾段回答问题。
 
@@ -180,7 +180,7 @@ L_V=\frac12\max\bigl((V-Y)^2,(V_{\mathrm{clip}}-Y)^2\bigr).
 
 训练同时记录 `rollout_step`、`actor_optimizer_step` 和 PPO 的 `critic_optimizer_step`。PPO 以 critic 的实际 optimizer 更新数作为训练主步数，其他策略使用 actor 的实际更新数；`max_steps`、dev／保存间隔、checkpoint 目录及 SwanLab 横轴沿用该主步数。按数据轮数解析时，PPO 总预算为文档批次数乘 `ppo_epochs`；同批完成后记录最后一步，例如 4、8、12。预热占用原有数据和更新预算，不追加轮次；预热或全局无自主动作时 actor 不更新，其计数可以落后于 critic。
 
-两个 PPO optimizer 的 scheduler 各自按实际更新次数推进，`scheduler.warmup_steps` 仍以 optimizer update 为单位。策略温度按训练主步数与原总预算计算，actor 内轮按对应主步数递增。`critic_warmup` 单独按 rollout 批次判断，不能与学习率 warmup 混用。
+两个 PPO optimizer 的 scheduler 各自按实际更新次数推进，学习率预热步数由 `scheduler.warmup_ratio` 乘解析后的总 optimizer steps 并向上取整得到；总预算包含 `ppo_epochs`。策略温度按训练主步数与原总预算计算，actor 内轮按对应主步数递增。`critic_warmup` 单独按 rollout 批次判断，不能与学习率 warmup 混用。
 
 dev／保存的整数间隔在完整 rollout 更新批次跨过阈值后执行，checkpoint 不保存未完成的批内优化状态。训练指标取相应角色最后一次更新的结果；`step_seconds` 为该批采样与全部更新的总耗时除以本批主步数增量。
 
@@ -257,7 +257,7 @@ for split in train dev; do
   bash src/latent_working_memory/v3_1_1/scripts/prepare_pre.sh \
     --prepare-data "data/fineweb-multisegment-k512-seg1to3x_train32k_20261008/${split}.jsonl" \
     --output-file "data/fineweb_train5k_20261112/${split}.jsonl" \
-    --model-path /root/rivermind-data/models/Qwen3-4B-Instruct-2507 \
+    --model-path ~/models/Qwen3-4B-Instruct-2507 \
     --seed 42 \
     --target-samples "$target_samples" \
     --max-tokens 4096 \
@@ -301,7 +301,7 @@ done
 | `training.dev` | 固定验证倍率 `fixed_ratios`；仅 QA 目标配置生成上限 `max_new_tokens` |
 | `training.backward` | 仅 `joint` 策略训练配置：跨段反传长度 `bptt_steps` |
 | `training.optimizer` | 按更新范围配置学习率，另含 AdamW 参数和梯度范数裁剪 |
-| `training.scheduler` | 学习率 warmup 与余弦衰减比例 |
+| `training.scheduler` | 学习率预热比例 `warmup_ratio` 与余弦衰减最低比例 `min_lr_ratio` |
 | `training.run` | `output_root`、`run_id`；后训练另含 `init_checkpoint` |
 | `training.swanlab` | `tracking`、`project`、`group`、`tags` |
 
@@ -349,10 +349,10 @@ AE／LM 的 `objective` 还包含 `lm_ratio` 和 `lm_target_tokens`；QA SFT 只
 | 策略参数 | — | 成本权重 0.1，成本幂 1.0，策略权重 1.0，`clip_epsilon=0.2`，`advantage_epsilon=1e-6` |
 | 学习率 | 压缩器 `1e-4` | 压缩器 `2e-5`，边界 `1e-4` |
 | AdamW／裁剪 | `weight_decay=0.01`，`beta1=0.9`，`beta2=0.999`，`adam_epsilon=1e-8`，梯度范数上限 1.0 | 相同 |
-| 调度 | warmup 50 steps，`min_lr_ratio=0.1` | 相同 |
+| 调度 | `warmup_ratio=0.1`，`min_lr_ratio=0.1` | 相同 |
 | 跨段反传 | — | `bptt_steps=null`，完整反传 |
 
-K256 实验预设使用 `/root/rivermind-data/models/Qwen3-4B-Instruct-2507`，开启 FA2、BF16 autocast 和层内重算。它们的执行设置为：
+K256 实验预设使用 `~/models/Qwen3-4B-Instruct-2507`，开启 FA2、BF16 autocast 和层内重算。它们的执行设置为：
 
 | 设置 | K256 单块预训练 | K256 后训练（GRPO／SCST） |
 |---|---|---|
@@ -360,14 +360,14 @@ K256 实验预设使用 `/root/rivermind-data/models/Qwen3-4B-Instruct-2507`，�
 | 预算 | 普通训练 1 轮 | 3 个长度档位，每档 1 轮，历史回放 20% |
 | 每卡 microbatch × 梯度累积 | `16 × 2` | `2 × 8` |
 | train 长度上限 | `null` | 12288 tokens |
-| warmup／最低学习率比例 | `20 / 0.1` | `5 / 1.0` |
+| 预热比例／最低学习率比例 | `0.1 / 0.1` | `0.1 / 1.0` |
 | dev／checkpoint 间隔 | 每 40 steps | 每 20 steps |
 | checkpoint 保留上限 | 5 | 6 |
 | 跨段反传 | — | `bptt_steps=2` |
 
-仅压缩器 QA 后训练配置 `post_k256_conly.json` 使用 `compressor_learning_rate=1e-4`、`warmup_steps=4`、`min_lr_ratio=0.1`。每卡 `micro_batch_size=4`、`gradient_accumulation_steps=8`，每次更新每卡累计 32 篇文档，全局 batch 为 GPU 进程数乘 32；同篇全部 QA 不额外增加文档 batch。该配置的模型默认 `recent_size=256`，训练覆盖为 `null`，默认训练 1 轮，关闭长度课程。
+仅压缩器 QA 后训练配置 `post_k256_conly.json` 使用 `compressor_learning_rate=1e-4`、`warmup_ratio=0.1`、`min_lr_ratio=0.1`。每卡 `micro_batch_size=4`、`gradient_accumulation_steps=8`，每次更新每卡累计 32 篇文档，全局 batch 为 GPU 进程数乘 32；同篇全部 QA 不额外增加文档 batch。该配置的模型默认 `recent_size=256`，训练覆盖为 `null`，默认训练 1 轮，关闭长度课程。
 
-当前数据含 train 1002 篇／10020 道 QA、dev 118 篇／1180 道 QA，现有长度筛选保留全部样本。按下面的单卡命令运行 1 轮，共 `ceil(1002 / 32)=32` 个 optimizer steps。`dev_every=8`、`save_every=8`：在 step 0、8、16、24、32 验证，在 step 8、16、24、32 保存 checkpoint；每轮末与最终步也执行验证和保存。4 步 warmup 与 8 步间隔分别约占总步数的 1/8、1/4，与单块 157 步训练的 20 步 warmup、40 步间隔比例相近。改变 GPU 数或训练轮数时，应重新换算这些固定步数。
+当前数据含 train 1002 篇／10020 道 QA、dev 118 篇／1180 道 QA，现有长度筛选保留全部样本。按下面的单卡命令运行 1 轮，共 `ceil(1002 / 32)=32` 个 optimizer steps，预热为 `ceil(0.1 × 32)=4` 步。`dev_every=8`、`save_every=8`：在 step 0、8、16、24、32 验证，在 step 8、16、24、32 保存 checkpoint；每轮末与最终步也执行验证和保存。改变 GPU 数或训练轮数时，预热步数随实际总预算自动换算；验证和保存的整数间隔仍按配置执行。
 
 边界策略预设均设置 `pending_stride=256`、`pending_size=256`。`post_default.json` 的模型默认 recent 为 0，K256 实验预设为 256，训练覆盖均为 `null`。
 
@@ -456,7 +456,8 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
 - 长度课程由 `curriculum_stage_epochs` 控制每档轮数，完成全部档位后结束。
 - `training.loop.max_steps` 可进一步限制总更新数；解析后的实际步数写入训练配置和 checkpoint。
 - `dev_every`、`save_every` 可设步数间隔或 `after_each_epoch`；每轮结束和最终步也执行 dev 与保存。dev 使用固定验证集。
-- `warmup_steps` 和 `min_lr_ratio` 控制线性预热与余弦衰减，同一 optimizer 的参数组共用调度倍率；PPO 的 actor／critic 分别按自身实际更新次数推进。`min_lr_ratio=1.0` 时，预热后保持恒定学习率。
+- `training.scheduler.warmup_ratio` 控制线性预热比例，范围为 `[0,1)`，预设统一为 `0.1`，新训练可由 `--warmup-ratio` 覆盖。完成数据筛选、GPU 数量和训练预算解析后，实际预热步数为 `ceil(warmup_ratio × 总 optimizer steps)`，必须小于总步数；比例为 0 时不预热，启动日志报告实际比例与步数。PPO 的总预算包含 `ppo_epochs`，actor／critic 使用相同预热长度，分别按自身实际更新次数推进；`critic_warmup` 仍独立按 rollout 批次判断。
+- `min_lr_ratio` 控制余弦衰减的最低学习率比例，同一 optimizer 的参数组共用调度倍率。`min_lr_ratio=1.0` 时，预热后保持恒定学习率。
 
 恢复同阶段训练使用原 run 最新完整 checkpoint：
 
