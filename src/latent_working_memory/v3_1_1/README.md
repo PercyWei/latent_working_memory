@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261120 16:40:56 Asia/Shanghai
+最后修订时间：20261120 17:32:24 Asia/Shanghai
 
 v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=post` 使用问答（QA），由 `training.update_mode` 选择仅更新压缩器（`compressor_only`）、仅更新边界（`boundary_only`）或联合更新（`joint`）。每次写入将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆及未压缩的 pending 和 recent 尾段回答问题。
 
@@ -367,7 +367,7 @@ K256 实验预设使用 `~/models/Qwen3-4B-Instruct-2507`，开启 FA2、BF16 au
 
 仅压缩器 QA 后训练配置 `post_k256_conly.json` 使用 `compressor_learning_rate=1e-4`、`warmup_ratio=0.1`、`min_lr_ratio=0.1`。每卡 `micro_batch_size=4`、`gradient_accumulation_steps=8`，每次更新每卡累计 32 篇文档，全局 batch 为 GPU 进程数乘 32；同篇全部 QA 不额外增加文档 batch。该配置的模型默认 `recent_size=256`，训练覆盖为 `null`，默认训练 5 轮，关闭长度课程。默认 `init_checkpoint` 为 `artifacts/v3-1/pretrain_k256_20261113_copy2/train/checkpoints/global_step_157`，该来源保留 AE／LM 预训练最后第 157 步的压缩器权重，元数据按当前 checkpoint 格式保存；后训练新建 optimizer 和 scheduler。
 
-当前数据含 train 1002 篇／10020 道 QA、dev 118 篇／1180 道 QA，现有长度筛选保留全部样本。全局 batch 为 32 时，每轮 `ceil(1002 / 32)=32` 个 optimizer steps，5 轮共 160 步，预热为 `ceil(0.1 × 160)=16` 步。`dev_every` 和 `save_every` 均为 `after_each_epoch`：在 step 0、32、64、96、128、160 验证，在每轮末的 step 32、64、96、128、160 保存 checkpoint，保留全部 5 份。改变 GPU 数或训练轮数时，预热步数随实际总预算自动换算，验证和保存仍在每轮末执行。
+当前数据含 train 1002 篇／10020 道 QA、dev 118 篇／1180 道 QA，现有长度筛选保留全部样本。全局 batch 为 32 时，每轮 `ceil(1002 / 32)=32` 个 optimizer steps，5 轮共 160 步，预热为 `ceil(0.1 × 160)=16` 步。`dev_every` 和 `save_every` 均为 `after_each_epoch`：在每轮末的 step 32、64、96、128、160 验证并保存 checkpoint，保留全部 5 份。改变 GPU 数或训练轮数时，预热步数随实际总预算自动换算，验证和保存仍在每轮末执行。
 
 边界策略预设均设置 `pending_stride=256`、`pending_size=256`。`post_default.json` 的模型默认 recent 为 0，K256 实验预设为 256，训练覆盖均为 `null`。
 
@@ -431,7 +431,7 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
 
 初始化来源与目标 run 须使用相同基座、K 和 LoRA 设置（rank、alpha、目标模块）。`joint/boundary_only` 均可从 AE／LM 预训练或 `compressor_only` checkpoint 加载压缩器。启用 GRPO 温度退火时，将 `--config` 改为 `configs/v3_1_1/post_k256_grpo_temp.json`；使用 SCST 温度退火时，改为 `configs/v3_1_1/post_k256_scst_temp.json`。每次新训练分别设置 `--run-id`，并通过 `--init-checkpoint` 指定初始化来源。
 
-阶段 A（`compressor_only`）→ 阶段 B（`boundary_only`）使用以下两个后训练配置，分别通过 `--epochs` 设置 N、M 轮；默认分别为 5 轮和 1 轮，关闭长度课程。两阶段均在开始及每轮结束验证，每轮末保存 checkpoint。阶段 A 默认加载 `pretrain_k256_20261113_copy2` 的第 157 步 checkpoint；可通过 `--init-checkpoint` 指定其他 AE／LM 或 `compressor_only` checkpoint，或在配置中将 `init_checkpoint` 设为 `null`，从基座初始化压缩器。阶段切换新建 run，只载入压缩器权重，不沿用 optimizer 或 scheduler：
+阶段 A（`compressor_only`）→ 阶段 B（`boundary_only`）使用以下两个后训练配置，分别通过 `--epochs` 设置 N、M 轮；默认分别为 5 轮和 1 轮，关闭长度课程。两阶段启动后直接训练，每轮末验证并保存 checkpoint。阶段 A 默认加载 `pretrain_k256_20261113_copy2` 的第 157 步 checkpoint；可通过 `--init-checkpoint` 指定其他 AE／LM 或 `compressor_only` checkpoint，或在配置中将 `init_checkpoint` 设为 `null`，从基座初始化压缩器。阶段切换新建 run，只载入压缩器权重，不沿用 optimizer 或 scheduler：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
@@ -490,7 +490,7 @@ dev 保持模型参数不变，边界策略使用确定性判断。train/dev 曲
 
 阶段 A 分别验证四个固定倍率；阶段 B 额外验证 greedy 边界策略。策略与固定倍率基线使用相同 recent，策略收尾可额外保留不足 `pending_size` 的 pending。进入条件验证的 QA 设置均报告 NLL、EM／F1、块数、未压缩 pending、recent、前缀保留比例及完整保留比例；边界策略模式另报告记忆成本及 `QA NLL + α × cost`，其中成本采用前缀保留比例的 p 次幂。NLL 按题目再文档平均，EM／F1 按题目平均。AE／LM 条件只评价对应重建／续写 NLL，不生成 QA 答案。
 
-这些条件在 step 0、配置的验证间隔、每轮末和最终步计算。`boundary_only` 的固定倍率基线在本次进程内复用，联合更新时每次重算；恢复运行后首次验证重新建立基线缓存。所有验证保留训练 RNG，不改变后续采样。逐篇分段、逐题生成和汇总写入 `train/dev/global_step_<step>/rank_<rank>.jsonl` 与 `summary.json`。
+新 run 启动后直接训练，这些条件仅在配置的验证间隔、每轮末和最终步计算。`boundary_only` 的固定倍率基线在首次正常 dev 时建立，本次进程的后续验证复用；恢复后首次 dev 重建缓存。压缩器可更新的训练每次重新计算固定倍率结果。所有验证保留训练 RNG，不改变后续采样。逐篇分段、逐题生成和汇总写入 `train/dev/global_step_<step>/rank_<rank>.jsonl` 与 `summary.json`。
 
 SwanLab 使用 `dev/ratio_2/*`、`dev/ratio_4/*`、`dev/ratio_8/*`、`dev/ratio_16/*` 和 `dev/policy/*`。`dev/conditions/retention` 合并各条件的 `prefix_retention_ratio` 与 `retention_ratio`，按条件排列相邻图例；同一条件用同色系的深浅分别表示前缀与完整保留比例。四个固定倍率共显示 8 条曲线，有策略条件时追加其两条曲线。其余指标仍按同一指标合并条件并固定配色，`memory_cost` 作为本地辅助统计，包含该成本的 `objective` 单独展示。合并面板保留原指标键及统计口径。
 

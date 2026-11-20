@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261120 16:40:56 Asia/Shanghai
+最后修订时间：20261120 17:32:24 Asia/Shanghai
 
 计算协议、数据格式与模块分工见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256_grpo.json)中的基座与数据路径。
 
@@ -119,7 +119,7 @@ fineweb-factqa_q10_train1k_length3_20261112/
 - **计算设置**：FlashAttention2 需 BF16 基座或开启混合精度。恢复与独立评估沿用已保存设置，详细计算方式见[方法说明](../README.md#配置与运行)。
 - **训练批量**：`--micro-batch-size-per-gpu` 控制每卡实际批量计算的样本数，各 microbatch 之间累积梯度；全局 batch = GPU 数 × 每卡 microbatch × 梯度累积次数。预训练按样本、后训练按文档计数；下列单卡示例中，AE／LM 与 `compressor_only` 均为 32，联合更新为 16。
 - **长度课程**：`post_k256_grpo.json` 及其温度退火变体已开启课程，每档训练 1 轮，并从此前各档尽量均衡地随机无放回补充本档数量的 20%。按档位从短到长推进，每轮完整遍历本档，历史补充数量四舍五入、不足时取全部；每轮重新抽取，混合打乱后统一切 batch，全部档位完成后结束，不额外执行 `--epochs` 全量训练。其他配置可通过 `--length-curriculum` 开启，以 `--curriculum-stage-epochs` 和 `--curriculum-replay-ratio` 调整轮数与比例。关闭课程时，各档合并后按 `--epochs` 全量随机训练；dev 和 test 保持原协议。
-- **执行流程**：先保存训练计划，再执行训练、dev 与 checkpoint 保存。
+- **执行流程**：先保存训练计划，随后直接开始训练；dev 仅在配置的验证间隔、每轮末和最终步执行，checkpoint 按保存设置写入。
 - **覆盖训练**：追加 `--overwrite` 会清理本次 `run-id` 对应的整个 run，包括计划、训练和评估结果，再保存新计划重新训练；云端历史保留。
 
 ### 3.1 单次压缩预训练
@@ -155,7 +155,7 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
 
 该模式只更新 Writer LoRA 和 memory embeddings，Reader 冻结并保留输入梯度。预设的 `init_checkpoint` 为 `artifacts/v3-1/pretrain_k256_20261113_copy2/train/checkpoints/global_step_157`，保留 AE／LM 预训练最后第 157 步的压缩器权重，元数据按当前 checkpoint 格式保存。也可通过 `--init-checkpoint` 加载其他 AE／LM 或 `compressor_only` checkpoint，或在配置中设 `init_checkpoint=null` 从基座初始化压缩器；新 run 使用新的 optimizer 和 scheduler。
 
-多块 QA 数据包含 train 1002 篇／10020 道 QA、dev 118 篇／1180 道 QA，当前筛选保留全量；默认训练 5 轮。全局 batch 为 32 时，每轮 32 steps，共 160 steps，预热为 `ceil(0.1 × 160)=16` 步。`dev_every` 和 `save_every` 均为 `after_each_epoch`：dev 在 step 0、32、64、96、128、160 执行，checkpoint 在每轮末的 step 32、64、96、128、160 保存，保留全部 5 份。改变 GPU 数或轮数后，预热随实际总 optimizer steps 自动换算，验证和保存仍在每轮末执行。
+多块 QA 数据包含 train 1002 篇／10020 道 QA、dev 118 篇／1180 道 QA，当前筛选保留全量；默认训练 5 轮。全局 batch 为 32 时，每轮 32 steps，共 160 steps，预热为 `ceil(0.1 × 160)=16` 步。`dev_every` 和 `save_every` 均为 `after_each_epoch`：在每轮末的 step 32、64、96、128、160 执行 dev 并保存 checkpoint，保留全部 5 份。改变 GPU 数或轮数后，预热随实际总 optimizer steps 自动换算，验证和保存仍在每轮末执行。
 
 多块预设的模型默认 `recent_size=256`，训练使用 `{"mode":"multi","ratios":[2,4,8,16],"recent_size":null}`：先固定保留末尾 256 tokens，再从不会遗留过短尾块的合法倍率中逐段采样，仅在候选为空时将全部剩余前缀一次压缩。完整分段和固定倍率 dev 协议见[仅压缩器 QA 后训练](../README.md#仅压缩器-qa-后训练)与[固定倍率验证](../README.md#固定倍率与策略验证)。
 
@@ -544,4 +544,5 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 - **展示方式**：SwanLab 默认开启，记录 train/dev、训练资源及配置。project、group 和 tags 通过配置文件设置；project 默认为 `latent-working-memory-v3.1`，group 未指定时默认 `run_id`。`--tracking offline` 关闭 SwanLab 记录，仅保留本地产物；恢复训练沿用 `swanlab.json` 中的 run。评估由独立 dashboard 展示，不读取 SwanLab 身份或凭据。
 - **verl 接入**：边界训练直接运行原生 `PPOTrainer.step`，由其控制 critic／actor 更新与 critic 预热；RL 更新进入原生 `BaseEngine.train_batch` 生命周期，优势与损失尽量调用原生函数。分段采样、任务 autograd、复制式梯度同步、外层预算与单文件 checkpoint 保留项目适配，不启动 Ray worker 或 TransferQueue 服务。
 - **后训练图表**：`compressor_only` 记录 QA NLL、记忆用量和固定倍率 dev；边界策略模式另记录奖励、零优势比例、策略熵与回放概率偏差。SCST 的 greedy 基线并入奖励图，单随机路径时 `reward_std` 仅保留本地；启用退火时增加 `policy_temperature` 图。train/dev 的 `memory_usage` 绘制 `blocks`，图例为 `memory_blocks`；`compression` 绘制全局聚合后的 `segment_tokens / K`，图例为 `compression_rate`。首次出现真实记录时注册并配置原生面板，运行中只追加真实 optimizer step 的标量，dev 在实际验证步记录。辅助统计保存在本地，完整指标口径与展示规则见[方法说明](../README.md#验证独立评估与记录)。
+- **固定倍率基线**：`boundary_only` 在首次正常 dev 时计算并缓存固定倍率结果，本次进程的后续验证复用；恢复后首次 dev 重建。压缩器可更新的训练每次重新计算。
 - **保留比例曲线**：`train/retention` 合并 `train/prefix_retention_ratio` 与 `train/retention_ratio` 两条曲线。`dev/conditions/retention` 合并各条件的前缀与完整保留比例，图例按条件相邻排列，同一条件用同色系的深浅区分两类比例；2×、4×、8×、16× 共 8 条曲线。底层指标键及统计口径保持一致，其他 dev 指标仍各自合图。

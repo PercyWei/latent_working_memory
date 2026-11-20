@@ -257,20 +257,6 @@ def train(plan_dir, resume=None):
         if status[0] is not None:
             raise RuntimeError(status[0])
         baseline_cache = {}
-        if not resume and dev_documents and uses_condition_dev(config):
-            dev = _run_dev(
-                model, dev_documents, config, device, boundary_generator, output_dir, 0,
-                baseline_cache,
-            )
-            if rank == 0:
-                baseline = {"step": 0, **{f"dev/{key}": value for key, value in dev.items()}}
-                write_json(output_dir / "dev_baseline.json", baseline)
-                if remote is not None:
-                    with preserve_training_rng(device, boundary_generator):
-                        log_metrics(
-                            remote, baseline, 0, registered, config.stage, output_dir,
-                            training.objective,
-                        )
         while step < training.loop.max_steps:
             torch.cuda.synchronize(device)
             torch.cuda.reset_peak_memory_stats(device)
