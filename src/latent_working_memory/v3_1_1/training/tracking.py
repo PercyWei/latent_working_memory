@@ -43,6 +43,10 @@ def configure_post_panels(api, remote, metrics):
         ("train/compression", "compression_rate = segment_tokens / K", (
             ("train/compression_ratio", "compression_rate", "#2b8cbe"),
         )),
+        ("train/retention", "retention_ratio", (
+            ("train/prefix_retention_ratio", "prefix_retention_ratio", "#2b8cbe"),
+            ("train/retention_ratio", "retention_ratio", "#9ecae1"),
+        )),
         ("train/learning_rate", "learning_rate", (
             ("train/compressor_learning_rate", "compressor", "#2b8cbe"),
             ("train/boundary_learning_rate", "boundary", "#d95f0e"),
@@ -56,10 +60,19 @@ def configure_post_panels(api, remote, metrics):
             ("dev/compression_ratio", "compression_rate", "#2b8cbe"),
         )),
     )}
+    def condition_order(name):
+        return name != "policy", int(name[6:]) if name.startswith("ratio_") else 0, name
+
+    def lighter_color(color):
+        return "#" + "".join(
+            f"{round(int(color[start:start + 2], 16) * 0.55 + 255 * 0.45):02x}"
+            for start in (1, 3, 5)
+        )
+
     conditions = sorted(
         {name.split("/")[1] for name in metrics
          if name.startswith("dev/") and name.count("/") == 2},
-        key=lambda name: (name != "policy", int(name[6:]) if name.startswith("ratio_") else 0, name),
+        key=condition_order,
     )
     colors = {"policy": "#d62728", "single": "#2b8cbe", "sampled": "#2b8cbe"}
     palette = ("#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd", "#8c564b")
@@ -67,15 +80,22 @@ def configure_post_panels(api, remote, metrics):
     ratio_colors = dict(zip((2, 4, 8, 16), palette))
     colors.update({name: ratio_colors.get(int(name[6:]), palette[int(name[6:]) % len(palette)])
                    for name in ratios})
+    light_colors = {name: lighter_color(color) for name, color in colors.items()}
     comparisons = []
-    for metric in (
-        "qa_nll", "ae_nll", "lm_nll", "em", "f1", "prefix_retention_ratio",
-        "retention_ratio", "blocks", "objective",
-    ):
+    for metric in ("qa_nll", "ae_nll", "lm_nll", "em", "f1", "blocks", "objective"):
         series = tuple((f"dev/{condition}/{metric}", condition, colors[condition])
                        for condition in conditions if f"dev/{condition}/{metric}" in metrics)
         if series:
             comparisons.append((f"dev/conditions/{metric}", metric, series))
+    retention_labels = {"prefix_retention_ratio": "prefix", "retention_ratio": "full"}
+    retention_series = tuple(
+        (f"dev/{condition}/{metric}", f"{condition}/{label}",
+         (colors if label == "prefix" else light_colors)[condition])
+        for condition in conditions for metric, label in retention_labels.items()
+        if f"dev/{condition}/{metric}" in metrics
+    )
+    if retention_series:
+        comparisons.append(("dev/conditions/retention", "retention_ratio", retention_series))
     panels["dev"] += tuple(comparisons)
     for split, split_panels in panels.items():
         if not any(metric.startswith(f"{split}/") for metric in metrics):
@@ -90,15 +110,22 @@ def configure_post_panels(api, remote, metrics):
             if not keys & metrics:
                 continue
             names = {title, *keys}
+            merged_retention = title == "dev/conditions/retention"
+            if merged_retention:
+                names.update(f"dev/conditions/{metric}" for metric in retention_labels)
             # 首次配置使用原生主指标图，后续运行复用同一项目中的当前面板。
-            existing = next(chart for chart in charts if chart["type"] == "LINE"
-                            and chart["title"] in {title, series[0][0]})
+            matching = [chart for chart in charts if chart["type"] == "LINE"
+                        and chart["title"] in names]
+            existing = next((chart for chart in matching if chart["title"] == title), matching[0])
             if title.startswith("dev/conditions/"):
-                retained = {axis["key"] for axis in existing["config"]["yAxis"]} - keys
-                series += tuple((key, key.split("/")[1], None) for key in sorted(retained))
+                retained = {axis["key"] for chart in matching
+                            for axis in chart["config"]["yAxis"]} - keys
+                series += tuple((
+                    key, (f"{key.split('/')[1]}/{retention_labels[key.rsplit('/', 1)[1]]}"
+                          if merged_retention else key.split("/")[1]), None,
+                ) for key in sorted(retained))
                 series = tuple(sorted(series, key=lambda row: (
-                    row[1] != "policy",
-                    int(row[1][6:]) if row[1].startswith("ratio_") else 0, row[1],
+                    *condition_order(row[0].split("/")[1]), row[0],
                 )))
                 keys.update(retained)
             custom = {}
@@ -106,6 +133,17 @@ def configure_post_panels(api, remote, metrics):
                 if chart["type"] == "LINE" and chart["title"] in names:
                     custom.update(chart.get("custom") or {})
             custom.update(existing.get("custom") or {})
+            if merged_retention:
+                # 旧分图的图例只有条件名；合图后历史运行也需要区分两类比例。
+                for metric, label, _ in series:
+                    for custom_key, style in custom.items():
+                        if (custom_key.endswith(f"-{metric}")
+                            and style["name"].endswith(f"/{metric.split('/')[1]}")):
+                            custom[custom_key] = {
+                                **style, "name": f"{style['name']}/{label.rsplit('/', 1)[1]}",
+                                "colors": ([lighter_color(color) for color in style["colors"]]
+                                           if label.endswith("/full") else style["colors"]),
+                            }
             # 项目面板跨运行共享：保留其他策略已有的序列，只添加实际出现的新指标。
             displayed = keys & (set(metrics) | {
                 axis["key"] for chart in charts

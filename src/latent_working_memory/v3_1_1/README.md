@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261120 16:05:16 Asia/Shanghai
+最后修订时间：20261120 16:27:15 Asia/Shanghai
 
 v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=post` 使用问答（QA），由 `training.update_mode` 选择仅更新压缩器（`compressor_only`）、仅更新边界（`boundary_only`）或联合更新（`joint`）。每次写入将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆及未压缩的 pending 和 recent 尾段回答问题。
 
@@ -492,11 +492,11 @@ dev 保持模型参数不变，边界策略使用确定性判断。train/dev 曲
 
 这些条件在 step 0、配置的验证间隔、每轮末和最终步计算。`boundary_only` 的固定倍率基线在本次进程内复用，联合更新时每次重算；恢复运行后首次验证重新建立基线缓存。所有验证保留训练 RNG，不改变后续采样。逐篇分段、逐题生成和汇总写入 `train/dev/global_step_<step>/rank_<rank>.jsonl` 与 `summary.json`。
 
-SwanLab 使用 `dev/ratio_2/*`、`dev/ratio_4/*`、`dev/ratio_8/*`、`dev/ratio_16/*` 和 `dev/policy/*`，按同一指标合并条件并固定配色。前缀保留比例与完整保留比例分别展示，`memory_cost` 作为本地辅助统计，包含该成本的 `objective` 单独展示。
+SwanLab 使用 `dev/ratio_2/*`、`dev/ratio_4/*`、`dev/ratio_8/*`、`dev/ratio_16/*` 和 `dev/policy/*`。`dev/conditions/retention` 合并各条件的 `prefix_retention_ratio` 与 `retention_ratio`，按条件排列相邻图例；同一条件用同色系的深浅分别表示前缀与完整保留比例。四个固定倍率共显示 8 条曲线，有策略条件时追加其两条曲线。其余指标仍按同一指标合并条件并固定配色，`memory_cost` 作为本地辅助统计，包含该成本的 `objective` 单独展示。合并面板保留原指标键及统计口径。
 
 ### 指标口径与面板
 
-AE／LM 预训练保存实际选样数量、`loss`、`lm_fraction` 和分项 NLL；`compressor_only` 记录 `loss`、`qa_nll`、块数和保留比例。边界策略模式的 train 面板如下，均使用单 Y 轴；表中指标省略 `train/` 前缀。
+AE／LM 预训练保存实际选样数量、`loss`、`lm_fraction` 和分项 NLL；`compressor_only` 记录 `loss`、`qa_nll`、块数和保留比例。后训练的 `train/retention` 面板合并 `train/prefix_retention_ratio` 与 `train/retention_ratio` 两条曲线，原指标键与统计口径保持一致。边界策略模式的其他 train 面板如下，均使用单 Y 轴；表中指标省略 `train/` 前缀。
 
 | 图表 | 指标与展示 |
 |---|---|

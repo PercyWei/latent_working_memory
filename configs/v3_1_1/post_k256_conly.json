@@ -57,14 +57,14 @@
       "strategy": "sft"
     },
     "loop": {
-      "epochs": 1,
+      "epochs": 5,
       "curriculum_stage_epochs": 1,
       "curriculum_replay_ratio": 0.2,
       "max_steps": null,
       "micro_batch_size": 4,
       "gradient_accumulation_steps": 8,
-      "dev_every": 8,
-      "save_every": 8,
+      "dev_every": "after_each_epoch",
+      "save_every": "after_each_epoch",
       "save_total_limit": 5
     },
     "optimizer": {
