@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261119 20:39:45 Asia/Shanghai
+最后修订时间：20261120 11:29:27 Asia/Shanghai
 
 v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=post` 使用问答（QA），由 `training.update_mode` 选择仅更新压缩器（`compressor_only`）、仅更新边界（`boundary_only`）或联合更新（`joint`）。每次写入将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆及未压缩的 pending 和 recent 尾段回答问题。
 
@@ -387,7 +387,7 @@ K256 实验预设使用 `/root/rivermind-data/models/Qwen3-4B-Instruct-2507`，�
 
 BF16 autocast 的 backward 与 optimizer 更新在 autocast 上下文外执行，使用 FP32 参数更新；梯度检查点恢复原前向精度。CPU 暂存支持两阶段，可与混合精度组合；模型参数、返回的 memory 和采样 KV 保留在 GPU，暂存只用于带梯度前向。
 
-FA2 需要 `flash-attn`，并使用 BF16 基座或 BF16 autocast。项目默认的 Linux x86_64、PyTorch 2.6、CUDA 12.4 环境通过 `uv sync --frozen --group fa2` 安装该可选依赖。保留 FP32 参数时，配置为：
+FA2 需要 `flash-attn`，并使用 BF16 基座或 BF16 autocast。项目默认的 `torch2.6-cuda12.4` 依赖组在 Linux x86_64 安装 PyTorch 2.6、FlashInfer 和对应的 FA2 wheel，执行 `uv sync --frozen` 即可同步该环境；本地 wheel 优先的安装方式见[主环境说明](../../../README.md#主环境与开发)。保留 FP32 参数时，配置为：
 
 ```json
 {

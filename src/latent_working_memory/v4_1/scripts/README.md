@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261105 09:43:17 Asia/Shanghai
+最后修订时间：20261120 11:29:27 Asia/Shanghai
 
 计算协议与数据格式见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[配置](../../../../configs/v4-1/default.json)中的基座与数据路径。
 
@@ -13,7 +13,7 @@ uv sync --frozen
 bash src/latent_working_memory/v4_1/scripts/run.sh --help
 ```
 
-默认 BF16 离线准备使用 Linux x86_64、支持 BF16 的 NVIDIA GPU（SM80+）。默认 `cuda124` 依赖组固定 PyTorch 2.6／CUDA 12.4 与 FlashInfer `0.2.5+cu124torch2.6`，由上述命令安装；`torch214` 组不适用于此准备入口。
+默认 BF16 离线准备使用 Linux x86_64、支持 BF16 的 NVIDIA GPU（SM80+）。默认 `torch2.6-cuda12.4` 依赖组固定 PyTorch 2.6／CUDA 12.4、FlashInfer `0.2.5+cu124torch2.6` 与匹配的 FlashAttention 2 wheel，均由上述命令安装；`torch2.14` 组不适用于此准备入口。
 
 `run.sh` 默认执行训练和 dev 验证，`--evaluate-only` 执行独立评估，`--resume` 用于恢复训练或搭配 `--evaluate-only` 续跑已有评估；离线准备使用 `prepare`，评估看板通过 `dashboard.sh` 启动。各入口支持 `--help`。
 

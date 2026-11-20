@@ -1,6 +1,6 @@
 # 20260912_latent_working_memory
 
-最后修订时间：20261109 11:06:17 Asia/Shanghai
+最后修订时间：20261120 11:47:59 Asia/Shanghai
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理，入口见 [reproductions](reproductions/README.md)。ICAE v1 和 C-DIC 各自使用独立的 `uv` 环境；LaCT、E²-TTT 和 In-Place TTT 的第一阶段复现保留各自官方代码与运行环境。
 
@@ -12,7 +12,9 @@
 
 通用执行约定见项目 `AGENTS.md`；命名、SwanLab、实验产物及研究笔记规则见 [项目规范索引](docs/README.md)。
 
-主环境使用 **Python 3.11**，默认启用 `cuda124` 依赖组，安装 **PyTorch 2.6.0**。根目录 `pyproject.toml` 与 `uv.lock` 统一使用[清华 PyPI 镜像](https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/)，所有 Python 包从这一镜像获取。PyTorch 2.6.0 的 Linux x86-64 PyPI 构建使用 CUDA 12.4，macOS 安装对应平台构建。当前 GPU 服务器的 NVIDIA 550.144.03 驱动满足默认运行环境，安装依赖不修改服务器系统、驱动或系统 CUDA。
+主环境使用 **Python 3.11**，默认启用 `dev`、`macos` 和 `torch2.6-cuda12.4`。`dev` 提供 `pytest` 和 `ruff`，`macos` 仅在 macOS 上安装本地测试所需的 `flashinfer-python==0.2.5`。`torch2.6-cuda12.4` 固定 **PyTorch 2.6.0**，并在 Linux x86_64 上安装匹配的 FlashInfer 与 FlashAttention 2。
+
+根目录 `pyproject.toml` 与 `uv.lock` 默认使用[清华 PyPI 镜像](https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/)。Linux 的 FlashInfer 使用官方 CUDA 索引，FA2 使用 GitHub 上的预编译 wheel。PyTorch 2.6.0 的 Linux x86_64 PyPI 构建使用 CUDA 12.4，macOS 安装对应平台构建。当前 GPU 服务器的 NVIDIA 550.144.03 驱动满足默认运行环境，安装依赖不修改服务器系统、驱动或系统 CUDA。
 
 数据构造、主实验训练与评估统一使用项目根目录 `.venv/`，依赖由根目录 `pyproject.toml` 与 `uv.lock` 管理。通用数据构造入口位于 `src/latent_working_memory/data_preparation/`，训练与实验代码按阶段放在 `src/latent_working_memory/v1/` 的对应子目录，正式配置位于 `configs/`；执行记录与日志写入 `artifacts/`。
 
@@ -27,13 +29,28 @@ FactQA 与 multisegment 的目录前缀由实际 K、倍率与训练规模生成
 ```bash
 uv python install 3.11
 uv sync
-uv run --frozen --no-group cuda124 --group torch214 pytest tests/v1
+uv run --frozen --no-group torch2.6-cuda12.4 --group torch2.14 pytest tests/v1
 uv run --frozen pytest tests/v3 tests/v4
 ```
 
-已有 Python 3.11 时可直接执行 `uv sync`。它按项目配置同步 `.venv`，配置未变时沿用锁定版本；训练和评估入口继续使用 `uv run --frozen`。
+已有 Python 3.11 时可直接执行 `uv sync`。它按项目默认依赖组同步 `.venv`，配置未变时沿用锁定版本；Linux x86_64 的 FA2 随默认环境安装，无需额外指定依赖组。训练和评估入口继续使用 `uv run --frozen`。
 
-v1 保留原有 BF16 数值行为，v2 使用原生变长 attention；两者使用 PyTorch 2.14，运行及测试时显式选择 `uv run --frozen --no-group cuda124 --group torch214 ...`；仅安装该环境使用 `uv sync --no-group cuda124 --group torch214`。两个依赖组互斥，共用根目录 `.venv`，切换时会同步相应版本，不应在同一 checkout 中同时启动不同依赖组的任务。Linux 的 `torch214` 环境使用 CUDA 13，当前 R550 服务器只运行默认的 v3 环境。
+Linux x86_64 的 `torch2.6-cuda12.4` 环境可使用[同步脚本](scripts/sync_cuda_env.sh)。脚本跳过 `macos` 组，优先从指定目录安装本地 wheel：
+
+```bash
+bash scripts/sync_cuda_env.sh /data/percyw/wheels
+```
+
+省略目录时使用 `$HOME/wheels`。脚本分别查找以下两个文件：
+
+- `flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl`
+- `flashinfer_python-0.2.5+cu124torch2.6-cp38-abi3-linux_x86_64.whl`
+
+找到本地文件的包跳过远程同步，随后从本地 wheel 离线安装；未找到的包仍按 `uv.lock` 中的原依赖源同步。其余依赖正常同步，已额外安装的包保留。本地文件安装失败时直接报错，不改用其他来源。依赖版本和锁文件保持不变；更新这两个包的版本或构建时，同步调整脚本中的文件名。
+
+这个选择规则仅作用于同步脚本。采用本地 wheel 的环境，运行时使用 `.venv/bin/python` 或 `uv run --no-sync`；对于内部调用 `uv run` 的训练脚本，在启动命令前设置 `UV_NO_SYNC=1`。原生 `uv sync` 和普通 `uv run` 仍使用项目配置中的依赖源。
+
+v1 保留原有 BF16 数值行为，v2 使用原生变长 attention；两者使用 PyTorch 2.14，运行及测试时显式选择 `uv run --frozen --no-group torch2.6-cuda12.4 --group torch2.14 ...`；仅安装该环境使用 `uv sync --no-group torch2.6-cuda12.4 --group torch2.14`。`torch2.6-cuda12.4` 与 `torch2.14` 互斥，前者包含为 PyTorch 2.6 构建的 FlashInfer 和 FA2 wheel。各组共用根目录 `.venv`，切换时会同步相应版本，不应在同一 checkout 中同时启动不同依赖组的任务。Linux 的 `torch2.14` 环境使用 CUDA 13，当前 R550 服务器只运行默认的 v3 环境。
 
 通用预训练构造入口为：
 
@@ -84,7 +101,7 @@ v1 测试覆盖损失与梯度、原文边界、规则句界、任务配额与�
 数据准备仅检查数据长度与来源契约；训练时检查实际基座窗口、输入/目标预算和合法 memory 容量。当前默认 memory 上限为 4096，压缩率为 2、4、8。4k 数据的训练需要配置可覆盖 4096-token 写入及 `memory + target + prompt + special tokens` 读取预算的基座；下面的训练入口用于已完成相应预算适配的数据和训练配置。
 
 ```bash
-CUDA_VISIBLE_DEVICES=4 uv run --frozen --no-group cuda124 --group torch214 python -m latent_working_memory.v1.pretrain.train \
+CUDA_VISIBLE_DEVICES=4 uv run --frozen --no-group torch2.6-cuda12.4 --group torch2.14 python -m latent_working_memory.v1.pretrain.train \
   --phase pretrain \
   --config configs/v1/pretrain/llama-semantic-2048/model.json \
   --data-selection configs/v1/pretrain/llama-semantic-2048/selection.json \
@@ -95,7 +112,7 @@ CUDA_VISIBLE_DEVICES=4 uv run --frozen --no-group cuda124 --group torch214 pytho
 每轮样本量、实际配额与步数保存在 `epoch-plan.json`。临时限制执行可用 `--stop-after-steps <累计步数>`，恢复时保持原 `--epochs`、配置、输出目录与进程数，增加 `--resume <该运行 checkpoint>`，并删除或提高临时步数上限。checkpoint 保存模型、optimizer、epoch 顺序与游标、选样及容量随机状态。旧 step 协议 checkpoint 不用于新协议精确续训。
 
 ```bash
-CUDA_VISIBLE_DEVICES=4 uv run --frozen --no-group cuda124 --group torch214 python -m latent_working_memory.v1.pretrain.evaluate \
+CUDA_VISIBLE_DEVICES=4 uv run --frozen --no-group torch2.6-cuda12.4 --group torch2.14 python -m latent_working_memory.v1.pretrain.evaluate \
   --training-result artifacts/v1/pretrain-pilot/train/pretrain-pilot/training-result.json \
   --data-selection configs/v1/pretrain/llama-semantic-2048/selection.json \
   --output-dir artifacts/v1/pretrain-pilot/eval/pretrain-pilot-test \
