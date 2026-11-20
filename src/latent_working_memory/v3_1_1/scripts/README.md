@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261120 16:27:15 Asia/Shanghai
+最后修订时间：20261120 16:40:56 Asia/Shanghai
 
 计算协议、数据格式与模块分工见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256_grpo.json)中的基座与数据路径。
 
@@ -148,15 +148,14 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
   --config configs/v3_1_1/post_k256_conly.json \
-  --run-id compressor-post_k256_20261118 \
-  --epochs 1
+  --run-id compressor-post_k256_20261118
 ```
 
 [post_k256_conly.json](../../../../configs/v3_1_1/post_k256_conly.json) 使用 `stage=post`、`update_mode=compressor_only`，目标配置为 `training.objective={"type":"qa","strategy":"sft"}`，不配置 `backward`，`pending_stride`、`pending_size` 与 `boundary_hidden_size` 均为 `null`。该预设的压缩器学习率为 `1e-4`，`warmup_ratio=0.1`，`min_lr_ratio=0.1`；每卡 `micro_batch_size=4`、`gradient_accumulation_steps=8`，每次更新累计 `4 × 8 = 32` 篇文档，全局 batch 再乘 GPU 进程数，同篇 QA 数不计入文档 batch。默认运行名为 `compressor-post_k{memory_slots}_{YYYYMMDD-HHMM}`。
 
-该模式只更新 Writer LoRA 和 memory embeddings，Reader 冻结并保留输入梯度。`init_checkpoint=null` 从基座初始化，也可通过 `--init-checkpoint` 加载 AE／LM 或 `compressor_only` checkpoint 中的压缩器；新 run 使用新的 optimizer 和 scheduler。
+该模式只更新 Writer LoRA 和 memory embeddings，Reader 冻结并保留输入梯度。预设的 `init_checkpoint` 为 `artifacts/v3-1/pretrain_k256_20261113_copy2/train/checkpoints/global_step_157`，保留 AE／LM 预训练最后第 157 步的压缩器权重，元数据按当前 checkpoint 格式保存。也可通过 `--init-checkpoint` 加载其他 AE／LM 或 `compressor_only` checkpoint，或在配置中设 `init_checkpoint=null` 从基座初始化压缩器；新 run 使用新的 optimizer 和 scheduler。
 
-多块 QA 数据包含 train 1002 篇／10020 道 QA、dev 118 篇／1180 道 QA，当前筛选保留全量；单卡训练 1 轮共 32 steps，预热为 `ceil(0.1 × 32)=4` 步。配置每 8 步验证和保存，并保留每轮末与最终步检查：dev 在 step 0、8、16、24、32 执行，checkpoint 在 step 8、16、24、32 保存。改变 GPU 数或轮数后，预热随实际总 optimizer steps 自动换算，验证和保存的整数间隔保持配置值。
+多块 QA 数据包含 train 1002 篇／10020 道 QA、dev 118 篇／1180 道 QA，当前筛选保留全量；默认训练 5 轮。全局 batch 为 32 时，每轮 32 steps，共 160 steps，预热为 `ceil(0.1 × 160)=16` 步。`dev_every` 和 `save_every` 均为 `after_each_epoch`：dev 在 step 0、32、64、96、128、160 执行，checkpoint 在每轮末的 step 32、64、96、128、160 保存，保留全部 5 份。改变 GPU 数或轮数后，预热随实际总 optimizer steps 自动换算，验证和保存仍在每轮末执行。
 
 多块预设的模型默认 `recent_size=256`，训练使用 `{"mode":"multi","ratios":[2,4,8,16],"recent_size":null}`：先固定保留末尾 256 tokens，再从不会遗留过短尾块的合法倍率中逐段采样，仅在候选为空时将全部剩余前缀一次压缩。完整分段和固定倍率 dev 协议见[仅压缩器 QA 后训练](../README.md#仅压缩器-qa-后训练)与[固定倍率验证](../README.md#固定倍率与策略验证)。
 
@@ -210,7 +209,7 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
 CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
   --config configs/v3_1_1/post_k256_bonly.json \
   --run-id boundary-only_k256_20261118 \
-  --init-checkpoint 'artifacts/v3-1/compressor-post_k256_20261118/train/checkpoints/global_step_32'
+  --init-checkpoint 'artifacts/v3-1/compressor-post_k256_20261118/train/checkpoints/global_step_160'
 ```
 
 `post_default.json` 的模型默认 recent 为 0，K256 实验预设为 256；训练覆盖均为 `null`。`recent_size=0` 不预留 recent，但仍可能留下不足 `pending_size` 的 pending。
