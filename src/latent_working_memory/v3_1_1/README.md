@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261121 15:02:04 Asia/Shanghai
+最后修订时间：20261121 19:08:41 Asia/Shanghai
 
 v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=post` 使用问答（QA），由 `training.update_mode` 选择仅更新压缩器（`compressor_only`）、仅更新边界（`boundary_only`）或联合更新（`joint`）。每次写入将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆及未压缩的 pending 和 recent 尾段回答问题。
 
@@ -76,7 +76,7 @@ c_{i,T}=\left(\frac{K B_{i,T}+P_{i,T}}{S}\right)^p,
 
 其中 ℓᵢ 为最终 QA NLL，`memory_cost_power`（p）为正数，默认 1.0；`memory_cost_weight`（α）为非负数，默认 0.1。固定 recent 不参与成本的分子和分母，但仍供 Reader 回答。p=1 且 pending 长度相同时，同一文档每增加一块的惩罚为 `α × K / (D−R)`。D−R 只在完整轨迹结束后用于奖励结算，策略观察和动作约束不读取该长度。
 
-完整保留比例 `retention_ratio=(K×B+P+R)/D` 独立统计。若正文全部属于 recent，即 D=R，则 `prefix_retention_ratio` 和 `memory_cost` 为 0，完整保留比例为 1，奖励只包含最终 QA NLL；训练长度筛选保证 D−R 为正。
+完整保留比例 `retention_ratio=(K×B+P+R)/D` 独立统计。若正文全部属于 recent，即 D=R，则 `compression_retention_ratio` 和 `memory_cost` 为 0，完整保留比例为 1，奖励只包含最终 QA NLL；训练长度筛选保证 D−R 为正。
 
 `reward_mode` 决定原始奖励的分配。仅 `reward_mode=stepwise` 可配置 `training.objective.stepwise_cost_basis`，支持 `observed` 和 `full`，省略时默认 `observed`；terminal 和 SFT 配置不允许出现该字段。令 Uₜ 为事件 t 后尚未读入的前缀原文长度，不含 recent：
 
@@ -85,7 +85,7 @@ c_{i,T}=\left(\frac{K B_{i,T}+P_{i,T}}{S}\right)^p,
 | `observed` | `((K×Bᵢₜ+Pᵢₜ)/S)^p`，只计已读取文本的保留量 | 0 |
 | `full` | `((K×Bᵢₜ+Pᵢₜ+Uₜ)/S)^p`，未读文本按原长计入 | 1 |
 
-两种基准在终局均有 Uₜ=0，最终成本相同；`memory_cost`、`prefix_retention_ratio`、完整保留比例和 dev／独立评估指标始终使用实际终局保留量。初始成本只用于计算差分，不是一个奖励事件。
+两种基准在终局均有 Uₜ=0，最终成本相同；`memory_cost`、`compression_retention_ratio`、完整保留比例和 dev／独立评估统计始终使用实际终局保留量。初始成本只用于计算差分，不是一个奖励事件。
 
 `gamma` 默认 1.0，有效折扣率为：
 
@@ -492,7 +492,7 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
 
 train 与 dev 共用一个 run，恢复沿用原身份。自动记录阶段、压缩／目标模式及后训练更新方式等 tags；具体超参数记录在 config。
 
-dev 保持模型参数不变，边界策略使用确定性判断。train/dev 曲线横轴为真实 optimizer step，只在实际产生结果时追加标量。首次记录某个指标时注册原生图表并配置标题、坐标轴、配色和合并关系；后续复用面板及历史数据。资源统计放在 `resources/*`。
+dev 保持模型参数不变，边界策略使用确定性判断。train/dev 曲线横轴为真实 optimizer step，只在实际产生结果时追加标量。首次记录某个指标时注册原生图表并配置标题、坐标轴、配色和合并关系；后续复用面板及历史数据。图表标题与指标显示名统一采用对应 key 的小写下划线名称。Y 轴只标必要单位；NLL、loss、reward、learning_rate、EM／F1 和其他无量纲指标的轴标题留空。资源统计放在 `resources/*`，耗时和显存分别保留 `s`、`GiB` 单位。
 
 ### 固定倍率与策略验证
 
@@ -507,39 +507,42 @@ dev 保持模型参数不变，边界策略使用确定性判断。train/dev 曲
 
 新 run 启动后直接训练，这些条件仅在配置的验证间隔、每轮末和最终步计算。启用固定倍率对照时，`boundary_only` 的固定倍率基线在首次正常 dev 时建立，本次进程的后续验证复用；恢复后首次 dev 重建缓存。压缩器可更新的训练每次重新计算固定倍率结果，策略条件每次均使用当前边界参数重新验证。所有验证保留训练 RNG，不改变后续采样。逐篇分段、逐题生成和汇总写入 `train/dev/global_step_<step>/rank_<rank>.jsonl` 与 `summary.json`。
 
-SwanLab 只记录已启用的条件：当前仅边界预设使用 `dev/policy/*`，四个固定倍率对照启用时另有 `dev/ratio_2/*`、`dev/ratio_4/*`、`dev/ratio_8/*` 和 `dev/ratio_16/*`。`dev/conditions/retention` 合并各条件的 `prefix_retention_ratio` 与 `retention_ratio`，按条件排列相邻图例；同一条件用同色系的深浅分别表示前缀与完整保留比例。仅策略验证显示两条保留比例曲线，启用四个固定倍率时再增加 8 条。其余指标仍按同一指标合并条件并固定配色，`memory_cost` 作为本地辅助统计，包含该成本的 `objective` 单独展示。合并面板保留原指标键及统计口径。
+SwanLab 只记录实际计算的条件：当前仅边界预设使用 `dev/policy/*`，四个固定倍率对照启用时另有 `dev/ratio_2/*`、`dev/ratio_4/*`、`dev/ratio_8/*` 和 `dev/ratio_16/*`。压缩统计分为“compression_retention_ratio”“segment_compression_ratio”“memory_blocks”三张原生图，每图只合并同一指标的不同条件；图例保留 `policy`，固定倍率显示为 `2×`、`4×`、`8×`、`16×`；policy 优先，固定倍率按数值升序排列，条件配色在三图间一致。项目共享面板保留历史运行已经记录的同指标条件，policy 加四个固定倍率时每图共 5 个数据源。单图最多 8 个数据源，超过时在更新图表前明确报错，需按实际实验条件拆分。其他 dev 指标同样按指标合并条件；`memory_cost` 与完整 `retention_ratio` 仅保存本地，包含成本的 `objective` 单独展示。
 
 ### 指标口径与面板
 
-AE／LM 预训练保存实际选样数量、`loss`、`lm_fraction` 和分项 NLL；`compressor_only` 记录 `loss`、`qa_nll`、块数和保留比例。后训练的 `train/retention` 面板合并 `train/prefix_retention_ratio` 与 `train/retention_ratio` 两条曲线，原指标键与统计口径保持一致。边界策略模式的其他 train 面板如下，均使用单 Y 轴；表中指标省略 `train/` 前缀。
+AE／LM 预训练保存实际选样数量、`loss`、`lm_fraction` 和分项 NLL；`compressor_only` 记录 `loss`、`qa_nll` 与三项压缩统计。train 的“compression_retention_ratio”“segment_compression_ratio”“memory_blocks”分别展示，通用 dev 路径也只为实际产生的裸 `dev/*` 指标配置对应图表；条件验证使用 `dev/{condition}/*`，不重复写裸 dev 指标。三项统计在训练、验证和重传中使用相同的指标键与面板构造。保留率底层数据保留原始比例，百分比仅在图表表达式中换算，不重复绘制原始比例曲线。边界策略模式的 train 面板如下，均使用单 Y 轴；表中指标省略 `train/` 前缀。
 
 | 图表 | 指标与展示 |
 |---|---|
-| 训练、QA、策略损失 | `loss`、`qa_nll`、`policy_loss` 分别展示；仅边界模式的 `loss` 不含 QA 项 |
-| 奖励 `reward` | 随机路径 `reward` 与多样本 `reward_std`。SCST 的 `baseline_reward` 记录 greedy 路径的整轨总奖励，图例为 `greedy_reward` |
-| 零优势比例 | `zero_advantage_rate`：实际优势全部为零的文档比例 |
-| 记忆用量 `memory_usage` | 平均块数 `blocks`，图例 `memory_blocks`，轴名 `memory_blocks = memory_slots / K` |
-| 压缩程度 `compression` | `compression_ratio`，图例 `compression_rate`，轴名 `compression_rate = segment_tokens / K` |
-| 策略熵 | `policy_entropy` |
-| 回放概率偏差 | `replay_log_probability_drift`：各随机路径内最大 log-prob 差的平均值 |
-| 采样温度 | `policy_temperature`，启用退火时记录 |
-| PPO 价值与策略更新 | `value_loss`、`clip_fraction`、`dual_clip_fraction`、`value_clip_fraction`、`approx_kl`、`ppo_kl`，仅 PPO 记录 |
-| 梯度范数 | `grad_norm`、`compressor_grad_norm`、`boundary_grad_norm` 分别展示，PPO 另记 `value_grad_norm`，均为相应 optimizer 裁剪前的范数，PPO 的 actor／critic 分别裁剪 |
-| 学习率 `learning_rate` | `compressor_learning_rate`、`boundary_learning_rate` 共用纵轴，PPO 另记 `value_learning_rate` |
+| `loss`、`qa_nll`、`policy_loss` | `loss`、`qa_nll`、`policy_loss` 分别展示；仅边界模式的 `loss` 不含 QA 项 |
+| `reward` | 随机路径 `reward` 与多样本 `reward_std`。SCST 的 `baseline_reward` 记录 greedy 路径的整轨总奖励，图例为 `greedy_reward` |
+| `zero_advantage_rate` | `zero_advantage_rate`：实际优势全部为零的文档比例 |
+| `compression_retention_ratio` | `compression_retention_ratio` 保存原始比例，图表以原生表达式乘 100 显示百分比，Y 轴仅标 `%` |
+| `segment_compression_ratio` | `segment_compression_ratio`，Y 轴仅标 `×` |
+| `memory_blocks` | `memory_blocks`，Y 轴仅标 `blocks`；不是 GPU 显存占用 |
+| `policy_entropy` | `policy_entropy` |
+| `replay_log_probability_drift` | `replay_log_probability_drift`：各随机路径内最大 log-prob 差的平均值 |
+| `policy_temperature` | `policy_temperature`，启用退火时记录 |
+| `value_loss` 等 PPO 指标 | `value_loss`、`clip_fraction`、`dual_clip_fraction`、`value_clip_fraction`、`approx_kl`、`ppo_kl`，仅 PPO 记录 |
+| `grad_norm` 等梯度指标 | `grad_norm`、`compressor_grad_norm`、`boundary_grad_norm` 分别展示，PPO 另记 `value_grad_norm`，均为相应 optimizer 裁剪前的范数，PPO 的 actor／critic 分别裁剪 |
+| `learning_rate` | `compressor_learning_rate`、`boundary_learning_rate` 共用纵轴，PPO 另记 `value_learning_rate` |
 
 PPO 的 `clip_fraction`、`dual_clip_fraction` 与 `value_clip_fraction` 使用原生损失函数的裁剪统计。令 `q=exp(log π_new−log π_old)`，`approx_kl` 保留 `mean(q−1−log q)`，`ppo_kl` 记录原生 `−mean(clip(log q,−20,20))`，后者是采样估计，可以为负。训练进度在本地辅助指标中分别记录 rollout、actor 与 critic 的真实更新计数，不单独上传云端面板。`actor_loss` 与 `critic_loss` 同样保留在本地，分别为两侧已加权损失；`loss` 为两者之和，预热批只包含 critic 损失。
 
-policy 未配置固定倍率且模型默认 recent 为 0 时，dev 只执行 greedy 路径的 NLL 评分，记录 QA NLL、记忆用量、压缩程度、策略熵、两种保留比例、记忆成本和 `objective`，不生成答案。其余 policy 设置进入条件验证，按上一节组织 `dev/policy/*` 和固定倍率指标。
+policy 未配置固定倍率且模型默认 recent 为 0 时，dev 只执行 greedy 路径的 NLL 评分，记录 QA NLL、记忆块数、分段压缩倍率、策略熵、压缩区保留率和 `objective`，完整保留比例与记忆成本保存在本地，不生成答案。其余 policy 设置进入条件验证，按上一节组织 `dev/policy/*` 和固定倍率指标。
 
-`compression_ratio=segment_tokens/K` 表示已压缩段的整体压缩倍率，未压缩 pending 和 recent 不计入分子或分母。`prefix_retention_ratio=(memory slots+pending)/(D−R)` 衡量待压缩前缀的保留比例，`memory_cost=prefix_retention_ratio^p`；`retention_ratio=(memory slots+pending+recent)/D` 独立记录整篇最终保留比例。没有未压缩 pending 时，压缩倍率与前缀保留比例在单篇上互为倒数。train 的 QA、块数、压缩率和奖励只统计随机路径，greedy 奖励单独记录。同时记录 pending 原文峰值和自主动作的平均绝对优势。
+令 D 为正文长度、R 为 recent 长度、P 为最终未压缩 pending 长度、B 为记忆块数、K 为每块 slots 数。`compression_retention_ratio=(K×B+P)/(D−R)` 衡量压缩区的最终保留比例，包含压缩区内未压缩的 pending，`memory_cost=compression_retention_ratio^p`。`segment_compression_ratio=segment_tokens/K` 衡量实际已压缩段的倍率，pending 和 recent 不参与；`segment_tokens` 是所有已压缩段的平均长度，因此汇总倍率按块加权，没有压缩块时不产生该指标。`memory_blocks=B` 是记忆块数，压缩区保留率与记忆块数均按文档等权平均。`retention_ratio=(K×B+P+R)/D` 是整篇最终保留比例，仅保存在本地。
 
-边界策略模式的本地 `metrics.jsonl` 还保留辅助统计：train 的 `commit_rate`、`memory_slots`、`segment_tokens`，dev 的 `loss`、`samples`、`commit_rate`、`memory_slots`、`segment_tokens`。`dev/loss` 等于 `dev/qa_nll`，云端展示后者。SCST 单样本的 `reward_std` 为零，仅写本地；边界策略模式不单独记录 `train/samples`。
+没有未压缩 pending 时，分段压缩倍率与压缩区保留率在单篇上互为倒数；跨文档汇总后的两条曲线使用不同权重，不保证互为倒数。train 的 QA、记忆块数、压缩统计和奖励只统计随机路径，greedy 奖励单独记录。同时记录 pending 原文峰值和自主动作的平均绝对优势。
+
+边界策略模式的本地 `metrics.jsonl` 还保留辅助统计：train 的 `commit_rate`、`memory_slots`、`segment_tokens`、`retention_ratio`，dev 的 `loss`、`samples`、`commit_rate`、`memory_slots`、`segment_tokens`、`retention_ratio`。`dev/loss` 等于 `dev/qa_nll`，云端展示后者。SCST 单样本的 `reward_std` 为零，仅写本地；边界策略模式不单独记录 `train/samples`。
 
 ### 独立评估任务
 
 任务脚本只接受具有边界策略的 `joint/boundary_only` checkpoint；`compressor_only` 当前使用训练内 dev 验证。各任务按 checkpoint 中 `model.structure` 的边界参数和默认 recent 处理完整正文，忽略训练 recent 覆盖值，再由 Reader 根据 memory、未压缩 pending 和 recent 回答。Test 同文档、LoCoMo 同对话的全部 QA 共用一次压缩结果，各题独立生成；RULER 按题目处理。评估计划、日志、明细和汇总保存在本地。
 
-逐篇记录和汇总分别保留 `prefix_retention_ratio`、`memory_cost` 和完整 `retention_ratio`，均按文档等权平均；LoCoMo 每段对话只计一次。同文档各题共用压缩成本，不按 QA 数重复累计。
+独立评估的逐篇记录和汇总保留 `prefix_retention_ratio`、`memory_cost` 和完整 `retention_ratio`；其中 `prefix_retention_ratio` 与训练／dev 的 `compression_retention_ratio` 口径一致，均按文档等权平均；LoCoMo 每段对话只计一次。同文档各题共用压缩成本，不按 QA 数重复累计。
 
 | 任务与脚本 | 数据入口 | 范围与评分 |
 |---|---|---|

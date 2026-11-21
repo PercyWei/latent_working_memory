@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261121 15:09:53 Asia/Shanghai
+最后修订时间：20261121 19:05:26 Asia/Shanghai
 
 计算协议、数据格式与模块分工见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256_grpo.json)中的基座与数据路径。
 
@@ -548,6 +548,6 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 - **日志与状态**：训练日志同步写入文件和终端；评估 worker 的完整输出合并到 `eval.log`，带 step、GPU 和 rank 前缀，终端由主进程统一展示进度。任务 `status.json` 的 `eval_run` 指向运行根目录，`selected_checkpoints` 是本次调度范围，与计划 `checkpoints` 的累计范围区分。状态记录 checkpoint 与各分片的设备、命令、起止时间、返回码和错误，整体进度仅统计本轮选择。
 - **展示方式**：SwanLab 默认开启，记录 train/dev、训练资源及配置。project、group 和 tags 通过配置文件设置；project 默认为 `latent-working-memory-v3.1`，group 未指定时默认 `run_id`。`--tracking offline` 关闭 SwanLab 记录，仅保留本地产物；恢复训练沿用 `swanlab.json` 中的 run。评估由独立 dashboard 展示，不读取 SwanLab 身份或凭据。
 - **verl 接入**：边界训练直接运行原生 `PPOTrainer.step`，由其控制 critic／actor 更新与 critic 预热；RL 更新进入原生 `BaseEngine.train_batch` 生命周期，优势与损失尽量调用原生函数。分段采样、任务 autograd、复制式梯度同步、外层预算与单文件 checkpoint 保留项目适配，不启动 Ray worker 或 TransferQueue 服务。
-- **后训练图表**：`compressor_only` 记录 QA NLL、记忆用量和固定倍率 dev；边界策略模式另记录奖励、零优势比例、策略熵与回放概率偏差。SCST 的 greedy 基线并入奖励图，单随机路径时 `reward_std` 仅保留本地；启用退火时增加 `policy_temperature` 图。train/dev 的 `memory_usage` 绘制 `blocks`，图例为 `memory_blocks`；`compression` 绘制全局聚合后的 `segment_tokens / K`，图例为 `compression_rate`。首次出现真实记录时注册并配置原生面板，运行中只追加真实 optimizer step 的标量，dev 在实际验证步记录。辅助统计保存在本地，完整指标口径与展示规则见[方法说明](../README.md#验证独立评估与记录)。
+- **后训练图表**：`compressor_only` 记录 QA NLL、记忆用量和固定倍率 dev；边界策略模式另记录奖励、零优势比例、策略熵与回放概率偏差。SCST 的 greedy 基线并入奖励图，单随机路径时 `reward_std` 仅保留本地；启用退火时增加 `policy_temperature` 图。train 的“compression_retention_ratio”“segment_compression_ratio”“memory_blocks”分别绘制 `compression_retention_ratio`、`segment_compression_ratio`、`memory_blocks`；Y 轴仅标单位，依次为 `%`、`×`、`blocks`；保留率底层记录原始比例，仅由原生图表表达式乘 100 展示百分比。dev 按相同指标合并各条件，通用 dev 路径只为实际产生的裸指标配置对应图。图表标题与指标显示名采用对应 key 的小写下划线名称；NLL、loss、reward、learning_rate、EM／F1 和其他无量纲指标的 Y 轴标题留空，资源耗时和显存仅保留 `s`、`GiB`。首次出现真实记录时注册并配置原生面板，运行中只追加真实 optimizer step 的标量，dev 在实际验证步记录。辅助统计保存在本地，完整指标口径与展示规则见[方法说明](../README.md#验证独立评估与记录)。
 - **固定倍率基线**：启用非空 `dev.fixed_ratios` 时，`boundary_only` 在首次正常 dev 计算并缓存固定倍率结果，本次进程的后续验证复用；恢复后首次 dev 重建。压缩器可更新的训练每次重新计算。当前两份 `post_k256_bonly_*` 预设未启用固定倍率对照，policy 每次 dev 重新评价。
-- **保留比例曲线**：`train/retention` 合并 `train/prefix_retention_ratio` 与 `train/retention_ratio` 两条曲线。`dev/conditions/retention` 合并各条件的前缀与完整保留比例，图例按条件相邻排列，同一条件用同色系的深浅区分两类比例；启用 2×、4×、8×、16× 时，四个固定倍率共 8 条曲线，当前仅 policy 的两份边界预设只显示该策略的两类比例。底层指标键及统计口径保持一致，其他 dev 指标仍各自合图。
+- **压缩统计**：压缩区保留率为 `(K×B+P)/(D−R)`，记忆块数为 B，二者按文档等权平均；分段压缩倍率为所有已压缩段的平均长度除以 K，按块加权，未压缩 pending 和 recent 不参与，没有压缩块时不记录倍率。dev 的三张条件图使用一致的条件顺序和颜色，图例依次为 `policy`、`2×`、`4×`、`8×`、`16×`，每图最多 5 个数据源；共享项目保留历史运行已有的同指标条件，超过平台单图 8 个数据源时需按实验条件拆分。完整 `retention_ratio` 仅保存在本地。

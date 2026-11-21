@@ -173,13 +173,22 @@ def document_loss(model, document, config, temperature=1.0):
             model, document.input_ids, config.training.compression,
             recent_size=config.recent_size(),
         )
+        slots = len(result.blocks) * model.memory_slots
+        prefix_length = len(document.input_ids) - len(result.recent_ids)
+        metrics = {
+            "memory_blocks": (len(result.blocks), 1),
+            "compression_retention_ratio": (slots / prefix_length, 1),
+            "retention_ratio": ((slots + len(result.recent_ids)) / len(document.input_ids), 1),
+            "segment_tokens": (sum(result.block_lengths), len(result.block_lengths)),
+        }
         if config.training.objective.type == "qa":
             loss = qa_nll(model, result.blocks, document, result.recent_ids)
-            return loss, {"qa_nll": (float(loss.detach()), 1)}
+            return loss, {**metrics, "qa_nll": (float(loss.detach()), 1)}
         loss = model.answer_nll(
             result.blocks, (*result.recent_ids, *document.prompt_ids), document.target_ids,
         )
         return loss, {
+            **metrics,
             f"{document.task}_nll": (float(loss.detach()), 1),
             "lm_fraction": (float(document.task == "lm"), 1),
         }
@@ -198,11 +207,11 @@ def document_loss(model, document, config, temperature=1.0):
     objective = config.training.objective
     cost = prefix_retention ** objective.memory_cost_power
     return loss, {
-        "qa_nll": (float(loss), 1), "blocks": (len(result.blocks), 1),
+        "qa_nll": (float(loss), 1), "memory_blocks": (len(result.blocks), 1),
         "memory_slots": (slots, 1),
         "recent_tokens": (len(result.recent_ids), 1),
         "pending_tokens": (len(result.pending_ids), 1),
-        "prefix_retention_ratio": (prefix_retention, 1),
+        "compression_retention_ratio": (prefix_retention, 1),
         "memory_cost": (cost, 1),
         "objective": (float(loss) + objective.memory_cost_weight * cost, 1),
         "retention_ratio": ((slots + len(result.retained_ids))
@@ -573,9 +582,9 @@ class TrainingEngine(BaseEngine):
             slots = len(result.blocks) * self.model.memory_slots
             prefix_length = len(document.input_ids) - len(result.recent_ids)
             metrics = {
-                f"{task}_nll": (loss, 1), "blocks": (len(result.blocks), 1),
+                f"{task}_nll": (loss, 1), "memory_blocks": (len(result.blocks), 1),
                 "recent_tokens": (len(result.recent_ids), 1),
-                "prefix_retention_ratio": (slots / prefix_length, 1),
+                "compression_retention_ratio": (slots / prefix_length, 1),
                 "retention_ratio": ((slots + len(result.recent_ids)) / len(document.input_ids), 1),
                 "segment_tokens": (sum(result.block_lengths), len(result.block_lengths)),
             }

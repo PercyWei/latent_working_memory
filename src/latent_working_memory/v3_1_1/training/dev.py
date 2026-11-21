@@ -18,9 +18,11 @@ def _questions(document, qa_objective):
 def _add_record(totals, record):
     prefix = record["condition"]
     for name, value in record["metrics"].items():
+        # 分段倍率按压缩块平均，其余正文指标按文档平均。
+        weight = record["metrics"]["memory_blocks"] if name == "segment_compression_ratio" else 1
         pair = totals.setdefault(f"{prefix}/{name}", [0.0, 0.0])
-        pair[0] += value
-        pair[1] += 1
+        pair[0] += value * weight
+        pair[1] += weight
     for answer in record["qas"]:
         for name in ("em", "f1"):
             if name in answer:
@@ -99,10 +101,12 @@ def _evaluate_batch(model, documents, config, condition, ratio, qa_objective):
         prefix_retention = (slots + pending) / prefix_length if prefix_length else 0.0
         nll_name = "qa_nll" if qa_objective else f"{document.task}_nll"
         metrics = {
-            nll_name: nll, "blocks": len(path.blocks), "memory_slots": slots,
+            nll_name: nll, "memory_blocks": len(path.blocks), "memory_slots": slots,
             "recent_tokens": recent, "pending_tokens": pending, "retention_ratio": retention,
-            "prefix_retention_ratio": prefix_retention,
+            "compression_retention_ratio": prefix_retention,
         }
+        if slots:
+            metrics["segment_compression_ratio"] = sum(path.block_lengths) / slots
         if config.uses_boundary_policy:
             objective = config.training.objective
             cost = prefix_retention ** objective.memory_cost_power

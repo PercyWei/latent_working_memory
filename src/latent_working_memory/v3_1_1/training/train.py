@@ -99,7 +99,7 @@ def _run_dev(model, documents, config, device, boundary_generator, output_dir, s
             baseline_cache=baseline_cache, records=records,
         )
     if "segment_tokens" in metrics:
-        metrics["compression_ratio"] = metrics["segment_tokens"] / model.memory_slots
+        metrics["segment_compression_ratio"] = metrics["segment_tokens"] / model.memory_slots
     if uses_condition_dev(config):
         folder = output_dir / "dev" / f"global_step_{step}"
         folder.mkdir(parents=True, exist_ok=True)
@@ -289,7 +289,7 @@ def train(plan_dir, resume=None):
                 "resources/peak_memory_gib": peak_memory,
             }
             if "segment_tokens" in metrics:
-                record["train/compression_ratio"] = (
+                record["train/segment_compression_ratio"] = (
                     metrics["segment_tokens"] / config.model.structure.memory_slots
                 )
             dev_interval = (training.loop.dev_every != "after_each_epoch"
