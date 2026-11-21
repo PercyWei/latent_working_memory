@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261121 19:08:41 Asia/Shanghai
+最后修订时间：20261122 00:21:03 Asia/Shanghai
 
 v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=post` 使用问答（QA），由 `training.update_mode` 选择仅更新压缩器（`compressor_only`）、仅更新边界（`boundary_only`）或联合更新（`joint`）。每次写入将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆及未压缩的 pending 和 recent 尾段回答问题。
 
@@ -369,7 +369,7 @@ K256 实验预设使用 `~/models/Qwen3-4B-Instruct-2507`，开启 FA2、BF16 au
 
 当前数据含 train 1002 篇／10020 道 QA、dev 118 篇／1180 道 QA，现有长度筛选保留全部样本。全局 batch 为 32 时，每轮 `ceil(1002 / 32)=32` 个 optimizer steps，5 轮共 160 步，预热为 `ceil(0.1 × 160)=16` 步。`dev_every` 和 `save_every` 均为 `after_each_epoch`：在每轮末的 step 32、64、96、128、160 验证并保存 checkpoint，保留全部 5 份。改变 GPU 数或训练轮数时，预热步数随实际总预算自动换算，验证和保存仍在每轮末执行。
 
-两份 `post_k256_bonly_*` 预设的 `init_checkpoint` 均为 `artifacts/v3-1/compressor-post_k256_20261120/train/checkpoints/global_step_160`。仅边界阶段默认训练 1 轮、关闭长度课程，每卡 `micro_batch_size=2`、`gradient_accumulation_steps=2`；采用 4 个 GPU 进程时，全局 batch 为 `4 × 2 × 2=16` 篇文档。1002 篇文档形成 63 个 rollout 批次，末批为 10 篇。对应预算如下，GPU 数改变时须重新按全局 batch 换算：
+基础预设 `post_k256_bonly_grpo.json` 和 `post_k256_bonly_ppo.json` 的 `init_checkpoint` 均为 `artifacts/v3-1/compressor-post_k256_20261120/train/checkpoints/global_step_160`。仅边界阶段默认训练 1 轮、关闭长度课程，每卡 `micro_batch_size=2`、`gradient_accumulation_steps=2`；采用 4 个 GPU 进程时，全局 batch 为 `4 × 2 × 2=16` 篇文档。1002 篇文档形成 63 个 rollout 批次，末批为 10 篇。对应预算如下，GPU 数改变时须重新按全局 batch 换算：
 
 | 设置 | `post_k256_bonly_grpo.json` | `post_k256_bonly_ppo.json` |
 |---|---|---|
@@ -388,6 +388,26 @@ K256 实验预设使用 `~/models/Qwen3-4B-Instruct-2507`，开启 FA2、BF16 au
 边界策略预设均设置 `pending_stride=256`、`pending_size=256`。`post_default.json` 的模型默认 recent 为 0，K256 实验预设为 256，训练覆盖均为 `null`。
 
 两份 `*_temp.json` 均启用线性温度退火：前 30% 进度保持 T=1.0，30%～90% 从 1.0 降至 0.2，最后 10% 保持 T=0.2。进度按整个训练的实际 optimizer steps 计算，跨长度课程档位连续推进。GRPO 使用 `group_size=4`；SCST 使用 `group_size=1`，每篇另计算一条 greedy 路径作为奖励基线，仅随机路径参与反向传播。
+
+### PPO 参数对照配置
+
+`configs/v3_1_1/post_k256_bonly_ppo_p*.json` 是五份可独立加载的完整配置，均使用同一 compressor step 160 初始化新的 boundary 与 value head。共同设置为 PPO、`boundary_only`、`reward_mode=stepwise`，每卡 `micro_batch_size=2`、`gradient_accumulation_steps=4`，双卡全局 batch 为 16 篇文档。各配置独立采用下表设置，其余训练参数沿用基础 PPO 预设。
+
+| 方案 | 配置文件 | 专属设置 |
+|---|---|---|
+| P1：完整回报与路径覆盖 | [post_k256_bonly_ppo_p1_gae.json](../../../configs/v3_1_1/post_k256_bonly_ppo_p1_gae.json) | `gae_lambda=1.0`、`group_size=2` |
+| P2：过程奖励 | [post_k256_bonly_ppo_p2_reward.json](../../../configs/v3_1_1/post_k256_bonly_ppo_p2_reward.json) | `stepwise_cost_basis=full`、`memory_cost_weight=0.03` |
+| P3：温度退火 | [post_k256_bonly_ppo_p3_temperature.json](../../../configs/v3_1_1/post_k256_bonly_ppo_p3_temperature.json) | 线性退火：前 50% 保持 T=1.0，50%～80% 降至 T=0.2，最后 20% 保持 T=0.2 |
+| P4：学习率衰减 | [post_k256_bonly_ppo_p4_decay.json](../../../configs/v3_1_1/post_k256_bonly_ppo_p4_decay.json) | `min_lr_ratio=0.1`，峰值学习率保持 `1e-4` |
+| P5：增加新采样批次 | [post_k256_bonly_ppo_p5_rollout.json](../../../configs/v3_1_1/post_k256_bonly_ppo_p5_rollout.json) | `ppo_epochs=2`、`epochs=2`、`critic_warmup=15` |
+
+P2 以外均使用 `stepwise_cost_basis=observed`、`memory_cost_weight=0.1`；P1 以外均使用 `gae_lambda=0.95`、`group_size=1`。五份配置均保留 `gamma=1.0`、`memory_cost_power=1.0`、`warmup_ratio=0.1`，`max_steps=null`，由实际数据和训练轮数解析预算。
+
+双卡全局 batch 16、训练集 1002 篇时，P1～P4 为 63 个 rollout 批次、每批 4 次 PPO 更新；P5 为 126 个 rollout 批次、每批 2 次更新。五套均为 252 次 critic 更新，前 28 次仅更新 critic，之后最多 224 次 actor 更新；学习率预热均为 26 次更新。P1 每篇采样两条路径，P5 每篇训练两轮，两者的采样及 QA 评分路径数均为其余方案的两倍。
+
+`dev_every=80`、`save_every=80`、`save_total_limit=5`。P1～P4 在 step 80、160、240、252 验证并保存；P5 还在第一轮末 step 126 验证并保存，共保留 5 份 checkpoint。GPU 数或数据量变化时，须按实际全局 batch 重新核算这些步数。
+
+这些参数预设的 `run_id` 和 SwanLab `group` 均为 `null`。启动时通过 `--run-id` 为各方案指定独立运行名；作为同一组对照运行时，在五份配置的 `training.swanlab.group` 中显式填写同一实验系列名称。
 
 ### 计算精度与显存
 
