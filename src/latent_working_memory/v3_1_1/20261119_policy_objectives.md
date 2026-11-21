@@ -2,7 +2,7 @@
 
 创建时间：20261119 14:52:11 Asia/Shanghai
 
-最后修订时间：20261120 16:05:16 Asia/Shanghai
+最后修订时间：20261121 15:09:53 Asia/Shanghai
 
 ## 范围与约束
 
@@ -44,15 +44,17 @@ SCST 按正文读取位置对齐，不按自主动作或记忆块序号对齐。
 ## 配置与实现分工
 
 - objective 使用统一 group_size 表示每正文随机轨迹数。SCST／PPO 至少为 1，GRPO 至少为 2；greedy 不计入 group_size。
-- strategy 支持 scst、grpo、ppo，reward_mode 为 terminal 或 stepwise，优势算法由二者确定。仅 stepwise 配置 stepwise_cost_basis，值为 observed 或 full；post_k256_bonly.json 和 post_k256_ppo.json 显式使用 observed。
+- strategy 支持 scst、grpo、ppo，reward_mode 为 terminal 或 stepwise，优势算法由二者确定。仅 stepwise 配置 stepwise_cost_basis，值为 observed 或 full。post_k256_bonly_grpo.json 使用 terminal；post_k256_bonly_ppo.json 使用 stepwise，并显式设置 observed。
 - GRPO 的两种奖励均配置 advantage_epsilon，预设沿用 1e-6。
 - PPO 仅支持 boundary_only，独立创建 value head，冻结 Writer、memory embeddings 和 Reader。value head 复用 boundary_learning_rate。
-- PPO 的 ppo_epochs 默认 4，value_loss_weight 默认 0.5。post_k256_ppo.json 使用 group_size=1、gae_lambda=0.95；0.95 是预设值，不是系统默认。
+- PPO 的 ppo_epochs 默认 4，value_loss_weight 默认 0.5。post_k256_bonly_ppo.json 使用 group_size=1、gae_lambda=0.95、critic_warmup=8，前 7 个 rollout 批次只更新 critic，第 8 批开始更新 actor；这些是预设值。
 - training.loop.critic_warmup 默认 0，仅 PPO 配置可以包含该字段。原生批次从 1 开始，0／1 首批更新 actor，11 表示前 10 批只更新 critic。
 - optimizer 的学习率字段按 update_mode 区分：compressor_only 仅含 compressor_learning_rate，boundary_only 仅含 boundary_learning_rate，joint 同时包含两者。PPO 的 critic 与边界共用后者的数值，各自独立更新。
 - training.scheduler.warmup_ratio 的范围为 [0,1)，全部预设统一为 0.1。数据、GPU 数量与预算解析后，预热步数为 `ceil(warmup_ratio × 总 optimizer steps)`，必须小于总步数；比例为 0 时不预热。PPO 总预算包含 ppo_epochs，actor／critic 使用同一预热长度，各自按实际更新次数推进；critic_warmup 仍独立按 rollout 批次控制。
 - training.backward 仅用于 joint 策略训练，以 bptt_steps 控制压缩器跨段梯度；其他模式省略该分组。training.dev.max_new_tokens 仅用于 QA 生成验证，AE／LM 不配置。
 - checkpoint 的 model 状态保存 memory_embeddings、adapter、boundary、value_head；非 PPO 的 value_head 为 null。恢复严格按当前格式读取，无旧格式自动转换。
+
+`post_k256_bonly_grpo.json` 与 `post_k256_bonly_ppo.json` 的初始化来源均为 `artifacts/v3-1/compressor-post_k256_20261120/train/checkpoints/global_step_160`。两份预设采用每卡 microbatch 2、梯度累积 2、普通训练 1 轮；在四个 GPU 进程下，全局 batch 为 16。两份预设的边界学习率为 `1e-4`，`warmup_ratio=0.1`、`min_lr_ratio=1.0`，学习率预热后保持恒定；PPO value head 使用相同设置。当前 1002 篇文档对应 63 个 rollout 批次，末批 10 篇；GRPO 为 63 次主更新、7 步学习率预热，PPO 为 252 次 critic 主更新、各 optimizer 26 步学习率预热。PPO 前 7 批只执行 28 次 critic 更新，其余批次均有自主动作时 actor 更新 224 次。验证与保存使用相同间隔：GRPO 为 20，在主步数 20、40、60、63 触发；PPO 为 80，在主步数 80、160、240、252 触发。两者均对应第 20、40、60、63 个 rollout 批次，最后一批由轮末规则触发一次；`save_total_limit=5`，实际生成的 4 份 checkpoint 全部保留。两份预设均设置 `dev.fixed_ratios=[]`，在当前 `recent_size=256` 下只验证当前 greedy 边界策略，记录 QA NLL、EM／F1、最终记忆成本和保留比例。若启用非空 `fixed_ratios`，则额外评价固定倍率；仅边界训练的固定倍率结果在首次 dev 计算后缓存，恢复进程后重新计算，policy 每次 dev 重新评价。
 
 完整事件序列用于奖励、折扣回报和 GAE，decision_mask 仅控制 actor 损失。pending 不足的强制等待与末尾强制压缩不产生 actor 梯度，自主选择等待仍参与更新。首次读入、各固定读取位置以及收尾的状态特征对应同一事件时钟。
 

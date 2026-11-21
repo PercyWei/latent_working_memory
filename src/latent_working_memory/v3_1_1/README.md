@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261120 17:32:24 Asia/Shanghai
+最后修订时间：20261121 15:02:04 Asia/Shanghai
 
 v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=post` 使用问答（QA），由 `training.update_mode` 选择仅更新压缩器（`compressor_only`）、仅更新边界（`boundary_only`）或联合更新（`joint`）。每次写入将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆及未压缩的 pending 和 recent 尾段回答问题。
 
@@ -333,10 +333,10 @@ AE／LM 的 `objective` 还包含 `lm_ratio` 和 `lm_target_tokens`；QA SFT 只
 | [post_k256_grpo_temp.json](../../../configs/v3_1_1/post_k256_grpo_temp.json) | 同套后训练数据与执行设置，GRPO 4 路采样、线性温度退火 |
 | [post_k256_scst_temp.json](../../../configs/v3_1_1/post_k256_scst_temp.json) | 同套后训练数据与执行设置，SCST 单随机路径加 greedy 基线、线性温度退火 |
 | [post_k256_conly.json](../../../configs/v3_1_1/post_k256_conly.json) | FactQA 仅压缩器后训练，从合法倍率采样，固定保留 256 tokens recent |
-| [post_k256_bonly.json](../../../configs/v3_1_1/post_k256_bonly.json) | 冻结压缩器、仅训练边界，GRPO 4 路采样、stepwise 奖励，成本基准 `observed` |
-| [post_k256_ppo.json](../../../configs/v3_1_1/post_k256_ppo.json) | 冻结压缩器，PPO 单随机路径、stepwise 奖励、GAE，成本基准 `observed` |
+| [post_k256_bonly_grpo.json](../../../configs/v3_1_1/post_k256_bonly_grpo.json) | 冻结压缩器、仅训练边界，GRPO 4 路采样、terminal 奖励 |
+| [post_k256_bonly_ppo.json](../../../configs/v3_1_1/post_k256_bonly_ppo.json) | 冻结压缩器，PPO 单随机路径、stepwise 奖励、GAE，成本基准 `observed` |
 
-`post_k256_ppo.json` 沿用仅边界预设的数据和优化器设置，显式设置 `group_size=1`、`gae_lambda=0.95`、`ppo_epochs=4`、`value_loss_weight=0.5` 和 `critic_warmup=0`。0.95 是该预设的选择，不是系统默认值；terminal 同样读取这一 λ。
+`post_k256_bonly_ppo.json` 沿用仅边界预设的数据和优化器设置，显式设置 `group_size=1`、`gae_lambda=0.95`、`ppo_epochs=4`、`value_loss_weight=0.5` 和 `critic_warmup=8`。该预设前 7 个 rollout 批次只更新 critic，第 8 批开始更新 actor；通用 `critic_warmup` 默认仍为 0。0.95 是该预设的选择，不是系统默认值；terminal 同样读取这一 λ。
 
 两份 `*_default.json` 的主要设置如下：
 
@@ -354,7 +354,7 @@ AE／LM 的 `objective` 还包含 `lm_ratio` 和 `lm_target_tokens`；QA SFT 只
 
 K256 实验预设使用 `~/models/Qwen3-4B-Instruct-2507`，开启 FA2、BF16 autocast 和层内重算。它们的执行设置为：
 
-| 设置 | K256 单块预训练 | K256 后训练（GRPO／SCST） |
+| 设置 | K256 单块预训练 | K256 联合后训练（GRPO／SCST） |
 |---|---|---|
 | 数据目录 | `data/fineweb_train5k_20261112` | `data/fineweb-factqa_q10_train1k_length3_20261112` |
 | 预算 | 普通训练 1 轮 | 3 个长度档位，每档 1 轮，历史回放 20% |
@@ -368,6 +368,22 @@ K256 实验预设使用 `~/models/Qwen3-4B-Instruct-2507`，开启 FA2、BF16 au
 仅压缩器 QA 后训练配置 `post_k256_conly.json` 使用 `compressor_learning_rate=1e-4`、`warmup_ratio=0.1`、`min_lr_ratio=0.1`。每卡 `micro_batch_size=4`、`gradient_accumulation_steps=8`，每次更新每卡累计 32 篇文档，全局 batch 为 GPU 进程数乘 32；同篇全部 QA 不额外增加文档 batch。该配置的模型默认 `recent_size=256`，训练覆盖为 `null`，默认训练 5 轮，关闭长度课程。默认 `init_checkpoint` 为 `artifacts/v3-1/pretrain_k256_20261113_copy2/train/checkpoints/global_step_157`，该来源保留 AE／LM 预训练最后第 157 步的压缩器权重，元数据按当前 checkpoint 格式保存；后训练新建 optimizer 和 scheduler。
 
 当前数据含 train 1002 篇／10020 道 QA、dev 118 篇／1180 道 QA，现有长度筛选保留全部样本。全局 batch 为 32 时，每轮 `ceil(1002 / 32)=32` 个 optimizer steps，5 轮共 160 步，预热为 `ceil(0.1 × 160)=16` 步。`dev_every` 和 `save_every` 均为 `after_each_epoch`：在每轮末的 step 32、64、96、128、160 验证并保存 checkpoint，保留全部 5 份。改变 GPU 数或训练轮数时，预热步数随实际总预算自动换算，验证和保存仍在每轮末执行。
+
+两份 `post_k256_bonly_*` 预设的 `init_checkpoint` 均为 `artifacts/v3-1/compressor-post_k256_20261120/train/checkpoints/global_step_160`。仅边界阶段默认训练 1 轮、关闭长度课程，每卡 `micro_batch_size=2`、`gradient_accumulation_steps=2`；采用 4 个 GPU 进程时，全局 batch 为 `4 × 2 × 2=16` 篇文档。1002 篇文档形成 63 个 rollout 批次，末批为 10 篇。对应预算如下，GPU 数改变时须重新按全局 batch 换算：
+
+| 设置 | `post_k256_bonly_grpo.json` | `post_k256_bonly_ppo.json` |
+|---|---|---|
+| 奖励模式 | terminal | stepwise，成本基准 `observed` |
+| 每篇随机路径数 | 4 | 1 |
+| 训练主步数 | 63 次 actor 更新 | 252 次 critic 更新 |
+| 学习率预热 | `ceil(0.1 × 63)=7` 步 | actor／critic 各自预热 `ceil(0.1 × 252)=26` 步 |
+| critic 独占更新 | 不适用 | 前 7 批共 28 次 critic 更新 |
+| actor 更新上限 | 63 次 | `(63−7) × 4=224` 次，要求预热后每批均有自主动作 |
+| `dev_every`／`save_every` | 20 | 80 |
+| 验证与 checkpoint 主步数 | 20、40、60、63 | 80、160、240、252 |
+| `save_total_limit` | 5，实际保留 4 份 | 5，实际保留 4 份 |
+
+两份预设均在第 20、40、60 个 rollout 批次结束后验证并保存，并在第 63 批轮末额外执行一次，共保留 4 份 checkpoint。`dev.fixed_ratios=[]`，每次 dev 仅评价当前 greedy 边界策略，计算 QA NLL、生成 EM／F1、记忆成本和保留比例等指标。上述整数间隔按当前数据、全局 batch 和 PPO 内轮数设置，改变这些设置后需重新换算。两份预设的 `boundary_learning_rate=1e-4`、`warmup_ratio=0.1`、`min_lr_ratio=1.0`，学习率预热后保持恒定。阶段切换仅加载压缩器，重新初始化边界、PPO value head 及各自 optimizer／scheduler。
 
 边界策略预设均设置 `pending_stride=256`、`pending_size=256`。`post_default.json` 的模型默认 recent 为 0，K256 实验预设为 256，训练覆盖均为 `null`。
 
@@ -429,22 +445,21 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
   --gradient-accumulation-steps 8
 ```
 
-初始化来源与目标 run 须使用相同基座、K 和 LoRA 设置（rank、alpha、目标模块）。`joint/boundary_only` 均可从 AE／LM 预训练或 `compressor_only` checkpoint 加载压缩器。启用 GRPO 温度退火时，将 `--config` 改为 `configs/v3_1_1/post_k256_grpo_temp.json`；使用 SCST 温度退火时，改为 `configs/v3_1_1/post_k256_scst_temp.json`。每次新训练分别设置 `--run-id`，并通过 `--init-checkpoint` 指定初始化来源。
+初始化来源与目标 run 须使用相同基座、K 和 LoRA 设置（rank、alpha、目标模块）。`joint/boundary_only` 均可从 AE／LM 预训练或 `compressor_only` checkpoint 加载压缩器。启用 GRPO 温度退火时，将 `--config` 改为 `configs/v3_1_1/post_k256_grpo_temp.json`；使用 SCST 温度退火时，改为 `configs/v3_1_1/post_k256_scst_temp.json`。每次新训练分别设置 `--run-id`，初始化来源由配置中的 `training.run.init_checkpoint` 或显式 `--init-checkpoint` 指定。
 
-阶段 A（`compressor_only`）→ 阶段 B（`boundary_only`）使用以下两个后训练配置，分别通过 `--epochs` 设置 N、M 轮；默认分别为 5 轮和 1 轮，关闭长度课程。两阶段启动后直接训练，每轮末验证并保存 checkpoint。阶段 A 默认加载 `pretrain_k256_20261113_copy2` 的第 157 步 checkpoint；可通过 `--init-checkpoint` 指定其他 AE／LM 或 `compressor_only` checkpoint，或在配置中将 `init_checkpoint` 设为 `null`，从基座初始化压缩器。阶段切换新建 run，只载入压缩器权重，不沿用 optimizer 或 scheduler：
+阶段 A（`compressor_only`）→ 阶段 B（`boundary_only`）分别通过 `--epochs` 设置 N、M 轮；默认分别为 5 轮和 1 轮，关闭长度课程。两阶段启动后直接训练；阶段 A 每轮末验证并保存 checkpoint，阶段 B 按上述步数间隔验证并保存。阶段 A 默认加载 `pretrain_k256_20261113_copy2` 的第 157 步 checkpoint；可通过 `--init-checkpoint` 指定其他 AE／LM 或 `compressor_only` checkpoint，或在配置中将 `init_checkpoint` 设为 `null`，从基座初始化压缩器。以下阶段 A 示例使用单卡；阶段 B 示例按当前仅边界预设使用四卡，默认加载阶段 A 的第 160 步压缩器，重新初始化边界及 optimizer／scheduler：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
   --config configs/v3_1_1/post_k256_conly.json \
-  --run-id compressor-post_k256_20261118
+  --run-id compressor-post_k256_20261120
 
-CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
-  --config configs/v3_1_1/post_k256_bonly.json \
-  --run-id boundary-only_k256_20261118 --epochs 1 \
-  --init-checkpoint 'artifacts/v3-1/compressor-post_k256_20261118/train/checkpoints/global_step_<N>'
+CUDA_VISIBLE_DEVICES=4,5,6,7 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
+  --config configs/v3_1_1/post_k256_bonly_grpo.json \
+  --run-id boundary-only-grpo_k256_20261121
 ```
 
-将 `<N>` 替换为阶段 A 的 `train/summary.json` 中的真实 checkpoint step。边界策略允许一直等待到末尾，因此训练前检查去掉固定 recent 后的完整前缀能否放入 Writer 窗口；固定分段模式在实际 Writer／Reader 前向检查长度。
+使用 PPO 时将阶段 B 的配置改为 `configs/v3_1_1/post_k256_bonly_ppo.json`，并使用独立 `run_id`。若阶段 A 的运行目录或最终步数不同，通过 `--init-checkpoint` 指向其 `train/summary.json` 记录的 checkpoint。边界策略允许一直等待到末尾，因此训练前检查去掉固定 recent 后的完整前缀能否放入 Writer 窗口；固定分段模式在实际 Writer／Reader 前向检查长度。
 
 运行根目录为 `<output_root>/<run_id>/`。显式 `run_id` 原样使用；为 `null` 或省略时，AE／LM 预训练生成 `pretrain_k{K}_{YYYYMMDD-HHMM}`，`compressor_only` 生成 `compressor-post_k{K}_{YYYYMMDD-HHMM}`，`joint/boundary_only` 生成 `policy-post_k{K}_{YYYYMMDD-HHMM}`。时间采用 `Asia/Shanghai`，精确到分钟。
 
@@ -481,18 +496,18 @@ dev 保持模型参数不变，边界策略使用确定性判断。train/dev 曲
 
 ### 固定倍率与策略验证
 
-`training.dev.fixed_ratios=[2,4,8,16]` 使用同一批 dev；仅 QA 目标配置 `max_new_tokens`，预设值 128 控制 greedy 生成上限。AE／LM 验证只计算 NLL。固定倍率验证按压缩模式采用对应尾段协议：
+`training.dev.fixed_ratios` 控制固定倍率对照，例如 `[2,4,8,16]` 表示在同一批 dev 上评价四个倍率。当前仅边界预设将其设为 `[]`，只评价 greedy 边界策略。仅 QA 目标配置 `max_new_tokens`，预设值 128 控制 greedy 生成上限。AE／LM 验证只计算 NLL。启用固定倍率验证时，按压缩模式采用对应尾段协议：
 
 - AE／LM 或 `compressor_only` 的 multi：四个倍率使用相同的 recent 长度，预训练取 0，后训练取 `model.structure.recent_size`。对剩余前缀按当前固定倍率写入；若剩余长度不足一个固定倍率块，或写入一块会遗留不足 `min(ratios) × K` 的非空尾块，就将当前剩余前缀整体收尾。例如前缀 5K、固定倍率 4× 时，一次压缩 5K；最后一块实际倍率可略大于主倍率。single 若指定固定倍率对照，不保留 recent。
 - policy 的固定倍率基线：同样保留模型默认 recent；按固定倍率处理其余前缀，写入后若会遗留不足 `pending_size` 的非空尾块，就将当前剩余前缀整体收尾。各固定倍率块长至少为 `pending_size`。基线将 recent 之外的前缀全部压缩。
 
-各条件均记录实际段长和倍率。`fixed_ratios=[]` 不关闭 dev：AE／LM 和 `compressor_only` 的 single 验证单块压缩，multi 为每篇固定种子采样一条路径；`joint/boundary_only` 只验证 greedy 边界策略。QA 验证同时计算 NLL、生成答案并计算 EM／F1，与 recent 是否为 0 无关。
+各条件均记录实际段长和倍率。`fixed_ratios=[]` 不关闭 dev：AE／LM 和 `compressor_only` 的 single 验证单块压缩，multi 为每篇固定种子采样一条路径；当前 `recent_size=256` 的两份仅边界预设只验证 greedy 边界策略，同时计算 QA NLL、生成答案并计算 EM／F1。策略配置只有在 recent 为正或固定倍率列表非空时进入此条件验证路径；recent 为 0 且列表为空时使用逐文档损失验证。
 
-阶段 A 分别验证四个固定倍率；阶段 B 额外验证 greedy 边界策略。策略与固定倍率基线使用相同 recent，策略收尾可额外保留不足 `pending_size` 的 pending。进入条件验证的 QA 设置均报告 NLL、EM／F1、块数、未压缩 pending、recent、前缀保留比例及完整保留比例；边界策略模式另报告记忆成本及 `QA NLL + α × cost`，其中成本采用前缀保留比例的 p 次幂。NLL 按题目再文档平均，EM／F1 按题目平均。AE／LM 条件只评价对应重建／续写 NLL，不生成 QA 答案。
+阶段 A 预设分别验证四个固定倍率；阶段 B 预设只验证 greedy 边界策略，需要对照时可通过 `fixed_ratios` 加入固定倍率。策略与固定倍率基线使用相同 recent，策略收尾可额外保留不足 `pending_size` 的 pending。进入条件验证的 QA 设置均报告 NLL、EM／F1、块数、未压缩 pending、recent、前缀保留比例及完整保留比例；边界策略模式另报告记忆成本及 `QA NLL + α × cost`，其中成本采用前缀保留比例的 p 次幂。NLL 按题目再文档平均，EM／F1 按题目平均。AE／LM 条件只评价对应重建／续写 NLL，不生成 QA 答案。
 
-新 run 启动后直接训练，这些条件仅在配置的验证间隔、每轮末和最终步计算。`boundary_only` 的固定倍率基线在首次正常 dev 时建立，本次进程的后续验证复用；恢复后首次 dev 重建缓存。压缩器可更新的训练每次重新计算固定倍率结果。所有验证保留训练 RNG，不改变后续采样。逐篇分段、逐题生成和汇总写入 `train/dev/global_step_<step>/rank_<rank>.jsonl` 与 `summary.json`。
+新 run 启动后直接训练，这些条件仅在配置的验证间隔、每轮末和最终步计算。启用固定倍率对照时，`boundary_only` 的固定倍率基线在首次正常 dev 时建立，本次进程的后续验证复用；恢复后首次 dev 重建缓存。压缩器可更新的训练每次重新计算固定倍率结果，策略条件每次均使用当前边界参数重新验证。所有验证保留训练 RNG，不改变后续采样。逐篇分段、逐题生成和汇总写入 `train/dev/global_step_<step>/rank_<rank>.jsonl` 与 `summary.json`。
 
-SwanLab 使用 `dev/ratio_2/*`、`dev/ratio_4/*`、`dev/ratio_8/*`、`dev/ratio_16/*` 和 `dev/policy/*`。`dev/conditions/retention` 合并各条件的 `prefix_retention_ratio` 与 `retention_ratio`，按条件排列相邻图例；同一条件用同色系的深浅分别表示前缀与完整保留比例。四个固定倍率共显示 8 条曲线，有策略条件时追加其两条曲线。其余指标仍按同一指标合并条件并固定配色，`memory_cost` 作为本地辅助统计，包含该成本的 `objective` 单独展示。合并面板保留原指标键及统计口径。
+SwanLab 只记录已启用的条件：当前仅边界预设使用 `dev/policy/*`，四个固定倍率对照启用时另有 `dev/ratio_2/*`、`dev/ratio_4/*`、`dev/ratio_8/*` 和 `dev/ratio_16/*`。`dev/conditions/retention` 合并各条件的 `prefix_retention_ratio` 与 `retention_ratio`，按条件排列相邻图例；同一条件用同色系的深浅分别表示前缀与完整保留比例。仅策略验证显示两条保留比例曲线，启用四个固定倍率时再增加 8 条。其余指标仍按同一指标合并条件并固定配色，`memory_cost` 作为本地辅助统计，包含该成本的 `objective` 单独展示。合并面板保留原指标键及统计口径。
 
 ### 指标口径与面板
 

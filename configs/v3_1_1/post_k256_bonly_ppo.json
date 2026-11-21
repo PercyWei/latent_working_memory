@@ -30,7 +30,7 @@
   },
   "training": {
     "run": {
-      "init_checkpoint": null,
+      "init_checkpoint": "artifacts/v3-1/compressor-post_k256_20261120/train/checkpoints/global_step_160",
       "output_root": "artifacts/v3-1",
       "run_id": null
     },
@@ -68,11 +68,11 @@
       "curriculum_replay_ratio": 0.2,
       "max_steps": null,
       "micro_batch_size": 2,
-      "gradient_accumulation_steps": 8,
-      "critic_warmup": 0,
-      "dev_every": "after_each_epoch",
-      "save_every": "after_each_epoch",
-      "save_total_limit": 6
+      "gradient_accumulation_steps": 2,
+      "critic_warmup": 8,
+      "dev_every": 80,
+      "save_every": 80,
+      "save_total_limit": 5
     },
     "optimizer": {
       "boundary_learning_rate": 0.0001,
@@ -87,12 +87,7 @@
       "min_lr_ratio": 1.0
     },
     "dev": {
-      "fixed_ratios": [
-        2,
-        4,
-        8,
-        16
-      ],
+      "fixed_ratios": [],
       "max_new_tokens": 128
     },
     "swanlab": {

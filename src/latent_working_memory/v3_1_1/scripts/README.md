@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261120 17:32:24 Asia/Shanghai
+最后修订时间：20261121 15:09:53 Asia/Shanghai
 
 计算协议、数据格式与模块分工见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256_grpo.json)中的基座与数据路径。
 
@@ -148,7 +148,7 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
   --config configs/v3_1_1/post_k256_conly.json \
-  --run-id compressor-post_k256_20261118
+  --run-id compressor-post_k256_20261120
 ```
 
 [post_k256_conly.json](../../../../configs/v3_1_1/post_k256_conly.json) 使用 `stage=post`、`update_mode=compressor_only`，目标配置为 `training.objective={"type":"qa","strategy":"sft"}`，不配置 `backward`，`pending_stride`、`pending_size` 与 `boundary_hidden_size` 均为 `null`。该预设的压缩器学习率为 `1e-4`，`warmup_ratio=0.1`，`min_lr_ratio=0.1`；每卡 `micro_batch_size=4`、`gradient_accumulation_steps=8`，每次更新累计 `4 × 8 = 32` 篇文档，全局 batch 再乘 GPU 进程数，同篇 QA 数不计入文档 batch。默认运行名为 `compressor-post_k{memory_slots}_{YYYYMMDD-HHMM}`。
@@ -165,7 +165,7 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
 
 实际最终记忆成本为 `c=((K×B+P)/(D−R))^p`：D 为完整输入长度，R 为实际 recent 长度，B 为最终记忆块数，P 为最终未压缩 pending 长度。`terminal` 在末尾结算 `Z=-QA_NLL-αc`。
 
-仅 `reward_mode=stepwise` 允许配置 `training.objective.stepwise_cost_basis`，支持 `observed` 和 `full`，省略时默认 `observed`；terminal 和 SFT 配置不能包含该字段。两份 stepwise 预设 `post_k256_bonly.json` 和 `post_k256_ppo.json` 显式使用 `observed`。逐事件奖励为 `-α×(c_t−c_{t-1})`，最终额外加入一次 `-QA_NLL`：
+仅 `reward_mode=stepwise` 允许配置 `training.objective.stepwise_cost_basis`，支持 `observed` 和 `full`，省略时默认 `observed`；terminal 和 SFT 配置不能包含该字段。`post_k256_bonly_grpo.json` 使用 terminal 奖励；`post_k256_bonly_ppo.json` 使用 stepwise 奖励，并显式设置 `stepwise_cost_basis=observed`。stepwise 的逐事件奖励为 `-α×(c_t−c_{t-1})`，最终额外加入一次 `-QA_NLL`：
 
 | 成本基准 | 过程成本 | 即时记忆奖励 |
 |---|---|---|
@@ -178,11 +178,13 @@ recent 不收费，强制收尾不重复扣完整成本。D>R 时，未折扣原
 
 SCST terminal 调用 verl 原生 ReMax 得到完整得分差，stepwise 使用随机路径与 greedy 路径在同一正文读取位置的折扣后续回报差。GRPO terminal 调用原生 GRPO 标准化最终得分，stepwise 先对同篇采样组的全部真实事件奖励统一标准化，再累计折扣回报；两种模式均使用样本标准差。真实强制事件参与回报和统计，padding 与初始成本占位不参与。只有允许自主选择压缩或继续积累的位置参与 actor 损失。
 
-PPO 使用独立 value head 和 verl 原生 GAE，`gae_lambda` 必须显式设置，两种奖励模式都读取该值。原生 GAE 对完整 rollout 批次的真实事件优势做白化，critic 目标仍使用白化前的优势。预设 [post_k256_ppo.json](../../../../configs/v3_1_1/post_k256_ppo.json) 使用 `group_size=1`、`gae_lambda=0.95`、`ppo_epochs=4`、`value_loss_weight=0.5`；0.95 仅为预设值。Writer 和 memory 冻结，每批 rollout 固定特征、旧概率、旧价值、优势及价值目标。actor／critic 使用独立 optimizer 和梯度裁剪，先完成 critic 的全部内轮，再完成 actor 的全部内轮；value head 与边界沿用同一学习率数值。将下面命令的配置路径换为该 PPO 预设即可启动。
+PPO 使用独立 value head 和 verl 原生 GAE，`gae_lambda` 必须显式设置，两种奖励模式都读取该值。原生 GAE 对完整 rollout 批次的真实事件优势做白化，critic 目标仍使用白化前的优势。预设 [post_k256_bonly_ppo.json](../../../../configs/v3_1_1/post_k256_bonly_ppo.json) 使用 `group_size=1`、`gae_lambda=0.95`、`ppo_epochs=4`、`value_loss_weight=0.5` 和 `critic_warmup=8`；0.95 仅为预设值。Writer 和 memory 冻结，每批 rollout 固定特征、旧概率、旧价值、优势及价值目标。actor／critic 使用独立 optimizer 和梯度裁剪，先完成 critic 的全部内轮，再完成 actor 的全部内轮；value head 与边界沿用同一学习率数值。
 
 三种策略在 terminal 和 stepwise 下都使用 verl vanilla 策略损失：轨迹内对自主动作求和，再按完整 `group_size` 和实际全局文档数平均。零自主动作轨迹贡献 0，仍保留在轨迹和文档的平均分母中。策略项采用原生 dual-clip 系数 3 和 log 概率比 `[-20,20]` 截断；critic 保持每条轨迹的真实事件平均，再对轨迹和文档平均，并采用范围为 0.5 的原生 value clipping。求和归约会影响 actor 损失尺度，`clip_epsilon`、损失权重、学习率与其他超参数沿用配置值。
 
 `training.loop.critic_warmup` 默认 0，直接使用原生 rollout 批次阈值；仅 PPO 配置可以包含该字段。批次从 1 开始，0／1 均从首批更新 actor，11 表示前 10 批只更新 critic。预热期间继续采样新轨迹，使用相同 GAE 目标；该参数与学习率的 `scheduler.warmup_ratio` 独立。
+
+`post_k256_bonly_ppo.json` 的 `critic_warmup=8` 表示前 7 批只更新 critic，第 8 批开始更新 actor；这是该预设的配置，通用默认仍为 0。
 
 PPO 的 `max_steps`、checkpoint 和 SwanLab 横轴使用 critic 实际更新数作为主步数；其他策略使用 actor 实际更新数。完整数据轮数对应的文档批次数乘 `ppo_epochs` 为 PPO 预算，critic 预热占用原预算。两个 optimizer 的学习率 scheduler 分别按自身实际更新次数推进，温度按训练主步数计算；actor 在预热或全局无自主动作时不更新。`rollout_step`、`actor_optimizer_step` 和 `critic_optimizer_step` 分别记录在本地辅助指标中，不能将原生预热的批次阈值当成 optimizer 步数。记录、dev 与保存位于完整 rollout 更新批次结束处，跨过整数间隔阈值时触发，恢复从下一批 rollout 继续。
 
@@ -203,18 +205,21 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
 - **反传跨度**：在 JSON 中设置 `training.backward.bptt_steps`，支持 `null`（保留完整跨段反传）或正整数。例如设为 `2`，每两次实际写入为一组，组内正常反传，组间截断后续压缩与边界判断使用的历史梯度。全部历史 memory 仍参与前向，所有块保留直接 QA 监督；AE／LM、`compressor_only`、无梯度采样和评估不受影响。
 - **归约与尾批**：损失按实际文档数平均，尾批不补齐、不丢弃、不跨 epoch 拼接；空 rank 同样参加 collective。
 
-仅边界更新使用 `post_k256_bonly.json`，冻结 Writer 和记忆 embedding，只训练边界模块。阶段 A → B 可运行：
+仅边界更新使用 `post_k256_bonly_grpo.json` 或 `post_k256_bonly_ppo.json`，冻结 Writer、memory embeddings 和 Reader，GRPO 只训练边界，PPO 另训练 value head。两份预设的 `init_checkpoint` 均为 `artifacts/v3-1/compressor-post_k256_20261120/train/checkpoints/global_step_160`，每卡 `micro_batch_size=2`、`gradient_accumulation_steps=2`，训练 1 轮且关闭长度课程。边界学习率为 `1e-4`，`warmup_ratio=0.1`、`min_lr_ratio=1.0`，预热后保持恒定；PPO value head 使用相同学习率设置。以下按四卡运行，全局 batch 为 `4 × 2 × 2=16`：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
-  --config configs/v3_1_1/post_k256_bonly.json \
-  --run-id boundary-only_k256_20261118 \
-  --init-checkpoint 'artifacts/v3-1/compressor-post_k256_20261118/train/checkpoints/global_step_160'
+CUDA_VISIBLE_DEVICES=4,5,6,7 bash src/latent_working_memory/v3_1_1/scripts/train.sh \
+  --config configs/v3_1_1/post_k256_bonly_grpo.json \
+  --run-id boundary-only-grpo_k256_20261121
 ```
+
+使用 PPO 时将配置替换为 `configs/v3_1_1/post_k256_bonly_ppo.json`，并指定独立 `run_id`。初始化来源不同则用 `--init-checkpoint` 显式覆盖；新 run 的边界、value head、optimizer 和 scheduler 独立初始化。
+
+按四卡、全局 batch 16 和当前 1002 篇训练文档计算，1 轮共 63 个 rollout 批次，末批保留 10 篇：GRPO 共 63 次主更新，学习率预热 `ceil(0.1 × 63)=7` 步；PPO 共 `63 × 4=252` 次 critic 主更新，actor／critic 各自学习率预热 `ceil(0.1 × 252)=26` 步。PPO 前 7 批共 28 次更新仅训练 critic，其余 56 批每批均存在自主动作时，actor 共更新 224 次。GRPO 的 `dev_every`／`save_every` 均为 20，在主步数 20、40、60、63 验证并保存；PPO 均为 80，对应主步数 80、160、240、252。两者均对应第 20、40、60、63 个 rollout 批次，最后一批由轮末规则触发一次。`save_total_limit=5` 是保留上限，实际生成的 4 份 checkpoint 全部保留。两份预设均设置 `dev.fixed_ratios=[]`，在当前 `recent_size=256` 下仅验证当前 greedy 边界策略，记录 QA NLL、EM／F1、最终记忆成本和保留比例。数据规模、全局 batch 或 PPO 内轮数改变时，需重新计算预算及验证、保存间隔。
 
 `post_default.json` 的模型默认 recent 为 0，K256 实验预设为 256；训练覆盖均为 `null`。`recent_size=0` 不预留 recent，但仍可能留下不足 `pending_size` 的 pending。
 
-阶段 A 使用固定倍率 dev；阶段 B 额外使用 greedy 策略 dev。两段分别启动新 run；也可直接从 AE／LM checkpoint 启动 `boundary_only`。
+当前阶段 A 预设使用固定倍率 dev；阶段 B 两份预设只使用 greedy 策略 dev，可通过非空 `dev.fixed_ratios` 额外加入固定倍率对照。两段分别启动新 run；也可直接从 AE／LM checkpoint 启动 `boundary_only`。
 
 ### 3.4 中断恢复
 
@@ -409,7 +414,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 | `--config` | 新训练必填，JSON 配置文件；阶段取文件中的 `stage` |
 | `--model-path` | 基座与 tokenizer 路径，省略时沿用配置 |
 | `--seed` | 非负随机种子，默认 42 |
-| `--init-checkpoint` | `joint/boundary_only` 必填，`compressor_only` 可选；加载 AE／LM 或 `compressor_only` 的压缩器，使用新的 optimizer／scheduler |
+| `--init-checkpoint` | 覆盖配置中的压缩器来源；`joint/boundary_only` 须提供有效来源，`compressor_only` 可选；加载 AE／LM 或 `compressor_only` 压缩器，使用新的 optimizer／scheduler |
 | **目录与运行标识** | |
 | `--output-root` | 训练产物父目录，默认 `artifacts/v3-1` |
 | `--run-id` | 训练运行目录名，默认见[目录命名](#7-产物目录与记录) |
@@ -544,5 +549,5 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 - **展示方式**：SwanLab 默认开启，记录 train/dev、训练资源及配置。project、group 和 tags 通过配置文件设置；project 默认为 `latent-working-memory-v3.1`，group 未指定时默认 `run_id`。`--tracking offline` 关闭 SwanLab 记录，仅保留本地产物；恢复训练沿用 `swanlab.json` 中的 run。评估由独立 dashboard 展示，不读取 SwanLab 身份或凭据。
 - **verl 接入**：边界训练直接运行原生 `PPOTrainer.step`，由其控制 critic／actor 更新与 critic 预热；RL 更新进入原生 `BaseEngine.train_batch` 生命周期，优势与损失尽量调用原生函数。分段采样、任务 autograd、复制式梯度同步、外层预算与单文件 checkpoint 保留项目适配，不启动 Ray worker 或 TransferQueue 服务。
 - **后训练图表**：`compressor_only` 记录 QA NLL、记忆用量和固定倍率 dev；边界策略模式另记录奖励、零优势比例、策略熵与回放概率偏差。SCST 的 greedy 基线并入奖励图，单随机路径时 `reward_std` 仅保留本地；启用退火时增加 `policy_temperature` 图。train/dev 的 `memory_usage` 绘制 `blocks`，图例为 `memory_blocks`；`compression` 绘制全局聚合后的 `segment_tokens / K`，图例为 `compression_rate`。首次出现真实记录时注册并配置原生面板，运行中只追加真实 optimizer step 的标量，dev 在实际验证步记录。辅助统计保存在本地，完整指标口径与展示规则见[方法说明](../README.md#验证独立评估与记录)。
-- **固定倍率基线**：`boundary_only` 在首次正常 dev 时计算并缓存固定倍率结果，本次进程的后续验证复用；恢复后首次 dev 重建。压缩器可更新的训练每次重新计算。
-- **保留比例曲线**：`train/retention` 合并 `train/prefix_retention_ratio` 与 `train/retention_ratio` 两条曲线。`dev/conditions/retention` 合并各条件的前缀与完整保留比例，图例按条件相邻排列，同一条件用同色系的深浅区分两类比例；2×、4×、8×、16× 共 8 条曲线。底层指标键及统计口径保持一致，其他 dev 指标仍各自合图。
+- **固定倍率基线**：启用非空 `dev.fixed_ratios` 时，`boundary_only` 在首次正常 dev 计算并缓存固定倍率结果，本次进程的后续验证复用；恢复后首次 dev 重建。压缩器可更新的训练每次重新计算。当前两份 `post_k256_bonly_*` 预设未启用固定倍率对照，policy 每次 dev 重新评价。
+- **保留比例曲线**：`train/retention` 合并 `train/prefix_retention_ratio` 与 `train/retention_ratio` 两条曲线。`dev/conditions/retention` 合并各条件的前缀与完整保留比例，图例按条件相邻排列，同一条件用同色系的深浅区分两类比例；启用 2×、4×、8×、16× 时，四个固定倍率共 8 条曲线，当前仅 policy 的两份边界预设只显示该策略的两类比例。底层指标键及统计口径保持一致，其他 dev 指标仍各自合图。
