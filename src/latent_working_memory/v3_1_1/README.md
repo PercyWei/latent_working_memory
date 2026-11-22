@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261122 00:40:41 Asia/Shanghai
+最后修订时间：20261122 12:35:40 Asia/Shanghai
 
 v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=post` 使用问答（QA），由 `training.update_mode` 选择仅更新压缩器（`compressor_only`）、仅更新边界（`boundary_only`）或联合更新（`joint`）。每次写入将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆及未压缩的 pending 和 recent 尾段回答问题。
 
@@ -391,7 +391,11 @@ K256 实验预设使用 `~/models/Qwen3-4B-Instruct-2507`，开启 FA2、BF16 au
 
 ### PPO 参数对照配置
 
-`configs/v3_1_1/post_k256_bonly_ppo_*.json` 是五份可独立加载的完整配置，均使用同一 compressor step 160 初始化新的 boundary 与 value head。共同设置为 PPO、`boundary_only`、`reward_mode=stepwise`，每卡 `micro_batch_size=2`、`gradient_accumulation_steps=4`，双卡全局 batch 为 16 篇文档。各配置独立采用下表设置，其余训练参数沿用基础 PPO 预设。
+以下两组均为可独立加载的完整配置，使用同一 compressor step 160 初始化新的 boundary 与 value head。共同设置为 PPO、`boundary_only`、`reward_mode=stepwise`，每卡 `micro_batch_size=2`、`gradient_accumulation_steps=4`，双卡全局 batch 为 16 篇文档。均保留 `gamma=1.0`、`memory_cost_power=1.0`、`warmup_ratio=0.1`、`max_steps=null`，由实际数据和训练轮数解析预算。
+
+#### 基础参数对照
+
+这五份配置分别采用下表设置，其余训练参数沿用基础 PPO 预设。
 
 | 方案 | 配置文件 | 专属设置 |
 |---|---|---|
@@ -401,13 +405,28 @@ K256 实验预设使用 `~/models/Qwen3-4B-Instruct-2507`，开启 FA2、BF16 au
 | 学习率衰减 | [post_k256_bonly_ppo_decay0p1.json](../../../configs/v3_1_1/post_k256_bonly_ppo_decay0p1.json) | `min_lr_ratio=0.1`，峰值学习率保持 `1e-4` |
 | 增加新采样批次 | [post_k256_bonly_ppo_updates2_epochs2.json](../../../configs/v3_1_1/post_k256_bonly_ppo_updates2_epochs2.json) | `ppo_epochs=2`、`epochs=2`、`critic_warmup=15` |
 
-除 `full_cost0p03` 外均使用 `stepwise_cost_basis=observed`、`memory_cost_weight=0.1`；除 `gae1_group2` 外均使用 `gae_lambda=0.95`、`group_size=1`。五份配置均保留 `gamma=1.0`、`memory_cost_power=1.0`、`warmup_ratio=0.1`，`max_steps=null`，由实际数据和训练轮数解析预算。
+上表中，除 `full_cost0p03` 外均使用 `stepwise_cost_basis=observed`、`memory_cost_weight=0.1`；除 `gae1_group2` 外均使用 `gae_lambda=0.95`、`group_size=1`。
 
-双卡全局 batch 16、训练集 1002 篇时，单轮配置为 63 个 rollout 批次、每批 4 次 PPO 更新；`updates2_epochs2` 为 126 个 rollout 批次、每批 2 次更新。五套均为 252 次 critic 更新，前 28 次仅更新 critic，之后最多 224 次 actor 更新；学习率预热均为 26 次更新。`gae1_group2` 每篇采样两条路径，`updates2_epochs2` 每篇训练两轮，两者的采样及 QA 评分路径数均为其余方案的两倍。
+#### 衰减基线下的质量反馈与采样对照
+
+以下四份以 `post_k256_bonly_ppo_decay0p1.json` 为参数基线，只修改表中参数，仍从上述 compressor step 160 初始化。共同保留 `stepwise_cost_basis=observed`、`min_lr_ratio=0.1`、`boundary_learning_rate=1e-4`、`policy_transition=null`（T=1）、`ppo_epochs=4`、`epochs=1` 和 `critic_warmup=8`。
+
+| 配置文件 | 相对 decay0p1 的修改 | 主要对照 |
+|---|---|---|
+| [post_k256_bonly_ppo_decay0p1_gae1.json](../../../configs/v3_1_1/post_k256_bonly_ppo_decay0p1_gae1.json) | `gae_lambda=1.0` | 与 decay0p1 比较 GAE 的长程回报传播 |
+| [post_k256_bonly_ppo_decay0p1_group2.json](../../../configs/v3_1_1/post_k256_bonly_ppo_decay0p1_group2.json) | `group_size=2` | 与 decay0p1 比较每篇增加随机路径的作用 |
+| [post_k256_bonly_ppo_decay0p1_gae1_group2.json](../../../configs/v3_1_1/post_k256_bonly_ppo_decay0p1_gae1_group2.json) | `gae_lambda=1.0`、`group_size=2` | 与 decay0p1_gae1、decay0p1_group2 分别比较路径数和 GAE 的作用 |
+| [post_k256_bonly_ppo_decay0p1_gae1_cost0p03.json](../../../configs/v3_1_1/post_k256_bonly_ppo_decay0p1_gae1_cost0p03.json) | `gae_lambda=1.0`、`memory_cost_weight=0.03` | 与 decay0p1_gae1 单独比较成本权重 |
+
+前三份与 decay0p1 构成 `gae_lambda ∈ {0.95, 1.0}`、`group_size ∈ {1, 2}` 的 2×2 对照，成本权重均为 0.1。第四份在 `gae_lambda=1.0`、`group_size=1` 下将成本权重从 0.1 降至 0.03，保持 `observed`，可单独观察成本压力的影响；基础组的 `full_cost0p03` 同时改变成本基准与权重，不能替代这一对照。
+
+#### 共同预算与运行标识
+
+双卡全局 batch 16、训练集 1002 篇时，单轮配置为 63 个 rollout 批次、每批 4 次 PPO 更新；`updates2_epochs2` 为 126 个 rollout 批次、每批 2 次更新。两组配置均为 252 次 critic 更新，前 28 次仅更新 critic，之后最多 224 次 actor 更新；学习率预热均为 26 次更新。`group_size=2` 每篇采样两条路径，保持文档 batch 和更新步数不变，采样及 QA 评分路径数为同轮数 `group_size=1` 的两倍。`updates2_epochs2` 每篇训练两轮，路径数同样为单轮 `group_size=1` 的两倍。
 
 `dev_every=80`、`save_every=80`、`save_total_limit=5`。单轮配置在 step 80、160、240、252 验证并保存；`updates2_epochs2` 还在第一轮末 step 126 验证并保存，共保留 5 份 checkpoint。GPU 数或数据量变化时，须按实际全局 batch 重新核算这些步数。
 
-这些参数预设的 `run_id` 和 SwanLab `group` 均为 `null`。启动时通过 `--run-id` 为各方案指定独立运行名；作为同一组对照运行时，在五份配置的 `training.swanlab.group` 中显式填写同一实验系列名称。
+这些参数预设的 `run_id` 和 SwanLab `group` 均为 `null`。启动时通过 `--run-id` 为各方案指定独立运行名；作为同一组对照运行时，在参与对照的配置中显式填写相同的 `training.swanlab.group`。
 
 ### 计算精度与显存
 

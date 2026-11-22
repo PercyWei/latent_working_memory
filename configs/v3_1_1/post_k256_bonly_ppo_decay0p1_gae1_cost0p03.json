@@ -1,0 +1,100 @@
+{
+  "stage": "post",
+  "seed": 42,
+  "model_name_or_path": "~/models/Qwen3-4B-Instruct-2507",
+  "model": {
+    "structure": {
+      "memory_slots": 256,
+      "pending_stride": 256,
+      "pending_size": 256,
+      "recent_size": 256,
+      "boundary_hidden_size": 128
+    },
+    "lora": {
+      "lora_rank": 16,
+      "lora_alpha": 32,
+      "lora_target_modules": [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj"
+      ]
+    }
+  },
+  "compute": {
+    "dtype": "float32",
+    "attention_implementation": "flash_attention_2",
+    "gradient_checkpointing": true,
+    "mixed_precision": true,
+    "save_on_cpu": false
+  },
+  "training": {
+    "run": {
+      "init_checkpoint": "artifacts/v3-1/compressor-post_k256_20261120/train/checkpoints/global_step_160",
+      "output_root": "artifacts/v3-1",
+      "run_id": null
+    },
+    "data": {
+      "dataset_dir": "data/fineweb-factqa_q10_train1k_length3_20261112",
+      "max_train_data_tokens": 12288,
+      "max_train_samples": null,
+      "max_dev_samples": null,
+      "length_curriculum": false
+    },
+    "compression": {
+      "mode": "policy",
+      "recent_size": null
+    },
+    "update_mode": "boundary_only",
+    "objective": {
+      "type": "qa",
+      "strategy": "ppo",
+      "reward_mode": "stepwise",
+      "stepwise_cost_basis": "observed",
+      "group_size": 1,
+      "gamma": 1.0,
+      "policy_transition": null,
+      "memory_cost_weight": 0.03,
+      "memory_cost_power": 1.0,
+      "policy_weight": 1.0,
+      "clip_epsilon": 0.2,
+      "gae_lambda": 1.0,
+      "ppo_epochs": 4,
+      "value_loss_weight": 0.5
+    },
+    "loop": {
+      "epochs": 1,
+      "curriculum_stage_epochs": 1,
+      "curriculum_replay_ratio": 0.2,
+      "max_steps": null,
+      "micro_batch_size": 2,
+      "gradient_accumulation_steps": 4,
+      "critic_warmup": 8,
+      "dev_every": 80,
+      "save_every": 80,
+      "save_total_limit": 5
+    },
+    "optimizer": {
+      "boundary_learning_rate": 0.0001,
+      "weight_decay": 0.01,
+      "beta1": 0.9,
+      "beta2": 0.999,
+      "adam_epsilon": 1e-08,
+      "gradient_clip": 1.0
+    },
+    "scheduler": {
+      "warmup_ratio": 0.1,
+      "min_lr_ratio": 0.1
+    },
+    "dev": {
+      "fixed_ratios": [],
+      "max_new_tokens": 128
+    },
+    "swanlab": {
+      "tracking": true,
+      "project": "latent-working-memory-v3.1",
+      "group": null,
+      "tags": []
+    }
+  }
+}
