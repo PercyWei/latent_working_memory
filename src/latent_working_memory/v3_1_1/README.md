@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261122 12:35:40 Asia/Shanghai
+最后修订时间：20261122 20:13:29 Asia/Shanghai
 
 v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=post` 使用问答（QA），由 `training.update_mode` 选择仅更新压缩器（`compressor_only`）、仅更新边界（`boundary_only`）或联合更新（`joint`）。每次写入将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆及未压缩的 pending 和 recent 尾段回答问题。
 
@@ -391,21 +391,24 @@ K256 实验预设使用 `~/models/Qwen3-4B-Instruct-2507`，开启 FA2、BF16 au
 
 ### PPO 参数对照配置
 
-以下两组均为可独立加载的完整配置，使用同一 compressor step 160 初始化新的 boundary 与 value head。共同设置为 PPO、`boundary_only`、`reward_mode=stepwise`，每卡 `micro_batch_size=2`、`gradient_accumulation_steps=4`，双卡全局 batch 为 16 篇文档。均保留 `gamma=1.0`、`memory_cost_power=1.0`、`warmup_ratio=0.1`、`max_steps=null`，由实际数据和训练轮数解析预算。
+以下两组均为可独立加载的完整配置，使用同一 compressor step 160 初始化新的 boundary 与 value head。共同设置为 PPO、`boundary_only`、`reward_mode=stepwise`；双卡运行通过 CLI 指定每卡 `micro_batch_size=2`、`gradient_accumulation_steps=4`，全局 batch 为 16 篇文档。均保留 `gamma=1.0`、`memory_cost_power=1.0`、`warmup_ratio=0.1`、`max_steps=null`，由实际数据和训练轮数解析预算。
 
 #### 基础参数对照
 
-这五份配置分别采用下表设置，其余训练参数沿用基础 PPO 预设。
+这六份配置分别采用下表设置，其余训练参数沿用基础 PPO 预设。
 
 | 方案 | 配置文件 | 专属设置 |
 |---|---|---|
 | 完整回报与路径覆盖 | [post_k256_bonly_ppo_gae1_group2.json](../../../configs/v3_1_1/post_k256_bonly_ppo_gae1_group2.json) | `gae_lambda=1.0`、`group_size=2` |
-| 过程奖励 | [post_k256_bonly_ppo_full_cost0p03.json](../../../configs/v3_1_1/post_k256_bonly_ppo_full_cost0p03.json) | `stepwise_cost_basis=full`、`memory_cost_weight=0.03` |
+| 过程成本基准 | [post_k256_bonly_ppo_full.json](../../../configs/v3_1_1/post_k256_bonly_ppo_full.json) | 仅 `stepwise_cost_basis=full`，保持 `memory_cost_weight=0.1` |
+| 成本基准与权重 | [post_k256_bonly_ppo_full_cost0p03.json](../../../configs/v3_1_1/post_k256_bonly_ppo_full_cost0p03.json) | `stepwise_cost_basis=full`、`memory_cost_weight=0.03` |
 | 温度退火 | [post_k256_bonly_ppo_temp0p2.json](../../../configs/v3_1_1/post_k256_bonly_ppo_temp0p2.json) | 线性退火：前 50% 保持 T=1.0，50%～80% 降至 T=0.2，最后 20% 保持 T=0.2 |
 | 学习率衰减 | [post_k256_bonly_ppo_decay0p1.json](../../../configs/v3_1_1/post_k256_bonly_ppo_decay0p1.json) | `min_lr_ratio=0.1`，峰值学习率保持 `1e-4` |
 | 增加新采样批次 | [post_k256_bonly_ppo_updates2_epochs2.json](../../../configs/v3_1_1/post_k256_bonly_ppo_updates2_epochs2.json) | `ppo_epochs=2`、`epochs=2`、`critic_warmup=15` |
 
-上表中，除 `full_cost0p03` 外均使用 `stepwise_cost_basis=observed`、`memory_cost_weight=0.1`；除 `gae1_group2` 外均使用 `gae_lambda=0.95`、`group_size=1`。
+上表中，`full` 和 `full_cost0p03` 使用 `stepwise_cost_basis=full`，其余使用 `observed`；仅 `full_cost0p03` 的成本权重为 0.03，其余为 0.1。除 `gae1_group2` 外均使用 `gae_lambda=0.95`、`group_size=1`。
+
+`post_k256_bonly_ppo_full.json` 与基础 PPO 配置仅有 `stepwise_cost_basis` 一个字段不同，用于比较相同成本权重下的 `observed/full`。它保留基础配置的梯度累积默认值；双卡运行时按上述 CLI 设置覆盖为 4。与 `full_cost0p03` 在相同实际 batch 下比较，可单独观察成本权重的影响。
 
 #### 衰减基线下的质量反馈与采样对照
 
