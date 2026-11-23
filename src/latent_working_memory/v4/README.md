@@ -2,7 +2,7 @@
 
 创建时间：20261003 21:51:43 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261020 19:40:50 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261123 16:39:54 Asia/Shanghai
 
 冻结基座，在每层维护 latent memory，通过 Attention Matching 局部更新记忆，并由答案 CE 学习如何生成压缩查询和读写记忆。
 
@@ -170,7 +170,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - **评估看板**：通过 [dashboard.sh](scripts/dashboard.sh) 的必填参数 `--run-dir artifacts/v4/<run-id>` 指定单次 run，页面内选择方法、eval-id 和 checkpoint，仅加载当前打开的 test／RULER／LoCoMo 任务。读取本地汇总及其实际 seed，不缓存，点击“刷新结果”后重新读取；同步时保留 `<run-id>/eval/` 目录结构即可，无需 `plan/`、训练记录或权重。
 - **图表组织**：方法名使用方法目录名，基线先于当前方法排列，LoCoMo 各类别的基线柱使用同一颜色。单 checkpoint 的 test 将 NLL、EM／F1 合并为双轴柱图，AM loss 以 `Before write`／`After write` 展示；LoCoMo 按 QA 类别展示。多 checkpoint 按真实累计 optimizer step 升序绘图，逐样本记录按需读取。
 - **RULER 图表**：单 checkpoint 用折线图比较各长度的 Mean，选择长度后用分组柱图展示 13 项任务；横轴使用任务缩写，悬停显示完整名称，同一方法跨长度和任务保持同色，只展示实际完成的长度。多 checkpoint 可选择 Overall 或具体长度查看 step 曲线，再选择一个 checkpoint 查看长度总览和任务明细；总体分数仍按各 checkpoint 实际完成的长度计算，不额外对齐。
-- **基线对照**：看板通过 `--baseline-results <标签> <目录> ...` 接收 [full-context 基线](../baselines/README.md)，在页面勾选显示。每次仅使用当前传入集合，不保存绑定；缺少当前 benchmark 结果时跳过，路径、格式或比较协议错误在页面提示，不影响评估计算。基线加入对应的汇总图，多 checkpoint 的 step 曲线使用水平虚线，启动命令见[运行指南](scripts/README.md#25-评估看板)。
+- **基线对照**：看板通过 `--baseline-results <标签> <目录> ...` 接收 [full-context 基线](../full_context/README.md)，在页面勾选显示。每次仅使用当前传入集合，不保存绑定；缺少当前 benchmark 结果时跳过，路径、格式或比较协议错误在页面提示，不影响评估计算。基线加入对应的汇总图，多 checkpoint 的 step 曲线使用水平虚线，启动命令见[运行指南](scripts/README.md#25-评估看板)。
 
 | 位置 | 主要产物 |
 |---|---|

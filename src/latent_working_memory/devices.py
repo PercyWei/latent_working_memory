@@ -5,6 +5,14 @@ import os
 import torch
 
 
+def visible_devices():
+    """按 CUDA_VISIBLE_DEVICES 的顺序返回用户选择的物理卡编号。"""
+    devices = [value.strip() for value in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")]
+    if any(not value.isdecimal() for value in devices) or len(set(map(int, devices))) != len(devices):
+        raise ValueError("set CUDA_VISIBLE_DEVICES to distinct physical GPU indices")
+    return [str(int(value)) for value in devices]
+
+
 def validate_device(device: torch.device) -> None:
     if device.type != "cuda":
         return

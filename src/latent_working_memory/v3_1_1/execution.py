@@ -7,6 +7,8 @@ from pathlib import Path
 import signal
 import subprocess
 
+from latent_working_memory.devices import visible_devices as visible_devices
+
 
 @contextmanager
 def _lock(path, mode):
@@ -34,13 +36,6 @@ def run_lock(run_directory, exclusive=False):
 
 def evaluation_lock(run_directory, eval_id, task):
     return _lock(_lock_directory(run_directory) / f"eval-{eval_id}" / f"{task}.lock", fcntl.LOCK_EX)
-
-
-def visible_devices():
-    devices = [value.strip() for value in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")]
-    if any(not value.isdecimal() for value in devices) or len(set(map(int, devices))) != len(devices):
-        raise ValueError("set CUDA_VISIBLE_DEVICES to distinct physical GPU indices")
-    return [str(int(value)) for value in devices]
 
 
 def stop_process(process):
