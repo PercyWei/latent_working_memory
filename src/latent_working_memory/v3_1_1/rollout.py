@@ -21,6 +21,7 @@ class ExecutionResult(NamedTuple):
     prefix_retained_counts: tuple[int, ...]
     pending_ids: tuple[int, ...] = ()
     event_features: torch.Tensor | None = None
+    raw_logits: torch.Tensor | None = None
 
     @property
     def retained_ids(self):
@@ -251,7 +252,7 @@ def execute_replay_batch(model, contexts, pending_stride, actions, bptt_steps=No
 
 @torch.no_grad()
 def execute_batch(model, contexts, pending_stride, uniforms=None, temperature=1.0,
-                  pending_size=None, recent_size=0, collect_features=False):
+                  pending_size=None, recent_size=0, collect_features=False, collect_logits=False):
     """批量分段；uniforms 按正文固定位置索引，强制等待不产生策略概率。"""
     pending_size = model.memory_slots if pending_size is None else pending_size
     sources = [_source_units(context, pending_stride, recent_size) for context in contexts]
@@ -263,6 +264,7 @@ def execute_batch(model, contexts, pending_stride, uniforms=None, temperature=1.
     blocks = [[] for _ in units]
     pending = [len(sequence[0]) if sequence else 0 for sequence in units]
     chosen, log_probs, entropies = ([[] for _ in units] for _ in range(3))
+    raw_logits = [[] for _ in units] if collect_logits else None
     pending_tails = [() for _ in units]
     caches = [None] * len(units)
     source_features = [model.memory_embeddings.new_zeros(model.width) for _ in units]
@@ -324,6 +326,8 @@ def execute_batch(model, contexts, pending_stride, uniforms=None, temperature=1.
             chosen[index].append(commits[row])
             log_probs[index].append(probabilities[row])
             entropies[index].append(uncertainty[row])
+            if collect_logits:
+                raw_logits[index].append(logits[row].detach().clone())
             caches[index] = observed[row]
             if commits[row]:
                 caches[index] = observed[row] = None
@@ -360,6 +364,8 @@ def execute_batch(model, contexts, pending_stride, uniforms=None, temperature=1.
             torch.stack(entropies[index]) if entropies[index] else zero,
             lengths, recent[index], mask, retained, pending_tails[index],
             torch.stack(event_features[index]) if collect_features else None,
+            (torch.stack(raw_logits[index]) if raw_logits[index] else zero)
+            if collect_logits else None,
         ))
     return results
 
