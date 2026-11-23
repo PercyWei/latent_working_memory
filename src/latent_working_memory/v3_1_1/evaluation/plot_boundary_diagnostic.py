@@ -114,8 +114,9 @@ def plot_histogram(plan, split, statistics, destination):
         else:
             axis.set_title(f"{label}: no eligible decisions", loc="left", fontsize=10, pad=10)
     footnote = (f"N = {statistics['decision_count']:,} decisions; bars show fraction and count. "
-                "Forced waits and EOF excluded.\n"
-                "Bins are [left, right), with 1.0 included in the last bin; T = 1 uses the same visited states.")
+                "Bins are [left, right), with 1.0 in the last bin.\n"
+                "Greedy uses raw logit >= 0; rounded p can equal 0.5 for a negative logit. "
+                "T = 1 keeps the same visited states.")
     figure.text(0.065, 0.035, footnote, fontsize=9, color="#475569", linespacing=1.5)
     _save_figure(figure, destination)
 
@@ -149,7 +150,8 @@ def plot_scatter(plan, split, rows, statistics, destination):
     figure.text(0.065, 0.04,
                 f"N = {statistics['decision_count']:,} decisions across "
                 f"{statistics['documents_with_decisions']:,} documents. All points retained; no jitter.\n"
-                "Train uses sampled paths; dev uses greedy paths. T = 1 comparison keeps the same visited states.",
+                "Greedy uses raw logit >= 0; rounded p can equal 0.5 for a negative logit. "
+                "T = 1 keeps the same visited states.",
                 fontsize=9, color="#475569", linespacing=1.5)
     _save_figure(figure, destination)
 
@@ -160,12 +162,13 @@ def render_diagnostic(input_dir):
     plt.rcParams.update({
         "font.family": "DejaVu Sans", "font.size": 10,
         "axes.spines.top": False, "axes.spines.right": False,
-        "svg.fonttype": "none", "axes.titleweight": "semibold",
+        "svg.fonttype": "none", "axes.titleweight": "bold",
     })
     result = {
         "created_at": datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d %H:%M:%S Asia/Shanghai"),
         "run_id": plan["run_id"], "checkpoint_step": plan["checkpoint_step"],
         "aggregation": "Eligible decisions have equal weights; sampled paths are new checkpoint diagnostics.",
+        "greedy_rule": "raw_logit >= 0; rounded probabilities >= 0.5 are a separate statistic.",
         "splits": {},
     }
     for split in ("train", "dev"):
@@ -182,6 +185,9 @@ def render_diagnostic(input_dir):
             "paths_with_decisions": len({(row["document_id"], row["path_id"]) for row in rows}),
             "actual_commit_count": sum(row["action"] for row in rows),
             "actual_commit_fraction": sum(row["action"] for row in rows) / len(rows) if rows else None,
+            "nonnegative_logit_count": sum(row["raw_logit"] >= 0 for row in rows),
+            "nonnegative_logit_fraction": (sum(row["raw_logit"] >= 0 for row in rows) / len(rows)
+                                           if rows else None),
             "protocol": plan["split_protocols"][split],
             "actual_probability": summarize_probabilities(actual, pending),
             "probability_t1": summarize_probabilities(reference, pending),
