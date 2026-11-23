@@ -62,6 +62,7 @@ def _evaluate_batch(model, documents, config, condition, ratio, qa_objective):
     with model.forward_context():
         paths = _compress(model, documents, config, condition, ratio)
     questions = [_questions(document, qa_objective) for document in documents]
+    reader_prefix_ids = documents[0].reader_prefix_ids if qa_objective else ()
     answers = [[] for _ in documents]
     for question_index in range(max(map(len, questions))):
         active = [index for index, values in enumerate(questions) if question_index < len(values)]
@@ -70,9 +71,13 @@ def _evaluate_batch(model, documents, config, condition, ratio, qa_objective):
                    for index, question in zip(active, selected, strict=True)]
         memories = [paths[index].blocks for index in active]
         with model.forward_context():
-            losses = model.answer_nll_batch(memories, prompts, [question[1] for question in selected])
+            losses = model.answer_nll_batch(
+                memories, prompts, [question[1] for question in selected],
+                reader_prefix_ids=reader_prefix_ids,
+            )
             generated = (model.generate_batch(
                 memories, prompts, [config.training.dev.max_new_tokens] * len(active),
+                reader_prefix_ids=reader_prefix_ids,
             ) if qa_objective else None)
         for row, index in enumerate(active):
             prompt, target, question, reference = selected[row]

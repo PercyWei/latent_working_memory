@@ -183,7 +183,7 @@ def train(plan_dir, resume=None):
                    else checkpoint["binding"]["pretraining"])
     binding = {
         "train": train_statistics, "dev": dev_statistics,
-        "tokenization": tokenization_identity(tokenizer),
+        "tokenization": tokenization_identity(tokenizer, config.stage),
         "model": model.writer.get_base_model().config.to_dict(), "pretraining": pretraining,
     }
     if checkpoint is not None and checkpoint["binding"] != binding:

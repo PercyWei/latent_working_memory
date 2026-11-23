@@ -38,10 +38,11 @@ from latent_working_memory.v3_1_1.rollout import execute, sample_paths
 one_cpu_thread = pretrain_tests.one_cpu_thread
 tiny_source = pretrain_tests.tiny_source
 
-def _reference_qa_backward(model, memory_leaves, qa, normalizer, retained_ids):
+def _reference_qa_backward(model, memory_leaves, qa, normalizer, retained_ids, reader_prefix_ids):
     """单题只反传到独立 memory 叶子；返回统计时释放本题的 decoder 图。"""
     with model.forward_context():
-        loss = model.answer_nll(memory_leaves, retained_ids + qa.prompt_ids, qa.target_ids)
+        loss = model.answer_nll(memory_leaves, retained_ids + qa.prompt_ids, qa.target_ids,
+                                reader_prefix_ids=reader_prefix_ids)
         normalized_loss = loss / normalizer
     if normalized_loss.requires_grad:
         normalized_loss.backward()
@@ -66,6 +67,7 @@ def _reference_path_backward(
     for index in reversed(range(question_count)):
         question_losses[index] = _reference_qa_backward(
             model, memory_leaves, document.qas[index], question_count * group_size, replay.retained_ids,
+            document.reader_prefix_ids,
         )
     with model.forward_context():
         task_loss = torch.stack(question_losses).mean()
@@ -229,7 +231,7 @@ def document(index, length, question_count):
         prompt_ids=tuple(range(3, 5 + question % 3)),
         target_ids=tuple(20 + offset for offset in range(1 + (index + question) % 4)) + (1,),
     ) for question in range(question_count))
-    return Document(f"doc-{index}", f"doc-{index}", text, qas)
+    return Document(f"doc-{index}", f"doc-{index}", text, qas, reader_prefix_ids=(7, 13))
 
 
 def gradients(model):
@@ -497,10 +499,10 @@ def test_identical_sampled_paths_keep_identical_rewards_despite_batch_score_roun
     scoring = model.answer_nll_batch
     score_calls = []
 
-    def rounded_score(memories, prompts, targets):
+    def rounded_score(memories, prompts, targets, reader_prefix_ids):
         score_calls.append(len(memories))
         # 同一轨迹在不同批量计算形状中可能出现微小的评分舍入差。
-        return scoring(memories, prompts, targets) + len(score_calls) * 1e-4
+        return scoring(memories, prompts, targets, reader_prefix_ids) + len(score_calls) * 1e-4
 
     monkeypatch.setattr(model, "answer_nll_batch", rounded_score)
     with torch.no_grad(), model.forward_context():

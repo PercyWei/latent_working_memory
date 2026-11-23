@@ -7,8 +7,8 @@ import sys
 from latent_working_memory.benchmarks.data import load_samples
 from latent_working_memory.benchmarks.protocol import data_identity, protocol
 from latent_working_memory.benchmarks.scoring import score_sample, summarize_scores
-from latent_working_memory.v4_1.data import EpisodeEncoder
 from ..cli import ignore_resume_options, positive_int
+from ..data import QAEncoder
 from . import DEFAULT_EVAL_BATCH_SIZE
 from .inference import EvaluationInput, EvaluationQuestion, compute_batch as compute_model_batch
 from .run import run_evaluations
@@ -46,10 +46,9 @@ def load_data(config, tokenizer, model_window, data, max_samples, max_new_tokens
         samples = samples[:max_samples]
     identity = data_identity(samples, data, NAME)
     evaluation_protocol = protocol(
-        NAME, (), "immutable compressed embedding blocks; each block has fixed K slots",
+        NAME, (), "immutable compressed embedding blocks; each block has fixed K slots", use_qa_system=True,
     )
     evaluation_protocol.update({
-        "input": "complete body; separately encoded task instructions and question; no truncation or training length filtering",
         "write_boundary": (
             "fixed recent is reserved before policy decisions; short final pending and recent precede task instructions "
             "and query in the reader; no writes during generation"
@@ -74,7 +73,7 @@ def sample_batches(samples, execution):
 
 def compute_batch(conversations, request, model, config, max_new_tokens, commit):
     by_first_id = {questions[0].id: questions for questions in conversations}
-    encoder = EpisodeEncoder(model.tokenizer)
+    encoder = QAEncoder(model.tokenizer)
 
     def encode(sample):
         questions = by_first_id[sample.id]
@@ -92,7 +91,7 @@ def compute_batch(conversations, request, model, config, max_new_tokens, commit)
     return compute_model_batch(
         [questions[0] for questions in conversations], model, config, commit, encode,
         lambda sample, answers: make_record(by_first_id[sample.id][len(answers) - 1], [answers[-1]]),
-        commit_per_question=True,
+        encoder.reader_prefix_ids, commit_per_question=True,
     )
 
 

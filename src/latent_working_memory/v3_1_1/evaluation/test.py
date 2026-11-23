@@ -75,7 +75,7 @@ def compute_batch(samples, request, model, config, max_new_tokens, commit):
             EvaluationQuestion(qa.prompt_ids, max_new_tokens or 128, qa.target_ids, truncate_to_window=True)
             for qa in sample.qas
         )),
-        make_record,
+        make_record, samples[0].reader_prefix_ids,
     )
 
 

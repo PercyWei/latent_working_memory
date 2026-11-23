@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261122 20:13:29 Asia/Shanghai
+最后修订时间：20261123 16:19:12 Asia/Shanghai
 
 v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=post` 使用问答（QA），由 `training.update_mode` 选择仅更新压缩器（`compressor_only`）、仅更新边界（`boundary_only`）或联合更新（`joint`）。每次写入将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆及未压缩的 pending 和 recent 尾段回答问题。
 
@@ -24,11 +24,11 @@ v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=po
 
 `joint` 和 `boundary_only` 使用 `compression.mode=policy`。先预留正文末尾固定 recent，其余前缀按 L 分成处理单元。在线状态由历史 memory、待提交原文 a 和新到达单元 b 组成。边界模块读取这些已到达的内容，选择继续积累 ab，或将 a 压缩为 K 个 slots，再以 b 开始下一块。a 小于 H 时强制继续；达到 H 后允许策略判断，不限制最大段长。最后一个不足 L 的单元也按实际长度读入，固定 recent 不参与判断。
 
-前缀读取完毕后，若剩余 pending 长度至少为 H，则一次压缩为 K 个 slots；不足 H 则保留原文。收尾由规则决定，不计策略动作。Reader 输入顺序为历史 memory、未压缩 pending、固定 recent、问题提示。`recent_size=0` 只表示不预留 recent，最终仍可能保留短 pending。
+前缀读取完毕后，若剩余 pending 长度至少为 H，则一次压缩为 K 个 slots；不足 H 则保留原文。收尾由规则决定，不计策略动作。`recent_size=0` 只表示不预留 recent，最终仍可能保留短 pending。
 
 预训练的默认 recent 长度为 0，后训练取 `model.structure.recent_size`。multi／policy 的 `training.compression.recent_size` 只覆盖训练，`null` 沿用默认长度，0 不预留，正整数指定训练长度。训练中的 dev 和独立评估均使用默认长度。single 的 `compression` 仅含 `mode`，在训练和验证中都强制 recent 为 0。
 
-问题和任务指令交给 Reader，正文分段独立于 QA。Reader 在正文压缩完成后回答，生成期间保持 memory 不变。Writer 与 Reader 的模块及训练状态独立，共享冻结的基座参数；LoRA 仅作用于 Writer。
+QA 后训练、dev、独立 test、LoCoMo 和 RULER 共用文档问答 system 消息。Writer 只接收正文。Reader 依次读取原文 system 消息、user 角色开头、历史记忆块、未压缩的 pending 和 recent、题目提示、assistant 角色开头。生成期间固定记忆，同一正文的各题可复用记忆块。Writer 与 Reader 的模块及训练状态独立，共享冻结的基座参数；LoRA 仅作用于 Writer。
 
 ### 单次压缩预训练
 
@@ -67,7 +67,7 @@ v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=po
 
 一篇完整文档及其固定 QA 集合是一个训练单位。每条随机路径处理整篇正文，各题共享该路径的记忆。QA NLL 先在每题的答案 tokens 内平均，再依次对题目、随机路径和文档等权平均。
 
-令轨迹编号为 i，奖励事件编号为 t，最后一个事件为 T。D 是完整 `input_ids` 长度，包含上下文提示前缀，不含 QA、padding 和追加的 memory tokens；R 是实际保留的 recent 长度。事件 t 之后的记忆块数和 pending 长度分别记为 Bᵢₜ 和 Pᵢₜ。令 S=D−R，实际最终记忆成本及最终得分为：
+令轨迹编号为 i，奖励事件编号为 t，最后一个事件为 T。D 为 Writer 接收的正文 token 数，R 为实际保留的 recent 长度。事件 t 之后的记忆块数和 pending 长度分别记为 Bᵢₜ 和 Pᵢₜ。令 S=D−R，实际最终记忆成本及最终得分为：
 
 \[
 c_{i,T}=\left(\frac{K B_{i,T}+P_{i,T}}{S}\right)^p,
@@ -227,7 +227,7 @@ QA 后训练每题必填 `question`、`answer`，可成对附带来源字段 `se
 
 数据准备和 train/dev 长度筛选均使用 tokenizer 对完整正文计算的 token 数，不添加 special tokens、系统提示或 chat 前缀。AE／LM 与 `compressor_only` 使用固定分段规则：single 要求正文长度严格大于 K；multi 要求至少 `recent_size + min(ratios) × K`，保证固定保留 recent 后仍有一块合法压缩输入。AE／LM 的 LM 前缀也须满足对应下限，不足时改用 AE。policy 要求至少 `recent_size + pending_size`。train 下限采用训练实际 recent，dev 下限采用模型默认 recent。
 
-`training.data.max_train_data_tokens` 只限制 train，超限样本整条排除。筛选与限量在内存中完成，独立 test 读取完整正文。分段和成本的 D 则采用实际编码后的完整正文长度，包含既有上下文前缀。
+`training.data.max_train_data_tokens` 只限制 train，超限样本整条排除。筛选与限量在内存中完成，独立 test 读取完整正文。分段和成本计算使用与长度筛选相同的正文 tokens。
 
 ### 准备预训练与后训练数据
 
@@ -590,7 +590,7 @@ policy 未配置固定倍率且模型默认 recent 为 0 时，dev 只执行 gre
 |---|---|---|
 | Test：`eval_test.sh` | 数据目录下 `test.jsonl` | 完整正文 QA；NLL、EM、F1 |
 | LoCoMo：`eval_locomo.sh` | 数据目录下 `locomo10.json` | 类别 1–4，分离对话与问题，复用公共模块的官方评分逻辑 |
-| RULER：`eval_ruler.sh` | `<长度>/<子任务>/test.jsonl` | 全部 13 项任务，按模板拆分正文、指令和查询，复用公共模块的官方评分逻辑 |
+| RULER：`eval_ruler.sh` | `<长度>/<子任务>/test.jsonl` | 全部 13 项任务只提取正式题的最终问题。此前的指令、示例与正文按原顺序进入 Writer，Reader 在记忆块与保留尾段之后读取最终问题。 |
 
 Test 的 `qa_nll` 先按每题目标 tokens 平均，再按题目和文档等权平均；`token_nll` 按全部目标 tokens 加权，目标包含模板结束符。EM／F1 按题平均。`--max-test-samples` 限制文档数，`--max-new-tokens` 控制每题生成上限。
 

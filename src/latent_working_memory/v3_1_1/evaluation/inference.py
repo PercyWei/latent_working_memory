@@ -6,7 +6,6 @@ import time
 
 import torch
 
-from latent_working_memory.v4_1.data import EpisodeEncoder
 from ..rollout import execute_batch
 
 
@@ -24,11 +23,10 @@ class EvaluationInput:
     questions: tuple[EvaluationQuestion, ...]
 
 
-def encode_context_question(context, question, tokenizer, max_new_tokens):
-    """正文沿用训练编码；任务指令和问题作为未压缩的 Reader 提示。"""
-    encoder = EpisodeEncoder(tokenizer)
-    prompt_ids = tuple(tokenizer.encode(
-        f"\n\n{question}{encoder.suffix}", add_special_tokens=False,
+def encode_context_question(context, question, encoder, max_new_tokens):
+    """分别编码原始题面的两个连续片段，问题保留自带的分隔符。"""
+    prompt_ids = tuple(encoder.tokenizer.encode(
+        question + encoder.suffix, add_special_tokens=False,
     ))
     return EvaluationInput(
         encoder.context(context), (EvaluationQuestion(prompt_ids, max_new_tokens),),
@@ -36,7 +34,8 @@ def encode_context_question(context, question, tokenizer, max_new_tokens):
 
 
 @torch.no_grad()
-def compute_batch(samples, model, config, commit, encode, record, commit_per_question=False):
+def compute_batch(samples, model, config, commit, encode, record, reader_prefix_ids,
+                  commit_per_question=False):
     """正文只压缩一次；LoCoMo 逐题提交，其他任务在整篇回答完成后提交。"""
     count = len(samples)
     device = model.memory_embeddings.device
@@ -81,6 +80,7 @@ def compute_batch(samples, model, config, commit, encode, record, commit_per_que
     metadata_seconds = (time.perf_counter() - started) / count
     seconds = [value + metadata_seconds for value in seconds]
     device_label = f"{device} (CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '')})"
+    window_after_prefix = model.max_positions - len(reader_prefix_ids)
 
     for question_index in range(max(len(value.questions) for value in inputs)):
         indices = [index for index, value in enumerate(inputs) if question_index < len(value.questions)]
@@ -88,7 +88,7 @@ def compute_batch(samples, model, config, commit, encode, record, commit_per_que
         prompts = [paths[index].retained_ids + question.prompt_ids
                    for index, question in zip(indices, questions, strict=True)]
         requested = [question.max_new_tokens for question in questions]
-        capacities = [model.max_positions - rows[index]["memory_slots"] - len(prompt)
+        capacities = [window_after_prefix - rows[index]["memory_slots"] - len(prompt)
                       for index, prompt in zip(indices, prompts, strict=True)]
         budgets = [min(budget, capacity) if question.truncate_to_window else budget
                    for question, budget, capacity in zip(questions, requested, capacities, strict=True)]
@@ -106,6 +106,7 @@ def compute_batch(samples, model, config, commit, encode, record, commit_per_que
                 [paths[index].retained_ids + inputs[index].questions[question_index].prompt_ids
                  for index in nll_indices],
                 [inputs[index].questions[question_index].target_ids for index in nll_indices],
+                reader_prefix_ids=reader_prefix_ids,
             )
             torch.cuda.synchronize(device)
             nll_values = dict(zip(nll_indices, values.tolist(), strict=True))
@@ -163,4 +164,5 @@ def compute_batch(samples, model, config, commit, encode, record, commit_per_que
 
         model.generate_batch(
             [memories[index] for index in indices], prompts, budgets, on_complete=completed,
+            reader_prefix_ids=reader_prefix_ids,
         )

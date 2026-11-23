@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261109 00:01:38 Asia/Shanghai
+最后修订时间：20261123 16:39:54 Asia/Shanghai
 
 本目录提供 RULER 与 LoCoMo 的公共数据准备、读取和评分，供不同方法及 full-context 基线共用。
 
@@ -91,7 +91,7 @@ bash src/latent_working_memory/benchmarks/scripts/generate_ruler.sh \
 - `<model-name>` 取 `--model-path` 去掉尾部斜杠后的最后一级目录名或 HF 仓库名，默认 `Qwen3-4B-Instruct-2507`；不同模型自动使用各自目录，原始素材共享。
 - 相对目录以项目根目录为准；路径含空格时加双引号。更换下载目录时，生成阶段须传入相同的 `--ruler-source-dir`。
 - 已有 RULER 长度目录拒绝覆盖，包括失败生成留下的目录；重试前将失败的长度目录移出输出目录，或指定新的 `--output-dir`。同一模型修改长度、样本数或 seed 等设置并需重建已有长度时，用新的 `--output-dir` 保存样本。
-- RULER 的 `<length>` 表示完整输入与该任务生成预算的总长度上限；`chat` 模式预留聊天包装开销，`base` 模式预留编码时的 special tokens，任务生成器另行预留输出预算。
+- RULER 的 `<length>` 是完整输入与任务生成预算之和的上限。`chat` 模式按 full-context 基线使用的 QA system 消息、user 消息和 assistant 角色开头预留 token 空间。`base` 模式预留编码时的 special tokens。两种模式都按任务预留输出预算。
 - 官方生成器将 `answer_prefix` 单独保存；本项目现有聊天评估只读取 `input`，不拼回该前缀。`base` 评估须将 `input + answer_prefix` 编码为完整输入。多值／多 query 任务保持一条输入、一次回答。
 - `base` 模式的 NIAH 使用 [本地 NVIDIA 生成器副本](vendor/ruler_niah.py)，修正 512-token essay 无法缩短到 500 词以下及超长重试不退出的问题；原始素材不变，其他任务继续使用下载的官方生成器。
 - 同一模型的比较方法应使用同一批生成样本。评估自定义位置时，`--benchmark-data` 指向 RULER 的 `--output-dir` 或 LoCoMo 的 `<data-root>/locomo`。

@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261121 19:05:26 Asia/Shanghai
+最后修订时间：20261123 16:26:30 Asia/Shanghai
 
 计算协议、数据格式与模块分工见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256_grpo.json)中的基座与数据路径。
 
@@ -272,7 +272,8 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/eval_rule
 ```
 
 - **评估数据格式**：`--eval-data` 指定评估数据根目录：Test 读取 `test.jsonl`，LoCoMo 读取 `locomo10.json`，RULER 按 `<长度>/<子任务>/test.jsonl` 读取各长度档位和子任务的数据。Benchmark 数据须提前准备，数据布局与准备入口见[公共 benchmark 指南](../../benchmarks/README.md#2-数据准备)。
-- **压缩与回答**：三者共用正文压缩与 Reader 回答流程：正文全部压缩，结束时提交剩余正文；问题和任务指令只交给 Reader，不参与压缩或边界判断。LoCoMo、RULER 沿用官方评分逻辑。
+- 三个评估入口都只向 Writer 传入正文。Reader 先读取 system 消息原文与 user 角色开头，再读取记忆块、剩余原文和题目提示。LoCoMo、RULER 沿用官方评分逻辑。
+- RULER 以每题的最终问句为界。此前的全部文本（含任务说明和已答示例）按原顺序进入 Writer；最终问句原样交给 Reader。
 - **Test 协议**：固定读取数据目录的完整 `test.jsonl`，不套用训练长度筛选，默认每题最多生成 128 tokens；同文档全部 QA 共用记忆。
 - **LoCoMo 协议**：同对话的全部题目共用一次正文压缩得到的记忆，各题独立生成并立即保存；官方指标按题目评分，记忆用量按对话平均。续评时只对尚有未完成题目的对话重新压缩，并补齐缺失答案。
 - **运行与范围**：`--eval-run` 必填，指向运行根目录。`--checkpoint` 可选，只填一个或多个 `global_step_<N>` 名称，自动查找 `<eval-run>/train/checkpoints/<名称>/state.pt`；省略时选择当时保存的全部完整 checkpoint。
@@ -340,7 +341,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 
 - **压缩与逐文本分析**：
 
-  - **统计口径**：整篇倍率为实际编码后的完整正文 tokens 除以 memory slots、未压缩 pending 与 recent tokens 之和，单块倍率为块长除以 K；分别展示平均、最低、最高值，平均按篇或块等权。评估另记录前缀保留比例 `prefix_retention_ratio=(K×B+P)/(D−R)` 及其 p 次幂 `memory_cost`，完整 `retention_ratio=(K×B+P+R)/D` 独立保留。若正文全为 recent，前缀比例和成本记为 0，完整比例为 1。正文输入包含模板前缀；LoCoMo 每段对话只计一次，末尾强制提交块计入块统计。
+  - **统计口径**：整篇倍率为实际编码后的完整正文 tokens 除以 memory slots、未压缩 pending 与 recent tokens 之和，单块倍率为块长除以 K；分别展示平均、最低、最高值，平均按篇或块等权。评估另记录前缀保留比例 `prefix_retention_ratio=(K×B+P)/(D−R)` 及其 p 次幂 `memory_cost`，完整 `retention_ratio=(K×B+P+R)/D` 独立保留。若正文全为 recent，前缀比例和成本记为 0，完整比例为 1。正文长度按 Writer 输入计数。LoCoMo 每段对话只计一次，末尾强制提交块计入块统计。
   - **概览与分布**：另列每篇平均记忆块数及单块文本比例，展示整篇倍率分布、单块倍率分布和“输入长度—记忆块数”散点图。
   - **文本选择**：按输入长度、压缩倍率或块数排序，默认选中并高亮首行，始终保持一篇文本被选中；下方分段条、块信息表和问答与选中行同步。分段条宽度表示块长、颜色表示倍率，黄色表示未压缩 pending，灰色表示固定 recent，支持缩放；按实际动作标注策略提交或末尾强制提交。
   - **加载方式**：首次扫描当前 checkpoint 的明细，缓存压缩字段和记录位置；只为所选文本读取完整回答并生成分段条，不产生图片或逐文本图表文件。

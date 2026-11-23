@@ -553,6 +553,7 @@ class TrainingEngine(BaseEngine):
                   for result in results]
         qa_objective = self.config.objective.type == "qa"
         questions = [document.qas if qa_objective else (document,) for document in documents]
+        reader_prefix_ids = documents[0].reader_prefix_ids if qa_objective else ()
         document_losses = [0.0] * len(documents)
         for question_index in range(max(map(len, questions))):
             active = [index for index, rows in enumerate(questions) if question_index < len(rows)]
@@ -563,6 +564,7 @@ class TrainingEngine(BaseEngine):
                     [(*results[index].recent_ids, *question.prompt_ids)
                      for index, question in zip(active, selected, strict=True)],
                     [question.target_ids for question in selected],
+                    reader_prefix_ids=reader_prefix_ids,
                 )
                 if not bool(torch.isfinite(losses).all()):
                     raise RuntimeError("non-finite compressor training loss")
