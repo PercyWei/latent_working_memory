@@ -378,7 +378,7 @@ def _compression(directory, summary, key):
     left.metric("平均记忆块数 / 篇", f"{values['mean_blocks']:.2f}")
     right.metric("生成单个记忆块的文本比例", f"{values['single_block_fraction']:.1%}")
     st.caption("按篇倍率 = 输入 tokens /（记忆 slots + pending tokens + recent tokens），各篇等权；按块倍率 = 该块输入 tokens / K，各块等权。"
-               "输入长度采用实际编码后的完整正文，包含正文模板；统计包含末尾强制提交块。")
+               "输入长度取自本次评估记录的 Writer 输入 tokens。块数包含末尾强制提交块。")
     st.subheader("压缩分布")
     left, right = st.columns(2)
     with left:

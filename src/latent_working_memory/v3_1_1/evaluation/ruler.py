@@ -9,6 +9,7 @@ from latent_working_memory.benchmarks.data import load_samples
 from latent_working_memory.benchmarks.protocol import protocol
 from latent_working_memory.benchmarks.scoring import score_sample, summarize_scores
 from ..cli import ignore_resume_options, positive_int
+from ..data import QAEncoder
 from . import DEFAULT_EVAL_BATCH_SIZE
 from .inference import compute_batch as compute_model_batch, encode_context_question
 from .records import normalize_lengths, ruler_data_identity
@@ -36,7 +37,7 @@ _QA_INSTRUCTION = (
 
 
 def split_ruler_prompt(sample):
-    """保留原始任务指令、查询及 few-shot 示例，只将主正文交给 Writer。"""
+    """按正式题的最终问句起点切成两个原文片段，含示例的前缀完整交给 Writer。"""
     task, prompt = sample.metadata["task"], sample.prompt
     few_shot = task in {"vt", "cwe"}
     if task.startswith("niah_"):
@@ -58,7 +59,7 @@ def split_ruler_prompt(sample):
         prefix, separator = _FWE_PREFIX, "\nQuestion: Do not provide any explanation. Please ignore the dots '....'. "
     elif task in {"qa_1", "qa_2"}:
         prefix = _QA_INSTRUCTION + "The following are given documents.\n\n"
-        separator = "\n\n" + _QA_INSTRUCTION + "Question: "
+        separator = "\n\nQuestion: "
     else:
         raise ValueError(f"unsupported RULER task: {task}")
 
@@ -67,10 +68,10 @@ def split_ruler_prompt(sample):
     if start < 0 or not prompt.startswith(prefix, start):
         raise ValueError(f"{sample.id}: input does not match the RULER {task} template")
     start += len(prefix)
-    context, marker, question = prompt[start:].rpartition(separator)
-    if not marker or not context:
+    query_start = prompt.rfind(separator, start)
+    if query_start <= start:
         raise ValueError(f"{sample.id}: missing body/query boundary in the RULER {task} template")
-    return context, prompt[:start] + separator + question
+    return prompt[:query_start], prompt[query_start:]
 
 
 def length_batch_size(value):
@@ -130,13 +131,12 @@ def load_data(config, tokenizer, model_window, data, max_samples, max_new_tokens
         samples = tuple(selected)
     identity = ruler_data_identity(samples, data, lengths)
     evaluation_protocol = protocol(
-        NAME, lengths, "immutable compressed embedding blocks; each block has fixed K slots",
+        NAME, lengths, "immutable compressed embedding blocks; each block has fixed K slots", use_qa_system=True,
     )
     evaluation_protocol.update({
-        "input": "complete body; separately encoded task instructions and question; no truncation or training length filtering",
         "write_boundary": (
-            "fixed recent is reserved before policy decisions; short final pending and recent precede task instructions "
-            "and query in the reader; no writes during generation"
+            "everything before the final query, including instructions and demonstrations, is writer input in original order; "
+            "the reader receives memory blocks, raw pending and recent, then the original final query"
         ),
         "selection": "first max_samples per task/length",
         "max_samples": max_samples,
@@ -161,12 +161,13 @@ def sample_batches(samples, execution):
 
 
 def compute_batch(samples, request, model, config, max_new_tokens, commit):
+    encoder = QAEncoder(model.tokenizer)
     return compute_model_batch(
         samples, model, config, commit,
         lambda sample: encode_context_question(
-            *split_ruler_prompt(sample), model.tokenizer, sample.max_new_tokens,
+            *split_ruler_prompt(sample), encoder, sample.max_new_tokens,
         ),
-        make_record,
+        make_record, encoder.reader_prefix_ids,
     )
 
 

@@ -4,14 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from latent_working_memory.prompts import QA_SYSTEM_PROMPT as QA_SYSTEM_PROMPT, qa_messages
 from latent_working_memory.v4.data_types import TokenizedEpisode as TokenizedEpisode
-
-
-QA_SYSTEM_PROMPT = (
-    "Answer questions using the provided document. Use exact details whenever possible. "
-    "Answer with a short span, yes, no, or a concise phrase. "
-    "If the document does not contain the answer, reply exactly: No information available."
-)
 
 
 def _episode_statistics(episodes):
@@ -42,10 +36,7 @@ def _validate_lengths(min_text_tokens, max_train_data_tokens, model_window):
 
 
 def _tokenize_qa(text, qa, tokenizer, group_id, qa_index, location):
-    messages = [
-        {"role": "system", "content": QA_SYSTEM_PROMPT},
-        {"role": "user", "content": f"Document:\n{text}\n\nQuestion:\n{qa['question']}"},
-    ]
+    messages = qa_messages(f"Document:\n{text}\n\nQuestion:\n{qa['question']}")
     prompt_ids = tuple(
         tokenizer.apply_chat_template(
             messages,

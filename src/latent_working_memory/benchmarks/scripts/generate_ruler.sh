@@ -115,6 +115,7 @@ import yaml
 
 from latent_working_memory.benchmarks.data import RULER_TASKS
 from latent_working_memory.benchmarks import vendor
+from latent_working_memory.prompts import qa_messages
 
 source = Path(sys.argv[1]) / "scripts" / "data"
 destination = Path(sys.argv[2])
@@ -138,7 +139,7 @@ with (source.parent / "synthetic.yaml").open() as stream:
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 if prompt_format == "chat":
     chat_tokens = tokenizer.apply_chat_template(
-        [{"role": "user", "content": ""}],
+        qa_messages(""),
         tokenize=True, add_generation_prompt=True, enable_thinking=False,
     )
     base_tokens = len(tokenizer.tokenize(Templates["base"]))

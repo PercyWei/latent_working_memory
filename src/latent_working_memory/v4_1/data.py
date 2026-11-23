@@ -5,12 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
-
-QA_SYSTEM_PROMPT = (
-    "Answer questions using the provided document. Use exact details whenever possible. "
-    "Answer with a short span, yes, no, or a concise phrase. "
-    "If the document does not contain the answer, reply exactly: No information available."
-)
+from latent_working_memory.prompts import QA_SYSTEM_PROMPT, qa_messages
 
 
 @dataclass(frozen=True)
@@ -33,10 +28,7 @@ class EpisodeEncoder:
         self.tokenizer = tokenizer
         marker = "__LWM_DOCUMENT_PLACEHOLDER__"
         answer_marker = "__LWM_ANSWER_PLACEHOLDER__"
-        messages = [
-            {"role": "system", "content": QA_SYSTEM_PROMPT},
-            {"role": "user", "content": marker},
-        ]
+        messages = qa_messages(marker)
         rendered = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
         )

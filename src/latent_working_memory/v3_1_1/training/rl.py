@@ -89,6 +89,7 @@ def _paths_backward_batch(
                     [(*replays[index].retained_ids, *question.prompt_ids)
                      for index, question in zip(active, questions, strict=True)],
                     [question.target_ids for question in questions],
+                    reader_prefix_ids=documents[0].reader_prefix_ids,
                 )
                 normalizers = losses.new_tensor([len(documents[index].qas) * group_size for index in active])
                 loss = (losses / normalizers).sum()

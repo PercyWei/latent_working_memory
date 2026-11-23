@@ -106,10 +106,13 @@ class MemoryModel(nn.Module):
         if length > self.max_positions:
             raise ValueError(f"sequence length {length} exceeds model window {self.max_positions}")
 
-    def _inputs(self, backbone, memory_blocks, input_ids):
-        tokens = self._tokens(input_ids)
-        text = backbone.get_input_embeddings()(tokens)
-        return torch.cat([*(block.to(text.dtype) for block in memory_blocks), text])
+    def _inputs(self, backbone, memory_blocks, input_ids, prefix_ids=()):
+        embed = backbone.get_input_embeddings()
+        text = embed(self._tokens(input_ids))
+        pieces = [block.to(text.dtype) for block in memory_blocks]
+        if prefix_ids:
+            pieces.insert(0, embed(self._tokens(prefix_ids)))
+        return torch.cat([*pieces, text])
 
     @staticmethod
     def _hidden(backbone, inputs):
@@ -281,14 +284,15 @@ class MemoryModel(nn.Module):
         return [self.boundary(hidden[index, self._tokens(selected) + hidden.shape[1] - len(tokens)])
                 for index, (tokens, selected) in enumerate(zip(input_ids, positions, strict=True))]
 
-    def answer_nll(self, memory_blocks, prompt_ids, target_ids):
+    def answer_nll(self, memory_blocks, prompt_ids, target_ids, reader_prefix_ids=()):
         if not prompt_ids or not target_ids:
             raise ValueError("answer scoring requires a prompt and nonempty targets")
-        inputs = self._inputs(self.decoder, memory_blocks, (*prompt_ids, *target_ids[:-1]))
+        inputs = self._inputs(
+            self.decoder, memory_blocks, (*prompt_ids, *target_ids[:-1]), reader_prefix_ids,
+        )
         self._check_length(len(inputs))
-        offset = sum(len(block) for block in memory_blocks) + len(prompt_ids) - 1
         # Decoder 参数冻结，但不能 no_grad：目标通过 memory 回传到写入器。
-        selected = self._hidden(self.decoder, inputs)[offset:]
+        selected = self._hidden(self.decoder, inputs)[-len(target_ids):]
         targets = self._tokens(target_ids)
 
         def token_loss(hidden, token_targets):
@@ -305,13 +309,13 @@ class MemoryModel(nn.Module):
             )
         return torch.stack(losses).sum() / len(targets)
 
-    def answer_nll_batch(self, memories, prompt_ids, target_ids):
+    def answer_nll_batch(self, memories, prompt_ids, target_ids, reader_prefix_ids=()):
         """批量 Reader 前向；各行损失只平均自身的实际 target tokens。"""
         if not memories or not len(memories) == len(prompt_ids) == len(target_ids):
             raise ValueError("memories, prompts and targets must have the same nonzero batch size")
         if any(not targets for targets in target_ids):
             raise ValueError("NLL targets must be nonempty")
-        rows = [self._inputs(self.decoder, blocks, (*prompt, *target[:-1]))
+        rows = [self._inputs(self.decoder, blocks, (*prompt, *target[:-1]), reader_prefix_ids)
                 for blocks, prompt, target in zip(memories, prompt_ids, target_ids, strict=True)]
         hidden = self._hidden_batch(self.decoder, rows)
         # 左 padding 后每行最后 len(target) 个隐藏状态恰好预测该行的目标。
@@ -334,8 +338,8 @@ class MemoryModel(nn.Module):
         return torch.stack([values.mean() for values in torch.cat(losses).split(lengths)])
 
     @torch.no_grad()
-    def generate(self, memory_blocks, prompt_ids, max_new_tokens):
-        inputs = self._inputs(self.decoder, memory_blocks, prompt_ids)
+    def generate(self, memory_blocks, prompt_ids, max_new_tokens, reader_prefix_ids=()):
+        inputs = self._inputs(self.decoder, memory_blocks, prompt_ids, reader_prefix_ids)
         self._check_length(len(inputs) + max_new_tokens)
         was_training = self.decoder.training
         self.decoder.eval()
@@ -358,12 +362,12 @@ class MemoryModel(nn.Module):
         return tuple(tokens.tolist())
 
     @torch.no_grad()
-    def generate_batch(self, memories, prompt_ids, budgets, on_complete=None):
+    def generate_batch(self, memories, prompt_ids, budgets, on_complete=None, reader_prefix_ids=()):
         """真实批量贪心解码；每行独立 EOS／预算，完成后移出活跃批次。"""
         count = len(memories)
         if not count or len(prompt_ids) != count or len(budgets) != count:
             raise ValueError("memories, prompts and budgets must have the same nonzero batch size")
-        rows = [self._inputs(self.decoder, blocks, prompt)
+        rows = [self._inputs(self.decoder, blocks, prompt, reader_prefix_ids)
                 for blocks, prompt in zip(memories, prompt_ids, strict=True)]
         for length, budget in zip(map(len, rows), budgets, strict=True):
             if type(budget) is not int or budget < 1:

@@ -373,7 +373,10 @@ def execute_batch(model, contexts, pending_stride, uniforms=None, temperature=1.
 def qa_nll(model, blocks, document, retained_ids=()):
     """答案 token 平均，再按文档 QA 平均；pending 和 recent 按原文顺序进入 Reader。"""
     return torch.stack([
-        model.answer_nll(blocks, (*retained_ids, *qa.prompt_ids), qa.target_ids) for qa in document.qas
+        model.answer_nll(
+            blocks, (*retained_ids, *qa.prompt_ids), qa.target_ids,
+            reader_prefix_ids=document.reader_prefix_ids,
+        ) for qa in document.qas
     ]).mean()
 
 
@@ -416,6 +419,7 @@ def sample_paths_batch(model, documents, pending_stride, group_size, generator, 
                 [results[index].blocks for index in active],
                 [(*results[index].retained_ids, *documents[index].qas[question].prompt_ids) for index in active],
                 [documents[index].qas[question].target_ids for index in active],
+                reader_prefix_ids=documents[0].reader_prefix_ids,
             )
             for index, loss in zip(active, values, strict=True):
                 losses[index].append(loss)

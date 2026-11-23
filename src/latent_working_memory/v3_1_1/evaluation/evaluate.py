@@ -43,7 +43,8 @@ def _evaluation_inputs(checkpoint_path, data, task_module, max_new_tokens, max_s
         "pending_stride": config.model.structure.pending_stride,
         "pending_size": config.model.structure.pending_size,
         "recent_size": config.recent_size(),
-        "retention": "memory slots plus uncompressed pending and recent tokens, divided by complete context length",
+        "reader": "system message and user opening, followed by memory blocks, raw pending and recent, then the task prompt",
+        "retention": "memory slots plus uncompressed pending and recent tokens, divided by document body length",
         "memory_cost": {
             "formula": "((memory slots + uncompressed pending tokens) / (context tokens - recent tokens)) ** power",
             "empty_prefix": 0.0,

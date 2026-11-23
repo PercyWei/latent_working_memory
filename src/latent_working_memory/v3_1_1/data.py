@@ -12,6 +12,24 @@ AE_PROMPT = "Reconstruct the original text:\n"
 LM_PROMPT = "Continue the text:\n"
 
 
+class QAEncoder(EpisodeEncoder):
+    """Writer 编码纯正文，Reader 在记忆前使用完整聊天前缀。"""
+
+    def __init__(self, tokenizer):
+        super().__init__(tokenizer)
+        self.reader_prefix_ids = self._encode(self.prefix)
+
+    def context(self, text):
+        return self._encode(text)
+
+    def identity(self):
+        identity = super().identity()
+        identity["serialization"] = "separately-tokenized-reader-prefix-body-question-target"
+        del identity["context_prefix"]
+        identity["reader_prefix"] = self.prefix
+        return identity
+
+
 @dataclass(frozen=True)
 class PretrainExample:
     id: str
@@ -38,6 +56,7 @@ class Document:
     document_id: str
     input_ids: tuple[int, ...]
     qas: tuple[QA, ...]
+    reader_prefix_ids: tuple[int, ...]
 
 
 def _digest(value):
@@ -60,7 +79,7 @@ def data_identity(examples):
     }
 
 
-def tokenization_identity(tokenizer):
+def tokenization_identity(tokenizer, stage="post"):
     """词表、特殊符号和实际聊天拼接协议均属于实验身份。"""
     return {
         "tokenizer": tokenizer.name_or_path,
@@ -68,7 +87,7 @@ def tokenization_identity(tokenizer):
         "vocabulary": _digest(tokenizer.get_vocab()),
         "special_tokens": tokenizer.special_tokens_map,
         "chat_template": tokenizer.chat_template,
-        "qa_encoding": EpisodeEncoder(tokenizer).identity(),
+        "qa_encoding": (EpisodeEncoder if stage == "pretrain" else QAEncoder)(tokenizer).identity(),
         "ae_prompt": AE_PROMPT,
         "lm_prompt": LM_PROMPT,
     }
@@ -226,7 +245,7 @@ def load_pretraining(settings, tokenizer, split):
 def _load_documents(directory, tokenizer, split, minimum, upper, maximum, seed,
                     allow_empty=False, length_curriculum=False):
     data_path, sources, bins = _sources(directory, split, length_curriculum)
-    encoder = EpisodeEncoder(tokenizer)
+    encoder = QAEncoder(tokenizer)
     examples, raw_documents, bin_by_id, filtered, raw_qas = [], set(), {}, 0, 0
     for path, line_number, _, bin_index, line in _lines(sources):
         try:
@@ -272,12 +291,11 @@ def _load_documents(directory, tokenizer, split, minimum, upper, maximum, seed,
                     encoder.target(qa["answer"]), segment_id, segment_span,
                 ))
             raw_qas += len(qas)
-            body_length = len(tokenizer.encode(row["text"], add_special_tokens=False))
-            if body_length < minimum or (upper is not None and body_length > upper):
+            inputs = encoder.context(row["text"])
+            if len(inputs) < minimum or (upper is not None and len(inputs) > upper):
                 filtered += 1
                 continue
-            inputs = encoder.context(row["text"])
-            examples.append(Document(identifier, identifier, inputs, tuple(qas)))
+            examples.append(Document(identifier, identifier, inputs, tuple(qas), encoder.reader_prefix_ids))
             if bin_index is not None:
                 bin_by_id[identifier] = bin_index
         except (ValueError, KeyError, TypeError) as error:
