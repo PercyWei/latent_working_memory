@@ -12,7 +12,7 @@ from .locomo import evaluate_locomo
 from .ruler import evaluate_ruler
 
 
-def evaluate_samples(samples, snapshot, device: torch.device, detail_path, execution):
+def evaluate_samples(samples, snapshot, device: torch.device, physical_gpu, progress_path, execution):
     """独立评估一个 GPU 分片，记录实测耗时与峰值显存。"""
     benchmark = snapshot["benchmark"]
     model_config = snapshot["model"]
@@ -38,18 +38,18 @@ def evaluate_samples(samples, snapshot, device: torch.device, detail_path, execu
     )
     torch.cuda.synchronize(device)
     torch.cuda.reset_peak_memory_stats(device)
-    generation_seconds = 0.0
-    completed = 0
+    pending = {sample.id for sample in samples}
     started = time.perf_counter()
     with (
-        detail_path.open("w", encoding="utf-8") as stream,
+        progress_path.open("a", encoding="utf-8") as stream,
         torch.no_grad(),
         torch.autocast(
             device_type=device.type, dtype=torch.bfloat16, enabled=model_config["mixed_precision"],
         ),
     ):
         def commit(sample, prompt_tokens, generated, elapsed, batch_size, decode_batch_size):
-            nonlocal generation_seconds, completed
+            if sample.id not in pending:
+                raise ValueError(f"unexpected or duplicate evaluation record on GPU {physical_gpu}: {sample.id}")
             prediction = tokenizer.decode(generated, skip_special_tokens=True)
             record = {
                 "id": sample.id,
@@ -66,13 +66,18 @@ def evaluate_samples(samples, snapshot, device: torch.device, detail_path, execu
                 "eval_batch_size": batch_size,
                 "decode_batch_size": decode_batch_size,
             }
-            stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+            entry = {
+                "record": record,
+                "physical_gpu": physical_gpu,
+                "peak_memory_allocated_bytes": torch.cuda.max_memory_allocated(device),
+                "peak_memory_reserved_bytes": torch.cuda.max_memory_reserved(device),
+            }
+            stream.write(json.dumps(entry, ensure_ascii=False, allow_nan=False) + "\n")
             stream.flush()
-            generation_seconds += elapsed
-            completed += 1
+            pending.remove(sample.id)
             print(
-                f"{device} | {benchmark} {completed}/{len(samples)} | {sample.id} "
-                f"| batch {batch_size} | score {record['score']:.4f} "
+                f"{device} | {benchmark} {len(samples) - len(pending)}/{len(samples)} | {sample.id} "
+                f"| decode batch {decode_batch_size} | score {record['score']:.4f} "
                 f"| elapsed {time.perf_counter() - started:.1f}s",
                 flush=True,
             )
@@ -84,9 +89,6 @@ def evaluate_samples(samples, snapshot, device: torch.device, detail_path, execu
         else:
             evaluate_ruler(samples, tokenizer, model, generation, snapshot["model_window"],
                            device, batch_size, execution["batch_size_by_length"], commit)
-    return {
-        "evaluation_seconds": time.perf_counter() - started,
-        "generation_seconds": generation_seconds,
-        "peak_memory_allocated_bytes": torch.cuda.max_memory_allocated(device),
-        "peak_memory_reserved_bytes": torch.cuda.max_memory_reserved(device),
-    }
+    if pending:
+        raise ValueError(f"missing {len(pending)} evaluation records from GPU {physical_gpu}")
+    return {"evaluation_seconds": time.perf_counter() - started}

@@ -2,7 +2,7 @@
 
 创建时间：20261019 20:16:32 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261123 18:27:04 Asia/Shanghai
+最后修订时间：20261123 21:06:07 Asia/Shanghai
 
 Full-context 基线使用原始模型和完整上下文评估 LoCoMo 与 RULER。模型通过原生 chat template 编码统一的 QA system 提示和包含完整题面的 user 消息，再按任务规定的生成预算进行贪心解码。
 
@@ -19,7 +19,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eva
   --benchmark-data data/benchmarks/locomo \
   --attention-implementation flash_attention_2 \
   --mixed-precision \
-  --batch-size-per-gpu 32
+  --batch-size-per-gpu 2
 
 # RULER
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eval_ruler.sh \
@@ -33,10 +33,22 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eva
 
 | 任务 | 分卡与批量推理 |
 |---|---|
-| LoCoMo | 按会话分卡。每段对话只预填充一次，各题复用正文的 KV 缓存，可在同一批次独立解码。 |
+| LoCoMo | 按对话分卡。每张卡一次预填充一段对话，分批并行回答该段的问题。全部答完后释放正文 KV，再处理下一段。 |
 | RULER | 按题目分卡。长度档位和生成预算相同的题目组成一批。 |
 
 完整输入与生成预算之和须在模型窗口内，RULER 还须满足所选长度档位的上限。直接调用 Python 时，使用 `python -m latent_working_memory.full_context.evaluate` 并指定 `locomo` 或 `ruler` 子命令。
+
+中断后用原任务脚本加 `--resume` 续跑。用原 `--model-path` 和 `--output-root` 定位结果目录，默认值可省略。续跑沿用原计划的数据、精度、随机种子和 RULER 长度档位，只将未完成的题目按本次 GPU 和批量重新分配。
+
+```bash
+# LoCoMo 续跑，每卡同时回答同一段对话的 2 道题
+CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/full_context/scripts/eval_locomo.sh \
+  --resume --batch-size-per-gpu 2
+
+# RULER 续跑，调整不同长度的批量
+CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eval_ruler.sh \
+  --resume --batch-size-by-length 8192=8 16384=4 32768=2
+```
 
 ## 2. 评估参数
 
@@ -47,10 +59,11 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eva
 | `--model-path` | 本地基座模型，默认 `~/models/Qwen3-4B-Instruct-2507` |
 | `--benchmark-data` | benchmark 数据目录 |
 | `--output-root` | 模型结果的父目录，默认 `artifacts/baselines/base` |
+| `--resume` | 恢复已有计划并补评未完成题目，默认关闭 |
 | `--dtype` | 权重精度，支持 `fp32`（默认）和 `bf16` |
 | `--attention-implementation` | 支持 `sdpa`（默认）和 `flash_attention_2` |
 | `--mixed-precision` | PyTorch BF16 autocast，默认关闭 |
-| `--batch-size-per-gpu` | 每卡批量上限，默认 `1` |
+| `--batch-size-per-gpu` | 每卡并行题数上限，默认 `1`。LoCoMo 只在同一段对话内组批 |
 | `--seed` | 默认 `42` |
 
 专属参数：
@@ -72,11 +85,12 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eva
 | `eval.json` | 模型、数据与评估配置，`protocol.system_prompt` 保存实际使用的 QA 提示 |
 | `summary.json` | 评估配置、汇总指标与资源统计 |
 | `details.jsonl` | 按原始题序保存的模型回答、参考答案与逐题评分 |
+| `progress/worker_*.jsonl` | 每张卡逐题追加已完成记录，供中断后续跑 |
 | `status.json`、`eval.log` | 执行状态与运行日志 |
 
-数据、模型和评估配置一致时，直接读取已完成的结果，无需 GPU。换卡或调整批量也会复用原计时，测量不同设置时应分别指定 `--output-root`。
+已有计划须用 `--resume` 打开。所有题目都已完成时，脚本直接读取或补建汇总，无需 GPU。要从头测量另一组设置，请指定新的 `--output-root`。
 
-`summary.json` 的 `resources` 记录实际预填充批量（`batch_sizes`）和每批解码题数（`decode_batch_sizes`）。`wall_seconds` 是从启动推理进程到合并结果的耗时，`generation_seconds` 是各卡生成耗时之和，共享计算时间分摊到各题。峰值显存取各卡最大值。
+`summary.json` 的 `resources` 记录实际预填充批量（`batch_sizes`，LoCoMo 为 `[1]`）和每批解码题数（`decode_batch_sizes`）。`wall_seconds` 和 `evaluation_seconds` 分别记录本次调度的墙钟耗时和最长单卡评估循环耗时。`generation_seconds` 汇总历次已完成题目的生成耗时，峰值显存取这些题目记录的最大值。
 
 ## 4. 本地看板
 

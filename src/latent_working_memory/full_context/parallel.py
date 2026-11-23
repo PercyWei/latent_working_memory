@@ -61,11 +61,33 @@ def shard_samples(samples, benchmark, num_devices):
     return [samples[rank::count] for rank in range(count)]
 
 
-def _worker(rank, samples, snapshot, directory, execution):
+def load_progress(output, samples, repair=False):
+    """按题号读取已写完的进度行；续跑分片前截去中断写入的末行。"""
+    expected = {sample.id for sample in samples}
+    entries = {}
+    for path in sorted((Path(output) / "progress").glob("worker_*.jsonl")):
+        with path.open("r+b" if repair else "rb") as stream:
+            for line in stream:
+                if not line.endswith(b"\n"):
+                    if repair:
+                        stream.truncate(stream.tell() - len(line))
+                    break
+                entry = json.loads(line)
+                sample_id = entry["record"]["id"]
+                if sample_id not in expected:
+                    raise ValueError(f"unexpected sample in evaluation progress: {sample_id}")
+                if sample_id in entries:
+                    raise ValueError(f"duplicate sample in evaluation progress: {sample_id}")
+                entries[sample_id] = entry
+    return entries
+
+
+def _worker(rank, physical_gpu, samples, snapshot, directory, execution):
     with evaluation_log(directory.parent / "eval.log"):
         try:
             device = torch.device("cuda", rank)
-            resources = evaluate_samples(samples, snapshot, device, directory / f"{rank}.jsonl", execution)
+            progress = directory.parent / "progress" / f"worker_{rank}.jsonl"
+            resources = evaluate_samples(samples, snapshot, device, physical_gpu, progress, execution)
             (directory / f"{rank}.json").write_text(json.dumps(resources), encoding="utf-8")
         except Exception as error:
             (directory / f"{rank}.error").write_text(
@@ -108,7 +130,7 @@ def _run_workers(shards, snapshot, devices, directory, execution):
                 break
             process = context.Process(
                 target=_worker,
-                args=(rank, samples, snapshot, directory, execution),
+                args=(rank, devices[rank], samples, snapshot, directory, execution),
             )
             processes.append(process)
             process.start()
@@ -135,45 +157,37 @@ def _run_workers(shards, snapshot, devices, directory, execution):
 
 
 def evaluate_parallel(samples, snapshot, devices, output, shards, execution):
-    """各进程仅接收本卡的题面。控制进程校验并合并所有分片后原子发布明细。"""
+    """只派发待评估的分片，按原始题序合并历次评估的逐题记录。"""
     output = Path(output)
     started = time.perf_counter()
     with TemporaryDirectory(dir=output) as temporary:
         directory = Path(temporary)
-        _run_workers(shards, snapshot, devices, directory, execution)
+        if shards:
+            (output / "progress").mkdir(exist_ok=True)
+            _run_workers(shards, snapshot, devices, directory, execution)
         resources = [
             json.loads((directory / f"{rank}.json").read_text(encoding="utf-8"))
-            for rank in range(len(devices))
+            for rank in range(len(shards))
         ]
-        by_id = {}
-        for rank, assigned in enumerate(shards):
-            pending = {sample.id for sample in assigned}
-            with (directory / f"{rank}.jsonl").open(encoding="utf-8") as stream:
-                for line in stream:
-                    record = json.loads(line)
-                    sample_id = record["id"]
-                    if sample_id in by_id:
-                        raise ValueError(f"duplicate evaluation record: {sample_id}")
-                    if sample_id not in pending:
-                        raise ValueError(f"unexpected evaluation record from GPU {devices[rank]}: {sample_id}")
-                    pending.remove(sample_id)
-                    by_id[sample_id] = record
-            if pending:
-                raise ValueError(f"missing {len(pending)} evaluation records from GPU {devices[rank]}")
-        records = [by_id[sample.id] for sample in samples]
+        entries = load_progress(output, samples)
+        if len(entries) != len(samples):
+            raise ValueError(f"evaluation incomplete: {len(entries)}/{len(samples)} samples completed")
+        records = [entries[sample.id]["record"] for sample in samples]
         merged = directory / "details.jsonl"
         with merged.open("w", encoding="utf-8") as stream:
             for record in records:
                 stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
         merged.replace(output / "details.jsonl")
+    used_gpus = sorted({entry["physical_gpu"] for entry in entries.values()}, key=int)
     return records, {
-        "evaluation_seconds": max(row["evaluation_seconds"] for row in resources),
+        "device": f"CUDA (physical GPUs: {','.join(used_gpus)})",
+        "evaluation_seconds": max((row["evaluation_seconds"] for row in resources), default=0.0),
         "wall_seconds": time.perf_counter() - started,
-        "generation_seconds": sum(row["generation_seconds"] for row in resources),
-        "peak_memory_allocated_bytes": max(row["peak_memory_allocated_bytes"] for row in resources),
-        "peak_memory_reserved_bytes": max(row["peak_memory_reserved_bytes"] for row in resources),
-        "scope": "evaluation_seconds is the longest worker evaluation loop after model loading. "
-        "wall_seconds includes startup, model loading, generation and result merging. "
-        "generation_seconds sums worker generation times, with shared prefill and batched "
-        "generation apportioned across questions. Memory is the maximum single-worker peak.",
+        "generation_seconds": sum(record["generation_seconds"] for record in records),
+        "peak_memory_allocated_bytes": max(entry["peak_memory_allocated_bytes"] for entry in entries.values()),
+        "peak_memory_reserved_bytes": max(entry["peak_memory_reserved_bytes"] for entry in entries.values()),
+        "scope": "evaluation_seconds is the longest worker loop after model loading in this attempt. "
+        "wall_seconds covers this attempt from worker startup to result merging. "
+        "generation_seconds sums the generation time attributed to each completed question across attempts. "
+        "Memory is the maximum single-worker peak observed at a completed question across attempts.",
     }
