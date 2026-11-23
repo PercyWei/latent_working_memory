@@ -105,7 +105,7 @@ bash src/latent_working_memory/benchmarks/scripts/generate_ruler.sh \
 |---|---|
 | v4 | [Benchmark 评估与看板](../v4/benchmarks/README.md) |
 | v4.1 | [独立评估与结果看板](../v4_1/scripts/README.md#4-独立评估) |
-| Full-context 基线 | [基线运行说明](../baselines/README.md) |
+| Full-context 基线 | [基线运行说明](../full_context/README.md) |
 
 - **数据选择**：RULER 指向包含长度子目录的 `data/benchmarks/ruler-v1/<model-name>/`，LoCoMo 指向包含 `locomo10.json` 的目录。
 - **可比性**：同一模型的不同方法使用同一批生成样本及评分协议；评估结果、checkpoint 组织和可视化由各方法负责。

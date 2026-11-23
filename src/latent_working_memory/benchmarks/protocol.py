@@ -13,10 +13,6 @@ from latent_working_memory.benchmarks.data import (
 from latent_working_memory.prompts import QA_SYSTEM_PROMPT, qa_messages
 
 
-# 完整上下文基线的模型配置；跨方法质量比较另行提取来源与精度。
-MODEL_FIELDS = ("model_name_or_path", "backbone_dtype", "attention_implementation")
-
-
 def protocol(benchmark, lengths, memory, use_qa_system=False):
     """记录评估的输入、生成与评分协议，以及实际使用的 system 消息。"""
     if benchmark not in {"ruler", "locomo"}:

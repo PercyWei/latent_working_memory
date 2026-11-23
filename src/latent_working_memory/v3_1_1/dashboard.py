@@ -7,9 +7,8 @@ from pathlib import Path
 from pyecharts import charts
 import streamlit as st
 
-from latent_working_memory.baselines.results import load_baseline_results
+from latent_working_memory.benchmarks.results import load_baseline_results
 from latent_working_memory.benchmarks.data import RULER_TASKS
-from latent_working_memory.benchmarks.protocol import protocol
 from latent_working_memory.v4.reporting import evaluation_charts, ruler_overall, ruler_task_chart
 from latent_working_memory.v3_1_1 import dashboard_compression as compression
 from latent_working_memory.v3_1_1.evaluation.diagnostics import output_flags, visible_text
@@ -37,7 +36,7 @@ def parse_args(argv=None):
                         help="单次运行根目录，仅需保留 eval/ 目录结构")
     parser.add_argument("--dashboard-eval-id", help="启动时选中的评估标识，页面仍可切换")
     parser.add_argument("--dashboard-baselines", nargs="*", default=[], metavar="LABEL_OR_PATH",
-                        help="按“标签 评估结果目录”成对传入，仅本次展示使用")
+                        help="按“标签 结果目录”成对传入，可直接使用 artifacts/baselines/base/<模型名>")
     args = parser.parse_args(argv)
     args.dashboard_run_dir = args.dashboard_run_dir.expanduser().resolve()
     if not args.dashboard_run_dir.is_dir():
@@ -103,7 +102,6 @@ def load_completed_evaluations(directory):
 def _benchmark_view(summary):
     """将真实公共评估条件交给共用基线校验与绘图，保留原始结果格式。"""
     task = summary["task"]
-    common_protocol = protocol(task, summary["protocol"].get("lengths", ()), "")
     return {
         **summary,
         "benchmark": task,
@@ -111,7 +109,6 @@ def _benchmark_view(summary):
         "training_run": str(Path(summary["training_run"]["directory"]).parent),
         "samples": summary["metrics"]["samples"],
         "model": summary["model"],
-        "protocol": {key: summary["protocol"][key] for key in common_protocol},
     }
 
 
@@ -214,7 +211,8 @@ def _resource_rows(summaries, baselines):
             "设备记录": resources.get("device"),
             "实际评估批量": ", ".join(map(str, batch_sizes)) if batch_sizes is not None else None,
             "批量单位": ({"test": "文档", "locomo": "对话", "ruler": "题目"}[result["task"]]
-                         if step is not None else "题目"),
+                         if step is not None else
+                         {"conversations": "对话", "questions": "题目"}[resources.get("batch_unit", "questions")]),
             "生成路径累计耗时（秒）": resources["generation_seconds"],
             "峰值 allocated（GiB）": peak / 1024 ** 3 if peak is not None else None,
             "本次调度墙钟（秒）": resources.get("wall_seconds"),
@@ -411,6 +409,11 @@ def _render_task(directory, task, baseline_results):
     baselines = _baseline_selection(baseline_results, task, views, key) if views else {}
     st.subheader("质量指标")
     st.dataframe(_summary_rows(summaries, baselines), hide_index=True)
+    if task == "locomo" and "system_prompt" in summaries[0]["protocol"] and any(
+        result.get("method") == "full-context" for result in baselines.values()
+    ):
+        st.caption("Full-context 基线和 v3.1.1 使用相同的 QA system 消息。基线一次编码完整题面，"
+                   "v3.1.1 分别编码对话与问题，同一段对话的各题共享压缩记忆。")
     if task == "ruler" and baselines:
         st.caption("基线 Overall 按对应 checkpoint 的长度范围计算。")
     ruler_length = None

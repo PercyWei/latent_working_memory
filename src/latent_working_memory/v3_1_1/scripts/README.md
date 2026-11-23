@@ -328,7 +328,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
   --dashboard-run-dir artifacts/v3-1/policy-post_k256_20261104 \
   --dashboard-eval-id standard_20261104 \
   --dashboard-baselines \
-    full-context artifacts/baselines/full-context/qwen3-4b-inst-2507_20261019/eval
+    base-Qwen artifacts/baselines/base/Qwen3-4B-Instruct-2507
 ```
 
 - **结果浏览**：
@@ -355,7 +355,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 
 - **基线接入**：
 
-  - **添加方式**：通过 `--dashboard-baselines <标签> <结果目录> ...` 添加多组基线，标签须唯一。支持 `eval/<benchmark>/summary.json` 布局的 `eval/` 目录，或含 `summary.json` 的单任务／单 checkpoint 目录；页面可勾选基线，不保存绑定。
+  - 通过 `--dashboard-baselines <标签> <结果目录> ...` 添加多组基线。原始模型基线可以直接指定 `artifacts/baselines/base/<model_name>/`。也支持直接含 `summary.json` 的单任务或单 checkpoint 目录。标签用于图例，须唯一。
   - **异常提示**：缺少当前 benchmark 汇总时跳过该基线；路径、格式或比较设置不一致时在页面提示，不影响已有结果。
 
 - **比较规则**：
@@ -488,7 +488,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 |---|---|
 | `--dashboard-run-dir` | 看板必填，指向运行根目录 |
 | `--dashboard-eval-id` | 看板启动时选中的 eval-id；省略时默认列表首项，页面可切换 |
-| `--dashboard-baselines` | 按“标签 结果目录”成对传入；支持 benchmark 的 `eval/` 或直接含 `summary.json` 的目录 |
+| `--dashboard-baselines` | 按“标签 结果目录”成对传入，可指定基线模型目录或直接含 `summary.json` 的目录 |
 
 ## 6. 配置变更与结果复用
 

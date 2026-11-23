@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261101 17:31:30 Asia/Shanghai
+最后修订时间：20261123 16:39:54 Asia/Shanghai
 
 数据下载、RULER 样本生成与公共评分协议见[公共 benchmark 指南](../../benchmarks/README.md)。本页说明 v4 的 checkpoint 评估与结果看板；每题独立初始化记忆，按 checkpoint 的窗口和写入设置流式读取。
 
@@ -47,7 +47,7 @@ bash src/latent_working_memory/v4/scripts/dashboard.sh \
   --run-dir artifacts/v4/<run-id>
 ```
 
-先按 [full-context 运行说明](../../baselines/README.md) 独立计算基线，再按“标签＋基线运行的 `eval/` 目录”成对传给看板：
+先按 [full-context 运行说明](../../full_context/README.md) 独立计算基线，再按“标签＋基线运行的 `eval/` 目录”成对传给看板：
 
 ```bash
 bash src/latent_working_memory/v4/scripts/dashboard.sh \

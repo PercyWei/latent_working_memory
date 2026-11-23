@@ -11,7 +11,7 @@ from pathlib import Path
 from pyecharts import charts
 import streamlit as st
 
-from latent_working_memory.baselines.results import load_baseline_results, validate_quality_comparison
+from latent_working_memory.benchmarks.results import load_baseline_results, validate_quality_comparison
 from latent_working_memory.benchmarks.data import RULER_TASKS
 from latent_working_memory.benchmarks.protocol import protocol
 from latent_working_memory.v4.reporting import RULER_TASK_LABELS, ruler_overall
@@ -309,7 +309,8 @@ def _resource_rows(methods, baselines):
             "方法": label, "累计 step": step,
             "测量样本": resources.get("samples", result["metrics"]["samples"]),
             "测量长度": ", ".join(map(str, resources.get("lengths", result["protocol"].get("lengths", [])))),
-            "精度": model["backbone_dtype"],
+            "精度": (f"{model['backbone_dtype']} + BF16 autocast"
+                     if model.get("mixed_precision", False) else model["backbone_dtype"]),
             "Attention 实现": model.get("attention_implementation", "eager"),
             "设备记录": resources.get("device"),
             "生成路径累计耗时（秒）": resources["generation_seconds"],

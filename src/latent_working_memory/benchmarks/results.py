@@ -6,6 +6,8 @@ from pathlib import Path
 
 def _quality_conditions(summary):
     names = ["input", "decoding", "generation_budget", "reference"]
+    if "system_prompt" in summary["protocol"]:
+        names.append("system_prompt")
     names.extend(["answer_prefix"] if summary["benchmark"] == "ruler"
                  else ["categories", "history_order"])
     return {

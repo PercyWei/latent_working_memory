@@ -8,6 +8,7 @@ import sys
 from latent_working_memory.benchmarks.data import load_samples
 from latent_working_memory.benchmarks.protocol import protocol
 from latent_working_memory.benchmarks.scoring import score_sample, summarize_scores
+from latent_working_memory.cli import length_batch_size
 from ..cli import ignore_resume_options, positive_int
 from ..data import QAEncoder
 from . import DEFAULT_EVAL_BATCH_SIZE
@@ -72,17 +73,6 @@ def split_ruler_prompt(sample):
     if query_start <= start:
         raise ValueError(f"{sample.id}: missing body/query boundary in the RULER {task} template")
     return prompt[:query_start], prompt[query_start:]
-
-
-def length_batch_size(value):
-    """解析 RULER 的 LENGTH=BATCH 每卡批量覆盖。"""
-    try:
-        length, batch_size = map(int, value.split("="))
-    except ValueError as error:
-        raise argparse.ArgumentTypeError("use LENGTH=BATCH with positive integers") from error
-    if length < 1 or batch_size < 1:
-        raise argparse.ArgumentTypeError("use LENGTH=BATCH with positive integers")
-    return length, batch_size
 
 
 def plan_options(args, saved):

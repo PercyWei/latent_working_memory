@@ -8,7 +8,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from latent_working_memory.baselines.results import load_baseline_results
+from latent_working_memory.benchmarks.results import load_baseline_results
 from latent_working_memory.v4.evaluation_records import load_completed_evaluations
 from latent_working_memory.v4.reporting import evaluation_charts, ruler_task_chart
 

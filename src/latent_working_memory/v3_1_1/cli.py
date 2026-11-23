@@ -4,12 +4,7 @@ import argparse
 import math
 import sys
 
-
-def positive_int(value):
-    number = int(value)
-    if number < 1:
-        raise argparse.ArgumentTypeError("must be a positive integer")
-    return number
+from latent_working_memory.cli import positive_int
 
 
 def nonnegative_int(value):
