@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[4]
 
 def parse_args(argv=None):
     selector = argparse.ArgumentParser(add_help=False)
-    selector.add_argument("--method", choices=METHODS, required=True)
+    selector.add_argument("--method", choices=METHODS)
     selection, _ = selector.parse_known_args(argv)
     parser = argparse.ArgumentParser(description=__doc__, parents=[selector])
     parser.add_argument("--benchmark-data", type=Path, default=ROOT / "data/benchmarks/locomo")
@@ -34,8 +34,11 @@ def parse_args(argv=None):
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--batch-size-per-gpu", type=int, default=1)
     parser.add_argument("--max-conversations", type=int, help="仅评估前 N 段完整对话，默认全部")
-    method_module(selection.method).add_arguments(parser)
+    if selection.method is not None:
+        method_module(selection.method).add_arguments(parser)
     args = parser.parse_args(argv)
+    if args.method is None:
+        parser.error("--method is required")
     if args.batch_size_per_gpu < 1 or (args.max_conversations is not None and args.max_conversations < 1):
         parser.error("batch size and conversation limit must be positive")
     if args.output_id is None:
@@ -115,10 +118,12 @@ def main(argv=None):
                 log = (progress / f"worker-{rank}.log").open("w")
                 logs.append(log)
                 environment = {**os.environ, "CUDA_VISIBLE_DEVICES": devices[index]}
+                # Worker 继承目录锁，主进程意外退出后仍阻止另一轮续评改写任务。
                 process = subprocess.Popen([
                     sys.executable, "-u", "-m", "latent_working_memory.benchmarks.locomo.worker",
                     "--directory", str(directory), "--rank", str(rank),
-                ], env=environment, stdout=log, stderr=subprocess.STDOUT)
+                ], env=environment, stdout=log, stderr=subprocess.STDOUT,
+                    pass_fds=(lock.fileno(),))
                 processes.append(process)
             while any(process.poll() is None for process in processes):
                 failures = [p.returncode for p in processes if p.poll() not in (None, 0)]
