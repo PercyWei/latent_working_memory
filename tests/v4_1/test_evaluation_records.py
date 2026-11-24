@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from latent_working_memory.benchmarks.data import RULER_TASKS
+from benchmarks.data import RULER_TASKS
 from latent_working_memory.v4_1.config import ExperimentConfig, TrainingConfig
 from latent_working_memory.v4_1.data import Episode
 from latent_working_memory.v4_1.evaluation import evaluate as evaluation

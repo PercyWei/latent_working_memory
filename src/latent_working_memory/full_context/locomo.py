@@ -1,17 +1,15 @@
 """为同一段 LoCoMo 对话预填充一次 KV，再从该前缀独立回答各题。"""
 
-from pathlib import Path
 import time
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache, GenerationConfig
+from transformers import DynamicCache
 
-from latent_working_memory.benchmarks.protocol import encode_prompt
-from latent_working_memory.benchmarks.locomo.engine import (
+from benchmarks.protocol import encode_prompt
+from benchmarks.locomo.engine import (
     PreparedConversation, PreparedQuestion, evaluate_conversations,
 )
-from latent_working_memory.benchmarks.locomo.records import file_identity
-from latent_working_memory.benchmarks.locomo.reader import fork_dynamic_cache
+from benchmarks.locomo.reader import fork_dynamic_cache
 
 from .generation import generated_ids, left_pad
 
@@ -109,36 +107,3 @@ def evaluate_locomo(samples, tokenizer, model, generation, model_window, device,
         commit(sample, answer["prompt_tokens"], answer["generated_token_ids"],
                answer["generation_seconds"], 1, answer["decode_batch_size"])
     evaluate_conversations(samples, adapter, batch_size, completed)
-
-
-def add_arguments(parser):
-    parser.add_argument("--model-path", type=Path, required=True)
-    parser.add_argument("--dtype", choices=("fp32", "bf16"), default="fp32")
-    parser.add_argument("--attention-implementation", choices=("sdpa", "flash_attention_2"), default="sdpa")
-    parser.add_argument("--mixed-precision", action="store_true")
-
-
-def configuration(args):
-    model_path = args.model_path.expanduser().resolve()
-    if args.attention_implementation == "flash_attention_2" and args.dtype == "fp32" and not args.mixed_precision:
-        raise ValueError("FlashAttention 2 with float32 weights requires --mixed-precision")
-    return {"model_path": str(model_path), "files": file_identity(model_path),
-            "dtype": {"fp32": "float32", "bf16": "bfloat16"}[args.dtype], "attention_implementation": args.attention_implementation,
-            "mixed_precision": args.mixed_precision}
-
-
-def load_adapter(settings):
-    if not torch.cuda.is_available():
-        raise RuntimeError("LoCoMo evaluation requires CUDA")
-    tokenizer = AutoTokenizer.from_pretrained(settings["model_path"])
-    model = AutoModelForCausalLM.from_pretrained(
-        settings["model_path"], dtype=getattr(torch, settings["dtype"]),
-        attn_implementation=settings["attention_implementation"],
-    ).eval().to("cuda")
-    generation = GenerationConfig(
-        do_sample=False, num_beams=1, eos_token_id=tokenizer.eos_token_id,
-        pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
-        bos_token_id=tokenizer.bos_token_id, use_cache=True,
-    )
-    return FullContextLoCoMo(tokenizer, model, generation, model.config.max_position_embeddings,
-                            torch.device("cuda"), settings["mixed_precision"])

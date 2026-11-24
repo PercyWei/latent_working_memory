@@ -16,7 +16,7 @@ import sys
 import threading
 from zoneinfo import ZoneInfo
 
-from latent_working_memory.benchmarks.protocol import DEFAULT_RULER_LENGTHS
+from benchmarks.protocol import DEFAULT_RULER_LENGTHS
 from latent_working_memory.v4.config import (
     ModelConfig,
     TrainingConfig,

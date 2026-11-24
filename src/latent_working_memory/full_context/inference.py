@@ -6,7 +6,7 @@ import time
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, set_seed
 
-from latent_working_memory.benchmarks.scoring import score_sample
+from benchmarks.scoring import score_sample
 
 from .locomo import evaluate_locomo
 from .ruler import evaluate_ruler

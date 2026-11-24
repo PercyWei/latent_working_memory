@@ -7,7 +7,7 @@ from pathlib import Path
 import pyarrow as pa
 import streamlit as st
 
-from latent_working_memory.benchmarks.data import RULER_TASKS
+from benchmarks.data import RULER_TASKS
 
 
 def _probability_bin(probability):

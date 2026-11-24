@@ -3,10 +3,10 @@
 from pathlib import Path
 import torch
 
-from latent_working_memory.benchmarks.data import locomo_question_prompt
-from latent_working_memory.benchmarks.locomo.engine import PreparedConversation, PreparedQuestion
-from latent_working_memory.benchmarks.locomo.reader import greedy_read
-from latent_working_memory.benchmarks.locomo.records import file_identity
+from benchmarks.data import locomo_question_prompt
+from benchmarks.locomo.engine import PreparedConversation, PreparedQuestion
+from benchmarks.locomo.reader import greedy_read
+from benchmarks.locomo.records import file_identity
 from .model import CHECKPOINT_FILES, UPSTREAM_COMMIT, load_adapter as load_official
 
 

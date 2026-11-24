@@ -7,8 +7,8 @@ from pathlib import Path
 from pyecharts import charts
 import streamlit as st
 
-from latent_working_memory.benchmarks.results import load_baseline_results
-from latent_working_memory.benchmarks.data import RULER_TASKS
+from benchmarks.results import load_baseline_results
+from benchmarks.data import RULER_TASKS
 from latent_working_memory.v4.reporting import evaluation_charts, ruler_overall, ruler_task_chart
 from latent_working_memory.v3_1_1 import dashboard_boundary as boundary
 from latent_working_memory.v3_1_1 import dashboard_compression as compression

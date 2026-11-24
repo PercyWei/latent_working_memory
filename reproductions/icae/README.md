@@ -2,13 +2,13 @@
 
 创建时间：20260904 10:13:57 Asia/Shanghai
 
-最后修订时间：20261124 15:43:38 Asia/Shanghai
+最后修订时间：20261124 16:38:27 Asia/Shanghai
 
 本目录使用 [In-context Autoencoder（ICAE）](https://arxiv.org/abs/2307.06945) 的官方 v2 实现，在 LoCoMo 上分别评估基于 Mistral-7B-Instruct-v0.2 的预训练与指令微调权重。源码与项目适配见 [UPSTREAM.md](UPSTREAM.md#icae-v2)。
 
 ## 评估数据
 
-两个阶段共用 LoCoMo 的 10 段完整对话。每道题使用所属对话的全部历史，数据下载命令见[评估数据准备](../../src/latent_working_memory/benchmarks/README.md)。
+两个阶段共用 LoCoMo 的 10 段完整对话。每道题使用所属对话的全部历史，数据下载命令见[评估数据准备](../../benchmarks/README.md)。
 
 | benchmark | 题型 | 题数 | 默认数据路径 |
 |---|---|---:|---|
@@ -40,7 +40,7 @@ bash reproductions/setup_eval_env.sh icae
 source ~/rivermind-data/envs/icae-v2/bin/activate
 ```
 
-两次评估共用基座，各自写入独立目录。入口复用[公共 LoCoMo 框架](../../src/latent_working_memory/benchmarks/locomo/README.md)，可用 `CUDA_VISIBLE_DEVICES=0,1` 按对话分配到多卡。
+两次评估共用基座，各自写入独立目录。入口复用[公共 LoCoMo 框架](../../benchmarks/locomo/README.md)，可用 `CUDA_VISIBLE_DEVICES=0,1` 按对话分配到多卡。
 
 ```bash
 # 预训练权重
@@ -69,10 +69,10 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/icae/scripts/eval_locomo.sh \
 | `--benchmark-data` | 包含 `locomo10.json` 的目录，默认 `data/benchmarks/locomo` |
 | `--output-root` | 产物父目录，默认 `artifacts/reproductions/icae` |
 | `--output-id` | 单个目录名，首次运行须使用新名称。省略时按上海时间生成 `icae_<YYYYMMDD-HHMM>` |
-| `--batch-size-per-gpu` | 每卡同时回答的问题数上限，默认 1，同对话内按问题长度组批 |
+| `--batch-size-per-gpu` | 每卡评估批量大小（batch size），默认 1 |
 
 - 压缩器只读取对话正文，将完整历史均分为若干段，每段最多 512 个输入 token，压成 128 个记忆槽。超过官方示例 5,120 tokens 的对话也按此规则处理。
-- 同一对话的各题复用记忆槽和回答端的前缀 KV 缓存。回答端依次读取 QA 系统提示、记忆槽和问题。指令微调阶段在记忆后加入官方 `[FT]` 标记，预训练阶段直接用冻结基座回答。
+- 同一对话内按问题长度组批，各题复用记忆槽和回答端的前缀 KV 缓存。回答端依次读取 QA 系统提示、记忆槽和问题。指令微调阶段在记忆后加入官方 `[FT]` 标记，预训练阶段直接用冻结基座回答。
 - 贪心解码最多生成 50 个 token。按 LoCoMo 官方规则计算逐题 F1，再对题目取平均，分别报告总体和各题型分数。
 
 ## 查看结果

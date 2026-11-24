@@ -12,10 +12,10 @@ from zoneinfo import ZoneInfo
 import torch
 from transformers import AutoConfig
 
-from latent_working_memory.benchmarks.comparison import comparison_data
-from latent_working_memory.benchmarks.data import load_samples
-from latent_working_memory.benchmarks.protocol import DEFAULT_RULER_LENGTHS, data_identity, protocol
-from latent_working_memory.benchmarks.scoring import summarize_scores
+from benchmarks.comparison import comparison_data
+from benchmarks.data import load_samples
+from benchmarks.protocol import DEFAULT_RULER_LENGTHS, data_identity, protocol
+from benchmarks.scoring import summarize_scores
 from latent_working_memory.cli import length_batch_size, positive_int
 from latent_working_memory.devices import visible_devices
 from latent_working_memory.v4.io import write_json

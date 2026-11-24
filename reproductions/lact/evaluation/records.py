@@ -5,8 +5,8 @@ import json
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from evaluation_runtime import write_json
-from latent_working_memory.benchmarks.vendor.ruler import postprocess_pred, string_match_all
+from evaluation_runtime import write_json as write_json
+from benchmarks.vendor.ruler import postprocess_pred, string_match_all
 from provenance import UPSTREAM_REVISION
 
 

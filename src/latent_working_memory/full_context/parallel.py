@@ -13,7 +13,7 @@ from tempfile import TemporaryDirectory
 
 import torch
 
-from latent_working_memory.benchmarks.locomo.engine import shard_conversations
+from benchmarks.locomo.engine import shard_conversations
 
 from .inference import evaluate_samples
 

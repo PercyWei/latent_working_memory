@@ -6,8 +6,8 @@ import math
 from pathlib import Path
 import time
 
-from latent_working_memory.benchmarks.comparison import comparison_data
-from latent_working_memory.benchmarks.scoring import summarize_scores
+from benchmarks.comparison import comparison_data
+from benchmarks.scoring import summarize_scores
 from .diagnostics import summarize_outputs
 from .records import (
     check_evaluation, completed_evaluation, length_request, read_details,

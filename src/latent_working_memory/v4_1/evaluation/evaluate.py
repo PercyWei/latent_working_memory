@@ -9,8 +9,8 @@ from pathlib import Path
 
 from transformers import AutoConfig, AutoTokenizer, set_seed
 
-from latent_working_memory.benchmarks.data import load_samples
-from latent_working_memory.benchmarks.protocol import data_identity, protocol
+from benchmarks.data import load_samples
+from benchmarks.protocol import data_identity, protocol
 from latent_working_memory.runtime import initialize_device
 from latent_working_memory.v4_1.cli import DEFAULT_EVAL_BATCH_SIZE, positive_int
 from latent_working_memory.v4_1.config import config_from_dict

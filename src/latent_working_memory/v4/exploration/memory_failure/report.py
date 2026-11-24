@@ -10,8 +10,8 @@ from pathlib import Path
 import re
 import unicodedata
 
-from latent_working_memory.benchmarks.data import LOCOMO_CATEGORIES
-from latent_working_memory.benchmarks.scoring import summarize_scores
+from benchmarks.data import LOCOMO_CATEGORIES
+from benchmarks.scoring import summarize_scores
 from latent_working_memory.v4.exploration.memory_failure.constants import (
     COLORS,
     CONDITIONS,

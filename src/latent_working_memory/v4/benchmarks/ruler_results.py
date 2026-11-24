@@ -4,9 +4,9 @@ from collections import defaultdict
 import json
 from pathlib import Path
 
-from latent_working_memory.benchmarks.comparison import comparison_data
-from latent_working_memory.benchmarks.protocol import data_identity
-from latent_working_memory.benchmarks.scoring import summarize_scores
+from benchmarks.comparison import comparison_data
+from benchmarks.protocol import data_identity
+from benchmarks.scoring import summarize_scores
 from latent_working_memory.v4.evaluation_records import matching_evaluation_config
 
 

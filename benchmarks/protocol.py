@@ -5,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from latent_working_memory.benchmarks.data import (
+from benchmarks.data import (
     DEFAULT_RULER_LENGTHS as DEFAULT_RULER_LENGTHS,
     LOCOMO_COMMIT,
     RULER_COMMIT,

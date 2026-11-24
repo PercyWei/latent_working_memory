@@ -13,15 +13,15 @@ import torch
 from transformers import set_seed
 
 from latent_working_memory.runtime import initialize_device
-from latent_working_memory.benchmarks.comparison import comparison_data
-from latent_working_memory.benchmarks.data import load_samples
-from latent_working_memory.benchmarks.protocol import (
+from benchmarks.comparison import comparison_data
+from benchmarks.data import load_samples
+from benchmarks.protocol import (
     DEFAULT_RULER_LENGTHS,
     data_identity,
     encode_prompt,
     protocol,
 )
-from latent_working_memory.benchmarks.scoring import score_sample, summarize_scores
+from benchmarks.scoring import score_sample, summarize_scores
 from latent_working_memory.v4.benchmarks.ruler_results import (
     length_config,
     load_length_summaries,

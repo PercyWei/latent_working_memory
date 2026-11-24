@@ -14,10 +14,10 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from transformers import GenerationConfig, PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
 
-from latent_working_memory.benchmarks.data import BenchmarkSample, locomo_question_prompt
-from latent_working_memory.benchmarks.protocol import encode_prompt
-from latent_working_memory.benchmarks.locomo.engine import evaluate_conversations, shard_conversations
-from latent_working_memory.benchmarks.locomo.records import read_progress
+from benchmarks.data import BenchmarkSample, locomo_question_prompt
+from benchmarks.protocol import encode_prompt
+from benchmarks.locomo.engine import evaluate_conversations, shard_conversations
+from benchmarks.locomo.records import read_progress
 from latent_working_memory.full_context.locomo import FullContextLoCoMo
 from latent_working_memory.v3_1_1.config import ComputeConfig, ModelConfig, ModelStructureConfig, ModelLoraConfig
 from latent_working_memory.v3_1_1.evaluation.locomo_adapter import MemoryAdapter

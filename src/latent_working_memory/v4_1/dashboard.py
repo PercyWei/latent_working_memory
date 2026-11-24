@@ -11,9 +11,9 @@ from pathlib import Path
 from pyecharts import charts
 import streamlit as st
 
-from latent_working_memory.benchmarks.results import load_baseline_results, validate_quality_comparison
-from latent_working_memory.benchmarks.data import RULER_TASKS
-from latent_working_memory.benchmarks.protocol import protocol
+from benchmarks.results import load_baseline_results, validate_quality_comparison
+from benchmarks.data import RULER_TASKS
+from benchmarks.protocol import protocol
 from latent_working_memory.v4.reporting import RULER_TASK_LABELS, ruler_overall
 from latent_working_memory.v4_1.evaluation.diagnostics import output_flags, visible_text
 from latent_working_memory.v4_1.evaluation.records import completed_evaluation, read_evaluation_record

@@ -2,7 +2,7 @@
 
 创建时间：20261003 21:51:43 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261123 16:39:54 Asia/Shanghai
+最后修订时间：20261124 16:08:32 Asia/Shanghai
 
 冻结基座，在每层维护 latent memory，通过 Attention Matching 局部更新记忆，并由答案 CE 学习如何生成压缩查询和读写记忆。
 
@@ -198,7 +198,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 | 评估协议、结果复用、模型加载与计时 | [evaluation_records.py](evaluation_records.py)、[evaluation_runtime.py](evaluation_runtime.py) |
 | QASPER 评估 | [evaluate.py](evaluate.py) |
 | 评估看板与图表 | [dashboard.py](dashboard.py)、[reporting.py](reporting.py) |
-| Benchmark 公共读取与评分、v4 评估 | [公共 data.py](../benchmarks/data.py)、[公共 scoring.py](../benchmarks/scoring.py)、[v4 evaluate.py](benchmarks/evaluate.py) |
+| Benchmark 公共读取与评分、v4 评估 | [公共 data.py](../../../benchmarks/data.py)、[公共 scoring.py](../../../benchmarks/scoring.py)、[v4 evaluate.py](benchmarks/evaluate.py) |
 
 ```bash
 uv run --frozen python -m compileall -q src/latent_working_memory/v4

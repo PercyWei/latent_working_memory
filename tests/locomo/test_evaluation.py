@@ -1,0 +1,96 @@
+"""验证公共调度通过方法提供的工厂运行独立 worker，并按题续评。"""
+
+import argparse
+from importlib import import_module
+import json
+from pathlib import Path
+
+import pytest
+
+from benchmarks.locomo.evaluate import add_evaluation_arguments, run_evaluation
+
+
+def test_method_factory_workers_and_resume(tmp_path, monkeypatch):
+    root = Path(__file__).resolve().parents[2]
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setenv("PYTHONPATH", f"{tmp_path}:{root}:{root / 'src'}")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    monkeypatch.delenv("LOCAL_RANK", raising=False)
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    (tmp_path / "locomo_test_method.py").write_text('''
+import json
+import os
+from pathlib import Path
+from benchmarks.locomo.engine import PreparedConversation, PreparedQuestion
+
+class Adapter:
+    def __init__(self, settings):
+        self.trace = Path(settings["trace"])
+
+    def prepare_context(self, history, questions):
+        cid = questions[0].metadata["conversation_id"]
+        with self.trace.open("a") as stream:
+            stream.write(json.dumps([cid, os.environ["CUDA_VISIBLE_DEVICES"]]) + "\\n")
+        return PreparedConversation(cid, [PreparedQuestion(q, None, ()) for q in questions],
+                                    {"context_tokens": len(history)})
+
+    def answer_batch(self, state, questions, complete):
+        for question in questions:
+            assert question.sample.metadata["conversation_id"] == state
+            complete(question, {"prediction": "red", "decode_batch_size": len(questions)})
+
+def load_adapter(settings):
+    return Adapter(settings)
+''')
+    factory = import_module("locomo_test_method").load_adapter
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "locomo10.json").write_text(json.dumps([{
+        "sample_id": cid,
+        "conversation": {
+            "speaker_a": "Alice", "speaker_b": "Bob",
+            "session_1_date_time": "1 January 2026",
+            "session_1": [{"speaker": "Alice", "text": "My bike and hat are red."}],
+        },
+        "qa": [{"category": 4, "question": f"What color is Alice's {item}?", "answer": "red"}
+               for item in ("bike", "hat")],
+    } for cid in ("first", "second")]))
+    parser = argparse.ArgumentParser()
+    add_evaluation_arguments(parser, tmp_path / "results")
+    args = parser.parse_args([
+        "--benchmark-data", str(data), "--output-id", "factory-check", "--batch-size-per-gpu", "2",
+    ])
+    trace = tmp_path / "prepared.jsonl"
+    settings = {"trace": str(trace)}
+    summary = run_evaluation(args, "local-test", settings, factory)
+    directory = args.output_root / "eval/factory-check/locomo"
+    rows = [json.loads(line) for line in (directory / "details.jsonl").read_text().splitlines()]
+    assert summary["metrics"]["score"] == 1
+    assert len(rows) == 4
+    assert all(row["decode_batch_size"] == 2 for row in rows)
+    assert sorted(json.loads(line) for line in trace.read_text().splitlines()) == [
+        ["first", "0"], ["second", "1"],
+    ]
+    assert summary["adapter"] == {"module": "locomo_test_method", "factory": "load_adapter"}
+
+    # 模拟最后一题写入中断；保留另一题，改变 GPU 数量和 batch 后补齐。
+    shard = directory / "progress/worker-1.jsonl"
+    first_line = shard.read_text().splitlines()[0]
+    shard.write_text(first_line + '\n{"id":')
+    args.resume = True
+    args.batch_size_per_gpu = 1
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    resumed = run_evaluation(args, "local-test", settings, factory)
+    assert resumed["metrics"] == summary["metrics"]
+    after = [json.loads(line) for line in (directory / "details.jsonl").read_text().splitlines()]
+    assert [(r["id"], r["prediction"]) for r in after] == [(r["id"], r["prediction"]) for r in rows]
+    assert sum(row["decode_batch_size"] == 1 for row in after) == 1
+    assert len(trace.read_text().splitlines()) == 3
+    assert json.loads(trace.read_text().splitlines()[-1]) == ["second", "0"]
+    assert shard.read_text() == first_line + "\n"
+
+    # 全部完成后不再加载适配器；协议不一致仍须拒绝。
+    run_evaluation(args, "local-test", settings, factory)
+    assert len(trace.read_text().splitlines()) == 3
+    with pytest.raises(ValueError, match="settings differ"):
+        run_evaluation(args, "local-test", {**settings, "changed": True}, factory)

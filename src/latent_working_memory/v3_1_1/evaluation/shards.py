@@ -5,8 +5,8 @@ import json
 from pathlib import Path
 import time
 
-from latent_working_memory.benchmarks.locomo.engine import shard_conversations
-from latent_working_memory.benchmarks.comparison import comparison_data
+from benchmarks.locomo.engine import shard_conversations
+from benchmarks.comparison import comparison_data
 from ..io import write_json
 from .diagnostics import summarize_outputs
 from .records import (

@@ -1,6 +1,6 @@
 # 论文复现
 
-最后修订时间：20261124 15:43:38 Asia/Shanghai
+最后修订时间：20261124 16:08:32 Asia/Shanghai
 
 本目录保存论文方法的独立复现。训练和评估入口、依赖环境、源码来源及结果分别在各方法目录维护。
 
@@ -32,10 +32,10 @@
 [ICAE](icae/README.md) 和 [AutoCompressors](autocompressors/README.md) 均使用官方模型实现。各方法的 README 提供源码、权重、独立环境和评估命令。准备公共数据：
 
 ```bash
-bash src/latent_working_memory/benchmarks/scripts/download_benchmarks.sh --benchmark locomo
+bash benchmarks/scripts/download_benchmarks.sh --benchmark locomo
 ```
 
-ICAE 接入[公共 LoCoMo 框架](../src/latent_working_memory/benchmarks/locomo/README.md)，AutoCompressors 使用[逐题评估入口](soft_context_locomo.py)。每段对话按时间顺序完整压缩一次，再独立回答该对话的各个问题。system 提示和问题留在读出端。10 段对话共 1,540 道第 1–4 类开放题，每题贪心生成至多 50 个 token，使用项目的官方 LoCoMo F1。ICAE 用 `--output-root` 和 `--output-id` 生成 `<output-root>/eval/<output-id>/locomo/`，AutoCompressors 用 `--output-dir` 直接指定结果目录。两者均支持 `--resume` 续评。
+ICAE 接入[公共 LoCoMo 框架](../benchmarks/locomo/README.md)，AutoCompressors 使用[逐题评估入口](soft_context_locomo.py)。每段对话按时间顺序完整压缩一次，再独立回答该对话的各个问题。system 提示和问题留在读出端。10 段对话共 1,540 道第 1–4 类开放题，每题贪心生成至多 50 个 token，使用项目的官方 LoCoMo F1。ICAE 用 `--output-root` 和 `--output-id` 生成 `<output-root>/eval/<output-id>/locomo/`，AutoCompressors 用 `--output-dir` 直接指定结果目录。两者均支持 `--resume` 续评。
 
 | 产物 | 内容 |
 |---|---|

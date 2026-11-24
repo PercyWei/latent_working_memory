@@ -2,7 +2,7 @@
 
 创建时间：20261108 23:41:27 Asia/Shanghai
 
-最后修订时间：20261110 16:50:53 Asia/Shanghai
+最后修订时间：20261124 16:08:32 Asia/Shanghai
 
 本文记录 LaCT、E²-TTT 和 In-Place TTT 所需评估数据的下载与构造。全部命令从项目根目录执行，仅需 CPU；模型路径沿用 `~/rivermind-data/models/reproductions/`，数据直接保存到指定的本地目录。
 
@@ -31,7 +31,7 @@ E²-TTT 的 MLP、SwiGLU 两个 1.3B checkpoint 共用一份 RULER 数据；In-P
 已有 `data/raw/ruler-v1-source/` 和 `data/raw/nltk_data/` 时跳过下载，否则首次准备时需执行：
 
 ```bash
-bash src/latent_working_memory/benchmarks/scripts/download_benchmarks.sh --benchmark ruler
+bash benchmarks/scripts/download_benchmarks.sh --benchmark ruler
 ```
 
 该入口下载官方源码、Paul Graham essays、SQuAD、HotpotQA、词表及 NLTK 资源，三种方法共享这些原始素材。
@@ -41,7 +41,7 @@ bash src/latent_working_memory/benchmarks/scripts/download_benchmarks.sh --bench
 LaCT 使用 Momentum 目录的 tokenizer 构造，供其三个 760M checkpoint 使用：
 
 ```bash
-bash src/latent_working_memory/benchmarks/scripts/generate_ruler.sh \
+bash benchmarks/scripts/generate_ruler.sh \
   --model-path ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
   --output-dir data/benchmarks/ruler-v1/reproductions/lact-760m \
   --prompt-format base \
@@ -54,7 +54,7 @@ bash src/latent_working_memory/benchmarks/scripts/generate_ruler.sh \
 E²-TTT 使用 MLP checkpoint 的 tokenizer 构造，供其两个 1.3B checkpoint 使用：
 
 ```bash
-bash src/latent_working_memory/benchmarks/scripts/generate_ruler.sh \
+bash benchmarks/scripts/generate_ruler.sh \
   --model-path ~/rivermind-data/models/reproductions/e2_ttt/mlp-1.3b-15b \
   --output-dir data/benchmarks/ruler-v1/reproductions/e2-ttt-1.3b \
   --prompt-format base \
@@ -67,7 +67,7 @@ bash src/latent_working_memory/benchmarks/scripts/generate_ruler.sh \
 In-Place TTT 使用第三方 TTT checkpoint 的 tokenizer 构造，供其 TTT 和 baseline 使用：
 
 ```bash
-bash src/latent_working_memory/benchmarks/scripts/generate_ruler.sh \
+bash benchmarks/scripts/generate_ruler.sh \
   --model-path ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
   --output-dir data/benchmarks/ruler-v1/reproductions/in-place-ttt-qwen3-4b \
   --prompt-format base \

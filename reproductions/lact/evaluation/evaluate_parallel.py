@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "reproductions"))
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
 from evaluation_runtime import (  # noqa: E402
     EvaluationProgress, duration, source_record, stop_processes, timestamp, write_json,

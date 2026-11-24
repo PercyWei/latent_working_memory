@@ -21,7 +21,7 @@ from records import (
 import torch
 from transformers import AutoTokenizer
 
-from latent_working_memory.benchmarks.vendor.ruler import (
+from benchmarks.vendor.ruler import (
     postprocess_pred,
     string_match_all,
 )

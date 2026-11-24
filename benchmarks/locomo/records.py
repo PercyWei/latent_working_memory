@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from latent_working_memory.benchmarks.scoring import summarize_scores
+from benchmarks.scoring import summarize_scores
 
 
 def write_json(path, value):

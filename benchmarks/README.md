@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261124 15:43:38 Asia/Shanghai
+最后修订时间：20261124 16:08:32 Asia/Shanghai
 
 本目录提供 RULER 与 LoCoMo 的公共数据准备、读取和评分，供不同方法及 full-context 基线共用。
 
@@ -16,7 +16,7 @@
 - 以下指令从项目根目录执行；数据下载和 RULER 样本生成由用户手动运行。
 - RULER 保留官方 `input`、`outputs` 等字段；LoCoMo 保留官方完整 JSON，不转换为训练用的 `{text,qas}`。
 - 评估采用 greedy 生成，参考答案只用于评分；模型与记忆机制由各方法的评估入口管理。
-- 本项目 Instruct 模型的输入只应用一次 Qwen chat template，关闭 thinking；不套用训练数据的长度筛选，不截断 benchmark 内容。TTT baselines 的 base 续写协议及任务范围另见 [评估数据准备](../../../reproductions/20261108_ttt_data_preparation.md)。
+- 本项目 Instruct 模型的输入只应用一次 Qwen chat template，关闭 thinking；不套用训练数据的长度筛选，不截断 benchmark 内容。TTT baselines 的 base 续写协议及任务范围另见 [评估数据准备](../reproductions/20261108_ttt_data_preparation.md)。
 - RULER 按任务使用官方生成预算：NIAH 128、VT 30、CWE 120、FWE 50、QA 32 tokens。LoCoMo 为 50 tokens。
 - LoCoMo 按 session 时间顺序保留日期、说话人、正文和 `blip_caption`；不同问题不继承之前生成的答案。类别 1–4 分别为 multi-hop、temporal、open-domain、single-hop；不评估 adversarial 类别 5。
 
@@ -27,7 +27,7 @@
 
 ```bash
 uv sync --frozen
-bash src/latent_working_memory/benchmarks/scripts/download_benchmarks.sh --benchmark all
+bash benchmarks/scripts/download_benchmarks.sh --benchmark all
 ```
 
 **原始数据下载：[download_benchmarks.sh](scripts/download_benchmarks.sh)**
@@ -70,7 +70,7 @@ data/
 - 使用上述已下载素材，默认调用官方生成器构造全部 13 项任务；仅加载 tokenizer，在 CPU 上控制文本长度。
 
 ```bash
-bash src/latent_working_memory/benchmarks/scripts/generate_ruler.sh \
+bash benchmarks/scripts/generate_ruler.sh \
   --model-path "$HOME/models/Qwen3-4B-Instruct-2507" \
   --lengths 8192 16384 32768 \
   --num-samples 100 --seed 42
@@ -95,7 +95,7 @@ bash src/latent_working_memory/benchmarks/scripts/generate_ruler.sh \
 - 官方生成器将 `answer_prefix` 单独保存；本项目现有聊天评估只读取 `input`，不拼回该前缀。`base` 评估须将 `input + answer_prefix` 编码为完整输入。多值／多 query 任务保持一条输入、一次回答。
 - `base` 模式的 NIAH 使用 [本地 NVIDIA 生成器副本](vendor/ruler_niah.py)，修正 512-token essay 无法缩短到 500 词以下及超长重试不退出的问题；原始素材不变，其他任务继续使用下载的官方生成器。
 - 同一模型的比较方法应使用同一批生成样本。评估自定义位置时，`--benchmark-data` 指向 RULER 的 `--output-dir` 或 LoCoMo 的 `<data-root>/locomo`。
-- 完整生成参数执行 `bash src/latent_working_memory/benchmarks/scripts/generate_ruler.sh --help` 查看；下载参数见上表。
+- 完整生成参数执行 `bash benchmarks/scripts/generate_ruler.sh --help` 查看；下载参数见上表。
 
 ## 3. 评估入口
 
@@ -103,13 +103,13 @@ bash src/latent_working_memory/benchmarks/scripts/generate_ruler.sh \
 
 | 方法 | 运行说明 |
 |---|---|
-| v4 | [Benchmark 评估与看板](../v4/benchmarks/README.md) |
-| v4.1 | [独立评估与结果看板](../v4_1/scripts/README.md#4-独立评估) |
-| Full-context 基线 | [基线运行说明](../full_context/README.md) |
+| v4 | [Benchmark 评估与看板](../src/latent_working_memory/v4/benchmarks/README.md) |
+| v4.1 | [独立评估与结果看板](../src/latent_working_memory/v4_1/scripts/README.md#4-独立评估) |
+| Full-context 基线 | [基线运行说明](../src/latent_working_memory/full_context/README.md) |
 
 - **数据选择**：RULER 指向包含长度子目录的 `data/benchmarks/ruler-v1/<model-name>/`，LoCoMo 指向包含 `locomo10.json` 的目录。
 - **可比性**：同一模型的不同方法使用同一批生成样本及评分协议；评估结果、checkpoint 组织和可视化由各方法负责。
 
 ## 公共 LoCoMo 评估
 
-Full-context、ICAE v2 和 v3.1.1 可通过[公共入口](locomo/README.md)按会话分片、复用正文状态并独立批量回答问题。
+Full-context、ICAE v2 和 v3.1.1 通过各自的评估脚本调用[公共接口](locomo/README.md)，按会话分片、复用正文状态并独立批量回答问题。

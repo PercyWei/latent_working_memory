@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pyecharts import charts
 
-from latent_working_memory.benchmarks.data import RULER_TASKS
+from benchmarks.data import RULER_TASKS
 
 
 RULER_TASK_LABELS = {

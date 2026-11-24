@@ -5,7 +5,7 @@ import time
 
 import torch
 
-from latent_working_memory.benchmarks.protocol import encode_prompt
+from benchmarks.protocol import encode_prompt
 
 from .generation import generated_ids, left_pad
 

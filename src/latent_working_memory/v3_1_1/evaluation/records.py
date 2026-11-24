@@ -5,8 +5,8 @@ import fcntl
 import json
 from pathlib import Path
 
-from latent_working_memory.benchmarks.data import DEFAULT_RULER_LENGTHS
-from latent_working_memory.benchmarks.protocol import data_identity
+from benchmarks.data import DEFAULT_RULER_LENGTHS
+from benchmarks.protocol import data_identity
 from ..io import write_json
 
 

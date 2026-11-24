@@ -2,7 +2,7 @@
 
 创建时间：20261027 16:34:06 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261120 11:29:27 Asia/Shanghai
+最后修订时间：20261124 16:08:32 Asia/Shanghai
 
 计算协议与数据格式见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[配置](../../../../configs/v4-1/default.json)中的基座与数据路径。
 
@@ -121,7 +121,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v4_1/scripts/run.sh \
 | `locomo` | `data/benchmarks/locomo` | |
 | `ruler` | `data/benchmarks/ruler-v1/Qwen3-4B-Instruct-2507` | `--lengths` 选择长度 |
 
-- **Benchmark 准备**：Benchmark 数据须提前准备，数据布局与入口见[公共 benchmark 指南](../../benchmarks/README.md#2-数据准备)。
+- **Benchmark 准备**：Benchmark 数据须提前准备，数据布局与入口见[公共 benchmark 指南](../../../../benchmarks/README.md#2-数据准备)。
 - **运行与范围**：`--eval-run` 必填，指向运行根目录。`--checkpoint` 可选，只填一个或多个 `global_step_<N>` 名称，自动查找 `<eval-run>/train/checkpoints/<名称>/state.pt`；省略时选择当时保存的全部完整 checkpoint。
 - **评估计划**：新建时须提供 `--eval-data`，默认先将选定范围与评估设置保存到 `<eval-run>/plan/eval-<eval-id>/<task>.json`，再执行评估，结果保存到 `<eval-run>/eval/<eval-id>/<task>/`。`--eval-id` 默认 `YYYYMMDD-HHMMSS`；同一标识下各任务独立管理，目标任务计划已存在时直接报错。
 - **并行与批量**：多张可见 GPU 共同处理一个 checkpoint 的样本，每卡一份模型；`--eval-batch-size-per-gpu` 控制每卡批量，默认 8。多个 checkpoint 按 step 升序依次评估。

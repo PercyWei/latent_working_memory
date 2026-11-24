@@ -7,8 +7,8 @@ import time
 import torch
 from transformers import set_seed
 
-from latent_working_memory.benchmarks.protocol import encode_prompt
-from latent_working_memory.benchmarks.scoring import score_sample
+from benchmarks.protocol import encode_prompt
+from benchmarks.scoring import score_sample
 from latent_working_memory.data_preparation.personamem.audit import scores
 
 

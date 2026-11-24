@@ -5,10 +5,10 @@ import os
 import torch
 import sys
 
-from latent_working_memory.benchmarks.data import load_samples
-from latent_working_memory.benchmarks.locomo.engine import conversations, evaluate_conversations
-from latent_working_memory.benchmarks.protocol import data_identity, protocol
-from latent_working_memory.benchmarks.scoring import score_sample, summarize_scores
+from benchmarks.data import load_samples
+from benchmarks.locomo.engine import conversations, evaluate_conversations
+from benchmarks.protocol import data_identity, protocol
+from benchmarks.scoring import score_sample, summarize_scores
 from ..cli import ignore_resume_options, positive_int
 from . import DEFAULT_EVAL_BATCH_SIZE
 from .locomo_adapter import MemoryAdapter

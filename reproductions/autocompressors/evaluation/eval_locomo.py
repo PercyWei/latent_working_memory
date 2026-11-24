@@ -9,7 +9,7 @@ from auto_compressor import LlamaAutoCompressorModel
 from torch.nn.functional import pad
 from transformers import AutoTokenizer
 
-from latent_working_memory.benchmarks.data import load_samples
+from benchmarks.data import load_samples
 from latent_working_memory.prompts import QA_SYSTEM_PROMPT
 from reproductions.soft_context_locomo import (
     add_evaluation_arguments,

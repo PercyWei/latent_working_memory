@@ -2,9 +2,9 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261123 16:39:54 Asia/Shanghai
+最后修订时间：20261124 16:08:32 Asia/Shanghai
 
-数据下载、RULER 样本生成与公共评分协议见[公共 benchmark 指南](../../benchmarks/README.md)。本页说明 v4 的 checkpoint 评估与结果看板；每题独立初始化记忆，按 checkpoint 的窗口和写入设置流式读取。
+数据下载、RULER 样本生成与公共评分协议见[公共 benchmark 指南](../../../../benchmarks/README.md)。本页说明 v4 的 checkpoint 评估与结果看板；每题独立初始化记忆，按 checkpoint 的窗口和写入设置流式读取。
 
 ## 1. 运行评估与查看结果
 
@@ -27,7 +27,7 @@ bash src/latent_working_memory/v4/scripts/run.sh \
 - `--checkpoint` 后可列出同一 run 的多个目录；或改用 `--eval-run artifacts/v4/<run-id>/train/frozen-query-gen-m32/`，选择其中仍保留 `state.pt` 的全部 checkpoint。两者互斥；拒绝重复、跨 run 或缺少 `state.pt` 的 checkpoint。多 GPU 时每卡一个进程并行评估不同 checkpoint，命令示例见[运行指南](../scripts/README.md#22-单独评估)。
 - `--eval-id` 默认 `<run-id>-eval`，同一 run、方法下可包含 test、RULER 和 LoCoMo；各任务分别固定设置，换设置时使用新标识。默认沿用 `plan/<method-dir>/<eval-id>/<ruler|locomo>.json` 中的数据目录；首次计算没有该配置时，必须传入 `--benchmark-data`。RULER 指向包含各长度子目录的目录，LoCoMo 指向包含 `locomo10.json` 的目录。
 - 人工确认不同模型可复用同一批 RULER 样本时，用 `--benchmark-data` 指定已有模型目录，不自动判断 tokenizer 是否一致。
-- benchmark 模式不接受 test 专用的 `--test-data`、`--max-test-samples` 和 `--max-new-tokens`，`--lengths` 仅用于 RULER。以上评估参数不用于训练或恢复；下载脚本的同名 `--benchmark` 参数用于选择下载范围，见[公共数据准备说明](../../benchmarks/README.md#2-数据准备)。
+- benchmark 模式不接受 test 专用的 `--test-data`、`--max-test-samples` 和 `--max-new-tokens`，`--lengths` 仅用于 RULER。以上评估参数不用于训练或恢复；下载脚本的同名 `--benchmark` 参数用于选择下载范围，见[公共数据准备说明](../../../../benchmarks/README.md#2-数据准备)。
 - 模型配置与 memory 权重取自 checkpoint，tokenizer 从配置中的本地基座模型目录加载；GPU 通过 `--gpus` 指定。
 - 产物统一由 checkpoint 推导到原实验的 `eval/<method-dir>/<eval-id>/<ruler|locomo>/global_step_N/`，单个、多个 checkpoint 与 `--eval-run` 使用同一规则。
 - 同一 eval-id 的同类任务共用配置，记录实际数据、模型／分词、生成与官方评分设置，不重复保存 seed。评估始终读取公共 `config.json` seed，不接受评估 `--seed`；快照与结果保存实际值，与已有结果不一致时报错。对选中的 checkpoint，已有完整且设置一致的结果直接复用；设置不一致则报错。

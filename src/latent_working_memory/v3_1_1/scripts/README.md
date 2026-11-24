@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261124 09:38:12 Asia/Shanghai
+最后修订时间：20261124 16:08:32 Asia/Shanghai
 
 计算协议、数据格式与模块分工见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256_grpo.json)中的基座与数据路径。
 
@@ -271,7 +271,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/eval_rule
   --batch-size-by-length 8192=8 16384=4 32768=2
 ```
 
-- **评估数据格式**：`--eval-data` 指定评估数据根目录：Test 读取 `test.jsonl`，LoCoMo 读取 `locomo10.json`，RULER 按 `<长度>/<子任务>/test.jsonl` 读取各长度档位和子任务的数据。Benchmark 数据须提前准备，数据布局与准备入口见[公共 benchmark 指南](../../benchmarks/README.md#2-数据准备)。
+- **评估数据格式**：`--eval-data` 指定评估数据根目录：Test 读取 `test.jsonl`，LoCoMo 读取 `locomo10.json`，RULER 按 `<长度>/<子任务>/test.jsonl` 读取各长度档位和子任务的数据。Benchmark 数据须提前准备，数据布局与准备入口见[公共 benchmark 指南](../../../../benchmarks/README.md#2-数据准备)。
 - 三个评估入口都只向 Writer 传入正文。Reader 先读取 system 消息原文与 user 角色开头，再读取记忆块、剩余原文和题目提示。LoCoMo、RULER 沿用官方评分逻辑。
 - RULER 以每题的最终问句为界。此前的全部文本（含任务说明和已答示例）按原顺序进入 Writer；最终问句原样交给 Reader。
 - **Test 协议**：固定读取数据目录的完整 `test.jsonl`，不套用训练长度筛选，默认每题最多生成 128 tokens；同文档全部 QA 共用记忆。

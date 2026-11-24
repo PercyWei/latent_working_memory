@@ -1,20 +1,13 @@
 """v3.1.1 的会话压缩和冻结 Reader KV 复用。"""
 
-from dataclasses import asdict
-from pathlib import Path
 import time
 import torch
-from transformers import set_seed
 
-from latent_working_memory.benchmarks.data import locomo_question_prompt
-from latent_working_memory.benchmarks.locomo.engine import PreparedConversation, PreparedQuestion
-from latent_working_memory.benchmarks.locomo.reader import fork_dynamic_cache, greedy_read
-from latent_working_memory.benchmarks.locomo.records import file_identity
-from ..config import config_from_dict
+from benchmarks.data import locomo_question_prompt
+from benchmarks.locomo.engine import PreparedConversation, PreparedQuestion
+from benchmarks.locomo.reader import fork_dynamic_cache, greedy_read
 from ..data import QAEncoder
-from ..modeling.compressor import MemoryModel
 from ..rollout import execute_batch
-from ..training.checkpoint import checkpoint_file, read_checkpoint
 
 
 class MemoryAdapter:
@@ -92,33 +85,3 @@ class MemoryAdapter:
         with model.forward_context():
             greedy_read(model.decoder, cache, model.decoder.get_input_embeddings()(ids),
                         [q.sample.max_new_tokens for q in questions], model.tokenizer.eos_token_id, completed)
-
-
-def add_arguments(parser):
-    parser.add_argument("--checkpoint", type=Path, required=True, help="state.pt 或 checkpoint 目录")
-    parser.add_argument("--model-path", type=Path, help="覆盖 checkpoint 记录的基座路径")
-
-
-def configuration(args):
-    checkpoint = checkpoint_file(args.checkpoint)
-    state = read_checkpoint(checkpoint)
-    config = config_from_dict(state["config"])
-    if not config.uses_boundary_policy:
-        raise ValueError("LoCoMo requires a joint or boundary_only checkpoint")
-    model_path = args.model_path.expanduser().resolve() if args.model_path else Path(config.model_name_or_path).expanduser()
-    return {"checkpoint": str(checkpoint), "model_path": str(model_path),
-            "checkpoint_files": file_identity(checkpoint), "model_files": file_identity(model_path)}
-
-
-def load_adapter(settings):
-    if not torch.cuda.is_available():
-        raise RuntimeError("LoCoMo evaluation requires CUDA")
-    state = read_checkpoint(settings["checkpoint"])
-    config = config_from_dict(state["config"])
-    set_seed(config.seed)
-    model = MemoryModel(
-        settings["model_path"], asdict(config.model), asdict(config.compute), torch.device("cuda"),
-        with_value_head=config.training.objective.strategy == "ppo",
-    )
-    model.load_trainable_state_dict(state["model"])
-    return MemoryAdapter(model.eval(), config)

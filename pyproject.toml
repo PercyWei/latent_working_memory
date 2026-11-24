@@ -77,7 +77,7 @@ url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/"
 default = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/latent_working_memory"]
+packages = ["src/latent_working_memory", "benchmarks"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

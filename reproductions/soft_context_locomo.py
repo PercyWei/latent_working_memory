@@ -6,9 +6,9 @@ import json
 from pathlib import Path
 from statistics import mean
 
-from latent_working_memory.benchmarks.data import locomo_history, locomo_question_prompt
-from latent_working_memory.benchmarks.protocol import data_identity
-from latent_working_memory.benchmarks.scoring import score_sample, summarize_scores
+from benchmarks.data import locomo_history, locomo_question_prompt
+from benchmarks.protocol import data_identity
+from benchmarks.scoring import score_sample, summarize_scores
 from latent_working_memory.prompts import QA_SYSTEM_PROMPT
 from reproductions.evaluation_runtime import source_record, write_json
 

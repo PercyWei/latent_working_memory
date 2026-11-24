@@ -2,9 +2,9 @@
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable, Protocol
 
-from latent_working_memory.benchmarks.data import locomo_history
+from benchmarks.data import BenchmarkSample, locomo_history
 
 
 @dataclass
@@ -19,6 +19,21 @@ class PreparedConversation:
     state: Any
     questions: list[PreparedQuestion]
     statistics: dict = field(default_factory=dict)
+
+
+class ConversationAdapter(Protocol):
+    def prepare_context(
+        self, history: str, questions: list[BenchmarkSample],
+    ) -> PreparedConversation:
+        """准备只读正文状态；batch_key 标识可一起解码的问题。"""
+        ...
+
+    def answer_batch(
+        self, state: Any, questions: list[PreparedQuestion],
+        complete: Callable[[PreparedQuestion, dict], None],
+    ) -> None:
+        """从正文状态为各题独立解码，完成一题就回调一次。"""
+        ...
 
 
 def conversations(samples):
@@ -38,7 +53,7 @@ def shard_conversations(samples, workers):
     return shards
 
 
-def evaluate_conversations(samples, adapter, batch_size, commit):
+def evaluate_conversations(samples, adapter: ConversationAdapter, batch_size, commit):
     """adapter 返回的正文状态在各问题间只读；独立的回答分支由 adapter 创建。"""
     if batch_size < 1:
         raise ValueError("batch size must be positive")

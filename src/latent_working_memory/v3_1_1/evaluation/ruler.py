@@ -5,9 +5,9 @@ from collections import Counter
 from itertools import groupby
 import sys
 
-from latent_working_memory.benchmarks.data import load_samples
-from latent_working_memory.benchmarks.protocol import protocol
-from latent_working_memory.benchmarks.scoring import score_sample, summarize_scores
+from benchmarks.data import load_samples
+from benchmarks.protocol import protocol
+from benchmarks.scoring import score_sample, summarize_scores
 from latent_working_memory.cli import length_batch_size
 from ..cli import ignore_resume_options, positive_int
 from ..data import QAEncoder

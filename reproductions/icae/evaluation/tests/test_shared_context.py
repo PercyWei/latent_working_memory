@@ -13,8 +13,8 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from transformers import AutoModelForCausalLM, MistralConfig, MistralForCausalLM, PreTrainedTokenizerFast
 
-from latent_working_memory.benchmarks.data import BenchmarkSample, locomo_question_prompt
-from latent_working_memory.benchmarks.locomo.engine import evaluate_conversations
+from benchmarks.data import BenchmarkSample, locomo_question_prompt
+from benchmarks.locomo.engine import evaluate_conversations
 from reproductions.icae.evaluation.model import ICAE, ICAELoCoMo, ModelArguments, TrainingArguments
 from reproductions.icae.evaluation.locomo_adapter import ICAEAdapter
 

@@ -1,14 +1,14 @@
 """单张 GPU 的公共 LoCoMo worker。"""
 
 import argparse
+from importlib import import_module
 import json
 from pathlib import Path
 
-from latent_working_memory.benchmarks.data import load_samples
-from latent_working_memory.benchmarks.protocol import data_identity
-from latent_working_memory.benchmarks.scoring import score_sample
+from benchmarks.data import load_samples
+from benchmarks.protocol import data_identity
+from benchmarks.scoring import score_sample
 from .engine import evaluate_conversations
-from .registry import method_module
 
 
 def main():
@@ -19,14 +19,13 @@ def main():
     plan = json.loads((args.directory / "evaluation_config.json").read_text())
     work = json.loads((args.directory / "work.json").read_text())
     samples = load_samples("locomo", plan["data"]["directory"])
-    if plan["max_conversations"] is not None:
-        ids = list(dict.fromkeys(s.metadata["conversation_id"] for s in samples))[:plan["max_conversations"]]
-        samples = tuple(s for s in samples if s.metadata["conversation_id"] in ids)
     if data_identity(samples, plan["data"]["directory"], "locomo") != plan["data"]:
         raise ValueError("LoCoMo data changed after the evaluation was planned")
     by_id = {sample.id: sample for sample in samples}
     pending = [by_id[sample_id] for sample_id in work["workers"][args.rank]]
-    adapter = method_module(plan["method"]).load_adapter(plan["settings"])
+    factory = plan["adapter"]
+    load_adapter = getattr(import_module(factory["module"]), factory["factory"])
+    adapter = load_adapter(plan["settings"])
     completed = 0
     path = args.directory / "progress" / f"worker-{args.rank}.jsonl"
     with path.open("a") as stream:

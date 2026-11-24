@@ -1,6 +1,6 @@
 # 运行 v4 实验
 
-最后修订时间：20261101 17:31:18 Asia/Shanghai（UTC+08:00）
+最后修订时间：20261124 16:08:32 Asia/Shanghai
 
 使用 [run.sh](run.sh) 完成训练、恢复、新 run 续训和独立评估。默认 Qwen3-4B-Instruct-2507、每层 32 个 memory slots。方法与训练细节见 [v4 说明](../README.md)，默认配置为 [frozen_query_gen.json](../../../../configs/v4/frozen_query_gen.json)。
 
@@ -26,9 +26,9 @@ QASPER 目录保留 `train/dev/test.jsonl`，可从 [ModelScope](https://modelsc
 使用公共入口下载素材并生成 RULER 样本：
 
 ```bash
-bash src/latent_working_memory/benchmarks/scripts/download_benchmarks.sh --benchmark all
+bash benchmarks/scripts/download_benchmarks.sh --benchmark all
 
-bash src/latent_working_memory/benchmarks/scripts/generate_ruler.sh \
+bash benchmarks/scripts/generate_ruler.sh \
   --model-path "~/models/Qwen3-4B-Instruct-2507" \
   --lengths 8192 16384 32768 \
   --num-samples 100 --seed 42
@@ -36,7 +36,7 @@ bash src/latent_working_memory/benchmarks/scripts/generate_ruler.sh \
 
 - **RULER**：使用与评估模型相同的 tokenizer 生成样本，默认写入 `data/benchmarks/ruler-v1/<model-name>/`。
 - **LoCoMo**：下载后可直接评估，默认位于 `data/benchmarks/locomo/`。
-- **详细说明**：依赖、参数、原始素材搬运与失败重试见[公共 benchmark 数据准备说明](../../benchmarks/README.md#2-数据准备)。
+- **详细说明**：依赖、参数、原始素材搬运与失败重试见[公共 benchmark 数据准备说明](../../../../benchmarks/README.md#2-数据准备)。
 
 ## 2. 运行
 
