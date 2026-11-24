@@ -53,17 +53,17 @@ def charts(snapshots):
             "name": name, "type": "bar", "itemStyle": {"color": color},
             "data": [100 * count / total if total else None for count in counts],
         })
-        for label, data, symbol, size, opacity, z in (
-            ("压缩概率", decisions, "circle", 5, 0.35, 2),
-            ("平均压缩概率", means, "rect", [13, 3], 1, 4),
-        ):
-            points.append({
-                "name": name, "type": "scatter", "data": data, "symbol": symbol,
-                "symbolSize": size, "itemStyle": {"color": color, "opacity": opacity},
-                "tooltip": {"formatter": f"step {step}<br/>pending, {label}：{{c}}"},
-                "progressive": 5000, "progressiveThreshold": 10000,
-                "z": z,
-            })
+        points.append({
+            "name": name, "type": "scatter", "data": decisions, "symbol": "circle",
+            "symbolSize": 5, "itemStyle": {"color": color, "opacity": 0.35},
+            "tooltip": {"formatter": f"step {step}<br/>pending, 压缩概率：{{c}}"},
+            "progressive": 5000, "progressiveThreshold": 10000,
+        })
+        points.append({
+            "name": name, "type": "line", "data": means, "symbol": "rect", "symbolSize": [8, 3],
+            "itemStyle": {"color": color}, "lineStyle": {"color": color, "width": 2}, "z": 4,
+            "tooltip": {"formatter": f"step {step}<br/>pending, 平均压缩概率：{{c}}"},
+        })
     common = {
         "animation": False, "legend": {"type": "scroll", "data": legend, "top": 0},
         "grid": {"left": 64, "right": 25, "top": 70, "bottom": 69},
@@ -112,7 +112,7 @@ def render(sources, key, length=None, subtask=None):
     st.markdown("**压缩概率分布**")
     st.echarts_chart(histogram, height=355, theme=None, key=f"{key}:probability-histogram")
     st.markdown("**pending 长度与压缩概率**")
-    st.caption("每个圆点表示一次自主决策时的压缩概率，短横线表示同一 step、同一 pending 长度的均值。")
+    st.caption("每个圆点表示一次自主决策时的压缩概率。每条折线连接同一 step 在各 pending 长度上的平均压缩概率。")
     st.echarts_chart(scatter, height=375, theme=None, key=f"{key}:probability-scatter")
 
 

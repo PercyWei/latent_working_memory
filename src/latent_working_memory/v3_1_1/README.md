@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261124 09:38:12 Asia/Shanghai
+最后修订时间：20261124 10:15:25 Asia/Shanghai
 
 v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=post` 使用问答（QA），由 `training.update_mode` 选择仅更新压缩器（`compressor_only`）、仅更新边界（`boundary_only`）或联合更新（`joint`）。每次写入将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆及未压缩的 pending 和 recent 尾段回答问题。
 
@@ -641,7 +641,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 
 对于执行过 dev 的训练主步数 S，dev 图覆盖本次完整验证集的 greedy 轨迹，概率使用 T=1。train 图覆盖 S 之后第一批实际训练文档及其所有采样轨迹，概率使用该批真实温度，采样时尚未进行下一次参数更新。PPO 内轮更新和 SCST 的 greedy 基线均不重复计入。若 S 是最终步，则本步只有 dev 图。独立评估按 checkpoint 记录 greedy 轨迹，Test 按文档、LoCoMo 按对话、RULER 按样本各计一次。
 
-看板可直接打开只有训练结果的 run。边界诊断默认对比首、中、末三个有记录的 step；同一步在两张图中使用同色。直方图按 0.1 分箱，每根柱表示该步全部自主决策中落入该区间的比例，最后一区间包含 1。散点图按决策前的 pending 长度展示这些位置的概率，短横线表示同一步、同一 pending 长度的平均概率。图表按来源分别展示，SwanLab 继续记录训练与 dev 标量。
+看板可直接打开只有训练结果的 run。边界诊断默认对比首、中、末三个有记录的 step；同一步在两张图中使用同色。直方图按 0.1 分箱，每根柱表示该步全部自主决策中落入该区间的比例，最后一区间包含 1。散点图按决策前的 pending 长度展示这些位置的概率，同色折线按 pending 长度递增连接该步在各长度上的平均压缩概率。图表按来源分别展示，SwanLab 继续记录训练与 dev 标量。
 
 独立评估按 Test、RULER、LoCoMo 展示。多 checkpoint 比较包含指标表、按训练主步数排列的曲线、资源测量与输出诊断。明细默认选择最新完成的 checkpoint，可查看评估配置、RULER 单步明细、压缩分析与问答。Benchmark 支持接入本地基线，按实际输入、参考答案、基座和评估协议对齐。
 
