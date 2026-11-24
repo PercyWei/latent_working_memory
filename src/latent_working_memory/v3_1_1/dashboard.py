@@ -1,4 +1,4 @@
-"""v3.1.1 独立评估看板：官方指标、压缩分布与逐文本分析。"""
+"""v3.1.1 训练与评估看板，展示边界决策、任务指标与逐文本分析。"""
 
 import argparse
 import json
@@ -10,6 +10,7 @@ import streamlit as st
 from latent_working_memory.benchmarks.results import load_baseline_results
 from latent_working_memory.benchmarks.data import RULER_TASKS
 from latent_working_memory.v4.reporting import evaluation_charts, ruler_overall, ruler_task_chart
+from latent_working_memory.v3_1_1 import dashboard_boundary as boundary
 from latent_working_memory.v3_1_1 import dashboard_compression as compression
 from latent_working_memory.v3_1_1.evaluation.diagnostics import output_flags, visible_text
 from latent_working_memory.v3_1_1.evaluation.records import completed_evaluation
@@ -33,7 +34,7 @@ OUTPUT_LABELS = {
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dashboard-run-dir", type=Path, required=True,
-                        help="单次运行根目录，仅需保留 eval/ 目录结构")
+                        help="单次运行根目录，读取 train/ 下的边界诊断与 eval/ 下的独立评估")
     parser.add_argument("--dashboard-eval-id", help="启动时选中的评估标识，页面仍可切换")
     parser.add_argument("--dashboard-baselines", nargs="*", default=[], metavar="LABEL_OR_PATH",
                         help="按“标签 结果目录”成对传入，可直接使用 artifacts/baselines/base/<模型名>")
@@ -438,6 +439,7 @@ def _render_task(directory, task, baseline_results):
         st.dataframe([{"累计 step": value["checkpoint_step"],
                        **{OUTPUT_LABELS[name]: count for name, count in value["outputs"].items()}}
                       for value in summaries], hide_index=True)
+    boundary.evaluation(records, task, key)
     st.divider()
     st.header("单 checkpoint 详情")
     if len(records) > 1:
@@ -495,11 +497,19 @@ def _evaluations(args):
 
 def main():
     args = parse_args()
-    st.set_page_config(page_title="v3.1.1 独立评估", layout="wide")
-    st.title("v3.1.1 独立评估")
+    st.set_page_config(page_title="v3.1.1 训练与评估", layout="wide")
+    st.title("v3.1.1 训练与评估")
     st.sidebar.caption(str(args.dashboard_run_dir))
     st.sidebar.button("刷新结果")
-    _evaluations(args)
+    training_available = (args.dashboard_run_dir / "train" / "boundary").is_dir()
+    view = st.radio("查看", ["训练与验证", "独立评估"],
+                    index=int(bool(args.dashboard_eval_id) or not training_available),
+                    horizontal=True, key=f"{args.dashboard_run_dir}:view")
+    if view == "训练与验证":
+        st.subheader("边界决策")
+        boundary.training(args.dashboard_run_dir)
+    else:
+        _evaluations(args)
 
 
 if __name__ == "__main__":

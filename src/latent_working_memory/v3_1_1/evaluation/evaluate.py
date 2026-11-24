@@ -123,6 +123,11 @@ def evaluate_shard(checkpoint_path, data, output_dir, worker_rank, task_module, 
     work = json.loads((output_dir / "work.json").read_text(encoding="utf-8"))
     selected_ids = work["workers"][worker_rank]
     by_id = {sample.id: sample for sample in samples}
+    # LoCoMo 的首个有效问题持有会话轨迹；中断后只回答剩余问题时仍沿用原记录。
+    first_questions = {}
+    if task_module.NAME == "locomo":
+        for sample in samples:
+            first_questions.setdefault(sample.metadata["conversation_id"], sample.id)
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required to run v3.1.1 evaluation")
     device = initialize_device("cuda")
@@ -139,10 +144,23 @@ def evaluate_shard(checkpoint_path, data, output_dir, worker_rank, task_module, 
 
         def commit(entry):
             nonlocal completed
-            stream.write(json.dumps(entry, ensure_ascii=False, allow_nan=False) + "\n")
+            record = entry["record"]
+            if "boundary" in entry:
+                trace = entry.pop("boundary")
+                if task_module.NAME == "locomo":
+                    conversation = record["metadata"]["conversation_id"]
+                    if first_questions[conversation] == record["id"]:
+                        entry["boundary"] = {"id": conversation, **trace}
+                elif task_module.NAME == "ruler":
+                    metadata = record["metadata"]
+                    entry["boundary"] = {"id": record["id"], "length": metadata["length"],
+                                         "task": metadata["task"], **trace}
+                else:
+                    entry["boundary"] = {"id": record["id"], **trace}
+            stream.write(json.dumps(entry, ensure_ascii=False, allow_nan=False,
+                                    separators=(",", ":")) + "\n")
             stream.flush()
             completed += 1
-            record = entry["record"]
             print(f"{task_module.NAME} worker={worker_rank} {completed}/{len(selected_ids)} {record['id']} "
                   f"blocks={record['blocks']} batch={record['eval_batch_size']} "
                   f"seconds={record['seconds']:.1f}", flush=True)

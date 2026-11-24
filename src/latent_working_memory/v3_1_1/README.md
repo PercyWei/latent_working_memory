@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261123 16:19:12 Asia/Shanghai
+最后修订时间：20261124 09:38:12 Asia/Shanghai
 
 v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=post` 使用问答（QA），由 `training.update_mode` 选择仅更新压缩器（`compressor_only`）、仅更新边界（`boundary_only`）或联合更新（`joint`）。每次写入将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆及未压缩的 pending 和 recent 尾段回答问题。
 
@@ -637,7 +637,13 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
   --dashboard-eval-id standard_20261112
 ```
 
-看板展示独立评估，按 Test、RULER、LoCoMo 分页。页面上方是“多 checkpoint 比较”：展示全部已完成 checkpoint 的指标表、按实际 optimizer step 排列的变化曲线，以及折叠的资源测量与输出诊断。下方是“单 checkpoint 详情”：“明细 checkpoint”默认选择最新完成的一项，选择器下方依次展示折叠的评估配置、RULER 单步明细、压缩分析与问答。只有一个 checkpoint 时，上方展示其评估概览。Benchmark 支持接入本地基线，按实际输入、参考答案、基座和评估协议对齐。训练与 dev 指标在 SwanLab 查看。
+边界诊断只统计策略可自主选择 `compress` 或 `continue` 的位置。每条轨迹保存两个等长数组 `pending_tokens_before`（决策时可压缩的 pending 长度，不含新到达的单元）与 `compress_probs`；`compress_indices` 是实际选择压缩的位置在这两个数组中的下标，从 0 开始。强制等待和 EOF 收尾均排除。greedy 路径以原始 logit 的符号决定动作，实际动作可直接从下标读取。
+
+对于执行过 dev 的训练主步数 S，dev 图覆盖本次完整验证集的 greedy 轨迹，概率使用 T=1。train 图覆盖 S 之后第一批实际训练文档及其所有采样轨迹，概率使用该批真实温度，采样时尚未进行下一次参数更新。PPO 内轮更新和 SCST 的 greedy 基线均不重复计入。若 S 是最终步，则本步只有 dev 图。独立评估按 checkpoint 记录 greedy 轨迹，Test 按文档、LoCoMo 按对话、RULER 按样本各计一次。
+
+看板可直接打开只有训练结果的 run。边界诊断默认对比首、中、末三个有记录的 step；同一步在两张图中使用同色。直方图按 0.1 分箱，每根柱表示该步全部自主决策中落入该区间的比例，最后一区间包含 1。散点图按决策前的 pending 长度展示这些位置的概率，短横线表示同一步、同一 pending 长度的平均概率。图表按来源分别展示，SwanLab 继续记录训练与 dev 标量。
+
+独立评估按 Test、RULER、LoCoMo 展示。多 checkpoint 比较包含指标表、按训练主步数排列的曲线、资源测量与输出诊断。明细默认选择最新完成的 checkpoint，可查看评估配置、RULER 单步明细、压缩分析与问答。Benchmark 支持接入本地基线，按实际输入、参考答案、基座和评估协议对齐。
 
 压缩区按篇和记忆块分别展示平均、最低、最高压缩倍率，另列每篇平均记忆块数及只生成一个记忆块的比例。输入长度 N 取实际编码后的完整正文 token 数（含模板前缀），B 为记忆块数，K 为每块槽位数，P 为未压缩 pending 长度，R 为固定 recent 长度：
 
@@ -741,10 +747,13 @@ v3_1_1/
 | `train/config.json` | 实际训练配置，含解析后的总步数 |
 | `train/data.json` | 选样统计及数据、tokenizer、模型和初始化来源绑定信息；`compression_windows.train_recent_size/dev_recent_size` 记录实际生效的 recent 长度 |
 | `train/metrics.jsonl` | 逐 optimizer step 的训练、dev 与资源指标 |
+| `train/boundary/global_step_<N>/{train,dev}/` | 各 rank 的逐轨迹边界诊断与本次采样信息 |
 | `train/summary.json` | 已完成步数与最终 checkpoint 路径 |
 | `train/checkpoints/global_step_<N>/state.pt` | 可恢复的训练状态 |
 | `plan/eval-<eval-id>/<task>.json` | 独立评估协议及累计 `checkpoints` 列表 |
 | `eval/<eval-id>/<task>/global_step_<N>/` | 对应 checkpoint 的评估进度、明细和汇总 |
+| `eval/<eval-id>/{test,locomo}/global_step_<N>/boundary.jsonl` | 每个评估正文的自主决策轨迹 |
+| `eval/<eval-id>/ruler/global_step_<N>/lengths/<长度>/boundary.jsonl` | 该输入长度下各 RULER 样本的自主决策轨迹，附子任务 |
 
 Checkpoint 固定包含 `config`、`model`、`optimizer`、`scheduler`、`cursor`、`rng`、`boundary_rng`、`binding`。`model` 包含 `memory_embeddings`、`adapter`、`boundary` 和 `value_head`；AE／LM 和 `compressor_only` 的 `boundary` 为 `null`，仅 PPO 的 `value_head` 有参数。`optimizer` 和 `scheduler` 都按 `actor`、`critic` 两个键保存；非 PPO 的 `critic` 为 `null`，PPO 保存两个独立状态。
 

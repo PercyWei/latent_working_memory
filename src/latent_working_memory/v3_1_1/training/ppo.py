@@ -31,13 +31,13 @@ class PPOGroup(PPORolloutGroup):
 
 @torch.no_grad()
 def collect_rollouts(model, documents, pending_stride, objective, generator, temperature,
-                     pending_size, recent_size):
+                     pending_size, recent_size, collect_boundary=False):
     """只收集固定旧策略的数据；优势在全部累积微批采样完成后计算。"""
     with model.forward_context():
         groups = sample_paths_batch(
             model, documents, pending_stride, objective["group_size"], generator,
             temperature=temperature, pending_size=pending_size, recent_size=recent_size,
-            collect_features=True,
+            collect_features=True, collect_boundary=collect_boundary,
         )
         batches = []
         for document, paths in zip(documents, groups, strict=True):

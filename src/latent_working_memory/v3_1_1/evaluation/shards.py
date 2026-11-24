@@ -128,6 +128,22 @@ def _summary(request, entries, wall_seconds, task_module):
     }
 
 
+def _write_results(directory, entries, summary, write_boundary):
+    records = [entry["record"] for entry in entries]
+    if write_boundary:
+        boundaries = [entry["boundary"] for entry in entries if "boundary" in entry]
+        documents = (len({row["metadata"]["conversation_id"] for row in records})
+                     if summary["task"] == "locomo" else len(records))
+        # 从没有诊断的旧进度恢复时，不把局部覆盖的数据发布成整组评估的分布。
+        path = directory / "boundary.jsonl"
+        if len(boundaries) == documents:
+            write_details(path, boundaries)
+        else:
+            path.unlink(missing_ok=True)
+    write_details(directory / "details.jsonl", records)
+    write_json(directory / "summary.json", summary)
+
+
 def commit_results(output_dir, request, samples, entries, task_module):
     """先提交齐全的 RULER 长度；所有样本齐全后才提交根目录完成标记。"""
     output_dir = Path(output_dir)
@@ -147,14 +163,12 @@ def commit_results(output_dir, request, samples, entries, task_module):
             ordered = [entries[sample.id] for sample in selected]
             summary = _summary(current, ordered, wall_seconds, task_module)
             summary["comparison_data"] = comparison_data(selected, "ruler")
-            write_details(directory / "details.jsonl", [entry["record"] for entry in ordered])
-            write_json(directory / "summary.json", summary)
+            _write_results(directory, ordered, summary, write_boundary=True)
     if len(entries) != len(samples):
         raise IncompleteEvaluationError(len(entries), len(samples))
     ordered = [entries[sample.id] for sample in samples]
     summary = _summary(request, ordered, wall_seconds, task_module)
     if request["task"] != "test":
         summary["comparison_data"] = comparison_data(samples, request["task"])
-    write_details(output_dir / "details.jsonl", [entry["record"] for entry in ordered])
-    write_json(output_dir / "summary.json", summary)
+    _write_results(output_dir, ordered, summary, write_boundary=request["task"] != "ruler")
     return summary
