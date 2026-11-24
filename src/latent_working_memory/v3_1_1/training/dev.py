@@ -31,13 +31,14 @@ def _add_record(totals, record):
                 pair[1] += 1
 
 
-def _compress(model, documents, config, condition, ratio):
+def _compress(model, documents, config, condition, ratio, collect_boundary):
     compression = config.training.compression
     contexts = [document.input_ids for document in documents]
     if condition == "policy":
         return execute_batch(
             model, contexts, config.model.structure.pending_stride,
             pending_size=config.model.structure.pending_size, recent_size=config.recent_size(),
+            collect_boundary=collect_boundary,
         )
     if condition == "sampled":
         # 每篇独立固定种子，样本分片、排序和 batch 大小不改变验证边界。
@@ -58,9 +59,9 @@ def _compress(model, documents, config, condition, ratio):
     )
 
 
-def _evaluate_batch(model, documents, config, condition, ratio, qa_objective):
+def _evaluate_batch(model, documents, config, condition, ratio, qa_objective, boundary_records):
     with model.forward_context():
-        paths = _compress(model, documents, config, condition, ratio)
+        paths = _compress(model, documents, config, condition, ratio, boundary_records is not None)
     questions = [_questions(document, qa_objective) for document in documents]
     reader_prefix_ids = documents[0].reader_prefix_ids if qa_objective else ()
     answers = [[] for _ in documents]
@@ -124,6 +125,8 @@ def _evaluate_batch(model, documents, config, condition, ratio, qa_objective):
             "recent_tokens": recent, "pending_tokens": pending, "metrics": metrics, "qas": rows,
         }
         if condition == "policy":
+            if boundary_records is not None:
+                boundary_records.append({"id": document.id, **path.boundary_trace})
             mask = torch.tensor(path.decision_mask, device=path.entropy.device, dtype=torch.bool)
             decisions = int(mask.sum())
             metrics.update(
@@ -136,7 +139,7 @@ def _evaluate_batch(model, documents, config, condition, ratio, qa_objective):
 
 
 @torch.no_grad()
-def evaluate_dev_conditions(model, documents, config, baseline_cache=None):
+def evaluate_dev_conditions(model, documents, config, baseline_cache=None, boundary_records=None):
     """返回可跨 rank 汇总的 (sum,count) 指标及本地逐样本记录。"""
     model.eval()
     qa_objective = config.training.objective.type == "qa"
@@ -162,6 +165,7 @@ def evaluate_dev_conditions(model, documents, config, baseline_cache=None):
         for start in range(0, len(pending), batch_size):
             batch_records = _evaluate_batch(
                 model, pending[start:start + batch_size], config, condition, ratio, qa_objective,
+                boundary_records,
             )
             for record in batch_records:
                 records.append(record)

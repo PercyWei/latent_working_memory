@@ -49,7 +49,7 @@ def compute_batch(samples, model, config, commit, encode, record, reader_prefix_
     paths = execute_batch(
         model, contexts, config.model.structure.pending_stride,
         pending_size=config.model.structure.pending_size,
-        recent_size=config.recent_size(),
+        recent_size=config.recent_size(), collect_boundary=True,
     )
     torch.cuda.synchronize(device)
     compression = time.perf_counter() - started
@@ -156,8 +156,11 @@ def compute_batch(samples, model, config, commit, encode, record, reader_prefix_
             if complete:
                 row.update(seconds=seconds[index], generation_seconds=generation_seconds[index],
                            nll_seconds=nll_seconds[index])
-                commit({"record": row, "device": device_label,
-                        "peak_memory_bytes": torch.cuda.max_memory_allocated(device)})
+                entry = {"record": row, "device": device_label,
+                         "peak_memory_bytes": torch.cuda.max_memory_allocated(device)}
+                if not commit_per_question or question_index == 0:
+                    entry["boundary"] = paths[index].boundary_trace
+                commit(entry)
                 seconds[index] = generation_seconds[index] = nll_seconds[index] = 0.0
             # 评分和写盘时间不重复计入仍活跃的 GPU 任务。
             last_finished = time.perf_counter()

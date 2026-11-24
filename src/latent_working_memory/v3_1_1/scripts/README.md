@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261123 16:26:30 Asia/Shanghai
+最后修订时间：20261124 09:38:12 Asia/Shanghai
 
 计算协议、数据格式与模块分工见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256_grpo.json)中的基座与数据路径。
 
@@ -312,6 +312,8 @@ CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/v3_1_1/scripts/eval_test.s
 | `eval/<eval-id>/<task>/global_step_<N>/eval.json` | 当前 checkpoint 的评估设置快照 |
 | `eval/<eval-id>/<task>/global_step_<N>/summary.json` | 实验身份、协议与指标汇总 |
 | `eval/<eval-id>/<task>/global_step_<N>/details.jsonl` | 按原始样本顺序汇总的回答与评分 |
+| `eval/<eval-id>/{test,locomo}/global_step_<N>/boundary.jsonl` | 每个正文的边界概率、pending 长度与实际压缩位置 |
+| `eval/<eval-id>/ruler/global_step_<N>/lengths/<长度>/boundary.jsonl` | 按长度保存的 RULER 边界诊断 |
 | `eval/<eval-id>/<task>/global_step_<N>/work.json` | 本次执行的待评估样本分工 |
 | `eval/<eval-id>/<task>/global_step_<N>/progress/worker_<rank>.jsonl` | 各分片逐文档／题目保存的完成进度与资源记录 |
 | `eval/<eval-id>/<task>/global_step_<N>/progress/worker_<rank>.json` | 阶段、批量与长度的展示快照，每次续评重建 |
@@ -333,7 +335,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 
 - **结果浏览**：
 
-  - **页面入口**：看板只展示独立评估，训练与 dev 指标在 SwanLab 查看。
+  - **边界诊断**：仅指定 `--dashboard-run-dir` 即可查看 train 批次与 dev 验证集的概率直方图和 pending–概率散点图。选择多个训练步可在同一张图中比较。独立评估页面按任务提供相同的图表。详见[边界诊断的统计口径](../README.md#本地看板)。
   - **评估选择**：`--dashboard-eval-id` 指定启动时选中的评估，省略时默认名称排序后的末项；页面仍可切换其他 eval-id。指定评估不存在或没有已完成结果时提示错误。
   - **任务切换**：按 Test、RULER、LoCoMo 切换任务；点击“刷新结果”重新加载本地结果。
   - **比较区**：位于页面上方，展示全部已完成 checkpoint 的指标汇总和按实际 optimizer step 升序排列的变化曲线；基线排在当前方法之前。“资源测量与执行设置”和“输出诊断”在曲线下方折叠展示，均汇总多个 checkpoint。只有一项结果时展示评估概览。
@@ -368,7 +370,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 - **访问方式**：
 
   - **访问配置**：地址和端口见 [`.streamlit/config.toml`](../../../../.streamlit/config.toml)，修改后须重启看板；临时更换端口可在启动命令前加 `STREAMLIT_SERVER_PORT=8502`。
-  - **异地查看**：同步 `<运行目录>/eval/` 并保留目录结构，将 `--dashboard-run-dir` 指向运行根目录。查看 RULER 完整题面还需对应原始数据，在页面“RULER 数据目录”填写本地路径，目录下应包含 `<长度>/<子任务>/test.jsonl`。
+  - **异地查看**：训练边界诊断同步 `<运行目录>/train/boundary/`，独立评估同步 `<运行目录>/eval/`，保留目录结构并将 `--dashboard-run-dir` 指向运行根目录。查看 RULER 完整题面还需对应原始数据，在页面“RULER 数据目录”填写本地路径，目录下应包含 `<长度>/<子任务>/test.jsonl`。
 
 ## 5. 调整参数
 

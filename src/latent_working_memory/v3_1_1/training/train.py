@@ -5,6 +5,7 @@ from contextlib import ExitStack
 from dataclasses import asdict, replace
 import json
 from pathlib import Path
+import shutil
 import time
 
 import torch
@@ -40,6 +41,37 @@ def _restore_metrics(path, checkpoint_step, updates_per_batch):
     temporary = path.with_suffix(".tmp")
     temporary.write_text("".join(kept), encoding="utf-8")
     temporary.replace(path)
+    return "dev/samples" in json.loads(kept[-1])
+
+
+def _restore_boundary(output_dir, step):
+    """保留已到达恢复点的 dev，以及在恢复点之前完成的真实训练采样。"""
+    for folder in (output_dir / "boundary").glob("global_step_*"):
+        saved_step = int(folder.name.rsplit("_", 1)[1])
+        if saved_step > step:
+            shutil.rmtree(folder)
+        elif saved_step == step and (folder / "train").is_dir():
+            shutil.rmtree(folder / "train")
+
+
+def _save_boundary(output_dir, split, step, actor_step, temperature, records, rollout_step=None):
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    world = dist.get_world_size() if dist.is_initialized() else 1
+    folder = output_dir / "boundary" / f"global_step_{step}" / split
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"rank_{rank}.jsonl"
+    temporary = path.with_suffix(".tmp")
+    with temporary.open("w", encoding="utf-8") as stream:
+        for record in records:
+            stream.write(json.dumps(record, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n")
+    temporary.replace(path)
+    if world > 1:
+        dist.barrier()
+    if rank == 0:
+        metadata = {"step": step, "actor_step": actor_step, "temperature": temperature, "world_size": world}
+        if rollout_step is not None:
+            metadata["rollout_step"] = rollout_step
+        write_json(folder / "summary.json", metadata)
 
 
 def _load_data(config, tokenizer):
@@ -88,15 +120,16 @@ def _validate_context_lengths(model, documents, config, training=False):
         )
 
 
-def _run_dev(model, documents, config, device, boundary_generator, output_dir, step,
+def _run_dev(model, documents, config, device, boundary_generator, output_dir, step, actor_step,
              baseline_cache, temperature=1.0):
     rank = dist.get_rank() if dist.is_initialized() else 0
     world = dist.get_world_size() if dist.is_initialized() else 1
     records = []
+    boundary_records = [] if config.uses_boundary_policy else None
     with preserve_training_rng(device, boundary_generator):
         metrics = evaluate_dev(
             model, documents[rank::world], config, temperature=temperature,
-            baseline_cache=baseline_cache, records=records,
+            baseline_cache=baseline_cache, records=records, boundary_records=boundary_records,
         )
     if "segment_tokens" in metrics:
         metrics["segment_compression_ratio"] = metrics["segment_tokens"] / model.memory_slots
@@ -108,6 +141,8 @@ def _run_dev(model, documents, config, device, boundary_generator, output_dir, s
                 stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
         if rank == 0:
             write_json(folder / "summary.json", {"step": step, **metrics})
+    if boundary_records is not None:
+        _save_boundary(output_dir, "dev", step, actor_step, 1.0, boundary_records)
     return metrics
 
 
@@ -145,7 +180,7 @@ def train(plan_dir, resume=None):
             raise ValueError("resume the latest complete checkpoint in this run")
     existing = [checkpoint is None and rank == 0 and any(
         (output_dir / name).exists() for name in (
-            "config.json", "data.json", "metrics.jsonl", "summary.json", "checkpoints", "swanlab.json",
+            "config.json", "data.json", "metrics.jsonl", "summary.json", "checkpoints", "swanlab.json", "boundary",
         )
     )]
     if world > 1:
@@ -204,10 +239,13 @@ def train(plan_dir, resume=None):
     last_checkpoint = str(checkpoint_file(resume)) if resume else None
     metrics_path = output_dir / "metrics.jsonl"
     setup_error = None
+    previous_dev = False
     if rank == 0:
         try:
             if resume:
-                _restore_metrics(metrics_path, step, training.updates_per_batch)
+                previous_dev = _restore_metrics(metrics_path, step, training.updates_per_batch)
+                if config.uses_boundary_policy:
+                    _restore_boundary(output_dir, step)
             output_dir.mkdir(parents=True, exist_ok=True)
             write_json(output_dir / "config.json", config_to_dict(config))
             write_json(output_dir / "data.json", {
@@ -229,11 +267,12 @@ def train(plan_dir, resume=None):
             )
         except Exception as error:
             setup_error = f"training output setup failed: {error}"
-    status = [setup_error]
+    status = [setup_error, previous_dev]
     if world > 1:
         dist.broadcast_object_list(status, src=0)
     if status[0] is not None:
         raise RuntimeError(status[0])
+    previous_dev = status[1]
     if step == training.loop.max_steps:
         summary = {"step": step, "checkpoint": last_checkpoint, "output_dir": str(output_dir)}
         if rank == 0:
@@ -267,9 +306,11 @@ def train(plan_dir, resume=None):
             } if training.data.length_curriculum else {})
             indices = cursor.next_batch(global_batch)
             previous_step = step
+            boundary_records = [] if config.uses_boundary_policy and previous_dev else None
+            actor_step_before = engine.scheduler.last_epoch
             metrics = engine.train_batch(
                 [train_documents[index] for index in indices[rank::world]], boundary_generator,
-                step + 1,
+                step + 1, boundary_records,
             )
             step = engine.completed_steps
             torch.cuda.synchronize(device)
@@ -280,6 +321,11 @@ def train(plan_dir, resume=None):
             if world > 1:
                 dist.all_reduce(resources, op=dist.ReduceOp.MAX)
             seconds, peak_memory = resources.tolist()
+            if boundary_records is not None:
+                _save_boundary(
+                    output_dir, "train", previous_step, actor_step_before,
+                    metrics.get("rollout_temperature", 1.0), boundary_records, engine.rollout_step,
+                )
             record = {
                 "step": step, "epoch": cursor.epoch, "epoch_end": cursor.epoch_end,
                 **curriculum,
@@ -294,10 +340,11 @@ def train(plan_dir, resume=None):
                 )
             dev_interval = (training.loop.dev_every != "after_each_epoch"
                             and step // training.loop.dev_every > previous_step // training.loop.dev_every)
-            if dev_documents and (dev_interval or cursor.epoch_end or step == training.loop.max_steps):
+            previous_dev = bool(dev_documents) and (dev_interval or cursor.epoch_end or step == training.loop.max_steps)
+            if previous_dev:
                 dev = _run_dev(
                     model, dev_documents, config, device, boundary_generator, output_dir, step,
-                    baseline_cache, metrics.get("policy_temperature", 1.0),
+                    engine.scheduler.last_epoch, baseline_cache, metrics.get("policy_temperature", 1.0),
                 )
                 record.update({f"dev/{key}": value for key, value in dev.items()})
             if rank == 0:

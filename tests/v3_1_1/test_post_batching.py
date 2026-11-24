@@ -385,7 +385,7 @@ def test_engine_microbatch_accumulation_tail_and_state_restore_continuation(
     )
     calls, writer_shapes, reader_shapes, captured = [], [], [], []
     def sampling(model, batch, pending_stride, group_size, generator, temperature=1.0,
-                 score_cache=None, pending_size=None, recent_size=0):
+                 score_cache=None, pending_size=None, recent_size=0, collect_boundary=False):
         calls.append([row.id for row in batch])
         return [paths[row.id] for row in batch]
     monkeypatch.setattr(rl_objective, "sample_paths_batch", sampling)
@@ -462,7 +462,8 @@ def test_no_decisions_and_zero_policy_weight_preserve_gradient_presence(
     paths = fixed_paths(reference, rows, pending_stride, grpo["group_size"])
     monkeypatch.setattr(rl_objective, "sample_paths_batch",
                         lambda model, docs, pending_stride, group_size, generator, temperature=1.0,
-                        score_cache=None, pending_size=None, recent_size=0: [paths[row.id] for row in docs])
+                        score_cache=None, pending_size=None, recent_size=0, collect_boundary=False:
+                        [paths[row.id] for row in docs])
     expected = [reference_post_backward(reference, row, pending_stride, grpo, None, 2, paths[row.id]) for row in rows]
     results = rl_objective.post_backward_batch(actual, rows, pending_stride, grpo, None, 2)
     for (left_loss, left_metrics), (right_loss, right_metrics) in zip(expected, results, strict=True):

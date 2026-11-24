@@ -138,7 +138,7 @@ def _paths_backward_batch(
 
 @torch.no_grad()
 def collect_relative_rollouts(model, documents, pending_stride, rl, generator, temperature=1.0,
-                             pending_size=None, recent_size=0):
+                             pending_size=None, recent_size=0, collect_boundary=False):
     """同一旧策略完成采样和 greedy 基线，返回可由原生 trainer 调度的轨迹。"""
     pending_size = model.memory_slots if pending_size is None else pending_size
     self_critical = rl["strategy"] == "scst"
@@ -148,6 +148,7 @@ def collect_relative_rollouts(model, documents, pending_stride, rl, generator, t
         groups = sample_paths_batch(
             model, documents, pending_stride, group_size, generator,
             temperature=temperature, score_cache=score_cache, pending_size=pending_size, recent_size=recent_size,
+            collect_boundary=collect_boundary,
         )
         if self_critical:
             greedy = sample_paths_batch(

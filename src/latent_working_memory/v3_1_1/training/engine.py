@@ -166,7 +166,7 @@ class SampleCursor:
         self.generator.set_state(state["generator"])
 
 
-def document_loss(model, document, config, temperature=1.0):
+def document_loss(model, document, config, temperature=1.0, boundary_records=None):
     """预训练目标或后训练的确定性 dev 评分；不执行反向传播。"""
     if not config.uses_boundary_policy:
         result = compress_document(
@@ -196,8 +196,10 @@ def document_loss(model, document, config, temperature=1.0):
         model, document.input_ids, config.model.structure.pending_stride,
         temperature=temperature,
         pending_size=config.model.structure.pending_size,
-        recent_size=config.recent_size(),
+        recent_size=config.recent_size(), collect_boundary=boundary_records is not None,
     )
+    if boundary_records is not None:
+        boundary_records.append({"id": document.id, **result.boundary_trace})
     loss = qa_nll(model, result.blocks, document, result.retained_ids)
     decisions = sum(result.decision_mask)
     slots = len(result.blocks) * model.memory_slots
@@ -358,7 +360,7 @@ class TrainingEngine(BaseEngine):
             parameter.grad = flat[offset:offset + count].view_as(parameter).clone() if used else None
             offset += count
 
-    def train_batch(self, documents, boundary_generator, step):
+    def train_batch(self, documents, boundary_generator, step, boundary_records=None):
         self.rollout_step += 1
         if self.experiment.uses_boundary_policy and self.config.update_mode == "boundary_only":
             self.model.eval()
@@ -372,7 +374,9 @@ class TrainingEngine(BaseEngine):
             temperature = (1.0 if transition is None
                            else transition.temperature(step, self.config.loop.max_steps))
             before = self.completed_steps
+            self._boundary_records = boundary_records
             metrics = self.trainer.run(documents, self.rollout_step, temperature)
+            self._boundary_records = None
             metrics.update({
                 "rollout_step": self.rollout_step,
                 "actor_optimizer_step": self.scheduler.last_epoch,
@@ -461,7 +465,13 @@ class TrainingEngine(BaseEngine):
                 structure.pending_stride, objective, self._boundary_generator,
                 temperature=temperature, pending_size=structure.pending_size,
                 recent_size=self.experiment.recent_size(training=True),
+                collect_boundary=self._boundary_records is not None,
             ))
+        if self._boundary_records is not None:
+            self._boundary_records.extend(
+                {"id": group.document.id, **path.boundary_trace}
+                for group in groups for path in group.paths
+            )
         return BoundaryBatch(documents, groups, {"temperature": temperature})
 
     def _prepare_policy_batch(self, batch):
@@ -605,17 +615,18 @@ def uses_condition_dev(config):
 
 
 @torch.no_grad()
-def evaluate_dev(model, documents, config, temperature=1.0, baseline_cache=None, records=None):
+def evaluate_dev(model, documents, config, temperature=1.0, baseline_cache=None, records=None,
+                 boundary_records=None):
     model.eval()
     if uses_condition_dev(config):
-        totals, details = evaluate_dev_conditions(model, documents, config, baseline_cache)
+        totals, details = evaluate_dev_conditions(model, documents, config, baseline_cache, boundary_records)
         if records is not None:
             records.extend(details)
         return _aggregate_metrics(totals, len(documents))
     totals = {}
     for document in documents:
         with model.forward_context():
-            loss, metrics = document_loss(model, document, config, temperature)
+            loss, metrics = document_loss(model, document, config, temperature, boundary_records)
         if not bool(torch.isfinite(loss)):
             raise RuntimeError(f"non-finite dev loss: {document.id}")
         _accumulate(totals, loss, metrics)

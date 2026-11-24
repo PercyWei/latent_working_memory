@@ -1,13 +1,30 @@
 """因果硬分段、确定性回放与逐位置奖励账本。"""
 
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import NamedTuple, TypedDict
 
 import torch
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
 from .modeling.streaming import SourceStream, split_recent
+
+
+class BoundaryTrace(TypedDict):
+    pending_tokens_before: list[int]
+    compress_probs: list[float]
+    compress_indices: list[int]
+
+
+def _empty_boundary_trace() -> BoundaryTrace:
+    return {"pending_tokens_before": [], "compress_probs": [], "compress_indices": []}
+
+
+def _record_boundary(trace, pending, probability, compress):
+    if compress:
+        trace["compress_indices"].append(len(trace["compress_probs"]))
+    trace["pending_tokens_before"].append(pending)
+    trace["compress_probs"].append(probability)
 
 
 class ExecutionResult(NamedTuple):
@@ -22,6 +39,7 @@ class ExecutionResult(NamedTuple):
     pending_ids: tuple[int, ...] = ()
     event_features: torch.Tensor | None = None
     raw_logits: torch.Tensor | None = None
+    boundary_trace: BoundaryTrace | None = None
 
     @property
     def retained_ids(self):
@@ -39,6 +57,7 @@ class Rollout:
     prefix_retained_counts: tuple[int, ...]
     pending_ids: tuple[int, ...] = ()
     event_features: torch.Tensor | None = None
+    boundary_trace: BoundaryTrace | None = None
 
     @property
     def retained_ids(self):
@@ -142,7 +161,8 @@ def _replay_fixed(model, units, actions, bptt_steps, temperature, pending_size, 
 
 
 def execute(model, input_ids, pending_stride, actions=None, generator=None, bptt_steps=None,
-            temperature=1.0, pending_size=None, recent_size=0, collect_features=False):
+            temperature=1.0, pending_size=None, recent_size=0, collect_features=False,
+            collect_boundary=False):
     """先保留 recent，再采样或回放前缀的硬动作；不足阈值的最终 pending 保留原文。"""
     pending_size = model.memory_slots if pending_size is None else pending_size
     units, recent = _source_units(input_ids, pending_stride, recent_size)
@@ -150,23 +170,29 @@ def execute(model, input_ids, pending_stride, actions=None, generator=None, bptt
         raise ValueError("stream input must be nonempty")
     if collect_features and torch.is_grad_enabled():
         raise ValueError("event features are collected during no-grad rollouts")
+    if collect_boundary and actions is not None:
+        raise ValueError("boundary traces require an original policy trajectory")
     if actions is not None and len(actions) != max(0, len(units) - 1):
         raise ValueError("recorded actions must match the fixed prefix decision positions")
     if actions is not None and torch.is_grad_enabled():
         return _replay_fixed(model, units, actions, bptt_steps, temperature, pending_size, recent)
     zero = model.memory_embeddings.new_empty((0,), dtype=torch.float32)
+    trace = _empty_boundary_trace() if collect_boundary else None
     initial_features = model.memory_embeddings.new_zeros(model.width) if collect_features else None
     if not units:
         features = initial_features[None] if collect_features else None
-        return ExecutionResult((), (), zero, zero, (), recent, (), (0, 0), (), features)
+        return ExecutionResult((), (), zero, zero, (), recent, (), (0, 0), (), features,
+                               boundary_trace=trace)
     stream = SourceStream(model, units[0])
     chosen, log_probs, entropies = [], [], []
     features = [initial_features] if collect_features else None
     for index, unit in enumerate(units[1:]):
-        logit = stream.logit(unit) / temperature
+        raw_logit = stream.logit(unit)
+        logit = raw_logit / temperature
         if collect_features:
             features.append(stream.source_features.detach().clone())
         allowed = len(stream.pending_ids) >= pending_size
+        probability = logit.sigmoid() if allowed else None
         if actions is not None:
             commit = actions[index]
             if commit and not allowed:
@@ -176,10 +202,13 @@ def execute(model, input_ids, pending_stride, actions=None, generator=None, bptt
         else:
             # 包括强制等待在内，按固定前缀位置消耗随机数，保持单例／批量映射一致。
             uniform = torch.rand((), generator=generator)
-            commit = allowed and bool(uniform < logit.detach().sigmoid().cpu())
+            commit = allowed and bool(uniform < probability.detach().cpu())
+        if trace is not None and allowed:
+            p = raw_logit.sigmoid() if generator is None and temperature != 1.0 else probability
+            _record_boundary(trace, len(stream.pending_ids), p.item(), commit)
         chosen.append(commit)
         log_probs.append(F.logsigmoid(logit if commit else -logit) if allowed else logit.new_zeros(()))
-        entropies.append(F.softplus(logit) - logit * logit.sigmoid() if allowed else logit.new_zeros(()))
+        entropies.append(F.softplus(logit) - logit * probability if allowed else logit.new_zeros(()))
         stream.advance(unit, commit)
     if collect_features:
         features.append(stream.source_features.detach().clone())
@@ -189,6 +218,7 @@ def execute(model, input_ids, pending_stride, actions=None, generator=None, bptt
         blocks, tuple(chosen), torch.stack(log_probs) if log_probs else zero,
         torch.stack(entropies) if entropies else zero, lengths, recent, mask, retained, pending,
         torch.stack(features) if collect_features else None,
+        boundary_trace=trace,
     )
 
 
@@ -252,7 +282,8 @@ def execute_replay_batch(model, contexts, pending_stride, actions, bptt_steps=No
 
 @torch.no_grad()
 def execute_batch(model, contexts, pending_stride, uniforms=None, temperature=1.0,
-                  pending_size=None, recent_size=0, collect_features=False, collect_logits=False):
+                  pending_size=None, recent_size=0, collect_features=False, collect_logits=False,
+                  collect_boundary=False):
     """批量分段；uniforms 按正文固定位置索引，强制等待不产生策略概率。"""
     pending_size = model.memory_slots if pending_size is None else pending_size
     sources = [_source_units(context, pending_stride, recent_size) for context in contexts]
@@ -265,6 +296,7 @@ def execute_batch(model, contexts, pending_stride, uniforms=None, temperature=1.
     pending = [len(sequence[0]) if sequence else 0 for sequence in units]
     chosen, log_probs, entropies = ([[] for _ in units] for _ in range(3))
     raw_logits = [[] for _ in units] if collect_logits else None
+    traces = [_empty_boundary_trace() for _ in units] if collect_boundary else None
     pending_tails = [() for _ in units]
     caches = [None] * len(units)
     source_features = [model.memory_embeddings.new_zeros(model.width) for _ in units]
@@ -305,26 +337,33 @@ def execute_batch(model, contexts, pending_stride, uniforms=None, temperature=1.
             if collect_features:
                 event_features[index].append(features.detach().clone())
         policy_logits = logits / temperature
+        compress_probs = policy_logits.sigmoid()
         allowed = [pending[index] >= pending_size for index in active]
         if uniforms is None:
             commits = [valid and bool(value) for valid, value in zip(allowed, (logits >= 0).tolist(), strict=True)]
+            if traces is not None:
+                # Greedy 按原始 logit 决定动作，图中统一使用 T=1 的概率。
+                cpu_probs = (compress_probs if temperature == 1.0 else logits.sigmoid()).tolist()
         else:
+            cpu_probs = compress_probs.tolist()
             commits = [allowed[row] and uniforms[index][step - 1] < probability
                        for row, (index, probability) in enumerate(zip(
-                           active, policy_logits.sigmoid().cpu().tolist(), strict=True,
+                           active, cpu_probs, strict=True,
                        ))]
         chosen_tensor = torch.tensor(commits, device=logits.device, dtype=torch.bool)
         allowed_tensor = torch.tensor(allowed, device=logits.device, dtype=torch.bool)
-        probabilities = torch.where(
+        chosen_log_probs = torch.where(
             allowed_tensor, F.logsigmoid(torch.where(chosen_tensor, policy_logits, -policy_logits)), 0.,
         )
         uncertainty = torch.where(
-            allowed_tensor, F.softplus(policy_logits) - policy_logits * policy_logits.sigmoid(), 0.,
+            allowed_tensor, F.softplus(policy_logits) - policy_logits * compress_probs, 0.,
         )
         committed = []
         for row, index in enumerate(active):
+            if traces is not None and allowed[row]:
+                _record_boundary(traces[index], pending[index], cpu_probs[row], commits[row])
             chosen[index].append(commits[row])
-            log_probs[index].append(probabilities[row])
+            log_probs[index].append(chosen_log_probs[row])
             entropies[index].append(uncertainty[row])
             if collect_logits:
                 raw_logits[index].append(logits[row].detach().clone())
@@ -366,6 +405,7 @@ def execute_batch(model, contexts, pending_stride, uniforms=None, temperature=1.
             torch.stack(event_features[index]) if collect_features else None,
             (torch.stack(raw_logits[index]) if raw_logits[index] else zero)
             if collect_logits else None,
+            traces[index] if traces is not None else None,
         ))
     return results
 
@@ -397,7 +437,8 @@ def sample_paths(model, document, pending_stride, group_size, generator, tempera
 
 @torch.no_grad()
 def sample_paths_batch(model, documents, pending_stride, group_size, generator, temperature=1.0,
-                       score_cache=None, pending_size=None, recent_size=0, collect_features=False):
+                       score_cache=None, pending_size=None, recent_size=0, collect_features=False,
+                       collect_boundary=False):
     """按文档／路径分配随机数；同批文档的随机与 greedy 路径共享确定性评分。"""
     uniforms = (None if generator is None else [
         torch.rand((group_size, max(0, (len(document.input_ids) - recent_size - 1) // pending_stride)), generator=generator).tolist()
@@ -410,7 +451,7 @@ def sample_paths_batch(model, documents, pending_stride, group_size, generator, 
             model, [document.input_ids for document in documents], pending_stride,
             None if uniforms is None else [values[path_index] for values in uniforms],
             temperature=temperature, pending_size=pending_size, recent_size=recent_size,
-            collect_features=collect_features,
+            collect_features=collect_features, collect_boundary=collect_boundary,
         )
         losses = [[] for _ in documents]
         for question in range(max(len(document.qas) for document in documents)):
@@ -428,7 +469,7 @@ def sample_paths_batch(model, documents, pending_stride, group_size, generator, 
             paths[index].append(Rollout(
                 result.actions, result.log_probs.detach(), score, result.block_lengths,
                 result.recent_ids, result.decision_mask, result.prefix_retained_counts, result.pending_ids,
-                result.event_features,
+                result.event_features, result.boundary_trace,
             ))
         del results, result
     return [tuple(group) for group in paths]

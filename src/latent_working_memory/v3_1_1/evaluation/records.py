@@ -24,7 +24,7 @@ def write_details(path, records):
     temporary = path.with_suffix(path.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8") as stream:
         for row in records:
-            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+            stream.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
     temporary.replace(path)
 
 
