@@ -15,7 +15,7 @@ def load_points(files, length, subtask):
     documents = set()
     trajectories = 0
     counts = [0] * 10
-    compress, ongoing = [], []
+    decisions = []
     sums = defaultdict(float)
     sizes = defaultdict(int)
     for path, _mtime_ns, _size in files:
@@ -28,16 +28,14 @@ def load_points(files, length, subtask):
                     continue
                 documents.add(row["id"])
                 trajectories += 1
-                compressed = set(row["compress_indices"])
                 pairs = zip(row["pending_tokens_before"], row["compress_probs"], strict=True)
-                for index, (pending, probability) in enumerate(pairs):
+                for pending, probability in pairs:
                     counts[min(9, int(probability * 10))] += 1
-                    points = compress if index in compressed else ongoing
-                    points.append([pending, probability])
+                    decisions.append([pending, probability])
                     sums[pending] += probability
                     sizes[pending] += 1
     means = [[pending, sums[pending] / sizes[pending]] for pending in sorted(sums)]
-    return len(documents), trajectories, counts, ongoing, compress, means
+    return len(documents), trajectories, counts, decisions, means
 
 
 def charts(snapshots):
@@ -45,7 +43,7 @@ def charts(snapshots):
     labels = [f"[{i / 10:.1f}, {(i + 1) / 10:.1f}{']' if i == 9 else ')'}" for i in range(10)]
     legend = []
     bars, points = [], []
-    for step, temperature, (documents, trajectories, counts, ongoing, compress, means) in snapshots:
+    for step, temperature, (documents, trajectories, counts, decisions, means) in snapshots:
         total = sum(counts)
         name = f"step {step} · {documents:,} 篇 · {trajectories:,} 条轨迹 · {total:,} 个决策 · T={temperature:g}"
         legend.append(name)
@@ -55,17 +53,16 @@ def charts(snapshots):
             "name": name, "type": "bar", "itemStyle": {"color": color},
             "data": [100 * count / total if total else None for count in counts],
         })
-        for action, data, symbol, size, opacity in (
-            ("continue", ongoing, "circle", 5, 0.35),
-            ("compress", compress, "diamond", 8, 0.65),
-            ("平均概率", means, "rect", [13, 3], 1),
+        for label, data, symbol, size, opacity, z in (
+            ("压缩概率", decisions, "circle", 5, 0.35, 2),
+            ("平均压缩概率", means, "rect", [13, 3], 1, 4),
         ):
             points.append({
                 "name": name, "type": "scatter", "data": data, "symbol": symbol,
                 "symbolSize": size, "itemStyle": {"color": color, "opacity": opacity},
-                "tooltip": {"formatter": f"step {step} · {action}<br/>pending, 压缩概率：{{c}}"},
+                "tooltip": {"formatter": f"step {step}<br/>pending, {label}：{{c}}"},
                 "progressive": 5000, "progressiveThreshold": 10000,
-                "z": 4 if action == "平均概率" else 2,
+                "z": z,
             })
     common = {
         "animation": False, "legend": {"type": "scroll", "data": legend, "top": 0},
@@ -115,7 +112,7 @@ def render(sources, key, length=None, subtask=None):
     st.markdown("**压缩概率分布**")
     st.echarts_chart(histogram, height=355, theme=None, key=f"{key}:probability-histogram")
     st.markdown("**pending 长度与压缩概率**")
-    st.caption("圆点表示 continue，菱形表示 compress，短横线表示该 pending 长度的平均概率。")
+    st.caption("每个圆点表示一次自主决策时的压缩概率，短横线表示同一 step、同一 pending 长度的均值。")
     st.echarts_chart(scatter, height=375, theme=None, key=f"{key}:probability-scatter")
 
 
