@@ -1,6 +1,6 @@
 # 论文复现
 
-最后修订时间：20261124 14:58:37 Asia/Shanghai
+最后修订时间：20261124 15:43:38 Asia/Shanghai
 
 本目录保存论文方法的独立复现。训练和评估入口、依赖环境、源码来源及结果分别在各方法目录维护。
 
@@ -35,11 +35,11 @@
 bash src/latent_working_memory/benchmarks/scripts/download_benchmarks.sh --benchmark locomo
 ```
 
-两种方法共用[评估入口的公共逻辑](soft_context_locomo.py)。每段对话按时间顺序完整压缩一次，再独立回答该对话的各个问题。system 提示和问题留在读出端。10 段对话共 1,540 道第 1–4 类开放题，每题贪心生成至多 50 个 token，使用项目的官方 LoCoMo F1。ICAE 用 `--output-root` 和 `--output-id` 生成 `<output-root>/eval/<output-id>/locomo/`，AutoCompressors 用 `--output-dir` 直接指定结果目录。两者均支持 `--resume` 续评。
+ICAE 接入[公共 LoCoMo 框架](../src/latent_working_memory/benchmarks/locomo/README.md)，AutoCompressors 使用[逐题评估入口](soft_context_locomo.py)。每段对话按时间顺序完整压缩一次，再独立回答该对话的各个问题。system 提示和问题留在读出端。10 段对话共 1,540 道第 1–4 类开放题，每题贪心生成至多 50 个 token，使用项目的官方 LoCoMo F1。ICAE 用 `--output-root` 和 `--output-id` 生成 `<output-root>/eval/<output-id>/locomo/`，AutoCompressors 用 `--output-dir` 直接指定结果目录。两者均支持 `--resume` 续评。
 
 | 产物 | 内容 |
 |---|---|
-| `evaluation_config.json` | 数据身份、模型和权重设置、评估协议、项目 Git 来源 |
+| `evaluation_config.json` | 数据身份、模型和权重设置、评估协议 |
 | `details.jsonl` | 每题预测、参考答案、类别、F1 和该对话的记忆用量，按数据集原序追加 |
 | `summary.json` | 全部问题完成后的总体和分题型 F1（0–1），以及各对话的正文 token、记忆槽和保留原文 token 数 |
 

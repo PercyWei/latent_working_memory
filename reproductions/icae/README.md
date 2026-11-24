@@ -2,7 +2,7 @@
 
 创建时间：20260904 10:13:57 Asia/Shanghai
 
-最后修订时间：20261124 14:58:37 Asia/Shanghai
+最后修订时间：20261124 15:43:38 Asia/Shanghai
 
 本目录使用 [In-context Autoencoder（ICAE）](https://arxiv.org/abs/2307.06945) 的官方 v2 实现，在 LoCoMo 上分别评估基于 Mistral-7B-Instruct-v0.2 的预训练与指令微调权重。源码与项目适配见 [UPSTREAM.md](UPSTREAM.md#icae-v2)。
 
@@ -32,7 +32,7 @@ hf download sggetao/icae mistral_7b_pretrained_icae.safetensors mistral_7b_ft_ic
 
 ## 环境与运行命令
 
-从 Linux x86-64 服务器的项目根目录创建并激活独立评估环境。评估使用单张支持 BF16 和 FlashAttention 2 的 CUDA GPU，依赖版本见 [requirements-eval.txt](requirements-eval.txt)。
+从 Linux x86-64 服务器的项目根目录创建并激活独立评估环境。评估使用支持 BF16 和 FlashAttention 2 的 CUDA GPU，依赖版本见 [requirements-eval.txt](requirements-eval.txt)。
 
 ```bash
 export PATH="$HOME/rivermind-data/tools/uv/bin:$PATH"
@@ -40,7 +40,7 @@ bash reproductions/setup_eval_env.sh icae
 source ~/rivermind-data/envs/icae-v2/bin/activate
 ```
 
-两次评估共用基座，各自写入独立目录。
+两次评估共用基座，各自写入独立目录。入口复用[公共 LoCoMo 框架](../../src/latent_working_memory/benchmarks/locomo/README.md)，可用 `CUDA_VISIBLE_DEVICES=0,1` 按对话分配到多卡。
 
 ```bash
 # 预训练权重
@@ -68,7 +68,8 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/icae/scripts/eval_locomo.sh \
 | `--checkpoint` | 必填。与所选阶段对应的官方 `.safetensors` 文件，保留下载时的文件名 |
 | `--benchmark-data` | 包含 `locomo10.json` 的目录，默认 `data/benchmarks/locomo` |
 | `--output-root` | 产物父目录，默认 `artifacts/reproductions/icae` |
-| `--output-id` | 单个目录名，首次运行须使用新名称。省略时按权重文件名（去扩展名）和上海时间生成 `<checkpoint>_<YYYYMMDD-HHMM>` |
+| `--output-id` | 单个目录名，首次运行须使用新名称。省略时按上海时间生成 `icae_<YYYYMMDD-HHMM>` |
+| `--batch-size-per-gpu` | 每卡同时回答的问题数上限，默认 1，同对话内按问题长度组批 |
 
 - 压缩器只读取对话正文，将完整历史均分为若干段，每段最多 512 个输入 token，压成 128 个记忆槽。超过官方示例 5,120 tokens 的对话也按此规则处理。
 - 同一对话的各题复用记忆槽和回答端的前缀 KV 缓存。回答端依次读取 QA 系统提示、记忆槽和问题。指令微调阶段在记忆后加入官方 `[FT]` 标记，预训练阶段直接用冻结基座回答。
@@ -79,8 +80,8 @@ CUDA_VISIBLE_DEVICES=0 bash reproductions/icae/scripts/eval_locomo.sh \
 两次评估完成后，从项目根目录运行以下命令，在终端对照两个阶段的总体和分类 F1（百分制）。
 
 ```bash
-jq '{stage: .settings.stage, questions: .samples, F1: (.score * 100),
-     by_category: [.groups[] | {category: .category_name, F1: (.score * 100)}]}' \
+jq '{stage: .settings.stage, questions: .metrics.samples, F1: (.metrics.score * 100),
+     by_category: [.metrics.groups[] | {category: .category_name, F1: (.score * 100)}]}' \
   artifacts/reproductions/icae/eval/mistral-7b_{pretrained,finetuned}-4x/locomo/summary.json
 ```
 
@@ -90,8 +91,10 @@ jq '{stage: .settings.stage, questions: .samples, F1: (.score * 100),
 
 | 文件 | 内容 |
 |---|---|
-| `evaluation_config.json` | 权重与数据标识、输入与评分协议、启动时的 Git commit 和工作树状态 |
-| `details.jsonl` | 逐题追加的问题、参考答案、模型回答、F1 和该对话的记忆用量 |
+| `evaluation_config.json` | 权重与数据标识、输入与评分协议、方法与权重设置 |
+| `progress/worker-*.jsonl` | 每个 worker 逐题追加的回答、F1 和会话统计，作为续评依据 |
+| `details.jsonl` | 全部完成后按数据顺序汇总的逐题结果 |
+| `execution.json` | 最近启动的 Git commit、GPU 和耗时 |
 | `summary.json` | 全部题目完成后的总体与分类 F1、题数、各对话的记忆用量及平均保留比例 |
 
 ## 备用训练入口

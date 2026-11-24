@@ -81,16 +81,6 @@ def compute_batch(groups, request, model, config, max_new_tokens, commit, batch_
     evaluate_conversations([sample for group in groups for sample in group], adapter, batch_size, completed)
 
 
-def make_record(sample, answers):
-    answer = answers[0]
-    return {
-        "id": sample.id,
-        "question": sample.metadata["question"],
-        "references": list(sample.references), "metadata": sample.metadata,
-        **answer, "score": score_sample(NAME, sample, answer["prediction"]),
-    }
-
-
 def summarize(records):
     return summarize_scores(NAME, records)
 

@@ -2,7 +2,7 @@
 
 创建时间：20261019 20:16:32 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261123 21:06:07 Asia/Shanghai
+最后修订时间：20261124 15:43:38 Asia/Shanghai
 
 Full-context 基线使用原始模型和完整上下文评估 LoCoMo 与 RULER。模型通过原生 chat template 编码统一的 QA system 提示和包含完整题面的 user 消息，再按任务规定的生成预算进行贪心解码。
 
@@ -102,3 +102,5 @@ bash src/latent_working_memory/full_context/scripts/dashboard.sh \
 ```
 
 启动后访问 `http://127.0.0.1:8501`，选择要查看的任务。LoCoMo 可按题型查看 F1，RULER 可按长度档位和子任务查看准确率。两者均可逐题查看模型回答、参考答案与得分。
+
+统一的多方法 LoCoMo 入口见[公共评估说明](../benchmarks/locomo/README.md)，支持按方法注册加载与计算逻辑。

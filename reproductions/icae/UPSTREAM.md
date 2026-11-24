@@ -2,7 +2,7 @@
 
 创建时间：20260904 10:13:57 Asia/Shanghai
 
-最后修订时间：20261124 11:55:02 Asia/Shanghai
+最后修订时间：20261124 15:43:38 Asia/Shanghai
 
 ## ICAE v2
 
@@ -13,7 +13,7 @@
 | 基座和 tokenizer | [mistralai/Mistral-7B-Instruct-v0.2](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.2/tree/63a8b081895390a26e140280378bc85ec8bce07a)，Apache-2.0 |
 | Writer LoRA 和记忆槽 | [sggetao/icae](https://huggingface.co/sggetao/icae/tree/c95c70d670c8a284550610b49b0f26d2a3b2d1e3)，模型卡标注 Apache-2.0 |
 
-[evaluation/eval_locomo.py](evaluation/eval_locomo.py) 负责 LoCoMo 问答、完整对话的压缩与 reader 缓存复用。它沿用官方 LoRA rank 512、128 槽和平均 4× 的配置。原预训练示例用 `[AE]` 展示文本重建，项目以冻结指令基座直接读取预训练的槽回答问题，报告零样本 QA。微调权重沿用官方 v2 推理的 `[FT]`。与上游 5,120-token 演示的另一处差异是编码完整历史，并对压缩后的 reader 输入执行位置窗口检查。
+[模型适配](evaluation/model.py)和[会话适配](evaluation/locomo_adapter.py)负责 LoCoMo 问答、完整对话的压缩与 reader 缓存复用。它沿用官方 LoRA rank 512、128 槽和平均 4× 的配置。原预训练示例用 `[AE]` 展示文本重建，项目以冻结指令基座直接读取预训练的槽回答问题，报告零样本 QA。微调权重沿用官方 v2 推理的 `[FT]`。与上游 5,120-token 演示的另一处差异是编码完整历史，并对压缩后的 reader 输入执行位置窗口检查。
 
 ## ICAE v1
 

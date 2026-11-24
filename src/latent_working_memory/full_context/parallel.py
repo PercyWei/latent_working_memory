@@ -10,9 +10,10 @@ from multiprocessing import get_context
 from multiprocessing.connection import wait
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from latent_working_memory.benchmarks.locomo.engine import shard_conversations
 
 import torch
+
+from latent_working_memory.benchmarks.locomo.engine import shard_conversations
 
 from .inference import evaluate_samples
 

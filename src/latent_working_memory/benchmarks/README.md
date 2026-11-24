@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261123 16:39:54 Asia/Shanghai
+最后修订时间：20261124 15:43:38 Asia/Shanghai
 
 本目录提供 RULER 与 LoCoMo 的公共数据准备、读取和评分，供不同方法及 full-context 基线共用。
 
@@ -109,3 +109,7 @@ bash src/latent_working_memory/benchmarks/scripts/generate_ruler.sh \
 
 - **数据选择**：RULER 指向包含长度子目录的 `data/benchmarks/ruler-v1/<model-name>/`，LoCoMo 指向包含 `locomo10.json` 的目录。
 - **可比性**：同一模型的不同方法使用同一批生成样本及评分协议；评估结果、checkpoint 组织和可视化由各方法负责。
+
+## 公共 LoCoMo 评估
+
+Full-context、ICAE v2 和 v3.1.1 可通过[公共入口](locomo/README.md)按会话分片、复用正文状态并独立批量回答问题。

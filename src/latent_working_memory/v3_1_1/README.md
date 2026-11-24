@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261124 10:26:18 Asia/Shanghai
+最后修订时间：20261124 15:43:38 Asia/Shanghai
 
 v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=post` 使用问答（QA），由 `training.update_mode` 选择仅更新压缩器（`compressor_only`）、仅更新边界（`boundary_only`）或联合更新（`joint`）。每次写入将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆及未压缩的 pending 和 recent 尾段回答问题。
 
@@ -610,7 +610,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/eval_test
 
 新建评估必填 `--eval-run` 和 `--eval-data`；前者指向运行根目录。`--eval-id` 缺省生成 `YYYYMMDD-HHMMSS`。`--checkpoint` 接受一个或多个 `global_step_<N>` 名称，省略时选择当时全部完整 checkpoint；多个 checkpoint 按真实 step 串行执行。
 
-每卡批量上限由 `--batch-size-per-gpu` 控制，默认 1；Test 按文档、LoCoMo 按对话、RULER 按题目组批。LoCoMo 同一对话的未完成题目分配给同一 GPU，逐题保存与计数；续评时重新压缩尚有未完成题目的对话，只生成缺失答案，官方评分仍按题目汇总，记忆用量按对话平均。
+每卡批量上限由 `--batch-size-per-gpu` 控制，默认 1；Test 按文档、RULER 按题目组批。LoCoMo 每卡一次处理一段对话，在该对话内按问题 token 长度组批，并复用一次压缩和 Reader 前缀 KV。LoCoMo 同一对话的未完成题目分配给同一 GPU，逐题保存与计数；续评时重新压缩尚有未完成题目的对话，只生成缺失答案，官方评分仍按题目汇总，记忆用量按对话平均。
 
 RULER 通过 `--lengths` 选择长度，默认 `8192 16384 32768`；各长度单独组批，可用 `--batch-size-by-length 8192=8 16384=4 32768=2` 覆盖指定长度的批量，其余沿用通用值。GPU 数与批量属于本次执行设置，可在续评时调整。
 
@@ -760,3 +760,5 @@ Checkpoint 固定包含 `config`、`model`、`optimizer`、`scheduler`、`cursor
 `cursor` 包含训练主步数 `step`、已完成采样批次 `rollout_step` 和数据游标 `samples`。PPO 的 `step` 等于 critic scheduler 的实际更新次数，其他训练等于 actor scheduler 的更新次数；actor 的独立进度保存在其 scheduler 状态中。随机状态按 rank 保存，恢复时同时核对两侧更新进度、原配置、数据身份和游标，继续原生预热阶段。
 
 评估计划绑定基座、模型结构（含 pending 步长、最短长度和默认 recent）、LoRA、计算设置和 seed，并保存固定数据与协议。任务 `status.json` 的 `selected_checkpoints` 记录本次执行范围，与计划的累计列表分别保存。`progress/worker_<rank>.jsonl` 持续保存已完成样本，flush 后可续评；同目录的 `worker_<rank>.json` 是阶段、批量和长度的展示快照，每次续评重建。完整 details 提交后生成最终 summary。
+
+多方法统一 LoCoMo 入口见[公共评估说明](../benchmarks/locomo/README.md)。当前任务入口也复用该框架的会话调度和计算适配。
