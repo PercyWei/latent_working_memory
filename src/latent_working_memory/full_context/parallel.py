@@ -10,6 +10,7 @@ from multiprocessing import get_context
 from multiprocessing.connection import wait
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from latent_working_memory.benchmarks.locomo.engine import shard_conversations
 
 import torch
 
@@ -50,13 +51,7 @@ def evaluation_log(path):
 def shard_samples(samples, benchmark, num_devices):
     """LoCoMo 以完整会话分片并均衡题数，RULER 按题目轮流分配。"""
     if benchmark == "locomo":
-        conversations = {}
-        for sample in samples:
-            conversations.setdefault(sample.metadata["conversation_id"], []).append(sample)
-        shards = [[] for _ in range(min(num_devices, len(conversations)))]
-        for questions in sorted(conversations.values(), key=len, reverse=True):
-            min(shards, key=len).extend(questions)
-        return shards
+        return shard_conversations(samples, num_devices)
     count = min(num_devices, len(samples))
     return [samples[rank::count] for rank in range(count)]
 

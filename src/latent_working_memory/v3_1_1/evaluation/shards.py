@@ -4,6 +4,7 @@ from collections import Counter
 import json
 from pathlib import Path
 import time
+from latent_working_memory.benchmarks.locomo.engine import shard_conversations
 
 from latent_working_memory.benchmarks.comparison import comparison_data
 from ..io import write_json
@@ -68,14 +69,8 @@ def write_work(output_dir, samples, entries, num_workers, task):
         raise ValueError("num_workers must be a positive integer")
     pending = [sample.id for sample in samples if sample.id not in entries]
     if task == "locomo":
-        conversations = {}
-        for sample in samples:
-            if sample.id not in entries:
-                conversations.setdefault(sample.metadata["conversation_id"], []).append(sample.id)
-        workers = [[] for _ in range(min(num_workers, len(conversations)))]
-        # 同一正文的剩余问题归属同一 worker；优先分配题数较多的会话。
-        for questions in sorted(conversations.values(), key=len, reverse=True):
-            min(workers, key=len).extend(questions)
+        remaining = [sample for sample in samples if sample.id not in entries]
+        workers = [[sample.id for sample in shard] for shard in shard_conversations(remaining, num_workers)]
     else:
         count = min(num_workers, len(pending))
         workers = [pending[rank::count] for rank in range(count)]

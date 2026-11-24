@@ -1,16 +1,17 @@
 """执行独立 LoCoMo 评估，逐 checkpoint 保存本地结果。"""
 
 import argparse
-from collections import defaultdict
+import os
+import torch
 import sys
 
-from latent_working_memory.benchmarks.data import load_samples, locomo_history, locomo_question_prompt
+from latent_working_memory.benchmarks.data import load_samples
+from latent_working_memory.benchmarks.locomo.engine import conversations, evaluate_conversations
 from latent_working_memory.benchmarks.protocol import data_identity, protocol
 from latent_working_memory.benchmarks.scoring import score_sample, summarize_scores
 from ..cli import ignore_resume_options, positive_int
-from ..data import QAEncoder
 from . import DEFAULT_EVAL_BATCH_SIZE
-from .inference import EvaluationInput, EvaluationQuestion, compute_batch as compute_model_batch
+from .locomo_adapter import MemoryAdapter
 from .run import run_evaluations
 
 
@@ -56,39 +57,28 @@ def load_data(config, tokenizer, model_window, data, max_samples, max_new_tokens
 
 
 def sample_batches(samples, execution):
-    conversations = defaultdict(list)
-    for sample in samples:
-        conversations[sample.metadata["conversation_id"]].append(sample)
-    ordered = sorted(conversations.values(),
-                     key=lambda questions: len(locomo_history(questions[0])))
-    batch_size = execution["eval_batch_size_per_gpu"]
-    for start in range(0, len(ordered), batch_size):
-        yield ordered[start:start + batch_size]
+    for questions in conversations(samples):
+        yield [questions]
 
 
-def compute_batch(conversations, request, model, config, max_new_tokens, commit):
-    by_first_id = {questions[0].id: questions for questions in conversations}
-    encoder = QAEncoder(model.tokenizer)
-
-    def encode(sample):
-        questions = by_first_id[sample.id]
-        context = locomo_history(sample)
-        return EvaluationInput(
-            encoder.context(context),
-            tuple(EvaluationQuestion(
-                tuple(model.tokenizer.encode(
-                    "\n\n" + locomo_question_prompt(question.metadata["question"], question.metadata["category"])
-                    + encoder.suffix,
-                    add_special_tokens=False,
-                )), question.max_new_tokens,
-            ) for question in questions),
-        )
-
-    return compute_model_batch(
-        [questions[0] for questions in conversations], model, config, commit, encode,
-        lambda sample, answers: make_record(by_first_id[sample.id][len(answers) - 1], [answers[-1]]),
-        encoder.reader_prefix_ids, commit_per_question=True,
-    )
+def compute_batch(groups, request, model, config, max_new_tokens, commit, batch_size=1):
+    device = model.memory_embeddings.device
+    torch.cuda.reset_peak_memory_stats(device)
+    adapter = MemoryAdapter(model, config)
+    def completed(sample, answer, statistics):
+        boundary = answer.pop("boundary", None)
+        entry = {
+            "record": {**statistics, **answer, "id": sample.id,
+                       "question": sample.metadata["question"],
+                       "metadata": sample.metadata, "references": list(sample.references),
+                       "score": score_sample(NAME, sample, answer["prediction"])},
+            "device": f"{device} (CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '')})",
+            "peak_memory_bytes": torch.cuda.max_memory_allocated(device),
+        }
+        if boundary is not None:
+            entry["boundary"] = boundary
+        commit(entry)
+    evaluate_conversations([sample for group in groups for sample in group], adapter, batch_size, completed)
 
 
 def make_record(sample, answers):
