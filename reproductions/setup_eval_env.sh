@@ -2,14 +2,16 @@
 set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-method="${1:?用法：bash reproductions/setup_eval_env.sh lact|e2_ttt|in_place_ttt}"
+method="${1:?用法：bash reproductions/setup_eval_env.sh lact|e2_ttt|in_place_ttt|icae}"
+environment_name="ttt-$method"
 case "$method" in
   lact|in_place_ttt) python_minor=3.11 ;;
   e2_ttt) python_minor=3.12 ;;
+  icae) python_minor=3.11; environment_name=icae-v2 ;;
   *) printf '未知方法：%s\n' "$method" >&2; exit 2 ;;
 esac
 
-environment_dir="$HOME/rivermind-data/envs/ttt-$method"
+environment_dir="$HOME/rivermind-data/envs/$environment_name"
 wheel_dir="$HOME/rivermind-data/wheels/ttt"
 export UV_CACHE_DIR="$HOME/rivermind-data/cache/uv"
 export UV_PYTHON_DOWNLOADS=never

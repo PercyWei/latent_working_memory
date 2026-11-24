@@ -4,7 +4,7 @@ import argparse
 from collections import defaultdict
 import sys
 
-from latent_working_memory.benchmarks.data import load_samples
+from latent_working_memory.benchmarks.data import load_samples, locomo_history, locomo_question_prompt
 from latent_working_memory.benchmarks.protocol import data_identity, protocol
 from latent_working_memory.benchmarks.scoring import score_sample, summarize_scores
 from ..cli import ignore_resume_options, positive_int
@@ -15,11 +15,6 @@ from .run import run_evaluations
 
 
 NAME = "locomo"
-QA_INSTRUCTION = (
-    "\nBased on the above conversations, write a short answer for the following "
-    "question in a few words. Do not write complete and lengthy sentences. "
-    "Answer with exact words from the conversations whenever possible.\n\n"
-)
 
 
 def plan_options(args, saved):
@@ -65,7 +60,7 @@ def sample_batches(samples, execution):
     for sample in samples:
         conversations[sample.metadata["conversation_id"]].append(sample)
     ordered = sorted(conversations.values(),
-                     key=lambda questions: len(questions[0].prompt.rsplit(QA_INSTRUCTION, 1)[0]))
+                     key=lambda questions: len(locomo_history(questions[0])))
     batch_size = execution["eval_batch_size_per_gpu"]
     for start in range(0, len(ordered), batch_size):
         yield ordered[start:start + batch_size]
@@ -77,12 +72,13 @@ def compute_batch(conversations, request, model, config, max_new_tokens, commit)
 
     def encode(sample):
         questions = by_first_id[sample.id]
-        context = sample.prompt.rsplit(QA_INSTRUCTION, 1)[0]
+        context = locomo_history(sample)
         return EvaluationInput(
             encoder.context(context),
             tuple(EvaluationQuestion(
                 tuple(model.tokenizer.encode(
-                    f"\n\n{QA_INSTRUCTION}{question.prompt.rsplit(QA_INSTRUCTION, 1)[1]}{encoder.suffix}",
+                    "\n\n" + locomo_question_prompt(question.metadata["question"], question.metadata["category"])
+                    + encoder.suffix,
                     add_special_tokens=False,
                 )), question.max_new_tokens,
             ) for question in questions),

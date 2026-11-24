@@ -2,7 +2,7 @@
 
 创建时间：20261109 10:58:35 Asia/Shanghai
 
-最后修订时间：20261116 22:12:29 Asia/Shanghai
+最后修订时间：20261124 14:55:04 Asia/Shanghai
 
 ## 配置原则与实际版本
 
@@ -62,3 +62,5 @@ bash reproductions/setup_eval_env.sh in_place_ttt
 环境目录为 `~/rivermind-data/envs/ttt-lact/`、`ttt-e2_ttt/`、`ttt-in_place_ttt/`。运行评估前分别激活对应目录下的 `bin/activate`。安装器遵守各方法 `requirements-eval.txt`，只在 E²-TTT 环境安装其本地模型包和随附 harness。
 
 E²-TTT 的模型包和 harness 使用可编辑安装，路径分别为 `e2_ttt/source/e2_ttt/` 和其 `lm-evaluation-harness/`。源码目录变更后，在该环境的评估停止时重新执行 `bash reproductions/setup_eval_env.sh e2_ttt`，更新安装路径。
+
+同一安装器也支持 ICAE v2。运行 `bash reproductions/setup_eval_env.sh icae` 创建 `~/rivermind-data/envs/icae-v2/`，使用 Python 3.11 和 [ICAE 评估依赖](icae/requirements-eval.txt)。LoCoMo 运行命令见 [ICAE README](icae/README.md#环境与运行命令)。

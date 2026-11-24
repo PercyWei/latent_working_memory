@@ -136,6 +136,23 @@ def _locomo_history(conversation, location):
     return "".join(parts), len(session_keys), turn_count
 
 
+def locomo_question_prompt(question, category):
+    if category == 2:
+        question += " Use DATE of CONVERSATION to answer with an approximate date."
+    return (
+        "\nBased on the above conversations, write a short answer for the following "
+        "question in a few words. Do not write complete and lengthy sentences. "
+        "Answer with exact words from the conversations whenever possible.\n\n"
+        f"Question: {question}\n"
+    )
+
+
+def locomo_history(sample):
+    """取出构造题面时使用的完整对话，保留原始换行。"""
+    suffix = locomo_question_prompt(sample.metadata["question"], sample.metadata["category"])
+    return sample.prompt.removesuffix(suffix)
+
+
 def _load_locomo(data_dir):
     path = data_dir / "locomo10.json"
     with path.open(encoding="utf-8") as stream:
@@ -168,16 +185,7 @@ def _load_locomo(data_dir):
             if type(answer) not in {str, int, float}:
                 raise ValueError(f"{qa_location}.answer: expected a text or numeric answer")
             answer = _nonempty_string(str(answer), f"{qa_location}.answer")
-            instruction = question
-            if category == 2:
-                instruction += " Use DATE of CONVERSATION to answer with an approximate date."
-            prompt = (
-                history
-                + "\nBased on the above conversations, write a short answer for the following "
-                "question in a few words. Do not write complete and lengthy sentences. "
-                "Answer with exact words from the conversations whenever possible.\n\n"
-                + f"Question: {instruction}\n"
-            )
+            prompt = history + locomo_question_prompt(question, category)
             samples.append(
                 BenchmarkSample(
                     id=f"locomo/{conversation_id}/{question_index}",

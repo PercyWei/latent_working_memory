@@ -1,12 +1,13 @@
 # 论文复现
 
-最后修订时间：20261117 15:30:12 Asia/Shanghai
+最后修订时间：20261124 14:58:37 Asia/Shanghai
 
 本目录保存论文方法的独立复现。训练和评估入口、依赖环境、源码来源及结果分别在各方法目录维护。
 
 | 方法 | 入口 | 范围 |
 |---|---|---|
-| ICAE v1 | [icae](icae/README.md) | Llama-2-7B-Chat 压缩器及公开权重评估 |
+| ICAE | [icae](icae/README.md) | v2 的 Mistral 预训练、指令微调权重在 LoCoMo 上的对照；v1 的 Llama-2-7B-Chat 压缩器供 C-DIC 使用 |
+| AutoCompressors | [autocompressors](autocompressors/README.md) | 官方 Llama-2-7B-6k 摘要向量在 LoCoMo 上的评估 |
 | C-DIC | [cdic](cdic/README.md) | 多轮记忆、MSC 训练与评估 |
 | LaCT | [lact](lact/README.md) | 760M 模型的 RULER 评估 |
 | E²-TTT | [e2_ttt](e2_ttt/README.md) | 1.3B 模型的 RULER、SQuAD completion、SWDE 评估 |
@@ -20,11 +21,31 @@
 | [评估数据准备](20261108_ttt_data_preparation.md) | 三种 TTT 方法的数据规模、下载和构造命令 |
 | [评估环境](20261109_environment_setup.md) | 三种 TTT 方法的依赖版本、环境安装及安装记录 |
 | [复现状态](20261110_ttt_reproduction_status.md) | 正式评估进度、小样本验证结论、数值差异、资源测量及历史 B1 耗时外推 |
-| [setup_eval_env.sh](setup_eval_env.sh) | 安装 LaCT、E²-TTT 或 In-Place TTT 的独立评估环境 |
+| [setup_eval_env.sh](setup_eval_env.sh) | 安装 ICAE v2、LaCT、E²-TTT 或 In-Place TTT 的独立评估环境 |
 | [evaluation_runtime.py](evaluation_runtime.py) | 三方法共用的进程清理、时间、严格 JSON、基础 Git 来源、worker 进度快照与统一展示 |
 | [reporting/](reporting/comparison.py) | 三方法共用的论文对比图表与 HTML 渲染 |
 
 运行命令和当前参数由各方法 README 维护，来源与实现改进由各方法 `UPSTREAM.md` 维护；公共文档按上表分工。
+
+## 软上下文压缩的 LoCoMo 评估
+
+[ICAE](icae/README.md) 和 [AutoCompressors](autocompressors/README.md) 均使用官方模型实现。各方法的 README 提供源码、权重、独立环境和评估命令。准备公共数据：
+
+```bash
+bash src/latent_working_memory/benchmarks/scripts/download_benchmarks.sh --benchmark locomo
+```
+
+两种方法共用[评估入口的公共逻辑](soft_context_locomo.py)。每段对话按时间顺序完整压缩一次，再独立回答该对话的各个问题。system 提示和问题留在读出端。10 段对话共 1,540 道第 1–4 类开放题，每题贪心生成至多 50 个 token，使用项目的官方 LoCoMo F1。ICAE 用 `--output-root` 和 `--output-id` 生成 `<output-root>/eval/<output-id>/locomo/`，AutoCompressors 用 `--output-dir` 直接指定结果目录。两者均支持 `--resume` 续评。
+
+| 产物 | 内容 |
+|---|---|
+| `evaluation_config.json` | 数据身份、模型和权重设置、评估协议、项目 Git 来源 |
+| `details.jsonl` | 每题预测、参考答案、类别、F1 和该对话的记忆用量，按数据集原序追加 |
+| `summary.json` | 全部问题完成后的总体和分题型 F1（0–1），以及各对话的正文 token、记忆槽和保留原文 token 数 |
+
+总体 F1 按题等权。平均保留率按对话等权，每段对话计算 `(记忆槽数 + 保留原文 token 数) / 正文 token 数`。ICAE 的两套 v2 权重使用同一 Mistral 基座和 4× 设置，适合比较指令微调前后的 F1。
+
+AutoCompressors 默认每 2,048 个 token 写 50 个槽。按发布的 tokenizer 对这 10 段对话计数，实际倍率为 37.51×–40.75×。与多倍率压缩器对照时可另开输出目录，使用 `--segment-length 800` 测名义 16×：10 段均能放入原生 4,096 位置窗口，实际为 15.29×–15.89×。若改为 200 个 token 写 50 槽（4×），10 段均会超窗。上述数值为输入预算统计，F1 由独立评估生成。
 
 ## TTT 模型评估
 

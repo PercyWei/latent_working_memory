@@ -1,8 +1,21 @@
-# ICAE v1 上游来源与迁移记录（20260904 10:13:57 CST）
+# 20260904_ICAE 上游来源与适配
 
-创建时间：20260904 10:13:57 CST（UTC+08:00）
+创建时间：20260904 10:13:57 Asia/Shanghai
 
-最后修订时间：20260904 20:16:17 CST（UTC+08:00）
+最后修订时间：20261124 11:55:02 Asia/Shanghai
+
+## ICAE v2
+
+源码固定为 [getao/icae 的 469a468](https://github.com/getao/icae/tree/469a46886a92dd5e76b2d12a8bac0fb7ed7d4cdd)。[source/icae](source/icae) 保留上游 `code/icae_v2` 下的全部 Python 与 shell 源码、README 与 CC0-1.0 许可证。LoCoMo 入口直接导入官方 `ICAE`，使用其 `_compress`、特殊 token embedding 和分段规则。
+
+| 资源 | 官方发布 |
+|---|---|
+| 基座和 tokenizer | [mistralai/Mistral-7B-Instruct-v0.2](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.2/tree/63a8b081895390a26e140280378bc85ec8bce07a)，Apache-2.0 |
+| Writer LoRA 和记忆槽 | [sggetao/icae](https://huggingface.co/sggetao/icae/tree/c95c70d670c8a284550610b49b0f26d2a3b2d1e3)，模型卡标注 Apache-2.0 |
+
+[evaluation/eval_locomo.py](evaluation/eval_locomo.py) 负责 LoCoMo 问答、完整对话的压缩与 reader 缓存复用。它沿用官方 LoRA rank 512、128 槽和平均 4× 的配置。原预训练示例用 `[AE]` 展示文本重建，项目以冻结指令基座直接读取预训练的槽回答问题，报告零样本 QA。微调权重沿用官方 v2 推理的 `[FT]`。与上游 5,120-token 演示的另一处差异是编码完整历史，并对压缩后的 reader 输入执行位置窗口检查。
+
+## ICAE v1
 
 迁移日期：20260903
 

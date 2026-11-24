@@ -1,116 +1,99 @@
-# ICAE v1 复现（20260906 22:24:15 CST）
+# 20260904_ICAE 复现
 
-创建时间：20260904 10:13:57 CST（UTC+08:00）
+创建时间：20260904 10:13:57 Asia/Shanghai
 
-最后修订时间：20260906 22:24:15 CST（UTC+08:00）
+最后修订时间：20261124 14:58:37 Asia/Shanghai
 
-本目录保存后续复现 C-DIC 所需的 ICAE v1 压缩器代码，目标是论文使用的 Llama-2-7B-Chat 路径，而不是后续基于 Mistral 的 ICAE v2。
+本目录使用 [In-context Autoencoder（ICAE）](https://arxiv.org/abs/2307.06945) 的官方 v2 实现，在 LoCoMo 上分别评估基于 Mistral-7B-Instruct-v0.2 的预训练与指令微调权重。源码与项目适配见 [UPSTREAM.md](UPSTREAM.md#icae-v2)。
 
-仓库初始化过程不会保存或下载 benchmark、数据集、模型权重与 checkpoint。
+## 评估数据
 
-## 源码结构
+两个阶段共用 LoCoMo 的 10 段完整对话。每道题使用所属对话的全部历史，数据下载命令见[评估数据准备](../../src/latent_working_memory/benchmarks/README.md)。
 
-- `src/icae/`：迁移后的 ICAE v1 模型与训练代码；
-- `vendor/peft/`：ICAE 随附的定制 PEFT `0.4.0.dev0` 源码；
-- `src/icae_repro/`：无需下载模型的本地环境检查，以及受测试的 checkpoint 加载和推理入口；
-- `examples/ft_inference_upstream.py`：上游基于固定路径的原始推理示例，仅用于参考，不作为正式入口；
-- `UPSTREAM.md`：上游版本、迁移路径与本地改动记录。
+| benchmark | 题型 | 题数 | 默认数据路径 |
+|---|---|---:|---|
+| LoCoMo | 多跳（1）、时间（2）、开放域（3）、单跳（4） | 1,540 | `data/benchmarks/locomo/locomo10.json` |
 
-## 服务器环境
+## 模型下载
 
-目标环境：
-
-- NVIDIA A800-SXM4-80GB；
-- Linux x86-64；
-- 支持 CUDA 13.0 的服务器驱动与工具链；
-- Python 3.10；
-- PyTorch 2.0.1 CUDA 11.8 wheel；
-- Transformers 4.31.0 与 ICAE 定制 PEFT。
-
-使用 CUDA 11.8 wheel 是有意选择。NVIDIA 驱动能够向后兼容使用旧版 CUDA toolkit 构建的应用，而 PyTorch 2.0.1 比当前 CUDA 13.0 对应版本更接近 ICAE 最初使用的 2023 年依赖栈。迁移代码不编译本地 CUDA extension。
-
-在服务器上创建环境：
+从 [Mistral-7B-Instruct-v0.2](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.2) 和 [sggetao/icae](https://huggingface.co/sggetao/icae) 的 `main` 分支下载基座、tokenizer 和两份 ICAE v2 权重。`hf` CLI 安装方式见[复现总说明](../README.md#模型下载约定)。
 
 ```bash
-export UV_CACHE_DIR=/data/bywei/cache/uv
-uv sync --project reproductions/icae --frozen
-uv run --project reproductions/icae icae-check-environment
+# Mistral 基座和 tokenizer
+hf download mistralai/Mistral-7B-Instruct-v0.2 \
+  --include 'model*.safetensors' model.safetensors.index.json config.json generation_config.json \
+    'tokenizer*' special_tokens_map.json \
+  --local-dir ~/rivermind-data/models/Mistral-7B-Instruct-v0.2
+
+# ICAE v2 预训练与指令微调权重
+hf download sggetao/icae mistral_7b_pretrained_icae.safetensors mistral_7b_ft_icae.safetensors \
+  --local-dir ~/rivermind-data/models/reproductions/icae
 ```
 
-该 uv 项目使用阿里云 PyPI 镜像安装常规依赖，并使用阿里云 CUDA 11.8 wheel 镜像安装 PyTorch。`UV_CACHE_DIR` 将下载缓存保存在 `/data/bywei` 下，便于后续重建环境时复用。
+## 环境与运行命令
 
-环境检查不会访问 Hugging Face 或下载权重，只报告 PyTorch、CUDA、GPU 计算能力和 bfloat16 支持情况。
-
-环境检查通过后，可运行受测试的单样本推理入口：
+从 Linux x86-64 服务器的项目根目录创建并激活独立评估环境。评估使用单张支持 BF16 和 FlashAttention 2 的 CUDA GPU，依赖版本见 [requirements-eval.txt](requirements-eval.txt)。
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/icae --no-sync \
-  icae-smoke-inference \
-  --model-path /data/bywei/models/meta-llama/Llama-2-7b-chat-hf \
-  --checkpoint /data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt \
-  --context "The access code for Project Quartz is ZETA-4827." \
-  --prompt "What is the access code for Project Quartz?"
+export PATH="$HOME/rivermind-data/tools/uv/bin:$PATH"
+bash reproductions/setup_eval_env.sh icae
+source ~/rivermind-data/envs/icae-v2/bin/activate
 ```
 
-公开的 v1 checkpoint 使用标量 `0.0` 作为冻结 Llama 参数的占位符。推理入口会从本地基础模型恢复这些参数，再使用 `strict=True` 严格加载完整 state dict，不会通过 `strict=False` 跳过不匹配项。
-
-Checkpoint 格式固定为上游发布的 direct state dict：key 为参数名，value 只能是 PyTorch Tensor 或标量 `0.0`；不接受 `state_dict`、`model_state_dict`、`model` 等额外包装层。ICAE v1 的 LoRA rank 固定为 128。
-
-ICAE 上游说明要求训练使用 bfloat16 而不是 fp16，且公开训练路径只支持 batch size 1。在受控兼容性测试证明可以修改之前，应保留这些限制。
-
-## PwC 结果生成
-
-`icae-reproduce-pwc` 支持按 sample ID 断点续跑。本轮只运行 ICAE-128，并按 sample index 奇偶拆分到物理 GPU 0 和 1：
+两次评估共用基座，各自写入独立目录。
 
 ```bash
-export HF_HOME=/data/bywei/cache/huggingface
-export UV_CACHE_DIR=/data/bywei/cache/uv
-export HF_HUB_OFFLINE=1
-export TRANSFORMERS_OFFLINE=1
+# 预训练权重
+CUDA_VISIBLE_DEVICES=0 bash reproductions/icae/scripts/eval_locomo.sh \
+  --stage pretrained \
+  --model-path ~/rivermind-data/models/Mistral-7B-Instruct-v0.2 \
+  --checkpoint ~/rivermind-data/models/reproductions/icae/mistral_7b_pretrained_icae.safetensors \
+  --output-root artifacts/reproductions/icae \
+  --output-id mistral-7b_pretrained-4x
 
-CUDA_VISIBLE_DEVICES=0 uv run --project reproductions/icae --no-sync \
-  icae-reproduce-pwc \
-  --condition icae-128 \
-  --model-path /data/bywei/models/meta-llama/Llama-2-7b-chat-hf \
-  --checkpoint /data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt \
-  --input /data/bywei/projects/latent_working_memory/data/raw/pwc/PwC_test.jsonl \
-  --output artifacts/icae/20260904_pwc_reproduction/run/predictions_icae_shard0.jsonl \
-  --num-shards 2 \
-  --shard-index 0
-
-CUDA_VISIBLE_DEVICES=1 uv run --project reproductions/icae --no-sync \
-  icae-reproduce-pwc \
-  --condition icae-128 \
-  --model-path /data/bywei/models/meta-llama/Llama-2-7b-chat-hf \
-  --checkpoint /data/bywei/projects/latent_working_memory/checkpoints/icae/v1/llama-2-7b-chat-finetuned-icae_zeroweight_llama2.pt \
-  --input /data/bywei/projects/latent_working_memory/data/raw/pwc/PwC_test.jsonl \
-  --output artifacts/icae/20260904_pwc_reproduction/run/predictions_icae_shard1.jsonl \
-  --num-shards 2 \
-  --shard-index 1
+# 指令微调权重
+CUDA_VISIBLE_DEVICES=0 bash reproductions/icae/scripts/eval_locomo.sh \
+  --stage finetuned \
+  --model-path ~/rivermind-data/models/Mistral-7B-Instruct-v0.2 \
+  --checkpoint ~/rivermind-data/models/reproductions/icae/mistral_7b_ft_icae.safetensors \
+  --output-root artifacts/reproductions/icae \
+  --output-id mistral-7b_finetuned-4x
 ```
 
-ICAE 条件遵循上游的 `[FT] prompt [FT]`、greedy decoding 和 token `1` 停止规则。两个 shard 完成后按 `sample_index` 合并。本轮不运行完整上下文 baseline，因此不能报告论文 Table 4 的成对 win、lose、tie 指标。
+| 参数 | 默认值与约定 |
+|---|---|
+| `--resume` | 默认关闭。指定原 `--output-id` 并沿用原权重和数据，仅补齐未完成的题目 |
+| `--stage` | 必填。预训练选 `pretrained`，指令微调选 `finetuned` |
+| `--model-path` | 必填。本地 Mistral-7B-Instruct-v0.2 基座和 tokenizer 目录 |
+| `--checkpoint` | 必填。与所选阶段对应的官方 `.safetensors` 文件，保留下载时的文件名 |
+| `--benchmark-data` | 包含 `locomo10.json` 的目录，默认 `data/benchmarks/locomo` |
+| `--output-root` | 产物父目录，默认 `artifacts/reproductions/icae` |
+| `--output-id` | 单个目录名，首次运行须使用新名称。省略时按权重文件名（去扩展名）和上海时间生成 `<checkpoint>_<YYYYMMDD-HHMM>` |
 
-## 当前迁移边界
+- 压缩器只读取对话正文，将完整历史均分为若干段，每段最多 512 个输入 token，压成 128 个记忆槽。超过官方示例 5,120 tokens 的对话也按此规则处理。
+- 同一对话的各题复用记忆槽和回答端的前缀 KV 缓存。回答端依次读取 QA 系统提示、记忆槽和问题。指令微调阶段在记忆后加入官方 `[FT]` 标记，预训练阶段直接用冻结基座回答。
+- 贪心解码最多生成 50 个 token。按 LoCoMo 官方规则计算逐题 F1，再对题目取平均，分别报告总体和各题型分数。
 
-迁移后的模型和 trainer 源码已完成打包与语法检查。上游 v1 推理示例包含占位路径、引用了公开 v1 训练文件中不存在的 tokenization helper，并保留了一个上游变量名拼写错误。为保留来源信息，该示例不作修改；本项目使用受测试的 `icae-smoke-inference` 作为推理入口。
+## 查看结果
 
-首次批量推理时可准备 JSONL 文件，每行一个样本：
+两次评估完成后，从项目根目录运行以下命令，在终端对照两个阶段的总体和分类 F1（百分制）。
 
-```json
-{"input": "long context", "prompt": "question about the context", "answer": "reference answer"}
+```bash
+jq '{stage: .settings.stage, questions: .samples, F1: (.score * 100),
+     by_category: [.groups[] | {category: .category_name, F1: (.score * 100)}]}' \
+  artifacts/reproductions/icae/eval/mistral-7b_{pretrained,finetuned}-4x/locomo/summary.json
 ```
 
-`answer` 仅用于结果比较，不会在生成时提供给模型。
+## 来源记录与输出
 
-## 暂不纳入仓库的资源
+[评估入口](evaluation/eval_locomo.py) 将以下文件写入 `<output-root>/eval/<output-id>/locomo/`。
 
-以下内容保留为服务器侧准备事项，不提交到 Git：
+| 文件 | 内容 |
+|---|---|
+| `evaluation_config.json` | 权重与数据标识、输入与评分协议、启动时的 Git commit 和工作树状态 |
+| `details.jsonl` | 逐题追加的问题、参考答案、模型回答、F1 和该对话的记忆用量 |
+| `summary.json` | 全部题目完成后的总体与分类 F1、题数、各对话的记忆用量及平均保留比例 |
 
-- `meta-llama/Llama-2-7b-chat-hf` 的访问权限与本地模型目录；
-- ICAE Llama-2 checkpoint，保存在项目根目录 `checkpoints/icae/`；
-- PwC、MSC、REALTALK、LongMemEval 等数据集，保存在项目根目录 `data/`；
-- 生成结果和 benchmark 输出，保存在项目根目录 `artifacts/`；
-- 训练 checkpoint，保存在项目根目录 `checkpoints/`。
+## 备用训练入口
 
-不得将这些文件提交到 Git。根目录 `.gitignore` 已排除常见模型与实验产物路径和扩展名。
+ICAE v2 的官方训练代码见[预训练](source/icae/code/icae_v2/pretrain.py)和[指令微调](source/icae/code/icae_v2/instruction_finetune.py)。运行前需准备训练依赖，并将脚本中的占位路径替换为实际的训练集和验证集路径。

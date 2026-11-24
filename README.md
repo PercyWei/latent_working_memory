@@ -1,8 +1,8 @@
 # 20260912_latent_working_memory
 
-最后修订时间：20261120 11:47:59 Asia/Shanghai
+最后修订时间：20261124 11:53:51 Asia/Shanghai
 
-本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理，入口见 [reproductions](reproductions/README.md)。ICAE v1 和 C-DIC 各自使用独立的 `uv` 环境；LaCT、E²-TTT 和 In-Place TTT 的第一阶段复现保留各自官方代码与运行环境。
+本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理，入口见 [reproductions](reproductions/README.md)。ICAE v2 与 AutoCompressors 的公开权重使用同一 LoCoMo 开放问答评估协议，安装和运行命令见[软上下文压缩复现](reproductions/README.md#软上下文压缩的-locomo-评估)。
 
 当前在线 TTT 实现在 [v4.1 方法说明](src/latent_working_memory/v4_1/README.md)：逐层 latent memory、共享 KV、inner AM 与 outer QA + AM。配置、teacher 准备、单卡训练及评估命令见其[运行指南](src/latent_working_memory/v4_1/scripts/README.md)。
 
@@ -167,9 +167,9 @@ artifacts/             生成结果、测试报告和日志
 
 迁移前位于 `/data/bywei/datasets/`、`/data/bywei/checkpoints/` 和 `/data/bywei/logs/cdic/` 下的相关旧路径暂时保留为 symlink，以兼容已有 checkpoint 中记录的绝对路径；新配置统一使用项目内路径。
 
-## ICAE 环境
+## ICAE v1 环境
 
-ICAE lock 面向 Linux x86-64，使用与原始代码依赖栈兼容的 PyTorch CUDA 11.8 wheel。运行时需要与 CUDA 11.8 兼容的 NVIDIA 驱动。环境安装不会自动下载模型或数据。
+ICAE v1 lock 面向 Linux x86-64，使用与原始代码依赖栈兼容的 PyTorch CUDA 11.8 wheel。运行时需要与 CUDA 11.8 兼容的 NVIDIA 驱动。环境安装不会自动下载模型或数据。
 
 ```bash
 uv sync --project reproductions/icae --frozen
