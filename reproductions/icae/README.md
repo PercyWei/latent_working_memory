@@ -81,7 +81,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_locomo.sh \
 
 ```bash
 bash reproductions/icae/scripts/dashboard.sh \
-  --output-dir artifacts/reproductions/icae/eval/mistral_7b_ft_icae_20261125
+  --output-dir artifacts/reproductions/icae/eval/mistral_7b_pretrained_icae_mem128_cr4_20261125
 ```
 
 `--output-dir` 指向 `<output-root>/eval/<output-id>`。页面展示总体及各题型 F1、题数和记忆用量，并可按题型与对话筛选逐题回答、参考答案和 F1。阶段、基座名称、每块记忆槽数与目标压缩率读取评估配置。

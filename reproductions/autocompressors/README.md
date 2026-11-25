@@ -65,7 +65,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/autocompressors/scripts/eval_locomo.
 
 ```bash
 bash reproductions/autocompressors/scripts/dashboard.sh \
-  --output-dir artifacts/reproductions/autocompressors/eval/llama-2-7b_segment2048
+  --output-dir artifacts/reproductions/autocompressors/eval/AutoCompressor-Llama-2-7b-6k_seg2048_20261125
 ```
 
 看板的 `--output-dir` 指向包含 `locomo/` 的运行目录。页面展示总体及各题型 F1、题数和记忆用量，并可按题型与对话筛选逐题回答、参考答案和 F1。模型名称与分段长度读取评估配置。
