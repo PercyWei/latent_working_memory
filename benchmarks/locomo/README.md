@@ -166,6 +166,7 @@ if __name__ == "__main__":
 [公共看板脚本](scripts/dashboard.sh) 使用当前环境的 Python 启动 Streamlit。启动前激活已安装看板依赖的环境。`--run` 后按“展示标签、LoCoMo 结果目录”成对传参，可连续指定多组：
 
 ```bash
+source .venv/bin/activate
 bash benchmarks/locomo/scripts/dashboard.sh \
   --run 方法A-运行1 artifacts/method-a/eval/run-1/locomo \
         方法A-运行2 artifacts/method-a/eval/run-2/locomo \
