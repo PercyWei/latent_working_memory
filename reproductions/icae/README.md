@@ -2,7 +2,7 @@
 
 创建时间：20260904 10:13:57 Asia/Shanghai
 
-最后修订时间：20261125 11:54:15 Asia/Shanghai
+最后修订时间：20261125 16:56:04 Asia/Shanghai
 
 本目录使用 [In-context Autoencoder（ICAE）](https://arxiv.org/abs/2307.06945) 的官方 v2 实现，在 LoCoMo 上分别评估基于 Mistral-7B-Instruct-v0.2 的预训练与指令微调权重。源码与项目适配见 [UPSTREAM.md](UPSTREAM.md#icae-v2)。
 
@@ -37,7 +37,7 @@ hf download sggetao/icae mistral_7b_pretrained_icae.safetensors mistral_7b_ft_ic
 
 ## 环境准备
 
-从 Linux x86-64 服务器的项目根目录创建并激活独立评估环境。评估使用支持 BF16 和 FlashAttention 2 的 CUDA GPU，依赖版本见 [requirements-eval.txt](requirements-eval.txt)。
+从 Linux x86-64 服务器的项目根目录创建并激活独立评估环境。ICAE v2 评估固定使用 Transformers 4.47.1，可直接读取 Mistral 模型目录中的 `chat_template.jinja`。评估需要支持 BF16 和 FlashAttention 2 的 CUDA GPU，完整依赖见 [requirements-eval.txt](requirements-eval.txt)。
 
 ```bash
 bash reproductions/setup_eval_env.sh icae
