@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261125 17:20:12 Asia/Shanghai
+最后修订时间：20261125 17:41:23 Asia/Shanghai
 
 ## 评估目标与数据
 
@@ -41,7 +41,7 @@ RULER 固定从表中路径读取，下载与构造命令见[评估数据准备]
 
 ```bash
 bash reproductions/setup_eval_env.sh in_place_ttt
-source ~/envs/ttt-in_place_ttt/bin/activate
+source ~/envs/in_place_ttt/bin/activate
 ```
 
 环境位置、uv 镜像配置与激活方式见[评估环境](../README.md#评估环境)。

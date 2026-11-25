@@ -2,7 +2,7 @@
 
 创建时间：20261109 10:58:35 Asia/Shanghai
 
-最后修订时间：20261125 12:05:11 Asia/Shanghai
+最后修订时间：20261125 17:41:23 Asia/Shanghai
 
 ## 配置原则与实际版本
 
@@ -58,7 +58,7 @@ bash reproductions/setup_eval_env.sh e2_ttt
 bash reproductions/setup_eval_env.sh in_place_ttt
 ```
 
-环境默认位于 `~/envs/` 下的 `ttt-lact/`、`ttt-e2_ttt/`、`ttt-in_place_ttt/`。可用 `--env-root /data` 改为 `/data/envs/`；运行评估前激活对应目录下的 `bin/activate`。安装器遵守各方法 `requirements-eval.txt`，只在 E²-TTT 环境安装其本地模型包和随附 harness。
+环境默认位于 `~/envs/` 下的 `lact/`、`e2_ttt/`、`in_place_ttt/`。可用 `--env-root /data` 改为 `/data/envs/`；运行评估前激活对应目录下的 `bin/activate`。安装器遵守各方法 `requirements-eval.txt`，只在 E²-TTT 环境安装其本地模型包和随附 harness。
 
 E²-TTT 的模型包和 harness 使用可编辑安装，路径分别为 `e2_ttt/source/e2_ttt/` 和其 `lm-evaluation-harness/`。源码目录变更后，在该环境的评估停止时重新执行 `bash reproductions/setup_eval_env.sh e2_ttt`，更新安装路径。
 

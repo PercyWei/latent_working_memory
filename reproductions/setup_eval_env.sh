@@ -37,12 +37,11 @@ while [[ $# -gt 0 ]]; do
     *) printf '未知参数：%s\n' "$1" >&2; exit 2 ;;
   esac
 done
-environment_name="ttt-$method"
+environment_name="$method"
 case "$method" in
-  lact|in_place_ttt) python_minor=3.11 ;;
+  lact|in_place_ttt|autocompressors) python_minor=3.11 ;;
   e2_ttt) python_minor=3.12 ;;
   icae) python_minor=3.11; environment_name=icae-v2 ;;
-  autocompressors) python_minor=3.11; environment_name=autocompressors ;;
   *) printf '未知方法：%s\n' "$method" >&2; exit 2 ;;
 esac
 

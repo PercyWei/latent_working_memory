@@ -1,6 +1,6 @@
 # 论文复现
 
-最后修订时间：20261125 17:20:12 Asia/Shanghai
+最后修订时间：20261125 17:41:23 Asia/Shanghai
 
 本目录保存论文方法的独立复现。训练和评估入口、依赖环境、源码来源及结果分别在各方法目录维护。
 
@@ -37,9 +37,9 @@
 |---|---|---|
 | `icae` | 3.11 | `~/envs/icae-v2` |
 | `autocompressors` | 3.11 | `~/envs/autocompressors` |
-| `lact` | 3.11 | `~/envs/ttt-lact` |
-| `in_place_ttt` | 3.11 | `~/envs/ttt-in_place_ttt` |
-| `e2_ttt` | 3.12 | `~/envs/ttt-e2_ttt` |
+| `lact` | 3.11 | `~/envs/lact` |
+| `in_place_ttt` | 3.11 | `~/envs/in_place_ttt` |
+| `e2_ttt` | 3.12 | `~/envs/e2_ttt` |
 
 `--env-root` 指定环境根目录，默认 `~`，实际路径为 `<env-root>/envs/<环境名>`。例如：
 

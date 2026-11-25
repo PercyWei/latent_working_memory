@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261125 17:20:12 Asia/Shanghai
+最后修订时间：20261125 17:41:23 Asia/Shanghai
 
 本目录使用 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308) 的官方实现和作者公开 checkpoint。公开权重加载、生成和计分检查已完成，尚未完成本轮计划的完整评估。
 
@@ -43,7 +43,7 @@ hf download zeyun-zhong/e2-ttt-swiglu-1.3B-15B \
 
 ```bash
 bash reproductions/setup_eval_env.sh e2_ttt
-source ~/envs/ttt-e2_ttt/bin/activate
+source ~/envs/e2_ttt/bin/activate
 ```
 
 环境位置、uv 镜像配置与激活方式见[评估环境](../README.md#评估环境)。
