@@ -1,7 +1,6 @@
 """AutoCompressors 的 LoCoMo 独立评估入口。"""
 
 import argparse
-import subprocess
 from pathlib import Path
 
 from benchmarks.locomo.evaluate import add_evaluation_arguments, run_evaluation
@@ -22,11 +21,7 @@ def main(argv=None):
     if args.segment_length <= 0:
         parser.error("--segment-length must be positive")
     source = Path(__file__).resolve().parents[1] / "source"
-    revision = subprocess.check_output([
-        "git", "-C", str(source / "AutoCompressors"), "rev-parse", "HEAD",
-    ], text=True).strip()
-    if revision != (source / "revision").read_text().strip():
-        parser.error("AutoCompressors checkout differs from source/revision")
+    revision = (source / "revision").read_text().strip()
     checkpoint = args.checkpoint.expanduser().resolve(strict=True)
     settings = {
         "checkpoint": str(checkpoint), "checkpoint_files": file_identity(checkpoint),

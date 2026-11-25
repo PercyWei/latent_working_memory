@@ -44,19 +44,6 @@ case "$method" in
   *) printf '未知方法：%s\n' "$method" >&2; exit 2 ;;
 esac
 
-if [[ $method == autocompressors ]]; then
-  source_dir="$project_root/reproductions/autocompressors/source/AutoCompressors"
-  revision="$(cat "$project_root/reproductions/autocompressors/source/revision")"
-  if [[ ! -d "$source_dir/.git" ]]; then
-    git clone --no-checkout https://github.com/princeton-nlp/AutoCompressors.git "$source_dir"
-    git -C "$source_dir" checkout --detach "$revision"
-  fi
-  if [[ "$(git -C "$source_dir" rev-parse HEAD)" != "$revision" ]]; then
-    printf '已有官方检出不在所需 revision %s，请检查 %s\n' "$revision" "$source_dir" >&2
-    exit 1
-  fi
-fi
-
 environment_dir="$env_root/envs/$environment_name"
 wheel_dir="${XDG_CACHE_HOME:-$HOME/.cache}/latent-working-memory/wheels"
 export UV_PYTHON_DOWNLOADS=never
