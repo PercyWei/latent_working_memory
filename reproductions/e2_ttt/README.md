@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261117 15:35:23 Asia/Shanghai
+最后修订时间：20261125 10:58:32 Asia/Shanghai
 
 本目录使用 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308) 的官方实现和作者公开 checkpoint。公开权重加载、生成和计分检查已完成，尚未完成本轮计划的完整评估。
 
@@ -31,10 +31,10 @@ MLP 和 SwiGLU 两个 1.3B 模型均使用下表所列的 **10,095 条样本**�
 
 ```bash
 hf download zeyun-zhong/e2-ttt-mlp-1.3B-15B \
-  --local-dir ~/rivermind-data/models/reproductions/e2_ttt/mlp-1.3b-15b
+  --local-dir ~/models/reproductions/e2_ttt/mlp-1.3b-15b
 
 hf download zeyun-zhong/e2-ttt-swiglu-1.3B-15B \
-  --local-dir ~/rivermind-data/models/reproductions/e2_ttt/swiglu-1.3b-15b
+  --local-dir ~/models/reproductions/e2_ttt/swiglu-1.3b-15b
 ```
 
 ## 环境与运行命令
@@ -42,16 +42,17 @@ hf download zeyun-zhong/e2-ttt-swiglu-1.3B-15B \
 从服务器项目根目录安装并激活独立评估环境，版本见[评估环境](../20261109_environment_setup.md)：
 
 ```bash
-export PATH="$HOME/rivermind-data/tools/uv/bin:$PATH"
 bash reproductions/setup_eval_env.sh e2_ttt
-source ~/rivermind-data/envs/ttt-e2_ttt/bin/activate
+source ~/envs/ttt-e2_ttt/bin/activate
 ```
+
+自定义位置与激活方式见[评估环境](../README.md#评估环境)。
 
 MLP 和 SwiGLU 均支持 `optimized` 运行，验证范围见[复现状态记录](../20261110_ttt_reproduction_status.md#e-ttt)：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/scripts/eval.sh \
-  --checkpoint ~/rivermind-data/models/reproductions/e2_ttt/mlp-1.3b-15b \
+  --checkpoint ~/models/reproductions/e2_ttt/mlp-1.3b-15b \
   --output-id mlp-1.3b-15b_20261117 \
   --inference-mode optimized \
   --batch-size 32 \
@@ -75,7 +76,47 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 - SQuAD／SWDE 保留原文本 `.strip()` 和换行停止，最多生成 48 tokens；总预算 2048，prompt 超过 2000 tokens 时按原规则左截断。
 - 按长度降序排列后相邻组批，每批左 padding 到该批最长输入，最后一批保留实际样本数。各样本独立维护真实位置、attention 与 TTT 状态。
 
+## LoCoMo 评估
+
+适配代码已完成静态检查，CUDA 数值对照和完整 LoCoMo 评估尚未运行。
+
+在上述独立环境中运行。数据准备见[公共数据说明](../../benchmarks/README.md)，评估范围、F1 评分和续评规则见[公共 LoCoMo 说明](../../benchmarks/locomo/README.md)。
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash reproductions/e2_ttt/scripts/eval_locomo.sh \
+  --checkpoint ~/models/reproductions/e2_ttt/mlp-1.3b-15b \
+  --output-id mlp-1.3b-15b_20261117 \
+  --batch-size-per-gpu 2
+```
+
+| 参数 | 默认值与约定 |
+|---|---|
+| `--resume` | 沿用原 ID、checkpoint 和数据，补齐未完成的问题 |
+| `--checkpoint` | 必填，本地完整 checkpoint 目录 |
+| `--benchmark-data` | 默认 `data/benchmarks/locomo` |
+| `--output-root` | 默认 `artifacts/reproductions/e2_ttt` |
+| `--output-id` | 默认 `<checkpoint_name>_<YYYYMMDD-HHMM>` |
+| `--batch-size-per-gpu` | 每卡评估批量大小，默认 1 |
+
+- 支持公开 MLP／SwiGLU 权重，使用 `optimized` 批量推理和 BF16 精度。
+- 不套用聊天模板，由公共接口构造输入：`QA 系统提示 → 完整对话 → 简答指令与问题 → Answer:`。
+- 每段对话只预填一次，各题从这份正文状态独立作答，互不继承其他问题或答案。
+- 结果保存在 `<output-root>/eval/<output-id>/locomo/`。`summary.json` 汇总总体及各题型的 F1 和题数，`details.jsonl` 保存逐题回答与评分。
+
 ## 查看结果
+
+### Benchmark 结果
+
+从项目根目录启动独立看板，当前支持 LoCoMo：
+
+```bash
+bash reproductions/e2_ttt/scripts/dashboard.sh \
+  --output-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b_20261117
+```
+
+`--output-dir` 指向包含 `locomo/` 的运行目录。看板使用项目根环境，展示总体及各题型 F1、题数，并可按题型与对话查看逐题回答和参考答案。
+
+### 论文复现对照
 
 ```bash
 uv run reproductions/e2_ttt/evaluation/compare_results.py \

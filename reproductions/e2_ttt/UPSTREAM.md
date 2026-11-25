@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261117 15:30:12 Asia/Shanghai
+最后修订时间：20261125 00:11:31 Asia/Shanghai
 
 ## 来源与迁入范围
 
@@ -26,6 +26,12 @@
 | `evaluation/compare_results.py`、`evaluation/paper_reference.json` | 读取各 benchmark 汇总，按 MLP／SwiGLU 配置选择论文 1.3B 参照，调用公共报告渲染 |
 | `../evaluation_runtime.py` | 三方法共用的进程清理、时间、严格 JSON、基础 Git 来源，以及 `WorkerProgress` 快照和 `EvaluationProgress` 展示 |
 | `scripts/train_340m_gpu1.sh`、`requirements-eval.txt` | 单卡备用训练入口与独立评估环境依赖 |
+
+## LoCoMo 接入
+
+`evaluation/eval_locomo.py` 与 `scripts/eval_locomo.sh` 调用项目公共调度，`evaluation/locomo_adapter.py` 加载模型，`evaluation/locomo_state.py` 负责完整前缀状态的独立分支。输入采用带统一 QA 指令的普通文本续写，问题及答案继续原生状态更新；完整评估范围与参数见 [LoCoMo 说明](README.md#locomo-评估)。`evaluation/validate_locomo.py` 提供无需下载权重的小模型状态与生成对照。
+
+[Benchmark 结果看板](evaluation/dashboard.py)复用[公共 LoCoMo 组件](../../benchmarks/locomo/dashboard.py)，由 [dashboard.sh](scripts/dashboard.sh) 启动；论文复现对照继续使用 `compare_results.py`。
 
 ## 推理实现改进
 

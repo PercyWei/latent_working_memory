@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261117 15:35:23 Asia/Shanghai
+最后修订时间：20261125 10:58:32 Asia/Shanghai
 
 ## 评估目标与数据
 
@@ -27,10 +27,10 @@
 
 ```bash
 hf download zhongweixie/inplace-ttt-qwen3-4b-32k-ttt \
-  --local-dir ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt
+  --local-dir ~/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt
 
 hf download zhongweixie/inplace-ttt-qwen3-4b-32k-baseline \
-  --local-dir ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-baseline
+  --local-dir ~/models/reproductions/in_place_ttt/qwen3-4b-32k-baseline
 ```
 
 RULER 固定从表中路径读取，下载与构造命令见[评估数据准备](../20261108_ttt_data_preparation.md)。
@@ -40,16 +40,17 @@ RULER 固定从表中路径读取，下载与构造命令见[评估数据准备]
 从服务器项目根目录安装并激活独立评估环境，版本见[评估环境](../20261109_environment_setup.md)：
 
 ```bash
-export PATH="$HOME/rivermind-data/tools/uv/bin:$PATH"
 bash reproductions/setup_eval_env.sh in_place_ttt
-source ~/rivermind-data/envs/ttt-in_place_ttt/bin/activate
+source ~/envs/ttt-in_place_ttt/bin/activate
 ```
+
+自定义位置与激活方式见[评估环境](../README.md#评估环境)。
 
 TTT 和 baseline 均支持 `optimized` 运行，验证范围见[复现状态记录](../20261110_ttt_reproduction_status.md#in-place-ttt)。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/in_place_ttt/scripts/eval.sh \
-  --checkpoint ~/rivermind-data/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
+  --checkpoint ~/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
   --output-id qwen3-4b-32k-ttt_20261117 \
   --inference-mode optimized \
   --batch-size 1 \
@@ -76,7 +77,48 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 
 源码与优化适用范围见 [UPSTREAM.md](UPSTREAM.md) 及[复现状态](../20261110_ttt_reproduction_status.md)，训练与 checkpoint 转换见[官方说明](source/in_place_ttt/README.md)。
 
+## LoCoMo 评估
+
+状态与生成的小模型 CPU 对照已通过；完整 LoCoMo 评估尚未运行。
+
+在上述独立环境中运行。数据准备见[公共数据说明](../../benchmarks/README.md)，评估范围、F1 评分和续评规则见[公共 LoCoMo 说明](../../benchmarks/locomo/README.md)。
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash reproductions/in_place_ttt/scripts/eval_locomo.sh \
+  --checkpoint ~/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
+  --output-id qwen3-4b-32k-ttt_20261117 \
+  --batch-size-per-gpu 2
+```
+
+| 参数 | 默认值与约定 |
+|---|---|
+| `--resume` | 沿用原 ID、checkpoint 和数据，补齐未完成的问题 |
+| `--checkpoint` | 必填，本地完整 checkpoint 目录 |
+| `--benchmark-data` | 默认 `data/benchmarks/locomo` |
+| `--output-root` | 默认 `artifacts/reproductions/in_place_ttt` |
+| `--output-id` | 默认 `<checkpoint_name>_<YYYYMMDD-HHMM>` |
+| `--batch-size-per-gpu` | 每卡评估批量大小，默认 1 |
+| `--mlp-chunk-size` | 默认 0；设为 TTT chunk 的整数倍可减少 MLP 中间激活 |
+
+- 使用 `optimized` 批量推理、BF16 权重和 SDPA。完整输入与生成预算须在模型位置窗口内，超窗时报错。
+- 不套用聊天模板，由公共接口构造输入：`QA 系统提示 → 完整对话 → 简答指令与问题 → Answer:`。
+- 每段对话只预填一次，各题从这份 KV 和 TTT 状态独立作答，互不继承其他问题或答案。
+- 结果保存在 `<output-root>/eval/<output-id>/locomo/`。`summary.json` 汇总总体及各题型的 F1 和题数，`details.jsonl` 保存逐题回答与评分。
+
 ## 查看结果
+
+### Benchmark 结果
+
+从项目根目录启动独立看板，当前支持 LoCoMo：
+
+```bash
+bash reproductions/in_place_ttt/scripts/dashboard.sh \
+  --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt_20261117
+```
+
+`--output-dir` 指向包含 `locomo/` 的运行目录。看板使用项目根环境，展示总体及各题型 F1、题数，并可按题型与对话查看逐题回答和参考答案。
+
+### 论文复现对照
 
 ```bash
 uv run reproductions/in_place_ttt/evaluation/compare_results.py \

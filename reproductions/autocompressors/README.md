@@ -2,43 +2,70 @@
 
 创建时间：20261124 11:54:28 Asia/Shanghai
 
-最后修订时间：20261124 11:59:50 Asia/Shanghai
+最后修订时间：20261125 10:58:32 Asia/Shanghai
 
-本目录用 Princeton 发布的 `AutoCompressor-Llama-2-7b-6k` 在 LoCoMo 上做开放问答。作者使用 15B 个 RedPajama tokens 继续训练 Llama-2-7B，在 6,144 tokens 的序列上分四步训练摘要向量。当前使用该语言建模 checkpoint，评估阶段没有 QA 微调。[官方模型卡](https://huggingface.co/princeton-nlp/AutoCompressor-Llama-2-7b-6k)
+本目录使用 AutoCompressors 的官方实现和 Princeton 发布的 [AutoCompressor-Llama-2-7b-6k](https://huggingface.co/princeton-nlp/AutoCompressor-Llama-2-7b-6k) 权重，在 LoCoMo 上进行开放问答评估。该权重基于 Llama-2-7B 进行语言建模训练，未做 QA 微调。源码与项目适配见 [UPSTREAM.md](UPSTREAM.md)。
 
-## 环境与权重
+## 评估数据
 
-在项目根目录执行。评估环境使用 Linux x86-64、Python 3.11、PyTorch 2.1.0 CUDA 11.8 和 BF16 FlashAttention 2.3.5，适用于 A100/A800。安装脚本将官方源码检出到 `source/AutoCompressors/`，创建方法独立的 `.venv/`。
+评估 LoCoMo 的 10 段完整对话。每道题使用所属对话的全部历史，数据下载命令见[评估数据准备](../../benchmarks/README.md)。
+
+| benchmark | 题型 | 题数 | 默认数据路径 |
+|---|---|---:|---|
+| LoCoMo | 多跳（1）、时间（2）、开放域（3）、单跳（4） | 1,540 | `data/benchmarks/locomo/locomo10.json` |
+
+## 模型下载
+
+下载 [AutoCompressor-Llama-2-7b-6k](https://huggingface.co/princeton-nlp/AutoCompressor-Llama-2-7b-6k) 的完整权重与 tokenizer。`hf` CLI 安装方式见[复现总说明](../README.md#模型下载约定)。
 
 ```bash
-bash reproductions/autocompressors/scripts/setup.sh
-
-hf download \
-  princeton-nlp/AutoCompressor-Llama-2-7b-6k \
-  --revision e32c98b484e24e66cead4218a7fee1e0e5dd616f \
-  --local-dir ~/rivermind-data/models/reproductions/autocompressors/AutoCompressor-Llama-2-7b-6k
+hf download princeton-nlp/AutoCompressor-Llama-2-7b-6k \
+  --local-dir ~/models/reproductions/autocompressors/AutoCompressor-Llama-2-7b-6k
 ```
+
+## 环境准备
+
+从 Linux x86-64 服务器的项目根目录创建并激活独立评估环境。评估使用支持 BF16 和 FlashAttention 2 的 CUDA GPU，依赖版本见 [requirements-eval.txt](requirements-eval.txt)。安装器同时准备官方源码。
+
+```bash
+bash reproductions/setup_eval_env.sh autocompressors
+source ~/envs/autocompressors/bin/activate
+```
+
+自定义位置与激活方式见[评估环境](../README.md#评估环境)。
 
 ## LoCoMo 评估
 
-准备 `data/benchmarks/locomo/locomo10.json` 后运行。每个进程使用一张 GPU，每段对话写入一次，回答端只预填一次共享前缀，再逐题贪心生成最多 50 个 token。结果采用项目共用的 LoCoMo 官方四类逐题 F1。
+在上述独立环境中运行。`CUDA_VISIBLE_DEVICES` 指定使用的 GPU，按对话分配任务。评估范围、F1 评分与续评规则见[公共 LoCoMo 说明](../../benchmarks/locomo/README.md)。
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 bash reproductions/autocompressors/scripts/eval_locomo.sh \
-  --model-path ~/rivermind-data/models/reproductions/autocompressors/AutoCompressor-Llama-2-7b-6k \
-  --benchmark-data data/benchmarks/locomo \
-  --segment-length 2048 \
-  --output-dir artifacts/reproductions/autocompressors/eval/llama-2-7b_segment2048/locomo
+CUDA_VISIBLE_DEVICES=0,1 bash reproductions/autocompressors/scripts/eval_locomo.sh \
+  --checkpoint ~/models/reproductions/autocompressors/AutoCompressor-Llama-2-7b-6k \
+  --output-id AutoCompressor-Llama-2-7b-6k_seg2048_20261125 \
+  --batch-size-per-gpu 2
 ```
 
-| 参数 | 含义 |
+| 参数 | 默认值与约定 |
 |---|---|
-| `--model-path` | 完整本地 checkpoint 目录，包含权重、配置和 tokenizer |
-| `--benchmark-data` | LoCoMo 数据目录，默认 `data/benchmarks/locomo` |
-| `--segment-length` | 每段原文最多多少个 token，默认 2,048，与作者公布的困惑度评估设置一致 |
-| `--output-dir` | 独立运行目录。保存 `evaluation_config.json`、逐题 `details.jsonl` 和 `summary.json` |
-| `--resume` | 在相同数据、本地 checkpoint 和分段设置下继续未完成的问题 |
+| `--resume` | 指定原 ID、checkpoint、数据和分段设置，补齐未完成的问题 |
+| `--checkpoint` | 必填，本地完整 checkpoint 目录，包含权重、配置和 tokenizer |
+| `--benchmark-data` | 默认 `data/benchmarks/locomo` |
+| `--output-root` | 默认 `artifacts/reproductions/autocompressors` |
+| `--output-id` | 默认 `<checkpoint_name>_seg<segment_length>_<YYYYMMDD-HHMM>` |
+| `--batch-size-per-gpu` | 每卡评估批量大小，默认 1 |
+| `--segment-length` | 每段正文的 token 数上限，默认 2,048 |
 
-**记忆预算。** 长度为 `N` 的正文按 token 顺序切分，末段保留实际长度。每段连同之前累积的软记忆送入官方模型，新增 50 个摘要向量。全部对话最终占 `50 × ceil(N / segment_length)` 个槽，回答时保留的原文为 0。段长为 2,048 时，一个完整段的倍率为 40.96×；实际整篇倍率计入末段。LoCoMo 的长对话可跨越训练时的四段。每次写入的旧记忆、原文与新槽，以及每次读出的完整前缀和回答预算，都须能放入公开配置的 4,096 个位置。过短的段会使累积记忆超窗，评估在该处报告长度。
+- 只压缩完整对话正文，QA 系统提示与问题不参与压缩。默认每 2,048 个正文 token 生成 50 个摘要向量，完整段约为 41× 压缩；末段不足该长度时仍生成 50 个摘要向量。
+- 通过公共接口直接拼接 Reader 输入，不套用聊天模板：`BOS → QA 系统提示 → 记忆 → 简答指令与问题 → Answer:`。
+- 每段对话只压缩一次，各题复用摘要和 Reader 前缀 KV。同一对话内按问题长度组批，每道题使用独立缓存分支作答。
+- 摘要随段数累积，写入与回答均须满足 4,096 位置窗口，回答时还需预留生成预算；超窗时报错。
+- 结果保存在 `<output-root>/eval/<output-id>/locomo/`，标准产物见公共说明。额外记录各段对话的正文与记忆 token 数，以及按对话平均的记忆 token 数和保留比例；保留比例为摘要 token 数除以正文 token 数。
 
-**问答输入。** Llama-2 基座使用普通文本。回答时依次提供 BOS 和项目的 QA system 提示、整段对话的累积摘要、LoCoMo 简答指令与问题、`Answer:`。只有对话正文参与写入。修改段长会改变压缩预算，应在新的输出目录运行。目录职责和上游版本见 [UPSTREAM.md](UPSTREAM.md)。
+## 查看结果
+
+```bash
+bash reproductions/autocompressors/scripts/dashboard.sh \
+  --output-dir artifacts/reproductions/autocompressors/eval/llama-2-7b_segment2048
+```
+
+看板的 `--output-dir` 指向包含 `locomo/` 的运行目录。页面展示总体及各题型 F1、题数和记忆用量，并可按题型与对话筛选逐题回答、参考答案和 F1。模型名称与分段长度读取评估配置。

@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261124 16:08:32 Asia/Shanghai
+最后修订时间：20261125 10:58:32 Asia/Shanghai
 
 v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=post` 使用问答（QA），由 `training.update_mode` 选择仅更新压缩器（`compressor_only`）、仅更新边界（`boundary_only`）或联合更新（`joint`）。每次写入将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆及未压缩的 pending 和 recent 尾段回答问题。
 
@@ -584,6 +584,8 @@ policy 未配置固定倍率且模型默认 recent 为 0 时，dev 只执行 gre
 
 任务脚本只接受具有边界策略的 `joint/boundary_only` checkpoint；`compressor_only` 当前使用训练内 dev 验证。各任务按 checkpoint 中 `model.structure` 的边界参数和默认 recent 处理完整正文，忽略训练 recent 覆盖值，再由 Reader 根据 memory、未压缩 pending 和 recent 回答。Test 同文档、LoCoMo 同对话的全部 QA 共用一次压缩结果，各题独立生成；RULER 按题目处理。评估计划、日志、明细和汇总保存在本地。
 
+LoCoMo Reader 通过公共输入构造获取训练时的聊天前后缀，由本方法插入记忆块、未压缩尾段和问题；各题共用对话记忆和 Reader 前缀 KV，作答期间不更新记忆。数据与评分见[公共 LoCoMo 说明](../../../benchmarks/locomo/README.md)，实际输入格式随评估配置保存。
+
 独立评估的逐篇记录和汇总保留 `prefix_retention_ratio`、`memory_cost` 和完整 `retention_ratio`；其中 `prefix_retention_ratio` 与训练／dev 的 `compression_retention_ratio` 口径一致，均按文档等权平均；LoCoMo 每段对话只计一次。同文档各题共用压缩成本，不按 QA 数重复累计。
 
 | 任务与脚本 | 数据入口 | 范围与评分 |
@@ -610,7 +612,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/eval_test
 
 新建评估必填 `--eval-run` 和 `--eval-data`；前者指向运行根目录。`--eval-id` 缺省生成 `YYYYMMDD-HHMMSS`。`--checkpoint` 接受一个或多个 `global_step_<N>` 名称，省略时选择当时全部完整 checkpoint；多个 checkpoint 按真实 step 串行执行。
 
-每卡批量上限由 `--batch-size-per-gpu` 控制，默认 1；Test 按文档、RULER 按题目组批。LoCoMo 每卡一次处理一段对话，在该对话内按问题 token 长度组批，并复用一次压缩和 Reader 前缀 KV。LoCoMo 同一对话的未完成题目分配给同一 GPU，逐题保存与计数；续评时重新压缩尚有未完成题目的对话，只生成缺失答案，官方评分仍按题目汇总，记忆用量按对话平均。
+每卡批量上限由 `--batch-size-per-gpu` 控制，默认 1；Test 按文档、RULER 按题目组批，LoCoMo 按同一对话的问题组批。LoCoMo 续评会重新压缩仍有未完成问题的对话，仅生成缺失答案。
 
 RULER 通过 `--lengths` 选择长度，默认 `8192 16384 32768`；各长度单独组批，可用 `--batch-size-by-length 8192=8 16384=4 32768=2` 覆盖指定长度的批量，其余沿用通用值。GPU 数与批量属于本次执行设置，可在续评时调整。
 

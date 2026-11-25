@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261117 15:35:23 Asia/Shanghai
+最后修订时间：20261125 10:58:32 Asia/Shanghai
 
 本目录使用 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现和作者公开 checkpoint。Momentum 760M 已于 20261110 完成下表全部 12,000 条 RULER 样本的评估，结果查看方式见[查看结果](#查看结果)。
 
@@ -37,12 +37,12 @@
 # Momentum／RoPE／PreNorm
 hf download YunjinZhang/lact_llm \
   --include 'lact-momentum-rope-prenorm-nheads4-chunk2048-760m/*' \
-  --local-dir ~/rivermind-data/models/reproductions/lact
+  --local-dir ~/models/reproductions/lact
 
 # 可选：Muon／NoPE 的 PreNorm 和 PostNorm
 hf download YunjinZhang/lact_llm \
   --include 'lact-muon-*/*' \
-  --local-dir ~/rivermind-data/models/reproductions/lact
+  --local-dir ~/models/reproductions/lact
 ```
 
 需要注意的是，当前目录名和实际配置存在差异，加载时以 checkpoint 自带配置为准，差异见[LaCT 公开 checkpoint 权重说明](UPSTREAM.md#公开语言模型权重)。
@@ -52,16 +52,17 @@ hf download YunjinZhang/lact_llm \
 从服务器项目根目录安装并激活独立评估环境，版本见[评估环境](../20261109_environment_setup.md)：
 
 ```bash
-export PATH="$HOME/rivermind-data/tools/uv/bin:$PATH"
 bash reproductions/setup_eval_env.sh lact
-source ~/rivermind-data/envs/ttt-lact/bin/activate
+source ~/envs/ttt-lact/bin/activate
 ```
+
+自定义位置与激活方式见[评估环境](../README.md#评估环境)。
 
 Momentum 和 Muon 均支持 `optimized` 运行，验证范围见[复现状态记录](../20261110_ttt_reproduction_status.md#lact)：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/lact/scripts/eval.sh \
-  --checkpoint ~/rivermind-data/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
+  --checkpoint ~/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
   --output-id lact-momentum-rope-prenorm-nheads4-chunk2048-760m_20261116 \
   --inference-mode optimized \
   --batch-size-by-length 4096=64 8192=32 16384=32 32768=16
@@ -82,7 +83,45 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 - 输入为 `input + answer_prefix`，greedy 生成最多 128 tokens，保留 EOS；输入加生成预算不得超过所选长度，不截断。评分沿用原 RULER。
 - 每批左 padding 到该批最长输入，最后一批保留实际样本数。`input_tokens` 记录各样本的真实输入长度，生成从补齐后的批次宽度之后截取。padding 不推进真实位置或 TTT 更新；TTT 保持每条样本状态独立，按真实 chunk 进度批量读出和提交。验证范围和 Muon 数值限制见[复现状态](../20261110_ttt_reproduction_status.md)。
 
+## LoCoMo 评估
+
+在上述独立环境中运行。数据准备见[公共数据说明](../../benchmarks/README.md)，评估范围、F1 评分和续评规则见[公共 LoCoMo 说明](../../benchmarks/locomo/README.md)。
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash reproductions/lact/scripts/eval_locomo.sh \
+  --checkpoint ~/models/reproductions/lact/lact-momentum-rope-prenorm-nheads4-chunk2048-760m \
+  --output-id lact-momentum-rope-prenorm-nheads4-chunk2048-760m_20261116 \
+  --batch-size-per-gpu 2
+```
+
+| 参数 | 默认值与约定 |
+|---|---|
+| `--resume` | 沿用原 ID、checkpoint 和数据，补齐未完成的问题 |
+| `--checkpoint` | 必填，本地完整 checkpoint 目录 |
+| `--benchmark-data` | 默认 `data/benchmarks/locomo` |
+| `--output-root` | 默认 `artifacts/reproductions/lact` |
+| `--output-id` | 默认 `<checkpoint_name>_<YYYYMMDD-HHMM>` |
+| `--batch-size-per-gpu` | 每卡评估批量大小，默认 1 |
+
+- 使用 `optimized` 增量推理，FP32 权重配合 BF16 autocast。
+- 不套用聊天模板，由公共接口构造输入：`QA 系统提示 → 完整对话 → 简答指令与问题 → Answer:`。
+- 每段对话只预填一次，各题从这份正文状态独立作答，互不继承其他问题或答案。
+- 结果保存在 `<output-root>/eval/<output-id>/locomo/`。`summary.json` 汇总总体及各题型的 F1 和题数，`details.jsonl` 保存逐题回答与评分。
+
 ## 查看结果
+
+### Benchmark 结果
+
+从项目根目录启动独立看板，当前支持 LoCoMo：
+
+```bash
+bash reproductions/lact/scripts/dashboard.sh \
+  --output-dir artifacts/reproductions/lact/eval/lact-momentum-rope-prenorm-nheads4-chunk2048-760m_20261116
+```
+
+`--output-dir` 指向包含 `locomo/` 的运行目录。看板使用项目根环境，展示总体及各题型 F1、题数，并可按题型与对话查看逐题回答和参考答案。
+
+### 论文复现对照
 
 ```bash
 uv run reproductions/lact/evaluation/compare_results.py \

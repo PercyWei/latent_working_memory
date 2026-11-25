@@ -2,9 +2,16 @@
 
 创建时间：20260904 10:13:57 Asia/Shanghai
 
-最后修订时间：20261124 16:38:27 Asia/Shanghai
+最后修订时间：20261125 10:58:32 Asia/Shanghai
 
 本目录使用 [In-context Autoencoder（ICAE）](https://arxiv.org/abs/2307.06945) 的官方 v2 实现，在 LoCoMo 上分别评估基于 Mistral-7B-Instruct-v0.2 的预训练与指令微调权重。源码与项目适配见 [UPSTREAM.md](UPSTREAM.md#icae-v2)。
+
+两个阶段均冻结基座模型与 Reader，训练 Writer 的 LoRA 和记忆嵌入：
+
+| 阶段 | 训练目标 |
+|---|---|
+| `pretrained` | 将正文压缩为记忆，再由 Reader 重建原文；官方代码也支持混入后文续写目标 |
+| `finetuned` | 从预训练权重继续训练，使用“正文、指令或问题、答案”，让 Reader 根据记忆完成任务 |
 
 ## 评估数据
 
@@ -16,87 +23,71 @@
 
 ## 模型下载
 
-从 [Mistral-7B-Instruct-v0.2](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.2) 和 [sggetao/icae](https://huggingface.co/sggetao/icae) 的 `main` 分支下载基座、tokenizer 和两份 ICAE v2 权重。`hf` CLI 安装方式见[复现总说明](../README.md#模型下载约定)。
+下载 [Mistral-7B-Instruct-v0.2](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.2) 基座与 tokenizer，以及 [ICAE v2](https://huggingface.co/sggetao/icae) 两个阶段的公开权重。`hf` CLI 安装方式见[复现总说明](../README.md#模型下载约定)。
 
 ```bash
 # Mistral 基座和 tokenizer
 hf download mistralai/Mistral-7B-Instruct-v0.2 \
-  --include 'model*.safetensors' model.safetensors.index.json config.json generation_config.json \
-    'tokenizer*' special_tokens_map.json \
-  --local-dir ~/rivermind-data/models/Mistral-7B-Instruct-v0.2
+  --local-dir ~/models/Mistral-7B-Instruct-v0.2
 
 # ICAE v2 预训练与指令微调权重
 hf download sggetao/icae mistral_7b_pretrained_icae.safetensors mistral_7b_ft_icae.safetensors \
-  --local-dir ~/rivermind-data/models/reproductions/icae
+  --local-dir ~/models/reproductions/icae
 ```
 
-## 环境与运行命令
+## 环境准备
 
 从 Linux x86-64 服务器的项目根目录创建并激活独立评估环境。评估使用支持 BF16 和 FlashAttention 2 的 CUDA GPU，依赖版本见 [requirements-eval.txt](requirements-eval.txt)。
 
 ```bash
-export PATH="$HOME/rivermind-data/tools/uv/bin:$PATH"
 bash reproductions/setup_eval_env.sh icae
-source ~/rivermind-data/envs/icae-v2/bin/activate
+source ~/envs/icae-v2/bin/activate
 ```
 
-两次评估共用基座，各自写入独立目录。入口复用[公共 LoCoMo 框架](../../benchmarks/locomo/README.md)，可用 `CUDA_VISIBLE_DEVICES=0,1` 按对话分配到多卡。
+自定义位置与激活方式见[评估环境](../README.md#评估环境)。
+
+## LoCoMo 评估
+
+在上述独立环境中运行。评估范围、F1 评分和续评规则见[公共 LoCoMo 说明](../../benchmarks/locomo/README.md)。
 
 ```bash
-# 预训练权重
-CUDA_VISIBLE_DEVICES=0 bash reproductions/icae/scripts/eval_locomo.sh \
+CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_locomo.sh \
   --stage pretrained \
-  --model-path ~/rivermind-data/models/Mistral-7B-Instruct-v0.2 \
-  --checkpoint ~/rivermind-data/models/reproductions/icae/mistral_7b_pretrained_icae.safetensors \
-  --output-root artifacts/reproductions/icae \
-  --output-id mistral-7b_pretrained-4x
-
-# 指令微调权重
-CUDA_VISIBLE_DEVICES=0 bash reproductions/icae/scripts/eval_locomo.sh \
-  --stage finetuned \
-  --model-path ~/rivermind-data/models/Mistral-7B-Instruct-v0.2 \
-  --checkpoint ~/rivermind-data/models/reproductions/icae/mistral_7b_ft_icae.safetensors \
-  --output-root artifacts/reproductions/icae \
-  --output-id mistral-7b_finetuned-4x
+  --model-path ~/models/Mistral-7B-Instruct-v0.2 \
+  --checkpoint ~/models/reproductions/icae/mistral_7b_pretrained_icae.safetensors \
+  --output-id mistral_7b_pretrained_icae_mem128_cr4_20261125 \
+  --batch-size-per-gpu 2
 ```
 
 | 参数 | 默认值与约定 |
 |---|---|
-| `--resume` | 默认关闭。指定原 `--output-id` 并沿用原权重和数据，仅补齐未完成的题目 |
-| `--stage` | 必填。预训练选 `pretrained`，指令微调选 `finetuned` |
-| `--model-path` | 必填。本地 Mistral-7B-Instruct-v0.2 基座和 tokenizer 目录 |
-| `--checkpoint` | 必填。与所选阶段对应的官方 `.safetensors` 文件，保留下载时的文件名 |
-| `--benchmark-data` | 包含 `locomo10.json` 的目录，默认 `data/benchmarks/locomo` |
-| `--output-root` | 产物父目录，默认 `artifacts/reproductions/icae` |
-| `--output-id` | 单个目录名，首次运行须使用新名称。省略时按上海时间生成 `icae_<YYYYMMDD-HHMM>` |
-| `--batch-size-per-gpu` | 每卡评估批量大小（batch size），默认 1 |
+| `--resume` | 沿用原 ID、checkpoint、数据、记忆槽数和压缩率，补齐未完成的问题 |
+| `--stage` | 必填，支持 `pretrained` 和 `finetuned` |
+| `--model-path` | 必填，本地基座模型目录 |
+| `--checkpoint` | 必填，ICAE v2 格式的 `.safetensors` 权重文件 |
+| `--benchmark-data` | 默认 `data/benchmarks/locomo` |
+| `--output-root` | 默认 `artifacts/reproductions/icae` |
+| `--output-id` | 默认 `<checkpoint_name>_mem<fixed_mem_size>_cr<mean_compression_rate>_<YYYYMMDD-HHMM>` |
+| `--batch-size-per-gpu` | 每卡评估批量大小，默认 1 |
+| `--fixed-mem-size` | 每块记忆槽数，取正整数，默认 128 |
+| `--mean-compression-rate` | 平均压缩率参数，取正整数，默认 4 |
 
-- 压缩器只读取对话正文，将完整历史均分为若干段，每段最多 512 个输入 token，压成 128 个记忆槽。超过官方示例 5,120 tokens 的对话也按此规则处理。
-- 同一对话内按问题长度组批，各题复用记忆槽和回答端的前缀 KV 缓存。回答端依次读取 QA 系统提示、记忆槽和问题。指令微调阶段在记忆后加入官方 `[FT]` 标记，预训练阶段直接用冻结基座回答。
-- 贪心解码最多生成 50 个 token。按 LoCoMo 官方规则计算逐题 F1，再对题目取平均，分别报告总体和各题型分数。
+- 只压缩完整对话正文，QA 系统提示与问题不参与压缩。沿用官方分段规则：先按 `ceil(输入 token 数 / (每块记忆槽数 × 压缩率))` 确定块数，再将正文尽量均匀分段。默认每块最多 512 个输入 token 压成 128 个记忆 token，实际压缩率受取整影响；Reader 输入与生成预算须在基座位置窗口内。
+- 通过公共接口，按基座 tokenizer 的聊天模板构造 Reader 输入。以 Mistral 为例，输入结构为：`<s>[INST] → QA 系统提示 → 记忆 →（[FT]）→ 简答指令与问题 → [/INST]`。其中 `[FT]` 由 ICAE 适配在 `finetuned` 阶段插入。
+- 每段对话只压缩一次，各题复用记忆和 Reader 前缀 KV，独立作答，互不继承其他问题或答案。
+- 结果保存在 `<output-root>/eval/<output-id>/locomo/`。记忆槽数和压缩率写入评估配置，续评时严格核对。`summary.json` 汇总总体及各题型的 F1 和题数，`details.jsonl` 保存逐题回答与评分。额外指标为按对话平均的记忆 token 数和保留比例；保留比例为记忆 token 数除以正文 token 数。
 
 ## 查看结果
 
-两次评估完成后，从项目根目录运行以下命令，在终端对照两个阶段的总体和分类 F1（百分制）。
-
 ```bash
-jq '{stage: .settings.stage, questions: .metrics.samples, F1: (.metrics.score * 100),
-     by_category: [.metrics.groups[] | {category: .category_name, F1: (.score * 100)}]}' \
-  artifacts/reproductions/icae/eval/mistral-7b_{pretrained,finetuned}-4x/locomo/summary.json
+bash reproductions/icae/scripts/dashboard.sh \
+  --output-dir artifacts/reproductions/icae/eval/mistral_7b_ft_icae_20261125
 ```
 
-## 来源记录与输出
-
-[评估入口](evaluation/eval_locomo.py) 将以下文件写入 `<output-root>/eval/<output-id>/locomo/`。
-
-| 文件 | 内容 |
-|---|---|
-| `evaluation_config.json` | 权重与数据标识、输入与评分协议、方法与权重设置 |
-| `progress/worker-*.jsonl` | 每个 worker 逐题追加的回答、F1 和会话统计，作为续评依据 |
-| `details.jsonl` | 全部完成后按数据顺序汇总的逐题结果 |
-| `execution.json` | 最近启动的 Git commit、GPU 和耗时 |
-| `summary.json` | 全部题目完成后的总体与分类 F1、题数、各对话的记忆用量及平均保留比例 |
+`--output-dir` 指向 `<output-root>/eval/<output-id>`。页面展示总体及各题型 F1、题数和记忆用量，并可按题型与对话筛选逐题回答、参考答案和 F1。阶段、基座名称、每块记忆槽数与目标压缩率读取评估配置。
 
 ## 备用训练入口
 
 ICAE v2 的官方训练代码见[预训练](source/icae/code/icae_v2/pretrain.py)和[指令微调](source/icae/code/icae_v2/instruction_finetune.py)。运行前需准备训练依赖，并将脚本中的占位路径替换为实际的训练集和验证集路径。
+
+本项目的 [Reader 模板解析](formatting.py)已检查 Mistral 与 Qwen3-Instruct 的输入格式；官方训练脚本和当前独立评估环境仍面向 Mistral，尚未提供 Qwen3 训练入口。

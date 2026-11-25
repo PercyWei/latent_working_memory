@@ -2,11 +2,13 @@
 
 创建时间：20261019 20:16:32 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261124 16:08:32 Asia/Shanghai
+最后修订时间：20261125 10:58:32 Asia/Shanghai
 
-Full-context 基线使用原始模型和完整上下文评估 LoCoMo 与 RULER。模型通过原生 chat template 编码统一的 QA system 提示和包含完整题面的 user 消息，再按任务规定的生成预算进行贪心解码。
+Full-context 基线使用原始模型和完整上下文评估 LoCoMo 与 RULER，按任务规定的生成预算进行贪心解码。
 
-[提示原文](../prompts.py) · [数据与评分](../../../benchmarks/README.md)
+LoCoMo 通过公共输入构造套用原生聊天模板：`system(QA 系统提示) → user(完整对话 + 简答指令与问题) → assistant 起始标记`。
+
+[系统提示与输入构造](../prompts.py) · [数据与评分](../../../benchmarks/README.md)
 
 ## 1. 启动评估
 
@@ -63,16 +65,13 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eva
 | `--dtype` | 权重精度，支持 `fp32`（默认）和 `bf16` |
 | `--attention-implementation` | 支持 `sdpa`（默认）和 `flash_attention_2` |
 | `--mixed-precision` | PyTorch BF16 autocast，默认关闭 |
-| `--batch-size-per-gpu` | 每卡并行题数上限，默认 `1`。LoCoMo 只在同一段对话内组批 |
+| `--batch-size-per-gpu` | 每卡评估批量大小，默认 `1`。LoCoMo 只在同一段对话内组批 |
 | `--seed` | 默认 `42` |
 
-专属参数：
+以下参数仅用于 RULER：
 
 | 参数 | 用途／默认值 |
 |---|---|
-| **eval_locomo.sh** |
-| - |
-| **eval_ruler.sh** |
 | `--lengths` | RULER 评估长度档位，默认 `8192 16384 32768` |
 | `--batch-size-by-length` | RULER 各长度档位的每卡批量上限，格式为一个或多个 length=batch，如 8192=8 16384=4 32768=2；未指定的档位沿用 `--batch-size-per-gpu` |
 
@@ -82,7 +81,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eva
 
 | 文件 | 内容 |
 |---|---|
-| `eval.json` | 模型、数据与评估配置，`protocol.system_prompt` 保存实际使用的 QA 提示 |
+| `eval.json` | 模型、数据与评估配置，包括 QA 系统提示和 LoCoMo 输入格式 |
 | `summary.json` | 评估配置、汇总指标与资源统计 |
 | `details.jsonl` | 按原始题序保存的模型回答、参考答案与逐题评分 |
 | `progress/worker_*.jsonl` | 每张卡逐题追加已完成记录，供中断后续跑 |
