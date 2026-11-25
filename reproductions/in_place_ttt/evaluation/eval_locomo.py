@@ -22,6 +22,7 @@ def main(argv=None):
     settings = {
         "checkpoint": str(checkpoint), "checkpoint_files": file_identity(checkpoint),
         "inference_mode": "optimized",
+        "attention_implementation": "flash_attention_2",
         "input_format": dict(INPUT_FORMAT),
         "continuation": "context prefill followed by tokenwise cached question and answer",
         "mlp_chunk_size": args.mlp_chunk_size,

@@ -17,7 +17,7 @@ from inference_model.hf_qwen3.modeling_qwen3 import TTTDynamicCache
 from opencompass.utils.text_postprocessors import extract_non_reasoning_content
 from optimized.padding import PaddedTTTDynamicCache
 import torch
-import torch.nn.functional as F
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -292,22 +292,23 @@ def profile_attention(wrapper, prompt, output):
     select_mode(wrapper, "original", 0)
     ids = wrapper.tokenizer(prompt, return_tensors="pt")["input_ids"].to("cuda:0")
     signatures = {}
-    original = F.scaled_dot_product_attention
+    backend = wrapper.model.config._attn_implementation
+    original = ALL_ATTENTION_FUNCTIONS[backend]
 
-    def observed(q, k, v, *args, **kwargs):
+    def observed(module, q, k, v, attention_mask, *args, **kwargs):
         signature = {
             "q": list(q.shape),
             "k": list(k.shape),
             "v": list(v.shape),
             "dtype": str(q.dtype),
-            "mask_is_none": kwargs.get("attn_mask") is None,
-            "enable_gqa": kwargs.get("enable_gqa", False),
+            "mask_is_none": attention_mask is None,
+            "enable_gqa": q.shape[1] != k.shape[1],
         }
         key = json.dumps(signature, sort_keys=True)
         signatures.setdefault(key, {**signature, "calls": 0})["calls"] += 1
-        return original(q, k, v, *args, **kwargs)
+        return original(module, q, k, v, attention_mask, *args, **kwargs)
 
-    F.scaled_dot_product_attention = observed
+    ALL_ATTENTION_FUNCTIONS[backend] = observed
     try:
         with (
             torch.no_grad(),
@@ -336,13 +337,13 @@ def profile_attention(wrapper, prompt, output):
         operators = [
             {"name": row.key, "calls": row.count}
             for row in profiler.key_averages()
-            if "scaled_dot_product" in row.key or "flash_attention" in row.key
+            if "scaled_dot_product" in row.key or "flash" in row.key.lower()
         ]
     finally:
-        F.scaled_dot_product_attention = original
+        ALL_ATTENTION_FUNCTIONS[backend] = original
     write_json(
         output / "attention_profile.json",
-        {"operators": operators, "inputs": list(signatures.values())},
+        {"attention_implementation": backend, "operators": operators, "inputs": list(signatures.values())},
     )
     del first, second
     gc.collect()

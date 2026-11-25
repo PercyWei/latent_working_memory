@@ -18,9 +18,10 @@ def main(argv=None):
     add_evaluation_arguments(parser, root / "artifacts/baselines/full_context")
     parser.add_argument("--model-path", type=Path, default=Path("~/models/Qwen3-4B-Instruct-2507"),
                         help="本地基座模型目录，默认 ~/models/Qwen3-4B-Instruct-2507")
-    parser.add_argument("--dtype", choices=tuple(WEIGHT_DTYPES), default="fp32",
-                        help="基座权重精度，默认 fp32")
-    parser.add_argument("--attention-implementation", choices=ATTENTION_IMPLEMENTATIONS, default="sdpa")
+    parser.add_argument("--dtype", choices=tuple(WEIGHT_DTYPES), default="bf16",
+                        help="基座权重精度，默认 bf16")
+    parser.add_argument("--attention-implementation", choices=ATTENTION_IMPLEMENTATIONS,
+                        default="flash_attention_2", help="注意力实现，默认 flash_attention_2")
     parser.add_argument("--mixed-precision", action="store_true",
                         help="为 FP32 权重启用 PyTorch BF16 autocast，默认关闭")
     parser.add_argument("--seed", type=int, default=42)

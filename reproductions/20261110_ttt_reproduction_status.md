@@ -2,7 +2,7 @@
 
 创建时间：20261110 11:30:45 Asia/Shanghai
 
-最后修订时间：20261117 18:19:46 Asia/Shanghai
+最后修订时间：20261126 00:14:46 Asia/Shanghai
 
 ## 当前状态
 
@@ -28,7 +28,7 @@ LaCT 使用作者公开重训权重，E²-TTT 使用作者官方权重；In-Plac
 
 ### LaCT
 
-`lact/optimized/` 缓存窗口 KV、fast weights、范数、Momentum 和待提交 chunk，保留官方非 fused TTT 公式、先读后写与延迟提交规则。真实前缀长为 $L>0$、chunk 为 $C$ 时，提交次数仍为 $\lfloor(L-1)/C\rfloor$。padding 不计入位置、KV 或更新进度，模型参数保持 float32，计算使用 BF16 autocast。
+`lact/optimized/` 缓存窗口 KV、fast weights、范数、Momentum 和待提交 chunk，保留官方非 fused TTT 公式、先读后写与延迟提交规则。真实前缀长为 $L>0$、chunk 为 $C$ 时，提交次数仍为 $\lfloor(L-1)/C\rfloor$。padding 不计入位置、KV 或更新进度。本节验证采用 FP32 权重与 BF16 autocast。
 
 三个 checkpoint 均已完成混长小样本生成、原生计分和续评检查；chunk 边界、padding 忽略及固定 batch 形状下的样本隔离已有验证。不同 batch 形状仍可能改变浮点舍入、生成和逐题评分。Muon 与官方完整前缀路径的对照覆盖有限，不能声称任意输入逐 token 相同，也不能把已定位的 batch 数值差异归为 padding 状态错误。
 
@@ -58,7 +58,7 @@ LaCT 使用作者公开重训权重，E²-TTT 使用作者官方权重；In-Plac
 
 单卡和多卡均经 `scripts/eval.sh` 的共同启动器运行，每卡一个进程；数据路径在代码中固定。`--batch-size` 默认 `1`，`--batch-size-by-length` 覆盖指定长度；按真实 token 数降序排列后相邻组批。各轮执行按全局样本 ID 分配未完成样本，保留原 EOS、64-token 生成预算和 OpenCompass 评分协议，续评允许调整 GPU 数量、顺序与 batch 设置。
 
-attention 沿用原生 SDPA，按真实 query／key 长度分组；TTT 按读出长度、是否更新及适配权重状态分组，不要求混长样本同步提交。HF 原停止条件保留，结束行冻结状态，生成 IDs 按各行首次结束位置截取。批量路径支持 `default`、`linear`、`yarn`、`llama3` RoPE，不支持 `dynamic`、`longrope`。
+本节验证使用 SDPA，按真实 query／key 长度分组；TTT 按读出长度、是否更新及适配权重状态分组，不要求混长样本同步提交。HF 原停止条件保留，结束行冻结状态，生成 IDs 按各行首次结束位置截取。批量路径支持 `default`、`linear`、`yarn`、`llama3` RoPE，不支持 `dynamic`、`longrope`。
 
 20261117 在 `zcy-memory-v4.2` 的物理 GPU 0（L40S 48GB）验证两份 checkpoint，MLP 分块为 `0`。每模型使用 `niah_single_1` 的六条真实样本：4K 和 8K 各三条；各长度中 A／B 自然等长，C 比 A 短 12 tokens。保留原提示词、greedy、64-token 预算和 OpenCompass 评分。
 

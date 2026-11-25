@@ -40,6 +40,7 @@ TASKS = {
 MODEL_KWARGS = {
     "device_map": "cuda:0",
     "torch_dtype": "torch.bfloat16",
+    "attn_implementation": "flash_attention_2",
     "local_files_only": True,
 }
 TOKENIZER_KWARGS = {"local_files_only": True}

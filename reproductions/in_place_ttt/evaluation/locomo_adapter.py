@@ -13,7 +13,7 @@ def load_adapter(settings):
         raise RuntimeError("In-Place TTT LoCoMo requires CUDA")
     checkpoint = settings["checkpoint"]
     model, loading = OptimizedQwen3ForCausalLM.from_pretrained(
-        checkpoint, torch_dtype=torch.bfloat16, attn_implementation="sdpa",
+        checkpoint, torch_dtype=torch.bfloat16, attn_implementation=settings["attention_implementation"],
         local_files_only=True, output_loading_info=True,
     )
     failures = {key: loading[key] for key in (

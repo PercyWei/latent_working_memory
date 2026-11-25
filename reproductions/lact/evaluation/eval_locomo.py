@@ -19,6 +19,7 @@ def main(argv=None):
     settings = {
         "checkpoint": str(checkpoint), "checkpoint_files": file_identity(checkpoint),
         "inference_mode": "optimized",
+        "parameter_dtype": "bfloat16", "mixed_precision": False,
         "input_format": dict(INPUT_FORMAT),
         "continuation": "context prefill followed by tokenwise cached question and answer",
     }

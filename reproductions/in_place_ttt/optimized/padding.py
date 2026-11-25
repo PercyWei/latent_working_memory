@@ -1,4 +1,4 @@
-"""有效 token 的独立 KV、TTT 状态与原生 SDPA 调度。"""
+"""按有效序列长度分组计算 attention，并维护各样本的 KV 和 TTT 状态。"""
 
 from dataclasses import dataclass
 
@@ -9,8 +9,8 @@ from inference_model.hf_qwen3.modeling_qwen3 import (
 )
 import torch
 from transformers.generation.stopping_criteria import StoppingCriteriaList
-from transformers.integrations.sdpa_attention import sdpa_attention_forward
 from transformers.modeling_outputs import BaseModelOutputWithPast
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from .ttt import ttt_forward
 
@@ -118,6 +118,7 @@ def attention_forward(layer, hidden_states, position_embeddings, cache, step):
         keys, values = cache.rows[sample].update(current_k, current_v, layer.layer_idx)
         groups.setdefault((length, keys.shape[-2]), []).append((sample, current_q, keys, values))
     output = query.new_zeros((batch, width, query.shape[1], layer.head_dim))
+    attention = ALL_ATTENTION_FUNCTIONS[layer.config._attn_implementation]
     for (query_length, _), group in groups.items():
         # Separate rows share a kernel only when both sequence dimensions agree.
         if len(group) == 1:
@@ -126,7 +127,7 @@ def attention_forward(layer, hidden_states, position_embeddings, cache, step):
             queries = torch.cat([item[1] for item in group], dim=0)
             keys = torch.cat([item[2] for item in group], dim=0)
             values = torch.cat([item[3] for item in group], dim=0)
-        attended, _ = sdpa_attention_forward(
+        attended, _ = attention(
             layer, queries, keys, values, attention_mask=None,
             dropout=0.0, scaling=layer.scaling, is_causal=query_length > 1,
         )
@@ -145,8 +146,8 @@ class PaddedQwen3Model(Qwen3Model):
             raise ValueError("Optimized inference accepts input_ids in evaluation mode")
         if not use_cache:
             raise ValueError("Optimized inference requires use_cache=True")
-        if self.config._attn_implementation != "sdpa" or self.has_sliding_layers:
-            raise ValueError("Optimized inference retains the full-attention SDPA backend")
+        if self.config._attn_implementation not in ("flash_attention_2", "sdpa") or self.has_sliding_layers:
+            raise ValueError("Optimized inference requires full attention with FlashAttention 2 or SDPA")
         if self.rotary_emb.rope_type not in ("default", "linear", "yarn", "llama3"):
             raise ValueError("Optimized mixed batches require a sequence-independent RoPE configuration")
         if kwargs.get("output_attentions") or kwargs.get("output_hidden_states"):

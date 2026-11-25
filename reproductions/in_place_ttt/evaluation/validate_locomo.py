@@ -17,17 +17,19 @@ def main():
     torch.set_num_threads(1)
     torch.manual_seed(24)
     device = torch.device(os.environ.get("LOCOMO_TEST_DEVICE", "cpu"))
+    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     config = Qwen3Config(
         vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=2,
         num_attention_heads=4, num_key_value_heads=2, head_dim=8,
         max_position_embeddings=2048, eos_token_id=1, pad_token_id=0,
-        ttt_mode=True, ttt_layers=[0, 1], ttt_chunk=8, attn_implementation="sdpa",
+        ttt_mode=True, ttt_layers=[0, 1], ttt_chunk=8, dtype=dtype,
+        attn_implementation="flash_attention_2" if device.type == "cuda" else "sdpa",
     )
-    reference = Qwen3ForCausalLM(config).eval().to(device)
+    reference = Qwen3ForCausalLM(config).eval().to(device=device, dtype=dtype)
     with torch.no_grad():
         for block in reference.model.layers:
             block.mlp.ttt_conv.weight.normal_(0, 0.1)
-    model = OptimizedQwen3ForCausalLM(config).eval().to(device)
+    model = OptimizedQwen3ForCausalLM(config).eval().to(device=device, dtype=dtype)
     model.load_state_dict(reference.state_dict())
     model.set_optimization(True, 8)
     adapter = CausalLoCoMo(model, tokenizer_for_validation(), fork_cache, INPUT_FORMAT,

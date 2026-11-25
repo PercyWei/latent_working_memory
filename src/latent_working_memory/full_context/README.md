@@ -2,33 +2,29 @@
 
 创建时间：20261019 20:16:32 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261125 21:15:57 Asia/Shanghai
+最后修订时间：20261126 00:10:18 Asia/Shanghai
 
 Full-context 基线使用原始模型和完整上下文评估 LoCoMo 与 RULER，按任务规定的生成预算进行贪心解码。
 
-LoCoMo 的 reader 输入由公共输入构造器套用模型聊天模板：`system(QA 系统提示) → user(完整对话 + 简答指令与问题) → assistant 起始标记`。同一对话只预填一次公共前缀 KV。对全注意力模型逐题解码时，直接复用缓存，答完后裁回前缀长度。多题合批或使用滑动窗口时，各批从公共前缀创建独立分支。
+LoCoMo 的 reader 输入由公共输入构造器套用模型聊天模板：`system(QA 系统提示) → user(完整对话 + 简答指令与问题) → assistant 起始标记`。同一对话只预填一次公共前缀 KV，每批问题从该前缀创建独立缓存分支。
 
 [系统提示与输入构造](../prompts.py) · [数据准备与评分](../../../benchmarks/README.md) · [LoCoMo 公共接口](../../../benchmarks/locomo/README.md)
 
 ## 1. 启动评估
 
-在项目根目录运行，使用项目 `.venv` 环境。
+在项目根目录运行，使用项目 `.venv` 环境。两项评估均默认使用 BF16 权重和 FlashAttention 2，关闭混合精度。
 
 ```bash
 # LoCoMo
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eval_locomo.sh \
   --model-path ~/models/Qwen3-4B-Instruct-2507 \
-  --output-id Qwen3-4B-Instruct-2507_20261125 \
-  --attention-implementation flash_attention_2 \
-  --mixed-precision \
+  --output-id Qwen3-4B-Instruct-2507_20261126 \
   --batch-size-per-gpu 2
 
 # RULER
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eval_ruler.sh \
   --model-path ~/models/Qwen3-4B-Instruct-2507 \
   --benchmark-data data/benchmarks/ruler-v1/Qwen3-4B-Instruct-2507 \
-  --attention-implementation flash_attention_2 \
-  --mixed-precision \
   --lengths 8192 16384 32768 \
   --batch-size-by-length 8192=32 16384=32 32768=16
 ```
@@ -42,14 +38,12 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eva
 
 ### 中断续评
 
-LoCoMo 使用原 `--output-id` 和相同的模型、数据及推理参数，加 `--resume` 补齐未完成题目；GPU 数量和批量可调整。例如，续评上述运行：
+LoCoMo 使用原 `--output-id` 和相同的模型、数据及推理参数，加 `--resume` 补齐未完成题目；GPU 数量和批量可调整。使用 FP32 权重和 BF16 autocast 的运行在续评时需带上 `--dtype fp32 --mixed-precision`。以下示例续评上述 BF16 运行。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/full_context/scripts/eval_locomo.sh \
   --model-path ~/models/Qwen3-4B-Instruct-2507 \
-  --output-id Qwen3-4B-Instruct-2507_20261125 \
-  --attention-implementation flash_attention_2 \
-  --mixed-precision \
+  --output-id Qwen3-4B-Instruct-2507_20261126 \
   --batch-size-per-gpu 2 \
   --resume
 ```
@@ -71,9 +65,9 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eva
 | `--model-path` | 本地基座模型，默认 `~/models/Qwen3-4B-Instruct-2507` |
 | `--benchmark-data` | 数据目录；LoCoMo 默认 `data/benchmarks/locomo`，RULER 首次运行必填 |
 | `--output-root` | 评估产物根目录，默认 `artifacts/baselines/full_context` |
-| `--dtype` | 权重精度，支持 `fp32`（默认）和 `bf16` |
-| `--attention-implementation` | attention 实现方式，支持 `sdpa`（默认）和 `flash_attention_2` |
-| `--mixed-precision` | 混合精度训练，默认关闭 |
+| `--dtype` | 权重精度，支持 `bf16`（默认）和 `fp32` |
+| `--attention-implementation` | 注意力实现，支持 `flash_attention_2`（默认）和 `sdpa` |
+| `--mixed-precision` | 为 `--dtype fp32` 启用 BF16 autocast，默认关闭 |
 | `--batch-size-per-gpu` | 每卡评估批量大小，默认 `1` |
 | `--seed` | 默认 `42` |
 
@@ -105,7 +99,7 @@ RULER 的 `summary.json` 另外记录推理批量、耗时和峰值显存。所�
 ```bash
 # LoCoMo
 bash src/latent_working_memory/full_context/scripts/dashboard.sh \
-  --output-dir artifacts/baselines/full_context/eval/Qwen3-4B-Instruct-2507_20261125
+  --output-dir artifacts/baselines/full_context/eval/Qwen3-4B-Instruct-2507_20261126
 
 # RULER
 bash src/latent_working_memory/full_context/scripts/dashboard.sh \

@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261125 00:11:31 Asia/Shanghai
+最后修订时间：20261126 00:12:28 Asia/Shanghai
 
 ## 来源与迁入范围
 
@@ -18,7 +18,7 @@
 |---|---|
 | `source/in_place_ttt/` | 固定 revision 的官方源码 |
 | `optimized/model.py` | 独立模型子类、生成入口和可选 MLP 分块 |
-| `optimized/padding.py` | 真实位置、独立有效 KV、原生 SDPA 分组及结束行的状态冻结 |
+| `optimized/padding.py` | 真实位置、独立有效 KV、按有效长度分组计算 attention 及结束行的状态冻结 |
 | `optimized/ttt.py` | 原 TTT 公式的分组计算、独立尾段和适配权重 |
 | `evaluation/runtime.py` | checkpoint 严格加载、原始与优化路径的生成 |
 | `scripts/eval.sh`、`evaluation/evaluate_parallel.py`、`evaluation/evaluate.py` | 统一启动、单卡／多卡调度与各卡批量评估 |
@@ -43,14 +43,14 @@
 | 改进 | 实现 |
 |---|---|
 | 混长 batch | 单样本、等长和左 padding 输入统一调度；每条样本独立维护真实位置、attention KV、TTT 尾段及适配权重 |
-| 分组计算 | QKV 投影和 FFN 批量执行；query／key 长度相同的样本组成 attention 组，调用原生 SDPA；TTT 按读出长度、是否更新、是否已有适配权重及其 dtype 分组，不要求所有混长行同时更新 |
+| 分组计算 | QKV 投影和 FFN 批量执行。query／key 长度相同的样本组成 attention 组，调用模型配置的后端，部署默认使用 FlashAttention 2。TTT 按读出长度、是否更新、是否已有适配权重及其 dtype 分组 |
 | TTT 尾段存储压紧 | 上游已有未完成 chunk 的尾段缓存；本地将仍引用完整前缀底层存储的尾段张量复制为独立存储，减少缓存持有的显存 |
 | 单次编码 | 将完整编码结果复用于长度检查与生成；原始路径的预算检查和 OpenCompass 生成分别编码。特殊 token、生成参数、停止条件及解码设置保持原样 |
 | 可选 MLP 分块 | 在 token 维分段计算 MLP，减少中间激活显存。`--mlp-chunk-size` 默认 `0`，正值启用；TTT 层要求其为 TTT chunk 长度的整数倍，记忆更新仍按原 TTT chunk 执行 |
 
 每批生成时新建 attention／TTT cache，各行状态独立。TTT 在完整 chunk 的读出后更新，更新后的权重用于后续 chunk；未完成尾段继续累积。卷积保留每个 TTT chunk 内的零填充边界，不跨 chunk 卷积。padding 不进入有效 KV 或 TTT 数据，不推进真实位置、尾段和更新计数。推理采用完整 attention，保留全部有效 attention KV，模型参数及 RoPE 配置沿用 checkpoint。
 
-保留原 SDPA 后端，不切换为 varlen FlashAttention。批量路径支持与序列长度无关的 `default`、`linear`、`yarn` 和 `llama3` RoPE；`dynamic`、`longrope` 不在支持范围内。HF 原生停止条件继续生效，各行在首次 EOS 或其他停止条件触发后冻结真实状态；生成 IDs 按各行首次结束长度截取，保留 EOS。
+批量路径支持与序列长度无关的 `default`、`linear`、`yarn` 和 `llama3` RoPE。HF 原生停止条件继续生效，各行在首次 EOS 或其他停止条件触发后冻结真实状态。生成 IDs 按各行首次结束长度截取，保留 EOS。
 
 `--inference-mode` 默认 `original`，保留上游 B1 生成路径；`optimized` 支持 TTT 和 baseline 的批量生成。`--mlp-chunk-size` 默认 `0`，不对 MLP 额外分块；`original` 仅接受 `0`。
 

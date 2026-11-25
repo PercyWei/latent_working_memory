@@ -62,7 +62,7 @@ def load_checkpoint(checkpoint, inference_mode="original"):
     model, loading = model_class.from_pretrained(
         checkpoint,
         config=config,
-        torch_dtype=torch.float32,
+        torch_dtype=torch.bfloat16,
         local_files_only=True,
         output_loading_info=True,
     )
@@ -222,7 +222,7 @@ def run(args, output, logger, run_source, execution_attempt, progress):
             )
             progress.set_stage("generating")
             start = time.perf_counter()
-            with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+            with torch.no_grad():
                 generated = model.generate(
                     input_ids=input_ids,
                     attention_mask=encoded.attention_mask,

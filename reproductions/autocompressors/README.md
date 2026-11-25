@@ -2,7 +2,7 @@
 
 创建时间：20261124 11:54:28 Asia/Shanghai
 
-最后修订时间：20261125 11:54:15 Asia/Shanghai
+最后修订时间：20261126 00:10:59 Asia/Shanghai
 
 本目录使用 AutoCompressors 的官方实现和 Princeton 发布的 [AutoCompressor-Llama-2-7b-6k](https://huggingface.co/princeton-nlp/AutoCompressor-Llama-2-7b-6k) 权重，在 LoCoMo 上进行开放问答评估。该权重基于 Llama-2-7B 进行语言建模训练，未做 QA 微调。源码与项目适配见 [UPSTREAM.md](UPSTREAM.md)。
 
@@ -25,7 +25,7 @@ hf download princeton-nlp/AutoCompressor-Llama-2-7b-6k \
 
 ## 环境准备
 
-从 Linux x86-64 服务器的项目根目录创建并激活独立评估环境。评估使用支持 BF16 和 FlashAttention 2 的 CUDA GPU，依赖版本见 [requirements-eval.txt](requirements-eval.txt)。固定版本的官方源码随项目保存在 [source/AutoCompressors](source/AutoCompressors/)，安装器仅负责创建环境和安装依赖。
+从 Linux x86-64 服务器的项目根目录创建并激活独立评估环境。AutoCompressors 使用 BF16 权重和官方 Llama 实现中的 FlashAttention 2，推理时关闭混合精度（autocast）。依赖版本见 [requirements-eval.txt](requirements-eval.txt)。固定版本的官方源码随项目保存在 [source/AutoCompressors](source/AutoCompressors/)，安装器仅负责创建环境和安装依赖。
 
 ```bash
 bash reproductions/setup_eval_env.sh autocompressors

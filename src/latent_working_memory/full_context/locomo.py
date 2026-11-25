@@ -77,19 +77,12 @@ class FullContextLoCoMo:
         ids = torch.cat((prefix_ids.expand(size, -1), suffix_ids), dim=1)
         mask = torch.cat((prefix_mask.expand(size, -1), suffix_mask), dim=1)
         started = time.perf_counter()
-        # 单题可在同一份 KV 上追加并回退。滑动窗口会淘汰前缀，须使用独立分支。
-        reuse_prefix = size == 1 and not any(cache.is_sliding)
-        question_cache = cache if reuse_prefix else fork_dynamic_cache(cache, size)
-        try:
-            with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.mixed_precision):
-                tokens = self.model.generate(
-                    input_ids=ids, attention_mask=mask, past_key_values=question_cache,
-                    generation_config=self.generation, max_new_tokens=questions[0].sample.max_new_tokens,
-                    use_model_defaults=False,
-                )
-        finally:
-            if reuse_prefix:
-                cache.crop(prefix_ids.shape[1])
+        with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.mixed_precision):
+            tokens = self.model.generate(
+                input_ids=ids, attention_mask=mask, past_key_values=fork_dynamic_cache(cache, size),
+                generation_config=self.generation, max_new_tokens=questions[0].sample.max_new_tokens,
+                use_model_defaults=False,
+            )
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
         elapsed = (time.perf_counter() - started) / size

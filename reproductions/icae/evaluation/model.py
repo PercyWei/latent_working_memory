@@ -87,6 +87,7 @@ def load_adapter(model_path, checkpoint, stage, mean_compression_rate, fixed_mem
     )
     lora = LoraConfig(r=512, lora_alpha=32, lora_dropout=0.05, bias="none", task_type="CAUSAL_LM")
     model = ICAE(model_args, inference_args, lora)
+    model.memory_token_embed.bfloat16()
     # Official safetensors contain the complete writer LoRA and slot embeddings,
     # while all frozen weights come from the base model directory.
     weights = load_file(str(checkpoint))

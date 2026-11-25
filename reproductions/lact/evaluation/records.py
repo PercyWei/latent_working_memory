@@ -191,8 +191,8 @@ def build_protocol(checkpoint, lengths, inference_mode, samples):
             "use_cache": inference_mode == "optimized", "logits_to_keep": 1,
             "recompute_complete_prefix_per_token": inference_mode == "original",
         },
-        "parameter_dtype": "float32",
-        "compute_autocast_dtype": "bfloat16",
+        "parameter_dtype": "bfloat16",
+        "compute_autocast_dtype": None,
         "upstream_revision": UPSTREAM_REVISION,
         "scoring": "NVIDIA RULER string_match_all; case-insensitive reference recall, percent",
     }

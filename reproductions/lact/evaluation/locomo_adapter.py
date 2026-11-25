@@ -15,7 +15,7 @@ def load_adapter(settings):
     checkpoint = settings["checkpoint"]
     config = LaCTSWIGLUConfig.from_pretrained(checkpoint, local_files_only=True)
     model, loading = OptimizedLaCTForCausalLM.from_pretrained(
-        checkpoint, config=config, torch_dtype=torch.float32,
+        checkpoint, config=config, torch_dtype=getattr(torch, settings["parameter_dtype"]),
         local_files_only=True, output_loading_info=True,
     )
     failures = {key: loading[key] for key in (
@@ -25,4 +25,5 @@ def load_adapter(settings):
         raise ValueError(f"Checkpoint did not load strictly: {failures}")
     model.requires_grad_(False).eval().to("cuda")
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, local_files_only=True)
-    return CausalLoCoMo(model, tokenizer, fork_cache, settings["input_format"], mixed_precision=True)
+    return CausalLoCoMo(model, tokenizer, fork_cache, settings["input_format"],
+                       mixed_precision=settings["mixed_precision"])

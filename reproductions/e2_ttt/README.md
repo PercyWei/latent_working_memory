@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261125 17:41:23 Asia/Shanghai
+最后修订时间：20261126 00:11:42 Asia/Shanghai
 
 本目录使用 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308) 的官方实现和作者公开 checkpoint。公开权重加载、生成和计分检查已完成，尚未完成本轮计划的完整评估。
 
@@ -47,6 +47,8 @@ source ~/envs/e2_ttt/bin/activate
 ```
 
 环境位置、uv 镜像配置与激活方式见[评估环境](../README.md#评估环境)。
+
+评估以 BF16 加载模型权重，关闭模型级 autocast。启用窗口注意力的层使用 FlashAttention 2。TTT 状态更新和归一化沿用方法自身的计算精度。
 
 MLP 和 SwiGLU 均支持 `optimized` 运行，验证范围见[复现状态记录](../20261110_ttt_reproduction_status.md#e-ttt)：
 
@@ -98,7 +100,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/e2_ttt/scripts/eval_locomo.sh \
 | `--output-id` | 默认 `<checkpoint_name>_<YYYYMMDD-HHMM>` |
 | `--batch-size-per-gpu` | 每卡评估批量大小，默认 1 |
 
-- 支持公开 MLP／SwiGLU 权重，使用 `optimized` 批量推理和 BF16 精度。
+- 支持公开 MLP／SwiGLU 权重，使用 `optimized` 批量推理。
 - 不套用聊天模板，由公共接口构造输入：`QA 系统提示 → 完整对话 → 简答指令与问题 → Answer:`。
 - 每段对话只预填一次，各题从这份正文状态独立作答，互不继承其他问题或答案。
 - 结果保存在 `<output-root>/eval/<output-id>/locomo/`。`summary.json` 汇总总体及各题型的 F1 和题数，`details.jsonl` 保存逐题回答与评分。

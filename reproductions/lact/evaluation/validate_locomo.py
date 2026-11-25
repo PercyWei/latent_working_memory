@@ -20,9 +20,8 @@ def main():
         fuse_norm=False, last_layer_fuse_norm=False, fuse_swiglu=False,
         fuse_cross_entropy=False, fp32_states=True,
     )
-    model = OptimizedLaCTForCausalLM(config).eval().to("cuda")
-    adapter = CausalLoCoMo(model, tokenizer_for_validation(), fork_cache, INPUT_FORMAT,
-                          mixed_precision=True)
+    model = OptimizedLaCTForCausalLM(config).eval().to(device="cuda", dtype=torch.bfloat16)
+    adapter = CausalLoCoMo(model, tokenizer_for_validation(), fork_cache, INPUT_FORMAT)
     validate_context(adapter, model, 8, state_tensors, recompute=True)
 
 

@@ -2,11 +2,11 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261125 17:41:23 Asia/Shanghai
+最后修订时间：20261126 00:12:28 Asia/Shanghai
 
 ## 评估目标与数据
 
-首批评估第三方 Qwen3-4B 32K TTT 和 baseline 两个模型，采用完整 attention。两个模型均使用下表所列的 **9,100 条样本**进行评估，无需重新训练。
+首批评估第三方 Qwen3-4B 32K TTT 和 baseline 两个模型。评估以 BF16 加载权重，关闭全局 autocast，使用 FlashAttention 2 计算完整 attention。两个模型均使用下表所列的 **9,100 条样本**进行评估，无需重新训练。
 
 | benchmark | 任务与长度 | 样本数 | 固定数据路径 |
 |---|---|---:|---|
@@ -72,7 +72,7 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 - 评估产物保存在 `<output-root>/eval/<output-id>/ruler/`；新运行在已有同名目录时拒绝覆盖。续评指定原 `--output-id` 并追加 `--resume`，checkpoint、长度、推理模式、分块和生成／评分协议保持原计划不变，允许调整 GPU 数量、顺序与 batch 设置。
 - 输入为 `input + answer_prefix`，greedy 生成最多 64 tokens，沿用原停止条件；各行在首次结束后冻结状态，生成 IDs 截至各自结束位置，保留 EOS。输入加生成预算不得超过所选长度，不截断。评分沿用原 OpenCompass evaluator，长度分数为 13 项任务得分的等权平均。
 - 每个 RULER 长度内按实际 token 数稳定降序，相邻组批并左 padding 到批内最长输入，尾批保留实际样本数。每条样本独立维护真实位置、attention KV 和 TTT 状态；padding 不参与记忆读写或推进更新。完整 attention、原 TTT chunk 的读写顺序及卷积边界保持不变。
-- `optimized` 使用原生 SDPA 的完整 attention，支持 `default`、`linear`、`yarn`、`llama3` RoPE；不支持 `dynamic` 或 `longrope`。
+- `optimized` 的批量路径支持与序列长度无关的 `default`、`linear`、`yarn` 和 `llama3` RoPE。
 - 单卡和多卡均经同一启动器调度，每卡一个进程。同一评估使用独占运行目录锁；已有评估或历史 worker 仍存活时拒绝重复启动。
 
 源码与优化适用范围见 [UPSTREAM.md](UPSTREAM.md) 及[复现状态](../20261110_ttt_reproduction_status.md)，训练与 checkpoint 转换见[官方说明](source/in_place_ttt/README.md)。
@@ -100,7 +100,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/in_place_ttt/scripts/eval_locomo.sh 
 | `--batch-size-per-gpu` | 每卡评估批量大小，默认 1 |
 | `--mlp-chunk-size` | 默认 0；设为 TTT chunk 的整数倍可减少 MLP 中间激活 |
 
-- 使用 `optimized` 批量推理、BF16 权重和 SDPA。完整输入与生成预算须在模型位置窗口内，超窗时报错。
+- 使用 `optimized` 批量推理。完整输入与生成预算须在模型位置窗口内，超窗时报错。
 - 不套用聊天模板，由公共接口构造输入：`QA 系统提示 → 完整对话 → 简答指令与问题 → Answer:`。
 - 每段对话只预填一次，各题从这份 KV 和 TTT 状态独立作答，互不继承其他问题或答案。
 - 结果保存在 `<output-root>/eval/<output-id>/locomo/`。`summary.json` 汇总总体及各题型的 F1 和题数，`details.jsonl` 保存逐题回答与评分。

@@ -76,8 +76,8 @@ def _prepare_evaluation(args, model_path, output):
         data_dir = args.benchmark_data
         seed = 42 if args.seed is None else args.seed
         model_config = {
-            "backbone_dtype": WEIGHT_DTYPES[args.dtype or "fp32"],
-            "attention_implementation": args.attention_implementation or "sdpa",
+            "backbone_dtype": WEIGHT_DTYPES[args.dtype or "bf16"],
+            "attention_implementation": args.attention_implementation or "flash_attention_2",
             "mixed_precision": args.mixed_precision,
         }
         lengths = args.lengths or DEFAULT_RULER_LENGTHS
@@ -215,10 +215,10 @@ def parse_args(argv=None):
     parser.add_argument("--model-path", type=Path,
                         help="基座模型目录，默认 ~/models/Qwen3-4B-Instruct-2507")
     parser.add_argument(
-        "--dtype", choices=tuple(WEIGHT_DTYPES), help="基座权重精度，首次默认 fp32",
+        "--dtype", choices=tuple(WEIGHT_DTYPES), help="基座权重精度，首次默认 bf16",
     )
     parser.add_argument(
-        "--attention-implementation", choices=ATTENTION_IMPLEMENTATIONS, help="首次默认 sdpa",
+        "--attention-implementation", choices=ATTENTION_IMPLEMENTATIONS, help="注意力实现，首次默认 flash_attention_2",
     )
     parser.add_argument(
         "--mixed-precision", action="store_true",
