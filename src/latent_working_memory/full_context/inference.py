@@ -7,6 +7,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, set_seed
 
 from benchmarks.scoring import score_sample
+from latent_working_memory.prompts import qa_input_format
 
 from .locomo import evaluate_locomo
 from .ruler import evaluate_ruler
@@ -20,6 +21,8 @@ def evaluate_samples(samples, snapshot, device: torch.device, physical_gpu, prog
     torch.cuda.set_device(device)
     set_seed(snapshot["seed"])
     tokenizer = AutoTokenizer.from_pretrained(model_path)
+    if benchmark == "locomo" and qa_input_format(tokenizer) != snapshot["settings"]["input_format"]:
+        raise ValueError("loaded chat input format differs from the evaluation plan")
     if tokenizer.eos_token_id is None:
         raise ValueError("benchmark generation requires tokenizer.eos_token_id")
     model = AutoModelForCausalLM.from_pretrained(

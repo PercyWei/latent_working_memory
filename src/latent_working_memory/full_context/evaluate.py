@@ -10,7 +10,7 @@ import sys
 from zoneinfo import ZoneInfo
 
 import torch
-from transformers import AutoConfig
+from transformers import AutoConfig, AutoTokenizer
 
 from benchmarks.comparison import comparison_data
 from benchmarks.data import load_samples
@@ -18,6 +18,7 @@ from benchmarks.protocol import DEFAULT_RULER_LENGTHS, data_identity, protocol
 from benchmarks.scoring import summarize_scores
 from latent_working_memory.cli import length_batch_size, positive_int
 from latent_working_memory.devices import visible_devices
+from latent_working_memory.prompts import qa_input_format
 from latent_working_memory.v4.io import write_json
 
 from .parallel import evaluate_parallel, evaluation_log, load_progress, shard_samples
@@ -126,6 +127,7 @@ def _prepare_evaluation(args, model_path, output):
         ),
     }
     if args.benchmark == "locomo":
+        snapshot["settings"] = {"input_format": qa_input_format(AutoTokenizer.from_pretrained(model_path))}
         snapshot["protocol"]["memory_sharing"] = (
             "prefill each conversation's shared chat-token prefix once; answer questions from independent KV branches"
         )

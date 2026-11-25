@@ -6,6 +6,7 @@ from peft import LoraConfig
 from safetensors.torch import load_file
 
 from latent_working_memory.prompts import QA_SYSTEM_PROMPT
+from reproductions.icae.formatting import icae_input_format
 from reproductions.icae.source.icae.code.icae_v2.modeling_icae_multi_span import (
     ICAE,
     ModelArguments,
@@ -14,10 +15,6 @@ from reproductions.icae.source.icae.code.icae_v2.modeling_icae_multi_span import
 
 
 UPSTREAM_COMMIT = "469a46886a92dd5e76b2d12a8bac0fb7ed7d4cdd"
-CHECKPOINT_FILES = {
-    "pretrained": "mistral_7b_pretrained_icae.safetensors",
-    "finetuned": "mistral_7b_ft_icae.safetensors",
-}
 
 
 class ICAELoCoMo:
@@ -27,19 +24,23 @@ class ICAELoCoMo:
         self.decoder = model.icae.get_base_model()
         self.device = model.memory_token_embed.weight.device
         self.window = self.decoder.config.max_position_embeddings
-        # Official Mistral ICAE frame: BOS [INST] ... [/INST]. Mistral v0.2 has
-        # no system role, so the shared system instruction opens the user turn.
-        self.prefix_ids = [1, 733, 16289, 28793] + model.tokenizer.encode(
-            QA_SYSTEM_PROMPT + "\n\n", add_special_tokens=False
+        self.eos_id = model.tokenizer.eos_token_id
+        self.input_format = icae_input_format(
+            model.tokenizer, stage, model.ft_token_id, QA_SYSTEM_PROMPT,
         )
+        self.prefix_ids = self.input_format["reader_prefix_ids"]
 
     def token_tensor(self, ids):
         return torch.tensor([ids], dtype=torch.long, device=self.device)
 
+    def question_ids(self, question_prompt):
+        ids = self.model.tokenizer.encode(question_prompt, add_special_tokens=False)
+        return self.input_format["question_prefix_ids"] + ids + self.input_format["answer_prefix_ids"]
+
     @torch.inference_mode()
     def encode_history(self, text):
         body_ids = self.model.tokenizer.encode(text, add_special_tokens=False, truncation=False)
-        ids = [self.model.bos_id] + body_ids
+        ids = self.model.tokenizer.build_inputs_with_special_tokens(body_ids)
         memory_tokens = self.model.compute_num_segments(len(ids)) * self.model.mem_size
         prefix_length = len(self.prefix_ids) + memory_tokens
         if prefix_length >= self.window:
@@ -51,16 +52,13 @@ class ICAELoCoMo:
             # The base model returns the legacy tuple cache in Transformers 4.40.
             # Per-question extensions allocate new KV tensors and preserve this prefix.
             cache = self.decoder.model(inputs_embeds=embeddings, use_cache=True).past_key_values
-        stats = {"context_tokens": len(body_ids), "memory_tokens": memory_tokens, "raw_history_tokens": 0}
+        stats = {"context_tokens": len(body_ids), "memory_tokens": memory_tokens}
         return (cache, prefix_length), stats
 
     @torch.inference_mode()
     def answer(self, memory, question_prompt, max_new_tokens):
         cache, prefix_length = memory
-        ids = self.model.tokenizer.encode(question_prompt, add_special_tokens=False)
-        if self.stage == "finetuned":
-            ids = [self.model.ft_token_id] + ids
-        ids += [733, 28748, 16289, 28793]  # [/INST] in the official release.
+        ids = self.question_ids(question_prompt)
         total_length = prefix_length + len(ids) + max_new_tokens
         if total_length > self.window:
             raise ValueError(f"ICAE QA requires {total_length} tokens, window {self.window}")
@@ -72,7 +70,7 @@ class ICAELoCoMo:
                 # Added padding/memory/operation rows are never answer tokens.
                 token = outputs.logits[:, -1, : self.model.vocab_size - 1].argmax(dim=-1)
                 token_id = token.item()
-                if token_id == self.model.eos_id:
+                if token_id == self.eos_id:
                     break
                 generated.append(token_id)
                 inputs = self.decoder.get_input_embeddings()(token.unsqueeze(1))
@@ -80,13 +78,13 @@ class ICAELoCoMo:
         return self.model.tokenizer.decode(generated, skip_special_tokens=True).strip()
 
 
-def load_adapter(model_path, checkpoint, stage):
+def load_adapter(model_path, checkpoint, stage, mean_compression_rate, fixed_mem_size):
     if not torch.cuda.is_available():
         raise RuntimeError("ICAE v2 evaluation requires CUDA and FlashAttention 2")
     model_args = ModelArguments(model_name_or_path=str(model_path), lora_r=512, train=False)
     inference_args = TrainingArguments(
-        output_dir=str(checkpoint.parent), bf16=True, fixed_mem_size=128, mean_compression_rate=4,
-        report_to=[],
+        output_dir=str(checkpoint.parent), bf16=True, fixed_mem_size=fixed_mem_size,
+        mean_compression_rate=mean_compression_rate, report_to=[],
     )
     lora = LoraConfig(r=512, lora_alpha=32, lora_dropout=0.05, bias="none", task_type="CAUSAL_LM")
     model = ICAE(model_args, inference_args, lora)

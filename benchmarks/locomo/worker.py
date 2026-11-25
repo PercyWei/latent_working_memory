@@ -35,8 +35,9 @@ def main():
                 **answer, "id": sample.id, "question": sample.metadata["question"],
                 "metadata": sample.metadata, "references": list(sample.references),
                 "score": score_sample("locomo", sample, answer["prediction"]),
-                "context": statistics,
             }
+            if statistics:
+                row["context"] = statistics
             stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
             stream.flush()
             completed += 1

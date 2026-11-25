@@ -15,6 +15,7 @@ from transformers import AutoModelForCausalLM, MistralConfig, MistralForCausalLM
 
 from benchmarks.data import BenchmarkSample, locomo_question_prompt
 from benchmarks.locomo.engine import evaluate_conversations
+from latent_working_memory.prompts import QA_SYSTEM_PROMPT
 from reproductions.icae.evaluation.model import ICAE, ICAELoCoMo, ModelArguments, TrainingArguments
 from reproductions.icae.evaluation.locomo_adapter import ICAEAdapter
 
@@ -34,8 +35,12 @@ def test_both_stages_preserve_independent_answers():
                       **{f"t{i}": i for i in range(4, 64)}}
         tokenizer = Tokenizer(WordLevel(vocabulary, unk_token="[UNK]"))
         tokenizer.pre_tokenizer = Whitespace()
-        PreTrainedTokenizerFast(tokenizer_object=tokenizer, pad_token="[PAD]", bos_token="[BOS]",
-                               eos_token="[EOS]", unk_token="[UNK]").save_pretrained(root)
+        PreTrainedTokenizerFast(
+            tokenizer_object=tokenizer, pad_token="[PAD]", bos_token="[BOS]",
+            eos_token="[EOS]", unk_token="[UNK]",
+            chat_template=("{{ bos_token }}[INST] {{ messages[0]['content'] }}"
+                           "\n\n{{ messages[1]['content'] }} [/INST]"),
+        ).save_pretrained(root)
         load = AutoModelForCausalLM.from_pretrained
         def cpu_model(path, **kwargs):
             return load(path, torch_dtype=torch.float32, attn_implementation="sdpa")
@@ -53,6 +58,10 @@ def test_both_stages_preserve_independent_answers():
         ) for i, question in enumerate(("t8", "t9", "t10 t11"))]
         for stage in ("pretrained", "finetuned"):
             original = ICAELoCoMo(model, stage)
+            assert original.prefix_ids == (
+                model.tokenizer.encode("[BOS][INST]", add_special_tokens=False)
+                + model.tokenizer.encode(QA_SYSTEM_PROMPT + "\n\n", add_special_tokens=False)
+            )
             adapter = ICAEAdapter(original)
             state, _ = original.encode_history(history)
             expected = {
@@ -65,6 +74,12 @@ def test_both_stages_preserve_independent_answers():
                                        lambda s, a, stats: answers.update({s.id: a["prediction"]}))
                 assert answers == expected
             prepared = adapter.prepare_context(history, samples)
+            for question in prepared.questions:
+                text = locomo_question_prompt(question.sample.metadata["question"], 4)
+                expected_ids = model.tokenizer.encode(text, add_special_tokens=False)
+                if stage == "finetuned":
+                    expected_ids = [model.ft_token_id] + expected_ids
+                assert question.inputs == expected_ids + model.tokenizer.encode(" [/INST]", add_special_tokens=False)
             before = [layer[0].clone() for layer in prepared.state[0]]
             adapter.answer_batch(prepared.state, prepared.questions[:2], lambda *args: None)
             assert all(torch.equal(keys, layer[0]) for keys, layer in zip(before, prepared.state[0]))

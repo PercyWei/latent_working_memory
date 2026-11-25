@@ -10,7 +10,7 @@ from benchmarks.data import (
     LOCOMO_COMMIT,
     RULER_COMMIT,
 )
-from latent_working_memory.prompts import QA_SYSTEM_PROMPT, qa_messages
+from latent_working_memory.prompts import QA_SYSTEM_PROMPT, QAInputBuilder, qa_input_format
 
 
 def protocol(benchmark, lengths, memory, use_qa_system=False):
@@ -54,14 +54,9 @@ def encode_prompt(sample, tokenizer, model_window, benchmark, use_qa_system=Fals
     """使用指定的聊天协议编码完整题面，保留任务生成预算。"""
     if benchmark not in {"ruler", "locomo"}:
         raise ValueError("benchmark must be ruler or locomo")
-    messages = (qa_messages(sample.prompt) if use_qa_system
-                else [{"role": "user", "content": sample.prompt}])
-    ids = tokenizer.apply_chat_template(
-        messages,
-        tokenize=True,
-        add_generation_prompt=True,
-        enable_thinking=False,
-    )
+    builder = QAInputBuilder(tokenizer, qa_input_format(tokenizer),
+                             QA_SYSTEM_PROMPT if use_qa_system else None)
+    ids = builder.encode(sample.prompt)
     limit = min(sample.metadata["length"], model_window) if benchmark == "ruler" else model_window
     if len(ids) + sample.max_new_tokens > limit:
         raise ValueError(

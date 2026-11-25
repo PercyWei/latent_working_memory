@@ -9,6 +9,7 @@ import torch
 from transformers import AutoConfig, AutoTokenizer, set_seed
 
 from latent_working_memory.runtime import initialize_device
+from latent_working_memory.prompts import qa_input_format
 from ..config import config_from_dict
 from ..data import tokenization_identity
 from ..modeling.compressor import MemoryModel
@@ -66,6 +67,10 @@ def _evaluation_inputs(checkpoint_path, data, task_module, max_new_tokens, max_s
         "model_window": model_window, "seed": config.seed,
         "data": identity, "protocol": evaluation_protocol,
     }))
+    if task_module.NAME == "locomo":
+        request["settings"] = {"input_format": qa_input_format(tokenizer)}
+        # 实际聊天模板集中保存；保留原有分段编码身份用于核对记忆读入边界。
+        del request["protocol"]["tokenization"]["chat_template"]
     return state, config, tokenizer, request, samples
 
 
@@ -137,6 +142,8 @@ def evaluate_shard(checkpoint_path, data, output_dir, worker_rank, task_module, 
                         with_value_head=config.training.objective.strategy == "ppo")
     model.load_trainable_state_dict(state["model"])
     model.eval()
+    if task_module.NAME == "locomo" and qa_input_format(model.tokenizer) != request["settings"]["input_format"]:
+        raise ValueError("loaded chat input format differs from the evaluation plan")
     del state, tokenizer
     progress_directory = output_dir / "progress"
     with (progress_directory / f"worker_{worker_rank}.jsonl").open("a", encoding="utf-8") as stream:

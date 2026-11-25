@@ -1,4 +1,4 @@
-"""统一 LoCoMo 产物与逐题恢复，正文统计按会话计一次。"""
+"""LoCoMo 产物、逐题恢复与标准 F1 汇总。"""
 
 import json
 from pathlib import Path
@@ -36,14 +36,22 @@ def read_progress(directory, samples, repair=False):
     return records
 
 
-def summarize(plan, records):
+def summarize(plan, records, summarize_method=None):
+    """方法回调接收全部逐题记录及按对话去重的统计，返回额外指标。"""
     contexts = {}
     for row in records:
         cid = row["metadata"]["conversation_id"]
-        stats = row["context"]
+        stats = row.get("context", {})
         if contexts.setdefault(cid, stats) != stats:
             raise ValueError(f"inconsistent conversation statistics: {cid}")
-    return {**plan, "metrics": summarize_scores("locomo", records), "conversations": contexts}
+    summary = {**plan, "metrics": summarize_scores("locomo", records)}
+    if any(contexts.values()):
+        summary["conversations"] = contexts
+    if summarize_method is not None:
+        metrics = summarize_method(records, contexts)
+        if metrics:
+            summary["method_metrics"] = metrics
+    return summary
 
 
 def file_identity(path):

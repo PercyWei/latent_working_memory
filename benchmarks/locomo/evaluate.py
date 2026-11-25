@@ -25,21 +25,21 @@ def add_evaluation_arguments(parser, output_root):
     """向方法自己的 parser 添加公共调度参数。"""
     parser.add_argument("--benchmark-data", type=Path, default=ROOT / "data/benchmarks/locomo")
     parser.add_argument("--output-root", type=Path, default=Path(output_root))
-    parser.add_argument("--output-id")
+    parser.add_argument("--output-id", help="运行标识，默认名称由方法入口确定")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--batch-size-per-gpu", type=int, default=1,
                         help="每卡评估 batch size，默认 1")
 
 
-def run_evaluation(args, method, settings, load_adapter):
-    """加载函数须为可导入模块的顶层函数；worker 用它构造会话适配器。"""
+def run_evaluation(args, method, settings, load_adapter, output_name, summarize_method=None):
+    """方法提供默认运行名称；worker 加载模型，主进程汇总指标。"""
     if args.batch_size_per_gpu < 1:
         raise ValueError("batch size must be positive")
     if args.output_id is None:
         if args.resume:
             raise ValueError("--resume requires the original --output-id")
         current = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M")
-        args.output_id = f"{method}_{current}"
+        args.output_id = f"{output_name}_{current}"
     if not args.output_id.strip() or args.output_id in {".", ".."} or any(
         character in args.output_id for character in ("/", "\\")
     ):
@@ -126,7 +126,7 @@ def run_evaluation(args, method, settings, load_adapter):
             if len(records) != len(samples):
                 raise ValueError("workers did not cover all questions")
             rows = [records[sample.id] for sample in samples]
-            summary = summarize(plan, rows)
+            summary = summarize(plan, rows, summarize_method)
             temporary = directory / "details.jsonl.tmp"
             temporary.write_text("".join(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n" for row in rows))
             temporary.replace(directory / "details.jsonl")

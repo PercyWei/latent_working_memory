@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from benchmarks.locomo.evaluate import add_evaluation_arguments, run_evaluation
-from .locomo_adapter import add_arguments, configuration, load_adapter
+from .locomo_adapter import add_arguments, configuration, load_adapter, summarize_metrics
 
 
 def main(argv=None):
@@ -13,7 +13,10 @@ def main(argv=None):
     add_evaluation_arguments(parser, root / "artifacts/reproductions/icae")
     add_arguments(parser)
     args = parser.parse_args(argv)
-    return run_evaluation(args, "icae", configuration(args), load_adapter)
+    return run_evaluation(args, "icae", configuration(args), load_adapter,
+                          output_name=(f"{args.checkpoint.stem}_mem{args.fixed_mem_size}"
+                                       f"_cr{args.mean_compression_rate}"),
+                          summarize_method=summarize_metrics)
 
 
 if __name__ == "__main__":

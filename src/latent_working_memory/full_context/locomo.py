@@ -65,11 +65,7 @@ class FullContextLoCoMo:
             PreparedQuestion(sample, suffix, (sample.max_new_tokens, len(suffix) if sliding else None))
             for sample, suffix in turns
         ]
-        context_tokens = len(self.tokenizer.encode(history, add_special_tokens=False))
-        return PreparedConversation((cache, ids, mask, prefill_seconds), prepared, {
-            "context_tokens": context_tokens, "memory_tokens": 0,
-            "raw_history_tokens": context_tokens,
-        })
+        return PreparedConversation((cache, ids, mask, prefill_seconds), prepared)
 
     @torch.no_grad()
     def answer_batch(self, state, questions, complete):

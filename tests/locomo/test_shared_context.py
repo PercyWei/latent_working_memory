@@ -19,6 +19,7 @@ from benchmarks.protocol import encode_prompt
 from benchmarks.locomo.engine import evaluate_conversations, shard_conversations
 from benchmarks.locomo.records import read_progress
 from latent_working_memory.full_context.locomo import FullContextLoCoMo
+from latent_working_memory.prompts import qa_input_format, qa_messages
 from latent_working_memory.v3_1_1.config import ComputeConfig, ModelConfig, ModelStructureConfig, ModelLoraConfig
 from latent_working_memory.v3_1_1.evaluation.locomo_adapter import MemoryAdapter
 from latent_working_memory.v3_1_1.modeling.compressor import MemoryModel
@@ -70,7 +71,12 @@ def test_full_context_matches_independent_generation(setup):
     expected = {}
     with torch.no_grad():
         for sample in samples:
-            ids = torch.tensor([encode_prompt(sample, tokenizer, 2048, "locomo", True)], device=device)
+            # 与重构前的原生聊天调用逐 token 对照，避免记录与实际格式各自变化。
+            original_ids = tokenizer.apply_chat_template(
+                qa_messages(sample.prompt), tokenize=True, add_generation_prompt=True, enable_thinking=False,
+            )
+            assert encode_prompt(sample, tokenizer, 2048, "locomo", True) == original_ids
+            ids = torch.tensor([original_ids], device=device)
             output = model.generate(ids, generation_config=generation, max_new_tokens=sample.max_new_tokens,
                                     use_model_defaults=False)[0, ids.shape[1]:].tolist()
             expected[sample.id] = output
@@ -93,6 +99,7 @@ def test_memory_reader_matches_full_reprefill(setup):
     config = SimpleNamespace(model=model_config, recent_size=lambda: 4,
                              training=SimpleNamespace(objective=SimpleNamespace(memory_cost_power=1)))
     adapter = MemoryAdapter(model, config)
+    assert adapter.encoder.input_format == qa_input_format(model.tokenizer)
     history = samples[0].prompt.removesuffix(locomo_question_prompt(samples[0].metadata["question"], 4))
     with torch.no_grad(), model.forward_context():
         path = execute_batch(model, [adapter.encoder.context(history)], 16, pending_size=16,

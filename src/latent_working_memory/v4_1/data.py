@@ -5,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from latent_working_memory.prompts import QA_SYSTEM_PROMPT, qa_messages
+from latent_working_memory.prompts import QA_SYSTEM_PROMPT, QAInputBuilder, qa_input_format
 
 
 @dataclass(frozen=True)
@@ -26,22 +26,11 @@ class EpisodeEncoder:
 
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
-        marker = "__LWM_DOCUMENT_PLACEHOLDER__"
-        answer_marker = "__LWM_ANSWER_PLACEHOLDER__"
-        messages = qa_messages(marker)
-        rendered = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
-        )
-        self.prefix, self.suffix = rendered.split(marker)
-        complete = tokenizer.apply_chat_template(
-            [*messages, {"role": "assistant", "content": answer_marker}],
-            tokenize=False,
-            add_generation_prompt=False,
-            enable_thinking=False,
-        )
-        answer_prefix, self.answer_suffix = complete.split(answer_marker)
-        if answer_prefix != rendered:
-            raise ValueError("chat template must expose the same assistant generation prefix")
+        self.input_format = qa_input_format(tokenizer)
+        builder = QAInputBuilder(tokenizer, self.input_format)
+        parts = builder.parts()
+        self.prefix, self.suffix = parts.prefix, parts.suffix
+        self.answer_suffix = builder.answer_suffix()
 
     def _encode(self, text):
         return tuple(self.tokenizer.encode(text, add_special_tokens=False))
