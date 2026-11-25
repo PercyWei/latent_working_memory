@@ -16,12 +16,6 @@ conflicts = [[
     { package = "latent-working-memory", group = "torch2-6-cuda12-4" },
 ]]
 
-[[manifest.dependency-metadata]]
-name = "flashinfer-python"
-version = "0.2.5+cu124torch2.6"
-requires-dist = ["torch==2.6.*"]
-requires-python = ">=3.8, <4.0"
-
 [[package]]
 name = "absl-py"
 version = "2.5.0"
@@ -567,13 +561,13 @@ wheels = [
 [[package]]
 name = "flash-attn"
 version = "2.7.4.post1"
-source = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1%2Bcu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl" }
+source = { path = ".wheels/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl" }
 dependencies = [
     { name = "einops", marker = "sys_platform == 'linux'" },
     { name = "torch", version = "2.6.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1%2Bcu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl", hash = "sha256:58853b28a5a926cae14402bfd8d4d93a45ebf8f9e79533f37ab09d0d77a99c05" },
+    { filename = "flash_attn-2.7.4.post1+cu12torch2.6cxx11abifalse-cp311-cp311-linux_x86_64.whl", hash = "sha256:58853b28a5a926cae14402bfd8d4d93a45ebf8f9e79533f37ab09d0d77a99c05" },
 ]
 
 [package.metadata]
@@ -601,7 +595,7 @@ sdist = { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/b2/c4/9e
 [[package]]
 name = "flashinfer-python"
 version = "0.2.5+cu124torch2.6"
-source = { registry = "https://flashinfer.ai/whl/cu124/torch2.6/" }
+source = { path = ".wheels/flashinfer_python-0.2.5+cu124torch2.6-cp38-abi3-linux_x86_64.whl" }
 resolution-markers = [
     "python_full_version >= '3.11.5' and sys_platform == 'linux'",
     "python_full_version < '3.11.5' and sys_platform == 'linux'",
@@ -610,8 +604,11 @@ dependencies = [
     { name = "torch", version = "2.6.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }, marker = "sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.5/flashinfer_python-0.2.5+cu124torch2.6-cp38-abi3-linux_x86_64.whl", hash = "sha256:43d767b912c0c43a04be99595e0123eab9385fc72530a2874b5fb08e3145c0be" },
+    { filename = "flashinfer_python-0.2.5+cu124torch2.6-cp38-abi3-linux_x86_64.whl", hash = "sha256:43d767b912c0c43a04be99595e0123eab9385fc72530a2874b5fb08e3145c0be" },
 ]
+
+[package.metadata]
+requires-dist = [{ name = "torch", specifier = "==2.6.*" }]
 
 [[package]]
 name = "fonttools"
@@ -992,7 +989,7 @@ torch2-14 = [
 ]
 torch2-6-cuda12-4 = [
     { name = "flash-attn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "flashinfer-python", version = "0.2.5+cu124torch2.6", source = { registry = "https://flashinfer.ai/whl/cu124/torch2.6/" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "flashinfer-python", version = "0.2.5+cu124torch2.6", source = { path = ".wheels/flashinfer_python-0.2.5+cu124torch2.6-cp38-abi3-linux_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "torch", version = "2.6.0", source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" } },
 ]
 
@@ -1032,8 +1029,8 @@ dev = [
 macos = [{ name = "flashinfer-python", marker = "sys_platform == 'darwin'", specifier = "==0.2.5", index = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }]
 torch2-14 = [{ name = "torch", specifier = "==2.14.0" }]
 torch2-6-cuda12-4 = [
-    { name = "flash-attn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1%2Bcu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl" },
-    { name = "flashinfer-python", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==0.2.5+cu124torch2.6", index = "https://flashinfer.ai/whl/cu124/torch2.6/" },
+    { name = "flash-attn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", path = ".wheels/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl" },
+    { name = "flashinfer-python", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", path = ".wheels/flashinfer_python-0.2.5+cu124torch2.6-cp38-abi3-linux_x86_64.whl" },
     { name = "torch", specifier = "==2.6.0" },
 ]
 

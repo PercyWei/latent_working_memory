@@ -53,23 +53,11 @@ default-groups = ["dev", "macos", "torch2.6-cuda12.4"]
 conflicts = [[{ group = "torch2.6-cuda12.4" }, { group = "torch2.14" }]]
 
 [tool.uv.sources]
-flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1%2Bcu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl" }
+flash-attn = { path = ".wheels/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }
 flashinfer-python = [
-    { index = "flashinfer-cu124", marker = "sys_platform == 'linux'" },
+    { path = ".wheels/flashinfer_python-0.2.5+cu124torch2.6-cp38-abi3-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { index = "pypi", marker = "sys_platform == 'darwin'" },
 ]
-
-# 官方索引无独立 metadata；按 v0.2.5 setup.py 的 AOT 依赖避免锁定时下载整个 wheel。
-[[tool.uv.dependency-metadata]]
-name = "flashinfer-python"
-version = "0.2.5+cu124torch2.6"
-requires-python = ">=3.8,<4.0"
-requires-dist = ["torch==2.6.*"]
-
-[[tool.uv.index]]
-name = "flashinfer-cu124"
-url = "https://flashinfer.ai/whl/cu124/torch2.6/"
-explicit = true
 
 [[tool.uv.index]]
 name = "pypi"
