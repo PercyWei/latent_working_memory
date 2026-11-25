@@ -2,7 +2,7 @@
 
 创建时间：20261109 10:58:35 Asia/Shanghai
 
-最后修订时间：20261124 14:55:04 Asia/Shanghai
+最后修订时间：20261124 23:47:30 Asia/Shanghai
 
 ## 配置原则与实际版本
 
@@ -36,7 +36,7 @@
 - OpenCompass 0.5.5 要求 NumPy <2、datasets <4，因此 In-Place TTT 使用 NumPy 1.26.4／datasets 3.6.0，不能与 E²-TTT 的两个固定版本统一。
 - 三个评估环境统一 einops 0.8.1、huggingface-hub 0.36.2、tokenizers 0.22.2、safetensors 0.8.0、setuptools 80.9.0；E²-TTT 和 In-Place TTT 统一 Accelerate 1.10.1、SciPy 1.16.3。其余显式依赖见各方法 `requirements-eval.txt`。
 
-## 安装与检查结果
+## 20261109 安装与检查结果
 
 | 方法 | 环境目录 | 依赖检查 | 导入检查 |
 |---|---|---|---|
@@ -50,17 +50,16 @@
 
 ## 安装命令
 
-使用 uv 0.9.8，系统需已有 Python 3.11 和 3.12。安装器从所选方法的 `requirements-eval.txt` 读取官方 FlashAttention wheel 地址，自动下载到 `~/rivermind-data/wheels/ttt/`；已有 wheel 直接复用，随后安装依赖。下载沿用当前 shell 的代理环境变量，FlashAttention 仅使用预编译 wheel。服务器 uv 安装于 `~/rivermind-data/tools/uv/bin/`，将该目录加入当前 shell 的 PATH 后，从项目根目录执行：
+系统需已有 Python 3.11 和 3.12，且 `uv` 已在 PATH 中。安装器从所选方法的 `requirements-eval.txt` 读取官方 FlashAttention wheel 地址，默认缓存到 `~/.cache/latent-working-memory/wheels/`；已有 wheel 直接复用。下载沿用当前 shell 的代理环境变量，FlashAttention 仅使用预编译 wheel。从项目根目录执行：
 
 ```bash
-export PATH="$HOME/rivermind-data/tools/uv/bin:$PATH"
 bash reproductions/setup_eval_env.sh lact
 bash reproductions/setup_eval_env.sh e2_ttt
 bash reproductions/setup_eval_env.sh in_place_ttt
 ```
 
-环境目录为 `~/rivermind-data/envs/ttt-lact/`、`ttt-e2_ttt/`、`ttt-in_place_ttt/`。运行评估前分别激活对应目录下的 `bin/activate`。安装器遵守各方法 `requirements-eval.txt`，只在 E²-TTT 环境安装其本地模型包和随附 harness。
+环境默认位于 `~/envs/` 下的 `ttt-lact/`、`ttt-e2_ttt/`、`ttt-in_place_ttt/`。可用 `--env-root /data` 改为 `/data/envs/`；运行评估前激活对应目录下的 `bin/activate`。安装器遵守各方法 `requirements-eval.txt`，只在 E²-TTT 环境安装其本地模型包和随附 harness。
 
 E²-TTT 的模型包和 harness 使用可编辑安装，路径分别为 `e2_ttt/source/e2_ttt/` 和其 `lm-evaluation-harness/`。源码目录变更后，在该环境的评估停止时重新执行 `bash reproductions/setup_eval_env.sh e2_ttt`，更新安装路径。
 
-同一安装器也支持 ICAE v2。运行 `bash reproductions/setup_eval_env.sh icae` 创建 `~/rivermind-data/envs/icae-v2/`，使用 Python 3.11 和 [ICAE 评估依赖](icae/requirements-eval.txt)。LoCoMo 运行命令见 [ICAE README](icae/README.md#环境与运行命令)。
+同一安装器也支持 ICAE v2 和 AutoCompressors，方法参数、默认目录与自定义位置示例见[评估环境](README.md#评估环境)。LoCoMo 运行命令见 [ICAE README](icae/README.md#locomo-评估) 和 [AutoCompressors README](autocompressors/README.md#locomo-评估)。

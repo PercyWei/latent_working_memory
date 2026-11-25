@@ -8,4 +8,4 @@ export TOKENIZERS_PARALLELISM=false
 export PYTHONPATH="$project_root:$project_root/src:$method_dir/source/AutoCompressors${PYTHONPATH:+:$PYTHONPATH}"
 
 cd "$project_root"
-exec "$method_dir/.venv/bin/python" -u -m reproductions.autocompressors.evaluation.eval_locomo "$@"
+exec python -u -m reproductions.autocompressors.evaluation.eval_locomo "$@"

@@ -2,18 +2,63 @@
 set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-method="${1:?用法：bash reproductions/setup_eval_env.sh lact|e2_ttt|in_place_ttt|icae}"
+usage() {
+  cat <<'EOF'
+用法：bash reproductions/setup_eval_env.sh <方法> [--env-root <目录>]
+
+方法：icae、autocompressors、lact、in_place_ttt、e2_ttt
+--env-root  环境根目录，默认 ~；环境保存在 <env-root>/envs/<环境名>
+EOF
+}
+if [[ $# -eq 0 ]]; then
+  usage >&2
+  exit 2
+fi
+if [[ $1 == --help || $1 == -h ]]; then
+  usage
+  exit 0
+fi
+method="$1"
+shift
+env_root="$HOME"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --env-root)
+      if [[ $# -lt 2 || -z $2 || $2 == -* ]]; then
+        printf '%s\n' '--env-root 需要目录参数。' >&2
+        exit 2
+      fi
+      env_root="$2"
+      shift 2
+      ;;
+    --help|-h) usage; exit 0 ;;
+    *) printf '未知参数：%s\n' "$1" >&2; exit 2 ;;
+  esac
+done
 environment_name="ttt-$method"
 case "$method" in
   lact|in_place_ttt) python_minor=3.11 ;;
   e2_ttt) python_minor=3.12 ;;
   icae) python_minor=3.11; environment_name=icae-v2 ;;
+  autocompressors) python_minor=3.11; environment_name=autocompressors ;;
   *) printf '未知方法：%s\n' "$method" >&2; exit 2 ;;
 esac
 
-environment_dir="$HOME/rivermind-data/envs/$environment_name"
-wheel_dir="$HOME/rivermind-data/wheels/ttt"
-export UV_CACHE_DIR="$HOME/rivermind-data/cache/uv"
+if [[ $method == autocompressors ]]; then
+  source_dir="$project_root/reproductions/autocompressors/source/AutoCompressors"
+  revision="$(cat "$project_root/reproductions/autocompressors/source/revision")"
+  if [[ ! -d "$source_dir/.git" ]]; then
+    git clone --no-checkout https://github.com/princeton-nlp/AutoCompressors.git "$source_dir"
+    git -C "$source_dir" checkout --detach "$revision"
+  fi
+  if [[ "$(git -C "$source_dir" rev-parse HEAD)" != "$revision" ]]; then
+    printf '已有官方检出不在所需 revision %s，请检查 %s\n' "$revision" "$source_dir" >&2
+    exit 1
+  fi
+fi
+
+environment_dir="$env_root/envs/$environment_name"
+wheel_dir="${XDG_CACHE_HOME:-$HOME/.cache}/latent-working-memory/wheels"
 export UV_PYTHON_DOWNLOADS=never
 if [[ ! -e $environment_dir ]]; then
   uv --no-config venv --python "$python_minor" --seed "$environment_dir"

@@ -1,6 +1,7 @@
 # Linux x86-64, CPython 3.11, CUDA 11.8. Upstream FlashAttention prebuilt wheel.
 torch @ https://download.pytorch.org/whl/cu118/torch-2.1.0%2Bcu118-cp311-cp311-linux_x86_64.whl
-flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.3.5/flash_attn-2.3.5%2Bcu118torch2.1cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
+# Official prebuilt wheel: https://github.com/Dao-AILab/flash-attention/releases/download/v2.3.5/flash_attn-2.3.5%2Bcu118torch2.1cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
+flash-attn==2.3.5
 transformers==4.34.0
 tokenizers==0.14.1
 huggingface-hub==0.17.3
