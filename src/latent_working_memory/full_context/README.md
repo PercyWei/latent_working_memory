@@ -2,11 +2,11 @@
 
 创建时间：20261019 20:16:32 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261125 18:05:44 Asia/Shanghai
+最后修订时间：20261125 21:15:57 Asia/Shanghai
 
 Full-context 基线使用原始模型和完整上下文评估 LoCoMo 与 RULER，按任务规定的生成预算进行贪心解码。
 
-LoCoMo 的 reader 输入由公共输入构造器套用模型聊天模板：`system(QA 系统提示) → user(完整对话 + 简答指令与问题) → assistant 起始标记`。同一对话预填一次公共前缀 KV，各题从独立缓存分支作答。
+LoCoMo 的 reader 输入由公共输入构造器套用模型聊天模板：`system(QA 系统提示) → user(完整对话 + 简答指令与问题) → assistant 起始标记`。同一对话只预填一次公共前缀 KV。对全注意力模型逐题解码时，直接复用缓存，答完后裁回前缀长度。多题合批或使用滑动窗口时，各批从公共前缀创建独立分支。
 
 [系统提示与输入构造](../prompts.py) · [数据准备与评分](../../../benchmarks/README.md) · [LoCoMo 公共接口](../../../benchmarks/locomo/README.md)
 
