@@ -1,6 +1,6 @@
 # 论文复现
 
-最后修订时间：20261125 11:54:15 Asia/Shanghai
+最后修订时间：20261125 12:05:11 Asia/Shanghai
 
 本目录保存论文方法的独立复现。训练和评估入口、依赖环境、源码来源及结果分别在各方法目录维护。
 
@@ -53,7 +53,7 @@ bash reproductions/setup_eval_env.sh icae --env-root /data
 source /data/envs/icae-v2/bin/activate
 ```
 
-激活环境后执行对应方法的评估脚本。安装器复用已有环境并检查依赖；不会自动迁移其他位置的环境。FlashAttention wheel 默认缓存于 `~/.cache/latent-working-memory/wheels/`，可随 `XDG_CACHE_HOME` 调整；uv 使用自身的缓存设置。
+激活环境后执行对应方法的评估脚本。安装器复用已有环境并检查依赖；不会自动迁移其他位置的环境。FlashAttention 按所需文件名依次查找 `~/.cache/latent-working-memory/wheels/` 和 `~/wheels/`，直接安装命中的 wheel；两处均不存在时才从官方地址下载到缓存目录。缓存位置可随 `XDG_CACHE_HOME` 调整；uv 使用自身的缓存设置。
 
 ## 软上下文压缩的 LoCoMo 评估
 

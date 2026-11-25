@@ -2,7 +2,7 @@
 
 创建时间：20261109 10:58:35 Asia/Shanghai
 
-最后修订时间：20261125 11:54:15 Asia/Shanghai
+最后修订时间：20261125 12:05:11 Asia/Shanghai
 
 ## 配置原则与实际版本
 
@@ -50,7 +50,7 @@
 
 ## 安装命令
 
-系统需已有 Python 3.11 和 3.12，且 `uv` 已在 PATH 中。安装器从所选方法的 `requirements-eval.txt` 读取官方 FlashAttention wheel 地址，默认缓存到 `~/.cache/latent-working-memory/wheels/`；已有 wheel 直接复用。下载沿用当前 shell 的代理环境变量，FlashAttention 仅使用预编译 wheel。普通依赖的镜像与 uv 用户配置见[评估环境](README.md#评估环境)。从项目根目录执行：
+系统需已有 Python 3.11 和 3.12，且 `uv` 已在 PATH 中。安装器从所选方法的 `requirements-eval.txt` 确定 FlashAttention wheel，优先复用缓存目录和 `~/wheels/` 中的匹配文件。下载沿用当前 shell 的代理环境变量，FlashAttention 仅使用预编译 wheel。查找顺序、下载规则及 uv 镜像配置见[评估环境](README.md#评估环境)。从项目根目录执行：
 
 ```bash
 bash reproductions/setup_eval_env.sh lact
