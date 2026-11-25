@@ -7,11 +7,13 @@ from transformers import DynamicCache
 
 from benchmarks.protocol import encode_prompt
 from benchmarks.locomo.engine import (
-    PreparedConversation, PreparedQuestion, evaluate_conversations,
+    PreparedConversation, PreparedQuestion,
 )
 from benchmarks.locomo.reader import fork_dynamic_cache
+from latent_working_memory.prompts import qa_input_format
 
 from .generation import generated_ids, left_pad
+from .model import load_model
 
 
 def _encode_conversation(questions, tokenizer, model_window):
@@ -31,7 +33,6 @@ def _encode_conversation(questions, tokenizer, model_window):
     if not prefix:
         raise ValueError(f"LoCoMo conversation {questions[0].id} has no shared prompt tokens")
     return prefix, list(zip(questions, suffixes, strict=True))
-
 
 
 class FullContextLoCoMo:
@@ -96,10 +97,10 @@ class FullContextLoCoMo:
             })
 
 
-def evaluate_locomo(samples, tokenizer, model, generation, model_window, device, batch_size, commit):
-    adapter = FullContextLoCoMo(tokenizer, model, generation, model_window, device,
-                               mixed_precision=torch.is_autocast_enabled(device.type))
-    def completed(sample, answer, statistics):
-        commit(sample, answer["prompt_tokens"], answer["generated_token_ids"],
-               answer["generation_seconds"], 1, answer["decode_batch_size"])
-    evaluate_conversations(samples, adapter, batch_size, completed)
+def load_adapter(settings):
+    device = torch.device("cuda", 0)
+    tokenizer, model, generation = load_model(settings["model"], settings["seed"], device)
+    if qa_input_format(tokenizer) != settings["input_format"]:
+        raise ValueError("loaded chat input format differs from the evaluation plan")
+    return FullContextLoCoMo(tokenizer, model, generation, settings["model_window"], device,
+                            mixed_precision=settings["model"]["mixed_precision"])

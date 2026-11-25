@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+from benchmarks.protocol import protocol
+
 
 def _quality_conditions(summary):
     names = ["input", "decoding", "generation_budget", "reference"]
@@ -92,6 +94,18 @@ def _ruler_scope(summary, lengths):
 
 
 def _benchmark_view(summary, benchmark):
+    if summary.get("method") == "full-context" and summary["benchmark"] == "locomo":
+        # 公共调度的配置位于 settings；综合看板使用统一的模型与质量比较视图。
+        summary = {
+            **summary,
+            "model": summary["settings"]["model"],
+            "samples": summary["metrics"]["samples"],
+            "protocol": {
+                **protocol("locomo", (), "full prompt remains in the native KV cache; no memory compression",
+                           use_qa_system=True),
+                "system_prompt": summary["protocol"]["system_prompt"],
+            },
+        }
     if summary.get("task") == benchmark:
         return {**summary, "benchmark": benchmark, "samples": summary["metrics"]["samples"]}
     if summary["benchmark"] != benchmark:

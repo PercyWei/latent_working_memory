@@ -1,15 +1,13 @@
-"""在指定 CUDA 设备加载基座，按任务批量生成并写入逐题明细。"""
+"""在指定 CUDA 设备批量评估 RULER，写入逐题明细。"""
 
 import json
 import time
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, set_seed
 
 from benchmarks.scoring import score_sample
-from latent_working_memory.prompts import qa_input_format
 
-from .locomo import evaluate_locomo
+from .model import load_model
 from .ruler import evaluate_ruler
 
 
@@ -17,28 +15,7 @@ def evaluate_samples(samples, snapshot, device: torch.device, physical_gpu, prog
     """独立评估一个 GPU 分片，记录实测耗时与峰值显存。"""
     benchmark = snapshot["benchmark"]
     model_config = snapshot["model"]
-    model_path = model_config["model_name_or_path"]
-    torch.cuda.set_device(device)
-    set_seed(snapshot["seed"])
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    if benchmark == "locomo" and qa_input_format(tokenizer) != snapshot["settings"]["input_format"]:
-        raise ValueError("loaded chat input format differs from the evaluation plan")
-    if tokenizer.eos_token_id is None:
-        raise ValueError("benchmark generation requires tokenizer.eos_token_id")
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        dtype=getattr(torch, model_config["backbone_dtype"]),
-        attn_implementation=model_config["attention_implementation"],
-        device_map=device,
-    ).eval()
-    generation = GenerationConfig(
-        do_sample=False,
-        num_beams=1,
-        eos_token_id=tokenizer.eos_token_id,
-        pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
-        bos_token_id=tokenizer.bos_token_id,
-        use_cache=True,
-    )
+    tokenizer, model, generation = load_model(model_config, snapshot["seed"], device)
     torch.cuda.synchronize(device)
     torch.cuda.reset_peak_memory_stats(device)
     pending = {sample.id for sample in samples}
@@ -86,12 +63,8 @@ def evaluate_samples(samples, snapshot, device: torch.device, physical_gpu, prog
             )
 
         batch_size = execution["batch_size_per_gpu"]
-        if benchmark == "locomo":
-            evaluate_locomo(samples, tokenizer, model, generation, snapshot["model_window"],
-                            device, batch_size, commit)
-        else:
-            evaluate_ruler(samples, tokenizer, model, generation, snapshot["model_window"],
-                           device, batch_size, execution["batch_size_by_length"], commit)
+        evaluate_ruler(samples, tokenizer, model, generation, snapshot["model_window"],
+                       device, batch_size, execution["batch_size_by_length"], commit)
     if pending:
         raise ValueError(f"missing {len(pending)} evaluation records from GPU {physical_gpu}")
     return {"evaluation_seconds": time.perf_counter() - started}

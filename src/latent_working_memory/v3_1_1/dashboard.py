@@ -37,7 +37,7 @@ def parse_args(argv=None):
                         help="单次运行根目录，读取 train/ 下的边界诊断与 eval/ 下的独立评估")
     parser.add_argument("--dashboard-eval-id", help="启动时选中的评估标识，页面仍可切换")
     parser.add_argument("--dashboard-baselines", nargs="*", default=[], metavar="LABEL_OR_PATH",
-                        help="按“标签 结果目录”成对传入，可直接使用 artifacts/baselines/base/<模型名>")
+                        help="按“标签 结果目录”成对传入，目录中包含任务子目录或 summary.json")
     args = parser.parse_args(argv)
     args.dashboard_run_dir = args.dashboard_run_dir.expanduser().resolve()
     if not args.dashboard_run_dir.is_dir():
@@ -199,7 +199,7 @@ def _resource_rows(summaries, baselines):
                     value["checkpoint_step"], value) for value in summaries)
     rows = []
     for label, step, result in results:
-        resources, model = result["resources"], result["model"]
+        resources, model = result.get("resources", {}), result["model"]
         peak = resources.get("peak_memory_bytes", resources.get("peak_memory_allocated_bytes"))
         batch_sizes = resources["batch_sizes"] if step is not None else resources.get("batch_sizes")
         rows.append({
@@ -214,7 +214,7 @@ def _resource_rows(summaries, baselines):
             "批量单位": ({"test": "文档", "locomo": "对话", "ruler": "题目"}[result["task"]]
                          if step is not None else
                          {"conversations": "对话", "questions": "题目"}[resources.get("batch_unit", "questions")]),
-            "生成路径累计耗时（秒）": resources["generation_seconds"],
+            "生成路径累计耗时（秒）": resources.get("generation_seconds"),
             "峰值 allocated（GiB）": peak / 1024 ** 3 if peak is not None else None,
             "本次调度墙钟（秒）": resources.get("wall_seconds"),
             "基线评估循环耗时（秒）": resources.get("evaluation_seconds"),

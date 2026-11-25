@@ -1,4 +1,4 @@
-"""使用原生完整上下文和 greedy 解码，离线评估 RULER／LoCoMo。"""
+"""使用原生完整上下文和 greedy 解码，离线评估 RULER。"""
 
 import argparse
 from datetime import datetime
@@ -10,7 +10,7 @@ import sys
 from zoneinfo import ZoneInfo
 
 import torch
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoConfig
 
 from benchmarks.comparison import comparison_data
 from benchmarks.data import load_samples
@@ -18,15 +18,13 @@ from benchmarks.protocol import DEFAULT_RULER_LENGTHS, data_identity, protocol
 from benchmarks.scoring import summarize_scores
 from latent_working_memory.cli import length_batch_size, positive_int
 from latent_working_memory.devices import visible_devices
-from latent_working_memory.prompts import qa_input_format
 from latent_working_memory.v4.io import write_json
 
 from .parallel import evaluate_parallel, evaluation_log, load_progress, shard_samples
+from .model import ATTENTION_IMPLEMENTATIONS, WEIGHT_DTYPES, validate_compute
 
 
 METHOD = "full-context"
-WEIGHT_DTYPES = {"fp32": "float32", "bf16": "bfloat16"}
-ATTENTION_IMPLEMENTATIONS = ("sdpa", "flash_attention_2")
 
 
 def _now():
@@ -47,14 +45,8 @@ def _matching(actual, expected, path):
 
 def _print_scores(summary):
     metrics = summary["metrics"]
-    if summary["benchmark"] == "ruler":
-        for row in metrics["by_length"]:
-            print(f"RULER {row['length']} | accuracy={row['score']:.4f} | samples={row['samples']}")
-    else:
-        for row in metrics["groups"]:
-            print(
-                f"LoCoMo {row['category_name']} | f1={row['score']:.4f} | samples={row['samples']}"
-            )
+    for row in metrics["by_length"]:
+        print(f"RULER {row['length']} | accuracy={row['score']:.4f} | samples={row['samples']}")
     print(
         f"{summary['benchmark']} overall | {metrics['metric']}={metrics['score']:.4f} "
         f"| samples={summary['samples']}",
@@ -73,7 +65,7 @@ def _prepare_evaluation(args, model_path, output):
         model_config = dict(settings["model"])
         if args.model_path is None:
             model_path = Path(model_config["model_name_or_path"])
-        lengths = settings["protocol"].get("lengths", ())
+        lengths = settings["protocol"]["lengths"]
     else:
         if settings_path.exists():
             raise ValueError(f"evaluation plan already exists: {settings_path}; use --resume")
@@ -88,27 +80,12 @@ def _prepare_evaluation(args, model_path, output):
             "attention_implementation": args.attention_implementation or "sdpa",
             "mixed_precision": args.mixed_precision,
         }
-        lengths = (args.lengths or DEFAULT_RULER_LENGTHS) if args.benchmark == "ruler" else ()
-    if args.benchmark == "ruler":
-        unplanned = args.batch_size_by_length.keys() - set(lengths)
-        if unplanned:
-            raise ValueError(f"--batch-size-by-length includes unselected lengths: {sorted(unplanned)}")
+        lengths = args.lengths or DEFAULT_RULER_LENGTHS
+    unplanned = args.batch_size_by_length.keys() - set(lengths)
+    if unplanned:
+        raise ValueError(f"--batch-size-by-length includes unselected lengths: {sorted(unplanned)}")
     model_config["model_name_or_path"] = str(model_path)
-    if model_config["backbone_dtype"] not in WEIGHT_DTYPES.values():
-        raise ValueError(f"{settings_path}: unsupported model.backbone_dtype")
-    if model_config["attention_implementation"] not in ATTENTION_IMPLEMENTATIONS:
-        raise ValueError("attention implementation must be sdpa or flash_attention_2")
-    amp = model_config.get("mixed_precision")
-    if type(amp) is not bool:
-        raise ValueError(f"{settings_path}: model.mixed_precision must be true or false")
-    if amp and model_config["backbone_dtype"] != "float32":
-        raise ValueError("--mixed-precision requires --dtype fp32")
-    if (
-        model_config["attention_implementation"] == "flash_attention_2"
-        and model_config["backbone_dtype"] == "float32"
-        and not amp
-    ):
-        raise ValueError("flash_attention_2 with --dtype fp32 requires --mixed-precision")
+    validate_compute(model_config)
     samples = load_samples(args.benchmark, data_dir, tuple(lengths))
     model_window = AutoConfig.from_pretrained(model_path).max_position_embeddings
     snapshot = {
@@ -126,11 +103,6 @@ def _prepare_evaluation(args, model_path, output):
             use_qa_system=True,
         ),
     }
-    if args.benchmark == "locomo":
-        snapshot["settings"] = {"input_format": qa_input_format(AutoTokenizer.from_pretrained(model_path))}
-        snapshot["protocol"]["memory_sharing"] = (
-            "prefill each conversation's shared chat-token prefix once; answer questions from independent KV branches"
-        )
     if args.resume:
         _matching(settings, snapshot, settings_path)
     else:
@@ -152,7 +124,7 @@ def _evaluate(samples, snapshot, devices, output, shards, execution):
             **resources,
             **execution,
             "batch_sizes": sorted({row["eval_batch_size"] for row in records}),
-            "batch_unit": "conversations" if benchmark == "locomo" else "questions",
+            "batch_unit": "questions",
             "decode_batch_sizes": sorted({row["decode_batch_size"] for row in records}),
         },
     }
@@ -183,9 +155,8 @@ def run(args):
             return summary
         completed = set(load_progress(output, samples, repair=True))
         pending = [sample for sample in samples if sample.id not in completed]
-        execution = {"batch_size_per_gpu": args.batch_size_per_gpu}
-        if args.benchmark == "ruler":
-            execution["batch_size_by_length"] = args.batch_size_by_length
+        execution = {"batch_size_per_gpu": args.batch_size_per_gpu,
+                     "batch_size_by_length": args.batch_size_by_length}
         status = {
             "method": METHOD,
             "benchmark": args.benchmark,
@@ -209,7 +180,7 @@ def run(args):
                             f"CUDA_VISIBLE_DEVICES={','.join(devices)} selects {len(devices)} GPU(s), "
                             f"but PyTorch detects {available}"
                         )
-                    shards = shard_samples(pending, args.benchmark, len(devices))
+                    shards = shard_samples(pending, len(devices))
                     devices = devices[:len(shards)]
                 status["gpus"] = ",".join(devices)
                 write_json(output / "status.json", status)
@@ -236,33 +207,30 @@ def run(args):
 
 
 def parse_args(argv=None):
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--resume", action="store_true", help="沿用原评估计划，只补评未完成的题目")
-    common.add_argument("--benchmark-data", type=Path, help="新建评估时必填，续跑沿用原数据")
-    common.add_argument("--model-path", type=Path,
+    parser = argparse.ArgumentParser(description=__doc__,
+                                    epilog="使用 CUDA_VISIBLE_DEVICES 指定物理 GPU，例如 0 或 0,1。")
+    parser.set_defaults(benchmark="ruler")
+    parser.add_argument("--resume", action="store_true", help="沿用原评估计划，只补评未完成的题目")
+    parser.add_argument("--benchmark-data", type=Path, help="新建评估时必填，续跑沿用原数据")
+    parser.add_argument("--model-path", type=Path,
                         help="基座模型目录，默认 ~/models/Qwen3-4B-Instruct-2507")
-    common.add_argument(
+    parser.add_argument(
         "--dtype", choices=tuple(WEIGHT_DTYPES), help="基座权重精度，首次默认 fp32",
     )
-    common.add_argument(
+    parser.add_argument(
         "--attention-implementation", choices=ATTENTION_IMPLEMENTATIONS, help="首次默认 sdpa",
     )
-    common.add_argument(
+    parser.add_argument(
         "--mixed-precision", action="store_true",
         help="为 FP32 权重启用 PyTorch BF16 autocast，首次默认关闭",
     )
-    common.add_argument("--batch-size-per-gpu", type=positive_int, default=1,
-                        help="每卡并行题数上限，默认 1。LoCoMo 每批题目来自同一段对话")
-    common.add_argument("--seed", type=int, help="首次默认 42，复用时沿用已存配置")
-    common.add_argument("--output-root", type=Path, default=Path("artifacts/baselines/base"),
+    parser.add_argument("--batch-size-per-gpu", type=positive_int, default=1,
+                        help="每卡评估批量大小，默认 1")
+    parser.add_argument("--seed", type=int, help="首次默认 42，复用时沿用已存配置")
+    parser.add_argument("--output-root", type=Path, default=Path("artifacts/baselines/full_context"),
                         help="结果根目录，其下按模型目录名和任务名保存")
-    parser = argparse.ArgumentParser(description=__doc__)
-    tasks = parser.add_subparsers(dest="benchmark", required=True)
-    device_help = "使用 CUDA_VISIBLE_DEVICES 指定物理 GPU，例如 0 或 0,1。"
-    tasks.add_parser("locomo", parents=[common], description="评估 LoCoMo", epilog=device_help)
-    ruler = tasks.add_parser("ruler", parents=[common], description="评估 RULER", epilog=device_help)
-    ruler.add_argument("--lengths", type=positive_int, nargs="+", help="首次默认 8192 16384 32768")
-    ruler.add_argument("--batch-size-by-length", type=length_batch_size, nargs="+", default=[],
+    parser.add_argument("--lengths", type=positive_int, nargs="+", help="首次默认 8192 16384 32768")
+    parser.add_argument("--batch-size-by-length", type=length_batch_size, nargs="+", default=[],
                        metavar="LENGTH=BATCH", help="按 RULER 长度档位覆盖每卡批量，如 8192=4 32768=1")
     args = parser.parse_args(argv)
     if args.resume:
@@ -275,11 +243,10 @@ def parse_args(argv=None):
             print(f"[resume] ignored options; using the saved plan: {flags}", file=sys.stderr)
     elif args.seed is not None and args.seed < 0:
         parser.error("--seed must be nonnegative")
-    if args.benchmark == "ruler":
-        pairs = args.batch_size_by_length
-        args.batch_size_by_length = dict(pairs)
-        if len(args.batch_size_by_length) != len(pairs):
-            parser.error("--batch-size-by-length must not repeat a length")
+    pairs = args.batch_size_by_length
+    args.batch_size_by_length = dict(pairs)
+    if len(args.batch_size_by_length) != len(pairs):
+        parser.error("--batch-size-by-length must not repeat a length")
     return args
 
 

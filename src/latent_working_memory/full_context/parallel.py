@@ -1,4 +1,4 @@
-"""在可见 GPU 上按会话或题目分片评估，按原始题序提交完整明细。"""
+"""在可见 GPU 上按题目分片评估 RULER，按原始题序提交完整明细。"""
 
 import json
 import signal
@@ -12,8 +12,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import torch
-
-from benchmarks.locomo.engine import shard_conversations
 
 from .inference import evaluate_samples
 
@@ -49,10 +47,8 @@ def evaluation_log(path):
         yield
 
 
-def shard_samples(samples, benchmark, num_devices):
-    """LoCoMo 以完整会话分片并均衡题数，RULER 按题目轮流分配。"""
-    if benchmark == "locomo":
-        return shard_conversations(samples, num_devices)
+def shard_samples(samples, num_devices):
+    """RULER 按题目轮流分配给各张 GPU。"""
     count = min(num_devices, len(samples))
     return [samples[rank::count] for rank in range(count)]
 

@@ -2,7 +2,7 @@
 
 创建时间：20261102 17:04:01 Asia/Shanghai
 
-最后修订时间：20261124 16:08:32 Asia/Shanghai
+最后修订时间：20261125 19:56:39 Asia/Shanghai
 
 计算协议、数据格式与模块分工见[方法说明](../README.md)，命令行参数集中见[第 5 节](#5-调整参数)。以下命令使用项目根目录 `.venv`；正式实验先检查[K256 预训练配置](../../../../configs/v3_1_1/pretrain_k256.json)和[K256 后训练配置](../../../../configs/v3_1_1/post_k256_grpo.json)中的基座与数据路径。
 
@@ -330,7 +330,8 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
   --dashboard-run-dir artifacts/v3-1/policy-post_k256_20261104 \
   --dashboard-eval-id standard_20261104 \
   --dashboard-baselines \
-    base-Qwen artifacts/baselines/base/Qwen3-4B-Instruct-2507
+    base-Qwen-LoCoMo artifacts/baselines/full_context/eval/Qwen3-4B-Instruct-2507_20261125 \
+    base-Qwen-RULER artifacts/baselines/full_context/Qwen3-4B-Instruct-2507
 ```
 
 - **结果浏览**：
@@ -357,7 +358,7 @@ bash src/latent_working_memory/v3_1_1/scripts/dashboard.sh \
 
 - **基线接入**：
 
-  - 通过 `--dashboard-baselines <标签> <结果目录> ...` 添加多组基线。原始模型基线可以直接指定 `artifacts/baselines/base/<model_name>/`。也支持直接含 `summary.json` 的单任务或单 checkpoint 目录。标签用于图例，须唯一。
+  - 通过 `--dashboard-baselines <标签> <结果目录> ...` 添加多组基线。Full-context 的 LoCoMo 运行目录为 `artifacts/baselines/full_context/eval/<output-id>/`，RULER 为 `artifacts/baselines/full_context/<model_name>/`。也支持直接含 `summary.json` 的单任务或单 checkpoint 目录。标签用于图例，须唯一。
   - **异常提示**：缺少当前 benchmark 汇总时跳过该基线；路径、格式或比较设置不一致时在页面提示，不影响已有结果。
 
 - **比较规则**：
