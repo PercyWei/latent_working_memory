@@ -1,6 +1,7 @@
 # Checkpoint evaluation only; Linux x86-64, Python 3.12.
 # Fixed versions follow source/e2_ttt/environment.yml. Install the local model and
 # vendored lm-evaluation-harness separately; selected task dependencies are below.
+-r ../requirements-dashboard.txt
 torch @ https://download.pytorch.org/whl/cu128/torch-2.8.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl
 triton==3.4.0
 # Official prebuilt wheel: https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl

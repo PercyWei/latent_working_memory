@@ -6,8 +6,8 @@ cd -- "$project_root"
 export PYTHONPATH="$project_root:$project_root/src${PYTHONPATH:+:$PYTHONPATH}"
 
 if [[ $# -eq 0 || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-  exec uv run --frozen python -m reproductions.e2_ttt.evaluation.dashboard "$@"
+  exec python -m reproductions.e2_ttt.evaluation.dashboard "$@"
 fi
 
 export STREAMLIT_SERVER_HEADLESS="${STREAMLIT_SERVER_HEADLESS:-true}"
-exec uv run --frozen streamlit run reproductions/e2_ttt/evaluation/dashboard.py -- "$@"
+exec python -m streamlit run reproductions/e2_ttt/evaluation/dashboard.py -- "$@"

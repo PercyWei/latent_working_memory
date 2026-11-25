@@ -6,8 +6,8 @@ cd -- "$project_root"
 export PYTHONPATH="$project_root:$project_root/src${PYTHONPATH:+:$PYTHONPATH}"
 
 if [[ $# -eq 0 || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-  exec uv run --frozen python -m reproductions.icae.evaluation.dashboard "$@"
+  exec python -m reproductions.icae.evaluation.dashboard "$@"
 fi
 
 export STREAMLIT_SERVER_HEADLESS="${STREAMLIT_SERVER_HEADLESS:-true}"
-exec uv run --frozen streamlit run reproductions/icae/evaluation/dashboard.py -- "$@"
+exec python -m streamlit run reproductions/icae/evaluation/dashboard.py -- "$@"

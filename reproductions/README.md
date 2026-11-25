@@ -1,6 +1,6 @@
 # 论文复现
 
-最后修订时间：20261125 12:05:11 Asia/Shanghai
+最后修订时间：20261125 17:20:12 Asia/Shanghai
 
 本目录保存论文方法的独立复现。训练和评估入口、依赖环境、源码来源及结果分别在各方法目录维护。
 
@@ -29,7 +29,7 @@
 
 ## 评估环境
 
-从 Linux x86-64 服务器的项目根目录运行安装器，确保 `uv` 已在 PATH 中，所需 Python 已安装。各方法使用独立环境，依赖按其 `requirements-eval.txt` 安装。
+从 Linux x86-64 服务器的项目根目录运行安装器，确保 `uv` 已在 PATH 中，所需 Python 已安装。各方法使用独立环境，依赖按其 `requirements-eval.txt` 安装，其中包含[共用看板依赖](requirements-dashboard.txt)。同一环境用于评估、benchmark 看板和论文复现对照。
 
 安装器显式读取 uv 用户配置：默认 `${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml`，通常为 `~/.config/uv/uv.toml`；可用 `UV_CONFIG_FILE` 指定其他配置文件。该文件须已存在，普通 Python 依赖沿用其中的 PyPI 索引或镜像，主项目的 `pyproject.toml` 不参与配置。PyTorch 和 FlashAttention 仍使用各方法指定的 wheel 下载地址，不随 PyPI 镜像切换。
 
@@ -119,9 +119,9 @@ LaCT 的来源目录为 `source/lact/`、`source/flame/`；E²-TTT 为 `source/e
 
 ## Benchmark 结果看板
 
-ICAE、AutoCompressors、LaCT、In-Place TTT 和 E²-TTT 各自提供 `scripts/dashboard.sh`，通过项目根环境展示单次运行的 benchmark 结果，当前支持 LoCoMo。`--output-dir` 指向包含 `locomo/` 的运行目录。
+ICAE、AutoCompressors、LaCT、In-Place TTT 和 E²-TTT 各自提供 `scripts/dashboard.sh`，使用当前激活的方法环境展示单次运行的 benchmark 结果，当前支持 LoCoMo。`--output-dir` 指向包含 `locomo/` 的运行目录。
 
-总体及各题型 F1、题数和逐题回答复用[公共看板接口](../benchmarks/locomo/README.md#看板接口)；记忆用量等专属展示由方法维护。启动命令见各方法 README 的“查看结果”。
+总体及各题型 F1、题数和逐题回答复用[公共看板接口](../benchmarks/locomo/README.md#方法看板接入)；记忆用量等专属展示由方法维护。启动命令见各方法 README 的“查看结果”。跨运行比较使用[公共 LoCoMo 看板](../benchmarks/locomo/README.md#跨运行比较)，可在任一方法环境中启动。
 
 ## 结果对比
 

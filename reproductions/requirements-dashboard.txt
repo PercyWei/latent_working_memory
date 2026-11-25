@@ -1,0 +1,2 @@
+# 共用 benchmark 看板；兼容 ICAE 固定的 protobuf 4.25.8。
+streamlit==1.60.0

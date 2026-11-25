@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261125 11:54:15 Asia/Shanghai
+最后修订时间：20261125 17:20:12 Asia/Shanghai
 
 本目录使用 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308) 的官方实现和作者公开 checkpoint。公开权重加载、生成和计分检查已完成，尚未完成本轮计划的完整评估。
 
@@ -107,19 +107,17 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/e2_ttt/scripts/eval_locomo.sh \
 
 ### Benchmark 结果
 
-从项目根目录启动独立看板，当前支持 LoCoMo：
-
 ```bash
 bash reproductions/e2_ttt/scripts/dashboard.sh \
   --output-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b_20261117
 ```
 
-`--output-dir` 指向包含 `locomo/` 的运行目录。看板使用项目根环境，展示总体及各题型 F1、题数，并可按题型与对话查看逐题回答和参考答案。
+`--output-dir` 指向包含 `locomo/` 的运行目录。页面展示总体及各题型 F1、题数，并可按题型与对话查看逐题回答和参考答案。
 
 ### 论文复现对照
 
 ```bash
-uv run reproductions/e2_ttt/evaluation/compare_results.py \
+python reproductions/e2_ttt/evaluation/compare_results.py \
   --eval-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b_20261117
 ```
 

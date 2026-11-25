@@ -6,8 +6,8 @@ cd -- "$project_root"
 export PYTHONPATH="$project_root:$project_root/src${PYTHONPATH:+:$PYTHONPATH}"
 
 if [[ $# -eq 0 || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-  exec uv run --frozen python -m benchmarks.locomo.compare "$@"
+  exec python -m benchmarks.locomo.compare "$@"
 fi
 
 export STREAMLIT_SERVER_HEADLESS="${STREAMLIT_SERVER_HEADLESS:-true}"
-exec uv run --frozen streamlit run benchmarks/locomo/compare.py -- "$@"
+exec python -m streamlit run benchmarks/locomo/compare.py -- "$@"

@@ -2,7 +2,7 @@
 
 创建时间：20261124 15:43:38 Asia/Shanghai
 
-最后修订时间：20261125 15:13:43 Asia/Shanghai
+最后修订时间：20261125 17:20:12 Asia/Shanghai
 
 本目录提供 LoCoMo 的公共评估与看板接口。公共层维护数据、调度、评分和结果格式；各方法维护模型加载、正文处理、答案生成及自己的启动脚本。数据准备见[公共 benchmark 说明](../README.md)。
 
@@ -163,7 +163,7 @@ if __name__ == "__main__":
 
 ### 跨运行比较
 
-[公共看板脚本](scripts/dashboard.sh) 使用项目根环境启动 Streamlit。`--run` 后按“展示标签、LoCoMo 结果目录”成对传参，可连续指定多组：
+[公共看板脚本](scripts/dashboard.sh) 使用当前环境的 Python 启动 Streamlit。启动前激活已安装看板依赖的环境。`--run` 后按“展示标签、LoCoMo 结果目录”成对传参，可连续指定多组：
 
 ```bash
 bash benchmarks/locomo/scripts/dashboard.sh \
@@ -186,9 +186,9 @@ bash benchmarks/locomo/scripts/dashboard.sh \
 | `show_scores(metrics, extra_metrics=())` | 展示总体及分题型 F1 和题数；可通过 `(标签, 已格式化数值)` 序列追加方法指标卡 |
 | `show_answers(directory, metrics)` | `directory` 指向含 `details.jsonl` 的 LoCoMo 结果目录，展示筛选后的逐题回答 |
 
-渲染函数依次调用 `show_scores(summary["metrics"])`、方法专属展示和 `show_answers(directory, summary["metrics"])`。在项目根目录使用主环境启动页面，例如：
+渲染函数依次调用 `show_scores(summary["metrics"])`、方法专属展示和 `show_answers(directory, summary["metrics"])`。方法环境包含 Streamlit 等看板依赖，启动脚本使用该环境的 Python。在项目根目录运行，例如：
 
 ```bash
-PYTHONPATH=.:src uv run --frozen streamlit run my_method/dashboard.py -- \
+PYTHONPATH=.:src python -m streamlit run my_method/dashboard.py -- \
   --output-dir artifacts/my-method/eval/run-1
 ```
