@@ -49,8 +49,7 @@ class ICAELoCoMo:
         prefix = self.model.tokens_to_embeddings(self.token_tensor(self.prefix_ids))
         embeddings = torch.cat((prefix, slots.to(prefix).unsqueeze(0)), dim=1)
         with self.model.icae.disable_adapter():
-            # The base model returns the legacy tuple cache in Transformers 4.40.
-            # Per-question extensions allocate new KV tensors and preserve this prefix.
+            # The reader reuses this tuple cache as a shared prefix for all questions.
             cache = self.decoder.model(inputs_embeds=embeddings, use_cache=True).past_key_values
         stats = {"context_tokens": len(body_ids), "memory_tokens": memory_tokens}
         return (cache, prefix_length), stats

@@ -35,7 +35,7 @@ class ICAEAdapter:
     def answer_batch(self, state, questions, complete):
         prefix, _ = state
         size = len(questions)
-        # 官方 Transformers 4.40 的 tuple cache 追加时分配新张量。
+        # 在 batch 维度展开共享前缀；追加问题时会分配新的 KV 张量。
         cache = tuple(tuple(tensor.expand(size, -1, -1, -1) for tensor in layer) for layer in prefix)
         model = self.adapter.model
         ids = torch.tensor([question.inputs for question in questions], device=self.adapter.device)
