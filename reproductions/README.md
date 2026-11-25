@@ -1,6 +1,6 @@
 # 论文复现
 
-最后修订时间：20261125 10:08:15 Asia/Shanghai
+最后修订时间：20261125 11:54:15 Asia/Shanghai
 
 本目录保存论文方法的独立复现。训练和评估入口、依赖环境、源码来源及结果分别在各方法目录维护。
 
@@ -30,6 +30,8 @@
 ## 评估环境
 
 从 Linux x86-64 服务器的项目根目录运行安装器，确保 `uv` 已在 PATH 中，所需 Python 已安装。各方法使用独立环境，依赖按其 `requirements-eval.txt` 安装。
+
+安装器显式读取 uv 用户配置：默认 `${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml`，通常为 `~/.config/uv/uv.toml`；可用 `UV_CONFIG_FILE` 指定其他配置文件。该文件须已存在，普通 Python 依赖沿用其中的 PyPI 索引或镜像，主项目的 `pyproject.toml` 不参与配置。PyTorch 和 FlashAttention 仍使用各方法指定的 wheel 下载地址，不随 PyPI 镜像切换。
 
 | 方法参数 | Python | 默认环境目录 |
 |---|---|---|

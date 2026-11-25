@@ -2,7 +2,7 @@
 
 创建时间：20260904 10:13:57 Asia/Shanghai
 
-最后修订时间：20261125 10:58:32 Asia/Shanghai
+最后修订时间：20261125 11:54:15 Asia/Shanghai
 
 本目录使用 [In-context Autoencoder（ICAE）](https://arxiv.org/abs/2307.06945) 的官方 v2 实现，在 LoCoMo 上分别评估基于 Mistral-7B-Instruct-v0.2 的预训练与指令微调权重。源码与项目适配见 [UPSTREAM.md](UPSTREAM.md#icae-v2)。
 
@@ -44,7 +44,7 @@ bash reproductions/setup_eval_env.sh icae
 source ~/envs/icae-v2/bin/activate
 ```
 
-自定义位置与激活方式见[评估环境](../README.md#评估环境)。
+环境位置、uv 镜像配置与激活方式见[评估环境](../README.md#评估环境)。
 
 ## LoCoMo 评估
 

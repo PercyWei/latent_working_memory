@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261125 10:58:32 Asia/Shanghai
+最后修订时间：20261125 11:54:15 Asia/Shanghai
 
 本目录使用 [Test-Time Training Done Right](https://arxiv.org/abs/2505.23884v1) 的官方语言模型实现和作者公开 checkpoint。Momentum 760M 已于 20261110 完成下表全部 12,000 条 RULER 样本的评估，结果查看方式见[查看结果](#查看结果)。
 
@@ -56,7 +56,7 @@ bash reproductions/setup_eval_env.sh lact
 source ~/envs/ttt-lact/bin/activate
 ```
 
-自定义位置与激活方式见[评估环境](../README.md#评估环境)。
+环境位置、uv 镜像配置与激活方式见[评估环境](../README.md#评估环境)。
 
 Momentum 和 Muon 均支持 `optimized` 运行，验证范围见[复现状态记录](../20261110_ttt_reproduction_status.md#lact)：
 

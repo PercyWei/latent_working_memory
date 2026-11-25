@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261125 10:58:32 Asia/Shanghai
+最后修订时间：20261125 11:54:15 Asia/Shanghai
 
 ## 评估目标与数据
 
@@ -44,7 +44,7 @@ bash reproductions/setup_eval_env.sh in_place_ttt
 source ~/envs/ttt-in_place_ttt/bin/activate
 ```
 
-自定义位置与激活方式见[评估环境](../README.md#评估环境)。
+环境位置、uv 镜像配置与激活方式见[评估环境](../README.md#评估环境)。
 
 TTT 和 baseline 均支持 `optimized` 运行，验证范围见[复现状态记录](../20261110_ttt_reproduction_status.md#in-place-ttt)。
 

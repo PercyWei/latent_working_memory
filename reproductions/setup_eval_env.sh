@@ -8,6 +8,8 @@ usage() {
 
 方法：icae、autocompressors、lact、in_place_ttt、e2_ttt
 --env-root  环境根目录，默认 ~；环境保存在 <env-root>/envs/<环境名>
+
+uv 配置默认读取 ${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml，可用 UV_CONFIG_FILE 指定。
 EOF
 }
 if [[ $# -eq 0 ]]; then
@@ -44,11 +46,17 @@ case "$method" in
   *) printf '未知方法：%s\n' "$method" >&2; exit 2 ;;
 esac
 
+uv_config_file="${UV_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml}"
+if [[ ! -f $uv_config_file ]]; then
+  printf 'uv 用户配置不存在：%s；请创建该文件或通过 UV_CONFIG_FILE 指定。\n' "$uv_config_file" >&2
+  exit 2
+fi
+
 environment_dir="$env_root/envs/$environment_name"
 wheel_dir="${XDG_CACHE_HOME:-$HOME/.cache}/latent-working-memory/wheels"
 export UV_PYTHON_DOWNLOADS=never
 if [[ ! -e $environment_dir ]]; then
-  uv --no-config venv --python "$python_minor" --seed "$environment_dir"
+  uv --config-file "$uv_config_file" venv --python "$python_minor" --seed "$environment_dir"
 fi
 "$environment_dir/bin/python" -c \
   'import sys; assert f"{sys.version_info.major}.{sys.version_info.minor}" == sys.argv[1]' \
@@ -74,8 +82,8 @@ if [[ $method == e2_ttt ]]; then
   install_args+=(-e "$project_root/reproductions/e2_ttt/source/e2_ttt"
                 -e "$project_root/reproductions/e2_ttt/source/e2_ttt/lm-evaluation-harness")
 fi
-uv --no-config pip install --python "$environment_dir/bin/python" \
-  --index-url https://pypi.org/simple --find-links "$wheel_dir" \
+uv --config-file "$uv_config_file" pip install --python "$environment_dir/bin/python" \
+  --find-links "$wheel_dir" \
   --only-binary flash-attn "${install_args[@]}"
-uv --no-config pip check --python "$environment_dir/bin/python"
+uv --config-file "$uv_config_file" pip check --python "$environment_dir/bin/python"
 printf '环境已安装：%s\n' "$environment_dir"
