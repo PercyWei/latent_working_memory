@@ -20,7 +20,7 @@ UPSTREAM_COMMIT = "469a46886a92dd5e76b2d12a8bac0fb7ed7d4cdd"
 
 
 class ICAELoCoMo:
-    def __init__(self, model, stage):
+    def __init__(self, model, stage, system_prompt=QA_SYSTEM_PROMPT):
         self.model = model
         self.stage = stage
         self.decoder = model.icae.get_base_model()
@@ -28,7 +28,7 @@ class ICAELoCoMo:
         self.window = self.decoder.config.max_position_embeddings
         self.eos_id = model.tokenizer.eos_token_id
         self.input_format = icae_input_format(
-            model.tokenizer, stage, model.ft_token_id, QA_SYSTEM_PROMPT,
+            model.tokenizer, stage, model.ft_token_id, system_prompt,
         )
         self.prefix_ids = self.input_format["reader_prefix_ids"]
 
@@ -86,7 +86,8 @@ class ICAELoCoMo:
         return [((cache, len(embeds)), row) for cache, embeds, row in zip(caches, prefixes, stats, strict=True)]
 
 
-def load_adapter(model_path, checkpoint, stage, mean_compression_rate, fixed_mem_size):
+def load_adapter(model_path, checkpoint, stage, mean_compression_rate, fixed_mem_size,
+                 system_prompt=QA_SYSTEM_PROMPT):
     if not torch.cuda.is_available():
         raise RuntimeError("ICAE v2 evaluation requires CUDA and FlashAttention 2")
     model_args = ModelArguments(model_name_or_path=str(model_path), lora_r=512, train=False)
@@ -107,5 +108,5 @@ def load_adapter(model_path, checkpoint, stage, mean_compression_rate, fixed_mem
             f"unexpected={sorted(weights.keys() - expected)}"
         )
     model.load_state_dict(weights, strict=False)
-    return ICAELoCoMo(model.to("cuda").eval(), stage)
+    return ICAELoCoMo(model.to("cuda").eval(), stage, system_prompt)
 

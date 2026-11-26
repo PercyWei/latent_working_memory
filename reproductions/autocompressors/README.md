@@ -47,9 +47,9 @@ hf download princeton-nlp/AutoCompressor-Llama-2-7b-6k \
 | `--resume` | 用于续评估，默认关闭 |
 
 - **运行方式**：在项目根目录使用 AutoCompressors 环境运行。每张可见 GPU 加载一个模型副本。[环境准备](#一环境准备) · [数据下载](../../benchmarks/README.md)
-- **历史压缩**：Writer 逐段压缩对话正文，每段（含末段）生成 50 个摘要向量。累积摘要与当前正文合计最多占用 4,096 个位置。
+- **历史压缩**：Writer 逐段压缩正文，每段（含末段）生成 50 个摘要向量。累积摘要与当前正文合计最多占用 4,096 个位置。
 - **输入与解码**：Reader 依次读入 `BOS`、系统提示、全部摘要和问题，在 `Answer:` 后贪心生成回答。Reader 输入与回答预算之和也须在 4,096 个位置内。
-- **结果与续评**：各评估设置的结果分别保存在 `<output-root>/eval/<output-id>/` 下的对应子目录。`--resume` 复用已保存的回答和评分，只补齐未完成的部分。
+- **结果与续评**：各评估设置的结果分别保存在 `<output-root>/eval/<output-id>/` 下的对应子目录。使用原 `--output-id` 加 `--resume` 可复用已保存的进度，继续完成评估。
 
 <a id="locomo-评估"></a>
 <a id="31-locomo-评估"></a>
@@ -92,7 +92,8 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/autocompressors/scripts/eval_locomo.
 CUDA_VISIBLE_DEVICES=0,1 bash reproductions/autocompressors/scripts/eval_longmemeval.sh \
   --split longmemeval_s_cleaned \
   --checkpoint ~/models/reproductions/autocompressors/AutoCompressor-Llama-2-7b-6k \
-  --output-id AutoCompressor-Llama-2-7b-6k
+  --output-id AutoCompressor-Llama-2-7b-6k \
+  --batch-size-per-gpu 2
 ```
 
 | 独立评分代码参数 | 用途与默认值 |
@@ -106,6 +107,27 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/autocompressors/scripts/eval_longmem
 ```bash
 uv run -m benchmarks.longmemeval.score \
   --run-dir artifacts/reproductions/autocompressors/eval/AutoCompressor-Llama-2-7b-6k/longmemeval_s_cleaned
+```
+
+#### 3. QASPER
+
+| 完整评估脚本参数 | 用途与默认值 |
+|---|---|
+| `--benchmark-data` | 默认 `data/benchmarks/qasper` |
+| `--split` | 支持 `dev`（默认）和 `test` |
+| `--segment-length` | 默认 `2048` |
+| `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
+
+- **评估范围**：dev 包含 281 篇论文、1,005 道题，test 包含 416 篇论文、1,451 道题。[QASPER 评估协议](../../benchmarks/qasper/README.md)
+- **推理方式**：按论文分配 GPU。Writer 对每篇论文只压缩一次，各题复用摘要和 Reader 前缀缓存，独立作答。后续正文段的长度受剩余窗口限制。
+- **评分口径**：在本地逐题计算官方 Answer F1。每题取各参考答案中的最高分，再对所有题目取平均。
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash reproductions/autocompressors/scripts/eval_qasper.sh \
+  --split dev \
+  --checkpoint ~/models/reproductions/autocompressors/AutoCompressor-Llama-2-7b-6k \
+  --output-id AutoCompressor-Llama-2-7b-6k \
+  --batch-size-per-gpu 2
 ```
 
 <a id="33-结果展示"></a>
@@ -122,5 +144,6 @@ bash reproductions/autocompressors/scripts/dashboard.sh --output-dir artifacts/r
 |---|---|
 | `locomo/` | 总体与分题型 F1，以及各题型的题数 |
 | `longmemeval_s_cleaned/`、`longmemeval_oracle/` | 生成回答写入 `predictions.jsonl`。评分后可查看总体与分题型准确率以及每题的裁判判定 |
+| `qasper/dev/`、`qasper/test/` | 总体与分答案类型的 Answer F1，可按论文查看问题、参考答案、模型回答及逐题分数 |
 
 LoCoMo 看板可按题型和对话筛选，并显示模型、分段长度、每段对话的正文与摘要 token 数，以及按对话平均的摘要 token 数和保留比例。保留比例为摘要 token 数除以正文 token 数。

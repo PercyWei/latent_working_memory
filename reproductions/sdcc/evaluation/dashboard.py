@@ -33,4 +33,4 @@ def show_results(directory, summary):
 
 
 if __name__ == "__main__":
-    run_dashboard("sdcc", "SDCC", show_results)
+    run_dashboard("sdcc", "SDCC", show_results, qasper=True)

@@ -64,7 +64,7 @@ hf download sggetao/icae mistral_7b_pretrained_icae.safetensors mistral_7b_ft_ic
 - **运行方式**：在项目根目录使用 ICAE 环境运行。每张可见 GPU 加载一个模型副本。[环境准备](#一环境准备) · [数据下载](../../benchmarks/README.md)
 - **历史压缩**：Writer 按 `ceil(输入 token 数 / (每块记忆槽数 × 平均压缩率))` 确定块数，再将历史尽量均分到各块。默认每块最多把 512 个输入 token 压成 128 个记忆 token。
 - **输入与解码**：Reader 按 Mistral 聊天模板读入系统提示、记忆和问题，在 `[/INST]` 后贪心生成回答。指令微调阶段在记忆后插入 `[FT]`。Reader 输入与回答预算之和须在 32,768 个位置内。
-- **结果与续评**：各评估设置的结果分别保存在 `<output-root>/eval/<output-id>/` 下的对应子目录。`--resume` 复用已保存的回答和评分，只补齐未完成的部分。
+- **结果与续评**：各评估设置的结果分别保存在 `<output-root>/eval/<output-id>/` 下的对应子目录。使用原 `--output-id` 加 `--resume` 可复用已保存的进度，继续完成评估。
 
 <a id="locomo-评估"></a>
 <a id="31-locomo-评估"></a>
@@ -85,7 +85,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_locomo.sh \
   --model-path ~/models/Mistral-7B-Instruct-v0.2 \
   --checkpoint ~/models/reproductions/icae/mistral_7b_ft_icae.safetensors \
   --output-id mistral_7b_ft_icae_mem128_cr4 \
-  --batch-size-per-gpu 2
+  --batch-size-per-gpu 4
 ```
 
 <a id="32-longmemeval-评估"></a>
@@ -109,7 +109,8 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_longmemeval.sh \
   --stage finetuned \
   --model-path ~/models/Mistral-7B-Instruct-v0.2 \
   --checkpoint ~/models/reproductions/icae/mistral_7b_ft_icae.safetensors \
-  --output-id mistral_7b_ft_icae_mem128_cr4
+  --output-id mistral_7b_ft_icae_mem128_cr4 \
+  --batch-size-per-gpu 4
 ```
 
 | 独立评分代码参数 | 用途与默认值 |
@@ -123,6 +124,28 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_longmemeval.sh \
 ```bash
 uv run -m benchmarks.longmemeval.score \
   --run-dir artifacts/reproductions/icae/eval/mistral_7b_ft_icae_mem128_cr4/longmemeval_s_cleaned
+```
+
+#### 3. QASPER
+
+| 完整评估脚本参数 | 用途与默认值 |
+|---|---|
+| `--benchmark-data` | 默认 `data/benchmarks/qasper` |
+| `--split` | 支持 `dev`（默认）和 `test` |
+| `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
+
+- **评估范围**：dev 包含 281 篇论文、1,005 道题，test 包含 416 篇论文、1,451 道题。[QASPER 评估协议](../../benchmarks/qasper/README.md)
+- **推理方式**：按论文分配 GPU。每篇论文只压缩一次，各题复用记忆和 Reader 前缀缓存，独立作答。
+- **评分口径**：在本地逐题计算官方 Answer F1。每题取各参考答案中的最高分，再对所有题目取平均。
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_qasper.sh \
+  --split dev \
+  --stage finetuned \
+  --model-path ~/models/Mistral-7B-Instruct-v0.2 \
+  --checkpoint ~/models/reproductions/icae/mistral_7b_ft_icae.safetensors \
+  --output-id mistral_7b_ft_icae_mem128_cr4 \
+  --batch-size-per-gpu 4
 ```
 
 <a id="33-结果展示"></a>
@@ -139,5 +162,6 @@ bash reproductions/icae/scripts/dashboard.sh --output-dir artifacts/reproduction
 |---|---|
 | `locomo/` | 总体与分题型 F1，以及各题型的题数 |
 | `longmemeval_s_cleaned/`、`longmemeval_oracle/` | 生成回答写入 `predictions.jsonl`。评分后可查看总体与分题型准确率以及每题的裁判判定 |
+| `qasper/dev/`、`qasper/test/` | 总体与分答案类型的 Answer F1，可按论文查看问题、参考答案、模型回答及逐题分数 |
 
 LoCoMo 看板可按题型和对话筛选，并显示 ICAE 阶段、基座、记忆槽数、目标压缩率及按对话平均的记忆 token 数和保留比例。保留比例为记忆 token 数除以正文 token 数。

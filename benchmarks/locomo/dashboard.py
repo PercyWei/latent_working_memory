@@ -8,6 +8,7 @@ import streamlit as st
 
 from benchmarks.dashboard_data import load_details
 from benchmarks.longmemeval.dashboard import SETTINGS, show_runs
+from benchmarks.qasper.dashboard import TASK_LABELS as QASPER_LABELS, show_runs as show_qasper
 
 
 def show_scores(metrics, extra_metrics=()):
@@ -65,17 +66,19 @@ def show_answers(directory, metrics):
     references.code("\n".join(row["references"]), language=None, wrap_lines=True)
 
 
-def run_dashboard(method, title, render_results, argv=None):
-    """在方法的同一运行目录下选择 LoCoMo 或已评分的 LongMemEval 设置。"""
-    parser = argparse.ArgumentParser(description=f"查看 {title} 的 LoCoMo 和 LongMemEval 结果。")
+def run_dashboard(method, title, render_results, argv=None, qasper=False):
+    """在方法的同一运行目录下选择已评分的 benchmark 设置。"""
+    parser = argparse.ArgumentParser(description=f"查看 {title} 的 benchmark 结果。")
     parser.add_argument("--output-dir", type=Path, required=True,
-                        help="包含 locomo、longmemeval_s_cleaned 或 longmemeval_oracle 设置目录的运行目录")
+                        help="包含已评分的 benchmark 设置子目录的运行目录")
     directory = parser.parse_args(argv).output_dir.expanduser().resolve()
     if not directory.is_dir():
         parser.error(f"--output-dir 必须指向已有的评估运行目录：{directory}")
     st.set_page_config(page_title=title, layout="wide")
     st.title(f"{title} · {directory.name}")
     labels = {"locomo": "LoCoMo", **{key: f"LongMemEval-{value}" for key, value in SETTINGS.items()}}
+    if qasper:
+        labels.update(QASPER_LABELS)
     tasks = [key for key in labels if (directory / key / "summary.json").is_file()]
     if not tasks:
         st.info(f"在 {directory} 下未找到已评分的评估结果。")
@@ -83,10 +86,14 @@ def run_dashboard(method, title, render_results, argv=None):
     task = st.selectbox("评估任务", tasks, format_func=labels.__getitem__) if len(tasks) > 1 else tasks[0]
     task_dir = directory / task
     summary = json.loads((task_dir / "summary.json").read_text(encoding="utf-8"))
-    if summary["method"] != method or summary["benchmark"] != task:
+    benchmark, _, split = task.partition("/")
+    if (summary["method"] != method or summary["benchmark"] != benchmark
+            or (split and summary["split"] != split)):
         st.error(f"评估结果的方法或设置与所选的 {title} · {labels[task]} 不一致。")
         return
     if task == "locomo":
         render_results(task_dir, summary)
+    elif task in QASPER_LABELS:
+        show_qasper([(f"{title} · {labels[task]}", task_dir)])
     else:
         show_runs([(f"{title} · {labels[task]}", task_dir)])

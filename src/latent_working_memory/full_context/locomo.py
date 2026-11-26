@@ -1,4 +1,4 @@
-"""为同一段对话共享前缀 KV，再从该前缀独立回答各题。"""
+"""为同一段对话或论文共享前缀 KV，再从该前缀独立回答各题。"""
 
 import time
 
@@ -7,7 +7,7 @@ import torch
 from benchmarks.documents import PreparedConversation, PreparedQuestion
 from benchmarks.locomo.reader import prefill_prefixes, read_prefixes
 from benchmarks.protocol import encode_document_prompt
-from latent_working_memory.prompts import QAInputBuilder, qa_input_format
+from latent_working_memory.prompts import QAInputBuilder, QA_SYSTEM_PROMPT, qa_input_format
 
 from .model import load_model
 
@@ -29,9 +29,9 @@ def _encode_document(history, questions, builder, model_window):
 
 class FullContextLoCoMo:
     def __init__(self, tokenizer, model, generation, model_window, device, mixed_precision=False,
-                 prefill_chunk_size=None):
+                 system_prompt=QA_SYSTEM_PROMPT, prefill_chunk_size=None):
         self.tokenizer = tokenizer
-        self.prompt = QAInputBuilder(tokenizer, qa_input_format(tokenizer))
+        self.prompt = QAInputBuilder(tokenizer, qa_input_format(tokenizer), system_prompt)
         self.model = model
         self.generation = generation
         self.model_window = model_window
@@ -84,4 +84,5 @@ def load_adapter(settings, prefill_chunk_size=None):
         raise ValueError("loaded chat input format differs from the evaluation plan")
     return FullContextLoCoMo(tokenizer, model, generation, settings["model_window"], device,
                             mixed_precision=settings["model"]["mixed_precision"],
+                            system_prompt=settings.get("system_prompt", QA_SYSTEM_PROMPT),
                             prefill_chunk_size=prefill_chunk_size)

@@ -32,7 +32,7 @@ def validate_compute(config):
 
 
 def parse_chat_evaluation(parser, argv):
-    """LoCoMo 和 LongMemEval 共用的基座、精度及聊天模板配置。"""
+    """问答评估共用的基座、精度及聊天模板配置。"""
     parser.add_argument("--model-path", type=Path, default=Path("~/models/Qwen3-4B-Instruct-2507"),
                         help="本地基座模型目录，默认 ~/models/Qwen3-4B-Instruct-2507")
     parser.add_argument("--dtype", choices=tuple(WEIGHT_DTYPES), default="bf16",

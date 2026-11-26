@@ -5,7 +5,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 from benchmarks.documents import PreparedConversation, PreparedQuestion
 from benchmarks.locomo.reader import prefill_prefixes, read_prefixes
-from latent_working_memory.prompts import QAInputBuilder, qa_input_format
+from latent_working_memory.prompts import QA_SYSTEM_PROMPT, QAInputBuilder, qa_input_format
 
 
 def sdcc_input_format(tokenizer, placeholder_id):
@@ -22,12 +22,12 @@ def sdcc_input_format(tokenizer, placeholder_id):
 
 
 class SDCCLoCoMo:
-    def __init__(self, bridge, tokenizer, scale, input_format):
+    def __init__(self, bridge, tokenizer, scale, input_format, system_prompt=QA_SYSTEM_PROMPT):
         self.bridge = bridge
         self.tokenizer = tokenizer
         self.scale = scale
         self.decoder = bridge.decoder.get_base_model()
-        self.prompt = QAInputBuilder(tokenizer, input_format)
+        self.prompt = QAInputBuilder(tokenizer, input_format, system_prompt)
         # 保留官方 user 消息中的上下文标记。用实际 placeholder 确定 BPE 边界。
         self.context_marker = input_format["context_marker"]
         self.writer_eos_id = input_format["writer_eos_id"]

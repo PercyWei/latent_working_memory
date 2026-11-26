@@ -1,14 +1,14 @@
 # 论文复现
 
-最后修订时间：20261126 15:27:37 Asia/Shanghai
+最后修订时间：20261126 16:11:09 Asia/Shanghai
 
 本目录保存论文方法的独立复现。训练和评估入口、依赖环境、源码来源及结果分别在各方法目录维护。
 
 | 方法 | 入口 | 范围 |
 |---|---|---|
-| ICAE | [icae](icae/README.md) | v2 的 Mistral 预训练、指令微调权重在 LoCoMo 与 LongMemEval 上的对照；v1 的 Llama-2-7B-Chat 压缩器供 C-DIC 使用 |
-| AutoCompressors | [autocompressors](autocompressors/README.md) | 官方 Llama-2-7B-6k 摘要向量在 LoCoMo 与 LongMemEval 上的评估 |
-| SDCC | [sdcc](sdcc/README.md) | 官方 Qwen3-4B 半动态压缩权重在 LoCoMo 与 LongMemEval 上的评估 |
+| ICAE | [icae](icae/README.md) | v2 的 Mistral 预训练、指令微调权重在 LoCoMo、LongMemEval 和 QASPER 上的对照；v1 的 Llama-2-7B-Chat 压缩器供 C-DIC 使用 |
+| AutoCompressors | [autocompressors](autocompressors/README.md) | 官方 Llama-2-7B-6k 摘要向量在 LoCoMo、LongMemEval 和 QASPER 上的评估 |
+| SDCC | [sdcc](sdcc/README.md) | 官方 Qwen3-4B 半动态压缩权重在 LoCoMo、LongMemEval 和 QASPER 上的评估 |
 | C-DIC | [cdic](cdic/README.md) | 多轮记忆、MSC 训练与评估 |
 | LaCT | [lact](lact/README.md) | 760M 模型的 RULER、LoCoMo 和 LongMemEval 评估 |
 | E²-TTT | [e2_ttt](e2_ttt/README.md) | 1.3B 模型的 RULER、SQuAD completion、SWDE、LoCoMo 和 LongMemEval 评估 |
@@ -83,6 +83,10 @@ SDCC 在 Qwen3-4B-Instruct-2507 上按整段对话选择 2×、4×、8×、16× 
 
 上表六种已接入 LoCoMo 的复现方法，均可通过各自的 `scripts/eval_longmemeval.sh` 评估 S 或 Oracle。先用 `bash benchmarks/scripts/download_benchmarks.sh --benchmark longmemeval` 准备数据，并配置裁判 API。脚本生成全部回答后自动评分。中断后用原 `--output-id` 加 `--resume` 可继续生成或评分。各方法 README 给出对应的 checkpoint、评估命令和结果看板入口。[LongMemEval 公共评估协议](../benchmarks/longmemeval/README.md#评估约定)
 
+## QASPER
+
+ICAE v2、AutoCompressors 和 SDCC 使用各自的 `scripts/eval_qasper.sh`，可与 Full-context 在同一批论文问题上比较。默认评估开发集，测试集使用 `--split test`。每个划分独立保存预测和 Answer F1，结果位于运行目录的 `qasper/<split>/`。[四种方法的入口](../benchmarks/README.md#公共-qasper-评估) · [QASPER 公共评估协议](../benchmarks/qasper/README.md#评估约定)
+
 ## TTT 模型评估
 
 三个方法的既有评估进度与验证范围见[复现状态](20261110_ttt_reproduction_status.md)，LoCoMo 接入状态见各方法 README。评估使用各自的独立环境，命令均从项目根目录执行。
@@ -128,6 +132,8 @@ LaCT 的来源目录为 `source/lact/`、`source/flame/`；E²-TTT 为 `source/e
 ## Benchmark 结果看板
 
 ICAE、AutoCompressors、SDCC、LaCT、In-Place TTT 和 E²-TTT 各自提供 `scripts/dashboard.sh`，使用当前激活的方法环境展示单次运行的结果。`--output-dir` 指向包含 `locomo/`、`longmemeval_s_cleaned/` 或 `longmemeval_oracle/` 的运行目录，可在页面中选择已评分的任务。LongMemEval 的跨运行与跨设置比较见[公共看板](../benchmarks/longmemeval/README.md#查看结果)。
+
+ICAE、AutoCompressors 和 SDCC 的方法看板也可读取运行目录下的 `qasper/dev/` 和 `qasper/test/`。同一划分的跨运行比较使用 [QASPER 公共看板](../benchmarks/qasper/README.md#查看结果)。
 
 总体及各题型 F1、题数和逐题回答复用[公共看板接口](../benchmarks/locomo/README.md#方法看板接入)；记忆用量等专属展示由方法维护。启动命令见各方法 README 的“查看结果”。跨运行比较使用[公共 LoCoMo 看板](../benchmarks/locomo/README.md#跨运行比较)，可在任一方法环境中启动。
 

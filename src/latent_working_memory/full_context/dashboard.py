@@ -1,4 +1,4 @@
-"""独立查看原始模型的 LoCoMo、LongMemEval 和 RULER 评估结果。"""
+"""独立查看原始模型的 LoCoMo、LongMemEval、QASPER 和 RULER 评估结果。"""
 
 import argparse
 import json
@@ -8,10 +8,12 @@ import streamlit as st
 
 from benchmarks.locomo.dashboard import load_details, show_answers, show_scores
 from benchmarks.longmemeval.dashboard import SETTINGS as LONGMEMEVAL_LABELS, show_runs
+from benchmarks.qasper.dashboard import TASK_LABELS as QASPER_LABELS, show_runs as show_qasper
 
 
 TASK_LABELS = {"locomo": "LoCoMo", "ruler": "RULER",
-               **{task: f"LongMemEval-{name}" for task, name in LONGMEMEVAL_LABELS.items()}}
+               **{task: f"LongMemEval-{name}" for task, name in LONGMEMEVAL_LABELS.items()},
+               **QASPER_LABELS}
 
 
 def score_table(groups, field, label, metric):
@@ -26,8 +28,13 @@ def score_table(groups, field, label, metric):
 
 def show_results(directory, task):
     summary = json.loads((directory / "summary.json").read_text(encoding="utf-8"))
-    if summary["method"] != "full-context" or summary["benchmark"] != task:
+    benchmark, _, split = task.partition("/")
+    if (summary["method"] != "full-context" or summary["benchmark"] != benchmark
+            or (split and summary["split"] != split)):
         st.error(f"该目录不是 Full-context 的 {TASK_LABELS[task]} 评估结果。")
+        return
+    if task in QASPER_LABELS:
+        show_qasper([(TASK_LABELS[task], directory)])
         return
     if task in LONGMEMEVAL_LABELS:
         show_runs([(TASK_LABELS[task], directory)])
@@ -74,7 +81,7 @@ def show_results(directory, task):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True,
-                        help="评估运行目录，其下包含 LoCoMo、RULER 或 LongMemEval 设置子目录")
+                        help="包含已评分的 benchmark 设置子目录的运行目录")
     directory = parser.parse_args(argv).output_dir.expanduser().resolve()
     if not directory.is_dir():
         parser.error(f"--output-dir 必须指向已有的评估运行目录：{directory}")
@@ -82,7 +89,7 @@ def main(argv=None):
     st.title(f"原始模型基线 · {directory.name}")
     tasks = [task for task in TASK_LABELS if (directory / task / "summary.json").is_file()]
     if not tasks:
-        st.info(f"在 {directory} 下未找到已汇总的 LoCoMo、RULER 或 LongMemEval 结果。")
+        st.info(f"在 {directory} 下未找到已汇总的评估结果。")
         return
     task = st.selectbox("评估任务", tasks, format_func=TASK_LABELS.__getitem__)
     show_results(directory / task, task)

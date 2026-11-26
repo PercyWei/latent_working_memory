@@ -30,4 +30,4 @@ def show_results(directory, summary):
 
 
 if __name__ == "__main__":
-    run_dashboard("autocompressors", "AutoCompressors", show_results)
+    run_dashboard("autocompressors", "AutoCompressors", show_results, qasper=True)

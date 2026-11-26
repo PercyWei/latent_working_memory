@@ -3,7 +3,7 @@
 import torch
 
 from benchmarks.documents import PreparedConversation, PreparedQuestion
-from latent_working_memory.prompts import QAInputBuilder, qa_input_format
+from latent_working_memory.prompts import QA_SYSTEM_PROMPT, QAInputBuilder, qa_input_format
 
 
 INPUT_FORMAT = {
@@ -13,13 +13,14 @@ INPUT_FORMAT = {
 
 
 class AutoCompressorLoCoMo:
-    def __init__(self, model, tokenizer, segment_length, input_format, fit_segments=False):
+    def __init__(self, model, tokenizer, segment_length, input_format, fit_segments=False,
+                 system_prompt=QA_SYSTEM_PROMPT):
         self.model = model
         self.tokenizer = tokenizer
         self.segment_length = segment_length
         self.fit_segments = fit_segments
         self.input_format = dict(input_format)
-        self.prompt_parts = QAInputBuilder(tokenizer, self.input_format).parts()
+        self.prompt_parts = QAInputBuilder(tokenizer, self.input_format, system_prompt).parts()
         self.window = model.config.max_position_embeddings
 
     def segment_lengths(self, token_count):

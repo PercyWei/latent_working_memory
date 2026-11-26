@@ -9,6 +9,7 @@ from peft import PeftModel
 from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 from benchmarks.locomo.records import file_identity
+from latent_working_memory.prompts import QA_SYSTEM_PROMPT
 from reproductions.sdcc.source.sdcc.modeling_ctxcomp import CtxCompSemiDynamicModel
 from .locomo_adapter import SDCCLoCoMo, sdcc_input_format
 
@@ -93,7 +94,8 @@ def load_adapter(settings):
     bridge.projector.load_state_dict(weights["projector"])
     bridge.compress_ratio_head.load_state_dict(weights["compress_ratio_head"])
     return SDCCLoCoMo(bridge.requires_grad_(False).eval(), tokenizer,
-                      settings["compress_ratio_scale"], input_format)
+                      settings["compress_ratio_scale"], input_format,
+                      system_prompt=settings.get("system_prompt", QA_SYSTEM_PROMPT))
 
 
 def load_longmemeval_adapter(settings):

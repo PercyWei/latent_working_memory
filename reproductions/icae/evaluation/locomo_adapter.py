@@ -60,7 +60,7 @@ def add_arguments(parser):
                         help="官方平均压缩率参数，取正整数，默认 4")
 
 
-def configuration(args):
+def configuration(args, system_prompt=QA_SYSTEM_PROMPT):
     if args.fixed_mem_size <= 0:
         raise ValueError("--fixed-mem-size must be positive")
     if args.mean_compression_rate <= 0:
@@ -70,7 +70,7 @@ def configuration(args):
     base_config = AutoConfig.from_pretrained(args.model_path.expanduser(), local_files_only=True)
     tokenizer = AutoTokenizer.from_pretrained(args.model_path.expanduser(), use_fast=False, local_files_only=True)
     input_format = icae_input_format(
-        tokenizer, args.stage, base_config.vocab_size + 1 + args.fixed_mem_size + 2, QA_SYSTEM_PROMPT,
+        tokenizer, args.stage, base_config.vocab_size + 1 + args.fixed_mem_size + 2, system_prompt,
     )
     return {"model_path": str(args.model_path.expanduser().resolve()), "checkpoint": str(checkpoint),
             "stage": args.stage, "fixed_mem_size": args.fixed_mem_size,
@@ -82,7 +82,8 @@ def configuration(args):
 
 def load_adapter(settings):
     adapter = load_official(Path(settings["model_path"]), Path(settings["checkpoint"]),
-                            settings["stage"], settings["mean_compression_rate"], settings["fixed_mem_size"])
+                            settings["stage"], settings["mean_compression_rate"], settings["fixed_mem_size"],
+                            settings.get("system_prompt", QA_SYSTEM_PROMPT))
     if adapter.input_format != settings["input_format"]:
         raise ValueError("loaded ICAE input format differs from the evaluation plan")
     return ICAEAdapter(adapter)

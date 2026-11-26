@@ -7,6 +7,7 @@ import torch
 from transformers import AutoTokenizer
 
 from benchmarks.locomo.records import file_identity
+from latent_working_memory.prompts import QA_SYSTEM_PROMPT
 from .locomo_adapter import AutoCompressorLoCoMo, INPUT_FORMAT
 
 
@@ -50,7 +51,8 @@ def load_adapter(settings):
         raise ValueError("expected 50 accumulated summary vectors per segment")
     model.requires_grad_(False).eval().cuda()
     return AutoCompressorLoCoMo(model, tokenizer, settings["segment_length"], settings["input_format"],
-                                fit_segments=settings.get("fit_segments", False))
+                                fit_segments=settings.get("fit_segments", False),
+                                system_prompt=settings.get("system_prompt", QA_SYSTEM_PROMPT))
 
 
 def load_longmemeval_adapter(settings):

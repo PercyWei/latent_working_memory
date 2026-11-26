@@ -33,8 +33,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$benchmark" in
-  all|ruler|locomo|longmemeval) ;;
-  *) fail '--benchmark 只能为 all、ruler、locomo 或 longmemeval' ;;
+  all|ruler|locomo|longmemeval|qasper) ;;
+  *) fail '--benchmark 只能为 all、ruler、locomo、longmemeval 或 qasper' ;;
 esac
 data_root="$(expand_user_path "$data_root")"
 ruler_source_dir="$(expand_user_path "$ruler_source_dir")"
@@ -92,4 +92,22 @@ if [[ $benchmark == all || $benchmark == longmemeval ]]; then
     download_file "$base_url/$file" "$data_root/longmemeval/$file"
   done
   printf 'LongMemEval-S 和 Oracle 数据已准备：%s/longmemeval\n' "$data_root"
+fi
+
+if [[ $benchmark == all || $benchmark == qasper ]]; then
+  qasper_dir="$data_root/qasper"
+  qasper_endpoint=https://qasper-dataset.s3.us-west-2.amazonaws.com
+  mkdir -p "$qasper_dir"
+  for split in dev test; do
+    case "$split" in
+      dev) package=qasper-train-dev-v0.3.tgz ;;
+      test) package=qasper-test-and-evaluator-v0.3.tgz ;;
+    esac
+    file="qasper-$split-v0.3.json"
+    download_file "$qasper_endpoint/$package" "$qasper_dir/$package"
+    tar -xzO -f "$qasper_dir/$package" "$file" > "$qasper_dir/$file.tmp"
+    mv -- "$qasper_dir/$file.tmp" "$qasper_dir/$file"
+    rm -- "$qasper_dir/$package"
+  done
+  printf 'QASPER dev 和 test 数据已准备：%s\n' "$qasper_dir"
 fi

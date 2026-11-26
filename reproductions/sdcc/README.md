@@ -56,7 +56,7 @@ hf download yuyijiong/qwen3-semi-dynamic-soft-context-compress \
 - **运行方式**：在项目根目录使用 SDCC 环境运行。每张可见 GPU 各加载一套编码器和解码器。[环境准备](#一环境准备) · [数据下载](../../benchmarks/README.md)
 - **历史压缩**：编码器根据历史末尾 EOS 的隐藏状态选择压缩倍率。示例 checkpoint 支持 2×、4×、8×、16×、32×，长度为 `L` 的输入以倍率 `r` 压缩后得到 `ceil(L / r)` 个记忆 token。
 - **输入与解码**：解码器使用基座聊天模板，`system` 消息包含 QA 提示，`user` 消息依次包含 `Context:`、压缩记忆和问题。解码器从 `assistant` 起始标记贪心生成回答。含 EOS 的历史须放入编码器窗口，记忆前缀、问题和回答预算须放入解码器窗口。
-- **结果与续评**：各评估设置的结果分别保存在 `<output-root>/eval/<output-id>/` 下的对应子目录。`--resume` 复用已保存的回答和评分，只补齐未完成的部分。
+- **结果与续评**：各评估设置的结果分别保存在 `<output-root>/eval/<output-id>/` 下的对应子目录。使用原 `--output-id` 加 `--resume` 可复用已保存的进度，继续完成评估。
 
 <a id="locomo-评估"></a>
 <a id="31-locomo-评估"></a>
@@ -75,7 +75,7 @@ hf download yuyijiong/qwen3-semi-dynamic-soft-context-compress \
 CUDA_VISIBLE_DEVICES=0,1 bash reproductions/sdcc/scripts/eval_locomo.sh \
   --model-path ~/models/Qwen3-4B-Instruct-2507 \
   --checkpoint ~/models/reproductions/sdcc/semi-dynamic/ctxcomp-semi-dynamic-mean_pooling-doclen=1200to64-ratios=0.5_0.03125-enc=Qwen3-4B-Instruct-2507-lora-dec=Qwen3-4B-Instruct-2507-lora \
-  --output-id qwen3-4b_sdcc_scale0 \
+  --output-id ctxcomp-semi-dynamic-mean_pooling-doclen=1200to64-ratios=0.5_0.03125-enc=Qwen3-4B-Instruct-2507-lora-dec=Qwen3-4B-Instruct-2507-lora_scale0 \
   --batch-size-per-gpu 2
 ```
 
@@ -98,8 +98,8 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/sdcc/scripts/eval_longmemeval.sh \
   --split longmemeval_s_cleaned \
   --model-path ~/models/Qwen3-4B-Instruct-2507 \
   --checkpoint ~/models/reproductions/sdcc/semi-dynamic/ctxcomp-semi-dynamic-mean_pooling-doclen=1200to64-ratios=0.5_0.03125-enc=Qwen3-4B-Instruct-2507-lora-dec=Qwen3-4B-Instruct-2507-lora \
-  --output-id qwen3-4b_sdcc_scale0 \
-  --batch-size-per-gpu 1
+  --output-id ctxcomp-semi-dynamic-mean_pooling-doclen=1200to64-ratios=0.5_0.03125-enc=Qwen3-4B-Instruct-2507-lora-dec=Qwen3-4B-Instruct-2507-lora_scale0 \
+  --batch-size-per-gpu 2
 ```
 
 | 独立评分代码参数 | 用途与默认值 |
@@ -112,7 +112,28 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/sdcc/scripts/eval_longmemeval.sh \
 
 ```bash
 uv run -m benchmarks.longmemeval.score \
-  --run-dir artifacts/reproductions/sdcc/eval/qwen3-4b_sdcc_scale0/longmemeval_s_cleaned
+  --run-dir artifacts/reproductions/sdcc/eval/ctxcomp-semi-dynamic-mean_pooling-doclen=1200to64-ratios=0.5_0.03125-enc=Qwen3-4B-Instruct-2507-lora-dec=Qwen3-4B-Instruct-2507-lora_scale0/longmemeval_s_cleaned
+```
+
+#### 3. QASPER
+
+| 完整评估脚本参数 | 用途与默认值 |
+|---|---|
+| `--benchmark-data` | 默认 `data/benchmarks/qasper` |
+| `--split` | 支持 `dev`（默认）和 `test` |
+| `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
+
+- **评估范围**：dev 包含 281 篇论文、1,005 道题，test 包含 416 篇论文、1,451 道题。[QASPER 评估协议](../../benchmarks/qasper/README.md)
+- **推理方式**：按论文分配 GPU。编码器对每篇论文只选择一次倍率并生成一份记忆，各题复用解码器前缀缓存，独立作答。
+- **评分口径**：在本地逐题计算官方 Answer F1。每题取各参考答案中的最高分，再对所有题目取平均。
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash reproductions/sdcc/scripts/eval_qasper.sh \
+  --split dev \
+  --model-path ~/models/Qwen3-4B-Instruct-2507 \
+  --checkpoint ~/models/reproductions/sdcc/semi-dynamic/ctxcomp-semi-dynamic-mean_pooling-doclen=1200to64-ratios=0.5_0.03125-enc=Qwen3-4B-Instruct-2507-lora-dec=Qwen3-4B-Instruct-2507-lora \
+  --output-id ctxcomp-semi-dynamic-mean_pooling-doclen=1200to64-ratios=0.5_0.03125-enc=Qwen3-4B-Instruct-2507-lora-dec=Qwen3-4B-Instruct-2507-lora_scale0 \
+  --batch-size-per-gpu 2
 ```
 
 <a id="33-结果展示"></a>
@@ -123,12 +144,13 @@ uv run -m benchmarks.longmemeval.score \
 
 ```bash
 bash reproductions/sdcc/scripts/dashboard.sh \
-  --output-dir artifacts/reproductions/sdcc/eval/qwen3-4b_sdcc_scale0
+  --output-dir artifacts/reproductions/sdcc/eval/ctxcomp-semi-dynamic-mean_pooling-doclen=1200to64-ratios=0.5_0.03125-enc=Qwen3-4B-Instruct-2507-lora-dec=Qwen3-4B-Instruct-2507-lora_scale0
 ```
 
 | 设置目录 | 结果 |
 |---|---|
 | `locomo/` | 总体与分题型 F1，以及各题型的题数 |
 | `longmemeval_s_cleaned/`、`longmemeval_oracle/` | 生成回答写入 `predictions.jsonl`。评分后可查看总体与分题型准确率以及每题的裁判判定 |
+| `qasper/dev/`、`qasper/test/` | 总体与分答案类型的 Answer F1，可按论文查看问题、参考答案、模型回答及逐题分数 |
 
 LoCoMo 看板可按题型和对话筛选，并显示各对话的压缩倍率、正文与记忆 token 数及按对话平均的保留比例。保留比例为记忆 token 数除以原始正文 token 数。
