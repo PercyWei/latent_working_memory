@@ -55,8 +55,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/sdcc/scripts/eval_locomo.sh \
   --model-path ~/models/Qwen3-4B-Instruct-2507 \
   --checkpoint ~/models/reproductions/sdcc/semi-dynamic/ctxcomp-semi-dynamic-mean_pooling-doclen=1200to64-ratios=0.5_0.03125-enc=Qwen3-4B-Instruct-2507-lora-dec=Qwen3-4B-Instruct-2507-lora \
   --output-id ctxcomp-semi-dynamic-mean_pooling-doclen=1200to64-ratios=0.5_0.03125-enc=Qwen3-4B-Instruct-2507-lora-dec=Qwen3-4B-Instruct-2507-lora_scale0_20261126 \
-  --batch-size-per-gpu 2 \
-  --compress-ratio-scale 0
+  --batch-size-per-gpu 2
 ```
 
 | 参数 | 默认值与约定 |
