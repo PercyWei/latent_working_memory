@@ -1,6 +1,6 @@
 # 20260912_latent_working_memory
 
-最后修订时间：20261126 16:11:09 Asia/Shanghai
+最后修订时间：20261126 20:00:15 Asia/Shanghai
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理，入口见 [reproductions](reproductions/README.md)。Full-context 和六种复现基线支持 LoCoMo、LongMemEval-S 和 LongMemEval-Oracle。Full-context、ICAE、AutoCompressors 和 SDCC 还支持 QASPER 论文全文问答。[软上下文压缩复现](reproductions/README.md#软上下文压缩的-locomo-评估) · [LongMemEval 评估协议](benchmarks/longmemeval/README.md#评估约定) · [QASPER 评估协议](benchmarks/qasper/README.md#评估约定)
 
@@ -168,16 +168,9 @@ artifacts/             生成结果、测试报告和日志
 
 迁移前位于 `/data/bywei/datasets/`、`/data/bywei/checkpoints/` 和 `/data/bywei/logs/cdic/` 下的相关旧路径暂时保留为 symlink，以兼容已有 checkpoint 中记录的绝对路径；新配置统一使用项目内路径。
 
-## ICAE v1 环境
+## ICAE v2 复现
 
-ICAE v1 lock 面向 Linux x86-64，使用与原始代码依赖栈兼容的 PyTorch CUDA 11.8 wheel。运行时需要与 CUDA 11.8 兼容的 NVIDIA 驱动。环境安装不会自动下载模型或数据。
-
-```bash
-uv sync --project reproductions/icae --frozen
-uv run --project reproductions/icae icae-check-environment
-```
-
-在 GPU 服务器运行前，参见 `reproductions/icae/README.md`。
+Mistral ICAE v2 的环境安装与 benchmark 评估命令见 [ICAE 复现说明](reproductions/icae/README.md)。
 
 ## C-DIC 复现
 

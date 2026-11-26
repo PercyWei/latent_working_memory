@@ -11,12 +11,11 @@ ICAE_ROOT = ROOT / "reproductions" / "icae"
 
 def test_required_icae_sources_are_present() -> None:
     required = {
-        "src/icae/llama_icae_modeling.py",
-        "src/icae/llama_icae_learning.py",
-        "src/icae/base/modeling_llama_icae.py",
-        "src/icae/utils/stable_trainer.py",
-        "vendor/peft/src/peft/tuners/lora.py",
-        "LICENSE",
+        "source/icae/code/icae_v2/modeling_icae_multi_span.py",
+        "source/icae/code/icae_v2/pretrain.py",
+        "source/icae/code/icae_v2/instruction_finetune.py",
+        "source/icae/code/icae_v2/training_utils.py",
+        "source/icae/LICENSE",
         "UPSTREAM.md",
     }
     missing = [path for path in sorted(required) if not (ICAE_ROOT / path).is_file()]
