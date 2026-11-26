@@ -63,6 +63,9 @@ fi
 
 requirements_file="$project_root/reproductions/$method/requirements-eval.txt"
 install_args=(-r "$requirements_file")
+if [[ -d "$HOME/wheels" && -z ${UV_FIND_LINKS:-} ]]; then
+  install_args+=(--find-links "$HOME/wheels")
+fi
 while IFS= read -r wheel_url; do
   wheel_name="${wheel_url##*/}"
   wheel_name="${wheel_name//%2B/+}"
