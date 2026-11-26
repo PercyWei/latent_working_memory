@@ -2,8 +2,6 @@
 
 
 import torch
-from peft import LoraConfig
-from safetensors.torch import load_file
 
 from benchmarks.locomo.reader import prefill_prefixes
 from latent_working_memory.prompts import QA_SYSTEM_PROMPT
@@ -12,6 +10,7 @@ from reproductions.icae.source.icae.code.icae_v2.modeling_icae_multi_span import
     ICAE,
     ModelArguments,
     TrainingArguments,
+    adapter_config,
 )
 
 
@@ -93,24 +92,15 @@ def load_adapter(model_path, checkpoint, stage, mean_compression_rate, fixed_mem
                  system_prompt=QA_SYSTEM_PROMPT):
     if not torch.cuda.is_available():
         raise RuntimeError("ICAE v2 evaluation requires CUDA and FlashAttention 2")
-    model_args = ModelArguments(model_name_or_path=str(model_path), lora_r=512, train=False)
+    lora = adapter_config()
+    model_args = ModelArguments(model_name_or_path=str(model_path), lora_r=lora.r, train=False)
     inference_args = TrainingArguments(
         output_dir=str(checkpoint.parent), bf16=True, fixed_mem_size=fixed_mem_size,
         mean_compression_rate=mean_compression_rate, report_to=[],
     )
-    lora = LoraConfig(r=512, lora_alpha=32, lora_dropout=0.05, bias="none", task_type="CAUSAL_LM")
     # 特殊 token 读取 checkpoint 嵌入，PAD 有掩码，生成只在原词表内选词。
     model = ICAE(model_args, inference_args, lora, mean_resizing=False)
     model.memory_token_embed.bfloat16()
-    # Official safetensors contain the complete writer LoRA and slot embeddings,
-    # while all frozen weights come from the base model directory.
-    weights = load_file(str(checkpoint))
-    expected = {name for name, param in model.named_parameters() if param.requires_grad}
-    if set(weights) != expected:
-        raise ValueError(
-            f"ICAE adapter keys differ: missing={sorted(expected - weights.keys())}, "
-            f"unexpected={sorted(weights.keys() - expected)}"
-        )
-    model.load_state_dict(weights, strict=False)
+    model.load_adapter_weights(checkpoint)
     return ICAELoCoMo(model.to("cuda").eval(), stage, system_prompt)
 

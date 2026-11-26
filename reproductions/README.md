@@ -1,12 +1,12 @@
 # 论文复现
 
-最后修订时间：20261126 20:00:15 Asia/Shanghai
+最后修订时间：20261126 23:52:23 Asia/Shanghai
 
 本目录保存论文方法的独立复现。训练和评估入口、依赖环境、源码来源及结果分别在各方法目录维护。
 
 | 方法 | 入口 | 范围 |
 |---|---|---|
-| ICAE | [icae](icae/README.md) | Mistral ICAE v2 的预训练与指令微调权重在 LoCoMo、LongMemEval 和 QASPER 上的评估 |
+| ICAE | [icae](icae/README.md) | ICAE v2 预训练与指令微调（示例基座 Qwen3-4B-Instruct-2507），以及自训权重和 Mistral 公开权重的 LoCoMo、LongMemEval 和 QASPER 评估 |
 | AutoCompressors | [autocompressors](autocompressors/README.md) | 官方 Llama-2-7B-6k 摘要向量在 LoCoMo、LongMemEval 和 QASPER 上的评估 |
 | SDCC | [sdcc](sdcc/README.md) | 官方 Qwen3-4B 半动态压缩权重在 LoCoMo、LongMemEval 和 QASPER 上的评估 |
 | C-DIC | [cdic](cdic/README.md) | 多轮记忆、MSC 训练与评估 |

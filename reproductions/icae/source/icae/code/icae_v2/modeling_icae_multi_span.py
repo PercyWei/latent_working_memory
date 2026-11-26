@@ -1,21 +1,16 @@
 # ICAE that supports multi span concat
 
 import transformers
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
-import os
+from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 import torch.nn as nn
-import random
 from dataclasses import dataclass, field
 from typing import Optional
 from peft import (
-    get_peft_model,
+    LoraConfig, get_peft_model,
 )
-from torch.nn.functional import gelu
 import math
 from safetensors.torch import load_file
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 @dataclass
 class ModelArguments:
@@ -93,18 +88,30 @@ def freeze_model(model):
         param.requires_grad = False
 
 
+def adapter_config():
+    return LoraConfig(r=512, lora_alpha=32, lora_dropout=0.05, bias="none", task_type="CAUSAL_LM")
+
+
+def segment_count(length, mem_size, compression_rate):
+    if length <= 0:
+        raise ValueError("ICAE requires at least one document token")
+    return math.ceil(length / (mem_size * compression_rate))
+
+
 class ICAE(torch.nn.Module):
     def __init__(self, model_args, training_args, lora_config, mean_resizing=None):
         super().__init__()
         self.model_args = model_args
         self.training_args = training_args
         self.model_name = model_args.model_name_or_path
-        self.icae = AutoModelForCausalLM.from_pretrained(self.model_name, torch_dtype=torch.float16 if training_args.bf16 is False else torch.bfloat16, use_flash_attention_2=True, resume_download=True)
-        
-        self.training = self.model_args.train    
-        
-        if self.training:    # indepedent model for gradient checkpointing
-            self.decoder = AutoModelForCausalLM.from_pretrained(self.model_name, torch_dtype=torch.float16 if training_args.bf16 is False else torch.bfloat16, use_flash_attention_2=True, resume_download=True)
+        load_options = {
+            "dtype": torch.bfloat16 if training_args.bf16 else torch.float16,
+            "attn_implementation": "flash_attention_2",
+        }
+        self.icae = AutoModelForCausalLM.from_pretrained(self.model_name, **load_options)
+        self.training = self.model_args.train
+        if self.training:
+            self.decoder = AutoModelForCausalLM.from_pretrained(self.model_name, **load_options)
 
         self.vocab_size = self.icae.config.vocab_size + 1    # [PAD] token
         self.pad_token_id = self.vocab_size - 1
@@ -122,19 +129,16 @@ class ICAE(torch.nn.Module):
         resize_options = {} if mean_resizing is None else {"mean_resizing": mean_resizing}
         self.icae.resize_token_embeddings(self.vocab_size_with_mem + 3, **resize_options)
         
-        # special tokens for Llama-2/Mistral tokenizer
-        self.bos_id = 1
-        self.eos_id = 2
-        
         self.dim = self.icae.config.hidden_size
         self.icae = get_peft_model(self.icae, lora_config)
-        
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.memory_token_embed = nn.Embedding(self.mem_size + 3, self.dim, padding_idx=None)
         self.loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, use_fast=False)
-        self.append_sequence = torch.arange(self.vocab_size, self.vocab_size + self.mem_size, dtype=torch.long, device=device).unsqueeze(0)    # mem tokens
+        self.bos_id = self.tokenizer.bos_token_id
+        self.eos_id = self.tokenizer.eos_token_id
+        self.register_buffer("append_sequence", torch.arange(self.vocab_size, self.vocab_size_with_mem).unsqueeze(0),
+                             persistent=False)
         
         if self.training:
             self.init()
@@ -147,18 +151,28 @@ class ICAE(torch.nn.Module):
         print_trainable_parameters(self)
         if self.training_args.restore_from is not None and self.training_args.restore_from != "":
             print(f"Loading from the pretrained checkpoint: {self.training_args.restore_from}...")
-            state_dict = load_file(self.training_args.restore_from)
-            self.load_state_dict(state_dict)
+            self.load_adapter_weights(self.training_args.restore_from)
             print(f"Finished loading from {self.training_args.restore_from}")
         print("Enabling gradient checkpointing...")
         # self.icae.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         self.decoder.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
                 
         
+    def adapter_parameters(self):
+        return {name: param for name, param in self.named_parameters() if param.requires_grad}
+
+    def load_adapter_weights(self, path):
+        weights = load_file(str(path))
+        expected = self.adapter_parameters().keys()
+        if weights.keys() != expected:
+            raise ValueError(
+                f"ICAE adapter keys differ: missing={sorted(expected - weights.keys())}, "
+                f"unexpected={sorted(weights.keys() - expected)}"
+            )
+        self.load_state_dict(weights, strict=False)
+
     def compute_num_segments(self, total_length):
-        assert total_length > 0
-        num_segments = math.ceil(total_length / (self.mem_size * self.mean_compression_rate))
-        return num_segments
+        return segment_count(total_length, self.mem_size, self.mean_compression_rate)
 
 
     def forward(
@@ -167,49 +181,29 @@ class ICAE(torch.nn.Module):
         prompt_answer_ids: torch.LongTensor = None,
         labels: Optional[torch.LongTensor] = None,
     ):
-        # encoder part
-        batch_size = input_ids.size(0)
+        if input_ids.size(0) != 1:
+            raise ValueError("ICAE training requires one document per device per microbatch")
         total_length = input_ids.size(1)
         num_segments = self.compute_num_segments(total_length)
         segment_length = math.ceil(total_length / num_segments)
-        
-        prompt_answer_embs = self.icae.get_base_model().model.embed_tokens(prompt_answer_ids)
-        max_compressed_length = num_segments * self.mem_size
-        compress_outputs = torch.zeros((max_compressed_length, self.dim)).to(prompt_answer_embs)
-        
-        for segment_idx in range(num_segments):
-            
-            start_idx = segment_idx * segment_length
-            end_idx = min((segment_idx + 1) * segment_length, total_length)
-            segment_input_ids = input_ids[:, start_idx:end_idx]
-            segment_input_ids = torch.cat([segment_input_ids, self.append_sequence], dim=1)
-            mem_flag = segment_input_ids >= self.vocab_size
 
-            segment_input_embedding = self.icae.get_base_model().model.embed_tokens(segment_input_ids)
-            segment_input_embedding[mem_flag] = self.memory_token_embed(segment_input_ids[mem_flag] - self.vocab_size).to(segment_input_embedding)
+        memories = []
+        writer = self.icae.get_base_model().model
+        for segment in input_ids.split(segment_length, dim=1):
+            ids = torch.cat((segment, self.append_sequence), dim=1)
+            hidden = writer(inputs_embeds=self.tokens_to_embeddings(ids), use_cache=False,
+                            return_dict=True).last_hidden_state
+            memories.append(hidden[0, -self.mem_size:])
+        prompt_answer_embs = self.tokens_to_embeddings(prompt_answer_ids)
+        slots = (prompt_answer_ids >= self.vocab_size) & (prompt_answer_ids < self.vocab_size_with_mem)
+        prompt_answer_embs[slots] = torch.cat(memories).to(prompt_answer_embs)
 
-            # compress the current segment
-            segment_compress_outputs = self.icae(inputs_embeds=segment_input_embedding, output_hidden_states=True)
-            segment_compress_outputs = segment_compress_outputs.hidden_states[-1]
-
-            # collect memory tokens
-            compress_outputs[segment_idx*self.mem_size: self.mem_size*(segment_idx+1)] = segment_compress_outputs[mem_flag]
-            
-            del segment_input_ids, segment_input_embedding
-            torch.cuda.empty_cache()
-            
-        # decoder part
-        decoder_mem_flag = (prompt_answer_ids >= self.vocab_size) & (prompt_answer_ids < self.vocab_size + self.mem_size)   # only mem tokens
-
-        prompt_answer_embs[decoder_mem_flag] = compress_outputs  # replace memory slots
-        special_prompt = prompt_answer_ids >= self.vocab_size_with_mem
-        prompt_answer_embs[special_prompt] = self.memory_token_embed(prompt_answer_ids[special_prompt] - self.vocab_size).to(prompt_answer_embs)    # replace special token's embedding from self.memory_token_embed
-        
-        if self.training:   # has an independent se.f.decoder
-            decoder_outputs = self.decoder(inputs_embeds=prompt_answer_embs, output_hidden_states=True)
+        # Trainer 切到 eval() 计算验证损失时，仍使用训练时的冻结 Reader 和原词表。
+        if self.model_args.train:
+            decoder_outputs = self.decoder(inputs_embeds=prompt_answer_embs, use_cache=False)
         else:
-            with self.icae.disable_adapter():   # no independent decoder; use self.icae
-                decoder_outputs = self.icae(inputs_embeds=prompt_answer_embs, output_hidden_states=True)
+            with self.icae.disable_adapter():
+                decoder_outputs = self.icae(inputs_embeds=prompt_answer_embs, use_cache=False)
 
 
         logits = decoder_outputs.logits
@@ -231,7 +225,6 @@ class ICAE(torch.nn.Module):
         input_ids: torch.LongTensor = None
     ):  # for inference; compress a fixed length of input into memory slots
 
-        batch_size = input_ids.size(0)
         total_length = input_ids.size(1)
         num_segments = self.compute_num_segments(total_length)
         segment_length = math.ceil(total_length / num_segments)

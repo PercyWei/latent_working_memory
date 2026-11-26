@@ -1,6 +1,6 @@
 # 20260912_latent_working_memory
 
-最后修订时间：20261126 20:00:15 Asia/Shanghai
+最后修订时间：20261126 23:52:23 Asia/Shanghai
 
 本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理，入口见 [reproductions](reproductions/README.md)。Full-context 和六种复现基线支持 LoCoMo、LongMemEval-S 和 LongMemEval-Oracle。Full-context、ICAE、AutoCompressors 和 SDCC 还支持 QASPER 论文全文问答。[软上下文压缩复现](reproductions/README.md#软上下文压缩的-locomo-评估) · [LongMemEval 评估协议](benchmarks/longmemeval/README.md#评估约定) · [QASPER 评估协议](benchmarks/qasper/README.md#评估约定)
 
@@ -170,7 +170,7 @@ artifacts/             生成结果、测试报告和日志
 
 ## ICAE v2 复现
 
-Mistral ICAE v2 的环境安装与 benchmark 评估命令见 [ICAE 复现说明](reproductions/icae/README.md)。
+ICAE v2 的独立环境支持 Qwen3-4B-Instruct-2507 的预训练、指令微调与评估，也用于评估作者发布的 Mistral 权重。[ICAE 复现说明](reproductions/icae/README.md)
 
 ## C-DIC 复现
 

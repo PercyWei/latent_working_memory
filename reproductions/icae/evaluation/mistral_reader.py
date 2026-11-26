@@ -13,13 +13,15 @@ if is_flash_attn_2_available():
 
 def _read(model, hidden, positions, groups, suffix_caches, suffix_lengths):
     batch, width, _ = hidden.shape
+    num_heads = model.config.num_attention_heads
+    num_kv_heads = model.config.num_key_value_heads
+    cos, sin = model.model.rotary_emb(hidden, positions)
     for index, layer in enumerate(model.model.layers):
         attention = layer.self_attn
         inputs = layer.input_layernorm(hidden)
-        q = attention.q_proj(inputs).view(batch, width, attention.num_heads, attention.head_dim)
-        k = attention.k_proj(inputs).view(batch, width, attention.num_key_value_heads, attention.head_dim)
+        q = attention.q_proj(inputs).view(batch, width, num_heads, attention.head_dim)
+        k = attention.k_proj(inputs).view(batch, width, num_kv_heads, attention.head_dim)
         v = attention.v_proj(inputs).view_as(k)
-        cos, sin = attention.rotary_emb(v, positions)
         q, k = apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=2)
 
         # 后缀内部遵循因果掩码；问题中的每个有效位置均可看见整个正文。
@@ -32,7 +34,7 @@ def _read(model, hidden, positions, groups, suffix_caches, suffix_lengths):
             queries = q[rows]
             # 同正文问题合并查询，直接读取原 KV 的转置视图。
             prefix_output, prefix_lse = flash_attn_with_kvcache(
-                queries.reshape(1, -1, attention.num_heads, attention.head_dim),
+                queries.reshape(1, -1, num_heads, attention.head_dim),
                 keys.transpose(1, 2), values.transpose(1, 2), return_softmax_lse=True,
             )
             # 以两段的 softmax 分母合并，相当于对正文和后缀一起做一次 softmax。
@@ -58,7 +60,7 @@ def read_mistral_prefixes(model, caches, prefix_lengths, suffix_embeddings, budg
 
     lengths = [len(embeds) for embeds in suffix_embeddings]
     capacity = max(n + budget for n, budget in zip(lengths, budgets, strict=True))
-    # FA2 2.6 的单 token GQA 内核把同一 KV head 的查询头数作为查询长度。
+    # 为单 token GQA 内核保留同一 KV head 下各查询头所需的空间。
     capacity = max(capacity, model.config.num_attention_heads // model.config.num_key_value_heads)
     batch = len(caches)
     suffix_caches = []

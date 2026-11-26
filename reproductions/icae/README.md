@@ -2,7 +2,7 @@
 
 创建时间：20260904 10:13:57 Asia/Shanghai
 
-最后修订时间：20261126 17:07:15 Asia/Shanghai
+最后修订时间：20261126 23:52:23 Asia/Shanghai
 
 [环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能](#三通用功能)
 
@@ -10,7 +10,10 @@
 
 推理默认以 BF16 加载模型权重，关闭模型级自动混合精度（autocast）。注意力使用 FlashAttention 2。
 
-从服务器的项目根目录创建并激活独立评估环境。完整依赖见 [requirements-eval.txt](requirements-eval.txt)。
+在 Linux x86-64 GPU 服务器的项目根目录运行以下命令，创建或更新独立的 ICAE v2 环境。Qwen3 自行训练和 Mistral 公开权重评估共用该环境。
+
+- **GPU 依赖**：Python 3.11、PyTorch `2.8.0+cu128`、FlashAttention `2.8.3`。安装脚本使用与 Torch 2.8、CUDA 12 和 C++11 ABI（`TRUE`）匹配的预编译 wheel。
+- **训练依赖**：Transformers `4.57.3`、PEFT `0.18.0`、Accelerate `1.10.1` 和 Datasets `3.6.0`。[完整依赖](requirements-eval.txt)
 
 ```bash
 bash reproductions/setup_eval_env.sh icae
@@ -44,6 +47,61 @@ hf download sggetao/icae mistral_7b_pretrained_icae.safetensors mistral_7b_ft_ic
   --local-dir ~/models/reproductions/icae
 ```
 
+### 2.2 自行训练 ICAE v2
+
+- **基座与权重**：下例使用 Qwen3-4B-Instruct-2507 的基座与 tokenizer。指令微调加载第一步在同一 Qwen 基座上训练的 ICAE 权重，LoCoMo 评估加载第二步的微调权重。训练与评估共用 LoRA rank 512。
+- **训练数据**：每个阶段分别准备训练集和验证集，以下示例使用 JSONL，每行一个样本。预训练示例为 `{"text":"The Nile flows into the Mediterranean Sea."}`；指令微调示例为 `{"input":"The Nile flows into the Mediterranean Sea.","prompt":"Where does the Nile flow?","answer":"The Mediterranean Sea."}`。
+- **并行与批量**：每张可见 GPU 启动一个进程，每卡每个微批处理一篇正文。全局有效批量等于 GPU 数乘以 `--gradient-accumulation-steps`。两个阶段均在训练结束时计算验证集 loss。
+
+| 训练脚本参数 | 用途与默认值 |
+|---|---|
+| `--model-path` | 必填，本地基座模型与 tokenizer 目录 |
+| `--train-file`、`--validation-file` | 必填，当前阶段的训练集、验证集文件路径，支持 JSON 和 JSONL |
+| `--output-dir` | 必填，当前阶段的训练输出目录 |
+| `--checkpoint` | 指令微调必填，预训练 ICAE 的 `.safetensors` 文件 |
+| `--fixed-mem-size`、`--mean-compression-rate` | 每块记忆槽数和目标压缩率，默认 `128`、`4`。槽数为 2 的幂；微调及评估沿用预训练设置 |
+| `--model-max-length` | Writer 的正文 token 上限，默认 `5120`。预训练随机截取超长训练文本；预训练验证和指令微调使用正文开头。Reader 输入仍须放入基座窗口 |
+| `--lm-ratio` | 仅预训练，采样后文续写目标的概率，默认 `0`（重建原文）；验证始终使用重建目标 |
+| `--num-train-epochs`、`--max-steps` | 默认训练 `1` 轮；`--max-steps` 默认为 `-1`，设为正数时按指定优化步数训练 |
+| `--learning-rate`、`--gradient-accumulation-steps` | 学习率和梯度累积步数，默认 `5e-5`、`1` |
+| `--save-steps`、`--seed` | 两次训练断点间的优化步数和随机种子，默认 `500`、`42` |
+
+**预训练**
+
+```bash
+hf download Qwen/Qwen3-4B-Instruct-2507 --local-dir ~/models/Qwen3-4B-Instruct-2507
+
+CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/pretrain.sh \
+  --model-path ~/models/Qwen3-4B-Instruct-2507 \
+  --train-file data/reproductions/icae/pretrain/train.jsonl \
+  --validation-file data/reproductions/icae/pretrain/dev.jsonl \
+  --output-dir artifacts/reproductions/icae/train/qwen3_4b_instruct_2507_pretrained_icae_mem128_cr4 \
+  --gradient-accumulation-steps 4
+```
+
+**指令微调**
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/instruction_finetune.sh \
+  --model-path ~/models/Qwen3-4B-Instruct-2507 \
+  --checkpoint artifacts/reproductions/icae/train/qwen3_4b_instruct_2507_pretrained_icae_mem128_cr4/model.safetensors \
+  --train-file data/reproductions/icae/finetune/train.jsonl \
+  --validation-file data/reproductions/icae/finetune/dev.jsonl \
+  --output-dir artifacts/reproductions/icae/train/qwen3_4b_instruct_2507_ft_icae_mem128_cr4 \
+  --gradient-accumulation-steps 4
+```
+
+- **训练产物**：最终权重在 `<output-dir>/model.safetensors`，包含 Writer 的 LoRA 和记忆及控制标记嵌入。训练断点位于 `checkpoint-<step>/`。中断后用相同参数和输出目录重新启动会从最新断点恢复优化器和步数；新实验或新阶段请使用各自的输出目录。
+- **接入评估**：将最终文件或中间断点中的 `model.safetensors` 直接传给评估脚本的 `--checkpoint`。预训练权重选 `--stage pretrained`，指令微调权重选 `--stage finetuned`，两者均使用训练时的基座和压缩设置。例如：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_locomo.sh \
+  --stage finetuned \
+  --model-path ~/models/Qwen3-4B-Instruct-2507 \
+  --checkpoint artifacts/reproductions/icae/train/qwen3_4b_instruct_2507_ft_icae_mem128_cr4/model.safetensors \
+  --output-id qwen3_4b_instruct_2507_selftrained_ft_icae_mem128_cr4
+```
+
 ## 三、通用功能
 
 ### 3.1 benchmark 评估
@@ -63,7 +121,7 @@ hf download sggetao/icae mistral_7b_pretrained_icae.safetensors mistral_7b_ft_ic
 
 - **运行方式**：在项目根目录使用 ICAE 环境运行。每张可见 GPU 加载一个模型副本。[环境准备](#一环境准备) · [数据下载](../../benchmarks/README.md)
 - **历史压缩**：Writer 按 `ceil(输入 token 数 / (每块记忆槽数 × 平均压缩率))` 确定块数，再将历史尽量均分到各块。默认每块最多把 512 个输入 token 压成 128 个记忆 token。
-- **输入与解码**：Reader 按 Mistral 聊天模板读入系统提示、记忆和问题，在 `[/INST]` 后贪心生成回答。指令微调阶段在记忆后插入 `[FT]`。Reader 输入与回答预算之和须在 32,768 个位置内。
+- **输入与解码**：Reader 按基座 tokenizer 的聊天模板读入系统提示、记忆和问题，从模板的回答起点贪心生成。指令微调阶段在记忆后插入 `[FT]`。Reader 输入与回答预算之和须在基座的位置窗口内。
 - **结果与续评**：各评估设置的结果分别保存在 `<output-root>/eval/<output-id>/` 下的对应子目录。使用原 `--output-id` 加 `--resume` 可复用已保存的进度，继续完成评估。
 
 <a id="locomo-评估"></a>

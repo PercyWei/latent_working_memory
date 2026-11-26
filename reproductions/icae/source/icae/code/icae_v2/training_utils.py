@@ -1,12 +1,44 @@
-from transformers import Trainer
-import os
-import torch
-import random
-
-from transformers.trainer_utils import get_last_checkpoint
 import math
+import os
+import random
+from pathlib import Path
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+import torch
+from safetensors.torch import save_file
+from transformers import Trainer
+from transformers.trainer import TRAINING_ARGS_NAME
+from transformers.trainer_utils import get_last_checkpoint
+from transformers.utils import SAFE_WEIGHTS_NAME
+
+from reproductions.icae.formatting import icae_input_format
+from .modeling_icae_multi_span import segment_count
+
+
+class ICAETrainer(Trainer):
+    """沿用 Trainer 的优化器及随机数状态断点，模型文件仅保存可训练参数。"""
+
+    def _save(self, output_dir=None, state_dict=None):
+        # Trainer 只在负责保存的进程调用 _save，参数名取自原始 ICAE 模型。
+        parameters = self.model.adapter_parameters()
+        if state_dict is None:
+            state_dict = parameters
+        weights = {name: state_dict[name].detach().cpu().contiguous() for name in parameters}
+        directory = Path(output_dir or self.args.output_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / SAFE_WEIGHTS_NAME
+        temporary = target.with_suffix(".safetensors.tmp")
+        save_file(weights, str(temporary), metadata={"format": "pt"})
+        temporary.replace(target)
+        torch.save(self.args, directory / TRAINING_ARGS_NAME)
+
+    def _load_from_checkpoint(self, resume_from_checkpoint, model=None):
+        # 基座与冻结的解码器已经从 model_name_or_path 初始化。
+        target = self.model if model is None else self.accelerator.unwrap_model(model)
+        target.load_adapter_weights(Path(resume_from_checkpoint) / SAFE_WEIGHTS_NAME)
+
+    def _load_best_model(self):
+        self._load_from_checkpoint(self.state.best_model_checkpoint)
+
 
 def train_model(model, train_dataset, eval_dataset, training_args, data_collator=None):
 
@@ -32,7 +64,7 @@ def train_model(model, train_dataset, eval_dataset, training_args, data_collator
     if local_rank == 0:
         print(training_args)
 
-    trainer = Trainer(
+    trainer = ICAETrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -81,95 +113,68 @@ def text_extraction(input_ids, length, lm_ratio=0.0):
         return input_ids[random_start: random_start+length], input_ids[random_start+length:]
 
 
-def pretrain_tokenize_function(examples, model, mem, lm_ratio=0.0):
-    text_output = model.tokenizer(examples["text"], truncation=False, padding=False, return_attention_mask=False)
-    text_output['prompt_answer_ids'] = []
-    text_output['labels'] = []
+class ICAETrainingInputs:
+    """逐样本构建 Writer 输入和只对答案计算损失的 Reader 输入。仅保留分词器及配置。"""
 
-    max_len = model.training_args.model_max_length  # heuristic
+    def __init__(self, model, stage):
+        args = model.training_args
+        self.tokenizer = model.tokenizer
+        self.window = model.icae.config.max_position_embeddings
+        self.max_length = args.model_max_length
+        self.mem_size = model.mem_size
+        self.compression_rate = model.mean_compression_rate
+        self.first_mem_id = model.vocab_size
+        self.ae_id = model.ae_token_id
+        self.lm_id = model.lm_token_id
+        self.eos_id = model.eos_id
+        if self.eos_id is None:
+            raise ValueError("ICAE training requires a tokenizer EOS token")
+        self.min_tokens_for_lm = args.min_tokens_for_lm
+        self.leave_tokens_for_lm = args.leave_tokens_for_lm
+        self.add_lm_token = args.add_special_token_for_lm
+        if stage == "finetuned":
+            self.template = icae_input_format(self.tokenizer, stage, model.ft_token_id, system_prompt=None)
 
-    for idx in range(len(text_output["input_ids"])):
-        
-        ae = True
-        a, b = text_extraction(text_output["input_ids"][idx], max_len, lm_ratio=lm_ratio)
-        length_a = len(a)
-        num_segments = model.compute_num_segments(length_a)
-        total_mem_length = num_segments * model.mem_size
-        
-        if len(b) > model.training_args.min_tokens_for_lm:  # avoid too few tokens for lm, which is a waste of computing
-            ae = False
-            b = b[:max_len]
+    def memory_slots(self, document):
+        count = segment_count(len(document), self.mem_size, self.compression_rate)
+        writer_length = math.ceil(len(document) / count) + self.mem_size
+        if writer_length > self.window:
+            raise ValueError(f"ICAE writer needs {writer_length} positions (window {self.window})")
+        return [self.first_mem_id] * (count * self.mem_size)
 
-        text_output['input_ids'][idx] = a
+    def append_example(self, output, document, prompt, answer, skip=0):
+        reader_ids = prompt + answer
+        if len(reader_ids) > self.window:
+            raise ValueError(f"ICAE reader needs {len(reader_ids)} positions (window {self.window})")
+        output["input_ids"].append(document)
+        output["prompt_answer_ids"].append(reader_ids)
+        output["labels"].append([-100] * (len(prompt) + skip) + answer[skip:])
 
-        # decoder part: note that in v2, we add mem_tokens to the prompt_ids for easy implementation; which is different from v1 implementation where mem tokens are not in the prompt_ids
-        if ae:  # autoencoding objective
-            prompt_ids = [mem[0]] * total_mem_length + [model.ae_token_id]
-            answer_ids = a + [model.eos_id]    # if ae, eos token
-        else:   # lm objective
-            prompt_ids = [mem[0]] * total_mem_length
-            if model.training_args.add_special_token_for_lm:
-                prompt_ids += [model.lm_token_id]
-            answer_ids = b   # if lm, no eos token
+    def pretrain(self, examples, lm_ratio=0.0, validation=False):
+        output = {"input_ids": [], "prompt_answer_ids": [], "labels": []}
+        texts = self.tokenizer(examples["text"], truncation=False, return_attention_mask=False)["input_ids"]
+        for tokens in texts:
+            if validation:
+                document, continuation = tokens[:self.max_length], []
+            else:
+                document, continuation = text_extraction(tokens, self.max_length, lm_ratio)
+            prompt = self.memory_slots(document)
+            if len(continuation) > self.min_tokens_for_lm and self.max_length > self.leave_tokens_for_lm:
+                if self.add_lm_token:
+                    prompt.append(self.lm_id)
+                self.append_example(output, document, prompt, continuation[:self.max_length], self.leave_tokens_for_lm)
+            else:
+                self.append_example(output, document, prompt + [self.ae_id], document + [self.eos_id])
+        return output
 
-        text_output['prompt_answer_ids'].append(prompt_ids + answer_ids)
-        if ae:
-            labels = [-100] * len(prompt_ids) + answer_ids
-        else:
-            labels = [-100] * len(prompt_ids) + [-100] * model.training_args.leave_tokens_for_lm + answer_ids[model.training_args.leave_tokens_for_lm:] # no loss for leave_tokens_for_lm
-        text_output['labels'].append(labels)
-        assert len(text_output['prompt_answer_ids'][-1]) == len(labels)
-        
-    return text_output
-
-
-def instruct_ft_tokenize_function(examples, model, mem):
-    text_output = model.tokenizer(examples["input"], max_length=5120, truncation=True, padding=False, return_attention_mask=False, add_special_tokens=False)
-    prompt_output = model.tokenizer(examples["prompt"], truncation=False, padding=False, return_attention_mask=False, add_special_tokens=False)
-    label_output = model.tokenizer(examples["answer"], truncation=False, padding=False, return_attention_mask=False, add_special_tokens=False)
-    text_output['prompt_answer_ids'] = []
-    text_output['labels'] = []
-
-    max_len = model.training_args.model_max_length  # heuristic
-
-    for idx in range(len(text_output["input_ids"])):
-        
-        length = len(text_output["input_ids"][idx])
-        num_segments = model.compute_num_segments(length)
-        total_mem_length = num_segments * model.mem_size
-        
-        prompt_ids = [mem[0]] * total_mem_length + [model.ft_token_id] + prompt_output['input_ids'][idx]
-        prompt_ids = [1, 733, 16289, 28793] + prompt_ids + [733, 28748, 16289, 28793]   # special formats for prompt in Mistral
-        answer_ids = label_output['input_ids'][idx] + [model.eos_id]
-
-        text_output['prompt_answer_ids'].append(prompt_ids + answer_ids)
-            
-        labels = [-100] * len(prompt_ids) + answer_ids
-        text_output['labels'].append(labels)
-        
-        assert len(text_output['prompt_answer_ids'][-1]) == len(labels)
-        
-    return text_output
-
-
-class DataCollatorForDynamicPadding:
-    def __init__(self, pad_token_id, pad_to_multiple_of=None):
-        self.pad_token_id = pad_token_id
-        self.pad_to_multiple_of = pad_to_multiple_of
-    def __call__(self, examples):
-        input_ids = [torch.tensor(example["input_ids"], dtype=torch.long) for example in examples]
-        labels = [torch.tensor(example["labels"], dtype=torch.long) for example in examples]
-        prompt_answer_ids = [torch.tensor(example["prompt_answer_ids"], dtype=torch.long) for example in examples]
-        input_ids = self.dynamic_padding(input_ids, fill_value=self.pad_token_id)
-        prompt_answer_ids = self.dynamic_padding(prompt_answer_ids, fill_value=self.pad_token_id)
-        labels = self.dynamic_padding(labels)
-        batch = {"input_ids": input_ids, "labels": labels, "prompt_answer_ids": prompt_answer_ids}
-        return batch
-    def dynamic_padding(self, sequences, fill_value=-100):
-        max_length = max(len(x) for x in sequences)
-        if self.pad_to_multiple_of:
-            max_length = ((max_length - 1) // self.pad_to_multiple_of + 1) * self.pad_to_multiple_of
-        padded_sequences = torch.full((len(sequences), max_length), fill_value, dtype=torch.long)
-        for i, seq in enumerate(sequences):
-            padded_sequences[i, :len(seq)] = seq
-        return padded_sequences
+    def finetune(self, examples):
+        output = {"input_ids": [], "prompt_answer_ids": [], "labels": []}
+        documents = self.tokenizer(examples["input"], truncation=True, max_length=self.max_length,
+                                   return_attention_mask=False)["input_ids"]
+        prompts = self.tokenizer(examples["prompt"], add_special_tokens=False, return_attention_mask=False)["input_ids"]
+        answers = self.tokenizer(examples["answer"], add_special_tokens=False, return_attention_mask=False)["input_ids"]
+        for document, prompt, answer in zip(documents, prompts, answers, strict=True):
+            reader_prompt = (self.template["reader_prefix_ids"] + self.memory_slots(document)
+                             + self.template["question_prefix_ids"] + prompt + self.template["answer_prefix_ids"])
+            self.append_example(output, document, reader_prompt, answer + [self.eos_id])
+        return output
