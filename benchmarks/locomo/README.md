@@ -96,15 +96,15 @@ if __name__ == "__main__":
 
 ## 运行参数
 
-以下约定适用于公共调度器 `run_evaluation`。通过 `CUDA_VISIBLE_DEVICES` 指定 GPU，例如 `CUDA_VISIBLE_DEVICES=0,1`；调度器按对话分配任务，每张参与评估的 GPU 使用独立进程。
+以下约定适用于公共调度器 `run_evaluation`。调度器按对话分配任务，每张参与评估的 GPU 使用独立进程。
 
 | 参数 | 含义与默认值 |
 |---|---|
-| `--benchmark-data` | 含 `locomo10.json` 的目录，默认 `data/benchmarks/locomo` |
-| `--output-root` | 评估产物根目录，默认值由方法入口提供 |
-| `--output-id` | 运行标识；默认 `<output_name>_<YYYYMMDD-HHMM>`，`output_name` 由方法提供，时间采用 `Asia/Shanghai` |
+| `--benchmark-data` | 默认 `data/benchmarks/locomo` |
+| `--output-root` | 必填，评估产物根目录 |
+| `--output-id` | 必填，运行标识 |
 | `--batch-size-per-gpu` | 每卡评估批量大小，默认 1 |
-| `--resume` | 使用原 `--output-id` 和评估配置续评；GPU 数量和批量可调整 |
+| `--resume` | 使用原 `--output-id` 和评估配置续评 |
 
 结果目录为 `<output-root>/eval/<output-id>/locomo/`。
 
