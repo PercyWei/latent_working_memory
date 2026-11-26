@@ -2,7 +2,7 @@
 
 创建时间：20261019 20:16:32 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261126 15:09:31 Asia/Shanghai
+最后修订时间：20261126 15:26:50 Asia/Shanghai
 
 Full-context 基线用原始模型读取完整输入，贪心生成答案。支持 LoCoMo、LongMemEval-S、LongMemEval-Oracle 和 RULER。[公共数据准备](../../../benchmarks/README.md)
 
@@ -59,6 +59,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eva
 | `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
 
 - **评估范围**：S 和 Oracle 使用相同的 500 道题。S 提供证据会话和干扰会话，Oracle 只提供证据会话。
+- **输入长度**：按示例模型 Qwen3-4B-Instruct-2507 的 tokenizer 统计，计入系统提示和聊天模板后，S 每题为 99,491–110,826 个 token，Oracle 为 259–22,567 个 token。
 - **推理方式**：按题分配 GPU。每题按日期顺序拼接会话历史，再追加提问日期和问题。模型以最多 4,096 个 token 为一块预填输入，保留本批各题的完整 KV 缓存直至生成结束。
 - **自动评分**：生成全部回答后，脚本调用 `gpt-6-luna`，按官方分题型提示词逐题判定正误，汇总准确率。裁判密钥 `OPENAI_API_KEY` 可在项目根目录的 `.env` 中配置。[裁判配置与评分口径](../../../benchmarks/longmemeval/README.md#问答评分)
 

@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261126 14:44:01 Asia/Shanghai
+最后修订时间：20261126 15:27:37 Asia/Shanghai
 
 本目录提供 RULER、LoCoMo 和 LongMemEval 的公共数据准备、读取和评分。各方法通过相应接口接入。
 
@@ -122,4 +122,4 @@ Full-context、ICAE v2 和 v3.1.1 通过各自的评估脚本调用[公共接口
 
 ## 公共 LongMemEval 评估
 
-Full-context、ICAE v2、AutoCompressors、SDCC、LaCT、E²-TTT 和 In-Place TTT 均提供 `scripts/eval_longmemeval.sh`。用 `--split longmemeval_s_cleaned` 或 `--split longmemeval_oracle` 选择设置。脚本按原始题序保存回答后，自动调用公共裁判并汇总准确率。中断后用原 `--output-id` 加 `--resume` 补齐回答或评分。[LongMemEval 运行示例与裁判配置](longmemeval/README.md#运行基线)
+Full-context、ICAE v2、AutoCompressors、SDCC、LaCT、E²-TTT 和 In-Place TTT 均提供 `scripts/eval_longmemeval.sh`。用 `--split longmemeval_s_cleaned` 或 `--split longmemeval_oracle` 选择设置。脚本按原始题序保存回答后，自动调用公共裁判并汇总准确率。中断后用原 `--output-id` 加 `--resume` 补齐回答或评分。[LongMemEval 公共协议](longmemeval/README.md#评估约定) · [裁判配置](longmemeval/README.md#问答评分)

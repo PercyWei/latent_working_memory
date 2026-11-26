@@ -1,6 +1,6 @@
 # 论文复现
 
-最后修订时间：20261126 14:44:01 Asia/Shanghai
+最后修订时间：20261126 15:27:37 Asia/Shanghai
 
 本目录保存论文方法的独立复现。训练和评估入口、依赖环境、源码来源及结果分别在各方法目录维护。
 
@@ -81,7 +81,7 @@ SDCC 在 Qwen3-4B-Instruct-2507 上按整段对话选择 2×、4×、8×、16× 
 
 ## LongMemEval-S 与 Oracle
 
-上表六种已接入 LoCoMo 的复现方法，均可通过各自的 `scripts/eval_longmemeval.sh` 评估 S 或 Oracle。先用 `bash benchmarks/scripts/download_benchmarks.sh --benchmark longmemeval` 准备数据，并配置裁判 API。脚本生成全部回答后自动评分。中断后用原 `--output-id` 加 `--resume` 可继续生成或评分。各方法 README 给出对应的 checkpoint、评估命令和结果看板入口。[公共协议与七个基线入口](../benchmarks/longmemeval/README.md#运行基线)
+上表六种已接入 LoCoMo 的复现方法，均可通过各自的 `scripts/eval_longmemeval.sh` 评估 S 或 Oracle。先用 `bash benchmarks/scripts/download_benchmarks.sh --benchmark longmemeval` 准备数据，并配置裁判 API。脚本生成全部回答后自动评分。中断后用原 `--output-id` 加 `--resume` 可继续生成或评分。各方法 README 给出对应的 checkpoint、评估命令和结果看板入口。[LongMemEval 公共评估协议](../benchmarks/longmemeval/README.md#评估约定)
 
 ## TTT 模型评估
 
