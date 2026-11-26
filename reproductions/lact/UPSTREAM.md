@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:03:39 Asia/Shanghai
 
-最后修订时间：20261125 00:11:31 Asia/Shanghai
+最后修订时间：20261126 10:26:09 Asia/Shanghai
 
 ## 来源与迁入范围
 
@@ -26,7 +26,7 @@ LaCT 对应论文 [Test-Time Training Done Right v1](https://arxiv.org/abs/2505.
 | `evaluation/` | checkpoint 加载、组批、评估协议、记录收集、计分和结果比较，包含[论文对照数据](evaluation/ruler_paper_reference.json) |
 | `../evaluation_runtime.py` | 三方法共用的进程清理、时间、严格 JSON、基础 Git 来源，以及 `WorkerProgress` 快照和 `EvaluationProgress` 展示 |
 
-训练侧接入集中于 `source/flame/custom_models/__init__.py` 导入并注册官方 `lact_model`，以及本地单卡配置和梯度累积。备用入口 [train_760m_muon.sh](scripts/train_760m_muon.sh) 调用原 `flame.train`；训练环境和使用方式见 [README](README.md#备用训练入口)。
+训练侧接入集中于 `source/flame/custom_models/__init__.py` 导入并注册官方 `lact_model`，以及本地单卡配置和梯度累积。备用入口 [train_760m_muon.sh](scripts/train_760m_muon.sh) 调用原 `flame.train`；训练环境和使用方式见[官方训练说明](source/lact/README.md)。
 
 ## LoCoMo 接入
 
@@ -59,7 +59,7 @@ LaCT 对应论文 [Test-Time Training Done Right v1](https://arxiv.org/abs/2505.
 - **进度上报。** 使用公共 `WorkerProgress` 和展示器保存独立观测快照，不改变生成、TTT 更新、评分或续评流程；展示规则见[公共说明](../README.md#进度展示)。
 - **结果展示。** [compare_results.py](evaluation/compare_results.py) 从 `output-id` 总目录读取 `ruler/` 中已完成的完整六任务、四长度结果，在总目录生成 `comparison.html`，渲染复用 [reporting/](../reporting/comparison.py)。Momentum 对照论文两头／四头结果，两个 Muon 共用论文 Muon 四头结果；参照数据与适用范围见 [ruler_paper_reference.json](evaluation/ruler_paper_reference.json)。
 
-运行参数、输出命名与目录结构见 [README](README.md#环境与运行命令)。
+运行参数、输出命名与目录结构见 [README](README.md#22-ruler-评估)。
 
 ## 公开语言模型权重
 

@@ -2,30 +2,32 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261126 00:11:42 Asia/Shanghai
+最后修订时间：20261126 10:26:09 Asia/Shanghai
 
-本目录使用 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308) 的官方实现和作者公开 checkpoint。公开权重加载、生成和计分检查已完成，尚未完成本轮计划的完整评估。
+[环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能（LoCoMo）](#三通用功能)
+
+## 一、环境准备
+
+推理默认以 BF16 加载模型权重，关闭模型级自动混合精度（autocast）。窗口注意力使用 FlashAttention 2。TTT 状态更新和归一化沿用模型实现的计算精度。
+
+从服务器项目根目录安装并激活独立评估环境，版本见[评估环境](../20261109_environment_setup.md)：
+
+```bash
+bash reproductions/setup_eval_env.sh e2_ttt
+source ~/envs/e2_ttt/bin/activate
+```
+
+环境位置、uv 镜像配置与激活方式见[评估环境](../README.md#评估环境)。
+
+## 二、原论文复现
+
+本目录使用 [Rethinking Expressivity and Efficiency in Test-Time Training](https://arxiv.org/abs/2608.21308) 的官方实现和作者公开 checkpoint。
 
 源码与本地优化边界见 [UPSTREAM.md](UPSTREAM.md)，验证结论见[复现状态](../20261110_ttt_reproduction_status.md)。
 
-## 评估目标与数据
+<a id="模型下载"></a>
 
-MLP 和 SwiGLU 两个 1.3B 模型均使用下表所列的 **10,095 条样本**进行评估。下载和构造命令见[评估数据准备](../20261108_ttt_data_preparation.md)。数据固定从下表路径读取。
-
-| benchmark | 任务与长度 | 样本数 | 固定数据路径 |
-|---|---|---:|---|
-| RULER | S-NIAH-1／2；512、1K、2K、4K、8K、16K；每项任务、每个长度 500 条 | 6,000 | `data/benchmarks/ruler-v1/reproductions/e2-ttt-1.3b` |
-| SQuAD completion | 完整 validation | 2,984 | `data/benchmarks/based-squad/data/validation-00000-of-00001.parquet` |
-| SWDE | 完整 validation | 1,111 | `data/benchmarks/based-swde/data/validation-00000-of-00001.parquet` |
-
-论文 `tab:incontext_retrieval_main` 中 **1.3B 参数规模模型**的准确率如下；RULER 参照原文长上下文主图及附录的 S-NIAH 数值表。
-
-| 指标 | MLP | SwiGLU |
-|---|---:|---:|
-| SWDE accuracy (%) | 37.2 | 47.3 |
-| SQuAD accuracy (%) | 45.6 | 44.4 |
-
-## 模型下载
+### 2.1 模型下载
 
 作者公开权重见 [zeyun-zhong/e2-ttt](https://huggingface.co/collections/zeyun-zhong/e2-ttt)，`hf` CLI 安装方式见[复现总说明](../README.md#模型下载约定)。
 
@@ -37,20 +39,19 @@ hf download zeyun-zhong/e2-ttt-swiglu-1.3B-15B \
   --local-dir ~/models/reproductions/e2_ttt/swiglu-1.3b-15b
 ```
 
-## 环境与运行命令
+### 2.2 评估目标与数据
 
-从服务器项目根目录安装并激活独立评估环境，版本见[评估环境](../20261109_environment_setup.md)：
+MLP 和 SwiGLU 两个 1.3B 模型均使用下表所列的 **10,095 条样本**进行评估。下载和构造命令见[评估数据准备](../20261108_ttt_data_preparation.md)。数据固定从下表路径读取。
 
-```bash
-bash reproductions/setup_eval_env.sh e2_ttt
-source ~/envs/e2_ttt/bin/activate
-```
+| benchmark | 任务与长度 | 样本数 | 固定数据路径 |
+|---|---|---:|---|
+| RULER | S-NIAH-1／2；512、1K、2K、4K、8K、16K；每项任务、每个长度 500 条 | 6,000 | `data/benchmarks/ruler-v1/reproductions/e2-ttt-1.3b` |
+| SQuAD completion | 完整 validation | 2,984 | `data/benchmarks/based-squad/data/validation-00000-of-00001.parquet` |
+| SWDE | 完整 validation | 1,111 | `data/benchmarks/based-swde/data/validation-00000-of-00001.parquet` |
 
-环境位置、uv 镜像配置与激活方式见[评估环境](../README.md#评估环境)。
+### 2.3 复现评估
 
-评估以 BF16 加载模型权重，关闭模型级 autocast。启用窗口注意力的层使用 FlashAttention 2。TTT 状态更新和归一化沿用方法自身的计算精度。
-
-MLP 和 SwiGLU 均支持 `optimized` 运行，验证范围见[复现状态记录](../20261110_ttt_reproduction_status.md#e-ttt)：
+按[环境准备](#一环境准备)激活评估环境后，在项目根目录运行以下命令。示例使用 MLP checkpoint，评估 SwiGLU 时将 `--checkpoint` 指向对应模型目录。两个模型均支持 `optimized` 推理，验证范围见[复现状态记录](../20261110_ttt_reproduction_status.md#e-ttt)。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/e2_ttt/scripts/eval.sh \
@@ -78,11 +79,46 @@ CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bash reproductions/
 - SQuAD／SWDE 保留原文本 `.strip()` 和换行停止，最多生成 48 tokens；总预算 2048，prompt 超过 2000 tokens 时按原规则左截断。
 - 按长度降序排列后相邻组批，每批左 padding 到该批最长输入，最后一批保留实际样本数。各样本独立维护真实位置、attention 与 TTT 状态。
 
-## LoCoMo 评估
+#### 来源记录与输出
 
-适配代码已完成静态检查，CUDA 数值对照和完整 LoCoMo 评估尚未运行。
+最终分数分别读取 `<output-root>/eval/<output-id>/<benchmark>/summary.json`。`scripts/eval.sh` 调用 `evaluation/evaluate_parallel.py` 统一调度，每个 worker 加载一次模型，依次处理分配到的多个 benchmark。[进度展示](../README.md#进度展示)采用三方法的共同规则。
 
-在上述独立环境中运行。数据准备见[公共数据说明](../../benchmarks/README.md)，评估范围、F1 评分和续评规则见[公共 LoCoMo 说明](../../benchmarks/locomo/README.md)。
+| 文件 | 内容 |
+|---|---|
+| `evaluation_plan.json`、`launcher_execution.json`、`attempts/` | 父目录内的总评估计划、各次启动设置、代码来源与 worker 日志 |
+| `attempts/attempt-<编号>/workers/worker-<i>/progress.json` | 父目录内当前 worker 的独立进度快照，仅用于展示 |
+| `summary.json` | 各 benchmark 的汇总位置及整次运行的完成状态 |
+| `<benchmark>/evaluation_plan.json` | 该 benchmark 的固定数据及生成／评分协议 |
+| `<benchmark>/summary.json` | 该 benchmark 全部样本完成后的任务／长度分数 |
+| `<benchmark>/attempts/` | 各次 worker 的原始逐题结果、原生评分和生成缓存 |
+| `<benchmark>/predictions.jsonl`、`<benchmark>/manifest.json` | 该 benchmark 合并后的逐题结果及其原始记录位置 |
+| `comparison.html` | 执行对比脚本后在总目录生成的图表与表格 |
+
+### 2.4 论文复现对照
+
+论文 `tab:incontext_retrieval_main` 中 **1.3B 参数规模模型**的准确率见下表。RULER 参照原文长上下文主图及附录的 S-NIAH 数值表。
+
+| 指标 | MLP | SwiGLU |
+|---|---:|---:|
+| SWDE accuracy (%) | 37.2 | 47.3 |
+| SQuAD accuracy (%) | 45.6 | 44.4 |
+
+```bash
+python reproductions/e2_ttt/evaluation/compare_results.py \
+  --eval-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b_20261117
+```
+
+`--eval-dir` 指向 `<output-root>/eval/<output-id>`，报告保存为 `<eval-dir>/comparison.html`。
+
+MLP／SwiGLU 自动匹配论文参照；未评估完成的 benchmark 显示 `—`。
+
+## 三、通用功能
+
+<a id="locomo-评估"></a>
+
+### 3.1 LoCoMo 评估
+
+LoCoMo 使用 10 段完整对话，评估类别 1–4 的 1,540 道问题。适配代码已完成静态检查，CUDA 数值对照和完整评估待完成。下载数据及准备目录见[公共数据说明](../../benchmarks/README.md)，评估范围、F1 评分和续评规则见[公共 LoCoMo 说明](../../benchmarks/locomo/README.md)。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash reproductions/e2_ttt/scripts/eval_locomo.sh \
@@ -101,13 +137,12 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/e2_ttt/scripts/eval_locomo.sh \
 | `--batch-size-per-gpu` | 每卡评估批量大小，默认 1 |
 
 - 支持公开 MLP／SwiGLU 权重，使用 `optimized` 批量推理。
-- 不套用聊天模板，由公共接口构造输入：`QA 系统提示 → 完整对话 → 简答指令与问题 → Answer:`。
+- 公共接口将下列内容拼接为纯文本提示：`QA 系统提示 → 完整对话 → 简答指令与问题 → Answer:`。
 - 每段对话只预填一次，各题从这份正文状态独立作答，互不继承其他问题或答案。
-- 结果保存在 `<output-root>/eval/<output-id>/locomo/`。`summary.json` 汇总总体及各题型的 F1 和题数，`details.jsonl` 保存逐题回答与评分。
 
-## 查看结果
+### 3.2 结果展示
 
-### Benchmark 结果
+结果保存在 `<output-root>/eval/<output-id>/locomo/`。`summary.json` 汇总总体及各题型的 F1 和题数，`details.jsonl` 保存逐题回答与评分。
 
 ```bash
 bash reproductions/e2_ttt/scripts/dashboard.sh \
@@ -115,33 +150,3 @@ bash reproductions/e2_ttt/scripts/dashboard.sh \
 ```
 
 `--output-dir` 指向包含 `locomo/` 的运行目录。页面展示总体及各题型 F1、题数，并可按题型与对话查看逐题回答和参考答案。
-
-### 论文复现对照
-
-```bash
-python reproductions/e2_ttt/evaluation/compare_results.py \
-  --eval-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b_20261117
-```
-
-`--eval-dir` 指向 `<output-root>/eval/<output-id>`，报告保存为 `<eval-dir>/comparison.html`。
-
-MLP／SwiGLU 自动匹配论文参照；未评估完成的 benchmark 显示 `—`。
-
-## 来源记录与输出
-
-最终分数分别读取 `<output-root>/eval/<output-id>/<benchmark>/summary.json`。`scripts/eval.sh` 调用 `evaluation/evaluate_parallel.py` 统一调度，每个 worker 加载一次模型，依次处理分配到的多个 benchmark。[进度展示](../README.md#进度展示)采用三方法的共同规则。
-
-| 文件 | 内容 |
-|---|---|
-| `evaluation_plan.json`、`launcher_execution.json`、`attempts/` | 父目录内的总评估计划、各次启动设置、代码来源与 worker 日志 |
-| `attempts/attempt-<编号>/workers/worker-<i>/progress.json` | 父目录内当前 worker 的独立进度快照，仅用于展示 |
-| `summary.json` | 各 benchmark 的汇总位置及整次运行的完成状态 |
-| `<benchmark>/evaluation_plan.json` | 该 benchmark 的固定数据及生成／评分协议 |
-| `<benchmark>/summary.json` | 该 benchmark 全部样本完成后的任务／长度分数 |
-| `<benchmark>/attempts/` | 各次 worker 的原始逐题结果、原生评分和生成缓存 |
-| `<benchmark>/predictions.jsonl`、`<benchmark>/manifest.json` | 该 benchmark 合并后的逐题结果及其原始记录位置 |
-| `comparison.html` | 执行对比脚本后在总目录生成的图表与表格 |
-
-## 备用训练入口
-
-本轮使用公开权重进行模型评估。训练设置与备用入口见 [UPSTREAM.md](UPSTREAM.md) 和[官方训练说明](source/e2_ttt/training/README.md)。
