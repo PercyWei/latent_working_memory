@@ -7,6 +7,7 @@ from pathlib import Path
 
 from benchmarks.data import load_samples
 from benchmarks.io import run_lock, write_json, write_jsonl
+from benchmarks.progress import QuestionTimer
 from benchmarks.protocol import data_identity
 from .data import LONGMEMEVAL_FILES
 from .generate import read_predictions
@@ -58,6 +59,7 @@ def score_run(run_dir, resume=False, data_dir=None):
         else:
             write_json(scoring_path, scoring)
 
+        timer = QuestionTimer(len(rows))
         for index in range(len(rows), len(samples)):
             sample, prediction = samples[index], predictions[index]
             rows.append({
@@ -68,7 +70,8 @@ def score_run(run_dir, resume=False, data_dir=None):
                 "autoeval_label": judge_answer(sample, prediction["hypothesis"]),
             })
             write_jsonl(details_path, rows)
-            print(f"{benchmark} | judged {len(rows)}/{len(samples)}", flush=True)
+            print(f"{benchmark} | judged {len(rows)}/{len(samples)} | {timer.format_rate(len(rows))}",
+                  flush=True)
 
         summary = {**config, "judge": scoring, "metrics": summarize_scores(rows)}
         write_json(directory / "summary.json", summary)

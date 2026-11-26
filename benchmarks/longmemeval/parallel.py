@@ -9,6 +9,7 @@ import sys
 import time
 
 from benchmarks.io import write_jsonl
+from benchmarks.progress import QuestionTimer
 
 
 def generate_on_devices(directory, samples, rows, devices, batch_size, lock):
@@ -20,7 +21,16 @@ def generate_on_devices(directory, samples, rows, devices, batch_size, lock):
     pending = [i for i in unfinished if not (progress / f"{i}.json").is_file()]
     if pending and not devices:
         raise ValueError("LongMemEval generation requires a visible GPU")
-    print(f"{directory.name} | {len(samples) - len(pending)}/{len(samples)} | {directory}", flush=True)
+    already_completed = len(samples) - len(pending)
+    timer = QuestionTimer(already_completed)
+    print(f"{directory.name} | {already_completed}/{len(samples)} | {directory}", flush=True)
+
+    def report_progress(completed=None):
+        if completed is None:
+            completed = already_completed + sum((progress / f"{i}.json").is_file() for i in pending)
+        print(f"{directory.name} | {completed}/{len(samples)} | {timer.format_rate(completed)}",
+              flush=True)
+
     workers = []
     with ExitStack() as logs:
         def stop(signum, frame):
@@ -54,8 +64,7 @@ def generate_on_devices(directory, samples, rows, devices, batch_size, lock):
                 if not running:
                     break
                 if time.monotonic() - last_report >= 30:
-                    completed = prefix_size + sum((progress / f"{i}.json").is_file() for i in unfinished)
-                    print(f"{directory.name} | {completed}/{len(samples)}", flush=True)
+                    report_progress()
                     last_report = time.monotonic()
                 time.sleep(1)
         finally:
@@ -77,6 +86,8 @@ def generate_on_devices(directory, samples, rows, devices, batch_size, lock):
         rows.append(row)
     if unfinished:
         write_jsonl(predictions, rows)
+    if pending:
+        report_progress(len(rows))
     # 如果上次在合并后中断，完整预测仍是有效的，续评只需清理分片。
     for path in progress.glob("[0-9]*.json"):
         path.unlink()

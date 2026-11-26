@@ -9,6 +9,7 @@ from typing import Protocol
 
 from benchmarks.data import load_samples
 from benchmarks.io import run_lock, write_json, write_jsonl
+from benchmarks.progress import QuestionTimer
 from benchmarks.protocol import data_identity
 from .data import LONGMEMEVAL_FILES, LongMemEvalInput, format_history, format_question
 from .parallel import generate_on_devices
@@ -107,11 +108,13 @@ def run_generation(
         if devices is not None:
             generate_on_devices(directory, samples, rows, devices, batch_size, lock)
         elif len(rows) < len(samples):
+            timer = QuestionTimer(len(rows))
             adapter = load_adapter(settings)
             for completed in generate_batches(adapter, samples[len(rows):], batch_size):
                 rows.extend(completed)
                 write_jsonl(predictions, rows)
-                print(f"{benchmark} | {len(rows)}/{len(samples)}", flush=True)
+                print(f"{benchmark} | {len(rows)}/{len(samples)} | {timer.format_rate(len(rows))}",
+                      flush=True)
     return predictions
 
 

@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from benchmarks.data import load_samples
 from benchmarks.io import write_jsonl
+from benchmarks.progress import QuestionTimer
 from benchmarks.protocol import data_identity
 from latent_working_memory.prompts import QA_SYSTEM_PROMPT
 from .engine import shard_conversations
@@ -86,7 +87,13 @@ def run_evaluation(args, method, settings, load_adapter, output_name, summarize_
                 "batch_size_per_gpu": args.batch_size_per_gpu}
         write_json(directory / "work.json", work)
         processes, logs = [], []
-        started = time.monotonic()
+        timer = QuestionTimer(len(records))
+
+        def report_progress(completed):
+            elapsed = time.monotonic() - timer.started
+            print(f"LoCoMo {completed}/{len(samples)} | {elapsed:.0f}s | {timer.format_rate(completed)}",
+                  flush=True)
+
         print(f"LoCoMo {method} | {len(records)} completed | {len(pending)} pending | {directory}", flush=True)
         source = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
         execution = {"git_commit": source, "started_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
@@ -117,7 +124,7 @@ def run_evaluation(args, method, settings, load_adapter, output_name, summarize_
                     raise RuntimeError(f"LoCoMo worker failed; inspect {progress}")
                 if time.monotonic() - last_report >= 30:
                     completed = read_progress(directory, samples)
-                    print(f"LoCoMo {len(completed)}/{len(samples)} | {time.monotonic() - started:.0f}s", flush=True)
+                    report_progress(len(completed))
                     last_report = time.monotonic()
                 time.sleep(1)
             if any(process.returncode != 0 for process in processes):
@@ -125,6 +132,8 @@ def run_evaluation(args, method, settings, load_adapter, output_name, summarize_
             records = read_progress(directory, samples)
             if len(records) != len(samples):
                 raise ValueError("workers did not cover all questions")
+            if pending:
+                report_progress(len(records))
             rows = [records[sample.id] for sample in samples]
             summary = summarize(plan, rows, summarize_method)
             write_jsonl(directory / "details.jsonl", rows)
@@ -147,5 +156,5 @@ def run_evaluation(args, method, settings, load_adapter, output_name, summarize_
                 log.close()
             if execution["status"] == "running":
                 execution["status"] = "failed"
-            execution["wall_seconds"] = time.monotonic() - started
+            execution["wall_seconds"] = time.monotonic() - timer.started
             write_json(directory / "execution.json", execution)

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from benchmarks.data import load_samples
+from benchmarks.progress import QuestionTimer
 from benchmarks.protocol import data_identity
 from benchmarks.scoring import score_sample
 from .engine import evaluate_conversations
@@ -25,6 +26,7 @@ def main():
     pending = [by_id[sample_id] for sample_id in work["workers"][args.rank]]
     factory = plan["adapter"]
     load_adapter = getattr(import_module(factory["module"]), factory["factory"])
+    timer = QuestionTimer()
     adapter = load_adapter(plan["settings"])
     completed = 0
     path = args.directory / "progress" / f"worker-{args.rank}.jsonl"
@@ -41,7 +43,8 @@ def main():
             stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
             stream.flush()
             completed += 1
-            print(f"LoCoMo worker={args.rank} {completed}/{len(pending)} {sample.id}", flush=True)
+            print(f"LoCoMo worker={args.rank} {completed}/{len(pending)} {sample.id} | "
+                  f"{timer.format_rate(completed)}", flush=True)
         evaluate_conversations(pending, adapter, work["batch_size_per_gpu"], commit)
 
 

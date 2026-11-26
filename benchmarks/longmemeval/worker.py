@@ -7,6 +7,7 @@ from pathlib import Path
 
 from benchmarks.data import load_samples
 from benchmarks.io import write_json
+from benchmarks.progress import QuestionTimer
 from benchmarks.protocol import data_identity
 from .generate import generate_batches
 
@@ -25,6 +26,7 @@ def main():
     assigned = [samples[i] for i in args.indices]
     del samples
     factory = plan["adapter"]
+    timer = QuestionTimer()
     adapter = getattr(import_module(factory["module"]), factory["factory"])(plan["settings"])
     completed = 0
     for batch in generate_batches(adapter, assigned, args.batch_size):
@@ -32,7 +34,8 @@ def main():
             index = args.indices[completed]
             write_json(args.directory / "progress" / f"{index}.json", row)
             completed += 1
-        print(f"{benchmark} | {completed}/{len(assigned)} | {batch[-1]['question_id']}", flush=True)
+        print(f"{benchmark} | {completed}/{len(assigned)} | {batch[-1]['question_id']} | "
+              f"{timer.format_rate(completed)}", flush=True)
 
 
 if __name__ == "__main__":
