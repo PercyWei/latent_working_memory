@@ -7,6 +7,8 @@ import re
 
 from ..schema import Document, Question
 
+FINEWEB_FACTQA_FILES = {split: f"{split}.jsonl" for split in ("train", "dev", "test")}
+
 
 def _fineweb_question(qa: dict, text: str) -> Question:
     evidence = qa.get("evidence_char_span")
@@ -29,10 +31,10 @@ def iter_fineweb_factqa(dataset_dir: Path, split: str) -> Iterator[Document]:
     paragraphs. A text without line breaks remains one unit. Offsets always
     refer to the unmodified JSONL ``text`` string.
     """
-    if split not in ("train", "dev", "test"):
+    if split not in FINEWEB_FACTQA_FILES:
         raise ValueError("FineWeb FactQA split must be train, dev or test")
-    path = dataset_dir.expanduser().resolve() / f"{split}.jsonl"
-    role = {"train": "train", "dev": "evaluation", "test": "evaluation"}[split]
+    path = dataset_dir.expanduser().resolve() / FINEWEB_FACTQA_FILES[split]
+    role = "train" if split == "train" else "evaluation"
     with path.open(encoding="utf-8") as stream:
         for line_number, line in enumerate(stream, 1):
             row = json.loads(line)

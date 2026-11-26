@@ -4,26 +4,28 @@ import argparse
 from collections import Counter
 from dataclasses import asdict
 from datetime import datetime
-from itertools import islice
+from itertools import chain, islice
 import json
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from transformers import AutoTokenizer
 
-from .data_statistics.adapters.fineweb_factqa import iter_fineweb_factqa
+from benchmarks.longmemeval.data import LONGMEMEVAL_FILES
+
+from .data_statistics.adapters.fineweb_factqa import FINEWEB_FACTQA_FILES, iter_fineweb_factqa
 from .data_statistics.adapters.locomo import iter_locomo
 from .data_statistics.adapters.longmemeval import iter_longmemeval
-from .data_statistics.adapters.qasper import iter_qasper
+from .data_statistics.adapters.qasper import QASPER_FILES, iter_qasper
 from .data_statistics.metrics import compute_metrics
 from .data_statistics.report import build_summary, write_report
 from .data_statistics.schema import MetricConfig
 
 ADAPTERS = {
-    "fineweb_factqa": iter_fineweb_factqa,
-    "locomo": iter_locomo,
-    "longmemeval": iter_longmemeval,
-    "qasper": iter_qasper,
+    "fineweb_factqa": (iter_fineweb_factqa, FINEWEB_FACTQA_FILES),
+    "locomo": (iter_locomo, {}),
+    "longmemeval": (iter_longmemeval, LONGMEMEVAL_FILES),
+    "qasper": (iter_qasper, QASPER_FILES),
 }
 
 
@@ -52,14 +54,21 @@ def main():
     parser.add_argument("--window-tokens", type=int, default=defaults.window_tokens)
     parser.add_argument("--recent-tokens", type=int, nargs="+", default=defaults.recent_tokens)
     args = parser.parse_args()
-    if args.dataset == "locomo":
+    dataset_dir = args.dataset_dir.expanduser().resolve()
+    adapter, split_files = ADAPTERS[args.dataset]
+    if split_files:
+        if args.split is not None and args.split not in split_files:
+            parser.error(f"--split for {args.dataset} must be one of {', '.join(split_files)}")
+        splits = (args.split,) if args.split is not None else tuple(split_files)
+        for split in splits:
+            path = dataset_dir / split_files[split]
+            if not path.is_file():
+                parser.error(f"missing {args.dataset} split {split!r}: {path}")
+        documents = chain.from_iterable(adapter(dataset_dir, split) for split in splits)
+    else:
         if args.split is not None:
             parser.error("LoCoMo has no split; omit --split")
-        documents = iter_locomo(args.dataset_dir)
-    else:
-        if args.split is None:
-            parser.error(f"--split is required for {args.dataset}")
-        documents = ADAPTERS[args.dataset](args.dataset_dir, args.split)
+        documents = adapter(dataset_dir)
     if args.min_tokens is not None and args.min_tokens < 1:
         parser.error("min_tokens must be positive when specified")
     if args.max_tokens is not None and args.max_tokens < 1:
@@ -89,7 +98,7 @@ def main():
             "%Y%m%d %H:%M:%S Asia/Shanghai"
         ),
         "dataset": args.dataset,
-        "dataset_dir": str(args.dataset_dir.expanduser().resolve()),
+        "dataset_dir": str(dataset_dir),
         "split": args.split,
         "tokenizer": args.tokenizer,
         "tokenizer_class": type(tokenizer).__name__,

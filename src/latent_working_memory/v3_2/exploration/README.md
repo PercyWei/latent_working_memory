@@ -2,7 +2,7 @@
 
 创建时间：20261126 17:22:38 Asia/Shanghai
 
-最后修订时间：20261126 20:18:20 Asia/Shanghai
+最后修订时间：20261126 23:43:50 Asia/Shanghai
 
 本目录按探索任务组织代码。每项任务使用独立的运行入口，专用实现放在对应子目录中。
 
@@ -49,7 +49,7 @@ uv run -m latent_working_memory.v3_2.exploration.run_data_statistics \
   --output-dir artifacts/v3-2/exploration/locomo_statistics
 ```
 
-更换数据时指定 `--dataset` 和 `--dataset-dir`；LoCoMo 不传 `--split`，其余数据按上表指定。
+省略 `--split` 时，程序按上表从左到右读取所选数据集的全部划分，各划分的指标分别汇总。所有列出的划分文件都须就位，缺少文件会在统计开始前报错。只统计一个划分时可传入其名称，例如 `--dataset qasper --split dev`。LoCoMo 没有划分，省略 `--split` 即读取 `locomo10.json`。
 
 分段和末尾参数默认扫描下表中的取值集合，也可用空格分隔的值覆盖，例如：`--blocks 4 8 --min-block-tokens 32 --max-block-tokens 512 none --recent-tokens 0 256`。只传一个值即可统计单一设置。
 
@@ -59,10 +59,10 @@ uv run -m latent_working_memory.v3_2.exploration.run_data_statistics \
 |---|---|---|
 | `--dataset` | 必填 | 数据源，取值见上方数据表 |
 | `--dataset-dir` | 必填 | 数据集目录，文件布局见上方数据表 |
-| `--split` | 除 LoCoMo 外必填 | 数据划分，取值见上方数据表 |
+| `--split` | 全部划分 | 不同数据集支持的 split 见上表 |
 | `--tokenizer` | 必填 | 本地目录或 Hugging Face 模型 ID；需 Fast Tokenizer |
 | `--output-dir` | 必填 | 输出目录，必须尚不存在 |
-| `--max-samples` | 不限制 | 按源顺序处理前 N 条（过滤前）；正整数 |
+| `--max-samples` | 不限制 | 按读取顺序处理前 N 条文档（过滤前），所有划分共用此上限；正整数 |
 | `--min-tokens` | 不限制 | 整篇长度下限（含端点）；指定时为正整数 |
 | `--max-tokens` | 不限制 | 整篇长度上限（含端点）；指定时为正整数 |
 | `--blocks` | `4 8 16` | 目标块数集合；正整数 |
@@ -113,7 +113,7 @@ uv run -m latent_working_memory.v3_2.exploration.run_data_statistics \
 | [data_statistics/metrics.py](data_statistics/metrics.py) | 接收统一文档与 token offsets，计算指标 |
 | [data_statistics/report.py](data_statistics/report.py) | 聚合、分母与报告 |
 
-新增数据实现独立读取函数，返回 `Document`，并在 `run_data_statistics.py` 的 `ADAPTERS` 中注册。适配器接收 `dataset_dir, split` 并按本数据集规则选择文件；没有划分时只接收 `dataset_dir`，`Document.split` 为 `None`。所有字符区间相对同一 `text`，采用左闭右开区间；结构单元有序且不重叠，证据允许重叠。用 `unit_kind`、`evidence_granularity` 标明粒度，以 `exclusion_reason` 保留失败题，勿静默丢弃。`source_ref` 保存原始位置；QA 范围计数使用 `source_qa_count`、`selected_qa_count` 和 `qa_selection_rule`。
+新增数据实现独立读取函数，返回 `Document`，并在 `run_data_statistics.py` 的 `ADAPTERS` 中注册读取函数与按读取顺序排列的 split 到文件名的映射。适配器接收 `dataset_dir, split` 并读取对应文件；无划分的数据集使用空映射，适配器只接收 `dataset_dir`，`Document.split` 为 `None`。所有字符区间相对同一 `text`，采用左闭右开区间；结构单元有序且不重叠，证据允许重叠。用 `unit_kind`、`evidence_granularity` 标明粒度，以 `exclusion_reason` 保留失败题，勿静默丢弃。`source_ref` 保存原始位置；QA 范围计数使用 `source_qa_count`、`selected_qa_count` 和 `qa_selection_rule`。
 
 若接入切片，应先重定位证据；缺失必需证据时标为 `incomplete_evidence`。重复来源保留原文标识，当前报告仅做描述统计，不把切片当独立样本检验显著性。
 

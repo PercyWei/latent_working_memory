@@ -99,7 +99,7 @@ def main():
             {
                 "运行": name,
                 "数据集": config["dataset"],
-                "split": config["split"],
+                "split": config["split"] or ("无划分" if config["dataset"] == "locomo" else "全部"),
                 "tokenizer": config["tokenizer"],
                 "tokenizer 类型": config["tokenizer_class"],
                 "密度窗口": config["metrics"]["window_tokens"],

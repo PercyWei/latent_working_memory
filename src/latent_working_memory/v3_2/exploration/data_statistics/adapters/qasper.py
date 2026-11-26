@@ -13,6 +13,8 @@ from pathlib import Path
 
 from ..schema import Document, Question, Span
 
+QASPER_FILES = {split: f"qasper-{split}-v0.3.json" for split in ("train", "dev", "test")}
+
 
 def _question(qa: dict, paragraph_spans: dict[str, list[Span]]) -> tuple[Question, dict]:
     annotations = qa["answers"]
@@ -67,9 +69,9 @@ def iter_qasper(dataset_dir: Path, split: str) -> Iterator[Document]:
     unanswerable set is labeled unanswerable. Selection metadata keeps original
     annotation indices and rejected reasons without copying evidence text.
     """
-    if split not in ("train", "dev", "test"):
+    if split not in QASPER_FILES:
         raise ValueError("QASPER split must be train, dev or test")
-    path = dataset_dir.expanduser().resolve() / f"qasper-{split}-v0.3.json"
+    path = dataset_dir.expanduser().resolve() / QASPER_FILES[split]
     with path.open(encoding="utf-8") as stream:
         papers = json.load(stream)
     for paper_id, paper in papers.items():
