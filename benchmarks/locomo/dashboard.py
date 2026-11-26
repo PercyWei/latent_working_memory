@@ -6,12 +6,8 @@ from pathlib import Path
 
 import streamlit as st
 
-
-@st.cache_data(show_spinner=False)
-def load_details(path, modified_ns):
-    """结果文件更新后刷新缓存。"""
-    with path.open(encoding="utf-8") as stream:
-        return [json.loads(line) for line in stream]
+from benchmarks.dashboard_data import load_details
+from benchmarks.longmemeval.dashboard import SETTINGS, show_runs
 
 
 def show_scores(metrics, extra_metrics=()):
@@ -70,22 +66,27 @@ def show_answers(directory, metrics):
 
 
 def run_dashboard(method, title, render_results, argv=None):
-    """方法维护入口与渲染回调；公共层读取单次运行的 LoCoMo 结果。"""
-    parser = argparse.ArgumentParser(description=f"独立查看 {title} 的 benchmark 结果，当前支持 LoCoMo。")
+    """在方法的同一运行目录下选择 LoCoMo 或已评分的 LongMemEval 设置。"""
+    parser = argparse.ArgumentParser(description=f"查看 {title} 的 LoCoMo 和 LongMemEval 结果。")
     parser.add_argument("--output-dir", type=Path, required=True,
-                        help="单次评估运行目录，其下包含 locomo/summary.json 和 locomo/details.jsonl")
+                        help="包含 locomo、longmemeval_s_cleaned 或 longmemeval_oracle 设置目录的运行目录")
     directory = parser.parse_args(argv).output_dir.expanduser().resolve()
     if not directory.is_dir():
         parser.error(f"--output-dir 必须指向已有的评估运行目录：{directory}")
-    st.set_page_config(page_title=f"{title} · LoCoMo", layout="wide")
+    st.set_page_config(page_title=title, layout="wide")
     st.title(f"{title} · {directory.name}")
-    task_dir = directory / "locomo"
-    summary_path = task_dir / "summary.json"
-    if not summary_path.is_file():
-        st.info(f"在 {directory} 下未找到 locomo/summary.json，请在评估完成后刷新看板。")
+    labels = {"locomo": "LoCoMo", **{key: f"LongMemEval-{value}" for key, value in SETTINGS.items()}}
+    tasks = [key for key in labels if (directory / key / "summary.json").is_file()]
+    if not tasks:
+        st.info(f"在 {directory} 下未找到已评分的评估结果。")
         return
-    summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    if summary["method"] != method or summary["benchmark"] != "locomo":
-        st.error(f"该目录不是 {title} 的 LoCoMo 评估结果。")
+    task = st.selectbox("评估任务", tasks, format_func=labels.__getitem__) if len(tasks) > 1 else tasks[0]
+    task_dir = directory / task
+    summary = json.loads((task_dir / "summary.json").read_text(encoding="utf-8"))
+    if summary["method"] != method or summary["benchmark"] != task:
+        st.error(f"评估结果的方法或设置与所选的 {title} · {labels[task]} 不一致。")
         return
-    render_results(task_dir, summary)
+    if task == "locomo":
+        render_results(task_dir, summary)
+    else:
+        show_runs([(f"{title} · {labels[task]}", task_dir)])

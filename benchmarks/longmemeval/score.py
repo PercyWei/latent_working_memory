@@ -1,4 +1,4 @@
-"""根据独立生成的 LongMemEval 回答调用官方裁判，按题保存评分。"""
+"""使用 LongMemEval 官方提示词评判已生成的回答，按题保存评分。"""
 
 import argparse
 import hashlib
@@ -10,7 +10,7 @@ from benchmarks.io import run_lock, write_json, write_jsonl
 from benchmarks.protocol import data_identity
 from .data import LONGMEMEVAL_FILES
 from .generate import read_predictions
-from .judge import JUDGE_MODEL, JUDGE_REVISION, judge_answer, summarize_scores
+from .judge import JUDGE_MODEL, JUDGE_OPTIONS, JUDGE_REVISION, judge_answer, summarize_scores
 
 
 def score_run(run_dir, resume=False, data_dir=None):
@@ -35,14 +35,16 @@ def score_run(run_dir, resume=False, data_dir=None):
         with path.open("rb") as stream:
             prediction_digest = hashlib.file_digest(stream, "sha256").hexdigest()
         scoring = {
-            "model": JUDGE_MODEL, "source_commit": JUDGE_REVISION,
+            "model": JUDGE_MODEL, **JUDGE_OPTIONS, "source_commit": JUDGE_REVISION,
             "benchmark": benchmark, "data_fingerprint": config["data"]["fingerprint"],
             "predictions_sha256": prediction_digest,
         }
         scoring_path = directory / "scoring_config.json"
         details_path = directory / "details.jsonl"
         rows = []
-        if resume:
+        if scoring_path.exists():
+            if not resume:
+                raise FileExistsError(f"scoring already started in {directory}; use --resume")
             if json.loads(scoring_path.read_text(encoding="utf-8")) != scoring:
                 raise ValueError("saved judge settings, predictions or data differ")
             if details_path.exists():
@@ -54,8 +56,6 @@ def score_run(run_dir, resume=False, data_dir=None):
                     if any(row[key] != value for key, value in prediction.items()):
                         raise ValueError(f"{details_path}:{index + 1}: saved judgment differs")
         else:
-            if scoring_path.exists():
-                raise FileExistsError(f"scoring already started in {directory}; use --resume")
             write_json(scoring_path, scoring)
 
         for index in range(len(rows), len(samples)):

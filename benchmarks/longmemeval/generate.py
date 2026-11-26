@@ -1,4 +1,4 @@
-"""在清洗版 LongMemEval-S 或 Oracle 上生成回答，供独立的官方裁判评分。"""
+"""在清洗版 LongMemEval-S 或 Oracle 上生成回答，供独立评分。"""
 
 import argparse
 from collections.abc import Callable
@@ -10,13 +10,45 @@ from typing import Protocol
 from benchmarks.data import load_samples
 from benchmarks.io import run_lock, write_json, write_jsonl
 from benchmarks.protocol import data_identity
-from .data import LONGMEMEVAL_FILES, LongMemEvalInput
+from .data import LONGMEMEVAL_FILES, LongMemEvalInput, format_history, format_question
+from .parallel import generate_on_devices
 
 
 class LongMemEvalAdapter(Protocol):
     def answer_batch(self, inputs: list[LongMemEvalInput]) -> list[str]:
         """每题独立读取历史，按输入顺序返回回答。"""
         ...
+
+
+class CompressedHistoryAdapter:
+    """每题写入独立的压缩记忆，随后用提问日期和问题读出答案。"""
+
+    def __init__(self, adapter, max_new_tokens):
+        self.adapter = adapter
+        self.max_new_tokens = max_new_tokens
+
+    def answer_batch(self, inputs):
+        answers = []
+        for item in inputs:
+            state, _ = self.adapter.encode_history(format_history(item))
+            answers.append(self.adapter.answer(state, format_question(item), self.max_new_tokens))
+            del state
+        return answers
+
+
+def generate_batches(adapter, samples, batch_size):
+    for start in range(0, len(samples), batch_size):
+        batch = samples[start:start + batch_size]
+        try:
+            answers = adapter.answer_batch([sample.input for sample in batch])
+        except ValueError as error:
+            ids = ", ".join(sample.id for sample in batch)
+            raise ValueError(f"generating {ids}: {error}") from error
+        if (not isinstance(answers, list) or len(answers) != len(batch)
+                or not all(isinstance(answer, str) for answer in answers)):
+            raise ValueError("answer_batch must return one string per input, in order")
+        yield [{"question_id": sample.id, "hypothesis": answer}
+               for sample, answer in zip(batch, answers, strict=True)]
 
 
 def read_predictions(path, samples):
@@ -37,7 +69,7 @@ def read_predictions(path, samples):
 
 def run_generation(
     benchmark, data_dir, output_root, output_id, method, settings,
-    load_adapter: Callable[[dict], LongMemEvalAdapter], batch_size=1, resume=False,
+    load_adapter: Callable[[dict], LongMemEvalAdapter], batch_size=1, resume=False, devices=None,
 ):
     """返回官方 predictions.jsonl 的路径。settings 记录模型身份、输入和解码设置。"""
     if benchmark not in LONGMEMEVAL_FILES:
@@ -65,31 +97,28 @@ def run_generation(
             raise FileNotFoundError(f"resume requires {config_path}")
     else:
         directory.mkdir(parents=True, exist_ok=False)
-    with run_lock(directory):
+    with run_lock(directory) as lock:
         if resume:
             if json.loads(config_path.read_text()) != config:
                 raise ValueError("saved generation settings or data differ")
         else:
             write_json(config_path, config)
         rows = read_predictions(predictions, samples)
-        if len(rows) < len(samples):
+        if devices is not None:
+            generate_on_devices(directory, samples, rows, devices, batch_size, lock)
+        elif len(rows) < len(samples):
             adapter = load_adapter(settings)
-            for start in range(len(rows), len(samples), batch_size):
-                batch = samples[start:start + batch_size]
-                answers = adapter.answer_batch([sample.input for sample in batch])
-                if (not isinstance(answers, list) or len(answers) != len(batch)
-                        or not all(isinstance(answer, str) for answer in answers)):
-                    raise ValueError("answer_batch must return one string per input, in order")
-                rows.extend({"question_id": sample.id, "hypothesis": answer}
-                            for sample, answer in zip(batch, answers, strict=True))
+            for completed in generate_batches(adapter, samples[len(rows):], batch_size):
+                rows.extend(completed)
                 write_jsonl(predictions, rows)
                 print(f"{benchmark} | {len(rows)}/{len(samples)}", flush=True)
     return predictions
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--benchmark", choices=LONGMEMEVAL_FILES, required=True)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser.add_argument("--split", choices=LONGMEMEVAL_FILES, required=True,
+                        help="选择要生成回答的 LongMemEval 设置（S 或 Oracle）")
     parser.add_argument("--benchmark-data", type=Path,
                         default=Path(__file__).resolve().parents[2] / "data/benchmarks/longmemeval")
     parser.add_argument("--output-root", type=Path, required=True)
@@ -105,7 +134,7 @@ def main():
     if not (module and separator and factory):
         parser.error("--adapter requires MODULE:FACTORY")
     run_generation(
-        args.benchmark, args.benchmark_data, args.output_root, args.output_id, args.method,
+        args.split, args.benchmark_data, args.output_root, args.output_id, args.method,
         json.loads(args.settings.read_text()), getattr(import_module(module), factory),
         args.batch_size, args.resume,
     )

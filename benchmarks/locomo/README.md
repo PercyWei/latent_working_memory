@@ -2,7 +2,7 @@
 
 创建时间：20261124 15:43:38 Asia/Shanghai
 
-最后修订时间：20261125 17:20:12 Asia/Shanghai
+最后修订时间：20261126 12:03:06 Asia/Shanghai
 
 本目录提供 LoCoMo 的公共评估与看板接口。公共层维护数据、调度、评分和结果格式；各方法维护模型加载、正文处理、答案生成及自己的启动脚本。数据准备见[公共 benchmark 说明](../README.md)。
 
@@ -183,7 +183,7 @@ bash benchmarks/locomo/scripts/dashboard.sh \
 
 | 接口 | 用法 |
 |---|---|
-| `run_dashboard(method, title, render_results, argv=None)` | 接收 `--output-dir <运行目录>`，读取其下 `locomo/summary.json`，按 `method` 和 `benchmark="locomo"` 识别结果，调用 `render_results(locomo_directory, summary)` |
+| `run_dashboard(method, title, render_results, argv=None)` | 在 `--output-dir <运行目录>` 下选择已评分的 LoCoMo、LongMemEval-S 或 Oracle。选中 LoCoMo 时读取 `locomo/summary.json`，核对方法和设置后调用 `render_results(locomo_directory, summary)` |
 | `show_scores(metrics, extra_metrics=())` | 展示总体及分题型 F1 和题数；可通过 `(标签, 已格式化数值)` 序列追加方法指标卡 |
 | `show_answers(directory, metrics)` | `directory` 指向含 `details.jsonl` 的 LoCoMo 结果目录，展示筛选后的逐题回答 |
 

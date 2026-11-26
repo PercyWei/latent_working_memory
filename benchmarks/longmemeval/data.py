@@ -8,13 +8,16 @@ from pathlib import Path
 
 DATASET_REVISION = "98d7416c24c778c2fee6e6f3006e7a073259d48f"
 LONGMEMEVAL_FILES = {
-    "longmemeval_s": "longmemeval_s_cleaned.json",
+    "longmemeval_s_cleaned": "longmemeval_s_cleaned.json",
     "longmemeval_oracle": "longmemeval_oracle.json",
 }
 QUESTION_TYPES = (
     "single-session-user", "single-session-preference", "single-session-assistant",
     "multi-session", "temporal-reasoning", "knowledge-update",
 )
+SESSION_HEADER = "Session date: {date}"
+TURN_FORMAT = "{role}: {content}"
+QUESTION_FORMAT = "\n\nQuestion date: {question_date}\n\nQuestion: {question}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +45,21 @@ class LongMemEvalSample:
     input: LongMemEvalInput
     question_type: str
     answer: str | int
+
+
+def format_history(item: LongMemEvalInput) -> str:
+    """按数据读取顺序渲染完整会话，仅包含日期、角色和原始正文。"""
+    sessions = []
+    for session in item.sessions:
+        lines = [SESSION_HEADER.format(date=session.date)]
+        lines.extend(TURN_FORMAT.format(role=turn.role, content=turn.content) for turn in session.turns)
+        sessions.append("\n".join(lines))
+    return "\n\n".join(sessions)
+
+
+def format_question(item: LongMemEvalInput) -> str:
+    """问题与提问日期只在读出时追加，开头的空行分隔最后一场会话。"""
+    return QUESTION_FORMAT.format(question_date=item.question_date, question=item.question)
 
 
 def _required_text(value, field):

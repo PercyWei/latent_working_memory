@@ -37,7 +37,7 @@ class SDCCLoCoMo:
         self.prefix_ids = frame[:frame.index(bridge.placeholder_token_id) + 1]
 
     @torch.inference_mode()
-    def prepare_context(self, history, questions):
+    def encode_history(self, history):
         encoded = self.tokenizer(history, add_special_tokens=True, return_special_tokens_mask=True)
         tokens = encoded["input_ids"]
         context_tokens = encoded["special_tokens_mask"].count(0)
@@ -57,38 +57,58 @@ class SDCCLoCoMo:
             prediction, self.bridge.comp_ratio_or_len, self.bridge.discretize_ratio_mode,
             self.bridge.discretize_compare_in_log, values_in_log_space=True,
         ).item()
+        if embeds.size(1) >= self.decoder.config.max_position_embeddings:
+            raise ValueError(f"SDCC memory prefix fills decoder window: {embeds.size(1)} positions")
+        cache = self.decoder.model(inputs_embeds=embeds, attention_mask=mask, use_cache=True).past_key_values
+        return (cache, embeds.size(1)), {
+            "context_tokens": context_tokens, "encoder_tokens": len(tokens),
+            "memory_tokens": counts.item(), "compression_factor": round(1 / retention),
+        }
+
+    def question_ids(self, state, prompt, max_new_tokens):
+        ids = self.prompt.encode(self.context_marker + prompt)
+        if ids[:len(self.prefix_ids)] != self.prefix_ids:
+            raise ValueError("question changes SDCC memory prefix")
+        suffix = ids[len(self.prefix_ids):]
+        length = state[1] + len(suffix) + max_new_tokens
         window = self.decoder.config.max_position_embeddings
+        if length > window:
+            raise ValueError(f"SDCC reader needs {length} positions (window {window})")
+        return suffix
+
+    def prepare_context(self, history, questions):
+        state, stats = self.encode_history(history)
         prepared = []
         for question in questions:
             task = locomo_question_prompt(question.metadata["question"], question.metadata["category"])
-            ids = self.prompt.encode(self.context_marker + task)
-            if ids[:len(self.prefix_ids)] != self.prefix_ids:
-                raise ValueError(f"question changes SDCC memory prefix: {question.id}")
-            suffix = ids[len(self.prefix_ids):]
-            length = embeds.size(1) + len(suffix) + question.max_new_tokens
-            if length > window:
-                raise ValueError(f"SDCC reader needs {length} positions (window {window}): {question.id}")
+            suffix = self.question_ids(state, task, question.max_new_tokens)
             prepared.append(PreparedQuestion(question, suffix, (len(suffix), question.max_new_tokens)))
-        cache = self.decoder.model(inputs_embeds=embeds, attention_mask=mask, use_cache=True).past_key_values
-        return PreparedConversation(cache, prepared, {
-            "context_tokens": context_tokens, "encoder_tokens": len(tokens),
-            "memory_tokens": counts.item(), "compression_factor": round(1 / retention),
-        })
+        return PreparedConversation(state, prepared, stats)
 
     @torch.inference_mode()
-    def answer_batch(self, state, questions, complete):
-        size = len(questions)
-        ids = torch.tensor([q.inputs for q in questions], device=self.decoder.device)
-        cache = fork_dynamic_cache(state, size)
+    def _decode(self, state, question_ids, budgets, complete):
+        size = len(question_ids)
+        ids = torch.tensor(question_ids, device=self.decoder.device)
+        cache = fork_dynamic_cache(state[0], size)
 
         def completed(index, result):
             tokens = result["generated_token_ids"]
             result.update(prediction=self.tokenizer.decode(tokens, skip_special_tokens=True).strip(),
                           generated_tokens=len(tokens), decode_batch_size=size)
-            complete(questions[index], result)
+            complete(index, result)
 
         greedy_read(self.decoder, cache, self.decoder.get_input_embeddings()(ids),
-                    [q.sample.max_new_tokens for q in questions], self.tokenizer.eos_token_id, completed)
+                    budgets, self.tokenizer.eos_token_id, completed)
+
+    def answer_batch(self, state, questions, complete):
+        self._decode(state, [q.inputs for q in questions], [q.sample.max_new_tokens for q in questions],
+                     lambda index, result: complete(questions[index], result))
+
+    def answer(self, state, prompt, max_new_tokens):
+        ids = self.question_ids(state, prompt, max_new_tokens)
+        answers = []
+        self._decode(state, [ids], [max_new_tokens], lambda _, result: answers.append(result["prediction"]))
+        return answers[0]
 
 
 def summarize_metrics(records, conversations):

@@ -1,4 +1,4 @@
-"""用官方 ICAE v2 预训练或指令微调权重评估完整 LoCoMo 对话。"""
+"""使用 ICAE v2 的预训练或指令微调权重压缩完整历史并回答问题。"""
 
 
 import torch
@@ -41,7 +41,11 @@ class ICAELoCoMo:
     def encode_history(self, text):
         body_ids = self.model.tokenizer.encode(text, add_special_tokens=False, truncation=False)
         ids = self.model.tokenizer.build_inputs_with_special_tokens(body_ids)
-        memory_tokens = self.model.compute_num_segments(len(ids)) * self.model.mem_size
+        segments = self.model.compute_num_segments(len(ids))
+        writer_positions = (len(ids) + segments - 1) // segments + self.model.mem_size
+        if writer_positions > self.window:
+            raise ValueError(f"ICAE writer needs {writer_positions} positions (window {self.window})")
+        memory_tokens = segments * self.model.mem_size
         prefix_length = len(self.prefix_ids) + memory_tokens
         if prefix_length >= self.window:
             raise ValueError(f"ICAE reader prefix requires {prefix_length} tokens, window {self.window}")

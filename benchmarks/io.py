@@ -9,7 +9,7 @@ import json
 def run_lock(directory):
     with (directory / ".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        yield
+        yield lock
 
 
 def write_json(path, value):

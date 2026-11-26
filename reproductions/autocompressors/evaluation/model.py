@@ -1,15 +1,41 @@
 """加载官方 Llama AutoCompressor 及其 tokenizer。"""
 
+from pathlib import Path
+
 from auto_compressor import LlamaAutoCompressorModel
 import torch
 from transformers import AutoTokenizer
 
-from .locomo_adapter import AutoCompressorLoCoMo
+from benchmarks.locomo.records import file_identity
+from benchmarks.longmemeval.generate import CompressedHistoryAdapter
+from .locomo_adapter import AutoCompressorLoCoMo, INPUT_FORMAT
 
 
-def load_adapter(settings):
+def add_arguments(parser, segment_length):
+    parser.add_argument("--checkpoint", type=Path, required=True,
+                        help="AutoCompressor-Llama-2-7b-6k 的完整本地 checkpoint 目录")
+    parser.add_argument("--segment-length", type=int, default=segment_length,
+                        help="每段正文的 token 数上限，默认 %(default)s")
+
+
+def configuration(parser, args):
+    if args.segment_length <= 0:
+        parser.error("--segment-length must be positive")
+    source = Path(__file__).resolve().parents[1] / "source"
+    revision = (source / "revision").read_text().strip()
+    checkpoint = args.checkpoint.expanduser().resolve(strict=True)
+    return {
+        "checkpoint": str(checkpoint), "checkpoint_files": file_identity(checkpoint),
+        "upstream_revision": revision,
+        "segment_length": args.segment_length,
+        "input_format": dict(INPUT_FORMAT),
+        "dtype": "bfloat16",
+    }
+
+
+def load_adapter(settings, fit_segments=False):
     if not torch.cuda.is_available():
-        raise RuntimeError("AutoCompressors LoCoMo requires CUDA")
+        raise RuntimeError("AutoCompressors evaluation requires CUDA")
     checkpoint = settings["checkpoint"]
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, local_files_only=True)
     model, loading = LlamaAutoCompressorModel.from_pretrained(
@@ -24,4 +50,10 @@ def load_adapter(settings):
     if not model.config.accumulate_summary or model.config.summary_length != 50:
         raise ValueError("expected 50 accumulated summary vectors per segment")
     model.requires_grad_(False).eval().cuda()
-    return AutoCompressorLoCoMo(model, tokenizer, settings["segment_length"], settings["input_format"])
+    return AutoCompressorLoCoMo(model, tokenizer, settings["segment_length"], settings["input_format"],
+                                fit_segments=fit_segments)
+
+
+def load_longmemeval_adapter(settings):
+    return CompressedHistoryAdapter(load_adapter(settings, fit_segments=settings["fit_segments"]),
+                                    settings["max_new_tokens"])

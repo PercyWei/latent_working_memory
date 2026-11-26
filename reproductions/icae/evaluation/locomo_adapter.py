@@ -8,6 +8,7 @@ from benchmarks.data import locomo_question_prompt
 from benchmarks.locomo.engine import PreparedConversation, PreparedQuestion
 from benchmarks.locomo.reader import greedy_read
 from benchmarks.locomo.records import file_identity
+from benchmarks.longmemeval.generate import CompressedHistoryAdapter
 from latent_working_memory.prompts import QA_SYSTEM_PROMPT
 from reproductions.icae.formatting import icae_input_format
 from .model import (
@@ -81,12 +82,20 @@ def configuration(args):
             "model_files": file_identity(args.model_path), "checkpoint_files": file_identity(checkpoint)}
 
 
-def load_adapter(settings):
+def load_reader(settings):
     adapter = load_official(Path(settings["model_path"]), Path(settings["checkpoint"]),
                             settings["stage"], settings["mean_compression_rate"], settings["fixed_mem_size"])
     if adapter.input_format != settings["input_format"]:
         raise ValueError("loaded ICAE input format differs from the evaluation plan")
-    return ICAEAdapter(adapter)
+    return adapter
+
+
+def load_adapter(settings):
+    return ICAEAdapter(load_reader(settings))
+
+
+def load_longmemeval_adapter(settings):
+    return CompressedHistoryAdapter(load_reader(settings), settings["max_new_tokens"])
 
 
 def summarize_metrics(records, conversations):

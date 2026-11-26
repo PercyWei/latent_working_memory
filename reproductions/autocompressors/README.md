@@ -2,9 +2,9 @@
 
 创建时间：20261124 11:54:28 Asia/Shanghai
 
-最后修订时间：20261126 10:26:09 Asia/Shanghai
+最后修订时间：20261126 15:14:03 Asia/Shanghai
 
-[环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能（LoCoMo）](#三通用功能)
+[环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能](#三通用功能)
 
 ## 一、环境准备
 
@@ -34,47 +34,93 @@ hf download princeton-nlp/AutoCompressor-Llama-2-7b-6k \
 
 ## 三、通用功能
 
+### 3.1 benchmark 评估
+
+| 完整评估脚本共同参数 | 用途与默认值 |
+|---|---|
+| `--checkpoint` | 必填，本地完整的 checkpoint 目录 |
+| `--segment-length` | 每段正文的 token 数上限，默认值见各任务小节 |
+| `--benchmark-data` | 输入数据目录，默认路径见各任务小节 |
+| `--output-root` | 输出根目录，默认 `artifacts/reproductions/autocompressors` |
+| `--output-id` | 运行 ID，默认 `<checkpoint_name>_seg<segment_length>_<YYYYMMDD-HHMM>`，续评估时必填 |
+| `--batch-size-per-gpu` | 每卡批处理数，默认 `1` |
+| `--resume` | 用于续评估，默认关闭 |
+
+- **运行方式**：在项目根目录使用 AutoCompressors 环境运行。每张可见 GPU 加载一个模型副本。[环境准备](#一环境准备) · [数据下载](../../benchmarks/README.md)
+- **历史压缩**：Writer 逐段压缩对话正文，每段（含末段）生成 50 个摘要向量。累积摘要与当前正文合计最多占用 4,096 个位置。
+- **输入与解码**：Reader 依次读入 `BOS`、系统提示、全部摘要和问题，在 `Answer:` 后贪心生成回答。Reader 输入与回答预算之和也须在 4,096 个位置内。
+- **结果与续评**：各评估设置的结果分别保存在 `<output-root>/eval/<output-id>/` 下的对应子目录。`--resume` 复用已保存的回答和评分，只补齐未完成的部分。
+
 <a id="locomo-评估"></a>
+<a id="31-locomo-评估"></a>
 
-### 3.1 LoCoMo 评估
+#### 1. LoCoMo
 
-评估 LoCoMo 的 10 段完整对话。每道题使用所属对话的全部历史，数据下载命令见[评估数据准备](../../benchmarks/README.md)。
+| 完整评估脚本参数 | 用途与默认值 |
+|---|---|
+| `--benchmark-data` | 默认 `data/benchmarks/locomo` |
+| `--segment-length` | 默认 `2048` |
 
-| benchmark | 题型 | 题数 | 默认数据路径 |
-|---|---|---:|---|
-| LoCoMo | 多跳（1）、时间（2）、开放域（3）、单跳（4） | 1,540 | `data/benchmarks/locomo/locomo10.json` |
-
-`CUDA_VISIBLE_DEVICES` 指定使用的 GPU，按对话分配任务。评估范围、F1 评分与续评规则见[公共 LoCoMo 说明](../../benchmarks/locomo/README.md)。
+- **评估范围**：覆盖 10 段完整对话中类别 1–4 的 1,540 道题。[LoCoMo 评估协议](../../benchmarks/locomo/README.md)
+- **推理方式**：按对话分配 GPU，每段对话历史只压缩一次。默认分段下，完整段的压缩率约为 41 倍。同一对话内按问题长度组批，各题复用摘要与 Reader 前缀缓存，独立作答。
+- **回答长度与评分**：每题最多生成 50 个 token。按官方规则逐题计算 F1，再对所有题目取平均。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash reproductions/autocompressors/scripts/eval_locomo.sh \
   --checkpoint ~/models/reproductions/autocompressors/AutoCompressor-Llama-2-7b-6k \
-  --output-id AutoCompressor-Llama-2-7b-6k_seg2048_20261125 \
+  --output-id AutoCompressor-Llama-2-7b-6k \
   --batch-size-per-gpu 2
 ```
 
-| 参数 | 默认值与约定 |
-|---|---|
-| `--resume` | 指定原 ID、checkpoint、数据和分段设置，补齐未完成的问题 |
-| `--checkpoint` | 必填，本地完整 checkpoint 目录，包含权重、配置和 tokenizer |
-| `--benchmark-data` | 默认 `data/benchmarks/locomo` |
-| `--output-root` | 默认 `artifacts/reproductions/autocompressors` |
-| `--output-id` | 默认 `<checkpoint_name>_seg<segment_length>_<YYYYMMDD-HHMM>` |
-| `--batch-size-per-gpu` | 每卡评估批量大小，默认 1 |
-| `--segment-length` | 每段正文的 token 数上限，默认 2,048 |
+<a id="32-longmemeval-评估"></a>
 
-- 只压缩完整对话正文，QA 系统提示与问题不参与压缩。默认每 2,048 个正文 token 生成 50 个摘要向量，完整段约为 41× 压缩；末段不足该长度时仍生成 50 个摘要向量。
-- 通过公共接口直接拼接 Reader 输入，不套用聊天模板：`BOS → QA 系统提示 → 记忆 → 简答指令与问题 → Answer:`。
-- 每段对话只压缩一次，各题复用摘要和 Reader 前缀 KV。同一对话内按问题长度组批，每道题使用独立缓存分支作答。
-- 摘要随段数累积，写入与回答均须满足 4,096 位置窗口，回答时还需预留生成预算；超窗时报错。
+#### 2. LongMemEval
+
+| 完整评估脚本参数 | 用途与默认值 |
+|---|---|
+| `--benchmark-data` | 默认 `data/benchmarks/longmemeval` |
+| `--split` | 支持 `longmemeval_s_cleaned`（默认）和 `longmemeval_oracle` |
+| `--segment-length` | 默认 `2304` |
+| `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
+
+- **评估范围**：S 和 Oracle 使用相同的 500 道题。S 提供证据会话和干扰会话，Oracle 只提供证据会话。
+- **推理方式**：按题分配 GPU。每张卡逐题压缩按日期排列的会话历史，Reader 根据摘要、提问日期和问题作答。随着摘要累积，Writer 按剩余位置缩短后续正文段，为本段新增的 50 个摘要向量留出空间。
+- **输入长度**：按模型 tokenizer 统计，S 的历史长 120,431–132,553 个 token。使用默认分段长度与回答预算时，500 道 S 题均能放入 Writer 和 Reader 窗口。
+- **自动评分**：生成全部回答后，脚本调用 `gpt-6-luna`，按官方分题型提示词逐题判定正误，汇总准确率。裁判密钥 `OPENAI_API_KEY` 可在项目根目录的 `.env` 中配置。[裁判配置与评分口径](../../benchmarks/longmemeval/README.md#问答评分)
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash reproductions/autocompressors/scripts/eval_longmemeval.sh \
+  --split longmemeval_s_cleaned \
+  --checkpoint ~/models/reproductions/autocompressors/AutoCompressor-Llama-2-7b-6k \
+  --output-id AutoCompressor-Llama-2-7b-6k
+```
+
+| 独立评分代码参数 | 用途与默认值 |
+|---|---|
+| `--run-dir` | 必填，所选设置的结果目录 |
+| `--benchmark-data` | 默认沿用生成时记录的数据目录 |
+| `--resume` | 用于续评分，默认关闭 |
+
+- **独立评分**：已有完整回答时，可在项目根环境中直接评分，无需重新运行 AutoCompressors 推理。
+
+```bash
+uv run -m benchmarks.longmemeval.score \
+  --run-dir artifacts/reproductions/autocompressors/eval/AutoCompressor-Llama-2-7b-6k/longmemeval_s_cleaned
+```
+
+<a id="33-结果展示"></a>
 
 ### 3.2 结果展示
 
-结果保存在 `<output-root>/eval/<output-id>/locomo/`。除[公共评估产物](../../benchmarks/locomo/README.md#产物规范)外，还记录各段对话的正文与记忆 token 数，以及按对话平均的记忆 token 数和保留比例。保留比例为摘要 token 数除以正文 token 数。
+`--output-dir` 指向运行目录 `<output-root>/eval/<output-id>`。各任务评分完成后，`summary.json` 保存汇总指标，`details.jsonl` 保存逐题回答、参考答案及评分。看板可在同一运行目录中切换任务。
 
 ```bash
-bash reproductions/autocompressors/scripts/dashboard.sh \
-  --output-dir artifacts/reproductions/autocompressors/eval/AutoCompressor-Llama-2-7b-6k_seg2048_20261125
+bash reproductions/autocompressors/scripts/dashboard.sh --output-dir artifacts/reproductions/autocompressors/eval/AutoCompressor-Llama-2-7b-6k
 ```
 
-看板的 `--output-dir` 指向包含 `locomo/` 的运行目录。页面展示总体及各题型 F1、题数和记忆用量，并可按题型与对话筛选逐题回答、参考答案和 F1。模型名称与分段长度读取评估配置。
+| 设置目录 | 结果 |
+|---|---|
+| `locomo/` | 总体与分题型 F1，以及各题型的题数 |
+| `longmemeval_s_cleaned/`、`longmemeval_oracle/` | 生成回答写入 `predictions.jsonl`。评分后可查看总体与分题型准确率以及每题的裁判判定 |
+
+LoCoMo 看板可按题型和对话筛选，并显示模型、分段长度、每段对话的正文与摘要 token 数，以及按对话平均的摘要 token 数和保留比例。保留比例为摘要 token 数除以正文 token 数。

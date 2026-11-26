@@ -1,8 +1,8 @@
 # 20260912_latent_working_memory
 
-最后修订时间：20261125 21:08:47 Asia/Shanghai
+最后修订时间：20261126 11:59:27 Asia/Shanghai
 
-本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理，入口见 [reproductions](reproductions/README.md)。ICAE v2、AutoCompressors 和 SDCC 的公开权重使用同一 LoCoMo 开放问答评估协议，安装和运行命令见[软上下文压缩复现](reproductions/README.md#软上下文压缩的-locomo-评估)。
+本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理，入口见 [reproductions](reproductions/README.md)。Full-context 和六种复现基线支持 LoCoMo、LongMemEval-S 和 LongMemEval-Oracle。[软上下文压缩复现](reproductions/README.md#软上下文压缩的-locomo-评估) · [LongMemEval 基线入口](benchmarks/longmemeval/README.md#运行基线)
 
 当前在线 TTT 实现在 [v4.1 方法说明](src/latent_working_memory/v4_1/README.md)：逐层 latent memory、共享 KV、inner AM 与 outer QA + AM。配置、teacher 准备、单卡训练及评估命令见其[运行指南](src/latent_working_memory/v4_1/scripts/README.md)。
 

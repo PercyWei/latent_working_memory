@@ -66,8 +66,7 @@ def run_evaluation(args, method, settings, load_adapter, output_name, summarize_
         if not config.is_file():
             raise FileNotFoundError(f"--resume requires {config}")
     else:
-        run.mkdir(parents=True, exist_ok=False)
-        directory.mkdir()
+        directory.mkdir(parents=True, exist_ok=False)
     with (directory / ".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if args.resume:

@@ -2,28 +2,98 @@
 
 创建时间：20261019 20:16:32 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261126 10:05:16 Asia/Shanghai
+最后修订时间：20261126 15:09:31 Asia/Shanghai
 
-Full-context 基线使用原始模型和完整上下文评估 LoCoMo 与 RULER，按任务规定的生成预算进行贪心解码。
+Full-context 基线用原始模型读取完整输入，贪心生成答案。支持 LoCoMo、LongMemEval-S、LongMemEval-Oracle 和 RULER。[公共数据准备](../../../benchmarks/README.md)
 
-LoCoMo 的 reader 输入由公共输入构造器套用模型聊天模板：`system(QA 系统提示) → user(完整对话 + 简答指令与问题) → assistant 起始标记`。同一对话只预填一次公共前缀 KV，每批问题从该前缀创建独立缓存分支。
+## 一、运行环境
 
-[系统提示与输入构造](../prompts.py) · [数据准备与评分](../../../benchmarks/README.md) · [LoCoMo 公共接口](../../../benchmarks/locomo/README.md)
+从项目根目录运行，脚本使用项目的 `.venv`。推理默认以 BF16 加载权重，关闭模型级自动混合精度（autocast），注意力使用 FlashAttention 2。[主环境准备](../../../README.md#主环境与开发)
 
-## 一、启动评估
+## 二、benchmark 评估
 
-推理默认以 BF16 加载模型权重，关闭模型级自动混合精度（autocast）。注意力使用 FlashAttention 2。
+| 完整评估脚本共同参数 | 用途与默认值 |
+|---|---|
+| `--model-path` | 本地基座模型目录，默认 `~/models/Qwen3-4B-Instruct-2507` |
+| `--dtype` | 权重精度，支持 `bf16`（默认）和 `fp32` |
+| `--attention-implementation` | 注意力实现，支持 `flash_attention_2`（默认）和 `sdpa`。FP32 权重使用 FlashAttention 2 时须开启 `--mixed-precision` |
+| `--mixed-precision` | 为 FP32 权重启用 BF16 autocast，默认关闭 |
+| `--seed` | 随机种子，默认 `42` |
+| `--benchmark-data` | 输入数据目录，默认路径见各任务小节 |
+| `--output-root` | 输出根目录，默认 `artifacts/baselines/full_context` |
+| `--output-id` | 运行 ID，默认 `<模型目录名>_<YYYYMMDD-HHMM>`，续评估时必填 |
+| `--batch-size-per-gpu` | 每卡批处理数，默认 `1` |
+| `--resume` | 用于续评估，默认关闭 |
 
-在项目根目录运行，使用项目 `.venv` 环境。
+- **运行方式**：每张可见 GPU 加载一个模型副本。完整输入与回答预算之和须在模型的位置窗口内。[运行环境](#一运行环境) · [数据下载](../../../benchmarks/README.md)
+- **输入与解码**：使用基座模型的聊天模板和 QA 系统提示，将完整会话历史和问题放在同一条 user 消息中，从 assistant 起始标记贪心生成回答。[输入构造](../prompts.py)
+- **结果与续评**：各评估设置的结果分别保存在 `<output-root>/eval/<output-id>/` 下的对应子目录。`--resume` 复用已保存的回答和评分，只补齐未完成的部分。
+
+<a id="locomo"></a>
+
+### 1. LoCoMo
+
+| 完整评估脚本参数 | 用途与默认值 |
+|---|---|
+| `--benchmark-data` | 默认 `data/benchmarks/locomo` |
+
+- **评估范围**：覆盖 10 段完整对话中类别 1–4 的 1,540 道题。[LoCoMo 评估协议](../../../benchmarks/locomo/README.md)
+- **推理方式**：按对话分配 GPU，每段对话的公共前缀只预填一次。各题从该前缀的 KV 缓存独立生成回答。
+- **回答长度与评分**：每题最多生成 50 个 token。按官方规则逐题计算 F1，再对所有题目取平均。
 
 ```bash
-# LoCoMo
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eval_locomo.sh \
   --model-path ~/models/Qwen3-4B-Instruct-2507 \
   --output-id Qwen3-4B-Instruct-2507_20261126 \
   --batch-size-per-gpu 2
+```
 
-# RULER
+<a id="longmemeval-s-与-oracle"></a>
+
+### 2. LongMemEval
+
+| 完整评估脚本参数 | 用途与默认值 |
+|---|---|
+| `--benchmark-data` | 默认 `data/benchmarks/longmemeval` |
+| `--split` | 支持 `longmemeval_s_cleaned`（默认）和 `longmemeval_oracle` |
+| `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
+
+- **评估范围**：S 和 Oracle 使用相同的 500 道题。S 提供证据会话和干扰会话，Oracle 只提供证据会话。
+- **推理方式**：按题分配 GPU。每题按日期顺序拼接会话历史，再追加提问日期和问题。模型以最多 4,096 个 token 为一块预填输入，保留本批各题的完整 KV 缓存直至生成结束。
+- **自动评分**：生成全部回答后，脚本调用 `gpt-6-luna`，按官方分题型提示词逐题判定正误，汇总准确率。裁判密钥 `OPENAI_API_KEY` 可在项目根目录的 `.env` 中配置。[裁判配置与评分口径](../../../benchmarks/longmemeval/README.md#问答评分)
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eval_longmemeval.sh \
+  --split longmemeval_s_cleaned \
+  --model-path ~/models/Qwen3-4B-Instruct-2507 \
+  --output-id Qwen3-4B-Instruct-2507_20261126
+
+CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eval_longmemeval.sh \
+  --split longmemeval_oracle \
+  --model-path ~/models/Qwen3-4B-Instruct-2507 \
+  --output-id Qwen3-4B-Instruct-2507_20261126
+```
+
+| 独立评分代码参数 | 用途与默认值 |
+|---|---|
+| `--run-dir` | 必填，所选设置的结果目录 |
+| `--benchmark-data` | 默认沿用生成时记录的数据目录 |
+| `--resume` | 用于续评分，默认关闭 |
+
+- **独立评分**：已有完整回答时，可在项目根环境中直接评分，无需重新运行 Full-context 推理。
+
+```bash
+uv run -m benchmarks.longmemeval.score \
+  --run-dir artifacts/baselines/full_context/eval/Qwen3-4B-Instruct-2507_20261126/longmemeval_s_cleaned
+```
+
+## 三、RULER 评估
+
+新建 RULER 评估时，基座模型、精度、注意力实现、随机种子和每卡批量的默认值见[共同参数表](#二benchmark-评估)。
+
+首次运行须用 `--benchmark-data` 指定基座模型对应的数据目录。`--lengths` 默认选择 8192、16384、32768 三档，完整输入和回答预算还须满足所选长度档位的上限。调度器按题分卡，将长度档位和生成预算相同的题目组批。`--batch-size-by-length` 按长度覆盖每卡批量，其余档位沿用 `--batch-size-per-gpu`。
+
+```bash
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eval_ruler.sh \
   --model-path ~/models/Qwen3-4B-Instruct-2507 \
   --benchmark-data data/benchmarks/ruler-v1/Qwen3-4B-Instruct-2507 \
@@ -31,79 +101,34 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eva
   --batch-size-by-length 8192=32 16384=32 32768=16
 ```
 
-| 任务 | 调度与推理 |
-|---|---|
-| LoCoMo | 使用公共调度器，按完整对话分卡，在同一对话内组批回答；整段完成后释放正文 KV |
-| RULER | 按题目分卡，长度档位和生成预算相同的题目组成一批 |
-
-完整输入与生成预算之和须在模型窗口内；RULER 还须满足所选长度档位的上限。Python 入口分别为 `latent_working_memory.full_context.eval_locomo` 和 `latent_working_memory.full_context.eval_ruler`。
-
-### 中断续评
-
-LoCoMo 使用原 `--output-id` 和相同的模型、数据及推理参数，加 `--resume` 补齐未完成题目；GPU 数量和批量可调整。使用 FP32 权重和 BF16 autocast 的运行在续评时需带上 `--dtype fp32 --mixed-precision`。以下示例续评上述 BF16 运行。
-
-```bash
-CUDA_VISIBLE_DEVICES=0 bash src/latent_working_memory/full_context/scripts/eval_locomo.sh \
-  --model-path ~/models/Qwen3-4B-Instruct-2507 \
-  --output-id Qwen3-4B-Instruct-2507_20261126 \
-  --batch-size-per-gpu 2 \
-  --resume
-```
-
-RULER 通过原 `--model-path` 和 `--output-root` 定位结果目录，`--resume` 沿用已保存的数据、精度、随机种子和长度档位：
+结果保存在 `<output-root>/<模型目录名>/ruler/`。`--resume` 从原模型及输出目录读取已保存的数据、精度、随机种子和长度档位。另测一组设置时使用新的 `--output-root`。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eval_ruler.sh \
   --resume --batch-size-by-length 8192=8 16384=4 32768=2
 ```
 
-## 二、评估参数
-
-共同参数：
-
-| 参数 | 用途／默认值 |
-|---|---|
-| `--resume` | 补评未完成题目 |
-| `--model-path` | 本地基座模型，默认 `~/models/Qwen3-4B-Instruct-2507` |
-| `--benchmark-data` | 数据目录；LoCoMo 默认 `data/benchmarks/locomo`，RULER 首次运行必填 |
-| `--output-root` | 评估产物根目录，默认 `artifacts/baselines/full_context` |
-| `--dtype` | 权重精度，支持 `bf16`（默认）和 `fp32` |
-| `--attention-implementation` | 注意力实现，支持 `flash_attention_2`（默认）和 `sdpa` |
-| `--mixed-precision` | 混合精度计算，默认关闭 |
-| `--batch-size-per-gpu` | 每卡评估批量大小，默认 `1` |
-| `--seed` | 默认 `42` |
-
-任务专属参数：
-
-| 参数 | 用途／默认值 |
-|---|---|
-| LoCoMo |
-| `--output-id` | 运行标识，默认 `<模型名>_<YYYYMMDD-HHMM>` |
-| RULER |
-| `--lengths` | 评估长度档位，默认 `8192 16384 32768` |
-| `--batch-size-by-length` | 按长度覆盖每卡批量，如 `8192=8 16384=4 32768=2`；未指定档位沿用 `--batch-size-per-gpu` |
-
-## 三、评估产物
-
-| 任务 | 结果目录 | 配置与执行记录 |
-|---|---|---|
-| LoCoMo | `<output-root>/eval/<output-id>/locomo/` | 公共接口保存 `evaluation_config.json`、`execution.json`、任务分配和逐题续评记录 |
-| RULER | `<output-root>/<模型目录名>/ruler/` | `eval.json` 保存配置；`status.json`、`eval.log` 和 `progress/` 保存状态、日志与续评记录 |
-
-两项任务均保存 `summary.json` 和按原始题序排列的 `details.jsonl`。LoCoMo 使用公共结果格式，记录总体与分题型 F1、模型回答和参考答案；模型身份、精度和聊天模板记录在 `settings` 中。完整字段见[产物规范](../../../benchmarks/locomo/README.md#产物规范)。
-
-RULER 的 `summary.json` 另外记录推理批量、耗时和峰值显存。所有题目完成后，续评直接读取记录并汇总，无需加载模型。另测一组设置时，LoCoMo 使用新的 `--output-id`，RULER 使用新的 `--output-root`。
-
 ## 四、查看结果
 
-`--output-dir` 指向包含任务子目录的评估运行目录。LoCoMo 页面复用公共展示组件，支持按题型和对话查看 F1、逐题回答与参考答案；RULER 页面按长度档位和子任务展示准确率。
+评分完成后，各任务目录中的 `summary.json` 保存汇总指标，`details.jsonl` 按原始题序保存回答及评分。LoCoMo 和 LongMemEval 的 `evaluation_config.json` 记录模型身份、精度与聊天模板。
+
+| 任务 | 看板指标与运行记录 |
+|---|---|
+| LoCoMo | 总体及分题型 F1，可按对话查看逐题结果。`execution.json` 记录执行状态，`work.json` 和 `progress/` 保存任务分配与进度 |
+| LongMemEval-S / Oracle | 总体、分题型、题型宏平均及证据不足题准确率，可查看逐题判定和裁判模型。`scoring_config.json` 保存裁判配置 |
+| RULER | 按长度档位和子任务查看准确率。`summary.json` 另含推理批量、耗时与峰值显存，`eval.json`、`status.json`、`eval.log` 和 `progress/` 保存配置与运行记录 |
+
+方法看板的 `--output-dir` 指向包含任务子目录的运行目录。前面的 LoCoMo 与 LongMemEval 示例可以在同一个看板中查看。
 
 ```bash
-# LoCoMo
 bash src/latent_working_memory/full_context/scripts/dashboard.sh \
   --output-dir artifacts/baselines/full_context/eval/Qwen3-4B-Instruct-2507_20261126
+```
 
-# RULER
-bash src/latent_working_memory/full_context/scripts/dashboard.sh \
-  --output-dir artifacts/baselines/full_context/Qwen3-4B-Instruct-2507
+查看上例 RULER 结果时，将 `--output-dir` 设为 `artifacts/baselines/full_context/Qwen3-4B-Instruct-2507`。如需按题号并排比较 LongMemEval 的两种设置，可将各自的评分目录传给公共看板。
+
+```bash
+uv run --frozen bash benchmarks/longmemeval/scripts/dashboard.sh \
+  --run "Full-context S" artifacts/baselines/full_context/eval/Qwen3-4B-Instruct-2507_20261126/longmemeval_s_cleaned \
+  --run "Full-context Oracle" artifacts/baselines/full_context/eval/Qwen3-4B-Instruct-2507_20261126/longmemeval_oracle
 ```

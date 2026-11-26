@@ -2,30 +2,16 @@
 
 import torch
 
+from benchmarks.causal import CachedCausalReader
 from benchmarks.data import locomo_question_prompt
-from latent_working_memory.prompts import QAInputBuilder
 from .engine import PreparedConversation, PreparedQuestion
 
 
-class CausalLoCoMo:
+class CausalLoCoMo(CachedCausalReader):
     def __init__(self, model, tokenizer, fork_cache, input_format,
                  max_positions=None, mixed_precision=False):
-        self.model = model
-        self.tokenizer = tokenizer
+        super().__init__(model, tokenizer, input_format, max_positions, mixed_precision)
         self.fork_cache = fork_cache
-        self.input_format = dict(input_format)
-        self.input_builder = QAInputBuilder(tokenizer, self.input_format)
-        self.max_positions = max_positions
-        self.mixed_precision = mixed_precision
-        self.device = next(model.parameters()).device
-        eos = model.generation_config.eos_token_id
-        if eos is None:
-            eos = tokenizer.eos_token_id
-        self.eos_ids = {eos} if isinstance(eos, int) else set(eos)
-
-    def forward(self, ids, cache, mask):
-        return self.model(input_ids=ids, past_key_values=cache, attention_mask=mask,
-                          use_cache=True, return_dict=True, logits_to_keep=1)
 
     @torch.no_grad()
     def prepare_context(self, history, questions):
@@ -69,32 +55,12 @@ class CausalLoCoMo:
         cache = self.fork_cache(prefix, size)
         ids = torch.tensor([question.inputs for question in questions], device=self.device)
         mask = torch.ones((size, prefix_length), dtype=torch.long, device=self.device)
-        generated = [[] for _ in questions]
-        active = [True] * size
-        with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.mixed_precision):
-            # 部分原生递归状态只支持单 token 续写；保留其更新时机和位置规则。
-            for column in range(ids.shape[1]):
-                mask = torch.cat((mask, mask.new_ones(size, 1)), dim=1)
-                output = self.forward(ids[:, column:column + 1], cache, mask)
-                cache = output.past_key_values
-            for _ in range(max(question.sample.max_new_tokens for question in questions)):
-                predicted = output.logits[:, -1].argmax(dim=-1)
-                for index, token in enumerate(predicted.tolist()):
-                    if not active[index]:
-                        continue
-                    generated[index].append(token)
-                    question = questions[index]
-                    reason = ("eos" if token in self.eos_ids else "max_new_tokens"
-                              if len(generated[index]) == question.sample.max_new_tokens else None)
-                    if reason is not None:
-                        active[index] = False
-                        complete(question, {
-                            "prediction": self.tokenizer.decode(generated[index], skip_special_tokens=True).strip(),
-                            "generated_token_ids": generated[index], "stop_reason": reason,
-                        })
-                if not any(active):
-                    break
-                # 已结束行不再写入 KV 或递归状态，其余行继续原生自回归更新。
-                mask = torch.cat((mask, torch.tensor(active, device=self.device)[:, None]), dim=1)
-                output = self.forward(predicted[:, None], cache, mask)
-                cache = output.past_key_values
+
+        def completed(index, tokens, reason):
+            complete(questions[index], {
+                "prediction": self.tokenizer.decode(tokens, skip_special_tokens=True).strip(),
+                "generated_token_ids": tokens, "stop_reason": reason,
+            })
+
+        self.read_cached(cache, mask, ids, torch.ones_like(ids),
+                         [q.sample.max_new_tokens for q in questions], completed)

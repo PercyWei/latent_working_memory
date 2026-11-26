@@ -1,18 +1,18 @@
 # 论文复现
 
-最后修订时间：20261125 21:08:47 Asia/Shanghai
+最后修订时间：20261126 14:44:01 Asia/Shanghai
 
 本目录保存论文方法的独立复现。训练和评估入口、依赖环境、源码来源及结果分别在各方法目录维护。
 
 | 方法 | 入口 | 范围 |
 |---|---|---|
-| ICAE | [icae](icae/README.md) | v2 的 Mistral 预训练、指令微调权重在 LoCoMo 上的对照；v1 的 Llama-2-7B-Chat 压缩器供 C-DIC 使用 |
-| AutoCompressors | [autocompressors](autocompressors/README.md) | 官方 Llama-2-7B-6k 摘要向量在 LoCoMo 上的评估 |
-| SDCC | [sdcc](sdcc/README.md) | 官方 Qwen3-4B 半动态压缩权重在 LoCoMo 上的评估 |
+| ICAE | [icae](icae/README.md) | v2 的 Mistral 预训练、指令微调权重在 LoCoMo 与 LongMemEval 上的对照；v1 的 Llama-2-7B-Chat 压缩器供 C-DIC 使用 |
+| AutoCompressors | [autocompressors](autocompressors/README.md) | 官方 Llama-2-7B-6k 摘要向量在 LoCoMo 与 LongMemEval 上的评估 |
+| SDCC | [sdcc](sdcc/README.md) | 官方 Qwen3-4B 半动态压缩权重在 LoCoMo 与 LongMemEval 上的评估 |
 | C-DIC | [cdic](cdic/README.md) | 多轮记忆、MSC 训练与评估 |
-| LaCT | [lact](lact/README.md) | 760M 模型的 RULER、LoCoMo 评估 |
-| E²-TTT | [e2_ttt](e2_ttt/README.md) | 1.3B 模型的 RULER、SQuAD completion、SWDE、LoCoMo 评估 |
-| In-Place TTT | [in_place_ttt](in_place_ttt/README.md) | Qwen3-4B 32K TTT／baseline 的 RULER、LoCoMo 评估 |
+| LaCT | [lact](lact/README.md) | 760M 模型的 RULER、LoCoMo 和 LongMemEval 评估 |
+| E²-TTT | [e2_ttt](e2_ttt/README.md) | 1.3B 模型的 RULER、SQuAD completion、SWDE、LoCoMo 和 LongMemEval 评估 |
+| In-Place TTT | [in_place_ttt](in_place_ttt/README.md) | Qwen3-4B 32K TTT／baseline 的 RULER、LoCoMo 和 LongMemEval 评估 |
 
 ## 根目录文件
 
@@ -79,6 +79,10 @@ AutoCompressors 默认每 2,048 个 token 写 50 个槽。按发布的 tokenizer
 
 SDCC 在 Qwen3-4B-Instruct-2507 上按整段对话选择 2×、4×、8×、16× 或 32×。通过 `--compress-ratio-scale` 调整选择倾向，各对话的实际档位和保留比例随 F1 一起保存。
 
+## LongMemEval-S 与 Oracle
+
+上表六种已接入 LoCoMo 的复现方法，均可通过各自的 `scripts/eval_longmemeval.sh` 评估 S 或 Oracle。先用 `bash benchmarks/scripts/download_benchmarks.sh --benchmark longmemeval` 准备数据，并配置裁判 API。脚本生成全部回答后自动评分。中断后用原 `--output-id` 加 `--resume` 可继续生成或评分。各方法 README 给出对应的 checkpoint、评估命令和结果看板入口。[公共协议与七个基线入口](../benchmarks/longmemeval/README.md#运行基线)
+
 ## TTT 模型评估
 
 三个方法的既有评估进度与验证范围见[复现状态](20261110_ttt_reproduction_status.md)，LoCoMo 接入状态见各方法 README。评估使用各自的独立环境，命令均从项目根目录执行。
@@ -90,7 +94,7 @@ SDCC 在 Qwen3-4B-Instruct-2507 上按整段对话选择 2×、4×、8×、16× 
 | `source/<repo>/` | 按来源仓库保存迁入源码，保留仓库内部布局 |
 | `optimized/` | 本地推理优化 |
 | `evaluation/` | 各方法的 Python 评估模块，包含 `evaluate_parallel.py` 启动器、加载、续评、结果处理及论文参照数据 |
-| `scripts/` | Shell 评估入口 `eval.sh`、`eval_locomo.sh` 和实际使用的训练启动脚本 |
+| `scripts/` | Shell 评估入口 `eval.sh`、`eval_locomo.sh`、`eval_longmemeval.sh` 和实际使用的训练启动脚本 |
 | `configs/` | 实际使用的本地配置，按需设置 |
 | `requirements-eval.txt` | 方法独立评估环境的依赖 |
 | `README.md`、`UPSTREAM.md` | 使用方式、源码来源及本地改进 |
@@ -123,7 +127,7 @@ LaCT 的来源目录为 `source/lact/`、`source/flame/`；E²-TTT 为 `source/e
 
 ## Benchmark 结果看板
 
-ICAE、AutoCompressors、SDCC、LaCT、In-Place TTT 和 E²-TTT 各自提供 `scripts/dashboard.sh`，使用当前激活的方法环境展示单次运行的 benchmark 结果，当前支持 LoCoMo。`--output-dir` 指向包含 `locomo/` 的运行目录。
+ICAE、AutoCompressors、SDCC、LaCT、In-Place TTT 和 E²-TTT 各自提供 `scripts/dashboard.sh`，使用当前激活的方法环境展示单次运行的结果。`--output-dir` 指向包含 `locomo/`、`longmemeval_s_cleaned/` 或 `longmemeval_oracle/` 的运行目录，可在页面中选择已评分的任务。LongMemEval 的跨运行与跨设置比较见[公共看板](../benchmarks/longmemeval/README.md#查看结果)。
 
 总体及各题型 F1、题数和逐题回答复用[公共看板接口](../benchmarks/locomo/README.md#方法看板接入)；记忆用量等专属展示由方法维护。启动命令见各方法 README 的“查看结果”。跨运行比较使用[公共 LoCoMo 看板](../benchmarks/locomo/README.md#跨运行比较)，可在任一方法环境中启动。
 

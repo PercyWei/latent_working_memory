@@ -1,4 +1,4 @@
-"""LongMemEval 官方问答裁判及准确率汇总。"""
+"""使用 LongMemEval 官方提示词判分，并按官方口径汇总准确率。"""
 
 from functools import cache
 import json
@@ -15,7 +15,8 @@ from benchmarks.longmemeval.data import QUESTION_TYPES
 from benchmarks.vendor.longmemeval import get_anscheck_prompt
 
 
-JUDGE_MODEL = "gpt-4o-2024-08-06"
+JUDGE_MODEL = "gpt-6-luna"
+JUDGE_OPTIONS = {"reasoning_effort": "none", "temperature": 0, "max_completion_tokens": 10}
 JUDGE_REVISION = "9e0b455f4ef0e2ab8f2e582289761153549043fc"
 
 
@@ -47,9 +48,7 @@ def judge_answer(sample, hypothesis):
     body = {
         "model": JUDGE_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "n": 1,
-        "temperature": 0,
-        "max_tokens": 10,
+        **JUDGE_OPTIONS,
     }
     base = os.environ.get("OPENAI_BASE_URL", file_base_url) or "https://api.openai.com/v1"
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
@@ -58,8 +57,11 @@ def judge_answer(sample, hypothesis):
     url = f"{base.rstrip('/')}/chat/completions"
     request = Request(url, data=json.dumps(body).encode(), headers=headers)
     with urlopen(request, timeout=90) as response:
-        content = json.load(response)["choices"][0]["message"]["content"]
-    return {"model": JUDGE_MODEL, "label": "yes" in content.strip().lower()}
+        choice = json.load(response)["choices"][0]
+    content = (choice["message"]["content"] or "").strip()
+    if choice["finish_reason"] != "stop" or not content:
+        raise ValueError(f"{sample.id}: incomplete judge reply (finish_reason={choice['finish_reason']})")
+    return {"model": JUDGE_MODEL, "label": "yes" in content.lower()}
 
 
 def summarize_scores(records):

@@ -2,9 +2,9 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261126 10:26:09 Asia/Shanghai
+最后修订时间：20261126 15:14:03 Asia/Shanghai
 
-[环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能（LoCoMo）](#三通用功能)
+[环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能](#三通用功能)
 
 ## 一、环境准备
 
@@ -114,39 +114,84 @@ MLP／SwiGLU 自动匹配论文参照；未评估完成的 benchmark 显示 `—
 
 ## 三、通用功能
 
+### 3.1 benchmark 评估
+
+| 完整评估脚本共同参数 | 用途与默认值 |
+|---|---|
+| `--checkpoint` | 必填，本地完整的 checkpoint 目录 |
+| `--benchmark-data` | 输入数据目录，默认路径见各任务小节 |
+| `--output-root` | 输出根目录，默认 `artifacts/reproductions/e2_ttt` |
+| `--output-id` | 运行 ID，默认 `<checkpoint_name>_<YYYYMMDD-HHMM>`，续评估时必填 |
+| `--batch-size-per-gpu` | 每卡批处理数，默认 `1` |
+| `--resume` | 用于续评估，默认关闭 |
+
+- **运行方式**：在项目根目录使用 E²-TTT 环境运行。每张可见 GPU 加载一个模型副本，使用 `optimized` 模式推理。[环境准备](#一环境准备) · [数据下载](../../benchmarks/README.md)
+- **输入与解码**：将系统提示、会话历史和问题拼成纯文本，在 `Answer:` 后贪心生成回答。
+- **结果与续评**：各评估设置的结果分别保存在 `<output-root>/eval/<output-id>/` 下的对应子目录。`--resume` 复用已保存的回答和评分，只补齐未完成的部分。
+
 <a id="locomo-评估"></a>
+<a id="31-locomo-评估"></a>
 
-### 3.1 LoCoMo 评估
+#### 1. LoCoMo
 
-LoCoMo 使用 10 段完整对话，评估类别 1–4 的 1,540 道问题。适配代码已完成静态检查，CUDA 数值对照和完整评估待完成。下载数据及准备目录见[公共数据说明](../../benchmarks/README.md)，评估范围、F1 评分和续评规则见[公共 LoCoMo 说明](../../benchmarks/locomo/README.md)。
+| 完整评估脚本参数 | 用途与默认值 |
+|---|---|
+| `--benchmark-data` | 默认 `data/benchmarks/locomo` |
+
+- **评估范围**：覆盖 10 段完整对话中类别 1–4 的 1,540 道题。[LoCoMo 评估协议](../../benchmarks/locomo/README.md)
+- **推理方式**：按对话分配 GPU，每段对话历史只预填一次。该对话的各题复用预填好的递归状态和窗口注意力缓存，按各自的真实位置独立作答。
+- **回答长度与评分**：每题最多生成 50 个 token。按官方规则逐题计算 F1，再对所有题目取平均。
+- **验证范围**：LoCoMo 适配已完成静态检查，CUDA 数值对照和全量评估待完成。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash reproductions/e2_ttt/scripts/eval_locomo.sh \
   --checkpoint ~/models/reproductions/e2_ttt/mlp-1.3b-15b \
-  --output-id mlp-1.3b-15b_20261117 \
+  --output-id mlp-1.3b-15b_qa-eval \
   --batch-size-per-gpu 2
 ```
 
-| 参数 | 默认值与约定 |
-|---|---|
-| `--resume` | 沿用原 ID、checkpoint 和数据，补齐未完成的问题 |
-| `--checkpoint` | 必填，本地完整 checkpoint 目录 |
-| `--benchmark-data` | 默认 `data/benchmarks/locomo` |
-| `--output-root` | 默认 `artifacts/reproductions/e2_ttt` |
-| `--output-id` | 默认 `<checkpoint_name>_<YYYYMMDD-HHMM>` |
-| `--batch-size-per-gpu` | 每卡评估批量大小，默认 1 |
+<a id="32-longmemeval-评估"></a>
 
-- 支持公开 MLP／SwiGLU 权重，使用 `optimized` 批量推理。
-- 公共接口将下列内容拼接为纯文本提示：`QA 系统提示 → 完整对话 → 简答指令与问题 → Answer:`。
-- 每段对话只预填一次，各题从这份正文状态独立作答，互不继承其他问题或答案。
+#### 2. LongMemEval
+
+| 完整评估脚本参数 | 用途与默认值 |
+|---|---|
+| `--benchmark-data` | 默认 `data/benchmarks/longmemeval` |
+| `--split` | 支持 `longmemeval_s_cleaned`（默认）和 `longmemeval_oracle`  |
+| `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
+
+- **评估范围**：S 和 Oracle 使用相同的 500 道题。S 提供证据会话和干扰会话，Oracle 只提供证据会话。
+- **推理方式**：按题分配 GPU。每题按日期顺序读入自己的会话历史，再结合提问日期回答问题。
+- **评估长度**：S 的会话历史通常超过本项目 RULER 复现使用的最长设置（16K）。
+- **自动评分**：生成全部回答后，脚本调用 `gpt-6-luna`，按官方分题型提示词逐题判定正误，汇总准确率。裁判密钥 `OPENAI_API_KEY` 可在项目根目录的 `.env` 中配置。[裁判配置与评分口径](../../benchmarks/longmemeval/README.md#问答评分)
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash reproductions/e2_ttt/scripts/eval_longmemeval.sh \
+  --split longmemeval_s_cleaned \
+  --checkpoint ~/models/reproductions/e2_ttt/mlp-1.3b-15b \
+  --output-id mlp-1.3b-15b_qa-eval
+```
+
+| 独立评分代码参数 | 用途与默认值 |
+|---|---|
+| `--run-dir` | 必填，所选设置的结果目录 |
+| `--benchmark-data` | 默认沿用生成时记录的数据目录 |
+| `--resume` | 用于续评分，默认关闭 |
+
+- **独立评分**：已有完整回答时，可在项目根环境中直接评分，无需重新运行 E²-TTT 推理。
+
+```bash
+uv run -m benchmarks.longmemeval.score \
+  --run-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b_qa-eval/longmemeval_s_cleaned
+```
+
+<a id="33-结果展示"></a>
 
 ### 3.2 结果展示
 
-结果保存在 `<output-root>/eval/<output-id>/locomo/`。`summary.json` 汇总总体及各题型的 F1 和题数，`details.jsonl` 保存逐题回答与评分。
+以上示例共用一个运行目录，三个设置分别保存在 `locomo/`、`longmemeval_s_cleaned/` 和 `longmemeval_oracle/`。在看板中选择已评分的设置，可查看总体和分题型指标（LoCoMo 为 F1，LongMemEval 为准确率）、题数和逐题回答。每个设置的 `summary.json` 保存汇总，`details.jsonl` 保存逐题评分。LongMemEval 的生成回答另存为 `predictions.jsonl`。
 
 ```bash
 bash reproductions/e2_ttt/scripts/dashboard.sh \
-  --output-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b_20261117
+  --output-dir artifacts/reproductions/e2_ttt/eval/mlp-1.3b-15b_qa-eval
 ```
-
-`--output-dir` 指向包含 `locomo/` 的运行目录。页面展示总体及各题型 F1、题数，并可按题型与对话查看逐题回答和参考答案。

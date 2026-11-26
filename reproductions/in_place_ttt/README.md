@@ -2,9 +2,9 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261126 10:26:09 Asia/Shanghai
+最后修订时间：20261126 15:14:03 Asia/Shanghai
 
-[环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能（LoCoMo）](#三通用功能)
+[环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能](#三通用功能)
 
 ## 一、环境准备
 
@@ -117,40 +117,86 @@ TTT／baseline 自动匹配论文参照；要求本次 RULER 计划完成，论�
 
 ## 三、通用功能
 
+### 3.1 benchmark 评估
+
+| 完整评估脚本共同参数 | 用途与默认值 |
+|---|---|
+| `--checkpoint` | 必填，本地完整的 checkpoint 目录 |
+| `--benchmark-data` | 输入数据目录，默认路径见各任务小节 |
+| `--output-root` | 输出根目录，默认 `artifacts/reproductions/in_place_ttt` |
+| `--output-id` | 运行 ID，默认 `<checkpoint_name>_<YYYYMMDD-HHMM>`，续评估时必填 |
+| `--batch-size-per-gpu` | 每卡批处理数，默认 `1` |
+| `--mlp-chunk-size` | MLP 分块长度（token 数），默认 `0`（关闭）。TTT 模型启用时须取 TTT chunk 的正整数倍 |
+| `--resume` | 用于续评估，默认关闭 |
+
+- **运行方式**：在项目根目录使用 In-Place TTT 环境运行。每张可见 GPU 加载一个模型副本，使用 `optimized` 模式推理。[环境准备](#一环境准备) · [数据下载](../../benchmarks/README.md)
+- **输入与解码**：将系统提示、会话历史和问题拼成纯文本，在 `Answer:` 后贪心生成回答。
+- **结果与续评**：各评估设置的结果分别保存在 `<output-root>/eval/<output-id>/` 下的对应子目录。`--resume` 复用已保存的回答和评分，只补齐未完成的部分。
+
 <a id="locomo-评估"></a>
+<a id="31-locomo-评估"></a>
 
-### 3.1 LoCoMo 评估
+#### 1. LoCoMo
 
-数据准备见[公共数据说明](../../benchmarks/README.md)，评估范围、F1 评分和续评规则见[公共 LoCoMo 说明](../../benchmarks/locomo/README.md)。
+| 完整评估脚本参数 | 用途与默认值 |
+|---|---|
+| `--benchmark-data` | 默认 `data/benchmarks/locomo` |
+
+- **评估范围**：覆盖 10 段完整对话中类别 1–4 的 1,540 道题。[LoCoMo 评估协议](../../benchmarks/locomo/README.md)
+- **推理方式**：按对话分配 GPU，每段对话历史只预填一次。该对话的各题复用预填好的 KV 缓存，TTT 模型同时复用预填后的快速权重，各题独立作答。
+- **回答长度与评分**：每题最多生成 50 个 token，输入与生成预算之和须在 checkpoint 的 32,768 个位置以内。按官方规则逐题计算 F1，再对所有题目取平均。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash reproductions/in_place_ttt/scripts/eval_locomo.sh \
   --checkpoint ~/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
-  --output-id qwen3-4b-32k-ttt_20261117 \
+  --output-id qwen3-4b-32k-ttt_qa-eval \
   --batch-size-per-gpu 2
 ```
 
-| 参数 | 默认值与约定 |
-|---|---|
-| `--resume` | 沿用原 ID、checkpoint 和数据，补齐未完成的问题 |
-| `--checkpoint` | 必填，本地完整 checkpoint 目录 |
-| `--benchmark-data` | 默认 `data/benchmarks/locomo` |
-| `--output-root` | 默认 `artifacts/reproductions/in_place_ttt` |
-| `--output-id` | 默认 `<checkpoint_name>_<YYYYMMDD-HHMM>` |
-| `--batch-size-per-gpu` | 每卡评估批量大小，默认 1 |
-| `--mlp-chunk-size` | 默认 0；设为 TTT chunk 的整数倍可减少 MLP 中间激活 |
+<a id="32-longmemeval-评估"></a>
 
-- 使用 `optimized` 批量推理。完整输入与生成预算须在模型位置窗口内，超窗时报错。
-- 不套用聊天模板，由公共接口构造输入：`QA 系统提示 → 完整对话 → 简答指令与问题 → Answer:`。
-- 每段对话只预填一次，各题从这份 KV 和 TTT 状态独立作答，互不继承其他问题或答案。
+#### 2. LongMemEval
+
+| 完整评估脚本参数 | 用途与默认值 |
+|---|---|
+| `--benchmark-data` | 默认 `data/benchmarks/longmemeval` |
+| `--split` | 支持 `longmemeval_s_cleaned`（默认）和 `longmemeval_oracle`  |
+| `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
+| `--max-seq-len` | 输入与生成的 token 总预算，默认取 checkpoint 的 `max_position_embeddings`（两个 32K 模型均为 `32768`） |
+
+- **评估范围**：S 和 Oracle 使用相同的 500 道题。S 提供证据会话和干扰会话，Oracle 只提供证据会话。
+- **推理方式**：按题分配 GPU。每题按日期顺序读入自己的会话历史，再结合提问日期回答问题。
+- **位置预算**：Oracle 可使用默认的 32K 上限。S 示例将上限设为 `131072`，沿用 checkpoint 的 RoPE 配置做长度外推，外推效果尚未实测。
+- **自动评分**：生成全部回答后，脚本调用 `gpt-6-luna`，按官方分题型提示词逐题判定正误，汇总准确率。裁判密钥 `OPENAI_API_KEY` 可在项目根目录的 `.env` 中配置。[裁判配置与评分口径](../../benchmarks/longmemeval/README.md#问答评分)
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash reproductions/in_place_ttt/scripts/eval_longmemeval.sh \
+  --split longmemeval_s_cleaned \
+  --max-seq-len 131072 \
+  --checkpoint ~/models/reproductions/in_place_ttt/qwen3-4b-32k-ttt \
+  --output-id qwen3-4b-32k-ttt_qa-eval
+```
+
+| 独立评分代码参数 | 用途与默认值 |
+|---|---|
+| `--run-dir` | 必填，所选设置的结果目录 |
+| `--benchmark-data` | 默认沿用生成时记录的数据目录 |
+| `--resume` | 用于续评分，默认关闭 |
+
+- **独立评分**：已有完整回答时，可在项目根环境中直接评分，无需重新运行 In-Place TTT 推理。
+
+```bash
+uv run -m benchmarks.longmemeval.score \
+  --run-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt_qa-eval/longmemeval_s_cleaned
+```
+
+<a id="33-结果展示"></a>
 
 ### 3.2 结果展示
 
-结果保存在 `<output-root>/eval/<output-id>/locomo/`。`summary.json` 汇总总体及各题型的 F1 和题数，`details.jsonl` 保存逐题回答与评分。
+以上示例共用一个运行目录，三个设置分别保存在 `locomo/`、`longmemeval_s_cleaned/` 和 `longmemeval_oracle/`。在看板中选择已评分的设置，可查看总体和分题型指标（LoCoMo 为 F1，LongMemEval 为准确率）、题数和逐题回答。每个设置的 `summary.json` 保存汇总，`details.jsonl` 保存逐题评分。LongMemEval 的生成回答另存为 `predictions.jsonl`。
 
 ```bash
 bash reproductions/in_place_ttt/scripts/dashboard.sh \
-  --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt_20261117
+  --output-dir artifacts/reproductions/in_place_ttt/eval/qwen3-4b-32k-ttt_qa-eval
 ```
-
-`--output-dir` 指向包含 `locomo/` 的运行目录。页面展示总体及各题型 F1、题数，并可按题型与对话查看逐题回答和参考答案。

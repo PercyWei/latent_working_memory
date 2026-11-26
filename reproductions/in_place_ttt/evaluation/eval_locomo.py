@@ -9,10 +9,7 @@ from reproductions.ttt_locomo import INPUT_FORMAT
 from .locomo_adapter import load_adapter
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    root = Path(__file__).resolve().parents[3]
-    add_evaluation_arguments(parser, root / "artifacts/reproductions/in_place_ttt")
+def parse_checkpoint(parser, argv):
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--mlp-chunk-size", type=int, default=0, help="MLP 分块长度，默认 0")
     args = parser.parse_args(argv)
@@ -27,6 +24,14 @@ def main(argv=None):
         "continuation": "context prefill followed by tokenwise cached question and answer",
         "mlp_chunk_size": args.mlp_chunk_size,
     }
+    return args, settings
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    root = Path(__file__).resolve().parents[3]
+    add_evaluation_arguments(parser, root / "artifacts/reproductions/in_place_ttt")
+    args, settings = parse_checkpoint(parser, argv)
     return run_evaluation(args, "in-place-ttt", settings, load_adapter,
                           output_name=args.checkpoint.name)
 
