@@ -13,8 +13,8 @@ def iter_longmemeval(dataset_dir: Path, split: str) -> Iterator[Document]:
     """Keep dates and complete sessions; turn-level ``has_answer`` is not used.
 
     Session evidence is deliberately coarse and includes the date header.
-    Abstention, absent annotation, and unlocatable session IDs remain distinct
-    QA exclusions. All answer sessions must exist; there is no partial fallback.
+    Keep every occurrence in the history. Each annotated evidence ID must
+    identify exactly one session to locate the question's evidence.
     """
     if split not in LONGMEMEVAL_FILES:
         raise ValueError(f"unsupported LongMemEval split: {split!r}")
@@ -31,10 +31,11 @@ def iter_longmemeval(dataset_dir: Path, split: str) -> Iterator[Document]:
                 strict=True,
             )
         )
-        if len({session_id for _, session_id, _ in sessions}) != len(sessions):
-            raise ValueError(f"{qid}: duplicate haystack_session_ids")
+        answer_ids = row.get("answer_session_ids")
+        match_counts = dict.fromkeys(answer_ids or (), 0)
+        evidence_spans = []
         order = sorted(range(len(sessions)), key=lambda index: sessions[index][0])
-        parts, units, references, spans = [], [], [], {}
+        parts, units, references = [], [], []
         cursor = 0
         for index in order:
             date, session_id, turns = sessions[index]
@@ -46,23 +47,22 @@ def iter_longmemeval(dataset_dir: Path, split: str) -> Iterator[Document]:
             span = (cursor, cursor + len(text))
             parts.append(text)
             units.append(span)
-            spans[session_id] = span
+            if session_id in match_counts:
+                match_counts[session_id] += 1
+                evidence_spans.append(span)
             references.append({"session_index": index, "session_id": session_id})
             cursor += len(text) + 2
 
-        answer_ids = row.get("answer_session_ids")
         reason = None
         if "_abs" in qid:
             reason = "unanswerable"
         elif not answer_ids:
             reason = "missing_evidence_annotation"
-        elif any(session_id not in spans for session_id in answer_ids):
+        elif 0 in match_counts.values():
             reason = "evidence_locator_failed"
-        evidence = (
-            ()
-            if reason
-            else tuple(span for session_id, span in spans.items() if session_id in answer_ids)
-        )
+        elif any(count > 1 for count in match_counts.values()):
+            reason = "evidence_locator_ambiguous"
+        evidence = () if reason else tuple(evidence_spans)
         yield Document(
             doc_id=qid,
             dataset="longmemeval",
