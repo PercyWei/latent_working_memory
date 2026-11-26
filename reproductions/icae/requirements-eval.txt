@@ -1,8 +1,10 @@
-# ICAE v2 evaluation on Linux x86-64, Python 3.11, CUDA 12.8.
+# ICAE v2 evaluation on Linux x86-64, Python 3.11, CUDA 12.1.
 -r ../requirements-dashboard.txt
-torch @ https://download.pytorch.org/whl/cu128/torch-2.8.0%2Bcu128-cp311-cp311-manylinux_2_28_x86_64.whl
-# Official prebuilt wheel: https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3%2Bcu12torch2.8cxx11abiTRUE-cp311-cp311-linux_x86_64.whl
-flash-attn==2.8.3
+# Official prebuilt wheel: https://download.pytorch.org/whl/cu121/torch-2.4.0%2Bcu121-cp311-cp311-linux_x86_64.whl
+torch==2.4.0+cu121
+nvidia-nvjitlink-cu12==12.1.105
+# Official prebuilt wheel: https://github.com/Dao-AILab/flash-attention/releases/download/v2.6.3/flash_attn-2.6.3%2Bcu123torch2.4cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
+flash-attn==2.6.3
 transformers==4.47.1
 peft==0.10.0
 accelerate==0.29.3

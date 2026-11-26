@@ -62,30 +62,32 @@ fi
   "$python_minor"
 
 requirements_file="$project_root/reproductions/$method/requirements-eval.txt"
-wheel_url="$(sed -n 's/^# Official prebuilt wheel: //p' "$requirements_file")"
-wheel_name="${wheel_url##*/}"
-wheel_name="${wheel_name//%2B/+}"
-wheel_file="$wheel_dir/$wheel_name"
-if [[ ! -f $wheel_file && -f "$HOME/wheels/$wheel_name" ]]; then
-  wheel_file="$HOME/wheels/$wheel_name"
-fi
-if [[ ! -f $wheel_file ]]; then
-  mkdir -p "$wheel_dir"
-  printf '下载 FlashAttention wheel：%s\n' "$wheel_name"
-  partial_file="$wheel_file.part"
-  trap 'rm -f -- "$partial_file"' EXIT
-  curl --fail --location --retry 3 --output "$partial_file" "$wheel_url"
-  mv -- "$partial_file" "$wheel_file"
-  trap - EXIT
-fi
-printf '使用 FlashAttention wheel：%s\n' "$wheel_file"
-
 install_args=(-r "$requirements_file")
+while IFS= read -r wheel_url; do
+  wheel_name="${wheel_url##*/}"
+  wheel_name="${wheel_name//%2B/+}"
+  wheel_file="$wheel_dir/$wheel_name"
+  if [[ ! -f $wheel_file && -f "$HOME/wheels/$wheel_name" ]]; then
+    wheel_file="$HOME/wheels/$wheel_name"
+  fi
+  if [[ ! -f $wheel_file ]]; then
+    mkdir -p "$wheel_dir"
+    printf '下载 wheel：%s\n' "$wheel_name"
+    partial_file="$(mktemp "$wheel_file.part.XXXXXX")"
+    trap 'rm -f -- "$partial_file"' EXIT
+    curl --fail --location --retry 3 --output "$partial_file" "$wheel_url"
+    mv -- "$partial_file" "$wheel_file"
+    trap - EXIT
+  fi
+  printf '使用 wheel：%s\n' "$wheel_file"
+  install_args+=("$wheel_file")
+done < <(sed -n 's/^# Official prebuilt wheel: //p' "$requirements_file")
+
 if [[ $method == e2_ttt ]]; then
   install_args+=(-e "$project_root/reproductions/e2_ttt/source/e2_ttt"
                 -e "$project_root/reproductions/e2_ttt/source/e2_ttt/lm-evaluation-harness")
 fi
 uv --config-file "$uv_config_file" pip install --python "$environment_dir/bin/python" \
-  --only-binary flash-attn "$wheel_file" "${install_args[@]}"
+  --only-binary flash-attn "${install_args[@]}"
 uv --config-file "$uv_config_file" pip check --python "$environment_dir/bin/python"
 printf '环境已安装：%s\n' "$environment_dir"

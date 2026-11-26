@@ -2,7 +2,6 @@
 
 
 import torch
-from torch.nn.utils.rnn import pad_sequence
 from peft import LoraConfig
 from safetensors.torch import load_file
 
@@ -65,13 +64,17 @@ class ICAELoCoMo:
             embeds[:len(self.prefix_ids)] = prefix
         for index in range(max(map(len, segments))):
             active = [i for i, spans in enumerate(segments) if index < len(spans)]
-            spans = [torch.tensor(segments[i][index], device=self.device) for i in active]
+            spans = [segments[i][index] for i in active]
+            span_lengths = [len(span) for span in spans]
+            max_length = max(span_lengths)
             # 左侧填充让每行的最终 mem_size 个位置始终是该行的记忆槽。
-            padded = pad_sequence(spans, batch_first=True, padding_value=self.model.pad_token_id,
-                                  padding_side="left")
+            padded = torch.tensor(
+                [[self.model.pad_token_id] * (max_length - len(span)) + span for span in spans],
+                dtype=torch.long, device=self.device,
+            )
             ids = torch.cat((padded, self.model.append_sequence.expand(len(active), -1)), dim=1)
-            lengths = torch.tensor([len(span) for span in spans], device=self.device)
-            mask = torch.arange(ids.size(1), device=self.device) >= padded.size(1) - lengths[:, None]
+            lengths = torch.tensor(span_lengths, device=self.device)
+            mask = torch.arange(ids.size(1), device=self.device) >= max_length - lengths[:, None]
             positions = mask.long().cumsum(1).sub_(1).clamp_min_(0)
             hidden = self.decoder.model(inputs_embeds=self.model.tokens_to_embeddings(ids),
                                         attention_mask=mask, position_ids=positions,
