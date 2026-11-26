@@ -3,13 +3,8 @@
 import json
 from pathlib import Path
 
+from benchmarks.io import write_json as write_json
 from benchmarks.scoring import summarize_scores
-
-
-def write_json(path, value):
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
-    temporary.replace(path)
 
 
 def read_progress(directory, samples, repair=False):

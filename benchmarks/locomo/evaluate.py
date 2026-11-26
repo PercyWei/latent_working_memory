@@ -12,6 +12,7 @@ import time
 from zoneinfo import ZoneInfo
 
 from benchmarks.data import load_samples
+from benchmarks.io import write_jsonl
 from benchmarks.protocol import data_identity
 from latent_working_memory.prompts import QA_SYSTEM_PROMPT
 from .engine import shard_conversations
@@ -127,9 +128,7 @@ def run_evaluation(args, method, settings, load_adapter, output_name, summarize_
                 raise ValueError("workers did not cover all questions")
             rows = [records[sample.id] for sample in samples]
             summary = summarize(plan, rows, summarize_method)
-            temporary = directory / "details.jsonl.tmp"
-            temporary.write_text("".join(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n" for row in rows))
-            temporary.replace(directory / "details.jsonl")
+            write_jsonl(directory / "details.jsonl", rows)
             write_json(directory / "summary.json", summary)
             execution["status"] = "completed"
             print(f"LoCoMo F1 {100 * summary['metrics']['score']:.2f}", flush=True)

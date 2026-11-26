@@ -20,6 +20,7 @@ benchmark=all
 data_root=data/benchmarks
 ruler_source_dir=data/raw/ruler-v1-source
 ruler_revision=c3f5e3b4f87f97e048793bb510a3a6b19a46bf3a
+longmemeval_revision=98d7416c24c778c2fee6e6f3006e7a073259d48f
 hf_endpoint="${HF_ENDPOINT:-https://hf-mirror.com}"
 
 while [[ $# -gt 0 ]]; do
@@ -31,7 +32,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-case "$benchmark" in all|ruler|locomo) ;; *) fail '--benchmark 只能为 all、ruler 或 locomo' ;; esac
+case "$benchmark" in
+  all|ruler|locomo|longmemeval) ;;
+  *) fail '--benchmark 只能为 all、ruler、locomo 或 longmemeval' ;;
+esac
 data_root="$(expand_user_path "$data_root")"
 ruler_source_dir="$(expand_user_path "$ruler_source_dir")"
 [[ $data_root == /* ]] || data_root="$LWM_ROOT/$data_root"
@@ -78,4 +82,14 @@ if [[ $benchmark == all || $benchmark == locomo ]]; then
   mkdir -p "$data_root/locomo"
   download_file https://raw.githubusercontent.com/snap-research/locomo/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376/data/locomo10.json "$data_root/locomo/locomo10.json"
   printf 'LoCoMo 数据已准备：%s/locomo/locomo10.json\n' "$data_root"
+fi
+
+if [[ $benchmark == all || $benchmark == longmemeval ]]; then
+  longmemeval_endpoint="${HF_ENDPOINT:-https://huggingface.co}"
+  base_url="${longmemeval_endpoint%/}/datasets/xiaowu0162/longmemeval-cleaned/resolve/$longmemeval_revision"
+  mkdir -p "$data_root/longmemeval"
+  for file in longmemeval_oracle.json longmemeval_s_cleaned.json; do
+    download_file "$base_url/$file" "$data_root/longmemeval/$file"
+  done
+  printf 'LongMemEval-S 和 Oracle 数据已准备：%s/longmemeval\n' "$data_root"
 fi

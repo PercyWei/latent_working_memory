@@ -1,10 +1,10 @@
-# 20261014_RULER 与 LoCoMo 数据准备与协议
+# 20261014_公共 Benchmark 数据准备与协议
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261126 00:14:37 Asia/Shanghai
+最后修订时间：20261126 10:49:01 Asia/Shanghai
 
-本目录提供 RULER 与 LoCoMo 的公共数据准备、读取和评分，供不同方法及 full-context 基线共用。
+本目录提供 RULER、LoCoMo 和 LongMemEval 的公共数据准备、读取和评分。各方法通过相应接口接入。
 
 ## 1. 数据位置与评估协议
 
@@ -12,6 +12,7 @@
 |---|---|---|---|
 | RULER v1 | `data/benchmarks/ruler-v1/<model-name>/<length>/<task>/test.jsonl` | 8192、16384、32768 tokens；完整 13 项任务 | 官方必答项召回／任一参考答案命中，按任务等权汇总 |
 | LoCoMo | `data/benchmarks/locomo/locomo10.json` | 全部会话的 QA 类别 1–4 | 官方分类别 F1 与按题平均 F1 |
+| LongMemEval-S / Oracle | `data/benchmarks/longmemeval/` 下的两个官方 JSON 文件 | 清洗版，每种设置 500 题，独立运行 | 官方 GPT-4o 裁判逐题判分，汇总总体、分题型、题型宏平均及拒答准确率 |
 
 - 以下指令从项目根目录执行；数据下载和 RULER 样本生成由用户手动运行。
 - RULER 保留官方 `input`、`outputs` 等字段；LoCoMo 保留官方完整 JSON，不转换为训练用的 `{text,qas}`。
@@ -39,11 +40,12 @@ bash benchmarks/scripts/download_benchmarks.sh --benchmark all
 - **NLTK 资源**：强制重新下载 `punkt` 和 `punkt_tab`，保存到 `data/raw/nltk_data/tokenizers/`。生成脚本设置绝对路径 `NLTK_DATA`，供官方生成器子进程使用。
 - NLTK 下载默认允许使用已配置的代理（`NLTK_ALLOW_PROXIED_URLOPEN=1`），可通过同名环境变量覆盖；下载失败立即退出，不进入交互重试。
 - LoCoMo 下载 [官方正式数据](https://github.com/snap-research/locomo/tree/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376)，下载后可直接评估，无需额外构造脚本。
+- LongMemEval 下载作者[清洗版](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned)的 S 与 Oracle 原始 JSON。可通过 `HF_ENDPOINT` 指定 Hugging Face 镜像。
 
 | 参数 | 填法与默认值 |
 |---|---|
-| `--benchmark` | 支持 `all`（默认）、`ruler` 或 `locomo` |
-| `--data-root` | LoCoMo 数据父目录，默认 `data/benchmarks` |
+| `--benchmark` | 支持 `all`（默认）、`ruler`、`locomo` 或 `longmemeval` |
+| `--data-root` | LoCoMo 与 LongMemEval 数据父目录，默认 `data/benchmarks` |
 | `--ruler-source-dir` | RULER 官方源码及下载素材目录，默认 `data/raw/ruler-v1-source` |
 
 - HotpotQA 默认通过 `https://hf-mirror.com` 下载，可用 `HF_ENDPOINT` 覆盖下载源；数据路径和 revision 保持不变。
@@ -60,11 +62,14 @@ data/
 │           ├── punkt/
 │           └── punkt_tab/
 └── benchmarks/
-    └── locomo/
-        └── locomo10.json
+    ├── locomo/
+    │   └── locomo10.json
+    └── longmemeval/
+        ├── longmemeval_s_cleaned.json
+        └── longmemeval_oracle.json
 ```
 
-从 ModelScope 还原完整目录后，直接执行下方 RULER 生成命令；LoCoMo 可直接评估。RULER 源码与素材应来自上述固定版本，目录位置不同时向生成脚本传入 `--ruler-source-dir`。
+从 ModelScope 还原完整目录后，可执行下方 RULER 生成命令。LoCoMo 与 LongMemEval 可直接读取原始 JSON。RULER 源码与素材应来自上述固定版本，目录位置不同时向生成脚本传入 `--ruler-source-dir`。
 
 **RULER 样本生成：[generate_ruler.sh](scripts/generate_ruler.sh)**
 
@@ -100,7 +105,7 @@ bash benchmarks/scripts/generate_ruler.sh \
 
 ## 3. 评估入口
 
-各方法共用上述数据目录及公共读取、评分模块，使用各自的 checkpoint 与运行参数：
+下表列出已接入 RULER 与 LoCoMo 的方法入口，各方法使用自己的 checkpoint 与运行参数。
 
 | 方法 | 运行说明 |
 |---|---|
@@ -114,3 +119,7 @@ bash benchmarks/scripts/generate_ruler.sh \
 ## 公共 LoCoMo 评估
 
 Full-context、ICAE v2 和 v3.1.1 通过各自的评估脚本调用[公共接口](locomo/README.md)，按会话分片、复用正文状态并独立批量回答问题。
+
+## 公共 LongMemEval 评估
+
+S 与 Oracle 分别按题读取带日期的完整会话历史。生成阶段输出官方格式的回答，独立评分阶段调用固定版本的裁判。数据准备、方法适配器、续评命令与产物字段见 [LongMemEval 公共接口](longmemeval/README.md)。

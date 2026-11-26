@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import re
 
+from benchmarks.longmemeval.data import LONGMEMEVAL_FILES, load_longmemeval
+
 
 RULER_COMMIT = "c3f5e3b4f87f97e048793bb510a3a6b19a46bf3a"
 LOCOMO_COMMIT = "3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376"
@@ -215,4 +217,6 @@ def load_samples(benchmark: str, data_dir: Path, lengths: tuple[int, ...] = DEFA
         return _load_ruler(data_dir, lengths)
     if benchmark == "locomo":
         return _load_locomo(data_dir)
-    raise ValueError("benchmark must be ruler or locomo")
+    if benchmark in LONGMEMEVAL_FILES:
+        return load_longmemeval(benchmark, data_dir)
+    raise ValueError(f"unknown benchmark: {benchmark}")

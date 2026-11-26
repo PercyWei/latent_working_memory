@@ -10,6 +10,7 @@ from benchmarks.data import (
     LOCOMO_COMMIT,
     RULER_COMMIT,
 )
+from benchmarks.longmemeval.data import DATASET_REVISION, LONGMEMEVAL_FILES
 from latent_working_memory.prompts import QA_SYSTEM_PROMPT, QAInputBuilder, qa_input_format
 
 
@@ -34,8 +35,10 @@ def protocol(benchmark, lengths, memory, use_qa_system=False):
 
 def data_identity(samples, data_dir, benchmark):
     """绑定实际读取的原生样本，保留目录来源但不靠路径判断内容一致。"""
-    if benchmark not in {"ruler", "locomo"}:
-        raise ValueError("benchmark must be ruler or locomo")
+    source_commits = {"ruler": RULER_COMMIT, "locomo": LOCOMO_COMMIT,
+                      **dict.fromkeys(LONGMEMEVAL_FILES, DATASET_REVISION)}
+    if benchmark not in source_commits:
+        raise ValueError(f"unknown benchmark: {benchmark}")
     fingerprint = hashlib.blake2b(digest_size=32)
     for sample in samples:
         fingerprint.update(
@@ -44,7 +47,9 @@ def data_identity(samples, data_dir, benchmark):
         fingerprint.update(b"\n")
     return {
         "directory": str(Path(data_dir).expanduser().resolve()),
-        "source_commit": RULER_COMMIT if benchmark == "ruler" else LOCOMO_COMMIT,
+        "source_commit": source_commits[benchmark],
+        **({"benchmark": benchmark, "filename": LONGMEMEVAL_FILES[benchmark]}
+           if benchmark in LONGMEMEVAL_FILES else {}),
         "samples": len(samples),
         "fingerprint": fingerprint.hexdigest(),
     }
