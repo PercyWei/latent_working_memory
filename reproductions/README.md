@@ -1,6 +1,6 @@
 # 论文复现
 
-最后修订时间：20261125 17:41:23 Asia/Shanghai
+最后修订时间：20261125 21:08:47 Asia/Shanghai
 
 本目录保存论文方法的独立复现。训练和评估入口、依赖环境、源码来源及结果分别在各方法目录维护。
 
@@ -8,6 +8,7 @@
 |---|---|---|
 | ICAE | [icae](icae/README.md) | v2 的 Mistral 预训练、指令微调权重在 LoCoMo 上的对照；v1 的 Llama-2-7B-Chat 压缩器供 C-DIC 使用 |
 | AutoCompressors | [autocompressors](autocompressors/README.md) | 官方 Llama-2-7B-6k 摘要向量在 LoCoMo 上的评估 |
+| SDCC | [sdcc](sdcc/README.md) | 官方 Qwen3-4B 半动态压缩权重在 LoCoMo 上的评估 |
 | C-DIC | [cdic](cdic/README.md) | 多轮记忆、MSC 训练与评估 |
 | LaCT | [lact](lact/README.md) | 760M 模型的 RULER、LoCoMo 评估 |
 | E²-TTT | [e2_ttt](e2_ttt/README.md) | 1.3B 模型的 RULER、SQuAD completion、SWDE、LoCoMo 评估 |
@@ -21,7 +22,7 @@
 | [评估数据准备](20261108_ttt_data_preparation.md) | 三种 TTT 方法的数据规模、下载和构造命令 |
 | [评估环境](20261109_environment_setup.md) | 三种 TTT 方法的依赖版本、环境安装及安装记录 |
 | [复现状态](20261110_ttt_reproduction_status.md) | 正式评估进度、小样本验证结论、数值差异、资源测量及历史 B1 耗时外推 |
-| [setup_eval_env.sh](setup_eval_env.sh) | 安装 ICAE v2、AutoCompressors、LaCT、E²-TTT 或 In-Place TTT 的独立评估环境 |
+| [setup_eval_env.sh](setup_eval_env.sh) | 安装 ICAE v2、AutoCompressors、SDCC、LaCT、E²-TTT 或 In-Place TTT 的独立评估环境 |
 | [evaluation_runtime.py](evaluation_runtime.py) | 三方法共用的进程清理、时间、严格 JSON、基础 Git 来源、worker 进度快照与统一展示 |
 | [reporting/](reporting/comparison.py) | 三方法共用的论文对比图表与 HTML 渲染 |
 
@@ -37,6 +38,7 @@
 |---|---|---|
 | `icae` | 3.11 | `~/envs/icae-v2` |
 | `autocompressors` | 3.11 | `~/envs/autocompressors` |
+| `sdcc` | 3.11 | `~/envs/sdcc` |
 | `lact` | 3.11 | `~/envs/lact` |
 | `in_place_ttt` | 3.11 | `~/envs/in_place_ttt` |
 | `e2_ttt` | 3.12 | `~/envs/e2_ttt` |
@@ -57,13 +59,13 @@ source /data/envs/icae-v2/bin/activate
 
 ## 软上下文压缩的 LoCoMo 评估
 
-[ICAE](icae/README.md) 和 [AutoCompressors](autocompressors/README.md) 均使用官方模型实现。各方法的 README 提供源码、权重、独立环境和评估命令。准备公共数据：
+[ICAE](icae/README.md)、[AutoCompressors](autocompressors/README.md) 和 [SDCC](sdcc/README.md) 均使用官方模型实现。各方法的 README 提供源码、权重、独立环境和评估命令。准备公共数据：
 
 ```bash
 bash benchmarks/scripts/download_benchmarks.sh --benchmark locomo
 ```
 
-ICAE 和 AutoCompressors 均接入[公共 LoCoMo 框架](../benchmarks/locomo/README.md)。每段对话按时间顺序完整压缩一次，再独立回答所属问题；QA 系统提示和问题留在读出端。通过 `CUDA_VISIBLE_DEVICES` 分配 GPU，`--batch-size-per-gpu` 设置每卡批量。`--output-root` 和 `--output-id` 指定结果路径 `<output-root>/eval/<output-id>/locomo/`，续评时指定原 ID 并添加 `--resume`。
+三种方法均接入[公共 LoCoMo 框架](../benchmarks/locomo/README.md)。每段对话按时间顺序完整压缩一次，再独立回答所属问题；QA 系统提示和问题留在读出端。通过 `CUDA_VISIBLE_DEVICES` 分配 GPU，`--batch-size-per-gpu` 设置每卡批量。`--output-root` 和 `--output-id` 指定结果路径 `<output-root>/eval/<output-id>/locomo/`，续评时指定原 ID 并添加 `--resume`。
 
 | 产物 | 内容 |
 |---|---|
@@ -71,9 +73,11 @@ ICAE 和 AutoCompressors 均接入[公共 LoCoMo 框架](../benchmarks/locomo/RE
 | `details.jsonl` | 每题预测、参考答案、类别、F1 和该对话的记忆用量，完成后按数据集原序汇总 |
 | `summary.json` | `metrics` 保存总体和分题型 F1（0–1）；`conversations` 保存各对话的正文与记忆 token 数；`method_metrics` 保存方法汇总指标 |
 
-总体 F1 按题等权。两种适配均不保留原文，记忆用量按对话等权平均；保留比例为记忆 token 数除以正文 token 数。ICAE 的两套 v2 权重使用同一 Mistral 基座，默认平均压缩率为 4，可通过 `--mean-compression-rate` 调整；比较指令微调前后的 F1 时应使用相同压缩率。
+总体 F1 按题等权。三种方法的 Reader 均只接收压缩后的对话记忆。记忆用量按对话等权平均，保留比例为记忆 token 数除以正文 token 数。ICAE 的两套 v2 权重使用同一 Mistral 基座，默认平均压缩率为 4，可通过 `--mean-compression-rate` 调整；比较指令微调前后的 F1 时应使用相同压缩率。
 
 AutoCompressors 默认每 2,048 个 token 写 50 个槽。按发布的 tokenizer 对这 10 段对话计数，实际倍率为 37.51×–40.75×。与多倍率压缩器对照时可另开输出目录，使用 `--segment-length 800` 测名义 16×：10 段均能放入原生 4,096 位置窗口，实际为 15.29×–15.89×。若改为 200 个 token 写 50 槽（4×），10 段均会超窗。上述数值为输入预算统计，F1 由独立评估生成。
+
+SDCC 在 Qwen3-4B-Instruct-2507 上按整段对话选择 2×、4×、8×、16× 或 32×。通过 `--compress-ratio-scale` 调整选择倾向，各对话的实际档位和保留比例随 F1 一起保存。
 
 ## TTT 模型评估
 
@@ -119,7 +123,7 @@ LaCT 的来源目录为 `source/lact/`、`source/flame/`；E²-TTT 为 `source/e
 
 ## Benchmark 结果看板
 
-ICAE、AutoCompressors、LaCT、In-Place TTT 和 E²-TTT 各自提供 `scripts/dashboard.sh`，使用当前激活的方法环境展示单次运行的 benchmark 结果，当前支持 LoCoMo。`--output-dir` 指向包含 `locomo/` 的运行目录。
+ICAE、AutoCompressors、SDCC、LaCT、In-Place TTT 和 E²-TTT 各自提供 `scripts/dashboard.sh`，使用当前激活的方法环境展示单次运行的 benchmark 结果，当前支持 LoCoMo。`--output-dir` 指向包含 `locomo/` 的运行目录。
 
 总体及各题型 F1、题数和逐题回答复用[公共看板接口](../benchmarks/locomo/README.md#方法看板接入)；记忆用量等专属展示由方法维护。启动命令见各方法 README 的“查看结果”。跨运行比较使用[公共 LoCoMo 看板](../benchmarks/locomo/README.md#跨运行比较)，可在任一方法环境中启动。
 

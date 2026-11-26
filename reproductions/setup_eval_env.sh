@@ -6,7 +6,7 @@ usage() {
   cat <<'EOF'
 用法：bash reproductions/setup_eval_env.sh <方法> [--env-root <目录>]
 
-方法：icae、autocompressors、lact、in_place_ttt、e2_ttt
+方法：icae、autocompressors、sdcc、lact、in_place_ttt、e2_ttt
 --env-root  环境根目录，默认 ~；环境保存在 <env-root>/envs/<环境名>
 
 uv 配置默认读取 ${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml，可用 UV_CONFIG_FILE 指定。
@@ -39,7 +39,7 @@ while [[ $# -gt 0 ]]; do
 done
 environment_name="$method"
 case "$method" in
-  lact|in_place_ttt|autocompressors) python_minor=3.11 ;;
+  lact|in_place_ttt|autocompressors|sdcc) python_minor=3.11 ;;
   e2_ttt) python_minor=3.12 ;;
   icae) python_minor=3.11; environment_name=icae-v2 ;;
   *) printf '未知方法：%s\n' "$method" >&2; exit 2 ;;

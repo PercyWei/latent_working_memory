@@ -2,7 +2,7 @@
 
 创建时间：20261109 10:58:35 Asia/Shanghai
 
-最后修订时间：20261125 17:41:23 Asia/Shanghai
+最后修订时间：20261125 21:06:02 Asia/Shanghai
 
 ## 配置原则与实际版本
 
@@ -62,4 +62,4 @@ bash reproductions/setup_eval_env.sh in_place_ttt
 
 E²-TTT 的模型包和 harness 使用可编辑安装，路径分别为 `e2_ttt/source/e2_ttt/` 和其 `lm-evaluation-harness/`。源码目录变更后，在该环境的评估停止时重新执行 `bash reproductions/setup_eval_env.sh e2_ttt`，更新安装路径。
 
-同一安装器也支持 ICAE v2 和 AutoCompressors，方法参数、默认目录与自定义位置示例见[评估环境](README.md#评估环境)。LoCoMo 运行命令见 [ICAE README](icae/README.md#locomo-评估) 和 [AutoCompressors README](autocompressors/README.md#locomo-评估)。
+同一安装器也支持 ICAE v2、AutoCompressors 和 SDCC，方法参数、默认目录与自定义位置示例见[评估环境](README.md#评估环境)。LoCoMo 运行命令见 [ICAE](icae/README.md#locomo-评估)、[AutoCompressors](autocompressors/README.md#locomo-评估) 和 [SDCC](sdcc/README.md) 的方法说明。
