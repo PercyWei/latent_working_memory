@@ -25,7 +25,7 @@ def _fineweb_question(qa: dict, text: str) -> Question:
 
 
 def iter_fineweb_factqa(dataset_dir: Path, split: str) -> Iterator[Document]:
-    """Keep every document; select QA roles and use nonempty newline paragraphs.
+    """Keep each trajectory window and its task QAs across all splits.
 
     FineWeb's stored ``segments`` are artificial annotation ranges, not natural
     paragraphs. A text without line breaks remains one unit. Offsets always
@@ -34,7 +34,7 @@ def iter_fineweb_factqa(dataset_dir: Path, split: str) -> Iterator[Document]:
     if split not in FINEWEB_FACTQA_FILES:
         raise ValueError("FineWeb FactQA split must be train, dev or test")
     path = dataset_dir.expanduser().resolve() / FINEWEB_FACTQA_FILES[split]
-    role = "train" if split == "train" else "evaluation"
+    role = "task"
     with path.open(encoding="utf-8") as stream:
         for line_number, line in enumerate(stream, 1):
             row = json.loads(line)
