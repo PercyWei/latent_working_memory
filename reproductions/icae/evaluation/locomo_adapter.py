@@ -13,11 +13,17 @@ from .model import (
     UPSTREAM_COMMIT,
     load_adapter as load_official,
 )
+from .mistral_reader import read_mistral_prefixes
 
 
 class ICAEAdapter:
     def __init__(self, adapter):
         self.adapter = adapter
+        config = adapter.decoder.config
+        self.read = read_prefixes
+        if (config.model_type == "mistral" and config.sliding_window is None
+                and config._attn_implementation == "flash_attention_2"):
+            self.read = read_mistral_prefixes
 
     def prepare_contexts(self, documents):
         encoded = self.adapter.encode_histories([history for history, _ in documents])
@@ -45,9 +51,9 @@ class ICAEAdapter:
 
         caches, lengths = zip(*states)
         with model.icae.disable_adapter():
-            read_prefixes(self.adapter.decoder, caches, lengths, embeddings,
-                          [q.sample.max_new_tokens for q in questions], self.adapter.eos_id,
-                          completed, vocab_size=model.vocab_size - 1)
+            self.read(self.adapter.decoder, caches, lengths, embeddings,
+                      [q.sample.max_new_tokens for q in questions], self.adapter.eos_id,
+                      completed, vocab_size=model.vocab_size - 1)
 
 
 def add_arguments(parser):
