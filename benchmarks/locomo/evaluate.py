@@ -30,7 +30,7 @@ def add_evaluation_arguments(parser, output_root):
     parser.add_argument("--output-id", help="运行标识，默认名称由方法入口确定")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--batch-size-per-gpu", type=int, default=1,
-                        help="每卡评估 batch size，默认 1")
+                        help="每卡批处理数，默认 1")
 
 
 def run_evaluation(args, method, settings, load_adapter, output_name, summarize_method=None):

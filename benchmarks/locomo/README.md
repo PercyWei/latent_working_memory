@@ -2,7 +2,7 @@
 
 创建时间：20261124 15:43:38 Asia/Shanghai
 
-最后修订时间：20261126 12:03:06 Asia/Shanghai
+最后修订时间：20261126 16:58:52 Asia/Shanghai
 
 本目录提供 LoCoMo 的公共评估与看板接口。公共层维护数据、调度、评分和结果格式；各方法维护模型加载、正文处理、答案生成及自己的启动脚本。数据准备见[公共 benchmark 说明](../README.md)。
 
@@ -45,23 +45,23 @@ input_ids = builder.encode(sample.prompt)
 
 ### 会话适配器
 
-[engine.py](engine.py) 定义 `ConversationAdapter`，方法实现以下两个接口：
+[公共批处理模块](../documents.py) 定义 `DocumentAdapter`，方法实现以下两个接口：
 
 | 接口 | 输入与返回约定 |
 |---|---|
-| `prepare_context(history, questions)` | 接收正文字符串和当前对话待答的 `list[BenchmarkSample]`，返回 `PreparedConversation` |
-| `answer_batch(state, questions, complete)` | 接收共享正文状态和一批 `PreparedQuestion`；每完成一题，调用一次 `complete(question, answer)`，其中 `answer["prediction"]` 为回答字符串 |
+| `prepare_contexts(documents)` | 批量准备本批首次遇到的正文。每项为 `(正文, 待答问题列表)`，按顺序返回各自的 `PreparedConversation` |
+| `answer_batch(states, questions, complete)` | 接收与每题一一对应的正文状态和一批 `PreparedQuestion`；每完成一题，调用一次 `complete(question, answer)`，其中 `answer["prediction"]` 为回答字符串 |
 
 返回对象的字段如下：
 
 | 对象 | 字段 |
 |---|---|
 | `PreparedConversation` | `state`：共享正文状态；`questions`：全部待答题的准备结果；`statistics`：可选对话统计字典，默认空 |
-| `PreparedQuestion` | `sample`：原始样本；`inputs`：方法编码的问题输入；`batch_key`：标识可共同解码的问题的可哈希元组 |
+| `PreparedQuestion` | `sample`：原始样本；`inputs`：方法编码的问题输入 |
 
-公共层在同一对话内按 `batch_key` 组批，每批最多包含 `batch_size` 道题。方法保持共享正文状态只读，为每道题创建独立的可变状态分支，并按 `sample.max_new_tokens` 执行贪心生成。
+公共层按完整正文分组，优先从当前组取题，不足一批时从下一组补齐。同一正文跨批只准备一次，多篇新正文可在同一批中准备。各题使用自己的位置、生成预算和停止条件，解码完成即保存。
 
-通过前缀缓存续写的模型可使用 [causal.py](causal.py) 中的 `CausalLoCoMo`，传入模型、tokenizer、`fork_cache(prefix, batch_size)` 和输入配置。该实现负责共享前缀的预填、问题输入及答案生成；方法的 `fork_cache` 负责分支中的全部可变状态。
+TTT 方法通过 [CausalLoCoMo](causal.py) 的 `fork_cache` 从各题对应的正文状态选择行，构造独立的生成分支。
 
 ### 评估入口
 
@@ -103,7 +103,7 @@ if __name__ == "__main__":
 | `--benchmark-data` | 默认 `data/benchmarks/locomo` |
 | `--output-root` | 必填，评估产物根目录 |
 | `--output-id` | 必填，运行标识 |
-| `--batch-size-per-gpu` | 每卡评估批量大小，默认 1 |
+| `--batch-size-per-gpu` | 每卡批处理数，默认 1 |
 | `--resume` | 使用原 `--output-id` 和评估配置续评 |
 
 结果目录为 `<output-root>/eval/<output-id>/locomo/`。

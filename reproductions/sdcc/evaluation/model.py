@@ -9,7 +9,6 @@ from peft import PeftModel
 from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 from benchmarks.locomo.records import file_identity
-from benchmarks.longmemeval.generate import CompressedHistoryAdapter
 from reproductions.sdcc.source.sdcc.modeling_ctxcomp import CtxCompSemiDynamicModel
 from .locomo_adapter import SDCCLoCoMo, sdcc_input_format
 
@@ -17,7 +16,8 @@ from .locomo_adapter import SDCCLoCoMo, sdcc_input_format
 class SDCCForEvaluation(CtxCompSemiDynamicModel):
     def _get_context_encoder_last_hidden(self, input_ids, attention_mask):
         # 本地部署独立加载编码器；倍率选择与池化只需要最后一层，长历史无需驻留所有层。
-        return self.encoder(input_ids=input_ids, attention_mask=attention_mask,
+        positions = None if attention_mask is None else attention_mask.long().cumsum(1).sub_(1).clamp_min_(0)
+        return self.encoder(input_ids=input_ids, attention_mask=attention_mask, position_ids=positions,
                             use_cache=False, output_hidden_states=False, return_dict=True).last_hidden_state
 
 
@@ -97,4 +97,4 @@ def load_adapter(settings):
 
 
 def load_longmemeval_adapter(settings):
-    return CompressedHistoryAdapter(load_adapter(settings), settings["max_new_tokens"])
+    return load_adapter(settings)

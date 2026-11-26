@@ -6,10 +6,8 @@ import json
 from pathlib import Path
 
 from benchmarks.data import load_samples
-from benchmarks.io import write_json
-from benchmarks.progress import QuestionTimer
 from benchmarks.protocol import data_identity
-from .generate import generate_batches
+from .parallel import generate_assigned, history_groups
 
 
 def main():
@@ -23,19 +21,12 @@ def main():
     samples = load_samples(benchmark, data_dir)
     if data_identity(samples, data_dir, benchmark) != plan["data"]:
         raise ValueError("LongMemEval data changed after the generation run was planned")
-    assigned = [samples[i] for i in args.indices]
+    assigned = {i: samples[i] for i in args.indices}
     del samples
+    groups = history_groups(assigned, args.indices)
     factory = plan["adapter"]
-    timer = QuestionTimer()
-    adapter = getattr(import_module(factory["module"]), factory["factory"])(plan["settings"])
-    completed = 0
-    for batch in generate_batches(adapter, assigned, args.batch_size):
-        for row in batch:
-            index = args.indices[completed]
-            write_json(args.directory / "progress" / f"{index}.json", row)
-            completed += 1
-        print(f"{benchmark} | {completed}/{len(assigned)} | {batch[-1]['question_id']} | "
-              f"{timer.format_rate(completed)}", flush=True)
+    load_adapter = getattr(import_module(factory["module"]), factory["factory"])
+    generate_assigned(args.directory, assigned, groups, args.batch_size, load_adapter, plan["settings"])
 
 
 if __name__ == "__main__":

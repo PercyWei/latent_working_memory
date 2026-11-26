@@ -20,7 +20,7 @@ def add_evaluation_arguments(parser, output_root):
     parser.add_argument("--benchmark-data", type=Path, default=root / "data/benchmarks/longmemeval")
     parser.add_argument("--output-root", type=Path, default=Path(output_root))
     parser.add_argument("--output-id", help="默认使用模型或 checkpoint 名称及启动时间")
-    parser.add_argument("--batch-size-per-gpu", type=int, default=1)
+    parser.add_argument("--batch-size-per-gpu", type=int, default=1, help="每卡批处理数，默认 1")
     parser.add_argument("--max-new-tokens", type=int, default=128, help="每题的回答 token 上限")
     parser.add_argument("--resume", action="store_true",
                         help="沿用原输出 ID 和配置，补齐未完成的回答和评分")

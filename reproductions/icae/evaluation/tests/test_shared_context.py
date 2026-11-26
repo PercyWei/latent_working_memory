@@ -51,11 +51,16 @@ def test_both_stages_preserve_independent_answers():
                 TrainingArguments(output_dir=str(root), use_cpu=device.type == "cpu", report_to=[]),
                 LoraConfig(r=4, lora_alpha=8, bias="none", task_type="CAUSAL_LM"),
             ).eval().to(device)
-        history = "t4 t5 t6 t7 " * 140
+        with torch.no_grad():
+            for name, weight in model.named_parameters():
+                if "lora_B." in name:
+                    weight.normal_(std=0.05)
+        histories = ["t4 t5 t6 t7 " * 140, "t17 t22 " * 47]
         samples = [BenchmarkSample(
-            f"c/{i}", history + locomo_question_prompt(question, 4), ("t4",), 4,
-            {"conversation_id": "c", "question": question, "category": 4, "category_name": "single-hop"},
-        ) for i, question in enumerate(("t8", "t9", "t10 t11"))]
+            f"{doc}/{i}", histories[doc] + locomo_question_prompt(question, 4), ("t4",), budget,
+            {"conversation_id": str(doc), "question": question, "category": 4, "category_name": "single-hop"},
+        ) for i, (doc, question, budget) in enumerate(((0, "t8", 3), (0, "t9 t11", 2),
+                                                      (0, "t10", 2), (1, "t45 t46 t47", 4)))]
         for stage in ("pretrained", "finetuned"):
             original = ICAELoCoMo(model, stage)
             assert original.prefix_ids == (
@@ -63,23 +68,55 @@ def test_both_stages_preserve_independent_answers():
                 + model.tokenizer.encode(QA_SYSTEM_PROMPT + "\n\n", add_special_tokens=False)
             )
             adapter = ICAEAdapter(original)
-            state, _ = original.encode_history(history)
-            expected = {
-                sample.id: original.answer(state, locomo_question_prompt(sample.metadata["question"], 4), 4)
-                for sample in samples
-            }
-            for ordered, batch in ((samples, 2), (list(reversed(samples)), 1)):
-                answers = {}
-                evaluate_conversations(ordered, adapter, batch,
-                                       lambda s, a, stats: answers.update({s.id: a["prediction"]}))
-                assert answers == expected
-            prepared = adapter.prepare_context(history, samples)
-            for question in prepared.questions:
-                text = locomo_question_prompt(question.sample.metadata["question"], 4)
-                expected_ids = model.tokenizer.encode(text, add_special_tokens=False)
-                if stage == "finetuned":
-                    expected_ids = [model.ft_token_id] + expected_ids
-                assert question.inputs == expected_ids + model.tokenizer.encode(" [/INST]", add_special_tokens=False)
-            before = [layer[0].clone() for layer in prepared.state[0]]
-            adapter.answer_batch(prepared.state, prepared.questions[:2], lambda *args: None)
-            assert all(torch.equal(keys, layer[0]) for keys, layer in zip(before, prepared.state[0]))
+            documents = [(histories[0], samples[:3]), (histories[1], samples[3:])]
+            shapes = []
+            def record_inputs(module, args, kwargs):
+                shapes.append(tuple(kwargs["inputs_embeds"].shape[:2]))
+            hook = original.decoder.model.register_forward_pre_hook(record_inputs, with_kwargs=True)
+            contexts = adapter.prepare_contexts(documents)
+            hook.remove()
+            assert shapes[0][0] == 2
+            expected_tokens = {}
+            # 官方逐篇 _compress 与不复用 KV 的单题解码作为独立基准。
+            with torch.inference_mode():
+                for context, (history, _) in zip(contexts, documents, strict=True):
+                    ids = model.tokenizer.build_inputs_with_special_tokens(
+                        model.tokenizer.encode(history, add_special_tokens=False))
+                    slots = model._compress(original.token_tensor(ids))
+                    prefix = model.tokens_to_embeddings(original.token_tensor(original.prefix_ids))
+                    memory = torch.cat((prefix, slots.to(prefix).unsqueeze(0)), dim=1)
+                    assert context.statistics["memory_tokens"] == slots.size(0)
+                    with model.icae.disable_adapter():
+                        expected_cache = original.decoder.model(inputs_embeds=memory, use_cache=True).past_key_values
+                        for actual_layer, layer in zip(context.state[0], expected_cache, strict=True):
+                            for actual, expected in zip(actual_layer, layer, strict=True):
+                                tolerance = 1e-4 if actual.dtype == torch.float32 else 1e-2
+                                torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+                        for question in context.questions:
+                            sample = question.sample
+                            prompt = locomo_question_prompt(sample.metadata["question"], 4)
+                            tokens = model.tokenizer.encode(prompt, add_special_tokens=False)
+                            if stage == "finetuned":
+                                tokens = [model.ft_token_id] + tokens
+                            tokens += model.tokenizer.encode(" [/INST]", add_special_tokens=False)
+                            assert question.inputs == tokens
+                            embeds = torch.cat((memory, model.tokens_to_embeddings(original.token_tensor(tokens))), dim=1)
+                            generated = []
+                            for _ in range(sample.max_new_tokens):
+                                output = original.decoder(inputs_embeds=embeds, use_cache=False)
+                                token = output.logits[:, -1, :model.vocab_size - 1].argmax(-1)
+                                generated.append(token.item())
+                                if token.item() == original.eos_id:
+                                    break
+                                embeds = torch.cat((embeds, original.decoder.get_input_embeddings()(token[:, None])), dim=1)
+                            expected_tokens[sample.id] = generated
+
+            for ordered, batch in ((samples, 2), (list(reversed(samples)), 4), (samples, 1)):
+                outputs = {}
+                evaluate_conversations(ordered, adapter, batch, lambda s, a, _:
+                                       outputs.update({s.id: (a["generated_token_ids"], a["decode_batch_size"])}))
+                assert {i: tokens for i, (tokens, _) in outputs.items()} == expected_tokens
+                assert all(size == batch for _, size in outputs.values())
+            before = [layer[0].clone() for layer in contexts[0].state[0]]
+            adapter.answer_batch([contexts[0].state] * 2, contexts[0].questions[:2], lambda *args: None)
+            assert all(torch.equal(keys, layer[0]) for keys, layer in zip(before, contexts[0].state[0]))

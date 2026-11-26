@@ -2,9 +2,11 @@
 
 
 import torch
+from torch.nn.utils.rnn import pad_sequence
 from peft import LoraConfig
 from safetensors.torch import load_file
 
+from benchmarks.locomo.reader import prefill_prefixes
 from latent_working_memory.prompts import QA_SYSTEM_PROMPT
 from reproductions.icae.formatting import icae_input_format
 from reproductions.icae.source.icae.code.icae_v2.modeling_icae_multi_span import (
@@ -38,47 +40,50 @@ class ICAELoCoMo:
         return self.input_format["question_prefix_ids"] + ids + self.input_format["answer_prefix_ids"]
 
     @torch.inference_mode()
-    def encode_history(self, text):
-        body_ids = self.model.tokenizer.encode(text, add_special_tokens=False, truncation=False)
-        ids = self.model.tokenizer.build_inputs_with_special_tokens(body_ids)
-        segments = self.model.compute_num_segments(len(ids))
-        writer_positions = (len(ids) + segments - 1) // segments + self.model.mem_size
-        if writer_positions > self.window:
-            raise ValueError(f"ICAE writer needs {writer_positions} positions (window {self.window})")
-        memory_tokens = segments * self.model.mem_size
-        prefix_length = len(self.prefix_ids) + memory_tokens
-        if prefix_length >= self.window:
-            raise ValueError(f"ICAE reader prefix requires {prefix_length} tokens, window {self.window}")
-        slots = self.model._compress(self.token_tensor(ids))
-        prefix = self.model.tokens_to_embeddings(self.token_tensor(self.prefix_ids))
-        embeddings = torch.cat((prefix, slots.to(prefix).unsqueeze(0)), dim=1)
-        with self.model.icae.disable_adapter():
-            # The reader reuses this tuple cache as a shared prefix for all questions.
-            cache = self.decoder.model(inputs_embeds=embeddings, use_cache=True).past_key_values
-        stats = {"context_tokens": len(body_ids), "memory_tokens": memory_tokens}
-        return (cache, prefix_length), stats
+    def encode_histories(self, histories):
+        # 沿用官方 _compress 的逐篇分段尺寸。每轮并行处理各正文的下一段。
+        segments = []
+        stats = []
+        for text in histories:
+            body = self.model.tokenizer.encode(text, add_special_tokens=False, truncation=False)
+            ids = self.model.tokenizer.build_inputs_with_special_tokens(body)
+            count = self.model.compute_num_segments(len(ids))
+            width = (len(ids) + count - 1) // count
+            writer_length = width + self.model.mem_size
+            memory_tokens = count * self.model.mem_size
+            if writer_length > self.window:
+                raise ValueError(f"ICAE writer needs {writer_length} positions (window {self.window})")
+            if len(self.prefix_ids) + memory_tokens >= self.window:
+                raise ValueError(f"ICAE reader prefix exceeds position window {self.window}")
+            segments.append([ids[i:i + width] for i in range(0, len(ids), width)])
+            stats.append({"context_tokens": len(body), "memory_tokens": memory_tokens})
 
-    @torch.inference_mode()
-    def answer(self, memory, question_prompt, max_new_tokens):
-        cache, prefix_length = memory
-        ids = self.question_ids(question_prompt)
-        total_length = prefix_length + len(ids) + max_new_tokens
-        if total_length > self.window:
-            raise ValueError(f"ICAE QA requires {total_length} tokens, window {self.window}")
-        inputs = self.model.tokens_to_embeddings(self.token_tensor(ids))
-        generated = []
+        prefix = self.model.tokens_to_embeddings(self.token_tensor(self.prefix_ids))[0]
+        prefixes = [prefix.new_empty((len(self.prefix_ids) + row["memory_tokens"], prefix.size(-1)))
+                    for row in stats]
+        for embeds in prefixes:
+            embeds[:len(self.prefix_ids)] = prefix
+        for index in range(max(map(len, segments))):
+            active = [i for i, spans in enumerate(segments) if index < len(spans)]
+            spans = [torch.tensor(segments[i][index], device=self.device) for i in active]
+            # 左侧填充让每行的最终 mem_size 个位置始终是该行的记忆槽。
+            padded = pad_sequence(spans, batch_first=True, padding_value=self.model.pad_token_id,
+                                  padding_side="left")
+            ids = torch.cat((padded, self.model.append_sequence.expand(len(active), -1)), dim=1)
+            lengths = torch.tensor([len(span) for span in spans], device=self.device)
+            mask = torch.arange(ids.size(1), device=self.device) >= padded.size(1) - lengths[:, None]
+            positions = mask.long().cumsum(1).sub_(1).clamp_min_(0)
+            hidden = self.decoder.model(inputs_embeds=self.model.tokens_to_embeddings(ids),
+                                        attention_mask=mask, position_ids=positions,
+                                        use_cache=False, return_dict=True).last_hidden_state
+            start = len(self.prefix_ids) + index * self.model.mem_size
+            for row, document in enumerate(active):
+                prefixes[document][start:start + self.model.mem_size] = hidden[row, -self.model.mem_size:]
+            del hidden
+
         with self.model.icae.disable_adapter():
-            for _ in range(max_new_tokens):
-                outputs = self.decoder(inputs_embeds=inputs, past_key_values=cache, use_cache=True)
-                # Added padding/memory/operation rows are never answer tokens.
-                token = outputs.logits[:, -1, : self.model.vocab_size - 1].argmax(dim=-1)
-                token_id = token.item()
-                if token_id == self.eos_id:
-                    break
-                generated.append(token_id)
-                inputs = self.decoder.get_input_embeddings()(token.unsqueeze(1))
-                cache = outputs.past_key_values
-        return self.model.tokenizer.decode(generated, skip_special_tokens=True).strip()
+            caches = prefill_prefixes(self.decoder, prefixes)
+        return [((cache, len(embeds)), row) for cache, embeds, row in zip(caches, prefixes, stats, strict=True)]
 
 
 def load_adapter(model_path, checkpoint, stage, mean_compression_rate, fixed_mem_size):

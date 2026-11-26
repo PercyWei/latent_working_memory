@@ -5,51 +5,13 @@ from collections.abc import Callable
 from importlib import import_module
 import json
 from pathlib import Path
-from typing import Protocol
 
 from benchmarks.data import load_samples
-from benchmarks.io import run_lock, write_json, write_jsonl
-from benchmarks.progress import QuestionTimer
+from benchmarks.documents import DocumentAdapter
+from benchmarks.io import run_lock, write_json
 from benchmarks.protocol import data_identity
-from .data import LONGMEMEVAL_FILES, LongMemEvalInput, format_history, format_question
-from .parallel import generate_on_devices
-
-
-class LongMemEvalAdapter(Protocol):
-    def answer_batch(self, inputs: list[LongMemEvalInput]) -> list[str]:
-        """每题独立读取历史，按输入顺序返回回答。"""
-        ...
-
-
-class CompressedHistoryAdapter:
-    """每题写入独立的压缩记忆，随后用提问日期和问题读出答案。"""
-
-    def __init__(self, adapter, max_new_tokens):
-        self.adapter = adapter
-        self.max_new_tokens = max_new_tokens
-
-    def answer_batch(self, inputs):
-        answers = []
-        for item in inputs:
-            state, _ = self.adapter.encode_history(format_history(item))
-            answers.append(self.adapter.answer(state, format_question(item), self.max_new_tokens))
-            del state
-        return answers
-
-
-def generate_batches(adapter, samples, batch_size):
-    for start in range(0, len(samples), batch_size):
-        batch = samples[start:start + batch_size]
-        try:
-            answers = adapter.answer_batch([sample.input for sample in batch])
-        except ValueError as error:
-            ids = ", ".join(sample.id for sample in batch)
-            raise ValueError(f"generating {ids}: {error}") from error
-        if (not isinstance(answers, list) or len(answers) != len(batch)
-                or not all(isinstance(answer, str) for answer in answers)):
-            raise ValueError("answer_batch must return one string per input, in order")
-        yield [{"question_id": sample.id, "hypothesis": answer}
-               for sample, answer in zip(batch, answers, strict=True)]
+from .data import LONGMEMEVAL_FILES
+from .parallel import generate_predictions
 
 
 def read_predictions(path, samples):
@@ -70,7 +32,7 @@ def read_predictions(path, samples):
 
 def run_generation(
     benchmark, data_dir, output_root, output_id, method, settings,
-    load_adapter: Callable[[dict], LongMemEvalAdapter], batch_size=1, resume=False, devices=None,
+    load_adapter: Callable[[dict], DocumentAdapter], batch_size=1, resume=False, devices=None,
 ):
     """返回官方 predictions.jsonl 的路径。settings 记录模型身份、输入和解码设置。"""
     if benchmark not in LONGMEMEVAL_FILES:
@@ -105,16 +67,7 @@ def run_generation(
         else:
             write_json(config_path, config)
         rows = read_predictions(predictions, samples)
-        if devices is not None:
-            generate_on_devices(directory, samples, rows, devices, batch_size, lock)
-        elif len(rows) < len(samples):
-            timer = QuestionTimer(len(rows))
-            adapter = load_adapter(settings)
-            for completed in generate_batches(adapter, samples[len(rows):], batch_size):
-                rows.extend(completed)
-                write_jsonl(predictions, rows)
-                print(f"{benchmark} | {len(rows)}/{len(samples)} | {timer.format_rate(len(rows))}",
-                      flush=True)
+        generate_predictions(directory, samples, rows, devices, batch_size, lock, load_adapter, settings)
     return predictions
 
 

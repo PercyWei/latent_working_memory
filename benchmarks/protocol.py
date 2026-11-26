@@ -61,8 +61,13 @@ def encode_prompt(sample, tokenizer, model_window, benchmark, use_qa_system=Fals
         raise ValueError("benchmark must be ruler or locomo")
     builder = QAInputBuilder(tokenizer, qa_input_format(tokenizer),
                              QA_SYSTEM_PROMPT if use_qa_system else None)
-    ids = builder.encode(sample.prompt)
     limit = min(sample.metadata["length"], model_window) if benchmark == "ruler" else model_window
+    return encode_document_prompt(sample, builder, limit)
+
+
+def encode_document_prompt(sample, builder, limit):
+    """按指定问答协议编码完整输入，并为回答预留位置。"""
+    ids = builder.encode(sample.prompt)
     if len(ids) + sample.max_new_tokens > limit:
         raise ValueError(
             f"{sample.id}: prompt ({len(ids)}) + generation budget "

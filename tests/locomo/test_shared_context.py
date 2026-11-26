@@ -14,7 +14,7 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from transformers import GenerationConfig, PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
 
-from benchmarks.data import BenchmarkSample, locomo_question_prompt
+from benchmarks.data import BenchmarkSample, locomo_history, locomo_question_prompt
 from benchmarks.protocol import encode_prompt
 from benchmarks.locomo.engine import evaluate_conversations, shard_conversations
 from benchmarks.locomo.records import read_progress
@@ -68,6 +68,9 @@ def test_full_context_matches_independent_generation(setup):
     _, model, tokenizer, samples, device = setup
     generation = GenerationConfig(do_sample=False, eos_token_id=1, pad_token_id=0, use_cache=True)
     adapter = FullContextLoCoMo(tokenizer, model, generation, 2048, device)
+    # 最后一题来自另一篇正文，预算和前缀长度也不同；第二批必须混合两篇正文。
+    samples = [*samples, BenchmarkSample("c2/0", "t25 t26 " + samples[1].prompt, ("t3",), 3,
+                                         {**samples[1].metadata, "conversation_id": "c2"})]
     expected = {}
     with torch.no_grad():
         for sample in samples:
@@ -82,9 +85,9 @@ def test_full_context_matches_independent_generation(setup):
             expected[sample.id] = output
     assert collect(adapter, samples, 2) == expected
     assert collect(adapter, list(reversed(samples)), 1) == expected
-    prepared = adapter.prepare_context("t3 t4 " * 8, samples)
+    prepared = adapter.prepare_contexts([(locomo_history(samples[0]), samples[:3])])[0]
     original = [layer.keys.clone() for layer in prepared.state[0].layers]
-    adapter.answer_batch(prepared.state, prepared.questions[:2], lambda *args: None)
+    adapter.answer_batch([prepared.state] * 2, prepared.questions[:2], lambda *args: None)
     assert all(torch.equal(old, layer.keys) for old, layer in zip(original, prepared.state[0].layers))
 
 
@@ -104,19 +107,23 @@ def test_memory_reader_matches_full_reprefill(setup):
     with torch.no_grad(), model.forward_context():
         path = execute_batch(model, [adapter.encoder.context(history)], 16, pending_size=16,
                              recent_size=4, collect_boundary=True)[0]
-        prepared = adapter.prepare_context(history, samples)
+        prepared = adapter.prepare_contexts([(history, samples)])[0]
         expected = {}
         for question in prepared.questions:
             tokens = model.generate(path.blocks, path.retained_ids + tuple(question.inputs),
                                     question.sample.max_new_tokens, adapter.encoder.reader_prefix_ids)
             expected[question.sample.id] = list(tokens)
+    other = BenchmarkSample("other/0", "t25 " * 24 + samples[0].prompt, ("t3",), 3,
+                            {**samples[0].metadata, "conversation_id": "other"})
+    mixed = [*samples, other]
+    assert collect(adapter, mixed, 4) == collect(adapter, mixed, 1)
     assert collect(adapter, samples, 2) == expected
     assert collect(adapter, list(reversed(samples)), 1) == expected
 
 
 def test_resume_keeps_conversation_shards_and_repairs_last_line(tmp_path, setup):
     _, _, _, samples, _ = setup
-    other = [BenchmarkSample("c2/0", samples[0].prompt, ("t3",), 5,
+    other = [BenchmarkSample("c2/0", "t8 " + samples[0].prompt, ("t3",), 5,
                              {**samples[0].metadata, "conversation_id": "c2"})]
     all_samples = samples + other
     progress = tmp_path / "progress"

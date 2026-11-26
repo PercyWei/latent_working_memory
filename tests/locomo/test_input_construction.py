@@ -153,7 +153,7 @@ def test_autocompressor_actual_prefix_memory_and_questions(tokenizer):
     history = "Alice moved to Paris.\n\n" * 2
     row = sample(history)
     adapter = AutoCompressorLoCoMo(model, tokenizer, 8, AC_FORMAT)
-    prepared = adapter.prepare_context(history, [row])
+    prepared = adapter.prepare_contexts([(history, [row])])[0]
     body = tokenizer.encode(history, add_special_tokens=False)
     assert torch.cat(model.writes, dim=1).tolist() == [body]
     prefix_ids = tokenizer.encode(QA_SYSTEM_PROMPT + "\n\n", add_special_tokens=True)
@@ -171,7 +171,7 @@ def test_shared_ttt_actual_prefix_and_question_tokens(tokenizer):
     history = "Alice moved to Paris.\n\n"
     rows = [sample(history), sample(history, "When?", 2)]
     adapter = CausalLoCoMo(RecordingModel(tokenizer), tokenizer, None, TTT_FORMAT)
-    prepared = adapter.prepare_context(history, rows)
+    prepared = adapter.prepare_contexts([(history, rows)])[0]
     original_prefix = tokenizer.encode(QA_SYSTEM_PROMPT + "\n\n" + history, add_special_tokens=True)
     probe = tokenizer.encode(QA_SYSTEM_PROMPT + "\n\n" + history + locomo_question_prompt("", 4) + "\nAnswer:", add_special_tokens=True)
     shared = next((i for i, (a, b) in enumerate(zip(original_prefix, probe)) if a != b), min(len(original_prefix), len(probe)))

@@ -2,7 +2,7 @@
 
 创建时间：20261102 16:06:43 Asia/Shanghai
 
-最后修订时间：20261125 10:58:32 Asia/Shanghai
+最后修订时间：20261126 17:07:15 Asia/Shanghai
 
 v3.1.1 的 `stage=pretrain` 使用文本重建／续写（AE／LM）；`stage=post` 使用问答（QA），由 `training.update_mode` 选择仅更新压缩器（`compressor_only`）、仅更新边界（`boundary_only`）或联合更新（`joint`）。每次写入将一段正文压缩为固定 K 个记忆槽位（memory slots），已提交的记忆块保持不变；读取器（Reader）根据这些记忆及未压缩的 pending 和 recent 尾段回答问题。
 
@@ -612,7 +612,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/v3_1_1/scripts/eval_test
 
 新建评估必填 `--eval-run` 和 `--eval-data`；前者指向运行根目录。`--eval-id` 缺省生成 `YYYYMMDD-HHMMSS`。`--checkpoint` 接受一个或多个 `global_step_<N>` 名称，省略时选择当时全部完整 checkpoint；多个 checkpoint 按真实 step 串行执行。
 
-每卡批量上限由 `--batch-size-per-gpu` 控制，默认 1；Test 按文档、RULER 按题目组批，LoCoMo 按同一对话的问题组批。LoCoMo 续评会重新压缩仍有未完成问题的对话，仅生成缺失答案。
+每卡批量上限由 `--batch-size-per-gpu` 控制，默认 1；Test 按文档、RULER 按题目组批，LoCoMo 优先取同一对话的问题，剩余位置从其他对话补齐，批内新对话并行压缩。LoCoMo 续评会重新压缩仍有未完成问题的对话，仅生成缺失答案。
 
 RULER 通过 `--lengths` 选择长度，默认 `8192 16384 32768`；各长度单独组批，可用 `--batch-size-by-length 8192=8 16384=4 32768=2` 覆盖指定长度的批量，其余沿用通用值。GPU 数与批量属于本次执行设置，可在续评时调整。
 

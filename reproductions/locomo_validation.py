@@ -56,28 +56,33 @@ def validate_context(adapter, reference, chunk_size, state_tensors, recompute=Fa
             f"c1/{index}", history + locomo_question_prompt(question, 4), ("t3",), 5,
             {"conversation_id": "c1", "question": question, "category": 4},
         ) for index, question in enumerate(("t5", "t6", "t7 t8"))]
-        prepared = adapter.prepare_context(history, samples)
+        other_history = history + "t17 t18 t19 "
+        other = BenchmarkSample("c2/0", other_history + locomo_question_prompt("t20 t21", 4),
+                                ("t17",), 3, {"conversation_id": "c2", "question": "t20 t21", "category": 4})
+        prepared, second = adapter.prepare_contexts([(history, samples), (other_history, [other])])
         assert prepared.state[1] % chunk_size == remainder
         assert prepared.statistics == {}
         values = list(state_tensors(prepared.state[0]))
         frozen = [None if value is None else value.clone() for value in values]
         expected = {s.id: independent_answer(adapter, reference, s, prepared.state[1], recompute)
                     for s in samples}
+        expected[other.id] = independent_answer(adapter, reference, other, second.state[1], recompute)
         actual = {}
         def completed(question, answer):
             actual[question.sample.id] = answer["generated_token_ids"]
-        adapter.answer_batch(prepared.state, prepared.questions[:2], completed)
-        adapter.answer_batch(prepared.state, prepared.questions[2:], completed)
+        adapter.answer_batch([prepared.state] * 2, prepared.questions[:2], completed)
+        adapter.answer_batch([prepared.state, second.state], prepared.questions[2:] + second.questions, completed)
         assert actual == expected, (remainder, actual, expected)
         after = list(state_tensors(prepared.state[0]))
         for before, value in zip(frozen, after, strict=True):
             if before is not None:
                 torch.testing.assert_close(before, value, rtol=0, atol=0, equal_nan=True)
         reversed_answers = {}
-        evaluate_conversations(list(reversed(samples)), adapter, 1,
+        evaluate_conversations([other, *reversed(samples)], adapter, 1,
                                lambda sample, answer, stats: reversed_answers.update(
                                    {sample.id: answer["generated_token_ids"]}))
         assert reversed_answers == expected
-        resumed = adapter.prepare_context(history, samples[1:])
+        resumed, = adapter.prepare_contexts([(history, samples[1:])])
         assert resumed.statistics == prepared.statistics
-    print("LoCoMo context checks passed: chunk boundaries, B1/B2, question order, immutable state", flush=True)
+    print("LoCoMo context checks passed: mixed histories, chunk boundaries, B1/B2, question order, immutable state",
+          flush=True)

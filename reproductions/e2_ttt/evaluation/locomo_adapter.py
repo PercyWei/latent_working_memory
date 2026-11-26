@@ -5,7 +5,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from benchmarks.locomo.causal import CausalLoCoMo
 from reproductions.e2_ttt.optimized.model import optimize_model
-from reproductions.ttt_longmemeval import TTTLongMemEval
 from .locomo_state import fork_cache
 
 
@@ -35,5 +34,4 @@ def load_adapter(settings):
 
 
 def load_longmemeval_adapter(settings):
-    model, tokenizer = load_model(settings)
-    return TTTLongMemEval(model, tokenizer, settings)
+    return load_adapter(settings)

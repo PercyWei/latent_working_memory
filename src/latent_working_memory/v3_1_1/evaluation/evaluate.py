@@ -176,7 +176,8 @@ def evaluate_shard(checkpoint_path, data, output_dir, worker_rank, task_module, 
             [by_id[sample_id] for sample_id in selected_ids], execution,
         ):
             progress.set_stage(
-                "evaluating", batch_size=len(batch),
+                "evaluating", batch_size=min(len(batch), execution["eval_batch_size_per_gpu"])
+                if task_module.NAME == "locomo" else len(batch),
                 length=batch[0].metadata["length"] if task_module.NAME == "ruler" else None,
             )
             with torch.no_grad(), model.forward_context():

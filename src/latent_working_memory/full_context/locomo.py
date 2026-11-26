@@ -1,106 +1,87 @@
-"""为同一段 LoCoMo 对话预填充一次 KV，再从该前缀独立回答各题。"""
+"""为同一段对话共享前缀 KV，再从该前缀独立回答各题。"""
 
 import time
 
 import torch
-from transformers import DynamicCache
 
-from benchmarks.protocol import encode_prompt
-from benchmarks.locomo.engine import (
-    PreparedConversation, PreparedQuestion,
-)
-from benchmarks.locomo.reader import fork_dynamic_cache
-from latent_working_memory.prompts import qa_input_format
+from benchmarks.documents import PreparedConversation, PreparedQuestion
+from benchmarks.locomo.reader import prefill_prefixes, read_prefixes
+from benchmarks.protocol import encode_document_prompt
+from latent_working_memory.prompts import QAInputBuilder, qa_input_format
 
-from .generation import generated_ids, left_pad
 from .model import load_model
 
 
-def _encode_conversation(questions, tokenizer, model_window):
-    """在完整 chat token 序列上找公共前缀，只保存一次正文及每题的剩余 token。"""
-    first = encode_prompt(questions[0], tokenizer, model_window, "locomo", use_qa_system=True)
-    # 相同问题或单题会话也留一个 token，通过 generate 取得首个答案 token。
-    prefix, suffixes = first[:-1], [first[-1:]]
-    for question in questions[1:]:
-        tokens = encode_prompt(question, tokenizer, model_window, "locomo", use_qa_system=True)
-        limit = min(len(prefix), len(tokens) - 1)
-        shared = next((i for i in range(limit) if prefix[i] != tokens[i]), limit)
-        if shared < len(prefix):
-            tail = prefix[shared:]
-            suffixes = [tail + suffix for suffix in suffixes]
-            del prefix[shared:]
-        suffixes.append(tokens[shared:])
-    if not prefix:
-        raise ValueError(f"LoCoMo conversation {questions[0].id} has no shared prompt tokens")
-    return prefix, list(zip(questions, suffixes, strict=True))
+def _encode_document(history, questions, builder, model_window):
+    """在完整聊天分词的边界切分正文与问题，保留可能跨过边界的 BPE token。"""
+    prefix = builder.tokenizer.encode(
+        builder.parts().prefix + history, add_special_tokens=not builder.input_format["use_chat_template"],
+    )
+    prompts = [encode_document_prompt(q, builder, model_window) for q in questions]
+    length = len(prefix)
+    for tokens in prompts:
+        limit = min(length, len(tokens) - 1)
+        length = next((i for i in range(limit) if tokens[i] != prefix[i]), limit)
+    if not length:
+        raise ValueError(f"{questions[0].id}: missing shared document prefix")
+    return prefix[:length], [PreparedQuestion(q, ids[length:]) for q, ids in zip(questions, prompts, strict=True)]
 
 
 class FullContextLoCoMo:
-    def __init__(self, tokenizer, model, generation, model_window, device, mixed_precision=False):
+    def __init__(self, tokenizer, model, generation, model_window, device, mixed_precision=False,
+                 prefill_chunk_size=None):
         self.tokenizer = tokenizer
+        self.prompt = QAInputBuilder(tokenizer, qa_input_format(tokenizer))
         self.model = model
         self.generation = generation
         self.model_window = model_window
         self.device = device
         self.mixed_precision = mixed_precision
+        self.prefill_chunk_size = prefill_chunk_size
 
     @torch.no_grad()
-    def prepare_context(self, history, questions):
-        prefix, turns = _encode_conversation(questions, self.tokenizer, self.model_window)
-        ids = torch.tensor([prefix], dtype=torch.long, device=self.device)
-        mask = torch.ones_like(ids)
+    def prepare_contexts(self, documents):
+        encoded = [_encode_document(history, questions, self.prompt, self.model_window)
+                   for history, questions in documents]
+        ids = [torch.tensor(prefix, device=self.device) for prefix, _ in encoded]
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
         started = time.perf_counter()
         with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.mixed_precision):
-            cache = self.model.base_model(
-                input_ids=ids, attention_mask=mask,
-                past_key_values=DynamicCache(config=self.model.config),
-                use_cache=True, return_dict=True,
-            ).past_key_values
+            caches = prefill_prefixes(self.model, ids, self.prefill_chunk_size)
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
-        prefill_seconds = (time.perf_counter() - started) / len(questions)
-        sliding = any(cache.is_sliding)
-        prepared = [
-            PreparedQuestion(sample, suffix, (sample.max_new_tokens, len(suffix) if sliding else None))
-            for sample, suffix in turns
-        ]
-        return PreparedConversation((cache, ids, mask, prefill_seconds), prepared)
+        prefill_seconds = (time.perf_counter() - started) / sum(len(turns) for _, turns in encoded)
+        return [PreparedConversation((cache, len(prefix), prefill_seconds), turns)
+                for cache, (prefix, turns) in zip(caches, encoded, strict=True)]
 
     @torch.no_grad()
-    def answer_batch(self, state, questions, complete):
-        cache, prefix_ids, prefix_mask, prefill_seconds = state
-        suffixes = [question.inputs for question in questions]
+    def answer_batch(self, states, questions, complete):
+        caches, lengths, times = zip(*states, strict=True)
         size = len(questions)
-        suffix_ids, suffix_mask = left_pad(suffixes, self.generation.pad_token_id, self.device)
-        ids = torch.cat((prefix_ids.expand(size, -1), suffix_ids), dim=1)
-        mask = torch.cat((prefix_mask.expand(size, -1), suffix_mask), dim=1)
         started = time.perf_counter()
+
+        def completed(index, result):
+            question = questions[index]
+            answer = result["generated_token_ids"]
+            result.update(prediction=self.tokenizer.decode(answer, skip_special_tokens=True),
+                          generated_tokens=len(answer), prompt_tokens=lengths[index] + len(question.inputs),
+                          decode_batch_size=size,
+                          generation_seconds=times[index] + (time.perf_counter() - started) / size)
+            complete(question, result)
+
         with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.mixed_precision):
-            tokens = self.model.generate(
-                input_ids=ids, attention_mask=mask, past_key_values=fork_dynamic_cache(cache, size),
-                generation_config=self.generation, max_new_tokens=questions[0].sample.max_new_tokens,
-                use_model_defaults=False,
-            )
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
-        elapsed = (time.perf_counter() - started) / size
-        for question, row in zip(questions, tokens[:, ids.shape[1]:].tolist(), strict=True):
-            answer = generated_ids(row, self.generation.eos_token_id)
-            complete(question, {
-                "prediction": self.tokenizer.decode(answer, skip_special_tokens=True),
-                "generated_token_ids": answer, "generated_tokens": len(answer),
-                "prompt_tokens": prefix_ids.shape[1] + len(question.inputs),
-                "stop_reason": "eos" if answer[-1] == self.generation.eos_token_id else "max_new_tokens",
-                "decode_batch_size": size, "generation_seconds": prefill_seconds + elapsed,
-            })
+            suffixes = [self.model.get_input_embeddings()(torch.tensor(q.inputs, device=self.device))
+                        for q in questions]
+            read_prefixes(self.model, caches, lengths, suffixes, [q.sample.max_new_tokens for q in questions],
+                          self.generation.eos_token_id, completed, native_logits=True)
 
 
-def load_adapter(settings):
+def load_adapter(settings, prefill_chunk_size=None):
     device = torch.device("cuda", 0)
     tokenizer, model, generation = load_model(settings["model"], settings["seed"], device)
     if qa_input_format(tokenizer) != settings["input_format"]:
         raise ValueError("loaded chat input format differs from the evaluation plan")
     return FullContextLoCoMo(tokenizer, model, generation, settings["model_window"], device,
-                            mixed_precision=settings["model"]["mixed_precision"])
+                            mixed_precision=settings["model"]["mixed_precision"],
+                            prefill_chunk_size=prefill_chunk_size)

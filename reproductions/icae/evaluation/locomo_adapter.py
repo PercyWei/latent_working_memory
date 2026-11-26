@@ -1,14 +1,12 @@
-"""ICAE v2 接入公共 LoCoMo 会话评估。"""
+"""ICAE v2 的正文压缩、共享前缀和问答批处理。"""
 
 from pathlib import Path
 import torch
 from transformers import AutoConfig, AutoTokenizer
 
-from benchmarks.data import locomo_question_prompt
-from benchmarks.locomo.engine import PreparedConversation, PreparedQuestion
-from benchmarks.locomo.reader import greedy_read
+from benchmarks.documents import PreparedConversation, PreparedQuestion
+from benchmarks.locomo.reader import read_prefixes
 from benchmarks.locomo.records import file_identity
-from benchmarks.longmemeval.generate import CompressedHistoryAdapter
 from latent_working_memory.prompts import QA_SYSTEM_PROMPT
 from reproductions.icae.formatting import icae_input_format
 from .model import (
@@ -21,35 +19,35 @@ class ICAEAdapter:
     def __init__(self, adapter):
         self.adapter = adapter
 
-    def prepare_context(self, history, questions):
-        state, stats = self.adapter.encode_history(history)
-        prepared = []
-        for sample in questions:
-            prompt = locomo_question_prompt(sample.metadata["question"], sample.metadata["category"])
-            ids = self.adapter.question_ids(prompt)
-            if state[1] + len(ids) + sample.max_new_tokens > self.adapter.window:
-                raise ValueError(f"ICAE reader exceeds position window: {sample.id}")
-            prepared.append(PreparedQuestion(sample, ids, (len(ids), sample.max_new_tokens)))
-        return PreparedConversation(state, prepared, stats)
+    def prepare_contexts(self, documents):
+        encoded = self.adapter.encode_histories([history for history, _ in documents])
+        contexts = []
+        for (history, questions), (state, stats) in zip(documents, encoded, strict=True):
+            prepared = []
+            for sample in questions:
+                ids = self.adapter.question_ids(sample.prompt.removeprefix(history))
+                if state[1] + len(ids) + sample.max_new_tokens > self.adapter.window:
+                    raise ValueError(f"ICAE reader exceeds position window: {sample.id}")
+                prepared.append(PreparedQuestion(sample, ids))
+            contexts.append(PreparedConversation(state, prepared, stats))
+        return contexts
 
-    @torch.no_grad()
-    def answer_batch(self, state, questions, complete):
-        prefix, _ = state
-        size = len(questions)
-        # 在 batch 维度展开共享前缀；追加问题时会分配新的 KV 张量。
-        cache = tuple(tuple(tensor.expand(size, -1, -1, -1) for tensor in layer) for layer in prefix)
+    @torch.inference_mode()
+    def answer_batch(self, states, questions, complete):
         model = self.adapter.model
-        ids = torch.tensor([question.inputs for question in questions], device=self.adapter.device)
-        embeddings = model.tokens_to_embeddings(ids)
+        embeddings = [model.tokens_to_embeddings(self.adapter.token_tensor(q.inputs))[0] for q in questions]
+
         def completed(index, result):
             tokens = result["generated_token_ids"]
             result.update(prediction=model.tokenizer.decode(tokens, skip_special_tokens=True).strip(),
-                          generated_tokens=len(tokens), decode_batch_size=size)
+                          generated_tokens=len(tokens), decode_batch_size=len(questions))
             complete(questions[index], result)
+
+        caches, lengths = zip(*states)
         with model.icae.disable_adapter():
-            greedy_read(self.adapter.decoder, cache, embeddings,
-                        [q.sample.max_new_tokens for q in questions], self.adapter.eos_id,
-                        completed, vocab_size=model.vocab_size - 1)
+            read_prefixes(self.adapter.decoder, caches, lengths, embeddings,
+                          [q.sample.max_new_tokens for q in questions], self.adapter.eos_id,
+                          completed, vocab_size=model.vocab_size - 1)
 
 
 def add_arguments(parser):
@@ -82,20 +80,16 @@ def configuration(args):
             "model_files": file_identity(args.model_path), "checkpoint_files": file_identity(checkpoint)}
 
 
-def load_reader(settings):
+def load_adapter(settings):
     adapter = load_official(Path(settings["model_path"]), Path(settings["checkpoint"]),
                             settings["stage"], settings["mean_compression_rate"], settings["fixed_mem_size"])
     if adapter.input_format != settings["input_format"]:
         raise ValueError("loaded ICAE input format differs from the evaluation plan")
-    return adapter
-
-
-def load_adapter(settings):
-    return ICAEAdapter(load_reader(settings))
+    return ICAEAdapter(adapter)
 
 
 def load_longmemeval_adapter(settings):
-    return CompressedHistoryAdapter(load_reader(settings), settings["max_new_tokens"])
+    return load_adapter(settings)
 
 
 def summarize_metrics(records, conversations):

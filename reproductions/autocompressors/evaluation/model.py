@@ -2,12 +2,11 @@
 
 from pathlib import Path
 
-from auto_compressor import LlamaAutoCompressorModel
+from .reader import BatchedLlamaAutoCompressor
 import torch
 from transformers import AutoTokenizer
 
 from benchmarks.locomo.records import file_identity
-from benchmarks.longmemeval.generate import CompressedHistoryAdapter
 from .locomo_adapter import AutoCompressorLoCoMo, INPUT_FORMAT
 
 
@@ -33,12 +32,12 @@ def configuration(parser, args):
     }
 
 
-def load_adapter(settings, fit_segments=False):
+def load_adapter(settings):
     if not torch.cuda.is_available():
         raise RuntimeError("AutoCompressors evaluation requires CUDA")
     checkpoint = settings["checkpoint"]
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, local_files_only=True)
-    model, loading = LlamaAutoCompressorModel.from_pretrained(
+    model, loading = BatchedLlamaAutoCompressor.from_pretrained(
         checkpoint, local_files_only=True, torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True, output_loading_info=True,
     )
@@ -51,9 +50,8 @@ def load_adapter(settings, fit_segments=False):
         raise ValueError("expected 50 accumulated summary vectors per segment")
     model.requires_grad_(False).eval().cuda()
     return AutoCompressorLoCoMo(model, tokenizer, settings["segment_length"], settings["input_format"],
-                                fit_segments=fit_segments)
+                                fit_segments=settings.get("fit_segments", False))
 
 
 def load_longmemeval_adapter(settings):
-    return CompressedHistoryAdapter(load_adapter(settings, fit_segments=settings["fit_segments"]),
-                                    settings["max_new_tokens"])
+    return load_adapter(settings)

@@ -23,21 +23,24 @@ def test_method_factory_workers_and_resume(tmp_path, monkeypatch):
 import json
 import os
 from pathlib import Path
-from benchmarks.locomo.engine import PreparedConversation, PreparedQuestion
+from benchmarks.documents import PreparedConversation, PreparedQuestion
 
 class Adapter:
     def __init__(self, settings):
         self.trace = Path(settings["trace"])
 
-    def prepare_context(self, history, questions):
-        cid = questions[0].metadata["conversation_id"]
-        with self.trace.open("a") as stream:
-            stream.write(json.dumps([cid, os.environ["CUDA_VISIBLE_DEVICES"]]) + "\\n")
-        return PreparedConversation(cid, [PreparedQuestion(q, None, ()) for q in questions],
-                                    {"context_tokens": len(history)})
+    def prepare_contexts(self, documents):
+        prepared = []
+        for history, questions in documents:
+            cid = questions[0].metadata["conversation_id"]
+            with self.trace.open("a") as stream:
+                stream.write(json.dumps([cid, os.environ["CUDA_VISIBLE_DEVICES"]]) + "\\n")
+            prepared.append(PreparedConversation(cid, [PreparedQuestion(q, None) for q in questions],
+                                                  {"context_tokens": len(history)}))
+        return prepared
 
-    def answer_batch(self, state, questions, complete):
-        for question in questions:
+    def answer_batch(self, states, questions, complete):
+        for state, question in zip(states, questions, strict=True):
             assert question.sample.metadata["conversation_id"] == state
             complete(question, {"prediction": "red", "decode_batch_size": len(questions)})
 
@@ -56,7 +59,7 @@ def summarize_metrics(records, conversations):
         "conversation": {
             "speaker_a": "Alice", "speaker_b": "Bob",
             "session_1_date_time": "1 January 2026",
-            "session_1": [{"speaker": "Alice", "text": "My bike and hat are red."}],
+            "session_1": [{"speaker": "Alice", "text": f"My {cid} bike and hat are red."}],
         },
         "qa": [{"category": 4, "question": f"What color is Alice's {item}?", "answer": "red"}
                for item in ("bike", "hat")],

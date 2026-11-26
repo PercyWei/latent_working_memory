@@ -1,10 +1,10 @@
 """SDCC 对完整正文预测一次压缩率，各题复用回答端前缀。"""
 
 import torch
+from torch.nn.utils.rnn import pad_sequence
 
-from benchmarks.data import locomo_question_prompt
-from benchmarks.locomo.engine import PreparedConversation, PreparedQuestion
-from benchmarks.locomo.reader import fork_dynamic_cache, greedy_read
+from benchmarks.documents import PreparedConversation, PreparedQuestion
+from benchmarks.locomo.reader import prefill_prefixes, read_prefixes
 from latent_working_memory.prompts import QAInputBuilder, qa_input_format
 
 
@@ -37,33 +37,41 @@ class SDCCLoCoMo:
         self.prefix_ids = frame[:frame.index(bridge.placeholder_token_id) + 1]
 
     @torch.inference_mode()
-    def encode_history(self, history):
-        encoded = self.tokenizer(history, add_special_tokens=True, return_special_tokens_mask=True)
-        tokens = encoded["input_ids"]
-        context_tokens = encoded["special_tokens_mask"].count(0)
-        # 与作者评估相同，在正文末尾补一个 EOS 供比例选择器读取。
-        if not tokens or tokens[-1] != self.writer_eos_id:
-            tokens.append(self.writer_eos_id)
-        writer_window = self.bridge.encoder.config.max_position_embeddings
-        if len(tokens) > writer_window:
-            raise ValueError(f"SDCC encoder needs {len(tokens)} positions (window {writer_window})")
-        context_ids = torch.tensor([tokens], device=self.decoder.device)
-        frame_ids = torch.tensor([self.prefix_ids], device=self.decoder.device)
-        embeds, mask, _, counts, _, prediction, _ = self.bridge.compute_inputs_embeds(
-            context_ids, frame_ids, context_attention_mask=torch.ones_like(context_ids),
-            attention_mask=torch.ones_like(frame_ids), compress_ratio_scale=self.scale,
+    def encode_histories(self, histories):
+        encoded = self.tokenizer(histories, add_special_tokens=True, return_special_tokens_mask=True)
+        context_lengths = [mask.count(0) for mask in encoded["special_tokens_mask"]]
+        docs = []
+        for tokens in encoded["input_ids"]:
+            # 每篇正文末尾均有 EOS，供该篇的倍率选择器读取。
+            if not tokens or tokens[-1] != self.writer_eos_id:
+                tokens.append(self.writer_eos_id)
+            if len(tokens) > self.bridge.encoder.config.max_position_embeddings:
+                raise ValueError(f"SDCC encoder needs {len(tokens)} positions "
+                                 f"(window {self.bridge.encoder.config.max_position_embeddings})")
+            docs.append(torch.tensor(tokens, device=self.decoder.device))
+        # 官方变倍率池化从最右端对齐有效正文；每行的末位均是自己的 EOS。
+        ids = pad_sequence(docs, batch_first=True, padding_value=self.writer_eos_id, padding_side="left")
+        lengths = torch.tensor([len(doc) for doc in docs], device=ids.device)
+        mask = torch.arange(ids.size(1), device=ids.device) >= ids.size(1) - lengths[:, None]
+        frame = torch.tensor(self.prefix_ids, device=ids.device).expand(len(docs), -1)
+        embeds, _, _, counts, prefix_lengths, prediction, _ = self.bridge.compute_inputs_embeds(
+            ids, frame, context_attention_mask=mask.long(),
+            attention_mask=torch.ones_like(frame), compress_ratio_scale=self.scale,
         )
-        retention = self.bridge._discretize_ratio_log(
+        retentions = self.bridge._discretize_ratio_log(
             prediction, self.bridge.comp_ratio_or_len, self.bridge.discretize_ratio_mode,
             self.bridge.discretize_compare_in_log, values_in_log_space=True,
-        ).item()
-        if embeds.size(1) >= self.decoder.config.max_position_embeddings:
-            raise ValueError(f"SDCC memory prefix fills decoder window: {embeds.size(1)} positions")
-        cache = self.decoder.model(inputs_embeds=embeds, attention_mask=mask, use_cache=True).past_key_values
-        return (cache, embeds.size(1)), {
-            "context_tokens": context_tokens, "encoder_tokens": len(tokens),
-            "memory_tokens": counts.item(), "compression_factor": round(1 / retention),
-        }
+        ).flatten().tolist()
+        if max(prefix_lengths) >= self.decoder.config.max_position_embeddings:
+            raise ValueError(f"SDCC memory prefix fills decoder window: {max(prefix_lengths)} positions")
+        # frame 本身等长且无 padding，官方展开 placeholder 时将填充放在右侧。
+        caches = prefill_prefixes(self.decoder, [row[:n] for row, n in zip(embeds, prefix_lengths, strict=True)])
+        return [((cache, length), {
+            "context_tokens": context, "encoder_tokens": len(doc),
+            "memory_tokens": count, "compression_factor": round(1 / retention),
+        }) for cache, length, context, doc, count, retention in zip(
+            caches, prefix_lengths, context_lengths, docs, counts.tolist(), retentions, strict=True
+        )]
 
     def question_ids(self, state, prompt, max_new_tokens):
         ids = self.prompt.encode(self.context_marker + prompt)
@@ -76,39 +84,32 @@ class SDCCLoCoMo:
             raise ValueError(f"SDCC reader needs {length} positions (window {window})")
         return suffix
 
-    def prepare_context(self, history, questions):
-        state, stats = self.encode_history(history)
-        prepared = []
-        for question in questions:
-            task = locomo_question_prompt(question.metadata["question"], question.metadata["category"])
-            suffix = self.question_ids(state, task, question.max_new_tokens)
-            prepared.append(PreparedQuestion(question, suffix, (len(suffix), question.max_new_tokens)))
-        return PreparedConversation(state, prepared, stats)
+    def prepare_contexts(self, documents):
+        encoded = self.encode_histories([history for history, _ in documents])
+        contexts = []
+        for (history, questions), (state, stats) in zip(documents, encoded, strict=True):
+            prepared = []
+            for question in questions:
+                task = question.prompt.removeprefix(history)
+                ids = self.question_ids(state, task, question.max_new_tokens)
+                prepared.append(PreparedQuestion(question, ids))
+            contexts.append(PreparedConversation(state, prepared, stats))
+        return contexts
 
     @torch.inference_mode()
-    def _decode(self, state, question_ids, budgets, complete):
-        size = len(question_ids)
-        ids = torch.tensor(question_ids, device=self.decoder.device)
-        cache = fork_dynamic_cache(state[0], size)
+    def answer_batch(self, states, questions, complete):
+        embed = self.decoder.get_input_embeddings()
+        embeddings = [embed(torch.tensor(q.inputs, device=self.decoder.device)) for q in questions]
 
         def completed(index, result):
             tokens = result["generated_token_ids"]
             result.update(prediction=self.tokenizer.decode(tokens, skip_special_tokens=True).strip(),
-                          generated_tokens=len(tokens), decode_batch_size=size)
-            complete(index, result)
+                          generated_tokens=len(tokens), decode_batch_size=len(questions))
+            complete(questions[index], result)
 
-        greedy_read(self.decoder, cache, self.decoder.get_input_embeddings()(ids),
-                    budgets, self.tokenizer.eos_token_id, completed)
-
-    def answer_batch(self, state, questions, complete):
-        self._decode(state, [q.inputs for q in questions], [q.sample.max_new_tokens for q in questions],
-                     lambda index, result: complete(questions[index], result))
-
-    def answer(self, state, prompt, max_new_tokens):
-        ids = self.question_ids(state, prompt, max_new_tokens)
-        answers = []
-        self._decode(state, [ids], [max_new_tokens], lambda _, result: answers.append(result["prediction"]))
-        return answers[0]
+        caches, lengths = zip(*states)
+        read_prefixes(self.decoder, caches, lengths, embeddings,
+                      [q.sample.max_new_tokens for q in questions], self.tokenizer.eos_token_id, completed)
 
 
 def summarize_metrics(records, conversations):

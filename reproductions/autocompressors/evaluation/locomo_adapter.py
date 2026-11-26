@@ -2,9 +2,7 @@
 
 import torch
 
-from benchmarks.data import locomo_question_prompt
-from benchmarks.locomo.engine import PreparedConversation, PreparedQuestion
-from benchmarks.locomo.reader import greedy_read
+from benchmarks.documents import PreparedConversation, PreparedQuestion
 from latent_working_memory.prompts import QAInputBuilder, qa_input_format
 
 
@@ -24,89 +22,82 @@ class AutoCompressorLoCoMo:
         self.prompt_parts = QAInputBuilder(tokenizer, self.input_format).parts()
         self.window = model.config.max_position_embeddings
 
-    @torch.inference_mode()
-    def encode_history(self, text):
-        input_ids = self.tokenizer(text, add_special_tokens=False, return_tensors="pt").input_ids
-        summary = None
-        slots = self.model.config.summary_length
+    def segment_lengths(self, token_count):
         lengths = []
-        remaining = input_ids.size(1)
+        remaining = token_count
         while remaining:
-            summary_positions = (len(lengths) + 1) * slots
+            slots = (len(lengths) + 1) * self.model.config.summary_length
             length = min(self.segment_length, remaining)
             if self.fit_segments:
-                length = min(length, self.window - summary_positions)
-            if length <= 0 or length + summary_positions > self.window:
-                raise ValueError(f"AutoCompressor cannot write the full {input_ids.size(1)}-token history: "
-                                 f"{summary_positions} summary positions in a {self.window}-position window")
+                length = min(length, self.window - slots)
+            if length <= 0 or length + slots > self.window:
+                raise ValueError(f"AutoCompressor cannot write the full {token_count}-token history: "
+                                 f"{slots} summary positions in a {self.window}-position window")
             lengths.append(length)
             remaining -= length
-        for segment in input_ids.split(lengths, dim=1):
-            summary = self.model(
-                segment.to(self.model.device), softprompt=summary, output_softprompt=True, use_cache=False,
-            ).softprompt
-
-        # 写入仅接触正文，QA 系统提示位于摘要前。该前缀在所有问题间只读。
-        system_ids = self.tokenizer(
-            self.prompt_parts.prefix,
-            add_special_tokens=self.input_format["system_add_special_tokens"], return_tensors="pt",
-        ).input_ids.to(self.model.device)
-        prefix = torch.cat((self.model.get_input_embeddings()(system_ids), summary), dim=1)
-        if prefix.size(1) > self.window:
-            raise ValueError(f"AutoCompressor reader prefix needs {prefix.size(1)} positions (window {self.window})")
-        cache = self.model.model(inputs_embeds=prefix, use_cache=True).past_key_values
-        return cache, {"context_tokens": input_ids.size(1), "memory_tokens": summary.size(1)}
-
-    def question_ids(self, state, prompt, max_new_tokens):
-        ids = self.tokenizer.encode(
-            prompt + self.prompt_parts.suffix,
-            add_special_tokens=self.input_format["question_add_special_tokens"],
-        )
-        read_length = state[0][1] + len(ids) + max_new_tokens
-        if read_length > self.window:
-            raise ValueError(f"AutoCompressor reader needs {read_length} positions (window {self.window})")
-        return ids
-
-    def prepare_context(self, history, questions):
-        state, stats = self.encode_history(history)
-        prepared = []
-        for sample in questions:
-            prompt = locomo_question_prompt(sample.metadata["question"], sample.metadata["category"])
-            ids = self.question_ids(state, prompt, sample.max_new_tokens)
-            prepared.append(PreparedQuestion(sample, ids, (len(ids), sample.max_new_tokens)))
-        return PreparedConversation(state, prepared, stats)
+        return lengths
 
     @torch.inference_mode()
-    def _decode(self, state, question_ids, budgets, complete):
-        size = len(question_ids)
-        ids = torch.tensor(question_ids, device=self.model.device)
-        capacity = state[0][1] + ids.size(1) + max(budgets)
-        # 官方缓存为 (KV 存储, 有效长度)，追加时原地写入。
-        # 为每行复制前缀并预留问题和答案空间，不能仅 expand 共享存储。
-        cache = []
-        for kv, length in state:
-            branch = kv.new_empty((size, capacity, *kv.shape[2:]))
-            branch[:, :length].copy_(kv[:, :length])
-            cache.append((branch, length))
+    def prepare_contexts(self, documents):
+        # 第 t 轮每个活跃正文均有 t 组摘要；正文尾段的 padding 由官方 varlen writer 去除。
+        texts = [self.tokenizer.encode(history, add_special_tokens=False) for history, _ in documents]
+        segments = [self.segment_lengths(len(ids)) for ids in texts]
+        summaries = [None] * len(documents)
+        offsets = [0] * len(documents)
+        device = self.model.device
+        for step in range(max(map(len, segments))):
+            active = [i for i, lengths in enumerate(segments) if step < len(lengths)]
+            width = max(segments[i][step] for i in active)
+            ids = torch.zeros((len(active), width), dtype=torch.long, device=device)
+            mask = torch.zeros_like(ids)
+            for row, i in enumerate(active):
+                count = segments[i][step]
+                ids[row, :count] = torch.tensor(texts[i][offsets[i]:offsets[i] + count], device=device)
+                mask[row, :count] = 1
+                offsets[i] += count
+            prior = torch.cat([summaries[i] for i in active]) if step else None
+            summary = self.model(ids, attention_mask=mask, softprompt=prior,
+                                 output_softprompt=True, use_cache=False).softprompt
+            for row, i in enumerate(active):
+                summaries[i] = summary[row:row + 1]
 
+        system_ids = self.tokenizer(self.prompt_parts.prefix,
+                                    add_special_tokens=self.input_format["system_add_special_tokens"],
+                                    return_tensors="pt").input_ids.to(device)
+        system = self.model.get_input_embeddings()(system_ids)[0]
+        prefixes = [torch.cat((system, summary[0])) for summary in summaries]
+        width = max(map(len, prefixes))
+        if width > self.window:
+            raise ValueError(f"AutoCompressor reader prefix needs {width} positions (window {self.window})")
+        # 官方缓存模式使用稠密因果 attention。右侧补齐不会改变任何真实前缀 token。
+        padded = torch.nn.utils.rnn.pad_sequence(prefixes, batch_first=True)
+        caches = self.model.model(inputs_embeds=padded, use_cache=True).past_key_values
+        prepared = []
+        for i, (history, questions) in enumerate(documents):
+            length = len(prefixes[i])
+            cache = tuple((kv[i:i + 1, :length].clone() if len(documents) > 1 else kv, length)
+                          for kv, _ in caches)
+            turns = []
+            for sample in questions:
+                ids = self.tokenizer.encode(sample.prompt.removeprefix(history) + self.prompt_parts.suffix,
+                                            add_special_tokens=self.input_format["question_add_special_tokens"])
+                if length + len(ids) + sample.max_new_tokens > self.window:
+                    raise ValueError(f"{sample.id}: AutoCompressor answer exceeds reader window {self.window}")
+                turns.append(PreparedQuestion(sample, ids))
+            stats = {"context_tokens": len(texts[i]), "memory_tokens": summaries[i].size(1)}
+            prepared.append(PreparedConversation(cache, turns, stats))
+        return prepared
+
+    @torch.inference_mode()
+    def answer_batch(self, states, questions, complete):
         def completed(index, result):
             tokens = result["generated_token_ids"]
             result.update(prediction=self.tokenizer.decode(tokens, skip_special_tokens=True).strip(),
-                          generated_tokens=len(tokens), decode_batch_size=size)
-            complete(index, result)
+                          generated_tokens=len(tokens), decode_batch_size=len(questions))
+            complete(questions[index], result)
 
-        greedy_read(self.model, tuple(cache), self.model.get_input_embeddings()(ids),
-                    budgets, self.tokenizer.eos_token_id, completed)
-
-    def answer_batch(self, state, questions, complete):
-        self._decode(state, [q.inputs for q in questions], [q.sample.max_new_tokens for q in questions],
-                     lambda index, result: complete(questions[index], result))
-
-    def answer(self, state, prompt, max_new_tokens):
-        ids = self.question_ids(state, prompt, max_new_tokens)
-        answers = []
-        self._decode(state, [ids], [max_new_tokens], lambda _, result: answers.append(result["prediction"]))
-        return answers[0]
+        self.model.read_questions(states, [q.inputs for q in questions], [q.sample.max_new_tokens for q in questions],
+                                  self.tokenizer.eos_token_id, completed)
 
 
 def summarize_metrics(records, conversations):

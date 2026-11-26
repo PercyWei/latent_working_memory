@@ -1,15 +1,17 @@
-"""E²-TTT 的原生递归状态与局部 attention 状态按问题分支。"""
+"""从各正文选取独立的 E²-TTT 递归状态与局部 attention 状态。"""
 
-from copy import deepcopy
-
-
-def fork_cache(prefix, batch_size):
-    cache = deepcopy(prefix)
-    for index in range(len(cache)):
-        state = cache[index]["padding_state"]
-        state["rows"] = [deepcopy(state["rows"][0]) for _ in range(batch_size)]
-        state["seen"] = state["seen"] * batch_size
-    return cache
+def fork_cache(sources):
+    prefix, _ = sources[0]
+    lengths = [cache[0]["padding_state"]["seen"][row] for cache, row in sources]
+    branch = type(prefix)(seen_tokens=max(lengths))
+    for index in range(len(prefix)):
+        state = branch.update(layer_idx=index, offset=0)
+        # padding_forward 和 TTT 内核用新张量替换各行状态，分支可共享初始张量。
+        state["padding_state"] = {
+            "rows": [cache[index]["padding_state"]["rows"][row].copy() for cache, row in sources],
+            "seen": tuple(lengths),
+        }
+    return branch
 
 
 def state_tensors(cache):

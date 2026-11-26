@@ -2,7 +2,7 @@
 
 创建时间：20261126 10:49:01 Asia/Shanghai
 
-最后修订时间：20261126 15:26:50 Asia/Shanghai
+最后修订时间：20261126 16:58:52 Asia/Shanghai
 
 本目录维护 LongMemEval 的数据读取、按题生成、问答评分和结果格式。[官方仓库](https://github.com/xiaowu0162/LongMemEval) · [清洗版数据](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/tree/98d7416c24c778c2fee6e6f3006e7a073259d48f)
 
@@ -16,14 +16,14 @@ S 和 Oracle 使用相同的 500 道题，各自保存预测和分数，通过�
 | `longmemeval_oracle` | `longmemeval_oracle.json` | 作者为该题选出的证据会话 |
 
 - **输入范围**：每题使用所选设置的完整会话历史、问题和提问日期。参考答案、题型、问题 ID 和证据标注不进入模型输入。
-- **答案生成**：各题独立作答，采用贪心解码，每题默认最多生成 128 个新 token。S 和 Oracle 使用相同的模型及生成设置。
+- **答案生成**：同一完整历史的题目分在同一卡，历史只准备一次。按组取题，不足一批时加入其他历史；新历史一起准备，各题独立贪心解码，每题默认最多生成 128 个新 token。S 和 Oracle 使用相同的模型及生成设置。
 - **评分与续评**：回答齐全后，裁判逐题判定正误。续评沿用原数据和配置，补齐缺失的回答与判定。
 
 ## 公共接口
 
 ### 数据与输入构造
 
-`load_samples(benchmark, data_dir)` 按原始题序返回 `LongMemEvalSample`。其中 `id` 保留原始 `question_id`，`question_type` 和 `answer` 供评分使用。生成适配器只接收 `sample.input`，类型为 `LongMemEvalInput`。[数据入口](../data.py) · [类型与格式](data.py)
+`load_samples(benchmark, data_dir)` 按原始题序返回 `LongMemEvalSample`。其中 `id` 保留原始 `question_id`，`question_type` 和 `answer` 供评分使用。公共层从 `sample.input`（`LongMemEvalInput`）构造正文与问题，交给生成适配器。[数据入口](../data.py) · [类型与格式](data.py)
 
 | 输入字段 | 含义 |
 |---|---|
@@ -38,9 +38,10 @@ S 和 Oracle 使用相同的 500 道题，各自保存预测和分数，通过�
 | 接口 | 约定 |
 |---|---|
 | `load_adapter(settings)` | 根据可序列化为 JSON 的方法配置加载模型，返回生成适配器。`settings` 记录模型或 checkpoint 身份、提示格式和解码设置 |
-| `answer_batch(inputs: list[LongMemEvalInput]) -> list[str]` | 为每题独立处理历史，按输入顺序返回等长的回答列表。空回答仍作为预测进入评分 |
+| `prepare_contexts(documents)` | 每项为 `(完整历史, 待答问题列表)`。按输入顺序为每份历史返回一份正文状态及准备好的问题 |
+| `answer_batch(states, questions, complete)` | 从每题对应的正文状态并行生成，完成一题即回调保存。空回答仍作为预测进入评分 |
 | `run_generation(...)` | 按原始题序汇总回答并返回 `predictions.jsonl` 的路径 |
-| `run_evaluation(...)` | 按题分配生成任务，在全部回答保存后启动公共评分，输出总体准确率 |
+| `run_evaluation(...)` | 按完整历史分配生成任务，在全部回答保存后启动公共评分，输出总体准确率 |
 
 `add_evaluation_arguments(parser, output_root)` 定义下列公共参数。分词、模型窗口检查和生成由适配器负责；输入超出窗口时应报告错误。[生成接口](generate.py) · [调度入口](evaluate.py)
 
@@ -50,7 +51,7 @@ S 和 Oracle 使用相同的 500 道题，各自保存预测和分数，通过�
 | `--benchmark-data` | 输入数据目录，默认 `data/benchmarks/longmemeval` |
 | `--output-root` | 输出根目录，默认值由接入方提供 |
 | `--output-id` | 运行 ID，默认 `<output_name>_<YYYYMMDD-HHMM>`，续评时须指定原 ID |
-| `--batch-size-per-gpu` | 每张 GPU 一批最多处理的题数，默认 `1` |
+| `--batch-size-per-gpu` | 每卡批处理数，默认 `1` |
 | `--max-new-tokens` | 每题最多生成的新 token 数，默认 `128` |
 | `--resume` | 沿用原运行进度，默认关闭。续评时可调整 GPU 数和每卡批量 |
 

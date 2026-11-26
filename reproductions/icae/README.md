@@ -2,7 +2,7 @@
 
 创建时间：20260904 10:13:57 Asia/Shanghai
 
-最后修订时间：20261126 15:14:03 Asia/Shanghai
+最后修订时间：20261126 17:07:15 Asia/Shanghai
 
 [环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能](#三通用功能)
 
@@ -99,7 +99,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_locomo.sh \
 | `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
 
 - **评估范围**：S 和 Oracle 使用相同的 500 道题。S 提供证据会话和干扰会话，Oracle 只提供证据会话。
-- **推理方式**：按题分配 GPU。每张卡逐题压缩按日期排列的会话历史，Reader 根据记忆、提问日期和问题作答。
+- **推理方式**：相同的完整历史归到同一卡。Writer 并行压缩本批的新历史，Reader 从各题对应的记忆出发，结合提问日期并行作答。
 - **输入长度**：按 Mistral tokenizer 统计，S 的历史长 113,994–125,468 个 token。使用默认记忆槽数、压缩率和回答预算时，S 和 Oracle 的全部题目均能放入 Reader 窗口。
 - **自动评分**：生成全部回答后，脚本调用 `gpt-6-luna`，按官方分题型提示词逐题判定正误，汇总准确率。裁判密钥 `OPENAI_API_KEY` 可在项目根目录的 `.env` 中配置。[裁判配置与评分口径](../../benchmarks/longmemeval/README.md#问答评分)
 

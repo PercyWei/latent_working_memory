@@ -6,7 +6,7 @@ import torch
 import sys
 
 from benchmarks.data import load_samples
-from benchmarks.locomo.engine import conversations, evaluate_conversations
+from benchmarks.locomo.engine import evaluate_conversations
 from benchmarks.protocol import data_identity, protocol
 from benchmarks.scoring import score_sample, summarize_scores
 from ..cli import ignore_resume_options, positive_int
@@ -57,13 +57,12 @@ def load_data(config, tokenizer, model_window, data, max_samples, max_new_tokens
 
 
 def sample_batches(samples, execution):
-    for questions in conversations(samples):
-        yield [questions]
+    if samples:
+        yield samples
 
 
-def compute_batch(groups, request, model, config, max_new_tokens, commit, batch_size=1):
+def compute_batch(samples, request, model, config, max_new_tokens, commit, batch_size=1):
     device = model.memory_embeddings.device
-    torch.cuda.reset_peak_memory_stats(device)
     adapter = MemoryAdapter(model, config)
     def completed(sample, answer, statistics):
         boundary = answer.pop("boundary", None)
@@ -78,7 +77,8 @@ def compute_batch(groups, request, model, config, max_new_tokens, commit, batch_
         if boundary is not None:
             entry["boundary"] = boundary
         commit(entry)
-    evaluate_conversations([sample for group in groups for sample in group], adapter, batch_size, completed)
+    evaluate_conversations(samples, adapter, batch_size, completed,
+                           before_batch=lambda: torch.cuda.reset_peak_memory_stats(device))
 
 
 def summarize(records):

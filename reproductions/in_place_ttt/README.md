@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261126 15:14:03 Asia/Shanghai
+最后修订时间：20261126 17:07:15 Asia/Shanghai
 
 [环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能](#三通用功能)
 
@@ -165,7 +165,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/in_place_ttt/scripts/eval_locomo.sh 
 | `--max-seq-len` | 输入与生成的 token 总预算，默认取 checkpoint 的 `max_position_embeddings`（两个 32K 模型均为 `32768`） |
 
 - **评估范围**：S 和 Oracle 使用相同的 500 道题。S 提供证据会话和干扰会话，Oracle 只提供证据会话。
-- **推理方式**：按题分配 GPU。每题按日期顺序读入自己的会话历史，再结合提问日期回答问题。
+- **推理方式**：相同的完整历史归到同一卡，按日期顺序并行预填新历史。各题从对应的正文状态独立续写，结合提问日期并行作答。
 - **位置预算**：Oracle 可使用默认的 32K 上限。S 示例将上限设为 `131072`，沿用 checkpoint 的 RoPE 配置做长度外推，外推效果尚未实测。
 - **自动评分**：生成全部回答后，脚本调用 `gpt-6-luna`，按官方分题型提示词逐题判定正误，汇总准确率。裁判密钥 `OPENAI_API_KEY` 可在项目根目录的 `.env` 中配置。[裁判配置与评分口径](../../benchmarks/longmemeval/README.md#问答评分)
 
