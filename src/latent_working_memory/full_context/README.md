@@ -44,7 +44,7 @@ Full-context 基线用原始模型读取完整输入，贪心生成答案。支�
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eval_locomo.sh \
   --model-path ~/models/Qwen3-4B-Instruct-2507 \
-  --output-id Qwen3-4B-Instruct-2507_20261126 \
+  --output-id Qwen3-4B-Instruct-2507 \
   --batch-size-per-gpu 2
 ```
 
@@ -67,12 +67,8 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eva
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eval_longmemeval.sh \
   --split longmemeval_s_cleaned \
   --model-path ~/models/Qwen3-4B-Instruct-2507 \
-  --output-id Qwen3-4B-Instruct-2507_20261126
-
-CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eval_longmemeval.sh \
-  --split longmemeval_oracle \
-  --model-path ~/models/Qwen3-4B-Instruct-2507 \
-  --output-id Qwen3-4B-Instruct-2507_20261126
+  --output-id Qwen3-4B-Instruct-2507 \
+  --batch-size-per-gpu 2
 ```
 
 | 独立评分代码参数 | 用途与默认值 |
@@ -85,7 +81,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eva
 
 ```bash
 uv run -m benchmarks.longmemeval.score \
-  --run-dir artifacts/baselines/full_context/eval/Qwen3-4B-Instruct-2507_20261126/longmemeval_s_cleaned
+  --run-dir artifacts/baselines/full_context/eval/Qwen3-4B-Instruct-2507/longmemeval_s_cleaned
 ```
 
 ### 3. QASPER
@@ -105,7 +101,7 @@ uv run -m benchmarks.longmemeval.score \
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eval_qasper.sh \
   --split dev \
   --model-path ~/models/Qwen3-4B-Instruct-2507 \
-  --output-id Qwen3-4B-Instruct-2507_20261126 \
+  --output-id Qwen3-4B-Instruct-2507 \
   --batch-size-per-gpu 2
 ```
 
