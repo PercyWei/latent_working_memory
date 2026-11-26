@@ -2,11 +2,13 @@
 
 创建时间：20260904 10:13:57 Asia/Shanghai
 
-最后修订时间：20261125 10:58:32 Asia/Shanghai
+最后修订时间：20261126 17:32:41 Asia/Shanghai
 
 ## ICAE v2
 
 源码固定为 [getao/icae 的 469a468](https://github.com/getao/icae/tree/469a46886a92dd5e76b2d12a8bac0fb7ed7d4cdd)。[source/icae](source/icae) 保留上游 `code/icae_v2` 下的全部 Python 与 shell 源码、README 与 CC0-1.0 许可证。LoCoMo 入口直接导入官方 `ICAE`，使用其 `_compress`、特殊 token embedding 和分段规则。
+
+本地构造器允许传入 Transformers 的 `mean_resizing` 选项。项目的评估入口设为 `False`，扩展词表时跳过 CPU 上的协方差计算。记忆槽和指令标记的嵌入从 checkpoint 加载，生成时只使用基座原词表。
 
 | 资源 | 官方发布 |
 |---|---|

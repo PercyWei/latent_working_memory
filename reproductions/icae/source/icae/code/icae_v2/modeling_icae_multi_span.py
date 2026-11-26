@@ -94,7 +94,7 @@ def freeze_model(model):
 
 
 class ICAE(torch.nn.Module):
-    def __init__(self, model_args, training_args, lora_config):
+    def __init__(self, model_args, training_args, lora_config, mean_resizing=None):
         super().__init__()
         self.model_args = model_args
         self.training_args = training_args
@@ -119,7 +119,8 @@ class ICAE(torch.nn.Module):
         self.lm_token_id = self.vocab_size_with_mem + 1
         self.ft_token_id = self.vocab_size_with_mem + 2        
 
-        self.icae.resize_token_embeddings(self.vocab_size_with_mem + 3) 
+        resize_options = {} if mean_resizing is None else {"mean_resizing": mean_resizing}
+        self.icae.resize_token_embeddings(self.vocab_size_with_mem + 3, **resize_options)
         
         # special tokens for Llama-2/Mistral tokenizer
         self.bos_id = 1

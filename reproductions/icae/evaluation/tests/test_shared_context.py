@@ -50,6 +50,7 @@ def test_both_stages_preserve_independent_answers():
                 ModelArguments(model_name_or_path=str(root), train=False),
                 TrainingArguments(output_dir=str(root), use_cpu=device.type == "cpu", report_to=[]),
                 LoraConfig(r=4, lora_alpha=8, bias="none", task_type="CAUSAL_LM"),
+                mean_resizing=False,
             ).eval().to(device)
         with torch.no_grad():
             for name, weight in model.named_parameters():
