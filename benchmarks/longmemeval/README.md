@@ -2,7 +2,7 @@
 
 创建时间：20261126 10:49:01 Asia/Shanghai
 
-最后修订时间：20261126 16:58:52 Asia/Shanghai
+最后修订时间：20261127 10:43:03 Asia/Shanghai
 
 本目录维护 LongMemEval 的数据读取、按题生成、问答评分和结果格式。[官方仓库](https://github.com/xiaowu0162/LongMemEval) · [清洗版数据](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/tree/98d7416c24c778c2fee6e6f3006e7a073259d48f)
 
@@ -90,6 +90,54 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 | `task_averaged_accuracy` | 六个题型准确率的算术平均，每类权重相同 |
 | `abstention` | 30 道证据不足题的题数与准确率；这些题也计入所属题型和总体分数 |
 
-## 查看结果
+## 结果展示
 
-公共看板读取各设置目录中的 `summary.json` 和 `details.jsonl`。`--run` 接收一对参数（展示标签、已评分的设置目录），可重复指定。看板展示各项准确率和裁判模型，按原始 `question_id` 并排显示回答与判定。同一设置的运行须有相同的数据指纹，跨设置比较须有相同的题目 ID、问题、题型和参考答案。[公共看板入口](scripts/dashboard.sh) · [展示接口](dashboard.py)
+### 跨运行比较
+
+公共看板脚本使用当前环境的 Python 启动 Streamlit。启动前激活已安装看板依赖的环境。`--run` 后按“展示标签、已评分的设置目录”成对传参，可连续指定多组，也可重复使用 `--run`。[公共看板脚本](scripts/dashboard.sh)
+
+```bash
+source .venv/bin/activate
+bash benchmarks/longmemeval/scripts/dashboard.sh \
+  --run 方法A-S artifacts/method-a/eval/run-1/longmemeval_s_cleaned \
+        方法B-S artifacts/method-b/eval/run-1/longmemeval_s_cleaned \
+        方法A-Oracle artifacts/method-a/eval/run-1/longmemeval_oracle
+```
+
+每个目录直接包含 `summary.json` 和 `details.jsonl`，展示标签须非空且各不相同，含空格时加引号。侧栏选择运行，页面展示总体准确率、题型宏平均、证据不足题准确率、分题型结果和裁判模型。按题型或证据不足条件筛选后，可通过原始 `question_id` 并排查看同题回答、参考答案及裁判判定。
+
+参与比较的运行须有相同的题目 ID、问题、题型和参考答案，同一设置还须有相同的数据指纹。看板读取已保存的分数，支持不同方法、模型及 S／Oracle 设置的运行并列展示。[展示接口](dashboard.py)
+
+### 方法看板接入
+
+方法维护自己的 Streamlit 页面和启动脚本，通过 `show_runs(runs)` 嵌入 LongMemEval 的指标、运行配置和逐题回答对照。页面入口负责设置页面标题和选择结果目录。[公共展示组件](dashboard.py)
+
+| 接口 | 用法 |
+|---|---|
+| `show_runs(runs)` | 接收非空的 `(展示标签, Path 类型的设置目录)` 序列，标签须各不相同。读取已评分产物、核对运行间的数据和题目一致性，展示准确率、配置及逐题回答 |
+| `load_run(label, directory)` | 读取一个设置目录，返回含 `label`、`summary` 和 `records` 的字典，其中 `records` 按原始 `question_id` 索引 |
+| `show_scores(runs)` | 接收 `load_run` 返回对象的列表，展示总体准确率、题型宏平均、证据不足题准确率和分题型表格 |
+| `show_answers(runs)` | 接收同样的运行对象列表，按题型和证据不足条件筛选，展示同题回答与裁判判定 |
+
+自定义布局使用后两个接口时，由调用方保证各运行题目对齐。完整的跨运行校验集中在 `show_runs`。在方法的 Streamlit 页面中可直接调用下面的代码，同时展示同一次运行的 S 和 Oracle。
+
+```python
+from pathlib import Path
+
+from benchmarks.longmemeval.dashboard import show_runs
+
+run_dir = Path("artifacts/my-method/eval/run-1")
+show_runs([
+    ("My method · S", run_dir / "longmemeval_s_cleaned"),
+    ("My method · Oracle", run_dir / "longmemeval_oracle"),
+])
+```
+
+使用公共方法入口 `benchmarks.locomo.dashboard.run_dashboard(method, title, render_results, argv=None, qasper=False)` 时，`--output-dir` 指向包含设置子目录的上一级运行目录。入口枚举已评分任务，核对方法与设置后，将 LongMemEval 交给 `show_runs` 展示，`render_results` 回调负责 LoCoMo 的方法专属页面。[公共方法入口](../locomo/dashboard.py) · [LaCT 接入示例](../../reproductions/lact/evaluation/dashboard.py)
+
+方法环境需安装 Streamlit 等看板依赖，启动脚本使用该环境的 Python。以已有的 LaCT 页面为例，在项目根目录运行下面的命令，`--output-dir` 替换为实际评估运行目录。
+
+```bash
+PYTHONPATH=.:src python -m streamlit run reproductions/lact/evaluation/dashboard.py -- \
+  --output-dir artifacts/lact/eval/run-1
+```

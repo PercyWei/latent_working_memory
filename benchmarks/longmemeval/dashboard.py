@@ -124,12 +124,17 @@ def show_runs(runs):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run", action="append", nargs=2, metavar=("LABEL", "DIRECTORY"), required=True,
-                        help="标签和已评分的设置目录，可重复指定")
+    parser.add_argument("--run", nargs="+", action="extend", required=True,
+                        metavar="LABEL DIRECTORY",
+                        help="连续传入一组或多组标签和目录；目录直接包含 summary.json、details.jsonl")
     args = parser.parse_args(argv)
-    paths = {label: Path(path).expanduser().resolve() for label, path in args.run}
-    if len(paths) != len(args.run):
-        parser.error("每个 --run 需要不同的展示标签")
+    if len(args.run) % 2:
+        parser.error("--run 必须按“标签 目录”成对传入。")
+    paths = {}
+    for label, directory in zip(args.run[::2], args.run[1::2], strict=True):
+        if not label.strip() or label in paths:
+            parser.error("运行标签必须非空且不重复。")
+        paths[label] = Path(directory).expanduser().resolve()
     st.set_page_config(page_title="LongMemEval · 运行比较", layout="wide")
     st.title("LongMemEval · 运行比较")
     selected = st.sidebar.multiselect("参与比较的运行", paths.keys(), default=list(paths))
