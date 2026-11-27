@@ -75,6 +75,7 @@ def show_comparison(runs, all_labels, colors=None):
             "xOffset": {"field": "运行", "type": "nominal", "sort": all_labels},
             "y": {"field": "F1 (%)", "type": "quantitative", "scale": {"domain": [0, 100]}},
             "color": {"field": "运行", "type": "nominal",
+                      "legend": {"values": all_labels},
                       "scale": color_scale},
             "tooltip": [
                 {"field": "运行", "type": "nominal"},

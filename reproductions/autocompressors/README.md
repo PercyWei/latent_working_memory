@@ -2,7 +2,7 @@
 
 创建时间：20261124 11:54:28 Asia/Shanghai
 
-最后修订时间：20261127 15:05:26 Asia/Shanghai
+最后修订时间：20261127 15:28:10 Asia/Shanghai
 
 [环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能](#三通用功能)
 
@@ -134,12 +134,20 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/autocompressors/scripts/eval_qasper.
 
 ### 3.2 结果展示
 
-将 `--output-dir` 指向 `<output_root>/eval/<checkpoint_name>/`。看板默认展示该 checkpoint 下所有已评分的运行，按各自 `summary.json` 中记录的 benchmark 和设置或划分分组。结果目录名（`output_id`）作为运行标签，可在同一任务内比较不同压缩参数，也可对照相同参数、不同 ID 的多次评估。各运行的 `summary.json` 保存汇总指标，`details.jsonl` 保存逐题回答、参考答案及评分。
+将一个或多个 `<output_root>/eval/<checkpoint_name>/` 目录传给 `--output-dir`。多个目录可以用空格分隔，也可以重复指定 `--output-dir`。看板默认展示全部已评分的运行，按 `summary.json` 中的 benchmark 和设置或划分分组，侧栏可筛选 checkpoint。单目录使用 `output_id` 作为运行标签，多目录使用 `<checkpoint_name>/<output_id>`。
+
+图表、统计表和逐题回答使用相同的顺序。各任务内按分段长度（`segment_length`）的数值升序排列。参数相同时，依次按 checkpoint 目录名和 `output_id` 排列，名称中的数字按数值比较。相同压缩参数使用同一色系，不同 checkpoint 用深浅区分。
 
 ```bash
+# 查看一个 checkpoint
 bash reproductions/autocompressors/scripts/dashboard.sh --output-dir artifacts/reproductions/autocompressors/eval/AutoCompressor-Llama-2-7b-6k
+
+# 比较两个 checkpoint
+bash reproductions/autocompressors/scripts/dashboard.sh --output-dir \
+  "artifacts/reproductions/autocompressors/eval/<checkpoint_a>" \
+  "artifacts/reproductions/autocompressors/eval/<checkpoint_b>"
 ```
 
 LoCoMo 摘要用量表列出模型和分段长度，并按对话等权汇总摘要 token 数和保留比例。展开明细可查看每段对话的正文与摘要 token 数及保留比例。
 
-页面底部可对照各运行对同一道题的回答和评分。先选择任务，再选择问题。LoCoMo 可按题型和对话筛选，LongMemEval 可按题型筛选，QASPER 可按论文筛选。
+汇总指标保存在各运行的 `summary.json` 中，逐题回答、参考答案及评分保存在 `details.jsonl` 中。页面底部可对照各运行对同一道题的回答和评分。先选择任务，再选择问题。LoCoMo 可按题型和对话筛选，LongMemEval 可按题型筛选，QASPER 可按论文筛选。

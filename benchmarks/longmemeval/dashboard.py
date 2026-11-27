@@ -78,6 +78,7 @@ def show_scores(runs, colors=None):
             "y": {"field": "准确率", "type": "quantitative", "scale": {"domain": [0, 1]},
                   "axis": {"format": ".0%"}},
             "color": {"field": "运行", "type": "nominal",
+                      "legend": {"values": list(palette)},
                       "scale": {"domain": list(palette), "range": list(palette.values())}},
             "tooltip": [{"field": key} for key in ("运行", "设置", "指标")] +
                        [{"field": "准确率", "type": "quantitative", "format": ".2%"}],

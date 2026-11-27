@@ -2,7 +2,7 @@
 
 创建时间：20261126 16:09:15 Asia/Shanghai
 
-最后修订时间：20261127 15:07:41 Asia/Shanghai
+最后修订时间：20261127 15:28:01 Asia/Shanghai
 
 QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3 的开发集和测试集读取、按论文生成回答、本地 Answer F1 评分及结果展示。[原论文](https://aclanthology.org/2021.naacl-main.365/) · [官方数据（CC BY 4.0）](https://huggingface.co/datasets/allenai/qasper)
 
@@ -98,7 +98,9 @@ run_dir = Path("artifacts/my-method/eval/run-1")
 show_runs([("My method · dev", run_dir / "qasper" / "dev")])
 ```
 
-ICAE、AutoCompressors 和 SDCC 使用 `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`，`--output-dir` 指向 `<output-root>/eval/<checkpoint_name>/`。入口读取直接子目录中包含 `summary.json` 的全部已评分结果，根据汇总中的 benchmark 和 split 分组展示 QASPER dev 与 test；每组以完整 `output_id` 为标签，并排比较全部运行的总体和各答案类型 Answer F1 及题数。底部任务选择器用于查看所选划分的逐题回答与分数。`render_memory(runs)` 只负责 LoCoMo 的记忆统计。[checkpoint 看板入口](../checkpoint_dashboard.py) · [AutoCompressors 接入示例](../../reproductions/autocompressors/evaluation/dashboard.py)
+ICAE、AutoCompressors 和 SDCC 使用 `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`。`--output-dir` 接收一个或多个 `<output-root>/eval/<checkpoint_name>/`，可连续列出目录或重复该参数；侧栏默认选中全部 checkpoint。入口根据 `summary.json` 中的 benchmark 和 split 分组展示 QASPER 结果，跨 checkpoint 比较全部运行的总体和各答案类型 Answer F1 及题数。底部任务选择器用于查看逐题回答与分数。`render_memory(runs)` 只负责 LoCoMo 的记忆统计。[checkpoint 看板入口](../checkpoint_dashboard.py) · [AutoCompressors 接入示例](../../reproductions/autocompressors/evaluation/dashboard.py)
+
+多 checkpoint 的标签为 `checkpoint_name/output_id`，单 checkpoint 为 `output_id`。先按压缩参数数值升序，再按 checkpoint 名和 `output_id` 自然排序；看板图表中相同参数使用同色系，不同 checkpoint 以深浅区分。[多目录命令与任务分组](../locomo/README.md#方法看板接入)
 
 按运行 ID 保存结果的方法使用 `benchmarks.locomo.dashboard.run_dashboard(method, title, render_results, argv=None, qasper=False)`，通过 `qasper=True` 启用 QASPER，`--output-dir` 指向包含 `qasper/dev/` 或 `qasper/test/` 的运行目录。入口选择一个已评分任务，核对方法、benchmark 和划分后调用 `show_runs` 展示 QASPER；`render_results` 回调负责 LoCoMo 的方法专属页面。[公共方法入口](../locomo/dashboard.py)
 

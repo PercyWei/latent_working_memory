@@ -2,7 +2,7 @@
 
 创建时间：20261124 15:43:38 Asia/Shanghai
 
-最后修订时间：20261127 15:07:41 Asia/Shanghai
+最后修订时间：20261127 15:28:01 Asia/Shanghai
 
 本目录提供 LoCoMo 的公共评估与看板接口。公共层维护数据、调度、评分和结果格式；各方法维护模型加载、正文处理、答案生成及自己的启动脚本。数据准备见[公共 benchmark 说明](../README.md)。
 
@@ -187,7 +187,15 @@ bash benchmarks/locomo/scripts/dashboard.sh \
 | `show_scores(metrics, extra_metrics=())` | 展示总体及分题型 F1 和题数；可通过 `(标签, 已格式化数值)` 序列追加方法指标卡 |
 | `show_answers(directory, metrics)` | `directory` 指向含 `details.jsonl` 的 LoCoMo 结果目录，展示筛选后的逐题回答 |
 
-ICAE、AutoCompressors 和 SDCC 使用 [checkpoint 看板入口](../checkpoint_dashboard.py) `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`，`--output-dir` 指向 `<output-root>/eval/<checkpoint_name>/`。入口读取直接子目录中包含 `summary.json` 的全部已评分结果，根据汇总中的 benchmark 及其设置或划分分组；每个任务内并排比较全部运行，标签使用完整的 `output_id`，例如 `mem128_cr4_locomo` 或自定义名称。页面直接显示所有已有任务的概览，底部任务选择器用于查看该任务的逐题回答对照。
+ICAE、AutoCompressors 和 SDCC 使用 [checkpoint 看板入口](../checkpoint_dashboard.py) `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`。`--output-dir` 接收一个或多个 `<output-root>/eval/<checkpoint_name>/`，可在一次参数后连续列出目录，也可重复该参数。多个 checkpoint 可在侧栏选择，默认全部选中，例如：
+
+```bash
+bash reproductions/icae/scripts/dashboard.sh --output-dir \
+  artifacts/reproductions/icae/eval/mistral_7b_pretrained_icae \
+  artifacts/reproductions/icae/eval/mistral_7b_ft_icae
+```
+
+入口读取各 checkpoint 直接子目录中的已评分结果，根据 `summary.json` 中的 benchmark 及其设置或划分分组，在同一任务内比较不同 checkpoint 的全部运行。多 checkpoint 的标签为 `checkpoint_name/output_id`，单 checkpoint 为 `output_id`。先按压缩参数数值升序，再按 checkpoint 名和 `output_id` 自然排序；相同参数使用同色系，不同 checkpoint 以深浅区分。页面直接显示所有已有任务的概览，底部任务选择器用于查看逐题回答对照。
 
 checkpoint 看板的 `render_memory(runs)` 回调只负责 LoCoMo 全部压缩设置的记忆用量汇总与分对话统计。按运行 ID 保存结果的方法，其 `render_results` 回调依次调用 `show_scores(summary["metrics"])`、方法专属展示和 `show_answers(directory, summary["metrics"])`。
 

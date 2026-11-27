@@ -1,6 +1,6 @@
 # 论文复现
 
-最后修订时间：20261127 15:07:41 Asia/Shanghai
+最后修订时间：20261127 15:28:01 Asia/Shanghai
 
 本目录保存论文方法的独立复现。训练和评估入口、依赖环境、源码来源及结果分别在各方法目录维护。
 
@@ -131,7 +131,9 @@ LaCT 的来源目录为 `source/lact/`、`source/flame/`；E²-TTT 为 `source/e
 
 ## Benchmark 结果看板
 
-各方法通过 `scripts/dashboard.sh` 在当前激活的方法环境中启动看板。ICAE、AutoCompressors 和 SDCC 的 `--output-dir` 指向 `<output-root>/eval/<checkpoint_name>/`，页面读取直接子目录中包含 `summary.json` 的全部已评分结果，根据汇总元数据中的 benchmark 及其设置或划分分组，使用完整的 `output_id` 作为标签。所有已有任务的概览直接显示，同一任务的全部运行并排比较；底部任务选择器用于进入该任务的逐题回答对照。LoCoMo 同时汇总全部运行的记忆用量与分对话统计。[checkpoint 看板入口](../benchmarks/checkpoint_dashboard.py)
+各方法通过 `scripts/dashboard.sh` 在当前激活的方法环境中启动看板。ICAE、AutoCompressors 和 SDCC 的 `--output-dir` 接收一个或多个 `<output-root>/eval/<checkpoint_name>/`，可连续列出目录或重复该参数；侧栏可选择 checkpoint，默认全部选中。页面读取各 checkpoint 下的已评分结果，根据 `summary.json` 中的 benchmark 及其设置或划分分组，同一任务的运行跨 checkpoint 并排比较。所有任务概览直接显示，底部任务选择器用于查看逐题回答对照；LoCoMo 同时汇总记忆用量与分对话统计。[checkpoint 看板入口](../benchmarks/checkpoint_dashboard.py)
+
+多 checkpoint 的运行标签为 `checkpoint_name/output_id`，单 checkpoint 为 `output_id`。先按压缩参数数值升序，再按 checkpoint 名和 `output_id` 自然排序；相同参数使用同色系，不同 checkpoint 以深浅区分。[多目录命令示例](../benchmarks/locomo/README.md#方法看板接入)
 
 LaCT、In-Place TTT 和 E²-TTT 的 `--output-dir` 指向包含 `locomo/`、`longmemeval_s_cleaned/` 或 `longmemeval_oracle/` 的运行目录，在页面中选择一个已评分任务查看。
 
