@@ -176,7 +176,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_locomo.sh \
   --stage finetuned \
   --model-path ~/models/Mistral-7B-Instruct-v0.2 \
   --checkpoint ~/models/reproductions/icae/mistral_7b_ft_icae.safetensors \
-  --batch-size-per-gpu 4
+  --batch-size-per-gpu 2
 ```
 
 <a id="32-longmemeval-评估"></a>
@@ -201,7 +201,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_longmemeval.sh \
   --stage finetuned \
   --model-path ~/models/Mistral-7B-Instruct-v0.2 \
   --checkpoint ~/models/reproductions/icae/mistral_7b_ft_icae.safetensors \
-  --batch-size-per-gpu 4
+  --batch-size-per-gpu 2
 ```
 
 | 独立评分代码参数 | 用途与默认值 |
@@ -236,7 +236,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_qasper.sh \
   --stage finetuned \
   --model-path ~/models/Mistral-7B-Instruct-v0.2 \
   --checkpoint ~/models/reproductions/icae/mistral_7b_ft_icae.safetensors \
-  --batch-size-per-gpu 4
+  --batch-size-per-gpu 2
 ```
 
 <a id="33-结果展示"></a>
