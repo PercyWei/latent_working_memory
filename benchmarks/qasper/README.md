@@ -2,7 +2,7 @@
 
 创建时间：20261126 16:09:15 Asia/Shanghai
 
-最后修订时间：20261127 16:12:47 Asia/Shanghai
+最后修订时间：20261127 16:36:28 Asia/Shanghai
 
 QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3 测试集的读取、按论文生成回答、本地 Answer F1 评分及结果展示。[原论文](https://aclanthology.org/2021.naacl-main.365/) · [官方数据（CC BY 4.0）](https://huggingface.co/datasets/allenai/qasper)
 
@@ -28,14 +28,14 @@ QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3
 | `answer_batch(states, questions, complete)` | 从各题对应的状态并行回答，完成一题即回调 `complete`，空回答按官方规则计分 |
 | `run_evaluation(...)` | 按论文调度生成，在本地计算官方 Answer F1，按原始题序保存结果并汇总 |
 
-分词、模型位置窗口检查和具体读写由适配器维护。公共调度参数由 `add_evaluation_arguments(parser, output_root, checkpoint_layout=False)` 定义。按 checkpoint 组织结果的方法传入 `checkpoint_layout=True`，并向 `run_evaluation` 传入 `checkpoint_name` 和表示压缩设置的 `output_name`。[数据与输入](data.py) · [评估入口](evaluate.py)
+分词、模型位置窗口检查和具体读写由适配器维护。公共调度参数由 `add_evaluation_arguments(parser, output_root, checkpoint_layout=False)` 定义。按模型或 checkpoint 组织结果的方法传入 `checkpoint_layout=True`，并向 `run_evaluation` 传入 `checkpoint_name` 和评估设置前缀 `output_name`。Full-context 使用模型目录名作为 `checkpoint_name`，`output_name=""` 时默认结果目录名为 `qasper_test`。[数据与输入](data.py) · [评估入口](evaluate.py)
 
 | 参数 | 含义与默认值 |
 |---|---|
 | `--benchmark-data` | 输入数据目录，默认 `data/benchmarks/qasper` |
 | `--split` | `test`（默认） |
 | `--output-root` | 输出根目录，默认值由接入方提供 |
-| `--output-id` | 结果目录名；ICAE、AutoCompressors 和 SDCC 默认 `<压缩设置>_qasper_test`，其他方法默认 `<output_name>_<YYYYMMDD-HHMM>` |
+| `--output-id` | 结果目录名；Full-context 默认 `qasper_test`，ICAE、AutoCompressors 和 SDCC 默认 `<压缩设置>_qasper_test` |
 | `--batch-size-per-gpu` | 每卡批处理数，默认 `1` |
 | `--max-new-tokens` | 每题最多生成的新 token 数，默认 `128` |
 | `--resume` | 沿用原运行进度，默认关闭 |
@@ -47,7 +47,7 @@ QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3
 
 ## 产物与指标
 
-ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<output-id>/`。省略 `--output-id` 时使用 `<压缩设置>_qasper_test`，例如 `seg2048_qasper_test`；显式指定时以该值作为完整目录名。这三种方法在相同命令后加 `--resume` 即可续评，自定义 ID 须沿用原值。Full-context 写入 `<output-root>/eval/<output-id>/qasper/test/`，续评时指定原 ID。
+ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<output-id>/`，默认 ID 为 `<压缩设置>_qasper_test`，例如 `seg2048_qasper_test`。Full-context 写入 `<output-root>/eval/<model_name>/<output-id>/`，`model_name` 取 `--model-path` 指向的目录名，默认 ID 为 `qasper_test`。显式指定 `--output-id` 时以该值作为完整目录名；在相同命令后加 `--resume` 即可续评，自定义 ID 须沿用原值。
 
 | 文件 | 内容 |
 |---|---|

@@ -2,7 +2,7 @@
 
 创建时间：20261124 15:43:38 Asia/Shanghai
 
-最后修订时间：20261127 16:12:47 Asia/Shanghai
+最后修订时间：20261127 16:36:28 Asia/Shanghai
 
 本目录提供 LoCoMo 的公共评估与看板接口。公共层维护数据、调度、评分和结果格式；各方法维护模型加载、正文处理、答案生成及自己的启动脚本。数据准备见[公共 benchmark 说明](../README.md)。
 
@@ -90,7 +90,7 @@ if __name__ == "__main__":
     main()
 ```
 
-`run_evaluation` 负责数据读取、GPU 分片、worker 启动、评分、保存和续评。按 checkpoint 组织结果的方法调用 `add_evaluation_arguments(..., checkpoint_layout=True)`，并向 `run_evaluation` 传入 `checkpoint_name` 和表示压缩设置的 `output_name`。方法自己的 `eval_locomo.sh` 选择运行环境，将项目根目录和 `src/` 加入 `PYTHONPATH`，并调用 Python 入口。
+`run_evaluation` 负责数据读取、GPU 分片、worker 启动、评分、保存和续评。按模型或 checkpoint 组织结果的方法调用 `add_evaluation_arguments(..., checkpoint_layout=True)`，并向 `run_evaluation` 传入 `checkpoint_name` 和评估设置前缀 `output_name`。Full-context 使用模型目录名作为 `checkpoint_name`，`output_name=""` 时默认结果目录名仅含任务名。方法自己的 `eval_locomo.sh` 选择运行环境，将项目根目录和 `src/` 加入 `PYTHONPATH`，并调用 Python 入口。
 
 已有调度流程可直接复用 `shard_conversations(samples, workers)` 与 `evaluate_conversations(samples, adapter, batch_size, commit)`。前者按整段对话分片，后者完成一题即调用 `commit(sample, answer, statistics)`；调用方按下文的产物规范评分和保存。
 
@@ -102,11 +102,11 @@ if __name__ == "__main__":
 |---|---|
 | `--benchmark-data` | 默认 `data/benchmarks/locomo` |
 | `--output-root` | 评估产物根目录，默认值由方法入口提供 |
-| `--output-id` | 结果目录名；ICAE、AutoCompressors 和 SDCC 默认 `<压缩设置>_locomo`，其他方法默认由方法名称与时间戳组成 |
+| `--output-id` | 结果目录名；Full-context 默认 `locomo`，ICAE、AutoCompressors 和 SDCC 默认 `<压缩设置>_locomo`，其他方法默认由方法名称与时间戳组成 |
 | `--batch-size-per-gpu` | 每卡批处理数，默认 1 |
 | `--resume` | 沿用原结果目录和评估配置续评 |
 
-ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<output-id>/`。省略 `--output-id` 时使用 `<压缩设置>_locomo`；显式指定时以该值作为完整目录名。在相同命令后加 `--resume` 即可续评，自定义 ID 须沿用原值。其他方法写入 `<output-root>/eval/<output-id>/locomo/`，续评时指定原 ID。
+ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<output-id>/`，默认 ID 为 `<压缩设置>_locomo`。Full-context 写入 `<output-root>/eval/<model_name>/<output-id>/`，`model_name` 取 `--model-path` 指向的目录名，默认 ID 为 `locomo`。显式指定 `--output-id` 时以该值作为完整目录名；在相同命令后加 `--resume` 即可续评，自定义 ID 须沿用原值。其他方法写入 `<output-root>/eval/<output-id>/locomo/`，续评时指定原 ID。
 
 ## 产物规范
 

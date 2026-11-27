@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 def add_output_arguments(parser, output_root, checkpoint_layout=False):
     parser.add_argument("--output-root", type=Path, default=Path(output_root))
     if checkpoint_layout:
-        parser.add_argument("--output-id", help="checkpoint 下的结果目录名，默认使用压缩参数及任务名称")
+        parser.add_argument("--output-id", help="模型或 checkpoint 下的结果目录名，默认由评估设置和任务名称确定")
     else:
         parser.add_argument("--output-id", help="运行 ID，默认使用方法名称及启动时间")
 
@@ -17,7 +17,8 @@ def evaluation_directory(args, task, output_name, checkpoint_name=None):
     root = args.output_root.expanduser().resolve() / "eval"
     if args.output_id is None:
         if checkpoint_name is not None:
-            args.output_id = f"{output_name}_{task.replace('/', '_')}"
+            task_name = task.replace("/", "_")
+            args.output_id = f"{output_name}_{task_name}" if output_name else task_name
         else:
             if args.resume:
                 raise ValueError("--resume requires the original --output-id")

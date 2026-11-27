@@ -14,6 +14,7 @@ from transformers import AutoConfig
 
 from benchmarks.comparison import comparison_data
 from benchmarks.data import load_samples
+from benchmarks.output import add_output_arguments, evaluation_directory
 from benchmarks.protocol import DEFAULT_RULER_LENGTHS, data_identity, protocol
 from benchmarks.scoring import summarize_scores
 from latent_working_memory.cli import length_batch_size, positive_int
@@ -57,8 +58,6 @@ def _print_scores(summary):
 def _prepare_evaluation(args, model_path, output):
     settings_path = output / "eval.json"
     if args.resume:
-        if not settings_path.is_file():
-            raise ValueError(f"--resume requires an existing evaluation plan: {settings_path}")
         settings = json.loads(settings_path.read_text(encoding="utf-8"))
         data_dir = Path(settings["data"]["directory"])
         seed = settings["seed"]
@@ -67,10 +66,6 @@ def _prepare_evaluation(args, model_path, output):
             model_path = Path(model_config["model_name_or_path"])
         lengths = settings["protocol"]["lengths"]
     else:
-        if settings_path.exists():
-            raise ValueError(f"evaluation plan already exists: {settings_path}; use --resume")
-        if any(path.name != ".evaluation.lock" for path in output.iterdir()):
-            raise ValueError(f"evaluation output is not empty and has no eval.json: {output}")
         if args.benchmark_data is None:
             raise ValueError("specify --benchmark-data when creating an evaluation")
         data_dir = args.benchmark_data
@@ -105,8 +100,6 @@ def _prepare_evaluation(args, model_path, output):
     }
     if args.resume:
         _matching(settings, snapshot, settings_path)
-    else:
-        write_json(settings_path, snapshot)
     return samples, snapshot
 
 
@@ -136,12 +129,20 @@ def run(args):
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         raise ValueError("launch the evaluation script directly; it starts one worker per GPU")
     model_path = args.model_path or Path("~/models/Qwen3-4B-Instruct-2507")
-    model_path = Path(os.path.abspath(model_path.expanduser()))
-    output = args.output_root.expanduser().resolve() / model_path.name / args.benchmark
-    output.mkdir(parents=True, exist_ok=True)
+    model_path = model_path.expanduser().resolve()
+    output = evaluation_directory(args, args.benchmark, output_name="", checkpoint_name=model_path.name)
+    if args.resume:
+        if not (output / "eval.json").is_file():
+            raise ValueError(f"--resume requires an existing evaluation plan: {output / 'eval.json'}")
+    else:
+        samples, snapshot = _prepare_evaluation(args, model_path, output)
+        output.mkdir(parents=True, exist_ok=False)
     with (output / ".evaluation.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        samples, snapshot = _prepare_evaluation(args, model_path, output)
+        if args.resume:
+            samples, snapshot = _prepare_evaluation(args, model_path, output)
+        else:
+            write_json(output / "eval.json", snapshot)
         summary_path = output / "summary.json"
         if summary_path.is_file():
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -227,8 +228,8 @@ def parse_args(argv=None):
     parser.add_argument("--batch-size-per-gpu", type=positive_int, default=1,
                         help="每卡评估批量大小，默认 1")
     parser.add_argument("--seed", type=int, help="首次默认 42，复用时沿用已存配置")
-    parser.add_argument("--output-root", type=Path, default=Path("artifacts/baselines/full_context"),
-                        help="结果根目录，其下按模型目录名和任务名保存")
+    root = Path(__file__).resolve().parents[3]
+    add_output_arguments(parser, root / "artifacts/baselines/full_context", checkpoint_layout=True)
     parser.add_argument("--lengths", type=positive_int, nargs="+", help="首次默认 8192 16384 32768")
     parser.add_argument("--batch-size-by-length", type=length_batch_size, nargs="+", default=[],
                        metavar="LENGTH=BATCH", help="按 RULER 长度档位覆盖每卡批量，如 8192=4 32768=1")

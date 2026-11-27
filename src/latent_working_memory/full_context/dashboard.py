@@ -81,18 +81,35 @@ def show_results(directory, task):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True,
-                        help="包含已评分的 benchmark 设置子目录的运行目录")
+                        help="模型评估目录 <output_root>/eval/<model_name>，包含已评分的 output_id 子目录")
     directory = parser.parse_args(argv).output_dir.expanduser().resolve()
     if not directory.is_dir():
-        parser.error(f"--output-dir 必须指向已有的评估运行目录：{directory}")
+        parser.error(f"--output-dir 必须指向已有的模型评估目录：{directory}")
     st.set_page_config(page_title="原始模型基线", layout="wide")
     st.title(f"原始模型基线 · {directory.name}")
-    tasks = [task for task in TASK_LABELS if (directory / task / "summary.json").is_file()]
+    grouped = {}
+    try:
+        for path in sorted(directory.glob("*/summary.json")):
+            summary = json.loads(path.read_text(encoding="utf-8"))
+            task = summary["benchmark"]
+            if task == "qasper":
+                task = f"qasper/{summary['split']}"
+            if summary["method"] != "full-context" or task not in TASK_LABELS:
+                raise ValueError(f"{path.parent} 不是支持的 Full-context 评估结果。")
+            grouped.setdefault(task, []).append(path.parent)
+    except (OSError, KeyError, ValueError) as error:
+        st.error(f"无法读取评估结果。{error}")
+        return
+    tasks = [task for task in TASK_LABELS if task in grouped]
     if not tasks:
         st.info(f"在 {directory} 下未找到已汇总的评估结果。")
         return
     task = st.selectbox("评估任务", tasks, format_func=TASK_LABELS.__getitem__)
-    show_results(directory / task, task)
+    run_directory = st.selectbox(
+        "评估运行（output_id）", grouped[task], format_func=lambda path: path.name,
+        key=f"{directory}:{task}:run",
+    )
+    show_results(run_directory, task)
 
 
 if __name__ == "__main__":

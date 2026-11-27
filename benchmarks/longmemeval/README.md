@@ -2,7 +2,7 @@
 
 创建时间：20261126 10:49:01 Asia/Shanghai
 
-最后修订时间：20261127 16:12:47 Asia/Shanghai
+最后修订时间：20261127 16:36:28 Asia/Shanghai
 
 本目录维护 LongMemEval 的数据读取、按题生成、问答评分和结果格式。[官方仓库](https://github.com/xiaowu0162/LongMemEval) · [清洗版数据](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/tree/98d7416c24c778c2fee6e6f3006e7a073259d48f)
 
@@ -43,14 +43,14 @@ S 和 Oracle 使用相同的 500 道题，各自保存预测和分数，通过�
 | `run_generation(...)` | 按原始题序汇总回答并返回 `predictions.jsonl` 的路径 |
 | `run_evaluation(...)` | 按完整历史分配生成任务，在全部回答保存后启动公共评分，输出总体准确率 |
 
-`add_evaluation_arguments(parser, output_root, checkpoint_layout=False)` 定义公共参数。按 checkpoint 组织结果的方法传入 `checkpoint_layout=True`，并向 `run_evaluation` 传入 `checkpoint_name` 和表示压缩设置的 `output_name`。分词、模型窗口检查和生成由适配器负责；输入超出窗口时应报告错误。[生成接口](generate.py) · [调度入口](evaluate.py)
+`add_evaluation_arguments(parser, output_root, checkpoint_layout=False)` 定义公共参数。按模型或 checkpoint 组织结果的方法传入 `checkpoint_layout=True`，并向 `run_evaluation` 传入 `checkpoint_name` 和评估设置前缀 `output_name`。Full-context 使用模型目录名作为 `checkpoint_name`，`output_name=""` 时默认结果目录名仅含所选 split。分词、模型窗口检查和生成由适配器负责；输入超出窗口时应报告错误。[生成接口](generate.py) · [调度入口](evaluate.py)
 
 | 参数 | 含义与默认值 |
 |---|---|
 | `--split` | 选择 S 或 Oracle，默认 `longmemeval_s_cleaned` |
 | `--benchmark-data` | 输入数据目录，默认 `data/benchmarks/longmemeval` |
 | `--output-root` | 输出根目录，默认值由接入方提供 |
-| `--output-id` | 结果目录名；ICAE、AutoCompressors 和 SDCC 默认 `<压缩设置>_<split>`，其他方法默认 `<output_name>_<YYYYMMDD-HHMM>` |
+| `--output-id` | 结果目录名；Full-context 默认 `<split>`，ICAE、AutoCompressors 和 SDCC 默认 `<压缩设置>_<split>`，其他方法默认 `<output_name>_<YYYYMMDD-HHMM>` |
 | `--batch-size-per-gpu` | 每卡批处理数，默认 `1` |
 | `--max-new-tokens` | 每题最多生成的新 token 数，默认 `128` |
 | `--resume` | 沿用原运行进度，默认关闭。续评时可调整 GPU 数和每卡批量 |
@@ -70,7 +70,7 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 
 ## 产物与指标
 
-ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<output-id>/`。省略 `--output-id` 时使用 `<压缩设置>_<split>`，例如 `mem128_cr4_longmemeval_s_cleaned`；显式指定时以该值作为完整目录名。这三种方法在相同命令后加 `--resume` 即可续评，自定义 ID 须沿用原值。其他方法写入 `<output-root>/eval/<output-id>/<split>/`，续评时指定原 ID。
+ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<output-id>/`，默认 ID 为 `<压缩设置>_<split>`，例如 `mem128_cr4_longmemeval_s_cleaned`。Full-context 写入 `<output-root>/eval/<model_name>/<output-id>/`，`model_name` 取 `--model-path` 指向的目录名，默认 ID 为 `<split>`。显式指定 `--output-id` 时以该值作为完整目录名；在相同命令后加 `--resume` 即可续评，自定义 ID 须沿用原值。其他方法写入 `<output-root>/eval/<output-id>/<split>/`，续评时指定原 ID。
 
 | 文件 | 内容 |
 |---|---|
