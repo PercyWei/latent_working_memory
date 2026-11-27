@@ -2,7 +2,7 @@
 
 创建时间：20261019 20:16:32 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261126 17:07:15 Asia/Shanghai
+最后修订时间：20261127 15:31:23 Asia/Shanghai
 
 Full-context 基线用原始模型读取完整输入，贪心生成答案。支持 LoCoMo、LongMemEval-S、LongMemEval-Oracle、QASPER 和 RULER。[公共数据准备](../../../benchmarks/README.md)
 
@@ -26,7 +26,7 @@ Full-context 基线用原始模型读取完整输入，贪心生成答案。支�
 | `--resume` | 用于续评估，默认关闭 |
 
 - **运行方式**：每张可见 GPU 加载一个模型副本。完整输入与回答预算之和须在模型的位置窗口内。[运行环境](#一运行环境) · [数据下载](../../../benchmarks/README.md)
-- **输入与解码**：使用基座模型的聊天模板和对应任务的系统提示，将完整会话历史或论文正文与问题放在同一条 user 消息中，从 assistant 起始标记贪心生成回答。[输入构造](../prompts.py)
+- **输入与解码**：使用基座模型的聊天模板和对应任务的系统提示，将完整会话历史或论文正文与问题放在同一条 user 消息中，从 assistant 起始标记贪心生成回答。Qwen Instruct 关闭 thinking。[输入构造](../prompts.py)
 - **结果与续评**：各评估设置的结果分别保存在 `<output-root>/eval/<output-id>/` 下的对应子目录。使用原 `--output-id` 加 `--resume` 可复用已保存的进度，继续完成评估。
 
 <a id="locomo"></a>
@@ -89,17 +89,17 @@ uv run -m benchmarks.longmemeval.score \
 | 完整评估脚本参数 | 用途与默认值 |
 |---|---|
 | `--benchmark-data` | 默认 `data/benchmarks/qasper` |
-| `--split` | 支持 `dev`（默认）和 `test` |
+| `--split` | 支持 `test`（默认） |
 | `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
 
-- **评估范围**：dev 包含 281 篇论文、1,005 道题，test 包含 416 篇论文、1,451 道题。[QASPER 评估协议](../../../benchmarks/qasper/README.md)
-- **输入长度**：按示例模型 Qwen3-4B-Instruct-2507 的 tokenizer 统计，计入系统提示和聊天模板后，dev 每题为 928–21,955 个 token，test 为 893–29,902 个 token。加上默认回答预算后均在模型的 262,144 个 token 窗口内。
+- **评估范围**：test 包含 416 篇论文、1,451 道题。[QASPER 评估协议](../../../benchmarks/qasper/README.md)
+- **输入长度**：按示例模型 Qwen3-4B-Instruct-2507 的 tokenizer 统计，计入系统提示和聊天模板后，test 每题为 893–29,902 个 token。加上默认回答预算后均在模型的 262,144 个 token 窗口内。
 - **推理方式**：按论文分配 GPU，每篇论文的公共前缀只预填一次。各题从该前缀的 KV 缓存独立生成回答。
 - **评分口径**：在本地逐题计算官方 Answer F1。每题取各参考答案中的最高分，再对所有题目取平均。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eval_qasper.sh \
-  --split dev \
+  --split test \
   --model-path ~/models/Qwen3-4B-Instruct-2507 \
   --output-id Qwen3-4B-Instruct-2507 \
   --batch-size-per-gpu 2
@@ -134,7 +134,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eva
 |---|---|
 | LoCoMo | 总体及分题型 F1，可按对话查看逐题结果。`execution.json` 记录执行状态，`work.json` 和 `progress/` 保存任务分配与进度 |
 | LongMemEval-S / Oracle | 总体、分题型、题型宏平均及证据不足题准确率，可查看逐题判定和裁判模型。`scoring_config.json` 保存裁判配置 |
-| QASPER dev / test | 总体及分答案类型的 Answer F1，可按论文查看问题、参考答案、模型回答和逐题分数。每个划分的 `predictions.jsonl` 按原始题序保存模型回答 |
+| QASPER | 总体及分答案类型的 Answer F1，可按论文查看问题、参考答案、模型回答和逐题分数。`qasper/test/predictions.jsonl` 按原始题序保存模型回答 |
 | RULER | 按长度档位和子任务查看准确率。`summary.json` 另含推理批量、耗时与峰值显存，`eval.json`、`status.json`、`eval.log` 和 `progress/` 保存配置与运行记录 |
 
 方法看板的 `--output-dir` 指向包含任务子目录的运行目录。前面的 LoCoMo、LongMemEval 和 QASPER 示例可以在同一个看板中查看。

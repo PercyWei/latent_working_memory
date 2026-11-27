@@ -1,32 +1,23 @@
-# 20261014_公共 Benchmark 数据准备与协议
+# 20261014_公共 Benchmark 数据准备
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261127 11:30:30 Asia/Shanghai
+最后修订时间：20261127 15:31:23 Asia/Shanghai
 
-本目录提供 RULER、LoCoMo、LongMemEval 和 QASPER 的公共数据准备、读取和评分。各方法通过相应接口接入。
+本文介绍 RULER、LoCoMo、LongMemEval 和 QASPER 的数据下载与 RULER 样本生成。以下命令均从项目根目录执行。
 
-## 1. 数据位置与评估协议
+## 1. 数据概览
 
-| Benchmark | 本地数据 | 默认评估范围 | 评分 |
-|---|---|---|---|
-| RULER v1 | `data/benchmarks/ruler-v1/<model-name>/<length>/<task>/test.jsonl` | 8192、16384、32768 tokens；完整 13 项任务 | 官方必答项召回／任一参考答案命中，按任务等权汇总 |
-| LoCoMo | `data/benchmarks/locomo/locomo10.json` | 全部会话的 QA 类别 1–4 | 官方分类别 F1 与按题平均 F1 |
-| LongMemEval-S / Oracle | `data/benchmarks/longmemeval/` 下的两个官方 JSON 文件 | 清洗版，每种设置 500 题，独立运行 | `gpt-6-luna` 按官方提示词逐题判分，汇总总体、分题型、题型宏平均及拒答准确率 |
-| QASPER v0.3 | `data/benchmarks/qasper/qasper-<split>-v0.3.json` | 开发集 1,005 题（默认）或测试集 1,451 题 | 本地计算官方 Answer F1，报告总体及各答案类型的平均分 |
-
-- 以下指令从项目根目录执行；数据下载和 RULER 样本生成由用户手动运行。
-- RULER 保留官方 `input`、`outputs` 等字段；LoCoMo 保留官方完整 JSON，不转换为训练用的 `{text,qas}`。
-- 评估采用 greedy 生成，参考答案只用于评分；模型与记忆机制由各方法的评估入口管理。
-- Full-context、ICAE v2、AutoCompressors、SDCC、LaCT、E²-TTT 和 In-Place TTT 的评估默认加载 BF16 权重，关闭模型级 autocast，attention 使用 FlashAttention 2。TTT 方法内部的状态更新沿用各自的计算精度。
-- 使用 Qwen Instruct 完整上下文时，输入应用一次基座聊天模板，关闭 thinking。压缩方法按各自 checkpoint 的读写协议组织提示，所有方法均保留完整评估输入。TTT 基线的普通文本续写协议及任务范围见[评估数据准备](../reproductions/20261108_ttt_data_preparation.md)。
-- RULER 按任务使用官方生成预算：NIAH 128、VT 30、CWE 120、FWE 50、QA 32 tokens。LoCoMo 为 50 tokens。LongMemEval-S、Oracle 和 QASPER 默认每题最多生成 128 个新 token。
-- LoCoMo 按 session 时间顺序保留日期、说话人、正文和 `blip_caption`；不同问题不继承之前生成的答案。类别 1–4 分别为 multi-hop、temporal、open-domain、single-hop；不评估 adversarial 类别 5。
+| Benchmark | 本地数据 | 准备内容 |
+|---|---|---|
+| RULER v1 | `data/benchmarks/ruler-v1/<model-name>/<length>/<task>/test.jsonl` | 下载素材后生成样本；默认 8192、16384、32768 tokens 三档、13 项任务，每档每项 100 条 |
+| LoCoMo | `data/benchmarks/locomo/locomo10.json` | 完整原始 JSON，含 10 段对话及类别 1–5 的 QA 标注 |
+| LongMemEval-S / Oracle | `data/benchmarks/longmemeval/<split>.json`，其中 `<split>` 为 `longmemeval_s_cleaned` 或 `longmemeval_oracle` | 同时下载 S 与 Oracle，各含相同的 500 道题及对应上下文 |
+| QASPER v0.3 | `data/benchmarks/qasper/qasper-test-v0.3.json` | test 原始 JSON，含 416 篇论文、1,451 道题 |
 
 ## 2. 数据准备
 
-- 下载与生成使用独立入口，均从项目根目录执行，无需 GPU。
-- 先执行 `uv sync --frozen` 安装项目锁定依赖；官方下载入口还需系统 `curl`、`tar`，脚本不自动安装依赖。
+数据下载和 RULER 样本生成由用户手动运行，无需 GPU。下载依赖系统 `curl`、`tar` 及项目环境：
 
 ```bash
 uv sync --frozen
@@ -35,14 +26,14 @@ bash benchmarks/scripts/download_benchmarks.sh --benchmark all
 
 **原始数据下载：[download_benchmarks.sh](scripts/download_benchmarks.sh)**
 
-- RULER 固定采用 [NVIDIA/RULER v1 源码](https://github.com/NVIDIA/RULER/tree/c3f5e3b4f87f97e048793bb510a3a6b19a46bf3a)，下载 essay、SQuAD、HotpotQA、CWE 词表及 NLTK 分词资源；不加载 tokenizer，不生成样本。
-- **适用场景**：未从 ModelScope 获取素材时，运行此入口从官方来源准备数据。每次执行均重新下载所选 benchmark 的源码与素材，覆盖同路径文件。
-- **RULER 源码**：下载上述固定提交的源码压缩包并解包覆盖，CWE 词表单独从对应的官方 LFS 地址下载。
-- **NLTK 资源**：强制重新下载 `punkt` 和 `punkt_tab`，保存到 `data/raw/nltk_data/tokenizers/`。生成脚本设置绝对路径 `NLTK_DATA`，供官方生成器子进程使用。
-- NLTK 下载默认允许使用已配置的代理（`NLTK_ALLOW_PROXIED_URLOPEN=1`），可通过同名环境变量覆盖；下载失败立即退出，不进入交互重试。
-- LoCoMo 下载 [官方正式数据](https://github.com/snap-research/locomo/tree/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376)，下载后可直接评估，无需额外构造脚本。
-- LongMemEval 下载作者[清洗版](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned)的 S 与 Oracle 原始 JSON。可通过 `HF_ENDPOINT` 指定 Hugging Face 镜像。
-- QASPER 可单独执行 `bash benchmarks/scripts/download_benchmarks.sh --benchmark qasper`，从官方 v0.3 压缩包提取开发集和测试集的原始 JSON。[训练与开发集下载源](https://qasper-dataset.s3.us-west-2.amazonaws.com/qasper-train-dev-v0.3.tgz) · [测试集下载源](https://qasper-dataset.s3.us-west-2.amazonaws.com/qasper-test-and-evaluator-v0.3.tgz)
+下载入口覆盖所选 benchmark 的同路径文件。RULER 下载素材后还需生成样本；其余 benchmark 可直接读取原始 JSON 评估。
+
+- **RULER v1**：采用固定提交的 [NVIDIA/RULER v1 源码](https://github.com/NVIDIA/RULER/tree/c3f5e3b4f87f97e048793bb510a3a6b19a46bf3a)。
+  - 下载源码及 essay、SQuAD、HotpotQA、CWE 词表，保存到 `--ruler-source-dir`。
+  - 下载 NLTK 的 `punkt`、`punkt_tab`，保存到 `data/raw/nltk_data/tokenizers/`。
+- **LoCoMo**：下载[官方 `locomo10.json`](https://github.com/snap-research/locomo/tree/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376)。
+- **LongMemEval-S / Oracle**：下载作者[清洗版](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned)的 S 与 Oracle JSON。
+- **QASPER v0.3**：从[测试集压缩包](https://qasper-dataset.s3.us-west-2.amazonaws.com/qasper-test-and-evaluator-v0.3.tgz)提取 `qasper-test-v0.3.json`。
 
 | 参数 | 填法与默认值 |
 |---|---|
@@ -50,19 +41,15 @@ bash benchmarks/scripts/download_benchmarks.sh --benchmark all
 | `--data-root` | LoCoMo、LongMemEval 和 QASPER 的数据父目录，默认 `data/benchmarks` |
 | `--ruler-source-dir` | RULER 官方源码及下载素材目录，默认 `data/raw/ruler-v1-source` |
 
-- HotpotQA 默认通过 `https://hf-mirror.com` 下载，可用 `HF_ENDPOINT` 覆盖下载源；数据路径和 revision 保持不变。
-- 镜像可能重定向至 Hugging Face。仍无法连接时，配置可用代理或更换 `HF_ENDPOINT` 后重新运行。
+`HF_ENDPOINT` 可统一覆盖 HotpotQA 和 LongMemEval 的下载地址；未设置时，前者使用 `https://hf-mirror.com`，后者使用 `https://huggingface.co`。
 
-通过 ModelScope 分发时，将下列目录一起保存，并按项目根目录的相对路径还原；`nltk_data/` 保留完整目录结构：
+通过 ModelScope 分发或还原数据时，保留下列完整目录：
 
 ```text
 data/
 ├── raw/
 │   ├── ruler-v1-source/          # RULER 源码与已下载素材
-│   └── nltk_data/
-│       └── tokenizers/
-│           ├── punkt/
-│           └── punkt_tab/
+│   └── nltk_data/                # punkt、punkt_tab 及其目录结构
 └── benchmarks/
     ├── locomo/
     │   └── locomo10.json
@@ -70,21 +57,19 @@ data/
     │   ├── longmemeval_s_cleaned.json
     │   └── longmemeval_oracle.json
     └── qasper/
-        ├── qasper-dev-v0.3.json
         └── qasper-test-v0.3.json
 ```
 
-从 ModelScope 还原完整目录后，可执行下方 RULER 生成命令。LoCoMo、LongMemEval 和 QASPER 可直接读取原始 JSON。RULER 源码与素材应来自上述固定版本，目录位置不同时向生成脚本传入 `--ruler-source-dir`。
-
 **RULER 样本生成：[generate_ruler.sh](scripts/generate_ruler.sh)**
 
-- 使用上述已下载素材，默认调用官方生成器构造全部 13 项任务；仅加载 tokenizer，在 CPU 上控制文本长度。
+使用上述固定版本的源码与素材，仅加载 tokenizer 构造样本。源码目录不在默认位置时，传入对应的 `--ruler-source-dir`。
 
 ```bash
 bash benchmarks/scripts/generate_ruler.sh \
   --model-path "$HOME/models/Qwen3-4B-Instruct-2507" \
   --lengths 8192 16384 32768 \
-  --num-samples 100 --seed 42
+  --num-samples 100 \
+  --seed 42
 ```
 
 | 参数 | 填法与默认值 |
@@ -92,25 +77,21 @@ bash benchmarks/scripts/generate_ruler.sh \
 | `--ruler-source-dir` | 已下载的 RULER 源码及素材目录，默认 `data/raw/ruler-v1-source` |
 | `--output-dir` | 默认 `data/benchmarks/ruler-v1/<model-name>`；显式指定时直接使用该目录，不附加模型名 |
 | `--model-path` | 与训练一致的 tokenizer 来源；本地路径或 HF repo ID，默认 `~/models/Qwen3-4B-Instruct-2507` |
-| `--prompt-format` | `chat`（默认）应用现有 Qwen 聊天协议；`base` 使用原始文本与 `answer_prefix`，按默认 special tokens 预留 BOS 等开销 |
+| `--prompt-format` | `chat`（默认）或 `base`，输入协议见下文 |
 | `--tasks` | 空格分隔的 RULER 任务名称；默认全部 13 项 |
 | `--lengths` | 空格分隔的长度列表，默认 `8192 16384 32768` |
 | `--tokens-to-generate` | 可选，统一覆盖各任务的生成预算；默认沿用官方任务预算 |
 | `--num-samples` | 每个长度、每项任务的样本数，默认 `100` |
 | `--seed` | 样本生成的随机种子，默认 `42` |
 
-- `<model-name>` 取 `--model-path` 去掉尾部斜杠后的最后一级目录名或 HF 仓库名，默认 `Qwen3-4B-Instruct-2507`；不同模型自动使用各自目录，原始素材共享。
-- 相对目录以项目根目录为准；路径含空格时加双引号。更换下载目录时，生成阶段须传入相同的 `--ruler-source-dir`。
-- 已有 RULER 长度目录拒绝覆盖，包括失败生成留下的目录；重试前将失败的长度目录移出输出目录，或指定新的 `--output-dir`。同一模型修改长度、样本数或 seed 等设置并需重建已有长度时，用新的 `--output-dir` 保存样本。
-- RULER 的 `<length>` 是完整输入与任务生成预算之和的上限。`chat` 模式按 full-context 基线使用的 QA system 消息、user 消息和 assistant 角色开头预留 token 空间。`base` 模式预留编码时的 special tokens。两种模式都按任务预留输出预算。
-- 官方生成器将 `answer_prefix` 单独保存；本项目现有聊天评估只读取 `input`，不拼回该前缀。`base` 评估须将 `input + answer_prefix` 编码为完整输入。多值／多 query 任务保持一条输入、一次回答。
-- `base` 模式的 NIAH 使用 [本地 NVIDIA 生成器副本](vendor/ruler_niah.py)，修正 512-token essay 无法缩短到 500 词以下及超长重试不退出的问题；原始素材不变，其他任务继续使用下载的官方生成器。
-- 同一模型的比较方法应使用同一批生成样本。评估自定义位置时，`--benchmark-data` 指向 RULER 的 `--output-dir` 或 LoCoMo 的 `<data-root>/locomo`。
-- 完整生成参数执行 `bash benchmarks/scripts/generate_ruler.sh --help` 查看；下载参数见上表。
+- **输出目录**：`<model-name>` 取模型路径末级目录名或 HF 仓库名。已有长度目录拒绝覆盖；修改设置或失败重试时，移走对应目录或指定新的 `--output-dir`。
+- **长度预算**：`<length>` 包括完整输入与生成预算。`chat` 为聊天模板预留空间，`base` 为 BOS 等特殊 token 预留空间。默认生成预算为 NIAH 128、VT 30、CWE 120、FWE 50、QA 32 tokens。
+- **输入格式**：保留官方 `input`、`outputs`、`answer_prefix` 等字段。聊天评估只使用 `input`；`base` 评估使用 `input + answer_prefix`。多值／多 query 任务保持一条输入、一次回答。
+- **生成器**：`base` 的 NIAH 使用[本地 NVIDIA 生成器副本](vendor/ruler_niah.py)，其余任务使用下载的官方生成器。
 
 ## 3. 评估入口
 
-下表列出已接入 RULER 与 LoCoMo 的方法入口，各方法使用自己的 checkpoint 与运行参数。
+RULER 与 LoCoMo 的评估用法见各方法文档：
 
 | 方法 | 运行说明 |
 |---|---|
@@ -118,17 +99,14 @@ bash benchmarks/scripts/generate_ruler.sh \
 | v4.1 | [独立评估与结果看板](../src/latent_working_memory/v4_1/scripts/README.md#4-独立评估) |
 | Full-context 基线 | [基线运行说明](../src/latent_working_memory/full_context/README.md) |
 
-- **数据选择**：RULER 指向包含长度子目录的 `data/benchmarks/ruler-v1/<model-name>/`，LoCoMo 指向包含 `locomo10.json` 的目录。
-- **可比性**：同一模型的不同方法使用同一批生成样本及评分协议；评估结果、checkpoint 组织和可视化由各方法负责。
+### 公共 LoCoMo 评估
 
-## 公共 LoCoMo 评估
+Full-context、ICAE v2 和 v3.1.1 的公共接口与使用说明见 [LoCoMo 文档](locomo/README.md)。
 
-Full-context、ICAE v2 和 v3.1.1 通过各自的评估脚本调用[公共接口](locomo/README.md)，按会话分片、复用正文状态并独立批量回答问题。
+### 公共 LongMemEval 评估
 
-## 公共 LongMemEval 评估
+Full-context、ICAE v2、AutoCompressors、SDCC、LaCT、E²-TTT 和 In-Place TTT 均提供 `scripts/eval_longmemeval.sh`。[使用说明](longmemeval/README.md) · [裁判配置](longmemeval/README.md#问答评分)
 
-Full-context、ICAE v2、AutoCompressors、SDCC、LaCT、E²-TTT 和 In-Place TTT 均提供 `scripts/eval_longmemeval.sh`。用 `--split longmemeval_s_cleaned` 或 `--split longmemeval_oracle` 选择设置。脚本按原始题序保存回答后，自动调用公共裁判并汇总准确率。中断后，ICAE、AutoCompressors 和 SDCC 在原命令后加 `--resume` 即可补齐回答或评分，其他方法续评时还需指定原 `--output-id`。[LongMemEval 公共协议](longmemeval/README.md#评估约定) · [裁判配置](longmemeval/README.md#问答评分)
+### 公共 QASPER 评估
 
-## 公共 QASPER 评估
-
-Full-context、ICAE v2、AutoCompressors 和 SDCC 均提供 `scripts/eval_qasper.sh`。用 `--split dev`（默认）或 `--split test` 选择划分。评估脚本在本地逐题计算官方 Answer F1，并汇总所选划分的结果。[公共协议](qasper/README.md#评估约定) · [Full-context](../src/latent_working_memory/full_context/README.md) · [ICAE](../reproductions/icae/README.md) · [AutoCompressors](../reproductions/autocompressors/README.md) · [SDCC](../reproductions/sdcc/README.md)
+Full-context、ICAE v2、AutoCompressors 和 SDCC 均通过 `scripts/eval_qasper.sh` 评估 test。[公共协议与续评参数](qasper/README.md) · [Full-context](../src/latent_working_memory/full_context/README.md) · [ICAE](../reproductions/icae/README.md) · [AutoCompressors](../reproductions/autocompressors/README.md) · [SDCC](../reproductions/sdcc/README.md)

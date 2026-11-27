@@ -222,17 +222,17 @@ uv run -m benchmarks.longmemeval.score \
 | 完整评估脚本参数 | 用途与默认值 |
 |---|---|
 | `--benchmark-data` | 默认 `data/benchmarks/qasper` |
-| `--split` | 支持 `dev`（默认）和 `test` |
+| `--split` | 支持 `test`（默认） |
 | `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
 
-- **评估范围**：dev 包含 281 篇论文、1,005 道题，test 包含 416 篇论文、1,451 道题。[QASPER 评估协议](../../benchmarks/qasper/README.md)
+- **评估范围**：test 包含 416 篇论文、1,451 道题。[QASPER 评估协议](../../benchmarks/qasper/README.md)
 - **推理方式**：按论文分配 GPU。每篇论文只压缩一次，各题复用记忆和 Reader 前缀缓存，独立作答。
 - **评分口径**：在本地逐题计算官方 Answer F1。每题取各参考答案中的最高分，再对所有题目取平均。
 - **产物保存**：评估结果默认写入 `<output_root>/eval/<checkpoint_name>/mem<fixed_mem_size>_cr<mean_compression_rate>_qasper_<split>/`。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_qasper.sh \
-  --split dev \
+  --split test \
   --stage finetuned \
   --model-path ~/models/Mistral-7B-Instruct-v0.2 \
   --checkpoint ~/models/reproductions/icae/mistral_7b_ft_icae.safetensors \

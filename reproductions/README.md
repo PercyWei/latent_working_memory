@@ -85,7 +85,7 @@ SDCC 在 Qwen3-4B-Instruct-2507 上按整段对话选择 2×、4×、8×、16× 
 
 ## QASPER
 
-ICAE v2、AutoCompressors 和 SDCC 使用各自的 `scripts/eval_qasper.sh`，可与 Full-context 在同一批论文问题上比较。默认评估开发集，测试集使用 `--split test`。每个划分独立保存预测和 Answer F1，默认结果目录为 `<output-root>/eval/<checkpoint_name>/<压缩设置>_qasper_<split>/`；`--output-id` 可替换最后一级完整目录名。用相同命令加 `--resume` 续评，自定义 ID 须沿用原值。[四种方法的入口](../benchmarks/README.md#公共-qasper-评估) · [QASPER 公共评估协议](../benchmarks/qasper/README.md#评估约定)
+ICAE v2、AutoCompressors 和 SDCC 通过各自的 `scripts/eval_qasper.sh` 评估 QASPER test，可与 Full-context 比较。预测和 Answer F1 默认保存到 `<output-root>/eval/<checkpoint_name>/<压缩设置>_qasper_test/`；`--output-id` 可替换最后一级目录名。用相同命令加 `--resume` 续评，自定义 ID 须沿用原值。[四种方法的入口](../benchmarks/README.md#公共-qasper-评估) · [QASPER 公共评估协议](../benchmarks/qasper/README.md#评估约定)
 
 ## TTT 模型评估
 
@@ -137,7 +137,7 @@ LaCT 的来源目录为 `source/lact/`、`source/flame/`；E²-TTT 为 `source/e
 
 LaCT、In-Place TTT 和 E²-TTT 的 `--output-dir` 指向包含 `locomo/`、`longmemeval_s_cleaned/` 或 `longmemeval_oracle/` 的运行目录，在页面中选择一个已评分任务查看。
 
-跨运行比较时，公共看板的 `--run` 接收展示标签和直接包含 `summary.json` 与 `details.jsonl` 的结果目录。LongMemEval 支持同题的 S 与 Oracle 对照，QASPER 比较同一划分的运行。[LongMemEval 公共看板](../benchmarks/longmemeval/README.md#跨运行比较) · [QASPER 公共看板](../benchmarks/qasper/README.md#跨运行比较)
+跨运行比较时，公共看板的 `--run` 接收展示标签和直接包含 `summary.json` 与 `details.jsonl` 的结果目录。LongMemEval 支持同题的 S 与 Oracle 对照，QASPER 比较 test 划分的运行。[LongMemEval 公共看板](../benchmarks/longmemeval/README.md#跨运行比较) · [QASPER 公共看板](../benchmarks/qasper/README.md#跨运行比较)
 
 总体及各题型 F1、题数和逐题回答复用[公共看板接口](../benchmarks/locomo/README.md#方法看板接入)；记忆用量等专属展示由方法维护。启动命令见各方法 README 的“查看结果”。跨运行比较使用[公共 LoCoMo 看板](../benchmarks/locomo/README.md#跨运行比较)，可在任一方法环境中启动。
 

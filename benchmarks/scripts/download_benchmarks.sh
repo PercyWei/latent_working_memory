@@ -97,17 +97,12 @@ fi
 if [[ $benchmark == all || $benchmark == qasper ]]; then
   qasper_dir="$data_root/qasper"
   qasper_endpoint=https://qasper-dataset.s3.us-west-2.amazonaws.com
+  package=qasper-test-and-evaluator-v0.3.tgz
+  file=qasper-test-v0.3.json
   mkdir -p "$qasper_dir"
-  for split in dev test; do
-    case "$split" in
-      dev) package=qasper-train-dev-v0.3.tgz ;;
-      test) package=qasper-test-and-evaluator-v0.3.tgz ;;
-    esac
-    file="qasper-$split-v0.3.json"
-    download_file "$qasper_endpoint/$package" "$qasper_dir/$package"
-    tar -xzO -f "$qasper_dir/$package" "$file" > "$qasper_dir/$file.tmp"
-    mv -- "$qasper_dir/$file.tmp" "$qasper_dir/$file"
-    rm -- "$qasper_dir/$package"
-  done
-  printf 'QASPER dev 和 test 数据已准备：%s\n' "$qasper_dir"
+  download_file "$qasper_endpoint/$package" "$qasper_dir/$package"
+  tar -xzO -f "$qasper_dir/$package" "$file" > "$qasper_dir/$file.tmp"
+  mv -- "$qasper_dir/$file.tmp" "$qasper_dir/$file"
+  rm -- "$qasper_dir/$package"
+  printf 'QASPER test 数据已准备：%s\n' "$qasper_dir"
 fi

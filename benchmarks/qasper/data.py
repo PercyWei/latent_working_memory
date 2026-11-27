@@ -8,7 +8,7 @@ from pathlib import Path
 from benchmarks.vendor.qasper import answer_reference
 
 
-SPLIT_FILES = {"dev": "qasper-dev-v0.3.json", "test": "qasper-test-v0.3.json"}
+SPLIT_FILES = {"test": "qasper-test-v0.3.json"}
 QUESTION_FORMAT = "\n\nQuestion: {question}"
 SYSTEM_PROMPT = (
     "Answer the question using the provided research paper. Give a concise answer. "

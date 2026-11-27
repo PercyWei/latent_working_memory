@@ -15,7 +15,7 @@ from .data import QUESTION_FORMAT, SPLIT_FILES, SYSTEM_PROMPT, load_qasper, qasp
 
 def add_evaluation_arguments(parser, output_root, checkpoint_layout=False):
     parser.allow_abbrev = False
-    parser.add_argument("--split", choices=SPLIT_FILES, default="dev", help="QASPER 官方划分，默认 dev")
+    parser.add_argument("--split", choices=SPLIT_FILES, default="test", help="QASPER 划分，默认 test")
     parser.add_argument("--benchmark-data", type=Path,
                         default=Path(__file__).resolve().parents[2] / "data/benchmarks/qasper")
     add_output_arguments(parser, output_root, checkpoint_layout)
