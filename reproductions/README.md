@@ -1,6 +1,6 @@
 # 论文复现
 
-最后修订时间：20261126 23:52:23 Asia/Shanghai
+最后修订时间：20261127 14:50:15 Asia/Shanghai
 
 本目录保存论文方法的独立复现。训练和评估入口、依赖环境、源码来源及结果分别在各方法目录维护。
 
@@ -65,7 +65,7 @@ source /data/envs/icae-v2/bin/activate
 bash benchmarks/scripts/download_benchmarks.sh --benchmark locomo
 ```
 
-三种方法均接入[公共 LoCoMo 框架](../benchmarks/locomo/README.md)。每段对话按时间顺序完整压缩一次，再独立回答所属问题；QA 系统提示和问题留在读出端。通过 `CUDA_VISIBLE_DEVICES` 分配 GPU，`--batch-size-per-gpu` 设置每卡批量。`--output-root` 和 `--output-id` 指定结果路径 `<output-root>/eval/<output-id>/locomo/`，续评时指定原 ID 并添加 `--resume`。
+三种方法均接入[公共 LoCoMo 框架](../benchmarks/locomo/README.md)。每段对话按时间顺序完整压缩一次，再独立回答所属问题；QA 系统提示和问题留在读出端。通过 `CUDA_VISIBLE_DEVICES` 分配 GPU，`--batch-size-per-gpu` 设置每卡批量。结果按 `<output-root>/eval/<checkpoint_name>/<压缩设置>_locomo/` 保存，例如 ICAE 的 `mem128_cr4_locomo`、AutoCompressors 的 `seg2048_locomo`、SDCC 的 `scale0_locomo`。用相同命令加 `--resume` 可续评。
 
 | 产物 | 内容 |
 |---|---|
@@ -81,11 +81,11 @@ SDCC 在 Qwen3-4B-Instruct-2507 上按整段对话选择 2×、4×、8×、16× 
 
 ## LongMemEval-S 与 Oracle
 
-上表六种已接入 LoCoMo 的复现方法，均可通过各自的 `scripts/eval_longmemeval.sh` 评估 S 或 Oracle。先用 `bash benchmarks/scripts/download_benchmarks.sh --benchmark longmemeval` 准备数据，并配置裁判 API。脚本生成全部回答后自动评分。中断后用原 `--output-id` 加 `--resume` 可继续生成或评分。各方法 README 给出对应的 checkpoint、评估命令和结果看板入口。[LongMemEval 公共评估协议](../benchmarks/longmemeval/README.md#评估约定)
+上表六种已接入 LoCoMo 的复现方法，均可通过各自的 `scripts/eval_longmemeval.sh` 评估 S 或 Oracle。先用 `bash benchmarks/scripts/download_benchmarks.sh --benchmark longmemeval` 准备数据，并配置裁判 API。脚本生成全部回答后自动评分。ICAE、AutoCompressors 和 SDCC 以 `<压缩设置>_longmemeval_s_cleaned` 或 `<压缩设置>_longmemeval_oracle` 作为 checkpoint 下的结果目录名，用相同命令加 `--resume` 续评。三个 TTT 方法续评时还需指定原 `--output-id`。各方法 README 给出对应的 checkpoint、评估命令和结果看板入口。[LongMemEval 公共评估协议](../benchmarks/longmemeval/README.md#评估约定)
 
 ## QASPER
 
-ICAE v2、AutoCompressors 和 SDCC 使用各自的 `scripts/eval_qasper.sh`，可与 Full-context 在同一批论文问题上比较。默认评估开发集，测试集使用 `--split test`。每个划分独立保存预测和 Answer F1，结果位于运行目录的 `qasper/<split>/`。[四种方法的入口](../benchmarks/README.md#公共-qasper-评估) · [QASPER 公共评估协议](../benchmarks/qasper/README.md#评估约定)
+ICAE v2、AutoCompressors 和 SDCC 使用各自的 `scripts/eval_qasper.sh`，可与 Full-context 在同一批论文问题上比较。默认评估开发集，测试集使用 `--split test`。每个划分独立保存预测和 Answer F1，结果位于 checkpoint 目录下的 `<压缩设置>_qasper_<split>/`。[四种方法的入口](../benchmarks/README.md#公共-qasper-评估) · [QASPER 公共评估协议](../benchmarks/qasper/README.md#评估约定)
 
 ## TTT 模型评估
 
@@ -131,9 +131,11 @@ LaCT 的来源目录为 `source/lact/`、`source/flame/`；E²-TTT 为 `source/e
 
 ## Benchmark 结果看板
 
-ICAE、AutoCompressors、SDCC、LaCT、In-Place TTT 和 E²-TTT 各自提供 `scripts/dashboard.sh`，使用当前激活的方法环境展示单次运行的结果。`--output-dir` 指向包含 `locomo/`、`longmemeval_s_cleaned/` 或 `longmemeval_oracle/` 的运行目录，可在页面中选择已评分的任务。LongMemEval 的跨运行与跨设置比较见[公共看板](../benchmarks/longmemeval/README.md#查看结果)。
+各方法通过 `scripts/dashboard.sh` 在当前激活的方法环境中启动看板。ICAE、AutoCompressors 和 SDCC 的 `--output-dir` 指向 `<output-root>/eval/<checkpoint_name>/`，页面读取直接子目录中包含 `summary.json` 的全部已评分结果，按 benchmark 及其设置或划分分组。所有已有任务的概览直接显示，同一任务的全部压缩设置并排比较；底部任务选择器用于进入该任务的逐题多设置回答对照。LoCoMo 同时汇总全部设置的记忆用量与分对话统计。[checkpoint 看板入口](../benchmarks/checkpoint_dashboard.py)
 
-ICAE、AutoCompressors 和 SDCC 的方法看板也可读取运行目录下的 `qasper/dev/` 和 `qasper/test/`。同一划分的跨运行比较使用 [QASPER 公共看板](../benchmarks/qasper/README.md#查看结果)。
+LaCT、In-Place TTT 和 E²-TTT 的 `--output-dir` 指向包含 `locomo/`、`longmemeval_s_cleaned/` 或 `longmemeval_oracle/` 的运行目录，在页面中选择一个已评分任务查看。
+
+跨运行比较时，公共看板的 `--run` 接收展示标签和直接包含 `summary.json` 与 `details.jsonl` 的结果目录。LongMemEval 支持同题的 S 与 Oracle 对照，QASPER 比较同一划分的运行。[LongMemEval 公共看板](../benchmarks/longmemeval/README.md#跨运行比较) · [QASPER 公共看板](../benchmarks/qasper/README.md#跨运行比较)
 
 总体及各题型 F1、题数和逐题回答复用[公共看板接口](../benchmarks/locomo/README.md#方法看板接入)；记忆用量等专属展示由方法维护。启动命令见各方法 README 的“查看结果”。跨运行比较使用[公共 LoCoMo 看板](../benchmarks/locomo/README.md#跨运行比较)，可在任一方法环境中启动。
 

@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from benchmarks.data import load_samples
 from benchmarks.io import write_jsonl
+from benchmarks.output import add_output_arguments, evaluation_directory
 from benchmarks.progress import QuestionTimer
 from benchmarks.protocol import data_identity
 from latent_working_memory.prompts import QA_SYSTEM_PROMPT
@@ -23,29 +24,21 @@ from .records import read_progress, summarize, write_json
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def add_evaluation_arguments(parser, output_root):
+def add_evaluation_arguments(parser, output_root, checkpoint_layout=False):
     """向方法自己的 parser 添加公共调度参数。"""
     parser.add_argument("--benchmark-data", type=Path, default=ROOT / "data/benchmarks/locomo")
-    parser.add_argument("--output-root", type=Path, default=Path(output_root))
-    parser.add_argument("--output-id", help="运行标识，默认名称由方法入口确定")
+    add_output_arguments(parser, output_root, checkpoint_layout)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--batch-size-per-gpu", type=int, default=1,
                         help="每卡批处理数，默认 1")
 
 
-def run_evaluation(args, method, settings, load_adapter, output_name, summarize_method=None):
+def run_evaluation(args, method, settings, load_adapter, output_name, summarize_method=None,
+                   checkpoint_name=None):
     """方法提供默认运行名称；worker 加载模型，主进程汇总指标。"""
     if args.batch_size_per_gpu < 1:
         raise ValueError("batch size must be positive")
-    if args.output_id is None:
-        if args.resume:
-            raise ValueError("--resume requires the original --output-id")
-        current = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M")
-        args.output_id = f"{output_name}_{current}"
-    if not args.output_id.strip() or args.output_id in {".", ".."} or any(
-        character in args.output_id for character in ("/", "\\")
-    ):
-        raise ValueError("--output-id must be a single nonempty directory name")
+    directory = evaluation_directory(args, "locomo", output_name, checkpoint_name)
     devices = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")
     if not all(device.isdigit() for device in devices) or len(devices) != len(set(devices)):
         raise ValueError("CUDA_VISIBLE_DEVICES must contain distinct GPU indices")
@@ -60,8 +53,6 @@ def run_evaluation(args, method, settings, load_adapter, output_name, summarize_
                      "scoring": "official LoCoMo F1; question-weighted mean",
                      "sharing": "one immutable context state per conversation; independent question branches"},
     }
-    run = args.output_root.expanduser().resolve() / "eval" / args.output_id
-    directory = run / "locomo"
     config = directory / "evaluation_config.json"
     if args.resume:
         if not config.is_file():

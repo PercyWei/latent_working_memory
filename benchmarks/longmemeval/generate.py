@@ -33,12 +33,17 @@ def read_predictions(path, samples):
 def run_generation(
     benchmark, data_dir, output_root, output_id, method, settings,
     load_adapter: Callable[[dict], DocumentAdapter], batch_size=1, resume=False, devices=None,
+    output_directory=None,
 ):
     """返回官方 predictions.jsonl 的路径。settings 记录模型身份、输入和解码设置。"""
     if benchmark not in LONGMEMEVAL_FILES:
         raise ValueError(f"unsupported LongMemEval setting: {benchmark}")
-    if not output_id.strip() or output_id in {".", ".."} or any(c in output_id for c in "/\\"):
-        raise ValueError("output_id must be a single nonempty directory name")
+    if output_directory is None:
+        if not output_id.strip() or output_id in {".", ".."} or any(c in output_id for c in "/\\"):
+            raise ValueError("output_id must be a single nonempty directory name")
+        directory = Path(output_root).expanduser().resolve() / "eval" / output_id / benchmark
+    else:
+        directory = Path(output_directory).expanduser().resolve()
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
     if not isinstance(settings, dict):
@@ -52,7 +57,6 @@ def run_generation(
         "adapter": {"module": load_adapter.__module__, "factory": load_adapter.__name__},
         "data": data_identity(samples, data_dir, benchmark),
     }
-    directory = Path(output_root).expanduser().resolve() / "eval" / output_id / benchmark
     config_path = directory / "evaluation_config.json"
     predictions = directory / "predictions.jsonl"
     if resume:

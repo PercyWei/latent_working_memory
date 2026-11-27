@@ -2,7 +2,7 @@
 
 创建时间：20261126 16:09:15 Asia/Shanghai
 
-最后修订时间：20261127 11:09:46 Asia/Shanghai
+最后修订时间：20261127 14:48:34 Asia/Shanghai
 
 QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3 的开发集和测试集读取、按论文生成回答、本地 Answer F1 评分及结果展示。[原论文](https://aclanthology.org/2021.naacl-main.365/) · [官方数据（CC BY 4.0）](https://huggingface.co/datasets/allenai/qasper)
 
@@ -29,14 +29,14 @@ QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3
 | `answer_batch(states, questions, complete)` | 从各题对应的状态并行回答，完成一题即回调 `complete`，空回答按官方规则计分 |
 | `run_evaluation(...)` | 按论文调度生成，在本地计算官方 Answer F1，按原始题序保存结果并汇总 |
 
-分词、模型位置窗口检查和具体读写由适配器维护。公共调度参数由 `add_evaluation_arguments(parser, output_root)` 定义。[数据与输入](data.py) · [评估入口](evaluate.py)
+分词、模型位置窗口检查和具体读写由适配器维护。公共调度参数由 `add_evaluation_arguments(parser, output_root, checkpoint_layout=False)` 定义。按 checkpoint 组织结果的方法传入 `checkpoint_layout=True`，并向 `run_evaluation` 传入 `checkpoint_name` 和表示压缩设置的 `output_name`。[数据与输入](data.py) · [评估入口](evaluate.py)
 
 | 参数 | 含义与默认值 |
 |---|---|
 | `--split` | 支持 `dev`（默认）和 `test` |
 | `--benchmark-data` | 输入数据目录，默认 `data/benchmarks/qasper` |
 | `--output-root` | 输出根目录，默认值由接入方提供 |
-| `--output-id` | 运行 ID，默认 `<output_name>_<YYYYMMDD-HHMM>`，续评时须指定原 ID |
+| `--output-id` | 采用运行 ID 的方法使用，默认 `<output_name>_<YYYYMMDD-HHMM>`，续评时指定原 ID |
 | `--batch-size-per-gpu` | 每卡批处理数，默认 `1` |
 | `--max-new-tokens` | 每题最多生成的新 token 数，默认 `128` |
 | `--resume` | 沿用原运行进度，默认关闭 |
@@ -48,7 +48,7 @@ QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3
 
 ## 产物与指标
 
-每个划分的结果目录为 `<output-root>/eval/<output-id>/qasper/<split>/`。
+Full-context 写入 `<output-root>/eval/<output-id>/qasper/<split>/`。ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<压缩设置>_qasper_<split>/`，例如 `seg2048_qasper_dev`。这三种方法在相同命令后加 `--resume` 即可续评。
 
 | 文件 | 内容 |
 |---|---|
@@ -74,7 +74,7 @@ bash benchmarks/qasper/scripts/dashboard.sh \
 
 每个目录直接包含 `summary.json` 和 `details.jsonl`，展示标签须非空且各不相同，含空格时加引号。页面展示全部传入运行的总体和各答案类型的 Answer F1 及题数，按论文和原始 `question_id` 并排展示参考答案、模型回答及逐题分数。
 
-参与比较的运行须使用相同划分和数据指纹，逐题结果覆盖该划分的完整题目集合。比较测试集时，各目录统一指向 `qasper/test/`。看板读取已保存的分数，支持不同方法、模型及输入设置的运行并列展示。[展示接口](dashboard.py)
+参与比较的运行须使用相同划分和数据指纹，逐题结果覆盖该划分的完整题目集合。比较测试集时，各目录均应包含 `test` 划分的已评分结果。看板读取已保存的分数，支持不同方法、模型及输入设置的运行并列展示。[展示接口](dashboard.py)
 
 ### 方法看板接入
 
@@ -83,8 +83,11 @@ bash benchmarks/qasper/scripts/dashboard.sh \
 | 接口 | 用法 |
 |---|---|
 | `show_runs(runs)` | 接收非空的 `(展示标签, Path 类型的划分目录)` 序列，标签须各不相同。读取已评分产物，核对 QASPER Answer F1 指标、划分和数据指纹，展示总体与分答案类型结果及同题回答 |
+| `load_runs(runs)` | 接收相同的标签与目录序列，核对指标、划分和数据指纹，返回包含 `label`、`directory`、`summary` 和 `records` 的运行字典列表；`records` 按原始 `question_id` 索引 |
+| `show_scores(runs)` | 接收已加载的运行对象列表，展示总体与分答案类型的 Answer F1 和题数 |
+| `show_answers(runs)` | 接收同样的运行对象列表，按论文和问题展示多运行回答、参考答案及逐题分数 |
 
-在方法的 Streamlit 页面中可直接调用下面的代码，查看一次运行的开发集结果。传入多对标签与目录即可比较同一划分的多个运行。
+`show_runs` 复用 `load_runs` 完成加载与校验；自定义布局可先调用 `load_runs`，再分别调用 `show_scores` 和 `show_answers`，分开展示概览与逐题内容。在方法的 Streamlit 页面中可直接调用下面的代码，查看一次运行的开发集结果。传入多对标签与目录即可比较同一划分的多个运行。
 
 ```python
 from pathlib import Path
@@ -95,11 +98,13 @@ run_dir = Path("artifacts/my-method/eval/run-1")
 show_runs([("My method · dev", run_dir / "qasper" / "dev")])
 ```
 
-使用公共方法入口时，调用 `benchmarks.locomo.dashboard.run_dashboard(method, title, render_results, argv=None, qasper=True)` 启用 QASPER。`--output-dir` 指向包含 `qasper/dev/` 或 `qasper/test/` 的上一级运行目录。入口枚举已评分任务，核对方法、benchmark 和划分后，将 QASPER 交给 `show_runs` 展示，`render_results` 回调负责 LoCoMo 的方法专属页面。[公共方法入口](../locomo/dashboard.py) · [SDCC 接入示例](../../reproductions/sdcc/evaluation/dashboard.py)
+ICAE、AutoCompressors 和 SDCC 使用 `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`，`--output-dir` 指向 `<output-root>/eval/<checkpoint_name>/`。入口读取直接子目录中包含 `summary.json` 的全部已评分结果，按任务直接展示概览；QASPER dev 与 test 分组展示，每组并排比较全部压缩设置的总体和各答案类型 Answer F1 及题数。底部任务选择器用于查看所选划分的逐题多设置回答与分数。`render_memory(runs)` 只负责 LoCoMo 的记忆统计。[checkpoint 看板入口](../checkpoint_dashboard.py) · [AutoCompressors 接入示例](../../reproductions/autocompressors/evaluation/dashboard.py)
 
-方法环境需安装 Streamlit 等看板依赖，启动脚本使用该环境的 Python。以已有的 SDCC 页面为例，在项目根目录运行下面的命令，`--output-dir` 替换为实际评估运行目录。
+按运行 ID 保存结果的方法使用 `benchmarks.locomo.dashboard.run_dashboard(method, title, render_results, argv=None, qasper=False)`，通过 `qasper=True` 启用 QASPER，`--output-dir` 指向包含 `qasper/dev/` 或 `qasper/test/` 的运行目录。入口选择一个已评分任务，核对方法、benchmark 和划分后调用 `show_runs` 展示 QASPER；`render_results` 回调负责 LoCoMo 的方法专属页面。[公共方法入口](../locomo/dashboard.py)
+
+方法环境需安装 Streamlit 等看板依赖，启动脚本使用该环境的 Python。例如在项目根目录查看 AutoCompressors checkpoint 的已评分设置：
 
 ```bash
-PYTHONPATH=.:src python -m streamlit run reproductions/sdcc/evaluation/dashboard.py -- \
-  --output-dir artifacts/sdcc/eval/run-1
+bash reproductions/autocompressors/scripts/dashboard.sh \
+  --output-dir artifacts/reproductions/autocompressors/eval/AutoCompressor-Llama-2-7b-6k
 ```

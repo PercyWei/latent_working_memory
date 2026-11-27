@@ -67,29 +67,33 @@ def show_answers(directory, metrics):
 
 
 def run_dashboard(method, title, render_results, argv=None, qasper=False):
-    """在方法的同一运行目录下选择已评分的 benchmark 设置。"""
+    """从方法的运行目录选择已评分的 benchmark 设置。"""
     parser = argparse.ArgumentParser(description=f"查看 {title} 的 benchmark 结果。")
     parser.add_argument("--output-dir", type=Path, required=True,
                         help="包含已评分的 benchmark 设置子目录的运行目录")
     directory = parser.parse_args(argv).output_dir.expanduser().resolve()
     if not directory.is_dir():
-        parser.error(f"--output-dir 必须指向已有的评估运行目录：{directory}")
+        parser.error(f"--output-dir 必须指向已有的运行目录：{directory}")
     st.set_page_config(page_title=title, layout="wide")
     st.title(f"{title} · {directory.name}")
     labels = {"locomo": "LoCoMo", **{key: f"LongMemEval-{value}" for key, value in SETTINGS.items()}}
     if qasper:
         labels.update(QASPER_LABELS)
-    tasks = [key for key in labels if (directory / key / "summary.json").is_file()]
-    if not tasks:
+    choices = [key for key in labels if (directory / key / "summary.json").is_file()]
+    if not choices:
         st.info(f"在 {directory} 下未找到已评分的评估结果。")
         return
-    task = st.selectbox("评估任务", tasks, format_func=labels.__getitem__) if len(tasks) > 1 else tasks[0]
-    task_dir = directory / task
+    if len(choices) > 1:
+        selection = st.selectbox("评估任务", choices, format_func=labels.__getitem__)
+    else:
+        selection = choices[0]
+    task_dir = directory / selection
     summary = json.loads((task_dir / "summary.json").read_text(encoding="utf-8"))
-    benchmark, _, split = task.partition("/")
-    if (summary["method"] != method or summary["benchmark"] != benchmark
-            or (split and summary["split"] != split)):
-        st.error(f"评估结果的方法或设置与所选的 {title} · {labels[task]} 不一致。")
+    task = summary["benchmark"]
+    if task == "qasper":
+        task = f"qasper/{summary['split']}"
+    if summary["method"] != method or task != selection:
+        st.error(f"{task_dir} 中的评估结果与 {title} 的方法或任务设置不一致。")
         return
     if task == "locomo":
         render_results(task_dir, summary)

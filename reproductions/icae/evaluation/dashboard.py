@@ -4,33 +4,49 @@ from pathlib import Path
 
 import streamlit as st
 
-from benchmarks.locomo.dashboard import run_dashboard, show_answers, show_scores
+from benchmarks.checkpoint_dashboard import run_dashboard
 
 
 STAGE_LABELS = {"pretrained": "预训练", "finetuned": "指令微调"}
 
 
-def show_results(directory, summary):
-    settings = summary["settings"]
-    memory = summary["method_metrics"]
-    st.caption(f"LoCoMo · {STAGE_LABELS[settings['stage']]} · {Path(settings['model_path']).name}"
-               f" · 每块 {settings['fixed_mem_size']} 槽 · 目标压缩率 {settings['mean_compression_rate']}×")
-    show_scores(summary["metrics"], [
-        ("平均记忆 token 数", f"{memory['mean_memory_tokens']:,.1f}"),
-        ("平均保留比例", f"{memory['mean_retention_ratio']:.2%}"),
-    ])
-    st.caption("记忆用量按对话平均；保留比例为记忆 token 数除以正文 token 数。")
+def show_memory(runs):
+    overview = []
+    conversations = []
+    for run in runs:
+        label = run["label"]
+        summary = run["summary"]
+        settings = summary["settings"]
+        memory = summary["method_metrics"]
+        overview.append({
+            "压缩设置": label,
+            "阶段": STAGE_LABELS[settings["stage"]],
+            "基座": Path(settings["model_path"]).name,
+            "每块记忆槽数": settings["fixed_mem_size"],
+            "目标压缩率": settings["mean_compression_rate"],
+            "平均记忆 token 数": memory["mean_memory_tokens"],
+            "平均保留比例 (%)": 100 * memory["mean_retention_ratio"],
+        })
+        for conversation_id, stats in summary["conversations"].items():
+            conversations.append({
+                "压缩设置": label,
+                "对话": conversation_id,
+                "正文 token 数": stats["context_tokens"],
+                "记忆 token 数": stats["memory_tokens"],
+                "保留比例 (%)": 100 * stats["memory_tokens"] / stats["context_tokens"],
+            })
+
+    st.subheader("LoCoMo 记忆用量")
+    st.caption("保留比例为每段对话的记忆 token 数除以正文 token 数，表中均值按对话等权计算。")
+    st.dataframe(overview, hide_index=True, column_config={
+        "平均记忆 token 数": st.column_config.NumberColumn(format="%.1f"),
+        "平均保留比例 (%)": st.column_config.NumberColumn(format="%.2f%%"),
+    })
     with st.expander("各段对话的记忆用量"):
-        st.dataframe([
-            {"对话": cid, "正文 token 数": stats["context_tokens"],
-             "记忆 token 数": stats["memory_tokens"],
-             "保留比例 (%)": stats["memory_tokens"] / stats["context_tokens"] * 100}
-            for cid, stats in summary["conversations"].items()
-        ], hide_index=True, column_config={
+        st.dataframe(conversations, hide_index=True, column_config={
             "保留比例 (%)": st.column_config.NumberColumn(format="%.2f%%"),
         })
-    show_answers(directory, summary["metrics"])
 
 
 if __name__ == "__main__":
-    run_dashboard("icae", "ICAE", show_results, qasper=True)
+    run_dashboard("icae", "ICAE", show_memory)

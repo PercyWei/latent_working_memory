@@ -1,25 +1,15 @@
 """运行独立的 GPU worker，转发中断并保留各卡日志。"""
 
 from contextlib import ExitStack
-from datetime import datetime
 import os
 import signal
 import subprocess
 import sys
 import time
-from zoneinfo import ZoneInfo
 
 
-def resolve_generation_run(args, output_name):
-    """确定运行名称及可见设备；仅评分的续跑允许没有 GPU。"""
-    output_id = args.output_id
-    if output_id is None:
-        if args.resume:
-            raise ValueError("--resume requires the original --output-id")
-        timestamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M")
-        output_id = f"{output_name}_{timestamp}"
-    if not output_id.strip() or output_id in {".", ".."} or any(c in output_id for c in "/\\"):
-        raise ValueError("--output-id must be a single nonempty directory name")
+def resolve_generation_devices(args):
+    """校验生成参数并确定可见设备，已完成生成的续跑允许没有 GPU。"""
     if args.batch_size_per_gpu < 1:
         raise ValueError("--batch-size-per-gpu must be positive")
     if args.max_new_tokens < 1:
@@ -32,7 +22,7 @@ def resolve_generation_run(args, output_name):
         raise ValueError("generation requires a visible GPU")
     if int(os.environ.get("WORLD_SIZE", "1")) != 1 or "LOCAL_RANK" in os.environ:
         raise ValueError("launch directly, without torchrun")
-    return output_id, devices
+    return devices
 
 
 def run_workers(module, directory, devices, shards, batch_size, lock, report_progress):

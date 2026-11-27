@@ -2,7 +2,7 @@
 
 创建时间：20261126 10:49:01 Asia/Shanghai
 
-最后修订时间：20261127 10:43:03 Asia/Shanghai
+最后修订时间：20261127 14:48:34 Asia/Shanghai
 
 本目录维护 LongMemEval 的数据读取、按题生成、问答评分和结果格式。[官方仓库](https://github.com/xiaowu0162/LongMemEval) · [清洗版数据](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/tree/98d7416c24c778c2fee6e6f3006e7a073259d48f)
 
@@ -43,14 +43,14 @@ S 和 Oracle 使用相同的 500 道题，各自保存预测和分数，通过�
 | `run_generation(...)` | 按原始题序汇总回答并返回 `predictions.jsonl` 的路径 |
 | `run_evaluation(...)` | 按完整历史分配生成任务，在全部回答保存后启动公共评分，输出总体准确率 |
 
-`add_evaluation_arguments(parser, output_root)` 定义下列公共参数。分词、模型窗口检查和生成由适配器负责；输入超出窗口时应报告错误。[生成接口](generate.py) · [调度入口](evaluate.py)
+`add_evaluation_arguments(parser, output_root, checkpoint_layout=False)` 定义公共参数。按 checkpoint 组织结果的方法传入 `checkpoint_layout=True`，并向 `run_evaluation` 传入 `checkpoint_name` 和表示压缩设置的 `output_name`。分词、模型窗口检查和生成由适配器负责；输入超出窗口时应报告错误。[生成接口](generate.py) · [调度入口](evaluate.py)
 
 | 参数 | 含义与默认值 |
 |---|---|
 | `--split` | 选择 S 或 Oracle，默认 `longmemeval_s_cleaned` |
 | `--benchmark-data` | 输入数据目录，默认 `data/benchmarks/longmemeval` |
 | `--output-root` | 输出根目录，默认值由接入方提供 |
-| `--output-id` | 运行 ID，默认 `<output_name>_<YYYYMMDD-HHMM>`，续评时须指定原 ID |
+| `--output-id` | 采用运行 ID 的方法使用，默认 `<output_name>_<YYYYMMDD-HHMM>`，续评时指定原 ID |
 | `--batch-size-per-gpu` | 每卡批处理数，默认 `1` |
 | `--max-new-tokens` | 每题最多生成的新 token 数，默认 `128` |
 | `--resume` | 沿用原运行进度，默认关闭。续评时可调整 GPU 数和每卡批量 |
@@ -70,7 +70,7 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 
 ## 产物与指标
 
-每个设置的结果目录为 `<output-root>/eval/<output-id>/<split>/`。
+采用运行 ID 的方法写入 `<output-root>/eval/<output-id>/<split>/`。ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<压缩设置>_<split>/`，例如 `mem128_cr4_longmemeval_s_cleaned`。这三种方法在相同命令后加 `--resume` 即可续评。
 
 | 文件 | 内容 |
 |---|---|
@@ -115,11 +115,12 @@ bash benchmarks/longmemeval/scripts/dashboard.sh \
 | 接口 | 用法 |
 |---|---|
 | `show_runs(runs)` | 接收非空的 `(展示标签, Path 类型的设置目录)` 序列，标签须各不相同。读取已评分产物、核对运行间的数据和题目一致性，展示准确率、配置及逐题回答 |
-| `load_run(label, directory)` | 读取一个设置目录，返回含 `label`、`summary` 和 `records` 的字典，其中 `records` 按原始 `question_id` 索引 |
-| `show_scores(runs)` | 接收 `load_run` 返回对象的列表，展示总体准确率、题型宏平均、证据不足题准确率和分题型表格 |
+| `load_runs(runs)` | 接收与 `show_runs` 相同的标签与目录序列，核对运行间的数据和题目一致性，返回运行字典列表；每项包含 `label`、`directory`、`summary` 和 `records` |
+| `load_run(label, directory)` | 读取一个设置目录，返回含 `label`、`directory`、`summary` 和 `records` 的字典，其中 `records` 按原始 `question_id` 索引 |
+| `show_scores(runs, colors=None)` | 接收已加载的运行对象列表，展示总体准确率、题型宏平均、证据不足题准确率和分题型表格；`colors` 可传入展示标签到颜色的映射，使不同面板保持相同配色 |
 | `show_answers(runs)` | 接收同样的运行对象列表，按题型和证据不足条件筛选，展示同题回答与裁判判定 |
 
-自定义布局使用后两个接口时，由调用方保证各运行题目对齐。完整的跨运行校验集中在 `show_runs`。在方法的 Streamlit 页面中可直接调用下面的代码，同时展示同一次运行的 S 和 Oracle。
+跨运行校验集中在 `load_runs`，`show_runs` 复用该加载接口。自定义布局先调用 `load_runs`，再将返回值分别交给 `show_scores` 和 `show_answers`，即可分开展示概览与逐题内容。在方法的 Streamlit 页面中可直接调用下面的代码，同时展示同一次运行的 S 和 Oracle。
 
 ```python
 from pathlib import Path
@@ -133,7 +134,9 @@ show_runs([
 ])
 ```
 
-使用公共方法入口 `benchmarks.locomo.dashboard.run_dashboard(method, title, render_results, argv=None, qasper=False)` 时，`--output-dir` 指向包含设置子目录的上一级运行目录。入口枚举已评分任务，核对方法与设置后，将 LongMemEval 交给 `show_runs` 展示，`render_results` 回调负责 LoCoMo 的方法专属页面。[公共方法入口](../locomo/dashboard.py) · [LaCT 接入示例](../../reproductions/lact/evaluation/dashboard.py)
+ICAE、AutoCompressors 和 SDCC 使用 `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`，`--output-dir` 指向 `<output-root>/eval/<checkpoint_name>/`。入口读取直接子目录中包含 `summary.json` 的全部已评分结果，按任务直接展示概览；LongMemEval-S 和 Oracle 分组展示，每组并排比较全部压缩设置的准确率及分题型结果。底部任务选择器用于查看所选任务的逐题多设置回答与裁判判定。`render_memory(runs)` 只负责 LoCoMo 的记忆统计。[checkpoint 看板入口](../checkpoint_dashboard.py) · [完整任务分组说明](../locomo/README.md#方法看板接入)
+
+按运行 ID 保存结果的方法使用 `benchmarks.locomo.dashboard.run_dashboard(method, title, render_results, argv=None, qasper=False)`，`--output-dir` 指向运行目录。入口选择一个已评分任务，核对方法与任务后调用 `show_runs` 展示 LongMemEval；`render_results` 回调负责 LoCoMo 的方法专属页面。[公共方法入口](../locomo/dashboard.py) · [LaCT 接入示例](../../reproductions/lact/evaluation/dashboard.py)
 
 方法环境需安装 Streamlit 等看板依赖，启动脚本使用该环境的 Python。以已有的 LaCT 页面为例，在项目根目录运行下面的命令，`--output-dir` 替换为实际评估运行目录。
 

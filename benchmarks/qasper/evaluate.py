@@ -6,19 +6,19 @@ import time
 
 from benchmarks.documents import group_by_document, shard_groups
 from benchmarks.io import run_lock, write_json, write_jsonl
-from benchmarks.parallel import resolve_generation_run, run_workers
+from benchmarks.output import add_output_arguments, evaluation_directory
+from benchmarks.parallel import resolve_generation_devices, run_workers
 from benchmarks.progress import QuestionTimer
 from benchmarks.vendor.qasper import ANSWER_TYPES, EVALUATOR_REVISION
 from .data import QUESTION_FORMAT, SPLIT_FILES, SYSTEM_PROMPT, load_qasper, qasper_data_identity
 
 
-def add_evaluation_arguments(parser, output_root):
+def add_evaluation_arguments(parser, output_root, checkpoint_layout=False):
     parser.allow_abbrev = False
     parser.add_argument("--split", choices=SPLIT_FILES, default="dev", help="QASPER 官方划分，默认 dev")
     parser.add_argument("--benchmark-data", type=Path,
                         default=Path(__file__).resolve().parents[2] / "data/benchmarks/qasper")
-    parser.add_argument("--output-root", type=Path, default=Path(output_root))
-    parser.add_argument("--output-id", help="默认使用模型或 checkpoint 名称及启动时间")
+    add_output_arguments(parser, output_root, checkpoint_layout)
     parser.add_argument("--batch-size-per-gpu", type=int, default=1, help="每卡批处理数，默认 1")
     parser.add_argument("--max-new-tokens", type=int, default=128, help="每题生成预算，默认 128")
     parser.add_argument("--resume", action="store_true", help="沿用原配置和已评分的逐题结果，补齐剩余题目")
@@ -76,8 +76,9 @@ def summarize_scores(rows):
     }
 
 
-def run_evaluation(args, method, settings, load_adapter, output_name):
-    output_id, devices = resolve_generation_run(args, output_name)
+def run_evaluation(args, method, settings, load_adapter, output_name, checkpoint_name=None):
+    directory = evaluation_directory(args, f"qasper/{args.split}", output_name, checkpoint_name)
+    devices = resolve_generation_devices(args)
     papers = load_qasper(args.split, args.benchmark_data)
     config = {
         "benchmark": "qasper", "split": args.split, "method": method,
@@ -87,7 +88,6 @@ def run_evaluation(args, method, settings, load_adapter, output_name):
         "data": qasper_data_identity(papers, args.benchmark_data, args.split),
         "scoring": {"metric": "answer_f1", "source_commit": EVALUATOR_REVISION},
     }
-    directory = args.output_root.expanduser().resolve() / "eval" / output_id / "qasper" / args.split
     if not args.resume:
         directory.mkdir(parents=True, exist_ok=False)
     config_path = directory / "evaluation_config.json"

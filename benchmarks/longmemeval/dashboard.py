@@ -22,22 +22,44 @@ def load_run(label, directory):
     records = {row["question_id"]: row for row in load_details(path, path.stat().st_mtime_ns)}
     if len(records) != summary["metrics"]["samples"] or not records:
         raise ValueError(f"{label} 的逐题记录与已评分题数不一致")
-    return {"label": label, "summary": summary, "records": records}
+    return {"label": label, "directory": directory, "summary": summary, "records": records}
 
 
-def show_scores(runs):
-    chart, colors, groups, table = [], {}, {}, []
+def load_runs(runs):
+    """读取各设置的结果，核对同一设置的数据身份和各运行的题目对齐关系。"""
+    loaded = [load_run(label, directory) for label, directory in runs]
+    first = loaded[0]["records"]
+    fingerprints = {}
+    for run in loaded:
+        summary, records = run["summary"], run["records"]
+        fingerprint = summary["data"]["fingerprint"]
+        if fingerprints.setdefault(summary["benchmark"], fingerprint) != fingerprint:
+            raise ValueError(f"{run['label']} 的同设置数据与其他运行不一致")
+        if first.keys() != records.keys() or any(
+            row["reference"] != first[qid]["reference"] or
+            row["metadata"]["question"] != first[qid]["metadata"]["question"] or
+            row["metadata"]["question_type"] != first[qid]["metadata"]["question_type"]
+            for qid, row in records.items()
+        ):
+            raise ValueError(f"{run['label']} 的题目或参考答案与其他运行不一致")
+    return loaded
+
+
+def show_scores(runs, colors=None):
+    chart, palette, groups, table = [], {}, {}, []
     for run in runs:
         label, summary = run["label"], run["summary"]
         metrics = summary["metrics"]
         task = SETTINGS[summary["benchmark"]]
         judge = summary["judge"]["model"]
-        settings = summary["settings"]
-        identity = (summary["method"], json.dumps(settings, sort_keys=True), judge)
-        group = groups.setdefault(identity, len(groups))
-        hue = (0.60 + group * 0.618) % 1
-        rgb = hls_to_rgb(hue, 0.42 if task == "S" else 0.66, 0.60)
-        colors[label] = "#" + "".join(f"{round(v * 255):02x}" for v in rgb)
+        if colors is None:
+            identity = (summary["method"], json.dumps(summary["settings"], sort_keys=True), judge)
+            group = groups.setdefault(identity, len(groups))
+            hue = (0.60 + group * 0.618) % 1
+            rgb = hls_to_rgb(hue, 0.42 if task == "S" else 0.66, 0.60)
+            palette[label] = "#" + "".join(f"{round(v * 255):02x}" for v in rgb)
+        else:
+            palette[label] = colors[label]
         for scope, score in (("总体", metrics["score"]), ("题型宏平均", metrics["task_averaged_accuracy"]),
                              ("证据不足", metrics["abstention"]["score"])):
             if score is not None:
@@ -52,11 +74,11 @@ def show_scores(runs):
         "encoding": {
             "x": {"field": "指标", "type": "nominal", "sort": ["总体", "题型宏平均", "证据不足"],
                   "axis": {"labelAngle": 0}},
-            "xOffset": {"field": "运行", "sort": list(colors)},
+            "xOffset": {"field": "运行", "sort": list(palette)},
             "y": {"field": "准确率", "type": "quantitative", "scale": {"domain": [0, 1]},
                   "axis": {"format": ".0%"}},
             "color": {"field": "运行", "type": "nominal",
-                      "scale": {"domain": list(colors), "range": list(colors.values())}},
+                      "scale": {"domain": list(palette), "range": list(palette.values())}},
             "tooltip": [{"field": key} for key in ("运行", "设置", "指标")] +
                        [{"field": "准确率", "type": "quantitative", "format": ".2%"}],
         },
@@ -93,23 +115,8 @@ def show_answers(runs):
 
 def show_runs(runs):
     """展示一组（运行标签，已评分设置目录），供公共与各方法看板共用。"""
-    paths = dict(runs)
     try:
-        runs = [load_run(label, directory) for label, directory in paths.items()]
-        first = runs[0]["records"]
-        fingerprints = {}
-        for run in runs:
-            summary, records = run["summary"], run["records"]
-            fingerprint = summary["data"]["fingerprint"]
-            if fingerprints.setdefault(summary["benchmark"], fingerprint) != fingerprint:
-                raise ValueError(f"{run['label']} 的同设置数据与其他运行不一致")
-            if first.keys() != records.keys() or any(
-                row["reference"] != first[qid]["reference"] or
-                row["metadata"]["question"] != first[qid]["metadata"]["question"] or
-                row["metadata"]["question_type"] != first[qid]["metadata"]["question_type"]
-                for qid, row in records.items()
-            ):
-                raise ValueError(f"{run['label']} 的题目或参考答案与其他运行不一致")
+        runs = load_runs(runs)
     except (OSError, KeyError, ValueError) as error:
         st.error(f"无法读取评估结果。{error}")
         return
@@ -117,7 +124,7 @@ def show_runs(runs):
     with st.expander("运行配置"):
         for run in runs:
             st.markdown(f"**{run['label']}**")
-            st.json({"目录": str(paths[run["label"]]), "模型配置": run["summary"]["settings"],
+            st.json({"目录": str(run["directory"]), "模型配置": run["summary"]["settings"],
                      "评分配置": run["summary"]["judge"]}, expanded=False)
     show_answers(runs)
 

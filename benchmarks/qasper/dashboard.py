@@ -13,26 +13,28 @@ from benchmarks.qasper.data import SPLIT_FILES
 TASK_LABELS = {f"qasper/{split}": f"QASPER · {split}" for split in SPLIT_FILES}
 
 
-def show_runs(runs):
+def load_runs(runs):
     """读取一组（展示标签，已评分的划分目录），按同一划分的 question_id 对齐。"""
-    summaries, records = {}, {}
+    loaded = []
     identity = None
     for label, directory in runs:
         summary = json.loads((directory / "summary.json").read_text(encoding="utf-8"))
         if summary["benchmark"] != "qasper" or summary["metrics"]["metric"] != "answer_f1":
-            st.error(f"{label} 需要 QASPER Answer F1 结果。")
-            return
+            raise ValueError(f"{label} 需要 QASPER Answer F1 结果。")
         source = (summary["split"], summary["data"]["fingerprint"])
         if identity is not None and source != identity:
-            st.error("参与比较的运行需要使用相同的 QASPER 划分和数据。")
-            return
+            raise ValueError("参与比较的运行需要使用相同的 QASPER 划分和数据。")
         identity = source
-        summaries[label] = summary
         path = directory / "details.jsonl"
-        records[label] = {r["question_id"]: r for r in load_details(path, path.stat().st_mtime_ns)}
+        records = {r["question_id"]: r for r in load_details(path, path.stat().st_mtime_ns)}
+        loaded.append({"label": label, "directory": directory, "summary": summary, "records": records})
+    return loaded
 
+
+def show_scores(runs):
     totals, groups = [], []
-    for label, summary in summaries.items():
+    for run in runs:
+        label, summary = run["label"], run["summary"]
         metrics = summary["metrics"]
         totals.append({"运行": label, "划分": summary["split"], "题数": metrics["samples"],
                        "Answer F1": metrics["score"]})
@@ -43,8 +45,10 @@ def show_runs(runs):
         st.subheader(title)
         st.dataframe(rows, hide_index=True, column_config=f1_format)
 
+
+def show_answers(runs):
     st.subheader("逐题回答")
-    questions = next(iter(records.values()))
+    questions = runs[0]["records"]
     papers = list(dict.fromkeys(row["paper_id"] for row in questions.values()))
     paper_id = st.selectbox("论文", papers)
     question_ids = [qid for qid, row in questions.items() if row["paper_id"] == paper_id]
@@ -52,13 +56,23 @@ def show_runs(runs):
     row = questions[qid]
     st.caption(f"题号 {qid} · 人工参考答案")
     st.code("\n".join(ref["answer"] for ref in row["references"]), language=None, wrap_lines=True)
-    columns = st.columns(min(3, len(records)))
-    for i, (label, answers) in enumerate(records.items()):
-        answer = answers[qid]
+    columns = st.columns(min(3, len(runs)))
+    for i, run in enumerate(runs):
+        answer = run["records"][qid]
         with columns[i % len(columns)]:
-            st.markdown(f"**{label}**")
+            st.markdown(f"**{run['label']}**")
             st.caption(f"{answer['answer_type']} · Answer F1 {answer['score']:.2%}")
             st.code(answer["predicted_answer"], language=None, wrap_lines=True)
+
+
+def show_runs(runs):
+    try:
+        loaded = load_runs(runs)
+    except (OSError, KeyError, ValueError) as error:
+        st.error(str(error))
+        return
+    show_scores(loaded)
+    show_answers(loaded)
 
 
 def main(argv=None):

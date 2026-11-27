@@ -2,7 +2,7 @@
 
 创建时间：20261124 15:43:38 Asia/Shanghai
 
-最后修订时间：20261126 16:58:52 Asia/Shanghai
+最后修订时间：20261127 14:50:15 Asia/Shanghai
 
 本目录提供 LoCoMo 的公共评估与看板接口。公共层维护数据、调度、评分和结果格式；各方法维护模型加载、正文处理、答案生成及自己的启动脚本。数据准备见[公共 benchmark 说明](../README.md)。
 
@@ -90,7 +90,7 @@ if __name__ == "__main__":
     main()
 ```
 
-`run_evaluation` 负责数据读取、GPU 分片、worker 启动、评分、保存和续评。方法自己的 `eval_locomo.sh` 选择运行环境，将项目根目录和 `src/` 加入 `PYTHONPATH`，并调用 Python 入口。
+`run_evaluation` 负责数据读取、GPU 分片、worker 启动、评分、保存和续评。按 checkpoint 组织结果的方法调用 `add_evaluation_arguments(..., checkpoint_layout=True)`，并向 `run_evaluation` 传入 `checkpoint_name` 和表示压缩设置的 `output_name`。方法自己的 `eval_locomo.sh` 选择运行环境，将项目根目录和 `src/` 加入 `PYTHONPATH`，并调用 Python 入口。
 
 已有调度流程可直接复用 `shard_conversations(samples, workers)` 与 `evaluate_conversations(samples, adapter, batch_size, commit)`。前者按整段对话分片，后者完成一题即调用 `commit(sample, answer, statistics)`；调用方按下文的产物规范评分和保存。
 
@@ -101,12 +101,12 @@ if __name__ == "__main__":
 | 参数 | 含义与默认值 |
 |---|---|
 | `--benchmark-data` | 默认 `data/benchmarks/locomo` |
-| `--output-root` | 必填，评估产物根目录 |
-| `--output-id` | 必填，运行标识 |
+| `--output-root` | 评估产物根目录，默认值由方法入口提供 |
+| `--output-id` | 采用运行 ID 的方法可指定目录名，省略时由方法默认名称与时间戳组成 |
 | `--batch-size-per-gpu` | 每卡批处理数，默认 1 |
-| `--resume` | 使用原 `--output-id` 和评估配置续评 |
+| `--resume` | 沿用原结果目录和评估配置续评 |
 
-结果目录为 `<output-root>/eval/<output-id>/locomo/`。
+采用运行 ID 的方法写入 `<output-root>/eval/<output-id>/locomo/`，续评时指定原 ID。ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<压缩设置>_locomo/`，在相同命令后加 `--resume` 即可续评。
 
 ## 产物规范
 
@@ -179,15 +179,19 @@ bash benchmarks/locomo/scripts/dashboard.sh \
 
 ### 方法看板接入
 
-[dashboard.py](dashboard.py) 提供可复用的展示组件，方法维护自己的页面和启动脚本：
+[dashboard.py](dashboard.py) 提供可复用的展示组件，方法维护自己的页面和启动脚本。按运行 ID 保存结果的方法使用以下接口：
 
 | 接口 | 用法 |
 |---|---|
-| `run_dashboard(method, title, render_results, argv=None)` | 在 `--output-dir <运行目录>` 下选择已评分的 LoCoMo、LongMemEval-S 或 Oracle。选中 LoCoMo 时读取 `locomo/summary.json`，核对方法和设置后调用 `render_results(locomo_directory, summary)` |
+| `run_dashboard(method, title, render_results, argv=None, qasper=False)` | `--output-dir` 指向运行目录，选择一个已评分任务。支持 LoCoMo、LongMemEval-S 和 Oracle，传 `qasper=True` 可启用 QASPER。选中 LoCoMo 后调用 `render_results(结果目录, summary)` |
 | `show_scores(metrics, extra_metrics=())` | 展示总体及分题型 F1 和题数；可通过 `(标签, 已格式化数值)` 序列追加方法指标卡 |
 | `show_answers(directory, metrics)` | `directory` 指向含 `details.jsonl` 的 LoCoMo 结果目录，展示筛选后的逐题回答 |
 
-渲染函数依次调用 `show_scores(summary["metrics"])`、方法专属展示和 `show_answers(directory, summary["metrics"])`。方法环境包含 Streamlit 等看板依赖，启动脚本使用该环境的 Python。在项目根目录运行，例如：
+ICAE、AutoCompressors 和 SDCC 使用 [checkpoint 看板入口](../checkpoint_dashboard.py) `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`，`--output-dir` 指向 `<output-root>/eval/<checkpoint_name>/`。入口读取直接子目录中包含 `summary.json` 的全部已评分结果，按 benchmark 及其设置或划分分组；每个任务内并排比较全部压缩设置，例如 `mem128_cr4` 和 `mem128_cr8`。页面直接显示所有已有任务的概览，底部任务选择器用于查看该任务的逐题多设置回答对照。
+
+checkpoint 看板的 `render_memory(runs)` 回调只负责 LoCoMo 全部压缩设置的记忆用量汇总与分对话统计。按运行 ID 保存结果的方法，其 `render_results` 回调依次调用 `show_scores(summary["metrics"])`、方法专属展示和 `show_answers(directory, summary["metrics"])`。
+
+方法环境包含 Streamlit 等看板依赖，启动脚本使用该环境的 Python。按运行 ID 保存结果的方法在项目根目录运行，例如：
 
 ```bash
 PYTHONPATH=.:src python -m streamlit run my_method/dashboard.py -- \
