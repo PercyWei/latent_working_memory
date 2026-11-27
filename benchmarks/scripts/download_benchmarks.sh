@@ -21,6 +21,7 @@ data_root=data/benchmarks
 ruler_source_dir=data/raw/ruler-v1-source
 ruler_revision=c3f5e3b4f87f97e048793bb510a3a6b19a46bf3a
 longmemeval_revision=98d7416c24c778c2fee6e6f3006e7a073259d48f
+musique_revision=a7d9f9adf6191604fc67cde318ee1a86fcf7babc
 hf_endpoint="${HF_ENDPOINT:-https://hf-mirror.com}"
 
 while [[ $# -gt 0 ]]; do
@@ -33,8 +34,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$benchmark" in
-  all|ruler|locomo|longmemeval|qasper) ;;
-  *) fail '--benchmark 只能为 all、ruler、locomo、longmemeval 或 qasper' ;;
+  all|ruler|locomo|longmemeval|qasper|musique) ;;
+  *) fail '--benchmark 只能为 all、ruler、locomo、longmemeval、qasper 或 musique' ;;
 esac
 data_root="$(expand_user_path "$data_root")"
 ruler_source_dir="$(expand_user_path "$ruler_source_dir")"
@@ -105,4 +106,12 @@ if [[ $benchmark == all || $benchmark == qasper ]]; then
   mv -- "$qasper_dir/$file.tmp" "$qasper_dir/$file"
   rm -- "$qasper_dir/$package"
   printf 'QASPER test 数据已准备：%s\n' "$qasper_dir"
+fi
+
+if [[ $benchmark == all || $benchmark == musique ]]; then
+  musique_endpoint="${HF_ENDPOINT:-https://huggingface.co}"
+  base_url="${musique_endpoint%/}/datasets/voidful/MuSiQue/resolve/$musique_revision"
+  mkdir -p "$data_root/musique"
+  download_file "$base_url/musique_ans_v1.0_dev.jsonl" "$data_root/musique/musique_ans_v1.0_dev.jsonl"
+  printf 'MuSiQue-Ans dev 数据已准备：%s/musique/musique_ans_v1.0_dev.jsonl\n' "$data_root"
 fi

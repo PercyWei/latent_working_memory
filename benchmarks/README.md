@@ -2,9 +2,9 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261127 15:31:23 Asia/Shanghai
+最后修订时间：20261127 15:58:56 Asia/Shanghai
 
-本文介绍 RULER、LoCoMo、LongMemEval 和 QASPER 的数据下载与 RULER 样本生成。以下命令均从项目根目录执行。
+本文介绍 RULER、LoCoMo、LongMemEval、QASPER 和 MuSiQue 的数据下载与 RULER 样本生成。以下命令均从项目根目录执行。
 
 ## 1. 数据概览
 
@@ -14,6 +14,7 @@
 | LoCoMo | `data/benchmarks/locomo/locomo10.json` | 完整原始 JSON，含 10 段对话及类别 1–5 的 QA 标注 |
 | LongMemEval-S / Oracle | `data/benchmarks/longmemeval/<split>.json`，其中 `<split>` 为 `longmemeval_s_cleaned` 或 `longmemeval_oracle` | 同时下载 S 与 Oracle，各含相同的 500 道题及对应上下文 |
 | QASPER v0.3 | `data/benchmarks/qasper/qasper-test-v0.3.json` | test 原始 JSON，含 416 篇论文、1,451 道题 |
+| MuSiQue-Ans v1.0 | `data/benchmarks/musique/musique_ans_v1.0_dev.jsonl` | dev 原始 JSONL，含 2,417 道题 |
 
 ## 2. 数据准备
 
@@ -26,7 +27,7 @@ bash benchmarks/scripts/download_benchmarks.sh --benchmark all
 
 **原始数据下载：[download_benchmarks.sh](scripts/download_benchmarks.sh)**
 
-下载入口覆盖所选 benchmark 的同路径文件。RULER 下载素材后还需生成样本；其余 benchmark 可直接读取原始 JSON 评估。
+下载入口覆盖所选 benchmark 的同路径文件。RULER 下载素材后还需生成样本；其余 benchmark 可直接读取原始 JSON 或 JSONL 评估。
 
 - **RULER v1**：采用固定提交的 [NVIDIA/RULER v1 源码](https://github.com/NVIDIA/RULER/tree/c3f5e3b4f87f97e048793bb510a3a6b19a46bf3a)。
   - 下载源码及 essay、SQuAD、HotpotQA、CWE 词表，保存到 `--ruler-source-dir`。
@@ -34,14 +35,16 @@ bash benchmarks/scripts/download_benchmarks.sh --benchmark all
 - **LoCoMo**：下载[官方 `locomo10.json`](https://github.com/snap-research/locomo/tree/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376)。
 - **LongMemEval-S / Oracle**：下载作者[清洗版](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned)的 S 与 Oracle JSON。
 - **QASPER v0.3**：从[测试集压缩包](https://qasper-dataset.s3.us-west-2.amazonaws.com/qasper-test-and-evaluator-v0.3.tgz)提取 `qasper-test-v0.3.json`。
+- **MuSiQue-Ans v1.0**：从固定提交的 [`voidful/MuSiQue` 第三方镜像](https://huggingface.co/datasets/voidful/MuSiQue/tree/a7d9f9adf6191604fc67cde318ee1a86fcf7babc)下载原始 `musique_ans_v1.0_dev.jsonl`；[官方来源](https://github.com/StonyBrookNLP/musique#data)。
+  - test 未公开答案标签，因此使用完整 dev 的 2,417 道题作为当前评估划分。
 
 | 参数 | 填法与默认值 |
 |---|---|
-| `--benchmark` | 支持 `all`（默认）、`ruler`、`locomo`、`longmemeval` 或 `qasper` |
-| `--data-root` | LoCoMo、LongMemEval 和 QASPER 的数据父目录，默认 `data/benchmarks` |
+| `--benchmark` | 支持 `all`（默认）、`ruler`、`locomo`、`longmemeval`、`qasper` 或 `musique` |
+| `--data-root` | LoCoMo、LongMemEval、QASPER 和 MuSiQue 的数据父目录，默认 `data/benchmarks` |
 | `--ruler-source-dir` | RULER 官方源码及下载素材目录，默认 `data/raw/ruler-v1-source` |
 
-`HF_ENDPOINT` 可统一覆盖 HotpotQA 和 LongMemEval 的下载地址；未设置时，前者使用 `https://hf-mirror.com`，后者使用 `https://huggingface.co`。
+`HF_ENDPOINT` 可统一覆盖 HotpotQA、LongMemEval 和 MuSiQue 的下载地址；未设置时，HotpotQA 使用 `https://hf-mirror.com`，其余两者使用 `https://huggingface.co`。
 
 通过 ModelScope 分发或还原数据时，保留下列完整目录：
 
@@ -56,8 +59,10 @@ data/
     ├── longmemeval/
     │   ├── longmemeval_s_cleaned.json
     │   └── longmemeval_oracle.json
-    └── qasper/
-        └── qasper-test-v0.3.json
+    ├── qasper/
+    │   └── qasper-test-v0.3.json
+    └── musique/
+        └── musique_ans_v1.0_dev.jsonl
 ```
 
 **RULER 样本生成：[generate_ruler.sh](scripts/generate_ruler.sh)**
@@ -110,3 +115,7 @@ Full-context、ICAE v2、AutoCompressors、SDCC、LaCT、E²-TTT 和 In-Place TT
 ### 公共 QASPER 评估
 
 Full-context、ICAE v2、AutoCompressors 和 SDCC 均通过 `scripts/eval_qasper.sh` 评估 test。[公共协议与续评参数](qasper/README.md) · [Full-context](../src/latent_working_memory/full_context/README.md) · [ICAE](../reproductions/icae/README.md) · [AutoCompressors](../reproductions/autocompressors/README.md) · [SDCC](../reproductions/sdcc/README.md)
+
+### 公共 MuSiQue 评估
+
+目前仅提供公共评估接口，接入约定见 [MuSiQue 文档](musique/README.md)。
