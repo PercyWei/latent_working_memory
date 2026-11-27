@@ -22,9 +22,10 @@ STATISTICS = {"mean": "均值", "p50": "P50", "p90": "P90", "p10": "P10", "std":
 
 
 def _source(name, group):
-    parts = [name, group["dataset"]]
+    parts = []
     if group["split"] is not None:
         parts.append(group["split"])
+    parts.append(name)
     parts.extend(
         dict.fromkeys(group[key] for key in ("unit_kind", "evidence_granularity") if key in group)
     )
@@ -40,7 +41,7 @@ def _metric_row(name, group, metric):
     return row
 
 
-def _show(rows, value, axis=None):
+def _show(rows, value, axis=None, compact=False):
     if not rows:
         st.info("所选运行没有这项统计。")
         return
@@ -51,6 +52,8 @@ def _show(rows, value, axis=None):
                 [{"来源": row["来源"], value: row[value]} for row in points],
                 x="来源",
                 y=value,
+                horizontal=compact,
+                height=210 if compact else "content",
             )
         else:
             st.scatter_chart(
@@ -58,10 +61,91 @@ def _show(rows, value, axis=None):
                 x=axis,
                 y=value,
                 color="来源",
+                height=210 if compact else "content",
             )
     else:
         st.info("当前条件下没有有效值，分母见下表。")
-    st.dataframe(rows, hide_index=True, width="stretch")
+    if compact:
+        with st.expander("数值与有效分母"):
+            st.dataframe(rows, hide_index=True, width="stretch")
+    else:
+        st.dataframe(rows, hide_index=True, width="stretch")
+
+
+def _basic_rows(runs, group_key, metric):
+    return [
+        _metric_row(name, group, group["metrics"][metric])
+        for name, summary in runs
+        for group in summary[group_key]
+        if metric in group["metrics"]
+    ]
+
+
+def _block_constraints(groups):
+    constraints = sorted(
+        {(group["min_block_tokens"], group["max_block_tokens"]) for _, group in groups},
+        key=lambda pair: (pair[0], -float("inf") if pair[1] is None else -pair[1]),
+    )
+    return st.sidebar.selectbox(
+        "块长约束（tokens）",
+        constraints,
+        format_func=lambda pair: f"最短 {pair[0]} / 最长 {pair[1] if pair[1] is not None else '不限'}",
+    )
+
+
+def _segmentation_rows(groups, constraints, metric):
+    rows = []
+    for name, group in groups:
+        if (group["min_block_tokens"], group["max_block_tokens"]) != constraints:
+            continue
+        if metric in ("uniform_feasible", "natural_feasible"):
+            count, total = group[f"{metric}_count"], group["doc_count"]
+            row = {"来源": _source(name, group), "可行率": count / total if total else None}
+        else:
+            row = _metric_row(name, group, group[metric])
+        row.update(
+            {
+                "块数": group["blocks"],
+                "等长可行": f"{group['uniform_feasible_count']}/{group['doc_count']}",
+                "自然边界可行": f"{group['natural_feasible_count']}/{group['doc_count']}",
+            }
+        )
+        rows.append(row)
+    return rows
+
+
+def _recent_rows(runs):
+    return [
+        _metric_row(name, group, group["tail_overlap"]) | {"末尾 tokens": group["recent_tokens"]}
+        for name, summary in runs
+        for group in summary["recent_groups"]
+    ]
+
+
+def _core_overview(runs, segmentations):
+    first_row = st.columns(3)
+    second_row = st.columns(3)
+    for column, group_key, metric, title in (
+        (first_row[0], "document_groups", "doc_tokens", "文档长度（tokens）"),
+        (first_row[1], "document_groups", "unit_count", "每篇自然单元数"),
+        (first_row[2], "qa_groups", "evidence_tokens", "证据长度（tokens／题）"),
+        (second_row[0], "document_groups", "entity_density_mean", "实体提及密度（次／百词）"),
+    ):
+        with column:
+            st.markdown(f"#### {title}")
+            _show(_basic_rows(runs, group_key, metric), "均值", compact=True)
+
+    with second_row[1]:
+        st.markdown("#### 证据劈裂率")
+        if segmentations:
+            constraints = _block_constraints(segmentations)
+            rows = _segmentation_rows(segmentations, constraints, "evidence_cut")
+            _show(rows, "均值", axis="块数", compact=True)
+        else:
+            st.info("所选运行没有分段扫描结果。")
+    with second_row[2]:
+        st.markdown("#### 末尾证据覆盖率")
+        _show(_recent_rows(runs), "均值", axis="末尾 tokens", compact=True)
 
 
 def main():
@@ -99,7 +183,7 @@ def main():
             {
                 "运行": name,
                 "数据集": config["dataset"],
-                "split": config["split"] or ("无划分" if config["dataset"] == "locomo" else "全部"),
+                "split": config["split"] or ("无划分" if config["dataset"] == "locomo" else "all"),
                 "tokenizer": config["tokenizer"],
                 "tokenizer 类型": config["tokenizer_class"],
                 "密度窗口": config["metrics"]["window_tokens"],
@@ -111,16 +195,18 @@ def main():
                 "目录": str(root),
             }
         )
-    with st.expander("运行条件与样本量", expanded=True):
+    with st.expander("运行条件与样本量"):
         st.dataframe(overview, hide_index=True, width="stretch")
         st.caption("空白表示未设置；比较时核对 tokenizer、密度窗口和样本筛选条件。")
-    st.caption(
-        "来源标签保留结构／证据粒度；各运行独立展示，不合并样本。"
-        "QA 统计按文档等权，缺失不补 0；标准差不是置信区间。"
-    )
+    st.caption("QA 指标先在篇内取平均，再按文档等权汇总。展开图表下方的明细可查看有效分母。")
 
-    view = st.sidebar.radio("视图", ("基础指标", "分段扫描", "末尾覆盖"))
-    if view == "基础指标":
+    view = st.sidebar.radio("视图", ("核心总览", "基础指标", "分段扫描", "末尾覆盖"))
+    segmentations = [
+        (name, group) for name, summary in runs for group in summary["segmentation_groups"]
+    ]
+    if view == "核心总览":
+        _core_overview(runs, segmentations)
+    elif view == "基础指标":
         level = st.radio("统计层级", ("文档", "QA"), horizontal=True)
         key = "document_groups" if level == "文档" else "qa_groups"
         groups = [(name, group) for name, summary in runs for group in summary[key]]
@@ -135,28 +221,12 @@ def main():
             format_func=lambda key: METRIC_LABELS.get(key, key),
         )
         statistic = st.selectbox("统计量", list(STATISTICS), format_func=STATISTICS.__getitem__)
-        rows = [
-            _metric_row(name, group, group["metrics"][metric])
-            for name, group in groups
-            if metric in group["metrics"]
-        ]
-        _show(rows, STATISTICS[statistic])
+        _show(_basic_rows(runs, key, metric), STATISTICS[statistic])
     elif view == "分段扫描":
-        groups = [
-            (name, group) for name, summary in runs for group in summary["segmentation_groups"]
-        ]
-        constraints = sorted(
-            {(group["min_block_tokens"], group["max_block_tokens"]) for _, group in groups},
-            key=lambda pair: (pair[0], float("inf") if pair[1] is None else pair[1]),
-        )
-        if not constraints:
+        if not segmentations:
             st.info("所选运行没有分段扫描结果。")
             return
-        minimum, maximum = st.selectbox(
-            "块长约束",
-            constraints,
-            format_func=lambda pair: f"最短 {pair[0]} / 最长 {pair[1] if pair[1] is not None else '不限'}",
-        )
+        constraints = _block_constraints(segmentations)
         metric = st.selectbox(
             "指标",
             ("evidence_cut", "evidence_block_count", "uniform_feasible", "natural_feasible"),
@@ -170,35 +240,13 @@ def main():
                 st.selectbox("统计量", list(STATISTICS), format_func=STATISTICS.__getitem__)
             ]
         )
-        rows = []
-        for name, group in groups:
-            if (group["min_block_tokens"], group["max_block_tokens"]) != (minimum, maximum):
-                continue
-            if feasibility:
-                count, total = group[f"{metric}_count"], group["doc_count"]
-                row = {"来源": _source(name, group), "可行率": count / total if total else None}
-            else:
-                row = _metric_row(name, group, group[metric])
-            row.update(
-                {
-                    "块数": group["blocks"],
-                    "等长可行": f"{group['uniform_feasible_count']}/{group['doc_count']}",
-                    "自然边界可行": f"{group['natural_feasible_count']}/{group['doc_count']}",
-                }
-            )
-            rows.append(row)
+        rows = _segmentation_rows(segmentations, constraints, metric)
         st.caption("固定块长约束比较不同块数；只画已运行且有有效值的点，缺失组合不补零。")
         _show(rows, value, "块数")
     else:
         statistic = st.selectbox("统计量", list(STATISTICS), format_func=STATISTICS.__getitem__)
-        rows = []
-        for name, summary in runs:
-            for group in summary["recent_groups"]:
-                row = _metric_row(name, group, group["tail_overlap"])
-                row["末尾 tokens"] = group["recent_tokens"]
-                rows.append(row)
         st.caption("末尾范围独立比较，样本量不随分段组合数增加。")
-        _show(rows, STATISTICS[statistic], "末尾 tokens")
+        _show(_recent_rows(runs), STATISTICS[statistic], "末尾 tokens")
 
 
 if __name__ == "__main__":

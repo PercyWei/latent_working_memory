@@ -2,7 +2,7 @@
 
 创建时间：20261126 17:22:38 Asia/Shanghai
 
-最后修订时间：20261127 00:06:45 Asia/Shanghai
+最后修订时间：20261127 00:25:08 Asia/Shanghai
 
 本目录按探索任务组织代码。每项任务使用独立的运行入口，专用实现放在对应子目录中。
 
@@ -49,7 +49,7 @@ uv run -m latent_working_memory.v3_2.exploration.run_data_statistics \
   --output-dir artifacts/v3-2/exploration/locomo_statistics
 ```
 
-省略 `--split` 时，程序按上表从左到右读取所选数据集的全部划分，各划分的指标分别汇总。所有列出的划分文件都须就位，缺少文件会在统计开始前报错。只统计一个划分时可传入其名称，例如 `--dataset qasper --split dev`。LoCoMo 没有划分，省略 `--split` 即读取 `locomo10.json`。
+省略 `--split` 时，程序按上表从左到右读取全部划分，将实际扫描到的文档合并为一个 `all` 组。各指标的均值、分位数和有效分母均从逐文档记录计算。不同划分中相同的 `doc_id` 代表各自的输入，例如 LongMemEval 同一题的 S 和 Oracle 历史各计一条。所有列出的划分文件都须就位，缺少文件会在统计开始前报错。指定 `--split dev` 时只统计 `dev` 并使用该标签。LoCoMo 没有划分，省略 `--split` 即读取 `locomo10.json`。
 
 分段和末尾参数默认扫描下表中的取值集合，也可用空格分隔的值覆盖，例如：`--blocks 4 8 --min-block-tokens 32 --max-block-tokens 512 none --recent-tokens 0 256`。只传一个值即可统计单一设置。
 
@@ -59,7 +59,7 @@ uv run -m latent_working_memory.v3_2.exploration.run_data_statistics \
 |---|---|---|
 | `--dataset` | 必填 | 数据源，取值见上方数据表 |
 | `--dataset-dir` | 必填 | 数据集目录，文件布局见上方数据表 |
-| `--split` | 全部划分 | 不同数据集支持的 split 见上表 |
+| `--split` | 合并为 `all` | 有划分的数据集可指定上表中的一个 split；LoCoMo 须省略 |
 | `--tokenizer` | 必填 | 本地目录或 Hugging Face 模型 ID；需 Fast Tokenizer |
 | `--output-dir` | 必填 | 输出目录，必须尚不存在 |
 | `--max-samples` | 不限制 | 按读取顺序处理前 N 条文档（过滤前），所有划分共用此上限；正整数 |
@@ -81,7 +81,7 @@ uv run -m latent_working_memory.v3_2.exploration.run_data_statistics \
 
 - `report.md`：基础指标、分段扫描、末尾扫描及各项分母。
 - `summary.json`：各参数组合分别汇总；QA 先在文档内平均，再按文档等权汇总。
-- `documents.jsonl`：来源、基础指标和扫描明细，不复制正文或 token 序列。
+- `documents.jsonl`：每条文档的原始 split、来源、基础指标和扫描明细，不复制正文或 token 序列。
 - `config.json`：本次参数、数据位置和 tokenizer。
 
 逐文档的 `segmentations` 保存各组合的分段可行性；逐题的 `blocks` 保存各块数下的原始等长切分几何，`recent` 保存各末尾范围的交集。汇总时只在等长分段可行的组合中使用切分风险指标。多组结果分别报告，不重复累计样本数。
@@ -133,7 +133,7 @@ bash src/latent_working_memory/v3_2/exploration/data_statistics/dashboard.sh \
 
 一个 `--run` 后可连续传入多对“名称 目录”，也可重复使用 `--run`。名称须非空且唯一，含空格时加引号。启动脚本自动定位项目根目录并使用项目环境；结果目录的相对路径也从项目根目录解析。
 
-页面提供三个视图：
+页面默认打开**核心总览**，同时展示文档长度、自然结构单元数、证据长度、实体提及密度、证据劈裂率和末尾证据覆盖率。各图使用各自的单位与坐标轴，展开明细可查看数值和有效分母。侧栏还可切换到三个详细视图。
 
 - **基础指标**：选择文档／QA、指标和统计量，显示对比柱状图与有效分母。
 - **分段扫描**：固定块长约束，对比不同块数下的劈裂率、占用块数或分段可行率。

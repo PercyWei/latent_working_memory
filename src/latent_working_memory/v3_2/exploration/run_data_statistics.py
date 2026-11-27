@@ -162,7 +162,7 @@ def main():
                     record["status"] = "no_answerable_qa"
             stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
             records.append(record)
-    summary = build_summary(records)
+    summary = build_summary(records, merge_splits=bool(split_files) and args.split is None)
     (output / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8"
     )

@@ -53,25 +53,27 @@ def _qa_metrics(by_document):
     return metrics
 
 
-def build_summary(records: list[dict]) -> dict:
-    """Aggregate only scanned records; QA means give each document equal weight."""
+def build_summary(records: list[dict], merge_splits: bool = False) -> dict:
+    """Pool scanned documents, preserving their source identities for QA weighting."""
     document_groups = defaultdict(list)
     qa_groups = defaultdict(list)
     selection_groups = defaultdict(list)
     segmentation_groups = defaultdict(list)
     recent_groups = defaultdict(lambda: defaultdict(list))
     for record in records:
-        dataset, split = record["dataset"], record["split"]
+        dataset = record["dataset"]
+        split = "all" if merge_splits else record["split"]
+        document_key = (record["split"], record["doc_id"])
         document_groups[(dataset, split, record["unit_kind"])].append(record)
         retained_qas = defaultdict(list)
         for qa in record["qas"]:
             granularity = qa["evidence_granularity"]
-            qa_groups[(dataset, split, granularity)].append((record["doc_id"], qa))
+            qa_groups[(dataset, split, granularity)].append((document_key, qa))
             if record["status"] == "retained" and qa["status"] == "retained":
                 retained_qas[granularity].append(qa)
                 for recent in qa["recent"]:
                     key = (dataset, split, granularity, recent["recent_tokens"])
-                    recent_groups[key][record["doc_id"]].append(
+                    recent_groups[key][document_key].append(
                         {"tail_overlap": recent["tail_overlap"]}
                     )
         if record["status"] == "retained":
@@ -86,7 +88,7 @@ def build_summary(records: list[dict]) -> dict:
                         setting["min_block_tokens"],
                         setting["max_block_tokens"],
                     )
-                    segmentation_groups[key].append((record["doc_id"], setting, qas))
+                    segmentation_groups[key].append((document_key, setting, qas))
         source_ref = record["source_ref"]
         if "source_qa_count" in source_ref and "selected_qa_count" in source_ref:
             selection_groups[(dataset, split, source_ref["qa_selection_rule"])].append(source_ref)
