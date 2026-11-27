@@ -1,16 +1,8 @@
 """使用 LongMemEval 官方提示词判分，并按官方口径汇总准确率。"""
 
-from functools import cache
-import json
-import os
-from pathlib import Path
 from statistics import mean
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
-from dotenv import dotenv_values
-from tenacity import retry, retry_if_exception, stop_after_attempt, wait_random_exponential
-
+from benchmarks.chat_api import chat_completion
 from benchmarks.longmemeval.data import QUESTION_TYPES
 from benchmarks.vendor.longmemeval import get_anscheck_prompt
 
@@ -20,44 +12,14 @@ JUDGE_OPTIONS = {"reasoning_effort": "none", "temperature": 0, "max_completion_t
 JUDGE_REVISION = "9e0b455f4ef0e2ab8f2e582289761153549043fc"
 
 
-@cache
-def _project_credentials():
-    """首次判题时读取项目根目录的 .env，同一进程的后续题目复用配置。"""
-    values = dotenv_values(Path(__file__).resolve().parents[2] / ".env", interpolate=False)
-    return values.get("OPENAI_API_KEY"), values.get("OPENAI_BASE_URL")
-
-
-def _transient_error(error):
-    if isinstance(error, HTTPError):
-        return error.code in (408, 429) or 500 <= error.code < 600
-    return isinstance(error, (URLError, TimeoutError, ConnectionError))
-
-
-@retry(retry=retry_if_exception(_transient_error), wait=wait_random_exponential(min=1, max=30),
-       stop=stop_after_attempt(5), reraise=True)
 def judge_answer(sample, hypothesis):
     """返回作者 evaluate_qa.py 的 autoeval_label，仅发送题目、参考答案和回答。"""
-    file_key, file_base_url = _project_credentials()
-    key = os.environ.get("OPENAI_API_KEY", file_key)
-    if not key:
-        raise ValueError("Set OPENAI_API_KEY in the environment or the project root .env")
     prompt = get_anscheck_prompt(
         sample.question_type, sample.input.question, sample.answer, hypothesis,
         abstention="_abs" in sample.id,
     )
-    body = {
-        "model": JUDGE_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        **JUDGE_OPTIONS,
-    }
-    base = os.environ.get("OPENAI_BASE_URL", file_base_url) or "https://api.openai.com/v1"
-    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    if organization := os.environ.get("OPENAI_ORGANIZATION"):
-        headers["OpenAI-Organization"] = organization
-    url = f"{base.rstrip('/')}/chat/completions"
-    request = Request(url, data=json.dumps(body).encode(), headers=headers)
-    with urlopen(request, timeout=90) as response:
-        choice = json.load(response)["choices"][0]
+    response = chat_completion(JUDGE_MODEL, [{"role": "user", "content": prompt}], **JUDGE_OPTIONS)
+    choice = response["choices"][0]
     content = (choice["message"]["content"] or "").strip()
     if choice["finish_reason"] != "stop" or not content:
         raise ValueError(f"{sample.id}: incomplete judge reply (finish_reason={choice['finish_reason']})")
