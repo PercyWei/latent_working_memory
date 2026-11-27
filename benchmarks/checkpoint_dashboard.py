@@ -28,7 +28,7 @@ def natural_key(value):
                  for index, part in enumerate(parts)), value
 
 
-def select_runs(available, method, task):
+def select_runs(available, method, task, has_settings):
     """按模型或 checkpoint 全选或逐个勾选运行，沿用传入的比较顺序。"""
     def toggle_checkpoint(parent_key, child_keys):
         for key in child_keys:
@@ -45,6 +45,10 @@ def select_runs(available, method, task):
         parent_key = f"checkpoint-all:{method}:{task}:{checkpoint}"
         child_keys = [f"checkpoint-run:{method}:{task}:{path}" for path in directories]
         count = sum(st.session_state.setdefault(key, True) for key in child_keys)
+        if not has_settings and len(directories) == 1:
+            if st.checkbox(checkpoint.name, key=child_keys[0]):
+                selected.add(directories[0])
+            continue
         all_selected = count == len(directories)
         if st.session_state.get(parent_key) != all_selected:
             st.session_state[parent_key] = all_selected
@@ -143,8 +147,7 @@ def run_dashboard(method, title, render_memory=None, argv=None):
                     task = f"qasper/{summary['split']}"
                 if summary["method"] != method or task not in task_labels:
                     raise ValueError(f"{path.parent} 中的方法或任务与 {title} 不一致。")
-                setting = ((path.parent.name,) if full_context else
-                           tuple(summary["settings"][name] for name in parameters))
+                setting = tuple(summary["settings"][name] for name in parameters)
                 settings.add(setting)
                 label = f"{directory.name}/{path.parent.name}" if multiple else path.parent.name
                 grouped.setdefault(task, []).append({
@@ -157,27 +160,42 @@ def run_dashboard(method, title, render_memory=None, argv=None):
         st.error(f"无法读取评估结果。{error}")
         return
 
-    ordered_settings = (sorted(settings, key=lambda value: natural_key(value[0])) if full_context
-                        else sorted(settings))
+    ordered_settings = sorted(settings)
     setting_count = len(ordered_settings)
     setting_lightness = {
         setting: 0.50 if setting_count == 1 else 0.28 + 0.48 * index / (setting_count - 1)
         for index, setting in enumerate(ordered_settings)
     }
     group_indices = {name: index for index, name in enumerate(group_names)}
-    st.caption(f"各任务可按 {group_label} 全选运行，也可逐项勾选；图表、统计表和逐题回答同步更新。")
+    st.caption(f"各任务可勾选 {group_label} 及其运行；图表、统计表和逐题回答同步更新。")
     task_runs = {}
     for task in task_labels:
         if task not in grouped:
             continue
         available = sorted(grouped[task], key=lambda run: (
             natural_key(run["directory"].parent.name),
-            natural_key(run["setting"][0]) if full_context else run["setting"],
+            run["setting"],
             natural_key(run["directory"].name),
         ))
+        lightness_by_directory = {}
+        if parameters:
+            lightness_by_directory = {
+                run["directory"]: setting_lightness[run["setting"]] for run in available
+            }
+        else:
+            by_model = {}
+            for run in available:
+                by_model.setdefault(run["directory"].parent, []).append(run)
+            for model, model_runs in by_model.items():
+                count = len(model_runs)
+                for index, run in enumerate(model_runs):
+                    run["label"] = model.name if count == 1 else f"{model.name}/{run['directory'].name}"
+                    lightness_by_directory[run["directory"]] = (
+                        0.50 if count == 1 else 0.28 + 0.48 * index / (count - 1)
+                    )
         with st.container(border=True):
             st.header(task_labels[task])
-            chosen = select_runs(available, method, task)
+            chosen = select_runs(available, method, task, bool(parameters))
             paths = [(run["label"], run["directory"]) for run in chosen]
             if not paths:
                 st.info("请选择该任务中需要比较的运行。")
@@ -199,11 +217,9 @@ def run_dashboard(method, title, render_memory=None, argv=None):
             st.caption(f"已选 {len(runs)} / {len(available)} 份结果。")
             colors = {}
             for run in runs:
-                setting = ((run["directory"].name,) if full_context else
-                           tuple(run["summary"]["settings"][name] for name in parameters))
                 group_index = group_indices[run["directory"].parent.name]
                 hue = (0.60 + group_index * 0.618) % 1
-                rgb = hls_to_rgb(hue, setting_lightness[setting], 0.65)
+                rgb = hls_to_rgb(hue, lightness_by_directory[run["directory"]], 0.65)
                 colors[run["label"]] = "#" + "".join(f"{round(value * 255):02x}" for value in rgb)
             show_comparison_chart(runs, colors)
             with st.expander("详细统计"):

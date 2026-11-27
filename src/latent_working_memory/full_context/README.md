@@ -2,7 +2,7 @@
 
 创建时间：20261019 20:16:32 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261127 17:46:39 Asia/Shanghai
+最后修订时间：20261127 17:56:10 Asia/Shanghai
 
 Full-context 基线用原始模型读取完整输入，贪心生成答案。支持 LoCoMo、LongMemEval-S、LongMemEval-Oracle、QASPER 和 RULER。[公共数据准备](../../../benchmarks/README.md)
 
@@ -131,9 +131,9 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eva
 
 ## 四、查看结果
 
-将一个或多个 `<output_root>/eval/<model_name>/` 传给 `--output-dir`，多个目录可用空格分隔或重复指定该参数，模型目录名须各不相同。看板按任务以独立边框展示已评分的运行，每节列出“模型 → `output_id`”两级复选框，默认全选。可勾选整个模型或单个运行，子项和已选数量始终可见。
+将一个或多个 `<output_root>/eval/<model_name>/` 传给 `--output-dir`，多个目录可用空格分隔或重复指定该参数，模型目录名须各不相同。看板按任务以独立边框展示已评分的运行。同一任务内，某模型只有一份结果时仅显示模型复选框，图例使用模型名；有多份结果时才列出“模型 → `output_id`”两级复选框，图例使用 `model_name/output_id`。默认全选，可勾选整个模型或其下单个运行。
 
-运行按模型目录名、`output_id` 自然排序。每个模型使用一种色系，全部输入中的 `output_id` 按自然顺序预先分配从深到浅的色阶，筛选时颜色保持固定。
+运行按模型目录名、`output_id` 自然排序。每个模型使用一种色系，同一模型在各任务中的单份结果使用相同明度；同一任务有多份结果时，按该模型该任务的全部 `output_id` 自然顺序预先分配从深到浅的色阶。筛选时颜色保持固定。
 
 柱图按核心指标分组，顶部图例列出所选运行，柱顶显示百分比分数。详细统计和逐题回答随勾选同步更新；清空某个任务的选择后，该节显示选择提示。
 
