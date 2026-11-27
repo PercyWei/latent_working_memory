@@ -2,7 +2,7 @@
 
 创建时间：20261126 16:09:15 Asia/Shanghai
 
-最后修订时间：20261126 16:58:52 Asia/Shanghai
+最后修订时间：20261127 11:09:46 Asia/Shanghai
 
 QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3 的开发集和测试集读取、按论文生成回答、本地 Answer F1 评分及结果展示。[原论文](https://aclanthology.org/2021.naacl-main.365/) · [官方数据（CC BY 4.0）](https://huggingface.co/datasets/allenai/qasper)
 
@@ -58,6 +58,48 @@ QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3
 | `details.jsonl` | 每题的论文 ID、问题 ID、问题、预测、人工参考答案、用于分组的答案类型和 F1 |
 | `summary.json` | 评估配置与汇总指标。`metrics.score` 为总体 Answer F1，`metrics.groups` 保存各答案类型的题数及平均分。分数均以 0–1 保存 |
 
-## 查看结果
+## 结果展示
 
-公共看板读取划分目录中的 `summary.json` 和 `details.jsonl`。`--run` 接收一对参数（展示标签、已评分的划分目录），可重复指定。参与比较的运行须使用相同划分和数据指纹。看板展示总体和各答案类型的 Answer F1，按论文及题号并排显示参考答案、模型回答和逐题分数。[公共看板入口](scripts/dashboard.sh) · [展示接口](dashboard.py)
+### 跨运行比较
+
+公共看板脚本使用当前环境的 Python 启动 Streamlit。启动前激活已安装看板依赖的环境。`--run` 后按“展示标签、已评分的划分目录”成对传参，可连续指定多组，也可重复使用 `--run`。[公共看板脚本](scripts/dashboard.sh)
+
+```bash
+source .venv/bin/activate
+bash benchmarks/qasper/scripts/dashboard.sh \
+  --run 方法A-运行1 artifacts/method-a/eval/run-1/qasper/dev \
+        方法A-运行2 artifacts/method-a/eval/run-2/qasper/dev \
+        方法B-运行1 artifacts/method-b/eval/run-1/qasper/dev
+```
+
+每个目录直接包含 `summary.json` 和 `details.jsonl`，展示标签须非空且各不相同，含空格时加引号。页面展示全部传入运行的总体和各答案类型的 Answer F1 及题数，按论文和原始 `question_id` 并排展示参考答案、模型回答及逐题分数。
+
+参与比较的运行须使用相同划分和数据指纹，逐题结果覆盖该划分的完整题目集合。比较测试集时，各目录统一指向 `qasper/test/`。看板读取已保存的分数，支持不同方法、模型及输入设置的运行并列展示。[展示接口](dashboard.py)
+
+### 方法看板接入
+
+方法维护自己的 Streamlit 页面和启动脚本，通过 `show_runs(runs)` 嵌入 QASPER 的指标与逐题回答对照。页面入口负责设置页面标题和选择结果目录。[公共展示组件](dashboard.py)
+
+| 接口 | 用法 |
+|---|---|
+| `show_runs(runs)` | 接收非空的 `(展示标签, Path 类型的划分目录)` 序列，标签须各不相同。读取已评分产物，核对 QASPER Answer F1 指标、划分和数据指纹，展示总体与分答案类型结果及同题回答 |
+
+在方法的 Streamlit 页面中可直接调用下面的代码，查看一次运行的开发集结果。传入多对标签与目录即可比较同一划分的多个运行。
+
+```python
+from pathlib import Path
+
+from benchmarks.qasper.dashboard import show_runs
+
+run_dir = Path("artifacts/my-method/eval/run-1")
+show_runs([("My method · dev", run_dir / "qasper" / "dev")])
+```
+
+使用公共方法入口时，调用 `benchmarks.locomo.dashboard.run_dashboard(method, title, render_results, argv=None, qasper=True)` 启用 QASPER。`--output-dir` 指向包含 `qasper/dev/` 或 `qasper/test/` 的上一级运行目录。入口枚举已评分任务，核对方法、benchmark 和划分后，将 QASPER 交给 `show_runs` 展示，`render_results` 回调负责 LoCoMo 的方法专属页面。[公共方法入口](../locomo/dashboard.py) · [SDCC 接入示例](../../reproductions/sdcc/evaluation/dashboard.py)
+
+方法环境需安装 Streamlit 等看板依赖，启动脚本使用该环境的 Python。以已有的 SDCC 页面为例，在项目根目录运行下面的命令，`--output-dir` 替换为实际评估运行目录。
+
+```bash
+PYTHONPATH=.:src python -m streamlit run reproductions/sdcc/evaluation/dashboard.py -- \
+  --output-dir artifacts/sdcc/eval/run-1
+```
