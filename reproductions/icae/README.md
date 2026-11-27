@@ -2,7 +2,7 @@
 
 创建时间：20260904 10:13:57 Asia/Shanghai
 
-最后修订时间：20261127 16:12:47 Asia/Shanghai
+最后修订时间：20261127 20:33:44 Asia/Shanghai
 
 [环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能](#三通用功能)
 
@@ -245,7 +245,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_qasper.sh \
 
 将一个或多个 `<output_root>/eval/<checkpoint_name>/` 传给 `--output-dir`，多个目录可用空格分隔或重复指定该参数。看板按 `summary.json` 中的 benchmark 及其设置或划分展示已评分的运行。每个任务直接列出两级复选框，默认全部选中。每个 checkpoint 下始终列出各运行的 `output_id` 和已选数量。子项可单独勾选。全选时点击 checkpoint 可清空该组，只选部分或未选时点击可全选。
 
-各任务先按 checkpoint 名自然排序，同一 checkpoint 内先按每块记忆槽数（`fixed_mem_size`）、再按目标压缩率（`mean_compression_rate`）升序排列，同参数的运行按 `output_id` 自然排序。每个 checkpoint 使用一种色系。看板按全部输入目录、全部任务中的不同压缩设置预先分配深浅，参数从小到大对应从深到浅的等距色阶，只有一种设置时使用中等明度。同一 checkpoint 和设置跨任务同色，筛选时颜色保持固定。
+各任务先按评估配置的训练阶段（`settings.stage`）排序，`pretrained` 排在 `finetuned` 前。同一阶段内按 checkpoint 名自然排序，同一 checkpoint 内先按每块记忆槽数（`fixed_mem_size`）、再按目标压缩率（`mean_compression_rate`）升序排列，同参数的运行按 `output_id` 自然排序。每个 checkpoint 使用一种色系。看板按全部输入目录、全部任务中的不同压缩设置预先分配深浅，参数从小到大对应从深到浅的等距色阶，只有一种设置时使用中等明度。同一 checkpoint 和设置跨任务同色，筛选时颜色保持固定。
 
 柱图按核心指标分组，顶部图例列出所有所选运行，柱顶显示百分比分数。评分详细表、LoCoMo 记忆统计和逐题回答随勾选同步更新。清空某个任务的选择后，该任务显示选择提示。
 

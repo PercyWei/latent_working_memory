@@ -4,12 +4,12 @@ import argparse
 from colorsys import hls_to_rgb
 import json
 from pathlib import Path
-import re
 
 import streamlit as st
 
 from benchmarks import ruler_dashboard as ruler
 from benchmarks.comparison_dashboard import show_score_chart
+from benchmarks.comparison_runs import checkpoint_stage_order, natural_key
 from benchmarks.locomo import compare as locomo
 from benchmarks.longmemeval import dashboard as longmemeval
 from benchmarks.qasper import dashboard as qasper
@@ -20,13 +20,6 @@ TASK_LABELS = {
     **{task: f"LongMemEval-{label}" for task, label in longmemeval.SETTINGS.items()},
     **qasper.TASK_LABELS,
 }
-
-
-def natural_key(value):
-    """名称中的数字按数值排序，使 checkpoint-20 排在 checkpoint-100 前。"""
-    parts = re.split(r"([0-9]+)", value)
-    return tuple(int(part) if index % 2 else part.casefold()
-                 for index, part in enumerate(parts)), value
 
 
 def select_runs(available, method, task, has_settings):
@@ -41,8 +34,7 @@ def select_runs(available, method, task, has_settings):
         by_checkpoint.setdefault(directory.parent, []).append(directory)
 
     selected = set()
-    for checkpoint in sorted(by_checkpoint, key=lambda path: natural_key(path.name)):
-        directories = by_checkpoint[checkpoint]
+    for checkpoint, directories in by_checkpoint.items():
         parent_key = f"checkpoint-all:{method}:{task}:{checkpoint}"
         child_keys = [f"checkpoint-run:{method}:{task}:{path}" for path in directories]
         count = sum(st.session_state.setdefault(key, True) for key in child_keys)
@@ -148,6 +140,7 @@ def run_dashboard(method, title, render_memory=None, argv=None):
         if task not in grouped:
             continue
         available = sorted(grouped[task], key=lambda run: (
+            checkpoint_stage_order(run["summary"]),
             natural_key(run["directory"].parent.name),
             run["setting"],
             natural_key(run["directory"].name),

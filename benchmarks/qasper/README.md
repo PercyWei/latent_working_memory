@@ -2,7 +2,7 @@
 
 创建时间：20261126 16:09:15 Asia/Shanghai
 
-最后修订时间：20261127 20:27:07 Asia/Shanghai
+最后修订时间：20261127 20:33:44 Asia/Shanghai
 
 QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3 测试集的读取、按论文生成回答、本地 Answer F1 评分及结果展示。[原论文](https://aclanthology.org/2021.naacl-main.365/) · [官方数据（CC BY 4.0）](https://huggingface.co/datasets/allenai/qasper)
 
@@ -73,7 +73,7 @@ bash benchmarks/qasper/scripts/dashboard.sh --run-file configs/reproductions/ben
 
 两种入口可单独或合用。结果目录须直接包含 `summary.json` 和 `details.jsonl`，相对路径以项目根目录为基准，重复目录会报错。
 
-看板按方法、checkpoint／模型和评估设置分组，默认全选。方法按首次出现的顺序排列，合用时先读 `--run`，再按行读 `--run-file`。同一方法内按 checkpoint 名自然排序，再按评估参数数值排序。勾选会同步更新图表、统计和逐题对照。
+看板按方法、checkpoint／模型和评估设置分组，默认全选。方法按首次出现的顺序排列，合用时先读 `--run`，再按行读 `--run-file`。ICAE 优先按评估配置中的训练阶段排序，`pretrained` 排在 `finetuned` 前。同一方法内再按 checkpoint 名自然排序和评估参数数值排序。勾选会同步更新图表、统计和逐题对照。
 
 比较 test 的总体及分答案类型 Answer F1，统计表保留各类题数，逐题区按论文和问题筛选。各运行须使用相同的数据与评分器，题目、所属论文和参考答案须一致。答案类型按各运行中取得最高分的参考答案确定，因此各类题数可能不同。
 

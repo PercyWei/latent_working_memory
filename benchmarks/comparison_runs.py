@@ -12,6 +12,13 @@ def natural_key(value):
                  for index, part in enumerate(parts)), value
 
 
+def checkpoint_stage_order(summary):
+    """按 ICAE 评估配置中的训练阶段排列 checkpoint。"""
+    if summary["method"] == "icae":
+        return ("pretrained", "finetuned").index(summary["settings"]["stage"])
+    return 0
+
+
 def run_identity(summary):
     """只读取各方法当前写入的配置，不从目录或运行标签推断参数。"""
     method, settings = summary["method"], summary["settings"]
@@ -138,4 +145,6 @@ def prepare_runs(runs):
         for run in group:
             rgb = hls_to_rgb(hue, lightness[color_keys[id(run)]], 0.65)
             run["color"] = "#" + "".join(f"{round(value * 255):02x}" for value in rgb)
-    return sorted(prepared, key=lambda run: method_order[run["method"]])
+    return sorted(prepared, key=lambda run: (
+        method_order[run["method"]], checkpoint_stage_order(run["summary"]),
+    ))
