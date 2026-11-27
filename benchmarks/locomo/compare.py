@@ -50,7 +50,7 @@ def validate_runs(runs):
                 raise ValueError(f"{run['label']} 的题目 {sample_id} 与参考运行不一致。")
 
 
-def show_comparison(runs, all_labels, colors=None):
+def show_comparison(runs, all_labels, colors=None, show_chart=True):
     st.subheader("F1 对比")
     categories = sorted(group["category"] for group in runs[0]["summary"]["metrics"]["groups"])
     scopes = ["总体", *(LOCOMO_CATEGORIES[category] for category in categories)]
@@ -59,41 +59,47 @@ def show_comparison(runs, all_labels, colors=None):
         metrics = run["summary"]["metrics"]
         groups = {group["category"]: group["score"] for group in metrics["groups"]}
         values = [metrics["score"], *(groups[category] for category in categories)]
-        chart.extend({"运行": run["label"], "评估范围": scope, "F1 (%)": score * 100}
-                     for scope, score in zip(scopes, values, strict=True))
+        if show_chart:
+            chart.extend({"运行": run["label"], "评估范围": scope, "F1 (%)": score * 100}
+                         for scope, score in zip(scopes, values, strict=True))
         table.append({"运行": run["label"], "题数": metrics["samples"], **{
             scope: score * 100 for scope, score in zip(scopes, values, strict=True)
         }})
-    color_scale = {"domain": all_labels, "scheme": "tableau20"} if colors is None else {
-        "domain": all_labels, "range": [colors[label] for label in all_labels],
-    }
-    st.vega_lite_chart(chart, {
-        "mark": "bar",
-        "encoding": {
-            "x": {"field": "评估范围", "type": "nominal", "sort": scopes,
-                  "axis": {"labelAngle": 0}},
-            "xOffset": {"field": "运行", "type": "nominal", "sort": all_labels},
-            "y": {"field": "F1 (%)", "type": "quantitative", "scale": {"domain": [0, 100]}},
-            "color": {"field": "运行", "type": "nominal",
-                      "legend": {"values": all_labels},
-                      "scale": color_scale},
-            "tooltip": [
-                {"field": "运行", "type": "nominal"},
-                {"field": "评估范围", "type": "nominal"},
-                {"field": "F1 (%)", "type": "quantitative", "format": ".2f"},
-            ],
-        },
-        "height": 360,
-    }, width="stretch")
+    if show_chart:
+        color_scale = {"domain": all_labels, "scheme": "tableau20"} if colors is None else {
+            "domain": all_labels, "range": [colors[label] for label in all_labels],
+        }
+        st.vega_lite_chart(chart, {
+            "mark": "bar",
+            "encoding": {
+                "x": {"field": "评估范围", "type": "nominal", "sort": scopes,
+                      "axis": {"labelAngle": 0}},
+                "xOffset": {"field": "运行", "type": "nominal", "sort": all_labels},
+                "y": {"field": "F1 (%)", "type": "quantitative", "scale": {"domain": [0, 100]}},
+                "color": {"field": "运行", "type": "nominal",
+                          "legend": {"values": all_labels},
+                          "scale": color_scale},
+                "tooltip": [
+                    {"field": "运行", "type": "nominal"},
+                    {"field": "评估范围", "type": "nominal"},
+                    {"field": "F1 (%)", "type": "quantitative", "format": ".2f"},
+                ],
+            },
+            "height": 360,
+        }, width="stretch")
     st.dataframe(table, hide_index=True, column_config={
         scope: st.column_config.NumberColumn(f"{scope} F1 (%)", format="%.2f") for scope in scopes
     })
     st.caption("总体及各题型 F1 均按题平均。")
-    with st.expander("各题型题数"):
-        st.dataframe([
-            {"题型": group["category_name"], "题数": group["samples"]}
-            for group in runs[0]["summary"]["metrics"]["groups"]
-        ], hide_index=True)
+    category_counts = [
+        {"题型": group["category_name"], "题数": group["samples"]}
+        for group in runs[0]["summary"]["metrics"]["groups"]
+    ]
+    if show_chart:
+        with st.expander("各题型题数"):
+            st.dataframe(category_counts, hide_index=True)
+    else:
+        st.caption("各题型题数　" + " · ".join(f"{row['题型']} {row['题数']} 题" for row in category_counts))
 
 
 def show_answer_comparison(runs):

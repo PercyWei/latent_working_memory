@@ -2,7 +2,7 @@
 
 创建时间：20261125 21:08:04 Asia/Shanghai
 
-最后修订时间：20261127 15:28:10 Asia/Shanghai
+最后修订时间：20261127 15:46:03 Asia/Shanghai
 
 [环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能](#三通用功能)
 
@@ -140,9 +140,9 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/sdcc/scripts/eval_qasper.sh \
 
 ### 3.2 结果展示
 
-将一个或多个 `<output_root>/eval/<checkpoint_name>/` 目录传给 `--output-dir`。多个目录可以用空格分隔，也可以重复指定 `--output-dir`。看板默认展示全部已评分的运行，按 `summary.json` 中的 benchmark 和设置或划分分组，侧栏可筛选 checkpoint。单目录使用 `output_id` 作为运行标签，多目录使用 `<checkpoint_name>/<output_id>`。
+将一个或多个 `<output_root>/eval/<checkpoint_name>/` 传给 `--output-dir`，多个目录可用空格分隔或重复指定该参数。看板默认展示所有已评分的运行，按 `summary.json` 中的 benchmark 及其设置或划分归入各任务。侧栏可筛选 checkpoint。详细统计和逐题对照中，单目录使用 `output_id` 作为运行标签，多目录使用 `<checkpoint_name>/<output_id>`。
 
-图表、统计表和逐题回答使用相同的顺序。各任务内按压缩偏移（`compress_ratio_scale`）的数值升序排列。参数相同时，依次按 checkpoint 目录名和 `output_id` 排列，名称中的数字按数值比较。相同压缩参数使用同一色系，不同 checkpoint 用深浅区分。
+每个任务的全部压缩设置自上而下展示。各组按压缩偏移（`compress_ratio_scale`）的数值升序排列。每组一张横向条形表，行名为 checkpoint，核心指标分列，每个分数以百分比和横条显示。同一 checkpoint、同一设置下的多次运行按完整 `output_id` 分行展示。组内按 checkpoint 名和 `output_id` 自然排序，相同压缩参数使用同一色系，不同 checkpoint 用深浅区分。评分详细统计表默认折叠，逐题回答沿用概览顺序。
 
 ```bash
 # 查看一个 checkpoint

@@ -2,7 +2,7 @@
 
 创建时间：20261124 15:43:38 Asia/Shanghai
 
-最后修订时间：20261127 15:28:01 Asia/Shanghai
+最后修订时间：20261127 15:46:03 Asia/Shanghai
 
 本目录提供 LoCoMo 的公共评估与看板接口。公共层维护数据、调度、评分和结果格式；各方法维护模型加载、正文处理、答案生成及自己的启动脚本。数据准备见[公共 benchmark 说明](../README.md)。
 
@@ -195,7 +195,7 @@ bash reproductions/icae/scripts/dashboard.sh --output-dir \
   artifacts/reproductions/icae/eval/mistral_7b_ft_icae
 ```
 
-入口读取各 checkpoint 直接子目录中的已评分结果，根据 `summary.json` 中的 benchmark 及其设置或划分分组，在同一任务内比较不同 checkpoint 的全部运行。多 checkpoint 的标签为 `checkpoint_name/output_id`，单 checkpoint 为 `output_id`。先按压缩参数数值升序，再按 checkpoint 名和 `output_id` 自然排序；相同参数使用同色系，不同 checkpoint 以深浅区分。页面直接显示所有已有任务的概览，底部任务选择器用于查看逐题回答对照。
+入口按 `summary.json` 中的 benchmark 及其设置或划分展示各任务。每个任务下，全部压缩设置按参数数值升序自上而下排列。每组用一张横向条形表按行列出 checkpoint，总体及各题型 F1 分列显示百分比和横条。同一 checkpoint 和设置下有多次运行时，每个完整 `output_id` 单列一行。组内按 checkpoint 名和 `output_id` 自然排序，同一设置用同色系，checkpoint 用深浅区分。评分详细统计表默认折叠。页面底部可选择任务和题目，对照各运行的回答。
 
 checkpoint 看板的 `render_memory(runs)` 回调只负责 LoCoMo 全部压缩设置的记忆用量汇总与分对话统计。按运行 ID 保存结果的方法，其 `render_results` 回调依次调用 `show_scores(summary["metrics"])`、方法专属展示和 `show_answers(directory, summary["metrics"])`。
 

@@ -45,45 +45,47 @@ def load_runs(runs):
     return loaded
 
 
-def show_scores(runs, colors=None):
+def show_scores(runs, colors=None, show_chart=True):
     chart, palette, groups, table = [], {}, {}, []
     for run in runs:
         label, summary = run["label"], run["summary"]
         metrics = summary["metrics"]
         task = SETTINGS[summary["benchmark"]]
         judge = summary["judge"]["model"]
-        if colors is None:
-            identity = (summary["method"], json.dumps(summary["settings"], sort_keys=True), judge)
-            group = groups.setdefault(identity, len(groups))
-            hue = (0.60 + group * 0.618) % 1
-            rgb = hls_to_rgb(hue, 0.42 if task == "S" else 0.66, 0.60)
-            palette[label] = "#" + "".join(f"{round(v * 255):02x}" for v in rgb)
-        else:
-            palette[label] = colors[label]
-        for scope, score in (("总体", metrics["score"]), ("题型宏平均", metrics["task_averaged_accuracy"]),
-                             ("证据不足", metrics["abstention"]["score"])):
-            if score is not None:
-                chart.append({"运行": label, "设置": task, "指标": scope, "准确率": score})
+        if show_chart:
+            if colors is None:
+                identity = (summary["method"], json.dumps(summary["settings"], sort_keys=True), judge)
+                group = groups.setdefault(identity, len(groups))
+                hue = (0.60 + group * 0.618) % 1
+                rgb = hls_to_rgb(hue, 0.42 if task == "S" else 0.66, 0.60)
+                palette[label] = "#" + "".join(f"{round(v * 255):02x}" for v in rgb)
+            else:
+                palette[label] = colors[label]
+            for scope, score in (("总体", metrics["score"]), ("题型宏平均", metrics["task_averaged_accuracy"]),
+                                 ("证据不足", metrics["abstention"]["score"])):
+                if score is not None:
+                    chart.append({"运行": label, "设置": task, "指标": scope, "准确率": score})
         entry = {"运行": label, "设置": task, "方法": summary["method"], "裁判": judge, "题数": metrics["samples"],
                  "证据不足题数": metrics["abstention"]["samples"]}
         for item in metrics["groups"]:
             entry[item["question_type"]] = item["score"]
         table.append(entry)
-    st.vega_lite_chart(chart, {
-        "mark": "bar",
-        "encoding": {
-            "x": {"field": "指标", "type": "nominal", "sort": ["总体", "题型宏平均", "证据不足"],
-                  "axis": {"labelAngle": 0}},
-            "xOffset": {"field": "运行", "sort": list(palette)},
-            "y": {"field": "准确率", "type": "quantitative", "scale": {"domain": [0, 1]},
-                  "axis": {"format": ".0%"}},
-            "color": {"field": "运行", "type": "nominal",
-                      "legend": {"values": list(palette)},
-                      "scale": {"domain": list(palette), "range": list(palette.values())}},
-            "tooltip": [{"field": key} for key in ("运行", "设置", "指标")] +
-                       [{"field": "准确率", "type": "quantitative", "format": ".2%"}],
-        },
-    }, width="stretch")
+    if show_chart:
+        st.vega_lite_chart(chart, {
+            "mark": "bar",
+            "encoding": {
+                "x": {"field": "指标", "type": "nominal", "sort": ["总体", "题型宏平均", "证据不足"],
+                      "axis": {"labelAngle": 0}},
+                "xOffset": {"field": "运行", "sort": list(palette)},
+                "y": {"field": "准确率", "type": "quantitative", "scale": {"domain": [0, 1]},
+                      "axis": {"format": ".0%"}},
+                "color": {"field": "运行", "type": "nominal",
+                          "legend": {"values": list(palette)},
+                          "scale": {"domain": list(palette), "range": list(palette.values())}},
+                "tooltip": [{"field": key} for key in ("运行", "设置", "指标")] +
+                           [{"field": "准确率", "type": "quantitative", "format": ".2%"}],
+            },
+        }, width="stretch")
     st.subheader("分题型准确率")
     st.dataframe(table, hide_index=True, column_config={
         kind: st.column_config.NumberColumn(format="percent", step=0.0001) for kind in QUESTION_TYPES

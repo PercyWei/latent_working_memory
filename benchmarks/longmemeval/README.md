@@ -2,7 +2,7 @@
 
 创建时间：20261126 10:49:01 Asia/Shanghai
 
-最后修订时间：20261127 15:28:01 Asia/Shanghai
+最后修订时间：20261127 15:46:03 Asia/Shanghai
 
 本目录维护 LongMemEval 的数据读取、按题生成、问答评分和结果格式。[官方仓库](https://github.com/xiaowu0162/LongMemEval) · [清洗版数据](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/tree/98d7416c24c778c2fee6e6f3006e7a073259d48f)
 
@@ -117,7 +117,7 @@ bash benchmarks/longmemeval/scripts/dashboard.sh \
 | `show_runs(runs)` | 接收非空的 `(展示标签, Path 类型的设置目录)` 序列，标签须各不相同。读取已评分产物、核对运行间的数据和题目一致性，展示准确率、配置及逐题回答 |
 | `load_runs(runs)` | 接收与 `show_runs` 相同的标签与目录序列，核对运行间的数据和题目一致性，返回运行字典列表；每项包含 `label`、`directory`、`summary` 和 `records` |
 | `load_run(label, directory)` | 读取一个设置目录，返回含 `label`、`directory`、`summary` 和 `records` 的字典，其中 `records` 按原始 `question_id` 索引 |
-| `show_scores(runs, colors=None)` | 接收已加载的运行对象列表，展示总体准确率、题型宏平均、证据不足题准确率和分题型表格；`colors` 可传入展示标签到颜色的映射，使不同面板保持相同配色 |
+| `show_scores(runs, colors=None, show_chart=True)` | 默认展示总体、题型宏平均和证据不足题准确率柱图及分题型表格。`colors` 指定运行标签对应的颜色，`show_chart=False` 时仅展示表格 |
 | `show_answers(runs)` | 接收同样的运行对象列表，按题型和证据不足条件筛选，展示同题回答与裁判判定 |
 
 跨运行校验集中在 `load_runs`，`show_runs` 复用该加载接口。自定义布局先调用 `load_runs`，再将返回值分别交给 `show_scores` 和 `show_answers`，即可分开展示概览与逐题内容。在方法的 Streamlit 页面中可直接调用下面的代码，同时展示同一次运行的 S 和 Oracle。
@@ -134,9 +134,9 @@ show_runs([
 ])
 ```
 
-ICAE、AutoCompressors 和 SDCC 使用 `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`。`--output-dir` 接收一个或多个 `<output-root>/eval/<checkpoint_name>/`，可连续列出目录或重复该参数；侧栏默认选中全部 checkpoint。入口读取各目录的已评分结果，根据汇总中的 benchmark 分组展示 LongMemEval-S 和 Oracle，在同一任务内跨 checkpoint 比较准确率及分题型结果。底部任务选择器用于查看逐题回答与裁判判定。`render_memory(runs)` 只负责 LoCoMo 的记忆统计。[checkpoint 看板入口](../checkpoint_dashboard.py)
+ICAE、AutoCompressors 和 SDCC 使用 `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`。`--output-dir` 接收一个或多个 `<output-root>/eval/<checkpoint_name>/`，可连续列出目录或重复该参数。侧栏默认选中全部 checkpoint。看板分别展示 LongMemEval-S 和 Oracle。每个任务下，所有压缩设置按参数数值升序纵向排列，每组一张横向条形表，按行列出 checkpoint，总体、题型宏平均和证据不足题准确率分列显示百分比和横条。[checkpoint 看板入口](../checkpoint_dashboard.py)
 
-多 checkpoint 的标签为 `checkpoint_name/output_id`，单 checkpoint 为 `output_id`。先按压缩参数数值升序，再按 checkpoint 名和 `output_id` 自然排序；相同参数使用同色系，不同 checkpoint 以深浅区分。[多目录命令与任务分组](../locomo/README.md#方法看板接入)
+同一 checkpoint、同一设置下的多个 `output_id` 分行显示完整名称。相同设置用同一色系，checkpoint 用深浅区分。可展开分题型统计表，或在页面底部按任务和题目对照回答与裁判判定。[多目录命令与排序规则](../locomo/README.md#方法看板接入)
 
 按运行 ID 保存结果的方法使用 `benchmarks.locomo.dashboard.run_dashboard(method, title, render_results, argv=None, qasper=False)`，`--output-dir` 指向运行目录。入口选择一个已评分任务，核对方法与任务后调用 `show_runs` 展示 LongMemEval；`render_results` 回调负责 LoCoMo 的方法专属页面。[公共方法入口](../locomo/dashboard.py) · [LaCT 接入示例](../../reproductions/lact/evaluation/dashboard.py)
 
