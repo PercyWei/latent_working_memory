@@ -2,7 +2,7 @@
 
 创建时间：20261019 20:16:32 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261127 17:14:55 Asia/Shanghai
+最后修订时间：20261127 17:32:44 Asia/Shanghai
 
 Full-context 基线用原始模型读取完整输入，贪心生成答案。支持 LoCoMo、LongMemEval-S、LongMemEval-Oracle、QASPER 和 RULER。[公共数据准备](../../../benchmarks/README.md)
 
@@ -135,17 +135,32 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eva
 
 | 任务 | 看板指标与运行记录 |
 |---|---|
-| LoCoMo | 总体及分题型 F1，可按对话查看逐题结果。`execution.json` 记录执行状态，`work.json` 和 `progress/` 保存任务分配与进度 |
+| LoCoMo | 主图展示总体及分题型 F1，可按对话查看逐题结果。`execution.json` 记录执行状态，`work.json` 和 `progress/` 保存任务分配与进度 |
 | LongMemEval-S / Oracle | 主图展示总体、六类题型和不可回答题准确率，题型宏平均保留在“准确率统计”表中；可查看逐题判定和裁判模型。`scoring_config.json` 保存裁判配置 |
 | QASPER | 主图展示总体及抽取、自由文本、是非、不可回答的 Answer F1，表格保留分组题数；可按论文查看问题、参考答案、模型回答和逐题分数。`predictions.jsonl` 按原始题序保存模型回答 |
-| RULER | 按长度档位和子任务查看准确率。`summary.json` 另含推理批量、耗时与峰值显存，`eval.json`、`status.json`、`eval.log` 和 `progress/` 保存配置与运行记录 |
+| RULER | 主图展示总体及各长度档准确率，详细统计中选择长度查看子任务表。`summary.json` 另含推理批量、耗时与峰值显存，`eval.json`、`status.json`、`eval.log` 和 `progress/` 保存配置与运行记录 |
 
-方法看板的 `--output-dir` 指向一个模型目录 `<output_root>/eval/<model_name>/`。看板扫描 `*/summary.json`，根据其中的评估信息识别任务。先选任务（含 RULER），再选对应的 `output_id` 查看该次评估。
+方法看板的 `--output-dir` 接收一个或多个模型评估目录 `<output_root>/eval/<model_name>/`，可在同一参数后连续传入多个目录，也可重复使用 `--output-dir`。模型目录名须各不相同。看板扫描各目录下的 `*/summary.json`，根据评估信息识别任务。查看一个模型时：
 
 ```bash
 bash src/latent_working_memory/full_context/scripts/dashboard.sh \
   --output-dir artifacts/baselines/full_context/eval/Qwen3-4B-Instruct-2507
 ```
+
+比较多个模型时，将路径替换为已有的模型评估目录：
+
+```bash
+bash src/latent_working_memory/full_context/scripts/dashboard.sh \
+  --output-dir artifacts/baselines/full_context/eval/Qwen3-4B-Instruct-2507 \
+               artifacts/baselines/full_context/eval/Qwen3-8B \
+  --output-dir artifacts/baselines/full_context/eval/Qwen3-14B
+```
+
+各任务以独立边框分节，同时展示主图和可展开的“详细统计”。每节按“模型 → `output_id`”列出两级复选框，默认全选；可勾选整个模型，也可选择其下单次评估，子项和已选数量始终可见。多模型时运行标签为 `model_name/output_id`，单模型时只显示 `output_id`。
+
+运行依次按模型目录名、`output_id` 自然排序，名称中的数字按数值排序。模型决定色系，全部输入中的 `output_id` 统一决定深浅；筛选前后配色不变。主图、详细统计和逐题回答使用同一组选中运行，清空某任务的选择后，该节显示选择提示。
+
+底部“逐题结果”通过任务选择器切换同题对照。LoCoMo、LongMemEval 和 QASPER 使用公共比较组件，按各自题号对齐所选运行的参考答案、模型回答和分数；RULER 按长度、子任务和题号查看多运行回答。RULER 比较要求所选运行的数据及长度范围完全一致，不自动取交集。[共用看板入口](../../../benchmarks/checkpoint_dashboard.py) · [RULER 展示组件](../../../benchmarks/ruler_dashboard.py)
 
 如需按题号并排比较 LongMemEval 的两种设置，可将各自的评分目录传给公共看板。
 
