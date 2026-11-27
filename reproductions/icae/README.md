@@ -2,7 +2,7 @@
 
 创建时间：20260904 10:13:57 Asia/Shanghai
 
-最后修订时间：20261127 15:11:49 Asia/Shanghai
+最后修订时间：20261127 15:28:10 Asia/Shanghai
 
 [环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能](#三通用功能)
 
@@ -50,33 +50,77 @@ hf download sggetao/icae mistral_7b_pretrained_icae.safetensors mistral_7b_ft_ic
 ### 2.2 自行训练 ICAE v2
 
 - **基座与权重**：下例使用 Qwen3-4B-Instruct-2507 的基座与 tokenizer。指令微调加载第一步在同一 Qwen 基座上训练的 ICAE 权重，LoCoMo 评估加载第二步的微调权重。训练与评估共用 LoRA rank 512。
-- **训练数据**：每个阶段分别准备训练集和验证集，以下示例使用 JSONL，每行一个样本。预训练示例为 `{"text":"The Nile flows into the Mediterranean Sea."}`；指令微调示例为 `{"input":"The Nile flows into the Mediterranean Sea.","prompt":"Where does the Nile flow?","answer":"The Mediterranean Sea."}`。
-- **并行与批量**：每张可见 GPU 启动一个进程，每卡每个微批处理一篇正文。全局有效批量等于 GPU 数乘以 `--gradient-accumulation-steps`。两个阶段均在训练结束时计算验证集 loss。
+- **并行与批量**：每张可见 GPU 启动一个进程，每卡每个微批处理一篇正文。默认按进程数自动设置梯度累积，使全局有效批量为 `256`，双卡时累积 `128` 次。显式指定 `--gradient-accumulation-steps` 可调整批量。
+- **优化配置**：训练采用 BF16 和 AdamW，默认按更新步数执行。学习率、更新步数、批量、warmup 和梯度裁剪参考[论文附录 A](https://arxiv.org/html/2307.06945v4#A1) 的 Llama 系列实验，并非作者完整披露的 Mistral v2 训练配置。
+
+**训练数据准备**
+
+在项目根目录执行以下下载命令。`hf` CLI 安装方式见[复现总说明](../README.md#模型下载约定)。
+
+- **The Pile 来源**：训练集和可选验证集统一从[社区镜像 `xvjiarui/pile`](https://huggingface.co/datasets/xvjiarui/pile/tree/main) 下载，保留原始 JSONL 压缩分片格式。命令启用 [Xet 高性能并行下载](https://huggingface.co/docs/huggingface_hub/en/package_reference/environment_variables#hf_xet_high_performance)。
+- **PwC 来源**：训练集和测试集均来自[作者仓库 `sggetao/PwC`](https://huggingface.co/datasets/sggetao/PwC/tree/main)。
+
+```bash
+# The Pile 训练集：30 个压缩分片
+HF_XET_HIGH_PERFORMANCE=1 hf download xvjiarui/pile --repo-type dataset \
+  --include "train/*.jsonl.zst" \
+  --local-dir data/reproductions/icae/raw/the-pile
+
+# The Pile 验证集：仅在需要验证时下载
+HF_XET_HIGH_PERFORMANCE=1 hf download xvjiarui/pile val.jsonl.zst --repo-type dataset \
+  --local-dir data/reproductions/icae/raw/the-pile
+
+# PwC 官方训练集和测试集
+hf download sggetao/PwC PwC_train.jsonl PwC_test.jsonl --repo-type dataset \
+  --local-dir data/reproductions/icae/raw/pwc
+```
+
+将下载文件按以下规则整理为训练命令使用的 JSONL，每行一个 JSON 对象，输出路径均相对于 `data/reproductions/icae/`。
+
+- **预训练数据**：使用 Zstandard 解压 `raw/the-pile/train/*.jsonl.zst`，从各训练分片提取非空 `text` 并合并为 `pretrain/train.jsonl`。每篇一行，如 `{"text":"The Nile flows into the Mediterranean Sea."}`。训练脚本从正文自动构造重建或续写目标。
+- **指令微调数据**：作者公开的 PwC 由 GPT-4 根据 The Pile 文本生成指令和答案。从 `raw/pwc/PwC_train.jsonl` 保留 `input`（正文）、`prompt`（指令）和 `answer`（答案）三个字段，保存为 `finetune/train.jsonl`。`PwC_test.jsonl` 留作测试。[PwC 数据文件](https://huggingface.co/datasets/sggetao/PwC/tree/main) · [论文附录 C](https://arxiv.org/html/2307.06945v4#A3)
+- **可选验证集**：预训练可解压 `raw/the-pile/val.jsonl.zst`，提取非空 `text` 保存为 `pretrain/dev.jsonl`。指令微调可将 `PwC_train.jsonl` 按相同 `input` 分组后划分为 `finetune/train.jsonl` 和 `finetune/dev.jsonl`，使同一正文的所有指令落在同一划分。
+
+下表按原始数据逐条统计，包含空字段。长度为 Qwen3-4B-Instruct-2507 tokenizer 对完整字段文本的分词数，不含聊天模板或额外的特殊 token。
+
+| 字段 | 长度范围（token） | 平均长度（token） |
+---|---:|---:|
+| The Pile 验证集（214,670） |
+| 正文 `text` | 0–1,208,908 | 1,585.99 |
+| PwC 训练集 / 测试集（241,564 / 18,146） |
+| 正文 `input` | 126–802 / 198–917 | 469.98 / 494.40 |
+| 指令 `prompt` | 4–63 / 4–49 | 12.72 / 12.91 |
+| 答案 `answer` | 1–590 / 0–467 | 46.66 / 47.55 |
+
+**训练参数**
 
 | 训练脚本参数 | 用途与默认值 |
 |---|---|
 | `--model-path` | 必填，本地基座模型与 tokenizer 目录 |
-| `--train-file`、`--validation-file` | 必填，当前阶段的训练集、验证集文件路径，支持 JSON 和 JSONL |
+| `--train-file` | 必填，当前阶段的训练集文件路径，支持 JSON 和 JSONL |
+| `--validation-file` | 可选，当前阶段的验证集文件路径，支持 JSON 和 JSONL |
 | `--output-dir` | 必填，当前阶段的训练输出目录 |
-| `--checkpoint` | 指令微调必填，预训练 ICAE 的 `.safetensors` 文件 |
-| `--fixed-mem-size`、`--mean-compression-rate` | 每块记忆槽数和目标压缩率，默认 `128`、`4`。槽数为 2 的幂；微调及评估沿用预训练设置 |
+| `--checkpoint` | 指令微调必填，用于初始化微调的预训练 ICAE 权重文件（`.safetensors`） |
+| `--fixed-mem-size` | 每块的记忆槽数，默认 `128`，须为 2 的幂。微调及评估沿用预训练设置 |
+| `--mean-compression-rate` | 目标压缩率，默认 `4`，表示每个记忆槽平均对应 4 个正文 token。微调及评估沿用预训练设置 |
 | `--model-max-length` | Writer 的正文 token 上限，默认 `5120`。预训练随机截取超长训练文本；预训练验证和指令微调使用正文开头。Reader 输入仍须放入基座窗口 |
 | `--lm-ratio` | 仅预训练，采样后文续写目标的概率，默认 `0`（重建原文）；验证始终使用重建目标 |
-| `--num-train-epochs`、`--max-steps` | 默认训练 `1` 轮；`--max-steps` 默认为 `-1`，设为正数时按指定优化步数训练 |
-| `--learning-rate`、`--gradient-accumulation-steps` | 学习率和梯度累积步数，默认 `5e-5`、`1` |
-| `--save-steps`、`--seed` | 两次训练断点间的优化步数和随机种子，默认 `500`、`42` |
+| `--num-train-epochs` | 训练轮数，默认 `1`，仅在 `--max-steps -1` 时生效 |
+| `--max-steps` | 优化器更新总步数，预训练默认 `200000`，指令微调默认 `30000`；设为 `-1` 时按训练轮数执行 |
+| `--learning-rate` | 学习率，预训练默认 `1e-4`，指令微调默认 `5e-5` |
+| `--gradient-accumulation-steps` | 每次优化器更新前累积的微批数，默认按 `256 / WORLD_SIZE` 计算，`WORLD_SIZE` 为训练进程数；无法整除时须显式指定 |
+| `--warmup-steps` | 学习率预热的优化器更新步数，默认 `300` |
+| `--max-grad-norm` | 梯度裁剪范数上限，默认 `2.0` |
+| `--save-steps` | 每隔多少个优化器更新步保存一次训练断点，默认 `500` |
+| `--seed` | 随机种子，默认 `42` |
 
 **预训练**
 
 ```bash
-hf download Qwen/Qwen3-4B-Instruct-2507 --local-dir ~/models/Qwen3-4B-Instruct-2507
-
 CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/pretrain.sh \
   --model-path ~/models/Qwen3-4B-Instruct-2507 \
   --train-file data/reproductions/icae/pretrain/train.jsonl \
-  --validation-file data/reproductions/icae/pretrain/dev.jsonl \
-  --output-dir artifacts/reproductions/icae/train/qwen3_4b_instruct_2507_pretrained_icae_mem128_cr4 \
-  --gradient-accumulation-steps 4
+  --output-dir artifacts/reproductions/icae/train/qwen3_4b_instruct_2507_pretrained_icae_mem128_cr4
 ```
 
 **指令微调**
@@ -86,20 +130,10 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/instruction_finetune.sh
   --model-path ~/models/Qwen3-4B-Instruct-2507 \
   --checkpoint artifacts/reproductions/icae/train/qwen3_4b_instruct_2507_pretrained_icae_mem128_cr4/model.safetensors \
   --train-file data/reproductions/icae/finetune/train.jsonl \
-  --validation-file data/reproductions/icae/finetune/dev.jsonl \
-  --output-dir artifacts/reproductions/icae/train/qwen3_4b_instruct_2507_ft_icae_mem128_cr4 \
-  --gradient-accumulation-steps 4
+  --output-dir artifacts/reproductions/icae/train/qwen3_4b_instruct_2507_ft_icae_mem128_cr4
 ```
 
 - **训练产物**：最终权重在 `<output-dir>/model.safetensors`，包含 Writer 的 LoRA 和记忆及控制标记嵌入。训练断点位于 `checkpoint-<step>/`。中断后用相同参数和输出目录重新启动会从最新断点恢复优化器和步数；新实验或新阶段请使用各自的输出目录。
-- **接入评估**：将最终文件或中间断点中的 `model.safetensors` 直接传给评估脚本的 `--checkpoint`。预训练权重选 `--stage pretrained`，指令微调权重选 `--stage finetuned`，两者均使用训练时的基座和压缩设置。例如：
-
-```bash
-CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_locomo.sh \
-  --stage finetuned \
-  --model-path ~/models/Qwen3-4B-Instruct-2507 \
-  --checkpoint artifacts/reproductions/icae/train/qwen3_4b_instruct_2507_ft_icae_mem128_cr4/model.safetensors
-```
 
 ## 三、通用功能
 

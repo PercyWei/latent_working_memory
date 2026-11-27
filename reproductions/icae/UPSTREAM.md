@@ -2,7 +2,7 @@
 
 创建时间：20260904 10:13:57 Asia/Shanghai
 
-最后修订时间：20261126 23:52:23 Asia/Shanghai
+最后修订时间：20261127 10:24:41 Asia/Shanghai
 
 ## ICAE v2
 
@@ -15,7 +15,9 @@ Writer 和训练用 Reader 通过 Transformers 的 `attn_implementation="flash_a
 | 基座和 tokenizer | [mistralai/Mistral-7B-Instruct-v0.2](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.2/tree/63a8b081895390a26e140280378bc85ec8bce07a)，Apache-2.0 |
 | Writer LoRA 和记忆槽 | [sggetao/icae](https://huggingface.co/sggetao/icae/tree/c95c70d670c8a284550610b49b0f26d2a3b2d1e3)，模型卡标注 Apache-2.0 |
 
-项目的预训练与指令微调入口沿用官方 v2 的训练目标，均从命令行接收基座、训练集和验证集路径。指令微调从预训练权重初始化，按基座 tokenizer 的聊天模板拼接记忆、`[FT]` 和问题，对答案及 EOS 计算损失。每张 GPU 每个 microbatch 处理一篇正文，多卡训练和梯度累积可扩大有效批量。[数据与训练实现](source/icae/code/icae_v2/training_utils.py) · [训练示例](README.md#二原论文复现)
+项目的预训练与指令微调入口沿用官方 v2 的训练目标，均从命令行接收基座、训练集和可选的验证集路径。仅在提供验证集时于训练结束后计算验证 loss。指令微调从预训练权重初始化，按基座 tokenizer 的聊天模板拼接记忆、`[FT]` 和问题，对答案及 EOS 计算损失。每张 GPU 每个 microbatch 处理一篇正文，默认按训练进程数设置梯度累积，使全局有效批量为 256。[数据与训练实现](source/icae/code/icae_v2/training_utils.py) · [训练示例](README.md#二原论文复现)
+
+优化超参数参考[论文附录 A](https://arxiv.org/html/2307.06945v4#A1) 的 Llama 系列实验：预训练默认学习率 `1e-4`、更新 `200000` 步，指令微调默认学习率 `5e-5`、更新 `30000` 步，均使用 AdamW、BF16、300 步 warmup 和 `2.0` 的梯度裁剪范数。这些是项目采用的论文参考配置，并非作者完整披露的 Mistral v2 训练配置。
 
 两个阶段均冻结基座和 Reader，更新 Writer LoRA 和记忆及控制标记的嵌入。Trainer 将这些可训练参数写入 `model.safetensors`，与公开 ICAE v2 权重使用相同的参数名。微调与评估共用权重加载逻辑，训练中间的 `checkpoint-<step>/` 同时保留 Trainer 的续训状态。[模型与 checkpoint 加载](source/icae/code/icae_v2/modeling_icae_multi_span.py)
 
