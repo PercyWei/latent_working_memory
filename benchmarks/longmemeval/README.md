@@ -2,7 +2,7 @@
 
 创建时间：20261126 10:49:01 Asia/Shanghai
 
-最后修订时间：20261127 15:56:39 Asia/Shanghai
+最后修订时间：20261127 16:12:47 Asia/Shanghai
 
 本目录维护 LongMemEval 的数据读取、按题生成、问答评分和结果格式。[官方仓库](https://github.com/xiaowu0162/LongMemEval) · [清洗版数据](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/tree/98d7416c24c778c2fee6e6f3006e7a073259d48f)
 
@@ -134,9 +134,9 @@ show_runs([
 ])
 ```
 
-ICAE、AutoCompressors 和 SDCC 使用 `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`。`--output-dir` 可连续接收多个 checkpoint 目录，也可重复指定该参数。侧栏可筛选 checkpoint。LongMemEval-S 和 Oracle 各有“参与比较的运行”多选框，默认全选。柱图分别对照所选运行的总体准确率、题型宏平均和证据不足题准确率。顶部图例列出完整运行标签，柱顶显示百分比分数。[checkpoint 看板入口](../checkpoint_dashboard.py)
+ICAE、AutoCompressors 和 SDCC 使用 `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`。`--output-dir` 可连续接收多个 checkpoint 目录，也可重复指定该参数。LongMemEval-S 和 Oracle 各自列出两级复选框，默认全选。可勾选整个 checkpoint 或其下单独的 `output_id`，所有子项和已选数量始终可见。柱图分别对照所选运行的总体准确率、题型宏平均和证据不足题准确率。顶部图例列出完整运行标签，柱顶显示百分比分数。[checkpoint 看板入口](../checkpoint_dashboard.py)
 
-可跨 checkpoint 和压缩设置任选运行，同参数的不同 `output_id` 也可分别选取。分题型统计表和底部的逐题回答、裁判判定随选择同步更新。筛选前后配色一致，清空选择后该任务显示选择提示。[多目录命令与排序规则](../locomo/README.md#方法看板接入)
+运行按 checkpoint 名、压缩参数数值、`output_id` 排序。每个 checkpoint 使用一种色系，不同设置的深浅按全部输入预先分配。分题型统计表和底部的逐题回答、裁判判定随选择同步更新。筛选前后配色一致，清空选择后该任务显示选择提示。[多目录命令与排序规则](../locomo/README.md#方法看板接入)
 
 按运行 ID 保存结果的方法使用 `benchmarks.locomo.dashboard.run_dashboard(method, title, render_results, argv=None, qasper=False)`，`--output-dir` 指向运行目录。入口选择一个已评分任务，核对方法与任务后调用 `show_runs` 展示 LongMemEval；`render_results` 回调负责 LoCoMo 的方法专属页面。[公共方法入口](../locomo/dashboard.py) · [LaCT 接入示例](../../reproductions/lact/evaluation/dashboard.py)
 

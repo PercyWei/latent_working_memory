@@ -1,6 +1,6 @@
 # 论文复现
 
-最后修订时间：20261127 15:56:39 Asia/Shanghai
+最后修订时间：20261127 16:12:47 Asia/Shanghai
 
 本目录保存论文方法的独立复现。训练和评估入口、依赖环境、源码来源及结果分别在各方法目录维护。
 
@@ -131,9 +131,9 @@ LaCT 的来源目录为 `source/lact/`、`source/flame/`；E²-TTT 为 `source/e
 
 ## Benchmark 结果看板
 
-各方法通过 `scripts/dashboard.sh` 在当前激活的方法环境中启动看板。ICAE、AutoCompressors 和 SDCC 的 `--output-dir` 接收一个或多个 `<output-root>/eval/<checkpoint_name>/`，可连续列出目录或重复指定该参数。侧栏筛选 checkpoint，各任务顶部的“参与比较的运行”默认全选，可跨 checkpoint 和压缩设置自由组合。标签在单目录下为 `output_id`，多目录下为 `<checkpoint_name>/<output_id>`，同参数的多次运行各自保留。[checkpoint 看板入口](../benchmarks/checkpoint_dashboard.py)
+各方法通过 `scripts/dashboard.sh` 在当前激活的方法环境中启动看板。ICAE、AutoCompressors 和 SDCC 的 `--output-dir` 接收一个或多个 `<output-root>/eval/<checkpoint_name>/`，可连续列出目录或重复指定该参数。每个任务直接列出两级复选框，默认全部选中。每个 checkpoint 下始终列出各运行的 `output_id` 和已选数量。子项可单独勾选。全选时点击 checkpoint 可清空该组，只选部分或未选时点击可全选。[checkpoint 看板入口](../benchmarks/checkpoint_dashboard.py)
 
-柱图按核心指标分组，顶部图例列出所有所选运行，柱顶显示百分比分数。运行先按压缩参数数值，再按 checkpoint 名和 `output_id` 自然排序。同参数同色系，不同 checkpoint 用深浅区分，筛选前后配色一致。评分详细表、LoCoMo 记忆统计与底部逐题回答同步展示所选运行。清空某个任务的选择后，该任务显示选择提示。[多目录命令示例](../benchmarks/locomo/README.md#方法看板接入)
+运行先按 checkpoint 名自然排序，再按压缩参数数值升序、`output_id` 自然序排列。每个 checkpoint 使用一种色系。看板按全部输入目录、全部任务中的不同压缩设置预先分配深浅，参数从小到大对应从深到浅的等距色阶，只有一种设置时使用中等明度。同一 checkpoint 和设置跨任务同色，筛选时颜色保持固定。柱图按核心指标分组，顶部图例列出所选运行，柱顶显示百分比分数。详细统计、LoCoMo 记忆用量和逐题回答随选择同步更新。清空某个任务的选择后，该任务显示选择提示。[多目录命令示例](../benchmarks/locomo/README.md#方法看板接入)
 
 LaCT、In-Place TTT 和 E²-TTT 的 `--output-dir` 指向包含 `locomo/`、`longmemeval_s_cleaned/` 或 `longmemeval_oracle/` 的运行目录，在页面中选择一个已评分任务查看。
 

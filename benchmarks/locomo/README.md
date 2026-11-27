@@ -2,7 +2,7 @@
 
 创建时间：20261124 15:43:38 Asia/Shanghai
 
-最后修订时间：20261127 15:56:39 Asia/Shanghai
+最后修订时间：20261127 16:12:47 Asia/Shanghai
 
 本目录提供 LoCoMo 的公共评估与看板接口。公共层维护数据、调度、评分和结果格式；各方法维护模型加载、正文处理、答案生成及自己的启动脚本。数据准备见[公共 benchmark 说明](../README.md)。
 
@@ -187,7 +187,7 @@ bash benchmarks/locomo/scripts/dashboard.sh \
 | `show_scores(metrics, extra_metrics=())` | 展示总体及分题型 F1 和题数；可通过 `(标签, 已格式化数值)` 序列追加方法指标卡 |
 | `show_answers(directory, metrics)` | `directory` 指向含 `details.jsonl` 的 LoCoMo 结果目录，展示筛选后的逐题回答 |
 
-ICAE、AutoCompressors 和 SDCC 使用 [checkpoint 看板入口](../checkpoint_dashboard.py) `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`。`--output-dir` 接收一个或多个 `<output-root>/eval/<checkpoint_name>/`，可在一次参数后连续列出目录，也可重复该参数。多个 checkpoint 可在侧栏选择，默认全部选中，例如：
+ICAE、AutoCompressors 和 SDCC 使用 [checkpoint 看板入口](../checkpoint_dashboard.py) `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`。`--output-dir` 接收一个或多个 `<output-root>/eval/<checkpoint_name>/`，可在一次参数后连续列出目录，也可重复该参数。例如，可在同一看板比较以下两个 checkpoint：
 
 ```bash
 bash reproductions/icae/scripts/dashboard.sh --output-dir \
@@ -195,9 +195,9 @@ bash reproductions/icae/scripts/dashboard.sh --output-dir \
   artifacts/reproductions/icae/eval/mistral_7b_ft_icae
 ```
 
-入口按 `summary.json` 中的 benchmark 及其设置或划分组织任务。每个任务顶部的“参与比较的运行”默认全选，可跨 checkpoint 和压缩设置自由组合。单目录按 `output_id` 选择，多目录按 `<checkpoint_name>/<output_id>` 选择，相同参数的多次运行各自保留。LoCoMo 柱图按总体及各题型 F1 分组，顶部列出所选运行的完整图例，柱顶显示百分比分数。
+入口按 `summary.json` 中的 benchmark 及其设置或划分组织任务。每个任务直接列出两级复选框，默认全部选中。每个 checkpoint 下始终列出各运行的 `output_id` 和已选数量。子项可单独勾选。全选时点击 checkpoint 可清空该组，只选部分或未选时点击可全选。LoCoMo 柱图按总体及各题型 F1 分组，顶部列出所选运行的完整图例，柱顶显示百分比分数。
 
-运行按压缩参数数值升序排列，参数相同时依次按 checkpoint 名和 `output_id` 自然排序。配色由全部输入运行确定，同参数同色系，不同 checkpoint 用深浅区分。筛选后配色固定，评分详细表、`render_memory(runs)` 展示的记忆统计和底部逐题对照同步更新。清空某任务的选择后，该任务显示选择提示。
+各任务先按 checkpoint 名自然排序，同一 checkpoint 内按压缩参数数值升序排列，同参数的运行按 `output_id` 自然排序。每个 checkpoint 使用一种色系。看板按全部输入目录、全部任务中的不同压缩设置预先分配深浅，参数从小到大对应从深到浅的等距色阶，只有一种设置时使用中等明度。同一 checkpoint 和设置跨任务同色，筛选时颜色保持固定。评分详细表、`render_memory(runs)` 展示的记忆统计和底部逐题对照同步更新。清空某任务的选择后，该任务显示选择提示。
 
 按运行 ID 保存结果的方法，其 `render_results` 回调依次调用 `show_scores(summary["metrics"])`、方法专属展示和 `show_answers(directory, summary["metrics"])`。
 

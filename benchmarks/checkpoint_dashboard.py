@@ -27,6 +27,39 @@ def natural_key(value):
                  for index, part in enumerate(parts)), value
 
 
+def select_runs(available, method, task):
+    """按 checkpoint 全选或逐个勾选运行，结果沿用传入的比较顺序。"""
+    def toggle_checkpoint(parent_key, child_keys):
+        for key in child_keys:
+            st.session_state[key] = st.session_state[parent_key]
+
+    by_checkpoint = {}
+    for run in available:
+        directory = run["directory"]
+        by_checkpoint.setdefault(directory.parent, []).append(directory)
+
+    selected = set()
+    for checkpoint in sorted(by_checkpoint, key=lambda path: natural_key(path.name)):
+        directories = by_checkpoint[checkpoint]
+        parent_key = f"checkpoint-all:{method}:{task}:{checkpoint}"
+        child_keys = [f"checkpoint-run:{method}:{task}:{path}" for path in directories]
+        count = sum(st.session_state.setdefault(key, True) for key in child_keys)
+        all_selected = count == len(directories)
+        if st.session_state.get(parent_key) != all_selected:
+            st.session_state[parent_key] = all_selected
+
+        with st.container(horizontal=True, vertical_alignment="center"):
+            st.checkbox(checkpoint.name, key=parent_key, on_change=toggle_checkpoint,
+                        args=(parent_key, child_keys))
+            st.caption(f"已选 {count}/{len(directories)}", width="content")
+        with st.columns([1, 30], gap="small")[1]:
+            for directory, key in zip(directories, child_keys, strict=True):
+                if st.checkbox(directory.name, key=key):
+                    selected.add(directory)
+
+    return [run for run in available if run["directory"] in selected]
+
+
 def show_comparison_chart(runs, colors):
     """将所选 checkpoint 和压缩设置放在同一张核心指标柱图中。"""
     task = runs[0]["summary"]["benchmark"]
@@ -88,11 +121,6 @@ def run_dashboard(method, title, render_memory, argv=None):
     st.set_page_config(page_title=title, layout="wide")
     multiple = len(directories) > 1
     st.title(f"{title} · {'checkpoint 比较' if multiple else checkpoint_names[0]}")
-    selected = st.sidebar.multiselect("Checkpoint", checkpoint_names, default=checkpoint_names,
-                                      key="checkpoint-directories") if multiple else checkpoint_names
-    if not selected:
-        st.info("请选择需要比较的 checkpoint。")
-        return
 
     parameters = {
         "icae": ("fixed_mem_size", "mean_compression_rate"),
@@ -111,36 +139,36 @@ def run_dashboard(method, title, render_memory, argv=None):
                 if summary["method"] != method or task not in TASK_LABELS:
                     raise ValueError(f"{path.parent} 中的方法或任务与 {title} 不一致。")
                 compression_settings.add(tuple(summary["settings"][name] for name in parameters))
-                if directory.name in selected:
-                    label = f"{directory.name}/{path.parent.name}" if multiple else path.parent.name
-                    grouped.setdefault(task, []).append({
-                        "label": label, "directory": path.parent, "summary": summary,
-                    })
+                label = f"{directory.name}/{path.parent.name}" if multiple else path.parent.name
+                grouped.setdefault(task, []).append({
+                    "label": label, "directory": path.parent, "summary": summary,
+                })
         if not grouped:
-            st.info("所选 checkpoint 下未找到已评分的评估结果。")
+            st.info("输入的 checkpoint 目录下未找到已评分的评估结果。")
             return
     except (OSError, KeyError, ValueError) as error:
         st.error(f"无法读取评估结果。{error}")
         return
 
-    setting_indices = {setting: index for index, setting in enumerate(sorted(compression_settings))}
+    setting_count = len(compression_settings)
+    setting_lightness = {
+        setting: 0.50 if setting_count == 1 else 0.28 + 0.48 * index / (setting_count - 1)
+        for index, setting in enumerate(sorted(compression_settings))
+    }
     checkpoint_indices = {name: index for index, name in enumerate(checkpoint_names)}
-    st.caption("各任务可独立选择参与比较的运行；图表、统计表和逐题回答随选择同步更新。")
+    st.caption("各任务可按 checkpoint 全选设置，也可逐项勾选；图表、统计表和逐题回答同步更新。")
     task_runs = {}
     for task in TASK_LABELS:
         if task not in grouped:
             continue
         available = sorted(grouped[task], key=lambda run: (
+            natural_key(run["directory"].parent.name),
             tuple(run["summary"]["settings"][name] for name in parameters),
-            natural_key(run["directory"].parent.name), natural_key(run["directory"].name),
+            natural_key(run["directory"].name),
         ))
         st.header(TASK_LABELS[task])
-        labels = [run["label"] for run in available]
-        selected_labels = st.multiselect(
-            "参与比较的运行", labels, default=labels, key=f"checkpoint-runs:{method}:{task}",
-            help="可自由组合不同 checkpoint 和压缩设置；每个 output_id 对应一次独立评估。",
-        )
-        paths = [(run["label"], run["directory"]) for run in available if run["label"] in selected_labels]
+        chosen = select_runs(available, method, task)
+        paths = [(run["label"], run["directory"]) for run in chosen]
         if not paths:
             st.info("请选择该任务中需要比较的运行。")
             continue
@@ -160,16 +188,9 @@ def run_dashboard(method, title, render_memory, argv=None):
         colors = {}
         for run in runs:
             setting = tuple(run["summary"]["settings"][name] for name in parameters)
-            index = setting_indices[setting]
-            hue = (0.60 + index * 0.618) % 1
-            if multiple:
-                checkpoint_index = checkpoint_indices[run["directory"].parent.name]
-                lightness = 0.34 + 0.24 * checkpoint_index / (len(directories) - 1)
-                if task == "longmemeval_oracle":
-                    lightness += 0.10
-            else:
-                lightness = 0.66 if task == "longmemeval_oracle" else 0.42
-            rgb = hls_to_rgb(hue, lightness, 0.60)
+            checkpoint_index = checkpoint_indices[run["directory"].parent.name]
+            hue = (0.60 + checkpoint_index * 0.618) % 1
+            rgb = hls_to_rgb(hue, setting_lightness[setting], 0.65)
             colors[run["label"]] = "#" + "".join(f"{round(value * 255):02x}" for value in rgb)
         show_comparison_chart(runs, colors)
         with st.expander("详细统计"):
