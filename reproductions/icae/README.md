@@ -2,7 +2,7 @@
 
 创建时间：20260904 10:13:57 Asia/Shanghai
 
-最后修订时间：20261127 20:33:44 Asia/Shanghai
+最后修订时间：20261127 20:45:55 Asia/Shanghai
 
 [环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能](#三通用功能)
 
@@ -239,6 +239,28 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_qasper.sh \
   --batch-size-per-gpu 2
 ```
 
+#### 4. MuSiQue-Ans
+
+| 完整评估脚本参数 | 用途与默认值 |
+|---|---|
+| `--benchmark-data` | 默认 `data/benchmarks/musique` |
+| `--split` | 支持 `dev`（默认） |
+| `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
+
+- **评估范围**：使用 MuSiQue-Ans v1.0 dev 的全部 2,417 道题。[数据下载与评估协议](../../benchmarks/musique/README.md#评估约定)
+- **推理方式**：按题分配 GPU。Writer 压缩每题全部候选段落，Reader 从各题对应的记忆并行作答。
+- **评分口径**：在本地逐题计算官方 Answer F1 和 EM，汇总总体与各推理跳数的分数。
+- **产物保存**：评估结果默认写入 `<output_root>/eval/<checkpoint_name>/mem<fixed_mem_size>_cr<mean_compression_rate>_musique_<split>/`。
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_musique.sh \
+  --split dev \
+  --stage finetuned \
+  --model-path ~/models/Mistral-7B-Instruct-v0.2 \
+  --checkpoint ~/models/reproductions/icae/mistral_7b_ft_icae.safetensors \
+  --batch-size-per-gpu 2
+```
+
 <a id="33-结果展示"></a>
 
 ### 3.2 结果展示
@@ -261,4 +283,4 @@ bash reproductions/icae/scripts/dashboard.sh --output-dir \
 
 LoCoMo 记忆表列出各设置的 ICAE 阶段、基座、每块记忆槽数和目标压缩率，并按对话等权汇总记忆 token 数和保留比例。展开明细可查看每段对话的正文与记忆 token 数及保留比例。
 
-汇总指标保存在各运行的 `summary.json` 中，逐题回答、参考答案及评分保存在 `details.jsonl` 中。页面底部可对照各运行对同一道题的回答和评分。先选择任务，再选择问题。LoCoMo 可按题型和对话筛选，LongMemEval 可按题型筛选，QASPER 可按论文筛选。
+汇总指标保存在各运行的 `summary.json` 中，逐题回答、参考答案及评分保存在 `details.jsonl` 中。页面底部可对照各运行对同一道题的回答和评分。先选择任务，再选择问题。LoCoMo 可按题型和对话筛选，LongMemEval 可按题型筛选，QASPER 可按论文筛选，MuSiQue 可按推理跳数筛选。

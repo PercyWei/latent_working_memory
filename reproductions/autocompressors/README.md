@@ -2,7 +2,7 @@
 
 创建时间：20261124 11:54:28 Asia/Shanghai
 
-最后修订时间：20261127 16:12:47 Asia/Shanghai
+最后修订时间：20261127 20:46:33 Asia/Shanghai
 
 [环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能](#三通用功能)
 
@@ -130,6 +130,27 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/autocompressors/scripts/eval_qasper.
   --batch-size-per-gpu 2
 ```
 
+#### 4. MuSiQue-Ans
+
+| 完整评估脚本参数 | 用途与默认值 |
+|---|---|
+| `--benchmark-data` | 默认 `data/benchmarks/musique` |
+| `--split` | 支持 `dev`（默认） |
+| `--segment-length` | 默认 `2048` |
+| `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
+
+- **评估范围**：覆盖 MuSiQue-Ans dev 的 2,417 道题。[评估协议与数据下载](../../benchmarks/musique/README.md#评估约定)
+- **推理方式**：Writer 为每题的全部候选段落独立生成摘要，Reader 按批作答。后续正文段的长度受剩余窗口限制。
+- **评分口径**：在本地逐题计算官方 Answer F1 和 EM，汇总总体及各推理跳数的分数。
+- **产物保存**：评估结果默认写入 `<output_root>/eval/<checkpoint_name>/seg<segment_length>_musique_<split>/`。
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash reproductions/autocompressors/scripts/eval_musique.sh \
+  --split dev \
+  --checkpoint ~/models/reproductions/autocompressors/AutoCompressor-Llama-2-7b-6k \
+  --batch-size-per-gpu 2
+```
+
 <a id="33-结果展示"></a>
 
 ### 3.2 结果展示
@@ -152,4 +173,4 @@ bash reproductions/autocompressors/scripts/dashboard.sh --output-dir \
 
 LoCoMo 摘要用量表列出模型和分段长度，并按对话等权汇总摘要 token 数和保留比例。展开明细可查看每段对话的正文与摘要 token 数及保留比例。
 
-汇总指标保存在各运行的 `summary.json` 中，逐题回答、参考答案及评分保存在 `details.jsonl` 中。页面底部可对照各运行对同一道题的回答和评分。先选择任务，再选择问题。LoCoMo 可按题型和对话筛选，LongMemEval 可按题型筛选，QASPER 可按论文筛选。
+汇总指标保存在各运行的 `summary.json` 中，逐题回答、参考答案及评分保存在 `details.jsonl` 中。页面底部可对照各运行对同一道题的回答和评分。先选择任务，再选择问题。LoCoMo 可按题型和对话筛选，LongMemEval 可按题型筛选，QASPER 可按论文筛选，MuSiQue 可按推理跳数筛选。

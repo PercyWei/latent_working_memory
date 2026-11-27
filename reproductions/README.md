@@ -1,14 +1,14 @@
 # 论文复现
 
-最后修订时间：20261127 20:33:44 Asia/Shanghai
+最后修订时间：20261127 20:46:57 Asia/Shanghai
 
 本目录保存论文方法的独立复现。训练和评估入口、依赖环境、源码来源及结果分别在各方法目录维护。
 
 | 方法 | 入口 | 范围 |
 |---|---|---|
-| ICAE | [icae](icae/README.md) | ICAE v2 预训练与指令微调（示例基座 Qwen3-4B-Instruct-2507），以及自训权重和 Mistral 公开权重的 LoCoMo、LongMemEval 和 QASPER 评估 |
-| AutoCompressors | [autocompressors](autocompressors/README.md) | 官方 Llama-2-7B-6k 摘要向量在 LoCoMo、LongMemEval 和 QASPER 上的评估 |
-| SDCC | [sdcc](sdcc/README.md) | 官方 Qwen3-4B 半动态压缩权重在 LoCoMo、LongMemEval 和 QASPER 上的评估 |
+| ICAE | [icae](icae/README.md) | ICAE v2 预训练与指令微调（示例基座 Qwen3-4B-Instruct-2507），以及自训权重和 Mistral 公开权重的 LoCoMo、LongMemEval、QASPER 和 MuSiQue-Ans 评估 |
+| AutoCompressors | [autocompressors](autocompressors/README.md) | 官方 Llama-2-7B-6k 摘要向量在 LoCoMo、LongMemEval、QASPER 和 MuSiQue-Ans 上的评估 |
+| SDCC | [sdcc](sdcc/README.md) | 官方 Qwen3-4B 半动态压缩权重在 LoCoMo、LongMemEval、QASPER 和 MuSiQue-Ans 上的评估 |
 | C-DIC | [cdic](cdic/README.md) | 多轮记忆、MSC 训练与评估 |
 | LaCT | [lact](lact/README.md) | 760M 模型的 RULER、LoCoMo 和 LongMemEval 评估 |
 | E²-TTT | [e2_ttt](e2_ttt/README.md) | 1.3B 模型的 RULER、SQuAD completion、SWDE、LoCoMo 和 LongMemEval 评估 |
@@ -86,6 +86,10 @@ SDCC 在 Qwen3-4B-Instruct-2507 上按整段对话选择 2×、4×、8×、16× 
 ## QASPER
 
 ICAE v2、AutoCompressors 和 SDCC 通过各自的 `scripts/eval_qasper.sh` 评估 QASPER test，可与 Full-context 比较。预测和 Answer F1 默认保存到 `<output-root>/eval/<checkpoint_name>/<压缩设置>_qasper_test/`；`--output-id` 可替换最后一级目录名。用相同命令加 `--resume` 续评，自定义 ID 须沿用原值。[四种方法的入口](../benchmarks/README.md#公共-qasper-评估) · [QASPER 公共评估协议](../benchmarks/qasper/README.md#评估约定)
+
+## MuSiQue-Ans
+
+三种压缩方法通过各自的 `scripts/eval_musique.sh` 评估完整 dev，按总体和跳数汇总 Answer F1、EM。结果默认写入 `<output-root>/eval/<checkpoint_name>/<压缩设置>_musique_dev/`。用 `--output-id` 可指定末级目录，用相同命令加 `--resume` 可续评。[四种方法的入口](../benchmarks/README.md#公共-musique-评估) · [MuSiQue 评估协议](../benchmarks/musique/README.md#评估约定) · [公共看板](../benchmarks/musique/README.md#跨运行比较)
 
 ## TTT 模型评估
 

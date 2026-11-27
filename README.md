@@ -1,8 +1,8 @@
 # 20260912_latent_working_memory
 
-最后修订时间：20261126 23:52:23 Asia/Shanghai
+最后修订时间：20261127 20:46:57 Asia/Shanghai
 
-本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理，入口见 [reproductions](reproductions/README.md)。Full-context 和六种复现基线支持 LoCoMo、LongMemEval-S 和 LongMemEval-Oracle。Full-context、ICAE、AutoCompressors 和 SDCC 还支持 QASPER 论文全文问答。[软上下文压缩复现](reproductions/README.md#软上下文压缩的-locomo-评估) · [LongMemEval 评估协议](benchmarks/longmemeval/README.md#评估约定) · [QASPER 评估协议](benchmarks/qasper/README.md#评估约定)
+本项目用于研究 streaming mutable latent working memory，并开展 matched-budget context compression 实验。论文复现与新方法分开管理，入口见 [reproductions](reproductions/README.md)。Full-context 和六种复现基线支持 LoCoMo、LongMemEval-S 和 LongMemEval-Oracle。Full-context、ICAE、AutoCompressors 和 SDCC 还支持 QASPER 论文全文问答和 MuSiQue-Ans 多跳问答。[软上下文压缩复现](reproductions/README.md#软上下文压缩的-locomo-评估) · [LongMemEval 评估协议](benchmarks/longmemeval/README.md#评估约定) · [QASPER 评估协议](benchmarks/qasper/README.md#评估约定) · [MuSiQue 评估协议](benchmarks/musique/README.md#评估约定)
 
 当前在线 TTT 实现在 [v4.1 方法说明](src/latent_working_memory/v4_1/README.md)：逐层 latent memory、共享 KV、inner AM 与 outer QA + AM。配置、teacher 准备、单卡训练及评估命令见其[运行指南](src/latent_working_memory/v4_1/scripts/README.md)。
 

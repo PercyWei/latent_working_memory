@@ -8,10 +8,11 @@ from pathlib import Path
 import streamlit as st
 
 from benchmarks import ruler_dashboard as ruler
-from benchmarks.comparison_dashboard import show_score_chart
+from benchmarks.comparison_dashboard import show_score_chart, show_score_panels
 from benchmarks.comparison_runs import checkpoint_stage_order, natural_key
 from benchmarks.locomo import compare as locomo
 from benchmarks.longmemeval import dashboard as longmemeval
+from benchmarks.musique import dashboard as musique
 from benchmarks.qasper import dashboard as qasper
 
 
@@ -19,6 +20,7 @@ TASK_LABELS = {
     "locomo": "LoCoMo",
     **{task: f"LongMemEval-{label}" for task, label in longmemeval.SETTINGS.items()},
     **qasper.TASK_LABELS,
+    **musique.TASK_LABELS,
 }
 
 
@@ -59,8 +61,11 @@ def select_runs(available, method, task, has_settings):
 
 
 def show_comparison_chart(runs, colors):
-    """将所选运行放在同一张核心指标柱图中。"""
+    """将所选运行合并展示，MuSiQue 的 F1 与 EM 分图比较。"""
     task = runs[0]["summary"]["benchmark"]
+    if task == "musique":
+        show_score_panels(runs, musique.comparison_panels, colors)
+        return
     scores_by_label = {}
     for run in runs:
         metrics = run["summary"]["metrics"]
@@ -110,8 +115,8 @@ def run_dashboard(method, title, render_memory=None, argv=None):
             for path in directory.glob("*/summary.json"):
                 summary = json.loads(path.read_text(encoding="utf-8"))
                 task = summary["benchmark"]
-                if task == "qasper":
-                    task = f"qasper/{summary['split']}"
+                if task in ("qasper", "musique"):
+                    task = f"{task}/{summary['split']}"
                 if summary["method"] != method or task not in task_labels:
                     raise ValueError(f"{path.parent} 中的方法或任务与 {title} 不一致。")
                 setting = tuple(summary["settings"][name] for name in parameters)
@@ -174,6 +179,8 @@ def run_dashboard(method, title, render_memory=None, argv=None):
                     locomo.validate_runs(runs)
                 elif task in qasper.TASK_LABELS:
                     runs = qasper.load_runs(paths)
+                elif task in musique.TASK_LABELS:
+                    runs = musique.load_runs(paths)
                 elif task == "ruler":
                     runs = ruler.load_runs(paths)
                 else:
@@ -195,6 +202,8 @@ def run_dashboard(method, title, render_memory=None, argv=None):
                     locomo.show_comparison(runs, [run["label"] for run in runs], show_chart=False)
                 elif task in qasper.TASK_LABELS:
                     qasper.show_scores(runs, show_chart=False)
+                elif task in musique.TASK_LABELS:
+                    musique.show_scores(runs)
                 elif task == "ruler":
                     ruler.show_scores(runs)
                 else:
@@ -225,6 +234,8 @@ def run_dashboard(method, title, render_memory=None, argv=None):
             locomo.show_answer_comparison(runs)
         elif task in qasper.TASK_LABELS:
             qasper.show_answers(runs)
+        elif task in musique.TASK_LABELS:
+            musique.show_answers(runs)
         elif task == "ruler":
             ruler.show_answers(runs)
         else:

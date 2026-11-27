@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261127 17:43:30 Asia/Shanghai
+最后修订时间：20261127 20:46:57 Asia/Shanghai
 
 本文介绍 RULER、LoCoMo、LongMemEval、QASPER 和 MuSiQue 的数据格式、评估属性、规模与长度统计及准备方式。以下命令均从项目根目录执行。
 
@@ -222,4 +222,4 @@ Full-context、ICAE v2、AutoCompressors 和 SDCC 均通过 `scripts/eval_qasper
 
 ### 公共 MuSiQue 评估
 
-目前仅提供公共评估接口，接入约定见 [MuSiQue 文档](musique/README.md)。
+Full-context、ICAE v2、AutoCompressors 和 SDCC 均通过 `scripts/eval_musique.sh` 评估 MuSiQue-Ans dev，汇总 Answer F1 和 EM。[公共协议与续评参数](musique/README.md) · [Full-context](../src/latent_working_memory/full_context/README.md) · [ICAE](../reproductions/icae/README.md) · [AutoCompressors](../reproductions/autocompressors/README.md) · [SDCC](../reproductions/sdcc/README.md)

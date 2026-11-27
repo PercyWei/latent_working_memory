@@ -2,7 +2,7 @@
 
 创建时间：20261127 15:58:00 Asia/Shanghai
 
-最后修订时间：20261127 20:33:44 Asia/Shanghai
+最后修订时间：20261127 20:46:57 Asia/Shanghai
 
 MuSiQue 是需要关联多篇文档完成 2–4 跳推理的问答数据集。本目录维护 MuSiQue-Ans v1.0 的读取、答案生成调度、本地 Answer F1／EM 评分及结果展示。[原论文](https://aclanthology.org/2022.tacl-1.31/) · [官方仓库](https://github.com/StonyBrookNLP/musique)
 
@@ -34,7 +34,7 @@ MuSiQue 是需要关联多篇文档完成 2–4 跳推理的问答数据集。�
 | `--benchmark-data` | 输入数据目录，默认 `data/benchmarks/musique` |
 | `--split` | 仅支持 `dev`（默认） |
 | `--output-root` | 输出根目录，默认值由接入方提供 |
-| `--output-id` | 结果目录名；checkpoint 布局默认 `<output_name>_musique_dev`，普通布局默认 `<output_name>_<YYYYMMDD-HHMM>` |
+| `--output-id` | 结果目录名，默认值见[产物与指标](#产物与指标) |
 | `--batch-size-per-gpu` | 每卡批处理数，默认 `1` |
 | `--max-new-tokens` | 每题最多生成的新 token 数，默认 `128` |
 | `--resume` | 沿用原运行进度，默认关闭 |
@@ -46,7 +46,7 @@ MuSiQue 是需要关联多篇文档完成 2–4 跳推理的问答数据集。�
 
 ## 产物与指标
 
-结果目录由公共 `evaluation_directory` 统一构造。普通布局为 `<output-root>/eval/<output-id>/musique/dev/`，续评时指定原 `--output-id`；checkpoint 布局为 `<output-root>/eval/<checkpoint_name>/<output-id>/`，省略 ID 时使用 `<output_name>_musique_dev`，显式指定时以该值作为完整目录名。[目录规则](../output.py)
+结果目录由公共 `evaluation_directory` 统一构造。普通布局为 `<output-root>/eval/<output-id>/musique/dev/`，默认 ID 为 `<output_name>_<YYYYMMDD-HHMM>`，续评时指定原 ID。checkpoint 布局为 `<output-root>/eval/<checkpoint_name>/<output-id>/`，默认 ID 为 `<output_name>_musique_dev`，无前缀时为 `musique_dev`。显式指定的 ID 用作完整目录名。[目录规则](../output.py)
 
 | 文件 | 内容 |
 |---|---|
@@ -87,3 +87,5 @@ bash benchmarks/musique/scripts/dashboard.sh --run-file path/to/runs.txt
 | `comparison_panels(metrics)` | 返回 F1 与 EM 两组主图指标 |
 
 新方法接入公共比较时，在 [comparison_runs.py](../comparison_runs.py) 定义模型与评估参数的读取规则。
+
+[checkpoint 看板入口](../checkpoint_dashboard.py) 按 `MuSiQue · dev` 展示模型或 checkpoint 目录下的已评分设置。

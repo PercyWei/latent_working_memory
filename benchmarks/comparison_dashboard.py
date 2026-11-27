@@ -93,6 +93,14 @@ def show_score_chart(runs, scores_by_label, colors):
     }, width="stretch")
 
 
+def show_score_panels(runs, score_panels, colors):
+    """按指标面板绘图，并在各图中沿用同一运行顺序与配色。"""
+    panels = {run["label"]: score_panels(run["summary"]["metrics"]) for run in runs}
+    for panel in next(iter(panels.values())):
+        st.subheader(panel)
+        show_score_chart(runs, {label: scores[panel] for label, scores in panels.items()}, colors)
+
+
 def parse_run_paths(title, argv=None):
     """合并两种入口的目录，统一解析路径、检查重复并自动生成标签。"""
     parser = argparse.ArgumentParser(description=f"{title} 跨方法、checkpoint 和评估设置比较。")
@@ -165,11 +173,8 @@ def run_comparison(title, load_runs, scope_labels, score_panels, show_tables, sh
                 continue
             selected.extend(runs)
             st.caption(f"已选 {len(runs)} / {len(scope_runs)} 份结果。")
-            panels = {run["label"]: score_panels(run["summary"]["metrics"]) for run in runs}
             colors = {run["label"]: run["color"] for run in runs}
-            for panel in next(iter(panels.values())):
-                st.subheader(panel)
-                show_score_chart(runs, {label: scores[panel] for label, scores in panels.items()}, colors)
+            show_score_panels(runs, score_panels, colors)
             with st.expander("详细统计"):
                 st.dataframe([
                     {"运行": run["label"], "方法": run["method"], "checkpoint / 模型": run["checkpoint"],

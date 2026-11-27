@@ -2,7 +2,7 @@
 
 创建时间：20261125 21:08:04 Asia/Shanghai
 
-最后修订时间：20261127 16:12:47 Asia/Shanghai
+最后修订时间：20261127 20:46:33 Asia/Shanghai
 
 [环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能](#三通用功能)
 
@@ -136,6 +136,27 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/sdcc/scripts/eval_qasper.sh \
   --batch-size-per-gpu 2
 ```
 
+#### 4. MuSiQue-Ans
+
+| 完整评估脚本参数 | 用途与默认值 |
+|---|---|
+| `--benchmark-data` | 默认 `data/benchmarks/musique` |
+| `--split` | 支持 `dev`（默认） |
+| `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
+
+- **评估范围**：覆盖 MuSiQue-Ans dev 的 2,417 道题。[评估协议与数据下载](../../benchmarks/musique/README.md#评估约定)
+- **推理方式**：编码器为每题的全部候选段落独立选择压缩倍率并生成记忆，解码器按批作答。
+- **评分口径**：在本地逐题计算官方 Answer F1 和 EM，汇总总体及各推理跳数的分数。
+- **产物保存**：评估结果默认写入 `<output_root>/eval/<checkpoint_name>/scale<compress-ratio-scale>_musique_<split>/`。
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash reproductions/sdcc/scripts/eval_musique.sh \
+  --split dev \
+  --model-path ~/models/Qwen3-4B-Instruct-2507 \
+  --checkpoint ~/models/reproductions/sdcc/semi-dynamic/ctxcomp-semi-dynamic-mean_pooling-doclen=1200to64-ratios=0.5_0.03125-enc=Qwen3-4B-Instruct-2507-lora-dec=Qwen3-4B-Instruct-2507-lora \
+  --batch-size-per-gpu 2
+```
+
 <a id="33-结果展示"></a>
 
 ### 3.2 结果展示
@@ -159,4 +180,4 @@ bash reproductions/sdcc/scripts/dashboard.sh --output-dir \
 
 LoCoMo 记忆表列出各设置的基座和压缩偏移，并按对话等权汇总记忆 token 数和保留比例。展开明细可查看每段对话选中的压缩档位、正文与记忆 token 数及保留比例。
 
-汇总指标保存在各运行的 `summary.json` 中，逐题回答、参考答案及评分保存在 `details.jsonl` 中。页面底部可对照各运行对同一道题的回答和评分。先选择任务，再选择问题。LoCoMo 可按题型和对话筛选，LongMemEval 可按题型筛选，QASPER 可按论文筛选。
+汇总指标保存在各运行的 `summary.json` 中，逐题回答、参考答案及评分保存在 `details.jsonl` 中。页面底部可对照各运行对同一道题的回答和评分。先选择任务，再选择问题。LoCoMo 可按题型和对话筛选，LongMemEval 可按题型筛选，QASPER 可按论文筛选，MuSiQue 可按推理跳数筛选。

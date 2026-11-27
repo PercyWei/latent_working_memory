@@ -2,9 +2,9 @@
 
 创建时间：20261019 20:16:32 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261127 17:56:10 Asia/Shanghai
+最后修订时间：20261127 20:46:21 Asia/Shanghai
 
-Full-context 基线用原始模型读取完整输入，贪心生成答案。支持 LoCoMo、LongMemEval-S、LongMemEval-Oracle、QASPER 和 RULER。[公共数据准备](../../../benchmarks/README.md)
+Full-context 基线用原始模型读取完整输入，贪心生成答案。支持 LoCoMo、LongMemEval-S、LongMemEval-Oracle、QASPER、MuSiQue-Ans 和 RULER。[公共数据准备](../../../benchmarks/README.md)
 
 ## 一、运行环境
 
@@ -26,7 +26,7 @@ Full-context 基线用原始模型读取完整输入，贪心生成答案。支�
 | `--batch-size-per-gpu` | 每卡批处理数，默认 `1` |
 
 - **运行方式**：每张可见 GPU 加载一个模型副本。完整输入与回答预算之和须在模型的位置窗口内。[运行环境](#一运行环境) · [数据下载](../../../benchmarks/README.md)
-- **输入与解码**：使用基座模型的聊天模板和对应任务的系统提示，将完整会话历史或论文正文与问题放在同一条 user 消息中，从 assistant 起始标记贪心生成回答。Qwen Instruct 关闭 thinking。[输入构造](../prompts.py)
+- **输入与解码**：使用基座模型的聊天模板和对应任务的系统提示，将完整会话历史或文档正文与问题放在同一条 user 消息中，从 assistant 起始标记贪心生成回答。Qwen Instruct 关闭 thinking。[输入构造](../prompts.py)
 - **产物保存**：每次评估的配置、进度和结果统一写入 `<output_root>/eval/<model_name>/<output_id>/`。`<model_name>` 取 `--model-path` 指向的目录名，`<task>` 标识评估任务，默认路径见各任务小节。
 
 <a id="locomo"></a>
@@ -105,6 +105,26 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eva
   --batch-size-per-gpu 2
 ```
 
+### 4. MuSiQue-Ans
+
+| 完整评估脚本参数 | 用途与默认值 |
+|---|---|
+| `--benchmark-data` | 默认 `data/benchmarks/musique` |
+| `--split` | 仅支持 `dev`（默认） |
+| `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
+
+- **评估范围**：使用 MuSiQue-Ans v1.0 的完整 dev 划分，共 2,417 道题。[评估协议与数据下载](../../../benchmarks/musique/README.md#评估约定)
+- **推理方式**：按题分配 GPU，每题读取全部候选段落并独立生成回答。
+- **评分口径**：在本地逐题计算官方 Answer F1 与 EM，汇总总体和各推理跳数的平均分。
+- **产物保存**：评估结果默认写入 `<output_root>/eval/<model_name>/musique_<split>/`。
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eval_musique.sh \
+  --split dev \
+  --model-path ~/models/Qwen3-4B-Instruct-2507 \
+  --batch-size-per-gpu 2
+```
+
 ## 三、RULER 评估
 
 新建 RULER 评估时，基座模型、精度、注意力实现、随机种子和每卡批量的默认值见[共同参数表](#二benchmark-评估)。
@@ -148,6 +168,6 @@ bash src/latent_working_memory/full_context/scripts/dashboard.sh --output-dir \
   artifacts/baselines/full_context/eval/Qwen3-8B
 ```
 
-汇总指标保存在各运行的 `summary.json` 中，逐题回答、参考答案及评分保存在 `details.jsonl` 中。页面底部先选择任务，再选择问题，可对照各运行对同一道题的回答和评分。LoCoMo 可按题型和对话筛选，LongMemEval 可按题型筛选，QASPER 可按论文筛选，RULER 可按长度和子任务筛选。
+汇总指标保存在各运行的 `summary.json` 中，逐题回答、参考答案及评分保存在 `details.jsonl` 中。页面底部先选择任务，再选择问题，可对照各运行对同一道题的回答和评分。LoCoMo 可按题型和对话筛选，LongMemEval 可按题型筛选，QASPER 可按论文筛选，MuSiQue 可按推理跳数筛选，RULER 可按长度和子任务筛选。
 
 RULER 主图展示总体及各长度档准确率，详细统计中可选择长度查看子任务表现；参与比较的运行须使用相同数据及长度范围。LongMemEval-S 与 Oracle 的同题对照见[公共跨运行比较](../../../benchmarks/longmemeval/README.md#跨运行比较)。
