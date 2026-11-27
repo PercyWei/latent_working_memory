@@ -1,0 +1,9 @@
+artifacts/baselines/full_context/eval/Qwen3-4B-Instruct-2507/musique_dev
+artifacts/reproductions/icae/eval/mistral_7b_pretrained_icae/mem128_cr4_musique_dev
+artifacts/reproductions/icae/eval/mistral_7b_pretrained_icae/mem128_cr8_musique_dev
+artifacts/reproductions/icae/eval/mistral_7b_pretrained_icae/mem128_cr16_musique_dev
+artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr4_musique_dev
+artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr8_musique_dev
+artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr16_musique_dev
+artifacts/reproductions/autocompressors/eval/AutoCompressor-Llama-2-7b-6k/seg2048_musique_dev
+artifacts/reproductions/sdcc/eval/ctxcomp-semi-dynamic-mean_pooling-doclen=1200to64-ratios=0.5_0.03125-enc=Qwen3-4B-Instruct-2507-lora-dec=Qwen3-4B-Instruct-2507-lora/scale0_musique_dev
