@@ -2,19 +2,123 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261127 15:58:56 Asia/Shanghai
+最后修订时间：20261127 17:43:30 Asia/Shanghai
 
-本文介绍 RULER、LoCoMo、LongMemEval、QASPER 和 MuSiQue 的数据下载与 RULER 样本生成。以下命令均从项目根目录执行。
+本文介绍 RULER、LoCoMo、LongMemEval、QASPER 和 MuSiQue 的数据格式、评估属性、规模与长度统计及准备方式。以下命令均从项目根目录执行。
 
 ## 1. 数据概览
 
-| Benchmark | 本地数据 | 准备内容 |
+### 数据格式
+
+| Benchmark | 文件格式与记录单位 | 正文 | 题目 | 答案 |
+|---|---|---|---|---|
+| RULER v1 | JSONL，每行一条生成任务 | `input` 中的背景文本 | 同一 `input` 中的任务指令和问题，无独立问题字段 | `outputs`，一个或多个目标答案 |
+| LoCoMo | JSON 数组，每条是一段含多道题的多日对话 | `conversation` 中各 `session_n` 的 `speaker`、`text`、可选 `blip_caption`，以及 `session_n_date_time` | `qa[].question` | 常规题用 `answer`，对抗题用 `adversarial_answer` |
+| LongMemEval | JSON 数组，每条是一道题及其会话历史 | `haystack_sessions` 中的 `role`、`content`，结合 `haystack_dates` 按日期排列 | `question` 与提问日期 `question_date` | `answer` |
+| QASPER v0.3 | JSON 对象，以论文 ID 为键，每篇论文含多道题 | `full_text` 中的 `section_name` 与 `paragraphs`，按章节原顺序拼接 | `qas[].question` | `qas[].answers`，每题可有多份人工标注 |
+| MuSiQue-Ans v1.0 | JSONL，每行一道题及其候选段落 | `paragraphs` 中全部段落的 `title`、`paragraph_text`；dev 每题 17–20 段，保留原始顺序 | `question` | `answer` 及别名 `answer_aliases` |
+
+### 评估属性
+
+| Benchmark | 任务类别 | 官方评估指标 |
 |---|---|---|
-| RULER v1 | `data/benchmarks/ruler-v1/<model-name>/<length>/<task>/test.jsonl` | 下载素材后生成样本；默认 8192、16384、32768 tokens 三档、13 项任务，每档每项 100 条 |
-| LoCoMo | `data/benchmarks/locomo/locomo10.json` | 完整原始 JSON，含 10 段对话及类别 1–5 的 QA 标注 |
-| LongMemEval-S / Oracle | `data/benchmarks/longmemeval/<split>.json`，其中 `<split>` 为 `longmemeval_s_cleaned` 或 `longmemeval_oracle` | 同时下载 S 与 Oracle，各含相同的 500 道题及对应上下文 |
-| QASPER v0.3 | `data/benchmarks/qasper/qasper-test-v0.3.json` | test 原始 JSON，含 416 篇论文、1,451 道题 |
-| MuSiQue-Ans v1.0 | `data/benchmarks/musique/musique_ans_v1.0_dev.jsonl` | dev 原始 JSONL，含 2,417 道题 |
+| RULER v1 | 4 大类、13 项任务：检索（NIAH，8 项）、多跳追踪（VT，1 项）、聚合（CWE/FWE，2 项）、问答（QA，2 项） | **[子串匹配分数](https://github.com/NVIDIA/RULER/blob/c3f5e3b4f87f97e048793bb510a3a6b19a46bf3a/scripts/eval/synthetic/constants.py)**：忽略大小写；QA 命中任一参考答案计 1，否则计 0；其余任务计算命中的目标答案数占目标答案总数的比例。 |
+| LoCoMo | 5 类题型：多跳、时间推理、开放域知识、单跳、对抗 | **[答案 F1](https://github.com/snap-research/locomo/blob/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376/task_eval/evaluation.py)**：归一化及词干化后计算词级 F1；多跳题对每个参考子答案取最佳匹配 F1，再求平均。<br>**对抗题判分**：回答包含 `no information available` 或 `not mentioned` 计 1，否则计 0（忽略大小写）。 |
+| LongMemEval | 6 类题型：单会话用户信息、单会话用户偏好、单会话助手信息、多会话、时间推理、知识更新；另以 `_abs` 标记拒答题 | **[正确性判定](https://github.com/xiaowu0162/LongMemEval/blob/9e0b455f4ef0e2ab8f2e582289761153549043fc/src/evaluation/evaluate_qa.py)**：本项目使用 `gpt-6-luna`，按官方题型规则，根据问题与参考答案判断回答；正确计 1，否则计 0。 |
+| QASPER v0.3 | 4 种答案类型：抽取片段、自由文本、是非、不可回答 | **[Answer F1](https://github.com/allenai/qasper-led-baseline/blob/afd0fb96bf78ce8cd8157639c6f6a6995e4f9089/scripts/evaluator.py)**：预测与数据集参考答案归一化后计算词级 F1，多份参考答案取最高分。<br>**Evidence F1**：预测与数据集参考证据按条目精确匹配计算 F1，多组参考证据取最高分。 |
+| MuSiQue-Ans v1.0 | 按推理跳数分 3 组：2 跳、3 跳、4 跳 | **[Answer F1／EM](https://github.com/StonyBrookNLP/musique/blob/922ac98f19a201998dbdae6d7f2887a5258dbdeb/evaluate_v1.0.py)**：答案归一化后，F1 按词级匹配计算，EM 在字符串完全相同时计 1，否则计 0；两项分别取主答案及别名中的最高分。<br>**[Support F1](https://github.com/StonyBrookNLP/musique/blob/922ac98f19a201998dbdae6d7f2887a5258dbdeb/metrics/support.py)**：按预测与参考支持段落索引集合的交集计算 F1。 |
+
+### 规模与长度
+
+长度使用 [Qwen/Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) tokenizer 统计，单位为 tokens，不加特殊 token、不截断。RULER 统计完整题面，其余统计正文（不含问题和聊天模板），正文按表中单位计数，同一对话或论文只计一次；P50、P95 采用线性插值。
+
+RULER 使用默认设置（`chat`、seed 42、每档每任务 100 条）；`length` 包含生成预算，表中为实际题面长度。LongMemEval S 与 Oracle 对应同一批题目。
+
+| Benchmark | 统计单位 | 样本数 | 题目数 | 每样本题数 | 最短–最长 | P50 | P95 |
+|---|---|---:|---:|---|---:|---:|---:|
+| **RULER v1** | | | | | | | |
+| length 8,192 | 题面 | 1,300 | 1,300 | 1 | 5,544–8,100 | 7,910.5 | 8,066 |
+| length 16,384 | 题面 | 1,300 | 1,300 | 1 | 12,646–16,286 | 16,120 | 16,250 |
+| length 32,768 | 题面 | 1,300 | 1,300 | 1 | 28,345–32,676 | 32,450.5 | 32,642 |
+| **LoCoMo** | | | | | | | |
+|  | 对话 | 10 | 1,986 | 105–260（均值 198.6） | 13,479–25,580 | 23,548 | 25,557.05 |
+| **LongMemEval** | | | | | | | |
+| S | 会话历史 | 500 | 500 | 1 | 99,394–110,731 | 106,311 | 107,960.35 |
+| Oracle | 会话历史 | 500 | 500 | 1 | 146–22,448 | 5,805.5 | 12,047.9 |
+| **QASPER** | | | | | | | |
+| test | 论文 | 416 | 1,451 | 1–10（均值 3.49） | 819–29,828 | 4,441.5 | 8,439 |
+| **MuSiQue-Ans** | | | | | | | |
+| dev | 候选段落集 | 2,417 | 2,417 | 1 | 1,079–5,315 | 2,480 | 3,615.4 |
+
+### 长度分布
+
+每个区间包含 4,096 个整数长度，统计值为数量（占比）。
+
+<details>
+<summary>RULER v1</summary>
+
+| 长度区间（tokens） | length 8,192 | length 16,384 | length 32,768 |
+|---|---:|---:|---:|
+| 4,097–8,192 | 1,300（100.00%） | 0（0.00%） | 0（0.00%） |
+| 12,289–16,384 | 0（0.00%） | 1,300（100.00%） | 0（0.00%） |
+| 24,577–28,672 | 0（0.00%） | 0（0.00%） | 1（0.08%） |
+| 28,673–32,768 | 0（0.00%） | 0（0.00%） | 1,299（99.92%） |
+
+</details>
+
+<details>
+<summary>LoCoMo</summary>
+
+| 长度区间（tokens） | LoCoMo |
+|---|---:|
+| 12,289–16,384 | 1（10.00%） |
+| 16,385–20,480 | 2（20.00%） |
+| 20,481–24,576 | 4（40.00%） |
+| 24,577–28,672 | 3（30.00%） |
+
+</details>
+
+<details>
+<summary>LongMemEval</summary>
+
+| 长度区间（tokens） | S | Oracle |
+|---|---:|---:|
+| 1–4,096 | 0（0.00%） | 170（34.00%） |
+| 4,097–8,192 | 0（0.00%） | 255（51.00%） |
+| 8,193–12,288 | 0（0.00%） | 50（10.00%） |
+| 12,289–16,384 | 0（0.00%） | 16（3.20%） |
+| 16,385–20,480 | 0（0.00%） | 8（1.60%） |
+| 20,481–24,576 | 0（0.00%） | 1（0.20%） |
+| 98,305–102,400 | 7（1.40%） | 0（0.00%） |
+| 102,401–106,496 | 273（54.60%） | 0（0.00%） |
+| 106,497–110,592 | 219（43.80%） | 0（0.00%） |
+| 110,593–114,688 | 1（0.20%） | 0（0.00%） |
+
+</details>
+
+<details>
+<summary>QASPER</summary>
+
+| 长度区间（tokens） | test |
+|---|---:|
+| 1–4,096 | 185（44.47%） |
+| 4,097–8,192 | 207（49.76%） |
+| 8,193–12,288 | 17（4.09%） |
+| 12,289–16,384 | 5（1.20%） |
+| 24,577–28,672 | 1（0.24%） |
+| 28,673–32,768 | 1（0.24%） |
+
+</details>
+
+<details>
+<summary>MuSiQue-Ans</summary>
+
+| 长度区间（tokens） | dev |
+|---|---:|
+| 1–4,096 | 2,387（98.76%） |
+| 4,097–8,192 | 30（1.24%） |
+
+</details>
 
 ## 2. 数据准备
 
@@ -67,7 +171,7 @@ data/
 
 **RULER 样本生成：[generate_ruler.sh](scripts/generate_ruler.sh)**
 
-使用上述固定版本的源码与素材，仅加载 tokenizer 构造样本。源码目录不在默认位置时，传入对应的 `--ruler-source-dir`。
+使用上述固定版本的源码与素材，仅加载 tokenizer 构造样本。源码目录不在默认位置时，传入对应的 `--ruler-source-dir`。样本保存为 `<output-dir>/<length>/<task>/test.jsonl`。
 
 ```bash
 bash benchmarks/scripts/generate_ruler.sh \

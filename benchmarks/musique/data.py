@@ -47,8 +47,8 @@ def load_musique(split, data_dir):
             if not isinstance(decomposition, list) or len(decomposition) not in (2, 3, 4):
                 raise ValueError(f"{qid}: expected a 2-, 3-, or 4-hop question")
             paragraphs = raw["paragraphs"]
-            if not isinstance(paragraphs, list) or len(paragraphs) != 20:
-                raise ValueError(f"{qid}: expected all 20 candidate paragraphs")
+            if not isinstance(paragraphs, list) or not paragraphs:
+                raise ValueError(f"{qid}: expected candidate paragraphs")
             blocks = []
             for paragraph in paragraphs:
                 title, text = paragraph["title"], paragraph["paragraph_text"]
