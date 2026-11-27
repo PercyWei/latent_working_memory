@@ -2,7 +2,7 @@
 
 创建时间：20261127 15:58:00 Asia/Shanghai
 
-最后修订时间：20261127 16:34:57 Asia/Shanghai
+最后修订时间：20261127 18:39:18 Asia/Shanghai
 
 MuSiQue 是需要关联多篇文档完成 2–4 跳推理的问答数据集。本目录维护 MuSiQue-Ans v1.0 的读取、答案生成调度、本地 Answer F1／EM 评分及结果展示。[原论文](https://aclanthology.org/2022.tacl-1.31/) · [官方仓库](https://github.com/StonyBrookNLP/musique)
 
@@ -58,6 +58,8 @@ MuSiQue 是需要关联多篇文档完成 2–4 跳推理的问答数据集。�
 
 ## 结果展示
 
+### 跨运行比较
+
 公共看板脚本使用当前环境的 Python 启动 Streamlit。启动前激活已安装看板依赖的环境。`--run` 后按“展示标签、已评分目录”成对传参，可连续指定多组，也可重复使用 `--run`。[公共看板脚本](scripts/dashboard.sh)
 
 ```bash
@@ -67,13 +69,22 @@ bash benchmarks/musique/scripts/dashboard.sh \
         运行2 artifacts/my-method/eval/run-2/musique/dev
 ```
 
-每个目录直接包含 `summary.json` 和 `details.jsonl`，展示标签须非空且各不相同，含空格时加引号。页面展示总体及分跳数的 Answer F1、EM 和题数，可按跳数筛选问题，并按原始 `question_id` 对照各运行的回答、参考答案及逐题分数。
+每个目录直接包含 `summary.json` 和 `details.jsonl`，展示标签须非空且各不相同，含空格时加引号。页面根据保存的配置列出“方法 → checkpoint／模型 → 评估设置”复选框，默认全选，支持整组或逐项勾选；没有评估参数时直接选择模型。运行按方法、checkpoint 自然顺序和参数数值排序，同一 checkpoint 使用同一色系，深浅按全部候选设置预先分配，勾选时保持不变。相同配置的多次运行通过传入标签区分。
 
-参与比较的运行须使用相同划分和数据指纹，逐题结果覆盖完整题目集合。看板读取已保存的分数，支持不同方法、模型及输入设置的运行并列展示。[展示接口](dashboard.py)
+Answer F1 和 Answer EM 分别绘图，每张图合并比较已选运行的总体与 2、3、4 跳分数。图例显示完整运行名，柱顶显示分数。“详细统计”保留方法、checkpoint、设置、题数和分数，并提供运行配置。底部按跳数筛选问题，通过原始 `question_id` 对照相同已选运行；公共问题与参考答案只显示一次，回答最多三列排列。统计和逐题区域分别使用带边框的容器。
+
+参与比较的运行须使用相同划分、数据来源、指纹和评分器，逐题结果须完整且题号唯一；看板核对问题、跳数和参考答案的一致性。[展示接口](dashboard.py)
+
+### 方法看板接入
+
+方法页面可调用 `show_runs(runs)` 嵌入指标表格与逐题回答；自定义布局可先调用 `load_runs`，再分别展示指标和回答。页面入口负责标题和结果目录选择。
 
 | 接口 | 用法 |
 |---|---|
 | `show_runs(runs)` | 接收非空的 `(展示标签, Path 类型的结果目录)` 序列，加载并展示指标及逐题回答 |
-| `load_runs(runs)` | 核对 benchmark、指标、划分和数据指纹，返回含 `label`、`directory`、`summary`、`records` 的运行列表；`records` 按 `question_id` 索引 |
+| `load_runs(runs)` | 核对指标、划分、数据与评分器身份、完整且唯一的题号，以及问题、跳数和参考答案的一致性；返回含 `label`、`directory`、`summary`、`records` 的运行列表，`records` 按 `question_id` 索引 |
+| `comparison_panels(metrics)` | 返回 F1 与 EM 两组主图指标，各组按总体、2–4 跳排列 |
 | `show_scores(runs)` | 接收已加载的运行列表，展示总体与分跳数的 F1、EM 和题数 |
 | `show_answers(runs)` | 接收已加载的运行列表，按跳数和问题展示多运行回答、参考答案及逐题分数 |
+
+公共跨运行页面使用[统一比较框架](../comparison_dashboard.py)。新方法接入分层选择时，需在[运行配置解析](../comparison_runs.py)中明确 checkpoint 和评估参数的读取规则；分组不依赖展示标签或结果目录名。

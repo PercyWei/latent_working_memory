@@ -1,12 +1,12 @@
 """按论文展示同一 QASPER 划分中各运行的 Answer F1 和逐题回答。"""
 
-import argparse
+from functools import partial
 import json
-from pathlib import Path
 
 import streamlit as st
 
 from benchmarks.dashboard_data import load_details
+from benchmarks.comparison_dashboard import run_comparison
 from benchmarks.qasper.data import SPLIT_FILES
 from benchmarks.vendor.qasper import ANSWER_TYPES
 
@@ -32,12 +32,28 @@ def load_runs(runs):
         summary = json.loads((directory / "summary.json").read_text(encoding="utf-8"))
         if summary["benchmark"] != "qasper" or summary["metrics"]["metric"] != "answer_f1":
             raise ValueError(f"{label} 需要 QASPER Answer F1 结果。")
-        source = (summary["split"], summary["data"]["fingerprint"])
+        data = summary["data"]
+        if summary["split"] not in SPLIT_FILES or data["split"] != summary["split"]:
+            raise ValueError(f"{label} 需要 QASPER test 的评分结果。")
+        source = (summary["split"], data["filename"], data["source_release"], data["fingerprint"],
+                  summary["scoring"]["source_commit"])
         if identity is not None and source != identity:
-            raise ValueError("参与比较的运行需要使用相同的 QASPER 划分和数据。")
+            raise ValueError("参与比较的运行需要使用相同的 QASPER 划分、数据和评分器。")
         identity = source
         path = directory / "details.jsonl"
-        records = {r["question_id"]: r for r in load_details(path, path.stat().st_mtime_ns)}
+        rows = load_details(path, path.stat().st_mtime_ns)
+        records = {row["question_id"]: row for row in rows}
+        if not records or len(records) != len(rows) or any(not qid for qid in records):
+            raise ValueError(f"{label} 的逐题结果包含空题号、重复题号或没有题目。")
+        if len(records) != summary["metrics"]["samples"] or len(records) != data["samples"]:
+            raise ValueError(f"{label} 的逐题结果没有覆盖完整的已评分题目集合。")
+        if loaded:
+            first = loaded[0]["records"]
+            if records.keys() != first.keys() or any(
+                any(row[field] != first[qid][field] for field in ("paper_id", "question", "references"))
+                for qid, row in records.items()
+            ):
+                raise ValueError(f"{label} 的题目、所属论文或参考答案与其他运行不一致。")
         loaded.append({"label": label, "directory": directory, "summary": summary, "records": records})
     return loaded
 
@@ -96,15 +112,17 @@ def show_answers(runs):
     question_ids = [qid for qid, row in questions.items() if row["paper_id"] == paper_id]
     qid = st.selectbox("问题", question_ids, format_func=lambda q: questions[q]["question"])
     row = questions[qid]
+    st.text(row["question"])
     st.caption(f"题号 {qid} · 人工参考答案")
     st.code("\n".join(ref["answer"] for ref in row["references"]), language=None, wrap_lines=True)
-    columns = st.columns(min(3, len(runs)))
-    for i, run in enumerate(runs):
-        answer = run["records"][qid]
-        with columns[i % len(columns)]:
-            st.markdown(f"**{run['label']}**")
-            st.caption(f"{ANSWER_TYPE_LABELS[answer['answer_type']]} · Answer F1 {answer['score']:.2%}")
-            st.code(answer["predicted_answer"], language=None, wrap_lines=True)
+    for start in range(0, len(runs), 3):
+        row_runs = runs[start:start + 3]
+        for column, run in zip(st.columns(len(row_runs)), row_runs):
+            answer = run["records"][qid]
+            with column.container(border=True):
+                st.markdown(f"**{run['label']}**")
+                st.caption(f"{ANSWER_TYPE_LABELS[answer['answer_type']]} · Answer F1 {answer['score']:.2%}")
+                st.code(answer["predicted_answer"], language=None, wrap_lines=True)
 
 
 def show_runs(runs):
@@ -118,21 +136,9 @@ def show_runs(runs):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run", nargs="+", action="extend", required=True,
-                        metavar="LABEL DIRECTORY",
-                        help="连续传入一组或多组标签和目录；目录直接包含 summary.json、details.jsonl")
-    args = parser.parse_args(argv)
-    if len(args.run) % 2:
-        parser.error("--run 必须按“标签 目录”成对传入。")
-    paths = {}
-    for label, directory in zip(args.run[::2], args.run[1::2], strict=True):
-        if not label.strip() or label in paths:
-            parser.error("运行标签必须非空且不重复。")
-        paths[label] = Path(directory).expanduser().resolve()
-    st.set_page_config(page_title="QASPER · 运行比较", layout="wide")
-    st.title("QASPER · 运行比较")
-    show_runs(paths.items())
+    run_comparison("QASPER", load_runs, {"qasper": "QASPER · test"},
+                   lambda metrics: {"Answer F1": comparison_scores(metrics)},
+                   partial(show_scores, show_chart=False), show_answers, argv)
 
 
 if __name__ == "__main__":

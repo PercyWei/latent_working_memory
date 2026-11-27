@@ -2,7 +2,7 @@
 
 创建时间：20261124 15:43:38 Asia/Shanghai
 
-最后修订时间：20261127 16:36:28 Asia/Shanghai
+最后修订时间：20261127 18:38:33 Asia/Shanghai
 
 本目录提供 LoCoMo 的公共评估与看板接口。公共层维护数据、调度、评分和结果格式；各方法维护模型加载、正文处理、答案生成及自己的启动脚本。数据准备见[公共 benchmark 说明](../README.md)。
 
@@ -118,6 +118,7 @@ ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<ou
 
 | 字段 | 类型与含义 |
 |---|---|
+| `method`、`benchmark`、`settings` | 方法标识、固定任务名 `"locomo"` 和方法配置；跨运行看板从配置读取模型或 checkpoint 身份及评估参数 |
 | `data` | `data_identity(samples, data_dir, "locomo")` 的完整返回值：数据目录 `directory`、源仓库提交 `source_commit`、题数 `samples`、样本内容指纹 `fingerprint` |
 | `metrics.metric` | 字符串，固定为 `"f1"` |
 | `metrics.score` | 数值，全部题目的平均 F1 |
@@ -163,21 +164,25 @@ ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<ou
 
 ### 跨运行比较
 
-[公共看板脚本](scripts/dashboard.sh) 使用当前环境的 Python 启动 Streamlit。启动前激活已安装看板依赖的环境。`--run` 后按“展示标签、LoCoMo 结果目录”成对传参，可连续指定多组：
+[公共看板脚本](scripts/dashboard.sh) 使用当前环境的 Python 启动 Streamlit。启动前激活已安装看板依赖的环境。`--run` 后按“运行别名、LoCoMo 结果目录”成对传参，可连续指定多组，也可重复使用 `--run`：
 
 ```bash
 source .venv/bin/activate
 bash benchmarks/locomo/scripts/dashboard.sh \
-  --run 方法A-运行1 artifacts/method-a/eval/run-1/locomo \
-        方法A-运行2 artifacts/method-a/eval/run-2/locomo \
-        方法B-运行1 artifacts/method-b/eval/run-1/locomo
+  --run ICAE-cr4 artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr4_locomo \
+        ICAE-cr8 artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr8_locomo \
+        Full-context artifacts/full-context/eval/Qwen3-4B-Instruct-2507/locomo
 ```
 
-每个目录直接包含 `summary.json` 和 `details.jsonl`，展示标签各不相同。侧栏选择运行，页面展示总体与各题型 F1，并按题型、对话筛选同题回答、参考答案和逐题 F1。
+每个目录直接包含 `summary.json` 和 `details.jsonl`，运行别名须非空且各不相同，含空格时加引号。看板按保存的配置列出“方法 → checkpoint／模型 → 评估设置”复选框，默认全选；支持整组或逐项勾选，只有一个 checkpoint 或没有评估参数时简化层级。运行按方法、checkpoint 自然顺序及评估参数数值排序；配置相同的重复运行用别名区分。
 
-参与比较的运行使用相同数据指纹、题目和参考答案。看板读取已保存的分数，支持不同方法、模型及输入设置的运行并列展示。
+所选运行在同一柱图中比较总体与各题型 F1，图例显示完整标签，柱顶显示分数。同一方法与 checkpoint 使用同一色系，不同评估设置用不同深浅；颜色按全部输入预先分配，勾选时保持固定。“详细统计”列出运行身份、题数和分数，配置可展开查看。底部按题型、对话筛选，同题的问题和参考答案展示一次，各运行回答与逐题 F1 并排展示，每行最多三列。
+
+参与比较的运行须有相同的数据来源、指纹、题目范围和参考答案。看板核对逐题记录完整且题号唯一，读取已保存的分数；图表、统计与逐题回答随勾选同步更新。[公共比较入口](compare.py) · [共用布局](../comparison_dashboard.py)
 
 ### 方法看板接入
+
+公共跨运行看板通过 [comparison_runs.py](../comparison_runs.py) 从方法配置提取 checkpoint／模型与评估参数。接入新方法时，在该模块明确其配置字段；任务名、结果目录名和运行别名不用于推断评估设置。LoCoMo 的 `load_runs(runs)` 接收 `(运行标签, Path 类型的结果目录)` 序列，读取并校验结果；`comparison_scores(metrics)` 返回总体及各题型 F1，供比较布局使用。[比较组件](compare.py)
 
 [dashboard.py](dashboard.py) 提供可复用的展示组件，方法维护自己的页面和启动脚本。按运行 ID 保存结果的方法使用以下接口：
 

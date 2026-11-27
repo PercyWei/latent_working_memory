@@ -9,6 +9,7 @@ import re
 import streamlit as st
 
 from benchmarks import ruler_dashboard as ruler
+from benchmarks.comparison_dashboard import show_score_chart
 from benchmarks.locomo import compare as locomo
 from benchmarks.longmemeval import dashboard as longmemeval
 from benchmarks.qasper import dashboard as qasper
@@ -68,45 +69,19 @@ def select_runs(available, method, task, has_settings):
 def show_comparison_chart(runs, colors):
     """将所选运行放在同一张核心指标柱图中。"""
     task = runs[0]["summary"]["benchmark"]
-    chart = []
-    labels = [run["label"] for run in runs]
+    scores_by_label = {}
     for run in runs:
         metrics = run["summary"]["metrics"]
         if task == "locomo":
-            scores = {"总体 F1": metrics["score"], **{
-                f"{locomo.LOCOMO_CATEGORIES[group['category']]} F1": group["score"]
-                for group in sorted(metrics["groups"], key=lambda group: group["category"])
-            }}
+            scores = locomo.comparison_scores(metrics)
         elif task == "qasper":
             scores = qasper.comparison_scores(metrics)
         elif task == "ruler":
             scores = ruler.comparison_scores(metrics)
         else:
             scores = longmemeval.comparison_scores(metrics)
-        chart.extend({"运行": run["label"], "指标": metric, "得分": score}
-                     for metric, score in scores.items() if score is not None)
-    st.vega_lite_chart(chart, {
-        "encoding": {
-            "x": {"field": "指标", "type": "nominal", "sort": list(scores),
-                  "axis": {"title": None, "labelAngle": 0}},
-            "xOffset": {"field": "运行", "type": "nominal", "sort": labels},
-            "y": {"field": "得分", "type": "quantitative", "scale": {"domain": [0, 1]},
-                  "axis": {"format": ".0%"}},
-            "tooltip": [{"field": "运行"}, {"field": "指标"},
-                        {"field": "得分", "type": "quantitative", "format": ".2%"}],
-        },
-        "layer": [
-            {"mark": "bar", "encoding": {
-                "color": {"field": "运行", "type": "nominal",
-                          "scale": {"domain": labels, "range": [colors[label] for label in labels]},
-                          "legend": {"orient": "top", "direction": "vertical", "title": None,
-                                     "values": labels, "labelLimit": 0}},
-            }},
-            {"mark": {"type": "text", "dy": -7, "fontSize": 11},
-             "encoding": {"text": {"field": "得分", "type": "quantitative", "format": ".1%"}}},
-        ],
-        "height": 360,
-    }, width="stretch")
+        scores_by_label[run["label"]] = scores
+    show_score_chart(runs, scores_by_label, colors)
 
 
 def run_dashboard(method, title, render_memory=None, argv=None):

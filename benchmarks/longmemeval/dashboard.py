@@ -1,12 +1,11 @@
 """按原始问题 ID 对照 LongMemEval-S 和 Oracle 的准确率与逐题回答。"""
 
-import argparse
 from colorsys import hls_to_rgb
 import json
-from pathlib import Path
 
 import streamlit as st
 
+from benchmarks.comparison_dashboard import run_comparison
 from benchmarks.dashboard_data import load_details
 from benchmarks.longmemeval.data import QUESTION_TYPES
 
@@ -35,8 +34,11 @@ def load_run(label, directory):
     if summary["benchmark"] not in SETTINGS or summary["metrics"]["metric"] != "accuracy":
         raise ValueError(f"{label} 需要 LongMemEval 的评分结果")
     path = directory / "details.jsonl"
-    records = {row["question_id"]: row for row in load_details(path, path.stat().st_mtime_ns)}
-    if len(records) != summary["metrics"]["samples"] or not records:
+    rows = load_details(path, path.stat().st_mtime_ns)
+    records = {row["question_id"]: row for row in rows}
+    if not rows or len(records) != len(rows) or any(not qid.strip() for qid in records):
+        raise ValueError(f"{label} 的逐题结果为空或题号重复")
+    if len(rows) != summary["metrics"]["samples"] or len(rows) != summary["data"]["samples"]:
         raise ValueError(f"{label} 的逐题记录与已评分题数不一致")
     return {"label": label, "directory": directory, "summary": summary, "records": records}
 
@@ -45,12 +47,15 @@ def load_runs(runs):
     """读取各设置的结果，核对同一设置的数据身份和各运行的题目对齐关系。"""
     loaded = [load_run(label, directory) for label, directory in runs]
     first = loaded[0]["records"]
-    fingerprints = {}
+    scope_data, scope_records = {}, {}
     for run in loaded:
         summary, records = run["summary"], run["records"]
-        fingerprint = summary["data"]["fingerprint"]
-        if fingerprints.setdefault(summary["benchmark"], fingerprint) != fingerprint:
+        scope = summary["benchmark"]
+        data = {key: summary["data"][key] for key in
+                ("source_commit", "benchmark", "filename", "samples", "fingerprint")}
+        if data["benchmark"] != scope or scope_data.setdefault(scope, data) != data:
             raise ValueError(f"{run['label']} 的同设置数据与其他运行不一致")
+        same_scope = scope_records.setdefault(scope, records)
         if first.keys() != records.keys() or any(
             row["reference"] != first[qid]["reference"] or
             row["metadata"]["question"] != first[qid]["metadata"]["question"] or
@@ -58,6 +63,9 @@ def load_runs(runs):
             for qid, row in records.items()
         ):
             raise ValueError(f"{run['label']} 的题目或参考答案与其他运行不一致")
+        if any(row["metadata"]["question_date"] != same_scope[qid]["metadata"]["question_date"]
+               for qid, row in records.items()):
+            raise ValueError(f"{run['label']} 的同设置提问日期与其他运行不一致")
     return loaded
 
 
@@ -124,14 +132,15 @@ def show_answers(runs):
     st.text(records[qid]["metadata"]["question"])
     st.caption("参考答案")
     st.code(str(records[qid]["reference"]), language=None, wrap_lines=True)
-    cols = st.columns(min(len(runs), 3))
-    for i, run in enumerate(runs):
-        row = run["records"][qid]
-        with cols[i % len(cols)].container(border=True):
-            st.markdown(f"**{run['label']}**")
-            st.caption(f"提问日期 {row['metadata']['question_date']} · "
-                       f"裁判判定{'正确' if row['autoeval_label']['label'] else '错误'}")
-            st.code(row["hypothesis"], language=None, wrap_lines=True)
+    for start in range(0, len(runs), 3):
+        batch = runs[start:start + 3]
+        for column, run in zip(st.columns(len(batch)), batch, strict=True):
+            row = run["records"][qid]
+            with column.container(border=True):
+                st.markdown(f"**{run['label']}**")
+                st.caption(f"提问日期 {row['metadata']['question_date']} · "
+                           f"裁判判定{'正确' if row['autoeval_label']['label'] else '错误'}")
+                st.code(row["hypothesis"], language=None, wrap_lines=True)
 
 
 def show_runs(runs):
@@ -151,25 +160,11 @@ def show_runs(runs):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run", nargs="+", action="extend", required=True,
-                        metavar="LABEL DIRECTORY",
-                        help="连续传入一组或多组标签和目录；目录直接包含 summary.json、details.jsonl")
-    args = parser.parse_args(argv)
-    if len(args.run) % 2:
-        parser.error("--run 必须按“标签 目录”成对传入。")
-    paths = {}
-    for label, directory in zip(args.run[::2], args.run[1::2], strict=True):
-        if not label.strip() or label in paths:
-            parser.error("运行标签必须非空且不重复。")
-        paths[label] = Path(directory).expanduser().resolve()
-    st.set_page_config(page_title="LongMemEval · 运行比较", layout="wide")
-    st.title("LongMemEval · 运行比较")
-    selected = st.sidebar.multiselect("参与比较的运行", paths.keys(), default=list(paths))
-    if not selected:
-        st.info("请选择需要展示的运行。")
-        return
-    show_runs([(label, paths[label]) for label in selected])
+    run_comparison(
+        "LongMemEval", load_runs, {key: f"LongMemEval-{value}" for key, value in SETTINGS.items()},
+        lambda metrics: {"准确率": comparison_scores(metrics)},
+        lambda runs: show_scores(runs, show_chart=False), show_answers, argv,
+    )
 
 
 if __name__ == "__main__":

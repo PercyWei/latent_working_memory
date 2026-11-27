@@ -2,7 +2,7 @@
 
 创建时间：20261126 16:09:15 Asia/Shanghai
 
-最后修订时间：20261127 17:14:55 Asia/Shanghai
+最后修订时间：20261127 18:39:18 Asia/Shanghai
 
 QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3 测试集的读取、按论文生成回答、本地 Answer F1 评分及结果展示。[原论文](https://aclanthology.org/2021.naacl-main.365/) · [官方数据（CC BY 4.0）](https://huggingface.co/datasets/allenai/qasper)
 
@@ -71,9 +71,11 @@ bash benchmarks/qasper/scripts/dashboard.sh \
         方法B-运行1 artifacts/method-b/eval/run-1/qasper/test
 ```
 
-每个目录直接包含 `summary.json` 和 `details.jsonl`，展示标签须非空且各不相同，含空格时加引号。主图依次比较全部传入运行的总体、抽取、自由文本、是非和不可回答 Answer F1；“总体表现”和“分答案类型表现”表保留分数及题数。题数为 0 的类型不绘制柱子，表中分数留空。逐题结果按论文和原始 `question_id` 并排展示参考答案、模型回答及分数。
+每个目录直接包含 `summary.json` 和 `details.jsonl`，展示标签须非空且各不相同，含空格时加引号。页面根据保存的配置列出“方法 → checkpoint／模型 → 评估设置”复选框，默认全选，支持整组或逐项勾选；没有评估参数时直接选择模型。运行按方法、checkpoint 自然顺序和参数数值排序，同一 checkpoint 使用同一色系，深浅按全部候选设置预先分配，勾选时保持不变。相同配置的多次运行通过传入标签区分。
 
-参与比较的运行须使用相同数据指纹，逐题结果覆盖 test 的完整题目集合。看板读取已保存的分数，支持不同方法、模型及输入设置的运行并列展示。[展示接口](dashboard.py)
+主图合并比较已选运行的总体、抽取、自由文本、是非和不可回答 Answer F1，图例显示完整运行名，柱顶显示分数。“详细统计”保留方法、checkpoint、设置、各类题数和分数，并提供运行配置。题数为 0 的类型不绘制柱子，表中分数留空；答案类型按各运行最高分的人工标注确定，因此各类题数可能不同。底部按论文和原始 `question_id` 查看相同已选运行的回答，公共问题与参考答案只显示一次，回答最多三列排列。
+
+参与比较的运行须使用相同划分、数据来源、指纹和评分器，逐题结果须完整且题号唯一；看板核对题目、所属论文和参考答案的一致性。统计和逐题区域分别使用带边框的容器。[展示接口](dashboard.py)
 
 ### 方法看板接入
 
@@ -81,13 +83,15 @@ bash benchmarks/qasper/scripts/dashboard.sh \
 
 | 接口 | 用法 |
 |---|---|
-| `show_runs(runs)` | 接收非空的 `(展示标签, Path 类型的划分目录)` 序列，标签须各不相同。读取已评分产物，核对 QASPER Answer F1 指标、划分和数据指纹，展示总体与分答案类型结果及同题回答 |
-| `load_runs(runs)` | 接收相同的标签与目录序列，核对指标、划分和数据指纹，返回包含 `label`、`directory`、`summary` 和 `records` 的运行字典列表；`records` 按原始 `question_id` 索引 |
+| `show_runs(runs)` | 接收非空的 `(展示标签, Path 类型的划分目录)` 序列，标签须各不相同。读取并校验已评分产物，展示总体与分答案类型结果及同题回答 |
+| `load_runs(runs)` | 核对指标、划分、数据与评分器身份、完整且唯一的题号，以及题目、论文和参考答案的一致性；返回包含 `label`、`directory`、`summary` 和 `records` 的运行字典列表，`records` 按原始 `question_id` 索引 |
 | `comparison_scores(metrics)` | 返回按主图顺序排列的“中文指标名 → Answer F1”字典，供公共看板和 checkpoint 看板共用 |
 | `show_scores(runs, show_chart=True)` | 接收已加载的运行对象列表，默认展示总体与四类答案的 Answer F1 柱图及统计表，表格保留题数；`show_chart=False` 时仅展示表格 |
 | `show_answers(runs)` | 接收同样的运行对象列表，按论文和问题展示多运行回答、参考答案及逐题分数 |
 
 `show_runs` 复用 `load_runs` 完成加载与校验；自定义布局可先调用 `load_runs`，再分别调用 `show_scores` 和 `show_answers`，分开展示概览与逐题内容。在方法的 Streamlit 页面中可直接调用下面的代码，查看一次运行的测试集结果。传入多对标签与目录即可比较多个运行。
+
+公共跨运行页面使用[统一比较框架](../comparison_dashboard.py)。新方法接入分层选择时，需在[运行配置解析](../comparison_runs.py)中明确 checkpoint 和评估参数的读取规则；分组不依赖展示标签或结果目录名。
 
 ```python
 from pathlib import Path

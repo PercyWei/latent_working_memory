@@ -1,24 +1,24 @@
 """比较指定 LoCoMo 运行的 F1 和逐题回答。"""
 
-import argparse
 import json
-from pathlib import Path
 
 import streamlit as st
 
 from benchmarks.data import LOCOMO_CATEGORIES, LOCOMO_COMMIT
+from benchmarks.comparison_dashboard import run_comparison
 from benchmarks.dashboard_data import load_details
 
 
 def load_run(label, directory):
     summary = json.loads((directory / "summary.json").read_text(encoding="utf-8"))
     metrics = summary["metrics"]
-    if summary["data"]["source_commit"] != LOCOMO_COMMIT or metrics["metric"] != "f1":
+    if (summary["benchmark"] != "locomo" or summary["data"]["source_commit"] != LOCOMO_COMMIT
+            or metrics["metric"] != "f1"):
         raise ValueError(f"{label}：需要 LoCoMo 官方 F1 评估结果。")
     path = directory / "details.jsonl"
     rows = load_details(path, path.stat().st_mtime_ns)
     records = {row["id"]: row for row in rows}
-    if not rows or len(records) != len(rows):
+    if not rows or len(records) != len(rows) or any(not qid.strip() for qid in records):
         raise ValueError(f"{label}：逐题结果为空或题号重复。")
     if len(rows) != metrics["samples"] or len(rows) != summary["data"]["samples"]:
         raise ValueError(f"{label}：逐题结果与汇总的题数不一致。")
@@ -48,6 +48,20 @@ def validate_runs(runs):
                 for key in ("question", "category", "conversation_id")
             ):
                 raise ValueError(f"{run['label']} 的题目 {sample_id} 与参考运行不一致。")
+
+
+def load_runs(runs):
+    """读取已评分运行，并核对数据身份和逐题对齐关系。"""
+    loaded = [load_run(label, directory) for label, directory in runs]
+    validate_runs(loaded)
+    return loaded
+
+
+def comparison_scores(metrics):
+    return {"总体 F1": metrics["score"], **{
+        f"{LOCOMO_CATEGORIES[group['category']]} F1": group["score"]
+        for group in sorted(metrics["groups"], key=lambda group: group["category"])
+    }}
 
 
 def show_comparison(runs, all_labels, colors=None, show_chart=True):
@@ -133,48 +147,23 @@ def show_answer_comparison(runs):
     st.text(reference["metadata"]["question"])
     st.caption("参考答案")
     st.code("\n".join(reference["references"]), language=None, wrap_lines=True)
-    columns = st.columns(min(3, len(runs)))
-    for index, run in enumerate(runs):
-        row = run["records"][sample_id]
-        with columns[index % len(columns)].container(border=True):
-            st.markdown(f"**{run['label']}**")
-            st.caption(f"F1 {row['score']:.2%}")
-            st.code(row["prediction"], language=None, wrap_lines=True)
+    for start in range(0, len(runs), 3):
+        batch = runs[start:start + 3]
+        for column, run in zip(st.columns(len(batch)), batch, strict=True):
+            row = run["records"][sample_id]
+            with column.container(border=True):
+                st.markdown(f"**{run['label']}**")
+                st.caption(f"F1 {row['score']:.2%}")
+                st.code(row["prediction"], language=None, wrap_lines=True)
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run", nargs="+", action="extend", required=True,
-                        metavar="LABEL DIRECTORY",
-                        help="连续传入一组或多组标签和目录；目录直接包含 summary.json、details.jsonl")
-    args = parser.parse_args(argv)
-    if len(args.run) % 2:
-        parser.error("--run 必须按“标签 目录”成对传入。")
-    paths = {}
-    for label, directory in zip(args.run[::2], args.run[1::2], strict=True):
-        if not label.strip() or label in paths:
-            parser.error("运行标签必须非空且不重复。")
-        paths[label] = Path(directory).expanduser().resolve()
-
-    st.set_page_config(page_title="LoCoMo · 运行比较", layout="wide")
-    st.title("LoCoMo · 运行比较")
-    st.caption("选择运行，比较官方 F1 与同题回答。")
-    labels = list(paths)
-    selected = st.sidebar.multiselect("参与比较的运行", labels, default=labels, key="compare-runs")
-    if not selected:
-        st.info("请选择需要展示的运行。")
-        return
-    try:
-        runs = [load_run(label, paths[label]) for label in labels if label in selected]
-        validate_runs(runs)
-    except (OSError, ValueError, KeyError) as error:
-        st.error(f"无法比较这些结果：{error}")
-        return
-    with st.expander("结果目录"):
-        st.dataframe([{"运行": run["label"], "结果目录": str(run["directory"])} for run in runs],
-                     hide_index=True)
-    show_comparison(runs, labels)
-    show_answer_comparison(runs)
+    run_comparison(
+        "LoCoMo", load_runs, {"locomo": "LoCoMo"},
+        lambda metrics: {"F1": comparison_scores(metrics)},
+        lambda runs: show_comparison(runs, [run["label"] for run in runs], show_chart=False),
+        show_answer_comparison, argv,
+    )
 
 
 if __name__ == "__main__":

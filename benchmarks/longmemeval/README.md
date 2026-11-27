@@ -2,7 +2,7 @@
 
 创建时间：20261126 10:49:01 Asia/Shanghai
 
-最后修订时间：20261127 17:10:57 Asia/Shanghai
+最后修订时间：20261127 18:38:33 Asia/Shanghai
 
 本目录维护 LongMemEval 的数据读取、按题生成、问答评分和结果格式。[官方仓库](https://github.com/xiaowu0162/LongMemEval) · [清洗版数据](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/tree/98d7416c24c778c2fee6e6f3006e7a073259d48f)
 
@@ -94,21 +94,27 @@ ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<ou
 
 ### 跨运行比较
 
-公共看板脚本使用当前环境的 Python 启动 Streamlit。启动前激活已安装看板依赖的环境。`--run` 后按“展示标签、已评分的设置目录”成对传参，可连续指定多组，也可重复使用 `--run`。[公共看板脚本](scripts/dashboard.sh)
+公共看板脚本使用当前环境的 Python 启动 Streamlit。启动前激活已安装看板依赖的环境。`--run` 后按“运行别名、已评分的设置目录”成对传参，可连续指定多组，也可重复使用 `--run`。[公共看板脚本](scripts/dashboard.sh)
 
 ```bash
 source .venv/bin/activate
 bash benchmarks/longmemeval/scripts/dashboard.sh \
-  --run 方法A-S artifacts/method-a/eval/run-1/longmemeval_s_cleaned \
-        方法B-S artifacts/method-b/eval/run-1/longmemeval_s_cleaned \
-        方法A-Oracle artifacts/method-a/eval/run-1/longmemeval_oracle
+  --run ICAE-S artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr4_longmemeval_s_cleaned \
+        Full-context-S artifacts/full-context/eval/Qwen3-4B-Instruct-2507/longmemeval_s_cleaned \
+        ICAE-Oracle artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr4_longmemeval_oracle
 ```
 
-每个目录直接包含 `summary.json` 和 `details.jsonl`，展示标签须非空且各不相同，含空格时加引号。侧栏选择运行，主图依次展示总体准确率、六类题型（单会话·用户、单会话·偏好、单会话·助手、跨会话、时间推理、知识更新）准确率和不可回答题准确率。“准确率统计”表保留以上指标、题型宏平均及题数。按题型筛选或勾选“仅看不可回答题”后，可通过原始 `question_id` 并排查看同题回答、参考答案及裁判判定。
+每个目录直接包含 `summary.json` 和 `details.jsonl`，运行别名须非空且各不相同，含空格时加引号。S 和 Oracle 各自使用带边框的比较区，区内按保存的配置列出“方法 → checkpoint／模型 → 评估设置”复选框，默认全选；支持整组或逐项勾选，只有一个 checkpoint 或没有评估参数时简化层级。运行按方法、checkpoint 自然顺序及评估参数数值排序；配置相同的重复运行用别名区分。S／Oracle 和裁判配置不作为压缩设置。
 
-参与比较的运行须有相同的题目 ID、问题、题型和参考答案，同一设置还须有相同的数据指纹。看板读取已保存的分数，支持不同方法、模型及 S／Oracle 设置的运行并列展示。[展示接口](dashboard.py)
+每个比较区的主图展示所选运行的总体、六类题型和不可回答题准确率，图例显示完整标签，柱顶显示分数。同一方法与 checkpoint 使用同一色系，不同评估设置用不同深浅；颜色按全部输入预先分配，勾选时保持固定。“详细统计”列出运行身份、裁判、题数和准确率，题型宏平均保留在表中；配置可展开查看。
+
+底部汇集两个比较区的已选运行，按题型或“仅看不可回答题”筛选，通过原始 `question_id` 对照同题回答与裁判判定。问题和参考答案展示一次，回答每行最多三列，支持同时比较 S 和 Oracle。
+
+参与比较的运行须有相同的题目 ID、问题、题型和参考答案，逐题记录须完整且题号唯一；同一 S／Oracle 设置还须有相同的数据来源、指纹和提问日期。看板读取已保存的分数，图表、统计与逐题回答随勾选同步更新。[展示接口](dashboard.py) · [共用布局](../comparison_dashboard.py)
 
 ### 方法看板接入
+
+公共跨运行看板通过 [comparison_runs.py](../comparison_runs.py) 从方法配置提取 checkpoint／模型与评估参数。接入新方法时，在该模块明确其配置字段；任务名、结果目录名和运行别名不用于推断评估设置。
 
 方法维护自己的 Streamlit 页面和启动脚本，通过 `show_runs(runs)` 嵌入 LongMemEval 的指标、运行配置和逐题回答对照。页面入口负责设置页面标题和选择结果目录。[公共展示组件](dashboard.py)
 
