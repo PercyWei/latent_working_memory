@@ -2,7 +2,7 @@
 
 创建时间：20261126 16:09:15 Asia/Shanghai
 
-最后修订时间：20261127 14:48:34 Asia/Shanghai
+最后修订时间：20261127 15:07:41 Asia/Shanghai
 
 QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3 的开发集和测试集读取、按论文生成回答、本地 Answer F1 评分及结果展示。[原论文](https://aclanthology.org/2021.naacl-main.365/) · [官方数据（CC BY 4.0）](https://huggingface.co/datasets/allenai/qasper)
 
@@ -36,7 +36,7 @@ QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3
 | `--split` | 支持 `dev`（默认）和 `test` |
 | `--benchmark-data` | 输入数据目录，默认 `data/benchmarks/qasper` |
 | `--output-root` | 输出根目录，默认值由接入方提供 |
-| `--output-id` | 采用运行 ID 的方法使用，默认 `<output_name>_<YYYYMMDD-HHMM>`，续评时指定原 ID |
+| `--output-id` | 结果目录名；ICAE、AutoCompressors 和 SDCC 默认 `<压缩设置>_qasper_<split>`，其他方法默认 `<output_name>_<YYYYMMDD-HHMM>` |
 | `--batch-size-per-gpu` | 每卡批处理数，默认 `1` |
 | `--max-new-tokens` | 每题最多生成的新 token 数，默认 `128` |
 | `--resume` | 沿用原运行进度，默认关闭 |
@@ -48,7 +48,7 @@ QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3
 
 ## 产物与指标
 
-Full-context 写入 `<output-root>/eval/<output-id>/qasper/<split>/`。ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<压缩设置>_qasper_<split>/`，例如 `seg2048_qasper_dev`。这三种方法在相同命令后加 `--resume` 即可续评。
+ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<output-id>/`。省略 `--output-id` 时使用 `<压缩设置>_qasper_<split>`，例如 `seg2048_qasper_dev`；显式指定时以该值作为完整目录名。这三种方法在相同命令后加 `--resume` 即可续评，自定义 ID 须沿用原值。Full-context 写入 `<output-root>/eval/<output-id>/qasper/<split>/`，续评时指定原 ID。
 
 | 文件 | 内容 |
 |---|---|
@@ -98,7 +98,7 @@ run_dir = Path("artifacts/my-method/eval/run-1")
 show_runs([("My method · dev", run_dir / "qasper" / "dev")])
 ```
 
-ICAE、AutoCompressors 和 SDCC 使用 `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`，`--output-dir` 指向 `<output-root>/eval/<checkpoint_name>/`。入口读取直接子目录中包含 `summary.json` 的全部已评分结果，按任务直接展示概览；QASPER dev 与 test 分组展示，每组并排比较全部压缩设置的总体和各答案类型 Answer F1 及题数。底部任务选择器用于查看所选划分的逐题多设置回答与分数。`render_memory(runs)` 只负责 LoCoMo 的记忆统计。[checkpoint 看板入口](../checkpoint_dashboard.py) · [AutoCompressors 接入示例](../../reproductions/autocompressors/evaluation/dashboard.py)
+ICAE、AutoCompressors 和 SDCC 使用 `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`，`--output-dir` 指向 `<output-root>/eval/<checkpoint_name>/`。入口读取直接子目录中包含 `summary.json` 的全部已评分结果，根据汇总中的 benchmark 和 split 分组展示 QASPER dev 与 test；每组以完整 `output_id` 为标签，并排比较全部运行的总体和各答案类型 Answer F1 及题数。底部任务选择器用于查看所选划分的逐题回答与分数。`render_memory(runs)` 只负责 LoCoMo 的记忆统计。[checkpoint 看板入口](../checkpoint_dashboard.py) · [AutoCompressors 接入示例](../../reproductions/autocompressors/evaluation/dashboard.py)
 
 按运行 ID 保存结果的方法使用 `benchmarks.locomo.dashboard.run_dashboard(method, title, render_results, argv=None, qasper=False)`，通过 `qasper=True` 启用 QASPER，`--output-dir` 指向包含 `qasper/dev/` 或 `qasper/test/` 的运行目录。入口选择一个已评分任务，核对方法、benchmark 和划分后调用 `show_runs` 展示 QASPER；`render_results` 回调负责 LoCoMo 的方法专属页面。[公共方法入口](../locomo/dashboard.py)
 

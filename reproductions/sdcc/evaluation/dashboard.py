@@ -16,7 +16,7 @@ def show_memory(runs):
         settings = summary["settings"]
         memory = summary["method_metrics"]
         overview.append({
-            "压缩设置": label,
+            "运行": label,
             "基座": Path(settings["model_path"]).name,
             "压缩偏移": settings["compress_ratio_scale"],
             "平均记忆 token 数": memory["mean_memory_tokens"],
@@ -24,7 +24,7 @@ def show_memory(runs):
         })
         for conversation_id, stats in summary["conversations"].items():
             conversations.append({
-                "压缩设置": label,
+                "运行": label,
                 "对话": conversation_id,
                 "选中档位": f"{stats['compression_factor']}×",
                 "正文 token 数": stats["context_tokens"],

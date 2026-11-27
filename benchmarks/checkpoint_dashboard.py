@@ -39,7 +39,7 @@ def run_dashboard(method, title, render_memory, argv=None):
                 task = f"qasper/{summary['split']}"
             if summary["method"] != method or task not in TASK_LABELS:
                 raise ValueError(f"{path.parent} 中的方法或任务与 {title} 不一致。")
-            label = path.parent.name.removesuffix(f"_{task.replace('/', '_')}")
+            label = path.parent.name
             grouped.setdefault(task, []).append((label, path.parent))
         if not grouped:
             st.info(f"在 {directory} 下未找到已评分的评估结果。")
@@ -61,15 +61,31 @@ def run_dashboard(method, title, render_memory, argv=None):
         st.error(f"无法比较评估结果。{error}")
         return
 
-    all_labels = sorted({run["label"] for runs in task_runs.values() for run in runs})
-    st.caption(f"共 {len(all_labels)} 种压缩设置、{len(task_runs)} 个任务；各任务展示已评分的全部设置。")
+    parameters = {
+        "icae": ("fixed_mem_size", "mean_compression_rate"),
+        "autocompressors": ("segment_length",),
+        "sdcc": ("compress_ratio_scale",),
+    }[method]
+    compression_settings = sorted({
+        tuple(run["summary"]["settings"][name] for name in parameters)
+        for runs in task_runs.values() for run in runs
+    })
+    setting_indices = {setting: index for index, setting in enumerate(compression_settings)}
+    result_count = sum(len(runs) for runs in task_runs.values())
+    st.caption(f"共 {len(compression_settings)} 种压缩设置、{result_count} 份结果、{len(task_runs)} 个任务；"
+               "各任务展示已评分的全部运行。")
     for task, runs in task_runs.items():
+        runs.sort(key=lambda run: (
+            tuple(run["summary"]["settings"][name] for name in parameters), run["label"],
+        ))
         st.header(TASK_LABELS[task])
         colors = {}
-        for index, label in enumerate(all_labels):
+        for run in runs:
+            setting = tuple(run["summary"]["settings"][name] for name in parameters)
+            index = setting_indices[setting]
             hue = (0.60 + index * 0.618) % 1
             rgb = hls_to_rgb(hue, 0.66 if task == "longmemeval_oracle" else 0.42, 0.60)
-            colors[label] = "#" + "".join(f"{round(value * 255):02x}" for value in rgb)
+            colors[run["label"]] = "#" + "".join(f"{round(value * 255):02x}" for value in rgb)
         if task == "locomo":
             locomo.show_comparison(runs, [run["label"] for run in runs], colors)
             render_memory(runs)

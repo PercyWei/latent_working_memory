@@ -2,7 +2,7 @@
 
 创建时间：20261124 15:43:38 Asia/Shanghai
 
-最后修订时间：20261127 14:50:15 Asia/Shanghai
+最后修订时间：20261127 15:07:41 Asia/Shanghai
 
 本目录提供 LoCoMo 的公共评估与看板接口。公共层维护数据、调度、评分和结果格式；各方法维护模型加载、正文处理、答案生成及自己的启动脚本。数据准备见[公共 benchmark 说明](../README.md)。
 
@@ -102,11 +102,11 @@ if __name__ == "__main__":
 |---|---|
 | `--benchmark-data` | 默认 `data/benchmarks/locomo` |
 | `--output-root` | 评估产物根目录，默认值由方法入口提供 |
-| `--output-id` | 采用运行 ID 的方法可指定目录名，省略时由方法默认名称与时间戳组成 |
+| `--output-id` | 结果目录名；ICAE、AutoCompressors 和 SDCC 默认 `<压缩设置>_locomo`，其他方法默认由方法名称与时间戳组成 |
 | `--batch-size-per-gpu` | 每卡批处理数，默认 1 |
 | `--resume` | 沿用原结果目录和评估配置续评 |
 
-采用运行 ID 的方法写入 `<output-root>/eval/<output-id>/locomo/`，续评时指定原 ID。ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<压缩设置>_locomo/`，在相同命令后加 `--resume` 即可续评。
+ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<output-id>/`。省略 `--output-id` 时使用 `<压缩设置>_locomo`；显式指定时以该值作为完整目录名。在相同命令后加 `--resume` 即可续评，自定义 ID 须沿用原值。其他方法写入 `<output-root>/eval/<output-id>/locomo/`，续评时指定原 ID。
 
 ## 产物规范
 
@@ -187,7 +187,7 @@ bash benchmarks/locomo/scripts/dashboard.sh \
 | `show_scores(metrics, extra_metrics=())` | 展示总体及分题型 F1 和题数；可通过 `(标签, 已格式化数值)` 序列追加方法指标卡 |
 | `show_answers(directory, metrics)` | `directory` 指向含 `details.jsonl` 的 LoCoMo 结果目录，展示筛选后的逐题回答 |
 
-ICAE、AutoCompressors 和 SDCC 使用 [checkpoint 看板入口](../checkpoint_dashboard.py) `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`，`--output-dir` 指向 `<output-root>/eval/<checkpoint_name>/`。入口读取直接子目录中包含 `summary.json` 的全部已评分结果，按 benchmark 及其设置或划分分组；每个任务内并排比较全部压缩设置，例如 `mem128_cr4` 和 `mem128_cr8`。页面直接显示所有已有任务的概览，底部任务选择器用于查看该任务的逐题多设置回答对照。
+ICAE、AutoCompressors 和 SDCC 使用 [checkpoint 看板入口](../checkpoint_dashboard.py) `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`，`--output-dir` 指向 `<output-root>/eval/<checkpoint_name>/`。入口读取直接子目录中包含 `summary.json` 的全部已评分结果，根据汇总中的 benchmark 及其设置或划分分组；每个任务内并排比较全部运行，标签使用完整的 `output_id`，例如 `mem128_cr4_locomo` 或自定义名称。页面直接显示所有已有任务的概览，底部任务选择器用于查看该任务的逐题回答对照。
 
 checkpoint 看板的 `render_memory(runs)` 回调只负责 LoCoMo 全部压缩设置的记忆用量汇总与分对话统计。按运行 ID 保存结果的方法，其 `render_results` 回调依次调用 `show_scores(summary["metrics"])`、方法专属展示和 `show_answers(directory, summary["metrics"])`。
 

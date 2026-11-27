@@ -16,7 +16,7 @@ def show_memory(runs):
         settings = summary["settings"]
         memory = summary["method_metrics"]
         overview.append({
-            "压缩设置": label,
+            "运行": label,
             "模型": Path(settings["checkpoint"]).name,
             "分段长度": settings["segment_length"],
             "平均摘要 token 数": memory["mean_memory_tokens"],
@@ -24,7 +24,7 @@ def show_memory(runs):
         })
         for conversation_id, stats in summary["conversations"].items():
             conversations.append({
-                "压缩设置": label,
+                "运行": label,
                 "对话": conversation_id,
                 "正文 token 数": stats["context_tokens"],
                 "摘要 token 数": stats["memory_tokens"],

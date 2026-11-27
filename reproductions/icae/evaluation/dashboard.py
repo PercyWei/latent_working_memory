@@ -19,7 +19,7 @@ def show_memory(runs):
         settings = summary["settings"]
         memory = summary["method_metrics"]
         overview.append({
-            "压缩设置": label,
+            "运行": label,
             "阶段": STAGE_LABELS[settings["stage"]],
             "基座": Path(settings["model_path"]).name,
             "每块记忆槽数": settings["fixed_mem_size"],
@@ -29,7 +29,7 @@ def show_memory(runs):
         })
         for conversation_id, stats in summary["conversations"].items():
             conversations.append({
-                "压缩设置": label,
+                "运行": label,
                 "对话": conversation_id,
                 "正文 token 数": stats["context_tokens"],
                 "记忆 token 数": stats["memory_tokens"],

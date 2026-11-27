@@ -2,7 +2,7 @@
 
 创建时间：20261126 10:49:01 Asia/Shanghai
 
-最后修订时间：20261127 14:48:34 Asia/Shanghai
+最后修订时间：20261127 15:07:41 Asia/Shanghai
 
 本目录维护 LongMemEval 的数据读取、按题生成、问答评分和结果格式。[官方仓库](https://github.com/xiaowu0162/LongMemEval) · [清洗版数据](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/tree/98d7416c24c778c2fee6e6f3006e7a073259d48f)
 
@@ -50,7 +50,7 @@ S 和 Oracle 使用相同的 500 道题，各自保存预测和分数，通过�
 | `--split` | 选择 S 或 Oracle，默认 `longmemeval_s_cleaned` |
 | `--benchmark-data` | 输入数据目录，默认 `data/benchmarks/longmemeval` |
 | `--output-root` | 输出根目录，默认值由接入方提供 |
-| `--output-id` | 采用运行 ID 的方法使用，默认 `<output_name>_<YYYYMMDD-HHMM>`，续评时指定原 ID |
+| `--output-id` | 结果目录名；ICAE、AutoCompressors 和 SDCC 默认 `<压缩设置>_<split>`，其他方法默认 `<output_name>_<YYYYMMDD-HHMM>` |
 | `--batch-size-per-gpu` | 每卡批处理数，默认 `1` |
 | `--max-new-tokens` | 每题最多生成的新 token 数，默认 `128` |
 | `--resume` | 沿用原运行进度，默认关闭。续评时可调整 GPU 数和每卡批量 |
@@ -70,7 +70,7 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 
 ## 产物与指标
 
-采用运行 ID 的方法写入 `<output-root>/eval/<output-id>/<split>/`。ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<压缩设置>_<split>/`，例如 `mem128_cr4_longmemeval_s_cleaned`。这三种方法在相同命令后加 `--resume` 即可续评。
+ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<output-id>/`。省略 `--output-id` 时使用 `<压缩设置>_<split>`，例如 `mem128_cr4_longmemeval_s_cleaned`；显式指定时以该值作为完整目录名。这三种方法在相同命令后加 `--resume` 即可续评，自定义 ID 须沿用原值。其他方法写入 `<output-root>/eval/<output-id>/<split>/`，续评时指定原 ID。
 
 | 文件 | 内容 |
 |---|---|
@@ -134,7 +134,7 @@ show_runs([
 ])
 ```
 
-ICAE、AutoCompressors 和 SDCC 使用 `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`，`--output-dir` 指向 `<output-root>/eval/<checkpoint_name>/`。入口读取直接子目录中包含 `summary.json` 的全部已评分结果，按任务直接展示概览；LongMemEval-S 和 Oracle 分组展示，每组并排比较全部压缩设置的准确率及分题型结果。底部任务选择器用于查看所选任务的逐题多设置回答与裁判判定。`render_memory(runs)` 只负责 LoCoMo 的记忆统计。[checkpoint 看板入口](../checkpoint_dashboard.py) · [完整任务分组说明](../locomo/README.md#方法看板接入)
+ICAE、AutoCompressors 和 SDCC 使用 `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`，`--output-dir` 指向 `<output-root>/eval/<checkpoint_name>/`。入口读取直接子目录中包含 `summary.json` 的全部已评分结果，根据汇总中的 benchmark 分组展示 LongMemEval-S 和 Oracle；每组以完整 `output_id` 为标签，并排比较全部运行的准确率及分题型结果。底部任务选择器用于查看所选任务的逐题回答与裁判判定。`render_memory(runs)` 只负责 LoCoMo 的记忆统计。[checkpoint 看板入口](../checkpoint_dashboard.py) · [完整任务分组说明](../locomo/README.md#方法看板接入)
 
 按运行 ID 保存结果的方法使用 `benchmarks.locomo.dashboard.run_dashboard(method, title, render_results, argv=None, qasper=False)`，`--output-dir` 指向运行目录。入口选择一个已评分任务，核对方法与任务后调用 `show_runs` 展示 LongMemEval；`render_results` 回调负责 LoCoMo 的方法专属页面。[公共方法入口](../locomo/dashboard.py) · [LaCT 接入示例](../../reproductions/lact/evaluation/dashboard.py)
 

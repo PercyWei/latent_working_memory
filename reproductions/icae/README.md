@@ -2,7 +2,7 @@
 
 创建时间：20260904 10:13:57 Asia/Shanghai
 
-最后修订时间：20261127 14:50:15 Asia/Shanghai
+最后修订时间：20261127 15:11:49 Asia/Shanghai
 
 [环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能](#三通用功能)
 
@@ -107,12 +107,13 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_locomo.sh \
 
 | 完整评估脚本共同参数 | 用途与默认值 |
 |---|---|
-| `--resume` | 默认关闭；在原评估命令后添加即可从同一结果目录续评 |
+| `--resume` | 在原评估命令后添加即可从同一结果目录续评 |
 | `--stage` | 必填，与 checkpoint 对应的阶段，可选 `pretrained` 或 `finetuned` |
 | `--model-path` | 必填，本地基座模型目录 |
 | `--checkpoint` | 必填，所选阶段的本地 checkpoint 文件（`.safetensors`） |
 | `--benchmark-data` | 输入数据目录，默认路径见各任务小节 |
 | `--output-root` | 输出根目录，默认 `artifacts/reproductions/icae` |
+| `--output-id` | 默认 `mem<fixed_mem_size>_cr<mean_compression_rate>_<task>` |
 | `--batch-size-per-gpu` | 每卡批处理数，默认 `1` |
 | `--fixed-mem-size` | 每块的记忆槽数，取正整数，默认 `128`，须与 checkpoint 匹配 |
 | `--mean-compression-rate` | 每个记忆槽对应的平均输入 token 数，取正整数，默认 `4` |
@@ -120,7 +121,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_locomo.sh \
 - **运行方式**：在项目根目录使用 ICAE 环境运行。每张可见 GPU 加载一个模型副本。[环境准备](#一环境准备) · [数据下载](../../benchmarks/README.md)
 - **历史压缩**：Writer 按 `ceil(输入 token 数 / (每块记忆槽数 × 平均压缩率))` 确定块数，再将历史尽量均分到各块。默认每块最多把 512 个输入 token 压成 128 个记忆 token。
 - **输入与解码**：Reader 按基座 tokenizer 的聊天模板读入系统提示、记忆和问题，从模板的回答起点贪心生成。指令微调阶段在记忆后插入 `[FT]`。Reader 输入与回答预算之和须在基座的位置窗口内。
-- **产物保存**：评估结果按 checkpoint 和评估设置归档，写入 `<output_root>/eval/<checkpoint_name>/mem<fixed_mem_size>_cr<mean_compression_rate>_<task>/`。`<checkpoint_name>` 取 `--checkpoint` 指向的文件名，去掉 `.safetensors` 后缀，`<task>` 标识 benchmark，具体路径见各任务小节。
+- **产物保存**：评估结果写入 `<output_root>/eval/<checkpoint_name>/<output_id>/`。`<checkpoint_name>` 取 `--checkpoint` 指向的文件名，去掉 `.safetensors` 后缀。`<output_id>` 默认值中的 `<task>` 标识评估任务，具体路径见各任务小节。
 
 <a id="locomo-评估"></a>
 <a id="31-locomo-评估"></a>
@@ -134,7 +135,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_locomo.sh \
 - **评估范围**：覆盖 10 段完整对话中类别 1–4 的 1,540 道题。[LoCoMo 评估协议](../../benchmarks/locomo/README.md)
 - **推理方式**：按对话分配 GPU，每段对话历史只压缩一次。同一对话下的各题复用记忆与 Reader 前缀缓存，独立作答。
 - **回答长度与评分**：每题最多生成 50 个 token。按官方规则逐题计算 F1，再对所有题目取平均。
-- **产物保存**：评估结果写入 `<output_root>/eval/<checkpoint_name>/mem<fixed_mem_size>_cr<mean_compression_rate>_locomo/`。
+- **产物保存**：评估结果默认写入 `<output_root>/eval/<checkpoint_name>/mem<fixed_mem_size>_cr<mean_compression_rate>_locomo/`。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_locomo.sh \
@@ -158,7 +159,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_locomo.sh \
 - **推理方式**：相同的完整历史归到同一卡。Writer 并行压缩本批的新历史，Reader 从各题对应的记忆出发，结合提问日期并行作答。
 - **输入长度**：按 Mistral tokenizer 统计，S 的历史长 113,994–125,468 个 token。使用默认记忆槽数、压缩率和回答预算时，S 和 Oracle 的全部题目均能放入 Reader 窗口。
 - **自动评分**：生成全部回答后，脚本调用 `gpt-6-luna`，按官方分题型提示词逐题判定正误，汇总准确率。裁判密钥 `OPENAI_API_KEY` 可在项目根目录的 `.env` 中配置。[裁判配置与评分口径](../../benchmarks/longmemeval/README.md#问答评分)
-- **产物保存**：评估结果写入 `<output_root>/eval/<checkpoint_name>/mem<fixed_mem_size>_cr<mean_compression_rate>_<split>/`。
+- **产物保存**：评估结果默认写入 `<output_root>/eval/<checkpoint_name>/mem<fixed_mem_size>_cr<mean_compression_rate>_<split>/`。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_longmemeval.sh \
@@ -193,7 +194,7 @@ uv run -m benchmarks.longmemeval.score \
 - **评估范围**：dev 包含 281 篇论文、1,005 道题，test 包含 416 篇论文、1,451 道题。[QASPER 评估协议](../../benchmarks/qasper/README.md)
 - **推理方式**：按论文分配 GPU。每篇论文只压缩一次，各题复用记忆和 Reader 前缀缓存，独立作答。
 - **评分口径**：在本地逐题计算官方 Answer F1。每题取各参考答案中的最高分，再对所有题目取平均。
-- **产物保存**：评估结果写入 `<output_root>/eval/<checkpoint_name>/mem<fixed_mem_size>_cr<mean_compression_rate>_qasper_<split>/`。
+- **产物保存**：评估结果默认写入 `<output_root>/eval/<checkpoint_name>/mem<fixed_mem_size>_cr<mean_compression_rate>_qasper_<split>/`。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_qasper.sh \
@@ -208,7 +209,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_qasper.sh \
 
 ### 3.2 结果展示
 
-将 `--output-dir` 指向 `<output_root>/eval/<checkpoint_name>/`。看板默认一次展示该 checkpoint 下所有已评分的设置，按 benchmark 及其设置或划分分组，在同一任务内比较不同压缩参数。各设置目录中的 `summary.json` 保存汇总指标，`details.jsonl` 保存逐题回答、参考答案及评分。
+将 `--output-dir` 指向 `<output_root>/eval/<checkpoint_name>/`。看板默认展示该 checkpoint 下所有已评分的运行，按各自 `summary.json` 中记录的 benchmark 和设置或划分分组。结果目录名（`output_id`）作为运行标签，可在同一任务内比较不同压缩参数，也可对照相同参数、不同 ID 的多次评估。各运行的 `summary.json` 保存汇总指标，`details.jsonl` 保存逐题回答、参考答案及评分。
 
 ```bash
 bash reproductions/icae/scripts/dashboard.sh --output-dir artifacts/reproductions/icae/eval/mistral_7b_ft_icae
@@ -216,4 +217,4 @@ bash reproductions/icae/scripts/dashboard.sh --output-dir artifacts/reproduction
 
 LoCoMo 记忆表列出各设置的 ICAE 阶段、基座、每块记忆槽数和目标压缩率，并按对话等权汇总记忆 token 数和保留比例。展开明细可查看每段对话的正文与记忆 token 数及保留比例。
 
-页面底部可对照同一道题在各压缩设置下的回答和评分。先选择任务，再选择问题。LoCoMo 可按题型和对话筛选，LongMemEval 可按题型筛选，QASPER 可按论文筛选。
+页面底部可对照各运行对同一道题的回答和评分。先选择任务，再选择问题。LoCoMo 可按题型和对话筛选，LongMemEval 可按题型筛选，QASPER 可按论文筛选。
