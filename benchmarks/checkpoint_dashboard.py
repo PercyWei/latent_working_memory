@@ -166,6 +166,7 @@ def run_dashboard(method, title, render_memory, argv=None):
             tuple(run["summary"]["settings"][name] for name in parameters),
             natural_key(run["directory"].name),
         ))
+        st.divider()
         st.header(TASK_LABELS[task])
         chosen = select_runs(available, method, task)
         paths = [(run["label"], run["directory"]) for run in chosen]
@@ -205,6 +206,7 @@ def run_dashboard(method, title, render_memory, argv=None):
 
     if not task_runs:
         return
+    st.divider()
     st.header("逐题结果")
     task = st.selectbox("评估任务", list(task_runs), format_func=TASK_LABELS.__getitem__,
                         key="checkpoint-task")
