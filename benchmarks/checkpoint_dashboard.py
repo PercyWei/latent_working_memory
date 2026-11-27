@@ -166,61 +166,61 @@ def run_dashboard(method, title, render_memory, argv=None):
             tuple(run["summary"]["settings"][name] for name in parameters),
             natural_key(run["directory"].name),
         ))
-        st.divider()
-        st.header(TASK_LABELS[task])
-        chosen = select_runs(available, method, task)
-        paths = [(run["label"], run["directory"]) for run in chosen]
-        if not paths:
-            st.info("请选择该任务中需要比较的运行。")
-            continue
-        try:
+        with st.container(border=True):
+            st.header(TASK_LABELS[task])
+            chosen = select_runs(available, method, task)
+            paths = [(run["label"], run["directory"]) for run in chosen]
+            if not paths:
+                st.info("请选择该任务中需要比较的运行。")
+                continue
+            try:
+                if task == "locomo":
+                    runs = [locomo.load_run(label, path) for label, path in paths]
+                    locomo.validate_runs(runs)
+                elif task in qasper.TASK_LABELS:
+                    runs = qasper.load_runs(paths)
+                else:
+                    runs = longmemeval.load_runs(paths)
+            except (OSError, KeyError, ValueError) as error:
+                st.error(f"无法比较所选运行。{error}")
+                continue
+            task_runs[task] = runs
+            st.caption(f"已选 {len(runs)} / {len(available)} 份结果。")
+            colors = {}
+            for run in runs:
+                setting = tuple(run["summary"]["settings"][name] for name in parameters)
+                checkpoint_index = checkpoint_indices[run["directory"].parent.name]
+                hue = (0.60 + checkpoint_index * 0.618) % 1
+                rgb = hls_to_rgb(hue, setting_lightness[setting], 0.65)
+                colors[run["label"]] = "#" + "".join(f"{round(value * 255):02x}" for value in rgb)
+            show_comparison_chart(runs, colors)
+            with st.expander("详细统计"):
+                if task == "locomo":
+                    locomo.show_comparison(runs, [run["label"] for run in runs], show_chart=False)
+                elif task in qasper.TASK_LABELS:
+                    qasper.show_scores(runs)
+                else:
+                    longmemeval.show_scores(runs, show_chart=False)
             if task == "locomo":
-                runs = [locomo.load_run(label, path) for label, path in paths]
-                locomo.validate_runs(runs)
-            elif task in qasper.TASK_LABELS:
-                runs = qasper.load_runs(paths)
-            else:
-                runs = longmemeval.load_runs(paths)
-        except (OSError, KeyError, ValueError) as error:
-            st.error(f"无法比较所选运行。{error}")
-            continue
-        task_runs[task] = runs
-        st.caption(f"已选 {len(runs)} / {len(available)} 份结果。")
-        colors = {}
-        for run in runs:
-            setting = tuple(run["summary"]["settings"][name] for name in parameters)
-            checkpoint_index = checkpoint_indices[run["directory"].parent.name]
-            hue = (0.60 + checkpoint_index * 0.618) % 1
-            rgb = hls_to_rgb(hue, setting_lightness[setting], 0.65)
-            colors[run["label"]] = "#" + "".join(f"{round(value * 255):02x}" for value in rgb)
-        show_comparison_chart(runs, colors)
-        with st.expander("详细统计"):
-            if task == "locomo":
-                locomo.show_comparison(runs, [run["label"] for run in runs], show_chart=False)
-            elif task in qasper.TASK_LABELS:
-                qasper.show_scores(runs)
-            else:
-                longmemeval.show_scores(runs, show_chart=False)
-        if task == "locomo":
-            render_memory(runs)
+                render_memory(runs)
 
     if not task_runs:
         return
-    st.divider()
-    st.header("逐题结果")
-    task = st.selectbox("评估任务", list(task_runs), format_func=TASK_LABELS.__getitem__,
-                        key="checkpoint-task")
-    runs = task_runs[task]
-    with st.expander("评估配置"):
-        for run in runs:
-            st.markdown(f"**{run['label']}**")
-            config = {"目录": str(run["directory"]), "模型配置": run["summary"]["settings"]}
-            if task in longmemeval.SETTINGS:
-                config["评分配置"] = run["summary"]["judge"]
-            st.json(config, expanded=False)
-    if task == "locomo":
-        locomo.show_answer_comparison(runs)
-    elif task in qasper.TASK_LABELS:
-        qasper.show_answers(runs)
-    else:
-        longmemeval.show_answers(runs)
+    with st.container(border=True):
+        st.header("逐题结果")
+        task = st.selectbox("评估任务", list(task_runs), format_func=TASK_LABELS.__getitem__,
+                            key="checkpoint-task")
+        runs = task_runs[task]
+        with st.expander("评估配置"):
+            for run in runs:
+                st.markdown(f"**{run['label']}**")
+                config = {"目录": str(run["directory"]), "模型配置": run["summary"]["settings"]}
+                if task in longmemeval.SETTINGS:
+                    config["评分配置"] = run["summary"]["judge"]
+                st.json(config, expanded=False)
+        if task == "locomo":
+            locomo.show_answer_comparison(runs)
+        elif task in qasper.TASK_LABELS:
+            qasper.show_answers(runs)
+        else:
+            longmemeval.show_answers(runs)
