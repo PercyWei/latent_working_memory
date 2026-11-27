@@ -86,8 +86,7 @@ if [[ $benchmark == all || $benchmark == locomo ]]; then
 fi
 
 if [[ $benchmark == all || $benchmark == longmemeval ]]; then
-  longmemeval_endpoint="${HF_ENDPOINT:-https://huggingface.co}"
-  base_url="${longmemeval_endpoint%/}/datasets/xiaowu0162/longmemeval-cleaned/resolve/$longmemeval_revision"
+  base_url="${hf_endpoint%/}/datasets/xiaowu0162/longmemeval-cleaned/resolve/$longmemeval_revision"
   mkdir -p "$data_root/longmemeval"
   for file in longmemeval_oracle.json longmemeval_s_cleaned.json; do
     download_file "$base_url/$file" "$data_root/longmemeval/$file"
@@ -109,8 +108,7 @@ if [[ $benchmark == all || $benchmark == qasper ]]; then
 fi
 
 if [[ $benchmark == all || $benchmark == musique ]]; then
-  musique_endpoint="${HF_ENDPOINT:-https://huggingface.co}"
-  base_url="${musique_endpoint%/}/datasets/voidful/MuSiQue/resolve/$musique_revision"
+  base_url="${hf_endpoint%/}/datasets/voidful/MuSiQue/resolve/$musique_revision"
   mkdir -p "$data_root/musique"
   download_file "$base_url/musique_ans_v1.0_dev.jsonl" "$data_root/musique/musique_ans_v1.0_dev.jsonl"
   printf 'MuSiQue-Ans dev 数据已准备：%s/musique/musique_ans_v1.0_dev.jsonl\n' "$data_root"

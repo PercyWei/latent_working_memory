@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261127 20:46:57 Asia/Shanghai
+最后修订时间：20261127 20:54:16 Asia/Shanghai
 
 本文介绍 RULER、LoCoMo、LongMemEval、QASPER 和 MuSiQue 的数据格式、评估属性、规模与长度统计及准备方式。以下命令均从项目根目录执行。
 
@@ -148,7 +148,7 @@ bash benchmarks/scripts/download_benchmarks.sh --benchmark all
 | `--data-root` | LoCoMo、LongMemEval、QASPER 和 MuSiQue 的数据父目录，默认 `data/benchmarks` |
 | `--ruler-source-dir` | RULER 官方源码及下载素材目录，默认 `data/raw/ruler-v1-source` |
 
-`HF_ENDPOINT` 可统一覆盖 HotpotQA、LongMemEval 和 MuSiQue 的下载地址；未设置时，HotpotQA 使用 `https://hf-mirror.com`，其余两者使用 `https://huggingface.co`。
+HotpotQA、LongMemEval 和 MuSiQue 默认从 `https://hf-mirror.com` 下载，可通过 `HF_ENDPOINT` 统一覆盖。
 
 通过 ModelScope 分发或还原数据时，保留下列完整目录：
 
