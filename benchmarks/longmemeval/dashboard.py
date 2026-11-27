@@ -12,6 +12,22 @@ from benchmarks.longmemeval.data import QUESTION_TYPES
 
 
 SETTINGS = {"longmemeval_s_cleaned": "S", "longmemeval_oracle": "Oracle"}
+QUESTION_TYPE_LABELS = {
+    "single-session-user": "单会话·用户",
+    "single-session-preference": "单会话·偏好",
+    "single-session-assistant": "单会话·助手",
+    "multi-session": "跨会话",
+    "temporal-reasoning": "时间推理",
+    "knowledge-update": "知识更新",
+}
+
+
+def comparison_scores(metrics):
+    """为公共看板和 checkpoint 看板提供相同顺序与标签的主图指标。"""
+    groups = {group["question_type"]: group["score"] for group in metrics["groups"]}
+    return {"总体准确率": metrics["score"],
+            **{QUESTION_TYPE_LABELS[kind]: groups[kind] for kind in QUESTION_TYPES},
+            "不可回答": metrics["abstention"]["score"]}
 
 
 def load_run(label, directory):
@@ -52,6 +68,7 @@ def show_scores(runs, colors=None, show_chart=True):
         metrics = summary["metrics"]
         task = SETTINGS[summary["benchmark"]]
         judge = summary["judge"]["model"]
+        scores = comparison_scores(metrics)
         if show_chart:
             if colors is None:
                 identity = (summary["method"], json.dumps(summary["settings"], sort_keys=True), judge)
@@ -61,20 +78,18 @@ def show_scores(runs, colors=None, show_chart=True):
                 palette[label] = "#" + "".join(f"{round(v * 255):02x}" for v in rgb)
             else:
                 palette[label] = colors[label]
-            for scope, score in (("总体", metrics["score"]), ("题型宏平均", metrics["task_averaged_accuracy"]),
-                                 ("证据不足", metrics["abstention"]["score"])):
+            for scope, score in scores.items():
                 if score is not None:
                     chart.append({"运行": label, "设置": task, "指标": scope, "准确率": score})
         entry = {"运行": label, "设置": task, "方法": summary["method"], "裁判": judge, "题数": metrics["samples"],
-                 "证据不足题数": metrics["abstention"]["samples"]}
-        for item in metrics["groups"]:
-            entry[item["question_type"]] = item["score"]
+                 "不可回答题数": metrics["abstention"]["samples"], **scores,
+                 "题型宏平均": metrics["task_averaged_accuracy"]}
         table.append(entry)
     if show_chart:
         st.vega_lite_chart(chart, {
             "mark": "bar",
             "encoding": {
-                "x": {"field": "指标", "type": "nominal", "sort": ["总体", "题型宏平均", "证据不足"],
+                "x": {"field": "指标", "type": "nominal", "sort": list(scores),
                       "axis": {"labelAngle": 0}},
                 "xOffset": {"field": "运行", "sort": list(palette)},
                 "y": {"field": "准确率", "type": "quantitative", "scale": {"domain": [0, 1]},
@@ -86,17 +101,20 @@ def show_scores(runs, colors=None, show_chart=True):
                            [{"field": "准确率", "type": "quantitative", "format": ".2%"}],
             },
         }, width="stretch")
-    st.subheader("分题型准确率")
+    st.subheader("准确率统计")
     st.dataframe(table, hide_index=True, column_config={
-        kind: st.column_config.NumberColumn(format="percent", step=0.0001) for kind in QUESTION_TYPES
+        name: st.column_config.NumberColumn(format="percent", step=0.0001)
+        for name in (*scores, "题型宏平均")
     })
+    st.caption("不可回答题属于六类题型中的子集，也计入所属题型及总体准确率。")
 
 
 def show_answers(runs):
     st.subheader("逐题回答对照")
     records = runs[0]["records"]
-    category = st.selectbox("题型", [None, *QUESTION_TYPES], format_func=lambda value: value or "全部")
-    abstention = st.checkbox("仅看证据不足题")
+    category = st.selectbox("题型", [None, *QUESTION_TYPES],
+                            format_func=lambda value: "全部" if value is None else QUESTION_TYPE_LABELS[value])
+    abstention = st.checkbox("仅看不可回答题")
     ids = [qid for qid, row in records.items() if (category is None or row["metadata"]["question_type"] == category)
            and (not abstention or "_abs" in qid)]
     if not ids:

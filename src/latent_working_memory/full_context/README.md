@@ -2,7 +2,7 @@
 
 创建时间：20261019 20:16:32 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261127 16:39:18 Asia/Shanghai
+最后修订时间：20261127 17:14:55 Asia/Shanghai
 
 Full-context 基线用原始模型读取完整输入，贪心生成答案。支持 LoCoMo、LongMemEval-S、LongMemEval-Oracle、QASPER 和 RULER。[公共数据准备](../../../benchmarks/README.md)
 
@@ -136,8 +136,8 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eva
 | 任务 | 看板指标与运行记录 |
 |---|---|
 | LoCoMo | 总体及分题型 F1，可按对话查看逐题结果。`execution.json` 记录执行状态，`work.json` 和 `progress/` 保存任务分配与进度 |
-| LongMemEval-S / Oracle | 总体、分题型、题型宏平均及证据不足题准确率，可查看逐题判定和裁判模型。`scoring_config.json` 保存裁判配置 |
-| QASPER | 总体及分答案类型的 Answer F1，可按论文查看问题、参考答案、模型回答和逐题分数。`predictions.jsonl` 按原始题序保存模型回答 |
+| LongMemEval-S / Oracle | 主图展示总体、六类题型和不可回答题准确率，题型宏平均保留在“准确率统计”表中；可查看逐题判定和裁判模型。`scoring_config.json` 保存裁判配置 |
+| QASPER | 主图展示总体及抽取、自由文本、是非、不可回答的 Answer F1，表格保留分组题数；可按论文查看问题、参考答案、模型回答和逐题分数。`predictions.jsonl` 按原始题序保存模型回答 |
 | RULER | 按长度档位和子任务查看准确率。`summary.json` 另含推理批量、耗时与峰值显存，`eval.json`、`status.json`、`eval.log` 和 `progress/` 保存配置与运行记录 |
 
 方法看板的 `--output-dir` 指向一个模型目录 `<output_root>/eval/<model_name>/`。看板扫描 `*/summary.json`，根据其中的评估信息识别任务。先选任务（含 RULER），再选对应的 `output_id` 查看该次评估。

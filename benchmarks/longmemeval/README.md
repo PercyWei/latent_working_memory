@@ -2,7 +2,7 @@
 
 创建时间：20261126 10:49:01 Asia/Shanghai
 
-最后修订时间：20261127 16:36:28 Asia/Shanghai
+最后修订时间：20261127 17:10:57 Asia/Shanghai
 
 本目录维护 LongMemEval 的数据读取、按题生成、问答评分和结果格式。[官方仓库](https://github.com/xiaowu0162/LongMemEval) · [清洗版数据](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/tree/98d7416c24c778c2fee6e6f3006e7a073259d48f)
 
@@ -57,7 +57,7 @@ S 和 Oracle 使用相同的 500 道题，各自保存预测和分数，通过�
 
 ## 问答评分
 
-- **裁判输入**：项目使用 `gpt-6-luna`。按题型选用官方提示词，将问题、参考答案和模型回答放入一条 user 消息。偏好题的参考答案是评分标准；问题 ID 含 `_abs` 时优先使用证据不足题的提示词。[官方判题脚本](https://github.com/xiaowu0162/LongMemEval/blob/9e0b455f4ef0e2ab8f2e582289761153549043fc/src/evaluation/evaluate_qa.py)
+- **裁判输入**：项目使用 `gpt-6-luna`。按题型选用官方提示词，将问题、参考答案和模型回答放入一条 user 消息。偏好题的参考答案是评分标准；问题 ID 含 `_abs` 时优先使用不可回答题的提示词。[官方判题脚本](https://github.com/xiaowu0162/LongMemEval/blob/9e0b455f4ef0e2ab8f2e582289761153549043fc/src/evaluation/evaluate_qa.py)
 - **判定规则**：`judge_answer(sample, hypothesis)` 使用 `reasoning_effort=none`、`temperature=0` 和 `max_completion_tokens=10` 请求裁判。按官方规则，裁判回复转为小写后包含 `yes` 即判为正确。[裁判实现](judge.py)
 - **独立评分**：`uv run -m benchmarks.longmemeval.score --run-dir <设置目录>` 读取该目录的 `evaluation_config.json` 和完整的 `predictions.jsonl`。`--benchmark-data` 可指定同一份数据的本地目录。`--resume` 在核对数据、预测和裁判配置一致后，只补评尚未保存判定的题目。[评分入口](score.py)
 
@@ -88,7 +88,7 @@ ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<ou
 | `score` | 全部 500 道题中判为正确的比例，每题权重相同 |
 | `groups` | 六个 `question_type` 各自的题数与准确率 |
 | `task_averaged_accuracy` | 六个题型准确率的算术平均，每类权重相同 |
-| `abstention` | 30 道证据不足题的题数与准确率；这些题也计入所属题型和总体分数 |
+| `abstention` | 30 道不可回答题（Abstention）的题数与准确率。它们是历史证据不足的跨题型子集，仍计入所属题型和总体分数 |
 
 ## 结果展示
 
@@ -104,7 +104,7 @@ bash benchmarks/longmemeval/scripts/dashboard.sh \
         方法A-Oracle artifacts/method-a/eval/run-1/longmemeval_oracle
 ```
 
-每个目录直接包含 `summary.json` 和 `details.jsonl`，展示标签须非空且各不相同，含空格时加引号。侧栏选择运行，页面展示总体准确率、题型宏平均、证据不足题准确率、分题型结果和裁判模型。按题型或证据不足条件筛选后，可通过原始 `question_id` 并排查看同题回答、参考答案及裁判判定。
+每个目录直接包含 `summary.json` 和 `details.jsonl`，展示标签须非空且各不相同，含空格时加引号。侧栏选择运行，主图依次展示总体准确率、六类题型（单会话·用户、单会话·偏好、单会话·助手、跨会话、时间推理、知识更新）准确率和不可回答题准确率。“准确率统计”表保留以上指标、题型宏平均及题数。按题型筛选或勾选“仅看不可回答题”后，可通过原始 `question_id` 并排查看同题回答、参考答案及裁判判定。
 
 参与比较的运行须有相同的题目 ID、问题、题型和参考答案，同一设置还须有相同的数据指纹。看板读取已保存的分数，支持不同方法、模型及 S／Oracle 设置的运行并列展示。[展示接口](dashboard.py)
 
@@ -117,8 +117,9 @@ bash benchmarks/longmemeval/scripts/dashboard.sh \
 | `show_runs(runs)` | 接收非空的 `(展示标签, Path 类型的设置目录)` 序列，标签须各不相同。读取已评分产物、核对运行间的数据和题目一致性，展示准确率、配置及逐题回答 |
 | `load_runs(runs)` | 接收与 `show_runs` 相同的标签与目录序列，核对运行间的数据和题目一致性，返回运行字典列表；每项包含 `label`、`directory`、`summary` 和 `records` |
 | `load_run(label, directory)` | 读取一个设置目录，返回含 `label`、`directory`、`summary` 和 `records` 的字典，其中 `records` 按原始 `question_id` 索引 |
-| `show_scores(runs, colors=None, show_chart=True)` | 默认展示总体、题型宏平均和证据不足题准确率柱图及分题型表格。`colors` 指定运行标签对应的颜色，`show_chart=False` 时仅展示表格 |
-| `show_answers(runs)` | 接收同样的运行对象列表，按题型和证据不足条件筛选，展示同题回答与裁判判定 |
+| `comparison_scores(metrics)` | 返回按主图顺序排列的“中文指标名 → 准确率”字典，供公共看板和 checkpoint 看板共用 |
+| `show_scores(runs, colors=None, show_chart=True)` | 默认展示总体、六类题型和不可回答题准确率柱图，以及包含题型宏平均的“准确率统计”表。`colors` 指定运行标签对应的颜色，`show_chart=False` 时仅展示表格 |
+| `show_answers(runs)` | 接收同样的运行对象列表，按题型和不可回答条件筛选，展示同题回答与裁判判定 |
 
 跨运行校验集中在 `load_runs`，`show_runs` 复用该加载接口。自定义布局先调用 `load_runs`，再将返回值分别交给 `show_scores` 和 `show_answers`，即可分开展示概览与逐题内容。在方法的 Streamlit 页面中可直接调用下面的代码，同时展示同一次运行的 S 和 Oracle。
 
@@ -134,9 +135,9 @@ show_runs([
 ])
 ```
 
-ICAE、AutoCompressors 和 SDCC 使用 `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`。`--output-dir` 可连续接收多个 checkpoint 目录，也可重复指定该参数。LongMemEval-S 和 Oracle 各自列出两级复选框，默认全选。可勾选整个 checkpoint 或其下单独的 `output_id`，所有子项和已选数量始终可见。柱图分别对照所选运行的总体准确率、题型宏平均和证据不足题准确率。顶部图例列出完整运行标签，柱顶显示百分比分数。[checkpoint 看板入口](../checkpoint_dashboard.py)
+ICAE、AutoCompressors 和 SDCC 使用 `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`。`--output-dir` 可连续接收多个 checkpoint 目录，也可重复指定该参数。LongMemEval-S 和 Oracle 各自列出两级复选框，默认全选。可勾选整个 checkpoint 或其下单独的 `output_id`，所有子项和已选数量始终可见。主图展示所选运行的总体、六类题型和不可回答题准确率。顶部图例列出完整运行标签，柱顶显示百分比分数。[checkpoint 看板入口](../checkpoint_dashboard.py)
 
-运行按 checkpoint 名、压缩参数数值、`output_id` 排序。每个 checkpoint 使用一种色系，不同设置的深浅按全部输入预先分配。分题型统计表和底部的逐题回答、裁判判定随选择同步更新。筛选前后配色一致，清空选择后该任务显示选择提示。[多目录命令与排序规则](../locomo/README.md#方法看板接入)
+运行按 checkpoint 名、压缩参数数值、`output_id` 排序。每个 checkpoint 使用一种色系，不同设置的深浅按全部输入预先分配。“详细统计”内的准确率表保留题型宏平均，与底部的逐题回答、裁判判定随选择同步更新。筛选前后配色一致，清空选择后该任务显示选择提示。[多目录命令与排序规则](../locomo/README.md#方法看板接入)
 
 按运行 ID 保存结果的方法使用 `benchmarks.locomo.dashboard.run_dashboard(method, title, render_results, argv=None, qasper=False)`，`--output-dir` 指向运行目录。入口选择一个已评分任务，核对方法与任务后调用 `show_runs` 展示 LongMemEval；`render_results` 回调负责 LoCoMo 的方法专属页面。[公共方法入口](../locomo/dashboard.py) · [LaCT 接入示例](../../reproductions/lact/evaluation/dashboard.py)
 

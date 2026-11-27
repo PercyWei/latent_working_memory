@@ -73,11 +73,9 @@ def show_comparison_chart(runs, colors):
                 for group in sorted(metrics["groups"], key=lambda group: group["category"])
             }}
         elif task == "qasper":
-            scores = {"Answer F1": metrics["score"]}
+            scores = qasper.comparison_scores(metrics)
         else:
-            scores = {"总体准确率": metrics["score"],
-                      "题型宏平均": metrics["task_averaged_accuracy"],
-                      "证据不足": metrics["abstention"]["score"]}
+            scores = longmemeval.comparison_scores(metrics)
         chart.extend({"运行": run["label"], "指标": metric, "得分": score}
                      for metric, score in scores.items() if score is not None)
     st.vega_lite_chart(chart, {
@@ -198,7 +196,7 @@ def run_dashboard(method, title, render_memory, argv=None):
                 if task == "locomo":
                     locomo.show_comparison(runs, [run["label"] for run in runs], show_chart=False)
                 elif task in qasper.TASK_LABELS:
-                    qasper.show_scores(runs)
+                    qasper.show_scores(runs, show_chart=False)
                 else:
                     longmemeval.show_scores(runs, show_chart=False)
             if task == "locomo":

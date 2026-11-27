@@ -2,7 +2,7 @@
 
 创建时间：20261126 16:09:15 Asia/Shanghai
 
-最后修订时间：20261127 16:36:28 Asia/Shanghai
+最后修订时间：20261127 17:14:55 Asia/Shanghai
 
 QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3 测试集的读取、按论文生成回答、本地 Answer F1 评分及结果展示。[原论文](https://aclanthology.org/2021.naacl-main.365/) · [官方数据（CC BY 4.0）](https://huggingface.co/datasets/allenai/qasper)
 
@@ -43,7 +43,7 @@ QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3
 ## 问答评分
 
 - **逐题分数**：预测与参考答案统一转小写，去除英文标点、冠词，按空白切分 token，根据重复词的匹配次数计算 F1。多个抽取片段先以逗号和空格连接成一个答案。若一题有多份人工标注，取最高 F1；并列时以原顺序第一份最高分标注确定答案类型。[官方评分器](https://github.com/allenai/qasper-led-baseline/blob/afd0fb96bf78ce8cd8157639c6f6a6995e4f9089/scripts/evaluator.py) · [本地评分函数](../vendor/qasper.py) · [代码许可证](../vendor/QASPER-LICENSE.txt)
-- **汇总口径**：总体 Answer F1 对全部题目取算术平均。`extractive`、`abstractive`、`boolean` 和 `none` 各自统计题数与平均 F1，分别对应抽取、自由文本、是非和不可回答。同一题的人工标注可能属于不同类型，因此各组题数可随预测变化。证据选择属于独立任务。
+- **汇总口径**：总体 Answer F1 对全部题目取算术平均。`extractive`、`abstractive`、`boolean` 和 `none` 各自统计题数与平均 F1，分别对应抽取、自由文本、是非和不可回答。四组在单次运行中互斥且覆盖全部题目；同一题可能有不同类型的人工标注，最高分标注随预测变化，因此不同运行的分组题数可能不同。不可回答同样计算 Answer F1。证据选择属于独立任务。
 
 ## 产物与指标
 
@@ -71,7 +71,7 @@ bash benchmarks/qasper/scripts/dashboard.sh \
         方法B-运行1 artifacts/method-b/eval/run-1/qasper/test
 ```
 
-每个目录直接包含 `summary.json` 和 `details.jsonl`，展示标签须非空且各不相同，含空格时加引号。页面展示全部传入运行的总体和各答案类型的 Answer F1 及题数，按论文和原始 `question_id` 并排展示参考答案、模型回答及逐题分数。
+每个目录直接包含 `summary.json` 和 `details.jsonl`，展示标签须非空且各不相同，含空格时加引号。主图依次比较全部传入运行的总体、抽取、自由文本、是非和不可回答 Answer F1；“总体表现”和“分答案类型表现”表保留分数及题数。题数为 0 的类型不绘制柱子，表中分数留空。逐题结果按论文和原始 `question_id` 并排展示参考答案、模型回答及分数。
 
 参与比较的运行须使用相同数据指纹，逐题结果覆盖 test 的完整题目集合。看板读取已保存的分数，支持不同方法、模型及输入设置的运行并列展示。[展示接口](dashboard.py)
 
@@ -83,7 +83,8 @@ bash benchmarks/qasper/scripts/dashboard.sh \
 |---|---|
 | `show_runs(runs)` | 接收非空的 `(展示标签, Path 类型的划分目录)` 序列，标签须各不相同。读取已评分产物，核对 QASPER Answer F1 指标、划分和数据指纹，展示总体与分答案类型结果及同题回答 |
 | `load_runs(runs)` | 接收相同的标签与目录序列，核对指标、划分和数据指纹，返回包含 `label`、`directory`、`summary` 和 `records` 的运行字典列表；`records` 按原始 `question_id` 索引 |
-| `show_scores(runs)` | 接收已加载的运行对象列表，展示总体与分答案类型的 Answer F1 和题数 |
+| `comparison_scores(metrics)` | 返回按主图顺序排列的“中文指标名 → Answer F1”字典，供公共看板和 checkpoint 看板共用 |
+| `show_scores(runs, show_chart=True)` | 接收已加载的运行对象列表，默认展示总体与四类答案的 Answer F1 柱图及统计表，表格保留题数；`show_chart=False` 时仅展示表格 |
 | `show_answers(runs)` | 接收同样的运行对象列表，按论文和问题展示多运行回答、参考答案及逐题分数 |
 
 `show_runs` 复用 `load_runs` 完成加载与校验；自定义布局可先调用 `load_runs`，再分别调用 `show_scores` 和 `show_answers`，分开展示概览与逐题内容。在方法的 Streamlit 页面中可直接调用下面的代码，查看一次运行的测试集结果。传入多对标签与目录即可比较多个运行。
@@ -97,9 +98,9 @@ run_dir = Path("artifacts/my-method/eval/run-1")
 show_runs([("My method · test", run_dir / "qasper" / "test")])
 ```
 
-ICAE、AutoCompressors 和 SDCC 使用 `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`。`--output-dir` 可连续接收多个 checkpoint 目录，也可重复指定该参数。QASPER test 列出两级复选框，默认全选。可勾选整个 checkpoint 或其下单独的 `output_id`，所有子项和已选数量始终可见。柱图对照所选运行的总体 Answer F1。顶部图例列出完整运行标签，柱顶显示百分比分数。[checkpoint 看板入口](../checkpoint_dashboard.py) · [AutoCompressors 接入示例](../../reproductions/autocompressors/evaluation/dashboard.py)
+ICAE、AutoCompressors 和 SDCC 使用 `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`。`--output-dir` 可连续接收多个 checkpoint 目录，也可重复指定该参数。QASPER test 列出两级复选框，默认全选。可勾选整个 checkpoint 或其下单独的 `output_id`，所有子项和已选数量始终可见。主图按相同顺序展示总体及四类答案的 Answer F1。顶部图例列出完整运行标签，柱顶显示百分比分数。[checkpoint 看板入口](../checkpoint_dashboard.py) · [AutoCompressors 接入示例](../../reproductions/autocompressors/evaluation/dashboard.py)
 
-运行按 checkpoint 名、压缩参数数值、`output_id` 排序。每个 checkpoint 使用一种色系，不同设置的深浅按全部输入预先分配。分答案类型统计表和底部按论文、问题展示的回答与分数随选择同步更新。筛选前后配色一致，清空选择后该任务显示选择提示。[多目录命令与排序规则](../locomo/README.md#方法看板接入)
+运行按 checkpoint 名、压缩参数数值、`output_id` 排序。每个 checkpoint 使用一种色系，不同设置的深浅按全部输入预先分配。“详细统计”中的总体及分答案类型表格，与底部按论文、问题展示的回答和分数随选择同步更新。筛选前后配色一致，清空选择后该任务显示选择提示。[多目录命令与排序规则](../locomo/README.md#方法看板接入)
 
 按运行 ID 保存结果的方法使用 `benchmarks.locomo.dashboard.run_dashboard(method, title, render_results, argv=None, qasper=False)`，通过 `qasper=True` 启用 QASPER，`--output-dir` 指向包含 `qasper/test/` 的运行目录。入口选择一个已评分任务，核对方法、benchmark 和划分后调用 `show_runs` 展示 QASPER；`render_results` 回调负责 LoCoMo 的方法专属页面。[公共方法入口](../locomo/dashboard.py)
 
