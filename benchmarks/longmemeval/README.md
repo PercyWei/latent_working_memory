@@ -2,7 +2,7 @@
 
 创建时间：20261126 10:49:01 Asia/Shanghai
 
-最后修订时间：20261127 20:01:48 Asia/Shanghai
+最后修订时间：20261127 20:27:07 Asia/Shanghai
 
 本目录维护 LongMemEval 的数据读取、按题生成、问答评分和结果格式。[官方仓库](https://github.com/xiaowu0162/LongMemEval) · [清洗版数据](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/tree/98d7416c24c778c2fee6e6f3006e7a073259d48f)
 
@@ -94,78 +94,31 @@ ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<ou
 
 ### 跨运行比较
 
-[公共看板脚本](scripts/dashboard.sh) 使用当前环境的 Python 启动 Streamlit。启动前激活已安装看板依赖的环境。`--run-file` 读取目录清单，`--run` 直接接收结果目录；至少提供一个参数，也可同时使用以合并输入。
-
-将需要比较的已评分目录保存为 `configs/benchmarks/longmemeval_runs.txt`，例如：
-
-```text
-# 每行一个结果目录
-artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr4_longmemeval_s_cleaned
-artifacts/baselines/full_context/eval/Qwen3-4B-Instruct-2507/longmemeval_s_cleaned
-artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr4_longmemeval_oracle
-```
-
-清单使用 UTF-8 编码，每行一个直接包含 `summary.json` 和 `details.jsonl` 的目录；忽略空行和以 `#` 开头的整行注释。文件中的路径含空格时不用加引号。清单须非空，目录不递归展开。
+激活已安装 Streamlit 的环境后，在项目根目录运行以下任一命令。将 `path/to/...` 替换为实际路径。
 
 ```bash
-source .venv/bin/activate
-bash benchmarks/longmemeval/scripts/dashboard.sh \
-  --run-file configs/benchmarks/longmemeval_runs.txt
-
-# 也可直接指定运行
-bash benchmarks/longmemeval/scripts/dashboard.sh \
-  --run artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr4_longmemeval_s_cleaned \
-        artifacts/baselines/full_context/eval/Qwen3-4B-Instruct-2507/longmemeval_s_cleaned
+bash benchmarks/longmemeval/scripts/dashboard.sh --run path/to/run-a path/to/run-b
+bash benchmarks/longmemeval/scripts/dashboard.sh --run-file configs/reproductions/benchmarks/longmemeval_runs.txt
 ```
 
-`--run DIR [DIR...]` 可连续传入多个目录，也可重复该参数。两种输入的相对路径均以项目根目录为基准，也支持绝对路径和 `~`；命令行路径含空格时加引号。运行别名统一由目录名自动生成，重名时补充父路径。所有输入中的结果目录须互不重复。
+- `--run DIR [DIR ...]` 直接传入一个或多个结果目录，可重复使用。
+- `--run-file FILE` 读取 UTF-8 清单，每行一个结果目录，忽略空行与以 `#` 开头的注释行。
 
-S 和 Oracle 各自使用带边框的比较区，区内按保存的配置列出“方法 → checkpoint／模型 → 评估设置”复选框，默认全选；支持整组或逐项勾选，只有一个 checkpoint 或没有评估参数时简化层级。运行按方法、checkpoint 自然顺序及评估参数数值排序；配置相同的重复运行用别名区分。S／Oracle 和裁判配置不作为压缩设置。
+两种入口可单独或合用。结果目录须直接包含 `summary.json` 和 `details.jsonl`，相对路径以项目根目录为基准，重复目录会报错。
 
-每个比较区的主图展示所选运行的总体、六类题型和不可回答题准确率，图例显示完整标签，柱顶显示分数。同一方法与 checkpoint 使用同一色系，不同评估设置用不同深浅；颜色按全部输入预先分配，勾选时保持固定。“详细统计”列出运行身份、裁判、题数和准确率，题型宏平均保留在表中；配置可展开查看。
+看板按方法、checkpoint／模型和评估设置分组，默认全选。方法按首次出现的顺序排列，合用时先读 `--run`，再按行读 `--run-file`。同一方法内按 checkpoint 名自然排序，再按评估参数数值排序。勾选会同步更新图表、统计和逐题对照。
 
-底部汇集两个比较区的已选运行，按题型或“仅看不可回答题”筛选，通过原始 `question_id` 对照同题回答与裁判判定。问题和参考答案展示一次，回答每行最多三列，支持同时比较 S 和 Oracle。
-
-参与比较的运行须有相同的题目 ID、问题、题型和参考答案，逐题记录须完整且题号唯一；同一 S／Oracle 设置还须有相同的数据来源、指纹和提问日期。看板读取已保存的分数，图表、统计与逐题回答随勾选同步更新。[展示接口](dashboard.py) · [共用布局](../comparison_dashboard.py)
+S 和 Oracle 分别比较总体、六类题型和不可回答题的准确率。统计表补充题型宏平均、题数和裁判信息，逐题区支持跨设置对照同题回答。看板按题号核对问题、题型和参考答案，同一设置还须使用相同的数据和提问日期。
 
 ### 方法看板接入
 
-公共跨运行看板通过 [comparison_runs.py](../comparison_runs.py) 从方法配置提取 checkpoint／模型与评估参数。接入新方法时，在该模块明确其配置字段；任务名、结果目录名和运行别名不用于推断评估设置。
+[公共展示组件](dashboard.py) 的 `show_runs` 和 `load_runs` 均接收非空的 `(展示标签, Path 类型的结果目录)` 序列，标签须唯一。
 
-方法维护自己的 Streamlit 页面和启动脚本，通过 `show_runs(runs)` 嵌入 LongMemEval 的指标、运行配置和逐题回答对照。页面入口负责设置页面标题和选择结果目录。[公共展示组件](dashboard.py)
-
-| 接口 | 用法 |
+| 接口 | 用途 |
 |---|---|
-| `show_runs(runs)` | 接收非空的 `(展示标签, Path 类型的设置目录)` 序列，标签须各不相同。读取已评分产物、核对运行间的数据和题目一致性，展示准确率、配置及逐题回答 |
-| `load_runs(runs)` | 接收与 `show_runs` 相同的标签与目录序列，核对运行间的数据和题目一致性，返回运行字典列表；每项包含 `label`、`directory`、`summary` 和 `records` |
-| `load_run(label, directory)` | 读取一个设置目录，返回含 `label`、`directory`、`summary` 和 `records` 的字典，其中 `records` 按原始 `question_id` 索引 |
-| `comparison_scores(metrics)` | 返回按主图顺序排列的“中文指标名 → 准确率”字典，供公共看板和 checkpoint 看板共用 |
-| `show_scores(runs, colors=None, show_chart=True)` | 默认展示总体、六类题型和不可回答题准确率柱图，以及包含题型宏平均的“准确率统计”表。`colors` 指定运行标签对应的颜色，`show_chart=False` 时仅展示表格 |
-| `show_answers(runs)` | 接收同样的运行对象列表，按题型和不可回答条件筛选，展示同题回答与裁判判定 |
+| `show_runs(runs)` | 读取并校验结果，展示准确率、配置和逐题回答 |
+| `load_runs(runs)` | 返回校验后的运行列表，每项含 `label`、`directory`、`summary` 和按 `question_id` 索引的 `records` |
+| `show_scores(runs, colors=None, show_chart=True)` | 展示已加载运行的指标。设 `show_chart=False` 时仅展示统计表 |
+| `show_answers(runs)` | 对照已加载运行的同题回答 |
 
-跨运行校验集中在 `load_runs`，`show_runs` 复用该加载接口。自定义布局先调用 `load_runs`，再将返回值分别交给 `show_scores` 和 `show_answers`，即可分开展示概览与逐题内容。在方法的 Streamlit 页面中可直接调用下面的代码，同时展示同一次运行的 S 和 Oracle。
-
-```python
-from pathlib import Path
-
-from benchmarks.longmemeval.dashboard import show_runs
-
-run_dir = Path("artifacts/my-method/eval/run-1")
-show_runs([
-    ("My method · S", run_dir / "longmemeval_s_cleaned"),
-    ("My method · Oracle", run_dir / "longmemeval_oracle"),
-])
-```
-
-ICAE、AutoCompressors 和 SDCC 使用 `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`。`--output-dir` 可连续接收多个 checkpoint 目录，也可重复指定该参数。LongMemEval-S 和 Oracle 各自列出两级复选框，默认全选。可勾选整个 checkpoint 或其下单独的 `output_id`，所有子项和已选数量始终可见。主图展示所选运行的总体、六类题型和不可回答题准确率。顶部图例列出完整运行标签，柱顶显示百分比分数。[checkpoint 看板入口](../checkpoint_dashboard.py)
-
-运行按 checkpoint 名、压缩参数数值、`output_id` 排序。每个 checkpoint 使用一种色系，不同设置的深浅按全部输入预先分配。“详细统计”内的准确率表保留题型宏平均，与底部的逐题回答、裁判判定随选择同步更新。筛选前后配色一致，清空选择后该任务显示选择提示。[多目录命令与排序规则](../locomo/README.md#方法看板接入)
-
-按运行 ID 保存结果的方法使用 `benchmarks.locomo.dashboard.run_dashboard(method, title, render_results, argv=None, qasper=False)`，`--output-dir` 指向运行目录。入口选择一个已评分任务，核对方法与任务后调用 `show_runs` 展示 LongMemEval；`render_results` 回调负责 LoCoMo 的方法专属页面。[公共方法入口](../locomo/dashboard.py) · [LaCT 接入示例](../../reproductions/lact/evaluation/dashboard.py)
-
-方法环境需安装 Streamlit 等看板依赖，启动脚本使用该环境的 Python。以已有的 LaCT 页面为例，在项目根目录运行下面的命令，`--output-dir` 替换为实际评估运行目录。
-
-```bash
-PYTHONPATH=.:src python -m streamlit run reproductions/lact/evaluation/dashboard.py -- \
-  --output-dir artifacts/lact/eval/run-1
-```
+新方法接入跨运行看板时，在[运行配置解析](../comparison_runs.py)中定义模型、checkpoint 和评估参数的读取规则。

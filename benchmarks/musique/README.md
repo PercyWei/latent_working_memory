@@ -2,7 +2,7 @@
 
 创建时间：20261127 15:58:00 Asia/Shanghai
 
-最后修订时间：20261127 20:01:48 Asia/Shanghai
+最后修订时间：20261127 20:27:07 Asia/Shanghai
 
 MuSiQue 是需要关联多篇文档完成 2–4 跳推理的问答数据集。本目录维护 MuSiQue-Ans v1.0 的读取、答案生成调度、本地 Answer F1／EM 评分及结果展示。[原论文](https://aclanthology.org/2022.tacl-1.31/) · [官方仓库](https://github.com/StonyBrookNLP/musique)
 
@@ -60,47 +60,30 @@ MuSiQue 是需要关联多篇文档完成 2–4 跳推理的问答数据集。�
 
 ### 跨运行比较
 
-[公共看板脚本](scripts/dashboard.sh) 使用当前环境的 Python 启动 Streamlit。启动前激活已安装看板依赖的环境。`--run-file` 读取目录清单，`--run` 直接接收结果目录；至少提供一个参数，也可同时使用以合并输入。
-
-将需要比较的已评分目录保存为 `configs/benchmarks/musique_runs.txt`，例如：
-
-```text
-# 每行一个结果目录
-artifacts/my-method/eval/run-1/musique/dev
-artifacts/my-method/eval/run-2/musique/dev
-```
-
-清单使用 UTF-8 编码，每行一个直接包含 `summary.json` 和 `details.jsonl` 的目录；忽略空行和以 `#` 开头的整行注释。文件中的路径含空格时不用加引号。清单须非空，目录不递归展开。
+激活已安装 Streamlit 的环境后，在项目根目录运行以下任一命令。将 `path/to/...` 替换为实际路径。
 
 ```bash
-source .venv/bin/activate
-bash benchmarks/musique/scripts/dashboard.sh \
-  --run-file configs/benchmarks/musique_runs.txt
-
-# 也可直接指定运行
-bash benchmarks/musique/scripts/dashboard.sh \
-  --run artifacts/my-method/eval/run-1/musique/dev \
-        artifacts/my-method/eval/run-2/musique/dev
+bash benchmarks/musique/scripts/dashboard.sh --run path/to/run-a path/to/run-b
+bash benchmarks/musique/scripts/dashboard.sh --run-file path/to/runs.txt
 ```
 
-`--run DIR [DIR...]` 可连续传入多个目录，也可重复该参数。两种输入的相对路径均以项目根目录为基准，也支持绝对路径和 `~`；命令行路径含空格时加引号。运行别名统一由目录名自动生成，重名时补充父路径。所有输入中的结果目录须互不重复。
+- `--run DIR [DIR ...]` 接收一个或多个结果目录，可重复指定。
+- `--run-file FILE` 读取 UTF-8 清单，每行一个结果目录，忽略空行及以 `#` 开头的整行注释。
 
-页面根据保存的配置列出“方法 → checkpoint／模型 → 评估设置”复选框，默认全选，支持整组或逐项勾选；没有评估参数时直接选择模型。运行按方法、checkpoint 自然顺序和参数数值排序，同一 checkpoint 使用同一色系，深浅按全部候选设置预先分配，勾选时保持不变。相同配置的多次运行通过运行别名区分。
+两种入口可单独或合用。结果目录须直接包含 `summary.json` 和 `details.jsonl`，相对路径以项目根目录为基准，重复目录会报错。
 
-Answer F1 和 Answer EM 分别绘图，每张图合并比较已选运行的总体与 2、3、4 跳分数。图例显示完整运行名，柱顶显示分数。“详细统计”保留方法、checkpoint、设置、题数和分数，并提供运行配置。底部按跳数筛选问题，通过原始 `question_id` 对照相同已选运行；公共问题与参考答案只显示一次，回答最多三列排列。统计和逐题区域分别使用带边框的容器。
+看板按方法、checkpoint／模型和评估设置分组，默认全选。方法按首次出现的顺序排列，合用时先读 `--run`，再按行读 `--run-file`。同一方法内按 checkpoint 名自然排序，再按评估参数数值排序。勾选会同步更新图表、统计和逐题对照。
 
-参与比较的运行须使用相同划分、数据来源、指纹和评分器，逐题结果须完整且题号唯一；看板核对问题、跳数和参考答案的一致性。[展示接口](dashboard.py)
+主图分别比较 MuSiQue dev 总体和各跳数的 Answer F1、Answer EM，逐题对照可按跳数筛选。参与比较的运行须使用相同数据和评分器，逐题结果按题号核对问题、跳数及参考答案。
 
 ### 方法看板接入
 
-方法页面可调用 `show_runs(runs)` 嵌入指标表格与逐题回答；自定义布局可先调用 `load_runs`，再分别展示指标和回答。页面入口负责标题和结果目录选择。
+[展示组件](dashboard.py) 的 `runs` 输入为 `(标签, Path 类型的结果目录)` 序列。
 
-| 接口 | 用法 |
+| 接口 | 用途 |
 |---|---|
-| `show_runs(runs)` | 接收非空的 `(展示标签, Path 类型的结果目录)` 序列，加载并展示指标及逐题回答 |
-| `load_runs(runs)` | 核对指标、划分、数据与评分器身份、完整且唯一的题号，以及问题、跳数和参考答案的一致性；返回含 `label`、`directory`、`summary`、`records` 的运行列表，`records` 按 `question_id` 索引 |
-| `comparison_panels(metrics)` | 返回 F1 与 EM 两组主图指标，各组按总体、2–4 跳排列 |
-| `show_scores(runs)` | 接收已加载的运行列表，展示总体与分跳数的 F1、EM 和题数 |
-| `show_answers(runs)` | 接收已加载的运行列表，按跳数和问题展示多运行回答、参考答案及逐题分数 |
+| `show_runs(runs)` | 加载并校验结果，展示指标表格与逐题回答 |
+| `load_runs(runs)` | 返回经校验的运行列表，供 `show_scores(loaded)` 和 `show_answers(loaded)` 分开渲染 |
+| `comparison_panels(metrics)` | 返回 F1 与 EM 两组主图指标 |
 
-公共跨运行页面使用[统一比较框架](../comparison_dashboard.py)。新方法接入分层选择时，需在[运行配置解析](../comparison_runs.py)中明确 checkpoint 和评估参数的读取规则；分组不依赖展示标签或结果目录名。
+新方法接入公共比较时，在 [comparison_runs.py](../comparison_runs.py) 定义模型与评估参数的读取规则。

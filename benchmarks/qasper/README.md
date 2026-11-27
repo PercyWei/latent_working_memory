@@ -2,7 +2,7 @@
 
 创建时间：20261126 16:09:15 Asia/Shanghai
 
-最后修订时间：20261127 20:01:48 Asia/Shanghai
+最后修订时间：20261127 20:27:07 Asia/Shanghai
 
 QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3 测试集的读取、按论文生成回答、本地 Answer F1 评分及结果展示。[原论文](https://aclanthology.org/2021.naacl-main.365/) · [官方数据（CC BY 4.0）](https://huggingface.co/datasets/allenai/qasper)
 
@@ -61,71 +61,31 @@ ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<ou
 
 ### 跨运行比较
 
-[公共看板脚本](scripts/dashboard.sh) 使用当前环境的 Python 启动 Streamlit。启动前激活已安装看板依赖的环境。`--run-file` 读取目录清单，`--run` 直接接收结果目录；至少提供一个参数，也可同时使用以合并输入。
-
-将需要比较的已评分目录保存为 `configs/benchmarks/qasper_runs.txt`，例如：
-
-```text
-# 每行一个结果目录
-artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr4_qasper_test
-artifacts/baselines/full_context/eval/Qwen3-4B-Instruct-2507/qasper_test
-```
-
-清单使用 UTF-8 编码，每行一个直接包含 `summary.json` 和 `details.jsonl` 的目录；忽略空行和以 `#` 开头的整行注释。文件中的路径含空格时不用加引号。清单须非空，目录不递归展开。
+激活已安装 Streamlit 的环境后，在项目根目录运行以下任一命令。将 `path/to/...` 替换为实际路径。
 
 ```bash
-source .venv/bin/activate
-bash benchmarks/qasper/scripts/dashboard.sh \
-  --run-file configs/benchmarks/qasper_runs.txt
-
-# 也可直接指定运行
-bash benchmarks/qasper/scripts/dashboard.sh \
-  --run artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr4_qasper_test \
-        artifacts/baselines/full_context/eval/Qwen3-4B-Instruct-2507/qasper_test
+bash benchmarks/qasper/scripts/dashboard.sh --run path/to/run-a path/to/run-b
+bash benchmarks/qasper/scripts/dashboard.sh --run-file configs/reproductions/benchmarks/qasper.txt
 ```
 
-`--run DIR [DIR...]` 可连续传入多个目录，也可重复该参数。两种输入的相对路径均以项目根目录为基准，也支持绝对路径和 `~`；命令行路径含空格时加引号。运行别名统一由目录名自动生成，重名时补充父路径。所有输入中的结果目录须互不重复。
+- `--run DIR [DIR ...]` 直接传入一个或多个结果目录，可重复使用。
+- `--run-file FILE` 读取 UTF-8 清单，每行一个结果目录，忽略空行与以 `#` 开头的注释行。
 
-页面根据保存的配置列出“方法 → checkpoint／模型 → 评估设置”复选框，默认全选，支持整组或逐项勾选；没有评估参数时直接选择模型。运行按方法、checkpoint 自然顺序和参数数值排序，同一 checkpoint 使用同一色系，深浅按全部候选设置预先分配，勾选时保持不变。相同配置的多次运行通过运行别名区分。
+两种入口可单独或合用。结果目录须直接包含 `summary.json` 和 `details.jsonl`，相对路径以项目根目录为基准，重复目录会报错。
 
-主图合并比较已选运行的总体、抽取、自由文本、是非和不可回答 Answer F1，图例显示完整运行名，柱顶显示分数。“详细统计”保留方法、checkpoint、设置、各类题数和分数，并提供运行配置。题数为 0 的类型不绘制柱子，表中分数留空；答案类型按各运行最高分的人工标注确定，因此各类题数可能不同。底部按论文和原始 `question_id` 查看相同已选运行的回答，公共问题与参考答案只显示一次，回答最多三列排列。
+看板按方法、checkpoint／模型和评估设置分组，默认全选。方法按首次出现的顺序排列，合用时先读 `--run`，再按行读 `--run-file`。同一方法内按 checkpoint 名自然排序，再按评估参数数值排序。勾选会同步更新图表、统计和逐题对照。
 
-参与比较的运行须使用相同划分、数据来源、指纹和评分器，逐题结果须完整且题号唯一；看板核对题目、所属论文和参考答案的一致性。统计和逐题区域分别使用带边框的容器。[展示接口](dashboard.py)
+比较 test 的总体及分答案类型 Answer F1，统计表保留各类题数，逐题区按论文和问题筛选。各运行须使用相同的数据与评分器，题目、所属论文和参考答案须一致。答案类型按各运行中取得最高分的参考答案确定，因此各类题数可能不同。
 
 ### 方法看板接入
 
-方法维护自己的 Streamlit 页面和启动脚本，通过 `show_runs(runs)` 嵌入 QASPER 的指标与逐题回答对照。页面入口负责设置页面标题和选择结果目录。[公共展示组件](dashboard.py)
+[公共展示组件](dashboard.py) 的 `show_runs` 和 `load_runs` 均接收非空的 `(展示标签, Path 类型的结果目录)` 序列，标签须唯一。
 
-| 接口 | 用法 |
+| 接口 | 用途 |
 |---|---|
-| `show_runs(runs)` | 接收非空的 `(展示标签, Path 类型的划分目录)` 序列，标签须各不相同。读取并校验已评分产物，展示总体与分答案类型结果及同题回答 |
-| `load_runs(runs)` | 核对指标、划分、数据与评分器身份、完整且唯一的题号，以及题目、论文和参考答案的一致性；返回包含 `label`、`directory`、`summary` 和 `records` 的运行字典列表，`records` 按原始 `question_id` 索引 |
-| `comparison_scores(metrics)` | 返回按主图顺序排列的“中文指标名 → Answer F1”字典，供公共看板和 checkpoint 看板共用 |
-| `show_scores(runs, show_chart=True)` | 接收已加载的运行对象列表，默认展示总体与四类答案的 Answer F1 柱图及统计表，表格保留题数；`show_chart=False` 时仅展示表格 |
-| `show_answers(runs)` | 接收同样的运行对象列表，按论文和问题展示多运行回答、参考答案及逐题分数 |
+| `show_runs(runs)` | 读取并校验结果，展示 Answer F1、题数和逐题回答 |
+| `load_runs(runs)` | 返回校验后的运行列表，每项含 `label`、`directory`、`summary` 和按 `question_id` 索引的 `records` |
+| `show_scores(runs, show_chart=True)` | 展示已加载运行的指标。设 `show_chart=False` 时仅展示统计表 |
+| `show_answers(runs)` | 对照已加载运行的同题回答 |
 
-`show_runs` 复用 `load_runs` 完成加载与校验；自定义布局可先调用 `load_runs`，再分别调用 `show_scores` 和 `show_answers`，分开展示概览与逐题内容。在方法的 Streamlit 页面中可直接调用下面的代码，查看一次运行的测试集结果。传入多对标签与目录即可比较多个运行。
-
-公共跨运行页面使用[统一比较框架](../comparison_dashboard.py)。新方法接入分层选择时，需在[运行配置解析](../comparison_runs.py)中明确 checkpoint 和评估参数的读取规则；分组不依赖展示标签或结果目录名。
-
-```python
-from pathlib import Path
-
-from benchmarks.qasper.dashboard import show_runs
-
-run_dir = Path("artifacts/my-method/eval/run-1")
-show_runs([("My method · test", run_dir / "qasper" / "test")])
-```
-
-ICAE、AutoCompressors 和 SDCC 使用 `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`。`--output-dir` 可连续接收多个 checkpoint 目录，也可重复指定该参数。QASPER test 列出两级复选框，默认全选。可勾选整个 checkpoint 或其下单独的 `output_id`，所有子项和已选数量始终可见。主图按相同顺序展示总体及四类答案的 Answer F1。顶部图例列出完整运行标签，柱顶显示百分比分数。[checkpoint 看板入口](../checkpoint_dashboard.py) · [AutoCompressors 接入示例](../../reproductions/autocompressors/evaluation/dashboard.py)
-
-运行按 checkpoint 名、压缩参数数值、`output_id` 排序。每个 checkpoint 使用一种色系，不同设置的深浅按全部输入预先分配。“详细统计”中的总体及分答案类型表格，与底部按论文、问题展示的回答和分数随选择同步更新。筛选前后配色一致，清空选择后该任务显示选择提示。[多目录命令与排序规则](../locomo/README.md#方法看板接入)
-
-按运行 ID 保存结果的方法使用 `benchmarks.locomo.dashboard.run_dashboard(method, title, render_results, argv=None, qasper=False)`，通过 `qasper=True` 启用 QASPER，`--output-dir` 指向包含 `qasper/test/` 的运行目录。入口选择一个已评分任务，核对方法、benchmark 和划分后调用 `show_runs` 展示 QASPER；`render_results` 回调负责 LoCoMo 的方法专属页面。[公共方法入口](../locomo/dashboard.py)
-
-方法环境需安装 Streamlit 等看板依赖，启动脚本使用该环境的 Python。例如在项目根目录查看 AutoCompressors checkpoint 的已评分设置：
-
-```bash
-bash reproductions/autocompressors/scripts/dashboard.sh \
-  --output-dir artifacts/reproductions/autocompressors/eval/AutoCompressor-Llama-2-7b-6k
-```
+新方法接入跨运行看板时，在[运行配置解析](../comparison_runs.py)中定义模型、checkpoint 和评估参数的读取规则。

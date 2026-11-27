@@ -2,7 +2,7 @@
 
 创建时间：20261124 15:43:38 Asia/Shanghai
 
-最后修订时间：20261127 20:01:48 Asia/Shanghai
+最后修订时间：20261127 20:27:07 Asia/Shanghai
 
 本目录提供 LoCoMo 的公共评估与看板接口。公共层维护数据、调度、评分和结果格式；各方法维护模型加载、正文处理、答案生成及自己的启动脚本。数据准备见[公共 benchmark 说明](../README.md)。
 
@@ -164,67 +164,27 @@ ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<ou
 
 ### 跨运行比较
 
-[公共看板脚本](scripts/dashboard.sh) 使用当前环境的 Python 启动 Streamlit。启动前激活已安装看板依赖的环境。`--run-file` 读取目录清单，`--run` 直接接收结果目录；至少提供一个参数，也可同时使用以合并输入。
-
-将需要比较的已评分目录保存为 `configs/benchmarks/locomo_runs.txt`，例如：
-
-```text
-# 每行一个结果目录
-artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr4_locomo
-artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr8_locomo
-artifacts/baselines/full_context/eval/Qwen3-4B-Instruct-2507/locomo
-```
-
-清单使用 UTF-8 编码，每行一个直接包含 `summary.json` 和 `details.jsonl` 的目录；忽略空行和以 `#` 开头的整行注释。文件中的路径含空格时不用加引号。清单须非空，目录不递归展开。
+激活已安装 Streamlit 的环境后，在项目根目录运行以下任一命令。将 `path/to/...` 替换为实际路径。
 
 ```bash
-source .venv/bin/activate
-bash benchmarks/locomo/scripts/dashboard.sh \
-  --run-file configs/benchmarks/locomo_runs.txt
-
-# 也可直接指定运行
-bash benchmarks/locomo/scripts/dashboard.sh \
-  --run artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr4_locomo \
-        artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr8_locomo
+bash benchmarks/locomo/scripts/dashboard.sh --run path/to/run-a path/to/run-b
+bash benchmarks/locomo/scripts/dashboard.sh --run-file configs/reproductions/benchmarks/locomo_runs.txt
 ```
 
-`--run DIR [DIR...]` 可连续传入多个目录，也可重复该参数。两种输入的相对路径均以项目根目录为基准，也支持绝对路径和 `~`；命令行路径含空格时加引号。运行别名统一由目录名自动生成，重名时补充父路径。所有输入中的结果目录须互不重复。
+- `--run DIR [DIR ...]` 接收一个或多个结果目录，可重复指定。
+- `--run-file FILE` 读取 UTF-8 清单，每行一个结果目录，忽略空行及以 `#` 开头的整行注释。
 
-看板按保存的配置列出“方法 → checkpoint／模型 → 评估设置”复选框，默认全选；支持整组或逐项勾选，只有一个 checkpoint 或没有评估参数时简化层级。运行按方法、checkpoint 自然顺序及评估参数数值排序；配置相同的重复运行用别名区分。
+两种入口可单独或合用。结果目录须直接包含 `summary.json` 和 `details.jsonl`，相对路径以项目根目录为基准，重复目录会报错。
 
-所选运行在同一柱图中比较总体与各题型 F1，图例显示完整标签，柱顶显示分数。同一方法与 checkpoint 使用同一色系，不同评估设置用不同深浅；颜色按全部输入预先分配，勾选时保持固定。“详细统计”列出运行身份、题数和分数，配置可展开查看。底部按题型、对话筛选，同题的问题和参考答案展示一次，各运行回答与逐题 F1 并排展示，每行最多三列。
+看板按方法、checkpoint／模型和评估设置分组，默认全选。方法按首次出现的顺序排列，合用时先读 `--run`，再按行读 `--run-file`。同一方法内按 checkpoint 名自然排序，再按评估参数数值排序。勾选会同步更新图表、统计和逐题对照。
 
-参与比较的运行须有相同的数据来源、指纹、题目范围和参考答案。看板核对逐题记录完整且题号唯一，读取已保存的分数；图表、统计与逐题回答随勾选同步更新。[公共比较入口](compare.py) · [共用布局](../comparison_dashboard.py)
+主图展示总体与各题型 F1，逐题对照可按题型和对话筛选。参与比较的运行须使用相同评估数据和题目范围，逐题结果按题号核对问题及参考答案。
 
 ### 方法看板接入
 
-公共跨运行看板通过 [comparison_runs.py](../comparison_runs.py) 从方法配置提取 checkpoint／模型与评估参数。接入新方法时，在该模块明确其配置字段；任务名、结果目录名和运行别名不用于推断评估设置。LoCoMo 的 `load_runs(runs)` 接收 `(运行标签, Path 类型的结果目录)` 序列，读取并校验结果；`comparison_scores(metrics)` 返回总体及各题型 F1，供比较布局使用。[比较组件](compare.py)
-
-[dashboard.py](dashboard.py) 提供可复用的展示组件，方法维护自己的页面和启动脚本。按运行 ID 保存结果的方法使用以下接口：
-
-| 接口 | 用法 |
+| 组件 | 接口 |
 |---|---|
-| `run_dashboard(method, title, render_results, argv=None, qasper=False)` | `--output-dir` 指向运行目录，选择一个已评分任务。支持 LoCoMo、LongMemEval-S 和 Oracle，传 `qasper=True` 可启用 QASPER。选中 LoCoMo 后调用 `render_results(结果目录, summary)` |
-| `show_scores(metrics, extra_metrics=())` | 展示总体及分题型 F1 和题数；可通过 `(标签, 已格式化数值)` 序列追加方法指标卡 |
-| `show_answers(directory, metrics)` | `directory` 指向含 `details.jsonl` 的 LoCoMo 结果目录，展示筛选后的逐题回答 |
+| [单运行展示](dashboard.py) | `show_scores(metrics, extra_metrics=())` 展示 F1 和题数，`show_answers(directory, metrics)` 展示逐题结果 |
+| [多运行展示](compare.py) | `load_runs(runs)` 接收 `(标签, Path 类型的结果目录)` 序列并加载、校验结果。已加载运行可传给 `show_comparison(runs, all_labels, colors=None, show_chart=True)` 和 `show_answer_comparison(runs)` |
 
-ICAE、AutoCompressors 和 SDCC 使用 [checkpoint 看板入口](../checkpoint_dashboard.py) `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`。`--output-dir` 接收一个或多个 `<output-root>/eval/<checkpoint_name>/`，可在一次参数后连续列出目录，也可重复该参数。例如，可在同一看板比较以下两个 checkpoint：
-
-```bash
-bash reproductions/icae/scripts/dashboard.sh --output-dir \
-  artifacts/reproductions/icae/eval/mistral_7b_pretrained_icae \
-  artifacts/reproductions/icae/eval/mistral_7b_ft_icae
-```
-
-入口按 `summary.json` 中的 benchmark 及其设置或划分组织任务。每个任务直接列出两级复选框，默认全部选中。每个 checkpoint 下始终列出各运行的 `output_id` 和已选数量。子项可单独勾选。全选时点击 checkpoint 可清空该组，只选部分或未选时点击可全选。LoCoMo 柱图按总体及各题型 F1 分组，顶部列出所选运行的完整图例，柱顶显示百分比分数。
-
-各任务先按 checkpoint 名自然排序，同一 checkpoint 内按压缩参数数值升序排列，同参数的运行按 `output_id` 自然排序。每个 checkpoint 使用一种色系。看板按全部输入目录、全部任务中的不同压缩设置预先分配深浅，参数从小到大对应从深到浅的等距色阶，只有一种设置时使用中等明度。同一 checkpoint 和设置跨任务同色，筛选时颜色保持固定。评分详细表、`render_memory(runs)` 展示的记忆统计和底部逐题对照同步更新。清空某任务的选择后，该任务显示选择提示。
-
-按运行 ID 保存结果的方法，其 `render_results` 回调依次调用 `show_scores(summary["metrics"])`、方法专属展示和 `show_answers(directory, summary["metrics"])`。
-
-方法环境包含 Streamlit 等看板依赖，启动脚本使用该环境的 Python。按运行 ID 保存结果的方法在项目根目录运行，例如：
-
-```bash
-PYTHONPATH=.:src python -m streamlit run my_method/dashboard.py -- \
-  --output-dir artifacts/my-method/eval/run-1
-```
+按运行目录选任务可复用 [run_dashboard](dashboard.py)，通过 `render_results(directory, summary)` 定制 LoCoMo 页面。按 checkpoint 比较可复用 [checkpoint 看板入口](../checkpoint_dashboard.py)，其 `--output-dir` 接收一个或多个 checkpoint 目录。新方法接入公共比较时，在 [comparison_runs.py](../comparison_runs.py) 定义模型与评估参数的读取规则。

@@ -60,15 +60,18 @@ def scope_name(summary):
 def prepare_runs(runs):
     """在筛选前确定排序、完整标签和颜色，返回副本并保留原始 alias。"""
     prepared = []
+    method_order = {}
     checkpoints = defaultdict(dict)
     for run in runs:
         summary = run["summary"]
         checkpoint_id, checkpoint, values, setting = run_identity(summary)
-        item = {**run, "alias": run["label"], "method": summary["method"],
+        method = summary["method"]
+        method_order.setdefault(method, len(method_order))
+        item = {**run, "alias": run["label"], "method": method,
                 "checkpoint_id": checkpoint_id, "checkpoint": checkpoint,
                 "setting_sort": values, "setting": setting}
         prepared.append(item)
-        checkpoints[(item["method"], checkpoint)][checkpoint_id] = item
+        checkpoints[(method, checkpoint)][checkpoint_id] = item
 
     # 同名 checkpoint 使用能区分它们的最短路径后缀，内部仍按完整路径分组。
     checkpoint_names = {}
@@ -86,6 +89,7 @@ def prepare_runs(runs):
             checkpoint_names[(method, identity)] = str(path.with_suffix("") if method == "icae" else path)
     for run in prepared:
         run["checkpoint"] = checkpoint_names[(run["method"], run["checkpoint_id"])]
+    # 按固定顺序分配色相，使调整方法的展示顺序时色相保持一致。
     prepared.sort(key=lambda run: (
         natural_key(run["method"]), natural_key(run["checkpoint"]), run["checkpoint_id"],
         run["setting_sort"], natural_key(run["alias"]), str(run["directory"]),
@@ -134,4 +138,4 @@ def prepare_runs(runs):
         for run in group:
             rgb = hls_to_rgb(hue, lightness[color_keys[id(run)]], 0.65)
             run["color"] = "#" + "".join(f"{round(value * 255):02x}" for value in rgb)
-    return prepared
+    return sorted(prepared, key=lambda run: method_order[run["method"]])
