@@ -2,7 +2,7 @@
 
 创建时间：20261126 16:09:15 Asia/Shanghai
 
-最后修订时间：20261127 15:46:03 Asia/Shanghai
+最后修订时间：20261127 15:56:39 Asia/Shanghai
 
 QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3 测试集的读取、按论文生成回答、本地 Answer F1 评分及结果展示。[原论文](https://aclanthology.org/2021.naacl-main.365/) · [官方数据（CC BY 4.0）](https://huggingface.co/datasets/allenai/qasper)
 
@@ -97,9 +97,9 @@ run_dir = Path("artifacts/my-method/eval/run-1")
 show_runs([("My method · test", run_dir / "qasper" / "test")])
 ```
 
-ICAE、AutoCompressors 和 SDCC 使用 `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`。`--output-dir` 接收一个或多个 `<output-root>/eval/<checkpoint_name>/`，可连续列出目录或重复该参数。侧栏默认选中全部 checkpoint。QASPER test 的全部压缩设置按参数数值升序纵向排列，每组用一张横向条形表按行列出 checkpoint，Answer F1 以百分比和横条显示。[checkpoint 看板入口](../checkpoint_dashboard.py) · [AutoCompressors 接入示例](../../reproductions/autocompressors/evaluation/dashboard.py)
+ICAE、AutoCompressors 和 SDCC 使用 `benchmarks.checkpoint_dashboard.run_dashboard(method, title, render_memory, argv=None)`。`--output-dir` 可连续接收多个 checkpoint 目录，也可重复指定该参数。侧栏可筛选 checkpoint。QASPER test 的“参与比较的运行”默认全选，可用柱图对照所选运行的总体 Answer F1。顶部图例列出完整运行标签，柱顶显示百分比分数。[checkpoint 看板入口](../checkpoint_dashboard.py) · [AutoCompressors 接入示例](../../reproductions/autocompressors/evaluation/dashboard.py)
 
-同一 checkpoint、同一设置下的多个 `output_id` 分行显示完整名称。相同设置用同一色系，checkpoint 用深浅区分。可展开各答案类型的 Answer F1 和题数，或在页面底部按论文和问题查看各运行的回答与分数。[多目录命令与排序规则](../locomo/README.md#方法看板接入)
+可跨 checkpoint 和压缩设置任选运行，同参数的不同 `output_id` 也可分别选取。分答案类型统计表和底部按论文、问题展示的回答与分数随选择同步更新。筛选前后配色一致，清空选择后该任务显示选择提示。[多目录命令与排序规则](../locomo/README.md#方法看板接入)
 
 按运行 ID 保存结果的方法使用 `benchmarks.locomo.dashboard.run_dashboard(method, title, render_results, argv=None, qasper=False)`，通过 `qasper=True` 启用 QASPER，`--output-dir` 指向包含 `qasper/test/` 的运行目录。入口选择一个已评分任务，核对方法、benchmark 和划分后调用 `show_runs` 展示 QASPER；`render_results` 回调负责 LoCoMo 的方法专属页面。[公共方法入口](../locomo/dashboard.py)
 

@@ -2,7 +2,7 @@
 
 创建时间：20261124 11:54:28 Asia/Shanghai
 
-最后修订时间：20261127 15:46:03 Asia/Shanghai
+最后修订时间：20261127 15:56:39 Asia/Shanghai
 
 [环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能](#三通用功能)
 
@@ -134,9 +134,9 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/autocompressors/scripts/eval_qasper.
 
 ### 3.2 结果展示
 
-将一个或多个 `<output_root>/eval/<checkpoint_name>/` 传给 `--output-dir`，多个目录可用空格分隔或重复指定该参数。看板默认展示所有已评分的运行，按 `summary.json` 中的 benchmark 及其设置或划分归入各任务。侧栏可筛选 checkpoint。详细统计和逐题对照中，单目录使用 `output_id` 作为运行标签，多目录使用 `<checkpoint_name>/<output_id>`。
+将一个或多个 `<output_root>/eval/<checkpoint_name>/` 传给 `--output-dir`，多个目录可用空格分隔或重复指定该参数。看板按 `summary.json` 中的 benchmark 及其设置或划分展示已评分的运行。侧栏可筛选 checkpoint，每个任务顶部的“参与比较的运行”默认全选，可自由组合不同 checkpoint 和压缩设置。单目录显示 `output_id`，多目录显示 `<checkpoint_name>/<output_id>`，相同参数下的不同 ID 可独立选择。
 
-每个任务的全部压缩设置自上而下展示。各组按分段长度（`segment_length`）的数值升序排列。每组一张横向条形表，行名为 checkpoint，核心指标分列，每个分数以百分比和横条显示。同一 checkpoint、同一设置下的多次运行按完整 `output_id` 分行展示。组内按 checkpoint 名和 `output_id` 自然排序，相同压缩参数使用同一色系，不同 checkpoint 用深浅区分。评分详细统计表默认折叠，逐题回答沿用概览顺序。
+柱图按核心指标分组，顶部图例列出所有所选运行，柱顶显示百分比分数。运行按分段长度（`segment_length`）升序排列，参数相同时依次按 checkpoint 名和 `output_id` 自然排序。颜色由全部输入运行确定，同参数使用同一色系，不同 checkpoint 以深浅区分。筛选后配色固定，评分详细表、LoCoMo 记忆统计和逐题回答随选择同步更新。清空某个任务的选择后，该任务显示选择提示。
 
 ```bash
 # 查看一个 checkpoint

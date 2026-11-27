@@ -2,7 +2,7 @@
 
 创建时间：20261124 15:43:38 Asia/Shanghai
 
-最后修订时间：20261127 15:46:03 Asia/Shanghai
+最后修订时间：20261127 15:56:39 Asia/Shanghai
 
 本目录提供 LoCoMo 的公共评估与看板接口。公共层维护数据、调度、评分和结果格式；各方法维护模型加载、正文处理、答案生成及自己的启动脚本。数据准备见[公共 benchmark 说明](../README.md)。
 
@@ -195,9 +195,11 @@ bash reproductions/icae/scripts/dashboard.sh --output-dir \
   artifacts/reproductions/icae/eval/mistral_7b_ft_icae
 ```
 
-入口按 `summary.json` 中的 benchmark 及其设置或划分展示各任务。每个任务下，全部压缩设置按参数数值升序自上而下排列。每组用一张横向条形表按行列出 checkpoint，总体及各题型 F1 分列显示百分比和横条。同一 checkpoint 和设置下有多次运行时，每个完整 `output_id` 单列一行。组内按 checkpoint 名和 `output_id` 自然排序，同一设置用同色系，checkpoint 用深浅区分。评分详细统计表默认折叠。页面底部可选择任务和题目，对照各运行的回答。
+入口按 `summary.json` 中的 benchmark 及其设置或划分组织任务。每个任务顶部的“参与比较的运行”默认全选，可跨 checkpoint 和压缩设置自由组合。单目录按 `output_id` 选择，多目录按 `<checkpoint_name>/<output_id>` 选择，相同参数的多次运行各自保留。LoCoMo 柱图按总体及各题型 F1 分组，顶部列出所选运行的完整图例，柱顶显示百分比分数。
 
-checkpoint 看板的 `render_memory(runs)` 回调只负责 LoCoMo 全部压缩设置的记忆用量汇总与分对话统计。按运行 ID 保存结果的方法，其 `render_results` 回调依次调用 `show_scores(summary["metrics"])`、方法专属展示和 `show_answers(directory, summary["metrics"])`。
+运行按压缩参数数值升序排列，参数相同时依次按 checkpoint 名和 `output_id` 自然排序。配色由全部输入运行确定，同参数同色系，不同 checkpoint 用深浅区分。筛选后配色固定，评分详细表、`render_memory(runs)` 展示的记忆统计和底部逐题对照同步更新。清空某任务的选择后，该任务显示选择提示。
+
+按运行 ID 保存结果的方法，其 `render_results` 回调依次调用 `show_scores(summary["metrics"])`、方法专属展示和 `show_answers(directory, summary["metrics"])`。
 
 方法环境包含 Streamlit 等看板依赖，启动脚本使用该环境的 Python。按运行 ID 保存结果的方法在项目根目录运行，例如：
 
