@@ -2,7 +2,7 @@
 
 创建时间：20261126 16:09:15 Asia/Shanghai
 
-最后修订时间：20261127 18:39:18 Asia/Shanghai
+最后修订时间：20261127 20:01:48 Asia/Shanghai
 
 QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3 测试集的读取、按论文生成回答、本地 Answer F1 评分及结果展示。[原论文](https://aclanthology.org/2021.naacl-main.365/) · [官方数据（CC BY 4.0）](https://huggingface.co/datasets/allenai/qasper)
 
@@ -61,17 +61,32 @@ ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<ou
 
 ### 跨运行比较
 
-公共看板脚本使用当前环境的 Python 启动 Streamlit。启动前激活已安装看板依赖的环境。`--run` 后按“展示标签、已评分的划分目录”成对传参，可连续指定多组，也可重复使用 `--run`。[公共看板脚本](scripts/dashboard.sh)
+[公共看板脚本](scripts/dashboard.sh) 使用当前环境的 Python 启动 Streamlit。启动前激活已安装看板依赖的环境。`--run-file` 读取目录清单，`--run` 直接接收结果目录；至少提供一个参数，也可同时使用以合并输入。
+
+将需要比较的已评分目录保存为 `configs/benchmarks/qasper_runs.txt`，例如：
+
+```text
+# 每行一个结果目录
+artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr4_qasper_test
+artifacts/baselines/full_context/eval/Qwen3-4B-Instruct-2507/qasper_test
+```
+
+清单使用 UTF-8 编码，每行一个直接包含 `summary.json` 和 `details.jsonl` 的目录；忽略空行和以 `#` 开头的整行注释。文件中的路径含空格时不用加引号。清单须非空，目录不递归展开。
 
 ```bash
 source .venv/bin/activate
 bash benchmarks/qasper/scripts/dashboard.sh \
-  --run 方法A-运行1 artifacts/method-a/eval/run-1/qasper/test \
-        方法A-运行2 artifacts/method-a/eval/run-2/qasper/test \
-        方法B-运行1 artifacts/method-b/eval/run-1/qasper/test
+  --run-file configs/benchmarks/qasper_runs.txt
+
+# 也可直接指定运行
+bash benchmarks/qasper/scripts/dashboard.sh \
+  --run artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr4_qasper_test \
+        artifacts/baselines/full_context/eval/Qwen3-4B-Instruct-2507/qasper_test
 ```
 
-每个目录直接包含 `summary.json` 和 `details.jsonl`，展示标签须非空且各不相同，含空格时加引号。页面根据保存的配置列出“方法 → checkpoint／模型 → 评估设置”复选框，默认全选，支持整组或逐项勾选；没有评估参数时直接选择模型。运行按方法、checkpoint 自然顺序和参数数值排序，同一 checkpoint 使用同一色系，深浅按全部候选设置预先分配，勾选时保持不变。相同配置的多次运行通过传入标签区分。
+`--run DIR [DIR...]` 可连续传入多个目录，也可重复该参数。两种输入的相对路径均以项目根目录为基准，也支持绝对路径和 `~`；命令行路径含空格时加引号。运行别名统一由目录名自动生成，重名时补充父路径。所有输入中的结果目录须互不重复。
+
+页面根据保存的配置列出“方法 → checkpoint／模型 → 评估设置”复选框，默认全选，支持整组或逐项勾选；没有评估参数时直接选择模型。运行按方法、checkpoint 自然顺序和参数数值排序，同一 checkpoint 使用同一色系，深浅按全部候选设置预先分配，勾选时保持不变。相同配置的多次运行通过运行别名区分。
 
 主图合并比较已选运行的总体、抽取、自由文本、是非和不可回答 Answer F1，图例显示完整运行名，柱顶显示分数。“详细统计”保留方法、checkpoint、设置、各类题数和分数，并提供运行配置。题数为 0 的类型不绘制柱子，表中分数留空；答案类型按各运行最高分的人工标注确定，因此各类题数可能不同。底部按论文和原始 `question_id` 查看相同已选运行的回答，公共问题与参考答案只显示一次，回答最多三列排列。
 

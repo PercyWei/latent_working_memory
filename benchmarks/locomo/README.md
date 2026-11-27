@@ -2,7 +2,7 @@
 
 创建时间：20261124 15:43:38 Asia/Shanghai
 
-最后修订时间：20261127 18:38:33 Asia/Shanghai
+最后修订时间：20261127 20:01:48 Asia/Shanghai
 
 本目录提供 LoCoMo 的公共评估与看板接口。公共层维护数据、调度、评分和结果格式；各方法维护模型加载、正文处理、答案生成及自己的启动脚本。数据准备见[公共 benchmark 说明](../README.md)。
 
@@ -164,17 +164,33 @@ ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<ou
 
 ### 跨运行比较
 
-[公共看板脚本](scripts/dashboard.sh) 使用当前环境的 Python 启动 Streamlit。启动前激活已安装看板依赖的环境。`--run` 后按“运行别名、LoCoMo 结果目录”成对传参，可连续指定多组，也可重复使用 `--run`：
+[公共看板脚本](scripts/dashboard.sh) 使用当前环境的 Python 启动 Streamlit。启动前激活已安装看板依赖的环境。`--run-file` 读取目录清单，`--run` 直接接收结果目录；至少提供一个参数，也可同时使用以合并输入。
+
+将需要比较的已评分目录保存为 `configs/benchmarks/locomo_runs.txt`，例如：
+
+```text
+# 每行一个结果目录
+artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr4_locomo
+artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr8_locomo
+artifacts/baselines/full_context/eval/Qwen3-4B-Instruct-2507/locomo
+```
+
+清单使用 UTF-8 编码，每行一个直接包含 `summary.json` 和 `details.jsonl` 的目录；忽略空行和以 `#` 开头的整行注释。文件中的路径含空格时不用加引号。清单须非空，目录不递归展开。
 
 ```bash
 source .venv/bin/activate
 bash benchmarks/locomo/scripts/dashboard.sh \
-  --run ICAE-cr4 artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr4_locomo \
-        ICAE-cr8 artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr8_locomo \
-        Full-context artifacts/full-context/eval/Qwen3-4B-Instruct-2507/locomo
+  --run-file configs/benchmarks/locomo_runs.txt
+
+# 也可直接指定运行
+bash benchmarks/locomo/scripts/dashboard.sh \
+  --run artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr4_locomo \
+        artifacts/reproductions/icae/eval/mistral_7b_ft_icae/mem128_cr8_locomo
 ```
 
-每个目录直接包含 `summary.json` 和 `details.jsonl`，运行别名须非空且各不相同，含空格时加引号。看板按保存的配置列出“方法 → checkpoint／模型 → 评估设置”复选框，默认全选；支持整组或逐项勾选，只有一个 checkpoint 或没有评估参数时简化层级。运行按方法、checkpoint 自然顺序及评估参数数值排序；配置相同的重复运行用别名区分。
+`--run DIR [DIR...]` 可连续传入多个目录，也可重复该参数。两种输入的相对路径均以项目根目录为基准，也支持绝对路径和 `~`；命令行路径含空格时加引号。运行别名统一由目录名自动生成，重名时补充父路径。所有输入中的结果目录须互不重复。
+
+看板按保存的配置列出“方法 → checkpoint／模型 → 评估设置”复选框，默认全选；支持整组或逐项勾选，只有一个 checkpoint 或没有评估参数时简化层级。运行按方法、checkpoint 自然顺序及评估参数数值排序；配置相同的重复运行用别名区分。
 
 所选运行在同一柱图中比较总体与各题型 F1，图例显示完整标签，柱顶显示分数。同一方法与 checkpoint 使用同一色系，不同评估设置用不同深浅；颜色按全部输入预先分配，勾选时保持固定。“详细统计”列出运行身份、题数和分数，配置可展开查看。底部按题型、对话筛选，同题的问题和参考答案展示一次，各运行回答与逐题 F1 并排展示，每行最多三列。
 

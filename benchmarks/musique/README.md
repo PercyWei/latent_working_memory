@@ -2,7 +2,7 @@
 
 创建时间：20261127 15:58:00 Asia/Shanghai
 
-最后修订时间：20261127 18:39:18 Asia/Shanghai
+最后修订时间：20261127 20:01:48 Asia/Shanghai
 
 MuSiQue 是需要关联多篇文档完成 2–4 跳推理的问答数据集。本目录维护 MuSiQue-Ans v1.0 的读取、答案生成调度、本地 Answer F1／EM 评分及结果展示。[原论文](https://aclanthology.org/2022.tacl-1.31/) · [官方仓库](https://github.com/StonyBrookNLP/musique)
 
@@ -60,16 +60,32 @@ MuSiQue 是需要关联多篇文档完成 2–4 跳推理的问答数据集。�
 
 ### 跨运行比较
 
-公共看板脚本使用当前环境的 Python 启动 Streamlit。启动前激活已安装看板依赖的环境。`--run` 后按“展示标签、已评分目录”成对传参，可连续指定多组，也可重复使用 `--run`。[公共看板脚本](scripts/dashboard.sh)
+[公共看板脚本](scripts/dashboard.sh) 使用当前环境的 Python 启动 Streamlit。启动前激活已安装看板依赖的环境。`--run-file` 读取目录清单，`--run` 直接接收结果目录；至少提供一个参数，也可同时使用以合并输入。
+
+将需要比较的已评分目录保存为 `configs/benchmarks/musique_runs.txt`，例如：
+
+```text
+# 每行一个结果目录
+artifacts/my-method/eval/run-1/musique/dev
+artifacts/my-method/eval/run-2/musique/dev
+```
+
+清单使用 UTF-8 编码，每行一个直接包含 `summary.json` 和 `details.jsonl` 的目录；忽略空行和以 `#` 开头的整行注释。文件中的路径含空格时不用加引号。清单须非空，目录不递归展开。
 
 ```bash
 source .venv/bin/activate
 bash benchmarks/musique/scripts/dashboard.sh \
-  --run 运行1 artifacts/my-method/eval/run-1/musique/dev \
-        运行2 artifacts/my-method/eval/run-2/musique/dev
+  --run-file configs/benchmarks/musique_runs.txt
+
+# 也可直接指定运行
+bash benchmarks/musique/scripts/dashboard.sh \
+  --run artifacts/my-method/eval/run-1/musique/dev \
+        artifacts/my-method/eval/run-2/musique/dev
 ```
 
-每个目录直接包含 `summary.json` 和 `details.jsonl`，展示标签须非空且各不相同，含空格时加引号。页面根据保存的配置列出“方法 → checkpoint／模型 → 评估设置”复选框，默认全选，支持整组或逐项勾选；没有评估参数时直接选择模型。运行按方法、checkpoint 自然顺序和参数数值排序，同一 checkpoint 使用同一色系，深浅按全部候选设置预先分配，勾选时保持不变。相同配置的多次运行通过传入标签区分。
+`--run DIR [DIR...]` 可连续传入多个目录，也可重复该参数。两种输入的相对路径均以项目根目录为基准，也支持绝对路径和 `~`；命令行路径含空格时加引号。运行别名统一由目录名自动生成，重名时补充父路径。所有输入中的结果目录须互不重复。
+
+页面根据保存的配置列出“方法 → checkpoint／模型 → 评估设置”复选框，默认全选，支持整组或逐项勾选；没有评估参数时直接选择模型。运行按方法、checkpoint 自然顺序和参数数值排序，同一 checkpoint 使用同一色系，深浅按全部候选设置预先分配，勾选时保持不变。相同配置的多次运行通过运行别名区分。
 
 Answer F1 和 Answer EM 分别绘图，每张图合并比较已选运行的总体与 2、3、4 跳分数。图例显示完整运行名，柱顶显示分数。“详细统计”保留方法、checkpoint、设置、题数和分数，并提供运行配置。底部按跳数筛选问题，通过原始 `question_id` 对照相同已选运行；公共问题与参考答案只显示一次，回答最多三列排列。统计和逐题区域分别使用带边框的容器。
 

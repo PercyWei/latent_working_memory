@@ -1,6 +1,6 @@
 # 论文复现
 
-最后修订时间：20261127 16:12:47 Asia/Shanghai
+最后修订时间：20261127 20:01:48 Asia/Shanghai
 
 本目录保存论文方法的独立复现。训练和评估入口、依赖环境、源码来源及结果分别在各方法目录维护。
 
@@ -137,7 +137,7 @@ LaCT 的来源目录为 `source/lact/`、`source/flame/`；E²-TTT 为 `source/e
 
 LaCT、In-Place TTT 和 E²-TTT 的 `--output-dir` 指向包含 `locomo/`、`longmemeval_s_cleaned/` 或 `longmemeval_oracle/` 的运行目录，在页面中选择一个已评分任务查看。
 
-跨运行比较时，公共看板的 `--run` 接收展示标签和直接包含 `summary.json` 与 `details.jsonl` 的结果目录。LongMemEval 支持同题的 S 与 Oracle 对照，QASPER 比较 test 划分的运行。[LongMemEval 公共看板](../benchmarks/longmemeval/README.md#跨运行比较) · [QASPER 公共看板](../benchmarks/qasper/README.md#跨运行比较)
+跨运行比较时，公共看板的 `--run DIR [DIR...]` 直接接收一个或多个结果目录，也可通过 `--run-file` 读取每行一个目录的 UTF-8 清单；至少提供一个参数，可同时使用。目录直接包含 `summary.json` 与 `details.jsonl`，相对路径以项目根目录为基准；运行别名自动生成，重复目录报错。LongMemEval 支持同题的 S 与 Oracle 对照，QASPER 比较 test 划分的运行。[LongMemEval 公共看板](../benchmarks/longmemeval/README.md#跨运行比较) · [QASPER 公共看板](../benchmarks/qasper/README.md#跨运行比较)
 
 总体及各题型 F1、题数和逐题回答复用[公共看板接口](../benchmarks/locomo/README.md#方法看板接入)；记忆用量等专属展示由方法维护。启动命令见各方法 README 的“查看结果”。跨运行比较使用[公共 LoCoMo 看板](../benchmarks/locomo/README.md#跨运行比较)，可在任一方法环境中启动。
 

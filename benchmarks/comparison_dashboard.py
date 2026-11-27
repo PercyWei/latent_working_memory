@@ -93,23 +93,51 @@ def show_score_chart(runs, scores_by_label, colors):
     }, width="stretch")
 
 
+def parse_run_paths(title, argv=None):
+    """合并两种入口的目录，统一解析路径、检查重复并自动生成标签。"""
+    parser = argparse.ArgumentParser(description=f"{title} 跨方法、checkpoint 和评估设置比较。")
+    parser.add_argument("--run", nargs="+", action="extend", default=[],
+                        metavar="DIRECTORY",
+                        help="一个或多个直接包含 summary.json、details.jsonl 的结果目录；相对路径以项目根目录为基准")
+    parser.add_argument("--run-file", type=Path, metavar="FILE",
+                        help="UTF-8 目录清单，每行一个结果目录；相对路径以项目根目录为基准，忽略空行和 # 注释行")
+    args = parser.parse_args(argv)
+    if not args.run and args.run_file is None:
+        parser.error("至少提供 --run 或 --run-file。")
+    entries = [(f"--run 第 {number} 项", directory) for number, directory in enumerate(args.run, 1)]
+
+    if args.run_file is not None:
+        run_file = args.run_file.expanduser().resolve()
+        try:
+            lines = run_file.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError) as error:
+            parser.error(f"无法读取运行目录清单 {run_file}：{error}")
+        file_entries = [(f"{run_file}:{number}", line.strip()) for number, line in enumerate(lines, 1)
+                        if line.strip() and not line.lstrip().startswith("#")]
+        if not file_entries:
+            parser.error(f"运行目录清单为空：{run_file}")
+        entries.extend(file_entries)
+
+    project_root = Path(__file__).resolve().parents[1]
+    paths, seen = {}, set()
+    for source, directory in entries:
+        if not directory.strip():
+            parser.error(f"{source} 的结果目录不能为空。")
+        path = (project_root / Path(directory).expanduser()).resolve()
+        if path in seen:
+            parser.error(f"{source} 重复指定结果目录：{path}")
+        seen.add(path)
+        for depth in range(1, len(path.parts) + 1):
+            label = str(Path(*path.parts[-depth:]))
+            if label not in paths:
+                paths[label] = path
+                break
+    return paths
+
+
 def run_comparison(title, load_runs, scope_labels, score_panels, show_tables, show_answers, argv=None):
     """保留 benchmark 的读取和评分逻辑，统一多方法比较的交互。"""
-    parser = argparse.ArgumentParser(description=f"{title} 跨方法、checkpoint 和评估设置比较。")
-    parser.add_argument("--run", nargs="+", action="extend", required=True,
-                        metavar="LABEL DIRECTORY",
-                        help="连续传入一组或多组标签和目录；目录直接包含 summary.json、details.jsonl")
-    args = parser.parse_args(argv)
-    if len(args.run) % 2:
-        parser.error("--run 必须按“标签 目录”成对传入。")
-    paths = {}
-    for label, directory in zip(args.run[::2], args.run[1::2], strict=True):
-        if not label.strip() or label in paths:
-            parser.error("运行标签必须非空且不重复。")
-        path = Path(directory).expanduser().resolve()
-        if path in paths.values():
-            parser.error(f"同一结果目录不能重复传入：{path}")
-        paths[label] = path
+    paths = parse_run_paths(title, argv)
 
     st.set_page_config(page_title=f"{title} · 运行比较", layout="wide")
     st.title(f"{title} · 运行比较")
