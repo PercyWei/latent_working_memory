@@ -2,7 +2,7 @@
 
 创建时间：20261019 20:16:32 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261127 20:46:21 Asia/Shanghai
+最后修订时间：20261128 15:18:06 Asia/Shanghai
 
 Full-context 基线用原始模型读取完整输入，贪心生成答案。支持 LoCoMo、LongMemEval-S、LongMemEval-Oracle、QASPER、MuSiQue-Ans 和 RULER。[公共数据准备](../../../benchmarks/README.md)
 
@@ -36,6 +36,7 @@ Full-context 基线用原始模型读取完整输入，贪心生成答案。支�
 | 完整评估脚本参数 | 用途与默认值 |
 |---|---|
 | `--benchmark-data` | 默认 `data/benchmarks/locomo` |
+| `--no-llm-as-judge` | 跳过 Judge Accuracy，只计算官方 F1 |
 
 - **评估范围**：覆盖 10 段完整对话中类别 1–4 的 1,540 道题。[LoCoMo 评估协议](../../../benchmarks/locomo/README.md)
 - **推理方式**：按对话分配 GPU，每段对话的公共前缀只预填一次。各题从该前缀的 KV 缓存独立生成回答。
@@ -91,6 +92,7 @@ uv run -m benchmarks.longmemeval.score \
 | `--benchmark-data` | 默认 `data/benchmarks/qasper` |
 | `--split` | 支持 `test`（默认） |
 | `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
+| `--no-llm-as-judge` | 跳过 Judge Accuracy，只计算官方 Answer F1 |
 
 - **评估范围**：test 包含 416 篇论文、1,451 道题。[QASPER 评估协议](../../../benchmarks/qasper/README.md)
 - **输入长度**：按示例模型 Qwen3-4B-Instruct-2507 的 tokenizer 统计，计入系统提示和聊天模板后，test 每题为 893–29,902 个 token。加上默认回答预算后均在模型的 262,144 个 token 窗口内。
@@ -112,6 +114,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash src/latent_working_memory/full_context/scripts/eva
 | `--benchmark-data` | 默认 `data/benchmarks/musique` |
 | `--split` | 仅支持 `dev`（默认） |
 | `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
+| `--no-llm-as-judge` | 跳过 Judge Accuracy，只计算官方 Answer F1／EM |
 
 - **评估范围**：使用 MuSiQue-Ans v1.0 的完整 dev 划分，共 2,417 道题。[评估协议与数据下载](../../../benchmarks/musique/README.md#评估约定)
 - **推理方式**：按题分配 GPU，每题读取全部候选段落并独立生成回答。

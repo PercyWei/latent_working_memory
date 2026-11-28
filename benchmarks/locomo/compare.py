@@ -1,12 +1,12 @@
-"""比较指定 LoCoMo 运行的 F1 和逐题回答。"""
+"""比较指定 LoCoMo 运行的 F1、Judge Accuracy 和逐题回答。"""
 
 import json
 
 import streamlit as st
 
 from benchmarks.data import LOCOMO_CATEGORIES, LOCOMO_COMMIT
-from benchmarks.comparison_dashboard import run_comparison
-from benchmarks.dashboard_data import load_details
+from benchmarks.comparison_dashboard import run_comparison, show_judge_accuracy_chart
+from benchmarks.dashboard_data import load_details, load_judge_results, show_judge_answer, show_judge_statistics
 
 
 def load_run(label, directory):
@@ -25,7 +25,8 @@ def load_run(label, directory):
     categories = {group["category"] for group in metrics["groups"]}
     if not categories or not categories.issubset(LOCOMO_CATEGORIES):
         raise ValueError(f"{label}：题型必须属于 LoCoMo 类别 1–4。")
-    return {"label": label, "directory": directory, "summary": summary, "records": records}
+    judge = load_judge_results(directory, "locomo", records.keys())
+    return {"label": label, "directory": directory, "summary": summary, "records": records, "judge": judge}
 
 
 def validate_runs(runs):
@@ -114,6 +115,9 @@ def show_comparison(runs, all_labels, colors=None, show_chart=True):
             st.dataframe(category_counts, hide_index=True)
     else:
         st.caption("各题型题数　" + " · ".join(f"{row['题型']} {row['题数']} 题" for row in category_counts))
+    if show_chart:
+        show_judge_accuracy_chart(runs, colors, all_labels)
+    show_judge_statistics(runs)
 
 
 def show_answer_comparison(runs):
@@ -155,6 +159,7 @@ def show_answer_comparison(runs):
                 st.markdown(f"**{run['label']}**")
                 st.caption(f"F1 {row['score']:.2%}")
                 st.code(row["prediction"], language=None, wrap_lines=True)
+                show_judge_answer(run.get("judge"), sample_id)
 
 
 def main(argv=None):

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from benchmarks.dashboard_data import load_details
+from benchmarks.dashboard_data import load_details, load_judge_results, show_judge_answer, show_judge_statistics
 from benchmarks.longmemeval.dashboard import SETTINGS, show_runs
 from benchmarks.qasper.dashboard import TASK_LABELS as QASPER_LABELS, show_runs as show_qasper
 
@@ -28,9 +28,11 @@ def show_scores(metrics, extra_metrics=()):
 
 
 def show_answers(directory, metrics):
-    st.subheader("逐题结果")
     path = directory / "details.jsonl"
     records = load_details(path, path.stat().st_mtime_ns)
+    judge = load_judge_results(directory, "locomo", {row["id"] for row in records})
+    show_judge_statistics([{"label": directory.name, "judge": judge}])
+    st.subheader("逐题结果")
     categories = {group["category"]: group["category_name"] for group in metrics["groups"]}
     conversations = list(dict.fromkeys(row["metadata"]["conversation_id"] for row in records))
     left, right = st.columns(2)
@@ -64,6 +66,8 @@ def show_answers(directory, metrics):
     prediction.code(row["prediction"], language=None, wrap_lines=True)
     references.markdown("**参考答案**")
     references.code("\n".join(row["references"]), language=None, wrap_lines=True)
+    with prediction:
+        show_judge_answer(judge, row["id"])
 
 
 def run_dashboard(method, title, render_results, argv=None, qasper=False):

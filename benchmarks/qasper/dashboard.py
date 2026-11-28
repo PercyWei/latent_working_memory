@@ -1,18 +1,23 @@
-"""按论文展示同一 QASPER 划分中各运行的 Answer F1 和逐题回答。"""
+"""展示同一 QASPER 划分中各运行的 Answer F1、Judge Accuracy 和逐题回答。"""
 
 from functools import partial
 import json
 
 import streamlit as st
 
-from benchmarks.dashboard_data import load_details
-from benchmarks.comparison_dashboard import run_comparison
+from benchmarks.comparison_dashboard import run_comparison, show_judge_accuracy_chart
+from benchmarks.dashboard_data import (
+    QASPER_ANSWER_TYPE_LABELS as ANSWER_TYPE_LABELS,
+    load_details,
+    load_judge_results,
+    show_judge_answer,
+    show_judge_statistics,
+)
 from benchmarks.qasper.data import SPLIT_FILES
 from benchmarks.vendor.qasper import ANSWER_TYPES
 
 
 TASK_LABELS = {f"qasper/{split}": f"QASPER · {split}" for split in SPLIT_FILES}
-ANSWER_TYPE_LABELS = {"extractive": "抽取", "abstractive": "自由文本", "boolean": "是非", "none": "不可回答"}
 
 
 def comparison_scores(metrics):
@@ -54,7 +59,9 @@ def load_runs(runs):
                 for qid, row in records.items()
             ):
                 raise ValueError(f"{label} 的题目、所属论文或参考答案与其他运行不一致。")
-        loaded.append({"label": label, "directory": directory, "summary": summary, "records": records})
+        judge = load_judge_results(directory, "qasper", records.keys())
+        loaded.append({"label": label, "directory": directory, "summary": summary, "records": records,
+                       "judge": judge})
     return loaded
 
 
@@ -102,6 +109,9 @@ def show_scores(runs, show_chart=True):
         st.subheader(title)
         st.dataframe(rows, hide_index=True, column_config=f1_format)
     st.caption("每题按最高 F1 对应的人工标注归入一种答案类型；不同运行的各类题数可能不同。无题目的类型不显示分数。")
+    if show_chart:
+        show_judge_accuracy_chart(runs, color_labels=labels)
+    show_judge_statistics(runs)
 
 
 def show_answers(runs):
@@ -123,6 +133,7 @@ def show_answers(runs):
                 st.markdown(f"**{run['label']}**")
                 st.caption(f"{ANSWER_TYPE_LABELS[answer['answer_type']]} · Answer F1 {answer['score']:.2%}")
                 st.code(answer["predicted_answer"], language=None, wrap_lines=True)
+                show_judge_answer(run.get("judge"), qid)
 
 
 def show_runs(runs):

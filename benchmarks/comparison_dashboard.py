@@ -6,6 +6,7 @@ from pathlib import Path
 import streamlit as st
 
 from benchmarks.comparison_runs import prepare_runs
+from benchmarks.dashboard_data import judge_config, judge_groups
 
 
 def select_runs(available, scope):
@@ -61,9 +62,13 @@ def select_runs(available, scope):
     return [run for run in available if st.session_state[run_key(run)]]
 
 
-def show_score_chart(runs, scores_by_label, colors):
-    """同一量纲的指标合并为分组柱图，图例和配色仅引用所选运行。"""
+def show_score_chart(runs, scores_by_label, colors, color_labels=None):
+    """同一量纲的指标合并为分组柱图，沿用已有配色并只展示所选运行的图例。"""
     labels = [run["label"] for run in runs]
+    color_labels = labels if color_labels is None else color_labels
+    color_scale = {"domain": color_labels, "scheme": "tableau20"} if colors is None else {
+        "domain": color_labels, "range": [colors[label] for label in color_labels],
+    }
     metrics = list(dict.fromkeys(metric for scores in scores_by_label.values() for metric in scores))
     chart = [
         {"运行": label, "指标": metric, "得分": score}
@@ -82,7 +87,7 @@ def show_score_chart(runs, scores_by_label, colors):
         "layer": [
             {"mark": "bar", "encoding": {
                 "color": {"field": "运行", "type": "nominal",
-                          "scale": {"domain": labels, "range": [colors[label] for label in labels]},
+                          "scale": color_scale,
                           "legend": {"orient": "top", "direction": "vertical", "title": None,
                                      "values": labels, "labelLimit": 0}},
             }},
@@ -99,6 +104,25 @@ def show_score_panels(runs, score_panels, colors):
     for panel in next(iter(panels.values())):
         st.subheader(panel)
         show_score_chart(runs, {label: scores[panel] for label, scores in panels.items()}, colors)
+
+
+def show_judge_accuracy_chart(runs, colors=None, color_labels=None):
+    scored = [run for run in runs if run.get("judge")]
+    if not scored:
+        return
+    st.subheader("Judge Accuracy")
+    config = judge_config(scored[0]["judge"])
+    if any(judge_config(run["judge"]) != config for run in scored[1:]):
+        st.warning("所选运行的裁判配置不同。各运行的 Judge Accuracy 可在详细统计中查看。")
+        return
+    st.caption(f"裁判模型 {config['model']} · 所选运行中 {len(scored)}/{len(runs)} 份已完成裁判评分")
+    if config["benchmark"] == "qasper":
+        st.caption("答案类型沿用各运行的 F1 归类。")
+    scores_by_label = {
+        run["label"]: {scope: group["score"] for scope, group in judge_groups(run["judge"])}
+        for run in scored
+    }
+    show_score_chart(scored, scores_by_label, colors, color_labels)
 
 
 def parse_run_paths(title, argv=None):
@@ -175,6 +199,7 @@ def run_comparison(title, load_runs, scope_labels, score_panels, show_tables, sh
             st.caption(f"已选 {len(runs)} / {len(scope_runs)} 份结果。")
             colors = {run["label"]: run["color"] for run in runs}
             show_score_panels(runs, score_panels, colors)
+            show_judge_accuracy_chart(runs, colors)
             with st.expander("详细统计"):
                 st.dataframe([
                     {"运行": run["label"], "方法": run["method"], "checkpoint / 模型": run["checkpoint"],
@@ -185,7 +210,10 @@ def run_comparison(title, load_runs, scope_labels, score_panels, show_tables, sh
             with st.expander("运行配置"):
                 for run in runs:
                     st.markdown(f"**{run['label']}**")
-                    st.json({"目录": str(run["directory"]), **run["summary"]}, expanded=False)
+                    config = {"目录": str(run["directory"]), **run["summary"]}
+                    if run.get("judge"):
+                        config["裁判配置"] = judge_config(run["judge"])
+                    st.json(config, expanded=False)
 
     if selected:
         selected_directories = {run["directory"] for run in selected}

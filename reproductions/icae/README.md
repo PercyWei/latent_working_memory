@@ -2,7 +2,7 @@
 
 创建时间：20260904 10:13:57 Asia/Shanghai
 
-最后修订时间：20261127 20:45:55 Asia/Shanghai
+最后修订时间：20261128 15:18:06 Asia/Shanghai
 
 [环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能](#三通用功能)
 
@@ -165,6 +165,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/instruction_finetune.sh
 | 完整评估脚本参数 | 用途与默认值 |
 |---|---|
 | `--benchmark-data` | 默认 `data/benchmarks/locomo` |
+| `--no-llm-as-judge` | 跳过 Judge Accuracy，只计算官方 F1 |
 
 - **评估范围**：覆盖 10 段完整对话中类别 1–4 的 1,540 道题。[LoCoMo 评估协议](../../benchmarks/locomo/README.md)
 - **推理方式**：按对话分配 GPU，每段对话历史只压缩一次。同一对话下的各题复用记忆与 Reader 前缀缓存，独立作答。
@@ -224,6 +225,7 @@ uv run -m benchmarks.longmemeval.score \
 | `--benchmark-data` | 默认 `data/benchmarks/qasper` |
 | `--split` | 支持 `test`（默认） |
 | `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
+| `--no-llm-as-judge` | 跳过 Judge Accuracy，只计算官方 Answer F1 |
 
 - **评估范围**：test 包含 416 篇论文、1,451 道题。[QASPER 评估协议](../../benchmarks/qasper/README.md)
 - **推理方式**：按论文分配 GPU。每篇论文只压缩一次，各题复用记忆和 Reader 前缀缓存，独立作答。
@@ -246,6 +248,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/icae/scripts/eval_qasper.sh \
 | `--benchmark-data` | 默认 `data/benchmarks/musique` |
 | `--split` | 支持 `dev`（默认） |
 | `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
+| `--no-llm-as-judge` | 跳过 Judge Accuracy，只计算官方 Answer F1／EM |
 
 - **评估范围**：使用 MuSiQue-Ans v1.0 dev 的全部 2,417 道题。[数据下载与评估协议](../../benchmarks/musique/README.md#评估约定)
 - **推理方式**：按题分配 GPU。Writer 压缩每题全部候选段落，Reader 从各题对应的记忆并行作答。

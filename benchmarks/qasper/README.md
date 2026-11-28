@@ -2,7 +2,7 @@
 
 创建时间：20261126 16:09:15 Asia/Shanghai
 
-最后修订时间：20261127 20:33:44 Asia/Shanghai
+最后修订时间：20261128 15:11:56 Asia/Shanghai
 
 QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3 测试集的读取、按论文生成回答、本地 Answer F1 评分及结果展示。[原论文](https://aclanthology.org/2021.naacl-main.365/) · [官方数据（CC BY 4.0）](https://huggingface.co/datasets/allenai/qasper)
 
@@ -26,24 +26,26 @@ QASPER 是针对 NLP 论文的全文问答数据集。本目录维护官方 v0.3
 | `load_adapter(settings)` | 根据方法配置加载模型，返回具有 `prepare_contexts` 和 `answer_batch` 接口的适配器 |
 | `prepare_contexts(documents)` | 为本批首次出现的各篇论文并行准备正文状态和待回答问题。适配器接收的题目仅含推理所需信息 |
 | `answer_batch(states, questions, complete)` | 从各题对应的状态并行回答，完成一题即回调 `complete`，空回答按官方规则计分 |
-| `run_evaluation(...)` | 按论文调度生成，在本地计算官方 Answer F1，按原始题序保存结果并汇总 |
+| `run_evaluation(...)` | 按论文调度生成，按原始题序保存官方 Answer F1 结果，默认追加 Judge Accuracy |
 
 分词、模型位置窗口检查和具体读写由适配器维护。公共调度参数由 `add_evaluation_arguments(parser, output_root, checkpoint_layout=False)` 定义。按模型或 checkpoint 组织结果的方法传入 `checkpoint_layout=True`，并向 `run_evaluation` 传入 `checkpoint_name` 和评估设置前缀 `output_name`。Full-context 使用模型目录名作为 `checkpoint_name`，`output_name=""` 时默认结果目录名为 `qasper_test`。[数据与输入](data.py) · [评估入口](evaluate.py)
 
 | 参数 | 含义与默认值 |
 |---|---|
+| `--resume` | 沿用原运行进度，默认关闭 |
 | `--benchmark-data` | 输入数据目录，默认 `data/benchmarks/qasper` |
 | `--split` | `test`（默认） |
 | `--output-root` | 输出根目录，默认值由接入方提供 |
 | `--output-id` | 结果目录名；Full-context 默认 `qasper_test`，ICAE、AutoCompressors 和 SDCC 默认 `<压缩设置>_qasper_test` |
 | `--batch-size-per-gpu` | 每卡批处理数，默认 `1` |
 | `--max-new-tokens` | 每题最多生成的新 token 数，默认 `128` |
-| `--resume` | 沿用原运行进度，默认关闭 |
+| `--no-llm-as-judge` | 跳过 Judge Accuracy，生成答案并计算官方 Answer F1 |
 
 ## 问答评分
 
 - **逐题分数**：预测与参考答案统一转小写，去除英文标点、冠词，按空白切分 token，根据重复词的匹配次数计算 F1。多个抽取片段先以逗号和空格连接成一个答案。若一题有多份人工标注，取最高 F1；并列时以原顺序第一份最高分标注确定答案类型。[官方评分器](https://github.com/allenai/qasper-led-baseline/blob/afd0fb96bf78ce8cd8157639c6f6a6995e4f9089/scripts/evaluator.py) · [本地评分函数](../vendor/qasper.py) · [代码许可证](../vendor/QASPER-LICENSE.txt)
 - **汇总口径**：总体 Answer F1 对全部题目取算术平均。`extractive`、`abstractive`、`boolean` 和 `none` 各自统计题数与平均 F1，分别对应抽取、自由文本、是非和不可回答。四组在单次运行中互斥且覆盖全部题目；同一题可能有不同类型的人工标注，最高分标注随预测变化，因此不同运行的分组题数可能不同。不可回答同样计算 Answer F1。证据选择属于独立任务。
+- **Judge Accuracy** 默认在官方 Answer F1 写出后计算。逐题核对全部人工标注，预测完整匹配任一参考即可得分。对是非题检查答案极性，对不可回答标注检查是否明确表示论文无法作答。分类型统计沿用官方 F1 所选的答案类型。[裁判配置与补评](../README.md#judge-accuracy)
 
 ## 产物与指标
 
@@ -75,7 +77,7 @@ bash benchmarks/qasper/scripts/dashboard.sh --run-file configs/reproductions/ben
 
 看板按方法、checkpoint／模型和评估设置分组，默认全选。方法按首次出现的顺序排列，合用时先读 `--run`，再按行读 `--run-file`。ICAE 优先按评估配置中的训练阶段排序，`pretrained` 排在 `finetuned` 前。同一方法内再按 checkpoint 名自然排序和评估参数数值排序。勾选会同步更新图表、统计和逐题对照。
 
-比较 test 的总体及分答案类型 Answer F1，统计表保留各类题数，逐题区按论文和问题筛选。各运行须使用相同的数据与评分器，题目、所属论文和参考答案须一致。答案类型按各运行中取得最高分的参考答案确定，因此各类题数可能不同。
+分图比较 test 的总体及分答案类型 Answer F1 和 Judge Accuracy，统计表保留各类题数。逐题区可按论文和问题筛选并查看判定理由。各运行须使用相同的数据与评分器，题目、所属论文和参考答案须一致。答案类型按最高 F1 的标注确定，各运行的分组题数可能不同。
 
 ### 方法看板接入
 

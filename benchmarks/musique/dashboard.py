@@ -1,11 +1,11 @@
-"""按推理跳数展示 MuSiQue 各运行的 Answer F1、EM 和逐题回答。"""
+"""按推理跳数展示 MuSiQue 各运行的 Answer F1、EM、Judge Accuracy 和逐题回答。"""
 
 import json
 
 import streamlit as st
 
-from benchmarks.dashboard_data import load_details
-from benchmarks.comparison_dashboard import run_comparison
+from benchmarks.comparison_dashboard import run_comparison, show_judge_accuracy_chart
+from benchmarks.dashboard_data import load_details, load_judge_results, show_judge_answer, show_judge_statistics
 from benchmarks.musique.data import SPLIT_FILES
 
 
@@ -54,7 +54,9 @@ def load_runs(runs):
                 for qid, row in records.items()
             ):
                 raise ValueError(f"{label} 的题目、推理跳数或参考答案与其他运行不一致。")
-        loaded.append({"label": label, "directory": directory, "summary": summary, "records": records})
+        judge = load_judge_results(directory, "musique", records.keys())
+        loaded.append({"label": label, "directory": directory, "summary": summary, "records": records,
+                       "judge": judge})
     return loaded
 
 
@@ -73,6 +75,7 @@ def show_scores(runs):
     for title, rows in (("总体表现", totals), ("分推理跳数表现", groups)):
         st.subheader(title)
         st.dataframe(rows, hide_index=True, column_config=score_format)
+    show_judge_statistics(runs)
 
 
 def show_answers(runs):
@@ -94,6 +97,7 @@ def show_answers(runs):
                 st.markdown(f"**{run['label']}**")
                 st.caption(f"Answer F1 {answer['score']:.2%} · Answer EM {answer['exact_match']:.2%}")
                 st.code(answer["predicted_answer"], language=None, wrap_lines=True)
+                show_judge_answer(run.get("judge"), qid)
 
 
 def show_runs(runs):
@@ -102,6 +106,7 @@ def show_runs(runs):
     except (OSError, KeyError, ValueError) as error:
         st.error(str(error))
         return
+    show_judge_accuracy_chart(loaded)
     show_scores(loaded)
     show_answers(loaded)
 

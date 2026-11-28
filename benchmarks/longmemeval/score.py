@@ -1,60 +1,17 @@
 """使用 LongMemEval 官方提示词评判已生成的回答，按题保存评分。"""
 
 import argparse
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import hashlib
-from itertools import islice
 import json
 from pathlib import Path
 
 from benchmarks.data import load_samples
-from benchmarks.io import run_lock, write_json, write_jsonl
-from benchmarks.progress import QuestionTimer
+from benchmarks.io import run_lock, write_json
+from benchmarks.judge_pool import DEFAULT_CONCURRENCY, load_judgments, score_pending
 from benchmarks.protocol import data_identity
 from .data import LONGMEMEVAL_FILES
 from .generate import read_predictions
 from .judge import JUDGE_MODEL, JUDGE_OPTIONS, JUDGE_REVISION, judge_answer, summarize_scores
-
-
-DEFAULT_CONCURRENCY = 8
-
-
-def _score_pending(samples, predictions, rows, details_path, benchmark, concurrency):
-    timer = QuestionTimer(len(rows))
-    pending = (index for index in range(len(samples)) if index not in rows)
-    failure = None
-    with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        in_flight = {}
-        while True:
-            if failure is None:
-                for index in islice(pending, concurrency - len(in_flight)):
-                    future = executor.submit(judge_answer, samples[index], predictions[index]["hypothesis"])
-                    in_flight[future] = index
-            if not in_flight:
-                break
-            completed, _ = wait(in_flight, return_when=FIRST_COMPLETED)
-            for future in completed:
-                index = in_flight.pop(future)
-                try:
-                    judgment = future.result()
-                except Exception as error:
-                    # 停止派发新题，继续保存已经发出的请求中成功的判定。
-                    if failure is None:
-                        failure = error
-                    continue
-                sample = samples[index]
-                rows[index] = {
-                    **predictions[index],
-                    "metadata": {"question_type": sample.question_type, "question": sample.input.question,
-                                 "question_date": sample.input.question_date},
-                    "reference": sample.answer,
-                    "autoeval_label": judgment,
-                }
-                write_jsonl(details_path, (rows[index] for index in sorted(rows)))
-                print(f"{benchmark} | judged {len(rows)}/{len(samples)} | {timer.format_rate(len(rows))}",
-                      flush=True)
-    if failure is not None:
-        raise failure
 
 
 def score_run(run_dir, resume=False, data_dir=None, concurrency=DEFAULT_CONCURRENCY):
@@ -93,23 +50,24 @@ def score_run(run_dir, resume=False, data_dir=None, concurrency=DEFAULT_CONCURRE
                 raise FileExistsError(f"scoring already started in {directory}; use --resume")
             if json.loads(scoring_path.read_text(encoding="utf-8")) != scoring:
                 raise ValueError("saved judge settings, predictions or data differ")
-            if details_path.exists():
-                positions = {prediction["question_id"]: index for index, prediction in enumerate(predictions)}
-                previous_index = -1
-                with details_path.open(encoding="utf-8") as stream:
-                    for line_number, line in enumerate(stream, 1):
-                        row = json.loads(line)
-                        index = positions.get(row["question_id"], -1)
-                        if index <= previous_index or any(
-                            row[key] != value for key, value in predictions[index].items()
-                        ):
-                            raise ValueError(f"{details_path}:{line_number}: saved judgment differs or is out of order")
-                        rows[index] = row
-                        previous_index = index
+            rows = load_judgments(details_path, (prediction["question_id"] for prediction in predictions))
+            for index, row in rows.items():
+                if any(row[key] != value for key, value in predictions[index].items()):
+                    raise ValueError(f"{details_path}: saved judgment differs for {row['question_id']}")
         else:
             write_json(scoring_path, scoring)
 
-        _score_pending(samples, predictions, rows, details_path, benchmark, concurrency)
+        def judge_row(index):
+            sample, prediction = samples[index], predictions[index]
+            return {
+                **prediction,
+                "metadata": {"question_type": sample.question_type, "question": sample.input.question,
+                             "question_date": sample.input.question_date},
+                "reference": sample.answer,
+                "autoeval_label": judge_answer(sample, prediction["hypothesis"]),
+            }
+
+        score_pending(len(samples), rows, details_path, benchmark, concurrency, judge_row)
         summary = {**config, "judge": scoring, "metrics": summarize_scores(rows.values())}
         write_json(directory / "summary.json", summary)
         return summary

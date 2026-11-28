@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:02:06 Asia/Shanghai
 
-最后修订时间：20261126 17:07:15 Asia/Shanghai
+最后修订时间：20261128 15:17:55 Asia/Shanghai
 
 [环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能](#三通用功能)
 
@@ -137,10 +137,11 @@ MLP／SwiGLU 自动匹配论文参照；未评估完成的 benchmark 显示 `—
 | 完整评估脚本参数 | 用途与默认值 |
 |---|---|
 | `--benchmark-data` | 默认 `data/benchmarks/locomo` |
+| `--no-llm-as-judge` | 跳过 Judge Accuracy，只计算官方 F1 |
 
 - **评估范围**：覆盖 10 段完整对话中类别 1–4 的 1,540 道题。[LoCoMo 评估协议](../../benchmarks/locomo/README.md)
 - **推理方式**：按对话分配 GPU，每段对话历史只预填一次。该对话的各题复用预填好的递归状态和窗口注意力缓存，按各自的真实位置独立作答。
-- **回答长度与评分**：每题最多生成 50 个 token。按官方规则逐题计算 F1，再对所有题目取平均。
+- **回答长度与评分**：每题最多生成 50 个 token。按官方规则逐题计算 F1，再对所有题目取平均。保存 F1 后默认计算 Judge Accuracy。[裁判配置与补评](../../benchmarks/README.md#judge-accuracy)
 - **验证范围**：LoCoMo 适配已完成静态检查，CUDA 数值对照和全量评估待完成。
 
 ```bash

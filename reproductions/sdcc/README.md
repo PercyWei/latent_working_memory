@@ -2,7 +2,7 @@
 
 创建时间：20261125 21:08:04 Asia/Shanghai
 
-最后修订时间：20261127 20:46:33 Asia/Shanghai
+最后修订时间：20261128 15:18:06 Asia/Shanghai
 
 [环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能](#三通用功能)
 
@@ -66,6 +66,7 @@ hf download yuyijiong/qwen3-semi-dynamic-soft-context-compress \
 | 完整评估脚本参数 | 用途与默认值 |
 |---|---|
 | `--benchmark-data` | 默认 `data/benchmarks/locomo` |
+| `--no-llm-as-judge` | 跳过 Judge Accuracy，只计算官方 F1 |
 
 - **评估范围**：覆盖 10 段完整对话中类别 1–4 的 1,540 道题。按 Qwen3-4B-Instruct-2507 tokenizer 统计，每段对话正文为 13,479–25,580 个 token。[LoCoMo 评估协议](../../benchmarks/locomo/README.md)
 - **推理方式**：按对话分配 GPU，每段对话只选择一次压缩倍率并生成一份记忆。各题复用解码器的同一份前缀 KV 缓存，独立作答。
@@ -122,6 +123,7 @@ uv run -m benchmarks.longmemeval.score \
 | `--benchmark-data` | 默认 `data/benchmarks/qasper` |
 | `--split` | 支持 `test`（默认） |
 | `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
+| `--no-llm-as-judge` | 跳过 Judge Accuracy，只计算官方 Answer F1 |
 
 - **评估范围**：test 包含 416 篇论文、1,451 道题。[QASPER 评估协议](../../benchmarks/qasper/README.md)
 - **推理方式**：按论文分配 GPU。编码器对每篇论文只选择一次倍率并生成一份记忆，各题复用解码器前缀缓存，独立作答。
@@ -143,6 +145,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash reproductions/sdcc/scripts/eval_qasper.sh \
 | `--benchmark-data` | 默认 `data/benchmarks/musique` |
 | `--split` | 支持 `dev`（默认） |
 | `--max-new-tokens` | 每题最多生成的 token 数，默认 `128` |
+| `--no-llm-as-judge` | 跳过 Judge Accuracy，只计算官方 Answer F1／EM |
 
 - **评估范围**：覆盖 MuSiQue-Ans dev 的 2,417 道题。[评估协议与数据下载](../../benchmarks/musique/README.md#评估约定)
 - **推理方式**：编码器为每题的全部候选段落独立选择压缩倍率并生成记忆，解码器按批作答。

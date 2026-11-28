@@ -67,7 +67,7 @@ def summarize_metrics(records, conversations):
     parser = argparse.ArgumentParser()
     add_evaluation_arguments(parser, tmp_path / "results")
     args = parser.parse_args([
-        "--benchmark-data", str(data), "--batch-size-per-gpu", "2",
+        "--benchmark-data", str(data), "--batch-size-per-gpu", "2", "--no-llm-as-judge",
     ])
     trace = tmp_path / "prepared.jsonl"
     settings = {"trace": str(trace), "input_format": {"use_chat_template": False, "answer_prefix": "\nAnswer:"}}

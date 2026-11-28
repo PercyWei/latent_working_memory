@@ -2,7 +2,7 @@
 
 创建时间：20261014 11:04:16 Asia/Shanghai（UTC+08:00）
 
-最后修订时间：20261127 20:54:16 Asia/Shanghai
+最后修订时间：20261128 15:11:56 Asia/Shanghai
 
 本文介绍 RULER、LoCoMo、LongMemEval、QASPER 和 MuSiQue 的数据格式、评估属性、规模与长度统计及准备方式。以下命令均从项目根目录执行。
 
@@ -222,4 +222,21 @@ Full-context、ICAE v2、AutoCompressors 和 SDCC 均通过 `scripts/eval_qasper
 
 ### 公共 MuSiQue 评估
 
-Full-context、ICAE v2、AutoCompressors 和 SDCC 均通过 `scripts/eval_musique.sh` 评估 MuSiQue-Ans dev，汇总 Answer F1 和 EM。[公共协议与续评参数](musique/README.md) · [Full-context](../src/latent_working_memory/full_context/README.md) · [ICAE](../reproductions/icae/README.md) · [AutoCompressors](../reproductions/autocompressors/README.md) · [SDCC](../reproductions/sdcc/README.md)
+Full-context、ICAE v2、AutoCompressors 和 SDCC 均通过 `scripts/eval_musique.sh` 评估 MuSiQue-Ans dev。[公共协议与续评参数](musique/README.md) · [Full-context](../src/latent_working_memory/full_context/README.md) · [ICAE](../reproductions/icae/README.md) · [AutoCompressors](../reproductions/autocompressors/README.md) · [SDCC](../reproductions/sdcc/README.md)
+
+### Judge Accuracy
+
+LoCoMo、QASPER 和 MuSiQue-Ans 的公共评估脚本先生成答案并保存官方 F1／EM，再默认调用 `gpt-6-luna` 计算 Judge Accuracy。加 `--no-llm-as-judge` 可只计算官方指标，`--judge` 可显式启用裁判评分。
+
+裁判评分默认并发 8 个请求。在环境变量或项目根目录的 `.env` 设置 `OPENAI_API_KEY`，需要自定义 API 地址时也可设置 `OPENAI_BASE_URL`。每题通过公共 API 提交问题、人工参考及模型预测。Judge Accuracy 为判对的题数占比。[公共 API](chat_api.py) · [各任务判分提示](answer_judge.py)
+
+#### Judge Accuracy 补评
+
+已有结果可直接传入包含 `summary.json` 和 `details.jsonl` 的目录补评。裁判评分中断后加 `--resume`，可用 `--concurrency` 调整并发数。
+
+```bash
+uv run --frozen python -m benchmarks.judge_score --run-dir path/to/run
+uv run --frozen python -m benchmarks.judge_score --run-dir path/to/run --resume --concurrency 4
+```
+
+裁判配置保存在 `judge_config.json`，判定和简短理由按原题序逐步写入 `judge_details.jsonl`，全部完成后生成 `judge_summary.json`。续评核对裁判配置和原逐题结果，只补缺失题目。看板单独展示裁判准确率，并可查看逐题理由。所选运行的裁判配置不同时，各运行的裁判分数可在详细统计中查看。

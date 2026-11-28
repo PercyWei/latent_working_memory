@@ -8,8 +8,9 @@ from pathlib import Path
 import streamlit as st
 
 from benchmarks import ruler_dashboard as ruler
-from benchmarks.comparison_dashboard import show_score_chart, show_score_panels
+from benchmarks.comparison_dashboard import show_judge_accuracy_chart, show_score_chart, show_score_panels
 from benchmarks.comparison_runs import checkpoint_stage_order, natural_key
+from benchmarks.dashboard_data import judge_config
 from benchmarks.locomo import compare as locomo
 from benchmarks.longmemeval import dashboard as longmemeval
 from benchmarks.musique import dashboard as musique
@@ -197,6 +198,7 @@ def run_dashboard(method, title, render_memory=None, argv=None):
                 rgb = hls_to_rgb(hue, lightness_by_directory[run["directory"]], 0.65)
                 colors[run["label"]] = "#" + "".join(f"{round(value * 255):02x}" for value in rgb)
             show_comparison_chart(runs, colors)
+            show_judge_accuracy_chart(runs, colors)
             with st.expander("详细统计"):
                 if task == "locomo":
                     locomo.show_comparison(runs, [run["label"] for run in runs], show_chart=False)
@@ -229,6 +231,8 @@ def run_dashboard(method, title, render_memory=None, argv=None):
                     config = {"目录": str(run["directory"]), "模型配置": summary["settings"]}
                 if task in longmemeval.SETTINGS:
                     config["评分配置"] = run["summary"]["judge"]
+                if run.get("judge"):
+                    config["裁判配置"] = judge_config(run["judge"])
                 st.json(config, expanded=False)
         if task == "locomo":
             locomo.show_answer_comparison(runs)

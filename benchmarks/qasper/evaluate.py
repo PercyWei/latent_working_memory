@@ -6,6 +6,7 @@ import time
 
 from benchmarks.documents import group_by_document, shard_groups
 from benchmarks.io import run_lock, write_json, write_jsonl
+from benchmarks.judge_launch import add_judge_arguments, run_answer_judge
 from benchmarks.output import add_output_arguments, evaluation_directory
 from benchmarks.parallel import resolve_generation_devices, run_workers
 from benchmarks.progress import QuestionTimer
@@ -22,6 +23,7 @@ def add_evaluation_arguments(parser, output_root, checkpoint_layout=False):
     parser.add_argument("--batch-size-per-gpu", type=int, default=1, help="每卡批处理数，默认 1")
     parser.add_argument("--max-new-tokens", type=int, default=128, help="每题生成预算，默认 128")
     parser.add_argument("--resume", action="store_true", help="沿用原配置和已评分的逐题结果，补齐剩余题目")
+    add_judge_arguments(parser)
 
 
 def evaluate_papers(directory, papers, devices, batch_size, lock):
@@ -113,4 +115,6 @@ def run_evaluation(args, method, settings, load_adapter, output_name, checkpoint
 
     metrics = summary["metrics"]
     print(f"QASPER {args.split} | Answer F1 {metrics['score']:.2%} ({metrics['samples']} questions)", flush=True)
+    if args.judge:
+        run_answer_judge(directory, args.resume)
     return summary

@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from benchmarks.data import load_samples
 from benchmarks.io import write_jsonl
+from benchmarks.judge_launch import add_judge_arguments, run_answer_judge
 from benchmarks.output import add_output_arguments, evaluation_directory
 from benchmarks.progress import QuestionTimer
 from benchmarks.protocol import data_identity
@@ -29,6 +30,7 @@ def add_evaluation_arguments(parser, output_root, checkpoint_layout=False):
     parser.add_argument("--benchmark-data", type=Path, default=ROOT / "data/benchmarks/locomo")
     add_output_arguments(parser, output_root, checkpoint_layout)
     parser.add_argument("--resume", action="store_true")
+    add_judge_arguments(parser)
     parser.add_argument("--batch-size-per-gpu", type=int, default=1,
                         help="每卡批处理数，默认 1")
 
@@ -131,7 +133,6 @@ def run_evaluation(args, method, settings, load_adapter, output_name, summarize_
             write_json(directory / "summary.json", summary)
             execution["status"] = "completed"
             print(f"LoCoMo F1 {100 * summary['metrics']['score']:.2f}", flush=True)
-            return summary
         finally:
             signal.signal(signal.SIGTERM, previous_handler)
             for process in processes:
@@ -149,3 +150,7 @@ def run_evaluation(args, method, settings, load_adapter, output_name, summarize_
                 execution["status"] = "failed"
             execution["wall_seconds"] = time.monotonic() - timer.started
             write_json(directory / "execution.json", execution)
+
+    if args.judge:
+        run_answer_judge(directory, args.resume)
+    return summary

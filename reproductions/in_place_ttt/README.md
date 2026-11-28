@@ -2,7 +2,7 @@
 
 创建时间：20261108 17:05:19 Asia/Shanghai
 
-最后修订时间：20261126 17:07:15 Asia/Shanghai
+最后修订时间：20261128 15:17:55 Asia/Shanghai
 
 [环境准备](#一环境准备) · [原论文复现](#二原论文复现) · [通用功能](#三通用功能)
 
@@ -141,10 +141,11 @@ TTT／baseline 自动匹配论文参照；要求本次 RULER 计划完成，论�
 | 完整评估脚本参数 | 用途与默认值 |
 |---|---|
 | `--benchmark-data` | 默认 `data/benchmarks/locomo` |
+| `--no-llm-as-judge` | 跳过 Judge Accuracy，只计算官方 F1 |
 
 - **评估范围**：覆盖 10 段完整对话中类别 1–4 的 1,540 道题。[LoCoMo 评估协议](../../benchmarks/locomo/README.md)
 - **推理方式**：按对话分配 GPU，每段对话历史只预填一次。该对话的各题复用预填好的 KV 缓存，TTT 模型同时复用预填后的快速权重，各题独立作答。
-- **回答长度与评分**：每题最多生成 50 个 token，输入与生成预算之和须在 checkpoint 的 32,768 个位置以内。按官方规则逐题计算 F1，再对所有题目取平均。
+- **回答长度与评分**：每题最多生成 50 个 token，输入与生成预算之和须在 checkpoint 的 32,768 个位置以内。按官方规则逐题计算 F1，再对所有题目取平均。保存 F1 后默认计算 Judge Accuracy。[裁判配置与补评](../../benchmarks/README.md#judge-accuracy)
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 bash reproductions/in_place_ttt/scripts/eval_locomo.sh \

@@ -2,7 +2,7 @@
 
 创建时间：20261124 15:43:38 Asia/Shanghai
 
-最后修订时间：20261127 20:33:44 Asia/Shanghai
+最后修订时间：20261128 15:11:56 Asia/Shanghai
 
 本目录提供 LoCoMo 的公共评估与看板接口。公共层维护数据、调度、评分和结果格式；各方法维护模型加载、正文处理、答案生成及自己的启动脚本。数据准备见[公共 benchmark 说明](../README.md)。
 
@@ -11,6 +11,7 @@
 - **数据范围**：使用全部 10 段对话的完整历史，评估类别 1–4 的 1,540 道题：multi-hop、temporal、open-domain、single-hop。
 - **答案生成**：采用贪心解码，每题最多生成 50 tokens；参考答案仅用于评分。
 - **评分口径**：使用官方 F1 规则，总体及各题型均按题取算术平均。分数保存为 0–1，看板以百分制展示。
+- **Judge Accuracy**：默认在官方 F1 写出后计算。逐题判断预测是否完整表达参考答案的含义。日期按题目需要的精度判断，可接受等价日期或时段，单纯主题相关不能得分。[裁判配置与补评](../README.md#judge-accuracy)
 - **正文复用**：同一对话的待答问题分配给同一 worker，正文状态准备一次，各题从该状态独立作答；完成整段对话后释放状态。
 - **续评方式**：按已保存的题目 ID 补齐剩余问题，部分完成的对话重新准备正文状态。
 
@@ -100,11 +101,12 @@ if __name__ == "__main__":
 
 | 参数 | 含义与默认值 |
 |---|---|
+| `--resume` | 沿用原结果目录和评估配置续评 |
 | `--benchmark-data` | 默认 `data/benchmarks/locomo` |
 | `--output-root` | 评估产物根目录，默认值由方法入口提供 |
 | `--output-id` | 结果目录名；Full-context 默认 `locomo`，ICAE、AutoCompressors 和 SDCC 默认 `<压缩设置>_locomo`，其他方法默认由方法名称与时间戳组成 |
 | `--batch-size-per-gpu` | 每卡批处理数，默认 1 |
-| `--resume` | 沿用原结果目录和评估配置续评 |
+| `--no-llm-as-judge` | 跳过 Judge Accuracy，生成答案并计算官方 F1 |
 
 ICAE、AutoCompressors 和 SDCC 写入 `<output-root>/eval/<checkpoint_name>/<output-id>/`，默认 ID 为 `<压缩设置>_locomo`。Full-context 写入 `<output-root>/eval/<model_name>/<output-id>/`，`model_name` 取 `--model-path` 指向的目录名，默认 ID 为 `locomo`。显式指定 `--output-id` 时以该值作为完整目录名；在相同命令后加 `--resume` 即可续评，自定义 ID 须沿用原值。其他方法写入 `<output-root>/eval/<output-id>/locomo/`，续评时指定原 ID。
 
@@ -178,7 +180,7 @@ bash benchmarks/locomo/scripts/dashboard.sh --run-file configs/reproductions/ben
 
 看板按方法、checkpoint／模型和评估设置分组，默认全选。方法按首次出现的顺序排列，合用时先读 `--run`，再按行读 `--run-file`。ICAE 优先按评估配置中的训练阶段排序，`pretrained` 排在 `finetuned` 前。同一方法内再按 checkpoint 名自然排序和评估参数数值排序。勾选会同步更新图表、统计和逐题对照。
 
-主图展示总体与各题型 F1，逐题对照可按题型和对话筛选。参与比较的运行须使用相同评估数据和题目范围，逐题结果按题号核对问题及参考答案。
+主图分别比较总体和各题型的 F1、Judge Accuracy。逐题对照可按题型和对话筛选，并查看裁判判定及理由。参与比较的运行须使用相同评估数据和题目范围，逐题结果按题号核对问题及参考答案。
 
 ### 方法看板接入
 
